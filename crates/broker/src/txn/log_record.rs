@@ -1,24 +1,30 @@
-//! Byte-exact codec for Kafka's `TransactionLogValue` (v0 + v1) and
-//! `TransactionLogKey` (v0), matching the on-disk records the
-//! `__transaction_state` topic carries in Apache Kafka 4.0.
+//! Byte-exact codec for Kafka's `TransactionLogValue` and `TransactionLogKey`.
 //!
-//! This is pure codec; the transaction coordinator owns the runtime wiring.
+//! The codec covers `TransactionLogValue` v0 and v1, and `TransactionLogKey`
+//! v0. It matches the on-disk records that the `__transaction_state` topic
+//! carries in Apache Kafka 4.0.
 //!
-//! Schema (from cp-kafka 4.0 `TransactionLogValue.json` /
-//! `TransactionLogKey.json`):
+//! This module is a codec only. The transaction coordinator owns the runtime
+//! wiring.
 //!
-//! `TransactionLogKey`: validVersions "0", flexibleVersions "none". Wire is an
-//! `int16` version (=0) followed by the `TransactionalId` as a non-compact
-//! string (`int16` length + UTF-8 bytes).
+//! Schema, from cp-kafka 4.0 `TransactionLogValue.json` and
+//! `TransactionLogKey.json`:
 //!
-//! `TransactionLogValue`: validVersions "0-1", flexibleVersions "1+". Wire, in
-//! field order: `int16` version, `int64` `ProducerId`, `int16` `ProducerEpoch`,
-//! `int32` `TransactionTimeoutMs`, `int8` `TransactionStatus`, a nullable array
-//! of `{ string Topic; int32[] PartitionIds }`, `int64`
-//! `TransactionLastUpdateTimestampMs`, `int64` `TransactionStartTimestampMs`. v1
-//! adds a trailing tagged-field section on every struct; tags 0
-//! (`PreviousProducerId`, default -1), 1 (`NextProducerId`, default -1) and 2
-//! (`ClientTransactionVersion`, default 0) are emitted only when non-default.
+//! `TransactionLogKey`: validVersions "0", flexibleVersions "none". The wire
+//! form is an `int16` version, which is 0, and then the `TransactionalId` as a
+//! non-compact string: an `int16` length and the UTF-8 bytes.
+//!
+//! `TransactionLogValue`: validVersions "0-1", flexibleVersions "1+". The wire
+//! form, in field order: `int16` version, `int64` `ProducerId`, `int16`
+//! `ProducerEpoch`, `int32` `TransactionTimeoutMs`, `int8` `TransactionStatus`,
+//! a nullable array of `{ string Topic; int32[] PartitionIds }`, `int64`
+//! `TransactionLastUpdateTimestampMs`, `int64` `TransactionStartTimestampMs`.
+//! v1 adds a trailing tagged-field section on every struct. The codec writes
+//! these tags only when the value is not the default:
+//!
+//!   * tag 0, `PreviousProducerId`, default -1;
+//!   * tag 1, `NextProducerId`, default -1;
+//!   * tag 2, `ClientTransactionVersion`, default 0.
 //!
 //! v0 is non-flexible: arrays use `int32` lengths (-1 = null), strings use
 //! `int16` lengths, and there is no tagged-field section anywhere. v1 is
@@ -56,10 +62,11 @@ const TAG_CLIENT_TXN_VERSION: u32 = 2;
 /// Kafka's tagged-field default for the producer-id bookkeeping fields.
 const PRODUCER_ID_NONE: i64 = -1;
 
-/// Group `partitions` into one entry per topic with ascending partition ids,
-/// topics ordered lexicographically. Determinism matters: the `HashSet`
-/// iteration order is nondeterministic, but replicas must produce identical
-/// snapshot bytes.
+/// Group `partitions` into one entry per topic with ascending partition ids.
+///
+/// The function orders the topics lexicographically. This order matters: the
+/// `HashSet` iteration order is nondeterministic, but replicas must produce
+/// identical snapshot bytes.
 fn group_partitions(partitions: &HashSet<TopicPartition>) -> Vec<(&str, Vec<i32>)> {
     let mut by_topic: BTreeMap<&str, Vec<i32>> = BTreeMap::new();
     for tp in partitions {
@@ -77,9 +84,12 @@ fn group_partitions(partitions: &HashSet<TopicPartition>) -> Vec<(&str, Vec<i32>
         .collect()
 }
 
-/// Encode the Kafka `TransactionLogValue`. `flexible` selects v1 (flexible,
-/// `TV_1`/`TV_2`) when true, v0 (non-flexible, `TV_0`) when false. Output is
-/// deterministic: partitions are grouped and sorted before encoding.
+/// Encode the Kafka `TransactionLogValue`.
+///
+/// When `flexible` is true, the function selects v1, the flexible form, for
+/// `TV_1` and `TV_2`. When it is false, the function selects v0, the
+/// non-flexible form, for `TV_0`. The output is deterministic: the function
+/// groups and sorts the partitions before it encodes them.
 pub(crate) fn encode_value(entry: &TxnEntry, flexible: bool) -> Vec<u8> {
     let version: i16 = i16::from(flexible);
     let mut buf = BytesMut::new();
@@ -146,8 +156,10 @@ fn i64_to_bytes(v: i64) -> Bytes {
     b.freeze()
 }
 
-/// Decode a `TransactionLogValue`. `transactional_id` is supplied from the
-/// companion key (it is not present in the value record).
+/// Decode a `TransactionLogValue`.
+///
+/// The caller supplies `transactional_id` from the companion key. It is not
+/// present in the value record.
 pub(crate) fn decode_value(
     bytes: &[u8],
     transactional_id: String,
@@ -240,7 +252,7 @@ pub(crate) fn decode_value(
     })
 }
 
-/// Encode the Kafka `TransactionLogKey` (version 0).
+/// Encode the Kafka `TransactionLogKey`, version 0.
 pub(crate) fn encode_key(transactional_id: &str) -> Vec<u8> {
     let mut buf = BytesMut::new();
     put_i16(&mut buf, 0);
@@ -248,7 +260,7 @@ pub(crate) fn encode_key(transactional_id: &str) -> Vec<u8> {
     buf.to_vec()
 }
 
-/// Decode a Kafka `TransactionLogKey`, returning the transactional id.
+/// Decode a Kafka `TransactionLogKey` and return the transactional id.
 pub(crate) fn decode_key(bytes: &[u8]) -> Result<String, BrokerError> {
     let mut buf = bytes;
     let version = get_i16(&mut buf)?;

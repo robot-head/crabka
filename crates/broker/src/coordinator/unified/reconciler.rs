@@ -1,6 +1,6 @@
-//! Trigger-driven reconciler. Runs at the next heartbeat after a dirty
-//! signal: subscription change, member add/leave, metadata change, or
-//! assignor selection change.
+//! Trigger-driven reconciler. It runs at the next heartbeat after a dirty
+//! signal: a subscription change, a member add or leave, a metadata change, or
+//! an assignor selection change.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,8 +14,8 @@ pub struct ReconcileInput {
     pub topic_id_by_name: HashMap<String, Uuid>,
     pub partitions_per_topic: HashMap<Uuid, i32>,
     /// Per-`(topic_id, partition_index)` set of replica racks.
-    /// Empty / missing entries mean "no rack data for this partition" —
-    /// `UniformAssignor` then falls back to its non-rack-aware path.
+    /// An empty or missing entry means there is no rack data for that
+    /// partition. `UniformAssignor` then falls back to its non-rack-aware path.
     pub partition_racks: HashMap<(Uuid, i32), Vec<String>>,
 }
 
@@ -53,18 +53,18 @@ pub fn reconcile_if_dirty(
     ReconcileOutcome::Recomputed
 }
 
-/// Insert every topic-id a member subscribes to — via exact name and via
-/// its cached compiled regex — into `out`. The single source of truth for
-/// "what does this member subscribe to", shared by `reconcile_if_dirty`
-/// and `membership_topic_ids`.
+/// Insert into `out` every topic-id that a member subscribes to, both by exact
+/// name and through its cached compiled regex. This is the single source of
+/// truth for what a member subscribes to, and both `reconcile_if_dirty`
+/// and `membership_topic_ids` use it.
 ///
-/// KIP-848 v1+: the regex is supplied as a Java `Pattern`-syntax string —
-/// Crabka compiles it with Rust's RE2-based `regex` crate (differing only
-/// in extended constructs like lookaround, not expected in operator-facing
-/// subscription patterns). Compilation happens once, when the pattern
-/// changes, and is cached on `MemberState`; invalid patterns compile to
-/// `None` (warned once at set time) so a bad regex never poisons the rest
-/// of the assignment and is never recompiled on the hot path.
+/// At KIP-848 v1+ the client supplies the regex as a Java `Pattern`-syntax
+/// string. Crabka compiles it with Rust's RE2-based `regex` crate, which
+/// differs only in extended constructs such as lookaround. Operator-facing
+/// subscription patterns do not use those. Compilation happens once, when the
+/// pattern changes, and `MemberState` caches the result. An invalid pattern
+/// compiles to `None`, with one warning at set time, so a bad regex never
+/// poisons the rest of the assignment and never recompiles on the hot path.
 fn collect_subscribed_topic_ids(
     member: &MemberState,
     topic_id_by_name: &HashMap<String, Uuid>,

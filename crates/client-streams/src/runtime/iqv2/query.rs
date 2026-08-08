@@ -1,5 +1,5 @@
-//! `IQv2` query objects. Each builder lowers (serde-free) to a
-//! `store::iq::Iq2Query`; the store supplies the actual serdes.
+//! `IQv2` query objects. Each builder lowers to a `store::iq::Iq2Query` with no
+//! serde, and the store supplies the actual serdes.
 
 use std::{any::Any, marker::PhantomData};
 
@@ -12,8 +12,9 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// A typed `IQv2` query. `Result` is the type `KafkaStreams::query` returns per
-/// partition. Sealed: only the in-crate query types implement it.
+/// A typed `IQv2` query. `Result` is the type that `KafkaStreams::query` returns
+/// per partition. This trait is sealed, so only the in-crate query types
+/// implement it.
 pub trait Query: sealed::Sealed {
     /// What a successful `QueryResult` carries.
     type Result: 'static;
@@ -50,7 +51,8 @@ impl<K: Send + Sync + 'static, V: 'static> Query for KeyQuery<K, V> {
     }
 }
 
-/// Key-range scan. `None` bound = unbounded that side. Result: `Vec<(K,V)>`.
+/// Key-range scan. A `None` bound is unbounded on that side. Result:
+/// `Vec<(K,V)>`.
 pub struct RangeQuery<K, V> {
     lo: Option<K>,
     hi: Option<K>,
@@ -164,7 +166,7 @@ impl<K: Send + Sync + 'static, V: 'static> Query for WindowKeyQuery<K, V> {
     }
 }
 
-/// Key range × window-start range. Result: `Vec<((K, i64), V)>`.
+/// Key range by window-start range. Result: `Vec<((K, i64), V)>`.
 pub struct WindowRangeQuery<K, V> {
     lo: Option<K>,
     hi: Option<K>,
@@ -221,8 +223,8 @@ impl<K: Send + Sync + 'static, V: 'static> Query for WindowRangeQuery<K, V> {
     }
 }
 
-/// Single versioned-key lookup (KIP-960). `as_of = None` ⇒ latest live version.
-/// Result: `Option<VersionedRecord<V>>`.
+/// Single versioned-key lookup (KIP-960). `as_of = None` gives the latest live
+/// version. Result: `Option<VersionedRecord<V>>`.
 pub struct VersionedKeyQuery<K, V> {
     key: K,
     as_of: Option<i64>,
@@ -258,8 +260,9 @@ impl<K: Send + Sync + 'static, V: 'static> Query for VersionedKeyQuery<K, V> {
 }
 
 /// All versions of a key whose validity overlaps `[from_time, to_time]`
-/// (KIP-968). `None` bound = unbounded that side; ascending by `valid_from`
-/// unless `with_descending_timestamps()`. Result: `Vec<VersionedRecord<V>>`.
+/// (KIP-968). A `None` bound is unbounded on that side. The order is ascending by
+/// `valid_from`, unless you call `with_descending_timestamps()`. Result:
+/// `Vec<VersionedRecord<V>>`.
 pub struct MultiVersionedKeyQuery<K, V> {
     key: K,
     from_ts: Option<i64>,

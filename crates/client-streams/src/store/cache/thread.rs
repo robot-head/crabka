@@ -1,6 +1,7 @@
-//! Thread-wide record cache: a byte budget shared across `NamedCache`s. Ports
-//! Kafka `ThreadCache`. One per task; budget = `statestore.cache.max.bytes` /
-//! `task_count`.
+//! Thread-wide record cache: a byte budget shared across the `NamedCache`s.
+//!
+//! This module ports Kafka `ThreadCache`. There is one cache per task, and its
+//! budget is `statestore.cache.max.bytes` divided by `task_count`.
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -29,7 +30,7 @@ impl ThreadCache {
         self.max_bytes > ByteSize::ZERO
     }
 
-    /// Return the named cache for `name`, creating it if absent.
+    /// Return the named cache for `name`, and create it when it is absent.
     pub fn register(&mut self, name: &str) -> Arc<Mutex<NamedCache>> {
         Arc::clone(
             self.caches
@@ -46,14 +47,15 @@ impl ThreadCache {
             .fold(ByteSize::ZERO, |total, size| total + size)
     }
 
-    /// While over budget, evict the LRU entry from a non-empty cache, routing
-    /// each evicted dirty entry through `listener(cache_name, key, entry)`.
+    /// While the cache is over budget, evict the LRU entry from a non-empty
+    /// cache. Route each evicted dirty entry through
+    /// `listener(cache_name, key, entry)`.
     ///
-    /// Cross-cache policy: cache names are visited in sorted (lexicographic)
-    /// order, and one entry is evicted from the first non-empty cache each round.
-    /// This is deterministic and terminates: every round either frees bytes or,
-    /// if all caches are empty, breaks. Within a cache, eviction targets that
-    /// cache's own LRU (head) entry, matching `NamedCache::evict`.
+    /// The cross-cache policy visits the cache names in sorted (lexicographic)
+    /// order and evicts one entry from the first non-empty cache each round. This
+    /// is deterministic and it terminates. Every round either frees bytes or, when
+    /// all the caches are empty, breaks. Within one cache the eviction targets
+    /// that cache's own LRU (head) entry, which matches `NamedCache::evict`.
     pub fn maybe_evict(&mut self, listener: &mut impl FnMut(&str, &Bytes, &LruCacheEntry)) {
         let mut names: Vec<String> = self.caches.keys().cloned().collect();
         names.sort();

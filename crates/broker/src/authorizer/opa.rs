@@ -1,18 +1,19 @@
 //! OPA authorizer. POSTs Strimzi-compatible JSON to a
-//! configurable OPA decision endpoint, with super-user bypass + LRU+TTL
-//! decision cache + fail-open-or-closed.
+//! configurable OPA decision endpoint. It adds a super-user bypass, an
+//! LRU+TTL decision cache, and a fail-open-or-closed policy.
 //!
-//! The trait method [`Authorizer::authorize`] is synchronous (called
-//! from sync handler hot paths), but `reqwest` is async. We bridge with
-//! [`tokio::task::block_in_place`] + a captured runtime [`tokio::runtime::Handle`] —
-//! acceptable for a tail authorization check (sub-millisecond on cache
-//! hit, low-double-digit-ms on miss). Cache misses on a single-threaded
-//! runtime would deadlock; the broker is multi-thread, so this is fine.
+//! The trait method [`Authorizer::authorize`] is synchronous, because sync
+//! handler hot paths call it, but `reqwest` is async. This module bridges the
+//! two with [`tokio::task::block_in_place`] and a captured runtime
+//! [`tokio::runtime::Handle`]. That is acceptable for a tail authorization
+//! check, which takes under a millisecond on a cache hit and low double-digit
+//! milliseconds on a miss. A cache miss on a single-threaded
+//! runtime would deadlock, but the broker is multi-thread.
 //!
-//! Cache semantics: decisions are cached on BOTH success and error.
-//! Negative caching is intentional — under `allow_on_error = false`
-//! errors become `Deny`, which is the safe behavior for a brief OPA
-//! outage; entries expire on TTL so OPA recovery is observable.
+//! Cache semantics: the authorizer caches decisions on BOTH success and error.
+//! Negative caching is deliberate. Under `allow_on_error = false` an
+//! error becomes `Deny`, which is the safe behavior for a brief OPA
+//! outage. Entries expire on TTL, so an OPA recovery is observable.
 
 use std::{
     collections::HashSet,
@@ -30,36 +31,36 @@ use serde::{Deserialize, Serialize};
 /// HTTP-backed pluggable authorizer. Owns its `super_users` bypass set,
 /// HTTP client, decision cache, and a captured `tokio::runtime::Handle`
 /// so the synchronous [`Authorizer::authorize`] entry point can call
-/// `reqwest`'s async API via `block_in_place`.
+/// `reqwest`'s async API through `block_in_place`.
 ///
 /// # Security
 ///
 /// The `allow_on_error` knob is
 /// **security-sensitive**. When it is `true`, any OPA outage (timeout,
 /// 5xx, unparseable response) causes `error_decision`
-/// to return `Allow` — i.e. an unreachable policy server authorizes
-/// *every* request (fail-open). The default is `false` (fail-closed),
-/// matching the upstream Open Policy Agent Kafka plugin's
+/// to return `Allow`. An unreachable policy server then authorizes
+/// *every* request, which is fail-open. The default is `false`, which is
+/// fail-closed and matches the upstream Open Policy Agent Kafka plugin's
 /// `allow.on.error = false`. Only enable fail-open in environments where
-/// briefly over-permitting is strictly preferable to blocking on an OPA
+/// brief over-permission is strictly preferable to a block during an OPA
 /// outage.
 pub struct OpaAuthorizer {
     super_users: HashSet<String>,
     http_client: reqwest::Client,
     url: String,
-    /// **Security-sensitive.** `true` ⇒ OPA errors authorize the request
-    /// (fail-open); an OPA outage then authorizes every request. The
-    /// secure default (and the upstream OPA Kafka plugin default) is
-    /// `false` (fail-closed).
+    /// **Security-sensitive.** `true` ⇒ OPA errors authorize the request,
+    /// which is fail-open. An OPA outage then authorizes every request. The
+    /// secure default, which is also the upstream OPA Kafka plugin default,
+    /// is `false` (fail-closed).
     allow_on_error: bool,
     cache: Mutex<LruCache<CacheKey, CachedDecision>>,
     expire_after: Time,
     runtime: tokio::runtime::Handle,
     /// Clock backing the decision-cache TTL (the `expires_at_ms` stamp and its
-    /// expiry comparison). Production uses [`qubit_clock::SystemClock`] (wall
-    /// time); tests inject a [`qubit_clock::MockClock`] so cache entries expire
-    /// on a controlled timeline instead of a real `sleep`. It governs *only*
-    /// cache freshness — never the authorization decision itself.
+    /// expiry comparison). Production uses [`qubit_clock::SystemClock`], which
+    /// is wall time. Tests inject a [`qubit_clock::MockClock`] so cache entries
+    /// expire on a controlled timeline instead of a real `sleep`. The clock
+    /// governs *only* cache freshness, never the authorization decision.
     clock: Arc<dyn qubit_clock::Clock>,
 }
 
@@ -124,8 +125,8 @@ struct OpaResource<'a> {
     pattern_type: &'a str,
 }
 
-/// Decision payload returned by OPA — Strimzi expects exactly
-/// `{"result": true|false}`. Anything else parses as an error and the
+/// Decision payload returned by OPA. Strimzi expects exactly
+/// `{"result": true|false}`. Anything else parses as an error, and the
 /// caller falls through to [`OpaAuthorizer::error_decision`].
 #[derive(Debug, Deserialize)]
 struct OpaResponse {
@@ -133,14 +134,15 @@ struct OpaResponse {
 }
 
 impl OpaAuthorizer {
-    /// Build a new OPA authorizer. MUST be called from inside a tokio
-    /// runtime — we capture the current `Handle` to drive async HTTP
-    /// from the synchronous [`Authorizer::authorize`] entry point.
+    /// Build a new OPA authorizer. The caller MUST call this from inside a
+    /// tokio runtime, because the constructor captures the current `Handle`
+    /// to drive async HTTP from the synchronous [`Authorizer::authorize`]
+    /// entry point.
     ///
     /// # Errors
     ///
-    /// * [`OpaConfigError::Http`] if the `reqwest::Client` cannot be
-    ///   constructed (TLS misconfig is the realistic failure).
+    /// * [`OpaConfigError::Http`] if the constructor cannot build the
+    ///   `reqwest::Client`. A TLS misconfig is the realistic failure.
     /// * [`OpaConfigError::ZeroCache`] if `max_cache_size == 0`.
     /// * [`OpaConfigError::NoTokioRuntime`] if no tokio runtime is
     ///   active on the current thread.
@@ -165,7 +167,7 @@ impl OpaAuthorizer {
 
     /// Same as [`OpaAuthorizer::new`] but with a caller-supplied
     /// [`qubit_clock::Clock`] backing the decision-cache TTL. Production uses
-    /// [`OpaAuthorizer::new`] (a [`qubit_clock::SystemClock`]); tests pass a
+    /// [`OpaAuthorizer::new`] with a [`qubit_clock::SystemClock`]. Tests pass a
     /// [`qubit_clock::MockClock`] so cached decisions expire on a controlled
     /// timeline without a real `sleep`. The clock affects *only* cache
     /// freshness, never the authorization decision.
@@ -203,8 +205,8 @@ impl OpaAuthorizer {
     }
 
     /// POST the request to OPA and translate the boolean response into
-    /// our binary decision. Any HTTP- or JSON-level error falls through
-    /// to [`Self::error_decision`] which honours `allow_on_error`.
+    /// the binary decision. Any HTTP-level or JSON-level error falls through
+    /// to [`Self::error_decision`], which honours `allow_on_error`.
     async fn call_opa(&self, req: &AuthorizationRequest<'_>) -> AuthorizationResult {
         let body = OpaRequest {
             input: OpaInput {
@@ -241,12 +243,12 @@ impl OpaAuthorizer {
         }
     }
 
-    /// What to return when OPA is unreachable / returned garbage.
-    /// Fail-closed (`allow_on_error = false`, the default) denies — the
-    /// secure behavior. Fail-open (`allow_on_error = true`) is
-    /// **security-sensitive**: it authorizes every request for the
-    /// duration of an OPA outage, and is only for environments where
-    /// blocking on that outage is strictly worse than over-permitting.
+    /// What to return when OPA is unreachable or returned garbage.
+    /// Fail-closed (`allow_on_error = false`, the default) denies, which is
+    /// the secure behavior. Fail-open (`allow_on_error = true`) is
+    /// **security-sensitive**. It authorizes every request for the
+    /// duration of an OPA outage, and it is only for environments where
+    /// a block during that outage is strictly worse than over-permission.
     fn error_decision(&self) -> AuthorizationResult {
         if self.allow_on_error {
             AuthorizationResult::Allow
@@ -306,20 +308,21 @@ impl Authorizer for OpaAuthorizer {
     }
 }
 
-/// Constructor-time failures for [`OpaAuthorizer::new`]. Surfaced
-/// up through `file_config::FileConfigError` at broker startup so
-/// misconfigured deployments fail fast rather than at first request.
+/// Constructor-time failures for [`OpaAuthorizer::new`]. They travel
+/// up through `file_config::FileConfigError` at broker startup, so a
+/// misconfigured deployment fails at startup and not at the first request.
 #[derive(Debug, thiserror::Error)]
 pub enum OpaConfigError {
-    /// `reqwest::Client::build` failed (TLS / DNS / proxy misconfig).
+    /// `reqwest::Client::build` failed, from a TLS, DNS, or proxy misconfig.
     #[error("OPA HTTP client build failed: {0}")]
     Http(String),
-    /// `max_cache_size = 0` would mean the LRU rejects every entry —
-    /// invariant violation rather than a useful "disable cache" knob.
+    /// `max_cache_size = 0` would mean the LRU rejects every entry. That is
+    /// an invariant violation, not a useful "disable cache" knob.
     #[error("OPA cache size must be > 0")]
     ZeroCache,
-    /// `OpaAuthorizer::new` MUST run inside a tokio runtime — we capture
-    /// the current `Handle` for the sync→async bridge in `authorize`.
+    /// `OpaAuthorizer::new` MUST run inside a tokio runtime, because it
+    /// captures the current `Handle` for the sync→async bridge in
+    /// `authorize`.
     #[error("OPA authorizer requires an active tokio runtime")]
     NoTokioRuntime,
 }
@@ -381,8 +384,8 @@ mod tests {
     }
 
     /// The OPA input's `operation` string must be the Strimzi-compatible name,
-    /// including KIP-939's `TwoPhaseCommit`. Pins the mapping so a regression
-    /// (or a blanket mutation of `operation_str`) is caught.
+    /// including KIP-939's `TwoPhaseCommit`. This pins the mapping, so the
+    /// test catches a regression or a blanket mutation of `operation_str`.
     #[test]
     fn operation_str_maps_kafka_names() {
         for (op, want) in [

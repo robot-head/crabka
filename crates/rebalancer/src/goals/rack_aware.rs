@@ -1,12 +1,11 @@
-//! Hard goal: ensure no two replicas of the same partition share a
-//! rack. Brokers with `rack: None` each count as their own
-//! pseudo-rack (matches Kafka KIP-36 broker-side rack-aware
-//! assignment behavior).
+//! Hard goal: make sure no two replicas of the same partition share a rack.
+//! Each broker with `rack: None` counts as its own pseudo-rack, which matches
+//! the Kafka KIP-36 broker-side rack-aware assignment behavior.
 //!
-//! Strict mode: if RF exceeds the distinct rack count for the cluster,
-//! the affected partition is logged at warn level and skipped — the
-//! goal never produces `HardGoalUnsatisfied`. Operators with
-//! RF > rack-count get a no-op rather than a failed proposal.
+//! Strict mode works like this: if RF exceeds the distinct rack count for the
+//! cluster, the goal logs the affected partition at warn level and skips it.
+//! The goal never produces `HardGoalUnsatisfied`. An operator with
+//! RF > rack-count gets a no-op instead of a failed proposal.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -112,9 +111,9 @@ impl Goal for RackAware {
     }
 }
 
-/// Per-broker rack tag, treating None as a per-broker unique pseudo-rack.
-/// Encode unique racks as a synthetic `__no_rack_<broker_id>` string so
-/// collision detection is straightforward.
+/// Per-broker rack tag. It treats None as a unique per-broker pseudo-rack, and
+/// encodes such a rack as a synthetic `__no_rack_<broker_id>` string, which
+/// keeps collision detection simple.
 fn build_rack_map(state: &ClusterState) -> HashMap<i32, String> {
     state
         .brokers
@@ -129,9 +128,8 @@ fn build_rack_map(state: &ClusterState) -> HashMap<i32, String> {
         .collect()
 }
 
-/// Scan `working` for the next viable (idx, donor, target) swap.
-/// Returns `None` once every partition is either rack-diverse or
-/// infeasible.
+/// Scan `working` for the next viable (idx, donor, target) swap. Returns
+/// `None` once every partition is either rack-diverse or infeasible.
 fn pick_swap(
     state: &ClusterState,
     working: &[PartitionView],

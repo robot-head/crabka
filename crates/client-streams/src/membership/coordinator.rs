@@ -1,9 +1,11 @@
-//! Background `StreamsGroupHeartbeat` loop. Mirrors `share/coordinator.rs`: a
-//! ticker + `select!` racing each heartbeat against shutdown. Adopts the
-//! broker's epoch + assignment, echoes owned tasks back (adopt-and-echo
-//! reconciliation), rejoins from epoch 0 on fence, and sends a leave heartbeat
-//! (`member_epoch = -1`) on shutdown. Meaningful changes are emitted as
-//! [`StreamsEvent`]s.
+//! Background `StreamsGroupHeartbeat` loop.
+//!
+//! This module matches `share/coordinator.rs`. A ticker and a `select!` race
+//! each heartbeat against shutdown. The loop adopts the broker's epoch and
+//! assignment, then echoes the owned tasks back, which is adopt-and-echo
+//! reconciliation. It rejoins from epoch 0 on a fence, and it sends a leave
+//! heartbeat with `member_epoch = -1` on shutdown. It emits every meaningful
+//! change as a [`StreamsEvent`].
 
 use std::sync::Arc;
 
@@ -33,9 +35,8 @@ const FENCED_MEMBER_EPOCH: i16 = 110;
 const UNKNOWN_MEMBER_ID: i16 = 25;
 const STALE_MEMBER_EPOCH: i16 = 113;
 
-/// The heartbeat RPC the coordinator depends on. Implemented by the real
-/// [`Client`]; a fake is injected in tests so the loop is exercisable without a
-/// broker.
+/// The heartbeat RPC that the coordinator depends on. The real [`Client`]
+/// implements it. Tests inject a fake, so the loop runs without a broker.
 #[async_trait::async_trait]
 pub(crate) trait HeartbeatTransport: Send + Sync + 'static {
     async fn send_heartbeat(
@@ -61,8 +62,8 @@ pub(crate) struct CoordinatorState<T: HeartbeatTransport> {
     pub member_id: String,
     pub process_id: String,
     pub instance_id: Option<String>,
-    /// Rebalance deadline advertised to the coordinator; rendered as the raw
-    /// `StreamsGroupHeartbeat.rebalance_timeout_ms` wire field.
+    /// Rebalance deadline advertised to the coordinator. It is rendered as the
+    /// raw `StreamsGroupHeartbeat.rebalance_timeout_ms` wire field.
     pub rebalance_timeout: Time,
     pub topology: Arc<BuiltTopology>,
     pub member_epoch: Arc<Mutex<i32>>,
@@ -77,8 +78,8 @@ pub(crate) struct CoordinatorState<T: HeartbeatTransport> {
     pub heartbeat_interval: Time,
     pub leave_heartbeat_timeout: Time,
     pub events: mpsc::UnboundedSender<StreamsEvent>,
-    /// The last assignment emitted, to suppress duplicate `Assigned` events
-    /// (the broker re-sends `active_tasks: Some(...)` every heartbeat).
+    /// The last assignment emitted. It suppresses duplicate `Assigned` events,
+    /// because the broker re-sends `active_tasks: Some(...)` every heartbeat.
     pub last_assignment: tokio::sync::Mutex<StreamsAssignment>,
 }
 
@@ -251,9 +252,9 @@ async fn heartbeat_once<T: HeartbeatTransport>(
     }
 }
 
-/// Emit `NotReady` (status present) and/or `Assigned` (tasks present and
-/// changed since last emission), and update the owned-active set for the next
-/// echo.
+/// Emit `NotReady` when a status is present, and emit `Assigned` when tasks are
+/// present and have changed since the last emission. Then update the owned-active
+/// set for the next echo.
 #[tracing::instrument(
     name = "streams.coordinator.emit_response",
     level = "debug",
@@ -285,8 +286,8 @@ async fn emit_response<T: HeartbeatTransport>(
     }
 }
 
-/// Build the assignment from a heartbeat response and decide whether it
-/// changed since `last`. Returns the event to emit, or `None` if unchanged.
+/// Build the assignment from a heartbeat response and decide whether it changed
+/// since `last`. Returns the event to emit, or `None` when nothing changed.
 fn assignment_event(
     r: &StreamsGroupHeartbeatResponse,
     topology: &BuiltTopology,

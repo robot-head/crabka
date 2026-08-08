@@ -1,6 +1,6 @@
-//! Differential: produce a record via the gateway's `ProduceCore` against a
-//! host-advertised in-process broker, then read it back with the JVM
-//! `kafka-console-consumer` from a cp-kafka container. Requires Docker.
+//! Differential test: produce a record through the gateway's `ProduceCore`
+//! against a host-advertised in-process broker, then read it back with the JVM
+//! `kafka-console-consumer` from a cp-kafka container. This test needs Docker.
 
 use std::{
     collections::BTreeMap,

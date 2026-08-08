@@ -6,7 +6,7 @@ use crabka_pgparser::ParseError;
 use crabka_pgtypes::TypeError;
 use crabka_pgwire::error::PgError;
 
-/// Executor-level error; converts to a non-fatal `PgError`.
+/// Executor-level error. It converts to a non-fatal `PgError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecError {
     /// Deliberately recognized compatibility refusal with centralized wire metadata.
@@ -25,27 +25,28 @@ pub enum ExecError {
     MissingFromEntry(String),
     /// The same table name/alias appears twice in one FROM clause (42712).
     DuplicateAlias(String),
-    /// In-grammar but unimplemented (0A000) — e.g. $1 parameters.
+    /// In-grammar but unimplemented (0A000), for example $1 parameters.
     Unsupported(String),
-    /// Wrong type in a context that demands a specific one (42804) — e.g. a
-    /// non-boolean WHERE.
+    /// Wrong type in a context that demands a specific one (42804), for example
+    /// a non-boolean WHERE.
     TypeMismatch(String),
     /// A `WITH RECURSIVE` item breaks one of PostgreSQL's recursion rules
-    /// (42P19) — a missing or misplaced self-reference, or an unsupported
+    /// (42P19): a missing or misplaced self-reference, or an unsupported
     /// construct in the recursive term.
     InvalidRecursion(String),
-    /// A NULL value was assigned to a NOT NULL column (23502).
+    /// A statement assigned a NULL value to a NOT NULL column (23502).
     NotNullViolation {
         column: String,
         table: String,
     },
     /// An existing row holds NULL in a column being constrained NOT NULL
-    /// (23502) — `ALTER TABLE … ADD PRIMARY KEY` validation over stored rows.
+    /// (23502), found by `ALTER TABLE … ADD PRIMARY KEY` validation over stored
+    /// rows.
     ColumnContainsNullValues {
         column: String,
         table: String,
     },
-    /// The table definition itself is invalid (42P16) — e.g. adding a second
+    /// The table definition itself is invalid (42P16), for example a second
     /// primary key.
     InvalidTableDefinition(String),
     /// A written row failed a `CHECK` constraint (23514).
@@ -71,8 +72,8 @@ pub enum ExecError {
         column: String,
         table: String,
     },
-    /// A relation being defined would have two columns of the same name (42701)
-    /// — `CREATE TABLE … AS SELECT id, id FROM t`. Unlike
+    /// A relation being defined would have two columns of the same name
+    /// (42701), for example `CREATE TABLE … AS SELECT id, id FROM t`. Unlike
     /// [`ExecError::DuplicateColumn`] there is no relation to name yet.
     DuplicateOutputColumn(String),
     /// A named object already exists (42710).
@@ -80,19 +81,19 @@ pub enum ExecError {
     /// A named object does not exist (42704).
     UndefinedObject(String),
     /// `CREATE` with an unqualified name while no schema on the `search_path`
-    /// exists (3F000). `PostgreSQL` skips a nonexistent path entry rather than
+    /// exists (3F000). `PostgreSQL` skips a nonexistent path entry instead of
     /// refusing it, so this is what `SET search_path = notme; CREATE TABLE t`
-    /// reports — a path that is not empty but names nowhere to create in.
+    /// reports: a path that is not empty but names nowhere to create in.
     NoSchemaSelected,
     /// A `DROP <kind>` named a relation that does not exist (42P01).
     /// `PostgreSQL` names the kind the statement asked for ("table", "view",
-    /// "sequence") rather than the generic "relation".
+    /// "sequence") instead of the generic "relation".
     UndefinedRelationOfKind {
         kind: &'static str,
         name: String,
     },
-    /// An expression's type cannot be determined (42P18) — e.g. `ARRAY[]` with
-    /// no cast to supply the element type.
+    /// An expression's type cannot be determined (42P18), for example `ARRAY[]`
+    /// with no cast to supply the element type.
     IndeterminateType(String),
     /// A row would duplicate a visible row in a unique index (23505).
     UniqueViolation(String),
@@ -100,18 +101,18 @@ pub enum ExecError {
     /// (23505). `PostgreSQL` reports the index build, not a row insertion, so
     /// the message differs from [`ExecError::UniqueViolation`].
     UniqueIndexBuildViolation(String),
-    /// An object's definition is self-inconsistent (42P17) — e.g. a generated
-    /// column whose expression reads another generated column.
+    /// An object's definition is self-inconsistent (42P17), for example a
+    /// generated column whose expression reads another generated column.
     InvalidObjectDefinition(String),
     /// Other catalog objects depend on the one being dropped or altered
-    /// (2BP01), and no `CASCADE` was given.
+    /// (2BP01), and the statement gave no `CASCADE`.
     DependentObjectsStillExist(String),
-    /// No unique index arbitrates the `ON CONFLICT` specification (42P10) — the
+    /// No unique index arbitrates the `ON CONFLICT` specification (42P10): the
     /// inference column set matches no unique index on the target table.
     OnConflictNoArbiter,
     /// One `INSERT … ON CONFLICT DO UPDATE` statement tried to update the same
-    /// row twice (21000) — either two conflicting rows in the same statement or
-    /// a row already updated by this statement.
+    /// row twice (21000): either two conflicting rows in the same statement, or
+    /// a row this statement already updated.
     OnConflictAffectsRowTwice,
     /// `ON CONFLICT ON CONSTRAINT <name>` / `ALTER TABLE … RENAME CONSTRAINT`
     /// named a constraint the target table does not have (42704).
@@ -120,36 +121,39 @@ pub enum ExecError {
         table: String,
     },
     /// The same 42704 in the spelling `PostgreSQL` uses for `ALTER TABLE …
-    /// DROP CONSTRAINT` and `VALIDATE CONSTRAINT` — "of relation" there,
-    /// "for table" for [`ExecError::UndefinedConstraint`].
+    /// DROP CONSTRAINT` and `VALIDATE CONSTRAINT`. That spelling says
+    /// "of relation", where [`ExecError::UndefinedConstraint`] says "for table".
     UndefinedRelationConstraint {
         name: String,
         table: String,
     },
-    /// A grouping/aggregation rule was violated (42803) — e.g. a column that is
-    /// neither grouped nor inside an aggregate, or a nested aggregate.
+    /// A statement broke a grouping/aggregation rule (42803), for example a
+    /// column that is neither grouped nor inside an aggregate, or a nested
+    /// aggregate.
     Grouping(String),
-    /// A call to a function that does not exist (42883) — e.g. an unknown name
-    /// or an aggregate applied to an argument type/arity it does not accept.
+    /// A call to a function that does not exist (42883), for example an unknown
+    /// name, or an aggregate applied to an argument type/arity it does not
+    /// accept.
     UndefinedFunction(String),
-    /// An object was used in a way its kind does not allow (42809) — e.g.
-    /// `DISTINCT`/`ALL` applied to a scalar (non-aggregate) function.
+    /// A statement used an object in a way its kind does not allow (42809), for
+    /// example `DISTINCT`/`ALL` applied to a scalar (non-aggregate) function.
     WrongObjectType(String),
     /// A scalar subquery returned more than one row (21000).
     CardinalityViolation,
     /// A subquery used as an expression / IN / quantified source returned more than
     /// one column (42601).
     SubqueryColumns,
-    /// PostgreSQL syntax/parse-analysis error surfaced by executor analysis
-    /// (42601), used for SQL92 ORDER BY integer constants that cannot fit in
+    /// PostgreSQL syntax/parse-analysis error that executor analysis raises
+    /// (42601). It covers SQL92 ORDER BY integer constants that cannot fit in
     /// a positional reference.
     Syntax(String),
     /// A bare ORDER BY output label matched more than one projected column
     /// (42702). PostgreSQL's message differs from generic column ambiguity.
     AmbiguousOrderBy(String),
-    /// SP38: the branches of a UNION/INTERSECT/EXCEPT have different column counts
-    /// (42601). `op` names the specific operator for the PG-exact message; `left`/
-    /// `right` are kept for internal use (the message does not print them).
+    /// SP38: the branches of a UNION/INTERSECT/EXCEPT have different column
+    /// counts (42601). `op` names the specific operator for the PG-exact
+    /// message. `left` and `right` stay for internal use, and the message does
+    /// not print them.
     SetOpColumnCount {
         op: crabka_pgparser::ast::SetOp,
         left: usize,
@@ -158,23 +162,23 @@ pub enum ExecError {
     /// SP39: VALUES rows have different column counts (42601).
     ValuesColumnCount,
     /// A derived-table or function column alias list names more columns than the
-    /// item has (42P10 — `PostgreSQL`'s `buildRelationAliases` check).
+    /// item has (42P10, `PostgreSQL`'s `buildRelationAliases` check).
     DerivedColumnAliasCount {
         table: String,
         expected: usize,
         got: usize,
     },
     /// SP38: an `ORDER BY <n>` positional reference is 0 or past the number of
-    /// output columns (42P10 — invalid_column_reference).
+    /// output columns (42P10, invalid_column_reference).
     InvalidColumnReference(String),
-    /// A statement was issued in an aborted transaction block (25P02): every
-    /// command after an error (until COMMIT/ROLLBACK) is rejected.
+    /// A client issued a statement in an aborted transaction block (25P02). The
+    /// engine rejects every command after an error, until COMMIT/ROLLBACK.
     InFailedTransaction,
-    /// A statement that would change rows or catalog state was issued in a
+    /// A client issued a statement that would change rows or catalog state in a
     /// `READ ONLY` transaction (25006). Carries the command tag PostgreSQL names.
     ReadOnlyTransaction(&'static str),
-    /// S1/S2/S3: a command that requires an explicit transaction block was
-    /// issued outside one (25P01).
+    /// S1/S2/S3: a client issued a command that requires an explicit transaction
+    /// block outside one (25P01).
     NoActiveSqlTransaction(String),
     /// S1: `ROLLBACK TO`/`RELEASE` named a savepoint that is not open (3B001).
     InvalidSavepoint(String),
@@ -186,27 +190,30 @@ pub enum ExecError {
     DuplicatePreparedStatement(String),
     /// S2: `EXECUTE`/`DEALLOCATE` named an unknown prepared statement (26000).
     UndefinedPreparedStatement(String),
-    /// S3: a lock could not be taken without waiting (55P03).
+    /// S3: the engine could not take a lock without a wait (55P03).
     LockNotAvailable(String),
     /// A command forbidden inside an explicit transaction block (25001).
     ActiveSqlTransaction(String),
     /// A write conflicted with a concurrently-committed change under REPEATABLE
-    /// READ (40001) — the client should retry the transaction.
+    /// READ (40001). The client should retry the transaction.
     SerializationFailure,
-    /// A deadlock was detected and this transaction was chosen as the victim (40P01).
+    /// The engine detected a deadlock and chose this transaction as the victim
+    /// (40P01).
     Deadlock,
     /// A lock wait by a cross-range transaction outlived its bounded-wait cap
-    /// (40P01). A cycle spanning ranges is invisible to any single engine's
-    /// wait-for graph, so the expired cap is treated as a presumed distributed
-    /// deadlock; retrying is safe exactly as for a locally-detected one.
+    /// (40P01). A cycle that spans ranges is invisible to any single engine's
+    /// wait-for graph, so the engine treats the expired cap as a presumed
+    /// distributed deadlock. A retry is safe exactly as for a locally-detected
+    /// deadlock.
     LockWaitCapExpired,
-    /// The write hit a node that is not the Raft leader; the client should retry.
+    /// The write hit a node that is not the Raft leader. The client should retry.
     NotLeader,
-    /// The write could not reach a majority (partition/timeout); no partial state
-    /// was applied; the client should retry.
+    /// The write could not reach a majority (partition/timeout). The engine
+    /// applied no partial state, and the client should retry.
     Unavailable,
-    /// SP37: a `SET`/`RESET` supplied a value the parameter cannot accept (22023) —
-    /// e.g. an unknown time-zone name, or a non-default `datestyle`.
+    /// SP37: a `SET`/`RESET` supplied a value the parameter cannot accept
+    /// (22023), for example an unknown time-zone name, or a non-default
+    /// `datestyle`.
     InvalidParameterValue(String),
     /// SP37: a `SET`/`SHOW`/`RESET` named a configuration parameter that does not
     /// exist (42704).
@@ -219,33 +226,35 @@ pub enum ExecError {
     /// F-1: a numeric `SET` value outside the named parameter's declared range
     /// (22023). Value and bounds are already rendered in base units, with the
     /// parameter's unit suffix.
-    /// Boxed because it is by far the widest variant, and `ExecError`'s size is
-    /// multiplied by the recursive evaluator's frame — four inline `String`s
+    /// Boxed because it is by far the widest variant, and the recursive
+    /// evaluator's frame multiplies `ExecError`'s size. Four inline `String`s
     /// here cost every nested expression the same 96 bytes of stack.
     GucValueOutOfRange(Box<GucRangeViolation>),
     /// `ALTER TABLE … ATTACH PARTITION` that would make the partition metadata
     /// cyclic (42P07). PostgreSQL spells this "circular inheritance not
-    /// allowed"; it must be refused rather than stored, because a cycle turns
-    /// every later walk of the partition tree into an unbounded loop.
+    /// allowed". The engine must refuse it and must not store it, because a
+    /// cycle turns every later walk of the partition tree into an unbounded
+    /// loop.
     CircularInheritance,
     /// F-1: a `SET` against a parameter whose `pg_settings.context` forbids
     /// session assignment (55P02).
     CannotChangeParameter(String),
     /// An expression nested more deeply than the evaluator's `MAX_EVAL_DEPTH`
-    /// (54001 / statement_too_complex). Defense-in-depth: the parser already caps
-    /// the AST depth at parse time, so a tree this deep should never reach `eval`;
-    /// this guard ensures that even if one did, evaluation returns a clean error
-    /// rather than overflowing the stack and aborting the server process.
+    /// (54001 / statement_too_complex). This is defense in depth. The parser
+    /// already caps the AST depth at parse time, so a tree this deep should
+    /// never reach `eval`. If one did, this guard makes sure evaluation returns
+    /// a clean error and does not overflow the stack and abort the server
+    /// process.
     StackDepthExceeded,
     /// A sequence advanced outside its configured bounds (2200H).
     SequenceLimit(String),
     /// Object state does not satisfy a command precondition (55000).
     ObjectNotInPrerequisiteState(String),
-    /// A scalar function's own error, carrying the SQLSTATE and the message
-    /// PostgreSQL spells out at that call site — `setseed`'s range check
+    /// A scalar function's own error. It carries the SQLSTATE and the message
+    /// PostgreSQL spells out at that call site: `setseed`'s range check
     /// (22023), `format`'s specifier diagnostics (22023/22004), `encode`'s
-    /// unknown encoding, `split_part`'s zero field position. Both parts vary
-    /// per call, so neither can be baked into a dedicated variant.
+    /// unknown encoding, and `split_part`'s zero field position. Both parts vary
+    /// per call, so neither can go into a dedicated variant.
     FunctionError {
         sqlstate: &'static str,
         message: String,
@@ -276,15 +285,15 @@ pub enum ExecError {
     ChildMissingColumn(String),
     /// `PARTITION OF` named a relation that is not partitioned (42P17).
     NotPartitioned(String),
-    /// A row write, or a back-validation scan, broke referential integrity —
-    /// 23503 on three of the four sides, and 23001 (`restrict_violation`) when
-    /// `RESTRICT` is what refused a parent-side delete or update.
-    /// [`ForeignKeyViolationSide`] is the discriminator: `RESTRICT` and
-    /// `NO ACTION` read as synonyms but differ in both SQLSTATE and wording, so
-    /// the two must not be collapsed.
+    /// A row write, or a back-validation scan, broke referential integrity.
+    /// The SQLSTATE is 23503 on three of the four sides, and 23001
+    /// (`restrict_violation`) when `RESTRICT` is what refused a parent-side
+    /// delete or update. [`ForeignKeyViolationSide`] is the discriminator:
+    /// `RESTRICT` and `NO ACTION` read as synonyms but differ in both SQLSTATE
+    /// and wording, so the two must not be collapsed.
     ///
     /// `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` over stored rows reports
-    /// [`ForeignKeyViolationSide::KeyNotPresent`] as well — `PostgreSQL` reuses
+    /// [`ForeignKeyViolationSide::KeyNotPresent`] as well. `PostgreSQL` reuses
     /// the row-write message verbatim for back-validation, so there is no
     /// separate on-existing-rows variant here (unlike
     /// [`ExecError::CheckViolationOnExistingRows`]).
@@ -293,16 +302,16 @@ pub enum ExecError {
     /// payload's four inline `String`s would otherwise widen every frame of the
     /// recursive evaluator.
     ForeignKeyViolation(Box<ForeignKeyViolation>),
-    /// The referenced columns are covered by no unique constraint or unique
-    /// index (42830). Carries the referenced table.
+    /// No unique constraint or unique index covers the referenced columns
+    /// (42830). Carries the referenced table.
     NoUniqueConstraintForReferencedTable(String),
     /// The referencing and referenced column lists have different lengths
     /// (42830).
     ForeignKeyColumnCountMismatch,
     /// The referenced-column list names one column twice (42830).
     DuplicateForeignKeyReferencedColumn,
-    /// `REFERENCES` named a relation that is not a table (42809) — a view, for
-    /// instance. `PostgreSQL`'s message calls it the "referenced relation",
+    /// `REFERENCES` named a relation that is not a table (42809), for example a
+    /// view. `PostgreSQL`'s message calls it the "referenced relation",
     /// unlike the general-purpose [`ExecError::WrongObjectType`].
     ReferencedRelationNotATable(String),
     /// A `FOREIGN KEY (…)` list names a column the referencing table does not
@@ -333,10 +342,10 @@ pub enum ExecError {
         referencing_table: String,
         referenced_table: String,
     },
-    /// A drop was refused because foreign keys depend on the object (2BP01)
-    /// and no `CASCADE` was given. Unlike
+    /// The engine refused a drop because foreign keys depend on the object
+    /// (2BP01) and the statement gave no `CASCADE`. Unlike
     /// [`ExecError::DependentObjectsStillExist`], which carries a bare message,
-    /// this names every dependent constraint in `DETAIL` — one per line — and
+    /// this names every dependent constraint in `DETAIL`, one per line, and
     /// hints at `CASCADE`. Boxed: the payload holds a [`DroppedObject`] and a
     /// `Vec` of dependents.
     DependentForeignKeys(Box<ForeignKeyDependents>),
@@ -362,8 +371,8 @@ pub struct ForeignKeyViolation {
     pub table: String,
     /// The constraint's name, as `pg_constraint.conname` holds it.
     pub constraint: String,
-    /// Which side was violated. Selects the SQLSTATE as well as the wording of
-    /// both the message and the `DETAIL`.
+    /// Which side the write violated. This selects the SQLSTATE and the wording
+    /// of both the message and the `DETAIL`.
     pub side: ForeignKeyViolationSide,
 }
 
@@ -372,10 +381,10 @@ pub struct ForeignKeyViolation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForeignKeyViolationSide {
     /// The written row's key is absent from the referenced table (23503):
-    /// `Key (a, b)=(1, 1) is not present in table "p".` Also the shape a
-    /// back-validation scan reports.
+    /// `Key (a, b)=(1, 1) is not present in table "p".` A back-validation scan
+    /// reports the same shape.
     KeyNotPresent {
-        /// The `Key (a, b)=(1, 1)` fragment, already rendered — build it with
+        /// The `Key (a, b)=(1, 1)` fragment, already rendered. Build it with
         /// [`ForeignKeyViolationSide::render_key`], which assembles everything
         /// but the values themselves.
         key: String,
@@ -383,26 +392,26 @@ pub enum ForeignKeyViolationSide {
         referenced_table: String,
     },
     /// A `MATCH FULL` key mixed null and non-null columns (23503). The primary
-    /// message is the same as [`ForeignKeyViolationSide::KeyNotPresent`]'s; only
+    /// message is the same as [`ForeignKeyViolationSide::KeyNotPresent`]'s. Only
     /// the `DETAIL` differs, and it names no key.
     MatchFullMixedNulls,
     /// `NO ACTION` refused a delete or key update of a row that is still
     /// referenced (23503): `Key (id)=(1) is still referenced from table "c".`
     StillReferenced {
-        /// The `Key (id)=(1)` fragment, already rendered — see
+        /// The `Key (id)=(1)` fragment, already rendered. See
         /// [`ForeignKeyViolationSide::render_key`].
         key: String,
         /// The referencing table that still holds a matching row. Named in both
         /// the message and the `DETAIL`.
         referencing_table: String,
     },
-    /// `RESTRICT` refused it. Distinct from
-    /// [`ForeignKeyViolationSide::StillReferenced`] in SQLSTATE — 23001
-    /// (`restrict_violation`), not 23503 — in the message, which says
-    /// "violates RESTRICT setting of", and in the `DETAIL`, which says
-    /// "is referenced" where `NO ACTION` says "is still referenced".
+    /// `RESTRICT` refused it. This differs from
+    /// [`ForeignKeyViolationSide::StillReferenced`] in three ways. The SQLSTATE
+    /// is 23001 (`restrict_violation`), not 23503. The message says
+    /// "violates RESTRICT setting of". The `DETAIL` says "is referenced", where
+    /// `NO ACTION` says "is still referenced".
     Restricted {
-        /// The `Key (id)=(1)` fragment, already rendered — see
+        /// The `Key (id)=(1)` fragment, already rendered. See
         /// [`ForeignKeyViolationSide::render_key`].
         key: String,
         /// The referencing table that holds a matching row. Named in both the
@@ -412,7 +421,7 @@ pub enum ForeignKeyViolationSide {
 }
 
 /// The payload of [`ExecError::ForeignKeyTypeMismatch`], boxed to keep the error
-/// enum narrow. Every field lands in the `DETAIL` line; the primary message
+/// enum narrow. Every field lands in the `DETAIL` line, and the primary message
 /// names only the constraint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKeyTypeMismatch {
@@ -435,7 +444,7 @@ pub struct ForeignKeyDependents {
     /// The object the statement tried to drop.
     pub dropped: DroppedObject,
     /// The constraints that depend on it, one `DETAIL` line each, in the order
-    /// they should be listed.
+    /// the message should list them.
     pub dependents: Vec<DependentForeignKey>,
 }
 
@@ -449,12 +458,12 @@ pub enum DroppedObject {
     /// `DROP INDEX`. Named `index uniq_a` in both.
     Index(String),
     /// `ALTER TABLE … DROP CONSTRAINT`. Named `constraint p_pkey on table p` in
-    /// the message, but `index p_pkey` in the `DETAIL` — the dependents hang off
-    /// the constraint's backing index, not the constraint.
+    /// the message, but `index p_pkey` in the `DETAIL`, because the dependents
+    /// hang off the constraint's backing index, not the constraint.
     Constraint { name: String, table: String },
 }
 
-/// One foreign key blocking a drop, rendered as a single `DETAIL` line.
+/// One foreign key that blocks a drop, rendered as a single `DETAIL` line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependentForeignKey {
     /// The dependent constraint's name, unquoted in the `DETAIL`.
@@ -491,11 +500,11 @@ impl ForeignKeyViolationSide {
     /// line opens with, from the key's columns and their already-formatted
     /// values.
     ///
-    /// Formatting a value to its text representation belongs to the type layer,
-    /// so this takes text and only assembles it: columns and values each join
-    /// with `", "`, in the order the `FOREIGN KEY` clause writes them (which is
-    /// not necessarily the referenced index's order). The result carries no
-    /// trailing period — the sentence built around it supplies that.
+    /// The type layer owns the format of a value into its text representation,
+    /// so this method takes text and only assembles it. Columns and values each
+    /// join with `", "`, in the order the `FOREIGN KEY` clause writes them,
+    /// which is not necessarily the referenced index's order. The result carries
+    /// no trailing period. The sentence built around it supplies that.
     #[must_use]
     pub fn render_key<C: AsRef<str>, V: AsRef<str>>(columns: &[C], values: &[V]) -> String {
         let columns: Vec<&str> = columns.iter().map(AsRef::as_ref).collect();
@@ -955,8 +964,8 @@ mod tests {
     use super::*;
 
     /// Each row is (error, expected SQLSTATE, expected PG-exact message). The
-    /// ON CONFLICT rows are diffed against a real PostgreSQL oracle by the
-    /// conformance harness, so their texts are byte-for-byte PG's.
+    /// conformance harness diffs the ON CONFLICT rows against a real PostgreSQL
+    /// oracle, so their texts are byte-for-byte PG's.
     #[test]
     fn errors_map_to_sqlstate_and_pg_message() {
         let cases: Vec<(ExecError, &str, &str)> = vec![
@@ -1012,10 +1021,10 @@ mod tests {
         }))
     }
 
-    /// Every message, `DETAIL` and `HINT` below was captured from a live
-    /// PostgreSQL 18.4, so each row is compared as a whole [`PgError`] — the
-    /// severity and the absence or presence of the secondary fields are part of
-    /// what has to match.
+    /// Every message, `DETAIL` and `HINT` below comes from a live PostgreSQL
+    /// 18.4, so this test compares each row as a whole [`PgError`]. The severity
+    /// and the absence or presence of the secondary fields are part of what has
+    /// to match.
     #[test]
     fn foreign_key_errors_map_to_sqlstate_message_detail_and_hint() {
         let cases: Vec<(ExecError, PgError)> = vec![
@@ -1228,8 +1237,8 @@ mod tests {
         }
     }
 
-    /// DETAIL and HINT exist for the foreign-key errors only; widening them to
-    /// the rest of the executor's errors is not this wave's business.
+    /// DETAIL and HINT exist for the foreign-key errors only. This wave does
+    /// not widen them to the rest of the executor's errors.
     #[test]
     fn non_foreign_key_errors_carry_no_detail_or_hint() {
         let cases = vec![

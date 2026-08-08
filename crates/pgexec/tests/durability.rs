@@ -1,5 +1,5 @@
 //! Open a durable engine, write, drop it, reopen, and assert everything
-//! survived — including the rowid allocator (the SP2 carry-over fix).
+//! survived. This includes the rowid allocator, which is the SP2 carry-over fix.
 
 use crabka_pgexec::SqlEngine;
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};

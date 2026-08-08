@@ -1,16 +1,19 @@
-//! mTLS principal extraction. Given a DER-encoded X.509 client
-//! certificate, derive the principal name the broker uses for ACL
-//! lookups.
+//! mTLS principal extraction.
+//!
+//! From a DER-encoded X.509 client certificate, this module derives the
+//! principal name that the broker uses for ACL lookups.
 //!
 //! Kafka's `DefaultKafkaPrincipalBuilder` uses the cert's Subject
-//! Distinguished Name (RFC 2253 format, e.g. `CN=alice,OU=foo,O=org`)
-//! as the principal name. Operators and `KafkaUser` mTLS provisioning
-//! pin ACLs by that DN, so we match it byte-for-byte.
+//! Distinguished Name in RFC 2253 format, for example `CN=alice,OU=foo,O=org`,
+//! as the principal name. Operators and `KafkaUser` mTLS provisioning pin ACLs
+//! by that DN, so Crabka matches it byte-for-byte.
 
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 /// Parse `cert_der` and return the Subject DN in RFC 2253 format.
-/// Returns `None` if the bytes don't parse as a valid X.509 cert.
+///
+/// This function returns `None` if the bytes do not parse as a valid X.509
+/// cert.
 // mTLS principal extraction. skip_all keeps the raw `cert_der` bytes out of
 // span fields; the derived Subject DN (the principal, non-secret) is recorded
 // mid-fn. Returns `Option`, not `Result`, so no `err`.

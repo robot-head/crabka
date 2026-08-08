@@ -1,13 +1,14 @@
-//! Resolve response `TaskIds` into [`TaskAssignment`]s carrying the concrete
-//! source topic-partitions each task reads (via the built topology).
+//! Resolve the response `TaskIds` into [`TaskAssignment`]s. Each assignment
+//! carries the concrete source topic-partitions that its task reads, which come
+//! from the built topology.
 
 use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds;
 
 use super::types::{TaskAssignment, TopicPartition};
 use crate::topology::BuiltTopology;
 
-/// Map one role's assigned tasks to [`TaskAssignment`]s. `None` (unchanged
-/// since last heartbeat) resolves to an empty vec.
+/// Map one role's assigned tasks to [`TaskAssignment`]s. A `None`, which means
+/// unchanged since the last heartbeat, gives an empty vec.
 pub(crate) fn resolve(
     tasks: Option<&Vec<TaskIds>>,
     topology: &BuiltTopology,

@@ -86,7 +86,7 @@ pub(super) async fn merge_scan_table<const N: usize>(
     Ok(Some(table_name.to_string()))
 }
 
-/// Quote a SQL identifier for safe interpolation into a `DataFusion` query.
+/// Quotes a SQL identifier for safe interpolation into a `DataFusion` query.
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }

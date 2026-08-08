@@ -1,32 +1,35 @@
-//! Integration test: spin up an in-process broker via the existing
-//! `crates/broker/tests/support` harness, drive every admin RPC
-//! through `AdminClient`, assert the visible cluster state.
+//! Integration test for the admin RPCs against an in-process broker.
+//!
+//! The test starts an in-process broker with the existing
+//! `crates/broker/tests/support` harness. It drives every admin RPC through
+//! `AdminClient` and then checks the visible cluster state.
 //!
 //! # Coverage map for `NOT_CONTROLLER` retry
 //!
-//! The full retry pipeline — first response carries `NOT_CONTROLLER`
-//! (41) → admin client issues a fresh `Metadata` → reconnects to the
-//! reported controller → re-sends the original RPC — can't be unit-
-//! tested against `AdminClient` directly because it holds a concrete
-//! `crabka_client_core::Connection` (no trait seam at the byte layer).
-//! Building a Kafka-protocol fake server for ~3 RPCs is order-of-
-//! magnitude more code than the retry itself.
+//! The full retry pipeline has four steps. The first response carries
+//! `NOT_CONTROLLER` (41). The admin client sends a fresh `Metadata` request.
+//! The client reconnects to the reported controller. The client sends the
+//! original RPC again.
 //!
-//! Instead, coverage is split:
+//! This pipeline cannot be unit-tested against `AdminClient` directly, because
+//! `AdminClient` holds a concrete `crabka_client_core::Connection` and there is
+//! no trait seam at the byte layer. A Kafka-protocol fake server for about 3
+//! RPCs is much more code than the retry itself.
+//!
+//! The tests split the coverage into three parts instead:
 //!
 //! * **Predicate** — `src/topics.rs::tests::any_not_controller_*` lock
-//!   the retry-eligibility check on code 41 only.
+//!   the retry-eligibility check to code 41 only.
 //! * **Endpoint resolver** — `src/topics.rs::tests::controller_endpoint_*`
-//!   lock the `MetadataResponse` → `host:port` mapping the retry uses
-//!   to pick a reconnect target.
-//! * **Pipeline** — *this file*'s `admin_round_trip_create_alter_delete`
-//!   exercises the end-to-end happy path against a real broker. In a
-//!   singleton bootstrap the broker is always the controller so the
-//!   retry path doesn't fire here, but the same code path that would
-//!   retry on `NOT_CONTROLLER` is the one that succeeds without retry
-//!   when the response is clean — i.e. the integration path through
-//!   `parse_create_topics` / `parse_delete_topics` / `parse_create_partitions`
-//!   is fully exercised.
+//!   lock the mapping from `MetadataResponse` to `host:port` that the retry
+//!   uses to select a reconnect target.
+//! * **Pipeline** — `admin_round_trip_create_alter_delete` in *this file* runs
+//!   the end-to-end happy path against a real broker. In a singleton bootstrap
+//!   the broker is always the controller, so the retry path does not run here.
+//!   But the code path that retries on `NOT_CONTROLLER` is the same path that
+//!   succeeds without a retry when the response is clean. So the test fully
+//!   covers the integration path through `parse_create_topics`,
+//!   `parse_delete_topics`, and `parse_create_partitions`.
 
 use std::{collections::BTreeMap, time::Duration};
 

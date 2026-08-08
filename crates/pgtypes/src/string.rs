@@ -4,17 +4,17 @@ use crate::TypeError;
 
 /// Which coercion produced this length check.
 ///
-/// `PostgreSQL` threads the same distinction through the `isExplicit` argument of
-/// its `varchar(varchar, int4, bool)` and `bpchar(...)` cast functions, and the
-/// SQL standard requires both halves: an explicit cast truncates, an assignment
+/// `PostgreSQL` makes the same distinction with the `isExplicit` argument of its
+/// `varchar(varchar, int4, bool)` and `bpchar(...)` cast functions. The SQL
+/// standard requires both halves: an explicit cast truncates, an assignment
 /// raises `string_data_right_truncation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Coercion {
-    /// A cast the query wrote out (`v::varchar(3)`, `CAST(v AS char(2))`), which
+    /// A cast the query wrote out (`v::varchar(3)`, `CAST(v AS char(2))`). It
     /// truncates an over-long value silently.
     Explicit,
-    /// An implicit or assignment coercion — storing into a column, or feeding a
-    /// parameter — which rejects an over-long value unless the characters it
+    /// An implicit or assignment coercion, such as a store into a column or a
+    /// parameter feed. It rejects an over-long value unless the characters it
     /// would discard are all spaces.
     Assignment,
 }
@@ -71,8 +71,8 @@ fn apply_string_typmod(
     Ok(out)
 }
 
-/// Cut `value` to `limit` characters, and decide whether losing the rest is
-/// allowed. Trailing spaces are always discardable: they carry no information
+/// Cut `value` to `limit` characters, then decide if the loss of the rest is
+/// allowed. Trailing spaces are always safe to discard: they hold no information
 /// for a bounded string type, so even an assignment accepts them.
 fn truncate(value: &str, limit: usize, how: Coercion) -> Result<String, TypeError> {
     let mut out = String::new();
@@ -120,7 +120,7 @@ mod tests {
         ));
     }
 
-    /// An explicit cast truncates instead of erroring — the SQL standard requires
+    /// An explicit cast truncates instead of an error. The SQL standard requires
     /// it, and `PostgreSQL` implements it with the `isExplicit` cast argument.
     #[test]
     fn an_explicit_cast_truncates_where_an_assignment_would_reject() {

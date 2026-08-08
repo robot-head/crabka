@@ -6,11 +6,12 @@
 //!
 //! ## `OffsetFetch` version note
 //!
-//! The `Connection` negotiates the highest mutually supported version (v10 at
-//! the time of writing). At v10 the response encodes topics by `topic_id`
-//! only — the `name` field is omitted from the wire. To return the
-//! human-readable `(topic, partition) → offset` map we call `Metadata` with
-//! no filter (fetch-all) immediately after and build an id→name lookup table.
+//! The `Connection` negotiates the highest mutually supported version, which
+//! is v10 at the time of writing. At v10 the response encodes topics by
+//! `topic_id` only, and the wire omits the `name` field. To return the
+//! human-readable `(topic, partition) → offset` map, the client calls
+//! `Metadata` with no filter immediately after, which fetches all topics, and
+//! builds an id→name lookup table.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -25,8 +26,8 @@ use crabka_protocol::{
 
 use crate::{AdminClient, AdminError, kafka_error_name};
 
-/// One committed-offset row collected from an `OffsetFetch` response, retaining
-/// the `topic_id` so name-less (v10) topics can be resolved via `Metadata`.
+/// One committed-offset row collected from an `OffsetFetch` response. It keeps
+/// the `topic_id`, so `Metadata` can resolve name-less v10 topics.
 struct Entry {
     topic_name: String,
     topic_id: WireUuid,
@@ -35,7 +36,8 @@ struct Entry {
 }
 
 impl AdminClient {
-    /// Return the group-id of every consumer group known to the broker.
+    /// Returns the group-id of every consumer group known to the broker.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn list_groups(&mut self) -> Result<Vec<String>, AdminError> {
@@ -53,13 +55,14 @@ impl AdminClient {
         Ok(resp.groups.into_iter().map(|g| g.group_id).collect())
     }
 
-    /// Return `(topic, partition) → committed_offset` for the named group.
+    /// Returns `(topic, partition) → committed_offset` for the named group.
     ///
-    /// Requests all topics/partitions (`topics: None`). Entries with a
-    /// committed offset < 0 (i.e. no committed offset) are skipped.
+    /// The call requests all topics and partitions (`topics: None`). It skips
+    /// entries with a committed offset < 0, which means no committed offset.
     ///
-    /// At `OffsetFetch` v10 the response carries `topic_id` instead of `name`, so
-    /// the topic ids are resolved to names via a `Metadata` round-trip.
+    /// At `OffsetFetch` v10 the response carries `topic_id` instead of
+    /// `name`, so a `Metadata` round-trip resolves the topic ids to names.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn list_consumer_group_offsets(

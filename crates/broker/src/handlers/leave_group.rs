@@ -1,6 +1,6 @@
-//! `LeaveGroup` (`api_key=13`). Removes one or more members inside the group's
-//! actor and (if the group is still `Stable` with survivors) reopens a
-//! rebalance.
+//! `LeaveGroup` (`api_key=13`). It removes one or more members inside the
+//! group's actor. It then opens a rebalance again, if the group is still
+//! `Stable` and members remain.
 
 use bytes::Bytes;
 use crabka_protocol::{

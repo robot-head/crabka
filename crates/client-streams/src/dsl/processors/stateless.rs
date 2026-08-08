@@ -1,14 +1,15 @@
 //! Stateless `Processor` impls backing the `KStream` DSL ops.
 //!
 //! Each struct captures the user closure and implements [`Processor`] with the
-//! input/output KV types of its op. The DSL lowering thunk constructs one inside
-//! a `ProcessorSupplier` closure (`move || Proc { f: f.clone(), .. }`), so the
-//! structs themselves need not be `Clone` — only the captured closure does.
+//! input and output KV types of its op. The DSL lowering thunk constructs one
+//! struct inside a `ProcessorSupplier` closure,
+//! `move || Proc { f: f.clone(), .. }`. The structs themselves therefore need no
+//! `Clone`, and only the captured closure needs it.
 //!
-//! Bounds mirror what the Processor-API requires: every *output* key/value type
-//! is `Any + Send + Clone` (so [`ProcessorContext::forward`] can box + fan it
-//! out), and every captured closure is `Fn(..) + Send + Sync + 'static` (so the
-//! enclosing `move ||` supplier satisfies `ProcessorSupplier: Send + Sync`).
+//! The bounds match what the Processor-API needs. Every *output* key and value
+//! type is `Any + Send + Clone`, so [`ProcessorContext::forward`] can box it and
+//! fan it out. Every captured closure is `Fn(..) + Send + Sync + 'static`, so the
+//! enclosing `move ||` supplier satisfies `ProcessorSupplier: Send + Sync`.
 
 use std::{any::Any, marker::PhantomData};
 
@@ -19,9 +20,10 @@ use crate::processor::{
     record::Record,
 };
 
-/// Variance-neutral (always `Send + Sync`, contravariant-free) marker that "uses"
-/// the otherwise-unconstrained type params of a processor struct. Factored out so
-/// the multi-param markers stay under clippy's `type_complexity` threshold.
+/// Variance-neutral marker that "uses" the otherwise-unconstrained type params of
+/// a processor struct. It is always `Send + Sync` and free of contravariance.
+/// It is factored out, so the multi-param markers stay under clippy's
+/// `type_complexity` threshold.
 type Marker<T> = PhantomData<fn() -> T>;
 
 /// `map_values`: rewrite each value, key unchanged. `Processor<K, V, K, V2>`.
@@ -43,10 +45,10 @@ where
 }
 
 /// `filter` / `filter_not`: forward when `predicate(k, v) != negate`.
-/// `Processor<K, V, K, V>`. A null key is passed to the predicate as the
-/// type's `Default` so the predicate signature stays `Fn(&K, &V)` (JVM passes a
-/// nullable key; we have no key to lend, so synthesize one — filters rarely key
-/// on identity).
+/// `Processor<K, V, K, V>`. A null key reaches the predicate as the type's
+/// `Default`, so the predicate signature stays `Fn(&K, &V)`. The JVM passes a
+/// nullable key. This crate has no key to lend, so it synthesizes one, and a
+/// filter rarely keys on identity.
 pub(crate) struct FilterProcessor<K, V, P> {
     pub predicate: P,
     pub negate: bool,
@@ -108,7 +110,8 @@ where
     }
 }
 
-/// `flat_map`: one record → zero or more `(K2, V2)`. `Processor<K, V, K2, V2>`.
+/// `flat_map`: one record into zero or more `(K2, V2)`.
+/// `Processor<K, V, K2, V2>`.
 pub(crate) struct FlatMapProcessor<K, V, K2, V2, IT, F> {
     pub f: F,
     pub _pd: Marker<(K, V, K2, V2, IT)>,
@@ -131,7 +134,7 @@ where
     }
 }
 
-/// `flat_map_values`: one record → zero or more `V2`, key unchanged.
+/// `flat_map_values`: one record into zero or more `V2`, key unchanged.
 /// `Processor<K, V, K, V2>`.
 pub(crate) struct FlatMapValuesProcessor<V, V2, IT, F> {
     pub f: F,
@@ -173,9 +176,10 @@ where
     }
 }
 
-/// `foreach`: terminal side-effect — never forwards. Typed `Processor<K, V, K,
-/// V>` (reusing the input KV as the unused output avoids a unit-typed handle);
-/// the node has no children, so nothing is forwarded regardless.
+/// `foreach`: a terminal side-effect that never forwards. It is typed
+/// `Processor<K, V, K, V>`, because reuse of the input KV as the unused output
+/// avoids a unit-typed handle. The node has no children, so it forwards nothing
+/// in any case.
 pub(crate) struct ForeachProcessor<K, V, F> {
     pub f: F,
     pub _pd: std::marker::PhantomData<fn(K, V)>,

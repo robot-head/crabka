@@ -1,12 +1,14 @@
-//! `RemoveRaftVoter` (`api_key=81`, KIP-853). Admin RPC that drops a voter
-//! from the controller-raft voter set (refusing to remove the last voter).
+//! `RemoveRaftVoter` (`api_key=81`, KIP-853).
+//!
+//! This admin RPC drops a voter from the controller-raft voter set. It refuses
+//! to remove the last voter.
 //!
 //! ## ACL
 //!
-//! `Alter` on `Cluster("kafka-cluster")`. Deny → whole-response
-//! `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
+//! The handler needs `Alter` on `Cluster("kafka-cluster")`. On Deny, the whole
+//! response carries `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
 //!
-//! Outcome → error code mapping is shared with [`super::add_raft_voter`].
+//! [`super::add_raft_voter`] shares the map from an outcome to an error code.
 
 use bytes::Bytes;
 use crabka_protocol::{
@@ -121,7 +123,7 @@ mod tests {
     use super::*;
     use crate::test_support::start_broker_with_authorizer as start_broker;
 
-    /// Decode→encode round-trip at min and max versions.
+    /// Decode and encode round trip at the minimum and maximum versions.
     #[test]
     fn response_round_trips_at_min_and_max_versions() {
         use crabka_protocol::owned::remove_raft_voter_response::{self, RemoveRaftVoterResponse};

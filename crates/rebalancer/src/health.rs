@@ -1,5 +1,5 @@
-//! Plain axum routes for `/healthz`, `/readyz`, `/metrics`. Mounted
-//! alongside the Connect-RPC router by the binary entry.
+//! Plain axum routes for `/healthz`, `/readyz`, and `/metrics`. The binary
+//! entry mounts them alongside the Connect-RPC router.
 
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ use crate::{ingest::SharedSnapshot, state_topic::StateBackend};
 pub struct HealthState {
     pub snapshot: SharedSnapshot,
     pub registry: Arc<Mutex<Registry>>,
-    /// Gate `/readyz` on the state topic being fully loaded.
+    /// Gate `/readyz` on a fully loaded state topic.
     pub state_topic: Arc<dyn StateBackend>,
 }
 

@@ -77,6 +77,7 @@ const RANGE_TLS_IDENTITY_ANNOTATION: &str = "crabka.io/range-tls-identity";
 const RANGE_TLS_HASH_ANNOTATION: &str = "crabka.io/range-tls-hash";
 
 /// Run the controller forever.
+///
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -133,8 +134,8 @@ struct ReadyTenant {
     compute_policy: EffectiveGresComputePolicy,
     direct_bootstrap_grace: Time,
     kafka_sasl: bool,
-    /// Validated `Gres.spec.tracing`, cloned off the fleet object so the
-    /// render path never re-reads it.
+    /// Validated `Gres.spec.tracing`. The operator clones it off the fleet
+    /// object, so the render path never reads it again.
     tracing: Option<Tracing>,
 }
 
@@ -1113,10 +1114,12 @@ async fn park_retiring_ranges(
     Ok(ParkingProgress::Complete)
 }
 
-/// Reconcile at most one durable split/move predecessor WAL retirement without Kubernetes.
+/// Reconcile at most one durable split or move predecessor WAL retirement
+/// without Kubernetes.
 ///
-/// The registry sidecar is the authority: deletion is replay-safe, and the sidecar advances to
-/// `Parked` only after metadata confirms the exact generation topic is absent.
+/// The registry sidecar is the authority. Deletion is replay-safe, and the
+/// sidecar advances to `Parked` only after metadata confirms that the exact
+/// generation topic is absent.
 #[async_trait::async_trait]
 pub trait RangeRetirementAdmin: Send {
     async fn metadata(
@@ -2075,18 +2078,19 @@ struct DeploymentRenderConfig<'a> {
     tracing: Option<&'a Tracing>,
 }
 
-/// Append the `CRABKA_OTLP_*` / `OTEL_SERVICE_NAME` env a compute container
-/// needs to export traces, reading the fleet's `Gres.spec.tracing`.
+/// Append the `CRABKA_OTLP_*` and `OTEL_SERVICE_NAME` env that a compute
+/// container needs to export traces. This function reads the fleet's
+/// `Gres.spec.tracing`.
 ///
-/// Same shape as the broker renderer in [`super::kafka_node_pool`]: both ends
-/// consume the one `OtlpConfig::from_env` contract, so the env names, the
-/// implicit `CRABKA_OTLP_ENABLED=true`, and the "only render what was
-/// configured" rule have to agree.
+/// The shape is the same as the broker renderer in
+/// [`super::kafka_node_pool`]. Both ends use the one `OtlpConfig::from_env`
+/// contract, so the env names, the implicit `CRABKA_OTLP_ENABLED=true`, and
+/// the "only render what was configured" rule must agree.
 ///
-/// Nothing at all is appended when the fleet has no `spec.tracing`. That is
-/// load-bearing rather than tidiness: `CRABKA_OTLP_ENDPOINT=""` still counts as
-/// an endpoint to `OtlpConfig::from_env`, so a renderer that always emitted the
-/// pair would silently start an exporter that can never reach a collector.
+/// This function appends nothing when the fleet has no `spec.tracing`. That
+/// rule is load-bearing and not tidiness. `OtlpConfig::from_env` counts
+/// `CRABKA_OTLP_ENDPOINT=""` as an endpoint, so a renderer that always wrote
+/// the pair would start an exporter that can never reach a collector.
 fn push_otlp_env(env: &mut Vec<serde_json::Value>, tracing: Option<&Tracing>) {
     if let Some(tracing) = tracing
         && let TracingType::Otlp = tracing.kind
@@ -2121,7 +2125,7 @@ fn push_otlp_env(env: &mut Vec<serde_json::Value>, tracing: Option<&Tracing>) {
 /// The `--registry-*` flags a compute pod inherits from the shared policy.
 ///
 /// The policy holds quantities and the compute binary accepts human-readable
-/// quantities, so no unit information is discarded at this boundary.
+/// quantities, so this boundary discards no unit information.
 fn registry_policy_args(policy: &crabka_gres_control::RegistryPolicy) -> [String; 14] {
     [
         "--registry-replication-factor".to_owned(),
@@ -4708,8 +4712,8 @@ mod tests {
     }
 
     /// Base env of a single-range, no-SASL tenant. Every tracing case below is
-    /// this list plus (or exactly) nothing, so the assertions compare whole
-    /// collections instead of probing one variable at a time.
+    /// this list plus more entries, or exactly this list, so the assertions
+    /// compare whole collections instead of one variable at a time.
     fn base_compute_env() -> Vec<(String, Option<String>)> {
         [
             ("KAFKA_BOOTSTRAP_SERVERS", "k:9092"),
@@ -4784,10 +4788,10 @@ mod tests {
         assert!(container_env(&render_with_tracing(Some(&tracing))) == expected);
     }
 
-    /// The failure this pins is an always-on renderer that emits
-    /// `CRABKA_OTLP_ENDPOINT=""`: `OtlpConfig::from_env` reads any set endpoint
-    /// as "export enabled", so the pod would start a permanently failing
-    /// exporter instead of staying quiet.
+    /// This test pins the failure of an always-on renderer that emits
+    /// `CRABKA_OTLP_ENDPOINT=""`. `OtlpConfig::from_env` reads any set endpoint
+    /// as "export enabled", so the pod would start an exporter that always
+    /// fails instead of staying quiet.
     #[test]
     fn compute_env_has_no_otlp_variable_at_all_when_tracing_is_absent() {
         assert!(container_env(&render_with_tracing(None)) == base_compute_env());

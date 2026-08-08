@@ -1,7 +1,7 @@
-//! OTLP forward sink for KIP-714 client metrics. Re-emits decoded client
-//! `MetricsData` to the OTLP collector already used for traces. Sends happen
-//! on a bounded background task; overflow is dropped + counted so the request
-//! path never blocks on a slow collector.
+//! OTLP forward sink for KIP-714 client metrics. The sink re-emits decoded
+//! client `MetricsData` to the OTLP collector that traces already use. Sends
+//! happen on a bounded background task. The sink drops and counts overflow, so
+//! the request path never blocks on a slow collector.
 
 use opentelemetry_proto::tonic::{
     collector::metrics::v1::ExportMetricsServiceRequest,
@@ -10,8 +10,8 @@ use opentelemetry_proto::tonic::{
 };
 use tokio::sync::mpsc;
 
-/// Build an OTLP export request from decoded metrics, tagging every resource
-/// with the originating client's instance id.
+/// Build an OTLP export request from decoded metrics. This function tags
+/// every resource with the originating client's instance id.
 pub(crate) fn build_export_request(
     mut md: MetricsData,
     client_instance_id: &str,
@@ -36,7 +36,8 @@ pub(crate) struct OtlpForwarder {
 }
 
 impl OtlpForwarder {
-    /// Disabled forwarder (no endpoint configured). All `forward` calls no-op.
+    /// Disabled forwarder for when no endpoint is configured. All `forward`
+    /// calls no-op.
     pub(crate) fn disabled() -> Self {
         Self { tx: None }
     }
@@ -73,8 +74,9 @@ impl OtlpForwarder {
         self.tx.is_some()
     }
 
-    /// Enqueue metrics for forwarding. Drops (with a debug log) if the queue
-    /// is full or the forwarder is disabled — never blocks.
+    /// Enqueue metrics for forwarding. This function drops the metrics and
+    /// writes a debug log if the queue is full or the forwarder is disabled.
+    /// It never blocks.
     pub(crate) fn forward(&self, md: MetricsData, client_instance_id: &str) {
         if let Some(tx) = &self.tx
             && let Err(e) = tx.try_send((md, client_instance_id.to_string()))

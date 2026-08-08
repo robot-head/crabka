@@ -1,5 +1,5 @@
-//! Unix-only: the pin-cleanup failure path is provoked with Unix mode bits,
-//! which Windows has no equivalent for. Matches the gating its sibling
+//! Unix-only. The tests provoke the pin-cleanup failure path with Unix mode
+//! bits, and Windows has no equivalent. This matches the gating its siblings
 //! `topology_process_split_crash.rs` and `topology_process_nemesis.rs` use.
 #![cfg(unix)]
 
@@ -3168,7 +3168,8 @@ async fn runtime_live_loader_serves_sql_over_memory_substrate() {
     let _ = server.await;
 }
 
-/// Read one pgwire backend message (type byte + length-prefixed payload).
+/// Read one pgwire backend message: a type byte and a length-prefixed
+/// payload.
 async fn read_backend_message(
     stream: &mut tokio::net::TcpStream,
 ) -> std::io::Result<(u8, Vec<u8>)> {
@@ -3181,7 +3182,7 @@ async fn read_backend_message(
     Ok((kind, body))
 }
 
-/// Drain backend messages until `ReadyForQuery`, returning the types seen.
+/// Drain backend messages until `ReadyForQuery`, and return the types seen.
 async fn read_until_ready(
     stream: &mut tokio::net::TcpStream,
 ) -> std::io::Result<Vec<(u8, Vec<u8>)>> {
@@ -3207,8 +3208,9 @@ async fn send_simple_query(stream: &mut tokio::net::TcpStream, sql: &str) -> std
 }
 
 /// COPY FROM STDIN through the binary's front door uses the simple-query
-/// protocol (the path psql's `\copy` takes), so this drives raw pgwire frames:
-/// Query -> `CopyInResponse` -> `CopyData`/`CopyDone` -> `CommandComplete`.
+/// protocol, which is the path psql's `\copy` takes. This test therefore drives
+/// raw pgwire frames: Query -> `CopyInResponse` -> `CopyData`/`CopyDone` ->
+/// `CommandComplete`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_serves_copy_from_stdin_over_pgwire() {
     use assert2::assert;
@@ -3302,10 +3304,10 @@ async fn runtime_serves_copy_from_stdin_over_pgwire() {
     let _ = server.await;
 }
 
-/// COPY FROM STDIN via the extended protocol: tokio-postgres prepares the
+/// COPY FROM STDIN through the extended protocol. tokio-postgres prepares the
 /// COPY statement and pipelines Bind/Execute/Sync, so the server must answer
-/// Execute with `CopyInResponse`, ignore the pipelined Sync during copy-in,
-/// and complete on `CopyDone` + Sync.
+/// Execute with `CopyInResponse`, ignore the pipelined Sync during copy-in, and
+/// complete on `CopyDone` plus Sync.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_serves_copy_from_stdin_over_extended_protocol() {
     use assert2::assert;
@@ -3501,9 +3503,10 @@ async fn hosted_range_compute_forwards_dml_and_grants_timestamps_over_real_tcp()
     ));
 }
 
-/// A `tokio_postgres` connection whose asynchronous messages are observable:
-/// notifications arrive on the *connection*, not the client, so the connection
-/// is driven with `poll_message` instead of being spawned as a bare future.
+/// A `tokio_postgres` connection whose asynchronous messages are observable.
+/// Notifications arrive on the *connection*, not on the client, so the test
+/// drives the connection with `poll_message` instead of spawning it as a bare
+/// future.
 async fn connect_with_notifications(
     port: u16,
 ) -> (
@@ -3554,8 +3557,8 @@ async fn next_notification(
         .expect("the connection task is still running")
 }
 
-/// Assert that nothing is delivered in the next `millis` — used only for the
-/// "not yet" half of a case whose positive half is asserted right afterwards.
+/// Assert that nothing is delivered in the next `millis`. This covers only the
+/// "not yet" half of a case whose positive half is asserted right after it.
 async fn no_notification_within(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<tokio_postgres::Notification>,
     millis: u64,
@@ -3568,7 +3571,8 @@ async fn no_notification_within(
 
 /// A hand-rolled pgwire connection. tokio-postgres keeps the pid the server
 /// announced in `BackendKeyData` private, so the test that pins
-/// `NotificationResponse.process_id == BackendKeyData.pid` needs its own client.
+/// `NotificationResponse.process_id == BackendKeyData.pid` needs its own
+/// client.
 struct RawPgConnection {
     stream: tokio::net::TcpStream,
     /// The pid the server announced in `BackendKeyData`.
@@ -3604,7 +3608,7 @@ impl RawPgConnection {
         RawPgConnection { stream, pid }
     }
 
-    /// Run one simple-protocol Query, panicking on an `ErrorResponse`.
+    /// Run one simple-protocol Query. This panics on an `ErrorResponse`.
     async fn simple_query(&mut self, sql: &str) {
         use tokio::io::AsyncWriteExt as _;
 
@@ -3628,7 +3632,7 @@ impl RawPgConnection {
     }
 }
 
-/// The end-to-end proof: a real driver's `LISTEN` receives a
+/// The end-to-end proof. A real driver's `LISTEN` receives a
 /// `NotificationResponse` raised by another connection, stamped with that
 /// connection's `BackendKeyData` pid, and only once the notifier commits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3690,8 +3694,8 @@ async fn runtime_delivers_notifications_between_pgwire_connections() {
 }
 
 /// A connection that listens on a channel it notifies hears itself, and the pid
-/// on the message identifies the notifying connection (a second connection's
-/// notification carries a different one).
+/// on the message identifies the notifying connection. A second connection's
+/// notification carries a different pid.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_delivers_a_self_notification_to_the_notifying_connection() {
     use assert2::assert;

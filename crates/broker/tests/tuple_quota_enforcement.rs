@@ -10,18 +10,18 @@
 //! end-to-end enforcement.
 //!
 //! Tests:
-//! 1. `tuple_quota_throttles_only_matching_client_id` — Set
-//!    `(user=alice, client-id=app-x) producer_byte_rate=1024`; produce ~4 KB
-//!    as (alice, app-x) → `throttle_time_ms > 0`; produce ~4 KB as
-//!    (alice, other) → `throttle_time_ms == 0` (no quota match).
+//! 1. `tuple_quota_throttles_only_matching_client_id`. It sets
+//!    `(user=alice, client-id=app-x) producer_byte_rate=1024`. A produce of
+//!    about 4 KB as (alice, app-x) must give `throttle_time_ms > 0`. A produce
+//!    of about 4 KB as (alice, other) must give `throttle_time_ms == 0`,
+//!    because no quota matches.
 //!
-//! This test covers the end-to-end fix: the Produce
-//! handler must forward `ctx.client_id` to the quota lookup rather than "".
-//! Otherwise the tuple lookup always received `client_id`="" → no tuple match →
-//! `throttle_time_ms` == 0 for both cases.
+//! This test covers the end-to-end behaviour: the Produce handler must forward
+//! `ctx.client_id` to the quota lookup instead of "". If it forwards "", the
+//! tuple lookup never matches and `throttle_time_ms` is 0 in both cases.
 //!
-//! Gated to non-Windows to match the multi-broker test convention from
-//! slices 10b/12b/14/15/15b/16/17a.
+//! The test is gated to non-Windows, to match the multi-broker test convention
+//! from slices 10b, 12b, 14, 15, 15b, 16, and 17a.
 
 use std::{
     io,
@@ -203,8 +203,8 @@ async fn sasl_plain_authenticate(
 // Cluster setup helpers (copied from client_quotas.rs)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Start a single-broker SASL/PLAINTEXT cluster.
-/// Returns `(handle, _dir, addr)`.
+/// Starts a single-broker SASL/PLAINTEXT cluster. Returns
+/// `(handle, _dir, addr)`.
 fn start_single_broker_sasl_plaintext_with_users(
     super_user: &str,
     users: &[(&str, &str)],
@@ -234,7 +234,7 @@ fn start_single_broker_sasl_plaintext_with_users(
     })
 }
 
-/// Create a topic via SASL/PLAIN as admin. Asserts success.
+/// Creates a topic over SASL/PLAIN as admin, and asserts that it succeeds.
 async fn create_topic_as_admin(
     addr: SocketAddr,
     password: &[u8],
@@ -275,7 +275,7 @@ async fn create_topic_as_admin(
     );
 }
 
-/// Await until `handle` sees `(topic, partition)` present in its image.
+/// Waits until `handle` sees `(topic, partition)` in its image.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
     handle.wait_until_partition_present(topic, partition).await;
 }
@@ -302,7 +302,7 @@ async fn seed_compat_shim_disable_acl(handle: &BrokerHandle) {
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
-/// Seed an ACL that allows alice to Write topic `topic`.
+/// Seeds an ACL that allows alice to Write to the topic `topic`.
 async fn seed_alice_write_acl(handle: &BrokerHandle, topic: &str) {
     handle
         .submit_metadata_record_for_test(MetadataRecord::V1AccessControlEntry(AclEntry {
@@ -325,7 +325,7 @@ async fn seed_alice_write_acl(handle: &BrokerHandle, topic: &str) {
 // Wire driver for AlterClientQuotas
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `AlterClientQuotas` (`api_key=49`) over a SASL/PLAIN connection.
+/// Drives `AlterClientQuotas` (`api_key=49`) over a SASL/PLAIN connection.
 ///
 /// `entries` is a list of `(entity_components, ops)` where:
 /// - `entity_components` is `Vec<(entity_type, entity_name)>`
@@ -404,11 +404,12 @@ async fn drive_alter_client_quotas_sasl(
 // Wire driver for Produce with explicit on-wire client_id
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive a `Produce` request over a fresh SASL/PLAIN connection.
+/// Drives a `Produce` request over a fresh SASL/PLAIN connection.
 ///
-/// `wire_client_id` is written into the Kafka request header — it's the value
-/// the broker sees as the connection's client.id and uses for quota lookup.
-/// This lets a single test send two produces with different `client_ids`.
+/// The function writes `wire_client_id` into the Kafka request header. That is
+/// the value the broker sees as the connection's client.id and uses for the
+/// quota lookup. It lets one test send two produces with different
+/// `client_ids`.
 ///
 /// Returns the full `ProduceResponse`.
 async fn drive_produce_sasl_with_client_id(
@@ -513,23 +514,20 @@ async fn await_authorized_produce(
 // Integration test
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Set `(user=alice, client-id=app-x) producer_byte_rate=1024`.
+/// Sets `(user=alice, client-id=app-x) producer_byte_rate=1024`.
 ///
-/// * Produce ~4 KB as (alice, app-x) → `throttle_time_ms > 0`  (tuple matches).
-/// * Produce ~4 KB as (alice, other) → `throttle_time_ms == 0` (no quota match).
+/// * A produce of about 4 KB as (alice, app-x) gives `throttle_time_ms > 0`,
+///   because the tuple matches.
+/// * A produce of about 4 KB as (alice, other) gives `throttle_time_ms == 0`,
+///   because no quota matches.
 ///
 /// The second assertion verifies that the tuple quota does NOT fire on an
-/// unmatched `client_id`, i.e., there is no `(user=alice)` fallback quota set.
+/// unmatched `client_id`, that is, that no `(user=alice)` fallback quota is
+/// set.
 ///
-/// This test covers the end-to-end fix: the Produce handler
-/// must pass `ctx.client_id` to the quota lookup. Otherwise the handler always
-/// passed `""` → no tuple quota ever matched → both produces would return
-/// `throttle_time_ms == 0`.
-///
-/// NOTE: If T3 has not yet merged, the first assertion will fail
-/// (`throttle_time_ms == 0`). That is the expected pre-T3 behavior. The test
-/// is intentionally committed before T3 merges so it turns green automatically
-/// in the next CI run that includes T3.
+/// This test covers the end-to-end behaviour: the Produce handler must pass
+/// `ctx.client_id` to the quota lookup. If it passes `""`, no tuple quota ever
+/// matches and both produces return `throttle_time_ms == 0`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuple_quota_throttles_only_matching_client_id() {
     let admin_password = uuid::Uuid::new_v4().to_string();

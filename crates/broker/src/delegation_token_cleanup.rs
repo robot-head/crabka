@@ -1,16 +1,16 @@
 //! KIP-48: background sweep that tombstones expired
 //! delegation tokens.
 //!
-//! Spawned from [`Broker::start`] only when
-//! `delegation_token_secret_key` is set — without a master key the four
-//! delegation-token RPCs return `DELEGATION_TOKEN_AUTH_DISABLED` and
-//! the image never has any tokens to expire.
+//! [`Broker::start`] spawns this sweep only when
+//! `delegation_token_secret_key` is set. Without a master key, the four
+//! delegation-token RPCs return `DELEGATION_TOKEN_AUTH_DISABLED`, and
+//! the image never holds any tokens to expire.
 //!
-//! Every broker runs the sweep. Raft serializes the resulting
-//! tombstones, so a duplicate tombstone for the same `token_id` is a
-//! no-op on the apply path (the entry is already gone from
-//! `delegation_tokens`). This matches Kafka's "every broker sweeps,
-//! idempotent" pattern from KIP-48 §6.
+//! Every broker runs the sweep. Raft serializes the tombstones, so a
+//! duplicate tombstone for the same `token_id` is a no-op on the apply
+//! path, because the entry is already gone from `delegation_tokens`.
+//! This matches Kafka's "every broker sweeps, idempotent" pattern from
+//! KIP-48 §6.
 
 use std::sync::Arc;
 
@@ -20,9 +20,8 @@ use crabka_units::{Time, convert::TimeExt as _};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-/// Minimal controller surface used by the sweep. The real
-/// [`crabka_raft::ControllerHandle`] is adapted in [`crate::broker`];
-/// tests inject a mock.
+/// Minimal controller surface for the sweep. [`crate::broker`] adapts the
+/// real [`crabka_raft::ControllerHandle`]. Tests inject a mock.
 #[async_trait]
 pub(crate) trait DelegationTokenController: Send + Sync {
     fn current_image(&self) -> Arc<MetadataImage>;

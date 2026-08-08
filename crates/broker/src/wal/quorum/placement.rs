@@ -2,8 +2,8 @@
 
 use crabka_metadata::{BrokerRegistrationRecord, NodeId};
 
-/// Select WAL voters while spreading them across racks when metadata has rack
-/// information.
+/// Selects the WAL voters. It spreads them across racks when the metadata
+/// carries rack information.
 #[allow(dead_code)]
 pub(crate) fn select_voters(
     brokers: impl IntoIterator<Item = BrokerRegistrationRecord>,

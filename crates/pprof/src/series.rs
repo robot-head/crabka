@@ -11,28 +11,29 @@ pub struct Series {
     pub points: Vec<(i64, f64)>,
 }
 
-/// Select-series aggregation mode. Bodies land in the next slice.
+/// Select-series aggregation mode. The bodies come in the next slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SeriesAgg {
     Sum,
     Average,
 }
 
-/// The epoch-millisecond start of the bucket `ts_ms` falls in, for a query of
-/// the given step.
+/// Returns the epoch-millisecond start of the bucket that holds `ts_ms`.
 ///
-/// The timestamp is an instant and the bucket start is one too, so both stay
-/// epoch milliseconds; only the step is an extent. Flooring is Euclidean, so a
-/// timestamp before the epoch lands in the bucket below it rather than being
-/// truncated toward zero.
+/// The bucket size is the step of the query. The timestamp is an instant, and
+/// the bucket start is an instant too, so both stay epoch milliseconds. Only
+/// the step is an extent. This function floors with Euclidean division, so a
+/// timestamp before the epoch goes into the bucket below it. Euclidean division
+/// does not truncate toward zero.
 #[must_use]
 pub fn step_bucket_ms(ts_ms: i64, step: Time) -> i64 {
     let step_ms = step.millis_i64();
     ts_ms.div_euclid(step_ms) * step_ms
 }
 
-/// The step of a select-series query, read from the fractional seconds the
-/// Pyroscope `step` query parameter carries.
+/// Returns the step of a select-series query.
+///
+/// The Pyroscope `step` query parameter carries the step as fractional seconds.
 ///
 /// # Errors
 /// Returns [`ProfileError::Plan`] when the step is not a positive finite number
@@ -42,8 +43,9 @@ pub fn step_from_secs(step_secs: f64) -> Result<Time, ProfileError> {
     validated_step(Time::from_secs_f64(step_secs))
 }
 
-/// The same bounds as [`step_from_secs`], checked on a step that arrives already
-/// typed, so a query cannot reach the bucketing arithmetic with a step of zero.
+/// Checks the same bounds as [`step_from_secs`] on an already-typed step.
+///
+/// A query then cannot reach the bucket arithmetic with a step of zero.
 pub(crate) fn validated_step(step: Time) -> Result<Time, ProfileError> {
     let step_secs = step.secs_f64();
     if !(step_secs.is_finite() && step_secs > 0.0) {

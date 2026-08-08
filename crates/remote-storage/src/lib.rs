@@ -1,25 +1,25 @@
 //! KIP-405 tiered-storage SPI and reference implementations for Crabka.
 //!
-//! This crate is the foundation layer for Crabka's tiered storage: it
-//! defines the two plugin SPIs and the data model exchanged across them,
-//! and ships the two reference implementations that the rest of the
-//! tiered-storage stack is built and tested against. It mirrors the shapes
+//! This crate is the foundation layer for Crabka's tiered storage. It
+//! defines the two plugin SPIs and the data model that they exchange, and
+//! it supplies the two reference implementations that the rest of the
+//! tiered-storage stack builds and tests against. It mirrors the shapes
 //! of Apache Kafka's `storage-api` module
 //! (`org.apache.kafka.server.log.remote.storage`).
 //!
 //! ## What this crate provides
 //!
-//! - [`RemoteStorageManager`] — copy / fetch / delete of segment data and
+//! - [`RemoteStorageManager`] copies, fetches, and deletes segment data and
 //!   indexes to and from the remote tier.
-//! - [`RemoteLogMetadataManager`] — persistence + querying of
-//!   remote-segment metadata, with a strict lifecycle state machine.
+//! - [`RemoteLogMetadataManager`] stores and queries remote-segment metadata,
+//!   with a strict lifecycle state machine.
 //! - The data model: [`TopicIdPartition`], [`RemoteLogSegmentId`],
 //!   [`RemoteLogSegmentMetadata`] / [`RemoteLogSegmentMetadataUpdate`],
 //!   [`RemoteLogSegmentState`], [`LogSegmentData`], [`IndexType`],
 //!   [`CustomMetadata`], and the partition-delete lifecycle
 //!   ([`RemotePartitionDeleteMetadata`] / [`RemotePartitionDeleteState`]).
-//! - [`LocalTieredStorage`] — a filesystem [`RemoteStorageManager`].
-//! - [`InmemoryRemoteLogMetadataManager`] — a process-memory
+//! - [`LocalTieredStorage`] is a filesystem [`RemoteStorageManager`].
+//! - [`InmemoryRemoteLogMetadataManager`] is a process-memory
 //!   [`RemoteLogMetadataManager`].
 //!
 //! ## Boundary with the broker
@@ -29,11 +29,11 @@
 //! local-vs-remote retention policy, and topic config parsing lives in the
 //! broker.
 //!
-//! The SPIs are intentionally **synchronous** — they mirror Kafka's
+//! The SPIs are intentionally **synchronous**. They mirror Kafka's
 //! blocking `RemoteStorageManager` / `RemoteLogMetadataManager`, which the
-//! broker drives from a thread pool (the broker wraps calls in
-//! `spawn_blocking`). Keeping them sync keeps this crate free of the async
-//! runtime.
+//! broker drives from a thread pool. The broker wraps the calls in
+//! `spawn_blocking`. Because the SPIs stay synchronous, this crate does not
+//! need the async runtime.
 //!
 //! ## Filesystem-backed remote tier
 //!

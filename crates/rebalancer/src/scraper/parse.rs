@@ -1,8 +1,8 @@
-//! Scoped `OpenMetrics` text parser. Recognizes only three families:
+//! Scoped `OpenMetrics` text parser. It recognizes only three families:
 //! `crabka_broker_partition_bytes_in_total`,
 //! `crabka_broker_partition_bytes_out_total`, and
-//! `crabka_broker_partition_disk_bytes`. Everything else is silently
-//! skipped — no allocation, no panic.
+//! `crabka_broker_partition_disk_bytes`. It skips everything else silently,
+//! with no allocation and no panic.
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum MetricKind {

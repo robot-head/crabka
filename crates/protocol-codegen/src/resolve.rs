@@ -1,5 +1,7 @@
 //! Classify `PascalCase` type references in a `MessageSpec` as nested,
-//! common, or unknown. Used by the emitter to compute the Rust type path.
+//! common, or unknown.
+//!
+//! The emitter uses this classification to compute the Rust type path.
 
 use std::collections::HashMap;
 
@@ -7,11 +9,11 @@ use crate::ir::{FieldSpec, MessageSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StructKind {
-    /// Inline-defined under a field in the same message; emitted as a
-    /// sibling type in the same file.
+    /// Inline-defined under a field in the same message. The emitter writes
+    /// it as a sibling type in the same file.
     Nested,
-    /// Top-level `commonStructs` entry on the parent spec; emitted into
-    /// the shared `common/` module.
+    /// Top-level `commonStructs` entry on the parent spec. The emitter writes
+    /// it into the shared `common/` module.
     Common,
 }
 
@@ -40,12 +42,13 @@ fn is_struct_type(t: &str) -> bool {
     t.chars().next().is_some_and(char::is_uppercase)
 }
 
-/// Returns true if any field (recursively) carries a borrowed lifetime in the
-/// generated Rust type — i.e., `string`, `bytes`, `records`, or a nested struct
-/// whose own fields recursively need a lifetime.
+/// Returns true if any field, at any depth, carries a borrowed lifetime in the
+/// generated Rust type. Those fields are `string`, `bytes`, `records`, or a
+/// nested struct whose own fields need a lifetime at any depth.
 ///
-/// For common-struct references (`PascalCase` type where `f.fields.is_empty()`), the
-/// caller must consult the resolution map being built; those are handled separately.
+/// For a common-struct reference, which is a `PascalCase` type where
+/// `f.fields.is_empty()`, the caller must consult the resolution map under
+/// construction. This function handles those separately.
 fn fields_need_lifetime(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
@@ -92,9 +95,9 @@ fn check(
     Ok(())
 }
 
-/// Compute whether a common struct needs a `<'a>` lifetime, considering that
-/// its fields may themselves reference other common structs (by name, with empty
-/// `f.fields`). We do a simple fixpoint over the set of common struct names.
+/// Compute whether a common struct needs a `<'a>` lifetime. Its fields may
+/// themselves reference other common structs by name, with empty `f.fields`.
+/// This function runs a simple fixpoint over the set of common struct names.
 fn common_struct_needs_lifetime(
     cs_fields: &[FieldSpec],
     common_names_needing_lifetime: &std::collections::HashSet<String>,
@@ -110,8 +113,8 @@ fn common_struct_needs_lifetime(
     })
 }
 
-/// Build a resolution map for one message. Maps each `PascalCase` type name
-/// referenced anywhere in the field tree to its kind + Rust path.
+/// Build a resolution map for one message. The map takes each `PascalCase`
+/// type name referenced anywhere in the field tree to its kind and Rust path.
 /// # Errors
 /// Returns an error when the schema model is invalid or generated Rust cannot be formatted or written.
 pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>, ResolveError> {

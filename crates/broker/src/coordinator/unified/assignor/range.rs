@@ -1,6 +1,7 @@
-//! `RangeAssignor` — assigns contiguous partition ranges per topic.
-//! Matches classic `RangeAssignor` semantics for co-partitioning across
-//! topics with equal partition counts.
+//! `RangeAssignor`: it assigns a contiguous partition range for each topic.
+//!
+//! It matches the classic `RangeAssignor` semantics, which co-partition across
+//! topics that have equal partition counts.
 
 use std::collections::HashMap;
 

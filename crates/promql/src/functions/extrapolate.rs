@@ -1,24 +1,24 @@
 //! Pure extrapolation math for the rate-family `PromQL` functions.
 //!
 //! These free functions are a byte-for-byte port of the interpreter's
-//! counter-reset + extrapolation algorithm (see `engine.rs`'s
-//! `extrapolated_rate` and `instant_delta`). Factoring the math out here lets
-//! the `ScalarUDF`s in [`super::rate`] reuse the *exact* arithmetic the
-//! tree-walking engine already validates against the conformance corpus, and
-//! lets us unit-test the numbers directly.
+//! counter-reset and extrapolation algorithm. See `engine.rs`'s
+//! `extrapolated_rate` and `instant_delta`. The math lives here so that the
+//! `ScalarUDF`s in [`super::rate`] can reuse the exact arithmetic the
+//! tree-walking engine already validates against the conformance corpus, and so
+//! that tests can check the numbers directly.
 //!
 //! All inputs are decoded `&[f64]` values paired 1:1 with `&[i64]` millisecond
-//! timestamps (as produced by `RangeManipulate`'s `<value>_range` /
-//! `<time>_range` columns). `range` is the range-selector window width;
-//! `range_end_ms` is the eval instant `t` the window closes on;
-//! `range_start_ms` is `t - range`. Every function returns `None` where
-//! Prometheus yields no sample (fewer than two points, a zero-width sampled
-//! interval, etc.), which the UDF layer renders as a **NULL** cell.
+//! timestamps, as produced by `RangeManipulate`'s `<value>_range` and
+//! `<time>_range` columns. `range` is the range-selector window width.
+//! `range_end_ms` is the eval instant `t` the window closes on. `range_start_ms`
+//! is `t - range`. Every function returns `None` where Prometheus yields no
+//! sample, for example fewer than two points or a zero-width sampled interval.
+//! The UDF layer renders that `None` as a NULL cell.
 
 use crabka_units::prelude::*;
 use num_traits::ToPrimitive;
 
-/// The reset-correcting / windowed range functions evaluated over a full
+/// The reset-correcting, windowed range functions evaluated over a full
 /// `(t-range, t]` window: `rate`, `increase`, and `delta`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RangeKind {
@@ -26,13 +26,15 @@ pub enum RangeKind {
     Rate,
     /// Total increase over the window, counter-reset corrected.
     Increase,
-    /// Difference between first and last sample (gauge; no reset correction).
+    /// Difference between the first and last sample. This is a gauge function
+    /// with no reset correction.
     Delta,
 }
 
 impl RangeKind {
-    /// Whether this function treats the series as a monotonic counter (and so
-    /// applies counter-reset correction and the positive zero-anchor clamp).
+    /// Returns `true` when this function treats the series as a monotonic
+    /// counter. A counter function applies counter-reset correction and the
+    /// positive zero-anchor clamp.
     fn is_counter(self) -> bool {
         matches!(self, Self::Rate | Self::Increase)
     }
@@ -44,7 +46,8 @@ impl RangeKind {
 pub enum InstantKind {
     /// Per-second instant rate from the last two samples, reset-clamped.
     Irate,
-    /// Difference of the last two samples (gauge; no per-second division).
+    /// Difference of the last two samples. This is a gauge function with no
+    /// per-second division.
     Idelta,
 }
 
@@ -117,9 +120,10 @@ pub fn extrapolated_rate(
 
 /// Prometheus' instant estimator, shared by `irate`/`idelta`.
 ///
-/// A direct port of the engine's `instant_delta`: uses only the last two
-/// samples, clamps a negative `irate` delta to the last value (counter reset),
-/// and divides by the inter-sample interval for `irate` only.
+/// This function is a direct port of the engine's `instant_delta`. It uses only
+/// the last two samples, and it clamps a negative `irate` delta to the last
+/// value on a counter reset. It divides by the inter-sample interval for `irate`
+/// only.
 #[must_use]
 pub fn instant_delta(timestamps: &[i64], values: &[f64], kind: InstantKind) -> Option<f64> {
     let n = timestamps.len();
@@ -148,13 +152,13 @@ mod tests {
 
     use super::*;
 
-    /// Mirror the engine's `approx_eq` tolerance for f64 sample comparisons.
+    /// Mirrors the engine's `approx_eq` tolerance for f64 sample comparisons.
     fn approx_eq(left: f64, right: f64) -> bool {
         (left - right).abs() < 1e-9
     }
 
     /// Pins `rate` to `engine.rs::instant_rate_extrapolates_counter_window`:
-    /// samples at 0..240s stepping by 1.0, `rate(...[5m])` at t=300s == 5/300.
+    /// samples at 0..240s that step by 1.0, `rate(...[5m])` at t=300s == 5/300.
     #[test]
     fn rate_extrapolates_counter_window_like_engine() {
         let timestamps = [0_i64, 60_000, 120_000, 180_000, 240_000];
@@ -174,7 +178,7 @@ mod tests {
 
     /// Pins `increase` reset correction to
     /// `engine.rs::instant_increase_corrects_counter_resets`: 1,2,1 over [2m]
-    /// at t=120s => increase == 2.0 (the drop 2->1 adds back the pre-reset 2).
+    /// at t=120s => increase == 2.0. The drop 2->1 adds back the pre-reset 2.
     #[test]
     fn increase_corrects_counter_resets_like_engine() {
         let timestamps = [0_i64, 60_000, 120_000];
@@ -194,8 +198,8 @@ mod tests {
 
     /// Pins `delta` gauge mode to
     /// `engine.rs::instant_delta_is_gauge_delta_without_reset_correction`:
-    /// 4,3 over [1m] at t=60s => delta == -2.0 (no reset correction, the drop
-    /// is preserved; first sample at 30s, second at 60s).
+    /// 4,3 over [1m] at t=60s => delta == -2.0. There is no reset correction, so
+    /// the drop stays. The first sample is at 30s and the second at 60s.
     #[test]
     fn delta_is_gauge_delta_without_reset_correction_like_engine() {
         let timestamps = [30_000_i64, 60_000];
@@ -213,8 +217,9 @@ mod tests {
         assert2::assert!(approx_eq(got, -2.0));
     }
 
-    /// Durations just beyond 110% of the average sample interval are capped to
-    /// half an interval, matching Prometheus' extrapolation threshold.
+    /// The function caps a duration slightly beyond 110% of the average sample
+    /// interval to half an interval. This matches Prometheus' extrapolation
+    /// threshold.
     #[test]
     fn extrapolation_threshold_uses_ten_percent_slack() {
         let timestamps = [11_050_i64, 21_050];
@@ -286,7 +291,8 @@ mod tests {
         );
     }
 
-    /// A zero-width sampled interval (two coincident timestamps) yields no value.
+    /// Two coincident timestamps make a zero-width sampled interval, which
+    /// yields no value.
     #[test]
     fn zero_width_sampled_interval_yields_none() {
         let timestamps = [60_000_i64, 60_000];
@@ -316,7 +322,8 @@ mod tests {
 
     /// Pins `idelta` to
     /// `engine.rs::instant_idelta_uses_last_two_samples_without_per_second_division`:
-    /// 0,1,3 at 0/60/90s, `idelta(...[2m])` at t=90s == 3-1 == 2.0 (no division).
+    /// 0,1,3 at 0/60/90s, `idelta(...[2m])` at t=90s == 3-1 == 2.0, with no
+    /// division.
     #[test]
     fn idelta_uses_last_two_samples_without_division_like_engine() {
         let timestamps = [0_i64, 60_000, 90_000];
@@ -325,8 +332,8 @@ mod tests {
         assert2::assert!(approx_eq(got, 2.0));
     }
 
-    /// `irate` clamps a negative last-pair delta (a counter reset) to the last
-    /// value, matching the engine's `instant_delta` reset branch.
+    /// `irate` clamps a negative last-pair delta, which is a counter reset, to
+    /// the last value. This matches the engine's `instant_delta` reset branch.
     #[test]
     fn irate_clamps_counter_reset_to_last_value() {
         // last pair drops 5 -> 2 over 1s: reset, so result = last (2) / 1s = 2.

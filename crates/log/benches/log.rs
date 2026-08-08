@@ -1,9 +1,9 @@
 //! `CodSpeed` microbenchmarks for `crabka-log`.
 //!
-//! Covers the public `Log` surface: append (single + bulk), read at various
-//! offsets, open + recover with many segments, truncate, and time-based
-//! rolling. Intentionally exercises both the active-segment hot path and the
-//! sealed-segment scan path.
+//! These benchmarks cover the public `Log` surface: single and bulk appends,
+//! reads at various offsets, open and recover with many segments, truncate,
+//! and time-based rolls. They deliberately exercise both the active-segment
+//! hot path and the sealed-segment scan path.
 
 #[cfg(unix)]
 use std::fs::OpenOptions;

@@ -1,6 +1,7 @@
-//! Auto-trigger: map a freshly-detected anomaly to a goal set, run the
-//! optimizer, persist the resulting proposal, tag the anomaly. Guarded
-//! by config and by in-flight-execution / in-flight-reassignment gates.
+//! Auto-trigger. It maps a freshly detected anomaly to a goal set, runs the
+//! optimizer, persists the resulting proposal, and tags the anomaly. The
+//! config gate, the in-flight-execution gate, and the in-flight-reassignment
+//! gate all guard it.
 
 use crabka_units::convert::{StdDurationExt as _, TimeExt as _};
 use tracing::{debug, info, warn};
@@ -24,9 +25,9 @@ pub enum AutoTriggerError {
     Optimizer(#[from] optimizer::OptimizeError),
 }
 
-/// Per-kind goal list. Each list is intentionally minimal — auto-trigger
-/// runs the smallest goal set that will heal the specific anomaly,
-/// rather than the full registry.
+/// Per-kind goal list. Each list is deliberately minimal: auto-trigger runs
+/// the smallest goal set that heals the specific anomaly, not the full
+/// registry.
 #[must_use]
 pub fn goals_for_kind(kind: AnomalyKind) -> Vec<String> {
     match kind {
@@ -57,11 +58,13 @@ pub struct AutoTriggerCtx<'a> {
     pub now_ms: i64,
 }
 
-/// Evaluate gates, run the optimizer if all pass, persist the proposal
-/// and tag the anomaly. Returns Ok on every non-error path (the gates
-/// are not errors); returns Err only on optimizer failure or an unknown
-/// goal name (which would be a bug — the registry should contain every
-/// goal in `goals_for_kind`).
+/// Evaluate the gates, run the optimizer if they all pass, persist the
+/// proposal, and tag the anomaly.
+///
+/// This returns Ok on every path that is not an error, because a closed gate
+/// is not an error. It returns Err only on an optimizer failure, or on an
+/// unknown goal name. An unknown goal name is a bug: the registry must contain
+/// every goal in `goals_for_kind`.
 #[tracing::instrument(
     level = "info",
     skip_all,

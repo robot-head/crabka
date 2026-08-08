@@ -1,7 +1,8 @@
-//! `OffsetCommit` (`api_key=8`). Encodes `OffsetCommitKey` +
-//! `OffsetCommitValue` records, appends them to `__consumer_offsets-0`
-//! via the partition writer, then updates the group's committed offsets
-//! through its actor.
+//! `OffsetCommit` (`api_key=8`).
+//!
+//! This handler encodes `OffsetCommitKey` and `OffsetCommitValue` records. It
+//! appends them to `__consumer_offsets-0` with the partition writer. It then
+//! updates the group's committed offsets through the group actor.
 
 use std::sync::Arc;
 
@@ -256,9 +257,10 @@ fn normalize_topic_ids(
     unknown
 }
 
-/// Append the KIP-516 unknown-`topic_id` rows (if any) to the response and
-/// encode it. Every return path in `handle` flows through here so unknown-id
-/// topics surface `UNKNOWN_TOPIC_ID` even when the rest of the commit errors.
+/// Append any KIP-516 unknown-`topic_id` rows to the response and encode it.
+///
+/// Every return path in `handle` goes through this function, so unknown-id
+/// topics get `UNKNOWN_TOPIC_ID` even when the rest of the commit errors.
 fn finalize(
     version: i16,
     mut resp: OffsetCommitResponse,
@@ -277,12 +279,15 @@ fn now_ms() -> i64 {
     .unwrap_or(0)
 }
 
-/// Validate the commit against the group's membership/epoch through its actor.
-/// Returns `Some(error_code)` if the request should be rejected. Thin wrapper
-/// over the shared [`validate_group_commit`] (also used by `TxnOffsetCommit`),
-/// which dispatches on the actor's LIVE `group.kind` — a KIP-848 migration may
-/// have flipped the protocol in place after spawn, so validation must run
-/// against the current protocol, not the spawn-time `handle.kind`.
+/// Validate the commit against the group's membership and epoch through its
+/// actor.
+///
+/// This function returns `Some(error_code)` if the broker must reject the
+/// request. It is a thin wrapper over the shared [`validate_group_commit`],
+/// which `TxnOffsetCommit` also uses. That function dispatches on the actor's
+/// LIVE `group.kind`. A KIP-848 migration may have flipped the protocol in
+/// place after spawn, so validation must run against the current protocol,
+/// not the spawn-time `handle.kind`.
 async fn validate(handle: &Arc<GroupActorHandle>, req: &OffsetCommitRequest) -> Option<i16> {
     validate_group_commit(
         handle,
@@ -293,9 +298,11 @@ async fn validate(handle: &Arc<GroupActorHandle>, req: &OffsetCommitRequest) -> 
     .await
 }
 
-/// Append a single `RecordBatch` covering every (topic, partition) in `req`
-/// to the `__consumer_offsets-0` writer. Returns `Err(error_code)` on
-/// failure to either find the partition or hear back from the writer.
+/// Append a single `RecordBatch` for every (topic, partition) in `req` to the
+/// `__consumer_offsets-0` writer.
+///
+/// This function returns `Err(error_code)` if it cannot find the partition,
+/// or if it gets no answer from the writer.
 async fn append_batch(
     req: &OffsetCommitRequest,
     partitions: &Arc<PartitionRegistry>,

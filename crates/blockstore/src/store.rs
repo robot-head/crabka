@@ -64,9 +64,10 @@ impl BlockStore {
         }
     }
 
-    /// Build a `BlockStore` whose object store is constructed from `cfg` via the
-    /// shared `crabka-object-store` substrate. `base` remains the caller's
-    /// `DataFusion` registration URL (a query-engine concern owned by the caller).
+    /// Builds a `BlockStore` whose object store comes from `cfg` through the
+    /// shared `crabka-object-store` substrate. `base` stays the caller's
+    /// `DataFusion` registration URL, which is a query-engine concern that the
+    /// caller owns.
     ///
     /// # Errors
     ///
@@ -101,7 +102,7 @@ impl BlockStore {
         Self::new_with_block_read_max(self.store.clone(), self.base.clone(), self.block_read_max)
     }
 
-    /// Read Parquet row-group metadata with this store's configured cap.
+    /// Reads Parquet row-group metadata with this store's configured cap.
     ///
     /// # Errors
     /// Returns an error when object-store I/O fails, the block exceeds the

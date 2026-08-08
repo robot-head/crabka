@@ -1,20 +1,23 @@
-//! KIP-1071 streams-group coordinator actor: per-group tokio task driving the
-//! heartbeat epoch dance, reconciliation, and persistence.
+//! KIP-1071 streams-group coordinator actor: a per-group tokio task that drives
+//! the heartbeat epoch exchange, reconciliation, and persistence.
 //!
-//! Mirrors the KIP-932 share-group actor ([`super::super::share::actor`]) in
-//! overall shape — a `tokio::select!` loop over an mpsc message channel plus a
-//! `heartbeat_interval` session tick, the `Pending*Records` → `RecordBatch` →
-//! `OffsetsLog::append` flush, and a last-known-good cache hand-off via
-//! `GroupCoordinator::update_streams_cache` — but assigns *tasks*
-//! `(subtopology, partition)` across the active/standby/warmup roles rather than
-//! topic partitions, and reconciles against a full `MetadataImage` (topology
-//! resolution + internal-topic creation) via the [`MetadataSource`] instead of
-//! the consumer `MetadataProvider`.
+//! This actor mirrors the overall shape of the KIP-932 share-group actor
+//! ([`super::super::share::actor`]): a `tokio::select!` loop over an mpsc
+//! message channel plus a `heartbeat_interval` session tick, the
+//! `Pending*Records` → `RecordBatch` → `OffsetsLog::append` flush, and a
+//! last-known-good cache hand-off through
+//! `GroupCoordinator::update_streams_cache`.
 //!
-//! Reconciliation is gated on a wired [`MetadataSource`]: in the pure-coordinator
-//! unit tests (no source) the group stays `NotReady` with empty assignments —
-//! members still mint a `member_id` and advance their epoch, but no tasks are
-//! assigned.
+//! Two things differ. This actor assigns *tasks* `(subtopology, partition)`
+//! across the active, standby, and warmup roles instead of topic partitions.
+//! It also reconciles against a full `MetadataImage` through the
+//! [`MetadataSource`], which resolves the topology and creates internal
+//! topics, instead of the consumer `MetadataProvider`.
+//!
+//! Reconciliation needs a connected [`MetadataSource`]. The pure-coordinator
+//! unit tests have no source, so the group stays `NotReady` with empty
+//! assignments. Members there still mint a `member_id` and advance their
+//! epoch, but the actor assigns no tasks.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -66,11 +69,12 @@ pub enum StreamsGroupActorMessage {
     Describe {
         reply: oneshot::Sender<StreamsDescribeView>,
     },
-    /// Validate an `OffsetCommit` / `TxnOffsetCommit` against the streams
-    /// group's membership (KIP-1071 fences by `member_epoch`, like a KIP-848
-    /// consumer group). `Ok(())` = allowed; `Err(code)` = reject. A
-    /// simple-consumer commit (empty `member_id`, `member_epoch == -1`) is not
-    /// fenced. Mirrors the consumer-group `ValidateCommit`.
+    /// Validates an `OffsetCommit` or `TxnOffsetCommit` against the streams
+    /// group's membership. KIP-1071 fences by `member_epoch`, as a KIP-848
+    /// consumer group does. `Ok(())` allows the commit, and `Err(code)`
+    /// rejects it. The actor does not fence a simple-consumer commit, which
+    /// has an empty `member_id` and `member_epoch == -1`. This mirrors the
+    /// consumer-group `ValidateCommit`.
     ValidateCommit {
         member_id: String,
         /// The request's `generation_id_or_member_epoch` field, interpreted as
@@ -82,7 +86,7 @@ pub enum StreamsGroupActorMessage {
     Shutdown(oneshot::Sender<()>),
 }
 
-/// Read-only projection of [`StreamsGroupState`], consumed by the (later)
+/// Read-only projection of [`StreamsGroupState`] for the
 /// `StreamsGroupDescribe` handler.
 #[derive(Debug, Clone)]
 pub struct StreamsDescribeView {
@@ -91,10 +95,11 @@ pub struct StreamsDescribeView {
     pub assignment_epoch: i32,
     pub topology_epoch: i32,
     pub group_state: String,
-    /// The group's resolved topology (subtopologies + their topics). The real
-    /// JVM `DescribeStreamsGroupsHandler` rejects a describe response whose
-    /// topology is absent, so this must be populated once a member has supplied
-    /// one. `None` only before any topology has been initialized.
+    /// The group's resolved topology: the subtopologies and their topics.
+    ///
+    /// The real JVM `DescribeStreamsGroupsHandler` rejects a describe response
+    /// with no topology, so this field must hold a value once a member has
+    /// supplied one. It is `None` only before any topology is initialized.
     pub topology: Option<StreamsGroupTopologyValue>,
     pub members: Vec<StreamsDescribeMember>,
 }
@@ -140,15 +145,19 @@ impl StreamsGroupActorHandle {
     }
 }
 
-/// Validate an `OffsetCommit` / `TxnOffsetCommit` against a streams group's
-/// membership by messaging its actor. Returns `Some(error_code)` to reject,
-/// `None` to allow. KIP-447: a streams group fences offset commits by
-/// `member_epoch` (the request's `generation_id_or_member_epoch`), exactly as a
-/// KIP-848 consumer group does. The shared `validate_group_commit` only knows
-/// about the classic/consumer `GroupActorHandle`, so a streams-group consumer
-/// (whose membership lives in the streams actor, not a classic one) must be
-/// validated here instead — otherwise its commit is fenced against an empty
-/// classic actor and rejected with `UNKNOWN_MEMBER_ID`.
+/// Validates an `OffsetCommit` or `TxnOffsetCommit` against a streams group's
+/// membership by sending a message to its actor.
+///
+/// It returns `Some(error_code)` to reject the commit, and `None` to allow it.
+/// Per KIP-447, a streams group fences offset commits by `member_epoch`, the
+/// request's `generation_id_or_member_epoch`, exactly as a KIP-848 consumer
+/// group does.
+///
+/// The shared `validate_group_commit` knows only about the classic and
+/// consumer `GroupActorHandle`. A streams-group consumer keeps its membership
+/// in the streams actor, not a classic one, so this function must validate it
+/// instead. Otherwise the broker fences the commit against an empty classic
+/// actor and rejects it with `UNKNOWN_MEMBER_ID`.
 pub(crate) async fn validate_streams_group_commit(
     handle: &StreamsGroupActorHandle,
     member_id: &str,
@@ -174,17 +183,20 @@ pub(crate) async fn validate_streams_group_commit(
     }
 }
 
-/// The actor's full mutable state: the in-memory state machine plus the
-/// in-flight `StreamsGroupTopologyValue` (the resolved topology kept for
-/// persistence + reconcile, since [`StreamsGroupState`] only tracks presence +
-/// epoch) and the last-derived partition metadata.
+/// The actor's full mutable state.
+///
+/// It holds the in-memory state machine, the in-flight
+/// `StreamsGroupTopologyValue`, and the last-derived partition metadata. The
+/// actor keeps the resolved topology for persistence and reconcile, because
+/// [`StreamsGroupState`] tracks only its presence and epoch.
 struct ActorState {
     state: StreamsGroupState,
-    /// The full stored topology, kept alongside `state.topology` (which only
-    /// carries the epoch). `None` until the first member supplies one.
+    /// The full stored topology. It sits beside `state.topology`, which
+    /// carries only the epoch. It is `None` until the first member supplies a
+    /// topology.
     topology: Option<StreamsGroupTopologyValue>,
-    /// Partition metadata derived by the most recent reconcile, persisted as
-    /// the group's `StreamsGroupPartitionMetadataValue`.
+    /// Partition metadata from the most recent reconcile. The actor persists
+    /// it as the group's `StreamsGroupPartitionMetadataValue`.
     partition_metadata: Option<StreamsGroupPartitionMetadataValue>,
 }
 
@@ -283,8 +295,9 @@ async fn actor_loop(
     }
 }
 
-/// Evict members silent past the session timeout, reconcile, and persist the
-/// resulting tombstones. Returns `Err` if the log write fails (the actor exits).
+/// Evicts members that stayed silent past the session timeout, reconciles, and
+/// persists the resulting tombstones. Returns `Err` if the log write fails,
+/// and the actor then exits.
 async fn handle_session_tick(
     actor: &mut ActorState,
     config: &StreamsGroupConfig,
@@ -415,8 +428,8 @@ async fn handle_heartbeat(
     Ok(build_assignment_resp(&actor.state, &req.member_id, config))
 }
 
-/// Update a steady-state member's reported ownership + catch-up offsets +
-/// `last_seen`. Returns `true` if anything that needs persisting changed.
+/// Updates a steady-state member's reported ownership, catch-up offsets, and
+/// `last_seen`. Returns `true` if anything that needs persistence changed.
 fn update_member_steady_state(
     actor: &mut ActorState,
     req: &StreamsGroupHeartbeatRequest,
@@ -466,7 +479,7 @@ fn update_member_steady_state(
     changed
 }
 
-/// Handle a leave-group heartbeat (`member_epoch == -1`).
+/// Handles a leave-group heartbeat, where `member_epoch == -1`.
 async fn handle_leave(
     actor: &mut ActorState,
     config: &StreamsGroupConfig,
@@ -497,8 +510,9 @@ async fn handle_leave(
     Ok(base_resp(codes::NONE, -1, config))
 }
 
-/// Accept a client-supplied topology: store the resolved value for persistence
-/// + reconcile, stamp the epoch on the state handle, and mark the group dirty.
+/// Accepts a client-supplied topology. It stores the resolved value for
+/// persistence and reconcile, stamps the epoch on the state handle, and marks
+/// the group dirty.
 fn accept_topology(
     actor: &mut ActorState,
     wire_topology: &crabka_protocol::owned::streams_group_heartbeat_request::Topology,
@@ -512,9 +526,9 @@ fn accept_topology(
     actor.state.dirty = true;
 }
 
-/// KIP-1071 shutdown-application: any member can signal the whole group to shut
-/// down. Record it as a group status so subsequent responses carry it. Returns
-/// `true` if the status was newly added.
+/// KIP-1071 shutdown-application: any member can signal the whole group to
+/// shut down. This function records the signal as a group status, so later
+/// responses carry it. It returns `true` if it added the status.
 fn apply_shutdown_application(actor: &mut ActorState, req: &StreamsGroupHeartbeatRequest) -> bool {
     if !req.shutdown_application {
         return false;
@@ -526,8 +540,8 @@ fn apply_shutdown_application(actor: &mut ActorState, req: &StreamsGroupHeartbea
     )
 }
 
-/// Add a `(code, detail)` to the group status if no entry with that code is
-/// already present. Returns `true` if it was added.
+/// Adds a `(code, detail)` pair to the group status if no entry with that code
+/// is present. Returns `true` if the function added the pair.
 fn set_status(actor: &mut ActorState, code: i8, detail: &str) -> bool {
     if actor.state.status.iter().any(|(c, _)| *c == code) {
         return false;
@@ -536,13 +550,15 @@ fn set_status(actor: &mut ActorState, code: i8, detail: &str) -> bool {
     true
 }
 
-/// Recompute the target assignment when the group is dirty.
+/// Recomputes the target assignment when the group is dirty.
 ///
-/// Without a wired [`MetadataSource`] (unit tests) or before any topology is
-/// supplied, the group stays `NotReady` with an empty target — members still
-/// advance their epoch but receive no tasks. Otherwise: validate the topology,
-/// derive task counts + partition metadata, ensure internal topics exist, and
-/// run the assignor.
+/// With no connected [`MetadataSource`], as in the unit tests, or before any
+/// member supplies a topology, the group stays `NotReady` with an empty
+/// target. Members still advance their epoch but get no tasks.
+///
+/// Otherwise the function validates the topology, derives the task counts and
+/// the partition metadata, makes sure the internal topics exist, and runs the
+/// assignor.
 async fn reconcile(
     actor: &mut ActorState,
     config: &StreamsGroupConfig,
@@ -627,10 +643,12 @@ async fn reconcile(
     compute_and_install_target(actor, config, &topology, &derived.num_tasks);
 }
 
-/// Run the assignor over the resolved topology and install its output as the
-/// new target. Bumps the group epoch, installs the target (which computes the
-/// active revoke-split), and sets the phase to `Reconciling` while any member
-/// still owns un-revoked active tasks, else `Stable`.
+/// Runs the assignor over the resolved topology and installs its output as the
+/// new target.
+///
+/// The function bumps the group epoch and installs the target, which computes
+/// the active revoke-split. It sets the phase to `Reconciling` while any
+/// member still owns un-revoked active tasks, and to `Stable` otherwise.
 fn compute_and_install_target(
     actor: &mut ActorState,
     config: &StreamsGroupConfig,
@@ -691,9 +709,9 @@ fn compute_and_install_target(
     actor.state.dirty = false;
 }
 
-/// Bump the group epoch and install an empty target assignment, transitioning
-/// to `phase`. Members still advance to the new (empty) assignment epoch on
-/// their next `advance_member_epoch`. Clears `dirty`.
+/// Bumps the group epoch, installs an empty target assignment, and moves the
+/// group to `phase`. Members still advance to the new, empty assignment epoch
+/// on their next `advance_member_epoch`. The function clears `dirty`.
 fn install_empty_target(state: &mut StreamsGroupState, phase: StreamsGroupStatePhase) {
     state.bump_epoch();
     state.install_target(StreamsTargetAssignment::default());
@@ -701,8 +719,9 @@ fn install_empty_target(state: &mut StreamsGroupState, phase: StreamsGroupStateP
     state.dirty = false;
 }
 
-/// Per-task changelog lag for the assignor: `end_offset - offset` keyed by
-/// `(subtopology, partition)`, only where both endpoints are reported.
+/// Per-task changelog lag for the assignor: `end_offset - offset`, keyed by
+/// `(subtopology, partition)`. The map holds an entry only where the member
+/// reported both endpoints.
 fn task_lag(m: &StreamsMemberState) -> BTreeMap<(String, i32), i64> {
     let mut lag = BTreeMap::new();
     for (key, &end) in &m.task_end_offsets {
@@ -719,8 +738,8 @@ fn task_lag(m: &StreamsMemberState) -> BTreeMap<(String, i32), i64> {
 // Wire <-> state conversions
 // ---------------------------------------------------------------------------
 
-/// Convert request `TaskIds` (subtopology + partitions) into the in-memory
-/// `subtopology -> partitions` task map.
+/// Converts request `TaskIds`, which hold a subtopology and its partitions,
+/// into the in-memory `subtopology -> partitions` task map.
 fn task_ids_to_map(
     tasks: &[crabka_protocol::owned::common::streams_group_heartbeat_request::task_ids::TaskIds],
 ) -> BTreeMap<String, Vec<i32>> {
@@ -736,9 +755,10 @@ fn task_ids_to_map(
     map
 }
 
-/// Convert request `TaskOffset` entries into a `(subtopology, partition) ->
-/// offset` map. The wire `o.offset` field stays a raw `i64`; wrap it as an
-/// `Offset` for the in-memory changelog-position map.
+/// Converts request `TaskOffset` entries into a
+/// `(subtopology, partition) -> offset` map. The wire `o.offset` field stays a
+/// raw `i64`, and this function wraps it as an `Offset` for the in-memory
+/// changelog-position map.
 fn task_offsets_to_map(
     offsets: &[crabka_protocol::owned::common::streams_group_heartbeat_request::task_offset::TaskOffset],
 ) -> BTreeMap<(String, i32), Offset> {
@@ -748,7 +768,8 @@ fn task_offsets_to_map(
         .collect()
 }
 
-/// Render a `subtopology -> partitions` task map as a response `Vec<TaskIds>`.
+/// Renders a `subtopology -> partitions` task map as a response
+/// `Vec<TaskIds>`.
 fn map_to_task_ids(map: &BTreeMap<String, Vec<i32>>) -> Vec<RespTaskIds> {
     map.iter()
         .map(|(sub, parts)| RespTaskIds {
@@ -892,10 +913,11 @@ fn duration_ms(d: std::time::Duration, fallback: i32) -> i32 {
 // Persistence
 // ---------------------------------------------------------------------------
 
-/// Build a `PendingStreamsRecords` reflecting the changes for `affected_members`.
-/// Always includes the current group epoch; includes topology + partition
-/// metadata when both are present, and target metadata when the target has been
-/// installed (`epoch > 0`).
+/// Builds a `PendingStreamsRecords` for the changes to `affected_members`.
+///
+/// The result always holds the current group epoch. It holds the topology and
+/// the partition metadata when both are present, and the target metadata once
+/// the actor has installed the target, that is, when `epoch > 0`.
 fn snapshot_pending_after_change(
     actor: &ActorState,
     affected_members: &[String],
@@ -999,8 +1021,8 @@ async fn flush_pending(
     Ok(())
 }
 
-/// Snapshot the full actor state into a `StreamsGroupSeed` for the cache (and a
-/// respawned actor). Mirrors what bootstrap replay produces.
+/// Snapshots the full actor state into a `StreamsGroupSeed` for the cache and
+/// for a respawned actor. The result matches what bootstrap replay produces.
 fn snapshot_seed(actor: &ActorState) -> super::super::StreamsGroupSeed {
     let state = &actor.state;
     let mut members = std::collections::HashMap::new();
@@ -1024,7 +1046,8 @@ fn snapshot_seed(actor: &ActorState) -> super::super::StreamsGroupSeed {
     }
 }
 
-/// Hydrate the actor from a `StreamsGroupSeed` (bootstrap replay or respawn).
+/// Hydrates the actor from a `StreamsGroupSeed`, on bootstrap replay or on a
+/// respawn.
 fn apply_seed(actor: &mut ActorState, seed: super::super::StreamsGroupSeed) {
     let state = &mut actor.state;
     state.group_epoch = seed.group_epoch;
@@ -1103,8 +1126,8 @@ mod tests {
         }
     }
 
-    /// Build a coordinator with no `MetadataSource` wired (reconcile no-ops to
-    /// `NotReady`) and a fake offsets log.
+    /// Builds a coordinator with no connected `MetadataSource`, so reconcile
+    /// falls through to `NotReady`, and with a fake offsets log.
     fn make_coordinator() -> (Arc<GroupCoordinator>, Arc<InMemoryOffsetsLog>) {
         let log = Arc::new(InMemoryOffsetsLog::default());
         let metadata: Arc<dyn MetadataProvider> = Arc::new(EmptyMetadata);

@@ -154,7 +154,8 @@ impl TableTransferSelector {
     ///
     /// A newly retained tuple adds its XID dependencies before later operations,
     /// so later CLOG outcomes for those XIDs are retained. Earlier CLOG writes
-    /// are intentionally not retroactively selected; WAL replay is in-order.
+    /// are intentionally not selected retroactively, because WAL replay is in
+    /// order.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.

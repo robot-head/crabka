@@ -179,11 +179,12 @@ async fn cancel_while_idle_does_not_poison_next_query() {
     }
 }
 
-/// Deterministically exercises the extended-batch cancel window: a
-/// `CancelRequest` landing between Bind and Execute (no engine future running,
-/// the slot holding a never-polled token) must still cancel the subsequent
-/// Execute — real Postgres aborts the whole pending batch in this window.
-/// The sticky `pending` flag in `CancelRegistry` plus the biased,
+/// Deterministically exercises the extended-batch cancel window.
+///
+/// A `CancelRequest` that lands between Bind and Execute must still cancel the
+/// subsequent Execute. In that window no engine future runs and the slot holds
+/// a never-polled token. Real Postgres aborts the whole pending batch in this
+/// window. The sticky `pending` flag in `CancelRegistry` and the biased,
 /// cancellation-first select! make this deterministic, not best-effort.
 #[tokio::test]
 async fn cancel_during_extended_batch_window_cancels_next_execute() {

@@ -32,7 +32,7 @@ fn load_pair(stem: &Path) -> (Meta, Vec<u8>) {
     (meta, bytes)
 }
 
-/// Map (`api_key`, direction) to the message name via the generated `CASES` table.
+/// Map (`api_key`, direction) to the message name with the generated `CASES` table.
 fn name_for(api_key: i16, is_request: bool) -> Option<&'static str> {
     CASES
         .iter()

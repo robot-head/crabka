@@ -1,38 +1,39 @@
-//! Translate Crabka's internal [`MetadataRecord`] currency to/from the
-//! KIP-631 [`KraftMetadataRecord`] wire shape so the controller log and
+//! Translate Crabka's internal [`MetadataRecord`] currency to and from the
+//! KIP-631 [`KraftMetadataRecord`] wire shape, so the controller log and
 //! snapshots are genuinely KIP-631-framed.
 //!
-//! The conversion is *not* a pure field rename: several Crabka records
-//! carry state the KIP-631 records do not (and vice versa), so this
-//! module bridges the gap and defaults the KIP-631 extras Crabka does
-//! not model. The round-trip
+//! The conversion is *not* a pure field rename. Several Crabka records
+//! carry state that the KIP-631 records do not, and the reverse also holds.
+//! This module bridges the gap and defaults the KIP-631 extras that Crabka
+//! does not model. The round-trip
 //! `rec -> to_kraft(&image) -> from_kraft(&image) == rec` is the
 //! correctness bar for every modeled variant.
 //!
 //! ## Variants with no faithful KIP-631 counterpart
 //!
-//! - `V1Voters` / `V1KRaftVersion` are KIP-853 raft *control* records,
-//!   not metadata records — they have no entry in the
-//!   [`KraftMetadataRecord`] dispatch and are never submitted through the
+//! - `V1Voters` and `V1KRaftVersion` are KIP-853 raft *control* records and
+//!   not metadata records. They have no entry in the
+//!   [`KraftMetadataRecord`] dispatch, and nothing submits them through the
 //!   translation boundary, so
 //!   [`to_kraft`] returns [`TranslateError::NoCounterpart`] for them.
 //!
 //! ## Fan-out / image-keyed mappings
 //!
-//! - `V1TopicConfig` is whole-map authoritative; KIP-631 has only per-key
+//! - `V1TopicConfig` is whole-map authoritative, and KIP-631 has only per-key
 //!   `ConfigRecord`s. [`to_kraft_records`] diffs the new map against the
-//!   image's current overrides and emits a *set* per present key plus a
-//!   *tombstone* (`value: None`) per dropped key; [`from_kraft`] merges one
-//!   key's delta back onto the image map and re-emits the whole map (so
-//!   `MetadataImage::apply`'s replace semantics are unchanged). Records must
-//!   apply in log order against a live image.
+//!   current overrides of the image. It emits a *set* per present key plus a
+//!   *tombstone* (`value: None`) per dropped key. [`from_kraft`] merges the
+//!   delta of one key back onto the image map and re-emits the whole map, so
+//!   the replace semantics of `MetadataImage::apply` stay unchanged. Records
+//!   must apply in log order against a live image.
 //! - `V1DeleteAccessControlEntry(AclEntryFilter)`: KIP-631's
 //!   `RemoveAccessControlEntryRecord` deletes by `id: Uuid` only. Crabka does
 //!   not model ACL ids, so [`to_kraft_records`] resolves the filter against
 //!   the image to the matching entries and emits one `RemoveAccessControlEntry`
-//!   per match, keyed by a deterministic content-hash id (the same id the add
-//!   path stamps); [`from_kraft`] rescans the image by that hash to recover the
-//!   entry and emit a pinned filter. Self-consistent within Crabka.
+//!   per match, keyed by a deterministic content-hash id. That is the same id
+//!   that the add path stamps. [`from_kraft`] rescans the image by that hash to
+//!   recover the entry and emit a pinned filter. This is self-consistent within
+//!   Crabka.
 //!
 //! ## Lossy / awkward mappings (documented)
 //!
@@ -99,7 +100,7 @@ pub enum TranslateError {
     Decode(String),
     /// A `RemoveAccessControlEntry{{id}}` referenced an ACL id absent from the
     /// image. On the Crabka-only path the matching add always precedes the
-    /// remove in log order, so this means a corrupt / out-of-order log.
+    /// remove in log order, so this means a corrupt or out-of-order log.
     #[error("unknown ACL id {0} on decode")]
     UnknownAclId(uuid::Uuid),
 }
@@ -269,9 +270,9 @@ fn acl_id(e: &AclEntry) -> KUuid {
     KUuid(fnv1a_128(&buf))
 }
 
-/// FNV-1a over 128 bits: two independent 64-bit FNV-1a lanes (distinct offset
-/// bases) concatenated. Deterministic and dependency-free (unlike `DefaultHasher`,
-/// whose output is not guaranteed stable across toolchains).
+/// FNV-1a over 128 bits: two independent 64-bit FNV-1a lanes with distinct
+/// offset bases, concatenated. It is deterministic and dependency-free, unlike
+/// `DefaultHasher`, whose output is not guaranteed stable across toolchains.
 fn fnv1a_128(bytes: &[u8]) -> [u8; 16] {
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let lane = |mut h: u64| -> u64 {
@@ -289,8 +290,9 @@ fn fnv1a_128(bytes: &[u8]) -> [u8; 16] {
     out
 }
 
-/// A filter pinned to exactly one entry (every axis set). Used on decode of a
-/// `RemoveAccessControlEntry` so `apply` removes precisely the resolved entry.
+/// A filter pinned to exactly one entry, with every axis set. The decode of a
+/// `RemoveAccessControlEntry` uses it, so `apply` removes precisely the
+/// resolved entry.
 fn exact_filter(e: &AclEntry) -> AclEntryFilter {
     AclEntryFilter {
         resource_type: Some(e.resource_type),
@@ -358,13 +360,13 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, TranslateError> {
 
 /// Convert a single [`MetadataRecord`] to its KIP-631 counterpart.
 ///
-/// All modeled variants except `V1TopicConfig` (which may fan out to N
-/// `Config` records — use [`to_kraft_records`]) yield exactly one record.
-/// A multi-key `V1TopicConfig` yields its *first* key here; callers that
-/// must preserve every key must use [`to_kraft_records`].
+/// Every modeled variant yields exactly one record, except `V1TopicConfig`,
+/// which can fan out to N `Config` records. Use [`to_kraft_records`] for that
+/// variant. A multi-key `V1TopicConfig` yields its *first* key here. A caller
+/// that must preserve every key must use [`to_kraft_records`].
 ///
 /// # Errors
-/// [`TranslateError::NoCounterpart`] for raft control records / delete-ACL
+/// [`TranslateError::NoCounterpart`] for raft control records and delete-ACL
 /// filters, [`TranslateError::UnknownTopicName`] when a topic/partition
 /// references a topic absent from `image`, and [`TranslateError::Invalid`]
 /// for out-of-range enum values.
@@ -379,8 +381,8 @@ pub fn to_kraft(
 
 /// Convert a single [`MetadataRecord`] to one or more KIP-631 records.
 ///
-/// Only `V1TopicConfig` with N keys fans out (to N `Config` records, one
-/// per key); every other modeled variant yields exactly one record.
+/// Only a `V1TopicConfig` with N keys fans out, to N `Config` records, one
+/// per key. Every other modeled variant yields exactly one record.
 ///
 /// # Errors
 /// Same as [`to_kraft`].
@@ -391,19 +393,22 @@ pub fn to_kraft_records(
     Ok(to_kraft_iter(rec, image)?.collect())
 }
 
-/// The engine/snapshot framing entrypoint: translate one [`MetadataRecord`] to
-/// the KIP-631 value byte blobs to put on the log — one per fanned-out record
-/// (most records yield one; a `V1TopicConfig` yields one per key ± tombstones,
-/// a `V1DeleteAccessControlEntry` one per matched ACL). [`PartitionRecord`] is
-/// enveloped at apiVersion 1 so its KIP-858 `directories` survive; every other
-/// modeled record frames at apiVersion 0. Yields an empty `Vec` when a record
-/// fans out to nothing (an empty config clear with no prior keys, or a
-/// delete-ACL filter matching nothing) — callers treat an all-empty batch as a
-/// committed no-op.
+/// The engine and snapshot framing entrypoint.
+///
+/// This function translates one [`MetadataRecord`] to the KIP-631 value byte
+/// blobs to put on the log, one blob per fanned-out record. Most records yield
+/// one. A `V1TopicConfig` yields one per key ± tombstones, and a
+/// `V1DeleteAccessControlEntry` yields one per matched ACL.
+/// [`PartitionRecord`] is enveloped at apiVersion 1 so its KIP-858
+/// `directories` survive; every other modeled record frames at apiVersion 0.
+///
+/// The function yields an empty `Vec` when a record fans out to nothing, that
+/// is, an empty config clear with no prior keys, or a delete-ACL filter that
+/// matches nothing. Callers treat an all-empty batch as a committed no-op.
 ///
 /// apiVersion 0 is the "defaulted KIP-631 framing": the core fields Crabka
-/// populates all exist at v0; the remaining higher-version KIP-631 extras
-/// (broker incarnation/epoch, partition ELR, …) stay defaulted.
+/// populates all exist at v0, and the remaining higher-version KIP-631 extras
+/// such as broker incarnation, broker epoch, and partition ELR stay defaulted.
 /// [`PartitionRecord`] is the one exception, lifted to v1 to carry per-replica
 /// directory ids.
 ///
@@ -429,15 +434,18 @@ pub fn to_kraft_values(
         .collect()
 }
 
-/// The inverse framing entrypoint: decode one KIP-631 value blob back to a
-/// [`MetadataRecord`], resolving image-keyed fields (topic ids, the whole-map
-/// config merge, ACL ids) against `image`. The caller must apply decoded
-/// records to `image` in log order so each subsequent decode sees the
+/// The inverse framing entrypoint.
+///
+/// This function decodes one KIP-631 value blob back to a [`MetadataRecord`]
+/// and resolves the image-keyed fields against `image`. Those fields are the
+/// topic ids, the whole-map config merge, and the ACL ids. The caller must
+/// apply decoded records to `image` in log order, so each later decode sees the
 /// up-to-date state.
 ///
 /// # Errors
-/// [`TranslateError::Decode`] if the envelope/body is malformed, plus any
-/// [`from_kraft`] error (unknown topic/ACL id, unmodeled record).
+/// [`TranslateError::Decode`] if the envelope or the body is malformed, plus
+/// any [`from_kraft`] error, such as an unknown topic id, an unknown ACL id, or
+/// an unmodeled record.
 pub fn from_kraft_value(
     value: &[u8],
     image: &MetadataImage,
@@ -664,10 +672,10 @@ fn to_kraft_iter(
     Ok(recs.into_iter())
 }
 
-/// Crabka-private metadata-record apiKeys (well outside Kafka's real
-/// non-sequential range 0..=27) for records carried verbatim through the
-/// KIP-631 `Unknown` envelope. NOT wire-faithful to a JVM peer — Crabka-only
-/// round-trip carriers.
+/// Crabka-private metadata-record apiKeys, well outside Kafka's real
+/// non-sequential range 0..=27, for records carried verbatim through the
+/// KIP-631 `Unknown` envelope. These are NOT wire-faithful to a JVM peer. They
+/// are Crabka-only round-trip carriers.
 const PRIVATE_CLIENT_METRICS_KEY: u32 = 1000;
 const PRIVATE_FEATURES_EPOCH_KEY: u32 = 1001;
 /// KIP-858 directory-assignment delta carried verbatim so it stays a
@@ -679,7 +687,7 @@ const PRIVATE_PARTITION_OFFSET_ADVANCE_KEY: u32 = 1003;
 
 /// Wrap a wincode-serialized `MetadataRecord` in an `Unknown` KIP-631 envelope
 /// under a Crabka-private apiKey, so it round-trips byte-faithfully through the
-/// KIP-631 log/snapshot without a real KIP-631 schema.
+/// KIP-631 log and snapshot without a real KIP-631 schema.
 fn wincode_carrier(
     rec: &MetadataRecord,
     api_key: u32,
@@ -808,14 +816,14 @@ fn delegation_token_to_kraft(t: &DelegationTokenRecord) -> KDelegationTokenRecor
 /// Convert one KIP-631 record back to its [`MetadataRecord`] counterpart.
 ///
 /// Inverse of [`to_kraft`]. A `Config` record routes back to
-/// `V1TopicConfig`/`V1BrokerConfig` by `resource_type`; topic-config
+/// `V1TopicConfig` or `V1BrokerConfig` by `resource_type`. Topic-config
 /// records decode to single-key singletons that the image merges.
 ///
 /// # Errors
-/// [`TranslateError::UnknownTopicId`] when a topic/partition references a
+/// [`TranslateError::UnknownTopicId`] when a topic or partition references a
 /// topic id absent from `image`, [`TranslateError::NoCounterpart`] for
 /// records this layer does not model, and [`TranslateError::Invalid`] for
-/// out-of-range enum/hex values.
+/// out-of-range enum and hex values.
 // exhaustive match over KraftMetadataRecord
 pub fn from_kraft(
     rec: &KraftMetadataRecord,
@@ -1118,7 +1126,7 @@ fn config_from_kraft(
     }
 }
 
-/// Resolve a topic id to its name by scanning the image's topics.
+/// Resolve a topic id to its name with a scan of the topics of the image.
 fn topic_name_for_id(image: &MetadataImage, id: uuid::Uuid) -> Option<String> {
     image
         .topics()

@@ -421,10 +421,12 @@ pub(crate) fn advance_slot_sql() -> &'static str {
     "SELECT pg_replication_slot_advance($1, $2::text::pg_lsn)"
 }
 
-/// Run the one-time connection setup against `catalog`: resolve the database
-/// name, create + validate the publication (when tables are configured), and
-/// ensure the replication slot. Split out of [`PostgresWalSource::connect`] so
-/// the orchestration is unit-testable against a [`PgCatalog`] mock.
+/// Run the one-time connection setup against `catalog`.
+///
+/// The function resolves the database name, creates and validates the
+/// publication when tables are configured, and makes sure that the replication
+/// slot exists. It is separate from [`PostgresWalSource::connect`], so the
+/// orchestration is unit-testable against a [`PgCatalog`] mock.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -1152,10 +1154,12 @@ mod tests {
     }
 }
 
-/// Mock-driven coverage for the connection-setup decision logic. The `PgCatalog`
-/// seam lets these run entirely offline: every excluded-by-necessity live query
-/// is replaced by a `mockall` expectation, so the validation/orchestration
-/// branches carry real mutation signal without a running `PostgreSQL`.
+/// Mock-driven coverage for the connection-setup decision logic.
+///
+/// The `PgCatalog` seam lets these tests run offline. A `mockall` expectation
+/// replaces every live query that the tests must exclude, so the validation and
+/// orchestration branches carry real mutation signal without a running
+/// `PostgreSQL`.
 #[cfg(test)]
 mod catalog_tests {
     use assert2::check;
@@ -1189,9 +1193,9 @@ mod catalog_tests {
         }
     }
 
-    /// A minimal valid pgoutput `Begin` frame (tag, then the final-LSN,
-    /// commit-time, and xid fields); decoding it stages a transaction without
-    /// needing real WAL bytes.
+    /// A minimal valid pgoutput `Begin` frame: the tag, then the final-LSN,
+    /// commit-time, and xid fields. A decode of this frame stages a transaction
+    /// without real WAL bytes.
     fn begin_frame() -> Vec<u8> {
         let mut data = vec![b'B'];
         data.extend_from_slice(&0u64.to_be_bytes()); // final_lsn

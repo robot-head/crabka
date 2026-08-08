@@ -1,53 +1,55 @@
 //! The [`ConnectorRuntime`]: an async driver that owns one [`Source`] and one
-//! [`Sink`] and pipes records between them in a single process — no Connect
-//! worker protocol, no REST, no broker required between the two ends. This is
-//! the embeddable, single-binary shape (a ground-station / aircraft edge box):
-//! build it programmatically, [`run`](ConnectorRuntime::run) it, and drive its
-//! lifecycle through the returned [`ConnectorHandle`].
+//! [`Sink`] and pipes records between them in a single process. It needs no
+//! Connect worker protocol, no REST, and no broker between the two ends. This
+//! is the embeddable, single-binary shape, for example a ground-station or
+//! aircraft edge box. Build it programmatically,
+//! [`run`](ConnectorRuntime::run) it, and drive its lifecycle through the
+//! returned [`ConnectorHandle`].
 //!
 //! ## The driver loop
 //!
 //! The runtime drives one sequential
 //! `poll → put → commit → checkpoint → acknowledge` loop on the source. It is
-//! deliberately *not* a two-task pipeline with a channel
-//! between poll and put: [`Source::checkpoint`] reads the source's *live*
-//! position, so the poll side must never run ahead of what the sink has made
-//! durable — otherwise a persisted checkpoint would name records that were
-//! never delivered. Backpressure is therefore intrinsic (the loop never polls
-//! the next batch until the current one is committed) and bounded by
-//! [`max_batch`](ConnectorRuntime::max_batch): at most that many records are buffered in
-//! memory before they are pushed to the sink.
+//! deliberately *not* a two-task pipeline with a channel between poll and put.
+//! [`Source::checkpoint`] reads the source's *live* position, so the poll side
+//! must never run ahead of what the sink has made durable. A poll side that ran
+//! ahead would let a persisted checkpoint name records that the runtime never
+//! delivered. Backpressure is therefore intrinsic, because the loop never polls
+//! the next batch until it commits the current one.
+//! [`max_batch`](ConnectorRuntime::max_batch) bounds it: the runtime buffers at
+//! most that many records in memory before it pushes them to the sink.
 //!
 //! Each interval:
 //!
-//! 1. Poll the source into a batch — up to `max_batch` records, or until the
-//!    source reports caught-up ([`poll`](Source::poll) returns `None`), or the
+//! 1. Poll the source into a batch: up to `max_batch` records, or until the
+//!    source reports caught-up, that is, until [`poll`](Source::poll) returns
+//!    `None`, or until the
 //!    [`commit_interval`](ConnectorRuntime::commit_interval) deadline elapses.
-//! 2. If the batch is non-empty: lazily [`begin`](Sink::begin) a transaction
-//!    (only when the sink supports one — so an idle interval opens none),
-//!    [`put`](Sink::put) the batch, [`commit`](Sink::commit) it (which for an
-//!    at-least-once sink delegates to [`flush`](Sink::flush)).
+//! 2. If the batch is non-empty, lazily [`begin`](Sink::begin) a transaction,
+//!    only when the sink supports one, so an idle interval opens none. Then
+//!    [`put`](Sink::put) the batch and [`commit`](Sink::commit) it. For an
+//!    at-least-once sink the commit delegates to [`flush`](Sink::flush).
 //! 3. After the commit is durable, [`checkpoint`](Source::checkpoint) the source
-//!    and persist it through the [`CheckpointStore`]. Only after that save
-//!    succeeds does the runtime call [`acknowledge`](Source::acknowledge), so an
+//!    and persist it through the [`CheckpointStore`]. The runtime calls
+//!    [`acknowledge`](Source::acknowledge) only after that save succeeds, so an
 //!    upstream cursor advances only after the durable checkpoint names it. On
 //!    restart the runtime [`seek`](Source::seek)s to this offset, so delivery
 //!    resumes from the last fully-committed record.
 //!
-//! A put/commit failure on a transactional sink triggers a best-effort
-//! [`abort`](Sink::abort) before the error propagates, so a half-written
-//! interval is rolled back rather than leaked.
+//! A put or commit failure on a transactional sink triggers a best-effort
+//! [`abort`](Sink::abort) before the error propagates, so the runtime rolls a
+//! half-written interval back and does not leak it.
 //!
 //! ## Lifecycle
 //!
 //! [`run`](ConnectorRuntime::run) spawns the loop and hands back a
 //! [`ConnectorHandle`]. The handle [`pause`](ConnectorHandle::pause)s and
-//! [`resume`](ConnectorHandle::resume)s between intervals (an in-flight batch
-//! always commits before the loop parks), and
-//! [`shutdown`](ConnectorHandle::shutdown) performs a graceful drain: it commits
-//! one final bounded batch of whatever is immediately available, checkpoints it,
-//! then [`close`](Source::close)s both ends. These pause/resume + drain hooks are
-//! the seam a contact-window scheduler plugs into.
+//! [`resume`](ConnectorHandle::resume)s between intervals, and an in-flight
+//! batch always commits before the loop parks.
+//! [`shutdown`](ConnectorHandle::shutdown) does a graceful drain: it commits one
+//! final bounded batch of whatever is immediately available, checkpoints it,
+//! then [`close`](Source::close)s both ends. A contact-window scheduler plugs
+//! into these pause, resume, and drain hooks.
 
 use std::{
     marker::PhantomData,
@@ -65,9 +67,9 @@ use crate::{error::ConnectError, record::SourceOffset, sink::Sink, source::Sourc
 /// restart can [`seek`](Source::seek) back to the last committed position.
 ///
 /// The runtime owns a single source, so a store holds a single
-/// [`SourceOffset`]. The default [`InMemoryCheckpointStore`] keeps it in memory
-/// (durable only for the process lifetime); a real edge deployment supplies a
-/// file- or NVRAM-backed implementation.
+/// [`SourceOffset`]. The default [`InMemoryCheckpointStore`] keeps it in
+/// memory, which is durable only for the process lifetime. A real edge
+/// deployment supplies a file-backed or NVRAM-backed implementation.
 #[async_trait]
 pub trait CheckpointStore: Send + Sync + 'static {
     /// Persist `offset` as the latest committed position. Called only after the
@@ -78,8 +80,9 @@ pub trait CheckpointStore: Send + Sync + 'static {
     /// Returns [`ConnectError`] if the offset cannot be persisted.
     async fn save(&self, offset: &SourceOffset) -> Result<(), ConnectError>;
 
-    /// Load the last persisted position, or `None` if none was ever saved (a
-    /// fresh start). Called once before the first [`poll`](Source::poll).
+    /// Load the last persisted position, or `None` if the store never saved one,
+    /// which is a fresh start. The runtime calls this once before the first
+    /// [`poll`](Source::poll).
     ///
     /// # Errors
     ///
@@ -87,9 +90,10 @@ pub trait CheckpointStore: Send + Sync + 'static {
     async fn load(&self) -> Result<Option<SourceOffset>, ConnectError>;
 }
 
-/// In-memory [`CheckpointStore`]: holds the latest offset in a mutex. Survives
-/// pause/resume and restart-within-process, but not a process restart — use it
-/// for tests and for sources that re-derive their position from the backend.
+/// In-memory [`CheckpointStore`]: holds the latest offset in a mutex. It
+/// survives pause, resume, and a restart within the process, but not a process
+/// restart. Use it for tests and for sources that re-derive their position from
+/// the backend.
 #[derive(Debug, Default)]
 pub struct InMemoryCheckpointStore {
     offset: Mutex<Option<SourceOffset>>,
@@ -111,20 +115,20 @@ impl CheckpointStore for InMemoryCheckpointStore {
     }
 }
 
-/// Observable lifecycle state of a running connector, read via
+/// Observable lifecycle state of a running connector, read through
 /// [`ConnectorHandle::state`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeState {
-    /// Spawned but not yet inside the loop (seeking to its checkpoint).
+    /// Spawned but not yet inside the loop, and seeking to its checkpoint.
     Starting,
     /// Actively polling and writing.
     Running,
-    /// Parked by [`pause`](ConnectorHandle::pause); committing nothing until
+    /// Parked by [`pause`](ConnectorHandle::pause). It commits nothing until
     /// [`resume`](ConnectorHandle::resume)d.
     Paused,
     /// Draining the remaining available records on the way to a clean stop.
     Draining,
-    /// Stopped cleanly — the source drained and both ends were closed.
+    /// Stopped cleanly: the source drained and the runtime closed both ends.
     Stopped,
     /// Stopped because the loop returned an error.
     Failed,
@@ -158,7 +162,7 @@ impl Default for Config {
 
 /// A programmatically-assembled connector: one source, one sink, and the policy
 /// that brackets them. Build it with [`ConnectorRuntime::new`], wire the ends
-/// with [`add_source`](ConnectorRuntime::add_source) /
+/// with [`add_source`](ConnectorRuntime::add_source) and
 /// [`add_sink`](ConnectorRuntime::add_sink), then
 /// [`run`](ConnectorRuntime::run) it.
 ///
@@ -183,9 +187,9 @@ pub struct ConnectorRuntime<K, V, S = NoSource, T = NoSink> {
     sink: T,
     checkpoints: Arc<dyn CheckpointStore>,
     config: Config,
-    /// Drives the poll-backoff sleep. Kept out of `Config` (which is `Copy`) so
-    /// production uses real time via [`SystemSleeper`] while tests inject a mock
-    /// timeline.
+    /// Drives the poll-backoff sleep. It stays out of `Config`, which is `Copy`,
+    /// so production uses real time with [`SystemSleeper`] and tests inject a
+    /// mock timeline.
     sleeper: Arc<dyn AsyncSleeper>,
     _marker: PhantomData<(K, V)>,
 }
@@ -272,7 +276,7 @@ where
         self
     }
 
-    /// How often to commit + checkpoint. The loop also commits early once a
+    /// How often to commit and checkpoint. The loop also commits early once a
     /// batch fills [`max_batch`](Self::max_batch) or the source catches up.
     /// Default: 5s.
     #[must_use]
@@ -298,9 +302,9 @@ where
     }
 
     /// Drive the poll-backoff sleep through `sleeper` instead of the default
-    /// [`SystemSleeper`]. Production leaves this as real time; tests inject a
-    /// mock so the backoff cadence advances on a mock timeline deterministically
-    /// instead of on the wall clock.
+    /// [`SystemSleeper`]. Production leaves this as real time. Tests inject a
+    /// mock, so the backoff cadence advances deterministically on a mock
+    /// timeline and not on the wall clock.
     #[must_use]
     pub fn sleeper(mut self, sleeper: Arc<dyn AsyncSleeper>) -> Self {
         self.sleeper = sleeper;
@@ -315,10 +319,10 @@ where
 {
     /// Spawn the driver loop and return a handle to control it.
     ///
-    /// Must be called from within a Tokio runtime. The loop runs until
-    /// [`shutdown`](ConnectorHandle::shutdown) (graceful drain) or a fatal
-    /// error; an infinite source otherwise runs forever, backing off whenever it
-    /// is momentarily caught up.
+    /// The caller must be inside a Tokio runtime. The loop runs until
+    /// [`shutdown`](ConnectorHandle::shutdown), which is a graceful drain, or
+    /// until a fatal error. An infinite source otherwise runs forever and backs
+    /// off whenever it is momentarily caught up.
     #[must_use]
     pub fn run(self) -> ConnectorHandle {
         let source = self.source.0;
@@ -347,9 +351,9 @@ where
 }
 
 /// A control handle for a running [`ConnectorRuntime`]. Pause, resume, observe
-/// state, and shut down gracefully. Dropping the handle without calling
-/// [`shutdown`](Self::shutdown) signals a graceful drain to the orphaned loop so
-/// it does not run forever.
+/// state, and shut down gracefully. A drop of the handle without a call to
+/// [`shutdown`](Self::shutdown) signals a graceful drain to the orphaned loop,
+/// so it does not run forever.
 pub struct ConnectorHandle {
     control: watch::Sender<Control>,
     state: watch::Receiver<RuntimeState>,
@@ -357,8 +361,8 @@ pub struct ConnectorHandle {
 }
 
 impl ConnectorHandle {
-    /// Park the loop after the current interval commits. Idempotent; a no-op if
-    /// the loop has already stopped.
+    /// Park the loop after the current interval commits. This method is
+    /// idempotent, and it does nothing if the loop has already stopped.
     pub fn pause(&self) {
         let _ = self.control.send(Control::Pause);
     }
@@ -500,8 +504,9 @@ where
         Ok(())
     }
 
-    /// Poll one bounded batch and, if non-empty, write + commit + checkpoint it.
-    /// Returns whether the batch wrote anything or the source was caught up.
+    /// Poll one bounded batch and, if it is non-empty, write, commit, and
+    /// checkpoint it. Returns whether the batch wrote anything or the source
+    /// was caught up.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -540,9 +545,9 @@ where
         })
     }
 
-    /// Write a non-empty batch inside the transactional gate (lazy `begin`),
-    /// commit it, persist the source checkpoint, then acknowledge that offset.
-    /// Aborts on failure when the sink is transactional.
+    /// Write a non-empty batch inside the transactional gate, whose `begin` is
+    /// lazy, commit it, persist the source checkpoint, then acknowledge that
+    /// offset. Aborts on failure when the sink is transactional.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -584,8 +589,8 @@ where
         Ok(())
     }
 
-    /// `put` then `commit` the batch (commit delegates to `flush` for an
-    /// at-least-once sink), as one fallible unit so the caller can roll back.
+    /// `put` then `commit` the batch as one fallible unit, so the caller can
+    /// roll back. For an at-least-once sink the commit delegates to `flush`.
     async fn deliver(
         &mut self,
         batch: Vec<crate::record::ConnectRecord<K, V>>,
@@ -615,9 +620,9 @@ mod tests {
     use super::*;
     use crate::record::{ConnectRecord, OffsetMap, OffsetValue};
 
-    /// Yield until `cond` holds, letting a spawned task make progress between
-    /// checks without sleeping on real time. The bound makes a stuck condition
-    /// fail the test fast instead of hanging it.
+    /// Yield until `cond` holds. A spawned task can make progress between
+    /// checks, and this helper does not sleep on real time. The bound makes a
+    /// stuck condition fail the test fast instead of a hang.
     async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
         for _ in 0..100_000 {
             if cond() {
@@ -628,8 +633,8 @@ mod tests {
         panic!("condition never held: {what}");
     }
 
-    /// A source that yields a fixed list of values once, tracking its position
-    /// as the index, then reports caught-up forever.
+    /// A source that yields a fixed list of values once and tracks its position
+    /// as the index. It then reports caught-up forever.
     struct VecSource {
         records: Vec<Bytes>,
         pos: usize,
@@ -675,8 +680,8 @@ mod tests {
         }
     }
 
-    /// A source that never produces but counts how often it was polled — used to
-    /// prove pause stops polling.
+    /// A source that never produces but counts how often the runtime polled it.
+    /// It proves that pause stops polling.
     struct CountingIdleSource {
         polls: Arc<AtomicUsize>,
     }
@@ -696,8 +701,8 @@ mod tests {
     }
 
     /// A sink that forwards every delivered value over a channel and records the
-    /// transactional bracket calls + the size of each `put`, so a test can
-    /// assert on both the gate and the batch boundaries the loop chose.
+    /// transactional bracket calls and the size of each `put`, so a test can
+    /// assert on both the gate and the batch boundaries that the loop chose.
     struct ChannelSink {
         tx: mpsc::UnboundedSender<Bytes>,
         transactional: bool,
@@ -757,9 +762,9 @@ mod tests {
         )
     }
 
-    /// Receive `n` records, failing fast if any does not arrive promptly. The
-    /// bound is what makes a delivery-suppressing regression fail the test in
-    /// seconds rather than hang it — without it a no-op `put`/`commit` would
+    /// Receive `n` records and fail fast if any does not arrive promptly. The
+    /// bound makes a delivery-suppressing regression fail the test in seconds
+    /// instead of a hang. Without the bound, a no-op `put` or `commit` would
     /// block `recv` forever.
     async fn collect(rx: &mut mpsc::UnboundedReceiver<Bytes>, n: usize) -> Vec<Bytes> {
         let mut out = Vec::new();
@@ -930,8 +935,8 @@ mod tests {
         check!((result.is_err(), aborts.load(Ordering::SeqCst)) == (true, 1));
     }
 
-    /// A source whose `seek` always fails — to prove a restored checkpoint the
-    /// source cannot resume from fails the runtime at startup.
+    /// A source whose `seek` always fails. It proves that a restored checkpoint
+    /// that the source cannot resume from fails the runtime at startup.
     struct SeekFailSource;
 
     #[async_trait]
@@ -963,8 +968,8 @@ mod tests {
         check!(shutdown(handle).await.is_err());
     }
 
-    /// A checkpoint store that fails the requested direction, to exercise the
-    /// runtime's load (startup) and save (post-commit) error paths.
+    /// A checkpoint store that fails the requested direction. It exercises the
+    /// load error path at startup and the save error path after a commit.
     struct FailingCheckpointStore {
         fail_load: bool,
     }

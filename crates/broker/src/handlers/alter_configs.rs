@@ -1,9 +1,11 @@
-//! `AlterConfigs` (`api_key=33`). Topic-level only. Each resource's full
-//! override map (the *complete* set of non-default values for that topic)
-//! is built from the request, validated against the whitelist in
-//! [`crate::config_keys`], and submitted through the controller as a
+//! `AlterConfigs` (`api_key=33`). Topic-level only.
+//!
+//! The handler builds each resource's full override map from the request.
+//! That map is the *complete* set of non-default values for that topic. The
+//! handler validates the map against the whitelist in
+//! [`crate::config_keys`], then submits it through the controller as a
 //! single `V1TopicConfig` record. Replication-side propagation runs on
-//! every reconcile (see `ReplicatorSupervisor::reconcile`).
+//! every reconcile. See `ReplicatorSupervisor::reconcile`.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, MetadataRecord, ResourceType, TopicConfigRecord};

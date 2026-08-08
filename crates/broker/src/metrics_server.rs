@@ -1,10 +1,12 @@
-//! Prometheus `/metrics` HTTP server. Mirrors the operator
-//! crate's `health` pattern: a small axum app exposing one route.
-//! Returns `OpenMetrics` text on success; 500 on encoder failure.
+//! Prometheus `/metrics` HTTP server.
 //!
-//! The server is spawned by [`crate::Broker::start`] when
-//! `BrokerConfig::metrics_listen_addr` is `Some`. Cancelled via the
-//! broker's supervisor shutdown token.
+//! It mirrors the `health` pattern in the operator crate: a small axum app
+//! that exposes one route. It returns `OpenMetrics` text on success, and 500
+//! on an encoder failure.
+//!
+//! [`crate::Broker::start`] spawns the server when
+//! `BrokerConfig::metrics_listen_addr` is `Some`. The broker's supervisor
+//! shutdown token cancels it.
 
 use std::net::SocketAddr;
 
@@ -13,8 +15,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::metrics::SharedRegistry;
 
-/// Build the router: `/metrics` (Prometheus) plus `/debug/pprof/{profile,heap}`
-/// (CPU always on Unix; heap when built with `--features heap-profiling`).
+/// Builds the router. It serves `/metrics` for Prometheus, and
+/// `/debug/pprof/{profile,heap}`. The CPU route is always present on Unix. The
+/// heap route needs a build with `--features heap-profiling`.
 pub fn router(
     registry: SharedRegistry,
     profiling: crabka_telemetry::profiling::ProfilingConfig,
@@ -27,10 +30,10 @@ pub fn router(
         )?))
 }
 
-/// Bind and serve until `shutdown` fires. Returns the bound address so
-/// integration tests can scrape `127.0.0.1:0`-style configs without
-/// guessing ports. On any axum error (typically socket close), logs and
-/// returns.
+/// Binds and serves until `shutdown` fires. It returns the bound address, so
+/// an integration test can scrape a `127.0.0.1:0` config without a guess at
+/// the port. On any axum error, which is normally a socket close, it logs the
+/// error and returns.
 pub(crate) async fn run(
     addr: SocketAddr,
     registry: SharedRegistry,

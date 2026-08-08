@@ -35,7 +35,8 @@ pub fn module_name(s: &str) -> String {
 }
 
 /// `ApiVersionsRequest` -> `ApiVersionsRequest` (type name, unchanged).
-/// Provided for symmetry; trivial today but a single place to change if rules evolve.
+/// This function exists for symmetry. It is trivial today, but it is the
+/// single place to change if the rules evolve.
 #[must_use]
 pub fn type_name(s: &str) -> String {
     s.to_string()

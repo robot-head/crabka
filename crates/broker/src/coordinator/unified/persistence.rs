@@ -3,37 +3,37 @@
 //! The topic carries two kinds of records, discriminated by the first
 //! `i16` of the key:
 //!
-//! - **`OffsetCommit`** (key version `0` or `1`) — one record per
+//! - **`OffsetCommit`**, key version `0` or `1`: one record for each
 //!   `(group_id, topic, partition)` committed offset.
-//! - **`GroupMetadata`** (key version `2`) — one record per group state
-//!   snapshot, written at the end of every successful rebalance.
+//! - **`GroupMetadata`**, key version `2`: one record for each group state
+//!   snapshot. The broker writes it at the end of every successful rebalance.
 //!
 //! Field layouts mirror Apache Kafka's
 //! `clients/src/main/resources/common/message/OffsetCommitValue.json` and
-//! `GroupMetadataValue.json` (with the legacy non-flexible encoding —
-//! `__consumer_offsets` records are NOT flexible).
+//! `GroupMetadataValue.json`. They use the legacy non-flexible encoding.
+//! `__consumer_offsets` records are NOT flexible.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_log::Offset;
 
 use crate::error::BrokerError;
 
-/// Discriminator returned by [`parse_key`].
+/// Discriminator that [`parse_key`] returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
-    /// `(group_id, topic, partition)` — what offset was committed.
+    /// `(group_id, topic, partition)`. This key names the committed offset.
     OffsetCommit {
         group_id: String,
         topic: String,
         partition: i32,
     },
-    /// Just `group_id` — value carries the whole `GroupMetadataValue`.
+    /// Just `group_id`. The value carries the whole `GroupMetadataValue`.
     GroupMetadata { group_id: String },
-    /// KIP-848 next-gen consumer group record types (versions 3, 5–8).
+    /// KIP-848 next-gen consumer group record types, versions 3, 5–8.
     NextGen(crate::coordinator::unified::persistence_next_gen::NextGenKey),
-    /// KIP-932 share-group record types (versions 9–13).
+    /// KIP-932 share-group record types, versions 9–13.
     Share(crate::coordinator::unified::share::persistence::ShareGroupKey),
-    /// KIP-1071 streams-group record types (versions 15–21).
+    /// KIP-1071 streams-group record types, versions 15–21.
     Streams(crate::coordinator::unified::streams::persistence::StreamsGroupKey),
 }
 
@@ -74,10 +74,10 @@ pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
     }
 }
 
-/// Encode a [`Key`] back to its `__consumer_offsets` wire bytes, symmetric to
-/// [`parse_key`]. The k0/k1 `OffsetCommit` and k2 `GroupMetadata` variants are
-/// encoded here; the next-gen / share / streams families delegate to their own
-/// `encode_*` helpers.
+/// Encodes a [`Key`] back to its `__consumer_offsets` wire bytes, symmetric to
+/// [`parse_key`]. This function encodes the k0/k1 `OffsetCommit` and k2
+/// `GroupMetadata` variants. The next-gen, share, and streams families delegate
+/// to their own `encode_*` helpers.
 #[must_use]
 pub fn encode_key(key: &Key) -> Bytes {
     match key {
@@ -102,7 +102,7 @@ pub struct OffsetCommitValue {
 }
 
 impl OffsetCommitValue {
-    /// Encode an `OffsetCommit` key (version 1).
+    /// Encodes an `OffsetCommit` key, version 1.
     #[must_use]
     pub fn encode_key(group_id: &str, topic: &str, partition: i32) -> Bytes {
         let mut buf = BytesMut::new();
@@ -113,7 +113,7 @@ impl OffsetCommitValue {
         buf.freeze()
     }
 
-    /// Encode an `OffsetCommit` value (version 3).
+    /// Encodes an `OffsetCommit` value, version 3.
     #[must_use]
     pub fn encode_value(&self) -> Bytes {
         let mut buf = BytesMut::new();
@@ -178,7 +178,7 @@ pub struct MemberMetadata {
 
 #[allow(dead_code)] // k2 write codec; see GroupMetadataValue note above.
 impl GroupMetadataValue {
-    /// Encode a `GroupMetadata` key (version 2).
+    /// Encodes a `GroupMetadata` key, version 2.
     #[must_use]
     pub fn encode_key(group_id: &str) -> Bytes {
         let mut buf = BytesMut::new();
@@ -187,7 +187,7 @@ impl GroupMetadataValue {
         buf.freeze()
     }
 
-    /// Encode a `GroupMetadata` value (version 3).
+    /// Encodes a `GroupMetadata` value, version 3.
     #[must_use]
     pub fn encode_value(&self) -> Bytes {
         let mut buf = BytesMut::new();

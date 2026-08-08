@@ -1,17 +1,20 @@
-//! KIP-853 voter set value types: a voter is (id, directory-id, endpoints, kraft.version range).
+//! KIP-853 voter set value types. A voter is (id, directory-id, endpoints,
+//! kraft.version range).
 //!
-//! This is a pure value-type leaf crate — no IO, no async, no crypto — so it
-//! compiles for `wasm32-unknown-unknown`. `crabka-metadata` re-exports it as
-//! its `voters` module, and the deterministic consensus core
-//! (`crabka-kraft-core`) embeds a [`VoterSet`] in its quorum state.
+//! This is a pure value-type leaf crate, with no IO, no async, and no crypto,
+//! so it compiles for `wasm32-unknown-unknown`. `crabka-metadata` re-exports it
+//! as its `voters` module. The deterministic consensus core,
+//! `crabka-kraft-core`, embeds a [`VoterSet`] in its quorum state.
 
 #![doc(html_root_url = "https://docs.rs/crabka-voters/0.3.9")]
 
 use std::collections::BTreeMap;
 
-/// A broker/controller node id — the canonical [`crabka_ids::NodeId`] newtype
-/// (a `u64` internally; Kafka's `int32` on the wire). Re-exported here so the
-/// consensus stack keeps naming it `crabka_voters::NodeId`.
+/// A broker or controller node id: the canonical [`crabka_ids::NodeId`]
+/// newtype, which is a `u64` internally and Kafka's `int32` on the wire.
+///
+/// This crate re-exports the type, so the consensus stack keeps the name
+/// `crabka_voters::NodeId`.
 pub use crabka_ids::NodeId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -24,7 +27,7 @@ pub struct VoterEndpoint {
     pub port: u16,
 }
 
-/// Supported kraft.version range for a voter (inclusive).
+/// Supported kraft.version range for a voter. The range is inclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KRaftVersionRange {
     pub min: u16,
@@ -46,7 +49,7 @@ pub struct Voter {
     pub kraft_version: KRaftVersionRange,
 }
 
-/// The authoritative voter set (ordered by node id).
+/// The authoritative voter set, ordered by node id.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VoterSet {
     voters: BTreeMap<NodeId, Voter>,

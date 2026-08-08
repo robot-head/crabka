@@ -1,9 +1,9 @@
 //! Domain newtypes for the audit crate.
 //!
-//! These wrap same-typed primitives that recur across the hash-chain, spool,
-//! and verifier so a transposed call site (e.g. `set_depth(bytes, count)`) is a
-//! compile error rather than a silent corruption. See the [newtype guidance] in
-//! the style guide.
+//! These types wrap the same-typed primitives that recur across the hash-chain,
+//! the spool, and the verifier. A transposed call site, for example
+//! `set_depth(bytes, count)`, is then a compile error and not a silent
+//! corruption. See the [newtype guidance] in the style guide.
 //!
 //! [newtype guidance]: ../../../docs/style_guides/code_style_guide.md
 
@@ -11,15 +11,15 @@ use core::cmp::Ordering;
 
 use derive_more::{Add, AddAssign, Display, From, Into};
 
-/// Per-broker hash-chain sequence number stamped on each record (`seq` header).
+/// Per-broker hash-chain sequence number in each record's `seq` header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
 pub struct Seq(pub u64);
 
-/// Epoch-millisecond timestamp (checkpoint `time`, OCSF `time`).
+/// Epoch-millisecond timestamp for the checkpoint `time` and the OCSF `time`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
 pub struct EpochMs(pub i64);
 
-/// Count of chained (data) records.
+/// Count of chained data records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
 pub struct RecordCount(pub u64);
 

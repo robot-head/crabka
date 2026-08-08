@@ -1,25 +1,26 @@
 //! Chaos TCP proxy: every cluster endpoint sits behind one of these.
 //!
-//! The proxy is a byte pipe (TLS and pgwire pass through untouched) with
-//! dynamically reconfigurable fault behavior:
+//! The proxy is a byte pipe, and TLS and pgwire pass through it untouched. Its
+//! fault behavior is reconfigurable while it runs:
 //!
-//! - **Partition** — [`PartitionStyle::Blackhole`] pauses pumping: no bytes
-//!   are read from either side, so kernel buffers fill and peers stall
-//!   exactly as they would on a real partition; live connections survive a
+//! - **Partition** — [`PartitionStyle::Blackhole`] pauses the pump. The proxy
+//!   reads no bytes from either side, so kernel buffers fill and peers stall
+//!   exactly as they would on a real partition. Live connections survive a
 //!   heal. [`PartitionStyle::Reset`] closes live connections and refuses new
-//!   ones. New connections during a blackhole are accepted but not connected
-//!   to the backend until the partition heals. Chunks already read but still
-//!   waiting out configured latency are likewise held for the duration of a
-//!   blackhole and delivered, in order, after the heal.
-//! - **Latency** — each chunk read is stamped with a delivery time of
-//!   `read_time + base + uniform(0..=jitter)` and forwarded no earlier than
-//!   that, preserving order and pipelining (a busy stream is delayed, not
-//!   serialized). Applied independently in each direction, so a
-//!   request/response pair sees roughly twice the configured delay.
-//! - **Throttle** — a per-direction token bucket caps forwarded bytes per
+//!   ones. The proxy accepts a new connection during a blackhole but does not
+//!   connect it to the backend until the partition heals. A chunk that the
+//!   proxy has already read, but that still waits out the configured latency,
+//!   is held in the same way for the length of the blackhole and delivered, in
+//!   order, after the heal.
+//! - **Latency** — the proxy stamps each chunk it reads with a delivery time
+//!   of `read_time + base + uniform(0..=jitter)` and forwards the chunk no
+//!   earlier than that. Order and pipelining survive, so a busy stream is
+//!   delayed and not serialized. Each direction has its own delay, so a
+//!   request and response pair sees about twice the configured delay.
+//! - **Throttle** — a per-direction token bucket caps the forwarded bytes per
 //!   second.
 //!
-//! All controls take effect on live connections without reconnecting.
+//! All controls take effect on live connections, with no reconnect.
 
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -60,9 +61,9 @@ pub struct LatencySpec {
     pub jitter: Time,
 }
 
-/// A chaos TCP proxy listening on an OS-assigned localhost port.
+/// A chaos TCP proxy that listens on an OS-assigned localhost port.
 ///
-/// Dropping the proxy aborts its accept loop and every live connection.
+/// A drop of the proxy aborts its accept loop and every live connection.
 #[derive(Debug)]
 pub struct ChaosProxy {
     addr: SocketAddr,
@@ -74,7 +75,7 @@ pub struct ChaosProxy {
 }
 
 impl ChaosProxy {
-    /// Spawns a proxy forwarding to `backend`.
+    /// Spawns a proxy that forwards to `backend`.
     ///
     /// # Errors
     ///
@@ -121,15 +122,15 @@ impl ChaosProxy {
         self.addr
     }
 
-    /// Repoints the proxy at a new backend (used after a node restart).
-    /// Existing connections keep their old backend; new ones use the new
-    /// address.
+    /// Repoints the proxy at a new backend. The harness uses this after a
+    /// node restart. Existing connections keep their old backend, and new
+    /// connections use the new address.
     pub fn set_backend(&self, backend: SocketAddr) {
         self.backend.send_replace(backend);
     }
 
-    /// Applies or clears a partition. `Some(style)` cuts the link;
-    /// `None` heals it. Completes once the state change has taken effect.
+    /// Applies or clears a partition. `Some(style)` cuts the link, and `None`
+    /// heals it. The method returns once the state change has taken effect.
     pub async fn set_partitioned(&self, style: Option<PartitionStyle>) {
         let (acked, ack) = oneshot::channel();
         if self
@@ -168,7 +169,7 @@ struct PartitionCommand {
     acked: oneshot::Sender<()>,
 }
 
-/// Accept-and-control loop: owns the listener, the partition state, and the
+/// Accept-and-control loop. It owns the listener, the partition state, and the
 /// set of live connection tasks.
 async fn run(
     listener: TcpListener,
@@ -217,7 +218,7 @@ async fn run(
     }
 }
 
-/// Serves one accepted client connection: waits out any blackhole in
+/// Serves one accepted client connection. It waits out any blackhole in
 /// progress, dials the backend, then pumps bytes both ways until either side
 /// closes.
 async fn handle_connection(
@@ -262,8 +263,9 @@ async fn handle_connection(
     );
 }
 
-/// Waits while the link is blackholed. Returns `false` when the proxy has
-/// shut down (partition channel closed) and pumping should stop.
+/// Waits while the link is blackholed. It returns `false` when the proxy has
+/// shut down, that is, when the partition channel is closed, and the pump
+/// should stop.
 async fn wait_until_pumping(partition: &mut watch::Receiver<Option<PartitionStyle>>) -> bool {
     loop {
         if *partition.borrow_and_update() != Some(PartitionStyle::Blackhole) {
@@ -275,8 +277,8 @@ async fn wait_until_pumping(partition: &mut watch::Receiver<Option<PartitionStyl
     }
 }
 
-/// Pumps one direction of a proxied connection through a delay queue: a
-/// read side stamps, throttles, and enqueues chunks; a write side delivers
+/// Pumps one direction of a proxied connection through a delay queue. The read
+/// side stamps, throttles, and enqueues the chunks. The write side delivers
 /// each chunk once its deadline passes.
 async fn pump(
     reader: OwnedReadHalf,
@@ -300,9 +302,9 @@ async fn pump(
     );
 }
 
-/// Read half of a pump: gates on the blackhole state before every read, then
-/// stamps each chunk with its delivery deadline, charges the token bucket,
-/// and enqueues it for the write side.
+/// Read half of a pump. It gates on the blackhole state before every read,
+/// then stamps each chunk with its delivery deadline, charges the token
+/// bucket, and enqueues the chunk for the write side.
 async fn read_side(
     mut reader: OwnedReadHalf,
     queue: mpsc::Sender<(Vec<u8>, Instant)>,
@@ -345,9 +347,9 @@ async fn read_side(
     }
 }
 
-/// Write half of a pump: delivers queued chunks in order, each no earlier
-/// than its deadline and never during a blackhole, then propagates the
-/// half-close once the read side is done.
+/// Write half of a pump. It delivers the queued chunks in order, each no
+/// earlier than its deadline and never during a blackhole. It then propagates
+/// the half-close once the read side is done.
 async fn write_side(
     mut queue: mpsc::Receiver<(Vec<u8>, Instant)>,
     mut writer: OwnedWriteHalf,
@@ -381,8 +383,8 @@ async fn write_side(
     let _ = writer.shutdown().await;
 }
 
-/// Delivery deadline for a chunk read at `read_at` under `latency`: the base
-/// delay plus a uniform draw from `0..jitter`.
+/// Delivery deadline for a chunk read at `read_at` under `latency`. It is the
+/// base delay plus a uniform draw from `0..jitter`.
 fn delivery_instant(read_at: Instant, latency: Option<LatencySpec>) -> Instant {
     let Some(LatencySpec { delay, jitter }) = latency else {
         return read_at;
@@ -414,7 +416,7 @@ impl TokenBucket {
     }
 
     /// Waits until `needed` bytes of budget are available under the current
-    /// throttle setting and consumes them. Returns immediately when the
+    /// throttle setting, then consumes them. It returns at once when the
     /// throttle is off.
     async fn acquire(&mut self, throttle: &watch::Receiver<Option<ByteRate>>, needed: ByteSize) {
         loop {
@@ -441,7 +443,7 @@ impl TokenBucket {
     }
 }
 
-/// The burst budget a throttled direction may accumulate at `limit`.
+/// The burst budget that a throttled direction may accumulate at `limit`.
 fn burst_for(limit: ByteRate, policy: LoadtestRuntimePolicy) -> ByteSize {
     let window: ByteSize = (limit * policy.proxy_burst_window).into();
     window.max(policy.proxy_min_burst)

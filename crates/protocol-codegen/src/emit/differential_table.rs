@@ -1,12 +1,13 @@
 //! Emit a Rust source file that provides:
 //!   - `CASES: &[Case]` — a static table of `(message, api_key, version, kind)` cases
 //!   - `default_json_for(name)` — JSON the oracle should accept for default fixture
-//!   - `encode_default(name, version)` — Rust-encoded bytes via `Default::default()`
+//!   - `encode_default(name, version)` — Rust-encoded bytes from `Default::default()`
 //!
-//! Consumed by `crates/protocol/tests/differential_all.rs` via `include!`.
+//! `crates/protocol/tests/differential_all.rs` consumes the file with
+//! `include!`.
 //!
-//! Emission uses `proc_macro2`/`quote!` instead of `writeln!`. See
-//! `emit::api_key_enum_quote` for the overall pattern.
+//! This module emits with `proc_macro2` and `quote!` instead of `writeln!`.
+//! See `emit::api_key_enum_quote` for the overall pattern.
 
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
@@ -16,10 +17,10 @@ use crate::{
     name_conv,
 };
 
-/// Maximum version we will ever iterate to. Schemas with open-ended
-/// `validVersions` (e.g. `0+`) would produce `i16::MAX` iterations, which is
+/// Maximum version this emitter ever iterates to. Schemas with open-ended
+/// `validVersions`, such as `0+`, would produce `i16::MAX` iterations, which is
 /// wrong. In practice all active Kafka 4.2 schemas have bounded ranges, but
-/// cap defensively to avoid catastrophic output.
+/// this cap is a defence against enormous output.
 const MAX_VERSION_CAP: i16 = 127;
 
 #[must_use]

@@ -11,11 +11,13 @@ use crate::{
     frame::{Frame, SymbolSource},
 };
 
-/// Stacktrace id reserved for samples with no frames (e.g. a goroutine profile's
-/// occasional stackless record). It is kept distinct from node `0` — the first
-/// real stacktrace's root — so stackless samples resolve to no frames instead of
-/// borrowing another stack's root, and are thus excluded from flamegraph totals
-/// while remaining counted in series sums.
+/// Stacktrace id reserved for samples with no frames.
+///
+/// A goroutine profile, for example, holds an occasional stackless record. This
+/// id stays distinct from node `0`, the root of the first real stacktrace.
+/// Stackless samples then resolve to no frames, and they do not take the root
+/// of another stack. Flamegraph totals exclude these samples, but series sums
+/// still count them.
 pub const EMPTY_STACKTRACE_ID: u32 = u32::MAX;
 
 /// One inlined line within a location.
@@ -33,7 +35,9 @@ pub struct LocationRec {
     pub lines: Vec<LineRec>,
 }
 
-/// A function record. String fields index into `SymbolDb`'s string table.
+/// A function record.
+///
+/// The string fields index into the string table of `SymbolDb`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FunctionRec {
     pub name: u32,

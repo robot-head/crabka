@@ -3,14 +3,15 @@
 //! Like SP27's aggregates and SP28's predicates, every function here is a pure,
 //! deterministic transform over a *single row's* already-MVCC-resolved Datums.
 //! A whole table lives on one range (`RangeMap::range_for_table`), so a scalar
-//! function executes entirely inside one `execute_read`/`eval` on one engine —
-//! no cross-range scatter, no new lock/visibility rule, no new interleaving. This
-//! is exactly CLAUDE.md's "pure-data / single-node refactor" carve-out, so SP29
-//! ships NO Stateright model (a model of a scalar fold would have an
-//! interleaving-free state space and merely restate these unit tests).
+//! function executes entirely inside one `execute_read`/`eval` on one engine.
+//! There is no cross-range scatter, no new lock/visibility rule, and no new
+//! interleaving. This is exactly CLAUDE.md's "pure-data / single-node refactor"
+//! carve-out, so SP29 ships NO Stateright model. A model of a scalar fold would
+//! have an interleaving-free state space and would only restate these unit
+//! tests.
 //!
-//! The dispatch mirrors SP28: the pure combinators are shared between scalar
-//! `eval` and the grouped evaluator (`agg::eval_grouped`); only the child-eval
+//! The dispatch mirrors SP28: scalar `eval` and the grouped evaluator
+//! (`agg::eval_grouped`) share the pure combinators, and only the child-eval
 //! closure differs (`eval_scalar` takes it as `FnMut(&Expr) -> Result<Datum>`).
 //!
 //! Supported: string `length`/`char_length`/`character_length`, `upper`,
@@ -74,7 +75,7 @@ enum ScalarFunc {
     /// so the eight `pg_[try_]advisory[_xact]_lock[_shared]` names share one
     /// implementation.
     AdvisoryLock {
-        /// `pg_try_advisory_*` returns a boolean instead of waiting.
+        /// `pg_try_advisory_*` returns a boolean and does not wait.
         try_only: bool,
         /// The `_xact` spellings release at transaction end.
         transactional: bool,
@@ -93,9 +94,9 @@ enum ScalarFunc {
     SessionUser,
     Version,
     FormatType,
-    /// `pg_typeof(any)` — the argument's resolved type name.
+    /// `pg_typeof(any)`: the argument's resolved type name.
     PgTypeof,
-    /// `pg_input_is_valid(text, text)` — would the type's input function accept
+    /// `pg_input_is_valid(text, text)`: would the type's input function accept
     /// this string?
     PgInputIsValid,
     PgTableIsVisible,
@@ -105,9 +106,9 @@ enum ScalarFunc {
     PgNotify,
 }
 
-/// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
-/// `None` means "not a known scalar function"; the caller then tries the
-/// aggregate path / reports an undefined function.
+/// Classify a lowercased function name. The lexer lowercases unquoted idents.
+/// `None` means "not a known scalar function". The caller then tries the
+/// aggregate path or reports an undefined function.
 fn scalar_func(name: &str) -> Option<ScalarFunc> {
     Some(match name {
         "length" | "char_length" | "character_length" => ScalarFunc::Length,
@@ -211,10 +212,10 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
 
 /// Is `name` a known scalar function? (The dispatch point in `eval`/`infer_type`.)
 ///
-/// The scalar surface is split across four modules — this one plus `math_fn`,
-/// `string_fn` and `regexp_fn` — so that no single file owns hundreds of
-/// functions. They share one dispatch point so `eval`, `infer_type` and
-/// `agg::is_wrapping_scalar_func` each need only ask this question once.
+/// The scalar surface spans four modules: this one plus `math_fn`, `string_fn`
+/// and `regexp_fn`. No single file then owns hundreds of functions. They share
+/// one dispatch point, so `eval`, `infer_type` and `agg::is_wrapping_scalar_func`
+/// each need only ask this question once.
 pub(crate) fn is_scalar(name: &str) -> bool {
     scalar_func(name).is_some()
         || crate::math_fn::is_math_func(name)
@@ -224,15 +225,15 @@ pub(crate) fn is_scalar(name: &str) -> bool {
 }
 
 /// The call a bare, unparenthesised `name` denotes, when `PostgreSQL` reserves
-/// that name for a niladic function rather than leaving it available as a
+/// that name for a niladic function and does not leave it available as a
 /// column reference.
 ///
-/// `SELECT current_schema` is a function call on 18.4 — `CURRENT_SCHEMA` is a
-/// keyword in its grammar, so the name can never reach an identifier — and the
+/// `SELECT current_schema` is a function call on 18.4, because `CURRENT_SCHEMA`
+/// is a keyword in its grammar and the name can never reach an identifier. The
 /// lexer here hands it over as an ordinary identifier instead. The other
 /// no-paren spellings (`current_date`, `session_user`, `localtimestamp`, …)
-/// are already calls by the time they arrive, so this covers only the ones
-/// that are not.
+/// are already calls when they arrive, so this covers only the ones that are
+/// not.
 pub(crate) fn niladic_keyword_call(name: &str) -> Option<FuncCall> {
     matches!(name, "current_schema").then(|| FuncCall {
         name: name.to_string(),
@@ -254,7 +255,7 @@ pub(crate) fn undefined_function(name: &str) -> ExecError {
     ExecError::UndefinedFunction(format!("function {name}(...) does not exist"))
 }
 
-/// `DISTINCT`/`ALL` is only meaningful for aggregates (PostgreSQL 42809). Our
+/// `DISTINCT`/`ALL` has a meaning only for aggregates (PostgreSQL 42809). The
 /// parser discards `ALL`, so only an explicit `DISTINCT` reaches here.
 fn distinct_not_aggregate(name: &str) -> ExecError {
     ExecError::WrongObjectType(format!(
@@ -263,7 +264,7 @@ fn distinct_not_aggregate(name: &str) -> ExecError {
 }
 
 /// The positional argument list of a scalar call. `f(*)` is never valid for a
-/// scalar function (only `count(*)`), so it is an undefined-function error.
+/// scalar function (only `count(*)` is), so it is an undefined-function error.
 fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
     match &fc.args {
         FuncArgs::Exprs(v) => Ok(v),
@@ -280,15 +281,18 @@ pub(crate) fn checked_args(fc: &FuncCall) -> Result<&[Expr], ExecError> {
     exprs_of(fc)
 }
 
-/// Statically infer a scalar call's result type (for RowDescription), validating
-/// name, arity, and — where the result type depends on them or the function is
-/// strictly typed — argument types. A bad name/arity/argument type is 42883.
+/// Statically infer a scalar call's result type, for RowDescription.
 ///
-/// NB: this runs for PROJECTED expressions (via `resolve_projection`). A scalar
-/// function appearing only in `WHERE`/`HAVING`/`ORDER BY` is evaluated without a
-/// separate type-resolution pass (a pre-existing trait of the engine — the same
-/// is true of arithmetic), so an argument-type misuse THERE surfaces at runtime
-/// as 42804 rather than here as 42883. This per-clause difference is documented.
+/// This validates the name and the arity. It also validates the argument types
+/// where the result type depends on them, or where the function is strictly
+/// typed. A bad name, arity, or argument type is 42883.
+///
+/// NB: this runs for PROJECTED expressions, through `resolve_projection`. A
+/// scalar function that appears only in `WHERE`/`HAVING`/`ORDER BY` runs with no
+/// separate type-resolution pass, which is a pre-existing trait of the engine
+/// and is also true of arithmetic. So an argument-type misuse THERE surfaces at
+/// runtime as 42804, not here as 42883. This per-clause difference is
+/// documented.
 pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
     if crate::text_search_fn::is_text_search_func(&fc.name) {
         return crate::text_search_fn::text_search_result_type(fc, scope);
@@ -607,10 +611,10 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
 }
 
 /// Evaluate a scalar call. `eval_child` evaluates each argument expression
-/// against the current row — the SAME `eval` for scalar context and
-/// `agg::eval_grouped` for a grouped context, so the combinators are shared and
-/// only the closure differs. Short-circuiting functions (`coalesce`) and the
-/// lazy ones evaluate arguments only as far as needed.
+/// against the current row. It is the SAME `eval` for a scalar context and
+/// `agg::eval_grouped` for a grouped context, so the two share the combinators
+/// and only the closure differs. Short-circuiting functions (`coalesce`) and
+/// the lazy ones evaluate arguments only as far as they need to.
 pub(crate) fn eval_scalar(
     fc: &FuncCall,
     ctx: &EvalCtx,
@@ -728,9 +732,9 @@ pub(crate) fn eval_scalar(
 
 /// Coerce `unknown` literal arguments of the numeric-family scalar functions
 /// into the type the call resolved to, so `sqrt('4')` and `mod('9', 4)` compute
-/// instead of complaining about a text argument. PostgreSQL performs this
-/// coercion at plan time; the scalar evaluator has no scope, so it re-derives
-/// the target from the arguments that DID carry a type.
+/// and do not complain about a text argument. PostgreSQL does this coercion at
+/// plan time. The scalar evaluator has no scope, so it re-derives the target
+/// from the arguments that DID carry a type.
 fn coerce_unknown_numeric_args(
     f: ScalarFunc,
     args: &[Expr],
@@ -780,8 +784,8 @@ fn coerce_unknown_numeric_args(
 }
 
 /// Apply an eager scalar function to its already-evaluated arguments. Every
-/// function here except `concat` is strict (any NULL argument → NULL); `concat`
-/// skips NULLs and never returns NULL.
+/// function here except `concat` is strict, and returns NULL for any NULL
+/// argument. `concat` skips NULLs and never returns NULL.
 fn eval_eager(
     f: ScalarFunc,
     fc: &FuncCall,
@@ -1222,13 +1226,15 @@ pub(crate) fn no_matching_function() -> ExecError {
     ExecError::UndefinedFunction("no function matches the given name and argument types".into())
 }
 
-/// Require the argument to statically type as a string (a bare `NULL` qualifies,
-/// since it types as text); otherwise the function does not exist for it (42883).
+/// Require the argument to statically type as a string. A bare `NULL` qualifies,
+/// because it types as text. Otherwise the function does not exist for it
+/// (42883).
 ///
 /// `varchar(n)` and `char(n)` count. PostgreSQL declares its string functions on
 /// `text` alone, but `varchar` and `bpchar` are binary-coercible to it, so a call
-/// like `length(a_varchar_column)` resolves through that implicit cast. Matching
-/// only `Text` here rejected every string function on a `varchar`/`char` column.
+/// like `length(a_varchar_column)` resolves through that implicit cast. A match
+/// on `Text` alone would reject every string function on a `varchar`/`char`
+/// column.
 fn require_text(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     if crate::eval::infer_type(arg, scope)?.is_string() {
         Ok(())
@@ -1237,7 +1243,7 @@ fn require_text(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     }
 }
 
-/// Require the argument to statically type as an integer; returns that width.
+/// Require the argument to statically type as an integer. Returns that width.
 fn require_int(arg: &Expr, scope: &Scope) -> Result<ColumnType, ExecError> {
     match crate::eval::infer_type(arg, scope)? {
         t @ (ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8) => Ok(t),
@@ -1252,8 +1258,8 @@ fn require_bool(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     }
 }
 
-/// SP32: require an int OR numeric argument (the `mod` operand types — PostgreSQL
-/// has no `float8` modulo).
+/// SP32: require an int OR numeric argument. These are the `mod` operand types,
+/// because PostgreSQL has no `float8` modulo.
 fn require_int_or_numeric(arg: &Expr, scope: &Scope) -> Result<ColumnType, ExecError> {
     // An `unknown` operand constrains nothing; the caller's other operand picks
     // the overload, and `mod`'s widest candidate settles an all-unknown pair —
@@ -1269,11 +1275,11 @@ fn require_int_or_numeric(arg: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
     }
 }
 
-/// SP30/SP32: require a numeric argument (int4/int8/float8/numeric); returns that
-/// type so the caller (`abs`) can preserve it.
-/// `real` folded onto `double precision`, for the functions PostgreSQL
+/// SP30/SP32: require a numeric argument (int4/int8/float8/numeric). Returns
+/// that type so the caller (`abs`) can preserve it.
+/// This folds `real` onto `double precision` for the functions PostgreSQL
 /// overloads on `float8` but not `float4` (`floor`, `ceil`, `round`, `trunc`,
-/// `sign`, `sqrt`, …): those calls resolve through the implicit widening cast,
+/// `sign`, `sqrt`, …). Those calls resolve through the implicit widening cast,
 /// so their result is `double precision`, not `real`.
 fn float4_widens(t: ColumnType) -> ColumnType {
     if t == ColumnType::Float4 {
@@ -1306,11 +1312,12 @@ fn require_numeric(arg: &Expr, scope: &Scope) -> Result<ColumnType, ExecError> {
     }
 }
 
-/// Unify every argument's type into one, PostgreSQL's `select_common_type` for
-/// `COALESCE`/`GREATEST`/`LEAST`/`NULLIF`: `unknown` inputs (a bare `NULL` and
-/// an unadorned string literal) are ignored while choosing, and an argument list
-/// that is entirely `unknown` resolves to `text`. Incompatible known types are
-/// 42804, spelled the way PostgreSQL spells them — with the construct's name.
+/// Unify every argument's type into one. This is PostgreSQL's
+/// `select_common_type` for `COALESCE`/`GREATEST`/`LEAST`/`NULLIF`. The choice
+/// ignores `unknown` inputs, which are a bare `NULL` and an unadorned string
+/// literal, and an argument list that is entirely `unknown` resolves to `text`.
+/// Incompatible known types are 42804, spelled the way PostgreSQL spells them,
+/// with the construct's name.
 fn unify_args(f: ScalarFunc, args: &[Expr], scope: &Scope) -> Result<ColumnType, ExecError> {
     let mut acc: Option<ColumnType> = None;
     for a in args {
@@ -1327,11 +1334,11 @@ fn is_unknown_literal(e: &Expr) -> bool {
     matches!(e, Expr::StringLiteral(_) | Expr::NullLiteral)
 }
 
-/// Evaluate `args` and apply PostgreSQL's common-type resolution to the result,
-/// coercing every `unknown` string literal to the type the other arguments
+/// Evaluate `args` and apply PostgreSQL's common-type resolution to the result.
+/// This coerces every `unknown` string literal to the type the other arguments
 /// settled on. `greatest`/`least`/`nullif` all compare their arguments against
-/// one another, so they need one common type before `ops::compare` runs —
-/// otherwise `greatest(1, '2')` would try to order an integer against text.
+/// one another, so they need one common type before `ops::compare` runs.
+/// Without it, `greatest(1, '2')` would try to order an integer against text.
 fn resolved_args(
     args: &[Expr],
     ctx: &EvalCtx,
@@ -1361,7 +1368,7 @@ fn resolved_args(
     Ok(vals)
 }
 
-/// The type name `pg_typeof` reports: the evaluated value's own type, falling
+/// The type name `pg_typeof` reports: the evaluated value's own type. It falls
 /// back to an explicit cast's target when the value is NULL, and to PostgreSQL's
 /// `unknown` for a literal that never acquired one.
 fn typeof_name(arg: &Expr, value: &Datum) -> String {
@@ -1396,8 +1403,8 @@ fn type_display_name(t: ColumnType) -> String {
     }
 }
 
-/// Require an integer argument, or a bare `NULL` (which PostgreSQL resolves to
-/// the parameter's own type rather than rejecting).
+/// Require an integer argument, or a bare `NULL`. PostgreSQL resolves such a
+/// `NULL` to the parameter's own type and does not reject it.
 fn require_int_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     if matches!(arg, Expr::NullLiteral) {
         return Ok(());
@@ -1447,7 +1454,7 @@ fn format_type(oid: i64, typmod: i64) -> String {
 /// How a type spells its `typmod`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypmodKind {
-    /// No modifier is ever printed (`integer`, `text`, …).
+    /// Nothing ever prints a modifier (`integer`, `text`, …).
     None,
     /// A character length, stored with the 4-byte varlena header included.
     Length,
@@ -1471,8 +1478,8 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
 }
 
 /// The built-in types `format_type` knows, as `(printed name, typmod spelling)`.
-/// The name carries a `[]` suffix for an array type; the modifier is spliced in
-/// before it (`character varying(6)[]`).
+/// The name carries a `[]` suffix for an array type, and the modifier goes in
+/// before that suffix (`character varying(6)[]`).
 fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
     use TypmodKind::{Length, None as NoMod, PrecisionScale, Seconds};
     Some(match oid {
@@ -1546,15 +1553,15 @@ fn name_mismatch(f: ScalarFunc, e: ExecError) -> ExecError {
     }
 }
 
-/// Is `e` an argument PostgreSQL still calls `unknown`? (Public so the sibling
-/// function modules can apply the same overload-resolution rules.)
+/// Is `e` an argument PostgreSQL still calls `unknown`? This is public so the
+/// sibling function modules can apply the same overload-resolution rules.
 pub(crate) fn is_unknown_arg(e: &Expr) -> bool {
     is_unknown_literal(e)
 }
 
-/// 42725 — PostgreSQL cannot choose between a function's overloads because
-/// every argument is still `unknown` and no candidate is preferred. Raised by
-/// the families that have two or more equally-good numeric overloads
+/// 42725: PostgreSQL cannot choose between a function's overloads, because
+/// every argument is still `unknown` and no candidate is preferred. The
+/// families that have two or more equally-good numeric overloads raise it
 /// (`gcd`, `lcm`, `to_hex`, the two-argument `random`).
 pub(crate) fn ambiguous_function(name: &str, arity: usize) -> ExecError {
     let spelled = vec!["unknown"; arity].join(", ");
@@ -1564,8 +1571,8 @@ pub(crate) fn ambiguous_function(name: &str, arity: usize) -> ExecError {
     }
 }
 
-/// 42883 spelling out the argument types PostgreSQL could not match, so a bad
-/// call reads `function concat() does not exist` rather than a generic `(...)`.
+/// 42883 that spells out the argument types PostgreSQL could not match, so a
+/// bad call reads `function concat() does not exist` and not a generic `(...)`.
 pub(crate) fn undefined_function_spelled(name: &str, args: &[Expr], scope: &Scope) -> ExecError {
     let spelled: Vec<&str> = args
         .iter()
@@ -1603,13 +1610,14 @@ pub(crate) fn require_arity(fc: &FuncCall, ok: bool) -> Result<(), ExecError> {
     }
 }
 
-/// A text argument at runtime. A non-text Datum here means the function was used
-/// in a non-projected position (so `scalar_result_type` never type-checked it);
-/// PostgreSQL rejects it at plan time (42883), we surface it at runtime (42804).
+/// A text argument at runtime. A non-text Datum here means the call sat in a
+/// non-projected position, so `scalar_result_type` never type-checked it.
+/// PostgreSQL rejects it at plan time (42883); Gres surfaces it at runtime
+/// (42804).
 /// Queue one `pg_notify(channel, payload)` on the session's pending
-/// notification list — the same list a `NOTIFY` statement writes to, so both
-/// deliver at the same point (commit, or the end of an autocommit statement)
-/// and dedup against each other.
+/// notification list. This is the same list a `NOTIFY` statement writes to, so
+/// both deliver at the same point (commit, or the end of an autocommit
+/// statement) and dedup against each other.
 fn eval_pg_notify(channel: &Datum, payload: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let channel = nullable_text_arg(channel)?;
     let payload = nullable_text_arg(payload)?;
@@ -1680,8 +1688,9 @@ pub(crate) fn type_error(what: &str, got: &Datum) -> ExecError {
     ))
 }
 
-/// The canonical text rendering of a non-NULL Datum (the wire text encoding), so
-/// `concat` agrees with the DataRow output and with the `||` operator.
+/// The canonical text rendering of a non-NULL Datum, which is the wire text
+/// encoding. So `concat` agrees with the DataRow output and with the `||`
+/// operator.
 pub(crate) fn text_render(d: &Datum, tz: &jiff::tz::TimeZone) -> String {
     String::from_utf8(crabka_pgtypes::encoding::encode_text(d, tz))
         .expect("a Datum's text encoding is always valid UTF-8")
@@ -1690,8 +1699,8 @@ pub(crate) fn text_render(d: &Datum, tz: &jiff::tz::TimeZone) -> String {
 // ---- rounding helpers (SP33) ----
 
 /// Rounding-family value transform. `scale` is `Some` only for the two-arg
-/// `round`/`trunc` form, which always yields numeric (an int first arg is
-/// promoted to numeric). The one-arg form preserves the input numeric type.
+/// `round`/`trunc` form, which always yields numeric and promotes an int first
+/// argument to numeric. The one-arg form preserves the input numeric type.
 fn round_family(f: ScalarFunc, v: &Datum, scale: Option<i64>) -> Result<Datum, ExecError> {
     use crabka_pgtypes::numeric as num;
     if let Some(n) = scale {
@@ -1736,7 +1745,7 @@ fn round_family(f: ScalarFunc, v: &Datum, scale: Option<i64>) -> Result<Datum, E
     }
 }
 
-/// `sign` of an integer, preserving its width.
+/// `sign` of an integer, with its width preserved.
 fn sign_int(v: &Datum) -> Result<Datum, ExecError> {
     Ok(match v {
         Datum::Int2(n) => Datum::Int2(n.signum()),
@@ -1767,8 +1776,9 @@ pub(crate) fn domain(sqlstate: &'static str, message: &'static str) -> ExecError
     ExecError::Type(crabka_pgtypes::TypeError::Domain { sqlstate, message })
 }
 
-/// Wrap an f64 result, mapping an overflow-to-infinity to 22003 (matching the
-/// engine's float8 arithmetic, which treats a finite→∞ overflow as out-of-range).
+/// Wrap an f64 result and map an overflow to infinity onto 22003. This matches
+/// the engine's float8 arithmetic, which treats a finite-to-infinite overflow as
+/// out of range.
 fn finite_or_overflow(x: f64) -> Result<Datum, ExecError> {
     if x.is_infinite() {
         Err(ExecError::Type(crabka_pgtypes::TypeError::Overflow))
@@ -1777,8 +1787,9 @@ fn finite_or_overflow(x: f64) -> Result<Datum, ExecError> {
     }
 }
 
-/// PostgreSQL power result type: float8 if any operand is float8; else numeric if
-/// any operand is numeric; else float8 (all-int, PG's preferred type).
+/// PostgreSQL power result type. It is float8 if any operand is float8. If not,
+/// it is numeric if any operand is numeric. Otherwise it is float8, the all-int
+/// case, which is PG's preferred type.
 fn power_result_type(a: ColumnType, b: ColumnType) -> ColumnType {
     let (a, b) = (float4_widens(a), float4_widens(b));
     if a == ColumnType::Float8 || b == ColumnType::Float8 {
@@ -1819,7 +1830,7 @@ fn power(base: f64, exp: f64) -> Result<Datum, ExecError> {
     finite_or_overflow(base.powf(exp))
 }
 
-/// `sign` of a float8: −1 / 0 / 1, with `NaN` → `NaN` (PostgreSQL `dsign`).
+/// `sign` of a float8: −1 / 0 / 1, and `NaN` for `NaN` (PostgreSQL `dsign`).
 fn float_sign(x: f64) -> f64 {
     if x.is_nan() {
         f64::NAN
@@ -1851,10 +1862,11 @@ fn trim_set(f: ScalarFunc, s: &str, set: &[char]) -> String {
     }
 }
 
-/// PostgreSQL `substr(string, start [, count])`: 1-based `start`; characters
-/// before position 1 count against `count`; a negative `count` is an error
-/// (22011); a NULL argument already short-circuited to NULL in `eval_eager`.
-/// `substring(string, posix_pattern)` — the first match, or the first
+/// PostgreSQL `substr(string, start [, count])`. `start` is 1-based, and
+/// characters before position 1 count against `count`. A negative `count` is an
+/// error (22011). A NULL argument already short-circuited to NULL in
+/// `eval_eager`.
+/// `substring(string, posix_pattern)` returns the first match, or the first
 /// parenthesized subexpression when the pattern has one, and NULL when the
 /// pattern does not match at all.
 fn posix_substring(s: &str, pattern: &str) -> Result<Datum, ExecError> {
@@ -1875,12 +1887,12 @@ fn posix_substring(s: &str, pattern: &str) -> Result<Datum, ExecError> {
         .map_or(Datum::Null, |m| Datum::Text(m.as_str().to_string())))
 }
 
-/// `overlay(string, replacement, start, count)` — replace `count` characters
-/// beginning at `start` with `replacement`.
+/// `overlay(string, replacement, start, count)`: replace `count` characters
+/// that start at `start` with `replacement`.
 ///
 /// PostgreSQL defines it as `substring(s, 1, start - 1) || replacement ||
-/// substring(s, start + count)`, which is why a `start` of 0 with a positive
-/// `count` is a negative-length substring error rather than an insertion at the
+/// substring(s, start + count)`. That is why a `start` of 0 with a positive
+/// `count` is a negative-length substring error and not an insertion at the
 /// front.
 fn overlay(s: &str, replacement: &str, start: i64, count: i64) -> Result<Datum, ExecError> {
     let prefix = substr(s, 1, Some(start - 1))?;
@@ -1918,21 +1930,22 @@ fn substr(s: &str, start: i64, count: Option<i64>) -> Result<Datum, ExecError> {
 
 // ---- string-family helpers (SP33) ----
 
-/// PostgreSQL's ~1 GB field-size limit — guards `repeat`/`lpad`/`rpad` against
-/// minting an adversarially huge string (raised as 54000, "requested length too
-/// large", rather than aborting the process on an out-of-memory allocation).
+/// PostgreSQL's ~1 GB field-size limit. It guards `repeat`/`lpad`/`rpad` against
+/// an adversarially huge string. The engine raises 54000, "requested length too
+/// large", and does not abort the process on an out-of-memory allocation.
 const MAX_FIELD_SIZE: usize = 1 << 30;
 
-/// 54000 (`program_limit_exceeded`) — a string function was asked to produce a
-/// field larger than the engine permits.
+/// 54000 (`program_limit_exceeded`): a call asked a string function to produce
+/// a field larger than the engine permits.
 fn length_too_large() -> ExecError {
     domain("54000", "requested length too large")
 }
 
-/// `lpad`/`rpad`: pad `s` to `width` chars with `fill`; when `s` is longer than
-/// `width`, truncate to its first `width` chars (both forms). A `width <= 0`
-/// yields the empty string; an empty `fill` that cannot pad leaves `s` unchanged.
-/// A `width` beyond [`MAX_FIELD_SIZE`] is 54000 (rather than an OOM allocation).
+/// `lpad`/`rpad`: pad `s` to `width` chars with `fill`. When `s` is longer than
+/// `width`, both forms truncate it to its first `width` chars. A `width <= 0`
+/// yields the empty string. An empty `fill` that cannot pad leaves `s`
+/// unchanged. A `width` beyond [`MAX_FIELD_SIZE`] is 54000, and not an OOM
+/// allocation.
 fn pad(f: ScalarFunc, s: &str, width: i64, fill: &str) -> Result<String, ExecError> {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len() as i64;
@@ -1957,8 +1970,8 @@ fn pad(f: ScalarFunc, s: &str, width: i64, fill: &str) -> Result<String, ExecErr
     })
 }
 
-/// `left`/`right`: first/last `n` chars; a negative `n` drops `|n|` chars from the
-/// far end (PostgreSQL semantics).
+/// `left`/`right`: the first or last `n` chars. A negative `n` drops `|n|` chars
+/// from the far end, as PostgreSQL does.
 fn left_right(f: ScalarFunc, s: &str, n: i64) -> String {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len() as i64;
@@ -1969,7 +1982,8 @@ fn left_right(f: ScalarFunc, s: &str, n: i64) -> String {
     }
 }
 
-/// `repeat(s, n)`: `n <= 0` → empty; guarded against exceeding the field-size limit.
+/// `repeat(s, n)`: an `n <= 0` yields the empty string. A guard keeps the result
+/// within the field-size limit.
 fn repeat_str(s: &str, n: i64) -> Result<Datum, ExecError> {
     if n <= 0 {
         return Ok(Datum::Text(String::new()));
@@ -2001,8 +2015,9 @@ fn initcap(s: &str) -> String {
     out
 }
 
-/// `strpos(s, sub)`: 1-based char index of the first `sub` in `s`; `0` if absent;
-/// an empty `sub` matches at position `1` (PostgreSQL).
+/// `strpos(s, sub)`: the 1-based char index of the first `sub` in `s`, or `0`
+/// when `sub` is absent. An empty `sub` matches at position `1`, as PostgreSQL
+/// does.
 fn strpos(s: &str, sub: &str) -> i32 {
     if sub.is_empty() {
         return 1;
@@ -2078,7 +2093,7 @@ mod tests {
     }
 
     /// The SQL-standard call forms that spell their arguments with keywords.
-    /// Every expectation here was taken from PostgreSQL 18.4, including the
+    /// Every expectation here comes from PostgreSQL 18.4, including the
     /// clipping and error cases, because the keyword spellings and the comma
     /// spellings must agree and both must agree with the oracle.
     #[test]

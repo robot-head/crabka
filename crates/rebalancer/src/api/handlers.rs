@@ -1,14 +1,14 @@
-//! One Rust fn per Connect-RPC method. Each takes axum's `Extension`
-//! (carrying `Arc<AppState>`) and a typed `ConnectRequest`, returning
-//! a typed `ConnectResponse` or a `ConnectError`.
+//! One Rust fn per Connect-RPC method. Each one takes axum's `Extension`,
+//! which carries `Arc<AppState>`, and a typed `ConnectRequest`. Each one
+//! returns a typed `ConnectResponse` or a `ConnectError`.
 //!
-//! The connectrpc-axum-build 0.1 codegen produces a *builder* (not a
-//! trait): `pb::rebalancer_connect::RebalancerServiceBuilder` accepts
-//! these freestanding async fns via `post_connect`-style wiring. The
-//! builder is parameterized over the axum router's `S = ()` state, so
-//! we propagate the per-server `AppState` via an `Extension` layer
-//! rather than typed state — that keeps the codegen S generic at `()`
-//! and avoids `FromRef`/`with_state` plumbing.
+//! The connectrpc-axum-build 0.1 codegen produces a *builder*, not a trait.
+//! `pb::rebalancer_connect::RebalancerServiceBuilder` accepts these
+//! freestanding async fns through `post_connect`-style wiring. The builder is
+//! parameterized over the axum router's `S = ()` state, so the crate
+//! propagates the per-server `AppState` through an `Extension` layer rather
+//! than through typed state. That keeps the codegen S generic at `()` and
+//! avoids `FromRef` and `with_state` plumbing.
 
 use std::sync::Arc;
 
@@ -34,8 +34,8 @@ use crate::{
     time::now_ms,
 };
 
-/// State shared across all RPC handlers. Wired into axum via an
-/// `Extension(Arc<AppState>)` layer applied to the generated router.
+/// State shared across all RPC handlers. The generated router receives it
+/// through an `Extension(Arc<AppState>)` layer.
 pub struct AppState {
     pub snapshot: SharedSnapshot,
     pub store: Arc<ProposalStore>,
@@ -207,7 +207,8 @@ fn anomaly_key_to_proto(k: &crate::detector::AnomalyKey) -> pb::AnomalyKey {
 // RPC handlers
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Read the latest cluster snapshot; 503 (`Unavailable`) if none yet.
+/// Read the latest cluster snapshot. Returns 503 (`Unavailable`) if there is
+/// no snapshot yet.
 #[tracing::instrument(level = "info", skip_all, err(Debug))]
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
@@ -264,7 +265,7 @@ pub async fn create_proposal(
     Ok(ConnectResponse::new(proposal_to_proto(&out.proposal)))
 }
 
-/// Look up a stored proposal and return summary + estimated cost.
+/// Look up a stored proposal and return its summary and estimated cost.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn dry_run_proposal(
@@ -284,7 +285,7 @@ pub async fn dry_run_proposal(
     }))
 }
 
-/// Fetch a proposal by id; 404 (`NotFound`) if missing.
+/// Fetch a proposal by id. Returns 404 (`NotFound`) if it is missing.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn get_proposal(
@@ -299,7 +300,8 @@ pub async fn get_proposal(
     Ok(ConnectResponse::new(proposal_to_proto(&p)))
 }
 
-/// Return the most recent `limit` proposals (or capacity if `limit == 0`).
+/// Return the most recent `limit` proposals, or the full capacity if
+/// `limit == 0`.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn list_proposals(
@@ -314,9 +316,10 @@ pub async fn list_proposals(
     }))
 }
 
-/// Kick off an execution. Returns Executing-state proposal; operator
-/// polls `GetProposal` for progress. Async — the executor runs on a
-/// detached task.
+/// Start an execution and return the proposal in the Executing state.
+///
+/// The call is asynchronous: the executor runs on a detached task. The
+/// operator polls `GetProposal` for progress.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -499,10 +502,12 @@ fn cancel_poll_expired(now: std::time::Instant, deadline: std::time::Instant) ->
     now >= deadline
 }
 
-/// Read the anomaly history. `limit = 0` returns up to the
-/// `AnomalyStore`'s full capacity. `include_resolved` defaults to `true`
-/// when unset — the wire's default boolean false would be surprising;
-/// most callers want the full history surface.
+/// Read the anomaly history. `limit = 0` returns up to the `AnomalyStore`'s
+/// full capacity.
+///
+/// `include_resolved` defaults to `true` when unset. The wire's default boolean
+/// false would surprise the caller, because most callers want the full history
+/// surface.
 #[tracing::instrument(level = "info", skip_all, err(Debug))]
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
@@ -543,9 +548,9 @@ mod tests {
         scraper::UsageStore,
     };
 
-    /// Local no-op `ClientFacade` for handler-level unit tests. We don't
-    /// actually run the executor here — the handler tests only need a
-    /// type-correct `client_facade` field on `AppState`.
+    /// Local no-op `ClientFacade` for handler-level unit tests. These tests do
+    /// not run the executor. They only need a type-correct `client_facade`
+    /// field on `AppState`.
     struct NoopClient;
 
     #[async_trait]

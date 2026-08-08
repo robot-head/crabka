@@ -1,6 +1,7 @@
 //! End-to-end round-trip against a real broker.
 //!
-//! Requires Docker; gated `#[ignore]` and CI runs with `--include-ignored`.
+//! It needs Docker. It is gated behind `#[ignore]`, and CI runs it with
+//! `--include-ignored`.
 
 use std::sync::Arc;
 
@@ -15,9 +16,9 @@ use crabka_rebalancer::{
 use crabka_units::{Time, bytes_per_sec, convert::StdDurationExt as _, secs};
 use tokio_util::sync::CancellationToken;
 
-/// Boot a single-broker in-process Crabka, return its bootstrap address.
-/// The `BrokerHandle` and `TempDir` must be kept alive for the duration of
-/// the test.
+/// Boot a single-broker in-process Crabka and return its bootstrap address.
+/// The caller must keep the `BrokerHandle` and the `TempDir` alive for the
+/// whole test.
 async fn boot_broker() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))

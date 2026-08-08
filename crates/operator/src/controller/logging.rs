@@ -1,12 +1,12 @@
-//! Logging resolution — compose the broker's `RUST_LOG` env-filter
-//! from `Kafka.spec.logging`.
+//! Logging resolution. This module composes the broker's `RUST_LOG`
+//! env-filter from `Kafka.spec.logging`.
 //!
-//! `inline` loggers are composed by a pure, deterministic function
-//! ([`compose_inline_filter`]); `external` references are read from a
-//! user-managed `ConfigMap` at reconcile time. The resolved filter is
-//! rendered into the broker `ConfigMap` (`rust.log` key) by
-//! [`crate::controller::common::render_configmap`] and folded into the
-//! config hash so a change rolls the cluster.
+//! A pure, deterministic function composes the `inline` loggers. See
+//! [`compose_inline_filter`]. The operator reads `external` references from a
+//! user-managed `ConfigMap` at reconcile time.
+//! [`crate::controller::common::render_configmap`] renders the resolved filter
+//! into the broker `ConfigMap` under the `rust.log` key and folds it into the
+//! config hash, so a change rolls the cluster.
 
 use std::collections::BTreeMap;
 
@@ -19,10 +19,11 @@ use crate::{
     crd::{Kafka, KafkaCondition, LoggingType},
 };
 
-/// Canonicalize a level string to a `tracing` env-filter level. Accepts the
-/// `tracing` set (`trace|debug|info|warn|error|off`) case-insensitively, plus
-/// the log4j-friendly aliases `warning` → `warn`, `fatal` → `error`, and
-/// `none` → `off`. Returns `None` for anything else.
+/// Canonicalize a level string to a `tracing` env-filter level. This function
+/// accepts the `tracing` set `trace|debug|info|warn|error|off`,
+/// case-insensitively. It also accepts the log4j-friendly aliases
+/// `warning` → `warn`, `fatal` → `error`, and `none` → `off`. It returns
+/// `None` for any other string.
 fn normalize_level(level: &str) -> Option<&'static str> {
     match level.trim().to_ascii_lowercase().as_str() {
         "trace" => Some("trace"),
@@ -88,10 +89,10 @@ impl LoggingError {
 
 /// Compose an env-filter directive string from an inline `loggers` map.
 ///
-/// Pure + deterministic: directives are sorted so the resulting string (and
-/// therefore the config hash) is stable across reconciles regardless of map
-/// iteration order. The key `root` (case-insensitive) yields a bare level
-/// token (the env-filter global default); every other key yields
+/// This function is pure and deterministic. It sorts the directives, so the
+/// result string and the config hash are stable across reconciles for any map
+/// iteration order. The key `root` is case-insensitive and gives a bare level
+/// token, which is the env-filter global default. Every other key gives
 /// `target=level`.
 ///
 /// # Errors
@@ -128,14 +129,16 @@ pub fn compose_inline_filter(loggers: &BTreeMap<String, String>) -> Result<Strin
 pub enum LoggingOutcome {
     /// `spec.logging` is unset.
     Disabled,
-    /// A `RUST_LOG` filter string was successfully composed/read.
+    /// The operator composed or read a `RUST_LOG` filter string.
     Resolved(String),
-    /// `spec.logging` is set but could not be resolved (user error).
+    /// `spec.logging` is set but the operator could not resolve it. This is a
+    /// user error.
     Invalid(LoggingError),
 }
 
 impl LoggingOutcome {
-    /// The resolved filter string, if any. `None` for `Disabled`/`Invalid`.
+    /// The resolved filter string, if any. `None` for `Disabled` and
+    /// `Invalid`.
     #[must_use]
     pub fn filter(&self) -> Option<&str> {
         match self {
@@ -145,11 +148,11 @@ impl LoggingOutcome {
     }
 }
 
-/// Resolve `Kafka.spec.logging` to a `RUST_LOG` filter. `inline` is composed
-/// in-process; `external` issues a single `ConfigMap` GET. A transient API
-/// error during that GET propagates as `Err` (the reconcile requeues); a
-/// missing ConfigMap/key surfaces as `Ok(Invalid(..))` (a user error the
-/// operator reports without retry-spinning).
+/// Resolve `Kafka.spec.logging` to a `RUST_LOG` filter. This function composes
+/// `inline` in-process. For `external`, it issues one `ConfigMap` GET. A
+/// transient API error during that GET propagates as `Err`, and the reconcile
+/// requeues. A missing `ConfigMap` or key gives `Ok(Invalid(..))`, which is a
+/// user error that the operator reports without a retry spin.
 pub async fn resolve_logging(
     ctx: &Context,
     owner: &Kafka,
@@ -193,8 +196,9 @@ pub async fn resolve_logging(
 }
 
 /// Map a [`LoggingOutcome`] to the cluster's `LoggingReady` condition.
-/// Mirrors the `MetricsReady` shape: `Disabled` surfaces a
-/// `False`/`Disabled` condition rather than omitting it.
+///
+/// The shape is the same as `MetricsReady`. `Disabled` gives a `False` and
+/// `Disabled` condition, and the operator does not omit the condition.
 #[must_use]
 pub fn condition_for(outcome: &LoggingOutcome) -> KafkaCondition {
     match outcome {

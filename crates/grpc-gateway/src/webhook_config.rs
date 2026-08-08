@@ -1,6 +1,7 @@
-//! Operator-supplied webhook-endpoint config (TOML), compiled at load time:
-//! `JSONPath` expressions are parsed once, signature settings validated. Mirrors
-//! the broker's `file_config` pattern.
+//! Operator-supplied webhook-endpoint config (TOML), compiled at load time.
+//!
+//! The loader parses each `JSONPath` expression once and validates the
+//! signature settings. This module follows the broker's `file_config` pattern.
 
 use std::collections::HashMap;
 
@@ -17,7 +18,7 @@ use crate::{
     config_value::{non_negative_time, positive_byte_size},
 };
 
-/// Raw TOML form (one entry in `[[endpoints]]` per named endpoint).
+/// Raw TOML form, with one entry in `[[endpoints]]` per named endpoint.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WebhooksFile {
     #[serde(default)]
@@ -32,7 +33,8 @@ pub struct WebhooksFile {
 pub struct WebhookEndpoint {
     pub name: String,
     pub target_topic: String,
-    /// Service principal this endpoint produces as (authz). Default `webhook:{name}`.
+    /// Service principal this endpoint produces as, for authz. Default
+    /// `webhook:{name}`.
     pub principal: Option<String>,
     /// HMAC-SHA256 shared secret. If set, `signature_header` is required.
     pub secret: Option<String>,
@@ -40,7 +42,8 @@ pub struct WebhookEndpoint {
     pub signature_header: Option<String>,
     /// `"hex"` (default) or `"base64"`.
     pub signature_encoding: Option<String>,
-    /// Optional literal prefix stripped before decoding (e.g. `"sha256="` for GitHub).
+    /// Optional literal prefix to strip before decoding, for example
+    /// `"sha256="` for GitHub.
     pub signature_prefix: Option<String>,
     /// Optional replay guard: header that carries the request timestamp.
     pub timestamp_header: Option<String>,
@@ -51,7 +54,8 @@ pub struct WebhookEndpoint {
         skip_serializing_if = "Option::is_none"
     )]
     pub timestamp_tolerance: Option<Time>,
-    /// `header:<Name>` or `json:<JSONPath expr>`. Absent ⇒ no dedup (plain produce).
+    /// `header:<Name>` or `json:<JSONPath expr>`. Absent ⇒ no dedup, which is a
+    /// plain produce.
     pub idempotency_source: Option<String>,
     /// Optional record-key source: `header:<Name>` or `json:<JSONPath expr>`.
     pub key_source: Option<String>,
@@ -62,9 +66,9 @@ pub struct WebhookEndpoint {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_body: Option<ByteSize>,
-    /// Optional Schema Registry subject. When set, the request body is produced
-    /// as a STRUCTURED record validated+serialized against this subject's schema
-    /// (via the injected codec); a validation failure returns `400`.
+    /// Optional Schema Registry subject. When set, the injected codec validates
+    /// and serializes the request body against this subject's schema, then
+    /// produces it as a STRUCTURED record. A validation failure returns `400`.
     pub schema_subject: Option<String>,
     /// Payload format of the schema: `"avro"`, `"json"` (default), or
     /// `"protobuf"`. Only meaningful when `schema_subject` is set.
@@ -79,7 +83,8 @@ pub enum Source {
 }
 
 impl Source {
-    /// Parse a `header:<Name>` or `json:<expr>` spec, compiling `JSONPath` at load time.
+    /// Parse a `header:<Name>` or `json:<expr>` spec. This compiles the
+    /// `JSONPath` at load time.
     fn parse(spec: &str, ctx: &str) -> Result<Self, String> {
         if let Some(h) = spec.strip_prefix("header:") {
             Ok(Source::Header(h.to_string()))
@@ -100,7 +105,7 @@ pub enum SigEncoding {
     Base64,
 }
 
-/// Validated and compiled endpoint config — the runtime form.
+/// Validated and compiled endpoint config, the runtime form.
 #[derive(Debug, Clone)]
 pub struct CompiledWebhook {
     pub target_topic: String,
@@ -110,23 +115,25 @@ pub struct CompiledWebhook {
     /// HTTP header carrying the HMAC signature.
     pub signature_header: Option<String>,
     pub signature_encoding: SigEncoding,
-    /// Literal prefix stripped before hex/base64 decoding (e.g. `"sha256="`).
+    /// Literal prefix to strip before hex or base64 decoding, for example
+    /// `"sha256="`.
     pub signature_prefix: Option<String>,
     pub timestamp_header: Option<String>,
     pub timestamp_tolerance: Time,
     pub idempotency_source: Option<Source>,
     pub key_source: Option<Source>,
     pub max_body: ByteSize,
-    /// Schema Registry subject to validate+serialize the request body against.
-    /// `None` ⇒ the body is produced raw (no schema validation).
+    /// Schema Registry subject to validate and serialize the request body
+    /// against. `None` ⇒ the gateway produces the body raw, with no schema
+    /// validation.
     pub schema_subject: Option<String>,
-    /// The schema's payload format (defaults to [`SchemaFormat::Json`]). Only
-    /// consulted when `schema_subject` is `Some`.
+    /// The schema's payload format. Defaults to [`SchemaFormat::Json`]. The
+    /// gateway reads it only when `schema_subject` is `Some`.
     pub schema_format: SchemaFormat,
 }
 
 impl WebhooksFile {
-    /// Compile + validate every endpoint. Returns `name -> CompiledWebhook`.
+    /// Compile and validate every endpoint. Returns `name -> CompiledWebhook`.
     ///
     /// # Errors
     ///
@@ -209,9 +216,11 @@ impl WebhooksFile {
     }
 }
 
-/// Parse a schema-format string into a [`SchemaFormat`]. `None` and `"json"`
-/// both map to JSON (the default for webhook bodies, which are JSON on the
-/// wire). Returns a human-readable error for an unrecognized value.
+/// Parse a schema-format string into a [`SchemaFormat`].
+///
+/// `None` and `"json"` both map to JSON, the default for webhook bodies,
+/// because those bodies are JSON on the wire. The function returns a
+/// human-readable error for an unknown value.
 fn parse_schema_format(spec: Option<&str>, ctx: &str) -> Result<SchemaFormat, String> {
     match spec {
         None | Some("json") => Ok(SchemaFormat::Json),
@@ -228,7 +237,7 @@ fn parse_schema_format(spec: Option<&str>, ctx: &str) -> Result<SchemaFormat, St
 // ---------------------------------------------------------------------------
 
 /// Compute HMAC-SHA256(`secret`, `body`) and return the digest as a lowercase
-/// hex string. Used by the outbound webhook delivery layer to sign every
+/// hex string. The outbound webhook delivery layer calls this to sign every
 /// `X-Crabka-Signature` header.
 #[allow(dead_code)] // used by outbound.rs
 pub(crate) fn sign_hmac_hex(secret: &[u8], body: &[u8]) -> String {
@@ -237,8 +246,8 @@ pub(crate) fn sign_hmac_hex(secret: &[u8], body: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Compute HMAC-SHA256(`secret`, `body`) and return the digest as a
-/// standard base64 string (padding included).
+/// Compute HMAC-SHA256(`secret`, `body`) and return the digest as a standard
+/// base64 string, with padding.
 #[allow(dead_code)] // used by outbound.rs
 pub(crate) fn sign_hmac_base64(secret: &[u8], body: &[u8]) -> String {
     let mut mac = <Hmac<Sha256>>::new_from_slice(secret).expect("HMAC accepts any key length");
@@ -248,12 +257,13 @@ pub(crate) fn sign_hmac_base64(secret: &[u8], body: &[u8]) -> String {
 
 /// Verify an HMAC-SHA256 signature over `body` using `secret`.
 ///
-/// * `provided` is the raw header value (possibly prefixed).
-/// * `prefix` is an optional literal to strip before decoding (e.g. `"sha256="`).
-/// * The comparison is constant-time to prevent timing side-channels.
+/// * `provided` is the raw header value, which can carry a prefix.
+/// * `prefix` is an optional literal to strip before decoding, for example
+///   `"sha256="`.
+/// * The comparison is constant-time, which prevents timing side-channels.
 ///
-/// Returns `false` on any decoding failure so callers can treat it as
-/// an authentication failure without distinguishing error kinds.
+/// Returns `false` on any decoding failure, so callers can treat it as an
+/// authentication failure without telling the error kinds apart.
 #[allow(dead_code)] // used by webhook.rs
 pub(crate) fn verify_signature(
     secret: &[u8],
@@ -299,8 +309,8 @@ pub(crate) fn verify_signature(
 
 /// Extract a value from an HTTP header or a `JSONPath` expression over the body.
 ///
-/// Returns `None` when the header is absent/non-UTF-8 or the `JSONPath` yields
-/// no string result.
+/// Returns `None` when the header is absent, when the header is not UTF-8, or
+/// when the `JSONPath` gives no string result.
 #[allow(dead_code)] // used by webhook.rs
 pub(crate) fn extract_source(
     src: &Source,

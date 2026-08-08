@@ -47,13 +47,14 @@ impl QueryResult {
     }
 }
 
-/// Warnings and info annotations raised while evaluating a query.
+/// Warnings and info annotations from a query evaluation.
 ///
-/// Mirrors Prometheus' `util/annotations` channel: `PromQLWarning`-class
-/// messages land in [`Annotations::warnings`] and `PromQLInfo`-class messages
-/// land in [`Annotations::infos`]. Messages are deduplicated and stored as the
-/// exact Prometheus annotation text (without the trailing position suffix,
-/// which Crabka does not track through evaluation).
+/// This type mirrors the `util/annotations` channel of Prometheus.
+/// `PromQLWarning`-class messages go into [`Annotations::warnings`], and
+/// `PromQLInfo`-class messages go into [`Annotations::infos`]. The engine
+/// removes duplicate messages and keeps the exact Prometheus annotation text.
+/// The text has no trailing position suffix, because Crabka does not track that
+/// suffix through evaluation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Annotations {
     /// `PromQL warning:`-class annotations, in first-seen order.
@@ -69,7 +70,7 @@ impl Annotations {
         Self::default()
     }
 
-    /// Record a warning, ignoring exact duplicates.
+    /// Records a warning and ignores exact duplicates.
     pub fn warn(&mut self, message: impl Into<String>) {
         let message = message.into();
         if !self.warnings.contains(&message) {
@@ -77,7 +78,7 @@ impl Annotations {
         }
     }
 
-    /// Record an info annotation, ignoring exact duplicates.
+    /// Records an info annotation and ignores exact duplicates.
     pub fn info(&mut self, message: impl Into<String>) {
         let message = message.into();
         if !self.infos.contains(&message) {
@@ -85,7 +86,7 @@ impl Annotations {
         }
     }
 
-    /// Merge another set's annotations into this one, preserving dedup.
+    /// Merges the annotations of another set into this set, without duplicates.
     pub fn extend(&mut self, other: &Annotations) {
         for warning in &other.warnings {
             self.warn(warning.clone());
@@ -95,7 +96,7 @@ impl Annotations {
         }
     }
 
-    /// True when no annotations have been recorded.
+    /// Returns `true` when the set has no annotations.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.warnings.is_empty() && self.infos.is_empty()

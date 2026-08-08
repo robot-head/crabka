@@ -1,14 +1,15 @@
-//! End-to-end coverage for the verbatim produce passthrough (the
-//! header-only decode path): a producer-LZ4-compressed v2 batch is stored
-//! WITHOUT being decompressed/re-encoded and round-trips byte-identically on
-//! Fetch, while a recompression-forcing topic config, a control batch, and
-//! an idempotent producer all behave correctly across the path.
+//! End-to-end coverage for the verbatim produce passthrough, which is the
+//! header-only decode path. The broker stores a producer-LZ4-compressed v2
+//! batch WITHOUT a decompress or re-encode, and the batch round-trips
+//! byte-identically on Fetch. A recompression-forcing topic config, a control
+//! batch, and an idempotent producer all behave correctly across the path.
 //!
-//! These complement the unit tests in `handlers::produce::tests::verbatim`,
-//! which pin the dispatch (`prepare_batch` / `build_produce_data`) at the
-//! function level; here we drive the whole broker over the wire. Produce /
+//! These tests complement the unit tests in
+//! `handlers::produce::tests::verbatim`, which pin the dispatch
+//! (`prepare_batch` and `build_produce_data`) at the function level. These
+//! tests drive the whole broker over the wire. Produce and
 //! Fetch auto-negotiate to v13 (KIP-516 topic-id), so every batch travels the
-//! v≥3 native-v2 path the verbatim dispatch covers.
+//! v≥3 native-v2 path that the verbatim dispatch covers.
 
 use assert2::{assert, check};
 mod support;
@@ -46,8 +47,8 @@ async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUu
         .unwrap_or_default()
 }
 
-/// Build a single v2 `RecordBatch` carrying `n` copies of `value`, with the
-/// given codec. Encoding compresses the body when the codec isn't `None`.
+/// Build a single v2 `RecordBatch` that carries `n` copies of `value`, with the
+/// given codec. The encoder compresses the body when the codec is not `None`.
 fn batch(codec: CompressionType, n: usize, value: &[u8]) -> RecordBatch {
     let mut b = RecordBatch {
         last_offset_delta: i32::try_from(n).unwrap() - 1,
@@ -128,7 +129,7 @@ async fn create_topic_with_configs(
     broker.wait_until_partition_present(name, 0).await;
 }
 
-/// Produce a single batch to `topic` partition 0 (acks=1), returning the
+/// Produce a single batch to `topic` partition 0 with `acks=1`, and return the
 /// assigned base offset.
 async fn produce_one(
     client: &crabka_client_core::Client,
@@ -173,10 +174,10 @@ async fn produce_batches(
 
 /// Fetch partition 0 from offset 0 and return the first decoded batch.
 ///
-/// `n` is the number of records already produced to partition 0. Single-broker
-/// RF=1 means the high-watermark tracks the local log end offset, so waiting for
-/// LEO >= n makes the produced records readable before a single deterministic
-/// fetch (no polling loop needed).
+/// `n` is the number of records already produced to partition 0. With a single
+/// broker at RF=1 the high-watermark tracks the local log end offset, so a wait
+/// for LEO >= n makes the produced records readable before one deterministic
+/// fetch. No polling loop is needed.
 async fn fetch_first_batch(
     broker: &crabka_broker::BrokerHandle,
     client: &crabka_client_core::Client,
@@ -225,8 +226,8 @@ async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
 }
 
 /// A producer-LZ4-compressed v2 batch whose DECOMPRESSED form is large
-/// (~100 KiB) takes the verbatim path: the broker stores it WITHOUT
-/// decompressing, preserves the Lz4 codec (no recompression), and the data
+/// (~100 KiB) takes the verbatim path. The broker stores it WITHOUT a
+/// decompress and keeps the Lz4 codec, with no recompression. The data
 /// round-trips correctly on Fetch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lz4_batch_passes_through_and_roundtrips() {
@@ -275,11 +276,11 @@ async fn lz4_batch_passes_through_and_roundtrips() {
 }
 
 /// An UNCOMPRESSED v2 batch takes the verbatim path and round-trips
-/// byte-identically: the CRC-covered region (bytes 21..) of the stored bytes
-/// equals the producer's wire bytes exactly — only `base_offset` /
-/// `partition_leader_epoch` (both before the CRC region) are patched. We
-/// re-encode the fetched batch and compare; for an uncompressed batch the
-/// re-encode is deterministic and byte-exact.
+/// byte-identically. The CRC-covered region (bytes 21..) of the stored bytes
+/// equals the producer's wire bytes exactly. The broker patches only
+/// `base_offset` and `partition_leader_epoch`, which both sit before the CRC
+/// region. The test re-encodes the fetched batch and compares. For an
+/// uncompressed batch the re-encode is deterministic and byte-exact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn uncompressed_batch_roundtrips_byte_identically() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -319,10 +320,10 @@ async fn uncompressed_batch_roundtrips_byte_identically() {
 }
 
 /// A topic configured with a concrete `compression.type` that differs from
-/// the producer's codec forces broker-side recompression → the OWNED path.
-/// The stored batch must carry the TOPIC's codec, and the data must still be
-/// correct. This pins that the verbatim predicate's recompression gate routes
-/// to the owned fallback.
+/// the producer's codec forces broker-side recompression, which is the OWNED
+/// path. The stored batch must carry the TOPIC's codec, and the data must still
+/// be correct. This pins the verbatim predicate's recompression gate to the
+/// owned fallback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recompression_config_takes_owned_path() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -366,8 +367,8 @@ async fn recompression_config_takes_owned_path() {
     broker.shutdown().await;
 }
 
-/// A control batch never takes the verbatim path (its LSO bookkeeping needs
-/// the inner marker record). Producing a control batch must route to the
+/// A control batch never takes the verbatim path, because its LSO bookkeeping
+/// needs the inner marker record. A produced control batch must route to the
 /// owned path and stay correct on fetch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn control_batch_takes_owned_path() {
@@ -409,12 +410,11 @@ async fn control_batch_takes_owned_path() {
     broker.shutdown().await;
 }
 
-/// Idempotent-producer dedup is driven by the HEADER fields the verbatim path
-/// exposes (pid / epoch / `base_sequence` / `last_offset_delta`). Two appends with
-/// increasing sequences both succeed; a retry of the first sequence is
-/// recognized as a duplicate and returns the SAME base offset; an out-of-order
-/// sequence is rejected — all without the broker ever decompressing the (lz4)
-/// batches.
+/// Idempotent-producer dedup runs on the HEADER fields that the verbatim path
+/// exposes: pid, epoch, `base_sequence`, and `last_offset_delta`. Two appends
+/// with increasing sequences both succeed. A retry of the first sequence is a
+/// duplicate and returns the SAME base offset. An out-of-order sequence is
+/// rejected. The broker never decompresses the lz4 batches for any of this.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotent_dedup_over_verbatim_path() {
     let (broker, bootstrap, _dir) = boot().await;

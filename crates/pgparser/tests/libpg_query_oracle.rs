@@ -1,9 +1,10 @@
-//! Differential parser oracle: our parser must agree with `libpg_query` on
+//! Differential parser oracle: this parser must agree with `libpg_query` on
 //! accept/reject for slice-grammar statements and clear syntax errors.
-//! Gated behind --features oracle (`libpg_query` is a C build-time dep).
+//! --features oracle gates these tests, because `libpg_query` is a C
+//! build-time dep.
 #![cfg(feature = "oracle")]
 
-/// Statements inside the SP2 slice — BOTH parsers must accept.
+/// Statements inside the SP2 slice: BOTH parsers must accept.
 const ACCEPTED: &[&str] = &[
     "CREATE TABLE t (id int4, name text)",
     "CREATE TABLE t (a integer, b bigint, c boolean, d text)",
@@ -173,7 +174,7 @@ const ACCEPTED: &[&str] = &[
     "UNLISTEN *",
 ];
 
-/// Clear syntax errors — BOTH parsers must reject.
+/// Clear syntax errors: BOTH parsers must reject.
 const REJECTED: &[&str] = &[
     "SELECT FROM",
     "CREATE TABLE",
@@ -336,9 +337,9 @@ fn agreement_on_rejected() {
     }
 }
 
-/// Constructs `PostgreSQL`'s grammar accepts but this parser deliberately
-/// refuses (0A000 / 42601), so the divergence stays an explicit, listed set
-/// rather than drifting into an accidental acceptance.
+/// Constructs that `PostgreSQL`'s grammar accepts but this parser deliberately
+/// refuses (0A000 / 42601). The list keeps the divergence explicit and prevents
+/// an accidental acceptance.
 #[test]
 fn deliberately_unsupported_array_and_conflict_constructs_are_explicitly_bounded() {
     for sql in [

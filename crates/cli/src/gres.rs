@@ -175,9 +175,9 @@ enum GresCommand {
     Suspend(TenantNameArgs),
     /// Mark one Gres tenant active.
     Resume(TenantNameArgs),
-    /// Initiate a sealed, journaled two-successor range split.
+    /// Start a sealed, journaled two-successor range split.
     Split(SplitRangeArgs),
-    /// Initiate a sealed, journaled one-for-one range move.
+    /// Start a sealed, journaled one-for-one range move.
     Move(MoveRangeArgs),
     /// Delete one Gres tenant registry record.
     Delete(TenantNameArgs),
@@ -187,7 +187,7 @@ enum GresCommand {
     BalanceDryRun(BalanceDryRunArgs),
     /// Validate or apply a Gres range balancing plan from a JSON metrics snapshot.
     BalanceApply(BalanceApplyArgs),
-    /// Probe named-topic metadata using SCRAM credentials.
+    /// Probe named-topic metadata with SCRAM credentials.
     #[command(hide = true)]
     ProbeTopicRead(ProbeTopicReadArgs),
 }
@@ -308,7 +308,7 @@ struct RenderPgdogArgs {
         requires_all = ["tls_certificate", "tls_private_key"]
     )]
     tls_client_ca_certificate: Option<PathBuf>,
-    /// Fleet-wide backend connection pooling mode.
+    /// Fleet-wide pooling mode for backend connections.
     #[arg(
         long,
         env = "CRABKA_GRES_PGDOG_POOLER_MODE",
@@ -364,7 +364,8 @@ struct SplitRangeArgs {
     table: u64,
     /// Row identifier at the split point.
     rowid: u64,
-    /// Hash bucket at the split point; required exactly for hash-sharded tables.
+    /// Hash bucket at the split point. A hash-sharded table split requires it,
+    /// and any other split rejects it.
     #[arg(long)]
     bucket: Option<u32>,
     /// Durable idempotency key for this split.
@@ -379,7 +380,8 @@ struct SplitRangeArgs {
     /// New successor range id. Defaults to max(existing range id) + 1.
     #[arg(long)]
     successor_range_id: Option<u32>,
-    /// Successor compute endpoint. Defaults to the operator service naming convention.
+    /// Successor compute endpoint. Defaults to the naming convention for
+    /// operator services.
     #[arg(long)]
     successor_endpoint: Option<String>,
     /// Successor WAL generation. Defaults to the source range generation.
@@ -438,12 +440,14 @@ struct BalanceApplyArgs {
 enum BalanceExecuteMode {
     /// Keep legacy dry-run behavior: plan only, no executor hooks.
     DryRun,
-    /// Run through the executor seam without mutating registry state.
+    /// Run through the executor seam with no change to registry state.
     Validate,
 }
 
-/// `Eq` is deliberately absent: the balancer's byte thresholds are quantities,
-/// whose `f64` storage is only `PartialEq`.
+/// `Eq` is deliberately absent from this type.
+///
+/// The balancer's byte thresholds are quantities. Their `f64` storage is only
+/// `PartialEq`.
 #[derive(Debug, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct BalanceDryRunInput {

@@ -1,4 +1,4 @@
-//! A serialisable W3C trace context that can ride inside an existing payload.
+//! A serialisable W3C trace context that fits inside an existing payload.
 
 use std::str::FromStr as _;
 
@@ -16,17 +16,17 @@ const TRACE_ID_RANGE: std::ops::Range<usize> = 3..35;
 const SPAN_ID_RANGE: std::ops::Range<usize> = 36..52;
 const FLAGS_RANGE: std::ops::Range<usize> = 53..55;
 
-/// W3C caps `tracestate` at 512 bytes and 32 list members; anything larger is
-/// dropped rather than forwarded, so a client cannot use it as free storage on
-/// every span Crabka emits.
+/// W3C caps `tracestate` at 512 bytes and 32 list members. Crabka drops a
+/// larger value and does not forward it, so a client cannot use `tracestate`
+/// as free storage on every span Crabka emits.
 const MAX_TRACESTATE_BYTES: usize = 512;
 const MAX_TRACESTATE_MEMBERS: usize = 32;
 
-/// Why a client-supplied W3C trace context was rejected.
+/// Why Crabka rejected a client-supplied W3C trace context.
 ///
-/// No variant embeds the offending input: a rejected `traceparent` is attacker
-/// controlled, and a message carrying it verbatim would put that string into
-/// whatever log field the error is rendered into.
+/// No variant holds the input that failed. An attacker controls a rejected
+/// `traceparent`, and a message that keeps it verbatim would put that string
+/// into the log field that shows the error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum TraceContextError {
@@ -34,7 +34,7 @@ pub enum TraceContextError {
     #[error("traceparent must be {TRACEPARENT_LEN} bytes, got {0}")]
     Length(usize),
 
-    /// Only version `00` of the W3C traceparent format is understood.
+    /// Crabka reads only version `00` of the W3C traceparent format.
     #[error("unsupported traceparent version")]
     UnsupportedVersion,
 
@@ -42,28 +42,28 @@ pub enum TraceContextError {
     #[error("malformed traceparent")]
     Malformed,
 
-    /// An all-zero trace-id is defined as invalid by the W3C specification.
+    /// The W3C specification defines an all-zero trace-id as invalid.
     #[error("traceparent carries an all-zero trace-id")]
     ZeroTraceId,
 
-    /// An all-zero parent span-id is defined as invalid by the W3C specification.
+    /// The W3C specification defines an all-zero parent span-id as invalid.
     #[error("traceparent carries an all-zero span-id")]
     ZeroSpanId,
 }
 
-/// A W3C trace context in transit, sized to be embedded in a request payload.
+/// A W3C trace context in transit, sized to fit in a request payload.
 ///
-/// Both fields are `Option` because most calls happen with no active span — no
-/// sampling, or OTLP switched off entirely — and a carrier is then two `None`s
-/// that serialise to nothing. `#[serde(default, skip_serializing_if = …)]` is
-/// what makes that free on the wire; it is a payload-size optimisation for the
-/// common empty case, **not** a compatibility shim for older encodings (Crabka
-/// keeps none — see `CLAUDE.md`).
+/// Both fields are `Option` because most calls happen with no active span: no
+/// sampling, or OTLP switched off. The carrier is then two `None`s that
+/// serialise to nothing. `#[serde(default, skip_serializing_if = …)]` makes
+/// that free on the wire. It is a payload-size optimisation for the common
+/// empty case, **not** a compatibility shim for older encodings. Crabka keeps
+/// no such shims: see `CLAUDE.md`.
 ///
-/// `PartialEq` is deliberately not derived. A carrier is embedded alongside a
-/// request in RPC envelopes whose equality must stay a pure function of the
-/// request payload; deriving it here would silently make two identical requests
-/// compare unequal because they were traced differently.
+/// This type does not derive `PartialEq`, and that is deliberate. RPC envelopes
+/// hold a carrier next to a request, and their equality must stay a pure
+/// function of the request payload. A derived `PartialEq` would silently make
+/// two identical requests compare unequal because they were traced differently.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TraceCarrier {
     /// The validated, re-rendered W3C `traceparent`.
@@ -79,8 +79,9 @@ pub struct TraceCarrier {
 impl TraceCarrier {
     /// Capture the currently active span's trace context.
     ///
-    /// Empty when there is no active span, the span is not sampled, or OTLP is
-    /// disabled — so it is always safe to call on a hot path.
+    /// The carrier is empty when there is no active span, when the span is not
+    /// sampled, or when OTLP is disabled. It is always safe to call on a hot
+    /// path.
     #[must_use]
     pub fn capture_current() -> Self {
         let headers = current_trace_headers();
@@ -96,25 +97,25 @@ impl TraceCarrier {
         Self::from_w3c(traceparent, find(TRACESTATE)).unwrap_or_default()
     }
 
-    /// Build a carrier from a peer-supplied `traceparent` (and optional
-    /// `tracestate`), validating both.
+    /// Build a carrier from a peer-supplied `traceparent` and `tracestate`.
     ///
-    /// `traceparent` must match `^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$`
-    /// with a non-zero trace-id and a non-zero span-id. `tracestate` is
-    /// *dropped* — not an error — when it exceeds 512 bytes or 32 list
-    /// members, or when it is not a well-formed list; the `traceparent` is
-    /// still honoured, because losing vendor state is better than losing the
-    /// trace.
+    /// This function validates both inputs. `traceparent` must match
+    /// `^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$` with a non-zero trace-id
+    /// and a non-zero span-id. The function *drops* the `tracestate`, and does
+    /// not return an error, when it is more than 512 bytes, when it has more
+    /// than 32 list members, or when it is not a well-formed list. The
+    /// `traceparent` still applies, because a lost vendor state is better than
+    /// a lost trace.
     ///
-    /// Neither input is stored verbatim. Both are parsed and re-rendered from
-    /// the resulting [`SpanContext`] / [`TraceState`], so a hostile value
-    /// cannot survive into a span attribute or a log line.
+    /// This function stores neither input verbatim. It parses both, then
+    /// re-renders them from the [`SpanContext`] and the [`TraceState`], so a
+    /// hostile value cannot get into a span attribute or a log line.
     ///
     /// # Errors
     ///
-    /// Returns [`TraceContextError`] when `traceparent` fails validation.
-    /// Callers on an ingress path should discard the error rather than surface
-    /// it: a bad trace header must never fail the request it rode in on.
+    /// Returns [`TraceContextError`] when `traceparent` fails validation. A
+    /// caller on an ingress path should discard the error and not show it: a
+    /// bad trace header must never fail the request that carried it.
     pub fn from_w3c(
         traceparent: &str,
         tracestate: Option<&str>,
@@ -126,13 +127,13 @@ impl TraceCarrier {
         })
     }
 
-    /// Build a carrier from record headers (each a key plus a raw byte value),
-    /// as carried on a Kafka record.
+    /// Build a carrier from the headers on a Kafka record.
     ///
-    /// Runs the same validation as [`TraceCarrier::from_w3c`], but a
-    /// non-UTF-8, absent, or invalid value yields an empty carrier instead of
-    /// an error — a consumer that cannot read the producer's trace context
-    /// still has to apply the record.
+    /// Each header is a key plus a raw byte value. This function does the same
+    /// validation as [`TraceCarrier::from_w3c`]. But a non-UTF-8, absent, or
+    /// invalid value gives an empty carrier and not an error, because a
+    /// consumer that cannot read the producer's trace context must still apply
+    /// the record.
     #[must_use]
     pub fn from_headers<'a, I, V>(headers: I) -> Self
     where
@@ -165,8 +166,10 @@ impl TraceCarrier {
         self.traceparent.is_none()
     }
 
-    /// Make `span` a child of the carried context, so work on this side of the
-    /// boundary joins the caller's trace. A no-op when the carrier is empty.
+    /// Make `span` a child of the carried context.
+    ///
+    /// Work on this side of the boundary then joins the caller's trace. This
+    /// method does nothing when the carrier is empty.
     pub fn apply_to(&self, span: &tracing::Span) {
         if self.is_empty() {
             return;
@@ -174,14 +177,17 @@ impl TraceCarrier {
         set_remote_parent(span, self.headers());
     }
 
-    /// Attach the carried context to `span` as an OpenTelemetry **link** rather
-    /// than as its parent. A no-op when the carrier is empty.
+    /// Attach the carried context to `span` as an OpenTelemetry **link**.
     ///
-    /// This is the right relationship whenever the linked work fans out or runs
-    /// far later than the originating operation — a WAL record applied by every
-    /// follower, or replayed at recovery hours after the commit. Parenting
-    /// those would stretch one trace across the retention period and force
-    /// export of every apply of every sampled write.
+    /// The carried context becomes a link, not the parent of `span`. This
+    /// method does nothing when the carrier is empty.
+    ///
+    /// A link is the correct relation when many nodes do the linked work, or
+    /// when the work runs long after the operation that started it. Every
+    /// follower applies a WAL record, and recovery replays that record hours
+    /// after the commit. A parent relation would stretch one trace across the
+    /// retention period, and would force export of every apply of every
+    /// sampled write.
     pub fn link_into(&self, span: &tracing::Span) {
         let Some(span_context) = self.span_context() else {
             return;
@@ -189,8 +195,10 @@ impl TraceCarrier {
         span.add_link(span_context);
     }
 
-    /// The remote [`SpanContext`] this carrier describes, or `None` when the
-    /// carrier is empty or holds a value that does not parse.
+    /// The remote [`SpanContext`] this carrier describes.
+    ///
+    /// `None` when the carrier is empty, or when it holds a value that does
+    /// not parse.
     #[must_use]
     pub fn span_context(&self) -> Option<SpanContext> {
         let parsed = parse_traceparent(self.traceparent.as_deref()?).ok()?;
@@ -208,8 +216,9 @@ impl TraceCarrier {
         ))
     }
 
-    /// The carrier as `(key, value)` header pairs, ready to attach to a Kafka
-    /// record. Yields nothing when the carrier is empty.
+    /// The carrier as `(key, value)` header pairs for a Kafka record.
+    ///
+    /// The iterator yields nothing when the carrier is empty.
     pub fn headers(&self) -> impl Iterator<Item = (&str, &[u8])> + '_ {
         let traceparent = self.traceparent.as_deref();
         // `tracestate` alone carries no trace, so it is never emitted without
@@ -222,8 +231,9 @@ impl TraceCarrier {
     }
 }
 
-/// Validate a version-`00` W3C `traceparent` and return it as a remote
-/// [`SpanContext`] with no vendor state.
+/// Validate a version-`00` W3C `traceparent`.
+///
+/// Returns the `traceparent` as a remote [`SpanContext`] with no vendor state.
 pub fn parse_traceparent(value: &str) -> Result<SpanContext, TraceContextError> {
     let bytes = value.as_bytes();
     if bytes.len() != TRACEPARENT_LEN {
@@ -282,8 +292,10 @@ fn render_traceparent(span_context: &SpanContext) -> String {
     )
 }
 
-/// Re-render a peer's `tracestate`, or drop it when it is oversized or not a
-/// well-formed W3C list.
+/// Re-render a peer's `tracestate`.
+///
+/// This function drops the `tracestate` when it is too large, or when it is
+/// not a well-formed W3C list.
 fn sanitize_tracestate(value: &str) -> Option<String> {
     if value.is_empty() || value.len() > MAX_TRACESTATE_BYTES {
         return None;

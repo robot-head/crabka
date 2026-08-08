@@ -34,7 +34,8 @@ const REQUEST_PERCENTAGE_KEY: &str = "request_percentage";
 const CONNECTION_CREATION_RATE_KEY: &str = "connection_creation_rate";
 /// Quota key: controller mutation rate for topic/partition creation and deletion (KIP-599).
 const CONTROLLER_MUTATION_RATE_KEY: &str = "controller_mutation_rate";
-/// Upper bound for `request_percentage` — a percentage of one request-handler thread.
+/// Upper bound for `request_percentage`, a percentage of one request-handler
+/// thread.
 const REQUEST_PERCENTAGE_MAX: f64 = 100.0;
 
 /// Quota keys Crabka accepts in `AlterClientQuotas` ops.
@@ -118,8 +119,9 @@ pub(crate) async fn handle(
     encode_response(&resp, api_version)
 }
 
-/// Validate + transform one `EntryData` into a list of `MetadataRecord`s
-/// to submit. Returns wire `(code, message)` on validation failure.
+/// Validates one `EntryData` and transforms it into a list of
+/// `MetadataRecord` values to submit. It returns the wire `(code, message)`
+/// pair on a validation failure.
 pub(crate) fn process_one_entry(entry: &EntryData) -> Result<Vec<MetadataRecord>, (i16, String)> {
     if entry.entity.is_empty() {
         return Err((INVALID_REQUEST, "empty entity tuple".into()));

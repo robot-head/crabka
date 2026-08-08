@@ -1,10 +1,10 @@
-//! `ShareConsumer` — public lifecycle handle for a KIP-932 share group.
+//! `ShareConsumer`, the public lifecycle handle for a KIP-932 share group.
 //!
-//! Built via [`ShareConsumer::builder`]. The constructor joins the share group
-//! with one `ShareGroupHeartbeat` (empty member id, epoch 0, carrying the
-//! subscription), captures the broker-assigned member id / epoch / heartbeat
-//! interval / assignment, resolves the assignment's topic ids to names via
-//! Metadata, then spawns the background heartbeat loop.
+//! Build it with [`ShareConsumer::builder`]. The constructor joins the share
+//! group with one `ShareGroupHeartbeat` that carries an empty member id, epoch
+//! 0, and the subscription. It captures the broker-assigned member id, epoch,
+//! heartbeat interval, and assignment. It resolves the assignment's topic ids
+//! to names with Metadata, then spawns the background heartbeat loop.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -245,28 +245,29 @@ fn stage_implicit_accepts(
 
 /// A share-group consumer. Construct via [`ShareConsumer::builder`].
 ///
-/// It joins the group and keeps the membership alive via a background
-/// heartbeat; [`poll`](ShareConsumer::poll) issues `ShareFetch` over the live
-/// assignment and returns acquired records, and acknowledgement (implicit or
-/// explicit, per [`ShareAckMode`]) is carried back to the broker via the next
-/// `ShareFetch` (piggybacked) or a standalone `ShareAcknowledge`
-/// ([`commit`](ShareConsumer::commit)).
+/// It joins the group and keeps the membership alive with a background
+/// heartbeat. [`poll`](ShareConsumer::poll) issues `ShareFetch` over the live
+/// assignment and returns the acquired records. Acknowledgement, implicit or
+/// explicit per [`ShareAckMode`], travels back to the broker on the next
+/// `ShareFetch` as a piggyback, or in a standalone `ShareAcknowledge` from
+/// [`commit`](ShareConsumer::commit).
 pub struct ShareConsumer {
     pub(crate) client: Client,
     pub(crate) group_id: String,
     pub(crate) member_id: String,
-    /// The live member epoch, owned and advanced by the background heartbeat
-    /// loop (which holds the other `Arc`). The consumer keeps this clone so the
-    /// shared cell outlives the heartbeat task; `poll()` does not read it (the
-    /// data path keys off the share-session epoch, not the member epoch).
+    /// The live member epoch. The background heartbeat loop owns and advances
+    /// it, and holds the other `Arc`. The consumer keeps this clone so the
+    /// shared cell outlives the heartbeat task. `poll()` does not read it,
+    /// because the data path keys off the share-session epoch and not the
+    /// member epoch.
     #[allow(dead_code)]
     pub(crate) member_epoch: Arc<Mutex<i32>>,
-    /// Live assignment as `(topic_id, topic_name, partition)`, updated by the
-    /// heartbeat loop.
+    /// Live assignment as `(topic_id, topic_name, partition)`. The heartbeat
+    /// loop updates it.
     pub(crate) assignment: Arc<Mutex<Vec<(WireUuid, String, i32)>>>,
     pub(crate) topic_names: Arc<Mutex<HashMap<WireUuid, String>>>,
     /// `ShareFetch` session epoch: 0 opens the session, then 1, 2, … per
-    /// successful fetch. Owned by `poll()`.
+    /// successful fetch. `poll()` owns it.
     pub(crate) share_session_epoch: i32,
     pub(crate) fetch_min: ByteSize,
     pub(crate) fetch_max: ByteSize,
@@ -287,10 +288,10 @@ pub struct ShareConsumer {
 impl ShareConsumer {
     /// Join a share group and start heartbeating.
     ///
-    /// Sends one `ShareGroupHeartbeat` (empty member id, epoch 0, carrying
-    /// `subscribe`), captures the assigned member id / epoch / heartbeat
-    /// interval / assignment, resolves assignment topic ids → names via
-    /// Metadata, then spawns the heartbeat loop.
+    /// This method sends one `ShareGroupHeartbeat` that carries an empty member
+    /// id, epoch 0, and `subscribe`. It captures the assigned member id, epoch,
+    /// heartbeat interval, and assignment. It resolves the assignment topic ids
+    /// → names with Metadata, then spawns the heartbeat loop.
     #[builder(start_fn = builder, finish_fn = build)]
     #[tracing::instrument(
         name = "share_consumer.start",
@@ -482,7 +483,7 @@ impl ShareConsumer {
         &self.group_id
     }
 
-    /// The member id assigned by the broker at join time.
+    /// The member id that the broker assigned at join time.
     #[must_use]
     pub fn member_id(&self) -> &str {
         &self.member_id
@@ -500,13 +501,14 @@ impl ShareConsumer {
 
     /// Stop heartbeating, acknowledge outstanding records, and leave the group.
     ///
-    /// First flushes any outstanding acknowledgements via a standalone
-    /// `ShareAcknowledge`: in Implicit mode the previous poll's delivered ranges
-    /// are auto-`Accept`ed; in Explicit mode any staged `acknowledge()` calls are
-    /// sent. Then cancels the heartbeat task and awaits it; the task sends a
-    /// best-effort leave heartbeat (`member_epoch = -1`) on its way out so the
-    /// broker evicts this member promptly rather than waiting out the session
-    /// timeout. A flush failure is best-effort (logged) so close still leaves.
+    /// This method first flushes any outstanding acknowledgements in a
+    /// standalone `ShareAcknowledge`. In Implicit mode it auto-`Accept`s the
+    /// previous poll's delivered ranges. In Explicit mode it sends any staged
+    /// `acknowledge()` calls. It then cancels the heartbeat task and awaits it.
+    /// The task sends a best-effort leave heartbeat with `member_epoch = -1` on
+    /// its way out, so the broker evicts this member promptly and does not wait
+    /// out the session timeout. A flush failure is best-effort and logged, so
+    /// close still leaves the group.
     #[tracing::instrument(
         name = "share_consumer.close",
         level = "info",

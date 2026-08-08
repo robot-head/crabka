@@ -1,11 +1,11 @@
 //! Per-share-group tokio actor (KIP-932). Owns [`ShareGroupState`] for one
-//! share group. Heartbeats arrive as mpsc messages; responses go back via
-//! oneshot channels.
+//! share group. Heartbeats arrive as mpsc messages, and responses go back
+//! through oneshot channels.
 //!
-//! Mirrors the consumer next-gen [`crate::coordinator::unified::actor`] minus
-//! all offset-validation and partition-revocation machinery: share-group
-//! assignment is non-exclusive, so a member's epoch advances straight to the
-//! group epoch with no acknowledgement round-trip.
+//! It mirrors the consumer next-gen [`crate::coordinator::unified::actor`]
+//! without any offset-validation or partition-revocation machinery.
+//! Share-group assignment is non-exclusive, so a member's epoch advances
+//! straight to the group epoch with no acknowledgement round-trip.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -67,7 +67,7 @@ pub enum ShareGroupActorMessage {
     /// partition of `topic_id`. Drop the topic from `state.initialized` and
     /// rewrite the `ShareGroupStatePartitionMetadata` (key v14) so the topic no
     /// longer appears after a restart. `topic_id` is the metadata-image
-    /// (`uuid::Uuid`) id, matching the persister's delete key.
+    /// (`uuid::Uuid`) id, which matches the persister's delete key.
     DropTopicMetadata {
         topic_id: uuid::Uuid,
         reply: oneshot::Sender<()>,
@@ -101,8 +101,8 @@ pub struct ShareDescribeMember {
 
 impl ShareDescribeView {
     /// Render this view into a `ShareGroupDescribe` `DescribedGroup` wire row.
-    /// `error_code`/`authorized_operations` keep their defaults — the handler
-    /// owns the ACL outcome.
+    /// `error_code` and `authorized_operations` keep their defaults, because
+    /// the handler owns the ACL outcome.
     #[must_use]
     pub fn into_described_group(self) -> DescribedGroup {
         use crabka_protocol::owned::common::share_group_describe_response::{
@@ -269,9 +269,9 @@ async fn actor_loop(
     }
 }
 
-/// Called on every heartbeat-interval tick. Evicts expired members and writes
-/// the resulting tombstones to `__consumer_offsets`. Returns `Err` if the log
-/// write fails (the actor should exit).
+/// Called on every heartbeat-interval tick. It evicts expired members and
+/// writes the resulting tombstones to `__consumer_offsets`. Returns `Err` if
+/// the log write fails, and the actor must then exit.
 async fn handle_session_tick(
     state: &mut ShareGroupState,
     config: &ShareGroupConfig,
@@ -371,17 +371,18 @@ async fn handle_heartbeat(
     Ok(build_assignment_resp(state, &req.member_id, config))
 }
 
-/// KIP-932 lifecycle hook. Runs AFTER `reconcile`, off the
-/// sync state machine: gathers the group's full assigned `(topic_id,
-/// partition)` set and, for each not already Initialized, drives
-/// [`SharePersister::initialize`]. On success it records the partition in
-/// `state.initialized` and persists an updated `ShareGroupStatePartitionMetadata`
-/// (key v14) via the offsets log.
+/// KIP-932 lifecycle hook. It runs AFTER `reconcile`, off the
+/// sync state machine. It gathers the group's full assigned `(topic_id,
+/// partition)` set and drives [`SharePersister::initialize`] for each entry
+/// that is not already Initialized. On success it records the partition in
+/// `state.initialized` and persists an updated
+/// `ShareGroupStatePartitionMetadata` (key v14) through the offsets log.
 ///
-/// Best-effort: a persister error leaves the partition un-recorded so the next
-/// heartbeat retries; it never fails the heartbeat. `state_epoch` is the group
-/// epoch (monotonic, bumped on every membership change); `start_offset` is 0
-/// (a freshly-initialized share partition starts at the beginning).
+/// The hook is best-effort. A persister error leaves the partition
+/// un-recorded, so the next heartbeat retries it, and the error never fails
+/// the heartbeat. `state_epoch` is the group epoch, which is monotonic and
+/// bumps on every membership change. `start_offset` is 0, because a
+/// freshly-initialized share partition starts at the beginning.
 async fn reconcile_share_state(
     state: &mut ShareGroupState,
     offsets_log: &dyn OffsetsLog,
@@ -560,7 +561,7 @@ async fn handle_leave(
     Ok(base_resp(0, req.member_epoch, config))
 }
 
-/// Recompute the target assignment when the group is dirty. Builds the
+/// Recompute the target assignment when the group is dirty. It builds the
 /// assignor inputs from the latest metadata snapshot, runs the share-group
 /// assignor, bumps the epoch, and installs the new target.
 fn reconcile(state: &mut ShareGroupState, metadata: &dyn MetadataProvider) {
@@ -588,7 +589,7 @@ fn reconcile(state: &mut ShareGroupState, metadata: &dyn MetadataProvider) {
 }
 
 /// Resolve a share member's effective topic-id subscription. Share groups
-/// only support exact-name subscriptions (no regex), so this is a simple
+/// support exact-name subscriptions only, with no regex, so this is a simple
 /// name → id lookup against the current metadata.
 fn resolve_subscribed_topic_ids(member: &ShareMemberState, input: &ReconcileInput) -> Vec<Uuid> {
     member
@@ -737,7 +738,8 @@ use crabka_protocol::records::RecordBatch;
 #[derive(Debug, Default)]
 pub(crate) struct PendingShareRecords {
     pub group_metadata: Option<ShareGroupMetadataValue>,
-    /// `Some(value)` writes the record; `None` writes a tombstone (null value).
+    /// `Some(value)` writes the record. `None` writes a tombstone, which is a
+    /// null value.
     pub member_metadata: Vec<(String, Option<ShareGroupMemberMetadataValue>)>,
     pub target_metadata: Option<ShareGroupTargetAssignmentMetadataValue>,
     pub target_per_member: Vec<(String, Option<ShareGroupTargetAssignmentMemberValue>)>,
@@ -816,9 +818,9 @@ impl PendingShareRecords {
     }
 }
 
-/// Build a `PendingShareRecords` set reflecting the state changes for the
-/// listed `affected_members`. Always includes the current group epoch and
-/// (if non-zero) target epoch.
+/// Build a `PendingShareRecords` set that carries the state changes for the
+/// listed `affected_members`. It always includes the current group epoch, and
+/// it includes the target epoch when that epoch is non-zero.
 fn snapshot_pending_after_change(
     state: &ShareGroupState,
     affected_members: &[String],
@@ -872,8 +874,8 @@ fn snapshot_pending_after_change(
     pending
 }
 
-/// Snapshot a `ShareGroupState` into a `ShareGroupSeed` suitable for restoring
-/// a freshly-respawned actor. Mirrors what bootstrap replay produces.
+/// Snapshot a `ShareGroupState` into a `ShareGroupSeed` that can restore
+/// a freshly-respawned actor. It mirrors what bootstrap replay produces.
 fn snapshot_seed(state: &ShareGroupState) -> super::super::ShareGroupSeed {
     let mut members = HashMap::new();
     let mut target_per_member = HashMap::new();
@@ -925,8 +927,8 @@ fn snapshot_seed(state: &ShareGroupState) -> super::super::ShareGroupSeed {
 }
 
 /// Build the `ShareGroupStatePartitionMetadata` (key v14) value from the live
-/// Initialized set: one `(topic_id, partitions)` row per topic, partitions
-/// sorted for a stable encoding.
+/// Initialized set. There is one `(topic_id, partitions)` row per topic, and
+/// the partitions are sorted for a stable encoding.
 fn state_partition_metadata_from(state: &ShareGroupState) -> ShareGroupStatePartitionMetadataValue {
     let mut by_topic: HashMap<Uuid, Vec<i32>> = HashMap::new();
     for (tid, p) in &state.initialized {

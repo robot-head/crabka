@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-/// Front matter for a docs page (uses the `AdiDoks` docs layout).
+/// Front matter for a docs page. It uses the `AdiDoks` docs layout.
 #[must_use]
 pub fn page_front_matter(title: &str, weight: u32, body: &str) -> String {
     format!(
@@ -11,10 +11,11 @@ pub fn page_front_matter(title: &str, weight: u32, body: &str) -> String {
     )
 }
 
-/// Front matter for a docs page that also needs an `[extra]` table — e.g. a
-/// page that opts into Mermaid rendering via `extra.mermaid = true`. The
-/// `extra_toml` is the raw body of the `[extra]` table (one `key = value` per
-/// line, no surrounding `[extra]` header).
+/// Front matter for a docs page that also needs an `[extra]` table.
+///
+/// An example is a page that opts into Mermaid rendering with
+/// `extra.mermaid = true`. The `extra_toml` is the raw body of the `[extra]`
+/// table: one `key = value` per line, with no `[extra]` header around it.
 #[must_use]
 pub fn page_front_matter_with_extra(
     title: &str,
@@ -27,7 +28,8 @@ pub fn page_front_matter_with_extra(
     )
 }
 
-/// Front matter for a docs section index (uses the `AdiDoks` docs section layout).
+/// Front matter for a docs section index. It uses the `AdiDoks` docs section
+/// layout.
 #[must_use]
 pub fn section_front_matter(title: &str, weight: u32, body: &str) -> String {
     format!(
@@ -35,8 +37,10 @@ pub fn section_front_matter(title: &str, weight: u32, body: &str) -> String {
     )
 }
 
-/// Write the full reference tree (operator + broker pages and section indexes)
-/// under `out_dir`. Overwrites existing files.
+/// Write the full reference tree under `out_dir`.
+///
+/// The tree holds the operator pages, the broker pages, and the section
+/// indexes. This function overwrites existing files.
 ///
 /// # Errors
 /// Returns an error if any directory cannot be created or any file cannot be

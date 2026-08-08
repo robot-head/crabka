@@ -1,11 +1,10 @@
 //! `OffsetDelete` (`api_key` 47, KIP-496) broker integration tests.
 //!
-//! Each test boots a single broker via `support::start`, drives the
+//! Each test boots a single broker with `support::start`, drives the
 //! relevant flows over the PLAINTEXT data plane, and asserts on the
-//! response shape. Gated to non-Windows in line with the multi-broker
-//! test convention (single-broker tests stay unconditional but this
-//! file only uses `support::start` which is cross-platform — no gate
-//! needed).
+//! response shape. Single-broker tests stay unconditional, and this
+//! file uses only `support::start`, which is cross-platform, so it needs
+//! no platform gate.
 
 use assert2::{assert, check};
 mod support;
@@ -33,8 +32,8 @@ use crabka_protocol::{
 
 const OFFSET_ABSENT_SENTINEL: i64 = -1; // OffsetFetch returns -1 when no offset is committed.
 
-/// Resolve a topic's UUID via Metadata. KIP-516: OffsetCommit/OffsetFetch
-/// negotiate to v10/v8+, which key by `topic_id` on the wire.
+/// Resolve a topic's UUID with Metadata. Under KIP-516, OffsetCommit and
+/// OffsetFetch negotiate to v10/v8+, which key by `topic_id` on the wire.
 async fn topic_id_for(p: &support::InProcess, name: &str) -> WireUuid {
     let resp = p
         .client
@@ -124,8 +123,8 @@ async fn fetch_offset(p: &support::InProcess, group: &str, topic: &str, partitio
     resp.groups[0].topics[0].partitions[0].committed_offset
 }
 
-/// T1 — happy path: commit an offset for an Empty group, delete it,
-/// `OffsetFetch` then returns `-1` (no committed offset).
+/// T1, the happy path. Commit an offset for an Empty group and delete it.
+/// `OffsetFetch` then returns `-1`, which means no committed offset.
 #[tokio::test]
 async fn delete_offsets_from_empty_group_round_trip() {
     let p = support::start().await;
@@ -172,7 +171,7 @@ async fn delete_offsets_from_empty_group_round_trip() {
     p.broker.shutdown().await;
 }
 
-/// T2 — unknown group: `OffsetDelete` against a group that was never
+/// T2, unknown group. `OffsetDelete` against a group that was never
 /// joined or committed returns `GROUP_ID_NOT_FOUND` at the top level.
 #[tokio::test]
 async fn delete_offsets_unknown_group_returns_group_id_not_found() {
@@ -200,8 +199,9 @@ async fn delete_offsets_unknown_group_returns_group_id_not_found() {
     p.broker.shutdown().await;
 }
 
-/// T3 — missing topic: per-partition `UNKNOWN_TOPIC_OR_PARTITION` (3)
-/// for a topic that doesn't exist (even when the group does).
+/// T3, missing topic. The response carries per-partition
+/// `UNKNOWN_TOPIC_OR_PARTITION` (3) for a topic that does not exist, even when
+/// the group does exist.
 #[tokio::test]
 async fn delete_offsets_missing_topic_returns_unknown_topic_or_partition() {
     let p = support::start().await;
@@ -233,7 +233,7 @@ async fn delete_offsets_missing_topic_returns_unknown_topic_or_partition() {
     p.broker.shutdown().await;
 }
 
-/// T4 — out-of-range partition: per-partition
+/// T4, out-of-range partition. The response carries per-partition
 /// `UNKNOWN_TOPIC_OR_PARTITION` (3) for a partition index beyond the
 /// topic's partition count.
 #[tokio::test]
@@ -274,8 +274,8 @@ async fn delete_offsets_partition_out_of_range_returns_unknown_topic_or_partitio
     p.broker.shutdown().await;
 }
 
-/// T5 — subscription guard: a non-empty consumer-protocol group still
-/// subscribed to the topic returns per-partition
+/// T5, the subscription guard. A non-empty consumer-protocol group that is
+/// still subscribed to the topic returns per-partition
 /// `GROUP_SUBSCRIBED_TO_TOPIC` (86). The offset survives the request.
 #[tokio::test]
 async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {

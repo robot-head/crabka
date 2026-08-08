@@ -1,15 +1,19 @@
-//! SP33: the resolution scope for a (possibly joined) relation. A `Scope` is the
-//! ordered schema of a relation's combined row; `resolve` maps a (qualified or
-//! bare) column reference to its flat index into that row. Replaces the
-//! single-`crabka_pgcatalog::Table` column lookup that every prior slice used.
+//! SP33: the resolution scope for a relation, which can be a joined relation.
+//!
+//! A `Scope` is the ordered schema of a relation's combined row. `resolve` maps
+//! a column reference, qualified or bare, to its flat index into that row. This
+//! replaces the single-`crabka_pgcatalog::Table` column lookup that every prior
+//! slice used.
 
 use crabka_pgcatalog::Table;
 use crabka_pgtypes::ColumnType;
 
 use crate::error::ExecError;
 
-/// One column visible in a scope: its source qualifier (table name or alias;
-/// `None` for a USING/NATURAL-coalesced column), its name, and its type.
+/// One column visible in a scope: its source qualifier, its name, and its type.
+///
+/// The qualifier is a table name or an alias. It is `None` for a
+/// USING/NATURAL-coalesced column.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ColumnBinding {
     pub(crate) qualifier: Option<String>,
@@ -17,32 +21,36 @@ pub(crate) struct ColumnBinding {
     pub(crate) ty: ColumnType,
 }
 
-/// The qualifier of a positional column reference: `$pos.3` is "the column at
-/// index 3", whatever it is called.
+/// The qualifier of a positional column reference, where `$pos.3` is "the
+/// column at index 3", whatever its name is.
 ///
 /// `PostgreSQL` expands `*` into positional `Var` nodes, so `SELECT *` works
-/// over a relation whose column names repeat — `ROWS FROM (generate_series(1,3),
-/// generate_series(1,2))` has two columns named `generate_series` — while a bare
-/// reference to one of those names is still `42702`. A `$` cannot begin an
-/// unquoted identifier, so no user relation can collide with this qualifier.
+/// over a relation whose column names repeat. For example,
+/// `ROWS FROM (generate_series(1,3), generate_series(1,2))` has two columns
+/// named `generate_series`. A bare reference to one of those names is still
+/// `42702`. A `$` cannot begin an unquoted identifier, so no user relation can
+/// collide with this qualifier.
 pub(crate) const POSITION_QUALIFIER: &str = "$pos";
 
-/// The ordered schema of a relation. Flat indices line up with the combined row.
+/// The ordered schema of a relation. Flat indices match the combined row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Scope {
     pub(crate) columns: Vec<ColumnBinding>,
 }
 
 impl Scope {
-    /// The empty scope (FROM-less SELECT): only constant expressions resolve.
+    /// The empty scope, for a FROM-less SELECT. Only constant expressions
+    /// resolve.
     pub fn empty() -> Self {
         Self {
             columns: Vec::new(),
         }
     }
 
-    /// A base table's scope: every column qualified by `qualifier` (the alias if
-    /// present, else the table name).
+    /// A base table's scope, where `qualifier` qualifies every column.
+    ///
+    /// `qualifier` is the alias when there is one, and the table name when
+    /// there is not.
     pub fn single(table: &Table, qualifier: &str) -> Self {
         Self {
             columns: table
@@ -57,16 +65,18 @@ impl Scope {
         }
     }
 
-    /// The scope for an `INSERT … ON CONFLICT DO UPDATE` assignment/filter: the
-    /// target table's columns qualified by the table name, followed by the same
-    /// columns qualified as `excluded`. Expressions are evaluated against the
-    /// concatenation of the conflicting stored row and the proposed row, so the
-    /// order matters — target columns occupy `0..width`, `excluded` the rest.
+    /// The scope for an `INSERT … ON CONFLICT DO UPDATE` assignment or filter.
     ///
-    /// Every column name appears twice, so a bare (unqualified) reference is
-    /// ambiguous (42702). That is PostgreSQL's behavior: `DO UPDATE SET v = v + 1`
-    /// is an error there too, and the reference must be written `t.v` or
-    /// `excluded.v`.
+    /// The scope is the target table's columns qualified by the table name,
+    /// followed by the same columns qualified as `excluded`. Expressions
+    /// evaluate against the concatenation of the conflicting stored row and the
+    /// proposed row, so the order matters. Target columns occupy `0..width`,
+    /// and `excluded` columns occupy the rest.
+    ///
+    /// Every column name appears twice, so a bare unqualified reference is
+    /// ambiguous, which is 42702. That is PostgreSQL's behavior.
+    /// `DO UPDATE SET v = v + 1` is an error there too, and the reference must
+    /// be written `t.v` or `excluded.v`.
     pub fn insert_conflict(table: &Table) -> Self {
         // The qualifier is the relation's own name, never its schema-qualified
         // spelling: `INSERT INTO s.t … ON CONFLICT DO UPDATE SET v = t.v` is how
@@ -79,22 +89,28 @@ impl Scope {
         scope
     }
 
-    /// The combined row width; used by the join layer to size NULL-padded rows.
+    /// The combined row width. The join layer uses it to size NULL-padded
+    /// rows.
     pub fn width(&self) -> usize {
         self.columns.len()
     }
 
-    /// The type of the column at `idx` (caller ensures `idx < width()`).
+    /// The type of the column at `idx`. The caller must make sure that
+    /// `idx < width()`.
     pub fn ty_at(&self, idx: usize) -> ColumnType {
         self.columns[idx].ty
     }
 
-    /// Resolve a column reference to its flat index. Unqualified: unique match by
-    /// name (0 -> 42703, >1 -> 42702). Qualified `t.name`: `t` must be a qualifier in
-    /// scope (else 42P01), then unique match by name under it (0 -> 42703, >1 -> 42702).
+    /// Resolve a column reference to its flat index.
     ///
-    /// [`POSITION_QUALIFIER`] is the one exception: it names a column by index
-    /// rather than by name, which is how a `*` expansion refers to a relation
+    /// An unqualified reference needs a unique match by name. 0 matches is
+    /// 42703 and more than 1 match is 42702. For a qualified `t.name`, `t` must
+    /// be a qualifier in scope, and 42P01 if it is not. The name must then have
+    /// a unique match under that qualifier, where 0 matches is 42703 and more
+    /// than 1 match is 42702.
+    ///
+    /// [`POSITION_QUALIFIER`] is the one exception. It names a column by index
+    /// instead of by name, which is how a `*` expansion refers to a relation
     /// whose column names repeat.
     pub fn resolve(&self, qualifier: Option<&str>, name: &str) -> Result<usize, ExecError> {
         if qualifier == Some(POSITION_QUALIFIER) {

@@ -11,9 +11,10 @@ use crate::{
 /// Emit a `mod.rs` that declares one `pub mod` per active spec, sorted
 /// alphabetically by snake-case module name.
 ///
-/// Pass only the specs whose wrapper files actually exist (i.e., the set
-/// covering all active schemas).
-/// If `has_common` is true, a `pub mod common;` entry is also emitted.
+/// Pass only the specs whose wrapper files actually exist, which is the set
+/// that covers all active schemas.
+/// If `has_common` is true, this function also emits a `pub mod common;`
+/// entry.
 #[must_use]
 /// # Panics
 /// Panics if the validated schema model cannot be represented as the expected Rust syntax tree.

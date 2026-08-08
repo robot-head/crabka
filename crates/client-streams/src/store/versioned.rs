@@ -1,8 +1,10 @@
-//! Versioned key-value store (KIP-889). Each key maps to a chain of versions
-//! keyed by `validFrom` (epoch millis); a version's value is `Some` (live) or
-//! `None` (tombstone). `get` returns the latest; `get_as_of(t)` returns the
-//! version valid at `t`. History older than `history_retention` (relative to the
-//! max observed timestamp) is expired.
+//! Versioned key-value store (KIP-889).
+//!
+//! Each key maps to a chain of versions keyed by `validFrom`, in epoch millis. A
+//! version's value is `Some` when live and `None` for a tombstone. `get` returns
+//! the latest version. `get_as_of(t)` returns the version valid at `t`. The store
+//! expires history older than `history_retention`, measured from the max observed
+//! timestamp.
 //!
 //! Changelog format (KIP-889 / JVM-exact):
 //! - Changelog KEY  = raw key bytes.
@@ -16,8 +18,11 @@ use crabka_units::prelude::*;
 
 use crate::{processor::serde::Serde, store::api::StateStore};
 
-/// A single resolved version: its value, the timestamp it became valid, and the
-/// timestamp the next version superseded it (`None` = still the latest, ∞).
+/// A single resolved version.
+///
+/// The struct holds the value, the timestamp the version became valid, and the
+/// timestamp the next version superseded it. A `None` there means the version is
+/// still the latest, ∞.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionedRecord<V> {
     pub value: V,
@@ -28,18 +33,27 @@ pub struct VersionedRecord<V> {
 /// Typed versioned store surface.
 #[async_trait]
 pub trait VersionedKeyValueStore<K: Send + Sync, V: Send>: StateStore {
-    /// Insert a version at `validFrom = timestamp`. `value == None` is a
-    /// tombstone version. Out-of-order timestamps are inserted mid-chain; the
-    /// latest pointer only advances when `timestamp >=` the current max.
-    /// A timestamp older than the retention horizon is dropped.
+    /// Inserts a version at `validFrom = timestamp`.
+    ///
+    /// A `value == None` is a tombstone version. The store inserts out-of-order
+    /// timestamps mid-chain. The latest pointer only advances when
+    /// `timestamp >=` the current max. The store drops a timestamp older than the
+    /// retention horizon.
     async fn put(&mut self, key: K, value: Option<V>, timestamp: i64);
-    /// Insert a tombstone version at `timestamp`; returns the record that was
-    /// valid at `timestamp` immediately before the delete (if any live value).
+    /// Inserts a tombstone version at `timestamp`.
+    ///
+    /// Returns the record that was valid at `timestamp` just before the delete,
+    /// if there was a live value.
     async fn delete(&mut self, key: &K, timestamp: i64) -> Option<VersionedRecord<V>>;
-    /// The latest live version, or `None` if absent / latest is a tombstone.
+    /// Returns the latest live version.
+    ///
+    /// Returns `None` if the key is absent, or if the latest version is a
+    /// tombstone.
     async fn get(&self, key: &K) -> Option<VersionedRecord<V>>;
-    /// The version valid at `as_of`, or `None` if absent / that version is a
-    /// tombstone / `as_of` predates the oldest retained version.
+    /// Returns the version valid at `as_of`.
+    ///
+    /// Returns `None` if the key is absent, if that version is a tombstone, or if
+    /// `as_of` predates the oldest retained version.
     async fn get_as_of(&self, key: &K, as_of: i64) -> Option<VersionedRecord<V>>;
 }
 
@@ -96,8 +110,10 @@ impl<K: 'static, V: 'static> VersionedBytesStore<K, V> {
         )
     }
 
-    /// The retention horizon: versions whose `valid_to` is strictly below this
-    /// are unreachable and may be evicted; a put below it is dropped.
+    /// Returns the retention horizon.
+    ///
+    /// Versions whose `valid_to` is strictly below the horizon are unreachable,
+    /// and the store may evict them. The store drops a put below the horizon.
     fn horizon(&self) -> i64 {
         // The horizon is an instant, so the retention extent crosses into epoch
         // milliseconds here.
@@ -105,8 +121,10 @@ impl<K: 'static, V: 'static> VersionedBytesStore<K, V> {
             .saturating_sub(self.history_retention.millis_i64())
     }
 
-    /// Insert raw (already-serialized) version bytes into a chain, applying
-    /// retention. Shared by `put`/`delete` (logging on) and restore (logging off).
+    /// Inserts raw version bytes into a chain and applies retention.
+    ///
+    /// The bytes are already serialized. `put` and `delete` share this method
+    /// with logging on, and restore shares it with logging off.
     fn insert_raw(&mut self, key: Bytes, valid_from: i64, value: Option<Bytes>) -> bool {
         self.observed_stream_time = self.observed_stream_time.max(valid_from);
         // Compute horizon after updating stream time (horizon depends on it).

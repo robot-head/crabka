@@ -2,8 +2,8 @@
 //!
 //! For each case in the generated CASES table, encodes the Rust default fixture,
 //! sends the equivalent JSON to the JVM oracle, and asserts byte equality.
-//! All failures are collected and reported at the end so a single run reveals
-//! every divergence (not just the first).
+//! The sweep collects all failures and reports them at the end, so a single run
+//! reveals every divergence and not only the first one.
 
 mod support;
 use serde_json::json;

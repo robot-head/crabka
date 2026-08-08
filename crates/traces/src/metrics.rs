@@ -1,10 +1,11 @@
 //! Traces-service Prometheus metrics.
 //!
-//! Shared metric spec uniform across the LGTM observability services: a
-//! `prometheus-client` [`Registry`] (prefix `crabka_traces`) wrapped in
-//! `Arc<Mutex<…>>` so the `/metrics` exporter can lock it while the cheaply
-//! cloneable [`ServiceMetrics`] hands out counter / histogram handles that the
-//! ingest (distributor) and query (querier) handlers increment directly.
+//! The metric spec is uniform across the LGTM observability services. It is a
+//! `prometheus-client` [`Registry`] with the prefix `crabka_traces`, wrapped in
+//! `Arc<Mutex<…>>` so the `/metrics` exporter can lock it. The cheaply
+//! cloneable [`ServiceMetrics`] hands out counter and histogram handles, and
+//! the ingest and query handlers increment those directly. Ingest is the
+//! distributor, and query is the querier.
 //!
 //! `prometheus-client` auto-appends `_total` to counters at encode time, so
 //! counter names are registered WITHOUT the suffix.
@@ -19,42 +20,47 @@ use prometheus_client::{
 };
 use tokio::sync::Mutex;
 
-/// Shared registry owning every metric this service emits. Wrapped in
-/// `Arc<Mutex<…>>` because `prometheus-client` requires `&mut Registry` to
-/// register and the exporter takes a read lock at scrape time.
+/// Shared registry that owns every metric this service emits.
+///
+/// It is wrapped in `Arc<Mutex<…>>` because `prometheus-client` needs
+/// `&mut Registry` to register, and the exporter takes a read lock at scrape
+/// time.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
-/// Ingest request outcome label (`status="ok"|"error"`).
+/// Ingest request outcome label, `status="ok"` or `status="error"`.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct StatusLabel {
     pub status: String,
 }
 
-/// Query route + outcome label (`route="search", status="ok"|"error"`).
+/// Query route and outcome label, such as
+/// `route="search", status="ok"|"error"`.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct RouteStatusLabel {
     pub route: String,
     pub status: String,
 }
 
-/// Per-tenant ingest label (`tenant="anonymous"`), paired with the spans-accepted
-/// counter family so accepted-span volume can be attributed per tenant.
+/// Per-tenant ingest label, such as `tenant="anonymous"`. It pairs with the
+/// spans-accepted counter family, so accepted-span volume is attributable per
+/// tenant.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct TenantLabel {
     pub tenant: String,
 }
 
-/// Query route label (`route="search"`), paired with the per-route latency
-/// histogram family.
+/// Query route label, such as `route="search"`. It pairs with the per-route
+/// latency histogram family.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct RouteLabel {
     pub route: String,
 }
 
 /// Cheaply-clonable bundle of metric handles plus the shared registry.
-/// Construct once in the binary's `run()` before role dispatch; clone into the
-/// distributor and querier state structs (each clone is a handful of
-/// `Arc::clone`s).
+///
+/// Construct it once in the binary's `run()`, before role dispatch. Then clone
+/// it into the distributor and querier state structs. Each clone is a handful
+/// of `Arc::clone`s.
 #[derive(Clone)]
 pub struct ServiceMetrics {
     pub registry: SharedRegistry,
@@ -154,17 +160,19 @@ impl ServiceMetrics {
         }
     }
 
-    /// Record one trace-ingest request outcome: bumps the per-status request
-    /// counter, accumulates bytes / spans, and observes the handler latency.
-    /// `ok=false` covers any 4xx/5xx (validation, rate-limit, decode, or
-    /// produce failure); the WAL/produce-specific failure counter is bumped
-    /// separately via [`Self::record_wal_append_failure`] only at the actual
-    /// produce error site so a 4xx client error does not inflate it.
+    /// Record one trace-ingest request outcome.
     ///
-    /// `body` is the request-body size and `elapsed` the handler latency; both
-    /// are converted to the raw units the Prometheus instruments hold here, so
-    /// callers never spell out `_bytes`/`_secs` themselves. `items` is a plain
-    /// span count — dimensionless, so it stays an integer.
+    /// This bumps the per-status request counter, accumulates bytes and spans,
+    /// and observes the handler latency. `ok=false` covers any 4xx or 5xx: a
+    /// validation, rate-limit, decode, or produce failure.
+    /// [`Self::record_wal_append_failure`] bumps the WAL/produce-specific
+    /// failure counter separately, only at the actual produce error site, so a
+    /// 4xx client error does not inflate it.
+    ///
+    /// `body` is the request-body size and `elapsed` is the handler latency.
+    /// This method converts both to the raw units the Prometheus instruments
+    /// hold, so callers never spell out `_bytes` or `_secs` themselves. `items`
+    /// is a plain span count. It is dimensionless, so it stays an integer.
     pub fn record_ingest(&self, ok: bool, body: ByteSize, items: u64, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
@@ -177,17 +185,19 @@ impl ServiceMetrics {
         self.ingest_duration.observe(elapsed.secs_f64());
     }
 
-    /// Bump the WAL/produce append-failure counter. Called only when the
-    /// failure was an actual WAL (Kafka produce) error, not a client/validation
-    /// 4xx.
+    /// Bump the WAL/produce append-failure counter.
+    ///
+    /// Call this only when the failure was an actual WAL error, that is a Kafka
+    /// produce error. Do not call it for a client or validation 4xx.
     pub fn record_wal_append_failure(&self) {
         self.wal_append_failures.inc();
     }
 
-    /// Attribute `count` accepted spans to `tenant` on the ingest path. Called
-    /// once per successful push request (not per span-record) with the batch
-    /// size, so per-tenant span volume is visible without a high-cardinality
-    /// per-record hop.
+    /// Attribute `count` accepted spans to `tenant` on the ingest path.
+    ///
+    /// Call this once per successful push request with the batch size, not once
+    /// per span record. Per-tenant span volume is then visible without a
+    /// high-cardinality per-record hop.
     pub fn record_ingest_spans(&self, tenant: &str, count: u64) {
         if count == 0 {
             return;
@@ -205,7 +215,7 @@ impl ServiceMetrics {
         self.blocks_flushed.inc();
     }
 
-    /// Record one querier request: bumps the per-(route, status) request
+    /// Record one querier request. This bumps the per-(route, status) request
     /// counter and observes the per-route handler latency.
     pub fn record_query(&self, route: &str, ok: bool, secs: f64) {
         let status = if ok { "ok" } else { "error" };
@@ -229,9 +239,10 @@ impl Default for ServiceMetrics {
     }
 }
 
-/// `/metrics` router serving the `OpenMetrics` text encoding of `registry`.
-/// Merged onto the admin port by `serve_admin_from_env_with`; does NOT include
-/// the pprof routes (those are added by `serve_admin`).
+/// `/metrics` router that serves the `OpenMetrics` text encoding of `registry`.
+///
+/// `serve_admin_from_env_with` merges it onto the admin port. This router does
+/// NOT include the pprof routes. `serve_admin` adds those.
 pub fn metrics_router(registry: SharedRegistry) -> axum::Router {
     axum::Router::new()
         .route("/metrics", axum::routing::get(export))

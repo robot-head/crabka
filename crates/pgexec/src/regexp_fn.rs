@@ -1,18 +1,18 @@
 //! The scalar `regexp_*` function family: `regexp_replace`, `regexp_count`,
 //! `regexp_instr`, `regexp_like`, `regexp_substr`, `regexp_match` and
-//! `regexp_split_to_array`. (`regexp_split_to_table` and `regexp_matches` are
-//! set-returning and live in `srf`.)
+//! `regexp_split_to_array`. `regexp_split_to_table` and `regexp_matches` are
+//! set-returning and live in `srf`.
 //!
 //! ## Regular-expression dialect
 //!
-//! PostgreSQL implements POSIX Advanced Regular Expressions via Spencer's
-//! engine; crabka uses the `regex` crate's RE2-family engine. The two agree on
-//! the operators SQL patterns actually use — literals, classes and POSIX class
+//! PostgreSQL implements POSIX Advanced Regular Expressions with Spencer's
+//! engine. Crabka uses the `regex` crate's RE2-family engine. The two agree on
+//! the operators SQL patterns actually use: literals, classes and POSIX class
 //! names, alternation, grouping, the quantifiers and bounds, anchors, and the
-//! `i`/`n`/`s`/`x`/`q` flags — and diverge on back-references (`\1` inside a
-//! *pattern*) and look-around, which the `regex` crate rejects at compile time
-//! with 2201B rather than matching. Positions and lengths are counted in
-//! characters, as PostgreSQL counts them, not bytes.
+//! `i`/`n`/`s`/`x`/`q` flags. They diverge on back-references, which are `\1`
+//! inside a *pattern*, and on look-around. The `regex` crate rejects both at
+//! compile time with 2201B and does not match them. PostgreSQL counts positions
+//! and lengths in characters, not bytes, and crabka counts them the same way.
 
 use crabka_pgparser::ast::{Expr, FuncCall};
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
@@ -39,7 +39,7 @@ enum RegexpFunc {
 
 impl RegexpFunc {
     /// The name PostgreSQL prints in its "does not support the global option"
-    /// message — the SQL spelling, with parentheses.
+    /// message. This is the SQL spelling, with parentheses.
     fn sql_name(self) -> &'static str {
         match self {
             RegexpFunc::Replace => "regexp_replace()",
@@ -52,7 +52,7 @@ impl RegexpFunc {
         }
     }
 
-    /// Only `regexp_replace` reads `g`; every other function here rejects it.
+    /// Only `regexp_replace` reads `g`. Every other function here rejects it.
     fn allows_global(self) -> bool {
         self == RegexpFunc::Replace
     }
@@ -71,12 +71,12 @@ fn regexp_func(name: &str) -> Option<RegexpFunc> {
     })
 }
 
-/// Is `name` one of this module's functions? (`func::is_scalar` folds this in.)
+/// Is `name` one of this module's functions? `func::is_scalar` folds this in.
 pub(crate) fn is_regexp_func(name: &str) -> bool {
     regexp_func(name).is_some()
 }
 
-/// Statically infer a regexp call's result type, validating name and arity.
+/// Statically infer a regexp call's result type, and check name and arity.
 pub(crate) fn regexp_func_result_type(
     fc: &FuncCall,
     _scope: &Scope,
@@ -183,8 +183,8 @@ fn eval_strict(f: RegexpFunc, fc: &FuncCall, vals: &[Datum]) -> Result<Datum, Ex
 // ---- individual functions ----
 
 /// `regexp_replace(source, pattern, replacement [, start [, N]] [, flags])`.
-/// A text argument in the fourth position is the flag string; an integer there
-/// is the 1-based character position matching starts from.
+/// A text argument in the fourth position is the flag string. An integer there
+/// is the 1-based character position at which the search starts.
 fn replace(
     fc: &FuncCall,
     source: &str,
@@ -280,10 +280,11 @@ fn instr(fc: &FuncCall, source: &str, pattern: &str, tail: &[Datum]) -> Result<D
     ))
 }
 
-/// Split `input` on `re`, applying PostgreSQL's zero-length-match rule: an
-/// empty match at the start of the string, at its end, or immediately after a
-/// previous match is ignored, so `regexp_split_to_array('abc', '')` is
-/// `{a,b,c}` rather than a run of empty strings.
+/// Split `input` on `re`, and apply PostgreSQL's zero-length-match rule.
+///
+/// The rule ignores an empty match at the start of the string, at its end, or
+/// immediately after a previous match. `regexp_split_to_array('abc', '')` is
+/// therefore `{a,b,c}` and not a run of empty strings.
 fn split_pieces(re: &Regex, input: &str) -> Vec<String> {
     let mut pieces = Vec::new();
     let mut piece_start = 0usize;
@@ -317,8 +318,8 @@ fn split_pieces(re: &Regex, input: &str) -> Vec<String> {
     pieces
 }
 
-/// The next UTF-8 character boundary after `at` (or one past the end, so the
-/// zero-length-match scan always terminates).
+/// The next UTF-8 character boundary after `at`, or one past the end. The
+/// zero-length-match scan therefore always terminates.
 fn next_boundary(input: &str, at: usize) -> usize {
     input[at..]
         .chars()
@@ -331,9 +332,11 @@ fn nth_match<'h>(re: &Regex, haystack: &'h str, nth: usize) -> Option<Captures<'
     re.captures_iter(haystack).nth(nth.saturating_sub(1))
 }
 
-/// Every capture group's text, as PostgreSQL's `text[]` result: the whole match
-/// when the pattern has no groups, else one element per group with a
-/// non-participating group as a NULL element.
+/// Every capture group's text, as PostgreSQL's `text[]` result.
+///
+/// The result is the whole match when the pattern has no groups. If the pattern
+/// has groups, the result has one element per group, and a non-participating
+/// group is a NULL element.
 fn group_datums(re: &Regex, caps: &Captures<'_>) -> Vec<Datum> {
     if re.captures_len() == 1 {
         return vec![Datum::Text(
@@ -398,7 +401,7 @@ fn invalid_parameter(name: &str, value: i64) -> ExecError {
     }
 }
 
-/// A 1-based character position argument; `0` and below are 22023.
+/// A 1-based character position argument. `0` and below are 22023.
 fn position(d: &Datum, name: &str) -> Result<i64, ExecError> {
     let v = int_arg(d)?;
     if v < 1 {
@@ -415,8 +418,10 @@ fn optional_position(d: Option<&Datum>, name: &str) -> Result<Option<i64>, ExecE
     }
 }
 
-/// The `N` (which match) argument: 1-based, and `0` means "every match" for
-/// `regexp_replace` only — the other callers reject it through [`position`].
+/// The `N` argument, which selects the match. It is 1-based.
+///
+/// `0` means "every match" for `regexp_replace` only. The other callers reject
+/// `0` through [`position`].
 fn nth_arg(d: &Datum) -> Result<usize, ExecError> {
     let v = int_arg(d)?;
     if v < 0 {
@@ -433,8 +438,8 @@ fn subexpr_arg(d: &Datum) -> Result<usize, ExecError> {
     usize::try_from(v).map_err(|_| invalid_parameter("subexpr", v))
 }
 
-/// Split `s` at 1-based character position `start`, returning the untouched
-/// prefix and the region matching applies to.
+/// Split `s` at 1-based character position `start`, then return the untouched
+/// prefix and the region the match applies to.
 fn char_split(s: &str, start: i64) -> (&str, &str) {
     let skip = usize::try_from(start - 1).unwrap_or(0);
     let at = s.char_indices().nth(skip).map_or(s.len(), |(byte, _)| byte);

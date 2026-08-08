@@ -1,10 +1,10 @@
 //! Build-time code generator for the `crabka-protocol` crate.
 //!
 //! The generator reads the vendored Apache Kafka JSON message schemas,
-//! validates the subset Crabka supports, resolves nested/common structs, and
-//! emits the owned and borrowed Rust protocol modules. The binary wrapper is
-//! used by `crates/protocol/build.rs`; the library API is useful for tests and
-//! for one-off schema audits.
+//! validates the subset Crabka supports, resolves nested and common structs,
+//! and emits the owned and borrowed Rust protocol modules.
+//! `crates/protocol/build.rs` uses the binary wrapper. The library API is
+//! useful for tests and for one-off schema audits.
 //!
 //! ## Loading and validating schemas
 //!

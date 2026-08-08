@@ -1,12 +1,12 @@
-//! `IQv2` results: per-partition `QueryResult<R>` aggregated into
-//! `StateQueryResult<R>`.
+//! `IQv2` results. Each partition gives a `QueryResult<R>`, and the code
+//! aggregates them into a `StateQueryResult<R>`.
 
 use std::collections::BTreeMap;
 
 use super::request::Position;
 
-/// Why a partition's query did not produce a result (mirrors the JVM
-/// `FailureReason` subset crabka can produce locally).
+/// Why a partition's query gave no result. This mirrors the subset of the JVM
+/// `FailureReason` that crabka can produce locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureReason {
     /// The store kind does not support this query variant.
@@ -15,11 +15,13 @@ pub enum FailureReason {
     NotUpToBound,
     /// The store exists in the topology but not on this partition's task.
     NotPresent,
-    /// The partition is standby/restoring and an active-only query was asked.
+    /// The partition is a standby or is restoring, and the caller asked an
+    /// active-only query.
     NotActive,
     /// The store name is not in the topology.
     DoesNotExist,
-    /// Internal failure (e.g. a result/key type mismatch across the boundary).
+    /// An internal failure, such as a result-type or key-type mismatch across
+    /// the boundary.
     StoreException,
 }
 
@@ -91,7 +93,8 @@ impl<R> StateQueryResult<R> {
     pub fn partition_results(&self) -> &BTreeMap<i32, QueryResult<R>> {
         &self.partition_results
     }
-    /// The single partition's result, iff exactly one partition responded.
+    /// The single partition's result, but only when exactly one partition
+    /// responded.
     #[must_use]
     pub fn only_partition_result(&self) -> Option<&QueryResult<R>> {
         if self.partition_results.len() == 1 {
@@ -100,7 +103,8 @@ impl<R> StateQueryResult<R> {
             None
         }
     }
-    /// Global-store result — always `None` in slice 3a (out of scope).
+    /// The global-store result. It is always `None` in slice 3a, which does not
+    /// cover global stores.
     #[must_use]
     pub fn global_result(&self) -> Option<&QueryResult<R>> {
         None

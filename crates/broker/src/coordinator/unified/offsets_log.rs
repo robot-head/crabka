@@ -19,9 +19,9 @@ pub trait OffsetsLog: Send + Sync + std::fmt::Debug {
     async fn append(&self, batch: RecordBatch) -> Result<(), BrokerError>;
 }
 
-/// Resolves `__consumer_offsets-0` at every `append` call. The partition
-/// is registered by bootstrap *after* `GroupCoordinator` is constructed,
-/// so a snapshot taken at construction time would be permanently empty.
+/// Resolves `__consumer_offsets-0` on every `append` call. Bootstrap registers
+/// the partition *after* the broker constructs `GroupCoordinator`, so a
+/// snapshot taken at construction time would stay empty forever.
 #[derive(Debug)]
 pub(crate) struct ProductionOffsetsLog {
     partitions: Arc<PartitionRegistry>,
@@ -106,10 +106,11 @@ pub mod fake {
             self.appended.lock().await.clone()
         }
 
-        /// `true` iff some appended record tombstones the classic k2
-        /// `GroupMetadata` record for `group_id` — a key whose leading `i16`
-        /// version is `2` (classic `GroupMetadata`) with a null value. Used to
-        /// assert the upgrade flip atomically removed the classic group record.
+        /// Returns `true` if and only if an appended record tombstones the
+        /// classic k2 `GroupMetadata` record for `group_id`. Such a record has
+        /// a key whose leading `i16` version is `2`, for classic
+        /// `GroupMetadata`, and a null value. Tests read it to assert that the
+        /// upgrade flip removed the classic group record atomically.
         pub async fn has_classic_group_metadata_tombstone(&self, group_id: &str) -> bool {
             use crate::coordinator::unified::persistence::{Key, parse_key};
             self.appended.lock().await.iter().any(|batch| {
@@ -125,11 +126,12 @@ pub mod fake {
             })
         }
 
-        /// `true` iff some appended record tombstones the next-gen k3
-        /// `GroupMetadata` record for `group_id` — a key whose leading `i16`
-        /// version is `3` (next-gen `GroupMetadata`) with a null value. Used to
-        /// assert the downgrade flip atomically removed the next-gen group
-        /// record. `parse_key` dispatches version 3 to the next-gen family.
+        /// Returns `true` if and only if an appended record tombstones the
+        /// next-gen k3 `GroupMetadata` record for `group_id`. Such a record has
+        /// a key whose leading `i16` version is `3`, for next-gen
+        /// `GroupMetadata`, and a null value. Tests read it to assert that the
+        /// downgrade flip removed the next-gen group record atomically.
+        /// `parse_key` dispatches version 3 to the next-gen family.
         pub async fn has_next_gen_group_metadata_tombstone(&self, group_id: &str) -> bool {
             use crate::coordinator::unified::{
                 persistence::{Key, parse_key},
@@ -149,13 +151,15 @@ pub mod fake {
             })
         }
 
-        /// `true` iff some appended record tombstones the group-level next-gen
-        /// k6 `TargetAssignmentMetadata` record for `group_id` — a key whose
-        /// leading `i16` version is `6` with a null value. Used to assert the
-        /// downgrade flip also drops the group-level target metadata, which
-        /// would otherwise survive log compaction and resurrect the group as
-        /// next-gen on replay. `parse_key` dispatches version 6 to the next-gen
-        /// family.
+        /// Returns `true` if and only if an appended record tombstones the
+        /// group-level next-gen k6 `TargetAssignmentMetadata` record for
+        /// `group_id`. Such a record has a key whose leading `i16` version is
+        /// `6`, and a null value.
+        ///
+        /// Tests read it to assert that the downgrade flip also drops the
+        /// group-level target metadata. That metadata would otherwise survive
+        /// log compaction and bring the group back as next-gen on replay.
+        /// `parse_key` dispatches version 6 to the next-gen family.
         pub async fn has_next_gen_target_metadata_tombstone(&self, group_id: &str) -> bool {
             use crate::coordinator::unified::{
                 persistence::{Key, parse_key},

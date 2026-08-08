@@ -1,18 +1,22 @@
 //! JVM golden-parity tests for Interactive-Query read semantics.
 //!
-//! Ground truth is `tests/testdata/iq/behavior.json`, captured from a real JVM
-//! Kafka Streams 4.1 `TopologyTestDriver` run (`jvm-capture/run.sh --iq`). Each
-//! test rebuilds the equivalent Rust DSL topology, replays the SAME `records`
-//! (value, timestamp) the JVM fed, then reads each materialized store back through
-//! the driver's IQ byte-layer helpers and asserts parity with the captured reads:
-//! KV get / range / all / count; window point + range fetch; session fetch.
+//! The ground truth is `tests/testdata/iq/behavior.json`, captured from a real
+//! JVM Kafka Streams 4.1 `TopologyTestDriver` run through
+//! `jvm-capture/run.sh --iq`.
 //!
-//! On the one approximate field — KV `count`, which is `RocksDB`'s
-//! `approximateNumEntries()` on the JVM (a write-count estimate, `3` for `a,a,b`)
-//! versus our in-memory store's exact distinct-key count (`2`) — we assert our
-//! count lands in the contractually-valid `[distinct_keys, total_writes]` band
-//! that brackets the JVM value, since `approximateNumEntries` is documented as
-//! approximate. Every other field is an exact match.
+//! Each test rebuilds the equivalent Rust DSL topology and replays the SAME
+//! `records`, that is the same (value, timestamp) pairs, that the JVM read. It
+//! then reads each materialized store back through the driver's IQ byte-layer
+//! helpers and asserts parity with the captured reads: KV get, range, all, and
+//! count, the window point fetch and range fetch, and the session fetch.
+//!
+//! One field is approximate: the KV `count`. On the JVM it is `RocksDB`'s
+//! `approximateNumEntries()`, a write-count estimate, which gives `3` for
+//! `a,a,b`. Our in-memory store gives the exact distinct-key count, `2`. The test
+//! therefore asserts that our count lands in the contractually valid
+//! `[distinct_keys, total_writes]` band, which brackets the JVM value, because
+//! the documentation calls `approximateNumEntries` approximate. Every other field
+//! is an exact match.
 
 use crabka_client_streams::{
     Consumed, I64Serde, SessionWindows, StringSerde, TimeWindows, TopologyTestDriver,
@@ -43,7 +47,8 @@ fn records(section: &Value) -> Vec<(String, i64)> {
         .collect()
 }
 
-/// KV count: replay `records` under each value-as-key, then read get/range/all/count.
+/// KV count. It replays `records` under each value as the key, then reads get,
+/// range, all, and count.
 #[tokio::test]
 async fn iq_kv_golden_parity() {
     let g = golden();
@@ -116,8 +121,8 @@ async fn iq_kv_golden_parity() {
     );
 }
 
-/// Window count (tumbling): replay timestamped records under key "k", read point +
-/// range fetch.
+/// Window count on a tumbling window. It replays the timestamped records under
+/// key "k", then reads the point fetch and the range fetch.
 #[tokio::test]
 async fn iq_window_golden_parity() {
     let gold = golden();
@@ -176,7 +181,8 @@ async fn iq_window_golden_parity() {
     assert_eq!(got, want, "window range fetch parity");
 }
 
-/// Session count: replay timestamped records under key "k", read fetch(key).
+/// Session count. It replays the timestamped records under key "k", then reads
+/// `fetch(key)`.
 #[tokio::test]
 async fn iq_session_golden_parity() {
     let gold = golden();

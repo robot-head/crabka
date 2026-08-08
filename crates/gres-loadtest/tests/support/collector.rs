@@ -1,19 +1,20 @@
 //! An in-test OTLP collector: a real gRPC `TraceService` the spawned
 //! `crabka-gres` processes export to.
 //!
-//! This exists because the cross-process propagation claim cannot be checked
-//! from inside one process. Every other layer of the tracing suite installs a
-//! subscriber and inspects `SpanData` in memory; here the spans have to make a
-//! round trip through each node's batch exporter, over OTLP/gRPC, and be
-//! decoded from the wire — which is also the only way the `service.instance.id`
-//! resource attribute (the thing that says *which process* emitted a span)
-//! becomes observable at all.
+//! This exists because no test inside one process can check the cross-process
+//! propagation claim. Every other layer of the tracing suite installs a
+//! subscriber and inspects `SpanData` in memory. Here the spans must make a
+//! round trip through each node's batch exporter, over OTLP/gRPC, and then be
+//! decoded from the wire. That round trip is also the only way the
+//! `service.instance.id` resource attribute becomes observable at all, and
+//! that attribute is what says *which process* emitted a span.
 //!
-//! `LogsService` is implemented alongside `TraceService` because
+//! This module implements `LogsService` beside `TraceService`, because
 //! `crabka_telemetry::init` always builds a log exporter next to the span
-//! exporter. Leaving logs unimplemented would make every log batch fail, and
-//! the SDK reports export failures through `tracing` — which feeds the log
-//! bridge, which fails again. Accepting and discarding them cuts that loop.
+//! exporter. An unimplemented `LogsService` would make every log batch fail.
+//! The SDK reports an export failure through `tracing`, which feeds the log
+//! bridge, which fails again. To accept the log batches and discard them cuts
+//! that loop.
 
 use std::{
     collections::BTreeMap,
@@ -39,17 +40,18 @@ use opentelemetry_proto::tonic::{
 /// one gres process's spans from another's.
 const SERVICE_INSTANCE_ID: &str = "service.instance.id";
 
-/// One exported span, flattened out of its resource and scope envelopes with
-/// ids rendered as lowercase hex (the form a `traceparent` carries, so the
-/// client's tag can be compared directly against what came back).
+/// One exported span, flattened out of its resource and scope envelopes, with
+/// the ids rendered as lowercase hex. That is the form a `traceparent`
+/// carries, so a test can compare the client's tag directly against what came
+/// back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatSpan {
     /// `service.instance.id` of the process that emitted the span.
     pub instance: String,
-    /// Exported span name. Note that `otel.name`, when recorded, *replaces*
-    /// this — a `gres.range_serve` span arrives named after its RPC method and
-    /// a `gres.statement` span after its query summary, so tests must key off
-    /// attributes and span kind rather than this field.
+    /// Exported span name. `otel.name`, when recorded, *replaces* this name.
+    /// A `gres.range_serve` span arrives named after its RPC method, and a
+    /// `gres.statement` span after its query summary. Tests must therefore key
+    /// off the attributes and the span kind, not off this field.
     pub name: String,
     /// OTLP span kind.
     pub kind: SpanKind,
@@ -76,7 +78,7 @@ impl FlatSpan {
         self.attribute(key) == Some(value)
     }
 
-    /// Whether this span is one end of a range RPC — the pair that carries the
+    /// Whether this span is one end of a range RPC. That pair carries the
     /// trace across the process boundary.
     #[must_use]
     pub fn is_range_rpc(&self, kind: SpanKind) -> bool {
@@ -231,9 +233,10 @@ fn attribute(attributes: &[KeyValue], key: &str) -> Option<String> {
     attributes.iter().find(|kv| kv.key == key).and_then(render)
 }
 
-/// Renders an attribute value as a string. Composite values (arrays, nested
-/// key-value lists, opaque bytes) are dropped: no span the gres query path
-/// emits uses one, so a test that needed one would be testing something else.
+/// Renders an attribute value as a string. This function drops composite
+/// values, that is, arrays, nested key-value lists, and opaque bytes. No span
+/// that the gres query path emits uses one, so a test that needed one would
+/// test something else.
 fn render(kv: &KeyValue) -> Option<String> {
     match kv
         .value

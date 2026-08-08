@@ -1,9 +1,9 @@
 //! Diskless WAL shipping-gate harness.
 //!
-//! This is intentionally an ignored integration test: it is the place to grow
+//! This integration test is ignored on purpose. It is the place to add
 //! Jepsen-style nemesis scenarios without making the normal cross-platform unit
-//! lane slow. The first scenario exercises the public client path across a broker
-//! restart with diskless WAL enabled.
+//! lane slow. The first scenario runs the public client path across a broker
+//! restart with the diskless WAL enabled.
 
 use std::time::{Duration, Instant};
 

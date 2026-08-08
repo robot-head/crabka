@@ -1,7 +1,9 @@
-//! Docker-gated, `#[ignore]` corpus generator. Boots `mirror.gcr.io/apache/kafka:4.3.0`,
-//! routes real JVM-client traffic through an in-process `kafka-tap`, captures
-//! one frame per `(api_key, version, direction)`, then synthesizes the
-//! remainder via the JVM oracle. Run manually:
+//! Docker-gated, `#[ignore]` corpus generator.
+//!
+//! This generator boots `mirror.gcr.io/apache/kafka:4.3.0` and routes real
+//! JVM-client traffic through an in-process `kafka-tap`. It captures one frame
+//! per `(api_key, version, direction)`, then synthesizes the remainder with the
+//! JVM oracle. Run it manually:
 //!   `cargo test -p crabka-protocol --test capture_corpus -- --ignored --nocapture`
 mod support;
 use std::{
@@ -126,7 +128,7 @@ fn hex_encode(b: &[u8]) -> String {
     s
 }
 
-/// Map `(api_key, direction)` to the message name via the included `CASES` table.
+/// Map `(api_key, direction)` to the message name with the included `CASES` table.
 fn name_for(api_key: i16, is_request: bool) -> Option<&'static str> {
     CASES
         .iter()
@@ -140,7 +142,8 @@ fn name_for(api_key: i16, is_request: bool) -> Option<&'static str> {
         .map(|c| c.name)
 }
 
-/// Mirror `name_conv::module_name`: '_' before interior uppercase, lowercased.
+/// Mirror `name_conv::module_name`: add '_' before an interior uppercase letter,
+/// then lowercase the result.
 fn to_snake(name: &str) -> String {
     let mut out = String::new();
     for (i, ch) in name.chars().enumerate() {

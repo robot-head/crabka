@@ -1,4 +1,5 @@
-//! In-memory source->target offset translation built from MM2 offset-sync records.
+//! In-memory source-to-target offset translation built from MM2 offset-sync
+//! records.
 //! Translation is "at-or-before": find the latest sync with upstream <= committed,
 //! then downstream + (committed - upstream). Never maps past un-replicated data.
 
@@ -18,7 +19,7 @@ pub struct OffsetSyncStore {
 }
 
 impl OffsetSyncStore {
-    /// Ingest one offset-sync record, replacing any prior entry for the same
+    /// Ingest one offset-sync record. It replaces any prior entry for the same
     /// `(topic, partition, upstream)` triple.
     pub fn ingest(&mut self, s: OffsetSync) {
         self.syncs

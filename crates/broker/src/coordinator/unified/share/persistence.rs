@@ -1,14 +1,14 @@
 //! KIP-932 share-group record types persisted in `__consumer_offsets`.
 //!
-//! Wire encoding mirrors `persistence_next_gen` (the KIP-848 consumer
-//! next-gen codecs): a leading `i16` key-version discriminator on keys and an
-//! `i16(0)` version preamble on values. Share-group records reuse the same
-//! length-prefixed array / nullable-string leaf encoders but drop the
-//! consumer-only fields (`instance_id`, `server_assignor`,
-//! `subscribed_topic_regex`, `rebalance_timeout_ms`, and the
-//! revocation/pending assignment machinery).
+//! The wire encoding mirrors `persistence_next_gen`, the KIP-848 consumer
+//! next-gen codecs. Keys carry a leading `i16` key-version discriminator, and
+//! values carry an `i16(0)` version preamble. Share-group records reuse the same
+//! length-prefixed array and nullable-string leaf encoders. They drop the
+//! consumer-only fields: `instance_id`, `server_assignor`,
+//! `subscribed_topic_regex`, `rebalance_timeout_ms`, and the revocation and
+//! pending-assignment machinery.
 //!
-//! Key versions 9–13 are free; the consumer next-gen keys use 3,5,6,7,8.
+//! Key versions 9-13 are free. The consumer next-gen keys use 3, 5, 6, 7, 8.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_protocol::{ProtocolError, primitives::uuid::Uuid};
@@ -261,10 +261,12 @@ impl ShareGroupCurrentMemberAssignmentValue {
     }
 }
 
-/// KIP-932 `ShareGroupStatePartitionMetadata` (key v14): tracks which
-/// `(topic_id, partition)` share-states a group has initialized, plus a set
-/// of topic ids whose share-state is being deleted. Lets the group
-/// coordinator skip re-initializing partitions across restarts.
+/// KIP-932 `ShareGroupStatePartitionMetadata`, key v14.
+///
+/// The record tracks which `(topic_id, partition)` share-states a group has
+/// initialized. It also holds a set of topic ids whose share-state the broker is
+/// deleting. The record lets the group coordinator skip the re-initialization of
+/// partitions across restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareGroupStatePartitionMetadataValue {
     pub initialized: Vec<(uuid::Uuid, Vec<i32>)>,
@@ -384,8 +386,9 @@ mod tests {
 
     use super::*;
 
-    /// Split a freshly encoded key into its leading version and the remaining
-    /// body, mirroring how `__consumer_offsets` keys are dispatched on the
+    /// Split a freshly encoded key into its leading version and its body.
+    ///
+    /// This mirrors how the broker dispatches `__consumer_offsets` keys on the
     /// leading `i16`.
     fn peek_version(buf: &[u8]) -> (i16, &[u8]) {
         let mut r = buf;

@@ -1,13 +1,15 @@
-//! Gateway membership + owner-routing for active-active forwarding.
+//! Gateway membership and owner-routing for active-active forwarding.
 //!
-//! Each replica publishes `{advertised_addr, owned, epoch}` (keyed by a
-//! per-process `node_id`) to the compacted, single-partition membership topic
-//! on every dedup-assignment change. Every replica tails the whole topic — a
-//! unique consumer group per process ⇒ it is the sole member ⇒ assigned all
-//! partitions ⇒ a broadcast read — into a `dedup_partition → owner_addr`
-//! routing table. A crashed node's stale ownership record cannot shadow the
-//! live owner: the table breaks ties by record offset, and the topic's single
-//! partition makes those offsets a total order, so the most-recent claim wins.
+//! On every dedup-assignment change, each replica publishes
+//! `{advertised_addr, owned, epoch}` to the compacted, single-partition
+//! membership topic, keyed by a per-process `node_id`. Every replica tails the
+//! whole topic into a `dedup_partition → owner_addr` routing table. Each
+//! process uses a unique consumer group ⇒ it is the sole member ⇒ it is
+//! assigned all partitions ⇒ the read is a broadcast.
+//!
+//! A crashed node's stale ownership record cannot shadow the live owner. The
+//! table breaks ties by record offset, and the topic's single partition makes
+//! those offsets a total order, so the most-recent claim wins.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -25,7 +27,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{config::GatewayRuntimeConfig, error::GatewayError};
 
-/// One replica's published membership (value; key = `node_id`).
+/// One replica's published membership. It is the record value, and the key is
+/// `node_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub advertised_addr: String,
@@ -35,11 +38,13 @@ pub struct NodeInfo {
 
 struct NodeEntry {
     info: NodeInfo,
-    /// Membership-topic offset of this node's latest record (recency tiebreak).
+    /// Membership-topic offset of this node's latest record. The table uses it
+    /// as the recency tiebreak.
     offset: i64,
 }
 
-/// Materialized membership + the derived `partition → owner_addr` routing table.
+/// Materialized membership and the derived `partition → owner_addr` routing
+/// table.
 pub struct MembershipStore {
     nodes: RwLock<HashMap<String, NodeEntry>>,
     routing: RwLock<HashMap<u32, String>>,
@@ -61,7 +66,8 @@ impl MembershipStore {
         }
     }
 
-    /// Owner advertised-addr for dedup-partition `p`, if any replica claims it.
+    /// The owner's advertised address for dedup-partition `p`, if a replica
+    /// claims it.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -84,8 +90,9 @@ impl MembershipStore {
         self.rebuild();
     }
 
-    /// Rebuild `partition → owner_addr`: for each partition, the claimant whose
-    /// record has the highest offset (most recent publish) wins.
+    /// Rebuild `partition → owner_addr`. For each partition, the claimant whose
+    /// record has the highest offset wins, because that is the most recent
+    /// publish.
     fn rebuild(&self) {
         let nodes = self.nodes.read().expect("nodes lock");
         let mut best: HashMap<u32, (i64, String)> = HashMap::new();
@@ -102,9 +109,11 @@ impl MembershipStore {
     }
 
     /// Tail the membership topic into the routing table until `shutdown`.
-    /// `group` MUST be unique per process (node-scoped) so this replica is the
-    /// sole member and is assigned every partition (a broadcast read). Closes
-    /// the consumer on exit so the coordinator + group member don't leak.
+    ///
+    /// `group` MUST be unique per process, that is, node-scoped. This replica
+    /// is then the sole member and is assigned every partition, which makes the
+    /// read a broadcast. The task closes the consumer on exit, so the
+    /// coordinator and the group member do not leak.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn run_membership(
@@ -195,7 +204,7 @@ impl Default for MembershipStore {
     }
 }
 
-/// Publishes this replica's membership on each dedup-assignment change.
+/// Publisher of this replica's membership on each dedup-assignment change.
 pub struct MembershipPublisher {
     producer: Producer,
     node_id: String,
@@ -259,8 +268,9 @@ impl MembershipPublisher {
         })
     }
 
-    /// Publish the current owned set (bumps `epoch`). Keyed by `node_id` so the
-    /// compacted topic keeps exactly one live record per replica.
+    /// Publish the current owned set. This bumps `epoch`. The record is keyed
+    /// by `node_id`, so the compacted topic keeps exactly one live record per
+    /// replica.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn publish(&self, owned: &HashSet<u32>) -> Result<(), GatewayError> {

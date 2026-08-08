@@ -208,8 +208,10 @@ pub fn compact_bytes_len(b: &[u8]) -> usize {
     uvarint_len(u32::try_from(b.len() + 1).unwrap()) + b.len()
 }
 
-/// Like `compact_bytes_len` but takes the byte-count directly rather than a slice.
-/// Useful when the content size is known without materialising the buffer.
+/// Like `compact_bytes_len`, but takes the byte count directly rather than a slice.
+///
+/// Use this when you know the content size and do not need to materialise the
+/// buffer.
 #[must_use]
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.

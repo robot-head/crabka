@@ -1,15 +1,18 @@
 //! Per-process resource sampling via `/proc`.
 //!
-//! The sampler polls `/proc/<pid>/stat` (utime + stime, converted to
-//! core-seconds via `rustix::param::clock_ticks_per_second`; Linux-only —
-//! on other platforms `/proc` reads fail and every process reports zeros) and
-//! `/proc/<pid>/status` (`VmRSS`) on a fixed interval for every process in a
-//! live [`ProcessRoster`]. The roster is re-snapshotted on every tick, so an
-//! entry appended mid-run — a node restarted by a fault, with a fresh pid
-//! under a `label#N` entry — is attached at the next tick, its CPU window
-//! starting at attach (the correct attribution for a process born mid-run).
-//! A process that disappears (killed by a fault) keeps its last observed
-//! totals under its own entry.
+//! The sampler polls `/proc/<pid>/stat` and `/proc/<pid>/status` on a fixed
+//! interval, for every process in a live [`ProcessRoster`]. From `stat` it
+//! takes utime and stime and converts them to core-seconds with
+//! `rustix::param::clock_ticks_per_second`. From `status` it takes `VmRSS`.
+//! This works on Linux only. On other platforms the `/proc` reads fail and
+//! every process reports zeros.
+//!
+//! The sampler snapshots the roster again on every tick. An entry appended
+//! mid-run, such as a node that a fault restarted, with a fresh pid under a
+//! `label#N` entry, therefore attaches at the next tick. Its CPU window starts
+//! at that attach, which is the correct attribution for a process born
+//! mid-run. A process that disappears, because a fault killed it, keeps its
+//! last observed totals under its own entry.
 
 use std::fs;
 
@@ -27,8 +30,8 @@ use crate::{
 
 /// Handle to a background resource sampler.
 ///
-/// Dropping the handle without calling [`ProcSampler::stop`] cancels the
-/// background task; the collected totals are then discarded.
+/// A drop of the handle without a call to [`ProcSampler::stop`] cancels the
+/// background task, and the collected totals are then discarded.
 #[derive(Debug)]
 pub struct ProcSampler {
     stop_tx: oneshot::Sender<()>,
@@ -38,13 +41,16 @@ pub struct ProcSampler {
 impl ProcSampler {
     /// Starts sampling the roster's processes every `interval`.
     ///
-    /// One sample is taken synchronously before the background task starts,
-    /// so a window shorter than `interval` still observes every process, and
-    /// the reported CPU covers only the sampled window (last observed total
-    /// minus first observed total), not the whole process lifetime. The
-    /// roster is re-snapshotted on every tick: entries appended after spawn
-    /// (restarted nodes) are attached then, their windows starting at
-    /// attach. A pid whose `/proc` entries are never readable reports zeros.
+    /// This method takes one sample synchronously before the background task
+    /// starts, so a window shorter than `interval` still observes every
+    /// process. The reported CPU therefore covers only the sampled window, as
+    /// the last observed total minus the first observed total, and not the
+    /// whole process lifetime.
+    ///
+    /// The sampler snapshots the roster again on every tick. Entries appended
+    /// after the spawn, such as restarted nodes, attach at that point, and
+    /// their windows start at the attach. A pid whose `/proc` entries are
+    /// never readable reports zeros.
     ///
     /// # Panics
     ///
@@ -72,12 +78,12 @@ impl ProcSampler {
         Self { stop_tx, task }
     }
 
-    /// Stops sampling and returns totals over the sampled window, one entry
-    /// per roster entry in roster (launch) order.
+    /// Stops the sampling and returns the totals over the sampled window, one
+    /// entry for each roster entry, in roster order, which is launch order.
     ///
-    /// A final sample of still-alive pids is taken before totals are
-    /// computed; processes that vanished mid-run keep their last observed
-    /// totals.
+    /// This method takes a final sample of the still-alive pids before it
+    /// computes the totals. A process that vanished mid-run keeps its last
+    /// observed totals.
     ///
     /// # Panics
     ///
@@ -92,10 +98,10 @@ impl ProcSampler {
     }
 }
 
-/// Attaches roster entries not yet tracked, then samples every tracked
-/// process. The roster is append-only, so the untracked entries are exactly
-/// the tail past `tracked.len()` and result ordering stays roster order. A
-/// process attached mid-run starts its CPU window at attach.
+/// Attaches the roster entries that are not yet tracked, then samples every
+/// tracked process. The roster is append-only, so the untracked entries are
+/// exactly the tail past `tracked.len()`, and the result order stays roster
+/// order. A process attached mid-run starts its CPU window at the attach.
 fn attach_and_sample(roster: &ProcessRoster, tracked: &mut Vec<Tracked>) {
     for info in roster.snapshot().into_iter().skip(tracked.len()) {
         tracked.push(Tracked::new(info));
@@ -131,8 +137,9 @@ impl Tracked {
         }
     }
 
-    /// Takes one sample. A pid that cannot be read (process gone, or never
-    /// existed) is silently skipped, keeping the previous totals.
+    /// Takes one sample. This method quietly skips a pid that it cannot read,
+    /// because the process is gone or never existed, and it keeps the previous
+    /// totals.
     fn sample(&mut self) {
         let pid = self.info.pid;
         if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat"))
@@ -182,10 +189,10 @@ struct ProcStat {
 /// Parses `utime` (field 14) and `stime` (field 15) out of a
 /// `/proc/<pid>/stat` line.
 ///
-/// Field 2 (`comm`) is parenthesised and may itself contain spaces and
-/// parentheses; the kernel does not escape it, so the only safe parse is to
-/// split on the substring after the *last* `)` and count fields from there
-/// (the field after `comm` is field 3, the process state).
+/// Field 2, `comm`, is parenthesised and can itself hold spaces and
+/// parentheses. The kernel does not escape it, so the only safe parse splits
+/// on the substring after the *last* `)` and counts the fields from there. The
+/// field after `comm` is field 3, the process state.
 fn parse_proc_stat(line: &str) -> Option<ProcStat> {
     let (_, after_comm) = line.rsplit_once(')')?;
     let mut fields = after_comm.split_ascii_whitespace();
@@ -199,7 +206,8 @@ fn parse_proc_stat(line: &str) -> Option<ProcStat> {
 }
 
 /// Parses the `VmRSS:` line out of `/proc/<pid>/status` content. The kernel
-/// labels it `kB` but counts kibibytes; kernel threads have no `VmRSS` line.
+/// labels it `kB` but counts kibibytes. A kernel thread has no `VmRSS`
+/// line.
 fn parse_vm_rss(status: &str) -> Option<ByteSize> {
     let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
     let count: u64 = line
@@ -217,24 +225,25 @@ fn clock_tick_rate() -> Frequency {
     Frequency::from_per_sec(u64_as_f64(rustix::param::clock_ticks_per_second()))
 }
 
-/// Off Linux there is no `/proc` to sample — reads fail and every process
-/// reports zeros — so the rate is never observable; any nonzero constant
-/// keeps the arithmetic well-defined.
+/// Off Linux there is no `/proc` to sample. The reads fail and every process
+/// reports zeros, so the rate is never observable. Any nonzero constant keeps
+/// the arithmetic well-defined.
 #[cfg(not(target_os = "linux"))]
 fn clock_tick_rate() -> Frequency {
     per_sec(100)
 }
 
-/// The CPU time `ticks` of a clock running at `tick_rate` represent. A
-/// non-positive rate (impossible on Linux, but cheap to guard) yields no
-/// elapsed time rather than an infinity, because [`FrequencyExt::period`]
-/// reports a zero period for it.
+/// The CPU time that `ticks` of a clock running at `tick_rate` represent. A
+/// non-positive rate is impossible on Linux, but the guard is cheap. Such a
+/// rate gives no elapsed time rather than an infinity, because
+/// [`FrequencyExt::period`] reports a zero period for it.
 fn ticks_to_time(ticks: u64, tick_rate: Frequency) -> Time {
     tick_rate.period() * u64_as_f64(ticks)
 }
 
-/// Lossless-for-practical-values `u64` → `f64` conversion built from exact
-/// `u32` → `f64` conversions, avoiding a precision-losing `as` cast.
+/// A `u64` → `f64` conversion that is lossless for practical values. It is
+/// built from exact `u32` → `f64` conversions, so it needs no `as` cast, which
+/// would lose precision.
 fn u64_as_f64(value: u64) -> f64 {
     const TWO_POW_32: f64 = 4_294_967_296.0;
     let high = u32::try_from(value >> 32).expect("u64 >> 32 fits in u32");
@@ -326,7 +335,7 @@ mod tests {
         roster
     }
 
-    /// Burns CPU on the current thread for roughly `budget`. Only the
+    /// Burns CPU on the current thread for about `budget`. Only the
     /// Linux-gated self-sampling tests need it.
     #[cfg(target_os = "linux")]
     fn burn_cpu(budget: Time) {

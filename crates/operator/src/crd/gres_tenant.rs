@@ -1,5 +1,7 @@
-//! `GresTenant` CRD. Represents one tenant provisioned under a `Gres` fleet.
-//! The reconciler provisions registry records and compute workloads.
+//! `GresTenant` CRD.
+//!
+//! A `GresTenant` represents one tenant provisioned under a `Gres` fleet. The
+//! reconciler provisions registry records and compute workloads.
 
 use k8s_openapi::api::core::v1::ResourceRequirements;
 use kube::CustomResource;
@@ -26,8 +28,8 @@ pub struct GresTenantSpec {
     /// Name of the `Gres` fleet this tenant belongs to.
     pub gres: String,
 
-    /// Compute container image override. When absent the operator uses its
-    /// global Gres image override or compiled default.
+    /// Compute container image override. When absent, the operator uses its
+    /// global Gres image override or its compiled default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1))]
     pub image: Option<String>,
@@ -35,22 +37,23 @@ pub struct GresTenantSpec {
     /// SQL user exposed through `PgDog` and enforced by the tenant compute.
     pub user: String,
 
-    /// Secret key holding the plaintext tenant password. The reconciler hashes
-    /// it to a verifier; the password is never copied to
+    /// Secret key that holds the plaintext tenant password. The reconciler
+    /// hashes it to a verifier. The reconciler never copies the password to
     /// status.
     pub password_secret_ref: SecretKeyRef,
 
-    /// Suspends the tenant when true. Unset is treated as active.
+    /// Suspends the tenant when true. The operator treats unset as active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended: Option<bool>,
 
-    /// CPU / memory resource requests and limits for the tenant compute.
+    /// CPU and memory resource requests and limits for the tenant compute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequirements>,
 
-    /// Optional ordered range layout. Omitted means one open-ended range r0.
+    /// Optional ordered range layout. An omitted layout gives one open-ended
+    /// range r0.
     ///
-    /// Each entry is placed on a distinct range compute.
+    /// The operator places each entry on a distinct range compute.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ranges: Vec<GresTenantRangeSpec>,
 
@@ -78,7 +81,7 @@ pub struct GresTenantRangeSpec {
 pub struct GresTenantRangeKey {
     /// Table identifier at the boundary.
     pub table_id: u64,
-    /// Hash bucket at the boundary; absent for non-hash tables.
+    /// Hash bucket at the boundary. It is absent for non-hash tables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket: Option<u32>,
     /// Row identifier at the boundary.

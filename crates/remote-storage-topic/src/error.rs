@@ -8,8 +8,9 @@ use crabka_remote_storage::RemoteStorageError;
 /// `__remote_log_metadata` topic.
 #[derive(Debug, thiserror::Error)]
 pub enum MetadataLogError {
-    /// The transport refused the publish (broker unreachable, ack
-    /// timed out, …). The event was not appended.
+    /// The transport refused the publish, for example because the broker
+    /// was unreachable or the ack timed out. The log did not append the
+    /// event.
     #[error("publish failed: {0}")]
     Publish(String),
 
@@ -55,13 +56,13 @@ pub enum CodecError {
     #[error("length prefix {0} too large")]
     LengthOverflow(u64),
 
-    /// Reconstructing the event-domain type from the decoded fields
-    /// violated a precondition (e.g. empty leader-epoch map).
+    /// The reconstruction of the event-domain type from the decoded fields
+    /// violated a precondition, for example an empty leader-epoch map.
     #[error("decoded event rejected: {0}")]
     Domain(String),
 
-    /// An error propagated from the generated protocol codec (envelope
-    /// framing, schema mismatch, or trailing bytes).
+    /// An error propagated from the generated protocol codec: envelope
+    /// framing, schema mismatch, or trailing bytes.
     #[error("protocol codec: {0}")]
     Protocol(String),
 }
@@ -77,8 +78,8 @@ pub enum SnapshotError {
     #[error("unsupported snapshot format version {0}")]
     UnsupportedVersion(u16),
 
-    /// The snapshot bytes were malformed (truncated, bad framing, or a
-    /// contained event failed to decode).
+    /// The snapshot bytes were malformed. They were truncated, badly framed,
+    /// or a contained event failed to decode.
     #[error("malformed snapshot: {0}")]
     Malformed(#[from] CodecError),
 

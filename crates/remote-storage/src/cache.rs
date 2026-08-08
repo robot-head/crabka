@@ -1,14 +1,14 @@
-//! `RemoteLogMetadataCache` — per-partition metadata state with the
+//! `RemoteLogMetadataCache` holds per-partition metadata state with the
 //! lifecycle state machine and an epoch-indexed offset lookup.
 //!
-//! Mirrors Kafka's `RemoteLogMetadataCache`: segments are kept in an
-//! id-keyed map; once a segment reaches
-//! [`CopySegmentFinished`](RemoteLogSegmentState::CopySegmentFinished) it is
-//! also indexed per leader epoch by the offset at which that epoch starts
-//! contributing, so an `(epoch, offset)` query is a navigable-map floor
-//! lookup. A segment leaving the readable set
-//! ([`DeleteSegmentStarted`](RemoteLogSegmentState::DeleteSegmentStarted))
-//! is removed from the epoch index;
+//! Mirrors Kafka's `RemoteLogMetadataCache`. The cache holds segments in an
+//! id-keyed map. When a segment reaches
+//! [`CopySegmentFinished`](RemoteLogSegmentState::CopySegmentFinished), the
+//! cache also indexes it per leader epoch by the offset at which that epoch
+//! starts to contribute, so an `(epoch, offset)` query is a navigable-map
+//! floor lookup. When a segment leaves the readable set at
+//! [`DeleteSegmentStarted`](RemoteLogSegmentState::DeleteSegmentStarted), the
+//! cache removes it from the epoch index.
 //! [`DeleteSegmentFinished`](RemoteLogSegmentState::DeleteSegmentFinished)
 //! drops it entirely.
 
@@ -29,9 +29,9 @@ use crate::{
 pub(crate) struct RemoteLogMetadataCache {
     /// Every known segment, keyed by its per-segment UUID.
     id_to_metadata: HashMap<Uuid, RemoteLogSegmentMetadata>,
-    /// For each leader epoch, a navigable map from the offset that epoch
-    /// starts contributing → the finished segment id. Only finished
-    /// (readable) segments appear here.
+    /// For each leader epoch, a navigable map from the offset that the epoch
+    /// starts to contribute → the finished segment id. Only finished,
+    /// readable segments appear here.
     epoch_to_offset_to_id: HashMap<LeaderEpoch, BTreeMap<i64, Uuid>>,
     /// Partition-delete lifecycle state, once marked.
     delete_state: Option<RemotePartitionDeleteState>,
@@ -158,20 +158,22 @@ impl RemoteLogMetadataCache {
         out
     }
 
-    /// Every tracked segment (all states), unordered. The owning
-    /// manager pairs this with [`Self::delete_state`] to dump the
-    /// partition for snapshotting.
+    /// Every tracked segment, in all states, unordered. The owning manager
+    /// pairs this with [`Self::delete_state`] to dump the partition for a
+    /// snapshot.
     pub(crate) fn dump_segments(&self) -> Vec<RemoteLogSegmentMetadata> {
         self.id_to_metadata.values().cloned().collect()
     }
 
-    /// Seed this (assumed-empty) cache from a dump, bypassing
-    /// lifecycle-transition validation. Rebuilds the per-epoch offset
-    /// index for every finished segment exactly as the live path does,
-    /// so reads after seeding behave identically. `delete_started` /
-    /// `delete_finished` segments are kept in `id_to_metadata` but not
-    /// indexed (`delete_finished` never reaches a dump, but we tolerate
-    /// it for robustness). Partition-delete state is set verbatim.
+    /// Seeds this cache from a dump and does no lifecycle-transition
+    /// validation. The cache is assumed to be empty.
+    ///
+    /// The seed rebuilds the per-epoch offset index for every finished
+    /// segment exactly as the live path does, so reads after the seed behave
+    /// the same. The cache keeps `delete_started` and `delete_finished`
+    /// segments in `id_to_metadata` but does not index them. A
+    /// `delete_finished` segment never reaches a dump, but the seed tolerates
+    /// it for robustness. The seed sets the partition-delete state verbatim.
     pub(crate) fn seed(
         &mut self,
         segments: Vec<RemoteLogSegmentMetadata>,

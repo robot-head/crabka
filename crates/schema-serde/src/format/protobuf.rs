@@ -1,6 +1,7 @@
-//! Protobuf serde over `prost` + `prost-reflect`. The local message provides
-//! its descriptor via `ReflectMessage`; the registered schema is the
-//! normalized `.proto` text of its file descriptor.
+//! Protobuf serde over `prost` and `prost-reflect`.
+//!
+//! The local message gives its descriptor with `ReflectMessage`. The registered
+//! schema is the normalized `.proto` text of its file descriptor.
 
 use std::{marker::PhantomData, sync::Arc};
 
@@ -16,8 +17,10 @@ use crate::{
     wire,
 };
 
-/// Protobuf serializer/deserializer for a `prost` message `T: ReflectMessage`,
-/// bound to a key/value role; the subject is derived from the topic at call time.
+/// Protobuf serializer and deserializer for a `prost` message
+/// `T: ReflectMessage`, bound to a key/value role.
+///
+/// The serde takes the subject from the topic at call time.
 pub struct ProtobufSerde<T> {
     binding: Binding,
     message_index: Vec<i32>,
@@ -54,12 +57,12 @@ impl<T: ReflectMessage + Default> ProtobufSerde<T> {
         }
     }
 
-    /// A Protobuf serde for record **values** (`<topic>-value`).
+    /// A Protobuf serde for record **values**: `<topic>-value`.
     pub fn value(cache: &Arc<SchemaCache>) -> Self {
         Self::make(cache, Role::Value)
     }
 
-    /// A Protobuf serde for record **keys** (`<topic>-key`).
+    /// A Protobuf serde for record **keys**: `<topic>-key`.
     pub fn key(cache: &Arc<SchemaCache>) -> Self {
         Self::make(cache, Role::Key)
     }
@@ -130,8 +133,10 @@ fn message_index(descriptor: &prost_reflect::MessageDescriptor) -> Vec<i32> {
     vec![0]
 }
 
-/// Minimal `.proto` text renderer. Kept narrow: the registry stores text for
-/// dedup; full normalization parity is a verify-against-cp item.
+/// Minimal `.proto` text renderer.
+///
+/// The renderer stays narrow because the registry stores the text for dedup.
+/// Full normalization parity is a verify-against-cp item.
 pub(crate) mod print {
     use std::fmt::Write as _;
 
@@ -160,10 +165,13 @@ pub(crate) mod print {
         out
     }
 
-    /// Render a field's `.proto` type token: a message/enum's (leading-dot-stripped)
-    /// `type_name`, or the proto3 keyword for a scalar `type`. Scalar fields carry
-    /// an empty `type_name` and a populated `type`, so keying off `type_name` alone
-    /// would emit no type at all (and produce unparseable `.proto` text).
+    /// Render a field's `.proto` type token.
+    ///
+    /// For a message or an enum, this function returns the `type_name` with the
+    /// leading dot stripped. For a scalar, it returns the proto3 keyword for
+    /// the `type`. Scalar fields carry an empty `type_name` and a populated
+    /// `type`. A test of `type_name` alone would emit no type at all, and the
+    /// `.proto` text would not parse.
     fn field_type(field: &FieldDescriptorProto) -> String {
         if let Some(name) = field.type_name.as_deref()
             && !name.is_empty()

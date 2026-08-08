@@ -1,8 +1,9 @@
 //! Reconcile-level tests for the `SchemaRegistry` controller.
 //!
-//! These assert the kube-side request sequence the reconciler issues
-//! (Kafka GET, Service/Deployment SSA applies, status patch) and the
-//! rendered Deployment container args / env / Secret mounts.
+//! These tests assert on the request sequence that the reconciler issues
+//! on the kube side: the Kafka GET, the SSA applies of the Service and the
+//! Deployment, and the status patch. They also assert on the rendered
+//! Deployment container args, its env, and its Secret mounts.
 
 use std::sync::Arc;
 
@@ -336,7 +337,8 @@ async fn runtime_invalid_policy_is_rejected_before_deployment() {
     assert_schema_registry_config_invalid(invalid_acl).await;
 }
 
-/// A Ready Kafka body whose internal listener exposes a bootstrap address.
+/// A Ready Kafka body whose internal listener gives a bootstrap
+/// address.
 fn ready_kafka_body(name: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1", "kind": "Kafka",

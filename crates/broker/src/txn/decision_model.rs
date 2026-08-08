@@ -1,25 +1,27 @@
 //! Exhaustive stateright model of the KIP-98/EOS `EndTxn` decision core.
 //!
-//! Drives the real `decide_phase1_transition` / `decide_end_txn_completion`
-//! (and `TxnState::can_transition_to`) over one transactional-id, modeling the
-//! `EndTxn` Phase1 → marker-window → Phase3 split so a concurrent `InitProducerId`
-//! (which bumps the producer epoch) can interleave in the window and fence the
-//! in-flight transaction. Design:
+//! The model drives the real `decide_phase1_transition` /
+//! `decide_end_txn_completion` and `TxnState::can_transition_to` over one
+//! transactional-id. It models the `EndTxn` Phase1 → marker-window → Phase3
+//! split, so a concurrent `InitProducerId` can interleave in the window and
+//! fence the in-flight transaction. `InitProducerId` bumps the producer epoch.
+//! Design:
 //! `docs/superpowers/specs/2026-06-14-crabka-txn-coordinator-model-design.md`.
 //!
-//! Headline safety: a producer fenced (epoch bumped) during the window can never
-//! finalize, and a given producer epoch's transaction is finalized at most once
-//! and never both committed and aborted.
+//! Headline safety: a producer fenced by an epoch bump during the window can
+//! never finalize. The transaction of a given producer epoch is finalized at
+//! most once, and never both committed and aborted.
 //!
-//! NOTE: the partition set is omitted (it does not affect the fencing/atomicity
-//! properties); the txn-start is modeled as `BeginTxn` (the `→ Ongoing`
-//! transition). Terminal outcomes are tracked as ghost per-epoch sets, not
-//! lifetime flags, so a tid that legitimately commits one generation and aborts
-//! the next is not a false violation.
+//! NOTE: the model omits the partition set, which does not affect the fencing
+//! or atomicity properties. It models the txn-start as `BeginTxn`, the
+//! `→ Ongoing` transition. It tracks terminal outcomes as ghost per-epoch sets,
+//! not lifetime flags. So a tid that legitimately commits one generation and
+//! aborts the next is not a false violation.
 //!
 //! Memory safety: stateright BFS keeps every visited unique state resident, so
-//! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
-//! and MUST be executed under the host memory watchdog while bounds are tuned.
+//! this module fences each run with `within_boundary` + `target_state_count` +
+//! `timeout`. You MUST run each config under the host memory watchdog while you
+//! tune the bounds.
 
 use std::time::Duration;
 
@@ -44,7 +46,8 @@ struct TxnModel {
     max_epoch: i16,
 }
 
-/// In-flight `EndTxn` captured at Phase 1, awaiting Phase 3 (the marker window).
+/// In-flight `EndTxn` captured at Phase 1. It waits for Phase 3, the marker
+/// window.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct PendingEnd {
     expected_epoch: i16,
@@ -59,8 +62,9 @@ struct TxnProj {
     state: i8, // TxnState::to_kafka_status()
     pending: Option<PendingEnd>,
     /// Ghost: producer epochs whose transaction finalized as commit / abort.
-    /// Sorted, distinct. The invariants assert these never overlap and never
-    /// record the same epoch twice (single-finalize per generation).
+    /// Sorted, distinct. The invariants assert that these never overlap and
+    /// never record the same epoch twice. This enforces single-finalize per
+    /// generation.
     committed: Vec<i16>,
     aborted: Vec<i16>,
 }
@@ -77,17 +81,18 @@ fn st(id: i8) -> TxnState {
     TxnState::from_kafka_status(id).expect("valid TxnState id in model")
 }
 
-/// Reconstruct a real `TxnEntry` from the projection so the real decision fns
-/// behave identically to a live run. Partitions/timestamps don't affect the
-/// decision, so they're left empty/constant.
+/// Reconstructs a real `TxnEntry` from the projection, so the real decision fns
+/// behave the same as in a live run. Partitions and timestamps do not affect the
+/// decision, so this function leaves them empty or constant.
 fn rebuild(s: &TxnProj) -> TxnEntry {
     let mut e = TxnEntry::new_empty("tid".to_string(), PID, s.epoch, 60_000, 1);
     e.state = st(s.state);
     e
 }
 
-/// Record a terminal outcome for `epoch`, asserting it has not already
-/// finalized either way (single-finalize + no-commit-and-abort per generation).
+/// Records a terminal outcome for `epoch`. Asserts that the epoch has not
+/// already finalized in either direction. This enforces single-finalize and
+/// no-commit-and-abort per generation.
 fn record(committed: &mut Vec<i16>, aborted: &mut Vec<i16>, epoch: i16, is_commit: bool) {
     assert!(
         !committed.contains(&epoch) && !aborted.contains(&epoch),

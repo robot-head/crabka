@@ -23,7 +23,7 @@ fn is_allowed_byte(byte: u8) -> bool {
 
 /// Validate a raw tenant id against the Mimir/Pyroscope charset.
 ///
-/// Rejects (with a generic, non-leaky message):
+/// Rejects the following, each with a generic message:
 /// - leading or trailing ASCII whitespace (no silent trim),
 /// - the empty string,
 /// - ids longer than 150 bytes,
@@ -65,9 +65,8 @@ pub fn validate_tenant(raw: &str) -> Result<String, ProfilesError> {
 /// Resolve a tenant id from an optional header value.
 ///
 /// Returns the [`ANONYMOUS_TENANT`] default when `value` is `None` or an empty
-/// string (this preserves the existing anonymous-default behaviour; a non-UTF-8
-/// header is signalled by the caller passing `None`). For a present, non-empty
-/// value the id is validated via [`validate_tenant`].
+/// string. The caller signals a non-UTF-8 header by passing `None`. For a
+/// present, non-empty value, [`validate_tenant`] validates the id.
 ///
 /// # Errors
 ///

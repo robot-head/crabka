@@ -1,4 +1,4 @@
-//! KIP-73 throttled replication — value types and parser.
+//! KIP-73 throttled replication: the value types and the parser.
 
 pub use crabka_throttle::{ThrottleState, TokenBucket};
 
@@ -9,11 +9,11 @@ pub use refresh::{ImageWatcher, run};
 /// Topic-level `*.throttled.replicas` config value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThrottledReplicas {
-    /// Empty string — no replicas throttled.
+    /// Empty string: no replicas are throttled.
     None,
-    /// `"*"` wildcard — all replicas of this topic throttled.
+    /// `"*"` wildcard: all replicas of this topic are throttled.
     All,
-    /// `"partition:broker,partition:broker,..."` — specific pairs.
+    /// `"partition:broker,partition:broker,..."`: specific pairs.
     List(Vec<(i32, NodeId)>),
 }
 

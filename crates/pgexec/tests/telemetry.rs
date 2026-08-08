@@ -1,16 +1,17 @@
 //! Executor tracing: what a statement's spans carry, and that they survive the
 //! hop onto the blocking pool.
 //!
-//! Every assertion runs against exported [`SpanData`], never a live
-//! `tracing::Span` handle: `tracing-opentelemetry` resolves a re-parented span's
-//! trace id when the span closes, not when its parent is set, so a live handle
-//! reports the pre-parenting trace.
+//! Every assertion runs against exported [`SpanData`], and never against a live
+//! `tracing::Span` handle. `tracing-opentelemetry` resolves a re-parented
+//! span's trace id when the span closes, and not when its parent is set, so a
+//! live handle reports the pre-parenting trace.
 //!
-//! The subscriber is installed with `set_global_default`, not `with_default`.
-//! A thread-local subscriber is invisible on `tokio::task::spawn_blocking`
-//! threads, so a test that crosses one would silently observe zero spans and
-//! pass while proving nothing. `nextest` runs each test in its own process,
-//! which is what makes one global default per test sound.
+//! The subscriber is installed with `set_global_default`, and not with
+//! `with_default`. A thread-local subscriber is invisible on
+//! `tokio::task::spawn_blocking` threads, so a test that crosses one would
+//! silently observe zero spans and pass while it proved nothing. `nextest` runs
+//! each test in its own process, which is what makes one global default per
+//! test sound.
 
 use std::sync::Arc;
 
@@ -34,8 +35,8 @@ const REMOTE_TRACE_ID: &str = "0af7651916cd43dd8448eb211c80319c";
 const OTHER: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 const OTHER_TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
 
-/// Install a real `OTel` tracer as the process-wide subscriber and run `f`
-/// against a fresh in-memory engine, returning the spans that closed.
+/// Install a real `OTel` tracer as the process-wide subscriber, run `f` against
+/// a fresh in-memory engine, and return the spans that closed.
 fn traced<F, Fut>(f: F) -> Vec<SpanData>
 where
     F: FnOnce(<SqlEngine as crabka_pgwire::engine::Engine>::Session) -> Fut,
@@ -73,9 +74,9 @@ where
 ///
 /// `db.statement` is the `tracing` span name, but `tracing-opentelemetry` maps
 /// the `otel.name` field onto the exported name, and OpenTelemetry's database
-/// conventions ask for the query summary there — so an exported statement span
-/// is called `SELECT orders`, not `db.statement`. `db.system.name` is what
-/// identifies one regardless of the statement it ran.
+/// conventions ask for the query summary there. An exported statement span is
+/// therefore called `SELECT orders`, and not `db.statement`. `db.system.name`
+/// is what identifies one, whatever statement it ran.
 fn statements<'a>(spans: &'a [SpanData], operation: &str) -> Vec<&'a SpanData> {
     spans
         .iter()

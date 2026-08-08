@@ -1,18 +1,19 @@
-//! Integration tests for the operator's OAUTHBEARER
-//! introspection-secret surface. Verifies the full reconcile path:
-//! source-Secret validation (presence / key / value), the
-//! short-circuit when the listener is in JWT mode, the rendered
-//! `[oauthbearer]` TOML block in introspection mode (including
-//! `userinfo_endpoint_uri` when set), and the `StatefulSet` pod-template
-//! mount of the user-owned source Secret with a projected `items`
-//! mapping that pins the user's key to the fixed in-pod filename
-//! `client-secret`.
+//! Integration tests for the operator's OAUTHBEARER introspection-secret
+//! surface.
 //!
-//! T5's unit tests in `controller/kafka_node_pool.rs` cover the pod-
-//! template render in isolation. T6's integration tests exercise the
+//! These tests verify the full reconcile path. They cover source-Secret
+//! validation of presence, key, and value. They cover the short-circuit when
+//! the listener is in JWT mode. They cover the rendered `[oauthbearer]` TOML
+//! block in introspection mode, with `userinfo_endpoint_uri` when it is set.
+//! They also cover the `StatefulSet` pod-template mount of the user-owned
+//! source Secret, with a projected `items` mapping that pins the user's key to
+//! the fixed in-pod filename `client-secret`.
+//!
+//! The T5 unit tests in `controller/kafka_node_pool.rs` cover the pod-template
+//! render in isolation. The T6 integration tests exercise the
 //! validate-source-Secret code paths and the status-condition wiring
-//! end-to-end, plus the integration-level pod-template mount via the
-//! pool reconciler.
+//! end-to-end. They also exercise the integration-level pod-template mount
+//! through the pool reconciler.
 
 use std::sync::Arc;
 
@@ -52,8 +53,8 @@ const VALID_AUDIENCE: &str = "kafka-broker";
 const USER_NAME_CLAIM: &str = "preferred_username";
 
 /// Build a `ListenerAuthenticationOAuth` in introspection mode. The
-/// `client_secret` points at `(SOURCE_SECRET_NAME, SOURCE_KEY)` by
-/// default; tests override only what they need.
+/// `client_secret` points at `(SOURCE_SECRET_NAME, SOURCE_KEY)` by default.
+/// Each test overrides only what it needs.
 fn introspection_oauth_cfg() -> ListenerAuthenticationOAuth {
     ListenerAuthenticationOAuth {
         valid_issuer_uri: "https://keycloak.example/realms/kafka".into(),
@@ -127,9 +128,9 @@ fn kafka_cr(name: &str, namespace: &str, listeners: Vec<Listener>) -> Kafka {
     k
 }
 
-/// JSON body shaped like a `core/v1/Secret` with one base64-encoded
-/// data key. Used as the GET response for the introspection source-
-/// Secret read.
+/// JSON body shaped like a `core/v1/Secret` with one base64-encoded data key.
+/// The tests use it as the GET response for the introspection source-Secret
+/// read.
 fn source_secret_body(name: &str, namespace: &str, key: &str, value: &[u8]) -> serde_json::Value {
     let b64 = base64::engine::general_purpose::STANDARD.encode(value);
     serde_json::json!({
@@ -141,9 +142,9 @@ fn source_secret_body(name: &str, namespace: &str, key: &str, value: &[u8]) -> s
     })
 }
 
-/// JSON body shaped like a `core/v1/Secret` with **no** `data` field —
-/// used to exercise the `MissingOauthIntrospectionKey` branch (Secret
-/// exists but lacks the named key).
+/// JSON body shaped like a `core/v1/Secret` with **no** `data` field. It
+/// exercises the `MissingOauthIntrospectionKey` branch, where the Secret
+/// exists but does not have the named key.
 fn source_secret_body_no_data(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1",
@@ -155,12 +156,12 @@ fn source_secret_body_no_data(name: &str, namespace: &str) -> serde_json::Value 
 
 // ── test 1: happy path — source Secret read, mount derived ──────────────────
 
-/// An introspection-mode OAuth listener with a `clientSecret` ref to
-/// an existing Secret reconciles cleanly: the source Secret is GET'd,
-/// validated, and the reconcile proceeds past the introspection guard
-/// into per-broker rendering. Asserts that the source-Secret GET fires
-/// against the expected URI and that the reconcile reaches the
-/// `ConfigMap` PATCH step (proving we made it past validation).
+/// An introspection-mode OAuth listener with a `clientSecret` ref to an
+/// existing Secret reconciles cleanly. The operator GETs the source Secret,
+/// validates it, and continues past the introspection guard into per-broker
+/// rendering. The test asserts that the source-Secret GET fires against the
+/// expected URI and that the reconcile reaches the `ConfigMap` PATCH step.
+/// That step proves that the reconcile passed validation.
 #[tokio::test]
 async fn oauth_introspection_validates_source_secret_and_mounts_it() {
     let items = vec![fake_pool_list_item("brokers", "ns1", "c1", 1, 1)];
@@ -205,10 +206,9 @@ async fn oauth_introspection_validates_source_secret_and_mounts_it() {
 
 // ── test 2: missing source Secret → MissingOauthIntrospectionSecret ─────────
 
-/// Source Secret entirely absent (mock returns 404 on the `get_opt`).
-/// After reconcile, the Kafka CR status PATCH carries a `Ready`
-/// condition with `status: "False"` and `reason:
-/// "MissingOauthIntrospectionSecret"`.
+/// The source Secret is absent, and the mock returns 404 on the `get_opt`.
+/// After reconcile, the Kafka CR status PATCH carries a `Ready` condition with
+/// `status: "False"` and `reason: "MissingOauthIntrospectionSecret"`.
 #[tokio::test]
 async fn oauth_introspection_missing_source_secret_rejects_with_missing_oauth_introspection_secret()
 {
@@ -236,7 +236,7 @@ async fn oauth_introspection_missing_source_secret_rejects_with_missing_oauth_in
 
 // ── test 3: Secret present but key absent → MissingOauthIntrospectionKey ────
 
-/// Secret exists but lacks the named key. Reason:
+/// The Secret exists but does not have the named key. Reason:
 /// `MissingOauthIntrospectionKey`.
 #[tokio::test]
 async fn oauth_introspection_missing_key_in_secret_rejects_with_missing_oauth_introspection_key() {
@@ -260,7 +260,7 @@ async fn oauth_introspection_missing_key_in_secret_rejects_with_missing_oauth_in
 
 // ── test 4: Secret + key present but value zero bytes → EmptyOauthIntrospectionValue
 
-/// Secret + key exist; value is zero bytes. Reason:
+/// The Secret and the key exist, and the value is zero bytes. Reason:
 /// `EmptyOauthIntrospectionValue`.
 #[tokio::test]
 async fn oauth_introspection_empty_key_value_rejects_with_empty_oauth_introspection_value() {
@@ -284,17 +284,17 @@ async fn oauth_introspection_empty_key_value_rejects_with_empty_oauth_introspect
 
 // ── test 5: JWT-mode short-circuits — no source-Secret read, no mount ───────
 
-/// A JWT-mode OAuth listener (`accessTokenIsJwt: true`) must NOT cause
-/// the introspection-Secret validator to fire (it short-circuits to
-/// `Ok(None)`), and the rendered `StatefulSet` (via the pool reconciler)
-/// must NOT carry an `oauth-introspection-secret` volume.
+/// A JWT-mode OAuth listener with `accessTokenIsJwt: true` must NOT make the
+/// introspection-Secret validator fire. The validator short-circuits to
+/// `Ok(None)`. The `StatefulSet` that the pool reconciler renders must NOT
+/// carry an `oauth-introspection-secret` volume.
 ///
-/// This test runs only the pool reconciler — the cluster reconciler's
-/// fixture has no apiserver responder for a `GET /secrets/...` against
-/// a non-existent introspection source, so re-using `happy_path_rules`
-/// for the cluster pass would always 404-with-unmatched-rule. The pool
-/// reconciler is what mounts the volume, so testing the mount-absence
-/// at that level is the right contract.
+/// This test runs only the pool reconciler. The cluster reconciler's fixture
+/// has no apiserver responder for a `GET /secrets/...` against a non-existent
+/// introspection source, so a reuse of `happy_path_rules` for the cluster pass
+/// would always give a 404 with an unmatched rule. The pool reconciler mounts
+/// the volume, so a test of the mount absence at that level is the correct
+/// contract.
 #[tokio::test]
 async fn oauth_introspection_jwt_mode_does_not_mount_anything() {
     let rules = pool_reconcile_rules(
@@ -344,12 +344,11 @@ async fn oauth_introspection_jwt_mode_does_not_mount_anything() {
 
 // ── test 6: managed pod template mounts secret with projected items ─────────
 
-/// Introspection-mode pool reconcile renders a pod template with the
-/// user's source Secret as an `oauth-introspection-secret` volume.
-/// The projected `items[0]` mapping pins the user's key
-/// (`SOURCE_KEY` = "secret") to the fixed in-pod filename
-/// `client-secret` — which is the path the broker's rendered TOML
-/// references (`/etc/crabka/oauth-introspection/client-secret`).
+/// Introspection-mode pool reconcile renders a pod template with the user's
+/// source Secret as an `oauth-introspection-secret` volume. The projected
+/// `items[0]` mapping pins the user's key, `SOURCE_KEY` = "secret", to the
+/// fixed in-pod filename `client-secret`. The broker's rendered TOML
+/// references that path as `/etc/crabka/oauth-introspection/client-secret`.
 #[tokio::test]
 async fn oauth_introspection_managed_pod_template_mounts_secret_with_projected_items() {
     let rules = pool_reconcile_rules(
@@ -395,11 +394,11 @@ async fn oauth_introspection_managed_pod_template_mounts_secret_with_projected_i
 
 // ── test 7: userinfo endpoint renders into [oauthbearer] TOML ──────────────
 
-/// When the introspection-mode OAuth listener has
-/// `userInfoEndpointUri` set, the rendered broker `[oauthbearer]` TOML
-/// block must contain `userinfo_endpoint_uri = "..."` (T3's render
-/// path). Verified at integration scope by reading the captured
-/// broker-config `ConfigMap` PATCH body from the cluster reconciler.
+/// When the introspection-mode OAuth listener has `userInfoEndpointUri` set,
+/// the rendered broker `[oauthbearer]` TOML block must contain
+/// `userinfo_endpoint_uri = "..."`. This is the T3 render path. The test
+/// verifies it at integration scope. It reads the captured broker-config
+/// `ConfigMap` PATCH body from the cluster reconciler.
 #[tokio::test]
 async fn oauth_introspection_with_userinfo_renders_userinfo_endpoint_in_toml() {
     let items = vec![fake_pool_list_item("brokers", "ns7", "c7", 1, 1)];
@@ -434,10 +433,10 @@ async fn oauth_introspection_with_userinfo_renders_userinfo_endpoint_in_toml() {
 
 // ── test 8: StatefulSet mounts the introspection Secret end-to-end ─────────
 
-/// End-to-end mount assertion at integration scope (analogous to T5's
-/// unit test but driven through the full pool reconcile pipeline).
-/// Confirms the FIFO mock surface for the pool's parent-Kafka GET is
-/// enough to drive the introspection-mode mount derivation.
+/// End-to-end mount assertion at integration scope. It is like the T5 unit
+/// test, but the full pool reconcile pipeline drives it. It confirms that the
+/// FIFO mock surface for the pool's parent-Kafka GET is enough to drive the
+/// introspection-mode mount derivation.
 #[tokio::test]
 async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode() {
     let rules = pool_reconcile_rules(
@@ -498,10 +497,9 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
 // ── test 9: StatefulSet omits introspection volume when JWT mode ───────────
 
 /// Symmetric absence assertion: a JWT-mode parent Kafka produces a
-/// `StatefulSet` pod template with no `oauth-introspection-secret`
-/// volume or mount. Mirrors
-/// `statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs`
-/// shape.
+/// `StatefulSet` pod template with no `oauth-introspection-secret` volume or
+/// mount. The shape is the same as
+/// `statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs`.
 #[tokio::test]
 async fn statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
     let rules = pool_reconcile_rules(
@@ -551,10 +549,10 @@ async fn statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
 
 // ── pool-reconcile fixtures (tests 5, 6, 8, 9) ─────────────────────────────
 
-/// Parent-Kafka body that carries an OAuth listener in either JWT or
-/// introspection mode (per `jwt_mode`). Used as the GET response for
-/// the pool reconciler's `kafka_api.get_opt(parent_name)` step so the
-/// rendered pod template picks up the right branch of
+/// Parent-Kafka body that carries an OAuth listener in JWT mode or in
+/// introspection mode, as `jwt_mode` selects. The tests use it as the GET
+/// response for the pool reconciler's `kafka_api.get_opt(parent_name)` step,
+/// so that the rendered pod template takes the correct branch of
 /// `oauth_introspection_secret_mount`.
 fn parent_kafka_body_with_oauth(
     name: &str,

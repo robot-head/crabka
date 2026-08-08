@@ -2,50 +2,51 @@
 // describe_user_scram_credentials.rs). Suppress locally; the workspace
 // lint gate still applies elsewhere.
 
-//! KIP-48 end-to-end integration: full delegation-token lifecycle
+//! KIP-48 end-to-end integration: the full delegation-token lifecycle
 //! against a single-broker test cluster. Spec §8.2.
 //!
-//! One long `#[tokio::test]` walks every wire step the spec covers:
+//! One long `#[tokio::test]` walks every wire step the spec covers.
 //!
 //!   (a) SASL/PLAIN authenticate as `alice`.
-//!   (b) `CreateDelegationToken` over that connection — owner=alice,
-//!       renewers=[User:bob], `max_lifetime_ms = -1` (defer to broker
-//!       ceiling). Capture `token_id` + `hmac`.
-//!   (c) Open a second TCP connection; drive SASL/SCRAM-SHA-256 with
-//!       username=`token_id`, password=base64(hmac). The KIP-48
+//!   (b) `CreateDelegationToken` over that connection, with owner=alice,
+//!       renewers=[User:bob], and `max_lifetime_ms = -1`, which defers to
+//!       the broker ceiling. Capture `token_id` and `hmac`.
+//!   (c) Open a second TCP connection and drive SASL/SCRAM-SHA-256 with
+//!       username=`token_id` and password=base64(hmac). The KIP-48
 //!       token-fallback path in `network::auth::handle_authenticate_scram`
-//!       synthesizes a SCRAM credential for the token and accepts; the
-//!       principal must surface as `User:alice` (the token owner), NOT as
-//!       the `token_id`. We assert this by re-running `CreateDelegationToken`
-//!       on the token-authed connection and observing
-//!       `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED` (64) — that error is only
-//!       reachable when the broker correctly sees this session as
-//!       `authenticated_via_token = true`, which is set together with the
-//!       owner-principal override.
-//!   (d) Same connection: re-`CreateDelegationToken` → expect 64.
-//!   (e) Third TCP connection; SASL/PLAIN as `bob`; `RenewDelegationToken`
-//!       with the captured HMAC. Expect `error_code = 0` (the
-//!       renewer-authorization gate accepts the listed renewer). Per
-//!       KIP-48, the create handler sets `expiry_timestamp_ms = now +
-//!       min(default_renew_period, chosen_lifetime)` and
-//!       `max_timestamp_ms = now + chosen_lifetime` as SEPARATE values,
-//!       so a Renew with a large `renew_period_ms` extends the expiry
-//!       strictly beyond its initial value — up to (but not past)
-//!       `max_timestamp_ms`.
+//!       synthesizes a SCRAM credential for the token and accepts it. The
+//!       principal must appear as `User:alice`, the token owner, and NOT as
+//!       the `token_id`. The test asserts this by running
+//!       `CreateDelegationToken` again on the token-authed connection and
+//!       expecting `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED` (64). That error
+//!       is reachable only when the broker sees this session as
+//!       `authenticated_via_token = true`, which the broker sets together
+//!       with the owner-principal override.
+//!   (d) Same connection: run `CreateDelegationToken` again and expect 64.
+//!   (e) Third TCP connection, SASL/PLAIN as `bob`, then
+//!       `RenewDelegationToken` with the captured HMAC. Expect
+//!       `error_code = 0`, because the renewer-authorization gate accepts
+//!       the listed renewer. Per KIP-48, the create handler sets
+//!       `expiry_timestamp_ms = now + min(default_renew_period,
+//!       chosen_lifetime)` and `max_timestamp_ms = now + chosen_lifetime`
+//!       as SEPARATE values. A Renew with a large `renew_period_ms`
+//!       therefore extends the expiry strictly beyond its initial value, up
+//!       to `max_timestamp_ms` but never past it.
 //!   (f) `alice`'s connection: `DescribeDelegationToken` with
 //!       `owners=[User:alice]`. Expect 1 token, matching `token_id`.
 //!   (g) `alice`'s connection: `ExpireDelegationToken` with
-//!       `expiry_time_period_ms = -1` (immediate-delete sentinel). Expect
-//!       `error_code = 0`.
-//!   (h) Fourth TCP connection; attempt SASL/SCRAM-SHA-256 with the same
-//!       token creds. Expect failure — the token's tombstone is in the
-//!       image and the SCRAM credential lookup misses.
+//!       `expiry_time_period_ms = -1`, the immediate-delete sentinel.
+//!       Expect `error_code = 0`.
+//!   (h) Fourth TCP connection: try SASL/SCRAM-SHA-256 with the same token
+//!       credentials. Expect a failure, because the token's tombstone is in
+//!       the image and the SCRAM credential lookup misses.
 //!
 //! This file deliberately reuses the wire-driver shape from
-//! `auth_handlers.rs` (PLAIN + SCRAM-SHA-256 + `round_trip` helper) and
-//! `describe_user_scram_credentials.rs` (the `(handle, dir, addr)` cluster
-//! tuple). No public test-support surface was added — the helpers are
-//! inline so they don't leak into other tests.
+//! `auth_handlers.rs`, that is PLAIN, SCRAM-SHA-256, and the `round_trip`
+//! helper, and from `describe_user_scram_credentials.rs`, the
+//! `(handle, dir, addr)` cluster tuple. It adds no public test-support
+//! surface. The helpers stay inline so that they do not leak into other
+//! tests.
 
 use std::{io, net::SocketAddr};
 
@@ -76,13 +77,13 @@ use crabka_protocol::{
 };
 use crabka_security::{ListenerProtocol, SaslMechanism, SecretBytes};
 
-/// Canonical Kafka error code mirroring `crabka_broker::codes::
+/// Canonical Kafka error code that mirrors `crabka_broker::codes::
 /// DELEGATION_TOKEN_REQUEST_NOT_ALLOWED`. The broker's `codes` module is
-/// private to the crate, so we keep a local copy — kept in sync with
-/// `crates/broker/src/codes.rs` and the Apache Kafka error table.
+/// private to the crate, so this file keeps a local copy. Keep it in sync
+/// with `crates/broker/src/codes.rs` and the Apache Kafka error table.
 const DELEGATION_TOKEN_REQUEST_NOT_ALLOWED: i16 = 64;
-/// Canonical Kafka error code mirroring `crabka_broker::codes::
-/// DELEGATION_TOKEN_AUTHORIZATION_FAILED`. Same kept-in-sync rule.
+/// Canonical Kafka error code that mirrors `crabka_broker::codes::
+/// DELEGATION_TOKEN_AUTHORIZATION_FAILED`. The same sync rule applies.
 const DELEGATION_TOKEN_AUTHORIZATION_FAILED: i16 = 65;
 use tempfile::TempDir;
 use tokio::{
@@ -147,9 +148,10 @@ async fn round_trip(
 // for follow-up requests.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// PLAIN happy-path driver. Mirrors `auth_handlers.rs::drive_sasl_plain_session`
-/// but stops at the post-auth Metadata round-trip — callers want the open
-/// connection so they can issue admin RPCs.
+/// PLAIN happy-path driver. It mirrors
+/// `auth_handlers.rs::drive_sasl_plain_session` but stops at the post-auth
+/// Metadata round trip, because callers want the open connection so that they
+/// can send admin RPCs.
 async fn sasl_plain_authenticate(
     addr: SocketAddr,
     user: &str,
@@ -211,9 +213,9 @@ async fn sasl_plain_authenticate(
     Ok(stream)
 }
 
-/// SCRAM-SHA-256 driver. Same wire shape as
-/// `auth_handlers.rs::drive_sasl_scram_session` but factored to return the
-/// open connection on success — needed by step (c).
+/// SCRAM-SHA-256 driver. It has the same wire shape as
+/// `auth_handlers.rs::drive_sasl_scram_session`, but it returns the open
+/// connection on success, which step (c) needs.
 async fn sasl_scram_sha256_authenticate(
     addr: SocketAddr,
     username: &str,
@@ -310,9 +312,9 @@ async fn sasl_scram_sha256_authenticate(
 // monotonic `corr_id`.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Newest `CreateDelegationToken` supported by Crabka (Apache Kafka v3,
-/// flexible). Picking `MAX_VERSION` here exercises the same wire shape the
-/// JVM admin client would use against a modern broker.
+/// Newest `CreateDelegationToken` that Crabka supports: Apache Kafka v3,
+/// flexible. `MAX_VERSION` here exercises the same wire shape that the JVM
+/// admin client uses against a modern broker.
 const CREATE_DT_VERSION: i16 = crabka_protocol::owned::create_delegation_token_request::MAX_VERSION;
 const RENEW_DT_VERSION: i16 = crabka_protocol::owned::renew_delegation_token_request::MAX_VERSION;
 const EXPIRE_DT_VERSION: i16 = crabka_protocol::owned::expire_delegation_token_request::MAX_VERSION;
@@ -379,13 +381,14 @@ async fn send_describe_delegation_token(
 // Cluster bring-up.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Boot a single-broker `SASL_PLAINTEXT` cluster wired for the full
-/// KIP-48 lifecycle:
-///   - PLAIN credentials for `alice` + `bob`
-///   - both PLAIN and SCRAM-SHA-256 enabled on the listener (PLAIN for the
-///     human-user handshakes, SCRAM-SHA-256 for the token-fallback path)
-///   - `delegation_token_secret_key = Some("e2e-master-key")` — gates the
-///     four delegation-token RPCs and the SCRAM token-fallback lookup
+/// Boots a single-broker `SASL_PLAINTEXT` cluster set up for the full KIP-48
+/// lifecycle:
+///   - PLAIN credentials for `alice` and `bob`
+///   - both PLAIN and SCRAM-SHA-256 enabled on the listener. PLAIN serves the
+///     human-user handshakes, and SCRAM-SHA-256 serves the token-fallback
+///     path.
+///   - `delegation_token_secret_key = Some("e2e-master-key")`, which gates
+///     the four delegation-token RPCs and the SCRAM token-fallback lookup
 async fn start_broker() -> (BrokerHandle, TempDir, SocketAddr) {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
@@ -426,16 +429,18 @@ async fn start_broker() -> (BrokerHandle, TempDir, SocketAddr) {
     (handle, log_dir, addr)
 }
 
-/// Act-as variant: boot a single-broker `SASL_PLAINTEXT` cluster with
-/// caller-specified PLAIN credentials and a caller-specified set of super-users.
+/// Act-as variant. It boots a single-broker `SASL_PLAINTEXT` cluster with
+/// caller-specified PLAIN credentials and a caller-specified set of
+/// super-users.
 ///
-/// `plain_creds` is `&[(username, password)]`. `super_users` is `&[username]`
-/// — names listed here are inserted into `BrokerConfig.super_users` and bypass
-/// ACL checks (in particular, they're the only callers allowed to set
-/// `owner_principal_*` on `CreateDelegationToken` per spec §1).
+/// `plain_creds` is `&[(username, password)]`. `super_users` is
+/// `&[username]`. The names listed there go into `BrokerConfig.super_users`
+/// and bypass ACL checks. In particular, per spec §1 they are the only
+/// callers allowed to set `owner_principal_*` on `CreateDelegationToken`.
 ///
-/// Same protocol surface as `start_broker`: PLAIN + SCRAM-SHA-256 enabled,
-/// master delegation-token key set, 7d ceiling / 24h default renew period.
+/// The protocol surface matches `start_broker`: PLAIN and SCRAM-SHA-256
+/// enabled, the master delegation-token key set, a 7d ceiling, and a 24h
+/// default renew period.
 fn start_broker_with_super_users(
     plain_creds: &[(&str, &str)],
     super_users: &[&str],
@@ -754,15 +759,15 @@ async fn wait_for_token_gone(handle: &BrokerHandle, token_id: &str) {
 
 /// Spec §3.1 test 1.
 ///
-/// Super-user `admin` mints a delegation token owned by `alice` (act-as).
-/// Verifies:
-///   - request succeeds (`error_code = 0`)
-///   - response `principal_*` reflects the OWNER (`User:alice`)
-///   - response `token_requester_*` reflects the CALLER (`User:admin`)
-///   - a second SCRAM-token-authed connection is correctly tagged
-///     `authenticated_via_token = true` — proven by re-Create returning
-///     `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED` (64), which only fires on
-///     token-authed sessions.
+/// Super-user `admin` mints a delegation token owned by `alice`, through
+/// act-as. The test verifies that:
+///   - the request succeeds (`error_code = 0`)
+///   - the response `principal_*` holds the OWNER, `User:alice`
+///   - the response `token_requester_*` holds the CALLER, `User:admin`
+///   - a second SCRAM-token-authed connection carries
+///     `authenticated_via_token = true`. A second Create proves it by
+///     returning `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED` (64), which fires
+///     only on token-authed sessions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn act_as_super_user_mints_token_owned_by_target() {
     let (handle, _dir, addr) =
@@ -859,10 +864,11 @@ async fn act_as_super_user_mints_token_owned_by_target() {
 
 /// Spec §3.1 test 2.
 ///
-/// Non-super-user `alice` attempts to act-as: requests a token owned by
-/// `bob`. Must be rejected with `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65).
-/// This is the load-bearing authorization gate for act-as — without it,
-/// any authenticated user could mint tokens impersonating any other user.
+/// Non-super-user `alice` tries to act as another user and requests a token
+/// owned by `bob`. The broker must reject it with
+/// `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65). This is the authorization
+/// gate for act-as. Without it, any authenticated user could mint tokens that
+/// impersonate any other user.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn act_as_non_super_user_rejected_with_authorization_failed() {
     let (handle, _dir, addr) = start_broker_with_super_users(&[("alice", "alice-pw")], &[]).await;
@@ -915,13 +921,15 @@ async fn act_as_non_super_user_rejected_with_authorization_failed() {
 // must succeed (no err 63 / 65).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Super-user-bypass regression / spec §1.3 + §1.4.
+/// Super-user-bypass regression, spec §1.3 and §1.4.
 ///
-/// Super-user `admin` mints a token owned by `alice` via act-as,
-/// then renews + expires it via the wire. Both must
-/// succeed despite admin being neither owner nor renewer. Mirrors the
-/// kind-kafkauser-delegation-token e2e flow that was red on main with
-/// `RenewDelegationToken: UNKNOWN (63)` before this fix.
+/// Super-user `admin` mints a token owned by `alice` through act-as, then
+/// renews and expires it over the wire. Both must succeed even though admin
+/// is neither the owner nor a renewer.
+///
+/// This mirrors the kind-kafkauser-delegation-token e2e flow, which failed
+/// with `RenewDelegationToken: UNKNOWN (63)` when the super-user bypass was
+/// missing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn super_user_can_renew_other_owners_token() {
     let (handle, _dir, addr) =

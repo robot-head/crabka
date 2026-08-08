@@ -1,15 +1,18 @@
-//! Cluster CA + clients CA lifecycle and rotation.
+//! Lifecycle and rotation of the cluster CA and the clients CA.
 //!
-//! Owns:
-//! - the per-cluster `cluster CA` Secret pair (private key + public cert),
-//! - the per-cluster `clients CA` Secret pair (formerly in `user_tls.rs`),
-//! - the per-cluster broker-keystore Secret (`<cluster>-kafka-brokers`),
-//! - `reconcile_ca` — the per-CA create / reuse / **rotate** entrypoint the
-//!   `Kafka` reconciler calls each pass, plus the pure rotation state machine
-//!   (`plan_ca_rotation`) and trust-bundle helpers,
-//! - the pure `renew_if_expiring` predicate (used by `reconcile_ca` and the
-//!   `ca-renewal-check` `CronJob` subcommand),
-//! - the `run_renewal_check` entrypoint for the `CronJob`.
+//! This module owns:
+//! - the per-cluster `cluster CA` Secret pair, which is a private key and
+//!   a public cert,
+//! - the per-cluster `clients CA` Secret pair, which `user_tls.rs` held
+//!   before,
+//! - the per-cluster broker-keystore Secret `<cluster>-kafka-brokers`,
+//! - `reconcile_ca`, the per-CA create, reuse, and **rotate** entry point
+//!   that the `Kafka` reconciler calls on each pass. It also owns the pure
+//!   rotation state machine `plan_ca_rotation` and the trust-bundle
+//!   helpers,
+//! - the pure `renew_if_expiring` predicate, which `reconcile_ca` and the
+//!   `ca-renewal-check` `CronJob` subcommand both use,
+//! - the `run_renewal_check` entry point for the `CronJob`.
 
 use std::{collections::BTreeMap, net::IpAddr};
 
@@ -44,15 +47,19 @@ pub(crate) const CLIENTS_CA_CERT_SUFFIX: &str = "-clients-ca-cert";
 pub(crate) const BROKER_KEYSTORE_SUFFIX: &str = "-kafka-brokers";
 
 // Rotation bookkeeping.
-/// Annotation on the cert Secret tracking the monotonic generation of the
-/// *active signing cert* (bumped on same-key renewal and on key promotion).
+/// Annotation on the cert Secret that tracks the monotonic generation of
+/// the *active signing cert*. It increments on a same-key renewal and on a
+/// key promotion.
 pub(crate) const ANN_CERT_GENERATION: &str = "crabka.io/ca-cert-generation";
-/// Annotation on the key Secret tracking the monotonic generation of the
-/// *active signing key* (bumped only when the key is replaced).
+/// Annotation on the key Secret that tracks the monotonic generation of
+/// the *active signing key*. It increments only when the operator replaces
+/// the key.
 pub(crate) const ANN_KEY_GENERATION: &str = "crabka.io/ca-key-generation";
-/// Annotation on the cert Secret recording the staged key-replacement phase.
+/// Annotation on the cert Secret that records the staged key-replacement
+/// phase.
 pub(crate) const ANN_ROTATION_PHASE: &str = "crabka.io/ca-rotation-phase";
-/// Secret-data keys for the staged new key + cert during `key-replace-trust`.
+/// Secret-data keys for the staged new key and the staged new cert during
+/// `key-replace-trust`.
 const NEXT_KEY: &str = "ca.key.next";
 const NEXT_CERT: &str = "ca.crt.next";
 
@@ -60,9 +67,10 @@ const NEXT_CERT: &str = "ca.crt.next";
 pub const ANN_FORCE_RENEW: &str = "crabka.io/force-renew-ca";
 /// `Kafka` CR annotation: force a staged CA key replacement on the next reconcile.
 pub const ANN_FORCE_REPLACE_KEY: &str = "crabka.io/force-replace-ca-key";
-/// `Kafka` CR annotation: `CronJob` nudge — a CA cert is within `renewalDays`,
-/// so the reconciler should run a same-key renewal. Carries an RFC3339
-/// timestamp.
+/// `Kafka` CR annotation that the `CronJob` sets.
+///
+/// It means that a CA cert is inside `renewalDays`, so the reconciler should
+/// run a same-key renewal. The value is an RFC3339 timestamp.
 pub const ANN_RENEW_AFTER: &str = "crabka.io/ca-renew-after";
 
 #[must_use]
@@ -93,8 +101,10 @@ pub(crate) fn broker_keystore_name(cluster: &str) -> String {
 const BEGIN_CERT: &str = "-----BEGIN CERTIFICATE-----";
 const END_CERT: &str = "-----END CERTIFICATE-----";
 
-/// Split a PEM bundle into individual normalized certificate blocks (each
-/// ending in a single trailing newline). Non-certificate content is ignored.
+/// Splits a PEM bundle into single normalized certificate blocks.
+///
+/// Each block ends in one newline. This function ignores content that is
+/// not a certificate.
 #[must_use]
 pub(crate) fn split_pem_certs(bundle: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -109,13 +119,14 @@ pub(crate) fn split_pem_certs(bundle: &str) -> Vec<String> {
     out
 }
 
-/// Concatenate cert blocks into a single bundle PEM.
+/// Concatenates the cert blocks into one bundle PEM.
 #[must_use]
 pub(crate) fn join_bundle(blocks: &[String]) -> String {
     blocks.concat()
 }
 
-/// Drop byte-duplicate blocks, preserving first-seen order.
+/// Removes the blocks that are byte duplicates and keeps the order of the
+/// first occurrence.
 #[must_use]
 pub(crate) fn dedup_blocks(blocks: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -126,8 +137,12 @@ pub(crate) fn dedup_blocks(blocks: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Drop expired blocks (`notAfter <= now`) but NEVER the first (signing) block.
-/// An unparseable block is kept (defensive).
+/// Removes the expired blocks, which are the blocks with
+/// `notAfter <= now`.
+///
+/// This function NEVER removes the first block, which is the signing
+/// block. It also keeps a block that it cannot parse, as a defensive
+/// measure.
 #[must_use]
 pub(crate) fn prune_expired(blocks: &[String], now: OffsetDateTime) -> Vec<String> {
     blocks
@@ -142,18 +157,22 @@ pub(crate) fn prune_expired(blocks: &[String], now: OffsetDateTime) -> Vec<Strin
 // Rotation state machine (pure)
 // ---------------------------------------------------------------------------
 
-/// Staged key-replacement phase, persisted in the cert Secret's
-/// `crabka.io/ca-rotation-phase` annotation (absent ≡ `Idle`).
+/// Staged key-replacement phase.
+///
+/// The operator stores it in the `crabka.io/ca-rotation-phase` annotation
+/// of the cert Secret. An absent annotation means `Idle`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumString)]
 pub(crate) enum CaPhase {
     #[strum(serialize = "idle")]
     Idle,
-    /// New CA generated, its cert added to the trust bundle (trust-only); the
-    /// old key still signs. A roll distributes the larger trust set.
+    /// The operator generated a new CA and added its cert to the trust
+    /// bundle for trust only. The old key still signs. A roll distributes
+    /// the larger trust set.
     #[strum(serialize = "key-replace-trust")]
     KeyReplaceTrust,
-    /// New key promoted to signer + leafs reissued; the old cert lingers in the
-    /// bundle so in-flight peers still validate. A roll applies the new leafs.
+    /// The operator promoted the new key to signer and reissued the
+    /// leafs. The old cert stays in the bundle, so peers with open
+    /// connections still validate. A roll applies the new leafs.
     #[strum(serialize = "key-replace-promote")]
     KeyReplacePromote,
 }
@@ -167,12 +186,12 @@ impl CaPhase {
     }
 }
 
-/// CA material + rotation bookkeeping reconstructed from the Secret pair.
+/// CA material and rotation bookkeeping, rebuilt from the Secret pair.
 #[derive(Debug, Clone)]
 pub(crate) struct CaState {
     /// Trust bundle, signing cert first.
     pub bundle: Vec<String>,
-    /// Active signing key (pairs with `bundle[0]`).
+    /// Active signing key. It pairs with `bundle[0]`.
     pub key_pem: String,
     /// Staged new key during `KeyReplaceTrust`.
     pub pending_key_pem: Option<String>,
@@ -186,14 +205,16 @@ pub(crate) struct CaState {
 /// Per-reconcile inputs to [`plan_ca_rotation`].
 // distinct rotation triggers/state, not a state enum
 pub(crate) struct RotationInputs {
-    /// `generateCertificateAuthority` — BYO CAs are never rotated.
+    /// `generateCertificateAuthority`. The operator never rotates a BYO
+    /// CA.
     pub generate: bool,
     pub validity: Time,
     pub renewal: Time,
     /// `crabka.io/force-renew-ca` present on the `Kafka` CR.
     pub force: ForceRotation,
-    /// Every pool carries the desired config-hash AND is Ready (so the previous
-    /// rotation step's roll has finished). Only consulted for staged phases.
+    /// Every pool carries the desired config-hash AND is Ready, so the
+    /// roll of the previous rotation step has finished. The planner reads
+    /// this field only for the staged phases.
     pub rollout_converged: bool,
     pub now: OffsetDateTime,
     pub which: WhichCa,
@@ -217,32 +238,38 @@ impl ForceRotation {
     }
 }
 
-/// Why a forced rotation could not be honored.
+/// The reason why the operator could not do a forced rotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefuseReason {
-    /// `generateCertificateAuthority=false` — the operator never touches BYO CAs.
+    /// `generateCertificateAuthority=false`. The operator never changes a
+    /// BYO CA.
     Byo,
-    /// Key replacement is unsupported for the clients CA.
+    /// The clients CA does not support key replacement.
     ClientsCaKeyReplace,
 }
 
-/// What the reconciler should do to a CA this pass.
+/// What the reconciler should do to a CA in this pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CaRotationPlan {
     NoOp,
-    /// Re-sign the cert reusing the existing key (non-disruptive).
+    /// Sign the cert again with the existing key. This causes no
+    /// disruption.
     RenewCertSameKey,
-    /// Generate a new key+cert; add the new cert to the bundle (trust-only).
+    /// Generate a new key and cert. Add the new cert to the bundle for
+    /// trust only.
     StartKeyReplace,
-    /// Promote the staged key to signer + reissue leafs.
+    /// Promote the staged key to signer and reissue the leafs.
     PromoteNewKey,
-    /// Drop superseded / expired trust anchors from the bundle.
+    /// Remove the superseded and the expired trust anchors from the
+    /// bundle.
     PruneOldTrust,
-    /// A forced rotation was requested but cannot be honored.
+    /// A user asked for a forced rotation, but the operator cannot do
+    /// it.
     Refuse(RefuseReason),
 }
 
-/// Pure rotation decision. See the CA-rotation design's decision table.
+/// Makes the pure rotation decision. See the decision table in the
+/// CA-rotation design.
 pub(crate) fn plan_ca_rotation(state: &CaState, inp: &RotationInputs) -> CaRotationPlan {
     // BYO: never rotate. A forced request is refused (and the annotation is
     // stripped by the caller, with a Warning Event).
@@ -337,12 +364,15 @@ pub(crate) fn cert_not_after(pem: &str) -> Result<OffsetDateTime, ReconcileError
         .map_err(|e| ReconcileError::CertParse(e.to_string()))
 }
 
-/// Result of reconciling one CA (cluster or clients) for a single pass.
+/// Result of one reconcile pass over one CA, either the cluster CA or the
+/// clients CA.
 #[derive(Debug, Clone)]
 pub(crate) struct CaReconcileOutcome {
-    /// Active signing cert (`bundle[0]`) + active key — feeds leaf issuance.
+    /// Active signing cert, which is `bundle[0]`, and the active key.
+    /// Leaf issuance uses them.
     pub signing_material: CaMaterial,
-    /// Full trust bundle PEM — feeds the broker truststore + the config-hash.
+    /// Full trust bundle PEM. The broker truststore and the config hash
+    /// use it.
     pub trust_bundle_pem: String,
     /// RFC3339 `notAfter` of the signing cert.
     pub not_after: String,
@@ -351,20 +381,25 @@ pub(crate) struct CaReconcileOutcome {
     pub key_generation: KeyGeneration,
     pub phase: CaPhase,
     pub trust_anchors: usize,
-    /// Cluster CA only: every broker leaf must be reissued with the new key.
+    /// Cluster CA only. The operator must reissue every broker leaf with
+    /// the new key.
     pub force_reissue_leafs: bool,
     /// `CaRotation` condition surface.
     pub rotation_in_progress: bool,
     pub rotation_reason: &'static str,
     pub rotation_message: String,
-    /// A forced rotation was refused (caller emits a Warning Event).
+    /// The operator refused a forced rotation. The caller emits a Warning
+    /// Event.
     pub refused: Option<RefuseReason>,
 }
 
-/// Reconcile one CA: create-if-missing, reuse + rotate,
-/// or surface `ByoCaMissing`. Make exactly the create-path I/O
-/// (`GET key`, `GET cert`, then on create `PATCH key`, `PATCH cert`) plus, only
-/// when a rotation step fires, an extra cert/key `PATCH`.
+/// Reconciles one CA.
+///
+/// This function creates the CA when it is missing, reuses and rotates an
+/// existing CA, or reports `ByoCaMissing`. It makes exactly the create-path
+/// I/O: `GET key`, `GET cert`, and on a create also `PATCH key` and
+/// `PATCH cert`. It adds one more cert or key `PATCH` only when a rotation
+/// step runs.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -515,10 +550,12 @@ async fn patch_secret(
     Ok(())
 }
 
-/// Execute a [`CaRotationPlan`] against the live Secrets and build the outcome.
-/// The trust bundle for `NoOp`/`Refuse` is the raw stored PEM (preserving a
-/// byte-identical config-hash for the non-rotating path); rotating plans emit a
-/// freshly joined bundle.
+/// Executes a [`CaRotationPlan`] against the live Secrets and builds the
+/// outcome.
+///
+/// For `NoOp` and `Refuse`, the trust bundle is the raw stored PEM. The
+/// config hash of the path without a rotation therefore stays
+/// byte-identical. A plan that rotates gives a newly joined bundle.
 async fn apply_ca_rotation(
     owner: (&Api<Secret>, &Kafka, WhichCa),
     names: (&str, &str, &str),
@@ -663,8 +700,10 @@ async fn apply_ca_rotation(
     })
 }
 
-/// Normalize a single cert PEM to one trailing-newline block (matches the
-/// bundle blocks produced by [`split_pem_certs`]).
+/// Normalizes one cert PEM to a block with one trailing newline.
+///
+/// The result matches the bundle blocks that [`split_pem_certs`]
+/// produces.
 fn normalize_block(cert_pem: &str) -> String {
     split_pem_certs(cert_pem)
         .into_iter()
@@ -695,7 +734,8 @@ async fn patch_cert_bundle(
     .await
 }
 
-/// Map an executed plan + resulting phase to the `CaRotation` condition surface.
+/// Maps an executed plan and the phase that follows it to the
+/// `CaRotation` condition surface.
 fn rotation_condition(
     plan: CaRotationPlan,
     phase: CaPhase,
@@ -786,7 +826,10 @@ fn render_ca_secret(
     })
 }
 
-/// Read a monotonic generation annotation off a Secret (`0` if absent/unparsed).
+/// Reads a monotonic generation annotation from a Secret.
+///
+/// The result is `0` when the annotation is absent and when it does not
+/// parse.
 fn read_generation(secret: &Secret, ann: &str) -> u64 {
     secret
         .meta()
@@ -797,7 +840,8 @@ fn read_generation(secret: &Secret, ann: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Read the rotation phase off the cert Secret (`Idle` if absent).
+/// Reads the rotation phase from the cert Secret. The result is `Idle`
+/// when the annotation is absent.
 fn read_phase(cert_secret: &Secret) -> CaPhase {
     cert_secret
         .meta()
@@ -819,16 +863,19 @@ pub(crate) struct BrokerKeystoreStatus {
     pub pruned: Vec<i32>,
 }
 
-/// Per-broker cert request. Caller supplies the CN and SAN list that must match
-/// what peer brokers will actually dial (i.e., real pod FQDN derived from the
-/// `StatefulSet` name `{cluster}-{pool_name}` and ordinal).
+/// Per-broker cert request.
+///
+/// The caller supplies the CN and the SAN list. They must match the names
+/// that peer brokers dial, which are the real pod FQDNs from the
+/// `StatefulSet` name `{cluster}-{pool_name}` and the ordinal.
 #[derive(Debug, Clone)]
 pub(crate) struct BrokerCertRequest {
     pub broker_id: i32,
     pub cn: String,
     pub sans: Vec<SubjectAltName>,
-    /// Extra SANs for external listeners (e.g. `NodePort` node addresses,
-    /// `LoadBalancer` IPs). Empty when no external TLS listeners are configured.
+    /// Extra SANs for external listeners, for example `NodePort` node
+    /// addresses and `LoadBalancer` IPs. The list is empty when no
+    /// external TLS listener is configured.
     pub extra_sans: Vec<SubjectAltName>,
 }
 
@@ -964,9 +1011,12 @@ pub(crate) async fn ensure_broker_keystore(
 // SAN-list digest
 // ---------------------------------------------------------------------------
 
-/// SHA-256 digest of the canonical-form SAN list (sorted, deduped).
-/// Used to detect when the SAN list for a broker has changed vs the
-/// cert currently stored in the Secret, triggering a reissue.
+/// SHA-256 digest of the SAN list in canonical form, sorted and without
+/// duplicates.
+///
+/// The operator compares this digest against the cert in the Secret. A
+/// different digest means that the SAN list of the broker changed, and the
+/// operator then issues a new cert.
 #[must_use]
 pub fn compute_san_digest(base_sans: &[SubjectAltName], extras: &[SubjectAltName]) -> String {
     use std::fmt::Write as _;
@@ -1000,17 +1050,21 @@ pub fn compute_san_digest(base_sans: &[SubjectAltName], extras: &[SubjectAltName
 // Renewal predicate
 // ---------------------------------------------------------------------------
 
-/// A `time`-crate span as a [`Time`] extent. The sign is preserved, so a
-/// `notAfter` already behind `now` stays negative and still compares as
-/// "inside the renewal window".
+/// Converts a span from the `time` crate into a [`Time`] extent.
+///
+/// The conversion keeps the sign. A `notAfter` that is already before
+/// `now` therefore stays negative, and it still compares as inside the
+/// renewal window.
 fn span_as_time(span: time::Duration) -> Time {
     Time::from_secs_f64(span.as_seconds_f64())
 }
 
-/// A certificate lifetime in whole days — the unit `crabka_security::ca`
-/// speaks. The CRD carries these as `u32` days, so the round-trip is exact for
-/// every configured value; a negative extent floors at zero and an absurd one
-/// saturates.
+/// Converts a certificate lifetime into whole days, which is the unit that
+/// `crabka_security::ca` uses.
+///
+/// The CRD carries these values as `u32` days, so the round-trip is exact
+/// for every configured value. A negative extent becomes zero, and a very
+/// large one saturates.
 fn whole_days(extent: Time) -> u32 {
     let value = extent.get::<day>().round();
     if value <= 0.0 {
@@ -1020,8 +1074,8 @@ fn whole_days(extent: Time) -> u32 {
     }
 }
 
-/// Is `cert_pem` inside its renewal window — i.e. does it expire within
-/// `renewal` of `now`?
+/// Reports whether `cert_pem` is inside its renewal window, that is,
+/// whether it expires within `renewal` of `now`.
 ///
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
@@ -1221,11 +1275,13 @@ async fn flag_ca_if_expiring(
     Ok(())
 }
 
-/// Extract the CN (from the subject) and the SAN list (from the SAN extension)
-/// out of an existing broker leaf cert PEM. Used by `renew_broker_leafs` so the
-/// renewal `CronJob` preserves the exact identity originally issued by the reconciler
-/// rather than reconstructing it from scratch (which would be fragile w.r.t. pool
-/// names and ordinals the `CronJob` doesn't have access to).
+/// Extracts the CN from the subject and the SAN list from the SAN
+/// extension of an existing broker leaf cert PEM.
+///
+/// `renew_broker_leafs` uses this function, so that the renewal `CronJob`
+/// keeps the exact identity that the reconciler issued. To build that
+/// identity again from nothing would be fragile, because the `CronJob`
+/// cannot read the pool names and the ordinals.
 fn read_existing_cn_and_sans(
     cert_pem: &str,
 ) -> Result<(String, Vec<SubjectAltName>), ReconcileError> {
@@ -1456,8 +1512,9 @@ mod tests {
 
     use super::*;
 
-    /// A CA generated with `validity_days = 30` must have `notAfter` within
-    /// [29, 31] days of now (allowing for a second of clock skew in CI).
+    /// A CA that the operator generates with `validity_days = 30` must
+    /// have a `notAfter` inside [29, 31] days of now. The range allows one
+    /// second of clock skew in CI.
     #[test]
     fn ca_validity_days_is_honored() {
         use rustls::pki_types::{CertificateDer, pem::PemObject};

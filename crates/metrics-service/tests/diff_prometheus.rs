@@ -1,6 +1,7 @@
 //! Docker-backed differential probe against real Prometheus.
 //!
-//! Ignored by default because it pulls and runs `mirror.gcr.io/prom/prometheus`.
+//! Cargo ignores this test by default, because it pulls and runs
+//! `mirror.gcr.io/prom/prometheus`.
 //! Run with:
 //!
 //! `cargo test -p crabka-metrics-service --test diff_prometheus -- --ignored --nocapture`

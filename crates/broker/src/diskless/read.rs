@@ -11,8 +11,8 @@ use uuid::Uuid;
 use super::wal_index::WalIndexCache;
 use crate::{broker::Broker, codes, handlers::fetch::PendingRead, partition::Partition};
 
-/// Shared state for serving diskless offsets that were trimmed locally but
-/// covered by the committed WAL object index.
+/// Shared state that serves diskless offsets. The broker trimmed these offsets
+/// locally, but the committed WAL object index still covers them.
 pub(crate) struct DisklessReadHandle {
     pub(crate) index: Arc<AsyncMutex<WalIndexCache>>,
     store: Arc<dyn ObjectStore>,
@@ -53,7 +53,8 @@ impl DisklessReadHandle {
     }
 }
 
-/// Try to satisfy a local `OFFSET_OUT_OF_RANGE` fetch from diskless WAL objects.
+/// Tries to satisfy a local `OFFSET_OUT_OF_RANGE` fetch from the diskless WAL
+/// objects.
 pub(crate) async fn try_diskless_read(
     broker: &Broker,
     p: &mut PendingRead,

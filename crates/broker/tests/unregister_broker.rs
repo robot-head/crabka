@@ -1,8 +1,8 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
 
-//! KIP-919 `UnregisterBroker` admin RPC (`api_key` 64). Drops a broker
-//! registration record so subsequent `Metadata` responses no longer
-//! advertise the broker's endpoints.
+//! KIP-919 `UnregisterBroker` admin RPC (`api_key` 64). It drops a broker
+//! registration record, so later `Metadata` responses no longer advertise the
+//! broker's endpoints.
 
 use assert2::assert;
 mod support;

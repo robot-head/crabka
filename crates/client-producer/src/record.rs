@@ -1,12 +1,14 @@
-//! Public record types: `ProducerRecord` (what you send), `RecordMetadata`
-//! (what you get back), and `Header` (per-record key/value pairs).
+//! Public record types. `ProducerRecord` is what the caller sends,
+//! `RecordMetadata` is what it gets back, and `Header` holds the per-record key
+//! and value pairs.
 
 use bytes::Bytes;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProducerRecord {
     pub topic: String,
-    /// If `Some(p)`, the partitioner is bypassed and partition `p` is used.
+    /// If `Some(p)`, the producer bypasses the partitioner and uses partition
+    /// `p`.
     pub partition: Option<i32>,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,

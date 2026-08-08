@@ -1,4 +1,6 @@
-//! Internal audit event model — the source of truth for the KSI-MLA-LET catalog.
+//! Internal audit event model.
+//!
+//! This module is the source of truth for the KSI-MLA-LET catalog.
 
 use serde::Serialize;
 
@@ -39,19 +41,19 @@ pub enum LifecycleKind {
     TlsReloaded,
 }
 
-/// OCSF class grouping used for record headers/routing.
+/// OCSF class group for record headers and routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditEventClass {
     Authentication,
     Authorization,
     ApiActivity,
     ApplicationLifecycle,
-    /// Internal meta-record (signed chain checkpoint); not an OCSF event.
+    /// Internal meta-record for a signed chain checkpoint. It is not an OCSF event.
     Checkpoint,
 }
 
 impl AuditEventClass {
-    /// Stable lowercase identifier, used as the `event_class` record header value.
+    /// Stable lowercase identifier for the `event_class` record header value.
     #[must_use]
     pub fn as_header(self) -> &'static str {
         match self {
@@ -63,7 +65,7 @@ impl AuditEventClass {
         }
     }
 
-    /// Compact tag for spool framing.
+    /// Compact tag for the spool frame format.
     #[must_use]
     pub fn tag(self) -> u8 {
         match self {
@@ -102,8 +104,10 @@ impl AuditEventClass {
     }
 }
 
-/// A single auditable security event. Times are caller-supplied epoch-millis so
-/// the crate stays pure and deterministically testable.
+/// A single auditable security event.
+///
+/// The caller supplies the times as epoch-millis, so the crate stays pure and
+/// deterministically testable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuditEvent {
     Authentication {

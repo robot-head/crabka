@@ -1,13 +1,17 @@
-//! Versioned (de)serialization of a table schema — the value stored under
-//! `crabka_pgkv::key::catalog_key(name)`. Format: version byte, `table_id`
-//! (u32 BE), column count (u32 BE), then per column: u32 name length, name bytes,
-//! type tag; table option flags (u8); followed by a `foreign` flag byte: `0` =
-//! ordinary table (no further payload), `1` = foreign table (server name len u32,
-//! server name bytes, option count u32, then per option: key len u32, key bytes,
-//! value len u32, value bytes).
+//! Versioned (de)serialization of a table schema.
+//!
+//! The schema is the value stored under `crabka_pgkv::key::catalog_key(name)`.
+//! The format is a version byte, `table_id` (u32 BE), and a column count
+//! (u32 BE). Each column then holds a u32 name length, the name bytes, and a
+//! type tag. Table option flags (u8) follow, then a `foreign` flag byte.
+//!
+//! A `0` flag byte means an ordinary table and adds no further payload. A `1`
+//! flag byte means a foreign table. It adds a server name length (u32), the
+//! server name bytes, and an option count (u32). Each option then follows as a
+//! key length (u32), the key bytes, a value length (u32), and the value bytes.
 //!
 //! Foreign-data-wrapper, foreign-server, and user-mapping objects use their own
-//! simple binary format (not the schema format).
+//! simple binary format, not the schema format.
 
 use crabka_pgkv::KvError;
 use crabka_pgtypes::{
@@ -32,10 +36,11 @@ pub type DecodedSchema = (
     Vec<CheckConstraint>,
 );
 
-/// The single schema-value format version. All tables (ordinary and foreign)
-/// are written with this version byte; a flag byte after the column list
-/// distinguishes ordinary (`0`) from foreign (`1`), and a `CHECK` constraint
-/// list closes the record.
+/// The single schema-value format version.
+///
+/// Every table carries this version byte, ordinary and foreign alike. A flag
+/// byte after the column list separates ordinary (`0`) from foreign (`1`), and
+/// a `CHECK` constraint list closes the record.
 pub const SCHEMA_VERSION: u8 = 7;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
@@ -60,9 +65,11 @@ const REFERENTIAL_ACTION_SET_DEFAULT: u8 = 4;
 const MATCH_TYPE_SIMPLE: u8 = 0;
 const MATCH_TYPE_FULL: u8 = 1;
 
-/// Tags for a persisted column DEFAULT value. Like [`type_tag`], this space is
-/// **append-only**: a new value type takes the next free code and an existing
-/// code never changes meaning, so adding one needs no [`SCHEMA_VERSION`] bump.
+/// Tags for a persisted column DEFAULT value.
+///
+/// Like [`type_tag`], this space is **append-only**. A new value type takes the
+/// next free code, and an existing code never changes meaning. A new tag
+/// therefore needs no [`SCHEMA_VERSION`] bump.
 mod datum_tag {
     pub const NULL: u8 = 0;
     pub const BOOL: u8 = 1;
@@ -71,27 +78,28 @@ mod datum_tag {
     pub const TEXT: u8 = 4;
     pub const FLOAT8: u8 = 5;
     pub const NUMERIC: u8 = 6;
-    /// `jsonb` — followed by the value's canonical text (u32 length + bytes),
-    /// which is reparsed on read. Append-only — no version bump.
-    pub const JSONB: u8 = 7;
-    /// A one-dimensional array — followed by the element type's
-    /// `ElemType::code()` byte, then the elements as a `crabka_pgkv::rowenc`
-    /// row (u32 length + bytes). Reusing the row encoder keeps a second full
-    /// datum encoder out of the catalog and covers every element type,
-    /// including NULL and nested `jsonb`, for free. Append-only — no version
+    /// `jsonb`, followed by the value's canonical text as a u32 length and the
+    /// bytes. The reader parses that text again. Append-only, with no version
     /// bump.
+    pub const JSONB: u8 = 7;
+    /// A one-dimensional array, followed by the element type's
+    /// `ElemType::code()` byte. The elements then follow as a
+    /// `crabka_pgkv::rowenc` row, a u32 length and the bytes. Reuse of the row
+    /// encoder keeps a second full datum encoder out of the catalog, and covers
+    /// every element type at no cost, NULL and nested `jsonb` included.
+    /// Append-only, with no version bump.
     pub const ARRAY: u8 = 8;
-    /// `smallint`. Append-only — no version bump.
+    /// `smallint`. Append-only, with no version bump.
     pub const INT2: u8 = 9;
-    /// `real` — stored as the IEEE-754 bit pattern, like [`FLOAT8`].
-    /// Append-only — no version bump.
+    /// `real`, stored as the IEEE-754 bit pattern, like [`FLOAT8`].
+    /// Append-only, with no version bump.
     pub const FLOAT4: u8 = 10;
-    /// `regclass` — followed by the relation's four-byte oid, and only the oid.
-    /// The name `regclassout` prints is derived from the catalog when the
-    /// default is read, never stored, so a default follows a `RENAME` of the
-    /// relation it names and falls back to the bare oid once that relation is
-    /// dropped — what `PostgreSQL` does with the oid its folded `Const` holds.
-    /// Append-only — no version bump.
+    /// `regclass`, followed by the relation's four-byte oid, and only the oid.
+    /// The reader derives the name `regclassout` prints from the catalog when
+    /// it reads the default, and never stores that name. A default therefore
+    /// follows a `RENAME` of the relation it names, and falls back to the bare
+    /// oid once that relation is dropped. `PostgreSQL` does the same with the
+    /// oid its folded `Const` holds. Append-only, with no version bump.
     pub const REGCLASS: u8 = 11;
     pub const TSVECTOR: u8 = 12;
     pub const TSQUERY: u8 = 13;
@@ -102,53 +110,55 @@ mod type_tag {
     pub const INT4: u8 = 1;
     pub const INT8: u8 = 2;
     pub const TEXT: u8 = 3;
-    /// SP30: `float8` / `double precision`. Append-only — no version bump.
+    /// SP30: `float8` / `double precision`. Append-only, with no version bump.
     pub const FLOAT8: u8 = 4;
-    /// SP32: `numeric` — followed by a typmod byte (0 = unconstrained; 1 = a
-    /// `(precision: u16, scale: u16)` modifier). Append-only.
+    /// SP32: `numeric`, followed by a typmod byte. A `0` byte is unconstrained
+    /// and a `1` byte is a `(precision: u16, scale: u16)` modifier.
+    /// Append-only.
     pub const NUMERIC: u8 = 5;
-    /// SP37: `date`. Append-only — no version bump.
+    /// SP37: `date`. Append-only, with no version bump.
     pub const DATE: u8 = 6;
-    /// SP37: `time without time zone` — followed by a reserved precision byte (0).
-    /// Append-only — no version bump.
+    /// SP37: `time without time zone`, followed by a reserved precision byte
+    /// (0). Append-only, with no version bump.
     pub const TIME: u8 = 7;
-    /// SP37: `timestamp without time zone` — followed by a reserved precision byte (0).
-    /// Append-only — no version bump.
+    /// SP37: `timestamp without time zone`, followed by a reserved precision
+    /// byte (0). Append-only, with no version bump.
     pub const TIMESTAMP: u8 = 8;
-    /// SP37: `timestamp with time zone` — followed by a reserved precision byte (0).
-    /// Append-only — no version bump.
+    /// SP37: `timestamp with time zone`, followed by a reserved precision byte
+    /// (0). Append-only, with no version bump.
     pub const TIMESTAMPTZ: u8 = 9;
-    /// SP37: `interval` — followed by a reserved precision byte (0).
-    /// Append-only — no version bump.
+    /// SP37: `interval`, followed by a reserved precision byte (0).
+    /// Append-only, with no version bump.
     pub const INTERVAL: u8 = 10;
-    /// SP40: `bytea`. Append-only — no version bump.
+    /// SP40: `bytea`. Append-only, with no version bump.
     pub const BYTEA: u8 = 11;
     pub const VARCHAR: u8 = 12;
     pub const BPCHAR: u8 = 13;
     pub const UUID: u8 = 14;
-    /// `regclass` — a relation oid stored as `Int4`. Append-only — no version bump.
+    /// `regclass`, a relation oid stored as `Int4`. Append-only, with no
+    /// version bump.
     pub const REGCLASS: u8 = 15;
-    /// `jsonb`. Append-only — no version bump.
+    /// `jsonb`. Append-only, with no version bump.
     pub const JSONB: u8 = 16;
-    /// A one-dimensional array — followed by the element type's
-    /// `ElemType::code()` byte. Append-only — no version bump.
+    /// A one-dimensional array, followed by the element type's
+    /// `ElemType::code()` byte. Append-only, with no version bump.
     pub const ARRAY: u8 = 17;
-    /// `smallint` / `int2`. Append-only — no version bump.
+    /// `smallint` / `int2`. Append-only, with no version bump.
     pub const INT2: u8 = 18;
-    /// `real` / `float4`. Append-only — no version bump.
+    /// `real` / `float4`. Append-only, with no version bump.
     pub const FLOAT4: u8 = 19;
-    /// `time with time zone` / `timetz` — followed by a reserved precision
-    /// byte (0), like the other date/time tags. Append-only — no version bump.
+    /// `time with time zone` / `timetz`, followed by a reserved precision byte
+    /// (0), like the other date/time tags. Append-only, with no version bump.
     pub const TIMETZ: u8 = 20;
-    /// A user-defined type — a composite, an enum or a domain — followed by its
-    /// `pg_type.oid` as a big-endian `u32`. The definition lives in the type
-    /// catalog, so the column stores only the identity. Append-only.
+    /// A user-defined type: a composite, an enum or a domain. Its
+    /// `pg_type.oid` follows as a big-endian `u32`. The definition lives in the
+    /// type catalog, so the column stores only the identity. Append-only.
     pub const USER: u8 = 21;
     pub const TSVECTOR: u8 = 22;
     pub const TSQUERY: u8 = 23;
 }
 
-/// Append a column's type (tag byte, plus the numeric typmod payload).
+/// Append a column's type: the tag byte, plus the numeric typmod payload.
 pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
     match ty {
         ColumnType::Bool => out.push(type_tag::BOOL),
@@ -510,9 +520,10 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
 
 // ── Options helpers ───────────────────────────────────────────────────────────
 
-/// Write a relation name as its two length-prefixed halves. A stored name is
-/// never a dotted string, for the same reason a catalog key is not: the two
-/// halves are not recoverable from one.
+/// Write a relation name as its two length-prefixed halves.
+///
+/// A stored name is never a dotted string, for the same reason a catalog key is
+/// not: nothing can recover the two halves from one string.
 fn write_relation(out: &mut Vec<u8>, name: &crate::RelationName) {
     write_str(out, &name.schema);
     write_str(out, &name.name);
@@ -529,7 +540,7 @@ pub(crate) fn write_str(out: &mut Vec<u8>, s: &str) {
     write_bytes(out, s.as_bytes());
 }
 
-/// Append a length-prefixed byte string (the framing `read_str` expects).
+/// Append a length-prefixed byte string, the framing `read_str` expects.
 fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(
         &u32::try_from(bytes.len())
@@ -577,11 +588,12 @@ fn read_options(cur: &mut &[u8]) -> Result<Vec<(String, String)>, KvError> {
 
 // ── Table schema ──────────────────────────────────────────────────────────────
 
-/// Serialize a table schema (ordinary or foreign).
+/// Serialize a table schema, ordinary or foreign.
 ///
-/// Always writes version byte `5`, then the column list, table option flags, and
-/// a foreign flag: `0` for an ordinary table, `1` for a foreign table followed
-/// by the foreign metadata payload.
+/// This function always writes version byte `5`, then the column list and the
+/// table option flags. A foreign flag closes that head: `0` for an ordinary
+/// table, and `1` for a foreign table, followed by the foreign metadata
+/// payload.
 ///
 /// # Panics
 ///
@@ -972,16 +984,20 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
 
 /// Serialize a foreign-key constraint record.
 ///
-/// Version byte, then the constraint's own creation-order id and its name; the
-/// child relation's display name and its id; the referenced relation's display
-/// name and its id; the referenced unique index's display name and its id; the
-/// match type, `ON DELETE` and `ON UPDATE` actions as one byte each; the
-/// deferrable, initially-deferred and validated flags as one byte each; and
-/// finally the referencing, referenced and `SET NULL`/`SET DEFAULT` column-name
-/// lists, each a `u32` count followed by that many length-prefixed names.
+/// The record starts with a version byte. Then come the constraint's own
+/// creation-order id and its name, the child relation's display name and its
+/// id, the referenced relation's display name and its id, and the referenced
+/// unique index's display name and its id.
 ///
-/// The ids are the authority — the display names are denormalized copies that a
-/// rename rewrites — so the record is self-describing without a second lookup.
+/// The match type and the `ON DELETE` and `ON UPDATE` actions follow as one
+/// byte each. The deferrable, initially-deferred and validated flags follow as
+/// one byte each. The referencing, referenced and `SET NULL`/`SET DEFAULT`
+/// column-name lists close the record. Each list is a `u32` count followed by
+/// that many length-prefixed names.
+///
+/// The ids are the authority, and the display names are denormalized copies
+/// that a rename rewrites. The record is therefore self-describing without a
+/// second lookup.
 ///
 /// # Panics
 ///
@@ -1230,11 +1246,12 @@ pub fn deserialize_sequence(bytes: &[u8]) -> Result<Sequence, KvError> {
 
 /// Deserialize a table schema.
 ///
-/// Returns `(table_id, columns, table_options, Option<ForeignTableMeta>)`.
+/// This function returns
+/// `(table_id, columns, table_options, Option<ForeignTableMeta>)`.
 ///
-/// Returns `KvError::CorruptRow` if the version byte is not `5`, if the table
-/// option flags contain unknown bits, or if the foreign flag after the option
-/// flags is not `0` (ordinary) or `1` (foreign).
+/// It returns `KvError::CorruptRow` if the version byte is not `5`, if the
+/// table option flags contain unknown bits, or if the foreign flag after the
+/// option flags is not `0` (ordinary) or `1` (foreign).
 ///
 /// # Errors
 ///
@@ -1320,9 +1337,11 @@ pub fn deserialize_fdw(bytes: &[u8]) -> Result<ForeignDataWrapper, KvError> {
 
 // ── User-defined types ────────────────────────────────────────────────────────
 
-/// Serialize a user-defined type: `oid`, name, a kind byte, then the kind's own
-/// payload (a composite's fields, an enum's labels, a domain's base type,
-/// nullability, default and checks).
+/// Serialize a user-defined type.
+///
+/// The record is the `oid`, the name, a kind byte, and then the kind's own
+/// payload. That payload is a composite's fields, an enum's labels, or a
+/// domain's base type, nullability, default and checks.
 #[must_use]
 pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
     let mut out = Vec::new();
@@ -1373,9 +1392,9 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
 ///
 /// # Panics
 ///
-/// If a fixed-width field's slice is not the width the reader just asked for,
-/// which cannot happen: `take_n` either yields exactly that many bytes or
-/// returns the corruption error above.
+/// This function panics if a fixed-width field's slice is not the width the
+/// reader just asked for. That cannot happen: `take_n` either yields exactly
+/// that many bytes or returns the corruption error above.
 pub fn deserialize_user_type(bytes: &[u8]) -> Result<UserType, KvError> {
     let mut cur = bytes;
     let oid = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4 bytes fit u32"));
@@ -1666,10 +1685,10 @@ mod tests {
         assert_eq!(decoded, columns);
     }
 
-    /// `jsonb` and array DEFAULT values survive the catalog round trip, including
-    /// the awkward shapes: a nested object/array document, an array holding NULL
-    /// elements, an empty array (whose element type lives only in the tag), and
-    /// an array of `jsonb`.
+    /// `jsonb` and array DEFAULT values survive the catalog round trip, the
+    /// awkward shapes included. Those shapes are a nested object or array
+    /// document, an array that holds NULL elements, an empty array whose
+    /// element type lives only in the tag, and an array of `jsonb`.
     #[test]
     fn roundtrip_jsonb_and_array_column_defaults() {
         use assert2::assert;
@@ -1744,9 +1763,9 @@ mod tests {
         assert!(foreign.is_none());
     }
 
-    /// Every `jsonb`/array column type survives a catalog round trip — the
-    /// element code is what distinguishes one array column from another, so all
-    /// of them are exercised, not just one.
+    /// Every `jsonb`/array column type survives a catalog round trip. The
+    /// element code is what separates one array column from another, so this
+    /// test exercises all of them, not just one.
     #[test]
     fn roundtrip_schema_jsonb_and_array_types() {
         use assert2::assert;
@@ -1786,11 +1805,12 @@ mod tests {
 
     /// Every `ColumnType` must survive `write_type`/`read_type` unchanged.
     ///
-    /// The tag table is hand-maintained, so a new type whose tag collides with
-    /// an existing one, or whose read arm is missing, would otherwise surface as
-    /// a column silently decoding to the wrong type rather than as a failure.
-    /// This encoding was once reconstructed from its callers after an accidental
-    /// revert, which is exactly the situation this test exists to catch.
+    /// The tag table is hand-maintained. Without this test, a new type whose
+    /// tag collides with an existing one, or whose read arm is missing, would
+    /// surface as a column that silently decodes to the wrong type rather than
+    /// as a failure. This encoding was once reconstructed from its callers
+    /// after an accidental revert. That is exactly the situation this test
+    /// exists to catch.
     #[test]
     fn every_column_type_round_trips_through_its_tag() {
         let types = [
@@ -1837,8 +1857,8 @@ mod tests {
         }
     }
 
-    /// No two `ColumnType` tags may collide — a collision makes one type decode
-    /// as the other, which no single-type round trip can detect.
+    /// No two `ColumnType` tags may collide. A collision makes one type decode
+    /// as the other, and no single-type round trip can detect that.
     #[test]
     fn column_type_tags_are_distinct() {
         let types = [

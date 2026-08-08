@@ -1,7 +1,8 @@
 //! Q1 statement completeness: `INSERT … <query>`, `UPDATE … FROM`,
 //! `DELETE … USING`, `MERGE`, `CREATE TABLE … AS`, the standalone `TABLE`
 //! statement, data-modifying CTEs, and `PostgreSQL` 18's `RETURNING` `OLD`/`NEW`
-//! aliases. Every expectation here was taken from a live `PostgreSQL` 18.4 oracle.
+//! aliases. Every expectation here was taken from a live `PostgreSQL` 18.4
+//! oracle.
 
 use assert2::assert;
 use crabka_pgexec::SqlEngine;
@@ -776,8 +777,9 @@ async fn a_second_touch_from_an_upsert_or_merge_is_21000() {
     );
 }
 
-/// A `WITH` item nothing demands runs after the body, in reverse list order —
-/// `PostgreSQL`'s `ExecPostprocessPlan` order, which decides whose change survives.
+/// A `WITH` item nothing demands runs after the body, in reverse list order.
+/// That is `PostgreSQL`'s `ExecPostprocessPlan` order, and it decides whose
+/// change survives.
 #[tokio::test]
 async fn undemanded_with_items_run_after_the_body_in_reverse_order() {
     let engine = SqlEngine::new();
@@ -819,8 +821,9 @@ async fn undemanded_with_items_run_after_the_body_in_reverse_order() {
     );
 }
 
-/// With no explicit column list the implicit target list is truncated to the
-/// source width; only an explicit list makes "too few expressions" an error.
+/// With no explicit column list, the engine truncates the implicit target list
+/// to the source width. Only an explicit list makes "too few expressions" an
+/// error.
 #[tokio::test]
 async fn an_implicit_insert_target_list_is_truncated_to_the_source_width() {
     let engine = SqlEngine::new();
@@ -888,7 +891,7 @@ async fn a_merge_insert_action_fills_the_columns_its_values_omit() {
     }
 }
 
-/// `CREATE TABLE … AS` is all-or-nothing from the client's point of view: a
+/// `CREATE TABLE … AS` is all-or-nothing from the client's point of view. A
 /// runtime failure in the source query leaves no relation behind, so the
 /// ordinary fix-and-retry works.
 #[tokio::test]
@@ -907,7 +910,7 @@ async fn create_table_as_leaves_no_relation_behind_when_the_query_fails() {
 }
 
 /// Two output columns of the same name would build a relation that cannot be
-/// read; `PostgreSQL` rejects the definition instead.
+/// read. `PostgreSQL` rejects the definition instead.
 #[tokio::test]
 async fn create_table_as_rejects_duplicate_output_column_names() {
     let engine = SqlEngine::new();
@@ -930,7 +933,7 @@ async fn create_table_as_rejects_duplicate_output_column_names() {
     }
 }
 
-/// An explicit `RETURNING WITH` image alias is a relation name: it may not
+/// An explicit `RETURNING WITH` image alias is a relation name. It must not
 /// collide with another relation in scope or with the other image, and it
 /// suppresses the other image's default spelling.
 #[tokio::test]

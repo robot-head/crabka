@@ -1,10 +1,10 @@
 //! Round-trip a real JVM Kafka broker's log dir against `crabka-log`.
 //!
-//! Gated by `#[ignore]` so `cargo test` doesn't pull Docker by default.
-//! Run with `--include-ignored` (or `--ignored`).
+//! These tests carry `#[ignore]`, so `cargo test` does not pull Docker by
+//! default. Run them with `--include-ignored` or `--ignored`.
 //!
-//! The companion scenario `jvm_consumes_rust_written_log_dir` is currently
-//! deferred — see `crates/log/tests/KNOWN_ISSUES.md`.
+//! The companion scenario `jvm_consumes_rust_written_log_dir` is deferred. See
+//! `crates/log/tests/KNOWN_ISSUES.md`.
 
 use std::{
     path::Path,
@@ -19,7 +19,8 @@ use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
 
 const TOPIC: &str = "crabka-log-itest";
 
-/// `docker exec <container_id> <args...>` — fails the test on non-zero exit.
+/// `docker exec <container_id> <args...>`. This fails the test on a non-zero
+/// exit.
 fn docker_exec(container_id: &str, args: &[&str]) -> std::process::Output {
     let mut cmd = Command::new("docker");
     cmd.arg("exec").arg(container_id).args(args);

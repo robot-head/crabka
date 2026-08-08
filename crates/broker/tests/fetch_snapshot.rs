@@ -1,7 +1,9 @@
-//! `FetchSnapshot` (`api_key` 59, KIP-630) end-to-end. Boots a single
-//! in-process broker, creates a topic so the metadata image is non-empty,
-//! triggers a controller snapshot, then fetches the `__cluster_metadata`
-//! snapshot byte range over the wire and asserts the page is served.
+//! `FetchSnapshot` (`api_key` 59, KIP-630), end to end.
+//!
+//! The test boots one in-process broker, creates a topic so that the metadata
+//! image is non-empty, and triggers a controller snapshot. It then fetches the
+//! `__cluster_metadata` snapshot byte range over the wire and asserts that the
+//! broker serves the page.
 
 use std::time::{Duration, Instant};
 

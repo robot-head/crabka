@@ -1,16 +1,16 @@
 //! `sasl.kerberos.principal.to.local.rules` (`auth_to_local`) DSL.
 //!
-//! Maps a Kerberos principal (`primary/instance@REALM`) to a short ACL name
-//! using the same `RULE:`/`DEFAULT` grammar as the JVM `KerberosName`. Pure
-//! logic — no KDC required.
+//! This module maps a Kerberos principal, `primary/instance@REALM`, to a short
+//! ACL name. It uses the same `RULE:`/`DEFAULT` grammar as the JVM
+//! `KerberosName`. The logic is pure and needs no KDC.
 
 use regex::Regex;
 
 /// One `auth_to_local` rule.
 #[derive(Debug, Clone)]
 pub enum Rule {
-    /// `DEFAULT`: matches a 1-component principal whose realm == default realm;
-    /// result is the first component.
+    /// `DEFAULT`: matches a 1-component principal whose realm == default realm.
+    /// The result is the first component.
     Default,
     /// `RULE:[n:format](match)s/from/to/[g][/L]`
     Translate {
@@ -108,6 +108,7 @@ impl Rule {
 }
 
 /// Build the candidate string for a Translate rule from realm + components.
+///
 /// `$0` => realm, `$1`.. => components[0]..
 fn expand_format(format: &str, components: &[&str], realm: &str) -> String {
     let mut out = String::new();
@@ -136,7 +137,7 @@ fn expand_format(format: &str, components: &[&str], realm: &str) -> String {
     out
 }
 
-/// Apply rules in order; first match wins.
+/// Apply the rules in order. The first match wins.
 // auth_to_local principal mapping (Kerberos principal -> short ACL name).
 // skip_all avoids capturing the compiled `rules`; the non-sensitive realm is
 // recorded up front and the resolved short name in `mapped` on success. `err`

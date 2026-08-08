@@ -1,9 +1,9 @@
 //! `CodSpeed` microbenchmarks for `crabka-protocol::records`.
 //!
-//! Covers the v2 `RecordBatch` codec path end-to-end: encode, owned decode,
-//! borrowed (zero-copy) decode + iteration, and `encoded_len`. Each axis is
-//! varied across compression codecs and a small grid of batch sizes so
-//! regressions in any one shape show up clearly.
+//! Covers the v2 `RecordBatch` codec path end to end: encode, owned decode,
+//! borrowed zero-copy decode with iteration, and `encoded_len`. Each axis
+//! varies across compression codecs and a small grid of batch sizes, so a
+//! regression in any one shape shows up clearly.
 
 use bytes::{Bytes, BytesMut};
 use crabka_compression::CompressionType;

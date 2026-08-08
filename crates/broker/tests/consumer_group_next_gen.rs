@@ -1,5 +1,5 @@
 //! Raw-RPC integration tests for KIP-848 next-gen consumer groups,
-//! driven against an in-process Crabka broker via `crabka-client-core`.
+//! driven against an in-process Crabka broker through `crabka-client-core`.
 
 use std::sync::Arc;
 
@@ -315,8 +315,9 @@ async fn first_join_with_client_member_id_echoes_and_assigns() {
 
 /// `kafka-consumer-groups.sh --list` sends `ListGroups` (`api_key` 16) with
 /// `types_filter = ["consumer"]`. A live next-gen consumer group must appear in
-/// that response tagged `group_type == "consumer"`, must NOT appear when the
-/// request filters on `["share"]`, and must appear (once) with no filter.
+/// that response with `group_type == "consumer"`. It must NOT appear when the
+/// request filters on `["share"]`, and it must appear exactly once with no
+/// filter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_groups_includes_next_gen_consumer_group() {
     let (_b, bootstrap, _d) = boot().await;

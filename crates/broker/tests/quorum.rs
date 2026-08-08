@@ -1,15 +1,15 @@
-//! Multi-node in-process Crabka cluster tests. Each test spins up
-//! 3 brokers on distinct loopback ports, all listed as voters in
-//! each other's config.
+//! Multi-node in-process Crabka cluster tests. Each test starts
+//! 3 brokers on distinct loopback ports. The config of each broker
+//! lists all three as voters.
 //!
 //! These tests exercise the metadata quorum end-to-end: leader
-//! election, log replication, follower-forwarding via `submit_change`,
+//! election, log replication, follower-forwarding with `submit_change`,
 //! and openraft's per-leader `client_write` serialization.
 //!
-//! Deadlines are 2 minutes throughout: a 3-broker cluster spinning up
-//! cold on a hosted GitHub Actions runner can take tens of seconds for
+//! Deadlines are 2 minutes throughout. A 3-broker cluster that starts
+//! cold on a hosted GitHub Actions runner can need tens of seconds for
 //! openraft to converge on a leader, and `cluster_lock` serializes the
-//! tests so three slow startups accumulate.
+//! tests, so three slow startups accumulate.
 
 // Test-file pragmatism: broker ids are formed with plain
 // `u64::try_from(i+1).unwrap()`-style casts when turning 1-based `i` into broker
@@ -24,16 +24,17 @@ use tokio::sync::Mutex;
 
 mod support;
 
-/// Test-binary-wide serialization. Each test in this file spins up a
-/// 3-broker cluster on loopback; running them concurrently exhausts
-/// loopback ephemeral ports and starves the openraft election timing.
-/// Acquire this lock at the top of every `#[tokio::test]` so the binary
-/// is effectively single-threaded for these scenarios, regardless of
-/// whether the caller serializes execution through nextest test groups.
+/// Test-binary-wide serialization.
 ///
-/// `tokio::sync::Mutex` rather than `std::sync::Mutex` so the lock can
-/// be held across the `.await` calls that fill each test body without
-/// tripping clippy's `await_holding_lock`.
+/// Each test in this file starts a 3-broker cluster on loopback. Concurrent
+/// runs exhaust the loopback ephemeral ports and starve the openraft election
+/// timing. Acquire this lock at the top of every `#[tokio::test]`, so the
+/// binary is effectively single-threaded for these scenarios. This holds
+/// whether or not the caller serializes execution through nextest test groups.
+///
+/// This is a `tokio::sync::Mutex` and not a `std::sync::Mutex`, so a test can
+/// hold the lock across the `.await` calls in its body without a report from
+/// clippy's `await_holding_lock`.
 fn cluster_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -45,10 +46,13 @@ use crabka_protocol::owned::{
 };
 use tempfile::TempDir;
 
-/// Await every broker reporting an elected (non-zero) controller leader.
-/// Event-driven (each handle awaits its leader watch channel); stricter than the
-/// old "any one node" poll and exactly the precondition the callers need before
-/// issuing client requests to a specific node.
+/// Waits until every broker reports an elected controller leader with a
+/// non-zero id.
+///
+/// This function is event-driven. Each handle awaits its leader watch channel.
+/// The check is stricter than the old "any one node" poll, and it is exactly
+/// the precondition the callers need before they send client requests to a
+/// specific node.
 async fn wait_for_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) {
     for (h, _, _) in cluster {
         h.wait_until_controller_leader().await;

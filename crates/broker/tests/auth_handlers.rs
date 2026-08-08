@@ -1,12 +1,12 @@
 //! Broker-side auth tests. No Docker.
 //!
-//! T10 contributes a single smoke test that proves a TLS-only listener
-//! completes a TLS handshake with a stock `tokio_rustls::TlsConnector`
-//! using the dev cert fixture as the trust anchor. T11 adds a Metadata
-//! round-trip case that verifies per-listener endpoints land on the
-//! broker's self-registration record. Subsequent tasks (T12+) extend
-//! this file with SASL/PLAIN, SASL/SCRAM, and `AlterUserScramCredentials`
-//! cases.
+//! T10 gives one smoke test. It proves that a TLS-only listener completes
+//! a TLS handshake with a stock `tokio_rustls::TlsConnector`, and it uses
+//! the dev cert fixture as the trust anchor. T11 adds a Metadata
+//! round-trip case that checks that the per-listener endpoints land on the
+//! broker's self-registration record. Task T12 and the tasks after it add
+//! SASL/PLAIN, SASL/SCRAM, and `AlterUserScramCredentials` cases to this
+//! file.
 
 use std::{io, net::SocketAddr, sync::Arc};
 
@@ -48,23 +48,26 @@ use tokio_rustls::{
 const DEV_CERT: &str = include_str!("../../../crates/security/tests/fixtures/dev_cert.pem");
 const DEV_KEY: &str = include_str!("../../../crates/security/tests/fixtures/dev_key.pem");
 
-/// alice's SCRAM test password, assembled from characters at runtime rather
-/// than written inline. The value is a non-secret test fixture, but a literal
-/// flowing into the client SASL-auth calls trips GitHub's default code-scanning
-/// credential query; sourcing it here keeps those call sites literal-free.
+/// alice's SCRAM test password, built from characters at runtime.
+///
+/// The value is a non-secret test fixture. But a literal that goes into the
+/// client SASL-auth calls trips GitHub's default code-scanning credential
+/// query. This function keeps those call sites free of literals.
 fn alice_password() -> String {
     ['w', 'o', 'n', 'd', 'e', 'r', 'l', 'a', 'n', 'd']
         .iter()
         .collect()
 }
 
-/// admin PLAIN test password, assembled at runtime to avoid static-secret
-/// code-scanning false positives in integration fixtures.
+/// admin PLAIN test password, built at runtime.
+///
+/// A runtime value stops code scanning from giving a false positive for a
+/// static secret in the integration fixtures.
 fn admin_plain_password() -> String {
     ['s', 'e', 'c', 'r', 'e', 't'].iter().collect()
 }
 
-/// wrong SCRAM test password, assembled at runtime for the same reason as
+/// wrong SCRAM test password, built at runtime for the same reason as
 /// `admin_plain_password`.
 fn wrong_scram_password() -> String {
     ['h', 'u', 'n', 't', 'e', 'r', '2'].iter().collect()
@@ -140,9 +143,10 @@ async fn tls_listener_accepts_tls_handshake_only() {
     handle.shutdown().await;
 }
 
-/// Minimal `ServerCertVerifier` that accepts exactly one pre-known DER
-/// blob. Skips hostname, validity, signature, and CA-flag checks — fine
-/// for a smoke test, never for production code.
+/// Minimal `ServerCertVerifier` that accepts exactly one pre-known DER blob.
+///
+/// The verifier skips the hostname, validity, signature, and CA-flag checks.
+/// This is good enough for a smoke test, but never for production code.
 #[derive(Debug)]
 struct PinnedDevCertVerifier {
     pinned: CertificateDer<'static>,
@@ -199,11 +203,11 @@ impl ServerCertVerifier for PinnedDevCertVerifier {
     }
 }
 
-/// Every configured listener should appear as a `BrokerEndpoint`
-/// on this broker's self-registration record, and the projection should
-/// survive a Metadata round-trip end-to-end. The Kafka v9+ Metadata wire
-/// response carries a single `host:port` per broker (the codec has no
-/// `endpoints[]` array on `MetadataResponseBroker`), so this test asserts:
+/// Every configured listener should appear as a `BrokerEndpoint` on this
+/// broker's self-registration record, and the projection should survive a
+/// Metadata round-trip end-to-end. The Kafka v9+ Metadata wire response
+/// carries a single `host:port` per broker, because the codec has no
+/// `endpoints[]` array on `MetadataResponseBroker`. So this test asserts:
 ///
 /// 1. The on-disk registration record stored in [`crabka_metadata::MetadataImage`]
 ///    carries one [`crabka_metadata::BrokerEndpoint`] per [`ListenerSpec`].
@@ -211,10 +215,10 @@ impl ServerCertVerifier for PinnedDevCertVerifier {
 ///    returns at least one broker entry whose `host:port` matches one of
 ///    the configured advertised endpoints.
 ///
-/// The two-listener config uses PLAINTEXT + SSL (the SSL listener uses
-/// the dev cert so `BrokerConfig::validate` is satisfied). We
-/// only dial the PLAINTEXT listener — the goal here is the metadata
-/// projection, not TLS termination (that's `tls_listener_accepts_*`).
+/// The two-listener config uses PLAINTEXT and SSL. The SSL listener uses the
+/// dev cert, so `BrokerConfig::validate` accepts it. We dial only the
+/// PLAINTEXT listener, because the goal here is the metadata projection and
+/// not TLS termination. `tls_listener_accepts_*` covers TLS termination.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metadata_response_carries_listener_endpoints() {
     // The Broker installs the rustls crypto provider during `start`; the
@@ -335,10 +339,12 @@ async fn metadata_response_carries_listener_endpoints() {
 // ────────────────────────────────────────────────────────────────────────
 
 /// Happy-path drive of a SASL/PLAIN session: `ApiVersions` → `SaslHandshake`
-/// → `SaslAuthenticate` → Metadata. Asserts the connection survives every step
-/// and the final Metadata response carries this broker. The dial-side runs
-/// raw bytes against `TcpStream` rather than `Client` because `Client`
-/// doesn't (yet) speak SASL.
+/// → `SaslAuthenticate` → Metadata.
+///
+/// The test asserts that the connection survives every step and that the
+/// final Metadata response carries this broker. The dial side sends raw
+/// bytes over `TcpStream` and not `Client`, because `Client` does not speak
+/// SASL yet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_plain_happy_path() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -363,12 +369,13 @@ async fn sasl_plain_happy_path() {
     result.expect("SASL/PLAIN session must succeed end-to-end");
 }
 
-/// SASL PLAIN — one happy-path + one wrong-password
-/// session ticks both `successful_authentication_total` and
-/// `failed_authentication_total` per-mechanism counters on the
-/// `/metrics` scrape. Validates the end-to-end wire path from the
-/// `SaslAuthenticate` dispatch site through to the rendered
-/// Prometheus text.
+/// SASL PLAIN metrics: one happy-path session and one wrong-password session
+/// tick both the `successful_authentication_total` and the
+/// `failed_authentication_total` per-mechanism counters on the `/metrics`
+/// scrape.
+///
+/// The test checks the end-to-end wire path from the `SaslAuthenticate`
+/// dispatch site to the rendered Prometheus text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_plain_authentication_metrics_tick_for_success_and_failure() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -416,9 +423,11 @@ async fn sasl_plain_authentication_metrics_tick_for_success_and_failure() {
     );
 }
 
-/// HTTP GET `/metrics` against `addr` and return the response body
-/// (sans HTTP head). Mirrors the helper in `tests/metrics.rs` but
-/// kept inline here to avoid pulling a cross-test module.
+/// Send an HTTP GET `/metrics` to `addr` and return the response body.
+///
+/// The returned body holds no HTTP head. This helper is a copy of the helper
+/// in `tests/metrics.rs`. It stays inline here so that the test does not need
+/// a cross-test module.
 async fn scrape_metrics(addr: SocketAddr) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -434,11 +443,14 @@ async fn scrape_metrics(addr: SocketAddr) -> String {
     s[body_start..].to_string()
 }
 
-/// Negative path: wrong password ⇒ `SaslAuthenticate` responds with
-/// `error_code = SASL_AUTHENTICATION_FAILED` (58) and the broker closes
-/// the connection. `drive_sasl_plain_session` surfaces the failure as an
-/// `Err` either when the auth response's `error_code` is non-zero, or when
-/// the subsequent Metadata read returns EOF (connection closed by peer).
+/// Negative path: with a wrong password, `SaslAuthenticate` responds with
+/// `error_code = SASL_AUTHENTICATION_FAILED` (58) and the broker closes the
+/// connection.
+///
+/// `drive_sasl_plain_session` reports the failure as an `Err` in two cases.
+/// The first case is a non-zero `error_code` on the auth response. The second
+/// case is an EOF on the Metadata read that follows, when the peer closed the
+/// connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_plain_wrong_password_closes_connection() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -468,19 +480,22 @@ async fn sasl_plain_wrong_password_closes_connection() {
 
 /// Drive a complete SASL/PLAIN session against a `SASL_PLAINTEXT` listener.
 ///
-/// On success, returns `Ok(())` after a successful post-auth Metadata
-/// round-trip. Returns `Err` when any step (frame I/O, response decode,
-/// non-zero error code on a SASL response, EOF before Metadata) fails.
+/// On success, this helper returns `Ok(())` after a successful post-auth
+/// Metadata round-trip. It returns `Err` when any step fails: frame I/O,
+/// response decode, a non-zero error code on a SASL response, or EOF before
+/// Metadata.
 ///
-/// Wire-protocol mechanics this helper handles inline (no `Client` API):
-/// - Request headers: v1 (non-flexible) for `ApiVersions v0`, `SaslHandshake v1`;
-///   v2 (flexible, trailing `0x00` tagged-fields byte) for `SaslAuthenticate v2`
-///   and `Metadata v12`.
-/// - Response headers: always v0 (just `correlation_id`) for `ApiVersions`
-///   regardless of body flexibility, v1 (`corr_id` + `0x00` tagged byte) for
-///   every other flexible response, v0 for non-flexible.
-/// - Length framing: 4-byte big-endian length prefix on every frame in
-///   both directions, matching `crabka_broker::network::codec`.
+/// This helper handles these wire-protocol mechanics inline, without the
+/// `Client` API:
+/// - Request headers: v1, non-flexible, for `ApiVersions v0` and
+///   `SaslHandshake v1`. v2, flexible with a trailing `0x00` tagged-fields
+///   byte, for `SaslAuthenticate v2` and `Metadata v12`.
+/// - Response headers: always v0, which holds only `correlation_id`, for
+///   `ApiVersions`, whatever the body flexibility. v1, which holds `corr_id`
+///   plus a `0x00` tagged byte, for every other flexible response. v0 for
+///   non-flexible.
+/// - Length framing: a 4-byte big-endian length prefix on every frame in both
+///   directions, the same as `crabka_broker::network::codec`.
 async fn drive_sasl_plain_session(
     addr: SocketAddr,
     user: &str,
@@ -568,11 +583,13 @@ async fn drive_sasl_plain_session(
 // SASL/SCRAM-SHA-512 end-to-end.
 // ────────────────────────────────────────────────────────────────────────
 
-/// Happy-path drive of a SASL/SCRAM-SHA-512 session: provisions a credential
-/// for "alice" with the shared test password directly through the controller
-/// (rather than via the public `AlterUserScramCredentials` handler), then
-/// runs the two-round RFC 5802 dance end-to-end and asserts the post-auth
-/// Metadata request succeeds.
+/// Happy-path drive of a SASL/SCRAM-SHA-512 session.
+///
+/// The test provisions a credential for "alice" with the shared test
+/// password. It goes through the controller directly and not through the
+/// public `AlterUserScramCredentials` handler. It then runs the two-round
+/// RFC 5802 exchange end-to-end and asserts that the post-auth Metadata
+/// request succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_scram_sha512_happy_path() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -619,11 +636,13 @@ async fn sasl_scram_sha512_happy_path() {
     result.expect("SASL/SCRAM session must succeed end-to-end");
 }
 
-/// Negative path: wrong password ⇒ `SaslAuthenticate` round 2 responds
-/// with `error_code = 58` (`SASL_AUTHENTICATION_FAILED`) and the broker
-/// closes the connection. `drive_sasl_scram_session` surfaces the failure
-/// either as a non-zero error code on the auth response or as EOF when the
-/// follow-up Metadata read returns no bytes.
+/// Negative path: with a wrong password, `SaslAuthenticate` round 2 responds
+/// with `error_code = 58`, which is `SASL_AUTHENTICATION_FAILED`, and the
+/// broker closes the connection.
+///
+/// `drive_sasl_scram_session` reports the failure as a non-zero error code on
+/// the auth response, or as an EOF when the Metadata read that follows
+/// returns no bytes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_scram_sha512_wrong_password_closes_connection() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -675,10 +694,12 @@ async fn sasl_scram_sha512_wrong_password_closes_connection() {
     );
 }
 
-/// SASL/SCRAM-SHA-256 happy path. Mirrors the SHA-512 test but
-/// provisions a SHA-256 credential and configures the listener to enable
-/// only SHA-256, proving the new mechanism is wired end-to-end and not
-/// accidentally piggybacking on SHA-512 plumbing.
+/// SASL/SCRAM-SHA-256 happy path.
+///
+/// The test is a copy of the SHA-512 test, but it provisions a SHA-256
+/// credential and configures the listener to enable only SHA-256. This proves
+/// that the new mechanism is wired end-to-end, and that it does not use the
+/// SHA-512 code by accident.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_scram_sha256_happy_path() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -723,8 +744,8 @@ async fn sasl_scram_sha256_happy_path() {
     result.expect("SASL/SCRAM-SHA-256 session must succeed end-to-end");
 }
 
-/// Negative path for SHA-256 — wrong password must close the connection
-/// just like the SHA-512 variant.
+/// Negative path for SHA-256: a wrong password must close the connection,
+/// the same as in the SHA-512 variant.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_scram_sha256_wrong_password_closes_connection() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -776,14 +797,15 @@ async fn sasl_scram_sha256_wrong_password_closes_connection() {
     );
 }
 
-/// Drive a complete SASL/SCRAM session against a `SASL_PLAINTEXT`
-/// listener. Works for both SHA-256 and SHA-512; the mechanism is
-/// passed through to the handshake and the client state machine.
+/// Drive a complete SASL/SCRAM session against a `SASL_PLAINTEXT` listener.
 ///
-/// On success returns `Ok(())` after a successful post-auth Metadata
-/// round-trip. Returns `Err` when any step fails — non-zero error code on
+/// This helper works for both SHA-256 and SHA-512. It passes the mechanism
+/// through to the handshake and to the client state machine.
+///
+/// On success it returns `Ok(())` after a successful post-auth Metadata
+/// round-trip. It returns `Err` when any step fails: a non-zero error code on
 /// either of the two `SaslAuthenticate` rounds, a server-final signature
-/// mismatch (client-side proof), or EOF before Metadata returns.
+/// mismatch in the client-side proof, or EOF before Metadata returns.
 async fn drive_sasl_scram_session(
     addr: SocketAddr,
     user: &str,
@@ -900,10 +922,14 @@ async fn drive_sasl_scram_session(
     Ok(())
 }
 
-/// Encode a `RequestHeader v1` (or v2 when `flexible`), append the body,
-/// write the length-prefixed frame, then read one response frame and
-/// strip the `ResponseHeader` (always v0 for ApiVersions(18), otherwise
-/// v0 if non-flexible / v1 if flexible). Returns the response body bytes.
+/// Encode a request header, send the frame, and return the response body
+/// bytes.
+///
+/// The header is a `RequestHeader v1`, or a v2 header when `flexible` is set.
+/// This function appends the body, writes the length-prefixed frame, reads
+/// one response frame, and then strips the `ResponseHeader`. That header is
+/// always v0 for ApiVersions(18). For every other API it is v0 when the
+/// response is non-flexible and v1 when the response is flexible.
 async fn round_trip(
     stream: &mut TcpStream,
     api_key: i16,
@@ -958,7 +984,9 @@ async fn round_trip(
 // ────────────────────────────────────────────────────────────────────────
 
 /// Build an unsecured JWS (`alg:none`) bearer token with a `sub` principal and
-/// an `exp` (Unix seconds). Empty signature segment — matches what the JVM
+/// an `exp` in Unix seconds.
+///
+/// The signature segment is empty. This matches what the JVM
 /// `OAuthBearerUnsecuredLoginCallbackHandler` produces.
 fn unsecured_jws(sub: &str, exp_unix_secs: i64) -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
@@ -967,7 +995,8 @@ fn unsecured_jws(sub: &str, exp_unix_secs: i64) -> String {
     format!("{header}.{claims}.")
 }
 
-/// RFC 7628 client initial response carrying `token` (empty authzid).
+/// RFC 7628 client initial response that carries `token` with an empty
+/// authzid.
 fn oauthbearer_initial(token: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("n,,\u{1}auth=Bearer {token}\u{1}\u{1}").into_bytes())
 }
@@ -983,7 +1012,7 @@ fn now_unix_secs() -> i64 {
 }
 
 /// Start a single `SASL_PLAINTEXT` broker that enables only OAUTHBEARER, with
-/// the supplied validator.
+/// the given validator.
 fn start_oauthbearer_broker(
     log_dir: &std::path::Path,
     validator: crabka_security::OAuthBearerValidator,
@@ -1006,11 +1035,13 @@ fn start_oauthbearer_broker(
     Box::pin(async move { Broker::start(cfg).await.expect("broker must start") })
 }
 
-/// Same as [`start_oauthbearer_broker`] but with a configurable
-/// server-side ceiling on OAUTHBEARER session lifetime. Passing
-/// `Some(seconds)` clamps `session_lifetime_ms` (and the dispatch-loop
-/// re-auth deadline) to `min(token_exp - now, seconds * 1000)`. Passing
-/// `None` reproduces the 49e default (session = token exp).
+/// Same as [`start_oauthbearer_broker`], but with a configurable server-side
+/// ceiling on the OAUTHBEARER session lifetime.
+///
+/// `Some(seconds)` clamps `session_lifetime_ms` to
+/// `min(token_exp - now, seconds * 1000)`. It clamps the dispatch-loop
+/// re-auth deadline to the same value. `None` reproduces the 49e default,
+/// where the session ends at the token exp.
 fn start_oauthbearer_broker_with_cap(
     log_dir: &std::path::Path,
     validator: crabka_security::OAuthBearerValidator,
@@ -1032,8 +1063,10 @@ fn start_oauthbearer_broker_with_cap(
     Box::pin(async move { Broker::start(cfg).await.expect("broker must start") })
 }
 
-/// `ApiVersions` (pre-auth) + `SaslHandshake`(OAUTHBEARER); asserts the broker
-/// advertises OAUTHBEARER and the handshake succeeds.
+/// Run a pre-auth `ApiVersions` and a `SaslHandshake`(OAUTHBEARER).
+///
+/// The helper asserts that the broker advertises OAUTHBEARER and that the
+/// handshake succeeds.
 async fn oauthbearer_handshake(stream: &mut TcpStream, corr: &mut i32) -> Result<(), io::Error> {
     let av_req = ApiVersionsRequest::default();
     let mut av_body = BytesMut::new();
@@ -1071,7 +1104,7 @@ async fn oauthbearer_handshake(stream: &mut TcpStream, corr: &mut i32) -> Result
     Ok(())
 }
 
-/// Send one `SaslAuthenticate v2` with `auth_bytes`, returning the decoded
+/// Send one `SaslAuthenticate v2` with `auth_bytes` and return the decoded
 /// response.
 async fn oauthbearer_authenticate(
     stream: &mut TcpStream,
@@ -1092,9 +1125,10 @@ async fn oauthbearer_authenticate(
         .map_err(|e| io::Error::other(format!("SaslAuthenticate decode: {e}")))
 }
 
-/// Happy path: a valid unsecured token authenticates in a single round, and a
-/// post-auth Metadata round-trip proves the connection survived and the
-/// principal was accepted.
+/// Happy path: a valid unsecured token authenticates in a single round.
+///
+/// A post-auth Metadata round-trip proves that the connection survived and
+/// that the broker accepted the principal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_oauthbearer_happy_path() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -1146,8 +1180,10 @@ async fn sasl_oauthbearer_happy_path() {
 }
 
 /// Failure path: an expired token triggers the RFC 7628 two-round failure
-/// handshake — round 1 returns the `invalid_token` JSON with `error_code = 0`
-/// (connection open), round 2 (the client's `\x01` dummy) returns
+/// handshake.
+///
+/// Round 1 returns the `invalid_token` JSON with `error_code = 0` and keeps
+/// the connection open. Round 2, the client's `\x01` dummy, returns
 /// `SASL_AUTHENTICATION_FAILED` (58).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_oauthbearer_invalid_token_two_round_failure() {
@@ -1192,8 +1228,9 @@ async fn sasl_oauthbearer_invalid_token_two_round_failure() {
 // SASL/OAUTHBEARER signed-JWT (JWKS) validation end-to-end.
 // ────────────────────────────────────────────────────────────────────────
 
-/// Generate a fresh ES256 key, returning `(key_pair, jwks_json)` where the
-/// JWKS advertises the matching public key under `kid`.
+/// Generate a fresh ES256 key and return `(key_pair, jwks_json)`.
+///
+/// The JWKS advertises the matching public key under `kid`.
 fn es256_key(kid: &str) -> (ring::signature::EcdsaKeyPair, String) {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
     use ring::{
@@ -1225,8 +1262,9 @@ fn es256_token(kp: &ring::signature::EcdsaKeyPair, kid: &str, claims: &str) -> S
     format!("{signing_input}.{}", B64.encode(sig.as_ref()))
 }
 
-/// A `Signed` validator whose key set is pre-populated from `jwks_json` (no
-/// network fetch needed for the test).
+/// A `Signed` validator whose key set comes from `jwks_json`.
+///
+/// The test needs no network fetch.
 fn signed_validator(jwks_json: &str) -> crabka_security::OAuthBearerValidator {
     let handle = crabka_security::JwksHandle::new(
         crabka_security::Jwks::from_json(jwks_json, false).unwrap(),
@@ -1234,9 +1272,11 @@ fn signed_validator(jwks_json: &str) -> crabka_security::OAuthBearerValidator {
     crabka_security::OAuthBearerValidator::Signed(crabka_security::SignedJwsValidator::new(handle))
 }
 
-/// Happy path: a real signed (ES256) token verified against an in-memory JWKS
-/// authenticates in a single round, proving the `Signed` validator is wired
-/// through the live `SaslAuthenticate` path.
+/// Happy path: a real signed ES256 token, verified against an in-memory JWKS,
+/// authenticates in a single round.
+///
+/// This proves that the `Signed` validator is wired through the live
+/// `SaslAuthenticate` path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_oauthbearer_signed_token_happy_path() {
     let (kp, jwks) = es256_key("k1");
@@ -1288,8 +1328,10 @@ async fn sasl_oauthbearer_signed_token_happy_path() {
 }
 
 /// Failure path: a token signed by a *different* key than the JWKS advertises
-/// triggers the RFC 7628 two-round failure handshake (round 1 carries the
-/// `invalid_token` JSON; round 2's `\x01` dummy returns 58).
+/// triggers the RFC 7628 two-round failure handshake.
+///
+/// Round 1 carries the `invalid_token` JSON. Round 2, the `\x01` dummy,
+/// returns 58.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_oauthbearer_signed_token_wrong_key_two_round_failure() {
     // JWKS advertises key A's public key; the token is signed by key B.
@@ -1350,10 +1392,12 @@ async fn sasl_oauthbearer_signed_token_wrong_key_two_round_failure() {
 // SaslAuthenticate; `advance()` then jumps past that Instant.
 // ────────────────────────────────────────────────────────────────────────
 
-/// Build an unsecured-JWS validator with zero clock skew (so `exp` is
-/// the exact session boundary) and the default `sub` principal claim.
-/// Mirrors the existing OAuth tests, but pinned to zero skew so
-/// the assertion windows in the re-auth tests don't drift.
+/// Build an unsecured-JWS validator with zero clock skew and the default
+/// `sub` principal claim.
+///
+/// Zero clock skew makes `exp` the exact session boundary. This validator is
+/// the same as the one in the other OAuth tests, but it is pinned to zero
+/// skew so that the assertion windows in the re-auth tests do not drift.
 fn oauthbearer_zero_skew_validator() -> crabka_security::OAuthBearerValidator {
     crabka_security::OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
         allowable_clock_skew: crabka_units::secs(0),
@@ -1362,13 +1406,15 @@ fn oauthbearer_zero_skew_validator() -> crabka_security::OAuthBearerValidator {
 }
 
 /// Drive a `SASL_PLAINTEXT` OAUTHBEARER handshake to completion on a fresh
-/// connection. Returns the still-open `TcpStream` together with the
-/// `session_lifetime_ms` field from the `SaslAuthenticateResponse` so
-/// callers can assert on the timer and continue using the connection
-/// (notably the in-band re-auth scenarios).
+/// connection.
 ///
-/// `bearer_token` is the JWS string — for unsecured tests, an `alg:none`
-/// JWT with the desired `sub` + `exp`. The function frames the RFC 7628
+/// The function returns the still-open `TcpStream` and the
+/// `session_lifetime_ms` field from the `SaslAuthenticateResponse`. Callers
+/// can then assert on the timer and continue to use the connection. The
+/// in-band re-auth scenarios do this.
+///
+/// `bearer_token` is the JWS string. For unsecured tests it is an `alg:none`
+/// JWT with the wanted `sub` and `exp`. The function frames the RFC 7628
 /// client-first message that wraps the token.
 async fn drive_sasl_oauthbearer_session_open(
     addr: SocketAddr,
@@ -1393,12 +1439,13 @@ async fn drive_sasl_oauthbearer_session_open(
     Ok((stream, auth.session_lifetime_ms))
 }
 
-/// Drive a `SaslHandshake`(OAUTHBEARER) + `SaslAuthenticate` pair on an
-/// already-authenticated stream, swapping the bearer token. Used to
-/// exercise KIP-368 in-band re-authentication. Returns `Ok(())` when
-/// the broker accepts the new token; returns `Err` if either round
-/// reports a non-zero error code (caller asserts on the rendered
-/// error text to distinguish 34 vs 58).
+/// Drive a `SaslHandshake`(OAUTHBEARER) and `SaslAuthenticate` pair on an
+/// already-authenticated stream, with a new bearer token.
+///
+/// This helper exercises KIP-368 in-band re-authentication. It returns
+/// `Ok(())` when the broker accepts the new token. It returns `Err` when
+/// either round reports a non-zero error code. The caller then asserts on
+/// the rendered error text to tell 34 from 58.
 async fn drive_inband_reauth(stream: &mut TcpStream, new_token: &str) -> Result<(), io::Error> {
     let handshake_request = SaslHandshakeRequest {
         mechanism: "OAUTHBEARER".to_string(),
@@ -1442,8 +1489,10 @@ async fn drive_inband_reauth(stream: &mut TcpStream, new_token: &str) -> Result<
 }
 
 /// Test #1: a successful OAUTHBEARER authentication carries
-/// `session_lifetime_ms ≈ exp - now` (KIP-368 wire field on
-/// `SaslAuthenticateResponse v1+`).
+/// `session_lifetime_ms ≈ exp - now`.
+///
+/// `session_lifetime_ms` is the KIP-368 wire field on
+/// `SaslAuthenticateResponse v1+`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oauthbearer_session_lifetime_ms_set_from_token_exp() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -1467,11 +1516,12 @@ async fn oauthbearer_session_lifetime_ms_set_from_token_exp() {
     handle.shutdown().await;
 }
 
-/// When the broker is configured with
-/// `[oauthbearer].max_session_lifetime_seconds`, the response's
-/// `session_lifetime_ms` is clamped to `min(token_exp_ms - now_ms, cap *
-/// 1000)`, and the dispatch loop's deadline is anchored to the CLAMPED
-/// value so the broker enforces what the client was told.
+/// The broker clamps `session_lifetime_ms` when the config sets
+/// `[oauthbearer].max_session_lifetime_seconds`.
+///
+/// The response value becomes `min(token_exp_ms - now_ms, cap * 1000)`. The
+/// dispatch loop anchors its deadline to the CLAMPED value, so the broker
+/// enforces what it told the client.
 #[tokio::test(flavor = "current_thread")]
 async fn oauthbearer_session_capped_by_broker_max_session_lifetime_seconds() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -1519,13 +1569,14 @@ async fn oauthbearer_session_capped_by_broker_max_session_lifetime_seconds() {
 /// dispatch loop's per-connection `sleep_until` fires and closes the
 /// TCP stream. The client observes EOF on the next read.
 ///
-/// `tokio::time::pause()` requires the `current_thread` runtime — and
-/// post-handshake `pause()` rather than `start_paused = true` because
-/// the broker's startup-time internal timers (raft heartbeats, JWKS
-/// refresh, disk scans) need real wall-clock progress or `Broker::start`
-/// hangs. The dispatch loop's deadline was armed on the real Instant at
-/// the moment it re-entered `select!` after handshake completion, so
-/// after pause the `advance(61s)` jumps tokio past that Instant.
+/// `tokio::time::pause()` needs the `current_thread` runtime. The test calls
+/// `pause()` after the handshake and does not set `start_paused = true`,
+/// because the broker's internal start-up timers need real wall-clock
+/// progress. Those timers are the raft heartbeats, the JWKS refresh, and the
+/// disk scans. Without that progress, `Broker::start` hangs. The dispatch
+/// loop armed its deadline on the real Instant when it re-entered `select!`
+/// after the handshake, so `advance(61s)` after the pause jumps tokio past
+/// that Instant.
 #[tokio::test(flavor = "current_thread")]
 async fn oauthbearer_session_expires_closes_connection() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -1558,10 +1609,12 @@ async fn oauthbearer_session_expires_closes_connection() {
     handle.shutdown().await;
 }
 
-/// Test #3: an in-band SaslHandshake/SaslAuthenticate pair with a fresh
-/// token (longer `exp`) on an already-authenticated stream resets the
-/// per-connection deadline. After advancing past the original token's
-/// `exp`, the connection is still open and a Metadata RPC succeeds.
+/// Test #3: an in-band SaslHandshake/SaslAuthenticate pair with a fresh token
+/// on an already-authenticated stream resets the per-connection deadline.
+///
+/// The fresh token has a longer `exp`. After the clock advances past the
+/// original token's `exp`, the connection is still open and a Metadata RPC
+/// succeeds.
 #[tokio::test(flavor = "current_thread")]
 async fn oauthbearer_in_band_reauth_with_fresh_token_resets_timer() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -1607,11 +1660,13 @@ async fn oauthbearer_in_band_reauth_with_fresh_token_resets_timer() {
     handle.shutdown().await;
 }
 
-/// Test #4: in-band re-auth with a token whose `sub` differs from the
-/// original principal name is rejected — `SaslAuthenticateResponse`
-/// carries `error_code = SASL_AUTHENTICATION_FAILED (58)` and the
-/// connection closes (EOF on next read). KIP-368 forbids changing the
-/// principal across an in-band re-auth.
+/// Test #4: the broker rejects an in-band re-auth with a token whose `sub`
+/// differs from the original principal name.
+///
+/// `SaslAuthenticateResponse` carries
+/// `error_code = SASL_AUTHENTICATION_FAILED (58)`, and the connection closes.
+/// The client then reads EOF. KIP-368 forbids a change of principal across an
+/// in-band re-auth.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oauthbearer_in_band_reauth_with_different_principal_closes() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -1643,10 +1698,11 @@ async fn oauthbearer_in_band_reauth_with_different_principal_closes() {
     handle.shutdown().await;
 }
 
-/// Test #5: an in-band `SaslHandshake` whose `mechanism` differs from the
-/// originally negotiated one is rejected with
-/// `error_code = ILLEGAL_SASL_STATE (34)`. KIP-368 requires the same
-/// mechanism across an in-band re-auth — even if the broker would
+/// Test #5: the broker rejects an in-band `SaslHandshake` whose `mechanism`
+/// differs from the mechanism it first negotiated.
+///
+/// The response carries `error_code = ILLEGAL_SASL_STATE (34)`. KIP-368 needs
+/// the same mechanism across an in-band re-auth, even when the broker would
 /// otherwise accept SCRAM on a fresh connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oauthbearer_in_band_reauth_with_different_mechanism_closes() {
@@ -1698,15 +1754,16 @@ async fn oauthbearer_in_band_reauth_with_different_mechanism_closes() {
     handle.shutdown().await;
 }
 
-/// Test #6: regression for PLAIN listeners. A PLAIN `SaslAuthenticate`
-/// response must carry `session_lifetime_ms = 0` (KIP-368 wire field
-/// only meaningful for OAUTHBEARER), and the dispatch loop must NOT
-/// arm a per-connection deadline — advancing the tokio clock by an
-/// hour is harmless and a Metadata RPC still succeeds.
+/// Test #6: regression for PLAIN listeners.
 ///
-/// Uses `current_thread` flavor because `tokio::time::pause()` requires
-/// a single-threaded runtime; see test #2's comment for why we pause
-/// post-handshake rather than `start_paused = true`.
+/// A PLAIN `SaslAuthenticate` response must carry `session_lifetime_ms = 0`.
+/// The KIP-368 wire field has a meaning for OAUTHBEARER only. The dispatch
+/// loop must NOT arm a per-connection deadline. An advance of the tokio clock
+/// by one hour is harmless, and a Metadata RPC still succeeds.
+///
+/// The test uses the `current_thread` flavor, because `tokio::time::pause()`
+/// needs a single-threaded runtime. See the comment on test #2 for why we
+/// pause after the handshake and do not set `start_paused = true`.
 #[tokio::test(flavor = "current_thread")]
 async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -1802,8 +1859,8 @@ async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
 // AlterUserScramCredentials (api_key 51, KIP-554).
 // ────────────────────────────────────────────────────────────────────────
 
-/// SCRAM mechanism byte on the `AlterUserScramCredentials` wire (KIP-554):
-/// `1` = `SCRAM-SHA-256`, `2` = `SCRAM-SHA-512`.
+/// SCRAM mechanism byte on the `AlterUserScramCredentials` wire, from
+/// KIP-554. `1` is `SCRAM-SHA-256` and `2` is `SCRAM-SHA-512`.
 const WIRE_MECH_SCRAM_SHA_256: i8 = 1;
 const WIRE_MECH_SCRAM_SHA_512: i8 = 2;
 const KAFKA_UNSUPPORTED_SASL_MECHANISM: i16 = 33;
@@ -1813,8 +1870,10 @@ const KAFKA_MAX_SCRAM_ITERATIONS: i32 = 16_384;
 
 /// Happy path: a super-user authenticates over PLAIN, sends an
 /// `AlterUserScramCredentials` upsertion for `alice`, and the broker stores
-/// the credential. We then auth as `alice` over SCRAM-SHA-512 to prove the
-/// upsertion actually wrote a valid credential to the metadata image.
+/// the credential.
+///
+/// The test then authenticates as `alice` over SCRAM-SHA-512. This proves
+/// that the upsertion wrote a valid credential to the metadata image.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_scram_creds_super_user_can_provision() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -1880,11 +1939,12 @@ async fn alter_scram_creds_super_user_can_provision() {
     result.expect("post-upsertion SCRAM auth must succeed");
 }
 
-/// Wire-mapping proof: `AlterUserScramCredentials` accepts
-/// `mechanism=1` (SCRAM-SHA-256) and stores a credential the broker
-/// can later authenticate against over SHA-256. Mirrors
-/// `alter_scram_creds_super_user_can_provision` but with the SHA-256
-/// wire byte and a 32-byte `salted_password` payload.
+/// Wire-mapping proof: `AlterUserScramCredentials` accepts `mechanism=1`,
+/// which is SCRAM-SHA-256, and stores a credential.
+///
+/// The broker can later authenticate against that credential over SHA-256.
+/// The test is a copy of `alter_scram_creds_super_user_can_provision`, but it
+/// uses the SHA-256 wire byte and a 32-byte `salted_password` payload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_scram_creds_super_user_can_provision_sha256() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -1949,9 +2009,11 @@ async fn alter_scram_creds_super_user_can_provision_sha256() {
     result.expect("post-upsertion SHA-256 SCRAM auth must succeed");
 }
 
-/// Non-super-user authenticates and tries to upsert. The broker accepts the
-/// request (it's a valid SASL listener API) but every per-user row reports
-/// `CLUSTER_AUTHORIZATION_FAILED` (31). No metadata change is made.
+/// A non-super-user authenticates and tries to upsert.
+///
+/// The broker accepts the request, because it is a valid SASL listener API.
+/// But every per-user row reports `CLUSTER_AUTHORIZATION_FAILED` (31). The
+/// broker makes no metadata change.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_scram_creds_non_super_user_rejected() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2006,8 +2068,10 @@ async fn alter_scram_creds_non_super_user_rejected() {
     );
 }
 
-/// `iterations < 4096` ⇒ `UNACCEPTABLE_CREDENTIAL`. Verified for a super-user
-/// principal so the only error path exercised is the parameter validation.
+/// `iterations < 4096` gives `UNACCEPTABLE_CREDENTIAL`.
+///
+/// The test uses a super-user principal, so the only error path it exercises
+/// is the parameter validation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_scram_creds_low_iterations_rejected() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2359,10 +2423,11 @@ async fn alter_scram_creds_missing_deletion_returns_resource_not_found_91() {
     );
 }
 
-/// Authenticate over SASL/PLAIN against `addr` as `user`/`password`, then
-/// send one `AlterUserScramCredentials v0` (`api_key` 51, flexible) request
-/// and decode the response. Used by every T15 test case so the SASL
-/// boilerplate stays in one place.
+/// Authenticate over SASL/PLAIN against `addr` as `user`/`password`, send one
+/// `AlterUserScramCredentials v0` request, and decode the response.
+///
+/// The request uses `api_key` 51 and is flexible. Every T15 test case calls
+/// this helper, so the SASL boilerplate stays in one place.
 async fn drive_alter_user_scram_credentials_as_plain(
     addr: SocketAddr,
     user: &str,
@@ -2432,10 +2497,11 @@ async fn drive_alter_user_scram_credentials_as_plain(
         .map_err(|e| io::Error::other(format!("AUSCR decode: {e}")))
 }
 
-/// Compute `(salt, salted_password)` for a SCRAM-SHA-512 wire upsertion. The
-/// salt is a fixed 16-byte vector (deterministic for the test) and the
-/// salted password is the 64-byte PBKDF2-HMAC-SHA-512 output the KIP-554
-/// wire request carries.
+/// Compute `(salt, salted_password)` for a SCRAM-SHA-512 wire upsertion.
+///
+/// The salt is a fixed 16-byte vector, which keeps the test deterministic.
+/// The salted password is the 64-byte PBKDF2-HMAC-SHA-512 output that the
+/// KIP-554 wire request carries.
 fn pbkdf2_salt_and_salted(password: &[u8], iterations: u32) -> (Vec<u8>, [u8; 64]) {
     let salt: Vec<u8> = (0..16).collect();
     let salted: [u8; 64] =
@@ -2443,8 +2509,9 @@ fn pbkdf2_salt_and_salted(password: &[u8], iterations: u32) -> (Vec<u8>, [u8; 64
     (salt, salted)
 }
 
-/// SHA-256 analog of [`pbkdf2_salt_and_salted`]: produces the 32-byte
-/// PBKDF2-HMAC-SHA-256 output for the wire tests.
+/// SHA-256 analog of [`pbkdf2_salt_and_salted`].
+///
+/// It produces the 32-byte PBKDF2-HMAC-SHA-256 output for the wire tests.
 fn pbkdf2_salt_and_salted_sha256(password: &[u8], iterations: u32) -> (Vec<u8>, [u8; 32]) {
     let salt: Vec<u8> = (0..16).collect();
     let salted: [u8; 32] =
@@ -2456,10 +2523,12 @@ fn pbkdf2_salt_and_salted_sha256(password: &[u8], iterations: u32) -> (Vec<u8>, 
 // SASL gate integration test matrix.
 // ────────────────────────────────────────────────────────────────────────
 
-/// `ApiVersions` is on the pre-auth allowlist (`api_key` 18) and must
-/// succeed without any SASL exchange. The response should decode
-/// successfully and the supported-api list should include `api_keys`
-/// 17 (`SaslHandshake`) and 36 (`SaslAuthenticate`).
+/// `ApiVersions`, `api_key` 18, is on the pre-auth allowlist and must succeed
+/// without any SASL exchange.
+///
+/// The response should decode without an error. The supported-api list should
+/// include `api_keys` 17, which is `SaslHandshake`, and 36, which is
+/// `SaslAuthenticate`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_versions_reachable_pre_auth_on_sasl_listener() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2510,10 +2579,12 @@ async fn api_versions_reachable_pre_auth_on_sasl_listener() {
 }
 
 /// A pre-auth `Metadata` request on a `SASL_PLAINTEXT` listener must not
-/// succeed — `Metadata` (`api_key` 3) is not on the pre-auth allowlist.
-/// T12 chose to close the TCP connection rather than encode a typed error
-/// response, so the read after sending `Metadata` must return an I/O error
-/// (`UnexpectedEof` / connection reset) rather than a well-formed response.
+/// succeed.
+///
+/// `Metadata`, `api_key` 3, is not on the pre-auth allowlist. T12 closes the
+/// TCP connection and does not encode a typed error response. So the read
+/// after the `Metadata` request must return an I/O error, either
+/// `UnexpectedEof` or a connection reset, and not a well-formed response.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metadata_rejected_pre_auth_on_sasl_listener() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2568,10 +2639,12 @@ async fn metadata_rejected_pre_auth_on_sasl_listener() {
     handle.shutdown().await;
 }
 
-/// A `SaslHandshake` with an unsupported mechanism (GSSAPI) must return
-/// `error_code = 33` (`UNSUPPORTED_SASL_MECHANISM`) with the enabled list
-/// AND keep the connection open. A subsequent `SaslHandshake` with the
-/// supported mechanism (PLAIN) must succeed with `error_code = 0`.
+/// A `SaslHandshake` with an unsupported mechanism, GSSAPI, must return
+/// `error_code = 33`, which is `UNSUPPORTED_SASL_MECHANISM`, with the enabled
+/// list AND keep the connection open.
+///
+/// A `SaslHandshake` that follows with the supported mechanism, PLAIN, must
+/// succeed with `error_code = 0`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsupported_mechanism_rejected_but_handshake_retryable() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2643,12 +2716,13 @@ async fn unsupported_mechanism_rejected_but_handshake_retryable() {
 // InterBrokerClient — outbound TLS + SASL handshake.
 // ────────────────────────────────────────────────────────────────────────
 
-/// Spin up a broker with a `SASL_PLAINTEXT` listener and one PLAIN
-/// credential, then dial it via the public `InterBrokerClient` API. The
-/// client must run `SaslHandshake` + `SaslAuthenticate` transparently and
-/// return a stream the caller can keep using for normal RPCs — proven
-/// here by driving a follow-up `ApiVersions` request over the returned
-/// stream and decoding the response.
+/// Start a broker with a `SASL_PLAINTEXT` listener and one PLAIN credential,
+/// then dial it with the public `InterBrokerClient` API.
+///
+/// The client must run `SaslHandshake` and `SaslAuthenticate` on its own, and
+/// it must return a stream that the caller can keep using for normal RPCs.
+/// The test proves this: it sends an `ApiVersions` request over the returned
+/// stream and decodes the response.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inter_broker_client_authenticates_via_plain() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2682,10 +2756,12 @@ async fn inter_broker_client_authenticates_via_plain() {
     result.expect("InterBrokerClient PLAIN auth + ApiVersions round-trip must succeed");
 }
 
-/// Drive `InterBrokerClient::connect` and prove the post-auth stream
-/// survives by running one `ApiVersions` round-trip over it. Mechanism-
-/// agnostic: dials `localhost:<port>` over `SaslPlaintext` (so a GSSAPI SPN
-/// resolves to `kafka/localhost`) and asserts the post-auth stream works.
+/// Drive `InterBrokerClient::connect` and run one `ApiVersions` round-trip
+/// over the post-auth stream to prove that the stream survives.
+///
+/// The helper works with any mechanism. It dials `localhost:<port>` over
+/// `SaslPlaintext`, so a GSSAPI SPN resolves to `kafka/localhost`. It then
+/// asserts that the post-auth stream works.
 async fn drive_inter_broker_client_then_apiversions(
     client: &crabka_broker::network::client::InterBrokerClient,
     addr: SocketAddr,
@@ -2748,11 +2824,13 @@ async fn drive_inter_broker_client_then_apiversions(
 // ────────────────────────────────────────────────────────────────────────
 
 /// A broker with GSSAPI enabled advertises GSSAPI in its `SaslHandshake`
-/// response and accepts the handshake (`error_code = 0`), leaving the
-/// connection in GSSAPI negotiation. The actual GSS context exchange needs a
-/// live KDC and is covered by the E2E parity tests (Task 10); this case only
-/// proves the mechanism is wired through handshake advertisement and that the
-/// keytab is not touched until the first `SaslAuthenticate` round.
+/// response and accepts the handshake with `error_code = 0`.
+///
+/// The connection then stays in GSSAPI negotiation. The GSS context exchange
+/// itself needs a live KDC, and the E2E parity tests in Task 10 cover it.
+/// This case proves two things only. The mechanism is wired through the
+/// handshake advertisement, and the broker does not touch the keytab before
+/// the first `SaslAuthenticate` round.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gssapi_handshake_advertised_when_enabled() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2819,17 +2897,18 @@ async fn gssapi_handshake_advertised_when_enabled() {
     );
 }
 
-/// End-to-end inter-broker GSSAPI initiate against a live KDC: a Crabka
-/// broker accepts on a `SASL_PLAINTEXT`/GSSAPI listener (service key in
-/// `kafka.keytab`), and `InterBrokerClient` dials it with
-/// `InterBrokerCredentials::Gssapi`, authenticating *from a keytab* as
-/// `alice@CRABKA.TEST` (no password). Proves the full outbound GSSAPI path:
-/// AS/TGS from `alice.keytab` → AP-REQ → broker validates → RFC 4752
-/// auth-only layer negotiation → authenticated stream, confirmed by a
-/// follow-up `ApiVersions` round-trip.
+/// End-to-end inter-broker GSSAPI initiate against a live KDC.
 ///
-/// Requires the MIT KDC fixture and exported env, same as the provider
-/// contract test:
+/// A Crabka broker accepts on a `SASL_PLAINTEXT`/GSSAPI listener, with the
+/// service key in `kafka.keytab`. `InterBrokerClient` dials it with
+/// `InterBrokerCredentials::Gssapi` and authenticates *from a keytab* as
+/// `alice@CRABKA.TEST`, with no password. The test proves the full outbound
+/// GSSAPI path: AS/TGS from `alice.keytab` → AP-REQ → broker validates →
+/// RFC 4752 auth-only layer negotiation → authenticated stream. A follow-up
+/// `ApiVersions` round-trip confirms the stream.
+///
+/// The test needs the MIT KDC fixture and the exported env, the same as the
+/// provider contract test:
 ///
 /// ```text
 /// cd crates/security/tests/fixtures/kdc && docker compose up --build -d
@@ -2909,7 +2988,7 @@ mod two_broker_sasl {
 
     use super::*;
 
-    /// Reserve `n` ephemeral loopback ports via the bind-and-drop trick.
+    /// Reserve `n` ephemeral loopback ports with the bind-and-drop method.
     async fn reserve_ports(n: usize) -> Vec<SocketAddr> {
         let mut out = Vec::with_capacity(n);
         let mut listeners = Vec::with_capacity(n);
@@ -2922,10 +3001,12 @@ mod two_broker_sasl {
         out
     }
 
-    /// Build a SASL-enabled broker config. Two listeners: a PLAINTEXT
-    /// data-plane listener (`listen_addr`, used by test clients which
-    /// don't yet speak SASL) and a `SASL_PLAINTEXT` inter-broker listener
-    /// (used by the replicator + heartbeat against the peer broker).
+    /// Build a SASL-enabled broker config with two listeners.
+    ///
+    /// The first listener is a PLAINTEXT data-plane listener on
+    /// `listen_addr`. The test clients use it, because they do not speak SASL
+    /// yet. The second listener is a `SASL_PLAINTEXT` inter-broker listener.
+    /// The replicator and the heartbeat use it against the peer broker.
     fn sasl_two_listener_config(
         i: usize,
         plaintext_addrs: &[SocketAddr],
@@ -2977,10 +3058,12 @@ mod two_broker_sasl {
         cfg
     }
 
-    /// Boot a 2-broker cluster where the inter-broker listener is
-    /// `SASL_PLAINTEXT`. Mirrors `support::start_n_node` but with the
-    /// two-listener config above. Returns `(handle, config, tempdir)`
-    /// triples ordered by broker id.
+    /// Start a 2-broker cluster whose inter-broker listener is
+    /// `SASL_PLAINTEXT`.
+    ///
+    /// This helper is a copy of `support::start_n_node`, but it uses the
+    /// two-listener config above. It returns `(handle, config, tempdir)`
+    /// triples in broker id order.
     async fn start_two_node_sasl() -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let _ = tracing_subscriber::fmt()
@@ -3033,8 +3116,9 @@ mod two_broker_sasl {
         vec![(broker0, cfg0, dir0), (broker1, cfg1, dir1)]
     }
 
-    /// Spin up two brokers with `SASL_PLAINTEXT` inter-broker, create a
-    /// topic rf=2, produce, verify the follower converges.
+    /// Start two brokers with a `SASL_PLAINTEXT` inter-broker listener,
+    /// create a topic with rf=2, produce, and check that the follower
+    /// converges.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_broker_sasl_plaintext_replication() {
         let cluster = start_two_node_sasl().await;

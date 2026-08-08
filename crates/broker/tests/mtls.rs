@@ -8,15 +8,15 @@
 //! extracts the cert's Subject DN as the connection's `Principal` →
 //! authorizer reads that name when checking ACLs.
 //!
-//! The test exercises the principal-derivation path by setting the
-//! cert DN as a super-user and then making a request that the
+//! The test exercises the principal-derivation path. It sets the
+//! cert DN as a super-user and then sends a request that the
 //! authorizer would refuse for any other principal. A successful round
-//! trip proves the broker resolved the connection to the cert DN
-//! (not `ANONYMOUS`).
+//! trip proves that the broker resolved the connection to the cert DN
+//! and not to `ANONYMOUS`.
 //!
-//! Gated to non-Windows: no multi-broker dependency, but the dev cert
-//! fixture path resolution and tempfile semantics are easier to keep
-//! consistent with the existing TLS integration tests.
+//! The test is gated to non-Windows. There is no multi-broker dependency, but
+//! the dev cert fixture path resolution and tempfile semantics are easier to
+//! keep consistent with the existing TLS integration tests.
 
 use std::{io, sync::Arc};
 
@@ -54,7 +54,7 @@ const DEV_CLIENT_KEY: &str =
     include_str!("../../../crates/security/tests/fixtures/dev_client_key.pem");
 
 /// Subject DN of the fixture client cert as rendered by `x509-parser`.
-/// Must match `extract_principal_from_cert` exactly — operators pin
+/// It must match `extract_principal_from_cert` exactly, because operators pin
 /// this string in ACLs and `super_users`.
 const CLIENT_PRINCIPAL: &str = "CN=test-client,OU=integration,O=crabka";
 
@@ -68,7 +68,7 @@ fn write_fixture(dir: &std::path::Path, name: &str, contents: &str) -> std::path
 /// - skips server-cert verification (the broker presents the self-issued
 ///   `dev_cert` fixture, which rustls's default verifier rejects as
 ///   `CaUsedAsEndEntity`),
-/// - presents the fixture client cert + private key on the
+/// - presents the fixture client cert and private key on the
 ///   `CertificateRequest` callback.
 fn client_config_with_pinned_server_and_client_cert(
     broker_cert: CertificateDer<'static>,
@@ -89,10 +89,10 @@ fn client_config_with_pinned_server_and_client_cert(
     Arc::new(cfg)
 }
 
-/// Test-only `ServerCertVerifier` that pins a single DER blob. Skips
-/// hostname / validity / signature / CA-flag checks. Mirrors the
-/// helper in `tests/auth_handlers.rs` (the dev fixture is a self-issued
-/// CA cert that rustls won't accept as an end-entity by default).
+/// Test-only `ServerCertVerifier` that pins a single DER blob. It skips the
+/// hostname, validity, signature, and CA-flag checks. It mirrors the
+/// helper in `tests/auth_handlers.rs`. The dev fixture is a self-issued
+/// CA cert, which rustls does not accept as an end-entity by default.
 #[derive(Debug)]
 struct PinnedServerVerifier {
     pinned: CertificateDer<'static>,
@@ -237,8 +237,8 @@ async fn mtls_principal_is_cert_dn_and_super_user_bypass_works() {
 }
 
 /// PLAINTEXT-style length-prefixed request/response over an arbitrary
-/// `AsyncRead + AsyncWrite` stream. Mirrors the helper in
-/// `auth_handlers.rs` / `elect_leaders.rs`.
+/// `AsyncRead + AsyncWrite` stream. It mirrors the helper in
+/// `auth_handlers.rs` and `elect_leaders.rs`.
 async fn round_trip<S>(
     stream: &mut S,
     api_key: i16,

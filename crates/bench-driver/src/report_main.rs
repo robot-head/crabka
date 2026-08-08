@@ -1,5 +1,5 @@
-//! `crabka-bench-report` — walk a directory of `RunOutput` JSON files and
-//! emit a Markdown side-by-side comparison.
+//! `crabka-bench-report` walks a directory of `RunOutput` JSON files and
+//! writes a Markdown side-by-side comparison.
 
 use std::path::PathBuf;
 
@@ -16,20 +16,21 @@ struct Cli {
     /// Where to write the Markdown summary.
     #[arg(long, default_value = "bench/results/SUMMARY.md")]
     out: PathBuf,
-    /// Also write a wide per-run summary CSV (one row per run) here.
+    /// Also write a wide per-run summary CSV here, with one row per run.
     #[arg(long)]
     csv: Option<PathBuf>,
-    /// Also write a long-format time-series CSV (one row per run × time-offset
-    /// × metric) here — the graph-ready export for values over the test.
+    /// Also write a long-format time-series CSV here, with one row per run ×
+    /// time-offset × metric. This is the graph-ready export for values over the
+    /// test.
     #[arg(long)]
     timeseries_csv: Option<PathBuf>,
-    /// Also write a self-contained Plotly HTML report (bar charts with
-    /// run-to-run error bars + averaged time-series line charts) here.
+    /// Also write a self-contained Plotly HTML report here, with bar charts that
+    /// carry run-to-run error bars and averaged time-series line charts.
     #[arg(long)]
     html: Option<PathBuf>,
-    /// Also write the website HTML fragment (per-run + averaged throughput /
-    /// CPU / memory charts) here — embedded by the Zola `benchmark_charts`
-    /// shortcode. Typically `website/static/benchmarks/charts.html`.
+    /// Also write the website HTML fragment here, with per-run and averaged
+    /// throughput, CPU, and memory charts. The Zola `benchmark_charts` shortcode
+    /// embeds it. This is usually `website/static/benchmarks/charts.html`.
     #[arg(long)]
     web_fragment: Option<PathBuf>,
     /// Title for the HTML report.

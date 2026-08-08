@@ -22,8 +22,8 @@ use crate::{PromqlError, error::Result};
 
 /// Query-range values available to Prometheus duration expressions.
 ///
-/// `start` and `end` are epoch-millisecond instants; `step` is the grid
-/// resolution, an extent. Not `Eq`, because [`Time`] stores `f64`.
+/// `start` and `end` are epoch-millisecond instants. `step` is the grid
+/// resolution, an extent. This type is not `Eq`, because [`Time`] stores `f64`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DurationExprContext {
     start_ms: i64,
@@ -51,7 +51,7 @@ impl DurationExprContext {
     }
 }
 
-/// Parse a `PromQL` expression into the upstream parser AST.
+/// Parses a `PromQL` expression into the upstream parser AST.
 ///
 /// # Errors
 ///
@@ -60,11 +60,11 @@ pub fn parse_promql(query: &str) -> Result<Expr> {
     parse_promql_with_duration_context(query, DurationExprContext::instant(0))
 }
 
-/// Parse `PromQL`, first folding Prometheus duration expressions to fixed durations.
+/// Parses `PromQL` and first folds Prometheus duration expressions to fixed durations.
 ///
 /// The parser crate stores selector ranges, subquery resolutions, and offsets as
 /// concrete [`Duration`] values. Prometheus 3.x accepts scalar expressions in
-/// those positions, so Crabka normalizes them before handing the query to the
+/// those positions, so Crabka normalizes them before it sends the query to the
 /// parser.
 ///
 /// # Errors
@@ -535,9 +535,10 @@ fn is_ident_char(ch: char) -> bool {
     is_ident_start(ch) || ch.is_ascii_digit() || ch == ':'
 }
 
-/// Largest duration the engine represents: `i64::MAX` milliseconds expressed in
-/// seconds. `Duration::from_secs_f64` panics for finite values beyond `u64`
-/// seconds (~1.8e19), so we reject anything past the engine ceiling first.
+/// Largest duration the engine represents: `i64::MAX` milliseconds in seconds.
+///
+/// `Duration::from_secs_f64` panics for finite values beyond `u64` seconds
+/// (~1.8e19), so this function rejects a value past the engine ceiling first.
 fn seconds_to_duration_literal(seconds: f64) -> Result<String> {
     let max_duration_seconds = i64::MAX
         .to_f64()

@@ -1,12 +1,12 @@
-//! `StreamsGroupDescribe` (`api_key` 89) — KIP-1071. Returns one
+//! `StreamsGroupDescribe` (`api_key` 89), from KIP-1071. It returns one
 //! `DescribedGroup` per requested `group_id`, rendered from the streams actor's
 //! `Describe` view.
 //!
-//! Mirrors the KIP-848 consumer-group describe handler
-//! ([`super::consumer_group_describe`]): a plain 4-arg handler (NOT inline
-//! intercepted) gated on the same `streams.version` feature + `streams_group`
-//! config as the heartbeat. Per-group DESCRIBE ACL is not applied by this
-//! handler; topic-level and feature gates still run normally.
+//! It mirrors the KIP-848 consumer-group describe handler
+//! ([`super::consumer_group_describe`]). It is a plain 4-arg handler, NOT
+//! inline intercepted, and it gates on the same `streams.version` feature and
+//! `streams_group` config as the heartbeat. This handler does not apply the
+//! per-group DESCRIBE ACL. Topic-level and feature gates still run normally.
 
 use std::collections::BTreeMap;
 
@@ -33,8 +33,8 @@ use crate::{
     error::BrokerError,
 };
 
-/// Minimum finalized `streams.version` feature level at which the KIP-1071
-/// streams RPCs (heartbeat/describe) are served.
+/// Minimum finalized `streams.version` feature level at which the broker
+/// serves the KIP-1071 streams RPCs, heartbeat and describe.
 const STREAMS_VERSION_MIN_LEVEL: i16 = 1;
 
 pub(crate) fn handle(
@@ -134,9 +134,9 @@ fn render_group(
     }
 }
 
-/// Map a describe-view member into a wire `Member`. The view carries current
-/// (in-flight) active/standby/warmup task ownership; `target_assignment` is not
-/// projected by the view so it renders empty.
+/// Map a describe-view member into a wire `Member`. The view carries the
+/// current in-flight active, standby, and warmup task ownership. The view does
+/// not project `target_assignment`, so that field renders empty.
 fn render_member(m: StreamsDescribeMember) -> Member {
     Member {
         member_id: m.member_id,
@@ -159,7 +159,7 @@ fn render_member(m: StreamsDescribeMember) -> Member {
 
 /// Map the stored `StreamsGroupTopologyValue` into the wire describe `Topology`.
 /// The describe `Subtopology` omits the request-only `source_topic_regex` and
-/// `copartition_groups`; everything else maps across field-for-field.
+/// `copartition_groups`. Everything else maps across field-for-field.
 fn render_topology(
     t: crate::coordinator::unified::streams::persistence::StreamsGroupTopologyValue,
 ) -> Topology {
@@ -354,8 +354,8 @@ mod tests {
         }
     }
 
-    /// A fully-pinned error row as the handler renders it: only `group_id` and
-    /// `error_code` set, every other field at its wire default.
+    /// A fully-pinned error row as the handler renders it. Only `group_id` and
+    /// `error_code` are set, and every other field holds its wire default.
     fn error_group(group_id: &str, error_code: i16) -> DescribedGroup {
         DescribedGroup {
             error_code,
@@ -373,7 +373,7 @@ mod tests {
     }
 
     /// The wire `Topology` that [`render_topology`] must produce from
-    /// [`topology_value`] — every field pinned.
+    /// [`topology_value`], with every field pinned.
     fn expected_rendered_topology() -> Topology {
         Topology {
             epoch: 9,

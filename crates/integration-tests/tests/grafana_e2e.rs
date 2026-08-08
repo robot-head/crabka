@@ -1,13 +1,14 @@
-//! Comprehensive Grafana end-to-end differential suite for the Loki logs wedge.
+//! Grafana end-to-end differential suite for the Loki logs wedge.
 //!
-//! Boots **real Grafana** + **real Loki** + a **Crabka querier** (via the full
-//! push -> WAL -> compact -> query path, so ingest-derived labels like
-//! `detected_level`/`service_name` match Loki), provisions BOTH backends as
-//! Grafana Loki datasources, ingests identical data into both, then drives a
-//! LogQL corpus THROUGH Grafana's datasource-proxy and asserts crabka == Loki.
+//! The suite starts **real Grafana**, **real Loki**, and a **Crabka querier**.
+//! The querier runs the full push -> WAL -> compact -> query path, so
+//! ingest-derived labels such as `detected_level` and `service_name` match
+//! Loki. The suite provisions BOTH backends as Grafana Loki datasources and
+//! ingests identical data into both. It then drives a LogQL corpus THROUGH
+//! Grafana's datasource-proxy and asserts crabka == Loki.
 //!
-//! These are Docker-dependent integration tests (run in CI via nextest
-//! `--include-ignored`); they are intentionally NOT `#[ignore]`d.
+//! These are Docker-dependent integration tests. CI runs them with nextest
+//! `--include-ignored`. They are intentionally NOT `#[ignore]`d.
 
 use std::{
     collections::BTreeMap,
@@ -68,12 +69,13 @@ fn now_ns() -> i64 {
     i64::try_from(secs).unwrap() * 1_000_000_000
 }
 
-/// Build the shared dataset pushed identically into Crabka and Loki.
+/// Builds the shared dataset that the test pushes into Crabka and Loki.
 ///
-/// Three streams over a ~2-minute window ending ~3 minutes in the past (inside
-/// Loki's ingestion window). Lines carry JSON + logfmt bodies with numeric /
-/// duration / bytes / ip fields and clear level tokens so both backends derive
-/// the same `detected_level` / `service_name`.
+/// The dataset has three streams over a window of about 2 minutes. The window
+/// ends about 3 minutes in the past, inside Loki's ingestion window. The lines
+/// carry JSON and logfmt bodies with numeric, duration, bytes, and ip fields.
+/// The lines also carry clear level tokens, so both backends derive the same
+/// `detected_level` and `service_name`.
 fn dataset(base_ns: i64) -> (Value, i64, i64) {
     let s = 1_000_000_000_i64; // one second in ns
     let api = |offset: i64, line: &str| [(base_ns + offset * s).to_string(), line.to_string()];
@@ -483,10 +485,12 @@ async fn push_to_crabka(app: axum::Router, payload: &Value) {
 }
 
 impl Stack {
-    /// Drive a LogQL `query_range` through Grafana's datasource proxy and return a
-    /// canonical, comparable value: a normalized success result, or an
-    /// `{__error__:{status,body}}` marker so error responses are *diffed* (a real
-    /// crabka-vs-Loki divergence) rather than panicking the suite.
+    /// Drives a LogQL `query_range` through Grafana's datasource proxy.
+    ///
+    /// The method returns a canonical, comparable value. A success gives a
+    /// normalized result. An error gives an `{__error__:{status,body}}` marker.
+    /// So the suite *diffs* error responses as a real crabka-vs-Loki
+    /// divergence, and does not panic.
     async fn fetch_range(&self, uid: &str, query: &str) -> Value {
         let url = format!(
             "{}/api/datasources/proxy/uid/{uid}/loki/api/v1/query_range",
@@ -562,8 +566,10 @@ fn round_metric_value(s: &str) -> String {
         .unwrap_or_else(|_| s.to_string())
 }
 
-/// Normalize a Loki query response (streams or matrix/vector) into a canonical,
-/// order-independent shape suitable for equality comparison.
+/// Normalizes a Loki query response into a canonical, order-independent shape.
+///
+/// The response can be streams, matrix, or vector. The shape is suitable for an
+/// equality comparison.
 fn normalize_result(v: &Value) -> Value {
     let data = &v["data"];
     let result_type = data["resultType"].as_str().unwrap_or("");
@@ -656,7 +662,8 @@ fn report(mismatches: &[Mismatch]) -> String {
 // Corpus tables
 // ---------------------------------------------------------------------------
 
-/// Log (stream) queries: selectors, line filters, parsers, formatting, label filters.
+/// Log (stream) queries: selectors, line filters, parsers, format expressions,
+/// and label filters.
 const LOG_QUERIES: &[(&str, &str)] = &[
     ("selector_eq", r#"{app="api"}"#),
     ("selector_neq", r#"{app!="api",env="prod"}"#),
@@ -713,7 +720,8 @@ const LOG_QUERIES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Metric (matrix) queries: range aggs, vector aggs, vector(), binary ops, label ops, offset.
+/// Metric (matrix) queries: range aggs, vector aggs, vector(), binary ops,
+/// label ops, and offset.
 const METRIC_QUERIES: &[(&str, &str)] = &[
     ("count_over_time", r#"count_over_time({app="api"}[5m])"#),
     (

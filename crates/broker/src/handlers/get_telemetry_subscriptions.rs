@@ -1,7 +1,9 @@
-//! `GetTelemetrySubscriptions` (`api_key=71`, KIP-714). Assigns/echoes the
-//! client instance id, matches the client against configured `CLIENT_METRICS`
-//! subscriptions, and returns the computed subscription (metrics, interval,
-//! id). See `client_metrics::manager`.
+//! `GetTelemetrySubscriptions` (`api_key=71`, KIP-714).
+//!
+//! This handler assigns or echoes the client instance id. It matches the
+//! client against the configured `CLIENT_METRICS` subscriptions. It then
+//! returns the computed subscription, which holds the metrics, the interval,
+//! and the id. See `client_metrics::manager`.
 
 use bytes::Bytes;
 use crabka_protocol::{

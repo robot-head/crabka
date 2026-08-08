@@ -1,7 +1,7 @@
 //! Slice-48f broker integration: the topic-backed
 //! [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-//! (configured via `[remote_storage.kafka_metadata]`) wired against a
-//! single broker's own loopback listener.
+//! wired against a single broker's own loopback listener. The manager is
+//! configured with `[remote_storage.kafka_metadata]`.
 //!
 //! `Broker::start` boots on the fail-closed `NotReadyRlmm` behind a
 //! `SwappableRlmm`, then a retry-until-success task dials the broker's own
@@ -9,13 +9,13 @@
 //! `TopicBasedRemoteLogMetadataManager`, and swaps it in. These tests
 //! exercise that path end-to-end with the `Local` tiered-storage backend:
 //!
-//! * [`topic_rlmm_activates_against_loopback`] — the bootstrap completes:
-//!   the `tiered_storage_rlmm_topic_backed` gauge flips to 1 and the
+//! * [`topic_rlmm_activates_against_loopback`]: the bootstrap completes. The
+//!   `tiered_storage_rlmm_topic_backed` gauge flips to 1 and the
 //!   `__remote_log_metadata` topic exists on the broker.
-//! * [`topic_rlmm_copy_then_fetch_round_trip`] — a sealed segment is
-//!   tiered (proving the RLM copy task's `CopySegment*` events round-trip
-//!   through `__remote_log_metadata` over the loopback) and the records
-//!   read back at offset 0.
+//! * [`topic_rlmm_copy_then_fetch_round_trip`]: the test tiers a sealed
+//!   segment and reads the records back at offset 0. This proves that the RLM
+//!   copy task's `CopySegment*` events round-trip through
+//!   `__remote_log_metadata` over the loopback.
 
 use assert2::assert;
 mod support;
@@ -64,7 +64,7 @@ fn run_broker_test(test: impl Future<Output = ()>) {
 
 /// Boot a single broker with the `Local` tiered-storage backend and the
 /// topic-backed RLMM pointed at its own loopback listener. Returns the
-/// handle plus the log + remote tempdirs (kept alive by the caller).
+/// handle plus the log + remote tempdirs. The caller keeps them alive.
 async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
     support::init_tracing();
 
@@ -135,7 +135,7 @@ async fn build_client(broker: &BrokerHandle) -> Client {
 }
 
 /// Build a test client, optionally negotiating TLS/SASL. `None` is the
-/// plaintext path used by the loopback tests; `Some(..)` authenticates
+/// plaintext path used by the loopback tests. `Some(..)` authenticates
 /// against a SASL listener.
 async fn build_client_secured(
     broker: &BrokerHandle,
@@ -150,8 +150,8 @@ async fn build_client_secured(
         .expect("client build")
 }
 
-/// Wait for the slice-48f bootstrap to swap the topic-backed manager in,
-/// signalled by the `tiered_storage_rlmm_topic_backed` gauge flipping to 1.
+/// Wait for the slice-48f bootstrap to swap the topic-backed manager in. The
+/// `tiered_storage_rlmm_topic_backed` gauge flips to 1 to signal the swap.
 async fn await_activation(broker: &BrokerHandle) {
     broker
         .wait_for_metrics("rlmm topic-backed", |m| {
@@ -160,8 +160,8 @@ async fn await_activation(broker: &BrokerHandle) {
         .await;
 }
 
-/// The bootstrap completes against the loopback listener: the activation
-/// gauge flips and the `__remote_log_metadata` topic is provisioned.
+/// The bootstrap completes against the loopback listener. The activation
+/// gauge flips and the broker provisions the `__remote_log_metadata` topic.
 #[test]
 fn topic_rlmm_activates_against_loopback() {
     run_broker_test(topic_rlmm_activates_against_loopback_case());
@@ -180,9 +180,10 @@ async fn topic_rlmm_activates_against_loopback_case() {
 }
 
 /// Produce enough to seal several segments, wait for the RLM copy task to
-/// tier one through the topic-backed RLMM (which publishes `CopySegment*`
-/// events to `__remote_log_metadata` over the loopback and consumes them
-/// back to update its cache), then read the records back at offset 0.
+/// tier one through the topic-backed RLMM, then read the records back at
+/// offset 0. That RLMM publishes `CopySegment*` events to
+/// `__remote_log_metadata` over the loopback and consumes them back to update
+/// its cache.
 #[test]
 fn topic_rlmm_copy_then_fetch_round_trip() {
     run_broker_test(topic_rlmm_copy_then_fetch_round_trip_case());
@@ -206,8 +207,8 @@ async fn topic_rlmm_copy_then_fetch_round_trip_case() {
 /// Shared copy→metadata→read body: create a tiered topic, wait for the
 /// config to propagate, produce enough to seal segments, wait for the RLM
 /// copy task to tier one through the topic-backed RLMM, then read offset 0
-/// back. Used by both the plaintext loopback test and the `SASL_PLAINTEXT`
-/// variant; the only difference is how `client` was built.
+/// back. Both the plaintext loopback test and the `SASL_PLAINTEXT` variant use
+/// this body. The only difference is how the caller built `client`.
 async fn copy_then_fetch_round_trip(
     broker: &BrokerHandle,
     client: &Client,
@@ -387,8 +388,8 @@ async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
         .unwrap_or_default()
 }
 
-/// Count files named `log` anywhere under `root` — the
-/// `LocalTieredStorage` segment-bytes object for each copied segment.
+/// Count files named `log` anywhere under `root`. Each one is the
+/// `LocalTieredStorage` segment-bytes object for a copied segment.
 fn count_remote_log_files(root: &std::path::Path) -> usize {
     fn walk(dir: &std::path::Path, count: &mut usize) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -408,8 +409,8 @@ fn count_remote_log_files(root: &std::path::Path) -> usize {
     count
 }
 
-/// Boot a single broker whose only (and inter-broker) listener is
-/// `SASL_PLAINTEXT/PLAIN`, with the topic-backed RLMM pointed at it. The
+/// Boot a single broker whose only listener, which is also the inter-broker
+/// listener, is `SASL_PLAINTEXT/PLAIN`. The topic-backed RLMM points at it. The
 /// RLMM authenticates as the inter-broker PLAIN principal.
 async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
     use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
@@ -471,16 +472,16 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
     (broker, log_dir, remote_dir)
 }
 
-/// While the topic-backed RLMM has not yet activated (bootstrap points at a
-/// dead port so the retry loop never succeeds), the RLM copy task must not
-/// tier any segment — `add_remote_log_segment_metadata` is called first,
-/// and a `NotReady` error causes the copy task to skip the segment entirely.
-/// This proves the fail-closed guarantee: no orphaned objects accumulate in
-/// the remote store while the RLMM is unavailable.
+/// While the topic-backed RLMM has not yet activated, the RLM copy task must
+/// not tier any segment. Bootstrap points at a dead port, so the retry loop
+/// never succeeds. The copy task calls `add_remote_log_segment_metadata`
+/// first, and a `NotReady` error makes the copy task skip the segment
+/// entirely. This proves the fail-closed guarantee: no orphaned objects
+/// accumulate in the remote store while the RLMM is unavailable.
 ///
 /// The topic config and produce volume mirror
 /// [`topic_rlmm_copy_then_fetch_round_trip`] exactly, so "0 tiered objects"
-/// is genuinely discriminating: the analogous loopback test tiers ≥ 1.
+/// is genuinely discriminating. The analogous loopback test tiers ≥ 1.
 #[test]
 fn copy_task_skips_tiering_while_rlmm_not_ready() {
     run_broker_test(copy_task_skips_tiering_while_rlmm_not_ready_case());
@@ -610,8 +611,8 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready_case() {
 /// The full copy→metadata→read round-trip, but the broker's only listener
 /// is `SASL_PLAINTEXT/PLAIN`. The RLMM's internal metadata client must
 /// authenticate as the inter-broker PLAIN principal to bootstrap the
-/// topic, publish/consume `CopySegment` events, and serve the read-back —
-/// proving the secured metadata client works end-to-end. The test's own
+/// topic, publish/consume `CopySegment` events, and serve the read-back. This
+/// proves the secured metadata client works end-to-end. The test's own
 /// client authenticates with the same credentials.
 #[test]
 fn topic_rlmm_sasl_loopback_copy_then_fetch_round_trip() {

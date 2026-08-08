@@ -1,8 +1,8 @@
-//! No-Docker conformance gate: drive the compatibility engine directly against
-//! the golden cp-schema-registry verdicts in `tests/fixtures/compat/*_matrix.json`
-//! (21 Avro cases, 88 Protobuf cases, 92 JSON cases, all captured from real
-//! cp 7.4.0). cp is the authority; this gate fails if our engine diverges from a
-//! single verdict.
+//! No-Docker conformance gate. It drives the compatibility engine directly
+//! against the golden cp-schema-registry verdicts in
+//! `tests/fixtures/compat/*_matrix.json`. There are 21 Avro cases, 88 Protobuf
+//! cases, and 92 JSON cases, all captured from real cp 7.4.0. cp is the
+//! authority, and this gate fails if our engine diverges from a single verdict.
 
 use std::path::Path;
 
@@ -26,8 +26,8 @@ fn load_matrix(path: &Path) -> Vec<Case> {
     .expect("valid matrix")
 }
 
-/// Drive `ty` cases from `file` through the engine and assert each verdict
-/// matches cp (modulo any documented `known_divergences`).
+/// Drive `ty` cases from `file` through the engine and assert that each verdict
+/// matches cp, except for any documented `known_divergences`.
 fn assert_matrix_matches_cp(
     path: &Path,
     ty: SchemaType,

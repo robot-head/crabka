@@ -1,5 +1,5 @@
-//! `ConsumerGroupHeartbeat` (`api_key` 68) — KIP-848 next-gen consumer
-//! group protocol. Routes the request to the per-group actor in
+//! `ConsumerGroupHeartbeat` (`api_key` 68), from the KIP-848 next-gen consumer
+//! group protocol. It routes the request to the per-group actor in
 //! `GroupCoordinator`.
 
 use bytes::Bytes;

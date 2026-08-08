@@ -1,5 +1,7 @@
-//! Avro serde over `apache-avro`. The local type provides its schema via the
-//! `AvroSchema` derive; deserialize resolves the writer schema against it.
+//! Avro serde over `apache-avro`.
+//!
+//! The local type gives its schema with the `AvroSchema` derive. Deserialize
+//! resolves the writer schema against that schema.
 
 use std::{marker::PhantomData, sync::Arc};
 
@@ -17,8 +19,11 @@ use crate::{
     wire,
 };
 
-/// Avro serializer/deserializer for `T: AvroSchema`, bound to a key/value role.
-/// The subject is derived from the topic at (de)serialize time.
+/// Avro serializer and deserializer for `T: AvroSchema`, bound to a key/value
+/// role.
+///
+/// The serde takes the subject from the topic at serialize and deserialize
+/// time.
 pub struct AvroSerde<T> {
     binding: Binding,
     reader_schema: Schema,
@@ -53,19 +58,20 @@ impl<T: AvroSchema> AvroSerde<T> {
         }
     }
 
-    /// An Avro serde for record **values** (`<topic>-value`).
+    /// An Avro serde for record **values**: `<topic>-value`.
     pub fn value(cache: &Arc<SchemaCache>) -> Self {
         Self::make(cache, Role::Value)
     }
 
-    /// An Avro serde for record **keys** (`<topic>-key`).
+    /// An Avro serde for record **keys**: `<topic>-key`.
     pub fn key(cache: &Arc<SchemaCache>) -> Self {
         Self::make(cache, Role::Key)
     }
 }
 
-/// A value serde over the process [`default_registry`](crate::default_registry)
-/// — enables `T` to declare a default schema serde for `add_source`/`add_sink`.
+/// A value serde over the process [`default_registry`](crate::default_registry).
+///
+/// It lets `T` declare a default schema serde for `add_source` and `add_sink`.
 impl<T: AvroSchema> Default for AvroSerde<T> {
     fn default() -> Self {
         let cache = crate::default_registry()

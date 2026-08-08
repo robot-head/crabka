@@ -28,8 +28,8 @@ pub fn lookup_quota(
     lookup_quota_with_key(image, principal, client_id, quota_key).map(|(_, v)| v)
 }
 
-/// Like `lookup_quota` but also returns the canonical entity key
-/// that matched. Used by enforcement code to bind the lookup to a
+/// Like `lookup_quota`, but it also returns the canonical entity key
+/// that matched. Enforcement code uses this to bind the lookup to a
 /// bucket in `QuotaBuckets`.
 #[must_use]
 pub fn lookup_quota_with_key(
@@ -61,15 +61,15 @@ pub fn lookup_quota_with_key(
 }
 
 /// Lookup an `ip`-scoped quota for `peer_ip`. Priority order:
-///   1. (ip = `Some(peer_ip)`) — specific
-///   2. (ip = None)            — default
+///   1. (ip = `Some(peer_ip)`): specific
+///   2. (ip = None): default
 ///
-/// Accepts both IPv4 and IPv6 peers: Kafka keys IP quotas by the IP's
+/// This accepts both IPv4 and IPv6 peers. Kafka keys IP quotas by the IP's
 /// string form for either family, so the same two-priority match applies.
 ///
-/// Disjoint from `lookup_quota` (which checks `("user", *)` and
-/// `("client-id", *)` candidates only). Used by KIP-612
-/// `connection_creation_rate` enforcement.
+/// It is disjoint from `lookup_quota`, which checks only `("user", *)` and
+/// `("client-id", *)` candidates. KIP-612 `connection_creation_rate`
+/// enforcement uses this function.
 #[must_use]
 pub fn lookup_ip_quota(
     image: &MetadataImage,
@@ -292,16 +292,18 @@ mod tests {
         ]
     }
 
-    /// Distinct per-candidate sentinel values (index = priority) so the matched
-    /// candidate is identifiable by value, with no int→float cast.
+    /// Distinct per-candidate sentinel values, where the index is the priority.
+    /// The value alone then identifies the matched candidate, with no int→float
+    /// cast.
     const CAND_VALS: [f64; 8] = [
         1000.0, 1001.0, 1002.0, 1003.0, 1004.0, 1005.0, 1006.0, 1007.0,
     ];
 
-    /// Exhaustive: every one of the 2^8 presence configs of the 8 candidates
-    /// (fixed probe) resolves to the minimum-index present candidate, with the
-    /// matching value; empty config → `None`. Each candidate is configured with
-    /// a distinct value (`1000 + i`) so the matched candidate is identifiable.
+    /// Exhaustive test. Every one of the 2^8 presence configs of the 8
+    /// candidates, for a fixed probe, resolves to the present candidate with
+    /// the lowest index and returns its value. An empty config returns `None`.
+    /// Each candidate has a distinct value (`1000 + i`), so the value
+    /// identifies the matched candidate.
     #[test]
     fn quota_precedence_exhaustive() {
         let cands = uc_candidates("u", "c");
@@ -335,7 +337,7 @@ mod tests {
         }
     }
 
-    /// Exhaustive: the 2-priority IP order (specific beats default).
+    /// Exhaustive test of the 2-priority IP order. Specific beats default.
     #[test]
     fn ip_quota_precedence_exhaustive() {
         let ip: std::net::IpAddr = "10.1.2.3".parse().unwrap();
@@ -359,9 +361,9 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Random probes + random candidate subsets + a non-matching decoy:
-        /// the min-index present candidate wins, the decoy is never returned,
-        /// and the user/client path never returns an IP entity.
+        /// Random probes, random candidate subsets, and a non-matching decoy.
+        /// The present candidate with the lowest index wins, the decoy is never
+        /// returned, and the user/client path never returns an IP entity.
         #[test]
         fn quota_precedence_random(
             principal in "[uv][12]",
@@ -399,7 +401,7 @@ mod tests {
             }
         }
 
-        /// Random IP precedence: specific beats default; the IP path never
+        /// Random IP precedence. Specific beats default, and the IP path never
         /// returns a user/client entity.
         #[test]
         fn ip_precedence_random(specific in proptest::bool::ANY, default in proptest::bool::ANY) {

@@ -42,11 +42,11 @@ struct BrokerEntry {
 
 /// Monotonic time source for liveness tracking.
 ///
-/// Production uses the real clock. Tests use a controllable clock so the
-/// liveness windows are driven by explicit advances instead of wall-clock
-/// `std::thread::sleep` — sleeps flake when the CI runner is loaded, because the
-/// gap between a re-seed and the next `tick` can exceed a short timeout and
-/// spuriously mark a broker dead.
+/// Production uses the real clock. Tests use a controllable clock, so
+/// explicit advances drive the liveness windows instead of wall-clock
+/// `std::thread::sleep`. Sleeps flake when the CI runner is loaded. The gap
+/// between a re-seed and the next `tick` can then exceed a short timeout and
+/// mark a broker dead by mistake.
 enum Clock {
     Real,
     #[cfg(test)]
@@ -76,9 +76,9 @@ struct TestClockInner {
     offset_nanos: std::sync::atomic::AtomicU64,
 }
 
-/// Test handle for the controllable [`Clock`]. Shares its inner state with the
-/// `Clock::Test` handed to [`ControllerLivenessState::with_clock`], so `advance`
-/// is observed by the liveness state under test.
+/// Test handle for the controllable [`Clock`]. It shares its inner state with
+/// the `Clock::Test` handed to [`ControllerLivenessState::with_clock`], so the
+/// liveness state under test observes every `advance`.
 #[cfg(test)]
 struct TestClock(std::sync::Arc<TestClockInner>);
 
@@ -109,7 +109,7 @@ impl TestClock {
 ///
 /// One instance lives on the `Broker` struct. Handlers call
 /// [`record_heartbeat`](Self::record_heartbeat) on every incoming
-/// `BrokerHeartbeat` RPC; the liveness ticker calls [`tick`](Self::tick)
+/// `BrokerHeartbeat` RPC. The liveness ticker calls [`tick`](Self::tick)
 /// every second to expire stale entries.
 pub(crate) struct ControllerLivenessState {
     timeout: Duration,
@@ -146,9 +146,9 @@ impl ControllerLivenessState {
     }
 
     /// Record whether `broker_id` is currently asking to shut down.
-    /// `true` adds to the set; `false` removes (covers a broker that
-    /// retracts the request, though in practice the controller only
-    /// clears state when the broker is observed dead).
+    /// `true` adds to the set. `false` removes from the set, which
+    /// covers a broker that retracts the request. In practice the
+    /// controller only clears state when it observes the broker dead.
     pub(crate) async fn set_wants_shutdown(&self, broker_id: u64, want: bool) {
         let mut set = self.wants_shutdown.lock().await;
         if want {
@@ -165,8 +165,8 @@ impl ControllerLivenessState {
     }
 
     /// Record a heartbeat from `broker_id`. Returns `Some(DeadToAlive)`
-    /// if this heartbeat revives a previously-dead broker, `None` if the
-    /// broker was already alive (or is new).
+    /// if this heartbeat revives a previously-dead broker. Returns
+    /// `None` if the broker was already alive or is new.
     pub(crate) async fn record_heartbeat(&self, broker_id: u64) -> Option<LivenessTransition> {
         let mut map = self.brokers.lock().await;
         let now = self.clock.now();
@@ -232,12 +232,13 @@ impl ControllerLivenessState {
     }
 
     /// Snapshot the set of currently-`Alive` broker ids under a single
-    /// lock acquisition. Equivalent to calling [`is_alive`](Self::is_alive)
-    /// for every broker, but the cluster-wide maintenance loops (failover,
-    /// rebalance, metrics) take the `brokers` lock once and then do
-    /// synchronous set-membership checks instead of one `.await` lock per
-    /// partition. Unknown brokers are absent from the set (so membership
-    /// `false` == not alive), matching `is_alive`'s predicate exactly.
+    /// lock acquisition. This is equivalent to calling
+    /// [`is_alive`](Self::is_alive) for every broker. But the cluster-wide
+    /// maintenance loops for failover, rebalance, and metrics take the
+    /// `brokers` lock once and then do synchronous set-membership checks.
+    /// They do not take one `.await` lock per partition. Unknown brokers
+    /// are absent from the set, so membership `false` means not alive.
+    /// This matches `is_alive`'s predicate exactly.
     pub(crate) async fn alive_snapshot(&self) -> HashSet<u64> {
         let map = self.brokers.lock().await;
         map.iter()
@@ -247,10 +248,10 @@ impl ControllerLivenessState {
     }
 
     /// Seed the liveness registry with the given broker ids as `Alive` with
-    /// `last_heartbeat = now`. This is called when this broker becomes the
-    /// raft leader so that live peers get a full timeout window to redirect
-    /// their heartbeat loop at the new controller, while dead peers are still
-    /// detected by [`tick`](Self::tick) after `timeout` ms.
+    /// `last_heartbeat = now`. The broker calls this when it becomes the raft
+    /// leader. Live peers then get a full timeout window to redirect their
+    /// heartbeat loop at the new controller. [`tick`](Self::tick) still
+    /// detects dead peers after `timeout` ms.
     pub(crate) async fn seed_brokers(&self, broker_ids: impl IntoIterator<Item = u64>) {
         let mut map = self.brokers.lock().await;
         let now = self.clock.now();
@@ -268,9 +269,9 @@ impl ControllerLivenessState {
     }
 
     /// Seed brokers as alive, but with only `grace` remaining before timeout.
-    /// Used when this node becomes controller leader: live peers should heartbeat
-    /// quickly, while a broker that died with the previous leader should not get
-    /// a full fresh session timeout.
+    /// The broker calls this when this node becomes controller leader. Live
+    /// peers should heartbeat quickly. A broker that died with the previous
+    /// leader should not get a full fresh session timeout.
     pub(crate) async fn seed_brokers_expiring_after(
         &self,
         broker_ids: impl IntoIterator<Item = u64>,

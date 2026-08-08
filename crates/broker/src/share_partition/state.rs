@@ -1,14 +1,14 @@
 //! In-memory share-partition acquisition state machine (KIP-932).
 //!
-//! This is the pure core the share-partition leader drives. It owns no I/O: it
-//! tracks per-offset delivery state over the live window
-//! `[start_offset, end_offset)` (SPSO..SPEO) as a list of contiguous
-//! `InFlightBatch` runs and answers `acquire` / `acknowledge` /
+//! This is the pure core that the share-partition leader drives. It owns no
+//! I/O. It tracks the per-offset delivery state over the live window
+//! `[start_offset, end_offset)`, that is SPSO to SPEO, as a list of contiguous
+//! `InFlightBatch` runs. It answers `acquire`, `acknowledge`, and
 //! `expire_locks` queries. Bytes, logs, locks, and persistence live elsewhere.
 //!
-//! Delivery-state codes match Kafka's on-the-wire values
-//! (`DS_AVAILABLE=0`, `DS_ACQUIRED=1`, `DS_ACKNOWLEDGED=2`, `DS_ARCHIVED=4`).
-//! `Acquired` is transient and is persisted back as `Available(0)`.
+//! Delivery-state codes match Kafka's on-the-wire values: `DS_AVAILABLE=0`,
+//! `DS_ACQUIRED=1`, `DS_ACKNOWLEDGED=2`, and `DS_ARCHIVED=4`. `Acquired` is
+//! transient, and the machine persists it back as `Available(0)`.
 
 use std::time::{Duration, Instant};
 
@@ -16,8 +16,9 @@ use crabka_log::Offset;
 
 use crate::share_coordinator::persistence::StateBatch;
 
-/// Saturating `i64 -> i32` for record counts (offset ranges never realistically
-/// overflow `i32`, but the counter type is `i32` to match the persister).
+/// Saturating `i64 -> i32` conversion for record counts. Offset ranges do not
+/// overflow `i32` in practice, but the counter type is `i32` to match the
+/// persister.
 fn clamp_i32(n: i64) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
@@ -64,9 +65,9 @@ pub struct AcquiredRange {
     pub delivery_count: i16,
 }
 
-/// One contiguous run of offsets `[first_offset, last_offset]` sharing the same
-/// delivery state and delivery count. Lock fields are only meaningful while
-/// `state == RecordState::Acquired`.
+/// One contiguous run of offsets `[first_offset, last_offset]` with the same
+/// delivery state and delivery count. The lock fields have a meaning only
+/// while `state == RecordState::Acquired`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InFlightBatch {
     first_offset: Offset,
@@ -86,17 +87,17 @@ impl InFlightBatch {
 /// The in-memory acquisition state for one share partition.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AcquisitionState {
-    /// Share-partition start offset (SPSO): the lowest offset not yet
-    /// terminally acknowledged/archived.
+    /// Share-partition start offset (SPSO): the lowest offset that is not yet
+    /// terminally acknowledged or archived.
     pub start_offset: Offset,
     /// Share-partition end offset (SPEO): one past the highest materialized
-    /// offset. Equals `start_offset` when the window is empty.
+    /// offset. It equals `start_offset` when the window is empty.
     pub end_offset: Offset,
     pub state_epoch: i32,
     pub leader_epoch: i32,
     pub dirty: bool,
-    /// Count of offsets that have reached a terminal state (Acknowledged or
-    /// Archived) since `new`/`load_from`. This is the persister's
+    /// Count of offsets that have reached a terminal state, Acknowledged or
+    /// Archived, since `new` or `load_from`. This is the persister's
     /// `delivery_complete_count`.
     delivery_complete_count: i32,
     batches: Vec<InFlightBatch>,
@@ -116,13 +117,14 @@ impl AcquisitionState {
         }
     }
 
-    /// Extend the live window with freshly produced records.
+    /// Extends the live window with newly produced records.
     ///
-    /// If no `Available` records remain in the window and the log has advanced
-    /// past `end_offset`, append one `Available` batch spanning
-    /// `[end_offset, min(hwm-1, end_offset + max_inflight - 1)]` and advance
-    /// `end_offset`. `max_inflight` caps how many records may be in flight at
-    /// once (approximated as a record count).
+    /// When no `Available` record remains in the window and the log has
+    /// advanced past `end_offset`, this method appends one `Available` batch
+    /// that spans `[end_offset, min(hwm-1, end_offset + max_inflight - 1)]`
+    /// and advances `end_offset`. `max_inflight` caps how many records can be
+    /// in flight at once. The machine approximates that cap as a record
+    /// count.
     pub fn materialize(&mut self, hwm: Offset, max_inflight: i32) {
         let has_available = self
             .batches
@@ -148,19 +150,20 @@ impl AcquisitionState {
         self.coalesce();
     }
 
-    /// Acquire up to `max_records` Available records for `member`, walking the
-    /// window from `start_offset`.
+    /// Acquires up to `max_records` Available records for `member`. It walks
+    /// the window from `start_offset`.
     ///
-    /// Available batches whose `delivery_count >= max_attempts` are poison
-    /// pills: they are Archived (not handed out) and the SPSO advances past
-    /// them. Available batches under the limit transition to Acquired (split if
-    /// they would exceed `max_records`), get `acquired_by`/`lock_deadline` set,
-    /// `delivery_count += 1`, and are collected into the returned ranges.
-    /// Walking stops once `max_records` are acquired.
+    /// An Available batch whose `delivery_count >= max_attempts` is a bad
+    /// record. This method archives it, does not give it out, and advances the
+    /// SPSO past it. An Available batch under the limit moves to Acquired. The
+    /// method splits the batch when it would exceed `max_records`, sets
+    /// `acquired_by` and `lock_deadline`, adds 1 to `delivery_count`, and adds
+    /// the batch to the returned ranges. The walk stops once it has acquired
+    /// `max_records`.
     ///
-    /// `max_bytes` is accepted for API symmetry but is approximated here by the
-    /// record count (`max_records`); byte limits are enforced at the handler's
-    /// log-read step, not in this pure machine.
+    /// This method accepts `max_bytes` for API symmetry, but approximates it
+    /// here with the record count `max_records`. The handler enforces byte
+    /// limits at its log-read step, not in this pure machine.
     pub fn acquire(
         &mut self,
         member: &str,
@@ -220,15 +223,17 @@ impl AcquisitionState {
         acquired
     }
 
-    /// Acknowledge the offset range `[first, last]` previously acquired by
-    /// `member`.
+    /// Acknowledges the offset range `[first, last]` that `member` acquired
+    /// earlier.
     ///
-    /// The whole range must currently be `Acquired` by `member`, else
-    /// `Err(INVALID_RECORD_STATE)`. The range is split off into its own batches
-    /// at the boundaries, then: `Accept` -> Acknowledged, `Release` ->
-    /// Available (lock/owner cleared, `delivery_count` retained for redelivery),
-    /// `Reject`/`Gap` -> Archived. SPSO is advanced over any new terminal
-    /// prefix and the state is marked dirty.
+    /// `member` must currently hold the whole range as `Acquired`. If it does
+    /// not, this method returns `Err(INVALID_RECORD_STATE)`. It splits the
+    /// range into its own batches at the boundaries, then applies the
+    /// acknowledgement. `Accept` gives Acknowledged. `Release` gives
+    /// Available, clears the lock and the owner, and keeps `delivery_count`
+    /// for redelivery. `Reject` and `Gap` give Archived. The method then
+    /// advances the SPSO over any new terminal prefix and marks the state
+    /// dirty.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn acknowledge(
@@ -283,14 +288,15 @@ impl AcquisitionState {
         Ok(())
     }
 
-    /// Renew (extend) the acquisition lock on the range `[first, last]` held by
-    /// `member`, resetting each covered Acquired batch's `lock_deadline` to
-    /// `now + lock_dur` (KIP-932 RENEW acknowledgement).
+    /// Renews the acquisition lock on the range `[first, last]` that `member`
+    /// holds. It resets each covered Acquired batch's `lock_deadline` to
+    /// `now + lock_dur`. This is the KIP-932 RENEW acknowledgement.
     ///
-    /// The whole range must currently be `Acquired` by `member`, else
-    /// `Err(INVALID_RECORD_STATE)`. State, owner, and `delivery_count` are all
-    /// preserved (only the deadline moves) and SPSO is NOT advanced — renew
-    /// keeps records in flight. Marks the state dirty.
+    /// `member` must currently hold the whole range as `Acquired`. If it does
+    /// not, this method returns `Err(INVALID_RECORD_STATE)`. The state, the
+    /// owner, and `delivery_count` do not change. Only the deadline moves. The
+    /// method does NOT advance the SPSO, because a renew keeps records in
+    /// flight. It marks the state dirty.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn renew(
@@ -325,9 +331,10 @@ impl AcquisitionState {
         Ok(())
     }
 
-    /// Revert any Acquired batch whose lock has expired back to Available,
-    /// clearing the lock/owner but retaining `delivery_count` (so the next
-    /// acquire counts as a redelivery). Marks dirty if anything changed.
+    /// Returns any Acquired batch whose lock has expired to Available. It
+    /// clears the lock and the owner but keeps `delivery_count`, so the next
+    /// acquire counts as a redelivery. It marks the state dirty when something
+    /// changed.
     pub fn expire_locks(&mut self, now: Instant) {
         let mut changed = false;
         for b in &mut self.batches {
@@ -347,8 +354,8 @@ impl AcquisitionState {
         }
     }
 
-    /// True iff every offset in `[first, last]` is currently Acquired by
-    /// `member`.
+    /// True if and only if `member` currently holds every offset in
+    /// `[first, last]` as Acquired.
     fn range_acquired_by(&self, member: &str, first: Offset, last: Offset) -> bool {
         let mut cursor = first;
         for b in &self.batches {
@@ -370,8 +377,9 @@ impl AcquisitionState {
         cursor > last
     }
 
-    /// Split the batch at index `i` so that `split` becomes the first offset of
-    /// a new trailing batch. No-op if `split` is at a boundary.
+    /// Splits the batch at index `i` so that `split` becomes the first offset
+    /// of a new trailing batch. It does nothing when `split` is at a
+    /// boundary.
     fn split_at(&mut self, i: usize, split: Offset) {
         let b = &self.batches[i];
         if split <= b.first_offset || split > b.last_offset {
@@ -389,9 +397,9 @@ impl AcquisitionState {
         self.batches.insert(i + 1, tail);
     }
 
-    /// Split whichever batch contains the boundary so `offset` is a batch
-    /// `first_offset`. No-op when `offset` already lands on a boundary or is
-    /// outside the window.
+    /// Splits whichever batch holds the boundary, so that `offset` becomes a
+    /// batch `first_offset`. It does nothing when `offset` already lands on a
+    /// boundary, and when `offset` is outside the window.
     fn split_at_offset(&mut self, offset: Offset) {
         if let Some(i) = self.batches.iter().position(|b| {
             b.first_offset
@@ -405,8 +413,9 @@ impl AcquisitionState {
         }
     }
 
-    /// Advance SPSO over any terminal (Acknowledged/Archived) prefix, dropping
-    /// those batches, then coalesce adjacent same-state neighbors.
+    /// Advances the SPSO over any terminal prefix, that is Acknowledged or
+    /// Archived, and drops those batches. It then merges adjacent same-state
+    /// neighbors.
     fn advance_spso(&mut self) {
         while let Some(b) = self.batches.first() {
             if b.first_offset == self.start_offset
@@ -424,8 +433,9 @@ impl AcquisitionState {
         self.coalesce();
     }
 
-    /// Merge adjacent batches that share the same delivery state, delivery
-    /// count, and acquisition (owner + deadline). Keeps the batch list compact.
+    /// Merges adjacent batches that have the same delivery state, delivery
+    /// count, and acquisition, that is the same owner and deadline. This keeps
+    /// the batch list compact.
     fn coalesce(&mut self) {
         let mut i = 0;
         while i + 1 < self.batches.len() {
@@ -448,12 +458,13 @@ impl AcquisitionState {
         }
     }
 
-    /// Project the live window into persistable batches.
+    /// Projects the live window into persistable batches.
     ///
-    /// Returns `(start_offset, delivery_complete_count, batches)` for
-    /// `[start_offset, end_offset)`. Transient `Acquired` records are persisted
-    /// as `Available(0)` (a leader that crashes and reloads re-offers them).
-    /// Acknowledged/Archived batches are emitted with their terminal codes.
+    /// It returns `(start_offset, delivery_complete_count, batches)` for
+    /// `[start_offset, end_offset)`. It persists a transient `Acquired` record
+    /// as `Available(0)`, so a leader that crashes and reloads offers the
+    /// record again. It emits Acknowledged and Archived batches with their
+    /// terminal codes.
     #[must_use]
     pub fn to_persist_batches(&self) -> (Offset, i32, Vec<StateBatch>) {
         let mut out = Vec::with_capacity(self.batches.len());
@@ -473,10 +484,11 @@ impl AcquisitionState {
         (self.start_offset, self.delivery_complete_count, out)
     }
 
-    /// Cumulative count of offsets that have reached a terminal state
-    /// (Acknowledged or Archived) — the persister's `delivery_complete_count`.
-    /// Currently only consulted by the state-machine tests; the value also
-    /// flows out through [`Self::to_persist_batches`].
+    /// Cumulative count of offsets that have reached a terminal state,
+    /// Acknowledged or Archived. This is the persister's
+    /// `delivery_complete_count`. Only the state-machine tests read this
+    /// method today. The value also leaves through
+    /// [`Self::to_persist_batches`].
     #[cfg(test)]
     #[must_use]
     pub(crate) fn delivery_complete_count(&self) -> i32 {
@@ -496,12 +508,14 @@ impl AcquisitionState {
         .unwrap_or(i32::MAX)
     }
 
-    /// Rebuild the machine from persisted state. SPSO is restored to
-    /// `start_offset`, the cumulative `delivery_complete_count` is restored
-    /// (so the consumer-lag accounting survives a leader change), batches are
-    /// rehydrated (persisted `Acquired(1)` maps to `Available` since locks
-    /// don't survive a leader change), and `end_offset` is set to
-    /// `max(last_offset)+1` or `start_offset` when empty.
+    /// Rebuilds the machine from persisted state.
+    ///
+    /// It restores the SPSO to `start_offset`. It restores the cumulative
+    /// `delivery_complete_count`, so the consumer-lag accounting survives a
+    /// leader change. It rebuilds the batches, and maps a persisted
+    /// `Acquired(1)` to `Available`, because a lock does not survive a leader
+    /// change. It sets `end_offset` to `max(last_offset)+1`, or to
+    /// `start_offset` when the batch list is empty.
     pub fn load_from(
         &mut self,
         start_offset: Offset,

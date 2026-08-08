@@ -9,7 +9,8 @@ use serde_json::Value;
 
 use crate::schema_md::render_field_table;
 
-/// One generated CRD page: front-matter title/weight metadata and body markdown.
+/// One generated CRD page: the front-matter title and weight metadata, plus the
+/// body markdown.
 pub struct CrdPage {
     pub slug: String,
     pub title: String,
@@ -120,9 +121,9 @@ mod tests {
         }
     }
 
-    /// The pages added after the original six, each guarded the way the Kafka
-    /// page is: a concrete field must appear, so `render_field_table` silently
-    /// emitting an empty table fails here rather than shipping a blank page.
+    /// The pages added after the original six. Each one has the same guard as
+    /// the Kafka page: a concrete field must appear. If `render_field_table`
+    /// silently emits an empty table, this test fails and no blank page ships.
     #[test]
     fn the_later_pages_have_spec_fields() {
         let pages = crd_pages();
@@ -153,9 +154,9 @@ mod tests {
         }
     }
 
-    /// `emit` derives each page's weight from its index, so a reordering that
-    /// looks harmless silently renumbers every page after it and reshuffles the
-    /// site nav. Pin the order rather than just the membership.
+    /// `emit` derives each page's weight from its index. A reordering that
+    /// looks harmless thus renumbers every page after it and moves the site
+    /// nav. This test pins the order, not only the membership.
     #[test]
     fn page_order_fixes_the_generated_weights() {
         let slugs: Vec<String> = crd_pages().into_iter().map(|p| p.slug).collect();

@@ -1,6 +1,6 @@
-//! Soft goal: balance per-broker total bytes-out rate, summed across
-//! every replica role (leaders serve consumers; followers serve
-//! replication). Use `LeaderDistribution` for a leader-only view.
+//! Soft goal: balance the per-broker total bytes-out rate, summed across every
+//! replica role. Leaders serve consumers, and followers serve replication. Use
+//! `LeaderDistribution` for a leader-only view.
 
 use std::collections::HashMap;
 

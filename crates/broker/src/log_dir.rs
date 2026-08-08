@@ -1,37 +1,40 @@
 //! Per-partition directory layout: `<log_dir>/<topic>-<partition>/`.
-//! Mirrors the Apache Kafka convention so `crabka-log` can open existing
-//! Kafka log directories byte-compatibly.
+//!
+//! This layout mirrors the Apache Kafka convention, so `crabka-log` can open
+//! existing Kafka log directories with byte compatibility.
 
 use std::path::{Path, PathBuf};
 
 use crate::error::BrokerError;
 
-/// Suffix appended to a future-log partition directory while a
-/// KIP-113 intra-broker move is in progress. The directory at
-/// `<target_log_dir>/<topic>-<partition><FUTURE_SUFFIX>` accumulates
-/// copied batches until the future log catches up and is renamed
-/// in-place to `<topic>-<partition>`. Mirrors Apache Kafka's
-/// `LogManager.FutureDirSuffix` so cp-kafka tooling expectations
-/// (`kafka-log-dirs`) line up byte-for-byte on disk.
+/// Suffix that the broker appends to a future-log partition directory while a
+/// KIP-113 intra-broker move runs.
+///
+/// The directory at `<target_log_dir>/<topic>-<partition><FUTURE_SUFFIX>`
+/// collects copied batches. When the future log catches up, the broker renames
+/// it in place to `<topic>-<partition>`. The suffix mirrors Apache Kafka's
+/// `LogManager.FutureDirSuffix`, so what cp-kafka tooling such as
+/// `kafka-log-dirs` expects matches the bytes on disk.
 pub const FUTURE_SUFFIX: &str = "-future";
 
-/// Build the directory path for a (topic, partition).
+/// Builds the directory path for a (topic, partition).
 #[must_use]
 pub fn partition_dir(log_dir: &Path, topic: &str, partition: i32) -> PathBuf {
     log_dir.join(format!("{topic}-{partition}"))
 }
 
-/// Build the future-log directory path for a (topic, partition) in
-/// `log_dir`. Used by `AlterReplicaLogDirs` / KIP-113 — the future
-/// log accumulates copied batches and is atomically renamed to the
-/// canonical `<topic>-<partition>` on swap.
+/// Builds the future-log directory path for a (topic, partition) in `log_dir`.
+///
+/// `AlterReplicaLogDirs` and KIP-113 use it. The future log collects copied
+/// batches, and the broker renames it atomically to the canonical
+/// `<topic>-<partition>` on the swap.
 #[must_use]
 pub fn future_partition_dir(log_dir: &Path, topic: &str, partition: i32) -> PathBuf {
     log_dir.join(format!("{topic}-{partition}{FUTURE_SUFFIX}"))
 }
 
-/// Parse `<topic>-<partition>` from a directory name.
-/// Returns `None` if the name doesn't match the pattern.
+/// Parses `<topic>-<partition>` from a directory name. It returns `None` when
+/// the name does not match the pattern.
 #[must_use]
 pub fn parse_partition_dir(name: &str) -> Option<(String, i32)> {
     let (topic, part) = name.rsplit_once('-')?;
@@ -48,20 +51,22 @@ pub fn parse_partition_dir(name: &str) -> Option<(String, i32)> {
     Some((topic.to_string(), partition))
 }
 
-/// Parse a `<topic>-<partition>-future` directory name back to
-/// `(topic, partition)`. Strips the [`FUTURE_SUFFIX`] then defers to
-/// [`parse_partition_dir`] so the topic-name handling stays in one
-/// place. Returns `None` if the name doesn't carry the suffix or the
-/// stripped remainder isn't a valid partition directory.
+/// Parses a `<topic>-<partition>-future` directory name back to
+/// `(topic, partition)`.
+///
+/// It strips the [`FUTURE_SUFFIX`], then calls [`parse_partition_dir`], so
+/// that the topic-name handling stays in one place. It returns `None` when the
+/// name does not carry the suffix, and when the remainder after the strip is
+/// not a valid partition directory.
 #[must_use]
 pub fn parse_future_partition_dir(name: &str) -> Option<(String, i32)> {
     let base = name.strip_suffix(FUTURE_SUFFIX)?;
     parse_partition_dir(base)
 }
 
-/// Walk `log_dir` and return every `(topic, partition)` whose directory
-/// exists. Used at broker startup to repopulate the metadata image +
-/// partition registry from whatever was on disk last run.
+/// Walks `log_dir` and returns every `(topic, partition)` whose directory
+/// exists. Broker startup uses it to refill the metadata image and the
+/// partition registry from what the last run left on disk.
 pub fn scan(log_dir: &Path) -> Result<Vec<(String, i32)>, BrokerError> {
     if !log_dir.exists() {
         std::fs::create_dir_all(log_dir)?;
@@ -70,11 +75,12 @@ pub fn scan(log_dir: &Path) -> Result<Vec<(String, i32)>, BrokerError> {
     scan_existing(log_dir, parse_partition_dir)
 }
 
-/// Walk `log_dir` and return every `(topic, partition)` whose
-/// future-log directory (`<topic>-<partition>-future`) is present.
-/// Used by `DescribeLogDirs` to surface in-progress KIP-113 moves
-/// with `is_future_key=true`, and by broker startup to resume moves
-/// that were interrupted by a crash.
+/// Walks `log_dir` and returns every `(topic, partition)` that has a
+/// future-log directory, `<topic>-<partition>-future`.
+///
+/// `DescribeLogDirs` uses it to report KIP-113 moves that are still running,
+/// with `is_future_key=true`. Broker startup uses it to resume a move that a
+/// crash interrupted.
 pub fn scan_future(log_dir: &Path) -> Result<Vec<(String, i32)>, BrokerError> {
     if !log_dir.exists() {
         return Ok(Vec::new());
@@ -103,10 +109,12 @@ fn scan_existing(
     Ok(out)
 }
 
-/// Count the partition subdirectories (`<topic>-<partition>/`) directly
-/// under `dir`. Used for least-loaded JBOD placement. A missing directory
-/// counts as zero. Non-partition entries (e.g. `__cluster_metadata`,
-/// stray files) are ignored.
+/// Counts the partition subdirectories, `<topic>-<partition>/`, directly under
+/// `dir`.
+///
+/// Least-loaded JBOD placement uses this count. A missing directory counts as
+/// zero. This function ignores non-partition entries such as
+/// `__cluster_metadata` and stray files.
 #[must_use]
 pub fn count_partitions(dir: &Path) -> usize {
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -119,20 +127,21 @@ pub fn count_partitions(dir: &Path) -> usize {
         .count()
 }
 
-/// Resolve the directory a `(topic, partition)` should live in across a
-/// JBOD set of `log_dirs` (KIP-113 placement), returning the full
+/// Resolves the directory that a `(topic, partition)` should live in across a
+/// JBOD set of `log_dirs`, which is KIP-113 placement. It returns the full
 /// `<dir>/<topic>-<partition>` path.
 ///
-/// - If the partition directory already exists under one of `log_dirs`,
-///   that existing location wins (idempotent — handles restart, recovery,
-///   and concurrent re-materialization).
-/// - Otherwise it is placed in the least-loaded directory (fewest
-///   partition subdirs), ties broken by `log_dirs` order. This mirrors
-///   Kafka's `LogManager` round-robin-by-count default.
+/// - When the partition directory already exists under one of `log_dirs`, that
+///   existing location wins. This makes the function idempotent, and it covers
+///   restart, recovery, and concurrent re-materialization.
+/// - In every other case the function puts the partition in the least-loaded
+///   directory, which is the one with the fewest partition subdirs. It breaks
+///   a tie by `log_dirs` order. This mirrors the round-robin-by-count default
+///   in Kafka's `LogManager`.
 ///
-/// `log_dirs` must be non-empty; the caller guarantees this via
-/// [`crate::BrokerConfig::all_log_dirs`], which always includes the
-/// primary `log_dir`.
+/// `log_dirs` must not be empty. The caller guarantees this through
+/// [`crate::BrokerConfig::all_log_dirs`], which always includes the primary
+/// `log_dir`.
 #[must_use]
 pub fn place_partition_dir(log_dirs: &[PathBuf], topic: &str, partition: i32) -> PathBuf {
     debug_assert!(!log_dirs.is_empty(), "log_dirs must be non-empty");
@@ -154,10 +163,12 @@ pub fn place_partition_dir(log_dirs: &[PathBuf], topic: &str, partition: i32) ->
     chosen.join(&leaf)
 }
 
-/// Scan every directory in `log_dirs` and return each discovered
-/// `(topic, partition, owning_dir)`. If the same partition appears in more
-/// than one directory (a misconfiguration) the first occurrence wins and a
-/// warning is logged. Results are sorted by `(topic, partition)`.
+/// Scans every directory in `log_dirs` and returns each discovered
+/// `(topic, partition, owning_dir)`.
+///
+/// When the same partition appears in more than one directory, which is a
+/// misconfiguration, the first occurrence wins and this function logs a
+/// warning. It sorts the results by `(topic, partition)`.
 pub fn scan_all(log_dirs: &[PathBuf]) -> Result<Vec<(String, i32, PathBuf)>, BrokerError> {
     use std::collections::HashMap;
     let mut seen: HashMap<(String, i32), PathBuf> = HashMap::new();

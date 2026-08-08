@@ -108,15 +108,16 @@ struct PartialLimits {
 }
 
 impl PartialLimits {
-    /// Validate numeric ranges before the partial is merged into full limits.
+    /// Validate numeric ranges before the merge of the partial into full limits.
     ///
-    /// Rejects (with [`OverridesError::Invalid`]):
-    /// - a non-finite (`NaN`/`inf`) or negative `ingestion_rate_profiles_per_sec`,
-    /// - a negative flamegraph node cap (`max_flamegraph_nodes_default` /
-    ///   `max_flamegraph_nodes_max`).
+    /// Rejects the following, each with [`OverridesError::Invalid`]:
+    /// - a non-finite (`NaN` or `inf`) or negative
+    ///   `ingestion_rate_profiles_per_sec`,
+    /// - a negative flamegraph node cap, either `max_flamegraph_nodes_default`
+    ///   or `max_flamegraph_nodes_max`.
     ///
-    /// The remaining caps are `u64` and therefore cannot be negative; an
-    /// out-of-range YAML literal for them is already rejected by serde during
+    /// The remaining caps are `u64` and therefore cannot be negative. Serde
+    /// already rejects an out-of-range YAML literal for them at
     /// deserialization.
     fn validate(&self, tenant: &str) -> Result<(), OverridesError> {
         let invalid = |reason: &str| OverridesError::Invalid {

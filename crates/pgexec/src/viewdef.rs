@@ -1,6 +1,6 @@
 //! F-2: reconstruct a view's SQL text the way PostgreSQL's rule deparser
-//! (`ruleutils.c`) does, so `pg_get_viewdef` answers a *normalized* definition
-//! rather than echoing what the user typed.
+//! `ruleutils.c` does. `pg_get_viewdef` therefore answers a *normalized*
+//! definition and does not echo what the user typed.
 //!
 //! The layout PostgreSQL produces is fixed and worth writing down, because it
 //! is what clients diff against:
@@ -16,19 +16,19 @@
 //!  LIMIT 5
 //! ```
 //!
-//! Each clause keyword sits at its own fixed indent; continuation lines of the
-//! select list are indented four. Two behaviors depend on the pretty flag:
-//! without it every operator expression is fully parenthesized and a join tree
-//! is wrapped in parentheses, with it neither is. `pg_get_viewdef(oid)` is the
-//! un-pretty form; `pg_get_viewdef(oid, true)` and the wrap-column overload are
-//! the pretty one.
+//! Each clause keyword sits at its own fixed indent. Continuation lines of the
+//! select list have an indent of four. Two behaviors depend on the pretty flag.
+//! Without the flag, every operator expression is fully parenthesized and a
+//! join tree is wrapped in parentheses. With the flag, neither is.
+//! `pg_get_viewdef(oid)` is the un-pretty form. `pg_get_viewdef(oid, true)` and
+//! the wrap-column overload are the pretty one.
 //!
-//! Two of PostgreSQL's rules are reproduced exactly because they are the ones
-//! that decide whether the text round-trips:
+//! This module reproduces two of PostgreSQL's rules exactly, because they
+//! decide whether the text round-trips:
 //!
 //! * **Column qualification.** A reference is written `tbl.col` whenever the
 //!   query has other than exactly one range-table entry, or the query is nested
-//!   inside another — matching `get_query_def`'s `varprefix`.
+//!   inside another. This matches `get_query_def`'s `varprefix`.
 //! * **Output naming.** A bare column reference whose name already equals the
 //!   view's column name is written without `AS`; everything else always carries
 //!   one.
@@ -51,12 +51,12 @@ struct Ctx<'a> {
     qualify: bool,
     /// The relation an unqualified column reference belongs to, when the query
     /// has exactly one FROM item. PostgreSQL resolves the prefix from its range
-    /// table; the parse tree keeps no such link, so the sole FROM item is the
+    /// table. The parse tree keeps no such link, so the sole FROM item is the
     /// only case where the prefix can be recovered.
     qualifier: Option<&'a str>,
     /// The column the select list is packed to, from the
-    /// `pg_get_viewdef(oid, integer)` overload. `None` — every other overload —
-    /// puts one output column per line.
+    /// `pg_get_viewdef(oid, integer)` overload. `None`, which is every other
+    /// overload, puts one output column per line.
     wrap: Option<usize>,
 }
 
@@ -71,7 +71,7 @@ impl Ctx<'_> {
     }
 }
 
-/// Write a whole query expression, naming its output columns from `names`.
+/// Write a whole query expression, and name its output columns from `names`.
 pub(crate) fn write_query(
     out: &mut String,
     query: &QueryExpr,
@@ -267,9 +267,11 @@ fn target_list(select: &SelectStmt, names: &[String], ctx: Ctx<'_>) -> Vec<Strin
     out
 }
 
-/// Append the rendered select list. Without a wrap column each entry gets its
-/// own line at PostgreSQL's four-space continuation indent; with one, entries
-/// are packed greedily and a line breaks before the entry that would cross it.
+/// Append the rendered select list.
+///
+/// Without a wrap column, each entry gets its own line at PostgreSQL's
+/// four-space continuation indent. With a wrap column, this function packs
+/// entries greedily and breaks a line before the entry that would cross it.
 fn write_target_list(out: &mut String, items: &[String], ctx: Ctx<'_>) {
     let mut line_start = out.rfind('\n').map_or(0, |at| at + 1);
     for (index, item) in items.iter().enumerate() {
@@ -289,8 +291,8 @@ fn write_target_list(out: &mut String, items: &[String], ctx: Ctx<'_>) {
     }
 }
 
-/// One select-list entry. A bare column reference already carrying the output
-/// name needs no `AS`; PostgreSQL writes one for everything else.
+/// One select-list entry. A bare column reference that already carries the
+/// output name needs no `AS`. PostgreSQL writes one for everything else.
 fn target_item(expr: &Expr, target: &str, ctx: Ctx<'_>) -> String {
     let text = expr_text(expr, ctx);
     if target.is_empty() {
@@ -430,8 +432,9 @@ fn join_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
 
 // ------------------------------------------------------- expression rendering
 
-/// Render an expression. In un-pretty mode every operator node is wrapped in
-/// parentheses, which is what PostgreSQL's `PRETTYFLAG_PAREN`-off path does.
+/// Render an expression. In un-pretty mode this function wraps every operator
+/// node in parentheses, which is what PostgreSQL's `PRETTYFLAG_PAREN`-off path
+/// does.
 fn expr_text(expr: &Expr, ctx: Ctx<'_>) -> String {
     match expr {
         Expr::IntLiteral(text) | Expr::NumericLiteral(text) => text.clone(),

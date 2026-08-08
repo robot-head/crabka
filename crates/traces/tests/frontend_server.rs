@@ -1,5 +1,5 @@
 //! The frontend axum router round-trips the Tempo endpoints over loopback,
-//! backed by `MockQuerier` + `MockCatalog`.
+//! backed by `MockQuerier` and `MockCatalog`.
 
 use std::{sync::Arc, time::Duration};
 

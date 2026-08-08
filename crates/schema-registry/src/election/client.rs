@@ -1,7 +1,8 @@
-//! The `"sr"` group-membership loop: `FindCoordinator` → `JoinGroup` → (leader:
-//! select+assign) `SyncGroup` → `Heartbeat`, rejoining on rebalance and leaving
-//! on shutdown. Generic over `protocol_type` + opaque JSON metadata/assignment;
-//! models `client-consumer`'s coordinator loop without consumer semantics.
+//! The `"sr"` group-membership loop: `FindCoordinator` → `JoinGroup` →
+//! `SyncGroup` → `Heartbeat`, where the leader selects and assigns the master.
+//! It rejoins on rebalance and leaves on shutdown. It is generic over
+//! `protocol_type` and over opaque JSON metadata and assignment. It models
+//! `client-consumer`'s coordinator loop without consumer semantics.
 
 use bytes::Bytes;
 use crabka_client_core::{Client, ClientSecurity};
@@ -35,7 +36,7 @@ const UNKNOWN_MEMBER_ID: i16 = 25;
 const REBALANCE_IN_PROGRESS: i16 = 27;
 const MEMBER_ID_REQUIRED: i16 = 79;
 
-/// `PartialEq` but not `Eq`: [`Time`] stores `f64`.
+/// `PartialEq` but not `Eq`, because [`Time`] stores `f64`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ElectionPolicy {
     session_timeout: Time,
@@ -60,14 +61,14 @@ pub(super) struct ElectionClient {
     pub identity: SchemaRegistryIdentity,
     pub tx: watch::Sender<PrimaryState>,
     /// SR-to-broker Kafka-client security for the coordinator connections.
-    /// `None` = plaintext (the pre-security default).
+    /// `None` means plaintext, which is the pre-security default.
     pub security: Option<ClientSecurity>,
     pub runtime: RegistryRuntimeConfig,
 }
 
 impl ElectionClient {
-    /// Run until `cancel` fires. Reconnects + rejoins on any error; publishes
-    /// `PrimaryState` after each successful `SyncGroup`.
+    /// Run until `cancel` fires. It reconnects and rejoins on any error, and it
+    /// publishes `PrimaryState` after each successful `SyncGroup`.
     pub async fn run(self, cancel: CancellationToken) {
         let mut member_id = String::new();
         loop {
@@ -149,7 +150,7 @@ impl ElectionClient {
         }
     }
 
-    /// `FindCoordinator` via the bootstrap, then a `Client` to the coordinator.
+    /// `FindCoordinator` through the bootstrap, then a `Client` to the coordinator.
     async fn connect_coordinator(&self) -> anyhow::Result<Client> {
         let boot = Client::builder()
             .bootstrap(self.bootstrap.clone())
@@ -186,9 +187,9 @@ impl ElectionClient {
             .await?)
     }
 
-    /// `JoinGroup` (+ `MEMBER_ID_REQUIRED` two-step) then `SyncGroup`; as
-    /// leader, select the master and assign it to every member. Returns
-    /// (generation, our assignment bytes).
+    /// `JoinGroup`, including the `MEMBER_ID_REQUIRED` two-step, then
+    /// `SyncGroup`. As leader, this method selects the master and assigns it to
+    /// every member. Returns (generation, our assignment bytes).
     async fn join_and_sync(
         &self,
         coord: &Client,

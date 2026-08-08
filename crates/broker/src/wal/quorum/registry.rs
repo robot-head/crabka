@@ -43,7 +43,8 @@ impl WalShardRegistry {
     }
 }
 
-/// Routes shard-addressed KIP-595 Fetch requests to registered diskless WAL engines.
+/// Routes shard-addressed KIP-595 Fetch requests to the registered diskless
+/// WAL engines.
 #[derive(Debug, Clone)]
 pub(crate) struct WalShardRouter {
     registry: Arc<WalShardRegistry>,

@@ -1,6 +1,6 @@
 //! Asynchronous `NotificationResponse` delivery through the session loop.
 //!
-//! A fake engine hands the wire layer a notification stream; the tests drive
+//! A fake engine hands the wire layer a notification stream. The tests drive
 //! `run_session` over an in-memory duplex stream and assert on the bytes the
 //! client sees.
 
@@ -26,9 +26,9 @@ use tokio::{
 // ── Fake engine ─────────────────────────────────────────────────────────────
 
 struct NotifyEngine {
-    /// Handed to the session so a `NOTIFY` statement can publish while the
-    /// wire loop is busy executing it — the only way a notification becomes
-    /// pending outside the idle wait.
+    /// The test hands this to the session so a `NOTIFY` statement can publish
+    /// while the wire loop executes it. That is the only way a notification
+    /// becomes pending outside the idle wait.
     publisher: mpsc::Sender<Notification>,
     notifications: Mutex<Option<mpsc::Receiver<Notification>>>,
     connected_pid: Mutex<Option<i32>>,
@@ -241,8 +241,8 @@ impl Harness {
             .expect("notification queued");
     }
 
-    /// Read one message, asserting it is a `NotificationResponse`, and return
-    /// its decoded (pid, channel, payload).
+    /// Read one message, assert that it is a `NotificationResponse`, and
+    /// return its decoded (pid, channel, payload).
     async fn read_notification(&mut self) -> (i32, String, String) {
         let (tag, body) = self.read_message().await;
         assert!(tag == b'A');

@@ -1,11 +1,13 @@
-//! End-to-end: a Rust [`crabka_client_producer::Producer`] writes records
-//! to an in-process [`crabka_broker`] and a Rust
-//! [`crabka_client_consumer::Consumer`] reads them back.
+//! End-to-end producer tests against an in-process broker.
+//!
+//! A Rust [`crabka_client_producer::Producer`] writes records to an in-process
+//! [`crabka_broker`]. A Rust [`crabka_client_consumer::Consumer`] reads the
+//! records back.
 //!
 //! `flavor = "multi_thread", worker_threads = 2` is required for the same
-//! reason as the acceptance tests: a single-threaded
-//! runtime can't drive the broker's accept loop concurrently with the
-//! producer's sender task and the test body.
+//! reason as the acceptance tests. A single-threaded runtime cannot drive the
+//! broker's accept loop at the same time as the producer's sender task and the
+//! test body.
 
 use std::time::Duration;
 
@@ -17,8 +19,10 @@ use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use tempfile::TempDir;
 
-/// Spin up an in-process broker and return its handle, bootstrap address,
-/// and the `TempDir` (kept alive by the caller to control log-dir lifetime).
+/// Starts an in-process broker.
+///
+/// Returns the broker handle, the bootstrap address, and the `TempDir`. The
+/// caller keeps the `TempDir` alive to control the lifetime of the log dir.
 async fn boot() -> (BrokerHandle, String, TempDir) {
     let dir = TempDir::new().expect("tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
@@ -28,8 +32,9 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
-/// Create `name` with `partitions` partitions, replication factor 1, via a
-/// short-lived [`Client`]. The broker handles topic-id generation.
+/// Creates `name` with `partitions` partitions and replication factor 1.
+///
+/// The helper uses a short-lived [`Client`]. The broker generates the topic id.
 async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
     let client = Client::builder()
         .bootstrap(bootstrap)

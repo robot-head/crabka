@@ -101,27 +101,29 @@ fn over_time_function(name: &str) -> Option<OverTimeFn> {
 }
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Tree-walking differential test oracle — NOT compiled into shipped builds.
+    /// Tree-walking differential test oracle, NOT compiled into shipped builds.
     ///
-    /// `eval_instant_expr` and the `eval_instant_call`/`eval_instant_aggregate`/
-    /// `eval_instant_binary`/`eval_instant_unary` dispatch plus the whole
-    /// `eval_*_call` / `eval_*_aggregate` family below it form the recursive
-    /// tree-walking interpreter. The production engine no longer uses any of it:
-    /// `query_instant` / `query_range` route solely through the recursive operator
-    /// planner ([`Self::plan_instant_expr`]), and every planner sub-expression is
-    /// resolved by [`Self::plan_and_resolve`] — the planner is fully self-recursive.
+    /// `eval_instant_expr`, the `eval_instant_call`, `eval_instant_aggregate`,
+    /// `eval_instant_binary`, and `eval_instant_unary` dispatch, and the whole
+    /// `eval_*_call` and `eval_*_aggregate` family below it form the recursive
+    /// tree-walking interpreter. The production engine does not use any of it.
+    /// `query_instant` and `query_range` route only through the recursive
+    /// operator planner, [`Self::plan_instant_expr`]. [`Self::plan_and_resolve`]
+    /// resolves every planner sub-expression, so the planner is fully
+    /// self-recursive.
     ///
-    /// This dispatch is retained ONLY behind `#[cfg(test)]` as the differential
-    /// parity oracle: the `*_planner_path_matches_interpreter` tests assert the
-    /// self-recursive planner produces byte-for-byte the same result the tree-walker
-    /// would. Because it is gated `#[cfg(test)]`, it is excluded from
-    /// `cargo build` (default and `--features experimental-functions`), proving the
-    /// production engine is interpreter-free.
+    /// This dispatch stays ONLY behind `#[cfg(test)]`, as the differential
+    /// parity oracle. The `*_planner_path_matches_interpreter` tests assert that
+    /// the self-recursive planner returns byte-for-byte the same result as the
+    /// tree-walker. The `#[cfg(test)]` gate keeps this dispatch out of
+    /// `cargo build`, both with the default features and with
+    /// `--features experimental-functions`. The production engine is therefore
+    /// interpreter-free.
     ///
-    /// The genuine leaf KERNELS the planner shares with this oracle
-    /// (`eval_instant_selector`, `eval_matrix_selector`, `eval_subquery`,
-    /// `eval_range_arg`, `eval_smoothed_instant_selector`) stay in production and
-    /// are deliberately NOT gated.
+    /// The leaf kernels that the planner shares with this oracle stay in
+    /// production and are deliberately NOT gated. These kernels are
+    /// `eval_instant_selector`, `eval_matrix_selector`, `eval_subquery`,
+    /// `eval_range_arg`, and `eval_smoothed_instant_selector`.
     #[cfg(test)]
     pub(super) fn eval_instant_expr<'a>(
         &'a self,
@@ -187,16 +189,16 @@ impl<S: MetricStore> PromqlEngine<S> {
         .boxed()
     }
 
-    /// Evaluate a bare instant-vector selector through the `DataFusion`
-    /// `LogicalPlan` operator chain (`SeriesDivide -> SeriesNormalize ->
-    /// InstantManipulate`) instead of the interpreter.
+    /// Evaluates a bare instant-vector selector through the `DataFusion`
+    /// `LogicalPlan` operator chain instead of the interpreter.
     ///
-    /// This is the float-only spine of the interpreter -> operator migration.
-    /// The caller only routes here when the selector has no matching histogram
-    /// series; histogram selection stays on the interpreter
-    /// ([`Self::eval_instant_selector`]). Thin wrapper over the plan-builder
-    /// [`Self::plan_instant_selector`] plus the shared assembler; kept as the
-    /// parity-test seam.
+    /// The chain is `SeriesDivide -> SeriesNormalize -> InstantManipulate`. This
+    /// is the float-only spine of the interpreter -> operator migration. The
+    /// caller routes here only when the selector has no matching histogram
+    /// series. Histogram selection stays on the interpreter,
+    /// [`Self::eval_instant_selector`]. This method is a thin wrapper over the
+    /// plan-builder [`Self::plan_instant_selector`] and the shared assembler,
+    /// and it is the parity-test seam.
     #[cfg(test)]
     pub(super) async fn eval_instant_selector_via_planner(
         &self,
@@ -209,11 +211,13 @@ impl<S: MetricStore> PromqlEngine<S> {
             .await?;
         self.assemble_planned_instant(planned, time_ms).await
     }
-    /// Evaluate a top-level `f(selector[range])` rate-family call through the
-    /// `DataFusion` operator chain (`SeriesDivide -> SeriesNormalize ->
-    /// RangeManipulate -> rate-UDF projection`) instead of the interpreter. Thin
-    /// wrapper over [`Self::plan_rate_range`] plus the shared assembler; kept as
-    /// the parity-test seam.
+    /// Evaluates a top-level `f(selector[range])` rate-family call through the
+    /// `DataFusion` operator chain instead of the interpreter.
+    ///
+    /// The chain is `SeriesDivide -> SeriesNormalize -> RangeManipulate ->
+    /// rate-UDF projection`. This method is a thin wrapper over
+    /// [`Self::plan_rate_range`] and the shared assembler, and it is the
+    /// parity-test seam.
     #[cfg(test)]
     pub(super) async fn eval_rate_range_via_planner(
         &self,

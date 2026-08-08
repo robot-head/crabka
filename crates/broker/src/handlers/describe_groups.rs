@@ -1,13 +1,15 @@
-//! `DescribeGroups` (`api_key=15`). One entry per requested `group_id`.
-//! Members include their `JoinGroup` protocol metadata (`member_metadata`)
-//! and current assignment bytes; the group reports its selected protocol
-//! name (`protocol_data`) and stored `protocol_type` (`""` for a typeless /
-//! dead group, matching Kafka).
+//! `DescribeGroups` (`api_key=15`). The response holds one entry per requested
+//! `group_id`.
 //!
-//! KIP-430: when `include_authorized_operations` is set on the request,
-//! each Allow row carries a bitfield of the group operations the
-//! principal may perform; rows that auth-fail or aren't found stay at
-//! the `i32::MIN` "not present" sentinel.
+//! Each member carries its `JoinGroup` protocol metadata (`member_metadata`)
+//! and its current assignment bytes. The group reports its selected protocol
+//! name (`protocol_data`) and its stored `protocol_type`. That type is `""`
+//! for a typeless or dead group, which matches Kafka.
+//!
+//! KIP-430: when the request sets `include_authorized_operations`, each Allow
+//! row carries a bitfield of the group operations that the principal may
+//! perform. A row that fails the auth check, and a row for a group that does
+//! not exist, keeps the `i32::MIN` "not present" sentinel.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};

@@ -1,7 +1,7 @@
 //! The `metrics-generator` role: the third traces consumer group.
 //!
-//! It runs span-metrics (RED) and service-graph processors over the traces WAL
-//! stream and flushes their series via Prometheus `remote_write`.
+//! It runs the span-metrics (RED) and service-graph processors over the traces
+//! WAL stream, and flushes their series through Prometheus `remote_write`.
 
 pub mod checkpoint;
 pub mod clock;
@@ -38,7 +38,7 @@ pub mod contract {
         pub status_message: String,
         pub service_name: String,
         pub attributes: Vec<(String, String)>,
-        /// The encoded size of the WAL record this span was projected from.
+        /// The encoded size of the WAL record that this span was projected from.
         pub size: ByteSize,
     }
 

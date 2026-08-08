@@ -1,9 +1,9 @@
 //! KIP-113 admin RPCs: `AlterReplicaLogDirs` (`api_key` 34) and
 //! `DescribeLogDirs` (`api_key` 35).
 //!
-//! Both target the broker the connection is open against — these are
-//! per-broker calls, so the admin client does NOT do a controller
-//! retry on `NOT_CONTROLLER` (the request doesn't hit the controller).
+//! Both target the broker that the connection is open against. These are
+//! per-broker calls, so the admin client does NOT do a controller retry on
+//! `NOT_CONTROLLER`. The request does not reach the controller.
 
 use std::collections::BTreeMap;
 
@@ -47,11 +47,12 @@ pub struct LogDirPartitionInfo {
 }
 
 impl AdminClient {
-    /// `AlterReplicaLogDirs` (KIP-113): move replicas between local
+    /// `AlterReplicaLogDirs` (KIP-113): moves replicas between local
     /// `log.dirs` on this broker.
     ///
     /// `assignments` maps each target absolute directory path to the
-    /// `(topic, [partition])` pairs that should be moved into it.
+    /// `(topic, [partition])` pairs to move into it.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn alter_replica_log_dirs(
@@ -93,11 +94,14 @@ impl AdminClient {
         Ok(out)
     }
 
-    /// `DescribeLogDirs` (KIP-113): list every configured `log.dir` on
-    /// this broker, with the partitions each holds (current and
-    /// in-progress future logs). Pass `None` to fetch all partitions
-    /// or `Some` with topic → partitions filter (empty inner vec means
-    /// all partitions of that topic).
+    /// `DescribeLogDirs` (KIP-113): lists every configured `log.dir` on this
+    /// broker, with the partitions each one holds. The list covers current
+    /// logs and in-progress future logs.
+    ///
+    /// Pass `None` to fetch all partitions. Pass `Some` with a topic →
+    /// partitions filter to narrow the result. An empty inner vec means all
+    /// partitions of that topic.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_log_dirs(

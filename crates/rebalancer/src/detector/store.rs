@@ -1,5 +1,5 @@
 //! Ring buffer of `Anomaly` records with atomic on-disk persistence at
-//! `{data_dir}/anomalies.json`. Mirrors `model::store::ProposalStore`.
+//! `{data_dir}/anomalies.json`. It mirrors `model::store::ProposalStore`.
 
 use std::{
     collections::VecDeque,
@@ -77,9 +77,10 @@ impl AnomalyStore {
         })
     }
 
-    /// Returns `(id, is_new)`. `is_new = true` means a fresh record was
-    /// inserted, so the caller's tick loop may fire auto-trigger; `false`
-    /// means an existing open record was refreshed in place (dedup).
+    /// Returns `(id, is_new)`. `is_new = true` means the store inserted a
+    /// fresh record, so the caller's tick loop may fire auto-trigger. `false`
+    /// means the store refreshed an existing open record in place, which
+    /// deduplicates it.
     /// # Panics
     /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn upsert_open(

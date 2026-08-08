@@ -1,11 +1,13 @@
-//! `GlobalKTable<K,V>`: a fully-replicated lookup table — a join target only (no
-//! aggregations, no `to_stream`). Built by [`StreamsBuilder::global_table`] and
-//! consumed by [`KStream::join_global`] / [`KStream::left_join_global`].
+//! `GlobalKTable<K,V>`: a fully-replicated lookup table.
 //!
-//! A `GlobalKTable` is invisible in the wire topology: it has no source topic, no
+//! It is a join target only. It supports no aggregations and no `to_stream`.
+//! [`StreamsBuilder::global_table`] builds it, and
+//! [`KStream::join_global`] and [`KStream::left_join_global`] consume it.
+//!
+//! A `GlobalKTable` is invisible in the wire topology. It has no source topic, no
 //! changelog, and no subtopology of its own. Its source node only occupies a
-//! node-group index during grouping (so other subtopology ids shift). The store is
-//! registered with [`Topology::add_global_store`].
+//! node-group index during grouping, so the other subtopology ids shift. The DSL
+//! registers the store with [`Topology::add_global_store`].
 //!
 //! [`StreamsBuilder::global_table`]: crate::dsl::builder::StreamsBuilder::global_table
 //! [`KStream::join_global`]: crate::dsl::kstream::KStream::join_global
@@ -18,11 +20,12 @@ use crate::{
     processor::serde::DefaultSerde,
 };
 
-/// A handle to a fully-replicated `GlobalKTable`. Only usable as a join target.
+/// A handle to a fully-replicated `GlobalKTable`. It works only as a join
+/// target.
 ///
-/// `store_name` is the materialized store `KStream::join_global` /
+/// `store_name` is the materialized store that `KStream::join_global` and
 /// `left_join_global` wire the join processor's lookup against. `source_topic`
-/// is the broker topic used to fully replicate the global store.
+/// is the broker topic that fully replicates the global store.
 pub struct GlobalKTable<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde>::Serde> {
     // Keeps the shared builder alive while this handle is live.
     #[allow(dead_code)]
@@ -59,9 +62,11 @@ impl<K, V, KS, VS> GlobalKTable<K, V, KS, VS> {
         }
     }
 
-    /// The name of the materialized state store backing this global table. Read by
-    /// [`KStream::join_global`](crate::dsl::kstream::KStream::join_global) /
-    /// `left_join_global` to wire the join processor's global-store lookup.
+    /// The name of the materialized state store that backs this global table.
+    ///
+    /// [`KStream::join_global`](crate::dsl::kstream::KStream::join_global) and
+    /// `left_join_global` read it to wire the join processor's global-store
+    /// lookup.
     pub(crate) fn store_name(&self) -> &str {
         &self.store_name
     }

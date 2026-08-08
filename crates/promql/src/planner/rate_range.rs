@@ -1,12 +1,12 @@
 //! Leaf source and `LogicalPlan` assembly for the rate-family range-selector
 //! operator path.
 //!
-//! This is the matrix-selector sibling of [`super::leaf`]. Where the instant
-//! path selects a single sample per series within the lookback window, the rate
-//! path materializes a full range window `(t - range, t]` per series and folds
-//! it through [`RangeManipulate`] into windowed `RangeArray` columns, then
-//! projects a rate-family [`datafusion::logical_expr::ScalarUDF`] over those
-//! columns to produce one float per series.
+//! This module is the matrix-selector sibling of [`super::leaf`]. The instant
+//! path selects one sample per series inside the lookback window. The rate path
+//! instead materializes a full range window `(t - range, t]` per series and
+//! folds it through [`RangeManipulate`] into windowed `RangeArray` columns. It
+//! then projects a rate-family [`datafusion::logical_expr::ScalarUDF`] over
+//! those columns and returns one float per series.
 //!
 //! The assembled chain is
 //! `<leaf over MetricStore> -> SeriesDivide -> SeriesNormalize -> RangeManipulate
@@ -15,12 +15,12 @@
 //!
 //! # Window semantics (vs. the instant path)
 //!
-//! A range selector does **not** apply the 5m lookback. The window is exactly
-//! `(eval_time - range, eval_time]`, left-open and right-closed, matching
+//! A range selector does not apply the 5m lookback. The window is exactly
+//! `(eval_time - range, eval_time]`, left-open and right-closed. This matches
 //! Prometheus' matrix-selector semantics and the interpreter's
 //! `range_function_sample_from_series`. The caller fetches samples over
 //! `(eval_time - range, eval_time]` and passes the window's range width as
-//! `range_ms`; `RangeManipulate` re-derives the per-step window and the UDF
+//! `range_ms`. `RangeManipulate` re-derives the per-step window, and the UDF
 //! re-derives `range_start = eval_timestamp - range_ms`.
 
 use std::{collections::BTreeSet, sync::Arc};
@@ -50,17 +50,19 @@ use crate::{
     },
 };
 
-/// Leaf-batch column carrying the per-sample timestamp in epoch milliseconds.
-/// This is the operator chain's time index; `RangeManipulate` reuses the name
-/// for the scalar eval-timestamp column it emits.
+/// Leaf-batch column that holds the per-sample timestamp in epoch milliseconds.
+/// This column is the operator chain's time index. `RangeManipulate` reuses the
+/// name for the scalar eval-timestamp column that it emits.
 pub const TIME_COLUMN: &str = "timestamp";
-/// Leaf-batch column carrying the per-sample float value.
+/// Leaf-batch column that holds the per-sample float value.
 pub const VALUE_COLUMN: &str = "value";
-/// Projection output column name carrying the rate-family UDF result.
+/// Name of the projection output column that holds the rate-family UDF result.
 pub const RATE_VALUE_COLUMN: &str = "value";
 
-/// Which rate-family `ScalarUDF` a range-selector plan projects. The registered
-/// UDF names (`prom_rate`, …) are the seam to [`crate::functions::rate`].
+/// Which rate-family `ScalarUDF` a range-selector plan projects.
+///
+/// The registered UDF names (`prom_rate`, …) are the seam to
+/// [`crate::functions::rate`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RateUdfKind {
     Rate,
@@ -82,8 +84,10 @@ impl RateUdfKind {
         }
     }
 
-    /// Resolve the matrix-selector `PromQL` function name to its UDF kind. Returns
-    /// `None` for any function outside the operator-path rate family.
+    /// Resolves the matrix-selector `PromQL` function name to its UDF kind.
+    ///
+    /// This function returns `None` for any function outside the operator-path
+    /// rate family.
     #[must_use]
     pub fn from_function_name(name: &str) -> Option<Self> {
         match name {
@@ -105,32 +109,33 @@ pub struct LabeledSample {
     pub value: f64,
 }
 
-/// The assembled operator plan plus the per-series labels needed to reattach
-/// label sets to the projected rate values.
+/// The assembled operator plan and the per-series labels that reattach label
+/// sets to the projected rate values.
 pub struct RateRangePlan {
-    /// Session context whose physical planner understands the custom operators
-    /// and whose registry holds the rate UDFs, with the leaf table registered.
+    /// Session context with the leaf table registered. Its physical planner
+    /// understands the custom operators, and its registry holds the rate UDFs.
     pub ctx: SessionContext,
     /// The `SeriesDivide -> SeriesNormalize -> RangeManipulate -> Projection`
     /// logical plan.
     pub plan: LogicalPlan,
-    /// Series labels keyed by fingerprint, for assembling the result.
+    /// Series labels keyed by fingerprint. The caller uses them to assemble the
+    /// result.
     pub labels_by_fp: std::collections::BTreeMap<SeriesFingerprint, Labels>,
 }
 
-/// Build the leaf table and operator chain that evaluates `f(selector[range])`
-/// at a single eval instant `eval_time_ms` with the given `range` width.
+/// Builds the leaf table and operator chain that evaluates `f(selector[range])`
+/// at one eval instant `eval_time_ms` with the given `range` width.
 ///
 /// `samples` are the float samples of the matched series over the exact range
-/// window `(eval_time_ms - range, eval_time_ms]`. Stale-NaN markers must be
-/// filtered out by the caller (matching the interpreter's `eval_matrix_selector`
-/// staleness handling) before the values reach the operator chain; genuine NaN
-/// values are carried through unchanged, as the interpreter does.
+/// window `(eval_time_ms - range, eval_time_ms]`. The caller must filter out
+/// stale-NaN markers before the values reach the operator chain, which matches
+/// the interpreter's `eval_matrix_selector` staleness handling. Genuine NaN
+/// values pass through unchanged, as the interpreter does.
 ///
 /// # Errors
 ///
-/// Returns an error if the Arrow batch, table, or projection plan cannot be
-/// constructed.
+/// Returns an error if this function cannot build the Arrow batch, the table, or
+/// the projection plan.
 pub async fn plan_rate_range_selector(
     samples: Vec<LabeledSample>,
     eval_time_ms: i64,
@@ -297,9 +302,10 @@ mod tests {
         }
     }
 
-    /// `rate(counter[5m])` over the engine's canonical counter window
-    /// (0..240s stepping by 1.0, eval at t=300s) yields 5/300 through the full
-    /// operator chain, matching `extrapolate::rate_extrapolates_counter_window`.
+    /// `rate(counter[5m])` over the engine's canonical counter window returns
+    /// 5/300 through the full operator chain. The window runs 0..240s in steps
+    /// of 1.0, with the eval at t=300s. This matches
+    /// `extrapolate::rate_extrapolates_counter_window`.
     #[tokio::test]
     async fn rate_range_plan_reproduces_counter_window() {
         let samples = vec![
@@ -373,8 +379,9 @@ mod tests {
         assert2::assert!(approx_eq(value.value(0), 2.0));
     }
 
-    /// A single-sample window has no rate; the UDF emits NULL (not a NaN
-    /// sentinel), so the assembler drops the series and aggregates skip it.
+    /// A single-sample window has no rate. The UDF returns NULL rather than a
+    /// NaN sentinel, so the assembler drops the series and the aggregates skip
+    /// it.
     #[tokio::test]
     async fn single_sample_window_yields_null() {
         use arrow::array::Array;

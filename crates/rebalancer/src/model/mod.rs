@@ -1,9 +1,9 @@
 //! In-memory data model for the rebalancer.
 //!
-//! `ClusterState` is the snapshot fed into the optimizer. `Movement`
-//! is a single proposed change (replica-set update, leader change, or
-//! both). Validity helpers reject malformed movements before they
-//! reach the optimizer's accumulator.
+//! `ClusterState` is the snapshot the optimizer reads. `Movement` is a single
+//! proposed change: a replica-set update, a leader change, or both. Validity
+//! helpers reject malformed movements before they reach the optimizer's
+//! accumulator.
 
 pub mod proposal;
 pub mod store;
@@ -45,9 +45,8 @@ pub struct InFlightReassignment {
     pub removing: Vec<i32>,
 }
 
-/// Why a proposed movement was rejected. Returned by
-/// [`validate_movement`]. The optimizer logs at debug + drops the
-/// movement.
+/// Why a proposed movement was rejected. [`validate_movement`] returns it. The
+/// optimizer logs at debug level and drops the movement.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MovementError {
     #[error("replication factor changed: old={old} new={new}")]
@@ -62,9 +61,9 @@ pub enum MovementError {
     UnknownPartition { topic: String, partition: i32 },
 }
 
-/// Inspect `movement` against `state`'s broker + partition tables.
-/// Returns `Ok(())` for movements the optimizer should accept,
-/// `Err(MovementError)` for ones it should drop.
+/// Inspect `movement` against the broker and partition tables of `state`.
+/// Returns `Ok(())` for movements the optimizer should accept, and
+/// `Err(MovementError)` for movements it should drop.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub fn validate_movement(state: &ClusterState, mv: &Movement) -> Result<(), MovementError> {

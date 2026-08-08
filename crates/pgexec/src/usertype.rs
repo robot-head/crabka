@@ -1,11 +1,12 @@
 //! User-defined types: `CREATE`/`ALTER`/`DROP` of `TYPE` and `DOMAIN`, and the
 //! value-level operations over the types they create.
 //!
-//! The durable definition lives in the catalog (`crabka_pgcatalog`); the
+//! The durable definition lives in the catalog (`crabka_pgcatalog`). The
 //! process-wide registry in `crabka_pgtypes::usertype` is what makes a type
 //! *name* resolvable from the parser, which holds no catalog handle. Every DDL
-//! path here writes both, and [`hydrate`] restores the registry from the catalog
-//! when a session opens so a restart or a second node still resolves the names.
+//! path here writes both. [`hydrate`] restores the registry from the catalog
+//! when a session opens, so a restart or a second node still resolves the
+//! names.
 
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgparser::ast::{
@@ -22,8 +23,8 @@ use crate::error::ExecError;
 
 /// Load every catalog-stored type into the process registry.
 ///
-/// Idempotent: re-registering a type keeps its oid, so calling this on every
-/// session open costs a catalog scan and changes nothing else.
+/// Idempotent: a second registration of a type keeps its oid, so a call on
+/// every session open costs a catalog scan and changes nothing else.
 ///
 /// # Errors
 ///
@@ -403,8 +404,10 @@ fn rename(
     ))
 }
 
-/// `DROP TYPE`/`DROP DOMAIN`. `kind` selects which of the two is being dropped,
-/// so `DROP DOMAIN` refuses a composite (42809) exactly as `PostgreSQL` does.
+/// `DROP TYPE`/`DROP DOMAIN`.
+///
+/// `kind` selects which of the two to drop, so `DROP DOMAIN` refuses a
+/// composite (42809) exactly as `PostgreSQL` does.
 ///
 /// # Errors
 ///
@@ -507,9 +510,9 @@ fn command(tag: &str) -> QueryResult {
 
 /// Enforce a domain's `NOT NULL` and `CHECK` constraints on `value`.
 ///
-/// A no-op for every type that is not a domain, so callers can hand it whatever
-/// target type they have. `CHECK` follows `PostgreSQL`'s three-valued rule: only
-/// an explicit `false` violates, a NULL result passes.
+/// A no-op for every type that is not a domain, so callers can hand it
+/// whatever target type they have. `CHECK` follows `PostgreSQL`'s three-valued
+/// rule: only an explicit `false` violates it, and a NULL result passes.
 ///
 /// # Errors
 ///

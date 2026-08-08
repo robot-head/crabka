@@ -1,6 +1,8 @@
-//! KIP-932 share coordinator (persister): durable per-`(group, topicId,
-//! partition)` delivery state stored in the `__share_group_state` internal
-//! topic. Mirrors the transaction coordinator (`crate::txn`).
+//! KIP-932 share coordinator, also called the persister.
+//!
+//! The coordinator holds durable per-`(group, topicId, partition)` delivery
+//! state in the `__share_group_state` internal topic. It mirrors the
+//! transaction coordinator, `crate::txn`.
 
 pub mod bootstrap;
 pub mod config;

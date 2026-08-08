@@ -1,42 +1,42 @@
-//! Set-returning functions (SRFs) — the one registry that answers, for a
+//! Set-returning functions (SRFs): the one registry that answers, for a
 //! function name and its arguments, the *columns* the call produces and the
 //! *rows* it expands to.
 //!
-//! Every SRF is described once, by [`plan`] (names + types, for RowDescription
-//! and the extended protocol's `Describe`) and [`rows`] (values). Both the
-//! FROM-item path ([`from_item`] / [`from_item_schema`]) and the
-//! select-list path ([`project_rows_ordered`]) drive that single description, so
-//! a prepared statement's `RowDescription` cannot drift from what execution
-//! actually returns.
+//! Two functions describe every SRF once. [`plan`] gives the names and types,
+//! for RowDescription and the extended protocol's `Describe`, and [`rows`] gives
+//! the values. Both the FROM-item path, [`from_item`] and [`from_item_schema`],
+//! and the select-list path, [`project_rows_ordered`], drive that single
+//! description. So a prepared statement's `RowDescription` cannot drift from
+//! what execution returns.
 //!
-//! Naming follows PostgreSQL: a single-column SRF names its column after the
-//! function (`generate_series`, `unnest`), a multi-column one names them
-//! individually (`jsonb_each` → `key`, `value`), a bare `AS u` on a
+//! Naming follows PostgreSQL. A single-column SRF names its column after the
+//! function, as `generate_series` and `unnest` do. A multi-column one names them
+//! individually, so `jsonb_each` gives `key` and `value`. A bare `AS u` on a
 //! single-column item renames the column as well as the qualifier, and
 //! `AS u(a, b)` renames each column positionally.
 //!
 //! ## Deliberate divergences from PostgreSQL
 //!
-//! - A **multi-column** SRF in the select list (`SELECT jsonb_each(j)`) is
-//!   `0A000`: PostgreSQL returns one `record`-typed column, and crabka has no
+//! - A **multi-column** SRF in the select list, such as `SELECT jsonb_each(j)`,
+//!   is `0A000`. PostgreSQL returns one `record`-typed column, and crabka has no
 //!   composite type to put in it.
-//! - An SRF nested inside **another SRF's arguments**
-//!   (`SELECT generate_series(1, generate_series(1, 2))`) is `0A000`;
-//!   PostgreSQL lifts the inner call into its own ProjectSet level.
-//! - An SRF in an **aggregate query's** select list is `0A000`; PostgreSQL
+//! - An SRF nested inside **another SRF's arguments**, such as
+//!   `SELECT generate_series(1, generate_series(1, 2))`, is `0A000`. PostgreSQL
+//!   lifts the inner call into its own ProjectSet level.
+//! - An SRF in an **aggregate query's** select list is `0A000`. PostgreSQL
 //!   evaluates SRFs after aggregation.
 //! - `SELECT *` over a multi-argument `unnest(a, b)` written without column
 //!   aliases is `42702`. PostgreSQL names both output columns `unnest` and
 //!   expands `*` positionally, while crabka expands a wildcard into one
 //!   *by-name* column reference each, so two identically named columns under one
 //!   qualifier are ambiguous. `unnest(a, b) AS t(x, y)` names them apart and
-//!   works. (The same by-name expansion makes `SELECT *` over a derived table
-//!   with duplicate output names ambiguous, so this is not specific to SRFs.)
+//!   works. The same by-name expansion makes `SELECT *` over a derived table
+//!   with duplicate output names ambiguous, so this is not specific to SRFs.
 //!
 //! Multiple SRFs in one select list *are* supported and follow PostgreSQL 10+
-//! semantics — the calls run in lockstep and the shorter ones pad with NULL
-//! until the longest is exhausted (the pre-10 "least common multiple" rule is
-//! gone from PostgreSQL itself).
+//! semantics. The calls run in lockstep, and the shorter ones pad with NULL
+//! until the longest is exhausted. The pre-10 "least common multiple" rule is
+//! gone from PostgreSQL itself.
 
 use std::borrow::Cow;
 
@@ -55,9 +55,9 @@ use crate::{
 /// The set-returning functions crabka implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Srf {
-    /// `unnest(anyarray [, anyarray …])` — one column per argument, shorter
-    /// arrays padded with NULL (PostgreSQL expands the multi-argument form as
-    /// `ROWS FROM`).
+    /// `unnest(anyarray [, anyarray …])`: one column per argument, with shorter
+    /// arrays padded with NULL. PostgreSQL expands the multi-argument form as
+    /// `ROWS FROM`.
     Unnest,
     /// `generate_series(start, stop [, step])` over int4/int8/numeric, and
     /// `(timestamp|timestamptz, same, interval)`.
@@ -86,9 +86,9 @@ enum Srf {
 }
 
 /// Classify a function name. Unquoted identifiers reach here lowercased, but a
-/// quoted `"UNNEST"` does not, and PostgreSQL matches those case-sensitively —
-/// the folding here is deliberate leniency, matching the pre-existing `unnest`
-/// handling this registry replaces.
+/// quoted `"UNNEST"` does not, and PostgreSQL matches those case-sensitively.
+/// The folding here is deliberate leniency, and it matches the pre-existing
+/// `unnest` handling this registry replaces.
 fn classify(name: &str) -> Option<Srf> {
     let lowered = if name.bytes().any(|b| b.is_ascii_uppercase()) {
         Cow::Owned(name.to_ascii_lowercase())
@@ -115,8 +115,8 @@ fn classify(name: &str) -> Option<Srf> {
     })
 }
 
-/// Is `name` a set-returning function? (The dispatch point for the FROM-item and
-/// select-list guards.)
+/// Is `name` a set-returning function? This is the dispatch point for the
+/// FROM-item and select-list guards.
 pub(crate) fn is_srf(name: &str) -> bool {
     classify(name).is_some()
 }
@@ -129,9 +129,9 @@ pub(crate) struct SrfPlan {
     columns: Vec<ColumnBinding>,
 }
 
-/// Resolve `name(args)` to the columns it produces. Every arity/type rule a call
-/// can fail is checked here, at plan time, so `Describe` reports the same error
-/// `Execute` would.
+/// Resolve `name(args)` to the columns it produces. This function checks every
+/// arity and type rule a call can fail, at plan time, so `Describe` reports the
+/// same error `Execute` would.
 pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, ExecError> {
     // Resolve the arguments' types first, so a name no entry claims still reports
     // the argument types PostgreSQL's 42883 names.
@@ -268,9 +268,9 @@ pub(crate) fn rows(
     Ok(produced)
 }
 
-/// The type an `unknown` literal argument adopts, per position — the ONE place
-/// each SRF's parameter types are written down, driven by both the plan-time
-/// resolver and the run-time coercion.
+/// The type an `unknown` literal argument adopts, per position. This is the ONE
+/// place each SRF's parameter types are written down. Both the plan-time
+/// resolver and the run-time coercion drive it.
 fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
     let text = Some(ColumnType::Text);
     match plan.kind {
@@ -402,11 +402,12 @@ fn event_dropped_object_rows(ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError
 
 // ---- FROM position ----
 
-/// A FROM-position function item (`FROM generate_series(1, 3) AS g(n)`,
-/// `FROM ROWS FROM (f(…), g(…)) WITH ORDINALITY`) as a relation.
+/// A FROM-position function item as a relation. Two examples are
+/// `FROM generate_series(1, 3) AS g(n)` and
+/// `FROM ROWS FROM (f(…), g(…)) WITH ORDINALITY`.
 ///
-/// The arguments evaluate in the empty scope. A lateral item's outer references
-/// have already been substituted for constants by the caller, so nothing here
+/// The arguments evaluate in the empty scope. The caller has already
+/// substituted constants for a lateral item's outer references, so nothing here
 /// needs an outer row.
 pub(crate) fn from_item(
     functions: &[TableFuncCall],
@@ -429,8 +430,8 @@ pub(crate) fn from_item(
     qualify(&plans, rows, with_ordinality, alias, column_aliases)
 }
 
-/// The same item's schema, with no rows — the `Describe` path, which must agree
-/// with [`from_item`] on every column name and type.
+/// The same item's schema, with no rows. This is the `Describe` path, and it
+/// must agree with [`from_item`] on every column name and type.
 pub(crate) fn from_item_schema(
     functions: &[TableFuncCall],
     with_ordinality: bool,
@@ -441,9 +442,9 @@ pub(crate) fn from_item_schema(
     qualify(&plans, Vec::new(), with_ordinality, alias, column_aliases)
 }
 
-/// Plan every call in the item, rejecting a column-definition list the way
-/// `PostgreSQL` does: crabka has no composite types, so no function it knows
-/// returns `record` and the list is never allowed.
+/// Plan every call in the item, and reject a column-definition list the way
+/// `PostgreSQL` does. crabka has no composite types, so no function it knows
+/// returns `record`, and the list is never allowed.
 fn plan_all(functions: &[TableFuncCall]) -> Result<Vec<SrfPlan>, ExecError> {
     functions
         .iter()
@@ -460,8 +461,8 @@ fn plan_all(functions: &[TableFuncCall]) -> Result<Vec<SrfPlan>, ExecError> {
 }
 
 /// Combine several calls' rows side by side. `ROWS FROM` runs its functions in
-/// lockstep and pads the shorter ones with NULL until the longest is exhausted —
-/// the same rule the multi-argument `unnest(a, b)` form follows.
+/// lockstep and pads the shorter ones with NULL until the longest is exhausted.
+/// The multi-argument `unnest(a, b)` form follows the same rule.
 fn zip_in_lockstep(produced: Vec<Vec<Vec<Datum>>>, plans: &[SrfPlan]) -> Vec<Vec<Datum>> {
     if let [single] = produced.as_slice() {
         return single.clone();
@@ -481,7 +482,7 @@ fn zip_in_lockstep(produced: Vec<Vec<Vec<Datum>>>, plans: &[SrfPlan]) -> Vec<Vec
         .collect()
 }
 
-/// The name a function FROM item is qualified by: its alias, or the first
+/// The name that qualifies a function FROM item: its alias, or the first
 /// function's own name.
 fn qualifier_for(plans: &[SrfPlan], alias: Option<&str>) -> String {
     alias.map_or_else(
@@ -502,13 +503,13 @@ fn ordinality_column() -> ColumnBinding {
 
 /// Apply `WITH ORDINALITY`, then the FROM item's alias and column aliases.
 ///
-/// Absent an explicit alias the item is qualified by the first function's name
-/// (`generate_series.generate_series`). A bare `AS g` renames the column of an
-/// item whose *functions* produce exactly one column — a function in FROM
-/// returning one scalar takes its column name from the table alias in
-/// PostgreSQL, so `SELECT g FROM generate_series(1, 3) AS g` resolves — and the
-/// ordinality column keeps its own name either way. A column-alias list renames
-/// a prefix positionally; naming more columns than the item has is
+/// Without an explicit alias, the first function's name qualifies the item, as
+/// in `generate_series.generate_series`. A bare `AS g` renames the column of an
+/// item whose *functions* produce exactly one column. In PostgreSQL a function
+/// in FROM that returns one scalar takes its column name from the table alias,
+/// so `SELECT g FROM generate_series(1, 3) AS g` resolves. The ordinality column
+/// keeps its own name either way. A column-alias list renames a prefix
+/// positionally. A list that names more columns than the item has is
 /// `PostgreSQL`'s 42P10.
 fn qualify(
     plans: &[SrfPlan],
@@ -630,8 +631,8 @@ fn expr_contains_srf(expr: &Expr) -> bool {
     children(expr).into_iter().any(expr_contains_srf)
 }
 
-/// 0A000 for an SRF in an aggregate query's select list — PostgreSQL evaluates
-/// SRFs after aggregation, which crabka's aggregate path does not model.
+/// 0A000 for an SRF in an aggregate query's select list. PostgreSQL evaluates
+/// SRFs after aggregation, and crabka's aggregate path does not model that.
 pub(crate) fn reject_in_aggregate(exprs: &[Expr]) -> Result<(), ExecError> {
     if exprs_contain_srf(exprs) {
         return Err(ExecError::Unsupported(
@@ -641,9 +642,9 @@ pub(crate) fn reject_in_aggregate(exprs: &[Expr]) -> Result<(), ExecError> {
     Ok(())
 }
 
-/// An expression's immediate sub-expressions, for the SRF walks. A set-returning
-/// call is found by walking these, so a variant that hides a sub-expression here
-/// would hide an SRF from expansion — hence the exhaustive match.
+/// An expression's immediate sub-expressions, for the SRF walks. The walks find
+/// a set-returning call through these, so a variant that hides a sub-expression
+/// here would hide an SRF from expansion. That is why the match is exhaustive.
 fn children(expr: &Expr) -> Vec<&Expr> {
     match expr {
         Expr::FieldSelect { base, .. } | Expr::FieldSelectAll(base) => vec![base],
@@ -703,9 +704,9 @@ fn children(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// A select list rewritten for set expansion: each SRF call replaced by a
-/// synthetic column reference, plus the calls themselves and the scope those
-/// references resolve against.
+/// A select list rewritten for set expansion. Each SRF call becomes a synthetic
+/// column reference. This value also carries the calls themselves and the scope
+/// those references resolve against.
 struct ProjectSet {
     exprs: Vec<Expr>,
     calls: Vec<SrfCall>,
@@ -719,7 +720,7 @@ struct SrfCall {
 
 /// Rewrite `out_exprs` so every SRF call becomes a reference to a synthetic
 /// column, and extend `scope` with one binding per call. Both the type resolver
-/// ([`projection_type`]) and the row expander drive this one rewrite, so a
+/// [`projection_type`] and the row expander drive this one rewrite, so a
 /// projected SRF's `RowDescription` type is the type its rows carry.
 fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
     let mut calls: Vec<SrfCall> = Vec::new();
@@ -839,7 +840,7 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
     }
 }
 
-/// Statically infer a projected expression's type, resolving any SRF call it
+/// Statically infer a projected expression's type, and resolve any SRF call it
 /// contains to that call's single output column type. Expressions without an SRF
 /// take the ordinary path unchanged.
 pub(crate) fn projection_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecError> {
@@ -854,10 +855,10 @@ pub(crate) fn projection_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, 
 /// set-returning functions.
 ///
 /// Row expansion happens *below* DISTINCT, ORDER BY and LIMIT, exactly as
-/// PostgreSQL plans it: `SELECT generate_series(1, 3) ORDER BY 1 DESC LIMIT 2`
+/// PostgreSQL plans it. `SELECT generate_series(1, 3) ORDER BY 1 DESC LIMIT 2`
 /// sorts the three expanded rows and then takes two of them. An ORDER BY key
-/// that is not a select-list output is evaluated once per *source* row and
-/// replicated across that row's expansion, which is what PostgreSQL's resjunk
+/// that is not a select-list output evaluates once per *source* row, and
+/// replicates across that row's expansion. That is what PostgreSQL's resjunk
 /// target does.
 pub(crate) fn project_rows_ordered(
     s: &SelectStmt,
@@ -965,7 +966,7 @@ pub(crate) fn project_rows_ordered(
 }
 
 /// Expand one source row into the output rows its select-list SRFs produce.
-/// PostgreSQL 10+ runs the calls in lockstep: the row count is the longest
+/// PostgreSQL 10+ runs the calls in lockstep. The row count is the longest
 /// call's, and the shorter ones read as NULL past their end.
 fn expand_row(
     set: &ProjectSet,
@@ -1023,7 +1024,7 @@ fn unnest_columns(name: &str, given: &[ArgType]) -> Result<Vec<ColumnBinding>, E
 }
 
 /// `unnest(a, b, …)`: PostgreSQL expands the multi-argument form as
-/// `ROWS FROM (unnest(a), unnest(b), …)` — one column per argument, as many rows
+/// `ROWS FROM (unnest(a), unnest(b), …)`: one column per argument, as many rows
 /// as the longest array, shorter arrays padded with NULL. A NULL array behaves
 /// exactly as an empty one.
 fn unnest_rows(vals: &[Datum]) -> Vec<Vec<Datum>> {
@@ -1047,15 +1048,15 @@ fn unnest_rows(vals: &[Datum]) -> Vec<Vec<Datum>> {
 
 // ---- generate_series ----
 
-/// The value type `generate_series` resolves to — the type of its one output
-/// column, and (except for the temporal candidates, whose step is an `interval`)
-/// of its step.
+/// The value type `generate_series` resolves to. This is the type of its one
+/// output column, and also of its step. The temporal candidates are the
+/// exception, because their step is an `interval`.
 ///
 /// PostgreSQL's candidate set is `(int4, int4, int4)`, `(int8, …)`,
 /// `(numeric, …)`, `(timestamp, timestamp, interval)` and
 /// `(timestamptz, timestamptz, interval)`. `double precision` matches none of
-/// them (42883), and a call whose bounds are all `unknown` literals matches
-/// several equally well (42725).
+/// them, which is 42883. A call whose bounds are all `unknown` literals matches
+/// several equally well, which is 42725.
 fn series_types(name: &str, given: &[ArgType]) -> Result<ColumnType, ExecError> {
     require_arity(name, given, (2, 3))?;
     let bounds: Vec<ColumnType> = given[..2].iter().filter_map(|arg| arg.known()).collect();
@@ -1108,7 +1109,7 @@ fn series_types(name: &str, given: &[ArgType]) -> Result<ColumnType, ExecError> 
 
 /// `generate_series(start, stop [, step])`: PostgreSQL walks `current += step`
 /// from `start` while the bound holds, so a `1 month` step over a month-end date
-/// drifts exactly as its iterative implementation does. A zero step is 22023; a
+/// drifts exactly as its iterative implementation does. A zero step is 22023. A
 /// step whose sign points away from `stop` yields no rows.
 fn series_rows(
     plan: &SrfPlan,
@@ -1192,8 +1193,8 @@ fn series_advance(current: &Datum, step: &Datum, ctx: &EvalCtx) -> Result<Datum,
 // ---- generate_subscripts ----
 
 /// `generate_subscripts(array, dim [, reverse])`: crabka arrays are
-/// one-dimensional and 1-based, so any `dim` other than 1 — and any empty or
-/// NULL array — yields no rows, exactly as PostgreSQL does for a dimension the
+/// one-dimensional and 1-based. So any `dim` other than 1 yields no rows, and so
+/// does any empty or NULL array. PostgreSQL does the same for a dimension the
 /// array does not have.
 fn subscript_rows(name: &str, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError> {
     let Datum::Array(array) = &vals[0] else {
@@ -1230,7 +1231,7 @@ fn subscript_rows(name: &str, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecErr
 
 // ---- string_to_table / regexp_split_to_table ----
 
-/// `string_to_table(text, delimiter [, null_string])` — the row-wise twin of
+/// `string_to_table(text, delimiter [, null_string])`: the row-wise twin of
 /// `string_to_array`, and split by exactly the same rules: a NULL delimiter
 /// splits into single characters, an empty one yields the whole string as one
 /// row, an empty input yields no rows at all, and a piece equal to
@@ -1277,10 +1278,11 @@ fn string_to_table_rows(name: &str, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, E
 
 /// `regexp_split_to_table(text, pattern [, flags])`.
 ///
-/// Zero-length matches follow PostgreSQL's documented rule: one at the start of
-/// the string, at its end, or immediately after a previous match is ignored, so
-/// `regexp_split_to_table('abc', 'x*')` is `a, b, c` rather than a run of empty
-/// strings. Unlike `string_to_table`, an empty input yields ONE empty row.
+/// Zero-length matches follow PostgreSQL's documented rule. This function
+/// ignores one at the start of the string, at its end, or directly after a
+/// previous match. So `regexp_split_to_table('abc', 'x*')` is `a, b, c` rather
+/// than a run of empty strings. An empty input yields ONE empty row, unlike
+/// `string_to_table`.
 fn regexp_split_rows(name: &str, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError> {
     let input = text_arg(name, &vals[0])?;
     let pattern = text_arg(name, &vals[1])?;
@@ -1323,8 +1325,8 @@ fn regexp_split_rows(name: &str, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, Exec
         .collect())
 }
 
-/// The next UTF-8 character boundary after `at` (or one past the end, so the
-/// scan always terminates).
+/// The next UTF-8 character boundary after `at`, or one past the end, so the
+/// scan always terminates.
 fn next_boundary(input: &str, at: usize) -> usize {
     input[at..]
         .chars()
@@ -1337,8 +1339,8 @@ fn next_boundary(input: &str, at: usize) -> usize {
 /// PostgreSQL's default is "non-newline-sensitive": `.` matches a newline and
 /// `^`/`$` anchor only at the ends of the string. `n`/`m` make both
 /// newline-sensitive, `s` restores the default, `i`/`c` set case folding, `x`
-/// enables expanded syntax and `q` makes the pattern a literal. `g` is rejected
-/// the way PostgreSQL rejects it for this function.
+/// enables expanded syntax and `q` makes the pattern a literal. This function
+/// rejects `g` the way PostgreSQL rejects it for this function.
 fn compile_regex(pattern: &str, flags: &str) -> Result<regex::Regex, ExecError> {
     let mut case_insensitive = false;
     let mut newline_sensitive = false;
@@ -1419,7 +1421,7 @@ fn text_arg<'a>(name: &str, value: &'a Datum) -> Result<&'a str, ExecError> {
     }
 }
 
-/// PostgreSQL's 42883, spelling out the argument types it could not match.
+/// PostgreSQL's 42883, which spells out the argument types it could not match.
 fn undefined_function(name: &str, given: &[ArgType]) -> ExecError {
     let types: Vec<&str> = given
         .iter()
@@ -1433,10 +1435,11 @@ fn undefined_function(name: &str, given: &[ArgType]) -> ExecError {
 
 /// A running total of the bytes an expansion has materialized.
 ///
-/// An SRF can name far more rows than fit in memory (`generate_series(1, 1e9)`),
-/// and crabka materializes, so the same whole-result budget every other blocking
-/// operator honors caps the expansion instead of exhausting the process. The
-/// total is carried rather than recomputed so charging stays O(1) per row.
+/// An SRF can name far more rows than fit in memory, as
+/// `generate_series(1, 1e9)` does, and crabka materializes. So the same
+/// whole-result budget every other blocking operator honors caps the expansion,
+/// instead of exhausting the process. This type carries the total rather than
+/// recomputing it, so charging stays O(1) per row.
 #[derive(Debug, Default)]
 struct MemoryBudget {
     bytes: usize,
@@ -2067,8 +2070,8 @@ mod tests {
 
     /// An `ORDER BY` expression may call an SRF of its own. `PostgreSQL` adds it
     /// to the target list as a junk column, so it expands in lockstep with the
-    /// select list's calls and multiplies the output rows the same way; the junk
-    /// columns are then dropped.
+    /// select list's calls and multiplies the output rows the same way.
+    /// `PostgreSQL` then drops the junk columns.
     #[tokio::test]
     async fn an_order_by_srf_expands_the_output_and_then_disappears() {
         let engine = SqlEngine::new();

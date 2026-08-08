@@ -14,9 +14,11 @@ use crate::{
     result::{InstantSample, QueryResult, SampleValue},
 };
 
-/// Reconstruct a [`Labels`] set from the string label columns of one row of a
-/// planner-path output batch. Only `Utf8` columns are treated as labels; the
-/// `timestamp`/`value` columns are skipped.
+/// Reconstructs a [`Labels`] set from the string label columns of one row of a
+/// planner-path output batch.
+///
+/// This function treats only `Utf8` columns as labels and skips the
+/// `timestamp`/`value` columns.
 fn labels_from_batch(batch: &RecordBatch, row: usize) -> Labels {
     let mut labels = Labels::new();
     for (index, field) in batch.schema().fields().iter().enumerate() {
@@ -39,10 +41,11 @@ fn labels_from_batch(batch: &RecordBatch, row: usize) -> Labels {
     labels
 }
 
-/// Reconstruct a [`Labels`] set from the string label columns of one row of a
-/// rate-range projection output batch. The rate projection carries only label
-/// (`Utf8`) columns plus the float `value` result column, so every non-`value`
-/// `Utf8` column is a label.
+/// Reconstructs a [`Labels`] set from the string label columns of one row of a
+/// rate-range projection output batch.
+///
+/// The rate projection carries only label (`Utf8`) columns plus the float
+/// `value` result column, so every non-`value` `Utf8` column is a label.
 fn labels_from_rate_batch(batch: &RecordBatch, row: usize) -> Labels {
     let mut labels = Labels::new();
     for (index, field) in batch.schema().fields().iter().enumerate() {
@@ -60,10 +63,12 @@ fn labels_from_rate_batch(batch: &RecordBatch, row: usize) -> Labels {
     labels
 }
 
-/// Assemble instant-vector-selector output batches into a result. Output rows
-/// carry label columns plus `timestamp`/`value`/`sample_timestamp`; the selected
-/// sample's true timestamp is in `sample_timestamp`. Result labels are recovered
-/// from `labels_by_fp` keyed by the row's reconstructed fingerprint.
+/// Assembles instant-vector-selector output batches into a result.
+///
+/// Output rows carry label columns plus `timestamp`, `value`, and
+/// `sample_timestamp`. `sample_timestamp` holds the selected sample's true
+/// timestamp. This function recovers the result labels from `labels_by_fp`,
+/// keyed by the row's reconstructed fingerprint.
 pub(super) fn assemble_selector_batches(
     batches: &[RecordBatch],
     labels_by_fp: &BTreeMap<SeriesFingerprint, Labels>,
@@ -111,12 +116,14 @@ pub(super) fn assemble_selector_batches(
     Ok(QueryResult::InstantVector(samples))
 }
 
-/// Assemble rate-family projection output batches into a result. Output rows
-/// carry label columns plus a single `value` column; the eval timestamp is
-/// reattached and the metric name dropped, and NULL rows (the UDF's "no value"
-/// marker for a window with too few samples) are dropped - exactly as the
-/// interpreter omits no-value series. A non-null NaN row is a genuine NaN value
-/// and is KEPT and propagated.
+/// Assembles rate-family projection output batches into a result.
+///
+/// Output rows carry label columns plus one `value` column. This function
+/// reattaches the eval timestamp and drops the metric name. It also drops NULL
+/// rows, which are the UDF's "no value" marker for a window with too few
+/// samples. This is exactly how the interpreter omits no-value series. A
+/// non-null NaN row is a genuine NaN value, so the function KEEPS it and
+/// propagates it.
 pub(super) fn assemble_rate_batches(
     batches: &[RecordBatch],
     labels_by_fp: &BTreeMap<SeriesFingerprint, Labels>,
@@ -157,14 +164,17 @@ pub(super) fn assemble_rate_batches(
     Ok(QueryResult::InstantVector(samples))
 }
 
-/// Assemble `*_over_time` projection output batches into a result. Output rows
-/// carry label columns plus a single `value` column; the eval timestamp is
-/// reattached and NULL rows (the UDF's "no value" marker for an empty window)
-/// are dropped - exactly as the interpreter omits no-value series. A non-null NaN
-/// row is a genuine NaN value and is KEPT and propagated. `preserve_metric_name`
-/// keeps `__name__` only for `last_over_time`; every other family drops it,
-/// matching the interpreter's `eval_over_time_call`
-/// (`OverTimeFn::preserves_metric_name`).
+/// Assembles `*_over_time` projection output batches into a result.
+///
+/// Output rows carry label columns plus one `value` column. This function
+/// reattaches the eval timestamp and drops NULL rows, which are the UDF's "no
+/// value" marker for an empty window. This is exactly how the interpreter omits
+/// no-value series. A non-null NaN row is a genuine NaN value, so the function
+/// KEEPS it and propagates it.
+///
+/// `preserve_metric_name` keeps `__name__` only for `last_over_time`. Every
+/// other family drops it, which matches the interpreter's `eval_over_time_call`
+/// and `OverTimeFn::preserves_metric_name`.
 pub(super) fn assemble_over_time_batches(
     batches: &[RecordBatch],
     labels_by_fp: &BTreeMap<SeriesFingerprint, Labels>,
@@ -214,18 +224,20 @@ pub(super) fn assemble_over_time_batches(
     Ok(QueryResult::InstantVector(samples))
 }
 
-/// Assemble simple-aggregation output batches into a result. Output rows carry
-/// exactly the grouping label columns plus `value`; the labelset is read
-/// directly from the batch (no fingerprint lookup) and the eval timestamp is
-/// reattached. An empty grouping (`by ()` / no modifier) yields a single row
-/// with an empty labelset.
+/// Assembles simple-aggregation output batches into a result.
 ///
-/// A NULL aggregate result means the group had no value-bearing input (every
-/// member was a no-value series, all dropped by the pre-aggregate NULL filter, or
-/// the NaN-ignoring `min`/`max` UDAF saw only nulls): drop it, matching the
-/// interpreter, which forms no group when no sample reaches it. A non-null NaN
-/// result is a genuine aggregated NaN (e.g. `sum` over a group holding a genuine
-/// NaN, or an all-NaN `min`/`max` group) and is KEPT.
+/// Output rows carry exactly the grouping label columns plus `value`. This
+/// function reads the label set directly from the batch, with no fingerprint
+/// lookup, and reattaches the eval timestamp. An empty grouping, which is
+/// `by ()` or no modifier, returns one row with an empty label set.
+///
+/// A NULL aggregate result means the group had no value-bearing input. This
+/// happens when every member was a no-value series that the pre-aggregate NULL
+/// filter dropped, or when the NaN-ignoring `min`/`max` UDAF saw only nulls. The
+/// function drops such a result, which matches the interpreter: the interpreter
+/// forms no group when no sample reaches it. A non-null NaN result is a genuine
+/// aggregated NaN, for example a `sum` over a group that holds a genuine NaN or
+/// an all-NaN `min`/`max` group, and the function KEEPS it.
 pub(super) fn assemble_aggregate_batches(
     batches: &[RecordBatch],
     time_ms: i64,
@@ -258,13 +270,14 @@ pub(super) fn assemble_aggregate_batches(
     Ok(QueryResult::InstantVector(samples))
 }
 
-/// Assemble per-row scalar-math projection output batches into a result. Output
-/// rows carry the metadata-free label columns plus a single `value` column; the
-/// metric name is already dropped at the leaf, the labelset is read directly
-/// from the batch, and the eval timestamp is reattached. **Every** row is kept:
-/// the scalar-math functions never drop a float sample, so `f(NaN)` / `sqrt(-1)`
-/// surface as `NaN` (matching the interpreter's `eval_unary_float_call` /
-/// `eval_clamp_call` / `eval_round_call`).
+/// Assembles per-row scalar-math projection output batches into a result.
+///
+/// Output rows carry the metadata-free label columns plus one `value` column.
+/// The leaf already dropped the metric name, this function reads the label set
+/// directly from the batch, and the eval timestamp is reattached. The function
+/// keeps every row: the scalar-math functions never drop a float sample, so
+/// `f(NaN)` and `sqrt(-1)` surface as `NaN`. This matches the interpreter's
+/// `eval_unary_float_call`, `eval_clamp_call`, and `eval_round_call`.
 pub(super) fn assemble_scalar_math_batches(
     batches: &[RecordBatch],
     _time_ms: i64,

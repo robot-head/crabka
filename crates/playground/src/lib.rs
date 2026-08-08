@@ -2,27 +2,28 @@
 //! engine in the browser.
 //!
 //! The roadmap for the docs-site playground is to "simulate consensus in your
-//! browser": compile the deterministic core to WASM and let the page inject
-//! partitions, drop / reorder / duplicate messages, and watch a cluster elect a
-//! leader, lose it, and recover — live, with no backend. This crate is the
-//! seam. It wraps [`crabka_kraft_core::sim::Sim`] — the very same pure,
-//! sans-IO multi-node simulator the integration tests and `crabka-docgen`
-//! drive — and exposes it to JavaScript as a [`Playground`] handle.
+//! browser". The deterministic core compiles to WASM. The page can then inject
+//! partitions, drop, reorder, and duplicate messages, and watch a cluster elect
+//! a leader, lose it, and recover, live and with no backend. This crate is the
+//! seam. It wraps [`crabka_kraft_core::sim::Sim`] and exposes it to JavaScript
+//! as a [`Playground`] handle. `Sim` is the same pure, sans-IO multi-node
+//! simulator that the integration tests and `crabka-docgen` drive.
 //!
-//! Everything here is a thin shim: the consensus, the scheduler, the in-memory
-//! message bus, and the fault model all live in the core. JavaScript owns only
-//! the clock (it calls [`Playground::step`] when it wants time to advance) and
-//! the rendering; it reads cluster state back as JSON after each action.
+//! Everything here is a thin shim. The consensus, the scheduler, the in-memory
+//! message bus, and the fault model are all in the core. JavaScript owns the
+//! clock and the rendering only. It calls [`Playground::step`] when it wants
+//! time to advance, and it reads the cluster state back as JSON after each
+//! action.
 
 use crabka_kraft_core::{sim::Sim, types::NodeId};
 use wasm_bindgen::prelude::*;
 
 /// An interactive, in-browser `KRaft` consensus simulation.
 ///
-/// Construct one with a voter count, then drive it from JavaScript: inject
-/// faults, step the message bus / timers, and read [`Playground::state`] back as
-/// JSON to render. The simulation is fully deterministic — the same sequence of
-/// calls always produces the same trace.
+/// Construct one with a voter count, then drive it from JavaScript. Inject
+/// faults, step the message bus and the timers, and read [`Playground::state`]
+/// back as JSON to render. The simulation is fully deterministic: the same
+/// sequence of calls always produces the same trace.
 #[wasm_bindgen]
 pub struct Playground {
     sim: Sim,
@@ -30,9 +31,10 @@ pub struct Playground {
 
 #[wasm_bindgen]
 impl Playground {
-    /// Create a fresh cluster with `voters` nodes (clamped to 1..=7). The
-    /// cluster starts with no leader and every node's election timer armed, so
-    /// the very first [`step`](Self::step)s show the bootstrap election happen.
+    /// Create a fresh cluster with `voters` nodes, with the count clamped to
+    /// 1..=7. The cluster starts with no leader and with every node's election
+    /// timer armed, so the first [`step`](Self::step) calls show the bootstrap
+    /// election.
     #[wasm_bindgen(constructor)]
     #[must_use]
     pub fn new(voters: u32) -> Self {
@@ -49,21 +51,24 @@ impl Playground {
         self.sim = Sim::new(&voter_ids(voters));
     }
 
-    /// Advance one scheduler microstep: deliver the next in-flight message, or —
-    /// if the bus is empty — fire the next-due timer. Returns `true` if anything
-    /// happened (drives the JS animation loop, which stops when this is `false`).
+    /// Advance one scheduler microstep. The method delivers the next in-flight
+    /// message. If the bus is empty, it fires the next-due timer. It returns
+    /// `true` if something happened. This drives the JS animation loop, which
+    /// stops when the result is `false`.
     pub fn step(&mut self) -> bool {
         self.sim.step_once()
     }
 
-    /// Run the scheduler until the cluster stops changing (a leader is settled
-    /// and no messages remain), bounded so a pathological case can't hang.
+    /// Run the scheduler until the cluster stops changing, that is until a
+    /// leader is settled and no messages remain. The run is bounded, so a
+    /// pathological case cannot hang.
     pub fn settle(&mut self) {
         self.sim.run_until_stable(10_000);
     }
 
-    /// Network-partition `node` away from the rest of the cluster: its in-flight
-    /// messages are dropped and it can neither send nor receive until healed.
+    /// Network-partition `node` away from the rest of the cluster. The method
+    /// drops its in-flight messages, and the node can neither send nor receive
+    /// until it is healed.
     pub fn partition(&mut self, node: u32) {
         self.sim.partition(NodeId(u64::from(node)));
     }
@@ -73,8 +78,9 @@ impl Playground {
         self.sim.heal(NodeId(u64::from(node)));
     }
 
-    /// Append `n` records on whichever node is currently leader (the "produce"
-    /// button). Returns `false` if there is no leader to append to.
+    /// Append `n` records on the node that is currently leader. This is the
+    /// "produce" button. The method returns `false` if there is no leader to
+    /// append to.
     pub fn append(&mut self, n: u32) -> bool {
         self.sim.append(n as usize)
     }
@@ -85,8 +91,9 @@ impl Playground {
         self.sim.drop_next()
     }
 
-    /// Deliver every queued message back-to-front (non-FIFO) to exercise
-    /// reordered delivery. Returns how many were delivered.
+    /// Deliver every queued message back-to-front, that is not in FIFO order,
+    /// to exercise reordered delivery. The method returns how many messages it
+    /// delivered.
     pub fn reorder(&mut self) -> usize {
         self.sim.reorder()
     }
@@ -97,9 +104,10 @@ impl Playground {
         self.sim.duplicate_next()
     }
 
-    /// A JSON snapshot of the whole cluster — clock, every node's role / epoch /
-    /// log, the in-flight bus, the current leaders, and the elapsed step count —
-    /// for the UI to render after each action. Shape:
+    /// A JSON snapshot of the whole cluster for the UI to render after each
+    /// action. The snapshot holds the clock, each node's role, epoch, and log,
+    /// the in-flight bus, the current leaders, and the elapsed step count.
+    /// Shape:
     ///
     /// ```json
     /// { "clock_ms": 1234,
@@ -115,9 +123,10 @@ impl Playground {
     }
 
     /// The event timeline recorded from `index` onward, as a JSON array of
-    /// steps. The UI tracks the last index it has seen (from `state`'s
-    /// `step_count`) and asks only for new steps, so the timeline streams
-    /// incrementally instead of re-sending the whole history each frame.
+    /// steps. The UI tracks the last index that it has seen, from the
+    /// `step_count` field of `state`, and asks for the new steps only. The
+    /// timeline thus streams incrementally, and the crate does not re-send the
+    /// whole history each frame.
     #[must_use]
     pub fn timeline_since(&self, index: usize) -> String {
         let steps = self.sim.steps();
@@ -126,8 +135,8 @@ impl Playground {
     }
 }
 
-/// Build the voter id list `[1, 2, ..., n]`, clamping `n` to a sane 1..=7 so a
-/// stray UI value can never allocate an absurd cluster.
+/// Build the voter id list `[1, 2, ..., n]`. The function clamps `n` to 1..=7,
+/// so a stray UI value can never allocate an absurd cluster.
 fn voter_ids(voters: u32) -> Vec<NodeId> {
     let n = u64::from(voters.clamp(1, 7));
     (1..=n).map(NodeId).collect()
@@ -153,8 +162,8 @@ mod tests {
     fn in_flight_len(p: &Playground) -> usize {
         state(p)["in_flight"].as_array().unwrap().len()
     }
-    /// Drive the bus/timers until `pred` holds (or a step budget is exhausted),
-    /// the way the JS animation loop does.
+    /// Drive the bus and the timers until `pred` holds, or until the step
+    /// budget is exhausted, the way the JS animation loop does.
     fn step_until(p: &mut Playground, pred: impl Fn(&Playground) -> bool) {
         for _ in 0..20_000 {
             if pred(p) {

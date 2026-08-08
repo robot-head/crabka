@@ -909,30 +909,35 @@ mod recovery_watermark_model {
 /// sequence and publishing a closed timestamp, plus a cross-range snapshot read
 /// that reconciles against those watermarks.
 ///
-/// This is the safety proof for the single-shard commit bypass. The instant a
-/// commit is stamped from a per-range local sequence rather than the global
-/// timestamp source, a cross-range read at `read_ts` could miss it unless the
-/// read waits for the range's published closed timestamp to reach `read_ts`.
+/// This is the safety proof for the single-shard commit bypass. As soon as a
+/// commit takes its stamp from a per-range local sequence rather than from the
+/// global timestamp source, a cross-range read at `read_ts` could miss it,
+/// unless the read waits for the range's published closed timestamp to reach
+/// `read_ts`.
+///
 /// The model encodes the two primitive guarantees the real `LocalSequence`
-/// enforces — a commit is allocated from `next` (monotone), and a publish
-/// reserves `next` strictly above the target before raising the watermark, so
-/// the sequence invariant `next > closed` holds for all time — and checks that
-/// reconciling reads never miss a qualifying commit. Flipping the reconcile
-/// knob off reintroduces the linearizability bug and the checker witnesses it.
+/// enforces. First, a commit takes its timestamp from `next`, which is monotone.
+/// Second, a publish reserves `next` strictly above the target before it raises
+/// the watermark, so the sequence invariant `next > closed` holds for all time.
+/// The model then checks that a read that reconciles never misses a qualifying
+/// commit. With the reconcile control off, the linearizability bug returns and
+/// the checker witnesses it.
 mod single_shard_closed_timestamp_model {
     use stateright::{Checker, Model, Property};
 
-    /// Highest timestamp a range's local sequence will hand out in the model.
-    /// Two ranges each committing/publishing up to this bound is enough to reach
-    /// the boundary interleaving (read, then a later commit at or below
-    /// `read_ts`) that the closed-timestamp discipline must forbid.
+    /// Highest timestamp a range's local sequence hands out in the model.
+    ///
+    /// Two ranges that each commit and publish up to this bound are enough to
+    /// reach the boundary interleaving the closed-timestamp discipline must
+    /// forbid: a read, then a later commit at or below `read_ts`.
     const MAX_TS: u8 = 3;
-    /// Exploration-depth guard keeping the state space finite and small.
+    /// Exploration-depth guard that keeps the state space finite and small.
     const MAX_STEPS: u8 = 10;
 
-    /// One range's local sequence: `next` is the next allocatable timestamp,
-    /// `closed` the published closed-timestamp watermark, and `commits` the
-    /// commit timestamps of single-shard transactions already durable on it.
+    /// One range's local sequence. `next` is the next allocatable timestamp,
+    /// `closed` is the published closed-timestamp watermark, and `commits` holds
+    /// the commit timestamps of the single-shard transactions already durable on
+    /// the range.
     #[derive(Clone, Debug, Hash, PartialEq, Eq)]
     struct Sequence {
         next: u8,
@@ -950,8 +955,9 @@ mod single_shard_closed_timestamp_model {
             }
         }
 
-        /// Allocate one commit timestamp (mirrors `allocate_transaction_id` /
-        /// `allocate_commit_after` collapsed to a single monotone tick).
+        /// Allocate one commit timestamp. This mirrors
+        /// `allocate_transaction_id` and `allocate_commit_after`, collapsed to
+        /// one monotone tick.
         fn commit(&mut self) -> Option<u8> {
             if self.next > MAX_TS {
                 return None;
@@ -962,9 +968,9 @@ mod single_shard_closed_timestamp_model {
             Some(commit_ts)
         }
 
-        /// Raise the closed timestamp toward `target`, reserving `next` strictly
-        /// above it first (mirrors `publish_closed_timestamp`). Preserves the
-        /// `next > closed` invariant the whole bypass rests on.
+        /// Raise the closed timestamp toward `target`, and reserve `next`
+        /// strictly above it first. This mirrors `publish_closed_timestamp`. It
+        /// preserves the `next > closed` invariant the whole bypass rests on.
         fn publish(&mut self, target: u8) -> Option<()> {
             self.next = self.next.max(target.checked_add(1)?);
             self.closed = self.closed.max(target);
@@ -976,20 +982,23 @@ mod single_shard_closed_timestamp_model {
     struct State {
         a: Sequence,
         b: Sequence,
-        /// The cross-range read's snapshot timestamp; `0` before it is chosen.
+        /// The cross-range read's snapshot timestamp. It is `0` before the
+        /// model chooses one.
         read_ts: u8,
-        /// Whether the read has already observed range A / range B.
+        /// Whether the read has already observed range A and range B.
         read_a: bool,
         read_b: bool,
         /// A commit with `commit_ts <= read_ts` became durable on a range the
-        /// read had already observed: the read missed a qualifying commit.
+        /// read had already observed. The read therefore missed a qualifying
+        /// commit.
         missed: bool,
         steps: u8,
     }
 
     struct ClosedTimestampModel {
         /// Whether a cross-range read waits for a range's closed timestamp to
-        /// reach `read_ts` before observing it. Off reintroduces the bug.
+        /// reach `read_ts` before it observes the range. With this off, the bug
+        /// returns.
         reconcile_before_read: bool,
     }
 
@@ -1124,9 +1133,9 @@ mod single_shard_closed_timestamp_model {
         }
     }
 
-    /// Fold a freshly durable commit into the missed-commit witness: if the read
-    /// has already observed this range and the commit qualifies for the snapshot
-    /// (`commit_ts <= read_ts`), the read missed it.
+    /// Fold a freshly durable commit into the missed-commit witness. If the read
+    /// has already observed this range, and the commit qualifies for the
+    /// snapshot with `commit_ts <= read_ts`, then the read missed the commit.
     fn record_commit(state: &mut State, commit_ts: u8, range_already_read: bool) {
         if range_already_read && state.read_ts != 0 && commit_ts <= state.read_ts {
             state.missed = true;

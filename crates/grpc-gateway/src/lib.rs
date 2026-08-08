@@ -1,8 +1,8 @@
-//! `crabka-grpc-gateway` — gRPC / Connect-RPC + HTTP gateway into Crabka topics.
+//! `crabka-grpc-gateway` is a gRPC / Connect-RPC + HTTP gateway into Crabka topics.
 //!
-//! Built on the native client crates. The broker's Kafka wire stays byte-exact;
-//! the gateway translates Connect-RPC calls into producer, consumer, schema,
-//! deduplication, and authorization operations.
+//! The gateway builds on the native client crates. The broker's Kafka wire
+//! stays byte-exact. The gateway translates Connect-RPC calls into producer,
+//! consumer, schema, deduplication, and authorization operations.
 //!
 //! ## Serving the gateway
 //!
@@ -46,9 +46,8 @@ pub mod webhook_config;
 
 /// Build the Connect-RPC [`axum::Router`] for the Gateway service.
 ///
-/// The returned router has the shared `AppState` wired in as an
-/// `Extension` layer so each handler can extract it with
-/// `axum::Extension<Arc<AppState>>`.
+/// The returned router carries the shared `AppState` in an `Extension`
+/// layer. Each handler extracts it with `axum::Extension<Arc<AppState>>`.
 pub fn router(state: std::sync::Arc<state::AppState>) -> axum::Router {
     pb::gateway_connect::GatewayServiceBuilder::<()>::new()
         .send(handlers::send)
@@ -66,8 +65,9 @@ pub fn router(state: std::sync::Arc<state::AppState>) -> axum::Router {
         .layer(axum::Extension(state))
 }
 
-/// Generated protobuf + Connect server stubs. The actual content lives
-/// in `OUT_DIR/crabka.gateway.v1.rs` and is produced by `build.rs`.
+/// Generated protobuf and Connect server stubs.
+///
+/// `build.rs` produces the content in `OUT_DIR/crabka.gateway.v1.rs`.
 ///
 /// Pedantic lints are silenced here because the include is verbatim
 /// codegen output; we cannot retrofit `#[must_use]` annotations or

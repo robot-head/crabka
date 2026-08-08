@@ -1,13 +1,18 @@
-//! `KTableSuppressProcessor` — KIP suppression. Buffers `Change` updates and emits
-//! each buffered record once stream-time passes `buffer_time(record) + wait`.
-//! Unifies `untilWindowCloses` (`buffer_time` = window.end, wait = grace) and
-//! `untilTimeLimitElapsed` (`buffer_time` = record ts, wait = the duration) behind a
-//! `fn(&K, i64) -> i64` buffer-time pointer.
+//! `KTableSuppressProcessor`, the KIP suppression. It buffers the `Change`
+//! updates and emits each buffered record once stream-time passes
+//! `buffer_time(record) + wait`.
 //!
-//! The pending-change buffer is NOT owned by the processor: it lives in a
-//! registered, changelog-backed [`SuppressBytesStore`](crate::store::suppress_store)
-//! reached per-record via [`ProcessorContext::get_suppress_store`]. The processor is
-//! pure control flow over that store.
+//! One `fn(&K, i64) -> i64` buffer-time pointer unifies two forms. For
+//! `untilWindowCloses`, `buffer_time` is `window.end` and `wait` is the grace.
+//! For `untilTimeLimitElapsed`, `buffer_time` is the record timestamp and `wait`
+//! is the duration.
+//!
+//! The processor does NOT own the pending-change buffer. That buffer lives in a
+//! registered, changelog-backed
+//! [`SuppressBytesStore`](crate::store::suppress_store), and the processor
+//! reaches it once per record through
+//! [`ProcessorContext::get_suppress_store`]. The processor is pure control flow
+//! over that store.
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
@@ -57,7 +62,8 @@ impl<K, V> KTableSuppressProcessor<K, V> {
     }
 }
 
-/// The buffer is "full" if it exceeds either configured cap (records or bytes).
+/// The buffer is full when it exceeds either configured cap, that is the record
+/// cap or the byte cap.
 fn over_caps(
     len: usize,
     byte_size: ByteSize,
@@ -192,8 +198,9 @@ mod tests {
         }
     }
 
-    /// Seed a `Windowed<String> -> i64` suppress store named "sup" (size 10 matches
-    /// every test window → the serde round-trips `Window{start,end}`).
+    /// Seed a `Windowed<String> -> i64` suppress store named "sup". A size of 10
+    /// matches every test window, so the serde round-trips
+    /// `Window{start,end}`.
     fn seed_windowed_store(stores: &mut StoreRegistry) {
         stores.insert(Box::new(
             SuppressBytesStore::<Windowed<String>, i64>::in_memory(
@@ -205,7 +212,8 @@ mod tests {
         ));
     }
 
-    /// Construct a window-close processor (`buffer_time` = window.end, strict).
+    /// Build a window-close processor, where `buffer_time` is `window.end` and
+    /// the buffer is strict.
     fn window_close_proc(
         grace: Time,
         max_records: Option<usize>,

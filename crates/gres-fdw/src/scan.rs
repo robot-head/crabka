@@ -1,7 +1,9 @@
-//! Row assembly: turn a `Vec<RawRecord>` into `Vec<Vec<Datum>>` aligned to the
-//! foreign table's column order — the five envelope columns (`_partition`,
-//! `_offset`, `_timestamp`, `_key`, `_headers`) first, then the decoded value
-//! columns (`table.columns[5..]`), exactly as
+//! Row assembly: turns a `Vec<RawRecord>` into `Vec<Vec<Datum>>` in the
+//! foreign table's column order.
+//!
+//! The five envelope columns `_partition`, `_offset`, `_timestamp`, `_key`,
+//! and `_headers` come first. The decoded value columns
+//! (`table.columns[5..]`) follow, exactly as
 //! [`crabka_pgcatalog::create_foreign_table`] lays them out.
 
 use std::{fmt::Write as _, sync::Arc};
@@ -18,25 +20,26 @@ use crate::{
     types::project,
 };
 
-/// Number of envelope columns prepended to every foreign table by
-/// [`crabka_pgcatalog::create_foreign_table`]; value columns follow at this index.
+/// Number of envelope columns that [`crabka_pgcatalog::create_foreign_table`]
+/// prepends to every foreign table. The value columns start at this index.
 const ENVELOPE_COLS: usize = 5;
 
-/// Assemble decoded rows for a foreign-table scan.
+/// Assembles decoded rows for a foreign-table scan.
 ///
-/// For each [`RawRecord`], emit a row of `table.columns.len()` datums:
+/// For each [`RawRecord`], the function emits a row of `table.columns.len()`
+/// datums:
 /// 1. `_partition` → [`Datum::Int4`]
 /// 2. `_offset`    → [`Datum::Int8`]
 /// 3. `_timestamp` → [`Datum::Timestamptz`] (from `timestamp_ms`)
 /// 4. `_key`       → [`Datum::Bytea`] or [`Datum::Null`]
 /// 5. `_headers`   → [`Datum::Text`] holding the headers as a JSON string
-/// 6. the value columns, decoded via [`decode_value_with_policy`] and projected via
-///    [`project`] onto `table.columns[5..]`. A `None`/empty value yields all
-///    value columns as [`Datum::Null`].
+/// 6. the value columns. [`decode_value_with_policy`] decodes them, and
+///    [`project`] projects them onto `table.columns[5..]`. A `None` or empty
+///    value gives all value columns as [`Datum::Null`].
 ///
 /// # Errors
-/// Propagates [`KafkaFdwError`] from value decoding (wire-format, schema
-/// registry, or Avro/JSON parse failures).
+/// Propagates [`KafkaFdwError`] from the value decode: wire-format, schema
+/// registry, or Avro/JSON parse failures.
 #[cfg(test)]
 pub async fn assemble_rows(
     table: &Table,
@@ -54,10 +57,10 @@ pub async fn assemble_rows(
     .await
 }
 
-/// Assemble rows under explicit cold-cache schema resolution policy.
+/// Assembles rows under an explicit cold-cache schema resolution policy.
 ///
 /// # Errors
-/// Propagates value decoding and schema resolution failures.
+/// Propagates value decode and schema resolution failures.
 pub async fn assemble_rows_with_policy(
     table: &Table,
     raw_records: &[RawRecord],
@@ -109,14 +112,17 @@ pub async fn assemble_rows_with_policy(
     Ok(rows)
 }
 
-/// Serialise record headers as a JSON object string for the `_headers` text
-/// column. Header values are bytes; absent values become JSON `null`, present
-/// values become a `\x`-prefixed lowercase-hex string (mirroring `PostgreSQL`'s
-/// `bytea` text output) so the column round-trips losslessly through text.
+/// Serialises record headers as a JSON object string for the `_headers` text
+/// column.
 ///
-/// Kafka permits duplicate header keys, so this deliberately writes the JSON
-/// object by hand instead of collecting into a map. Empty headers keep the
-/// existing FDW representation: `{}`.
+/// Header values are bytes. An absent value becomes JSON `null`. A present
+/// value becomes a `\x`-prefixed lowercase-hex string, which mirrors
+/// `PostgreSQL`'s `bytea` text output, so the column round-trips losslessly
+/// through text.
+///
+/// Kafka permits duplicate header keys, so this function writes the JSON
+/// object by hand instead of a collect into a map. Empty headers keep the FDW
+/// representation `{}`.
 fn headers_to_json(headers: &[(String, Option<Vec<u8>>)]) -> String {
     if headers.is_empty() {
         return "{}".to_string();
@@ -163,8 +169,8 @@ mod tests {
     use super::*;
     use crate::decode::Wire;
 
-    /// Build a foreign `Table` with the five envelope columns plus a single
-    /// `bytea` value column (the raw-format projection target).
+    /// Builds a foreign `Table` with the five envelope columns and a single
+    /// `bytea` value column, the raw-format projection target.
     fn raw_value_table() -> Table {
         Table {
             id: 1,
@@ -198,8 +204,8 @@ mod tests {
         }
     }
 
-    /// A `SchemaCache` is required by the signature but never touched on the
-    /// raw path (no registry access).
+    /// The signature needs a `SchemaCache`, but the raw path never uses it
+    /// and makes no registry access.
     fn dummy_cache() -> Arc<SchemaCache> {
         SchemaCache::new(
             crabka_schema_serde::RegistryClient::new("http://unused"),

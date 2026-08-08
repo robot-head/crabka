@@ -1,6 +1,7 @@
-//! `__consumer_offsets` topic lifecycle: ensure the topic exists at
-//! startup, then synchronously replay every record into the in-memory
-//! `GroupCoordinator`.
+//! `__consumer_offsets` topic lifecycle.
+//!
+//! The module makes sure that the topic exists at startup. It then replays
+//! every record synchronously into the in-memory `GroupCoordinator`.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -28,42 +29,50 @@ use crate::{
     partition_registry::PartitionRegistry,
 };
 
-/// How much of `__consumer_offsets` one replay read pulls back before the
-/// walk advances to the next offset.
+/// How much of `__consumer_offsets` one replay read returns before the walk
+/// advances to the next offset.
 const REPLAY_READ_MAX: ByteSize = mebibytes(1);
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
 pub const OFFSETS_PARTITION: i32 = 0;
-/// Number of partitions in `__consumer_offsets`. Bootstrap creates a
-/// 1-partition topic (`OFFSETS_PARTITION = 0`), so all group-ids map to
-/// partition 0. Shared so the transaction handlers (`AddOffsetsToTxn`,
-/// `EndTxn`) agree on the partition a group's offset commits land in.
+/// Number of partitions in `__consumer_offsets`.
+///
+/// Bootstrap creates a 1-partition topic with `OFFSETS_PARTITION = 0`, so all
+/// group-ids map to partition 0. The constant is shared, so the transaction
+/// handlers `AddOffsetsToTxn` and `EndTxn` agree on the partition that a
+/// group's offset commits land in.
 ///
 /// CAVEAT for a future multi-partition `__consumer_offsets`: Kafka partitions
-/// this topic by group with `abs(groupId.hashCode()) % N` (Java
-/// `String.hashCode`), NOT murmur2. `AddOffsetsToTxn` currently computes the
-/// group's partition with `partition_for_tid` (murmur2) — correct only while
-/// `N == 1`. Growing this past 1 requires a dedicated `partition_for_group`
-/// using the Java-hashCode rule, applied consistently here and in the offset
-/// storage path (which today hardcodes `OFFSETS_PARTITION = 0`).
+/// this topic by group with `abs(groupId.hashCode()) % N`, the Java
+/// `String.hashCode`, and NOT with murmur2. `AddOffsetsToTxn` computes the
+/// group's partition today with `partition_for_tid`, which uses murmur2. That
+/// is correct only while `N == 1`. A value above 1 needs a dedicated
+/// `partition_for_group` that uses the Java-hashCode rule. The code must apply
+/// it here and in the offset storage path, which hardcodes
+/// `OFFSETS_PARTITION = 0` today.
 pub const OFFSETS_NUM_PARTITIONS: i32 = 1;
 
-/// Internal topic carrying tamper-evident OCSF audit records (`FedRAMP` MLA).
+/// Internal topic that carries tamper-evident OCSF audit records for the
+/// `FedRAMP` MLA.
 pub const AUDIT_TOPIC: &str = "__crabka_audit";
 
-/// Create `__crabka_audit` with one partition per registered broker (RF=1).
+/// Create `__crabka_audit` with one partition per registered broker at RF=1.
 ///
-/// Broker-affinity: partition `i` is led by the i-th broker (ascending node
-/// id), so each broker leads exactly one audit partition and writes to it
-/// locally. Idempotent: a `TopicExists` error from the controller is treated
-/// as success (another broker or a restart already created the topic).
+/// Broker-affinity: the i-th broker in ascending node-id order leads partition
+/// `i`. Each broker therefore leads exactly one audit partition and writes to
+/// it locally.
 ///
-/// Only the quorum leader submits the metadata records, mirroring the
-/// `__consumer_offsets` bootstrap path to avoid TOCTOU duplicate-id races.
-/// Followers skip submission entirely; the leader's records replicate into
-/// their image through the normal raft log.
+/// The function is idempotent. It treats a `TopicExists` error from the
+/// controller as a success, because another broker or a restart already
+/// created the topic.
 ///
-/// Returns `Ok(())` immediately when `config.audit_enabled` is `false`.
+/// Only the quorum leader submits the metadata records. This matches the
+/// `__consumer_offsets` bootstrap path and prevents TOCTOU duplicate-id races.
+/// Followers submit nothing. The leader's records replicate into their image
+/// through the normal raft log.
+///
+/// The function returns `Ok(())` at once when `config.audit_enabled` is
+/// `false`.
 pub async fn bootstrap_audit_topic(
     config: &BrokerConfig,
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
@@ -133,26 +142,30 @@ pub async fn bootstrap_audit_topic(
     }
 }
 
-/// Bootstrap-time accumulator. Committed offsets are protocol-agnostic, so we
-/// collect them per group and attach them once the group's kind is known;
-/// classic `GroupMetadata` builds a `ClassicState` in place. Next-gen records
-/// feed the coordinator's own seed accumulator (`replay_*`), drained by
-/// `finalize_bootstrap`.
+/// Bootstrap-time accumulator.
+///
+/// Committed offsets are protocol-agnostic. Replay collects them per group and
+/// attaches them once it knows the group's kind. A classic `GroupMetadata`
+/// builds a `ClassicState` in place. Next-gen records feed the coordinator's
+/// own seed accumulator through the `replay_*` methods, and
+/// `finalize_bootstrap` drains it.
 #[derive(Default)]
 struct Replayed {
     classic: HashMap<String, ClassicState>,
     committed: HashMap<String, HashMap<(String, i32), OffsetEntry>>,
 }
 
-/// Ensure the `__consumer_offsets-0` partition exists on disk, open its
-/// `Log`, spawn a writer task, and replay every record into the supplied
-/// `GroupCoordinator`. Registers the topic via the metadata quorum
-/// (`controller.submit_change(...)`) as a 1-partition internal topic;
-/// `TopicExists` is treated as success so a restart that finds the topic
-/// already in the log is a no-op.
+/// Make sure the `__consumer_offsets-0` partition exists on disk, open its
+/// `Log`, spawn a writer task, and replay every record into the given
+/// `GroupCoordinator`.
 ///
-/// Called exactly once from `Broker::start`, BEFORE the TCP listener binds
-/// and AFTER the controller has elected a leader (see `Broker::start`).
+/// The function registers the topic through the metadata quorum with
+/// `controller.submit_change(...)` as a 1-partition internal topic. It treats
+/// `TopicExists` as a success, so a restart that finds the topic already in
+/// the log does nothing.
+///
+/// `Broker::start` calls this exactly once, BEFORE the TCP listener binds and
+/// AFTER the controller has elected a leader. See `Broker::start`.
 pub async fn bootstrap(
     config: &BrokerConfig,
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
@@ -277,9 +290,11 @@ pub async fn bootstrap(
     Ok(())
 }
 
-/// Walk every `RecordBatch` in the log from offset 0 to `log_end_offset()`
-/// and apply each record's key/value into the accumulator (classic + offsets)
-/// or, for next-gen records, the coordinator's seed accumulator.
+/// Walk every `RecordBatch` in the log from offset 0 to `log_end_offset()` and
+/// apply each record's key and value.
+///
+/// Classic records and offsets go into the accumulator. Next-gen records go
+/// into the coordinator's seed accumulator.
 fn replay_records(
     log: &crabka_log::Log,
     coordinator: &Arc<GroupCoordinator>,
@@ -548,11 +563,13 @@ fn apply_streams_record(
     Ok(())
 }
 
-/// Apply a tombstone (record with `value = None`). Classic offset-commit /
-/// group-metadata tombstones are no-ops during replay (preserved from the
-/// classic coordinator, whose in-memory snapshot is rebuilt fresh on restart);
-/// next-gen (KIP-848) and share-group (KIP-932) tombstones are honored so
-/// leave/eviction semantics survive a restart.
+/// Apply a tombstone, which is a record with `value = None`.
+///
+/// Classic offset-commit and group-metadata tombstones do nothing during
+/// replay. This comes from the classic coordinator, which rebuilds its
+/// in-memory snapshot fresh on restart. Replay honors the next-gen KIP-848
+/// tombstones and the share-group KIP-932 tombstones, so the leave and
+/// eviction semantics survive a restart.
 fn apply_tombstone(coordinator: &Arc<GroupCoordinator>, key: Key) {
     match key {
         Key::NextGen(ng_key) => coordinator.replay_next_gen_tombstone(&ng_key),
@@ -562,10 +579,12 @@ fn apply_tombstone(coordinator: &Arc<GroupCoordinator>, key: Key) {
     }
 }
 
-/// Decide each group's kind and seed its actor. Next-gen groups (those that
-/// accumulated next-gen records) spawn via `finalize_bootstrap`; their
-/// committed offsets are attached afterward. Every other group with classic
-/// metadata or committed offsets replays as a classic actor.
+/// Decide each group's kind and seed its actor.
+///
+/// The next-gen groups are the groups that accumulated next-gen records.
+/// `finalize_bootstrap` spawns them, and the function attaches their committed
+/// offsets afterward. Every other group with classic metadata or committed
+/// offsets replays as a classic actor.
 fn finalize(coordinator: &Arc<GroupCoordinator>, mut replayed: Replayed) {
     // Next-gen group ids are those present in the coordinator's seed map.
     let next_gen_ids: std::collections::HashSet<String> =
@@ -671,7 +690,8 @@ mod tests {
     use super::*;
     use crate::config::BrokerConfig;
 
-    /// Spin up a controller, wait until it reports a leader, return the handle.
+    /// Start a controller, wait until it reports a leader, and return the
+    /// handle.
     async fn controller_with_leader(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
         let cfg = crabka_raft::ControllerConfig {
             election_timeout: crabka_units::millis(200),
@@ -689,9 +709,12 @@ mod tests {
         handle
     }
 
-    /// Replaying a share-group's records (group metadata, member metadata,
-    /// target + current assignment) must reconstruct the cached seed so a
-    /// freshly-spawned actor restores the same membership after a restart.
+    /// A replay of a share-group's records must rebuild the cached seed, so
+    /// that a freshly-spawned actor restores the same membership after a
+    /// restart.
+    ///
+    /// The records are the group metadata, the member metadata, the target
+    /// assignment, and the current assignment.
     #[tokio::test]
     async fn share_group_records_replay_into_seed() {
         use crabka_protocol::primitives::uuid::Uuid;
@@ -778,9 +801,12 @@ mod tests {
         assert!(!seed.members.contains_key("m1"), "tombstone removed member");
     }
 
-    /// Replaying a streams-group's records (group metadata, member metadata,
-    /// current assignment) must lock the group type to Streams and reconstruct
-    /// the cached seed; a member tombstone scrubs that member from the seed.
+    /// A replay of a streams-group's records must lock the group type to
+    /// Streams and rebuild the cached seed.
+    ///
+    /// The records are the group metadata, the member metadata, and the
+    /// current assignment. A member tombstone removes that member from the
+    /// seed.
     #[tokio::test]
     async fn streams_group_records_replay_into_seed() {
         use std::collections::BTreeMap;
@@ -923,13 +949,15 @@ mod tests {
     }
 
     /// Regression for the bootstrap TOCTOU: a SECOND bootstrap against a
-    /// controller that already has `__consumer_offsets` (the leader registered
-    /// it on the first boot) must NOT submit a second, conflicting
-    /// `TopicRecord`. It must observe the existing topic, no-op the
-    /// registration, succeed, and leave EXACTLY ONE `__consumer_offsets` topic
-    /// in the image. This exercises the "already exists => no-op" arm plus the
-    /// leader-gate (the test node 1 is the leader, so the first boot is the
-    /// single writer; the second boot finds the topic present and skips).
+    /// controller that already has `__consumer_offsets` must NOT submit a
+    /// second, conflicting `TopicRecord`.
+    ///
+    /// The leader registered the topic on the first boot. The second bootstrap
+    /// must see the existing topic, skip the registration, succeed, and leave
+    /// EXACTLY ONE `__consumer_offsets` topic in the image. The test exercises
+    /// the "already exists => no-op" arm and the leader gate. Test node 1 is
+    /// the leader, so the first boot is the single writer. The second boot
+    /// finds the topic present and skips it.
     #[tokio::test]
     async fn second_bootstrap_does_not_duplicate_offsets_topic() {
         let dir = tempdir().unwrap();
@@ -1035,9 +1063,12 @@ mod tests {
         assert!(empty.state == ClassicGroupState::Empty);
     }
 
-    /// Build a bare `GroupCoordinator` with no metadata/persister wiring — the
-    /// same shape the share/streams replay tests use. Suitable for driving the
-    /// `apply_record` / `apply_tombstone` / `finalize` replay path directly.
+    /// Build a bare `GroupCoordinator` with no metadata wiring and no
+    /// persister wiring.
+    ///
+    /// It has the same shape as the coordinator in the share and streams
+    /// replay tests. A test can drive the `apply_record`, `apply_tombstone`,
+    /// and `finalize` replay path directly with it.
     fn bare_coordinator() -> Arc<GroupCoordinator> {
         use crate::coordinator::unified::{
             offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
@@ -1060,8 +1091,8 @@ mod tests {
         ))
     }
 
-    /// Encode a classic k2 `GroupMetadata` (key, value) record pair for group
-    /// `g` carrying a single member `m1`.
+    /// Encode a classic k2 `GroupMetadata` key-value record pair for group
+    /// `g` with a single member `m1`.
     fn classic_group_record(group_id: &str, member_id: &str) -> (bytes::Bytes, bytes::Bytes) {
         use crate::coordinator::persistence::MemberMetadata;
         let key = GroupMetadataValue::encode_key(group_id);
@@ -1086,12 +1117,13 @@ mod tests {
         (key, value)
     }
 
-    /// PROBLEM A (the downgrade trap): a group that was created classic,
-    /// UPGRADED to next-gen, then DOWNGRADED back to classic must replay as a
-    /// CLASSIC group — not as an empty next-gen group. The downgrade drops the
-    /// k3 `GroupMetadata` with a tombstone; replay must remove the next-gen
-    /// seed entirely so the later fresh k2 record reconstructs the classic
-    /// group. Log order wins.
+    /// PROBLEM A, the downgrade trap: a group that started classic, then was
+    /// UPGRADED to next-gen, then was DOWNGRADED back to classic must replay
+    /// as a CLASSIC group and not as an empty next-gen group.
+    ///
+    /// The downgrade drops the k3 `GroupMetadata` with a tombstone. Replay
+    /// must remove the next-gen seed completely, so that the fresh k2 record
+    /// that comes later rebuilds the classic group. Log order wins.
     #[tokio::test]
     async fn downgraded_group_replays_as_classic() {
         use crate::coordinator::unified::{
@@ -1179,19 +1211,24 @@ mod tests {
         );
     }
 
-    /// PROBLEM A under LOG COMPACTION (the resurrection trap): a downgraded
-    /// group whose batch tombstoned the k3 `GroupMetadata` but NOT the
-    /// group-level k6 `TargetAssignmentMetadata` would, after compaction GCs the
-    /// tombstoned k3, leave a surviving k6 write behind. `__consumer_offsets` is
-    /// compacted by default, so replay then sees the post-compaction residue:
-    /// just the surviving k6 write plus the fresh classic k2 — NO k3, NO k3
-    /// tombstone. Because `replay_target_assignment_metadata` does
-    /// `seeds.entry(..).or_default()`, that lone k6 re-creates a next-gen seed,
-    /// `finalize` classifies the group next-gen, and the classic k2 is dropped —
-    /// resurrecting the group as an empty next-gen consumer. The fix tombstones
-    /// k6 in the downgrade batch so compaction retains the k6 TOMBSTONE (last
-    /// value per key) instead of a stale write; this test pins the corrected
-    /// post-compaction shape and asserts the group replays CLASSIC.
+    /// PROBLEM A under LOG COMPACTION, the resurrection trap.
+    ///
+    /// Take a downgraded group whose batch tombstoned the k3 `GroupMetadata`
+    /// but NOT the group-level k6 `TargetAssignmentMetadata`. After compaction
+    /// collects the tombstoned k3, a k6 write survives. `__consumer_offsets`
+    /// is compacted by default, so replay then sees the post-compaction
+    /// residue: the surviving k6 write and the fresh classic k2, with NO k3
+    /// and NO k3 tombstone.
+    ///
+    /// `replay_target_assignment_metadata` calls
+    /// `seeds.entry(..).or_default()`, so that lone k6 re-creates a next-gen
+    /// seed. `finalize` then classifies the group as next-gen and drops the
+    /// classic k2. The group comes back as an empty next-gen consumer.
+    ///
+    /// The fix tombstones k6 in the downgrade batch, so compaction keeps the
+    /// k6 TOMBSTONE, the last value per key, and not a stale write. This test
+    /// pins the corrected post-compaction shape and asserts that the group
+    /// replays CLASSIC.
     #[tokio::test]
     async fn compacted_downgrade_residue_replays_as_classic() {
         use crate::coordinator::unified::{GroupType, persistence_next_gen as ng};
@@ -1240,10 +1277,12 @@ mod tests {
         );
     }
 
-    /// Counterpoint to `compacted_downgrade_residue_replays_as_classic`: WITHOUT
-    /// the k6 tombstone, a surviving k6 WRITE re-creates a next-gen seed and the
-    /// group wrongly resurrects as next-gen (the bug being fixed). This pins the
-    /// hazard so a regression that drops the k6 tombstone is caught.
+    /// Counterpoint to `compacted_downgrade_residue_replays_as_classic`.
+    ///
+    /// WITHOUT the k6 tombstone, a surviving k6 WRITE re-creates a next-gen
+    /// seed, and the group wrongly comes back as next-gen. That is the bug
+    /// this work fixes. The test pins the hazard, so it catches a regression
+    /// that drops the k6 tombstone.
     #[tokio::test]
     async fn surviving_k6_write_resurrects_as_next_gen_without_fix() {
         use crate::coordinator::unified::persistence_next_gen as ng;
@@ -1298,9 +1337,10 @@ mod tests {
         );
     }
 
-    /// Existing upgrade-only replay (k3 live, no later tombstone) must still
-    /// yield a CONSUMER (next-gen) group. Guards the PROBLEM A fix against an
-    /// over-eager seed removal.
+    /// An upgrade-only replay, with k3 live and no tombstone after it, must
+    /// still give a CONSUMER, that is next-gen, group.
+    ///
+    /// The test guards the PROBLEM A fix against an over-eager seed removal.
     #[tokio::test]
     async fn upgraded_group_without_tombstone_replays_as_consumer() {
         use crate::coordinator::unified::{
@@ -1347,10 +1387,12 @@ mod tests {
         assert!(handle.kind == crate::coordinator::unified::actor::GroupKindTag::Consumer);
     }
 
-    /// PROBLEM B (facade not restored): a k5 `MemberMetadataValue` carrying a
-    /// `classic` block must reconstruct the in-memory member's
-    /// `ClassicMemberFacade` on replay. The replayed consumer group's member
-    /// "m1" must report `is_classic == true` via the next-gen `Describe` view.
+    /// PROBLEM B, the facade is not restored: a k5 `MemberMetadataValue` that
+    /// carries a `classic` block must rebuild the in-memory member's
+    /// `ClassicMemberFacade` on replay.
+    ///
+    /// The replayed consumer group's member "m1" must report
+    /// `is_classic == true` in the next-gen `Describe` view.
     #[tokio::test]
     async fn member_with_classic_block_replays_facade() {
         use tokio::sync::oneshot;
@@ -1419,12 +1461,14 @@ mod tests {
         assert!(m1.is_classic, "facade reconstructed from k5 classic block");
     }
 
-    /// `replay_records` must walk EVERY batch in the log, not just the first.
+    /// `replay_records` must walk EVERY batch in the log, not the first batch
+    /// only.
+    ///
     /// The cursor that advances between batches is
-    /// `base_offset + last_offset_delta + 1`; a two-record first batch
-    /// (`last_offset_delta == 1`) followed by a second batch is only fully
-    /// replayed if that arithmetic is exact. Both offset-commit records from
-    /// the first batch AND the commit from the second batch must land in
+    /// `base_offset + last_offset_delta + 1`. A two-record first batch, where
+    /// `last_offset_delta == 1`, followed by a second batch replays fully only
+    /// when that arithmetic is exact. Both offset-commit records from the
+    /// first batch AND the commit from the second batch must land in
     /// `acc.committed`.
     #[tokio::test]
     async fn replay_records_walks_all_batches() {

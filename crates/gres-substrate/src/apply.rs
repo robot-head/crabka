@@ -1,11 +1,11 @@
 //! Replay application with the engine's merge semantics.
 //!
-//! A strictly ordered single-writer journal still needs two non-LWW rules
-//! (mirrored from the donor's replicated state machine): counter keys
-//! max-merge because sessions fold counter ops at allocation time, so journal
-//! order can carry non-monotone values; clog keys are write-once with the
-//! first terminal decision winning, because an abort race can journal two
-//! decisions for one xid.
+//! A strictly ordered single-writer journal still needs two non-LWW rules,
+//! mirrored from the donor's replicated state machine. Counter keys max-merge,
+//! because sessions fold counter ops at allocation time and journal order can
+//! therefore carry non-monotone values. Clog keys are write-once, and the first
+//! terminal decision wins, because an abort race can journal two decisions for
+//! one xid.
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,12 +15,13 @@ use crabka_pgmvcc::clog;
 use crate::telemetry;
 
 /// Apply one journaled batch to `kv` with max-merge counters and write-once
-/// clog, folding duplicates within the batch.
+/// clog, and fold duplicates within the batch.
 ///
-/// Cross-node `NOTIFY` records are dropped: they ride the WAL so followers can
-/// observe them in flight, but a record that reached the KV would be baked into
-/// every later checkpoint. Skipping them is invisible to everything else —
-/// offsets and journal sequences are accounted for by the caller, per frame.
+/// This function drops cross-node `NOTIFY` records. They travel on the WAL so
+/// followers can observe them in flight, but a record that reached the KV would
+/// become part of every later checkpoint. The drop is invisible to everything
+/// else, because the caller accounts for offsets and journal sequences per
+/// frame.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -301,8 +302,8 @@ mod tests {
         assert!(kv.get(b"a").expect("get").is_none());
     }
 
-    /// Notify records must never reach the store — a checkpoint would make them
-    /// permanent — while every other op in the same batch applies as usual.
+    /// Notify records must never reach the store, because a checkpoint would
+    /// make them permanent. Every other op in the same batch applies as usual.
     #[test]
     fn notify_ops_are_dropped_without_disturbing_the_rest_of_the_batch() {
         let kv = MemKv::default();
@@ -357,8 +358,8 @@ mod tests {
         );
     }
 
-    /// Every write shape is filtered, so a stray delete or conditional put in
-    /// the notify namespace cannot resurrect it either.
+    /// The filter covers every write shape, so a stray delete or conditional
+    /// put in the notify namespace cannot restore it either.
     #[test]
     fn notify_ops_are_dropped_in_every_write_shape() {
         let kv = MemKv::default();

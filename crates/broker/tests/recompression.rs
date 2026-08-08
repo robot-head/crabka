@@ -3,15 +3,16 @@
 
 //! Broker-side recompression.
 //!
-//! Produces a gzip-compressed batch to a topic configured with
+//! The test produces a gzip-compressed batch to a topic configured with
 //! `compression.type=lz4`, fetches it back, and asserts the served
-//! batch's attributes report `lz4` — proving the broker re-encoded
-//! before writing. Also verifies the record payload survives the
-//! round-trip intact (gzip-decompressed on the broker, lz4-compressed,
-//! lz4-decompressed by the client).
+//! batch's attributes report `lz4`. This proves the broker re-encoded
+//! the batch before it wrote it. The test also verifies the record
+//! payload survives the round-trip intact. The broker decompresses the
+//! gzip bytes and compresses them with lz4, and the client then
+//! decompresses the lz4 bytes.
 //!
-//! Gated to non-Windows to match the multi-broker test convention used
-//! by the other replication and compaction tests.
+//! The test is gated to non-Windows. This matches the multi-broker test
+//! convention of the other replication and compaction tests.
 
 use std::{
     io,
@@ -280,7 +281,7 @@ async fn topic_compression_lz4_recompresses_producer_gzip_batch() {
 }
 
 /// Sanity check: when `compression.type=producer` (the Kafka default),
-/// the broker does NOT recompress — the served batch keeps the
+/// the broker does NOT recompress. The served batch keeps the
 /// producer's gzip flag verbatim. Without this guard a regression that
 /// always recompresses would still satisfy the lz4 happy-path test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

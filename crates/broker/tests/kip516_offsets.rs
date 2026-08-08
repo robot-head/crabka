@@ -1,4 +1,4 @@
-//! KIP-516: `OffsetCommit` v10 / `OffsetFetch` v8+ by `topic_id`.
+//! KIP-516: `OffsetCommit` v10 and `OffsetFetch` v8+ keyed by `topic_id`.
 use assert2::{assert, check};
 mod support;
 
@@ -137,9 +137,9 @@ async fn offset_fetch_unknown_topic_id_returns_unknown_topic_id() {
     assert!(t.partitions.first().expect("a partition").error_code == 100);
 }
 
-/// `OffsetCommit` v10 with a mix of a known `topic_id` and an unknown one: the
-/// known topic commits (error 0), the unknown `topic_id` is not committed and
-/// comes back as `UNKNOWN_TOPIC_ID` with its id echoed.
+/// `OffsetCommit` v10 with a mix of a known `topic_id` and an unknown one. The
+/// known topic commits and returns error 0. The unknown `topic_id` does not
+/// commit and comes back as `UNKNOWN_TOPIC_ID` with its id echoed.
 #[tokio::test]
 async fn offset_commit_unknown_topic_id_returns_unknown_topic_id() {
     let p = support::start().await;
@@ -204,8 +204,8 @@ async fn offset_commit_unknown_topic_id_returns_unknown_topic_id() {
     assert!(bad.partitions[0].error_code == 100); // UNKNOWN_TOPIC_ID
 }
 
-/// Fetch-all (null `topics`) at v10 must echo each topic's `topic_id`, since
-/// the name is dropped from the wire at v10 and the client matches by id.
+/// A fetch-all with null `topics` at v10 must echo each topic's `topic_id`,
+/// because v10 drops the name from the wire and the client matches by id.
 #[tokio::test]
 async fn offset_fetch_all_echoes_topic_id() {
     let p = support::start().await;

@@ -1,5 +1,5 @@
-//! pgparser: hand-written lexer + recursive-descent/Pratt parser producing the
-//! crabgresql AST for the SP2 SQL slice.
+//! pgparser: a hand-written lexer and recursive-descent/Pratt parser that
+//! builds the crabgresql AST for the SP2 SQL slice.
 
 #![doc(html_root_url = "https://docs.rs/crabka-pgparser/0.3.9")]
 

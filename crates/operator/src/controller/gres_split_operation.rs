@@ -15,8 +15,11 @@ pub trait RangeMutationClient: Send + Sync {
     ) -> Result<RangeControlResp, SplitReconcileError>;
 }
 
-/// Production mTLS adapter. Construction of `FramedTcpClient` requires a client identity,
-/// trust roots and peer DNS verification; plaintext is unavailable outside range crate tests.
+/// Production mTLS adapter.
+///
+/// To construct a `FramedTcpClient`, the caller needs a client identity,
+/// the trust roots, and peer DNS verification. Plaintext is available only
+/// in the tests of the range crate.
 pub struct MtlsRangeMutationClient {
     client: FramedTcpClient,
 }
@@ -65,8 +68,10 @@ pub enum SplitReconcileError {
     UnexpectedResponse(String),
 }
 
-/// Advance at most one durable range-RPC phase. Ambiguous responses leave the journal
-/// unchanged, so the receipt-keyed request is replayed verbatim after restart.
+/// Advances one durable range-RPC phase at most.
+///
+/// An ambiguous response leaves the journal unchanged. After a restart,
+/// the operator sends the receipt-keyed request again, verbatim.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -127,8 +132,11 @@ pub async fn reconcile_one_rpc_phase(
         .map_err(|error| SplitReconcileError::Registry(error.to_string()))
 }
 
-/// Perform or acknowledge the exact atomic topology cutover. The tenant CAS and journal CAS
-/// happen on separate reconciles, making an ambiguous registry acknowledgement restart-safe.
+/// Does the exact atomic topology cutover, or acknowledges it.
+///
+/// The tenant CAS and the journal CAS happen on separate reconciles. An
+/// ambiguous registry acknowledgement is therefore safe across a
+/// restart.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -200,7 +208,8 @@ pub async fn reconcile_activated_cutover(
     Ok(record.clone())
 }
 
-/// Authenticate both exact successor generations and require their serving status before cutover.
+/// Authenticates both exact successor generations and requires their
+/// serving status before the cutover.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -448,9 +457,12 @@ pub(crate) fn active_operations(
     records
 }
 
-/// Successor pods require the irreversible activation receipt written by the source prologue.
-/// Before this point, changing the source Deployment can destroy the only process holding staged
-/// successor state and able to publish that receipt.
+/// Successor pods need the irreversible activation receipt that the source
+/// prologue writes.
+///
+/// Before this point, a change to the source Deployment can destroy the
+/// only process that holds the staged successor state and can publish that
+/// receipt.
 pub(crate) fn successors_may_be_deployed(record: &SplitOperationRecord) -> bool {
     matches!(
         record.phase,

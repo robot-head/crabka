@@ -5,18 +5,19 @@
 //! share-partition leader. The `share_session_epoch` on each request drives a
 //! small state machine:
 //!
-//! - epoch `0` opens (or re-opens) a session — the stored epoch becomes `1`.
-//! - epoch `-1` (`FINAL_EPOCH`) closes the session — the entry is removed.
-//! - any other epoch must match the stored epoch exactly; the stored epoch is
-//!   then bumped for the next request.
+//! - epoch `0` opens or re-opens a session, and the stored epoch becomes `1`.
+//! - epoch `-1` (`FINAL_EPOCH`) closes the session, and the cache removes the
+//!   entry.
+//! - any other epoch must match the stored epoch exactly. The cache then bumps
+//!   the stored epoch for the next request.
 //!
 //! Mismatches map to Kafka's share-session error codes:
-//! `INVALID_SHARE_SESSION_EPOCH` (stale/ahead epoch),
-//! `SHARE_SESSION_NOT_FOUND` (a non-zero epoch with no live session), and
-//! `SHARE_SESSION_LIMIT_REACHED` (the cache is full).
+//! `INVALID_SHARE_SESSION_EPOCH` for a stale or ahead epoch,
+//! `SHARE_SESSION_NOT_FOUND` for a non-zero epoch with no live session, and
+//! `SHARE_SESSION_LIMIT_REACHED` when the cache is full.
 //!
-//! Locking discipline: the `DashMap` guard is taken and released entirely
-//! within `validate`; nothing here is held across an `.await`.
+//! Locking discipline: `validate` takes and releases the `DashMap` guard
+//! entirely within itself, and this module holds nothing across an `.await`.
 
 use std::collections::HashSet;
 
@@ -30,10 +31,10 @@ const FINAL_EPOCH: i32 = -1;
 /// Epoch value a client sends to open a fresh share session.
 const INITIAL_EPOCH: i32 = 0;
 
-/// One live share session: the current epoch plus the set of share partitions
-/// the member currently has in its session. The partition set is maintained by
-/// the `ShareFetch` handler (full fetches replace it; the field is reserved for
-/// incremental-fetch bookkeeping).
+/// One live share session. It holds the current epoch and the set of share
+/// partitions that the member currently has in its session. The `ShareFetch`
+/// handler maintains the partition set. A full fetch replaces it, and the field
+/// is reserved for incremental-fetch bookkeeping.
 #[derive(Debug, Default)]
 struct ShareSession {
     epoch: i32,
@@ -49,7 +50,7 @@ pub(crate) struct ShareSessionCache {
 }
 
 impl ShareSessionCache {
-    /// Create a cache holding at most `max` concurrent sessions.
+    /// Create a cache that holds at most `max` concurrent sessions.
     pub(crate) fn new(max: usize) -> Self {
         Self {
             sessions: DashMap::new(),
@@ -57,11 +58,12 @@ impl ShareSessionCache {
         }
     }
 
-    /// Validate (and advance) the share session for `(group, member)` against
+    /// Validate and advance the share session for `(group, member)` against
     /// the request's `epoch`.
     ///
-    /// On success the stored epoch is updated for the next request. See the
-    /// module docs for the epoch state machine and the error codes returned.
+    /// On success this method updates the stored epoch for the next request.
+    /// See the module docs for the epoch state machine and the error codes it
+    /// returns.
     pub(crate) fn validate(&self, group: &str, member: &str, epoch: i32) -> Result<(), i16> {
         let key = (group.to_string(), member.to_string());
 

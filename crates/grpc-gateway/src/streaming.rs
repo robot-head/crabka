@@ -1,7 +1,9 @@
-//! Streaming Connect handlers — bidirectional `SendStream` (produce) and
-//! `Subscribe` (consume). The per-handler logic lives in a `*_inner` function
-//! returning a plain `Stream` (unit-testable); the public handler is a thin
-//! wrapper into `ConnectResponse::new(StreamBody::new(inner))`.
+//! Streaming Connect handlers: the bidirectional `SendStream` for produce and
+//! `Subscribe` for consume.
+//!
+//! The per-handler logic lives in a `*_inner` function that returns a plain
+//! `Stream`, which a unit test can drive. The public handler is a thin wrapper
+//! into `ConnectResponse::new(StreamBody::new(inner))`.
 
 use std::{net::SocketAddr, pin::Pin, sync::Arc};
 
@@ -163,10 +165,12 @@ fn inbound_from_decoded_record(record: crate::consume::DecodedConsumerRecord) ->
     }
 }
 
-/// Produce every record in each inbound `SendRequest`, emitting one `SendAck`
-/// (with a per-record `RecordResult` vector) per request. Each record is gated
-/// by a Write ACL on its target topic for the on-behalf-of `principal`/`host`;
-/// a denied record is skipped and reported as a non-retriable `PERMISSION_DENIED`.
+/// Produce every record in each inbound `SendRequest`, and emit one `SendAck`
+/// per request. Each `SendAck` carries a per-record `RecordResult` vector.
+///
+/// A Write ACL on the target topic gates each record for the on-behalf-of
+/// `principal` and `host`. A denied record is skipped and reported as a
+/// non-retriable `PERMISSION_DENIED`.
 pub fn send_stream_inner(
     mut inbound: Streaming<pb::SendRequest>,
     state: Arc<AppState>,
@@ -236,18 +240,19 @@ pub async fn send_stream(
     ))))
 }
 
-/// Join a consumer group on the caller's behalf and stream records. The first
-/// frame MUST be `Start`; subsequent `Ack` frames drive offset commits
-/// (at-least-once). The subscription ends when the control stream closes or
-/// errors.
+/// Join a consumer group on the caller's behalf and stream records.
+///
+/// The first frame MUST be `Start`. Each later `Ack` frame drives an offset
+/// commit, which gives at-least-once. The subscription ends when the control
+/// stream closes or errors.
 ///
 /// Commit semantics: on `Ack`, the session commits its *current* consumed
-/// positions for all assigned partitions (the `Ack`'s `topic`/`partition`/
-/// `offset` fields are currently advisory — per-offset commit is a follow-up,
-/// pending an offset-specific commit API on the consumer). With `auto_commit`,
-/// the session commits after each non-empty poll (at enqueue, slightly weaker
-/// than on-receipt). For strict at-least-once, the caller should ack
-/// synchronously per received batch.
+/// positions for all assigned partitions. The `Ack`'s `topic`, `partition`, and
+/// `offset` fields are currently advisory. Per-offset commit is a follow-up and
+/// waits on an offset-specific commit API on the consumer. With `auto_commit`,
+/// the session commits after each non-empty poll, at enqueue, which is slightly
+/// weaker than a commit on receipt. For strict at-least-once, the caller
+/// should ack synchronously for each received batch.
 pub fn subscribe_inner(
     mut frames: Streaming<pb::SubscribeFrame>,
     state: Arc<AppState>,

@@ -1,5 +1,6 @@
-//! Shared, lock-free counters the writer updates and the broker scrapes into
-//! Prometheus.
+//! Shared, lock-free counters for the audit spool.
+//!
+//! The writer updates these counters. The broker scrapes them into Prometheus.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -7,9 +8,9 @@ use crabka_units::prelude::{ByteSize, ByteSizeExt as _};
 
 use crate::ids::RecordCount;
 
-/// Cumulative + current spool statistics.
+/// Cumulative and current spool statistics.
 ///
-/// The counters are `AtomicU64`, which cannot hold a quantity; the byte gauge
+/// The counters are `AtomicU64`, which cannot hold a quantity. The byte gauge
 /// converts to and from [`ByteSize`] in its accessors.
 #[derive(Debug, Default)]
 pub struct AuditStats {
@@ -56,8 +57,10 @@ impl AuditStats {
     pub fn depth(&self) -> u64 {
         self.depth.load(Ordering::Relaxed)
     }
-    /// Bytes currently held in the spool. Named for the `audit_spool_bytes`
-    /// gauge the broker exports it as.
+    /// Bytes currently held in the spool.
+    ///
+    /// The broker exports this value as the `audit_spool_bytes` gauge, and the
+    /// method takes its name from that gauge.
     #[must_use]
     pub fn spool_bytes(&self) -> ByteSize {
         ByteSize::from_bytes(self.spool_bytes.load(Ordering::Relaxed))

@@ -1,12 +1,13 @@
 //! Throughput of the range-0 grant path under high aggregate grant rate.
 //!
-//! Ignored by default (timing-sensitive, seconds long): run explicitly with
+//! This test is ignored by default, because it is timing-sensitive and takes
+//! seconds. Run it explicitly with
 //! `cargo test -p crabka-gres-ranges --test tso_grant_pressure -- --ignored
 //! --nocapture`. It drives the real serialized grant conveyor over a
-//! [`TsoOracle`] whose durable committer models a range-0 WAL commit latency,
-//! and compares `logical-tso` against `hlc` so the cost of the logical mode's
-//! grant-volume-driven persist cadence is visible against HLC's wall-bounded
-//! one.
+//! [`TsoOracle`] whose durable committer models a range-0 WAL commit latency. It
+//! compares `logical-tso` against `hlc`, which shows the cost of the persist
+//! cadence that grant volume drives in the logical mode against the wall-bounded
+//! cadence of HLC.
 
 use std::{
     num::NonZeroU64,
@@ -20,7 +21,7 @@ use crabka_gres_ranges::{
 };
 use crabka_pgkv::MemKv;
 
-/// Concurrent grant loops hammering the single serialized oracle.
+/// Concurrent grant loops that load the single serialized oracle.
 const CONCURRENCY: u64 = 64;
 /// Grants issued per loop.
 const GRANTS_PER_TASK: u64 = 4_000;
@@ -28,7 +29,7 @@ const GRANTS_PER_TASK: u64 = 4_000;
 const PERSIST_LATENCY: Duration = Duration::from_micros(800);
 
 /// Committer decorator that sleeps to model the range-0 WAL commit a horizon
-/// persist pays for, then delegates to an in-memory horizon.
+/// persist pays for, and then delegates to an in-memory horizon.
 struct LatencyCommitter {
     inner: MemoryTsoHorizon,
     latency: Duration,

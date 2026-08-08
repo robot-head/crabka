@@ -1,6 +1,8 @@
-//! End-to-end relay test against a fake upstream "broker" that echoes a
-//! canned response. Verifies bytes pass through unmodified and frames are
-//! recorded with correct classification.
+//! End-to-end relay test against a fake upstream "broker" that echoes a canned
+//! response.
+//!
+//! The test verifies that the bytes pass through unmodified, and that the relay
+//! records the frames with the correct classification.
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},

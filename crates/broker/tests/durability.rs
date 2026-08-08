@@ -1,8 +1,8 @@
-//! Integration tests for bulletproof EOS — HW + acks=all.
+//! Integration tests for EOS durability: the high watermark and acks=all.
 //!
-//! Windows-gated like the other multi-broker tests: openraft +
-//! `tokio` scheduling on Windows runners cause flakes that have
-//! nothing to do with the protocol being tested.
+//! These tests are gated off Windows, like the other multi-broker tests.
+//! openraft and `tokio` scheduling on Windows runners cause flakes that have
+//! nothing to do with the protocol under test.
 
 use std::time::{Duration, Instant};
 
@@ -26,11 +26,12 @@ use tempfile::TempDir;
 
 mod support;
 
-/// Resolve the topic UUID via Metadata. Produce/Fetch at v ≥ 13 carry
-/// only `topic_id` on the wire (KIP-516); without this the broker
-/// decodes the request with empty name + ZERO `topic_id` and returns
-/// `UNKNOWN_TOPIC_OR_PARTITION`. Mirrors the helper in
-/// `crates/client-consumer/tests/integration.rs`.
+/// Resolves the topic UUID through Metadata.
+///
+/// Produce and Fetch at v ≥ 13 carry only `topic_id` on the wire (KIP-516).
+/// Without this lookup, the broker decodes the request with an empty name and
+/// a ZERO `topic_id`, and returns `UNKNOWN_TOPIC_OR_PARTITION`. This mirrors
+/// the helper in `crates/client-consumer/tests/integration.rs`.
 async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
     let resp = client
         .send(MetadataRequest {
@@ -143,8 +144,9 @@ async fn produce_acks(
     }
 }
 
-/// An idempotent batch with explicit `(producer_id, base_sequence)` so a
-/// "retry" can be replayed deterministically by re-sending the same batch.
+/// An idempotent batch with an explicit `(producer_id, base_sequence)`, so
+/// that a test can replay a "retry" deterministically by sending the same
+/// batch again.
 fn idempotent_batch(pid: i64, base_seq: i32, values: &[&str]) -> RecordBatch {
     let mut b = record_batch_with_values(values);
     b.producer_id = pid;
@@ -153,7 +155,7 @@ fn idempotent_batch(pid: i64, base_seq: i32, values: &[&str]) -> RecordBatch {
     b
 }
 
-/// Send one explicit `RecordBatch` as a single-partition Produce and return
+/// Sends one explicit `RecordBatch` as a single-partition Produce and returns
 /// `Ok(base_offset)` or `Err(error_code)`.
 async fn produce_batch(
     bootstrap: &str,
@@ -194,15 +196,16 @@ async fn produce_batch(
     }
 }
 
-/// Bug D regression: after a failover-rejoin divergence TRUNCATES an
-/// idempotent batch off the leader's log (which also reverts producer-state),
-/// a retry of that same batch must RE-APPEND — not deduplicate against the
+/// Bug D regression. A failover-rejoin divergence can TRUNCATE an idempotent
+/// batch off the leader's log, which also reverts the producer state. A retry
+/// of that same batch must then RE-APPEND. It must not deduplicate against the
 /// now-truncated offset and stall its `acks=all` high-watermark gate forever.
 ///
 /// Without the producer-state revert on truncation, the retry resolves to
-/// `Decision::Duplicate{base_offset}` and waits for `HW >= base_offset + N`,
-/// which the truncated log can never reach → `NOT_ENOUGH_REPLICAS_AFTER_APPEND`
-/// on every attempt (the on-cluster permanent stall).
+/// `Decision::Duplicate{base_offset}` and waits for `HW >= base_offset + N`.
+/// The truncated log can never reach that, so every attempt returns
+/// `NOT_ENOUGH_REPLICAS_AFTER_APPEND`, which is a permanent stall on the
+/// cluster.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idempotent_retry_reappends_after_truncation_instead_of_stalling() {
     let (broker, bootstrap, _dir) = boot_single().await;

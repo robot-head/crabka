@@ -1,5 +1,5 @@
-//! In-process integration tests for KIP-101 leader-epoch
-//! fencing + .leader-epoch-checkpoint byte format.
+//! In-process integration tests for KIP-101 leader-epoch fencing and the
+//! .leader-epoch-checkpoint byte format.
 //!
 //! Windows-gated like the other multi-broker tests.
 
@@ -25,10 +25,12 @@ use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
 
-/// Serialize the multi-broker tests in this binary. Each spins up a
-/// 3-broker loopback cluster; running them concurrently exhausts
-/// ephemeral ports and starves openraft election timing. Same rationale
-/// as `replication.rs::cluster_lock` / `quorum.rs::cluster_lock`.
+/// Serializes the multi-broker tests in this binary.
+///
+/// Each test starts a 3-broker loopback cluster. Running them at the same time
+/// exhausts the ephemeral ports and starves the openraft election timing. This
+/// is the same reason as for `replication.rs::cluster_lock` and
+/// `quorum.rs::cluster_lock`.
 fn cluster_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -263,23 +265,24 @@ async fn epoch_checkpoint_byte_compat() {
     broker.shutdown().await;
 }
 
-/// KIP-320 leader side. A follower-style Fetch (`replica_id >= 0`) that
+/// KIP-320 leader side. A follower-style Fetch, with `replica_id >= 0`, that
 /// advertises a stale `last_fetched_epoch` whose epoch ends *before* the
-/// requested `fetch_offset` must get a `diverging_epoch` pointing at the
+/// requested `fetch_offset` must get a `diverging_epoch` that points at the
 /// epoch boundary, and NO records.
 ///
-/// Build the leader's epoch history deterministically:
-///   * produce `k = 2` records at epoch 0  → checkpoint `0 -> 0`,
-///   * bump the leader epoch to 1 (split-brain shim used by the fence
-///     test), produce 2 more                → checkpoint `1 -> 2`,
-/// so the cache is `e0 -> [0, 2)`, `e1 -> [2, 4)` and the log end is 4.
+/// The test builds the leader's epoch history deterministically:
+///   * produce `k = 2` records at epoch 0, which gives checkpoint `0 -> 0`,
+///   * bump the leader epoch to 1, with the split-brain shim that the fence
+///     test uses, then produce 2 more, which gives checkpoint `1 -> 2`.
 ///
-/// A follower fetch at `fetch_offset = 4` with `last_fetched_epoch = 0`
-/// (i.e. "my last record was in epoch 0, give me offset 4") is divergent:
-/// epoch 0 on this leader ends at offset 2, not 4. The leader's
-/// `epoch_and_offset_for(0, 4)` returns `(0, 2)` and, because the
-/// recorded end (2) is below the fetch offset (4), the handler answers
-/// with `diverging_epoch { epoch: 0, end_offset: 2 }` and serves nothing.
+/// The cache is then `e0 -> [0, 2)` and `e1 -> [2, 4)`, and the log end is 4.
+///
+/// A follower fetch at `fetch_offset = 4` with `last_fetched_epoch = 0` says
+/// "my last record was in epoch 0, give me offset 4". That is divergent,
+/// because epoch 0 on this leader ends at offset 2, not 4. The leader's
+/// `epoch_and_offset_for(0, 4)` returns `(0, 2)`. The recorded end, 2, is below
+/// the fetch offset, 4, so the handler answers with
+/// `diverging_epoch { epoch: 0, end_offset: 2 }` and serves nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn diverging_epoch_returned_on_stale_last_fetched_epoch() {
     let (broker, bootstrap, _dir) = boot_single().await;
@@ -393,29 +396,29 @@ async fn diverging_epoch_returned_on_stale_last_fetched_epoch() {
     broker.shutdown().await;
 }
 
-/// KIP-320 follower side, end-to-end. A follower whose local log has a
-/// divergent suffix beyond the leader's epoch boundary must truncate it
-/// *in band* on the leader's `diverging_epoch` Fetch response — without
-/// ever issuing an `OffsetForLeaderEpoch` RPC (that path is reserved for
-/// the `FENCED`/`UNKNOWN_LEADER_EPOCH` error codes, which this scenario
-/// never produces).
+/// KIP-320 follower side, end to end. A follower whose local log has a
+/// divergent suffix beyond the leader's epoch boundary must truncate that
+/// suffix *in band*, on the leader's `diverging_epoch` Fetch response. It must
+/// never issue an `OffsetForLeaderEpoch` RPC. That path serves the `FENCED`
+/// and `UNKNOWN_LEADER_EPOCH` error codes, which this scenario never produces.
 ///
-/// Determinism without racing a real unclean election:
-///   1. 3-broker cluster, topic rf=3, partition leader = broker 1.
-///   2. Produce `k = 8` records through the leader (acks=-1); every
-///      replica converges to LEO 8 with checkpoint `0 -> 0` (the produce
-///      handler stamps leader epoch 0 onto each batch).
-///   3. On a *follower*, append a divergent suffix straight to its local
-///      log via `produce_records_for_test` (5 extra records). Those
-///      batches carry epoch -1, so they add no checkpoint entry — the
-///      follower's latest recorded epoch stays 0 while its LEO jumps to
-///      13, i.e. records the leader does not have.
-///   4. The follower's already-running replicator fetches at offset 13
-///      advertising `last_fetched_epoch = 0`. The leader (LEO 8, latest
-///      epoch 0) computes `epoch_and_offset_for(0, 8) = (0, 8)`; since
-///      the epoch-0 end (8) is below the fetch offset (13) it answers
-///      `diverging_epoch { end_offset: 8 }`. The replicator truncates to
-///      8 and converges back to the leader.
+/// The test reaches determinism without racing a real unclean election:
+///   1. A 3-broker cluster, a topic with rf=3, and broker 1 as the partition
+///      leader.
+///   2. Produce `k = 8` records through the leader with acks=-1. Every replica
+///      converges to LEO 8 with checkpoint `0 -> 0`, because the produce
+///      handler stamps leader epoch 0 onto each batch.
+///   3. On a *follower*, append a divergent suffix of 5 extra records straight
+///      to its local log with `produce_records_for_test`. Those batches carry
+///      epoch -1, so they add no checkpoint entry. The follower's latest
+///      recorded epoch stays 0 while its LEO jumps to 13, so it holds records
+///      the leader does not have.
+///   4. The follower's already-running replicator fetches at offset 13 and
+///      advertises `last_fetched_epoch = 0`. The leader, at LEO 8 and latest
+///      epoch 0, computes `epoch_and_offset_for(0, 8) = (0, 8)`. The epoch-0
+///      end, 8, is below the fetch offset, 13, so the leader answers
+///      `diverging_epoch { end_offset: 8 }`. The replicator truncates to 8 and
+///      converges back to the leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn follower_truncates_in_band_on_diverging_epoch() {
     let _g = cluster_lock().lock().await;

@@ -17,7 +17,7 @@ pub struct Manifest {
     pub format_version: u32,
     /// Tenant whose KV state was checkpointed.
     pub tenant: String,
-    /// WAL offset covered through; replay resumes at `covered_offset + 1`.
+    /// WAL offset covered through. Replay resumes at `covered_offset + 1`.
     pub covered_offset: i64,
     /// Next engine journal sequence at the snapshot instant.
     pub journal_seq: u64,

@@ -1,5 +1,6 @@
-//! KIP-599 `controller_mutation_rate` helper. Called from `CreateTopics`,
-//! `CreatePartitions`, `DeleteTopics` handlers after response assembly.
+//! KIP-599 `controller_mutation_rate` helper. The `CreateTopics`,
+//! `CreatePartitions`, and `DeleteTopics` handlers call it after they assemble
+//! the response.
 
 use crabka_metadata::MetadataImage;
 use crabka_units::{Time, convert::TimeExt};
@@ -10,9 +11,10 @@ use super::{
 };
 
 /// Consume `mutations` from the `controller_mutation_rate` bucket for
-/// `(principal, client_id)`. Returns the throttle delay to apply
-/// before sending the response. A zero extent if no quota
-/// configured, no overage, or `mutations == 0`. Capped at `maximum_delay`.
+/// `(principal, client_id)`. This function returns the throttle delay to apply
+/// before the handler sends the response. The delay is zero if no quota is
+/// configured, if there is no overage, or if `mutations == 0`. The delay is
+/// capped at `maximum_delay`.
 #[must_use]
 pub fn consume_controller_mutation_quota(
     image: &MetadataImage,

@@ -1,6 +1,7 @@
-//! `DeleteTopics` (`api_key=20`). Routes through `Controller::submit_change`
-//! so every topic deletion is recorded in the metadata quorum before the
-//! partition dirs and in-memory state are torn down.
+//! `DeleteTopics` (`api_key=20`). This handler routes through
+//! `Controller::submit_change`, so the metadata quorum records every topic
+//! deletion before the broker tears down the partition dirs and the in-memory
+//! state.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, DeleteTopicRecord, MetadataRecord};

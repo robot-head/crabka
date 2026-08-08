@@ -9,16 +9,21 @@ use super::{
 };
 use crate::{MetricStore, PromqlEngine, PromqlError, QueryResult, SampleValue};
 
-/// Evaluate one recording rule and materialize the result as metrics WAL records.
+/// Evaluates one recording rule and materializes the result as metrics WAL
+/// records.
 ///
-/// Each output series gets `__name__` rewritten to `record_name` and the
-/// rule-level `labels` merged on top (rule labels win), matching Prometheus.
-/// If two output samples collapse to the same labelset after that rewrite the
-/// rule fails — Prometheus rejects this as "vector contains metrics with the
-/// same labelset after applying rule labels" — instead of writing duplicate
-/// WAL records.
+/// This function rewrites `__name__` to `record_name` on each output series and
+/// merges the rule-level `labels` on top, so the rule labels win. This matches
+/// Prometheus. If two output samples collapse to the same label set after that
+/// rewrite, the rule fails and writes no duplicate WAL records. Prometheus
+/// rejects this case as "vector contains metrics with the same labelset after
+/// applying rule labels".
+///
 /// # Errors
-/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+///
+/// Returns an error when metric input is malformed. Returns an error when a
+/// limit is exceeded. Returns an error when the backing WAL, the block store, or
+/// a remote endpoint fails.
 pub async fn evaluate_recording_rule<S: MetricStore>(
     engine: &PromqlEngine<S>,
     tenant: &str,
@@ -67,9 +72,14 @@ pub async fn evaluate_recording_rule<S: MetricStore>(
     Ok(records)
 }
 
-/// Evaluate one recording rule and append its materialized samples to the WAL sink.
+/// Evaluates one recording rule and appends its materialized samples to the WAL
+/// sink.
+///
 /// # Errors
-/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+///
+/// Returns an error when metric input is malformed. Returns an error when a
+/// limit is exceeded. Returns an error when the backing WAL, the block store, or
+/// a remote endpoint fails.
 pub async fn evaluate_and_append_recording_rule<S, W>(
     engine: &PromqlEngine<S>,
     sink: &W,
@@ -93,9 +103,13 @@ where
     Ok(count)
 }
 
-/// Evaluate all recording rules in one rule group and append their outputs.
+/// Evaluates all recording rules in one rule group and appends their outputs.
+///
 /// # Errors
-/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+///
+/// Returns an error when metric input is malformed. Returns an error when a
+/// limit is exceeded. Returns an error when the backing WAL, the block store, or
+/// a remote endpoint fails.
 pub async fn evaluate_and_append_recording_rule_group<S, W>(
     engine: &PromqlEngine<S>,
     sink: &W,

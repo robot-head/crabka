@@ -1,10 +1,10 @@
 //! DML coordination from an rN-only gateway over real mTLS TCP.
 //!
-//! The gateway under test hosts only the data range r1 and carries a
-//! read-only range-0 replica. Ranges r0 and r2 live behind one remote
-//! [`HostedRangeService`], so timestamps mint through the real
-//! `RangeRequest::Tso(Grant)` wire path and DML for r2 forwards through the
-//! remote-session, prewrite/resolve, and GTM RPCs.
+//! The gateway under test hosts only the data range r1 and carries a read-only
+//! range-0 replica. Ranges r0 and r2 live behind one remote
+//! [`HostedRangeService`]. Timestamps therefore mint through the real
+//! `RangeRequest::Tso(Grant)` wire path, and DML for r2 forwards through the
+//! remote-session RPCs, the prewrite and resolve RPCs, and the GTM RPCs.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -117,8 +117,8 @@ async fn spawn_tls(
     address
 }
 
-/// The replica shares range 0's store `Arc`, so it is always current and the
-/// barrier needs no committed frames beyond offset -1.
+/// The replica shares range 0's store `Arc`. It is therefore always current, and
+/// the barrier needs no committed frames beyond offset -1.
 struct ZeroLagRange0End;
 
 #[async_trait]
@@ -130,17 +130,18 @@ impl Range0EndSampler for ZeroLagRange0End {
 
 struct RnOnlyTopology {
     gateway: MultiRangeTenant,
-    /// The remote node's range-0 engine (catalog owner, GTM, TSO backing store).
+    /// The remote node's range-0 engine. It is the catalog owner, the GTM, and
+    /// the TSO backing store.
     catalog_engine: SqlEngine,
     /// The remote node's r2 data engine, sharing range 0's catalog store.
     remote_engine: SqlEngine,
     _tls: MtlsFixture,
 }
 
-/// Start the shared topology: a remote node serving `{r0, r2}` over mTLS TCP
-/// and an rN-only gateway hosting r1 with a zero-lag range-0 replica. The
-/// gateway gets no injected timestamp oracle, so assembly installs the real
-/// remote TSO wire path from its registry and range client.
+/// Start the shared topology. A remote node serves `{r0, r2}` over mTLS TCP, and
+/// an rN-only gateway hosts r1 with a zero-lag range-0 replica. The gateway gets
+/// no injected timestamp oracle, so assembly installs the real remote TSO wire
+/// path from its registry and range client.
 async fn rn_only_topology(tenant: &str, record_tenant: &str) -> RnOnlyTopology {
     let fixture = MtlsFixture::new();
     let catalog_kv: Arc<dyn Kv> = Arc::new(MemKv::default());
@@ -222,8 +223,9 @@ async fn rn_only_topology(tenant: &str, record_tenant: &str) -> RnOnlyTopology {
     }
 }
 
-/// Record with placeholder endpoints; live addresses are published through
-/// [`RangeRegistry::refresh_from_tenant_record`] once the services are up.
+/// Record with placeholder endpoints. The test publishes the live addresses
+/// through [`RangeRegistry::refresh_from_tenant_record`] after the services come
+/// up.
 fn tenant_record(record_tenant: &str) -> TenantRecord {
     TenantRecord::new(
         1,
@@ -276,8 +278,9 @@ fn bucket_of(id: i32) -> u32 {
         .expect("power-of-two bucket count")
 }
 
-/// The first `count` shard-key values whose hash bucket is owned by the remote
-/// range r2 (`remote`) or by the gateway-hosted range r1 (`!remote`).
+/// The first `count` shard-key values whose hash bucket one range owns. With
+/// `remote` set that range is the remote range r2, and otherwise it is the
+/// gateway-hosted range r1.
 fn sharded_ids(remote: bool, count: usize) -> Vec<i32> {
     let ids = (1..=10_000)
         .filter(|id| (bucket_of(*id) >= REMOTE_BUCKET_START) == remote)
@@ -495,12 +498,12 @@ async fn rn_only_gateway_forwards_ordinary_dml_for_unhosted_and_hosted_ranges() 
     assert!(sorted_rows(&rows) == expected_rows(&[&[9]]));
 }
 
-/// The contended-update regression: an update-heavy autocommit workload
-/// forwarded to an unhosted range must not grow the hot row's physical
-/// version chain without bound. The owner engine prunes superseded versions
-/// inside each forwarded statement's own commit batch (there is no vacuum on
-/// multi-range engines), so the chain stays O(1) while throughput-relevant
-/// scans stay O(chain).
+/// The contended-update regression. An update-heavy autocommit workload
+/// forwarded to an unhosted range must not grow the hot row's physical version
+/// chain without bound. The owner engine prunes superseded versions inside each
+/// forwarded statement's own commit batch, because there is no vacuum on
+/// multi-range engines. The chain therefore stays O(1), and the scans that
+/// matter for throughput stay O(chain).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rn_only_gateway_forwarded_update_loop_keeps_owner_chain_bounded() {
     let topology = rn_only_topology("rn_only_dml_prune", "rn-only-dml-prune").await;

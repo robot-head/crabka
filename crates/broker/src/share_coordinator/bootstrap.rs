@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 pub const TOPIC: &str = "__share_group_state";
 
-/// Ensure `__share_group_state` exists in the controller's metadata.
-/// No-op if it already does. Tolerate `TopicExists` in case a concurrent
-/// `FindCoordinator(SHARE)` already created it.
+/// Make sure `__share_group_state` exists in the controller's metadata.
+/// This is a no-op if the topic already exists. It tolerates `TopicExists`,
+/// because a concurrent `FindCoordinator(SHARE)` can create the topic first.
 pub(crate) async fn ensure_topic(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     num_partitions: i32,

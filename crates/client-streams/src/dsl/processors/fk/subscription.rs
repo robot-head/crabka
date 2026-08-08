@@ -3,8 +3,9 @@
 //!
 //! `SubscriptionWrapper`  : `version1 | (isHashNull<<7)` ‖ `instruction(1)` ‖ `[hash:16]` ‖ `pk…` ‖ `primaryPartition:4BE`
 //! `SubscriptionResponse` : `version0 | (isHashNull<<7)` ‖ `[hash:16]` ‖ `[foreignValue…]`
-//! Byte-exact vs the `--fkjoin` capture.
-//! Consumed by the FK-join subscription store + the five FK-join processors.
+//!
+//! Both layouts are byte-exact against the `--fkjoin` capture. The FK-join
+//! subscription store and the five FK-join processors consume them.
 use bytes::{BufMut, Bytes, BytesMut};
 
 const SUB_VERSION: u8 = 1;
@@ -38,7 +39,8 @@ impl Instruction {
             _ => return None,
         })
     }
-    /// JVM enum name — used only to assert ordinal parity against the capture.
+    /// The JVM enum name. The tests use it only to assert ordinal parity against
+    /// the capture.
     #[cfg(test)]
     pub(crate) fn name(self) -> &'static str {
         match self {

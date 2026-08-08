@@ -1,8 +1,8 @@
 //! Differential Loki compatibility coverage.
 //!
-//! These tests run a real Loki container beside in-process Crabka services,
-//! ingest the same Loki push payload into both, and compare the stable query
-//! result shape that Grafana's built-in Loki datasource consumes.
+//! These tests run a real Loki container beside in-process Crabka services.
+//! The tests ingest the same Loki push payload into both. They then compare the
+//! stable query result shape that Grafana's built-in Loki datasource reads.
 
 use std::{
     collections::BTreeMap,
@@ -44,15 +44,19 @@ use tokio_tungstenite::{
 use tower::ServiceExt;
 
 const LOKI_PORT: u16 = 3100;
-/// Loki release image the whole differential suite pins its wire semantics to.
+/// The Loki release image that the whole differential suite pins its wire semantics to.
 const LOKI_IMAGE: &str = "mirror.gcr.io/grafana/loki";
-/// Loki release tag the whole differential suite pins its wire semantics to.
+/// The Loki release tag that the whole differential suite pins its wire semantics to.
 const LOKI_TAG: &str = "3.4.2";
-/// Seconds testcontainers waits after container start before `/ready` polling.
+/// Seconds that testcontainers waits after container start, before it polls `/ready`.
 const LOKI_STARTUP_WAIT_SECS: u64 = 2;
-/// Tenant id (`X-Scope-OrgID`) used for every push and query in this suite.
+/// The tenant id for every push and query in this suite.
+///
+/// The suite sends this id in the `X-Scope-OrgID` header.
 const TENANT: &str = "tenant-a";
-/// Byte cap when draining an in-process response body (results are tiny).
+/// The byte cap for a drain of an in-process response body.
+///
+/// The results are small.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, PartialEq, ::prost::Message)]

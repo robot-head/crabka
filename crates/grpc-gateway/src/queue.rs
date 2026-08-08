@@ -1,4 +1,4 @@
-//! Pull-based gateway access to Kafka share groups (KIP-932 work queues).
+//! Pull-based gateway access to Kafka share groups, the KIP-932 work queues.
 
 use std::{
     net::SocketAddr,
@@ -58,9 +58,11 @@ impl QueueSession {
     }
 }
 
-/// Process-local queue sessions. Broker-side acquisition expiry remains the
-/// durability and redelivery authority; this table only keeps native consumer
-/// connections alive between unary RPCs.
+/// Process-local queue sessions.
+///
+/// Broker-side acquisition expiry stays the durability and redelivery
+/// authority. This table only keeps native consumer connections alive between
+/// unary RPCs.
 pub struct QueueSessionTable {
     sessions: DashMap<String, Arc<QueueSession>>,
     capacity: Arc<Semaphore>,
@@ -389,8 +391,8 @@ fn ack_record(entry: &pb::QueueAckEntry) -> ShareConsumerRecord {
     }
 }
 
-/// Apply explicit share acknowledgements. Each entry is committed separately
-/// so a broker verdict can be returned for that exact coordinate.
+/// Apply explicit share acknowledgements. This function commits each entry
+/// separately, so it can return a broker verdict for that exact coordinate.
 ///
 /// # Errors
 /// Returns a Connect error when the queue session is missing or belongs to a

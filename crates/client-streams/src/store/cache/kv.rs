@@ -1,27 +1,29 @@
-//! `CachingKeyValueStore`: byte-level write-back caching wrapper over a
-//! `ByteKeyValueStore`. Ports Kafka `CachingKeyValueStore`.
+//! `CachingKeyValueStore`, a byte-level write-back caching wrapper over a
+//! `ByteKeyValueStore`. It ports the Kafka `CachingKeyValueStore`.
 //!
-//! Reads are cache-first: a cache hit (including a tombstone, i.e. a dirty
-//! `None`) wins over the underlying store. Writes are write-back: `put`/`delete`
-//! only stage a dirty entry in the cache and are pushed THROUGH to the inner
-//! store on `flush`. `flush` also returns the drained dirty entries so the
-//! caller can forward them downstream (Kafka's flush listener).
+//! Reads are cache-first. A cache hit wins over the underlying store, and this
+//! includes a tombstone, which is a dirty `None`. Writes are write-back.
+//! `put` and `delete` only stage a dirty entry in the cache, and `flush` pushes
+//! that entry THROUGH to the inner store. `flush` also returns the drained dirty
+//! entries, so the caller can forward them downstream. This matches Kafka's
+//! flush listener.
 //!
 //! ## Inner mutability / locking
 //!
-//! [`ByteKeyValueStore`]'s `put`/`delete` take `&mut self`, so `inner` is held
-//! behind a `tokio::sync::Mutex` — its async methods are awaited while the guard
-//! is held, which a `std::sync::Mutex` guard cannot do (`await_holding_lock`).
-//! The cache, whose ops are synchronous, uses a plain `std::sync::Mutex` whose
-//! guard is always dropped before any `.await`. All public methods take `&self`
-//! so the store can be shared.
+//! The `put` and `delete` of [`ByteKeyValueStore`] take `&mut self`, so `inner`
+//! sits behind a `tokio::sync::Mutex`. The code awaits its async methods while
+//! it holds the guard, and a `std::sync::Mutex` guard cannot do that, as
+//! `await_holding_lock` shows. The cache operations are synchronous, so the
+//! cache uses a plain `std::sync::Mutex`, and the code always drops that guard
+//! before any `.await`. All public methods take `&self`, so the store can be
+//! shared.
 //!
 //! ## Merged `range`
 //!
-//! [`NamedCache::range`] yields the staged entries whose key falls in `[lo, hi)`
-//! in ascending memcmp order, so the merge enumerates cache candidates directly
-//! off the cache (no shadow key set). Cache entries win on key collision and a
-//! cached tombstone hides the inner value.
+//! [`NamedCache::range`] gives the staged entries whose key falls in `[lo, hi)`,
+//! in ascending memcmp order. The merge therefore reads the cache candidates
+//! directly off the cache and needs no shadow key set. A cache entry wins on a
+//! key collision, and a cached tombstone hides the inner value.
 
 use std::{
     collections::BTreeMap,
@@ -42,8 +44,9 @@ use crate::{
 pub(crate) struct CachingKeyValueStore {
     cache: Arc<Mutex<NamedCache>>,
     inner: AsyncMutex<Box<dyn ByteKeyValueStore>>,
-    /// Cache name, captured so `clear` can rebuild an empty [`NamedCache`]
-    /// (which has no in-place reset) under the same identity.
+    /// The cache name. The store captures it so `clear` can rebuild an empty
+    /// [`NamedCache`] under the same identity, because a [`NamedCache`] has no
+    /// in-place reset.
     name: String,
 }
 
@@ -56,7 +59,7 @@ impl CachingKeyValueStore {
         }
     }
 
-    /// Like [`new`](Self::new) but records the cache's name for `clear`.
+    /// Like [`new`](Self::new), but it records the cache's name for `clear`.
     pub fn with_name(
         cache: Arc<Mutex<NamedCache>>,
         inner: Box<dyn ByteKeyValueStore>,
@@ -69,8 +72,9 @@ impl CachingKeyValueStore {
         }
     }
 
-    /// Cache-first read: a cache hit (including a tombstone, a dirty `None`)
-    /// wins; otherwise fall through to the inner store.
+    /// Cache-first read. A cache hit wins, and this includes a tombstone, which
+    /// is a dirty `None`. Without a cache hit, the read falls through to the
+    /// inner store.
     pub async fn get(&self, key: &[u8]) -> Option<Bytes> {
         let key = Bytes::copy_from_slice(key);
         // Take the cached value out of the guard before any await.
@@ -87,24 +91,27 @@ impl CachingKeyValueStore {
         }
     }
 
-    /// Write-back put: stage a dirty entry in the cache carrying its context.
-    /// The inner store is not touched until `flush`.
+    /// Write-back put. It stages a dirty entry in the cache with its context.
+    /// The inner store stays untouched until `flush`.
     pub fn put(&self, key: Bytes, value: Bytes, ctx: RecordContext) -> std::future::Ready<()> {
         let mut cache = self.cache.lock().unwrap();
         cache.put(key, LruCacheEntry::new(Some(value), true, ctx));
         std::future::ready(())
     }
 
-    /// Write-back delete: stage a dirty tombstone (`None`) in the cache.
+    /// Write-back delete. It stages a dirty tombstone, which is a `None`, in the
+    /// cache.
     pub fn delete(&self, key: Bytes, ctx: RecordContext) -> std::future::Ready<()> {
         let mut cache = self.cache.lock().unwrap();
         cache.delete(key, ctx);
         std::future::ready(())
     }
 
-    /// Merged range over `[lo, hi)`: the cache layer is overlaid on the inner
-    /// store. Cache entries win on key collision, and a cached tombstone hides
-    /// the inner value (the key is omitted). Returns key-sorted `(key, value)`.
+    /// Merged range over `[lo, hi)`, with the cache layer over the inner store.
+    ///
+    /// A cache entry wins on a key collision. A cached tombstone hides the inner
+    /// value, and the result omits that key. The method returns key-sorted
+    /// `(key, value)` pairs.
     pub async fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, Bytes)> {
         // Seed the merged view from the inner store.
         let mut merged: BTreeMap<Bytes, Bytes> = {
@@ -133,9 +140,12 @@ impl CachingKeyValueStore {
         merged.into_iter().collect()
     }
 
-    /// Flush: drain dirty entries in insertion order, write each THROUGH to the
-    /// inner store (`put` the value, `delete` on a tombstone), clear dirty, and
-    /// return the drained entries so the caller can forward them downstream.
+    /// Flush the cache.
+    ///
+    /// The method drains the dirty entries in insertion order and writes each one
+    /// THROUGH to the inner store: `put` for a value and `delete` for a
+    /// tombstone. It then clears the dirty set and returns the drained entries,
+    /// so the caller can forward them downstream.
     pub async fn flush(&self) -> Vec<(Bytes, LruCacheEntry)> {
         let mut collected: Vec<(Bytes, LruCacheEntry)> = Vec::new();
         {
@@ -158,19 +168,23 @@ impl CachingKeyValueStore {
         collected
     }
 
-    /// Write straight through to the inner store, bypassing the cache. Used by
-    /// the restore path (`apply_changelog`), which replays the committed
-    /// changelog into the state below the cache without staging dirty entries.
+    /// Write straight through to the inner store and bypass the cache.
+    ///
+    /// The restore path (`apply_changelog`) uses this method. It replays the
+    /// committed changelog into the state below the cache and stages no dirty
+    /// entries.
     pub async fn put_inner(&self, key: Bytes, value: Bytes) {
         self.inner.lock().await.put(key, value).await;
     }
 
-    /// Delete straight through to the inner store, bypassing the cache (restore).
+    /// Delete straight through to the inner store and bypass the cache. The
+    /// restore path uses this method.
     pub async fn delete_inner(&self, key: &[u8]) {
         self.inner.lock().await.delete(key).await;
     }
 
-    /// Clear both the cache layer and the inner store (EOS rollback reset).
+    /// Clear both the cache layer and the inner store. This is the EOS rollback
+    /// reset.
     pub async fn clear(&self) {
         {
             let mut cache = self.cache.lock().unwrap();
@@ -179,9 +193,10 @@ impl CachingKeyValueStore {
         self.inner.lock().await.clear().await;
     }
 
-    /// Merged unbounded scan: every inner entry overlaid with the cache. Cache
-    /// entries win on key collision and a cached tombstone hides the inner value.
-    /// Returns key-sorted `(key, value)`.
+    /// Merged unbounded scan, with the cache over every inner entry.
+    ///
+    /// A cache entry wins on a key collision, and a cached tombstone hides the
+    /// inner value. The method returns key-sorted `(key, value)` pairs.
     pub async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
         let mut merged: BTreeMap<Bytes, Bytes> = {
             let inner = self.inner.lock().await;
@@ -204,13 +219,15 @@ impl CachingKeyValueStore {
         merged.into_iter().collect()
     }
 
-    /// Flush dirty entries in insertion order, capturing the inner OLD value
-    /// BEFORE each write-through. For each entry: read `old = inner.get(&k)`,
-    /// then write the new value through (`put` / `delete` on a tombstone), and
-    /// return `(key, old, new, context)`. `old`/`new` are `Option<Bytes>`
-    /// (`None` = absent / tombstone). The typed store uses `old` (the
-    /// last-committed value) to build the deduped downstream `Change` and the
-    /// context to stamp the forwarded record.
+    /// Flush the dirty entries in insertion order and capture the inner OLD
+    /// value BEFORE each write-through.
+    ///
+    /// For each entry the method reads `old = inner.get(&k)`, then writes the new
+    /// value through with `put`, or with `delete` for a tombstone. It returns
+    /// `(key, old, new, context)`. `old` and `new` are `Option<Bytes>`, where
+    /// `None` means absent or a tombstone. The typed store uses `old`, the
+    /// last-committed value, to build the deduped downstream `Change`, and it
+    /// uses the context to stamp the forwarded record.
     pub async fn flush_with_old(
         &self,
     ) -> Vec<(Bytes, Option<Bytes>, Option<Bytes>, RecordContext)> {
@@ -345,7 +362,8 @@ mod tests {
         assert_eq!(r, vec![(b(b"b"), b(b"2"))]);
     }
 
-    /// A cache miss falls through to the inner store (the `None` arm of `get`).
+    /// A cache miss falls through to the inner store, which is the `None` arm of
+    /// `get`.
     #[tokio::test]
     async fn get_falls_through_to_inner_on_miss() {
         let mut inner = InMemoryBytes::default();
@@ -358,8 +376,8 @@ mod tests {
         assert_eq!(store.get(b"missing").await, None);
     }
 
-    /// `scan_all` overlays the full cache on the full inner store: cache wins on
-    /// collision and a cached tombstone hides the inner value.
+    /// `scan_all` puts the full cache over the full inner store. The cache wins
+    /// on a collision, and a cached tombstone hides the inner value.
     #[tokio::test]
     async fn scan_all_merges_cache_and_underlying() {
         let mut inner = InMemoryBytes::default();
@@ -383,8 +401,8 @@ mod tests {
         );
     }
 
-    /// `put_inner` / `delete_inner` write straight through, bypassing the cache:
-    /// no dirty entry is staged (a subsequent `flush` drains nothing).
+    /// `put_inner` and `delete_inner` write straight through and bypass the
+    /// cache. They stage no dirty entry, so a later `flush` drains nothing.
     #[tokio::test]
     async fn put_and_delete_inner_bypass_the_cache() {
         let store = CachingKeyValueStore::new(cache(), Box::new(InMemoryBytes::default()));
@@ -400,8 +418,8 @@ mod tests {
         assert!(store.flush().await.is_empty());
     }
 
-    /// `clear` empties both the cache layer (dropping staged dirty entries) and
-    /// the inner store.
+    /// `clear` empties both the cache layer, which drops the staged dirty
+    /// entries, and the inner store.
     #[tokio::test]
     async fn clear_empties_cache_and_inner() {
         let mut inner = InMemoryBytes::default();
@@ -451,8 +469,8 @@ mod tests {
         assert_eq!(store.get(b"fresh").await, Some(b(b"v")));
     }
 
-    /// `flush_with_old` on a tombstone returns `new = None` and deletes the inner
-    /// value through (the tombstone arm of the write-through).
+    /// `flush_with_old` on a tombstone returns `new = None` and deletes the
+    /// inner value through. This is the tombstone arm of the write-through.
     #[tokio::test]
     async fn flush_with_old_tombstone_deletes_through() {
         let mut inner = InMemoryBytes::default();

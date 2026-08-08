@@ -1,6 +1,6 @@
-//! JSON Schema: parse as JSON + well-formedness; canonical form = recursively
-//! key-sorted compact JSON (the dedup key). Compatibility uses the in-tree
-//! structural diff.
+//! JSON Schema support. This module parses the input as JSON and checks
+//! well-formedness. The canonical form is recursively key-sorted compact JSON,
+//! and it is the dedup key. Compatibility uses the in-tree structural diff.
 
 mod compat;
 mod diff;
@@ -12,8 +12,9 @@ pub struct JsonSchema {
     value: serde_json::Value,
     /// Resolved registry references as `(name, parsed-document)` pairs, where
     /// `name` is the `$ref` target string a referring schema uses. JSON refs do
-    /// NOT affect the canonical form (cp does not inline them) — they only feed
-    /// the compatibility diff so a cross-subject `$ref` resolves to its target.
+    /// NOT affect the canonical form, because cp does not inline them. They only
+    /// feed the compatibility diff, so a cross-subject `$ref` resolves to its
+    /// target.
     refs: Vec<(String, serde_json::Value)>,
 }
 
@@ -50,9 +51,10 @@ pub fn parse(schema: &str, refs: &[super::ResolvedReference]) -> Result<JsonSche
     Ok(JsonSchema { value, refs })
 }
 
-/// Confluent JSON Schema compatibility: can a reader using `reader` read data
-/// written with `writer`? Diffs (original = writer, update = reader); rejects if
-/// any difference is backward-incompatible.
+/// Confluent JSON Schema compatibility. It answers whether a reader that uses
+/// `reader` can read data written with `writer`. It diffs with `writer` as the
+/// original and `reader` as the update, and rejects the pair if any difference
+/// is backward-incompatible.
 #[tracing::instrument(level = "debug", name = "json.check", skip_all, fields(reader_refs = reader_refs.len(), writer_refs = writer_refs.len(), diffs = tracing::field::Empty))]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.

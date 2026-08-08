@@ -1,24 +1,28 @@
-//! Per-partition KIP-320 position metadata (sidecar to `next_offsets`) and
-//! the pure truncation-decision used by the proactive validate pass and the
-//! in-band `diverging_epoch` path.
+//! Per-partition KIP-320 position metadata, a sidecar to `next_offsets`.
+//!
+//! This module also holds the pure truncation decision that the proactive
+//! validate pass and the in-band `diverging_epoch` path use.
 
 use crabka_ids::LeaderEpoch;
 
-/// Epoch metadata for one assigned partition. The fetch *offset* itself lives
-/// in `Consumer::next_offsets`; this carries the leader-epoch state.
+/// Epoch metadata for one assigned partition.
+///
+/// The fetch *offset* itself lives in `Consumer::next_offsets`. This struct
+/// carries the leader-epoch state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PartitionPosition {
-    /// Leader epoch of the last consumed record (the `last_fetched_epoch` we
-    /// send). `-1` until a record is consumed or a committed epoch is seeded.
+    /// Leader epoch of the last consumed record. The client sends it as
+    /// `last_fetched_epoch`. It is `-1` until the client consumes a record or
+    /// seeds a committed epoch.
     pub offset_epoch: LeaderEpoch,
     /// Current leader node id from the latest metadata. `-1` if unknown.
     pub leader_id: i32,
-    /// Current leader epoch from the latest metadata (the `current_leader_epoch`
-    /// we send). `-1` if unknown.
+    /// Current leader epoch from the latest metadata. The client sends it as
+    /// `current_leader_epoch`. It is `-1` if unknown.
     pub leader_epoch: LeaderEpoch,
-    /// `true` while this partition must be validated via `OffsetForLeaderEpoch`
-    /// before it may be fetched again (set when the metadata leader epoch
-    /// advances past `offset_epoch`).
+    /// `true` while this partition must be validated with `OffsetForLeaderEpoch`
+    /// before it may be fetched again. The client sets it when the metadata
+    /// leader epoch advances past `offset_epoch`.
     pub awaiting_validation: bool,
 }
 
@@ -36,18 +40,22 @@ impl Default for PartitionPosition {
 /// Outcome of validating a fetch position against the leader's epoch history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ValidationOutcome {
-    /// Position is consistent with the leader; resume fetching. Carries the
-    /// leader's epoch for that offset (to refresh `offset_epoch`).
+    /// The position is consistent with the leader. Resume fetching. This
+    /// variant carries the leader's epoch for that offset, which refreshes
+    /// `offset_epoch`.
     Valid { leader_epoch: LeaderEpoch },
-    /// Truncation detected; the fetcher must reset to `safe_offset`.
+    /// Truncation detected. The fetcher must reset to `safe_offset`.
     Truncated { safe_offset: i64 },
 }
 
-/// Decide whether a position has diverged, given the fetch `offset`, the epoch
-/// we last consumed (`offset_epoch`), and the leader's answer for that epoch
-/// (`leader_end_offset`, `leader_epoch`). This is Kafka's consumer-side rule:
-/// truncation iff the leader's epoch for our data is older than ours, or its
-/// end offset for that epoch is below our position.
+/// Decide whether a position has diverged.
+///
+/// The inputs are the fetch `offset`, the epoch of the last consumed record in
+/// `offset_epoch`, and the leader's answer for that epoch in
+/// `leader_end_offset` and `leader_epoch`. This is Kafka's consumer-side rule:
+/// truncation iff the leader's epoch for the client's data is older than the
+/// client's, or the leader's end offset for that epoch is below the client's
+/// position.
 pub(crate) fn classify(
     offset: i64,
     offset_epoch: LeaderEpoch,

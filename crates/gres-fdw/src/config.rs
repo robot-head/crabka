@@ -1,5 +1,6 @@
-//! Resolution of catalog `ForeignServer` + `UserMapping` + table OPTIONS into
-//! a [`ConnProfile`] the scanner/source uses to connect to Kafka.
+//! Resolves catalog `ForeignServer`, `UserMapping`, and table OPTIONS into a
+//! [`ConnProfile`]. The scanner and the source use that profile to connect to
+//! Kafka.
 
 use crabka_client_core::security::{ClientSecurity, SaslCredentials, TlsConnectorConfig};
 use crabka_security::{ListenerProtocol, SaslMechanism};
@@ -23,13 +24,13 @@ pub struct ConnProfile {
     pub key_format: Wire,
 }
 
-/// Resolve a [`crabka_pgcatalog::ForeignServer`] + optional [`crabka_pgcatalog::UserMapping`] +
-/// foreign-table OPTIONS into a [`ConnProfile`].
+/// Resolves a [`crabka_pgcatalog::ForeignServer`], an optional [`crabka_pgcatalog::UserMapping`],
+/// and foreign-table OPTIONS into a [`ConnProfile`].
 ///
 /// # Required options
-/// * **Server option** `bootstrap` — comma-separated `host:port` list, unless a
-///   caller-supplied default bootstrap is present.
-/// * **Table option** `topic` — the Kafka topic name.
+/// * **Server option** `bootstrap` is a comma-separated `host:port` list. It
+///   is required unless a caller-supplied default bootstrap is present.
+/// * **Table option** `topic` is the Kafka topic name.
 ///
 /// # Optional options
 /// | Source  | Key                 | Default       |
@@ -42,11 +43,13 @@ pub struct ConnProfile {
 /// | Table   | `value_format`      | `"raw"`       |
 /// | Table   | `key_format`        | `"raw"`       |
 ///
-/// Unknown option keys are silently ignored (`PostgreSQL` FDW leniency).
+/// This function silently ignores unknown option keys, which matches
+/// `PostgreSQL` FDW leniency.
 ///
 /// # Errors
-/// Returns [`KafkaFdwError::Config`] when a required option is absent or an
-/// option value is unrecognised (e.g. unknown `security_protocol`).
+/// Returns [`KafkaFdwError::Config`] when a required option is absent, or when
+/// an option value is unrecognised, for example an unknown
+/// `security_protocol`.
 pub fn resolve(
     server: &crabka_pgcatalog::ForeignServer,
     mapping: Option<&crabka_pgcatalog::UserMapping>,
@@ -103,9 +106,10 @@ pub fn resolve(
 
 /// Server-level connection info, resolved without a per-table `topic`.
 ///
-/// `IMPORT FOREIGN SCHEMA` has no table OPTIONS to supply a `topic` — it
-/// *discovers* topics — so it resolves only the bootstrap + registry +
-/// security from the [`crabka_pgcatalog::ForeignServer`] / [`crabka_pgcatalog::UserMapping`].
+/// `IMPORT FOREIGN SCHEMA` has no table OPTIONS to supply a `topic`, because
+/// it *discovers* topics, so it resolves only the bootstrap, the registry,
+/// and the security from the [`crabka_pgcatalog::ForeignServer`]
+/// and the [`crabka_pgcatalog::UserMapping`].
 #[derive(Debug)]
 pub struct ServerProfile {
     /// Bootstrap broker addresses, e.g. `["h1:9092", "h2:9092"]`.
@@ -116,9 +120,10 @@ pub struct ServerProfile {
     pub security: Option<ClientSecurity>,
 }
 
-/// Resolve a [`crabka_pgcatalog::ForeignServer`] (+ optional [`crabka_pgcatalog::UserMapping`])
-/// into the connection-level [`ServerProfile`], **without** requiring a
-/// `topic`. Used by the `IMPORT FOREIGN SCHEMA` path.
+/// Resolves a [`crabka_pgcatalog::ForeignServer`], and an optional
+/// [`crabka_pgcatalog::UserMapping`], into the connection-level
+/// [`ServerProfile`] **without** a `topic`. The `IMPORT FOREIGN SCHEMA` path
+/// uses it.
 ///
 /// # Errors
 /// Returns [`KafkaFdwError::Config`] when `bootstrap` is missing, the
@@ -191,14 +196,14 @@ fn parse_listener_protocol(s: &str) -> Result<ListenerProtocol, KafkaFdwError> {
     }
 }
 
-/// Build [`ClientSecurity`] from the resolved protocol and mapping options.
+/// Builds [`ClientSecurity`] from the resolved protocol and mapping options.
 ///
-/// Deviation from the task sketch: `SaslCredentials` does **not** have
-/// `ScramSha256`/`ScramSha512` variants; it uses a single `Scram { mechanism,
-/// username, password }` variant where `mechanism` is
-/// [`crabka_security::SaslMechanism`]. Both `SCRAM-SHA-256` and
-/// `SCRAM-SHA-512` map to this variant with the appropriate
-/// `SaslMechanism::ScramSha256` / `SaslMechanism::ScramSha512` discriminant.
+/// `SaslCredentials` has **no** `ScramSha256` or `ScramSha512` variant. It
+/// uses a single `Scram { mechanism, username, password }` variant, where
+/// `mechanism` is [`crabka_security::SaslMechanism`]. Both `SCRAM-SHA-256`
+/// and `SCRAM-SHA-512` map to this variant with the matching
+/// `SaslMechanism::ScramSha256` or `SaslMechanism::ScramSha512`
+/// discriminant.
 fn build_security(
     protocol: ListenerProtocol,
     bootstrap: &[String],

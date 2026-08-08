@@ -1,6 +1,8 @@
-//! SP33: SQL joins, end-to-end over the wire (extended protocol via `tokio_postgres`):
-//! every join type, comma form, USING/NATURAL, qualified refs, `a.*`, self/multi-way
-//! joins, derived tables, aggregate-over-join, and the column-resolution error
+//! SP33: SQL joins, end-to-end over the wire with the extended protocol.
+//!
+//! The tests drive `tokio_postgres`. They cover every join type, the comma
+//! form, USING/NATURAL, qualified refs, `a.*`, self joins and multi-way joins,
+//! derived tables, aggregate-over-join, and the column-resolution error
 //! surface (42702 / 42703 / 42P01).
 
 use std::sync::Arc;
@@ -34,8 +36,10 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
-/// Seed the standard emp/dept fixture. emp 'cy' has a NULL `dept_id` (unmatched on
-/// the left); dept 'ops'(30) has no employee (unmatched on the right).
+/// Seed the standard emp/dept fixture.
+///
+/// emp 'cy' has a NULL `dept_id`, so it is unmatched on the left. dept 'ops'(30)
+/// has no employee, so it is unmatched on the right.
 async fn seed(client: &tokio_postgres::Client) {
     client
         .batch_execute("CREATE TABLE emp (id int4, name text, dept_id int4)")
@@ -353,12 +357,13 @@ async fn unknown_qualifier_is_42p01() {
 }
 
 /// A large equi-join must not degrade to a full inner scan per outer row.
-/// `pg_regress`'s `join` corpus self-joins a 10k-row table on an equality —
-/// 100 million predicate evaluations, each copying a 500-byte text column, when
-/// the join folds as a nested loop — and never answers. The wall clock is the
-/// only thing that distinguishes the two shapes end-to-end, so the bound is
-/// deliberately far above what the indexed probe needs (well under a second)
-/// and far below what the nested loop needs (minutes).
+///
+/// `pg_regress`'s `join` corpus self-joins a 10k-row table on an equality. If
+/// the join folds as a nested loop, it does 100 million predicate evaluations,
+/// each one copies a 500-byte text column, and the query never answers. The
+/// wall clock is the only thing that separates the two shapes end-to-end. The
+/// bound is therefore far above what the indexed probe needs, which is well
+/// under a second, and far below what the nested loop needs, which is minutes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_equi_self_join_answers_without_scanning_every_pair() {
     let client = connect(spawn().await).await;

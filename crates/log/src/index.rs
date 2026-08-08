@@ -1,5 +1,5 @@
-//! Sparse offset index. 8 bytes per entry: `relative_offset` (u32 BE)
-//! + position (u32 BE). Entries are monotonically increasing.
+//! Sparse offset index. Each entry is 8 bytes: `relative_offset` as u32 BE
+//! and position as u32 BE. Entries increase monotonically.
 
 // `truncate_by_position`, `truncate_by_relative_offset`, `entry_count`,
 // and `TimeIndex::{lookup, last_entry}` are consumed by log truncation,
@@ -36,13 +36,15 @@ const _: [(); OFFSET_ENTRY_SIZE] = [(); std::mem::size_of::<OffsetEntryRaw>()];
 #[derive(Debug)]
 pub struct OffsetIndex {
     file: File,
-    /// Entries currently in the file. Lazily loaded into memory on construction.
+    /// Entries currently in the file. The constructor loads them into memory
+    /// lazily.
     entries: Vec<(u32, u32)>,
 }
 
 impl OffsetIndex {
-    /// Open or create an offset-index file. If the file exists, load its
-    /// entries into memory. If it doesn't, create an empty file.
+    /// Open or create an offset-index file. If the file exists, this method
+    /// loads its entries into memory. If it does not exist, this method
+    /// creates an empty file.
     #[instrument(
         level = "debug",
         skip_all,
@@ -81,7 +83,7 @@ impl OffsetIndex {
         Ok(Self { file, entries })
     }
 
-    /// Append a new entry. Caller ensures monotonicity.
+    /// Append a new entry. The caller must keep the entries monotonic.
     pub fn append(&mut self, relative_offset: u32, position: u32) -> Result<(), LogError> {
         let raw = OffsetEntryRaw {
             relative_offset: U32::new(relative_offset),
@@ -93,16 +95,16 @@ impl OffsetIndex {
         Ok(())
     }
 
-    /// Find the byte position to start reading at for a given relative offset.
-    /// Returns the position of the largest entry with `relative_offset <= target`,
-    /// or 0 if no entries are present.
+    /// Find the byte position where a read for a given relative offset must
+    /// start. This method returns the position of the largest entry with
+    /// `relative_offset <= target`, or 0 when there are no entries.
     #[must_use]
     pub fn lookup(&self, target: u32) -> u32 {
         crabka_verified::offset_index_lookup(&self.entries, target)
     }
 
-    /// Truncate entries (and the on-disk file) so that all entries with
-    /// `position >= max_position_exclusive` are removed.
+    /// Truncate the entries, and the on-disk file, so that no entry with
+    /// `position >= max_position_exclusive` remains.
     #[instrument(level = "debug", skip(self), fields(entries = tracing::field::Empty), err)]
     pub fn truncate_by_position(&mut self, max_position_exclusive: u32) -> Result<(), LogError> {
         let new_len = self
@@ -118,10 +120,10 @@ impl OffsetIndex {
         Ok(())
     }
 
-    /// Byte position of the first entry whose `relative_offset >= target`,
-    /// or `None` when every entry is below `target`. Every batch covering
-    /// an offset `< target` lives strictly below this position, so it
-    /// bounds a from-start scan that must stop at `target`.
+    /// Byte position of the first entry whose `relative_offset >= target`, or
+    /// `None` when every entry is below `target`. Every batch that covers an
+    /// offset `< target` lies strictly below this position, so the position
+    /// bounds a scan from the start that must stop at `target`.
     #[must_use]
     pub fn position_at_or_after(&self, target: u32) -> Option<u32> {
         match self.entries.binary_search_by_key(&target, |&(rel, _)| rel) {
@@ -261,7 +263,7 @@ mod tests {
 
 // ===== TimeIndex =====
 
-/// 12 bytes per entry: timestamp (i64 BE) + `relative_offset` (u32 BE).
+/// 12 bytes per entry: timestamp as i64 BE and `relative_offset` as u32 BE.
 pub const TIME_ENTRY_SIZE: usize = 12;
 
 /// On-disk byte layout of one time-index entry.
@@ -318,7 +320,7 @@ impl TimeIndex {
         Ok(Self { file, entries })
     }
 
-    /// Append. Caller ensures monotonicity.
+    /// Append an entry. The caller must keep the entries monotonic.
     pub fn append(&mut self, timestamp: i64, relative_offset: u32) -> Result<(), LogError> {
         let raw = TimeEntryRaw {
             timestamp: I64::new(timestamp),
@@ -330,9 +332,9 @@ impl TimeIndex {
         Ok(())
     }
 
-    /// Find the relative offset at or after the given timestamp.
-    /// Returns the relative offset of the largest entry with
-    /// `timestamp <= target`, or 0 if no entries.
+    /// Find the relative offset at or after the given timestamp. This method
+    /// returns the relative offset of the largest entry with
+    /// `timestamp <= target`, or 0 when there are no entries.
     #[must_use]
     pub fn lookup(&self, target_timestamp: i64) -> u32 {
         match self

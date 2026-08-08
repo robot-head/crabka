@@ -1,34 +1,35 @@
-//! `Consumer::seek` — set the fetch position for an assigned (or
-//! yet-to-be-assigned) partition, KIP-320-aware.
+//! `Consumer::seek` sets the KIP-320-aware fetch position for a partition,
+//! whether it is assigned yet or not.
 //!
 //! ## Why a *pending* seek rather than a direct `next_offsets` write
 //!
 //! A subscribe-based consumer does not own its partitions until the coordinator
-//! task completes the first `JoinGroup`/`SyncGroup` round, and the offset prime
-//! that follows assignment (`coordinator::prime_offsets`, and the initial prime
-//! in `consumer::start` step 5) writes `next_offsets` from the committed offset
-//! or the `auto.offset.reset` baseline. A `seek` that wrote `next_offsets`
-//! directly would therefore be *clobbered* by a prime that runs after it — for
-//! example a restart that seeks before the very first assignment lands.
+//! task completes the first `JoinGroup`/`SyncGroup` round. The offset prime
+//! that follows assignment writes `next_offsets` from the committed offset or
+//! from the `auto.offset.reset` baseline. That prime is
+//! `coordinator::prime_offsets`, plus the initial prime in `consumer::start`
+//! step 5. A `seek` that wrote `next_offsets` directly would therefore be
+//! *clobbered* by a prime that runs after it, for example on a restart that
+//! seeks before the very first assignment lands.
 //!
-//! So [`Consumer::seek`] records the target in `pending_seeks` instead, and the
-//! position is materialised into `next_offsets` at the top of every
-//! [`poll`](Consumer::poll) (via [`apply_pending_seeks`](Consumer::apply_pending_seeks)),
-//! *after* the prime, but *before* the `FetchRequest` for that poll is built.
-//! Consequences, all load-bearing:
+//! So [`Consumer::seek`] records the target in `pending_seeks` instead.
+//! [`apply_pending_seeks`](Consumer::apply_pending_seeks) then materialises the
+//! position into `next_offsets` at the top of every [`poll`](Consumer::poll),
+//! *after* the prime but *before* the code builds the `FetchRequest` for that
+//! poll. The consequences are all load-bearing:
 //!
 //! - **No skipped records / no data gap.** The sought value is the next offset
-//!   to fetch; the very next `Fetch` starts there, so nothing between the sought
+//!   to fetch. The very next `Fetch` starts there, so nothing between the sought
 //!   offset and the prior position is ever passed over.
-//! - **No pre-seek records delivered.** Because the seek lands before the fetch
-//!   is built, `poll` never fetches — let alone returns — a record below the
-//!   sought offset. There is no window in which a stale `next_offsets` drives a
-//!   fetch the caller asked to skip past.
-//! - **The prime cannot win.** A prime for an assigned partition runs while we
-//!   hold no poll, and the pending entry outlives it: the entry is consumed only
-//!   once it has been written into `next_offsets` for a *currently assigned*
-//!   partition. A seek issued before assignment simply waits in `pending_seeks`
-//!   until its partition appears in `assigned`.
+//! - **No pre-seek records delivered.** The seek lands before the code builds
+//!   the fetch, so `poll` never fetches a record below the sought offset, and
+//!   never returns one. There is no window in which a stale `next_offsets`
+//!   drives a fetch that the caller asked to skip past.
+//! - **The prime cannot win.** A prime for an assigned partition runs while no
+//!   poll is in progress, and the pending entry outlives it. The entry is
+//!   consumed only once it has been written into `next_offsets` for a
+//!   *currently assigned* partition. A seek issued before assignment waits in
+//!   `pending_seeks` until its partition appears in `assigned`.
 //!
 //! This mirrors the JVM client's `seek`: a one-shot position set that takes
 //! effect on the next fetch and is not re-applied after a later rebalance.
@@ -38,20 +39,20 @@ use crate::{consumer::Consumer, error::ConsumerError};
 impl Consumer {
     /// Set the next offset `poll` will fetch for `(topic, partition)`.
     ///
-    /// `offset` is the **next** offset to read — i.e. `last_consumed + 1`, the
+    /// `offset` is the **next** offset to read, that is `last_consumed + 1`, the
     /// same convention as a committed group offset. Pass `0` to re-read a
     /// partition from the beginning.
     ///
-    /// The seek is *pending*: it is materialised into the live fetch position at
-    /// the start of the next [`poll`](Consumer::poll) that observes the partition
-    /// as assigned. This is deliberate — a subscribe-based consumer assigns
-    /// partitions asynchronously on `JoinGroup`/`SyncGroup`, and the offset prime
-    /// that follows assignment would clobber an eager direct write. Seeking a
-    /// partition the consumer is not (yet) assigned is therefore valid: the
-    /// target is held until the partition is assigned, then applied before any
-    /// record is fetched for it — so no record below `offset` is ever delivered
-    /// and none above it is skipped. Re-seeking the same partition before the
-    /// next poll replaces the prior target.
+    /// The seek is *pending*. The next [`poll`](Consumer::poll) that sees the
+    /// partition as assigned materialises it into the live fetch position at its
+    /// start. This is deliberate. A subscribe-based consumer assigns partitions
+    /// asynchronously on `JoinGroup`/`SyncGroup`, and the offset prime that
+    /// follows assignment would clobber an eager direct write. A seek on a
+    /// partition that the consumer does not hold yet is therefore valid. The
+    /// method holds the target until the partition is assigned, then applies it
+    /// before any record is fetched for that partition. No record below `offset`
+    /// is ever delivered, and none above it is skipped. A second seek on the
+    /// same partition before the next poll replaces the prior target.
     ///
     /// Like the JVM client's `seek`, this is a one-shot position set: once
     /// applied it is not re-applied after a subsequent rebalance.
@@ -87,16 +88,16 @@ impl Consumer {
     /// Materialise any pending [`seek`](Self::seek) whose partition is currently
     /// assigned into `next_offsets`, then drop it from the pending set.
     ///
-    /// Called at the very top of [`poll`](Consumer::poll), after the coordinator
-    /// has had its chance to prime offsets on assignment and before the fetch is
-    /// built — so a seek always wins over the prime, and the sought offset is the
-    /// one fetched.
+    /// [`poll`](Consumer::poll) calls this at its very top, after the
+    /// coordinator has had its chance to prime offsets on assignment and before
+    /// the code builds the fetch. A seek therefore always wins over the prime,
+    /// and the sought offset is the one fetched.
     ///
-    /// Lock order matches `poll`'s (`next_offsets` then `positions`) so this can
-    /// never deadlock against a concurrent rebalance. A seek also clears the
-    /// partition's KIP-320 `offset_epoch`/`awaiting_validation` state: the caller
-    /// is asserting a fresh position with no consumed-epoch history to validate
-    /// against, so a stale epoch must not wedge the partition in
+    /// The lock order matches `poll`'s, `next_offsets` then `positions`, so this
+    /// can never deadlock against a concurrent rebalance. A seek also clears the
+    /// partition's KIP-320 `offset_epoch` and `awaiting_validation` state. The
+    /// caller asserts a fresh position with no consumed-epoch history to
+    /// validate against, so a stale epoch must not wedge the partition in
     /// `validate_positions`.
     #[tracing::instrument(
         name = "consumer.apply_pending_seeks",

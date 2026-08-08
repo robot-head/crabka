@@ -1,24 +1,24 @@
 //! `crabka format --add-scram` -> broker bootstrap consumption.
 //!
-//! Each test either runs the `crabka` CLI to produce a `log_dir` containing
-//! a `bootstrap.records.bin` file, or writes that file directly (for the
-//! corruption case), then starts a single-broker `Broker` pointed at the
-//! dir and verifies the broker's bootstrap path behaves correctly.
+//! Each test either runs the `crabka` CLI to produce a `log_dir` that holds a
+//! `bootstrap.records.bin` file, or writes that file directly for the
+//! corruption case. It then starts a single-broker `Broker` that points at the
+//! dir, and verifies that the broker's bootstrap path behaves correctly.
 //!
-//! The happy-path test additionally drives a full SASL/SCRAM-SHA-512
-//! handshake against the broker's `SASL_PLAINTEXT` listener to prove the
-//! seeded credential is queryable via the metadata image immediately
-//! after `Broker::start` returns.
+//! The happy-path test also drives a full SASL/SCRAM-SHA-512 handshake against
+//! the broker's `SASL_PLAINTEXT` listener. That proves the metadata image can
+//! answer a query for the seeded credential as soon as `Broker::start`
+//! returns.
 //!
 //! ## Helper duplication
 //!
-//! `drive_sasl_scram_session` / `round_trip` are copied verbatim from
+//! `drive_sasl_scram_session` and `round_trip` are copied verbatim from
 //! `tests/auth_handlers.rs`. Cargo's integration-test model gives each
-//! `tests/*.rs` file its own crate root — sharing code between two such
-//! files requires either a `tests/common/mod.rs` submodule or a copy.
-//! For a self-contained test file that consumes only these two
-//! helpers, a verbatim copy keeps blast radius small and avoids touching
-//! the (1500+ line) auth test file.
+//! `tests/*.rs` file its own crate root, so sharing code between two such
+//! files needs either a `tests/common/mod.rs` submodule or a copy. This test
+//! file is self-contained and uses only those two helpers, so a verbatim copy
+//! keeps the blast radius small and leaves the auth test file, over 1500
+//! lines, untouched.
 
 use std::{io, net::SocketAddr, process::Command};
 
@@ -42,14 +42,14 @@ use tokio::{
     net::TcpStream,
 };
 
-/// Run the `crabka format` binary as a subprocess.
+/// Runs the `crabka format` binary as a subprocess.
 ///
-/// `CARGO_BIN_EXE_<name>` is only populated for integration tests inside
-/// the package that declares the binary, so we shell out via the parent
-/// `cargo` invocation (`env!("CARGO")`) and let cargo locate / rebuild
-/// the `crabka-cli` binary. The `crabka-cli` dev-dep in this crate's
-/// `Cargo.toml` ensures the binary is part of this test's compile-graph
-/// so the inner `cargo run` is a cache hit, not a fresh build.
+/// Cargo populates `CARGO_BIN_EXE_<name>` only for integration tests inside
+/// the package that declares the binary. This function therefore shells out
+/// through the parent `cargo` invocation, `env!("CARGO")`, and lets cargo find
+/// or rebuild the `crabka-cli` binary. The `crabka-cli` dev-dependency in this
+/// crate's `Cargo.toml` puts the binary in this test's compile graph, so the
+/// inner `cargo run` is a cache hit instead of a fresh build.
 fn run_crabka_format(log_dir: &std::path::Path, add_scram: &str) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let out = Command::new(cargo)
@@ -160,7 +160,7 @@ async fn bootstrap_absent_legacy_path() {
 // verbatim copy is intentional — see file-level docs above.
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Drive a complete SASL/SCRAM-SHA-512 session against a `SASL_PLAINTEXT`
+/// Drives a complete SASL/SCRAM-SHA-512 session against a `SASL_PLAINTEXT`
 /// listener.
 async fn drive_sasl_scram_session(
     addr: SocketAddr,
@@ -275,9 +275,9 @@ async fn drive_sasl_scram_session(
     Ok(())
 }
 
-/// Encode a `RequestHeader v1` (or v2 when `flexible`), append the body,
-/// write the length-prefixed frame, then read one response frame and
-/// strip the `ResponseHeader`.
+/// Encodes a `RequestHeader v1`, or v2 when `flexible` is set, appends the
+/// body, and writes the length-prefixed frame. It then reads one response
+/// frame and strips the `ResponseHeader`.
 async fn round_trip(
     stream: &mut TcpStream,
     api_key: i16,

@@ -1,7 +1,9 @@
-//! `KGroupedTable<KR, VR>`: the handle between `KTable::group_by` and a terminal
-//! table aggregation (`count`/`reduce`/`aggregate`). Unlike `KGroupedStream`,
-//! the input is a `Change<V>` change-stream and the repartition topic carries a
-//! `Change<VR>` (via the `Changed` serde). `KTable.groupBy` always repartitions.
+//! `KGroupedTable<KR, VR>`, the handle between `KTable::group_by` and a terminal
+//! table aggregation such as `count`, `reduce`, or `aggregate`.
+//!
+//! Unlike `KGroupedStream`, the input is a `Change<V>` change-stream, and the
+//! repartition topic carries a `Change<VR>` through the `Changed` serde.
+//! `KTable.groupBy` always repartitions.
 
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
@@ -22,14 +24,18 @@ use crate::{
     topology::NodeHandle,
 };
 
-/// Erased thunk wiring the `Change`-carrying repartition `sink → topic → source`.
-/// Args: `(state, parent_name, sink_name, source_name, topic)`. The parent node
-/// here forwards `Record<KR, Change<VR>>` (the SELECT output).
+/// The erased thunk that wires the `Change`-carrying repartition
+/// `sink → topic → source`.
+///
+/// Its arguments are `(state, parent_name, sink_name, source_name, topic)`. The
+/// parent node here forwards `Record<KR, Change<VR>>`, which is the SELECT
+/// output.
 pub(crate) type ChangedRepartitionLowerFn =
     Box<dyn FnOnce(&mut LowerState, String, String, String, String) + Send>;
 
-/// Build a [`ChangedRepartitionLowerFn`] capturing the grouped key serde and a
-/// `Changed`-wrapped value serde so the repartition round-trip carries `Change<VR>`.
+/// Build a [`ChangedRepartitionLowerFn`] that captures the grouped key serde and
+/// a `Changed`-wrapped value serde, so the repartition round-trip carries
+/// `Change<VR>`.
 pub(crate) fn repartition_lower_changed<KR, VR, KS, VS>(
     key_serde: KS,
     value_serde: VS,
@@ -70,10 +76,12 @@ where
 /// Handle produced by `KTable::group_by[_explicit]`.
 pub struct KGroupedTable<KR, VR> {
     builder: Rc<RefCell<InternalStreamsBuilder>>,
-    /// The `KTABLE-SELECT` repartition-map node, already recorded by `group_by`
-    /// at call time (mirroring the JVM, which mints it when `groupBy()` is called
-    /// — *before* the terminal op mints the result store). The terminal op wires
-    /// the repartition off this node.
+    /// The `KTABLE-SELECT` repartition-map node, which `group_by` already
+    /// recorded at call time.
+    ///
+    /// This mirrors the JVM, which mints the node when the caller calls
+    /// `groupBy()`, *before* the terminal op mints the result store. The terminal
+    /// op wires the repartition off this node.
     select_node: NodeId,
     repartition_lower: Option<ChangedRepartitionLowerFn>,
     _pd: PhantomData<fn() -> (KR, VR)>,
@@ -115,10 +123,12 @@ where
         )
     }
 
-    /// `reduce`: fold per group with `adder`, undo with `subtractor`. Result type
-    /// stays `VR`; the first value for a group seeds (an empty group starts at
-    /// `VR::default()`, and `adder(default, first) == first` for the additive
-    /// reduce — exact JVM parity; `aggregate()` is the escape hatch otherwise).
+    /// `reduce` folds each group with `adder` and undoes with `subtractor`.
+    ///
+    /// The result type stays `VR`, and the first value for a group seeds it. An
+    /// empty group starts at `VR::default()`, and `adder(default, first)` equals
+    /// `first` for the additive reduce. This is exact JVM parity. Use
+    /// `aggregate()` as the escape hatch for anything else.
     pub fn reduce_explicit<KS, VS, Add, Sub>(
         self,
         adder: Add,
@@ -143,7 +153,8 @@ where
         )
     }
 
-    /// `aggregate`: general subtract/add aggregation into `KTable<KR, T>`.
+    /// `aggregate` is the general subtract-and-add aggregation into a
+    /// `KTable<KR, T>`.
     pub fn aggregate_explicit<KS, VS, T, I, Add, Sub>(
         self,
         init: I,
@@ -232,8 +243,8 @@ where
         self.lower::<KS, VS, T, I, Add, Sub>(materialized, store_name, init, adder, subtractor)
     }
 
-    /// Record SELECT → repartition(Changed) → AGGREGATE + store; return
-    /// `KTable<KR, T>`.
+    /// Record SELECT → repartition(Changed) → AGGREGATE and its store, then
+    /// return a `KTable<KR, T>`.
     fn lower<KS, VS, T, I, Add, Sub>(
         mut self,
         materialized: Materialized<KS, VS>,

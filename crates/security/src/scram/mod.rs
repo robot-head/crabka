@@ -1,4 +1,4 @@
-//! SCRAM (RFC 5802) — supports SHA-256 and SHA-512.
+//! SCRAM (RFC 5802) with support for SHA-256 and SHA-512.
 
 use std::{fmt, str::FromStr};
 
@@ -77,8 +77,9 @@ pub struct ScramCredential {
     pub iterations: u32,
 }
 
-/// Output byte length of the underlying hash function for a given
-/// SCRAM mechanism: 32 for SHA-256, 64 for SHA-512. Panics on a
+/// Output byte length of the underlying hash function for a SCRAM mechanism.
+///
+/// The length is 32 for SHA-256 and 64 for SHA-512. This function panics on a
 /// non-SCRAM mechanism.
 #[must_use]
 /// # Panics
@@ -109,7 +110,7 @@ pub fn hash_scram_password(
     hash_scram_password_with_salt(password, mechanism, iterations, salt)
 }
 
-/// Test-only entry that lets callers fix the salt (for golden vectors).
+/// Test-only entry that lets callers fix the salt for golden vectors.
 #[must_use]
 /// # Panics
 /// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
@@ -143,14 +144,15 @@ pub fn hash_scram_password_with_salt(
     }
 }
 
-/// Compute the PBKDF2 output ("salted password" in KIP-554 / RFC 5802
-/// language) for a given SCRAM mechanism. Output length matches
-/// [`scram_hash_len`]: 32 bytes for SHA-256, 64 bytes for SHA-512.
+/// Compute the PBKDF2 output for a SCRAM mechanism.
 ///
-/// Used by `crabka-client-admin` to populate
-/// `AlterUserScramCredentialsRequest.upsertions[].salted_password`
-/// without leaking the broker-side `derive_keys_from_salted` machinery
-/// or the raw password into the operator. Panics on a non-SCRAM
+/// KIP-554 and RFC 5802 call this output the "salted password". Its length
+/// matches [`scram_hash_len`]: 32 bytes for SHA-256, 64 bytes for SHA-512.
+///
+/// `crabka-client-admin` uses this function to populate
+/// `AlterUserScramCredentialsRequest.upsertions[].salted_password`. It does so
+/// without leaking the broker-side `derive_keys_from_salted` machinery or the
+/// raw password into the operator. This function panics on a non-SCRAM
 /// mechanism.
 #[must_use]
 /// # Panics
@@ -181,11 +183,11 @@ pub fn pbkdf2_salted(
 /// output the client sends in an `AlterUserScramCredentialsRequest`
 /// per KIP-554.
 ///
-/// The KIP places PBKDF2 on the client side: the wire request carries
-/// the already-stretched PBKDF2 output (32 bytes for SHA-256, 64 bytes
-/// for SHA-512), and the broker derives the two stored keys from it.
-/// This avoids the broker holding the raw password even briefly. The
-/// transformation, for each hash H:
+/// The KIP places PBKDF2 on the client side. The wire request carries the
+/// already-stretched PBKDF2 output, which is 32 bytes for SHA-256 and 64 bytes
+/// for SHA-512, and the broker derives the two stored keys from it. This keeps
+/// the broker from holding the raw password even briefly. The transformation,
+/// for each hash H, is:
 ///
 /// ```text
 /// client_key  = HMAC-H(salted_password, "Client Key")
@@ -193,7 +195,7 @@ pub fn pbkdf2_salted(
 /// server_key  = HMAC-H(salted_password, "Server Key")
 /// ```
 ///
-/// The mechanism argument selects which `H` to use. Panics on a
+/// The mechanism argument selects which `H` to use. This function panics on a
 /// non-SCRAM mechanism.
 #[must_use]
 /// # Panics
@@ -264,9 +266,8 @@ mod tests {
         assert2::assert!(cred.stored_key == expected_stored.as_slice());
     }
 
-    /// SHA-256 analog of the SHA-512 vector. Verifies output lengths
-    /// (32 bytes) and the same `stored_key = H(client_key)`
-    /// invariant.
+    /// SHA-256 analog of the SHA-512 vector. It checks the 32-byte output
+    /// lengths and the same `stored_key = H(client_key)` invariant.
     #[test]
     fn hash_scram_password_sha256_produces_expected_keys() {
         let password = b"pencil";
@@ -347,9 +348,9 @@ mod tests {
         assert2::assert!(final_check.is_ok());
     }
 
-    /// Mirror of the SHA-512 round-trip with SHA-256 — proves the
-    /// generalized state machines produce a matching client/server
-    /// pair on the smaller-hash path.
+    /// Mirror of the SHA-512 round-trip with SHA-256. It proves that the
+    /// generalized state machines produce a matching client/server pair on the
+    /// smaller-hash path.
     #[test]
     fn scram_server_and_client_round_trip_sha256() {
         let password = b"hunter2";
@@ -383,8 +384,8 @@ mod tests {
     }
 
     /// The hand-written `Debug` impl on `ScramServerExchange` prints the
-    /// observable negotiation phase (the variant payload isn't exported, so
-    /// callers can only ever see the phase name via `Debug`/logging).
+    /// observable negotiation phase. The variant payload is not exported, so
+    /// callers can only ever see the phase name through `Debug` or logging.
     #[test]
     fn scram_server_exchange_debug_includes_the_observable_phase() {
         let password = b"hunter2";
@@ -524,11 +525,11 @@ mod tests {
         );
     }
 
-    /// KIP-48: `new_with_principal` stamps an override
-    /// principal that wins on the `Done` arm — used by the
-    /// delegation-token SCRAM fallback so a client authenticating
-    /// with a `tokenId` as the SCRAM username surfaces as the token's
-    /// owner (e.g. `User:alice`), not as `User:<token-uuid>`.
+    /// KIP-48: `new_with_principal` stamps an override principal that wins on
+    /// the `Done` arm. The delegation-token SCRAM fallback uses it, so a client
+    /// that authenticates with a `tokenId` as the SCRAM username surfaces as
+    /// the token's owner, for example `User:alice`, and not as
+    /// `User:<token-uuid>`.
     #[test]
     fn scram_server_with_principal_override_yields_override_on_done() {
         let password = b"hunter2";
@@ -596,9 +597,9 @@ mod tests {
     }
 
     /// RFC 5802 §5.1: the server must reject a client-final whose `r=`
-    /// (combined nonce) does not equal the nonce it issued in
-    /// server-first. We tamper with the `r=` attribute of an otherwise
-    /// well-formed client-final and expect `MalformedMessage`.
+    /// combined nonce does not equal the nonce it issued in server-first. This
+    /// test tampers with the `r=` attribute of an otherwise well-formed
+    /// client-final and expects `MalformedMessage`.
     #[test]
     fn scram_server_rejects_wrong_nonce() {
         // Arbitrary, non-secret test password generated at runtime (not a
@@ -639,9 +640,9 @@ mod tests {
         }
     }
 
-    /// RFC 5802 §5.1: the server must reject a client-final whose `c=`
-    /// channel binding is not the base64 of the GS2 header `n,,`
-    /// (`"biws"`). We swap in a bogus channel binding and expect
+    /// RFC 5802 §5.1: the server must reject a client-final whose `c=` channel
+    /// binding is not the base64 of the GS2 header `n,,`, which is `"biws"`.
+    /// This test swaps in a bogus channel binding and expects
     /// `MalformedMessage`.
     #[test]
     fn scram_server_rejects_wrong_channel_binding() {

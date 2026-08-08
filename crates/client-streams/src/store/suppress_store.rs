@@ -1,14 +1,15 @@
 //! Suppress buffer as a registered, changelog-backed state store.
 //!
-//! Unlike the other typed stores ([`WindowBytesStore`](crate::store::window),
-//! [`SessionBytesStore`](crate::store::session)), the suppress store does NOT sit
-//! over the pluggable `ByteKeyValueStore` backend: a `KTable.suppress(...)` buffer
-//! evicts by `buffer_time`, not by key order, so its internal storage is a
-//! time-ordered `BTreeMap` keyed by `(buffer_time, seq)` with a side `index`
-//! (`key_bytes -> slot`) for replace-by-key. It stores serialized keys and
-//! values, tracks byte-size limits, and writes a JVM-compatible changelog.
+//! The suppress store does NOT sit over the pluggable `ByteKeyValueStore`
+//! backend, unlike the other typed stores
+//! [`WindowBytesStore`](crate::store::window) and
+//! [`SessionBytesStore`](crate::store::session). A `KTable.suppress(...)` buffer
+//! evicts by `buffer_time`, not by key order. So its internal storage is a
+//! time-ordered `BTreeMap` keyed by `(buffer_time, seq)`, with a side `index`
+//! from `key_bytes` to slot for replace-by-key. The store keeps serialized keys
+//! and values, tracks byte-size limits, and writes a JVM-compatible changelog.
 //!
-//! The changelog KEY is the serialized record-key bytes; the changelog VALUE is
+//! The changelog KEY is the serialized record-key bytes. The changelog VALUE is
 //! the JVM `BufferValue` payload. A buffer eviction logs a `(key_bytes, None)`
 //! tombstone.
 use std::{
@@ -29,38 +30,51 @@ use crate::{
     },
 };
 
-/// Typed, time-ordered suppress buffer. `put` buffers (replace-by-key) a
-/// [`Change<V>`] under a `buffer_time`; `evict_while`/`evict_oldest` drain the
-/// earliest-closing entries (and log tombstones) for the processor to forward.
+/// Typed, time-ordered suppress buffer.
+///
+/// `put` buffers a [`Change<V>`] under a `buffer_time` and replaces by key.
+/// `evict_while` and `evict_oldest` drain the earliest-closing entries and log
+/// tombstones, so the processor can forward them.
 // `pub(crate)`: the trait surfaces `Change<V>` (a crate-internal type) and the
 // suppress store is a built-in DSL mechanism the suppress processor reaches via
 // `ctx.get_suppress_store` — never a user-facing custom-processor store.
 #[async_trait]
 pub(crate) trait SuppressStore<K: Send + Sync, V: Send>: StateStore {
-    /// Buffer (or replace) `key`'s pending change at `buffer_time`. `ctx` is the
-    /// source record context carried into the changelog VALUE.
+    /// Buffers or replaces the pending change for `key` at `buffer_time`.
+    ///
+    /// `ctx` is the source record context. The store carries it into the
+    /// changelog VALUE.
     async fn put(&mut self, key: K, buffer_time: i64, change: Change<V>, ctx: SuppressRecordCtx);
-    /// Pop every entry with `buffer_time <= threshold`, in `(buffer_time, seq)`
-    /// order, as `(key, change, record_ts)`. Logs a tombstone per popped entry.
+    /// Pops every entry with `buffer_time <= threshold`.
+    ///
+    /// The entries come back in `(buffer_time, seq)` order as
+    /// `(key, change, record_ts)`. This method logs a tombstone for each popped
+    /// entry.
     async fn evict_while(&mut self, threshold: i64) -> Vec<(K, Change<V>, i64)>;
-    /// Pop the single lowest-`(buffer_time, seq)` entry (emit-early overflow).
-    /// `None` if empty. Logs a tombstone for the popped entry.
+    /// Pops the single lowest-`(buffer_time, seq)` entry for emit-early overflow.
+    ///
+    /// Returns `None` if the buffer is empty. This method logs a tombstone for
+    /// the popped entry.
     async fn evict_oldest(&mut self) -> Option<(K, Change<V>, i64)>;
     fn len(&self) -> usize;
-    /// Paired with [`len`](Self::len) for `clippy::len_without_is_empty`; the
-    /// processor reads `len`/`byte_size` for the caps, never emptiness, so this is
-    /// exercised only by the store's own tests.
+    /// Paired with [`len`](Self::len) for `clippy::len_without_is_empty`.
+    ///
+    /// The processor reads `len` and `byte_size` for the caps, never emptiness.
+    /// Only the store's own tests call this method.
     #[allow(dead_code)]
     fn is_empty(&self) -> bool;
-    /// Total buffered size (`key_bytes.len() + new_bytes.len()` per entry), the
-    /// JVM `maxBytes`-cap accounting unit.
+    /// Total buffered size, the JVM `maxBytes`-cap accounting unit.
+    ///
+    /// Each entry counts `key_bytes.len() + new_bytes.len()`.
     fn byte_size(&self) -> ByteSize;
 }
 
-/// One buffered entry. `new_bytes`/`old_bytes` are the (de)serializable sides of
-/// the buffered `Change`, recovered on eviction; `record_ts` is the forwarded
-/// timestamp. (The changelog VALUE is built once at `put`/drained on evict — the
-/// `prior`/`ctx` it needs are not retained per entry.)
+/// One buffered entry.
+///
+/// `new_bytes` and `old_bytes` are the serializable sides of the buffered
+/// `Change`. The store recovers them on eviction. `record_ts` is the forwarded
+/// timestamp. The store builds the changelog VALUE once at `put` and drains it on
+/// evict, so it does not keep the `prior` and `ctx` that VALUE needs per entry.
 struct Entry {
     key_bytes: Bytes,
     new_bytes: Option<Bytes>,
@@ -73,15 +87,17 @@ fn entry_size(key_bytes: &Bytes, new_bytes: Option<&Bytes>) -> usize {
     key_bytes.len() + new_bytes.map_or(0, Bytes::len)
 }
 
-/// Typed suppress store that holds the key/value serdes and is registered in the
-/// task's state-store registry for lookup by the suppress processor.
+/// Typed suppress store that holds the key serde and the value serde.
+///
+/// The task registers this store in its state-store registry, and the suppress
+/// processor looks it up there.
 pub struct SuppressBytesStore<K, V> {
     name: String,
     changelog_topic: String,
     logging: bool,
     key_serde: Box<dyn Serde<K>>,
     value_serde: Box<dyn Serde<V>>,
-    /// Ordered by `(buffer_time, seq)`; `seq` disambiguates equal buffer times.
+    /// Ordered by `(buffer_time, seq)`. `seq` separates equal buffer times.
     entries: BTreeMap<(i64, u64), Entry>,
     /// `key_bytes -> slot`, for replace-by-key.
     index: HashMap<Bytes, (i64, u64)>,
@@ -112,8 +128,10 @@ impl<K: 'static, V: 'static> SuppressBytesStore<K, V> {
         }
     }
 
-    /// The public ctor used by tests + the DSL. Suppress has no pluggable backend,
-    /// so `in_memory` and `new` are the same body.
+    /// The public ctor that the tests and the DSL use.
+    ///
+    /// Suppress has no pluggable backend, so `in_memory` and `new` have the same
+    /// body.
     #[must_use]
     pub fn in_memory(
         name: String,
@@ -124,9 +142,11 @@ impl<K: 'static, V: 'static> SuppressBytesStore<K, V> {
         Self::new(name, key_serde, value_serde, changelog_topic)
     }
 
-    /// Remove a key's current slot (if any), subtracting its size. Returns the
-    /// removed entry's `new_bytes` (the value previously buffered for the key) —
-    /// the `prior` for the JVM `-2` alias rule.
+    /// Removes the current slot for a key, if there is one, and subtracts its
+    /// size.
+    ///
+    /// Returns the `new_bytes` of the removed entry. That is the value the store
+    /// buffered for the key before. It is the `prior` for the JVM `-2` alias rule.
     fn remove_existing(&mut self, key_bytes: &Bytes) -> Option<Bytes> {
         let slot = self.index.remove(key_bytes)?;
         let entry = self.entries.remove(&slot).expect("indexed slot present");
@@ -134,7 +154,7 @@ impl<K: 'static, V: 'static> SuppressBytesStore<K, V> {
         entry.new_bytes
     }
 
-    /// Insert a fresh slot at `(buffer_time, seq)` and account its size.
+    /// Inserts a fresh slot at `(buffer_time, seq)` and accounts its size.
     fn insert_slot(&mut self, buffer_time: i64, entry: Entry) {
         let slot = (buffer_time, self.seq);
         self.seq += 1;
@@ -143,8 +163,11 @@ impl<K: 'static, V: 'static> SuppressBytesStore<K, V> {
         self.entries.insert(slot, entry);
     }
 
-    /// Pop one slot: drop it from `entries`/`index`, subtract its size, log a
-    /// tombstone (if logging), and rebuild the typed `(K, Change<V>, record_ts)`.
+    /// Pops one slot.
+    ///
+    /// This method drops the slot from `entries` and `index`, subtracts its size,
+    /// logs a tombstone if logging is on, and rebuilds the typed
+    /// `(K, Change<V>, record_ts)`.
     fn pop_slot(&mut self, slot: (i64, u64)) -> (K, Change<V>, i64) {
         let entry = self.entries.remove(&slot).expect("slot present");
         self.index.remove(&entry.key_bytes);
@@ -483,12 +506,13 @@ mod tests {
         check!(s.take_changelog().is_empty());
     }
 
-    /// Restart-restore at the golden's scenario: a windowed-key suppress buffer
-    /// (the `until_window_closes` shape, `Windowed<String>` keys via
-    /// `TimeWindowedSerde`) survives `take_changelog` → fresh store →
-    /// `apply_changelog`, and the restored buffered windows still emit their final
-    /// value when stream-time closes them. Task restore drives exactly this
-    /// drain/replay over the registered store.
+    /// Restart-restore at the golden's scenario.
+    ///
+    /// A windowed-key suppress buffer survives `take_changelog` → fresh store →
+    /// `apply_changelog`. The buffer has the `until_window_closes` shape and
+    /// `Windowed<String>` keys from `TimeWindowedSerde`. The restored buffered
+    /// windows still emit their final value when stream-time closes them. Task
+    /// restore drives exactly this drain and replay over the registered store.
     #[tokio::test]
     async fn windowed_buffer_restores_and_emits_on_close() {
         use crate::dsl::windows::{TimeWindowedSerde, Window, Windowed};

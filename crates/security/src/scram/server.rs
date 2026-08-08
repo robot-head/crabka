@@ -1,6 +1,7 @@
-//! `ScramServerExchange` — RFC 5802 SCRAM server state machine.
-//! Supports SCRAM-SHA-256 and SCRAM-SHA-512; the mechanism comes from
-//! the credential being authenticated against.
+//! `ScramServerExchange`, the RFC 5802 SCRAM server state machine.
+//!
+//! It supports SCRAM-SHA-256 and SCRAM-SHA-512. The mechanism comes from the
+//! credential that the server authenticates against.
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use hmac::{Hmac, KeyInit, Mac};
@@ -27,9 +28,9 @@ struct AwaitingClientFinal {
 
 /// RFC 5802 SCRAM server-side handshake, one type per negotiation phase.
 ///
-/// The variant payload types are intentionally not exported: the phase is
-/// driven entirely through `step`/`StepResult`, so callers never need to
-/// name `AwaitingClientFirst`/`AwaitingClientFinal` directly.
+/// The variant payload types stay unexported on purpose. `step` and
+/// `StepResult` drive the phase, so callers never need to name
+/// `AwaitingClientFirst` or `AwaitingClientFinal` directly.
 #[allow(private_interfaces)]
 pub enum ScramServerExchange {
     AwaitingClientFirst(AwaitingClientFirst),
@@ -67,12 +68,12 @@ impl ScramServerExchange {
         })
     }
 
-    /// KIP-48: variant of [`Self::new`] that stamps a
-    /// principal to be returned by the `Done` arm in place of one
-    /// synthesized from `username`. Used by the delegation-token SCRAM
-    /// fallback to surface the token's owner (e.g. `User:alice`) when
-    /// the client authenticated with the token's UUID `token_id` as the
-    /// SCRAM username.
+    /// KIP-48: variant of [`Self::new`] that stamps a principal for the `Done`
+    /// arm to return in place of one synthesized from `username`.
+    ///
+    /// The delegation-token SCRAM fallback uses this to surface the token's
+    /// owner, for example `User:alice`, when the client authenticated with the
+    /// token's UUID `token_id` as the SCRAM username.
     #[must_use]
     pub fn new_with_principal(
         username: String,

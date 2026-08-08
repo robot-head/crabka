@@ -1,17 +1,19 @@
 //! The `jsonb` function family and the semantics of every `jsonb` operator.
 //!
-//! Mirrors the existing scalar families (`func.rs`, `datetime_fn.rs`,
-//! `format_fn.rs`): a `json_func(name)` classifier, an `is_json_func` dispatch
-//! predicate, a `json_func_result_type` static resolver for RowDescription, and
-//! an `eval_json` value evaluator that takes the caller's child-evaluation
-//! closure, so scalar `eval` and the grouped evaluator share the math.
+//! This module follows the existing scalar families `func.rs`, `datetime_fn.rs`
+//! and `format_fn.rs`. It holds a `json_func(name)` classifier, an
+//! `is_json_func` dispatch predicate, a `json_func_result_type` static resolver
+//! for RowDescription, and an `eval_json` value evaluator that takes the
+//! caller's child-evaluation closure. So scalar `eval` and the grouped evaluator
+//! share the math.
 //!
-//! The operator semantics (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`,
-//! `?&`, `||`, `-`) live here as well, exposed through [`JsonOp`] +
-//! [`eval_json_operator`] (and individually), so the eval layer only has to map
-//! its `BinaryOp` variants onto [`JsonOp`]. Keeping them beside the functions
-//! puts every PostgreSQL corner case — jsonb null vs SQL NULL, the raw-scalar
-//! containment exception, right-wins object merge — in one file.
+//! The operator semantics for `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?|`,
+//! `?&`, `||` and `-` live here as well. [`JsonOp`] and [`eval_json_operator`]
+//! expose them, and each operator is also exposed on its own, so the eval layer
+//! only has to map its `BinaryOp` variants onto [`JsonOp`]. Keeping them beside
+//! the functions puts every PostgreSQL corner case in one file: jsonb null
+//! against SQL NULL, the raw-scalar containment exception, and right-wins object
+//! merge.
 //!
 //! Everything here is a pure, deterministic transform over a single row's
 //! already-resolved `Datum`s, so it introduces no lock, visibility, or
@@ -30,7 +32,7 @@ use crate::{clock::EvalCtx, error::ExecError, eval::ArgType, scope::Scope};
 /// The `jsonb` functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JsonFunc {
-    /// `jsonb_build_object(VARIADIC k, v, …)` — an even-length key/value list.
+    /// `jsonb_build_object(VARIADIC k, v, …)`: an even-length key/value list.
     BuildObject,
     /// `jsonb_build_array(VARIADIC …)`.
     BuildArray,
@@ -38,48 +40,49 @@ enum JsonFunc {
     ArrayLength,
     /// `jsonb_typeof(jsonb)`.
     Typeof,
-    /// `jsonb_extract_path(jsonb, VARIADIC path text)` — the `#>` function form.
+    /// `jsonb_extract_path(jsonb, VARIADIC path text)`: the `#>` function form.
     ExtractPath,
-    /// `jsonb_extract_path_text(jsonb, VARIADIC path text)` — the `#>>` form.
+    /// `jsonb_extract_path_text(jsonb, VARIADIC path text)`: the `#>>` form.
     ExtractPathText,
     /// `jsonb_set(target, path, new_value [, create_if_missing])`.
     Set,
     /// `to_jsonb(anyelement)`.
     ToJsonb,
-    /// `jsonb_strip_nulls(jsonb)` — drop every object field whose value is the
+    /// `jsonb_strip_nulls(jsonb)`: drop every object field whose value is the
     /// JSON `null` literal, recursively. Array nulls are kept.
     StripNulls,
-    /// `jsonb_pretty(jsonb)` — the indented rendering, as `text`.
+    /// `jsonb_pretty(jsonb)`: the indented rendering, as `text`.
     Pretty,
     /// `jsonb_insert(target, path, new_value [, insert_after])`.
     Insert,
-    /// `jsonb_delete_path(target, path)` — the `#-` operator's function form.
+    /// `jsonb_delete_path(target, path)`: the `#-` operator's function form.
     DeletePath,
     /// `jsonb_set_lax(target, path, new_value [, create_if_missing [, null_value_treatment]])`.
     SetLax,
-    /// `json_object(text[])` / `json_object(text[], text[])` — an object built
+    /// `json_object(text[])` / `json_object(text[], text[])`: an object built
     /// from a flat or two-column key/value array. Every value is a JSON string.
     Object,
-    /// `jsonb_path_exists(target, path [, vars [, silent]])` — the `@?` function form.
+    /// `jsonb_path_exists(target, path [, vars [, silent]])`: the `@?` function form.
     PathExists,
-    /// `jsonb_path_match(target, path [, vars [, silent]])` — the `@@` function form.
+    /// `jsonb_path_match(target, path [, vars [, silent]])`: the `@@` function form.
     PathMatch,
     /// `jsonb_path_query_array(target, path [, vars [, silent]])`.
     PathQueryArray,
     /// `jsonb_path_query_first(target, path [, vars [, silent]])`.
     PathQueryFirst,
-    /// `jsonb_contains` / `jsonb_contained` / `jsonb_exists` / `jsonb_exists_any`
-    /// / `jsonb_exists_all` / `jsonb_delete` / `jsonb_concat` — the function
-    /// spellings of the operators, which `\df` and the regress corpus both use.
+    /// The function spellings of the operators, which `\df` and the regress
+    /// corpus both use: `jsonb_contains`, `jsonb_contained`, `jsonb_exists`,
+    /// `jsonb_exists_any`, `jsonb_exists_all`, `jsonb_delete` and
+    /// `jsonb_concat`.
     Operator(JsonOp),
 }
 
-/// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
+/// Classify a lowercased function name. The lexer lowercases unquoted idents.
 /// `None` means "not a jsonb function".
 ///
 /// The `json_*` spellings resolve to the same implementations as their `jsonb_*`
-/// counterparts, because crabka stores `json` as `jsonb` (see the compatibility
-/// matrix row). `_tz` jsonpath variants likewise share their implementation:
+/// counterparts, because crabka stores `json` as `jsonb`. See the compatibility
+/// matrix row. The `_tz` jsonpath variants also share their implementation:
 /// crabka's jsonpath datetime items are rendered strings, so no comparison in
 /// them depends on the session time zone.
 fn json_func(name: &str) -> Option<JsonFunc> {
@@ -113,26 +116,27 @@ fn json_func(name: &str) -> Option<JsonFunc> {
     })
 }
 
-/// Is `name` a jsonb function? (The dispatch point for the eval guard chains.)
+/// Is `name` a jsonb function? This is the dispatch point for the eval guard
+/// chains.
 pub(crate) fn is_json_func(name: &str) -> bool {
     json_func(name).is_some()
 }
 
 // ---- argument-type resolution ----
 
-/// The type an `unknown` literal argument adopts, per position — the ONE place
-/// the jsonb family's parameter types are written down.
+/// The type an `unknown` literal argument adopts, per position. This is the ONE
+/// place the jsonb family's parameter types are written down.
 ///
 /// PostgreSQL leaves a bare `'…'` / `NULL` literal `unknown` and resolves it
 /// against the parameter it is passed to, so `jsonb_set('{"a":1}', '{a}', '2')`
 /// passes a `jsonb`, a `text[]` and a `jsonb`. `None` in the result means the
 /// literal adopts nothing and stays `text`, which is PostgreSQL's own rule for a
-/// `"any"` parameter — that is why `jsonb_build_object('a', '{"x":1}')` stores
+/// `"any"` parameter. That is why `jsonb_build_object('a', '{"x":1}')` stores
 /// the JSON *string* `"{\"x\":1}"` rather than a nested object.
 ///
-/// Both [`json_func_result_type`] (plan time, over statically inferred argument
-/// types) and [`eval_json`] (run time, over the evaluated values' types) drive
-/// this one rule, so a literal is typed and converted by the same decision.
+/// Two callers drive this one rule: [`json_func_result_type`] at plan time, over
+/// statically inferred argument types, and [`eval_json`] at run time, over the
+/// evaluated values' types. So one decision types and converts a literal.
 fn param_types(f: JsonFunc, given: &[ArgType]) -> Result<Vec<Option<ColumnType>>, ExecError> {
     let n = given.len();
     let jsonb = Some(ColumnType::Jsonb);
@@ -300,9 +304,10 @@ pub(crate) fn json_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colu
     })
 }
 
-/// A `jsonb`-typed argument. An unadorned literal (`jsonb_typeof('{"a":1}')`)
-/// has already adopted `jsonb` in [`param_types`], so — as in PostgreSQL — a
-/// genuinely `text`-typed argument is 42883 and needs an explicit cast.
+/// A `jsonb`-typed argument. An unadorned literal such as
+/// `jsonb_typeof('{"a":1}')` has already adopted `jsonb` in [`param_types`]. So,
+/// as in PostgreSQL, a genuinely `text`-typed argument is 42883 and needs an
+/// explicit cast.
 fn require_jsonb_arg(fc: &FuncCall, t: ColumnType) -> Result<(), ExecError> {
     if t == ColumnType::Jsonb {
         Ok(())
@@ -316,8 +321,8 @@ fn require_jsonb_arg(fc: &FuncCall, t: ColumnType) -> Result<(), ExecError> {
 /// Evaluate a jsonb function call.
 ///
 /// Every function except `jsonb_build_object`/`jsonb_build_array` is STRICT: a
-/// NULL argument yields SQL NULL. The two builders are deliberately not strict —
-/// a NULL *value* becomes the JSON `null` literal (a NULL *key* is an error).
+/// NULL argument yields SQL NULL. The two builders are deliberately not strict.
+/// A NULL *value* becomes the JSON `null` literal, and a NULL *key* is an error.
 pub(crate) fn eval_json(
     fc: &FuncCall,
     ctx: &EvalCtx,
@@ -502,7 +507,8 @@ struct PathCall {
 }
 
 /// Resolve the arguments every `jsonb_path_*` function shares. `None` means the
-/// whole call is SQL NULL: all of them are STRICT in the target and the path.
+/// whole call is SQL NULL, because all of them are STRICT in the target and the
+/// path.
 fn path_args(name: &str, args: &[Datum]) -> Result<Option<PathCall>, ExecError> {
     if args[0].is_null() || args[1].is_null() {
         return Ok(None);
@@ -583,8 +589,8 @@ fn json_path_operator(left: &Datum, right: &Datum, predicate: bool) -> Result<Da
     })
 }
 
-/// `jsonb_set_lax(target, path, new_value, create_if_missing, null_value_treatment)`
-/// — `jsonb_set` plus an explicit policy for a SQL NULL `new_value`.
+/// `jsonb_set_lax(target, path, new_value, create_if_missing, null_value_treatment)`,
+/// which is `jsonb_set` plus an explicit policy for a SQL NULL `new_value`.
 fn eval_set_lax(fc: &FuncCall, vals: &[Datum]) -> Result<Datum, ExecError> {
     let treatment = match vals.get(4) {
         None => "use_json_null".to_string(),
@@ -635,7 +641,7 @@ fn eval_set_lax(fc: &FuncCall, vals: &[Datum]) -> Result<Datum, ExecError> {
 }
 
 /// `json_object(text[])` / `json_object(text[], text[])`: an object whose values
-/// are all JSON strings (a NULL element becomes the JSON `null` literal).
+/// are all JSON strings. A NULL element becomes the JSON `null` literal.
 fn eval_json_object(name: &str, vals: &[Datum]) -> Result<Datum, ExecError> {
     let flat = |d: &Datum| -> Result<Vec<Datum>, ExecError> {
         match d {
@@ -819,7 +825,7 @@ fn returning_json(
 
 /// `IS [NOT] JSON [<item>] [WITH UNIQUE KEYS]` over an already-evaluated,
 /// non-NULL value. Only the string family and `jsonb` have a JSON reading at
-/// all; every other type is 42804, as in `PostgreSQL`.
+/// all. Every other type is 42804, as in `PostgreSQL`.
 fn is_json(
     value: &Datum,
     item: crabka_pgparser::ast::JsonItemType,
@@ -1048,7 +1054,7 @@ fn sql_json_text(
 /// `('{"0": 1}'::jsonb)[0]` finds the key `"0"` and `('[1, 2]'::jsonb)['1']`
 /// finds element 1.
 ///
-/// `PostgreSQL` accepts only text-ish and `integer` subscripts; everything else,
+/// `PostgreSQL` accepts only text-ish and `integer` subscripts. Everything else,
 /// `bigint` and `numeric` included, is 42804 at parse-analysis time.
 fn subscript_path_element(index: &Datum) -> Result<Option<String>, ExecError> {
     Ok(match index {
@@ -1065,9 +1071,9 @@ fn subscript_path_element(index: &Datum) -> Result<Option<String>, ExecError> {
     })
 }
 
-/// `j[subscript]` — `PostgreSQL`'s jsonb subscripting *read*. A missing key, an
-/// out-of-range index, a NULL subscript and a scalar container are all SQL NULL;
-/// nothing here is an error.
+/// `j[subscript]`: `PostgreSQL`'s jsonb subscripting *read*. A missing key, an
+/// out-of-range index, a NULL subscript and a scalar container are all SQL NULL.
+/// Nothing here is an error.
 pub(crate) fn jsonb_subscript(base: &Datum, index: &Datum) -> Result<Datum, ExecError> {
     let step = subscript_path_element(index)?;
     if base.is_null() {
@@ -1082,11 +1088,12 @@ pub(crate) fn jsonb_subscript(base: &Datum, index: &Datum) -> Result<Datum, Exec
     )
 }
 
-/// `UPDATE t SET j[s1][s2] = v` — `PostgreSQL`'s `jsonb_set_element`, which is
-/// `setPath` with *create*, *fill gaps* and *consistent position*: missing
-/// intermediate levels are built (an integer step makes an array, a text step an
-/// object), a positive index past the end is padded with JSON nulls, and a
-/// negative index reaching before the start is an error rather than a prepend.
+/// `UPDATE t SET j[s1][s2] = v`: `PostgreSQL`'s `jsonb_set_element`, which is
+/// `setPath` with *create*, *fill gaps* and *consistent position*. This function
+/// builds the missing intermediate levels, where an integer step makes an array
+/// and a text step makes an object. It pads a positive index past the end with
+/// JSON nulls. A negative index that reaches before the start is an error rather
+/// than a prepend.
 pub(crate) fn jsonb_subscript_assign(
     target: &Datum,
     subscripts: &[Datum],
@@ -1253,8 +1260,8 @@ fn push_nulls(out: &mut Vec<JsonbValue>, count: i64) {
 }
 
 /// `PostgreSQL`'s `push_path`: the nested containers `path[level + 1 ..]`
-/// describes, with `new_value` at the bottom. An integer step builds an array
-/// (padded with JSON nulls up to that index), a text step an object.
+/// describes, with `new_value` at the bottom. An integer step builds an array,
+/// padded with JSON nulls up to that index. A text step builds an object.
 fn build_path(path: &[String], level: usize, new_value: &JsonbValue) -> JsonbValue {
     let mut value = new_value.clone();
     for step in path[level + 1..].iter().rev() {
@@ -1289,7 +1296,7 @@ pub(crate) enum JsonbSrf {
     ArrayElementsText,
 }
 
-/// `jsonb_path_query(target, path [, vars [, silent]])` — one row per item the
+/// `jsonb_path_query(target, path [, vars [, silent]])`: one row per item the
 /// jsonpath produces.
 pub(crate) fn jsonb_path_query_rows(
     name: &str,
@@ -1308,7 +1315,7 @@ pub(crate) fn jsonb_path_query_rows(
 
 /// Expand a jsonb set-returning function over its single already-evaluated
 /// argument. Object keys come out in the canonical jsonb order the value is
-/// already stored in; the `_text` flavours unquote a JSON string and turn the
+/// already stored in. The `_text` flavours unquote a JSON string and turn the
 /// JSON `null` literal into SQL NULL, exactly as `->>` does.
 pub(crate) fn jsonb_srf_rows(kind: JsonbSrf, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError> {
     let name = match kind {
@@ -1378,7 +1385,7 @@ pub(crate) fn jsonb_srf_rows(kind: JsonbSrf, vals: &[Datum]) -> Result<Vec<Vec<D
 }
 
 /// `jsonb_strip_nulls`: an object field whose value is the JSON `null` literal
-/// disappears, recursively. A `null` ARRAY element is kept — PostgreSQL only
+/// disappears, recursively. A `null` ARRAY element is kept. PostgreSQL only
 /// strips fields, because dropping an element would renumber the array.
 fn strip_nulls(value: &JsonbValue, in_arrays: bool) -> JsonbValue {
     match value {
@@ -1437,10 +1444,10 @@ fn pretty(value: &JsonbValue, indent: usize) -> String {
 
 /// `jsonb_insert(target, path, new_value, insert_after)`.
 ///
-/// The path's final step names the position to insert AT (before it, or after it
-/// when `after` is set). In an object the key must not already exist — replacing
-/// one is `jsonb_set`'s job and 22023 here; in an array an out-of-range index
-/// appends (or prepends for a negative one).
+/// The path's final step names the position to insert AT, before it, or after it
+/// when `after` is set. In an object the key must not already exist. Replacing
+/// one is `jsonb_set`'s job and is 22023 here. In an array an out-of-range index
+/// appends, or prepends for a negative one.
 fn insert_path(
     target: &JsonbValue,
     path: &[String],
@@ -1502,8 +1509,8 @@ fn insert_path(
     })
 }
 
-/// `jsonb_delete_path(target, path)` — the `#-` operator's function form. A path
-/// that does not resolve leaves the target unchanged; an empty path is a no-op.
+/// `jsonb_delete_path(target, path)`: the `#-` operator's function form. A path
+/// that does not resolve leaves the target unchanged. An empty path is a no-op.
 fn delete_path(target: &JsonbValue, path: &[String]) -> JsonbValue {
     let Some((step, rest)) = path.split_first() else {
         return target.clone();
@@ -1543,7 +1550,7 @@ fn delete_path(target: &JsonbValue, path: &[String]) -> JsonbValue {
 
 /// `jsonb_build_object(k1, v1, k2, v2, …)`: an odd-length list is 22023, a NULL
 /// key is 22023, a NULL value becomes the JSON `null` literal, and a duplicate
-/// key keeps the last value (`JsonbValue::object_from_pairs`).
+/// key keeps the last value through `JsonbValue::object_from_pairs`.
 fn build_object(vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
     if !vals.len().is_multiple_of(2) {
         return Err(invalid_parameter(
@@ -1571,8 +1578,8 @@ fn build_object(vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
 /// PostgreSQL renders a key through the same conversion as a value and then
 /// takes its unquoted text, so a key follows the *JSON* spelling rather than the
 /// SQL one: `true` not `t`, and `2020-01-02T03:04:05` not the space-separated
-/// form. Container and NULL keys are rejected by the caller, so the arms below
-/// cover every key that reaches here.
+/// form. The caller rejects container and NULL keys, so the arms below cover
+/// every key that reaches here.
 fn object_key_text(d: &Datum, ctx: &EvalCtx) -> Result<String, ExecError> {
     Ok(match to_jsonb(d, ctx)? {
         JsonbValue::String(s) => s,
@@ -1585,10 +1592,11 @@ fn object_key_text(d: &Datum, ctx: &EvalCtx) -> Result<String, ExecError> {
 
 /// `to_jsonb(anyelement)`: the value's JSON rendering.
 ///
-/// Numbers stay numbers (scale preserved, as `jsonb` is numeric-backed), strings
-/// and every stringly type become JSON strings, `jsonb` is the identity, and an
-/// array becomes a JSON array. Date/time values use PostgreSQL's JSON spelling —
-/// ISO 8601 with a `T` separator and an `hh:mm` offset — not their SQL output.
+/// Numbers stay numbers and keep their scale, because `jsonb` is
+/// numeric-backed. Strings and every stringly type become JSON strings, `jsonb`
+/// is the identity, and an array becomes a JSON array. Date/time values use
+/// PostgreSQL's JSON spelling, that is ISO 8601 with a `T` separator and an
+/// `hh:mm` offset, not their SQL output.
 fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
     Ok(match d {
         Datum::Null => JsonbValue::Null,
@@ -1651,10 +1659,10 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
 
 /// A composite's fields as JSON object pairs, in declaration order.
 ///
-/// `PostgreSQL` names an anonymous record's fields `f1`…`fn`; a named composite
+/// `PostgreSQL` names an anonymous record's fields `f1`…`fn`. A named composite
 /// uses its attribute names. Duplicate names are possible in a record built from
-/// a join, and `PostgreSQL` keeps both pairs in `row_to_json` (a `json` value is
-/// not de-duplicated); `jsonb` keeps only the last, which is what
+/// a join. `PostgreSQL` keeps both pairs in `row_to_json`, because it does not
+/// de-duplicate a `json` value. `jsonb` keeps only the last, which is what
 /// [`JsonbValue::Object`] does on construction.
 pub(crate) fn record_pairs(
     r: &crabka_pgtypes::RecordValue,
@@ -1696,31 +1704,31 @@ fn iso_8601_datetime(sql_text: &str) -> String {
 /// [`JsonOp`] and gets both the static result type and the value semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JsonOp {
-    /// `->` — field/element as `jsonb`.
+    /// `->`: field/element as `jsonb`.
     Get,
-    /// `->>` — field/element as `text`.
+    /// `->>`: field/element as `text`.
     GetText,
-    /// `#>` — path as `jsonb`.
+    /// `#>`: path as `jsonb`.
     GetPath,
-    /// `#>>` — path as `text`.
+    /// `#>>`: path as `text`.
     GetPathText,
-    /// `@>` — containment.
+    /// `@>`: containment.
     Contains,
-    /// `<@` — reverse containment.
+    /// `<@`: reverse containment.
     ContainedBy,
-    /// `?` — key/element existence.
+    /// `?`: key/element existence.
     KeyExists,
-    /// `?|` — any key exists.
+    /// `?|`: any key exists.
     KeyExistsAny,
-    /// `?&` — all keys exist.
+    /// `?&`: all keys exist.
     KeyExistsAll,
-    /// `||` — concatenation / object merge.
+    /// `||`: concatenation / object merge.
     Concat,
-    /// `-` — delete a key, an index, or a set of keys.
+    /// `-`: delete a key, an index, or a set of keys.
     Delete,
-    /// `@?` — the jsonpath finds at least one item.
+    /// `@?`: the jsonpath finds at least one item.
     PathExists,
-    /// `@@` — the jsonpath predicate, as a three-valued boolean.
+    /// `@@`: the jsonpath predicate, as a three-valued boolean.
     PathMatch,
 }
 
@@ -1746,7 +1754,7 @@ impl JsonOp {
 }
 
 /// The static result type of `left <op> right`, or `None` when the operand types
-/// do not resolve the operator (the caller reports 42883 at plan time).
+/// do not resolve the operator. The caller then reports 42883 at plan time.
 pub(crate) fn json_operator_result_type(
     op: JsonOp,
     left: ColumnType,
@@ -1804,8 +1812,8 @@ pub(crate) fn eval_json_operator(
     }
 }
 
-/// `jsonb -> text` / `jsonb -> integer`: an object field or an array element
-/// (negative indexes count from the end). A missing field/index is SQL NULL; a
+/// `jsonb -> text` / `jsonb -> integer`: an object field or an array element.
+/// Negative indexes count from the end. A missing field or index is SQL NULL. A
 /// JSON `null` value is the JSON null, which is *not* SQL NULL.
 pub(crate) fn json_get(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let Some((value, key)) = operands(JsonOp::Get, left, right)? else {
@@ -1841,7 +1849,7 @@ pub(crate) fn json_get_path(left: &Datum, right: &Datum) -> Result<Datum, ExecEr
     })
 }
 
-/// `jsonb #>> text[]` — [`json_get_path`] rendered as `text`.
+/// `jsonb #>> text[]`: [`json_get_path`] rendered as `text`.
 pub(crate) fn json_get_path_text(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let Some((value, path)) = path_operands(JsonOp::GetPathText, left, right)? else {
         return Ok(Datum::Null);
@@ -1863,7 +1871,7 @@ pub(crate) fn json_contains(left: &Datum, right: &Datum) -> Result<Datum, ExecEr
     Ok(Datum::Bool(contains(l.as_ref(), r.as_ref())))
 }
 
-/// `left <@ right` — [`json_contains`] with the operands swapped.
+/// `left <@ right`: [`json_contains`] with the operands swapped.
 pub(crate) fn json_contained_by(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let (Some(l), Some(r)) = (
         jsonb_or_null(left, JsonOp::ContainedBy)?,
@@ -1888,8 +1896,8 @@ pub(crate) fn json_key_exists(left: &Datum, right: &Datum) -> Result<Datum, Exec
     Ok(Datum::Bool(key_exists(value.as_ref(), key)))
 }
 
-/// `jsonb ?| text[]`: any of the keys exists. NULL elements are skipped, as in
-/// PostgreSQL's `jsonb_exists_any`.
+/// `jsonb ?| text[]`: any of the keys exists. This operator skips NULL elements,
+/// as PostgreSQL's `jsonb_exists_any` does.
 pub(crate) fn json_key_exists_any(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let Some((value, keys)) = path_operands(JsonOp::KeyExistsAny, left, right)? else {
         return Ok(Datum::Null);
@@ -1899,8 +1907,8 @@ pub(crate) fn json_key_exists_any(left: &Datum, right: &Datum) -> Result<Datum, 
     ))
 }
 
-/// `jsonb ?& text[]`: all of the keys exist. NULL elements are skipped, so an
-/// all-NULL array is trivially true (PostgreSQL's `jsonb_exists_all`).
+/// `jsonb ?& text[]`: all of the keys exist. This operator skips NULL elements,
+/// so an all-NULL array is true. This is PostgreSQL's `jsonb_exists_all`.
 pub(crate) fn json_key_exists_all(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let Some((value, keys)) = path_operands(JsonOp::KeyExistsAll, left, right)? else {
         return Ok(Datum::Null);
@@ -1910,9 +1918,10 @@ pub(crate) fn json_key_exists_all(left: &Datum, right: &Datum) -> Result<Datum, 
     ))
 }
 
-/// `jsonb || jsonb`: two objects merge with the right side winning; two arrays
-/// concatenate; every other combination converts each non-array operand into a
-/// one-element array and concatenates (PostgreSQL's documented rule).
+/// `jsonb || jsonb`: two objects merge with the right side winning, and two
+/// arrays concatenate. Every other combination converts each non-array operand
+/// into a one-element array and concatenates. This is PostgreSQL's documented
+/// rule.
 pub(crate) fn json_concat(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let (Some(l), Some(r)) = (
         jsonb_or_null(left, JsonOp::Concat)?,
@@ -1936,10 +1945,10 @@ pub(crate) fn json_concat(left: &Datum, right: &Datum) -> Result<Datum, ExecErro
     }))
 }
 
-/// `jsonb - text` (delete a key or matching string elements), `jsonb - integer`
-/// (delete an array element, negative from the end) and `jsonb - text[]` (delete
-/// each key/element). Deleting from a scalar — or by index from an object — is
-/// 22023, as in PostgreSQL.
+/// `jsonb - text` deletes a key or matching string elements. `jsonb - integer`
+/// deletes an array element, counted from the end when negative.
+/// `jsonb - text[]` deletes each key or element. A delete from a scalar, or a
+/// delete by index from an object, is 22023, as in PostgreSQL.
 pub(crate) fn json_delete(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let Some(value) = jsonb_or_null(left, JsonOp::Delete)? else {
         return Ok(Datum::Null);
@@ -1983,8 +1992,8 @@ pub(crate) fn json_delete(left: &Datum, right: &Datum) -> Result<Datum, ExecErro
     }
 }
 
-/// Delete each of `keys` from an object (by key) or an array (every string
-/// element equal to it). Deleting from a scalar is 22023.
+/// Delete each of `keys` from an object by key, or from an array by every string
+/// element equal to it. A delete from a scalar is 22023.
 fn delete_keys(value: &JsonbValue, keys: &[String]) -> Result<Datum, ExecError> {
     Ok(Datum::Jsonb(match value {
         JsonbValue::Object(pairs) => JsonbValue::Object(
@@ -2010,10 +2019,10 @@ fn delete_keys(value: &JsonbValue, keys: &[String]) -> Result<Datum, ExecError> 
 
 /// `jsonb_set(target, path, new_value, create_if_missing)`.
 ///
-/// A path that does not resolve leaves `target` unchanged; at the final step a
-/// missing object key is created (and a missing array index appended/prepended)
-/// only when `create` is set. An empty path returns `target`; a scalar target is
-/// 22023.
+/// A path that does not resolve leaves `target` unchanged. At the final step
+/// this function creates a missing object key, and appends or prepends a missing
+/// array index, only when `create` is set. An empty path returns `target`, and a
+/// scalar target is 22023.
 fn jsonb_set(
     target: &JsonbValue,
     path: &[String],
@@ -2105,17 +2114,17 @@ enum Subscript {
     Index(i64),
 }
 
-/// Extract by subscript: object keys match by name, array indexes count from the
-/// end when negative, and a subscript of the wrong shape for the value (a key on
-/// an array or a scalar, an index on an object) simply misses.
+/// Extract by subscript: object keys match by name, and array indexes count from
+/// the end when negative. A subscript of the wrong shape for the value simply
+/// misses. Those are a key on an array or a scalar, and an index on an object.
 ///
 /// A jsonb SCALAR answers an integer subscript as if it were a one-element
 /// array, so `'"s"'::jsonb -> 0` is `"s"`, `->> 0` is `s`, `-> -1` is `"s"` and
-/// every other index misses. That is not a special case in PostgreSQL: a scalar
-/// jsonb *is* stored as a one-element array (a container carrying the
-/// `JB_FSCALAR` flag), so `jsonb_array_element` walks it like any other array.
-/// The path operators do not share the behavior — `jsonb_get_path` rejects a
-/// scalar root outright, so `'"s"'::jsonb #> '{0}'` is NULL (see [`navigate`]).
+/// every other index misses. That is not a special case in PostgreSQL. A scalar
+/// jsonb *is* stored as a one-element array, in a container that carries the
+/// `JB_FSCALAR` flag, so `jsonb_array_element` walks it like any other array.
+/// The path operators do not share the behavior. `jsonb_get_path` rejects a
+/// scalar root outright, so `'"s"'::jsonb #> '{0}'` is NULL. See [`navigate`].
 fn extract<'a>(value: &'a JsonbValue, subscript: &Subscript) -> Option<&'a JsonbValue> {
     match (value, subscript) {
         (JsonbValue::Object(_), Subscript::Key(key)) => value.object_get(key),
@@ -2131,7 +2140,7 @@ fn extract<'a>(value: &'a JsonbValue, subscript: &Subscript) -> Option<&'a Jsonb
 }
 
 /// Follow a `#>`/`jsonb_extract_path` path. A NULL path element makes the whole
-/// lookup miss, matching PostgreSQL's `array_contains_nulls` short circuit.
+/// lookup miss, which matches PostgreSQL's `array_contains_nulls` short circuit.
 fn navigate<'a>(value: &'a JsonbValue, path: &[Option<String>]) -> Option<&'a JsonbValue> {
     let mut current = value;
     for step in path {
@@ -2148,8 +2157,8 @@ fn navigate<'a>(value: &'a JsonbValue, path: &[Option<String>]) -> Option<&'a Js
     Some(current)
 }
 
-/// A signed index resolved against a length: negative counts from the end.
-/// `None` when it falls outside the array.
+/// A signed index resolved against a length. A negative index counts from the
+/// end. Returns `None` when it falls outside the array.
 fn resolve_index(index: i64, len: usize) -> Option<usize> {
     let len = i64::try_from(len).ok()?;
     let at = if index < 0 { len + index } else { index };
@@ -2259,8 +2268,8 @@ fn operator_undefined(op: JsonOp, left: &Datum, right: &Datum) -> ExecError {
     ))
 }
 
-/// A PostgreSQL `invalid_parameter_value` (22023) with a fixed message — the
-/// SQLSTATE every jsonb domain error uses.
+/// A PostgreSQL `invalid_parameter_value` (22023) with a fixed message. This is
+/// the SQLSTATE every jsonb domain error uses.
 fn invalid_parameter(message: &'static str) -> ExecError {
     ExecError::Type(TypeError::Domain {
         sqlstate: "22023",
@@ -2304,10 +2313,10 @@ fn require_arity(fc: &FuncCall, ok: bool) -> Result<(), ExecError> {
     }
 }
 
-/// A `jsonb` value argument. An unadorned literal has already been converted by
-/// [`param_types`], so a `text` value only reaches here from a path that never
-/// ran the plan-time check; parsing it keeps that path working rather than
-/// failing on a value PostgreSQL would have coerced.
+/// A `jsonb` value argument. [`param_types`] has already converted an unadorned
+/// literal, so a `text` value only reaches here from a path that never ran the
+/// plan-time check. Parsing it keeps that path working, rather than failing on a
+/// value PostgreSQL would have coerced.
 fn jsonb_operand<'a>(d: &'a Datum, name: &str) -> Result<Cow<'a, JsonbValue>, ExecError> {
     match d {
         Datum::Jsonb(j) => Ok(Cow::Borrowed(j)),
@@ -2316,8 +2325,9 @@ fn jsonb_operand<'a>(d: &'a Datum, name: &str) -> Result<Cow<'a, JsonbValue>, Ex
     }
 }
 
-/// A `jsonb` operand of a binary operator: `Ok(None)` for SQL NULL (every jsonb
-/// operator is strict), an error for an operand of the wrong type.
+/// A `jsonb` operand of a binary operator. Returns `Ok(None)` for SQL NULL,
+/// because every jsonb operator is strict, and an error for an operand of the
+/// wrong type.
 fn jsonb_or_null(d: &Datum, op: JsonOp) -> Result<Option<Cow<'_, JsonbValue>>, ExecError> {
     match d {
         Datum::Null => Ok(None),
@@ -2359,8 +2369,8 @@ fn operands<'a>(
     Ok(Some((value, subscript)))
 }
 
-/// The `(jsonb, text[])` operands of `#>`/`#>>`/`?|`/`?&`; `Ok(None)` when
-/// either is SQL NULL.
+/// The `(jsonb, text[])` operands of `#>`/`#>>`/`?|`/`?&`. Returns `Ok(None)`
+/// when either is SQL NULL.
 fn path_operands<'a>(
     op: JsonOp,
     left: &'a Datum,
@@ -2387,7 +2397,7 @@ fn array_path(a: &ArrayValue) -> Vec<Option<String>> {
         .collect()
 }
 
-/// A `text[]` function argument with no NULL elements (`jsonb_set`'s path).
+/// A `text[]` function argument with no NULL elements, as `jsonb_set`'s path is.
 fn text_path(d: &Datum, name: &str) -> Result<Vec<String>, ExecError> {
     match d {
         Datum::Array(a) if a.elem == ElemType::Text => a
@@ -2414,10 +2424,10 @@ fn text_arg<'a>(d: &'a Datum, name: &str) -> Result<&'a str, ExecError> {
 
 /// A non-NULL datum's PostgreSQL text output, as JSON spells it.
 ///
-/// JSON always uses the ISO date spelling whatever `DateStyle` says (the
-/// separate `json_datetime_text` step turns it into the RFC 3339 form), but an
-/// `interval` inside JSON *does* follow `IntervalStyle` — `to_json(interval '1
-/// day')` is `"@ 1 day"` under `postgres_verbose`.
+/// JSON always uses the ISO date spelling whatever `DateStyle` says. The
+/// separate `json_datetime_text` step turns it into the RFC 3339 form. But an
+/// `interval` inside JSON *does* follow `IntervalStyle`, so
+/// `to_json(interval '1 day')` is `"@ 1 day"` under `postgres_verbose`.
 fn datum_text(d: &Datum, ctx: &EvalCtx) -> String {
     let style = crabka_pgtypes::encoding::OutputStyle {
         time_zone: &ctx.time_zone,
@@ -2527,7 +2537,7 @@ mod tests {
 
     /// `PostgreSQL` resolves an `unknown` literal argument against the parameter
     /// it is passed to, so `jsonb_set('{"a":1}', '{a}', '2')` passes a `jsonb`, a
-    /// `text[]` and a `jsonb` — a call this codebase used to reject as 42883
+    /// `text[]` and a `jsonb`. This codebase used to reject that call as 42883,
     /// because it typed every literal `text` on sight. Each row's type and value
     /// were taken from `PostgreSQL` 18.4.
     #[test]
@@ -2638,11 +2648,11 @@ mod tests {
         );
     }
 
-    /// A jsonb SCALAR is stored as a one-element array (`PostgreSQL` flags the
-    /// container `JB_FSCALAR`), so `->`/`->>` with an integer subscript walk it
-    /// like one: `'"quoted"'::jsonb ->> 0` is `quoted`, not NULL. An OBJECT never
-    /// answers an integer subscript, and the path operators reject a scalar root
-    /// outright. Every row was taken from `PostgreSQL` 18.4.
+    /// A jsonb SCALAR is stored as a one-element array, because `PostgreSQL`
+    /// flags the container `JB_FSCALAR`. So `->`/`->>` with an integer subscript
+    /// walk it like one: `'"quoted"'::jsonb ->> 0` is `quoted`, not NULL. An
+    /// OBJECT never answers an integer subscript, and the path operators reject
+    /// a scalar root outright. Every row was taken from `PostgreSQL` 18.4.
     #[test]
     fn a_scalar_answers_an_integer_subscript_like_a_one_element_array() {
         let quoted = r#""quoted""#;
@@ -3265,10 +3275,10 @@ mod tests {
         );
     }
 
-    /// A jsonb subscript *read* is `navigate` over one text path element: a
+    /// A jsonb subscript *read* is `navigate` over one text path element. A
     /// missing key, an out-of-range index, a NULL subscript and a scalar
-    /// container are all SQL NULL, and an integer subscript becomes its decimal
-    /// text (so `('{"0": 1}'::jsonb)[0]` finds the key `"0"`). Rows measured
+    /// container are all SQL NULL. An integer subscript becomes its decimal
+    /// text, so `('{"0": 1}'::jsonb)[0]` finds the key `"0"`. Rows measured
     /// against PostgreSQL 18.4.
     #[test]
     fn jsonb_subscript_reads_by_key_or_index() {
@@ -3299,11 +3309,11 @@ mod tests {
         assert!(err.into_pg().code == "42804");
     }
 
-    /// `UPDATE t SET j[…] = v` is PostgreSQL's `jsonb_set_element`: it creates
-    /// missing path steps (an integer step makes an array, a text step an
-    /// object), pads a positive index past the end with JSON nulls, refuses a
-    /// negative index that reaches before the start, and refuses a path step
-    /// through a scalar. Rows measured against PostgreSQL 18.4.
+    /// `UPDATE t SET j[…] = v` is PostgreSQL's `jsonb_set_element`. It creates
+    /// missing path steps, where an integer step makes an array and a text step
+    /// makes an object. It pads a positive index past the end with JSON nulls.
+    /// It refuses a negative index that reaches before the start, and it refuses
+    /// a path step through a scalar. Rows measured against PostgreSQL 18.4.
     #[test]
     fn jsonb_subscript_assignment_creates_and_fills_paths() {
         let cases: &[(&str, &[Datum], &str, &str)] = &[

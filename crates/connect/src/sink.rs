@@ -5,12 +5,13 @@ use async_trait::async_trait;
 
 use crate::{error::ConnectError, record::ConnectRecord};
 
-/// A connector that pushes records consumed from Kafka into an external system
-/// (a data warehouse, a search index, a telemetry backend).
+/// A connector that pushes records consumed from Kafka into an external system,
+/// for example a data warehouse, a search index, or a telemetry backend.
 ///
 /// This is the write side of the connector SPI and the template every telemetry
-/// sink builds on. It mirrors the streams runtime's `RecordProducer`: records
-/// are buffered by [`put`](Sink::put) and made durable by [`flush`](Sink::flush).
+/// sink builds on. It mirrors the streams runtime's `RecordProducer`:
+/// [`put`](Sink::put) buffers records and [`flush`](Sink::flush) makes them
+/// durable.
 ///
 /// ## Delivery
 ///
@@ -31,23 +32,24 @@ use crate::{error::ConnectError, record::ConnectRecord};
 /// ```
 ///
 /// Like the streams `BeginTxnGate`, the gate is lazy: the runtime calls `begin`
-/// only when a non-empty batch is about to be written, so an idle interval opens
-/// no transaction. The default implementations are at-least-once: `begin` and
+/// only just before it writes a non-empty batch, so an idle interval opens no
+/// transaction. The default implementations are at-least-once: `begin` and
 /// `abort` are no-ops and `commit` delegates to `flush`.
 #[async_trait]
 pub trait Sink<K, V>: Send + Sync + 'static {
-    /// Buffer a batch of records for writing. May write through immediately or
-    /// accumulate until [`flush`](Sink::flush); either way the records are not
-    /// guaranteed durable until `flush` (or [`commit`](Sink::commit)) returns.
+    /// Buffer a batch of records for writing. The sink may write through
+    /// immediately or accumulate until [`flush`](Sink::flush). In both cases the
+    /// records are not guaranteed durable until `flush` or
+    /// [`commit`](Sink::commit) returns.
     ///
     /// # Errors
     ///
     /// Returns [`ConnectError`] if the records cannot be accepted.
     async fn put(&mut self, records: Vec<ConnectRecord<K, V>>) -> Result<(), ConnectError>;
 
-    /// Make every record accepted since the last flush/commit durable. The
-    /// runtime calls this before committing consumer offsets, so a successful
-    /// `flush` is the guarantee those records will not be re-delivered.
+    /// Make every record accepted since the last flush or commit durable. The
+    /// runtime calls this before it commits consumer offsets, so a successful
+    /// `flush` is the guarantee that those records will not be re-delivered.
     ///
     /// # Errors
     ///
@@ -55,16 +57,17 @@ pub trait Sink<K, V>: Send + Sync + 'static {
     async fn flush(&mut self) -> Result<(), ConnectError>;
 
     /// Whether this sink writes atomically and so can take part in exactly-once
-    /// delivery. When `false` (the default) the runtime drives it at-least-once
-    /// and never calls [`begin`](Sink::begin) / [`abort`](Sink::abort).
+    /// delivery. When `false`, the default, the runtime drives it at-least-once
+    /// and never calls [`begin`](Sink::begin) or [`abort`](Sink::abort).
     fn supports_transactions(&self) -> bool {
         false
     }
 
-    /// Open a transaction enclosing the [`put`](Sink::put)s that follow, up to
-    /// the next [`commit`](Sink::commit) or [`abort`](Sink::abort). Called by
-    /// the runtime only when [`supports_transactions`](Sink::supports_transactions)
-    /// is `true` and only before a non-empty batch. Default: no-op.
+    /// Open a transaction that encloses the [`put`](Sink::put)s that follow, up
+    /// to the next [`commit`](Sink::commit) or [`abort`](Sink::abort). The
+    /// runtime calls this only when
+    /// [`supports_transactions`](Sink::supports_transactions) is `true`, and
+    /// only before a non-empty batch. Default: no-op.
     ///
     /// # Errors
     ///
@@ -73,9 +76,9 @@ pub trait Sink<K, V>: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Atomically commit the records written since [`begin`](Sink::begin),
-    /// making them durable. The default (no transaction support) delegates to
-    /// [`flush`](Sink::flush).
+    /// Atomically commit the records written since [`begin`](Sink::begin) and
+    /// make them durable. The default has no transaction support and delegates
+    /// to [`flush`](Sink::flush).
     ///
     /// # Errors
     ///
@@ -84,8 +87,8 @@ pub trait Sink<K, V>: Send + Sync + 'static {
         self.flush().await
     }
 
-    /// Discard the records written since [`begin`](Sink::begin) without making
-    /// them durable. Called by the runtime to roll back a failed interval.
+    /// Discard the records written since [`begin`](Sink::begin) and do not make
+    /// them durable. The runtime calls this to roll back a failed interval.
     /// Default: no-op.
     ///
     /// # Errors
@@ -96,8 +99,9 @@ pub trait Sink<K, V>: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Release any resources held by the sink (connections, buffers). The
-    /// default is a no-op. After `close`, no further records are written.
+    /// Release any resources that the sink holds, such as connections and
+    /// buffers. The default is a no-op. After `close`, the sink writes no
+    /// further records.
     ///
     /// # Errors
     ///
@@ -115,7 +119,7 @@ mod tests {
 
     use super::*;
 
-    /// A sink that takes every default — at-least-once, no transactions.
+    /// A sink that takes every default: at-least-once, and no transactions.
     #[derive(Default)]
     struct DefaultSink {
         durable: usize,

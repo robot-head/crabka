@@ -14,11 +14,11 @@ pub use crate::emit::owned::EmitError;
 /// The output of a single emitter run for one `MessageSpec`.
 ///
 /// `primary` is the body of the main generated `.rs` file.
-/// `commons` contains one entry per top-level `commonStruct` in the schema;
+/// `commons` contains one entry per top-level `commonStruct` in the schema, and
 /// each entry is `(struct_name, file_body)`. For the current curated set,
-/// `commons` is always empty (`DescribeGroups` uses inline nested structs, not
-/// top-level commonStructs). The field is included so future schemas with real
-/// commonStructs can be wired up without changing the API again.
+/// `commons` is always empty, because `DescribeGroups` uses inline nested
+/// structs rather than top-level commonStructs. This struct keeps the field so
+/// that future schemas with real commonStructs need no further API change.
 pub struct EmittedMessage {
     pub primary: String,
     pub commons: Vec<(String, String)>,
@@ -41,12 +41,13 @@ mod tests {
             .join("schemas")
     }
 
-    /// Drive the entire emit pipeline over a real schema directory, exercising
-    /// every emitter (owned, borrowed, wrappers, `default_json` /
-    /// `protocol_request` reached via `owned::emit`, common structs, `mod.rs`,
-    /// `ApiKey` enum, and the differential dispatch table) the same way
-    /// `main::run` does — but in the library's own test target so the work
+    /// Drive the entire emit pipeline over a real schema directory the same
+    /// way `main::run` does, but in the library's own test target so the work
     /// counts toward `--lib` coverage.
+    ///
+    /// This exercises every emitter: owned, borrowed, wrappers, `default_json`
+    /// and `protocol_request` reached through `owned::emit`, common structs,
+    /// `mod.rs`, the `ApiKey` enum, and the differential dispatch table.
     fn emit_all(dir: &PathBuf, namespace: Option<&str>) {
         let specs = ir::load_dir(dir).unwrap();
         validate::validate(&specs).unwrap();

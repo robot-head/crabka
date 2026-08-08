@@ -20,23 +20,25 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Plan a `histogram_quantile(phi, v)` call onto the operator path: resolve
-    /// `phi` to a scalar, select the inner instant-vector `v` through the
-    /// histogram-aware [`Self::histogram_fold_inner_vector`] (carrying native
-    /// histograms as `SampleValue::Histogram`), then apply the **shared** fold
-    /// ([`apply_histogram_quantile`]) in pure Rust and return a
-    /// [`PlannedInstant::Precomputed`]. Because the same fold backs the
-    /// interpreter (`Self::eval_histogram_quantile_call`), the operator path
-    /// matches Prometheus by construction for **both** histogram flavors:
-    /// - classic `<metric>_bucket{le}` float-bucket vectors — `le`-bound parsing
+    /// Plans a `histogram_quantile(phi, v)` call onto the operator path.
+    ///
+    /// This method resolves `phi` to a scalar. It selects the inner
+    /// instant-vector `v` through the histogram-aware
+    /// [`Self::histogram_fold_inner_vector`], which carries native histograms as
+    /// `SampleValue::Histogram`. It then applies the shared fold
+    /// [`apply_histogram_quantile`] in pure Rust and returns a
+    /// [`PlannedInstant::Precomputed`]. The same fold backs the interpreter
+    /// (`Self::eval_histogram_quantile_call`), so the operator path matches
+    /// Prometheus by construction for both histogram flavors:
+    /// - classic `<metric>_bucket{le}` float-bucket vectors: `le`-bound parsing
     ///   (incl. `+Inf`), bucket-monotonicity forcing, the `<2`-bucket /
     ///   `phi`-out-of-range / negative-first-bucket edge cases, linear
     ///   interpolation, and the `__name__` + `le` label drop;
-    /// - native-histogram vectors — the `native_histogram_quantile` path and the
-    ///   classic+native mixed-schema warning (emitted via the in-scope annotation
-    ///   sink, exactly as the interpreter does).
+    /// - native-histogram vectors: the `native_histogram_quantile` path and the
+    ///   classic+native mixed-schema warning, which the in-scope annotation sink
+    ///   emits exactly as the interpreter does.
     ///
-    /// Returns `None` (interpreter fallback) for:
+    /// Returns `None`, and the caller falls back to the interpreter, for:
     /// - wrong arity (the interpreter then raises the canonical error),
     /// - a non-scalar / non-evaluable `phi` argument (the interpreter raises the
     ///   identical "quantile argument must be a scalar" error), or
@@ -79,18 +81,21 @@ impl<S: MetricStore> PromqlEngine<S> {
         )?)))
     }
 
-    /// Plan an experimental `histogram_quantiles(label, v, phi...)` call onto the
-    /// operator path: validate arity, resolve the label name and each scalar `phi`
-    /// exactly as the interpreter does, select the inner bucket vector `v` through
-    /// the histogram-aware [`Self::histogram_fold_inner_vector`], then apply the
-    /// **shared** [`apply_histogram_quantiles`] fold and return a
-    /// [`PlannedInstant::Precomputed`]. Because the same fold backs the interpreter
-    /// (`Self::eval_histogram_quantiles_call`), the operator path is parity-exact
-    /// for classic and native bucket vectors.
+    /// Plans an experimental `histogram_quantiles(label, v, phi...)` call onto the operator path.
     ///
-    /// Returns `None` (interpreter fallback) for wrong arity, a non-string label
-    /// argument, a non-scalar `phi`, or an inner expression the recursive planner
-    /// cannot evaluate (the interpreter then raises the canonical error).
+    /// This method validates the arity and resolves the label name and each
+    /// scalar `phi` exactly as the interpreter does. It selects the inner bucket
+    /// vector `v` through the histogram-aware
+    /// [`Self::histogram_fold_inner_vector`], applies the shared
+    /// [`apply_histogram_quantiles`] fold, and returns a
+    /// [`PlannedInstant::Precomputed`]. The same fold backs the interpreter
+    /// (`Self::eval_histogram_quantiles_call`), so the operator path is
+    /// parity-exact for classic and native bucket vectors.
+    ///
+    /// Returns `None`, and the caller falls back to the interpreter, for wrong
+    /// arity, a non-string label argument, a non-scalar `phi`, or an inner
+    /// expression the recursive planner cannot evaluate. The interpreter then
+    /// raises the canonical error.
     #[cfg(feature = "experimental-functions")]
     pub(super) async fn plan_histogram_quantiles_call(
         &self,
@@ -125,20 +130,21 @@ impl<S: MetricStore> PromqlEngine<S> {
         )))
     }
 
-    /// Plan a native-histogram accessor call
-    /// (`histogram_count`/`sum`/`avg`/`stddev`/`stdvar`) onto the operator path:
-    /// select the single instant-vector operand through the histogram-aware
-    /// [`Self::histogram_fold_inner_vector`] (carrying native histograms as
-    /// `SampleValue::Histogram`), then apply the **shared**
-    /// [`apply_histogram_accessor`] fold in pure Rust and return a
-    /// [`PlannedInstant::Precomputed`]. Because the same fold backs the
-    /// interpreter (`Self::eval_histogram_accessor_call`) — float rows dropped,
-    /// `__name__` dropped, source timestamp kept — the two paths match Prometheus
+    /// Plans a native-histogram accessor call onto the operator path.
+    ///
+    /// The accessor is one of `histogram_count`/`sum`/`avg`/`stddev`/`stdvar`.
+    /// This method selects the single instant-vector operand through the
+    /// histogram-aware [`Self::histogram_fold_inner_vector`], which carries
+    /// native histograms as `SampleValue::Histogram`. It then applies the shared
+    /// [`apply_histogram_accessor`] fold in pure Rust and returns a
+    /// [`PlannedInstant::Precomputed`]. The same fold backs the interpreter
+    /// (`Self::eval_histogram_accessor_call`): float rows dropped, `__name__`
+    /// dropped, source timestamp kept. The two paths therefore match Prometheus
     /// by construction.
     ///
-    /// Returns `None` (interpreter fallback) for wrong arity (the interpreter
-    /// raises the canonical error) or an operand the recursive planner cannot
-    /// evaluate.
+    /// Returns `None`, and the caller falls back to the interpreter, for wrong
+    /// arity or for an operand the recursive planner cannot evaluate. The
+    /// interpreter raises the canonical error for wrong arity.
     pub(super) async fn plan_histogram_accessor_call(
         &self,
         tenant: &str,
@@ -160,19 +166,21 @@ impl<S: MetricStore> PromqlEngine<S> {
         ))))
     }
 
-    /// Plan a `histogram_fraction(lower, upper, v)` call onto the operator path:
-    /// resolve the two scalar bounds exactly as the interpreter does, select the
-    /// instant-vector operand `v` through the histogram-aware
-    /// [`Self::histogram_fold_inner_vector`], then apply the **shared**
-    /// [`apply_histogram_fraction`] fold in pure Rust and return a
-    /// [`PlannedInstant::Precomputed`]. The same fold backs the interpreter
-    /// (`Self::eval_histogram_fraction_call`) — handling classic buckets, native
-    /// histograms, and the classic+native mixed-schema warning — so the two paths
-    /// match Prometheus by construction.
+    /// Plans a `histogram_fraction(lower, upper, v)` call onto the operator path.
     ///
-    /// Returns `None` (interpreter fallback) for wrong arity or a non-scalar /
-    /// non-evaluable bound (the interpreter raises the canonical error), or an
-    /// operand the recursive planner cannot evaluate.
+    /// This method resolves the two scalar bounds exactly as the interpreter
+    /// does. It selects the instant-vector operand `v` through the
+    /// histogram-aware [`Self::histogram_fold_inner_vector`], applies the shared
+    /// [`apply_histogram_fraction`] fold in pure Rust, and returns a
+    /// [`PlannedInstant::Precomputed`]. The same fold backs the interpreter
+    /// (`Self::eval_histogram_fraction_call`) and handles classic buckets, native
+    /// histograms, and the classic+native mixed-schema warning. The two paths
+    /// therefore match Prometheus by construction.
+    ///
+    /// Returns `None`, and the caller falls back to the interpreter, for wrong
+    /// arity, for a non-scalar or non-evaluable bound, or for an operand the
+    /// recursive planner cannot evaluate. The interpreter raises the canonical
+    /// error for wrong arity and for a non-scalar or non-evaluable bound.
     pub(super) async fn plan_histogram_fraction_call(
         &self,
         tenant: &str,
@@ -203,21 +211,26 @@ impl<S: MetricStore> PromqlEngine<S> {
         )?)))
     }
 
-    /// Evaluate the inner instant-vector argument of a **histogram-fold** call
-    /// (`histogram_quantile` / the native accessors) into a `Vec<InstantSample>`
-    /// that carries native-histogram series as `SampleValue::Histogram`.
+    /// Evaluates the inner instant-vector argument of a histogram-fold call.
     ///
-    /// A bare instant-vector selector is selected directly via the interpreter's
-    /// own `Self::eval_instant_selector`, so the result is identical to the
-    /// interpreter by construction: genuine NaN floats are preserved, stale-NaN
-    /// markers are dropped, the full labelset (including `__name__`) is carried,
-    /// and — crucially — histogram series yield `SampleValue::Histogram` rows. The
-    /// selection is a direct shared-kernel scan (not the float-only operator
-    /// leaf), so histogram samples and empty-valued labels round-trip faithfully.
-    /// Every other planner-supported inner expression is recursed into and
-    /// assembled (the float operator path never surfaces a histogram, so a nested
-    /// inner stays float-only). Returns `None` (caller falls back) only for an
-    /// inner expression the recursive planner cannot evaluate.
+    /// The call is `histogram_quantile` or one of the native accessors. This
+    /// method returns a `Vec<InstantSample>` that carries native-histogram series
+    /// as `SampleValue::Histogram`.
+    ///
+    /// This method selects a bare instant-vector selector directly through the
+    /// interpreter's own `Self::eval_instant_selector`, so the result is
+    /// identical to the interpreter by construction. That path preserves genuine
+    /// NaN floats, drops stale-NaN markers, and carries the full label set
+    /// including `__name__`. Histogram series yield `SampleValue::Histogram`
+    /// rows. The selection is a direct shared-kernel scan, not the float-only
+    /// operator leaf, so histogram samples and empty-valued labels round-trip
+    /// faithfully.
+    ///
+    /// This method recurses into every other planner-supported inner expression
+    /// and assembles the samples. The float operator path never surfaces a
+    /// histogram, so a nested inner expression stays float-only. Returns `None`,
+    /// and the caller falls back, only for an inner expression the recursive
+    /// planner cannot evaluate.
     pub(super) fn histogram_fold_inner_vector<'a>(
         &'a self,
         tenant: &'a str,

@@ -51,9 +51,10 @@ impl BlockWriter {
         Self { store }
     }
 
-    /// Write `batches` as a single Parquet block at `object_key`.
+    /// Writes `batches` as a single Parquet block at `object_key`.
     ///
     /// Returns [`BlockMeta`] computed from the mandatory block columns.
+    ///
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn write_block(
@@ -74,7 +75,7 @@ impl BlockWriter {
         .await
     }
 
-    /// Write a block validated against a signal-specific schema declaration.
+    /// Writes a block validated against a signal-specific schema declaration.
     ///
     /// Returns [`BlockMeta`] computed from the declared summary columns.
     #[instrument(

@@ -20,10 +20,12 @@ fn remote_span_id() -> SpanId {
 }
 
 /// Run `f` under a subscriber wired to a real `OTel` tracer with `AlwaysOn`
-/// sampling, and collect the spans closed inside it. Asserting on the exported
-/// [`SpanData`] rather than on a live `Span` handle is what makes the
-/// parent/link distinction observable: `tracing-opentelemetry` resolves a
-/// re-parented span's trace id when the span closes, not when `set_parent` runs.
+/// sampling, and collect the spans closed inside it.
+///
+/// A check on the exported [`SpanData`], and not on a live `Span` handle, is
+/// what makes the parent and link difference observable.
+/// `tracing-opentelemetry` resolves a re-parented span's trace id when the span
+/// closes, not when `set_parent` runs.
 fn exported_spans(f: impl FnOnce()) -> Vec<SpanData> {
     opentelemetry::global::set_text_map_propagator(
         opentelemetry_sdk::propagation::TraceContextPropagator::new(),
@@ -48,8 +50,9 @@ fn find_span<'a>(spans: &'a [SpanData], name: &str) -> &'a SpanData {
         .unwrap_or_else(|| panic!("no exported span named {name}"))
 }
 
-/// A `tracestate` of exactly `total` bytes, spread over three list members so
-/// no single value exceeds the 256-byte W3C per-value cap.
+/// A `tracestate` of exactly `total` bytes, spread over three list members.
+///
+/// Three members keep every single value inside the 256-byte W3C per-value cap.
 fn tracestate_of_len(total: usize) -> String {
     let keys = ["ka", "kb", "kc"];
     // Each member contributes `k=` plus its padding, and the members are joined

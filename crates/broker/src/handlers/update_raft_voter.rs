@@ -1,14 +1,15 @@
 //! `UpdateRaftVoter` (`api_key=82`, KIP-853). Admin RPC that rewrites an
-//! existing voter's listeners / supported `kraft.version` range.
+//! existing voter's listeners and its supported `kraft.version` range.
 //!
 //! ## ACL
 //!
 //! `Alter` on `Cluster("kafka-cluster")`. Deny → whole-response
 //! `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
 //!
-//! Outcome → error code mapping is shared with [`super::add_raft_voter`].
-//! `UpdateVoter` never surfaces `VoterNotCaughtUp`; an unknown voter id
-//! comes back as `ReconfigRejected → INVALID_REQUEST`.
+//! The outcome → error code mapping is shared with
+//! [`super::add_raft_voter`]. `UpdateVoter` never returns
+//! `VoterNotCaughtUp`. An unknown voter id comes back as
+//! `ReconfigRejected → INVALID_REQUEST`.
 
 use bytes::Bytes;
 use crabka_metadata::{Voter, VoterEndpoint};
@@ -141,7 +142,7 @@ mod tests {
     use super::*;
     use crate::test_support::start_broker_with_authorizer as start_broker;
 
-    /// Decode→encode round-trip at min and max versions.
+    /// Decode and encode round-trip at the min and max versions.
     #[test]
     fn response_round_trips_at_min_and_max_versions() {
         use crabka_protocol::owned::update_raft_voter_response::{self, UpdateRaftVoterResponse};

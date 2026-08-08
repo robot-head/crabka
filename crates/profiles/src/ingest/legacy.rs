@@ -874,7 +874,8 @@ fn trie_to_pprof(
 }
 
 /// One level of the explicit trie work-stack: the accumulated key prefix for a
-/// node plus how many of its declared children remain to be visited.
+/// node plus the number of its declared children that the walk must still
+/// visit.
 struct TrieFrame {
     key: Vec<u8>,
     remaining: usize,
@@ -1493,8 +1494,9 @@ mod tests {
         );
     }
 
-    /// LEB128 varint encoder mirroring [`read_tree_varint`], for crafting
-    /// adversarial tree/trie payloads in the amplification tests below.
+    /// LEB128 varint encoder that mirrors [`read_tree_varint`]. The
+    /// amplification tests below use it to craft adversarial tree and trie
+    /// payloads.
     fn put_tree_varint(out: &mut Vec<u8>, mut value: u64) {
         loop {
             let mut byte = u8::try_from(value & 0x7f).unwrap();

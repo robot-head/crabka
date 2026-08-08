@@ -1,8 +1,8 @@
 //! Driver type-lookup (typeinfo) queries against the synthesized catalog.
 //!
-//! When tokio-postgres meets an unknown type OID it prepares a catalog query
-//! that LEFT JOINs `pg_catalog.pg_range`, and on `UNDEFINED_TABLE` falls back
-//! to a variant that casts `NULL::OID`. Both must parse and execute: `pg_range`
+//! When tokio-postgres meets an unknown type OID, it prepares a catalog query
+//! that LEFT JOINs `pg_catalog.pg_range`. On `UNDEFINED_TABLE` it falls back to
+//! a variant that casts `NULL::OID`. Both must parse and execute: `pg_range`
 //! is a zero-row virtual catalog relation and `oid` is a type-name alias for
 //! `int4`. The query texts are the verbatim `TYPEINFO_QUERY` /
 //! `TYPEINFO_FALLBACK_QUERY` from tokio-postgres 0.7.18's `src/prepare.rs`,
@@ -13,7 +13,7 @@
 //! for `typtype`, where a real `PostgreSQL` server reports oid (OID 26) and
 //! "char" (OID 18). tokio-postgres's binary decoder checks those OIDs, so full
 //! driver decode compatibility needs per-column type fidelity in the wire
-//! layer — a separate design, not per-column overrides in the executor.
+//! layer. That is a separate design, not per-column overrides in the executor.
 
 use assert2::assert;
 use crabka_pgexec::SqlEngine;
@@ -65,9 +65,11 @@ fn row_text(result: &QueryResult, index: usize) -> Vec<Option<String>> {
         .collect()
 }
 
-/// Both tokio-postgres typeinfo query shapes return the same full `int8` row:
-/// a base scalar (`typtype` 'b') with no array element type, no range subtype,
-/// no domain base type, and no backing relation, in `pg_catalog`.
+/// Both tokio-postgres typeinfo query shapes return the same full `int8` row.
+///
+/// The row is a base scalar (`typtype` 'b') in `pg_catalog` with no array
+/// element type, no range subtype, no domain base type, and no backing
+/// relation.
 #[tokio::test]
 async fn typeinfo_queries_return_full_int8_row() {
     let engine = SqlEngine::new();
@@ -90,8 +92,10 @@ async fn typeinfo_queries_return_full_int8_row() {
     }
 }
 
-/// `oid` casts parse and evaluate; the alias reports int4 (OID 23) in the
-/// `RowDescription`, matching the catalog's other oid-valued columns.
+/// `oid` casts parse and evaluate.
+///
+/// The alias reports int4 (OID 23) in the `RowDescription`, which matches the
+/// catalog's other oid-valued columns.
 #[tokio::test]
 async fn oid_casts_parse_evaluate_and_describe_as_int4() {
     let engine = SqlEngine::new();
@@ -109,8 +113,9 @@ async fn oid_casts_parse_evaluate_and_describe_as_int4() {
     assert!(type_oids == vec![23, 23, 23]);
 }
 
-/// `pg_range` exists with zero rows — none of the built-in scalar types are
-/// range types — and a direct `count(*)` over it works.
+/// `pg_range` exists with zero rows, and a direct `count(*)` over it works.
+///
+/// None of the built-in scalar types are range types.
 #[tokio::test]
 async fn pg_range_is_empty() {
     let engine = SqlEngine::new();
@@ -121,11 +126,13 @@ async fn pg_range_is_empty() {
     assert!(row_text(&counted, 0) == vec![Some("0".into())]);
 }
 
-/// Regression: `SELECT count(*)` directly over a virtual catalog relation
-/// used to fail with `UNDEFINED_TABLE` (42P01) because the single-table
-/// aggregate fast path (`single_sharded_base_table` in `exec.rs`) propagated
-/// the catalog miss instead of falling through to the materializing path.
-/// The count matches the number of rows the relation itself materializes.
+/// Regression: `SELECT count(*)` directly over a virtual catalog relation used
+/// to fail with `UNDEFINED_TABLE` (42P01).
+///
+/// The single-table aggregate fast path (`single_sharded_base_table` in
+/// `exec.rs`) propagated the catalog miss instead of falling through to the
+/// materializing path. The count matches the number of rows the relation itself
+/// materializes.
 #[tokio::test]
 async fn count_star_over_pg_type_returns_builtin_count() {
     let engine = SqlEngine::new();
@@ -152,9 +159,11 @@ async fn pg_class_lists_pg_range() {
     assert!(row_text(&result, 0) == vec![Some("pg_range".into()), Some("11".into())]);
 }
 
-/// The relkind probe pgbench -i issues before COPY, in both spellings: a
-/// literal relation name cast (simple protocol) and the schema-qualified form.
-/// `regclass` resolves a relation name to its `pg_class` oid.
+/// The relkind probe that pgbench -i issues before COPY, in both spellings.
+///
+/// The two spellings are a literal relation name cast (simple protocol) and the
+/// schema-qualified form. `regclass` resolves a relation name to its `pg_class`
+/// oid.
 #[tokio::test]
 async fn regclass_cast_resolves_relation_names_for_the_relkind_probe() {
     let engine = SqlEngine::new();

@@ -1,14 +1,16 @@
-//! `murmur2(transactional_id) % num_partitions` — Apache Kafka's
-//! `Utils.abs(murmur2(...)) % numPartitions` convention. Matches the
-//! JVM client so a tid hashes to the same `__transaction_state`
-//! partition on Crabka as it does on Apache Kafka.
+//! `murmur2(transactional_id) % num_partitions`.
+//!
+//! This is Apache Kafka's `Utils.abs(murmur2(...)) % numPartitions`
+//! convention. It matches the JVM client, so a tid hashes to the same
+//! `__transaction_state` partition on Crabka as it does on Apache Kafka.
 
 use crate::kafka_hash::murmur2_partition;
 
-/// Map a `transactional_id` to a partition index in
-/// `__transaction_state`. Uses `i32`-cast then `abs` to match the JVM
-/// `Utils.abs(int)` semantics, which returns 0 for `Integer.MIN_VALUE`
-/// to avoid arithmetic overflow.
+/// Map a `transactional_id` to a partition index in `__transaction_state`.
+///
+/// The function casts to `i32` and then takes `abs`, to match the JVM
+/// `Utils.abs(int)` semantics. Those semantics return 0 for
+/// `Integer.MIN_VALUE` to avoid arithmetic overflow.
 pub fn partition_for_tid(transactional_id: &str, num_partitions: i32) -> i32 {
     murmur2_partition(transactional_id.as_bytes(), num_partitions)
 }

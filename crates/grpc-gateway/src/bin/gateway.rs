@@ -1,7 +1,7 @@
 //! `crabka-grpc-gateway` binary entry point.
 //!
-//! Parses CLI flags, builds the Connect-RPC router and a minimal health
-//! router, then serves both on the configured listen address.
+//! The binary parses CLI flags, builds the Connect-RPC router and a minimal
+//! health router, then serves both on the configured listen address.
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
@@ -112,8 +112,9 @@ struct Args {
     )]
     dedup_txn_id_prefix: String,
 
-    /// Address peers reach this gateway at (e.g. `gw-0.gw:9500`). Required for
-    /// active-active forwarding; must be routable from other replicas.
+    /// Address peers reach this gateway at, for example `gw-0.gw:9500`.
+    /// Required for active-active forwarding. It must be routable from other
+    /// replicas.
     #[arg(long, env = "CRABKA_GATEWAY_ADVERTISED_ADDR")]
     advertised_addr: String,
 
@@ -131,7 +132,7 @@ struct Args {
     /// Server private key (PEM).
     #[arg(long, env = "CRABKA_GATEWAY_TLS_KEY")]
     tls_key: Option<std::path::PathBuf>,
-    /// CA(s) used to verify incoming client certs (mTLS). Required if --tls-client-auth != disabled.
+    /// CA(s) that verify incoming client certs (mTLS). Required if --tls-client-auth != disabled.
     #[arg(long, env = "CRABKA_GATEWAY_TLS_CLIENT_CA")]
     tls_client_ca: Option<std::path::PathBuf>,
     /// Client-cert mode: disabled | optional | required.
@@ -141,7 +142,7 @@ struct Args {
         default_value = "disabled"
     )]
     tls_client_auth: String,
-    /// CA(s) the forwarder trusts for peer gateway server certs (defaults to --tls-client-ca).
+    /// CA(s) the forwarder trusts for peer gateway server certs. Defaults to --tls-client-ca.
     #[arg(long, env = "CRABKA_GATEWAY_TLS_TRUST_ROOTS")]
     tls_trust_roots: Option<std::path::PathBuf>,
     /// Cert hot-reload poll interval, e.g. `30s`.
@@ -256,7 +257,7 @@ struct Args {
     /// CA cert (PEM) the gateway trusts when connecting to the broker over TLS.
     #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_CA")]
     broker_tls_ca: Option<std::path::PathBuf>,
-    /// Client cert chain (PEM) presented to the broker for mTLS.
+    /// Client cert chain (PEM) the gateway presents to the broker for mTLS.
     /// Must be set together with `--broker-tls-key`.
     #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_CERT")]
     broker_tls_cert: Option<std::path::PathBuf>,
@@ -264,8 +265,8 @@ struct Args {
     /// Must be set together with `--broker-tls-cert`.
     #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_KEY")]
     broker_tls_key: Option<std::path::PathBuf>,
-    /// SNI / server-name used for the TLS handshake with the broker.
-    /// Required when `--broker-tls-cert` + `--broker-tls-key` are set.
+    /// SNI / server-name for the TLS handshake with the broker.
+    /// Required when `--broker-tls-cert` and `--broker-tls-key` are set.
     #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_SERVER_NAME")]
     broker_tls_server_name: Option<String>,
 
@@ -277,9 +278,10 @@ struct Args {
     #[arg(long, env = "CRABKA_GATEWAY_OUTBOUND_WEBHOOKS_CONFIG")]
     outbound_webhooks_config: Option<std::path::PathBuf>,
 
-    /// Base URL of a Confluent-compatible Schema Registry (e.g.
-    /// `http://schema-registry:8081`). When set, records are encoded/decoded
-    /// via `SchemaRegistryCodec`; when absent, `RawCodec` (identity) is used.
+    /// Base URL of a Confluent-compatible Schema Registry, for example
+    /// `http://schema-registry:8081`. When set, `SchemaRegistryCodec` encodes
+    /// and decodes records. When absent, the gateway uses the identity
+    /// `RawCodec`.
     #[arg(long, env = "CRABKA_GATEWAY_SCHEMA_REGISTRY_URL")]
     schema_registry_url: Option<String>,
 }
@@ -402,10 +404,10 @@ fn build_authz_settings(args: &Args) -> anyhow::Result<Option<AuthzSettings>> {
 /// Build [`ClientSecurity`] for outbound broker connections from the four
 /// `--broker-tls-*` flags.
 ///
-/// - Both cert+key present ⇒ mTLS; SNI is required in that case.
-/// - Both absent ⇒ plaintext (`None`).
+/// - Both cert and key present ⇒ mTLS. SNI is required in that case.
+/// - Both absent ⇒ plaintext, which is `None`.
 /// - Exactly one present ⇒ configuration error.
-/// - CA only (no cert/key) ⇒ one-way TLS with the given CA.
+/// - CA only, with no cert and no key ⇒ one-way TLS with the given CA.
 fn build_broker_security(
     cert: Option<&PathBuf>,
     key: Option<&PathBuf>,
@@ -844,7 +846,9 @@ fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness, poll_in
 }
 
 /// Build the DLQ producer and spawn one delivery task per outbound subscription.
-/// No-ops when `config.outbound` is empty (zero overhead for default deployments).
+///
+/// This function does nothing when `config.outbound` is empty, so a default
+/// deployment carries no overhead.
 async fn spawn_outbound_subscriptions(
     config: &GatewayConfig,
     shutdown: &CancellationToken,

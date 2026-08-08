@@ -5,17 +5,17 @@
 
 //! Broker-side ACL integration tests. No Docker.
 //!
-//! T22 — the first of three integration test batches — drives the
+//! T22, the first of three integration test batches, drives the
 //! `CreateAcls` / `DescribeAcls` / `DeleteAcls` flow over a real
 //! `SASL_PLAINTEXT` listener with the wire-typed `crabka-protocol`
-//! request/response codecs. The SASL framing helpers (`drive_*`,
-//! `round_trip`) are copied inline rather than shared via `mod common`
-//! because Rust integration tests don't easily allow sibling-module
-//! reuse across files in `tests/`.
+//! request/response codecs. This file copies the SASL framing helpers
+//! (`drive_*`, `round_trip`) inline instead of sharing them through
+//! `mod common`, because Rust integration tests do not easily allow
+//! sibling-module reuse across files in `tests/`.
 //!
-//! Gated to non-Windows to match the multi-broker test convention
-//! (the SASL listener startup is fine on Windows, but keeping
-//! the gate uniform avoids one-off CI matrix surprises).
+//! The suite is gated to non-Windows to match the multi-broker test
+//! convention. The SASL listener starts correctly on Windows, but a uniform
+//! gate avoids one-off CI matrix surprises.
 
 use std::{io, net::SocketAddr};
 
@@ -113,9 +113,9 @@ const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 /// Build a `BrokerConfig` with a single `SASL_PLAINTEXT` listener, PLAIN
 /// enabled, and the given super-user. The non-super-user case still
 /// declares a super-user so the cluster-Alter gate applies. It also
-/// installs `SimpleAclAuthorizer` explicitly so the broker enforces ACLs
-/// (the new default is `AllowAllAuthorizer`, which would silently let
-/// every test through).
+/// installs `SimpleAclAuthorizer` explicitly so the broker enforces ACLs.
+/// The default is `AllowAllAuthorizer`, which would silently let
+/// every test through.
 fn sasl_plain_broker_config(
     log_dir: &std::path::Path,
     creds: &[(&str, &str)],
@@ -141,8 +141,8 @@ fn sasl_plain_broker_config(
     cfg
 }
 
-/// Like `sasl_plain_broker_config` but accepts multiple super-users. Used by
-/// the `multi_super_user_both_can_provision` test to verify that
+/// Like `sasl_plain_broker_config`, but it accepts multiple super-users. The
+/// `multi_super_user_both_can_provision` test uses it to verify that
 /// any principal in the `super_users` set can drive privileged admin APIs.
 fn sasl_plain_broker_config_multi_super(
     log_dir: &std::path::Path,
@@ -172,7 +172,7 @@ fn sasl_plain_broker_config_multi_super(
 /// Shorthand for `Allow <op> on Topic LITERAL <name> for <principal> from *`.
 /// Every test in this file uses literal Topic ACLs with host `*`, so the only
 /// dimensions that vary per binding are `resource_name`, `principal`, and
-/// `operation` — wrap them up here to keep the test bodies short.
+/// `operation`. This helper wraps them and keeps the test bodies short.
 fn topic_allow_creation(name: &str, principal: &str, operation: i8) -> AclCreation {
     AclCreation {
         resource_type: RESOURCE_TYPE_TOPIC,
@@ -186,7 +186,7 @@ fn topic_allow_creation(name: &str, principal: &str, operation: i8) -> AclCreati
     }
 }
 
-/// Permissive `DescribeAclsRequest` for `Topic` — every other axis is wildcard.
+/// Permissive `DescribeAclsRequest` for `Topic`. Every other axis is wildcard.
 fn describe_all_topic_acls() -> DescribeAclsRequest {
     DescribeAclsRequest {
         resource_type_filter: RESOURCE_TYPE_TOPIC,
@@ -586,7 +586,7 @@ async fn fetch_denied_without_topic_read_acl() {
 // ────────────────────────────────────────────────────────────────────────
 
 /// Build a `ProduceRequest` carrying a single record (`value`) for
-/// `(topic, partition)`. `acks=-1` (all-ISR) matches the JVM client's
+/// `(topic, partition)`. `acks=-1`, which is all-ISR, matches the JVM client's
 /// default for durable producers.
 fn single_record_produce_request(topic: &str, partition: i32, value: &[u8]) -> ProduceRequest {
     ProduceRequest {
@@ -619,8 +619,8 @@ fn single_record_produce_request(topic: &str, partition: i32, value: &[u8]) -> P
 
 /// Drive a single `CreateTopics` against `addr` authenticated as
 /// `admin` / `admin-secret`. Asserts the response has `error_code=0`
-/// for the requested topic. Used by the T23 tests to materialise a
-/// partition before producing / fetching against it.
+/// for the requested topic. The T23 tests use it to materialise a
+/// partition before they produce to it or fetch from it.
 async fn create_topic_as_admin(addr: SocketAddr, name: &str, partitions: i32) {
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -692,11 +692,10 @@ async fn drive_fetch_as_plain(
 }
 
 /// Retry `drive_produce_as_plain` against `topic`/partition-0 until the
-/// per-partition `error_code` is no longer `TOPIC_AUTHORIZATION_FAILED`
-/// (i.e. the ACL submit has been applied into the metadata image) or a
-/// 10 s deadline elapses. Used by the happy-path Produce test to absorb
-/// the raft commit-then-apply gap. The final response (whichever the
-/// caller gets) is what we return.
+/// per-partition `error_code` is no longer `TOPIC_AUTHORIZATION_FAILED`,
+/// that is, until the ACL submit reaches the metadata image, or until a
+/// 10 s deadline elapses. The happy-path Produce test uses this to absorb
+/// the raft commit-then-apply gap. It returns the final response.
 async fn retry_produce_until_allowed(
     addr: SocketAddr,
     user: &str,
@@ -1229,10 +1228,10 @@ async fn drive_init_producer_id_as_plain(
         .map_err(|e| io::Error::other(format!("InitProducerId decode: {e}")))
 }
 
-/// Build a single-protocol `JoinGroup` request with an empty `member_id`
-/// (so the broker will first respond with `MEMBER_ID_REQUIRED` + a
-/// generated id), proposing the `range` assignor (the only one the
-/// broker negotiates in MVP).
+/// Build a single-protocol `JoinGroup` request with an empty `member_id`, so
+/// the broker first responds with `MEMBER_ID_REQUIRED` and a generated id.
+/// The request proposes the `range` assignor, the only one the
+/// broker negotiates in MVP.
 fn join_group_request(group_id: &str) -> JoinGroupRequest {
     JoinGroupRequest {
         group_id: group_id.to_string(),
@@ -1250,11 +1249,11 @@ fn join_group_request(group_id: &str) -> JoinGroupRequest {
     }
 }
 
-/// Retry `drive_metadata_as_plain` until `topic` shows up in the
-/// response (i.e. the Allow Describe ACL has been applied) or a 10 s
-/// deadline elapses. `req_topics` is forwarded as-is to the inner
-/// `MetadataRequest::topics` so callers can poll either the fetch-all
-/// or named-topic path.
+/// Retry `drive_metadata_as_plain` until `topic` appears in the
+/// response, that is, until the Allow Describe ACL is applied, or until a
+/// 10 s deadline elapses. This helper forwards `req_topics` unchanged to the
+/// inner `MetadataRequest::topics`, so callers can poll either the fetch-all
+/// path or the named-topic path.
 async fn retry_metadata_until_topic_visible(
     addr: SocketAddr,
     user: &str,
@@ -1294,12 +1293,12 @@ async fn retry_metadata_until_topic_visible(
     }
 }
 
-/// Retry `drive_join_group_as_plain` against `group_id` (empty
-/// `member_id`) until the response stops being `GROUP_AUTHORIZATION_FAILED`
-/// (i.e. the Allow Read ACL has been applied) or a 10 s deadline
+/// Retry `drive_join_group_as_plain` against `group_id` with an empty
+/// `member_id` until the response is no longer `GROUP_AUTHORIZATION_FAILED`,
+/// that is, until the Allow Read ACL is applied, or until a 10 s deadline
 /// elapses. The next code in the success ladder is
-/// `MEMBER_ID_REQUIRED (79)`; the caller follows up with the generated
-/// `member_id` to actually complete the join.
+/// `MEMBER_ID_REQUIRED (79)`. The caller then sends the generated
+/// `member_id` to complete the join.
 async fn retry_join_group_until_allowed(
     addr: SocketAddr,
     user: &str,
@@ -1385,8 +1384,8 @@ async fn drive_delete_acls_as_plain(
 }
 
 /// Open a TCP stream to `addr` and drive `ApiVersions` → `SaslHandshake(PLAIN)`
-/// → `SaslAuthenticate(\0user\0password)`. Returns the authenticated stream
-/// for the caller to issue follow-up requests on. Mirrors the first three
+/// → `SaslAuthenticate(\0user\0password)`. Returns the authenticated stream,
+/// on which the caller sends follow-up requests. Mirrors the first three
 /// steps of `drive_sasl_plain_session` in `auth_handlers.rs`.
 async fn sasl_plain_authenticate(
     addr: SocketAddr,
@@ -1452,11 +1451,12 @@ async fn sasl_plain_authenticate(
     Ok(stream)
 }
 
-/// Same shape as `auth_handlers::round_trip`. Encodes a request header
-/// (v1 non-flexible / v2 flexible), prepends a 4-byte length prefix,
-/// writes the frame, reads one response frame and strips the response
-/// header (v0 for `ApiVersions` or any non-flexible response, v1 with a
-/// trailing tagged-fields byte for every other flexible response).
+/// Same shape as `auth_handlers::round_trip`. It encodes a request header
+/// (v1 non-flexible, v2 flexible), prepends a 4-byte length prefix,
+/// writes the frame, reads one response frame, and strips the response
+/// header. The response header is v0 for `ApiVersions` and any non-flexible
+/// response, and v1 with a trailing tagged-fields byte for every other
+/// flexible response.
 async fn round_trip(
     stream: &mut TcpStream,
     api_key: i16,

@@ -1,15 +1,15 @@
-//! Controller-side leader-election scan. Called by the liveness ticker
-//! when a broker transitions `alive → dead`. Scans every partition where
-//! the dead broker is leader, picks the first alive ISR replica as new
+//! Controller-side leader-election scan. The liveness ticker calls it
+//! when a broker transitions `alive → dead`. The scan reads every partition
+//! where the dead broker is leader, picks the first alive ISR replica as new
 //! leader, bumps `leader_epoch`, and emits the new `PartitionRecord`s
 //! through openraft.
 //!
 //! KIP-841: when ISR becomes empty and the topic's
 //! `unclean.leader.election.enable` is `true`, the scan falls through to
-//! an out-of-ISR pick (first alive replica, singleton-ISR) — accepting
-//! possible data loss in exchange for availability. Default `false`
-//! preserves Kafka's safe-by-default behavior (partition unavailable
-//! until a former ISR member returns).
+//! an out-of-ISR pick, the first alive replica, with a singleton ISR. This
+//! accepts possible data loss in exchange for availability. The default
+//! `false` keeps Kafka's safe-by-default behavior. The partition stays
+//! unavailable until a former ISR member returns.
 
 #![allow(dead_code)]
 
@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Output of a failover scan: immediate metadata changes plus partitions
-/// that need asynchronous offset-aware recovery via the URM.
+/// that need asynchronous offset-aware recovery through the URM.
 pub(crate) struct FailoverPlan {
     pub changes: Vec<MetadataRecord>,
     pub recoveries: Vec<(String, i32, RecoveryStrategy)>,
@@ -36,11 +36,12 @@ pub(crate) struct FailoverPlan {
 /// (`compute_failover_changes`) and the offline-log-dir scan
 /// (`compute_offline_dir_failover_changes`). No I/O: the callers handle
 /// partition filtering, the alive snapshot, record construction, metrics, and
-/// recovery enqueue. Extracted so the failover policy is independently
-/// unit-testable and model-checkable, and so the two scans share one copy.
+/// recovery enqueue. This enum is separate so the failover policy is
+/// independently unit-testable and model-checkable, and so the two scans share
+/// one copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FailoverDecision {
-    /// Elect `leader` with `isr`; the caller bumps `leader_epoch + 1` and, when
+    /// Elect `leader` with `isr`. The caller bumps `leader_epoch + 1` and, when
     /// `unclean`, records the unclean-election metric.
     Elect {
         leader: NodeId,
@@ -58,7 +59,7 @@ pub(crate) enum FailoverDecision {
 }
 
 /// Decide the failover action for one partition. `alive` is the controller's
-/// snapshot of live brokers; `strategy` / `unclean_enabled` are the topic's
+/// snapshot of live brokers. `strategy` and `unclean_enabled` are the topic's
 /// resolved recovery policy.
 pub(crate) fn failover_one(
     pr: &PartitionRecord,
@@ -114,9 +115,9 @@ pub(crate) fn failover_one(
     }
 }
 
-/// Read `unclean.leader.election.enable` for a topic, defaulting to
-/// `false` when the key is unset or unparseable. Centralized so the
-/// failover path and any future caller stay consistent.
+/// Read `unclean.leader.election.enable` for a topic. The default is
+/// `false` when the key is unset or unparseable. This function is central so
+/// the failover path and any future caller stay consistent.
 fn unclean_election_enabled(image: &MetadataImage, topic: &str) -> bool {
     image
         .topic_config(topic)
@@ -125,8 +126,8 @@ fn unclean_election_enabled(image: &MetadataImage, topic: &str) -> bool {
 }
 
 /// Compute the failover `MetadataRecord` changes for `dead` against
-/// `image`. Pure — no I/O beyond `liveness.is_alive` lookups. Extracted
-/// so the failover policy (including the KIP-841 unclean toggle) is
+/// `image`. Pure: no I/O beyond `liveness.is_alive` lookups. This function is
+/// separate so the failover policy, including the KIP-841 unclean toggle, is
 /// unit-testable without spinning up a controller.
 pub(crate) async fn compute_failover_changes(
     image: &MetadataImage,
@@ -232,17 +233,17 @@ pub(crate) async fn compute_failover_changes(
 
 /// Compute failover changes for partitions whose replica on `broker` lives
 /// on a now-offline log directory (`offline_uuids`). KIP-112: a broker stays
-/// alive after a disk failure, so the dead-broker scan never fires — this
-/// scan does, driven by the broker's `offline_log_dirs` heartbeat.
+/// alive after a disk failure, so the dead-broker scan never fires. This scan
+/// does, and the broker's `offline_log_dirs` heartbeat drives it.
 ///
 /// For each affected partition:
 /// - if `broker` is the leader, elect a new leader from the alive ISR minus
-///   `broker` (same clean / KIP-966 / KIP-841 policy as
-///   [`compute_failover_changes`]), drop `broker` from ISR, bump epoch;
-/// - if `broker` is a non-leader ISR member, drop it from ISR (no epoch bump).
+///   `broker`, drop `broker` from ISR, and bump epoch. The clean / KIP-966 /
+///   KIP-841 policy is the same as [`compute_failover_changes`].
+/// - if `broker` is a non-leader ISR member, drop it from ISR. No epoch bump.
 ///
-/// Pure; idempotent (after the change `broker` is neither leader nor in ISR,
-/// so a repeat yields an empty plan).
+/// Pure and idempotent. After the change `broker` is neither leader nor in
+/// ISR, so a repeat yields an empty plan.
 pub(crate) async fn compute_offline_dir_failover_changes(
     image: &MetadataImage,
     broker: NodeId,
@@ -329,12 +330,12 @@ pub(crate) async fn compute_offline_dir_failover_changes(
     }
 }
 
-/// Called when the liveness ticker observes `AliveToDead(dead)`. Scans
-/// every partition where `dead` is leader OR in the ISR; proposes
+/// Called when the liveness ticker observes `AliveToDead(dead)`. This function
+/// scans every partition where `dead` is leader OR in the ISR. It proposes
 /// updated `PartitionRecord`s.
 ///
-/// No-op unless `controller` is currently the openraft leader (only
-/// the leader can `submit_change`).
+/// This is a no-op unless `controller` is currently the openraft leader. Only
+/// the leader can `submit_change`.
 #[tracing::instrument(
     name = "leader_election_on_broker_dead",
     level = "info",
@@ -384,9 +385,9 @@ pub(crate) async fn on_broker_dead(
 }
 
 /// Called when the liveness ticker observes `DeadToAlive(alive)`. This
-/// is a no-op — ISR expand happens organically via
+/// is a no-op. ISR expand happens on its own through
 /// `isr_maintenance` once the rejoined broker's replicator catches up.
-/// The hook is here for future enhancements (e.g. auto-rebalance).
+/// The hook is here for future enhancements, for example auto-rebalance.
 pub(crate) fn on_broker_alive(
     _controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     _node_id: NodeId,
@@ -399,7 +400,7 @@ pub(crate) fn on_broker_alive(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ElectionType {
     /// Move leadership back to the first replica in `replicas[]` if it's
-    /// alive and in the ISR. Safe — no data loss possible.
+    /// alive and in the ISR. This is safe: no data loss is possible.
     Preferred,
     /// Allow election outside the ISR when every ISR member is dead.
     /// Operator has accepted the possible-data-loss risk.
@@ -424,11 +425,11 @@ pub(crate) enum ElectError {
 /// `ElectError::NoEligibleReplica` when no other ISR member is alive.
 ///
 /// Differs from `select_new_leader_for_partition(Preferred)`:
-/// - Trigger is "current leader wants to drain", not "preferred replica
-///   isn't leader". So we pick any alive ISR member that isn't the
+/// - The trigger is "current leader wants to drain", not "preferred replica
+///   isn't leader". So this function picks any alive ISR member that isn't the
 ///   shutting-down broker, not strictly the preferred one.
-/// - ISR is left unchanged. The shutting-down broker stays in ISR
-///   until it actually goes offline; the heartbeat loop is what flips
+/// - This function does not change the ISR. The shutting-down broker stays in
+///   ISR until it actually goes offline. The heartbeat loop is what flips
 ///   it dead.
 pub(crate) async fn select_replacement_leader_for_shutdown(
     image: &crabka_metadata::MetadataImage,
@@ -473,8 +474,8 @@ pub(crate) async fn select_replacement_leader_for_shutdown(
 /// Operator-triggered single-partition election. Returns the new
 /// `PartitionRecord` ready to submit, or an `ElectError`.
 ///
-/// Pure: no I/O, no panics. Caller is responsible for submitting the
-/// returned record via the controller.
+/// Pure: no I/O, no panics. The caller must submit the returned record
+/// through the controller.
 pub(crate) async fn select_new_leader_for_partition(
     image: &crabka_metadata::MetadataImage,
     liveness: &ControllerLivenessState,
@@ -892,7 +893,7 @@ mod tests {
         RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, UNCLEAN_RECOVERY_STRATEGY,
     };
 
-    /// Apply a `V1TopicConfig` override on top of an existing image —
+    /// Apply a `V1TopicConfig` override on top of an existing image. This
     /// matches the runtime path where `AlterConfigs` writes the record.
     fn set_topic_config(img: &mut MetadataImage, topic: &str, key: &str, value: &str) {
         let mut overrides = BTreeMap::new();

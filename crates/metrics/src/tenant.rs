@@ -3,12 +3,12 @@
 /// Maximum tenant-ID length in bytes, matching Mimir's `errTenantIDTooLong`.
 const MAX_TENANT_ID_LEN: usize = 150;
 
-/// Validate a tenant ID against Mimir's `ValidTenantID` rules: reject empty,
-/// reject lengths over 150 bytes, reject the reserved `.` and `..` path
-/// segments, and reject any character outside the allowed set
-/// (alphanumerics plus `! - _ . * ' ( )`).
+/// Validates a tenant ID against Mimir's `ValidTenantID` rules. It rejects an
+/// empty ID, a length over 150 bytes, the reserved `.` and `..` path segments,
+/// and any character outside the allowed set of alphanumerics plus
+/// `! - _ . * ' ( )`.
 ///
-/// Returns a human-readable reason on rejection.
+/// It returns a reason a person can read on rejection.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn validate_tenant(id: &str) -> Result<(), String> {
@@ -35,7 +35,7 @@ pub fn validate_tenant(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Allowed tenant-ID bytes: ASCII alphanumerics plus `! - _ . * ' ( )`.
+/// The allowed tenant-ID bytes are ASCII alphanumerics plus `! - _ . * ' ( )`.
 fn is_allowed_tenant_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
         || matches!(byte, b'!' | b'-' | b'_' | b'.' | b'*' | b'\'' | b'(' | b')')

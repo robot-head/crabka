@@ -1,7 +1,10 @@
-//! KIP-1071 streams→classic cold downgrade + admin type-awareness integration
-//! tests (slice 2). A drained streams group converts to classic on a classic
-//! `JoinGroup` (offsets preserved); a streams group with a live member rejects it;
-//! and the admin handlers (List/Describe/Delete) respect the type lock.
+//! KIP-1071 integration tests for the cold downgrade from streams to classic,
+//! and for admin type-awareness (slice 2).
+//!
+//! A drained streams group converts to classic on a classic `JoinGroup`, and
+//! keeps its offsets. A streams group with a live member rejects that
+//! `JoinGroup`. The admin handlers List, Describe, and Delete respect the type
+//! lock.
 
 use std::{sync::Arc, time::Duration};
 
@@ -39,8 +42,9 @@ const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 const ERR_GROUP_ID_NOT_FOUND: i16 = 69;
 const ERR_NON_EMPTY_GROUP: i16 = 68;
 
-/// Heartbeat rounds a streams member gets to converge on its assignment
-/// before the test proceeds with whatever state it reached.
+/// The number of heartbeat rounds a streams member gets to converge on its
+/// assignment. After that, the test continues with whatever state it
+/// reached.
 const CONVERGE_TRIES: usize = 15;
 
 // ── boot / connect helpers ────────────────────────────────────────────────────
@@ -85,8 +89,9 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
     );
 }
 
-/// Finalize `streams.version` to level 1 so the heartbeat/describe handlers
-/// stop returning `UNSUPPORTED_VERSION`. `upgrade_type: 1` is UPGRADE.
+/// Finalizes `streams.version` at level 1, so that the heartbeat and describe
+/// handlers stop returning `UNSUPPORTED_VERSION`. `upgrade_type: 1` is
+/// UPGRADE.
 async fn finalize_streams_version(client: &Client) {
     let resp = client
         .send(UpdateFeaturesRequest {
@@ -143,9 +148,10 @@ fn join_request(group_id: &str, member_id: &str) -> JoinGroupRequest {
     }
 }
 
-/// Drive the `JoinGroup` two-step (`MEMBER_ID_REQUIRED` + re-join) then `SyncGroup`.
-/// Returns `(member_id, generation_id)`. The caller is the sole member so it
-/// is also the leader and supplies a trivial self-assignment in `SyncGroup`.
+/// Drives the two-step `JoinGroup`, which is `MEMBER_ID_REQUIRED` and then a
+/// re-join, and then `SyncGroup`. It returns `(member_id, generation_id)`. The
+/// caller is the only member, so it is also the leader, and it supplies a
+/// trivial self-assignment in `SyncGroup`.
 async fn classic_join_sync(client: &Client, group_id: &str) -> (String, i32) {
     // Round 1: empty member_id → broker mints one and returns MEMBER_ID_REQUIRED.
     let r1 = tokio::time::timeout(
@@ -244,8 +250,9 @@ fn follow_up(
     }
 }
 
-/// Drive a single streams member to convergence (at least `want_active`
-/// active-task partitions). Returns `(member_id, last_response)`.
+/// Drives one streams member to convergence, which means at least
+/// `want_active` active-task partitions. It returns
+/// `(member_id, last_response)`.
 async fn streams_join_and_converge(
     client: &Client,
     group: &str,
@@ -300,7 +307,8 @@ async fn streams_join_and_converge(
     (member_id, resp)
 }
 
-/// Send a streams `LeaveGroup` (`member_epoch` -1) so the group drains.
+/// Sends a streams `LeaveGroup`, with `member_epoch` -1, so that the group
+/// drains.
 async fn streams_leave(client: &Client, group: &str, member_id: &str) {
     let _ = client
         .send(StreamsGroupHeartbeatRequest {
@@ -313,9 +321,10 @@ async fn streams_leave(client: &Client, group: &str, member_id: &str) {
         .expect("streams leave heartbeat");
 }
 
-/// Commit an offset via the "simple consumer" path (empty `member_id`) which
-/// bypasses classic-member validation. Safe to use for a streams group because
-/// the offset-home actor allows commits from unjoined clients (generation -1).
+/// Commits an offset through the "simple consumer" path, with an empty
+/// `member_id`, which skips classic-member validation. This is safe for a
+/// streams group, because the offset-home actor accepts a commit from a client
+/// that has not joined, at generation -1.
 async fn commit_offset_simple(
     client: &Client,
     group_id: &str,
@@ -360,7 +369,7 @@ fn rejoin_config(log_dir: std::path::PathBuf) -> BrokerConfig {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 /// A drained streams group with a committed offset converts to classic on a
-/// classic `JoinGroup`; the committed offset survives the flip.
+/// classic `JoinGroup`. The committed offset survives the flip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drained_streams_group_downgrades_and_preserves_offsets() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -497,9 +506,9 @@ async fn streams_group_with_live_member_rejects_classic_join() {
     );
 }
 
-/// After a classic→streams conversion (slice 1), the converted group is
-/// reported as `streams` by `ListGroups` and is NOT deletable via the classic
-/// path while the streams group has a live member.
+/// After a conversion from classic to streams (slice 1), `ListGroups` reports
+/// the converted group as `streams`. The classic path can NOT delete it while
+/// the streams group has a live member.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn converted_group_admin_views_respect_type_lock() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -578,8 +587,8 @@ async fn converted_group_admin_views_respect_type_lock() {
     );
 }
 
-/// A streams→classic downgrade survives a broker restart: after replay the
-/// group is Classic with its committed offset intact.
+/// A downgrade from streams to classic survives a broker restart. After
+/// replay the group is Classic and its committed offset is intact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn downgrade_survives_restart() {
     let dir = tempfile::TempDir::new().unwrap();

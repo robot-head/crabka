@@ -139,7 +139,7 @@ async fn values_derived_table_uses_alias_column_names() {
 }
 
 /// `PostgreSQL` renames a *prefix* when the alias list is shorter than the
-/// item's column list, and rejects only a list that names more columns than
+/// item's column list. It rejects only a list that names more columns than
 /// exist.
 #[tokio::test]
 async fn values_derived_column_alias_list_may_be_shorter_but_not_longer() {

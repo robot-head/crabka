@@ -1,14 +1,14 @@
 //! Schema-qualified relation names against a real in-process engine.
 //!
 //! Every statement that names a relation now goes through one parse function
-//! producing a `RelationRef`, so a dotted name means the same thing everywhere
-//! — where before `SELECT * FROM s1.t` and `INSERT INTO s1.t` failed with
-//! different SQLSTATEs in different phases.
+//! that produces a `RelationRef`, so a dotted name means the same thing
+//! everywhere. Before that, `SELECT * FROM s1.t` and `INSERT INTO s1.t` failed
+//! with different SQLSTATEs in different phases.
 //!
 //! Which SQLSTATE a missing schema draws was captured from a live
 //! `PostgreSQL` 18.4 rather than read from documentation, because the split is
-//! not the obvious one: DML reports the *relation* (`42P01`) while every
-//! utility statement reports the *schema* (`3F000`).
+//! not the obvious one. DML reports the *relation*, with `42P01`, while every
+//! utility statement reports the *schema*, with `3F000`.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -95,7 +95,7 @@ async fn a_dml_target_in_a_missing_schema_is_an_undefined_relation() {
 
 /// Every utility statement resolves the schema first, so the schema is what it
 /// reports. This is the half of the split the parser used to make for it, and
-/// the reason the decision had to move: the parser cannot tell these apart.
+/// the reason the decision had to move. The parser cannot tell these apart.
 #[tokio::test]
 async fn a_utility_statement_in_a_missing_schema_reports_the_schema() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -126,8 +126,8 @@ async fn a_utility_statement_in_a_missing_schema_reports_the_schema() {
 }
 
 /// `IF EXISTS` skips a name whose schema is missing rather than reporting it,
-/// and still acts on the rest of the list — as 18.4 does, with a NOTICE this
-/// engine has no channel for.
+/// and still acts on the rest of the list. 18.4 does the same, with a NOTICE
+/// this engine has no channel for.
 #[tokio::test]
 async fn if_exists_skips_a_name_in_a_missing_schema() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE keep (x int)"]).await;
@@ -148,7 +148,7 @@ async fn if_exists_skips_a_name_in_a_missing_schema() {
 }
 
 /// A schema that exists but holds nothing reports the *relation*, from every
-/// statement form — the schema check only fires when the schema is absent.
+/// statement form. The schema check only fires when the schema is absent.
 #[tokio::test]
 async fn an_existing_schema_without_the_relation_is_an_undefined_relation() {
     let (_engine, mut s) = engine_with(&["CREATE SCHEMA s1"]).await;
@@ -164,9 +164,9 @@ async fn an_existing_schema_without_the_relation_is_an_undefined_relation() {
 }
 
 /// A `public` qualifier reaches the relation the bare name reaches, because
-/// `public` is where the default `search_path` puts an unqualified name — and
-/// the unquoted `PUBLIC` folds to it. This is resolution through the path, not
-/// a special case for one schema name.
+/// `public` is where the default `search_path` puts an unqualified name. The
+/// unquoted `PUBLIC` folds to it. This is resolution through the path, not a
+/// special case for one schema name.
 #[tokio::test]
 async fn a_public_qualifier_reaches_the_relation_the_search_path_reaches() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (x int)"]).await;
@@ -193,9 +193,9 @@ async fn a_public_qualifier_reaches_the_relation_the_search_path_reaches() {
 
 /// `pg_temp` names the session's own temporary namespace, not `public`, so a
 /// permanent relation is not reachable through it. A session that has created
-/// no temporary relation has no such namespace, and 18.4 then splits the report
-/// the same way every missing schema is split: a DML target reports the dotted
-/// relation, a utility statement reports the schema.
+/// no temporary relation has no such namespace. 18.4 then splits the report the
+/// same way it splits every missing schema. A DML target reports the dotted
+/// relation, and a utility statement reports the schema.
 #[tokio::test]
 async fn a_pg_temp_qualifier_does_not_reach_a_permanent_relation() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (x int)"]).await;
@@ -244,7 +244,7 @@ async fn catalog_qualifiers_still_reach_the_virtual_catalog() {
     );
 }
 
-/// `CREATE VIEW public.v` was a bare syntax error before this change: the view
+/// `CREATE VIEW public.v` was a bare syntax error before this change. The view
 /// path was the one relation name with no dot handling at all.
 #[tokio::test]
 async fn create_view_accepts_a_qualified_name() {
@@ -257,7 +257,7 @@ async fn create_view_accepts_a_qualified_name() {
     assert!(failure_of(&mut s, "SELECT x FROM v").await == relation_missing("v"));
 }
 
-/// A three-part name can only ever be the cross-database refusal here: the
+/// A three-part name can only ever be the cross-database refusal here. The
 /// engine has one database, so there is nothing else `a.b.c` could mean.
 #[tokio::test]
 async fn a_three_part_name_is_the_cross_database_refusal() {
@@ -274,7 +274,7 @@ async fn a_three_part_name_is_the_cross_database_refusal() {
     }
 }
 
-/// A qualifier is never a CTE reference: `public.t` names the stored relation
+/// A qualifier is never a CTE reference. `public.t` names the stored relation
 /// even where a CTE of that name is in scope.
 #[tokio::test]
 async fn a_qualified_name_never_resolves_to_a_cte() {
@@ -291,7 +291,7 @@ async fn a_qualified_name_never_resolves_to_a_cte() {
 }
 
 /// The error names the case-folded, dotted, unquoted form rather than the
-/// source text — the lexer folds unquoted identifiers, so a `RelationRef` built
+/// source text. The lexer folds unquoted identifiers, so a `RelationRef` built
 /// from its tokens renders correctly with no extra machinery.
 #[tokio::test]
 async fn the_missing_relation_is_named_case_folded() {
@@ -300,9 +300,9 @@ async fn the_missing_relation_is_named_case_folded() {
     assert!(failure_of(&mut s, "DROP TABLE S.T").await == schema_missing("s"));
 }
 
-/// A relation in a real schema is reachable, and by its qualified name only —
-/// which is what the one parse policy buys: `CREATE`, `INSERT` and `SELECT`
-/// all agree on what the dot meant.
+/// A relation in a real schema is reachable, and by its qualified name only.
+/// That is what the one parse policy buys: `CREATE`, `INSERT` and `SELECT` all
+/// agree on what the dot meant.
 #[tokio::test]
 async fn a_relation_in_a_created_schema_round_trips_through_every_statement() {
     let (_engine, mut s) = engine_with(&["CREATE SCHEMA s1"]).await;

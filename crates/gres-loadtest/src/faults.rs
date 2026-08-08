@@ -1,22 +1,24 @@
 //! Executes a scenario's fault timeline against a live cluster.
 //!
 //! [`run_schedule`] expands the scenario's [`FaultEvent`]s into a flat,
-//! time-sorted list of atomic actions — apply/heal pairs for timed faults,
-//! kill/restart pairs for node crashes, alternating half-cycles for flaps —
-//! and executes them sequentially on the calling task, so the `&mut Cluster`
-//! borrow is never shared across concurrent timers.
+//! time-sorted list of atomic actions. Those actions are apply and heal pairs
+//! for timed faults, kill and restart pairs for node crashes, and alternating
+//! half-cycles for flaps. It runs them one after another on the calling task,
+//! so no two concurrent timers ever share the `&mut Cluster` borrow.
 //!
-//! Event durations may overlap freely, including on the same endpoint: the
-//! executor tracks active faults per individual proxy and per fault kind
-//! (partition, latency, throttle). While several overlap, the most recently
-//! applied value wins; a heal or clear removes only its own event's
-//! contribution and re-applies the most recent still-active value, so a
-//! proxy's state is cleared only when the last overlapping fault ends.
-//! `all-ranges`/`all-sql` targets are fanned out to concrete proxies before
-//! this bookkeeping, so a broad heal never clears a still-active
-//! single-endpoint fault (and vice versa). Kill/restart are process-level
-//! and bypass the proxy bookkeeping. The returned log records what was
-//! actually applied, in application order, for inclusion in the report.
+//! Event durations may overlap freely, including on the same endpoint. The
+//! executor tracks the active faults for each individual proxy and each fault
+//! kind: partition, latency, and throttle. While several overlap, the value
+//! applied most recently wins. A heal or a clear removes only its own event's
+//! contribution and applies the most recent still-active value again. A
+//! proxy's state therefore clears only when the last overlapping fault ends.
+//!
+//! The executor fans `all-ranges` and `all-sql` targets out to concrete
+//! proxies before this bookkeeping. A broad heal therefore never clears a
+//! still-active single-endpoint fault, and a single-endpoint heal never clears
+//! a broad one. Kill and restart are process-level and skip the proxy
+//! bookkeeping. The returned log records what the executor really applied, in
+//! application order, for the report.
 
 use std::{cmp::Ordering, collections::BTreeMap, fmt};
 
@@ -32,20 +34,23 @@ use crate::{
     scenario::{FaultAction, FaultEvent, FaultTarget, PartitionStyle},
 };
 
-/// Applies `events` to the cluster, anchored at `window_start` (the start of
-/// the measurement window). `ranges` is the topology's range count, used to
-/// fan [`FaultTarget::AllRanges`] out to every range proxy (the cluster does
-/// not expose its range count). Returns once every event has been applied
-/// and every timed heal/restart has completed.
+/// Applies `events` to the cluster, anchored at `window_start`, which is the
+/// start of the measurement window.
 ///
-/// Atoms execute sequentially on the calling task: a slow atom — most
-/// plausibly a node restart replaying WAL — delays every subsequent atom
-/// past its scheduled offset.
+/// `ranges` is the topology's range count. This function uses it to fan
+/// [`FaultTarget::AllRanges`] out to every range proxy, because the cluster
+/// does not expose its range count. The function returns once it has applied
+/// every event and every timed heal and restart has finished.
+///
+/// Atoms run one after another on the calling task. A slow atom, most likely a
+/// node restart that replays WAL, therefore delays every later atom past its
+/// scheduled offset.
 ///
 /// # Errors
 ///
-/// Returns an error if a kill or restart fails at the process level,
-/// abandoning the rest of the schedule; proxy reconfiguration is infallible.
+/// Returns an error if a kill or a restart fails at the process level, and
+/// then abandons the rest of the schedule. Proxy reconfiguration cannot
+/// fail.
 pub async fn run_schedule(
     events: &[FaultEvent],
     ranges: u16,
@@ -174,7 +179,7 @@ enum AtomAction {
 }
 
 /// Expands events into a flat, time-sorted atom list. The sort is stable, so
-/// atoms scheduled for the same second execute in event order.
+/// atoms scheduled for the same second run in event order.
 #[cfg(test)]
 fn expand(events: &[FaultEvent]) -> Vec<Atom> {
     expand_with_policy(events, LoadtestRuntimePolicy::default())
@@ -197,9 +202,9 @@ fn total_order(left: Time, right: Time) -> Ordering {
     left.secs_f64().total_cmp(&right.secs_f64())
 }
 
-/// Appends one event's atoms: the applying atom at `at` and, for timed
-/// faults, the corresponding heal/restore/restart atom when the duration
-/// elapses.
+/// Appends one event's atoms. Those are the atom that applies the fault at
+/// `at` and, for a timed fault, the matching heal, restore, or restart atom
+/// for the moment the duration elapses.
 fn expand_event(
     event: usize,
     entry: &FaultEvent,
@@ -283,9 +288,10 @@ fn expand_event(
     }
 }
 
-/// Emits alternating blackhole/heal atoms every `period` starting at `at`,
-/// guaranteed to end healed at or before `at + duration`. A non-positive
-/// period is clamped to the configured minimum; a zero duration emits nothing.
+/// Emits alternating blackhole and heal atoms every `period`, from `at`
+/// onward. The sequence always ends healed at or before `at + duration`. A
+/// non-positive period is clamped to the configured minimum, and a zero
+/// duration emits nothing.
 fn expand_flap(
     event: usize,
     target: FaultTarget,
@@ -325,8 +331,9 @@ fn expand_flap(
     }
 }
 
-/// One concrete proxied endpoint, the unit the active-fault bookkeeping
-/// tracks (broad targets are fanned out to these before bookkeeping).
+/// One concrete proxied endpoint. It is the unit that the active-fault
+/// bookkeeping tracks, and broad targets fan out to these before the
+/// bookkeeping runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ProxyId {
     /// The RPC endpoint of one range.
@@ -392,7 +399,7 @@ fn kind_word(kind: FaultKind) -> &'static str {
     }
 }
 
-/// One reconfiguration command for a concrete proxy; a `None` payload clears
+/// One reconfiguration command for a concrete proxy. A `None` payload clears
 /// the corresponding state.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ProxyCommand {
@@ -404,7 +411,7 @@ enum ProxyCommand {
     Throttle(ProxyId, Option<ByteRate>),
 }
 
-/// The command applying `value` to `proxy`.
+/// The command that applies `value` to `proxy`.
 fn set_command(proxy: ProxyId, value: FaultValue) -> ProxyCommand {
     match value {
         FaultValue::Partition(style) => ProxyCommand::Partition(proxy, Some(style)),
@@ -415,7 +422,7 @@ fn set_command(proxy: ProxyId, value: FaultValue) -> ProxyCommand {
     }
 }
 
-/// The command clearing `kind` on `proxy`.
+/// The command that clears `kind` on `proxy`.
 fn clear_command(kind: FaultKind, proxy: ProxyId) -> ProxyCommand {
     match kind {
         FaultKind::Partition => ProxyCommand::Partition(proxy, None),
@@ -424,7 +431,7 @@ fn clear_command(kind: FaultKind, proxy: ProxyId) -> ProxyCommand {
     }
 }
 
-/// The concrete proxies a target fans out to.
+/// The concrete proxies that a target fans out to.
 fn fan_out(target: FaultTarget, ranges: u16, nodes: u16) -> Vec<ProxyId> {
     match target {
         FaultTarget::Range(range) => vec![ProxyId::Range(range)],
@@ -442,27 +449,30 @@ struct ActiveEntry {
     value: FaultValue,
 }
 
-/// Result of resolving one atom against the bookkeeping: the proxy commands
-/// to issue (in fan-out order) and the fault-log description.
+/// Result of one atom resolved against the bookkeeping: the proxy commands to
+/// issue, in fan-out order, and the fault-log description.
 #[derive(Debug, Clone, PartialEq)]
 struct Step {
     commands: Vec<ProxyCommand>,
     description: String,
 }
 
-/// Pure executor bookkeeping: the active overlapping faults per
-/// (proxy, kind), in application order, so releasing one event's fault
-/// re-applies the most recent still-active value instead of clearing state
-/// another event still owns. Drivable without a live cluster: feed it
-/// expanded atoms, collect the emitted [`ProxyCommand`]s.
+/// Pure executor bookkeeping. It holds the active overlapping faults for each
+/// (proxy, kind) pair, in application order. A release of one event's fault
+/// therefore applies the most recent still-active value again, instead of a
+/// clear of state that another event still owns.
+///
+/// This type runs without a live cluster. Feed it expanded atoms and collect
+/// the emitted [`ProxyCommand`]s.
 #[derive(Debug, Default)]
 struct ScheduleState {
     active: BTreeMap<(ProxyId, FaultKind), Vec<ActiveEntry>>,
 }
 
 impl ScheduleState {
-    /// Resolves one atom into proxy commands and its log description.
-    /// Kill/restart atoms are process-level: no commands, base description.
+    /// Resolves one atom into proxy commands and its log description. Kill
+    /// and restart atoms are process-level, so they give no commands and the
+    /// base description.
     fn step(&mut self, atom: Atom, ranges: u16, nodes: u16) -> Step {
         let base = describe(atom.action);
         match atom.action {
@@ -516,7 +526,8 @@ impl ScheduleState {
     }
 
     /// Records `value` as active for the atom's event on every fanned-out
-    /// proxy and issues it (last-applied-wins while overlapping).
+    /// proxy, then issues it. While faults overlap, the value applied last
+    /// wins.
     fn apply_step(
         &mut self,
         atom: Atom,
@@ -539,9 +550,10 @@ impl ScheduleState {
         }
     }
 
-    /// Removes the event's entry on every fanned-out proxy: re-applies the
-    /// most recent still-active value where one remains, clears the proxy
-    /// state where none does, and names the survivors in the description.
+    /// Removes the event's entry on every fanned-out proxy. Where a
+    /// still-active value remains, this method applies the most recent one
+    /// again. Where none remains, it clears the proxy state. It names the
+    /// survivors in the description.
     fn release_step(
         &mut self,
         event: usize,
@@ -572,16 +584,16 @@ impl ScheduleState {
         }
     }
 
-    /// Marks `value` active for `event` on `proxy`, replacing the event's
-    /// previous entry (as a flap's next cycle does).
+    /// Marks `value` active for `event` on `proxy`. It replaces the event's
+    /// previous entry, as the next cycle of a flap does.
     fn insert(&mut self, event: usize, at: Time, proxy: ProxyId, value: FaultValue) {
         let entries = self.active.entry((proxy, kind_of(value))).or_default();
         entries.retain(|entry| entry.event != event);
         entries.push(ActiveEntry { event, at, value });
     }
 
-    /// Removes `event`'s entry for `(proxy, kind)` and returns the most
-    /// recently applied entry still active, if any.
+    /// Removes the entry of `event` for `(proxy, kind)`. It returns the entry
+    /// applied most recently that is still active, if there is one.
     fn release(&mut self, event: usize, proxy: ProxyId, kind: FaultKind) -> Option<ActiveEntry> {
         let key = (proxy, kind);
         let entries = self.active.get_mut(&key)?;
@@ -639,9 +651,9 @@ fn describe(action: AtomAction) -> String {
     }
 }
 
-/// Description suffix for a heal/clear that left other events' faults
-/// active: empty when everything cleared, otherwise the surviving faults
-/// and when they were applied.
+/// Description suffix for a heal or clear that left the faults of other events
+/// active. It is empty when everything cleared. Otherwise it names the
+/// surviving faults and the time when the executor applied them.
 fn describe_remnants(kind: FaultKind, remnants: &[(ProxyId, Time)], fanned: usize) -> String {
     match remnants {
         [] => String::new(),
@@ -699,8 +711,8 @@ mod tests {
     }
 
     /// Expands `events` and drives every atom through a fresh
-    /// [`ScheduleState`], returning what the executor would do at each
-    /// step: `(at, commands, description)`.
+    /// [`ScheduleState`]. It returns what the executor would do at each step,
+    /// as `(at, commands, description)`.
     fn drive(
         events: &[FaultEvent],
         ranges: u16,

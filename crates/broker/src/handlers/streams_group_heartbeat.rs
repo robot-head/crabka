@@ -1,12 +1,15 @@
-//! `StreamsGroupHeartbeat` (`api_key` 88) — KIP-1071 streams rebalance
-//! protocol. Routes the request to the per-group streams actor in
+//! `StreamsGroupHeartbeat` (`api_key` 88), the KIP-1071 streams rebalance
+//! protocol. The handler routes the request to the per-group streams actor in
 //! `GroupCoordinator`.
 //!
-//! Mirrors the KIP-932 share-group heartbeat handler
-//! ([`super::share_group_heartbeat`]): decode, gate, `mark_streams` +
+//! It mirrors the KIP-932 share-group heartbeat handler
+//! ([`super::share_group_heartbeat`]): decode, gate, `mark_streams` and
 //! `get_or_create_streams`, send a `Heartbeat` actor message, await the
-//! oneshot, encode. Gated on BOTH the finalized `streams.version >= 1` feature
-//! (KIP-1071 early access) AND the `streams_group.enable` config kill-switch.
+//! oneshot, then encode.
+//!
+//! Two gates gate it: the finalized `streams.version >= 1` feature, which is
+//! KIP-1071 early access, AND the `streams_group.enable` config kill-switch.
+//! BOTH must allow the request.
 
 use bytes::Bytes;
 use crabka_protocol::{
@@ -117,8 +120,9 @@ pub(crate) async fn handle(
     }
 }
 
-/// Response returned when the streams protocol is disabled on this broker
-/// (feature unfinalized or config kill-switch off).
+/// The response the handler returns when the streams protocol is disabled on
+/// this broker, because the feature is unfinalized or the config kill-switch
+/// is off.
 fn disabled_response() -> StreamsGroupHeartbeatResponse {
     error(codes::UNSUPPORTED_VERSION)
 }

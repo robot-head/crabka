@@ -3,19 +3,20 @@
 //!
 //! The quote-based emitters build a `proc_macro2::TokenStream` and render it
 //! with `TokenStream::to_string()`, which is valid but unformatted Rust (no
-//! line breaks, ` :: ` / ` . ` spacing). rustfmt alone is not enough: when a
-//! line exceeds `max_width` and cannot be broken (e.g. the long fully-qualified
-//! paths in `to_owned`, like
-//! `crate::owned::common::<msg>::<struct>::TypeName`), rustfmt *gives up on
-//! that item and emits it verbatim* — leaving the raw `quote!` ` :: ` spacing.
+//! line breaks, ` :: ` / ` . ` spacing). rustfmt alone is not enough. When a
+//! line exceeds `max_width` and cannot be broken, for example the long
+//! fully-qualified paths in `to_owned` such as
+//! `crate::owned::common::<msg>::<struct>::TypeName`, rustfmt *gives up on
+//! that item and emits it verbatim*. That leaves the raw `quote!` ` :: `
+//! spacing.
 //!
 //! `prettyplease` pretty-prints the `syn` AST and always renders canonical,
-//! correctly-spaced source regardless of line length, so we run it first; the
-//! subsequent rustfmt pass then applies the project's canonical style to
-//! everything it *can* fit, and leaves the unbreakable long lines as
-//! prettyplease rendered them (clean). Both passes double as validation:
-//! malformed generated code fails to parse / exits non-zero here, surfacing
-//! codegen bugs at regeneration time rather than three crates downstream.
+//! correctly-spaced source whatever the line length, so this module runs it
+//! first. The rustfmt pass then applies the project's canonical style to
+//! everything it *can* fit, and leaves the unbreakable long lines clean, as
+//! prettyplease rendered them. Both passes also work as validation. Malformed
+//! generated code fails to parse or exits non-zero here, so codegen bugs
+//! surface at regeneration time rather than three crates downstream.
 
 use std::{
     io::Write,
@@ -32,12 +33,13 @@ pub enum FmtError {
     Rejected { status: String, stderr: String },
 }
 
-/// Pretty-print `src` (prettyplease) and refine it through `rustfmt`
-/// (edition 2024), returning the formatted output.
+/// Pretty-print `src` with prettyplease, refine it through `rustfmt` at
+/// edition 2024, and return the formatted output.
 ///
-/// `src` must be a complete Rust source file (the generated files all are). The
-/// leading `//`-style banner comment is preserved: `syn` discards line comments,
-/// so it is peeled off before pretty-printing and re-attached afterwards.
+/// `src` must be a complete Rust source file, which every generated file is.
+/// This function keeps the leading `//`-style banner comment. `syn` discards
+/// line comments, so the function removes the banner before it pretty-prints
+/// and re-attaches the banner afterwards.
 /// # Errors
 /// Returns an error when the schema model is invalid or generated Rust cannot be formatted or written.
 pub fn rustfmt(src: &str) -> Result<String, FmtError> {
@@ -52,8 +54,9 @@ pub fn rustfmt(src: &str) -> Result<String, FmtError> {
     run_rustfmt(&format!("{banner}{body}"))
 }
 
-/// Split off the leading banner block — the contiguous run of blank and
-/// `//`-comment lines at the top of a generated file — from the code body.
+/// Split the leading banner block off from the code body. The banner is the
+/// contiguous run of blank and `//`-comment lines at the top of a generated
+/// file.
 fn split_banner(src: &str) -> (&str, &str) {
     let mut idx = 0;
     for line in src.split_inclusive('\n') {
@@ -123,7 +126,7 @@ mod tests {
 
     /// Regression guard for the ` :: ` / ` . ` spacing bug: a `to_owned` whose
     /// fully-qualified return path is too long for rustfmt to fit in `max_width`.
-    /// rustfmt gives up and emits the raw `quote!` token spacing verbatim;
+    /// rustfmt gives up and emits the raw `quote!` token spacing verbatim.
     /// prettyplease must render it cleanly, and the banner must survive.
     #[test]
     fn formats_long_to_owned_path_without_spaced_tokens() {

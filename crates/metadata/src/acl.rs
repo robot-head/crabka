@@ -1,8 +1,8 @@
 //! Wire-stable ACL types replicated through the raft quorum
-//! via `MetadataRecord::V1AccessControlEntry` /
-//! `V1DeleteAccessControlEntry`. Mirrors the shape Kafka exposes on the
-//! `CreateAcls` / `DeleteAcls` / `DescribeAcls` wire messages, but stays
-//! pure data — the authorizer in `crabka-broker` evaluates these.
+//! with `MetadataRecord::V1AccessControlEntry` and
+//! `V1DeleteAccessControlEntry`. They mirror the shape that Kafka exposes on
+//! the `CreateAcls`, `DeleteAcls`, and `DescribeAcls` wire messages, but they
+//! stay pure data. The authorizer in `crabka-broker` evaluates them.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,11 +12,11 @@ pub enum ResourceType {
     Group,
     Cluster,
     TransactionalId,
-    /// KIP-48 delegation tokens. Resource name is the owner's
-    /// `KafkaPrincipal` string form (e.g. `"User:alice"`). Pattern types
-    /// `LITERAL`/`PREFIXED` apply via the existing matcher; only the
-    /// `Describe` operation is externally grantable
-    /// (`Create`/`Renew`/`Expire` are implicit on ownership).
+    /// KIP-48 delegation tokens. The resource name is the `KafkaPrincipal`
+    /// string form of the owner, for example `"User:alice"`. The pattern types
+    /// `LITERAL` and `PREFIXED` apply through the existing matcher. Only the
+    /// `Describe` operation is externally grantable, because `Create`,
+    /// `Renew`, and `Expire` are implicit on ownership.
     DelegationToken,
 }
 
@@ -45,9 +45,9 @@ pub enum AclOperation {
     DescribeConfigs,
     AlterConfigs,
     IdempotentWrite,
-    /// KIP-939: permission to participate in two-phase commit (2PC) on a
-    /// `TransactionalId`. Required (in addition to `Write`) for an
-    /// `InitProducerId` carrying `enable2Pc=true`. Kafka wire discriminant 15.
+    /// KIP-939: permission to take part in two-phase commit (2PC) on a
+    /// `TransactionalId`. An `InitProducerId` that carries `enable2Pc=true`
+    /// needs it in addition to `Write`. Kafka wire discriminant 15.
     TwoPhaseCommit,
 }
 

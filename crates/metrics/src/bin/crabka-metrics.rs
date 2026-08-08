@@ -88,14 +88,16 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     compactor_poll_timeout: Time,
-    /// Flush the accumulated compaction buffer once this many WAL records are buffered.
+    /// Flush the accumulated compaction buffer once this many WAL records are
+    /// buffered.
     #[arg(
         long,
         env = "CRABKA_METRICS_COMPACTOR_FLUSH_MAX_ROWS",
         default_value_t = crabka_metrics::DEFAULT_FLUSH_MAX_ROWS
     )]
     compactor_flush_max_rows: usize,
-    /// Flush the accumulated compaction buffer once its oldest record reaches this age.
+    /// Flush the accumulated compaction buffer once its oldest record reaches
+    /// this age.
     #[arg(
         long,
         env = "CRABKA_METRICS_COMPACTOR_FLUSH_MAX_AGE",
@@ -103,7 +105,8 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     compactor_flush_max_age: Time,
-    /// Delete compacted metric blocks older than this window. Zero disables retention.
+    /// Delete compacted metric blocks older than this window. Zero turns
+    /// retention off.
     #[arg(
         long,
         env = "CRABKA_METRICS_COMPACTOR_RETENTION",
@@ -111,7 +114,8 @@ struct Cli {
         value_parser = parse::non_negative_time
     )]
     compactor_retention: Time,
-    /// How often the compactor sweeps object-store blocks/indexes for retention.
+    /// How often the compactor sweeps object-store blocks and indexes for
+    /// retention.
     #[arg(
         long,
         env = "CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_INTERVAL",

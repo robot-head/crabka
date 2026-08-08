@@ -1,7 +1,7 @@
-//! Soft goal: balance per-broker total disk usage. Per-broker total
-//! = sum over partitions a broker hosts of
-//! `UsageStore::disk_bytes_avg(broker, topic, partition, FiveMin)`.
-//! Greedy hot->cold swap, threshold-driven via
+//! Soft goal: balance per-broker total disk usage. The per-broker total is the
+//! sum, over the partitions a broker hosts, of
+//! `UsageStore::disk_bytes_avg(broker, topic, partition, FiveMin)`. The goal
+//! does a greedy hot-to-cold swap, driven by the
 //! `GoalContext.imbalance_threshold`.
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ pub struct DiskUsage;
 impl DiskUsage {
     pub const NAME: &'static str = "DiskUsage";
 
-    /// Disk-bytes total per broker. Skips partitions with no usage data.
+    /// Disk-bytes total per broker. It skips partitions with no usage data.
     fn totals(
         partitions: &[PartitionView],
         broker_ids: &[i32],

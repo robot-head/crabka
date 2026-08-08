@@ -1,28 +1,27 @@
-//! `DescribeQuorum` (`api_key=55`, KIP-595). Returns raft-quorum state
+//! `DescribeQuorum` (`api_key=55`, KIP-595). It returns the raft-quorum state
 //! for the cluster-metadata topic.
 //!
-//! Crabka's `KRaft` setup runs a single raft log (the controller quorum
-//! configured via `controller_quorum_voters`) and applies committed
-//! records to `MetadataImage`. Clients (the JVM
-//! `kafka-metadata-quorum --describe` admin tool) ask for
-//! `__cluster_metadata` partition 0; we respond from
-//! [`crabka_raft::ControllerHandle::quorum_state`]:
+//! Crabka's `KRaft` setup runs one raft log, the controller quorum that
+//! `controller_quorum_voters` configures, and applies committed records to
+//! `MetadataImage`. Clients, such as the JVM `kafka-metadata-quorum
+//! --describe` admin tool, ask for `__cluster_metadata` partition 0. The
+//! broker answers from [`crabka_raft::ControllerHandle::quorum_state`]:
 //!
-//! - `leader_id` = `current_leader` (`-1` when unknown — e.g. mid-election).
-//! - `leader_epoch` = `current_term` (capped at `i32::MAX`).
-//! - `high_watermark` = `last_applied_index` on this node's state machine
-//!   (capped at `i64::MAX`).
-//! - `current_voters` = openraft's voter set, with each voter's
-//!   `log_end_offset` = openraft's `replication.matched.index`.
-//!   openraft only populates the per-voter replication map on the
-//!   leader, so on followers every voter falls back to the JVM `-1`
-//!   ("Unknown") sentinel — `kafka-metadata-quorum --describe` is
-//!   meant to be routed to the leader anyway.
-//! - `observers` = empty (Crabka has no observer-role concept yet).
+//! - `leader_id` is `current_leader`. It is `-1` when the leader is unknown,
+//!   for example during an election.
+//! - `leader_epoch` is `current_term`, capped at `i32::MAX`.
+//! - `high_watermark` is `last_applied_index` on this node's state machine,
+//!   capped at `i64::MAX`.
+//! - `current_voters` is openraft's voter set. Each voter's `log_end_offset`
+//!   is openraft's `replication.matched.index`. openraft fills the per-voter
+//!   replication map only on the leader, so on a follower every voter falls
+//!   back to the JVM `-1` "Unknown" sentinel. Callers are meant to route
+//!   `kafka-metadata-quorum --describe` to the leader.
+//! - `observers` is empty, because Crabka has no observer role yet.
 //!
-//! For any topic OTHER than `__cluster_metadata`, the per-partition row
-//! gets `INVALID_TOPIC_EXCEPTION` (17) — matches the JVM behavior on
-//! a non-metadata topic.
+//! For any topic OTHER than `__cluster_metadata`, the per-partition row gets
+//! `INVALID_TOPIC_EXCEPTION` (17). That matches the JVM behavior on a
+//! non-metadata topic.
 
 use bytes::Bytes;
 use crabka_metadata::AclOperation;
@@ -46,13 +45,13 @@ use crate::{
     error::BrokerError,
 };
 
-/// JVM "Unknown" sentinel for a voter's `log_end_offset` when openraft
-/// isn't tracking peer progress (i.e. this node is a follower — only
-/// the leader's `replication` map is populated).
+/// JVM "Unknown" sentinel for a voter's `log_end_offset` when openraft does
+/// not track peer progress. That happens when this node is a follower, because
+/// openraft fills the `replication` map only on the leader.
 const UNKNOWN_LOG_END_OFFSET: i64 = -1;
 
-/// The single Kafka-side topic name that represents the `KRaft` metadata
-/// log. Mirrors `org.apache.kafka.common.Topic.CLUSTER_METADATA_TOPIC_NAME`.
+/// The one Kafka-side topic name that represents the `KRaft` metadata log. It
+/// mirrors `org.apache.kafka.common.Topic.CLUSTER_METADATA_TOPIC_NAME`.
 const CLUSTER_METADATA_TOPIC: &str = "__cluster_metadata";
 
 #[tracing::instrument(
@@ -117,10 +116,10 @@ pub(crate) fn handle(
     crate::handlers::encode_response(&resp, version)
 }
 
-/// Build a `TopicData` row per requested topic. The metadata raft topic
-/// gets a populated `PartitionData` for partition 0; any other topic
-/// gets a per-partition `INVALID_TOPIC_EXCEPTION` row. Pure — testable
-/// without a controller by feeding a hand-built `QuorumState`.
+/// Builds one `TopicData` row per requested topic. The metadata raft topic
+/// gets a full `PartitionData` for partition 0. Any other topic gets a
+/// per-partition `INVALID_TOPIC_EXCEPTION` row. The function is pure, so a
+/// test can drive it with a hand-built `QuorumState` and no controller.
 fn build_topic_responses(
     requested: &[crabka_protocol::owned::describe_quorum_request::TopicData],
     quorum: &QuorumState,
@@ -204,11 +203,13 @@ fn build_topic_responses(
         .collect()
 }
 
-/// Build the KIP-853 (v2+) `Nodes` block: one entry per voter with its
-/// directory id's listeners. Sourced from `quorum.voter_nodes`, which the
-/// raft layer populates from the replicated membership config (only fully
-/// known on the leader; followers may carry a partial map). Encoding drops
-/// this whole field on v0/v1, so it is harmless to build unconditionally.
+/// Builds the KIP-853 (v2+) `Nodes` block: one entry per voter, with the
+/// listeners of that voter's directory id.
+///
+/// The data comes from `quorum.voter_nodes`, which the raft layer fills from
+/// the replicated membership config. Only the leader knows that config in
+/// full, and a follower can carry a partial map. The encoder drops this whole
+/// field on v0 and v1, so building it every time is harmless.
 fn build_nodes(quorum: &QuorumState) -> Vec<Node> {
     quorum
         .voter_nodes
@@ -244,7 +245,7 @@ mod tests {
 
     use super::*;
 
-    /// Fully-specified expected voter row (no struct-update syntax).
+    /// A fully specified expected voter row, with no struct-update syntax.
     fn expected_voter(replica_id: i32, log_end_offset: i64) -> ReplicaState {
         ReplicaState {
             replica_id,
@@ -267,7 +268,7 @@ mod tests {
         }]
     }
 
-    /// Helper to build a `QuorumState` for a test.
+    /// Helper that builds a `QuorumState` for a test.
     fn quorum_state(
         leader: Option<u64>,
         term: u64,

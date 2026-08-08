@@ -2,10 +2,10 @@
 //! the bucket a row is *stored* under is the hash of that column's value.
 //!
 //! The gateway derives a statement's route from the same encoding, so the two
-//! must not drift. `CREATE TABLE` is where the single-column arity is fixed —
-//! in the grammar for a SQL statement, and in the catalog API for a caller that
-//! builds a sharding directly, so a table that could never be written to is
-//! never created either.
+//! must not drift. `CREATE TABLE` fixes the single-column arity in two places.
+//! The grammar fixes it for a SQL statement, and the catalog API fixes it for a
+//! caller that builds a sharding directly. So a table that could never be
+//! written to is never created either.
 
 use std::sync::Arc;
 

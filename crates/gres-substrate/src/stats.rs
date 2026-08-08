@@ -2,7 +2,7 @@
 //!
 //! This module deliberately has no integration with checkpoint trigger counters.
 //! Those counters describe work since the last successful checkpoint and reset on
-//! success; they are not live range metrics.
+//! success. They are not live range metrics.
 
 use std::{
     sync::{Arc, RwLock},
@@ -13,8 +13,8 @@ use std::{
 ///
 /// `row_count`, `store_bytes`, and `replication_lag_bytes` are gauges. `write_rate`
 /// and `read_rate` are rates calculated over a provider-defined non-reset interval.
-/// A missing value means that the source is not authoritative for that metric; it
-/// must not be interpreted as zero.
+/// A missing value means that the source is not authoritative for that metric.
+/// A caller must not interpret it as zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeStats {
     /// Tenant owning the range.
@@ -59,7 +59,7 @@ impl RangeStatsSnapshot {
 /// Narrow source seam for range-statistics consumers.
 ///
 /// Implementations only publish metrics they measure authoritatively. Callers must
-/// treat every `None` metric as unknown and abstain from metric-dependent action.
+/// treat every `None` metric as unknown and must not take metric-dependent action.
 pub trait RangeStatsProvider: Send + Sync {
     /// Return the provider's latest atomically published sample.
     fn snapshot(&self) -> RangeStatsSnapshot;

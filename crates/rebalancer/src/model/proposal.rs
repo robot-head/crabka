@@ -1,5 +1,5 @@
-//! Proposal + Movement types. Mirrors the proto definitions but owned
-//! by the model layer so the optimizer + goals don't depend on
+//! Proposal and Movement types. They mirror the proto definitions, but the
+//! model layer owns them, so the optimizer and the goals do not depend on
 //! generated code.
 
 use crabka_units::{ByteRate, convert::ByteRateExt};
@@ -25,7 +25,7 @@ pub enum ProposalStatus {
 }
 
 impl ProposalStatus {
-    /// True if the status is a final state (no further transitions).
+    /// True if the status is a final state with no further transitions.
     #[must_use]
     pub fn is_terminal(self) -> bool {
         matches!(
@@ -45,12 +45,12 @@ pub struct ProposalSummary {
     pub max_leaders_after: i32,
 }
 
-/// `serde` default for [`Proposal::throttle`] — no throttle applied.
+/// `serde` default for [`Proposal::throttle`]: no throttle applied.
 fn zero_byte_rate() -> ByteRate {
     ByteRate::ZERO
 }
 
-/// `PartialEq` but not `Eq`: [`Proposal::throttle`] is an `f64`-backed
+/// `PartialEq` but not `Eq`, because [`Proposal::throttle`] is an `f64`-backed
 /// quantity, so equality is not reflexive over the whole domain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Proposal {
@@ -60,17 +60,17 @@ pub struct Proposal {
     pub goals_applied: Vec<String>,
     pub summary: ProposalSummary,
     pub movements: Vec<Movement>,
-    /// Set when transitioning to `Executing`; 0 otherwise.
+    /// Set on the transition to `Executing`, and 0 otherwise.
     #[serde(default)]
     pub started_at_ms: i64,
-    /// Set when transitioning to a terminal status; 0 otherwise.
+    /// Set on the transition to a terminal status, and 0 otherwise.
     #[serde(default)]
     pub terminated_at_ms: i64,
     /// Set on `Failed`. None otherwise.
     #[serde(default)]
     pub failure_reason: Option<String>,
-    /// Set when transitioning to `Executing` (echoes the throttle the
-    /// executor applied). Zero otherwise.
+    /// Set on the transition to `Executing`, where it echoes the throttle the
+    /// executor applied. Zero otherwise.
     #[serde(
         default = "zero_byte_rate",
         with = "crabka_units::serde_units::numeric::bytes_per_sec_i64"

@@ -1,17 +1,21 @@
-//! Exhaustive-enumeration + proptest verification of `SimpleAclAuthorizer`
-//! precedence against an INDEPENDENT oracle. The authorizer is a sequential pure
-//! decision function (super-user bypass > deny-wins > allow > default-deny,
-//! composed with Literal / Literal-`*` / Prefixed resource matching,
-//! principal/host wildcards, and the one-way operation-implication table), so
-//! exhaustive enumeration + proptest is the honest fit — not stateright (there
-//! are no transitions). Mirrors the quota-precedence slice.
+//! Exhaustive-enumeration and proptest verification of `SimpleAclAuthorizer`
+//! precedence against an INDEPENDENT oracle.
 //!
-//! The oracle re-derives the decision from first principles (its own matching
-//! predicates + its own implication arrows), never calling the production
-//! `matches_*`/`implies`, so a production regression — a dropped/flipped
-//! implication arrow, broken deny-wins, or a matching bug — is caught rather
-//! than spot-checked. Every case also asserts the broker (`MetadataImage`) and
-//! gateway (`AclCache`) decision paths agree (no drift).
+//! The authorizer is a sequential pure decision function: super-user bypass >
+//! deny-wins > allow > default-deny. It composes that order with Literal,
+//! Literal-`*`, and Prefixed resource matching, with principal and host
+//! wildcards, and with the one-way operation-implication table. Exhaustive
+//! enumeration and proptest are therefore the honest fit, and stateright is
+//! not, because there are no transitions. This mirrors the quota-precedence
+//! slice.
+//!
+//! The oracle re-derives the decision from first principles with its own
+//! matching predicates and its own implication arrows. It never calls the
+//! production `matches_*` or `implies`. The suite therefore catches a
+//! production regression instead of spot-checking it: a dropped or flipped
+//! implication arrow, broken deny-wins, or a matching bug. Every case also
+//! asserts that the broker (`MetadataImage`) and gateway (`AclCache`) decision
+//! paths agree, with no drift.
 
 use std::{collections::HashSet, net::SocketAddr};
 
@@ -26,9 +30,11 @@ use crate::{AclCache, AuthorizationRequest, AuthorizationResult, Authorizer, Sim
 
 // ----- independent oracle (separate source of truth) -----
 
-/// Independent re-derivation of the ACL decision. Uses its OWN matching
-/// predicates and its OWN implication table — never calls the production
-/// `matches_*`/`implies`. Production and oracle must agree on every input.
+/// Independent re-derivation of the ACL decision.
+///
+/// This function uses its OWN matching predicates and its OWN implication
+/// table. It never calls the production `matches_*` or `implies`. Production
+/// and oracle must agree on every input.
 fn oracle_decision(
     super_users: &HashSet<String>,
     entries: &[AclEntry],
@@ -79,8 +85,10 @@ fn oracle_host_match(e: &AclEntry, host: &SocketAddr) -> bool {
 }
 
 /// The one-way operation-implication table, declared independently of
-/// production: exact match, `All` implies everything, and the explicit arrows
-/// `{Read,Write,Delete,Alter}` -> `Describe`, `AlterConfigs` ->
+/// production.
+///
+/// The table holds an exact match, `All` implies everything, and the explicit
+/// arrows `{Read,Write,Delete,Alter}` -> `Describe` and `AlterConfigs` ->
 /// `DescribeConfigs`.
 fn oracle_op_match(stored: AclOperation, requested: AclOperation) -> bool {
     use AclOperation::{All, Alter, AlterConfigs, Delete, Describe, DescribeConfigs, Read, Write};
@@ -138,9 +146,11 @@ fn image_of(entries: &[AclEntry]) -> MetadataImage {
     img
 }
 
-/// Assert the real authorizer (driven through BOTH the broker `MetadataImage`
-/// and the gateway `AclCache`) agrees with the oracle, and that the two sources
-/// agree with each other (no broker-vs-gateway drift).
+/// Assert that the real authorizer agrees with the oracle.
+///
+/// This function drives the authorizer through BOTH the broker
+/// `MetadataImage` and the gateway `AclCache`. It also asserts that the two
+/// sources agree with each other, with no broker-against-gateway drift.
 fn check(super_users: &HashSet<String>, entries: &[AclEntry], req: &AuthorizationRequest<'_>) {
     let auth = SimpleAclAuthorizer::new(super_users.clone());
     let image = image_of(entries);
@@ -155,11 +165,13 @@ fn check(super_users: &HashSet<String>, entries: &[AclEntry], req: &Authorizatio
 
 const ALICE: &str = "alice";
 
-/// Fixed candidate pool spanning every decision dimension: Allow & Deny on the
-/// same (resource, op) for deny-wins; ops that imply (Read/Write/`AlterConfigs`),
-/// a leaf op (Describe), and `All`; Literal-exact / Literal-`*` / Prefixed
-/// patterns; principal `User:alice` and the `User:*` wildcard; `*` and a
-/// specific host; plus a non-matching decoy.
+/// Fixed candidate pool that covers every decision dimension.
+///
+/// The pool holds Allow and Deny on the same (resource, op) for deny-wins. It
+/// holds the ops that imply (Read, Write, and `AlterConfigs`), a leaf op
+/// (Describe), and `All`. It holds Literal-exact, Literal-`*`, and Prefixed
+/// patterns, the principal `User:alice` and the `User:*` wildcard, the `*` host
+/// and a specific host, and one non-matching decoy.
 fn candidate_pool() -> Vec<AclEntry> {
     use AclOperation::{All, AlterConfigs, Describe, Read, Write};
     use PatternType::{Literal, Prefixed};
@@ -187,8 +199,8 @@ fn candidate_pool() -> Vec<AclEntry> {
     ]
 }
 
-/// Representative requests covering operation implication, both wildcards, both
-/// patterns, principal/host filtering, and default-deny.
+/// Representative requests that cover operation implication, both wildcards,
+/// both patterns, principal and host filtering, and default-deny.
 fn requests<'a>(
     alice: &'a Principal,
     bob: &'a Principal,

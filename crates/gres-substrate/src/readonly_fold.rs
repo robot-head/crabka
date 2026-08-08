@@ -258,9 +258,9 @@ pub async fn committed_fold_snapshot(
 
 /// Build an authoritative fold from the live Kafka/checkpoint configuration.
 ///
-/// The committed end is sampled exactly once and the private Kafka reader is
-/// bounded to that sample, so callers cannot accidentally combine identities
-/// from different durable instants.
+/// This function samples the committed end exactly once and bounds the private
+/// Kafka reader to that sample, so callers cannot accidentally combine
+/// identities from different durable instants.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.

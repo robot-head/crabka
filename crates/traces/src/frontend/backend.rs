@@ -1,11 +1,14 @@
 //! The querier-backend abstraction the frontend fans out to, one call per
-//! planned job. Tests use [`MockQuerier`]; real deployments use
+//! planned job.
+//!
+//! Tests use [`MockQuerier`]. Real deployments use
 //! [`crate::frontend::http_backend::HttpQuerier`].
 //!
-//! Partials are carried in the **typed serde edge model** ([`crate::frontend::wire`]),
-//! not raw `serde_json::Value`: a search job returns `Vec<TraceJson>` + `Metrics`,
-//! a by-id job returns a typed OTLP-JSON `TraceByIdResponseJson`, tag jobs return
-//! the typed tag bodies. The merge layer (`merge.rs`) operates on these.
+//! The **typed serde edge model** in [`crate::frontend::wire`] carries the
+//! partials, not raw `serde_json::Value`. A search job returns `Vec<TraceJson>`
+//! and `Metrics`. A by-id job returns a typed OTLP-JSON
+//! `TraceByIdResponseJson`. Tag jobs return the typed tag bodies. The merge
+//! layer in `merge.rs` operates on these.
 
 use std::sync::Mutex;
 
@@ -18,8 +21,9 @@ use crate::frontend::{
     wire::{Metrics, TraceByIdResponseJson, TraceJson},
 };
 
-/// A single search job: a `TraceQL` search restricted to one shard (the live hot
-/// tier, or one cold block narrowed to a row-group range) over a window.
+/// A single search job: a `TraceQL` search over a window, restricted to one
+/// shard. That shard is the live hot tier, or one cold block narrowed to a
+/// row-group range.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchJobRequest {
     pub tenant: String,
@@ -31,21 +35,24 @@ pub struct SearchJobRequest {
     pub shard: JobShard,
 }
 
-/// A by-id job: fetch one trace's spans from one querier. By-id does **not**
-/// fan per-block (the querier reassembles a trace across blocks); the frontend
-/// fans one job per querier and unions their v2 responses.
+/// A by-id job: fetch one trace's spans from one querier.
+///
+/// By-id does **not** fan per-block, because the querier reassembles a trace
+/// across blocks. The frontend fans one job per querier and unions their v2
+/// responses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraceByIdJobRequest {
     pub tenant: String,
     pub trace_id: [u8; 16],
     pub start_ns: i64,
     pub end_ns: i64,
-    /// Index into the backend's querier pool to target (so a fan-out queries
-    /// each querier exactly once). `None` lets the backend pick (round-robin).
+    /// Index into the backend's querier pool to target, so that a fan-out
+    /// queries each querier exactly once. `None` lets the backend pick one,
+    /// round-robin.
     pub querier: Option<usize>,
 }
 
-/// A tag-names job for one (optional) scope over a window.
+/// A tag-names job for one optional scope over a window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagNamesJobRequest {
     pub tenant: String,
@@ -65,8 +72,10 @@ pub struct TagValuesJobRequest {
     pub shard: JobShard,
 }
 
-/// A `TraceQL`-metrics job (`/api/metrics/query_range` or `/api/metrics/query`)
-/// over a window with a step. `instant` selects the instant-query path.
+/// A `TraceQL`-metrics job over a window with a step.
+///
+/// The job is `/api/metrics/query_range` or `/api/metrics/query`. `instant`
+/// selects the instant-query path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MetricsJobRequest {
     pub tenant: String,
@@ -78,16 +87,16 @@ pub struct MetricsJobRequest {
     pub shard: JobShard,
 }
 
-/// The partial result of one search job: matched traces (typed Tempo JSON) +
-/// the job's accounting.
+/// The partial result of one search job: the matched traces as typed Tempo
+/// JSON, plus the job's accounting.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SearchPartial {
     pub traces: Vec<TraceJson>,
     pub metrics: Metrics,
 }
 
-/// The partial result of one by-id job: the (possibly empty) typed v2 trace
-/// body + accounting.
+/// The partial result of one by-id job: the typed v2 trace body, which may be
+/// empty, plus the accounting.
 #[derive(Clone, Debug, Default)]
 pub struct TracePartial {
     pub trace: TraceByIdResponseJson,
@@ -108,7 +117,7 @@ pub struct TagValuesPartial {
     pub metrics: Metrics,
 }
 
-/// The partial result of one metrics job: the series body + accounting.
+/// The partial result of one metrics job: the series body plus the accounting.
 #[derive(Clone, Debug, Default)]
 pub struct MetricsPartial {
     pub response: MetricsResponseJson,
@@ -128,8 +137,11 @@ pub enum BackendError {
 
 impl BackendError {
     /// Map this backend failure to the `(status, body)` the frontend returns to
-    /// its client, preserving the upstream querier's status code and error text
-    /// where known (a timeout becomes `504`, a transport failure `502`).
+    /// its client.
+    ///
+    /// This keeps the upstream querier's status code and error text where they
+    /// are known. A timeout becomes `504`, and a transport failure becomes
+    /// `502`.
     #[must_use]
     pub fn to_http(&self) -> (u16, String) {
         match self {
@@ -142,11 +154,12 @@ impl BackendError {
     }
 }
 
-/// A queryable querier backend (a pool fronting N queriers). Every method is
-/// one fanned-out job's worth of work.
+/// A queryable querier backend, a pool that fronts N queriers.
+///
+/// Every method is one fanned-out job's worth of work.
 #[async_trait]
 pub trait QuerierBackend: Send + Sync {
-    /// Number of queriers in the pool (the by-id fan-out width).
+    /// Number of queriers in the pool, which is the by-id fan-out width.
     fn querier_count(&self) -> usize;
 
     async fn search_job(&self, req: &SearchJobRequest) -> Result<SearchPartial, BackendError>;
@@ -165,10 +178,13 @@ pub trait QuerierBackend: Send + Sync {
     async fn metrics_job(&self, req: &MetricsJobRequest) -> Result<MetricsPartial, BackendError>;
 }
 
-/// A programmable in-process backend for tests. Returns the next stubbed
-/// response (FIFO; the last stub repeats if more calls arrive) and records
-/// every request for assertions. Exposed un-gated so integration tests in
-/// `tests/` can construct it — a fixture, not production wiring.
+/// A programmable in-process backend for tests.
+///
+/// It returns the next stubbed response, FIFO, and the last stub repeats if
+/// more calls arrive. It records every request for assertions.
+///
+/// This type is un-gated so that integration tests in `tests/` can construct
+/// it. It is a fixture, not production wiring.
 pub struct MockQuerier {
     querier_count: usize,
     search_stubs: Mutex<Vec<SearchPartial>>,
@@ -206,7 +222,7 @@ impl MockQuerier {
         }
     }
 
-    /// Enqueue a canned search-job response (FIFO).
+    /// Enqueue a canned search-job response, FIFO.
     ///
     /// # Panics
     /// Panics if an internal synchronization primitive is poisoned.
@@ -214,7 +230,7 @@ impl MockQuerier {
         self.search_stubs.lock().unwrap().push(p);
     }
 
-    /// Enqueue a canned by-id-job response (FIFO).
+    /// Enqueue a canned by-id-job response, FIFO.
     ///
     /// # Panics
     /// Panics if an internal synchronization primitive is poisoned.
@@ -222,7 +238,7 @@ impl MockQuerier {
         self.trace_stubs.lock().unwrap().push(p);
     }
 
-    /// Enqueue a canned tag-names-job response (FIFO).
+    /// Enqueue a canned tag-names-job response, FIFO.
     ///
     /// # Panics
     /// Panics if an internal synchronization primitive is poisoned.
@@ -230,7 +246,7 @@ impl MockQuerier {
         self.tag_names_stubs.lock().unwrap().push(p);
     }
 
-    /// Enqueue a canned tag-values-job response (FIFO).
+    /// Enqueue a canned tag-values-job response, FIFO.
     ///
     /// # Panics
     /// Panics if an internal synchronization primitive is poisoned.
@@ -238,7 +254,7 @@ impl MockQuerier {
         self.tag_values_stubs.lock().unwrap().push(p);
     }
 
-    /// Enqueue a canned metrics-job response (FIFO).
+    /// Enqueue a canned metrics-job response, FIFO.
     ///
     /// # Panics
     /// Panics if an internal synchronization primitive is poisoned.

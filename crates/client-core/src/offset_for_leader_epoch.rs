@@ -1,7 +1,9 @@
-//! Client-side `OffsetForLeaderEpoch` (`api_key=23`) helper, used by the
-//! consumer's KIP-320 position-validation pass. The broker, given a
-//! partition's `leader_epoch`, returns the `end_offset` of that epoch —
-//! the safe offset a fetcher must not have consumed past.
+//! Client-side `OffsetForLeaderEpoch` (`api_key=23`) helper.
+//!
+//! The consumer's KIP-320 position-validation pass uses this helper. Given a
+//! partition's `leader_epoch`, the broker returns the `end_offset` of that
+//! epoch. That offset is the safe offset a fetcher must not have consumed
+//! past.
 
 use crabka_protocol::owned::{
     offset_for_leader_epoch_request::{
@@ -16,8 +18,8 @@ use crate::{connection::Connection, error::ClientError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpochEndOffset {
     pub partition: i32,
-    /// The leader's view of the epoch (may be lower than requested if the
-    /// requested epoch is unknown to the leader).
+    /// The leader's view of the epoch. It can be lower than the requested
+    /// epoch if the leader does not know that epoch.
     pub leader_epoch: i32,
     /// First offset *after* the requested epoch on the leader's log, or
     /// `-1` (`UNDEFINED_OFFSET`) if the epoch is unknown.
@@ -25,13 +27,15 @@ pub struct EpochEndOffset {
     pub error_code: i16,
 }
 
-/// Send a single-partition `OffsetForLeaderEpoch` request. `current_leader_epoch`
-/// is the epoch the caller believes the partition is in (for fencing);
-/// `leader_epoch` is the epoch the caller wants the end offset of.
+/// Send a single-partition `OffsetForLeaderEpoch` request.
+///
+/// `current_leader_epoch` is the epoch the caller believes the partition is
+/// in, and the broker uses it for fencing. `leader_epoch` is the epoch the
+/// caller wants the end offset of.
 ///
 /// # Errors
-/// Transport / version-negotiation failure, or a partition not present in the
-/// response.
+/// Returns an error on transport or version-negotiation failure, or when the
+/// response does not contain the partition.
 pub async fn offset_for_leader_epoch(
     conn: &Connection,
     topic: &str,

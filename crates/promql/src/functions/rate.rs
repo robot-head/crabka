@@ -1,32 +1,35 @@
 //! Rate-family `PromQL` functions as `DataFusion` [`ScalarUDF`]s.
 //!
-//! Each UDF consumes the windowed columns that `RangeManipulate` emits per eval
-//! step and produces a `Float64Array` with one value per step. The shared
-//! extrapolation/instant math lives in [`super::extrapolate`] (a byte-for-byte
-//! port of the tree-walking engine), so these UDFs and the interpreter agree on
-//! every number.
+//! Each UDF reads the windowed columns that `RangeManipulate` emits per eval
+//! step and returns a `Float64Array` with one value per step. The shared
+//! extrapolation and instant math lives in [`super::extrapolate`], a
+//! byte-for-byte port of the tree-walking engine, so these UDFs and the
+//! interpreter agree on every number.
 //!
 //! # Call convention
 //!
-//! Every rate-family UDF is called with **four** positional arguments, in order:
+//! The planner calls every rate-family UDF with four positional arguments, in
+//! this order:
 //!
-//! 1. `eval_timestamp` (`Int64`): the eval instant `t` each window closes on —
-//!    `RangeManipulate`'s scalar `timestamp` column. This is `range_end_ms`.
+//! 1. `eval_timestamp` (`Int64`): the eval instant `t` that each window closes
+//!    on. This is `RangeManipulate`'s scalar `timestamp` column, `range_end_ms`.
 //! 2. `timestamp_range` (`Dictionary<Int64, List<Int64>>`): the windowed sample
-//!    timestamps — `RangeManipulate`'s `<time>_range` column.
+//!    timestamps, `RangeManipulate`'s `<time>_range` column.
 //! 3. `value_range` (`Dictionary<Int64, List<Float64>>`): the windowed sample
-//!    values — `RangeManipulate`'s `<value>_range` column, 1:1 with (2).
+//!    values, `RangeManipulate`'s `<value>_range` column, 1:1 with (2).
 //! 4. `range_ms` (`Int64`, scalar): the range-selector width in milliseconds.
 //!    `range_start_ms = eval_timestamp - range_ms`.
 //!
-//! All five functions take the same arity even though `irate`/`idelta` ignore
-//! `range_ms` (they only use the last two samples) — a uniform shape keeps the
-//! planner lowering trivial. Cells that Prometheus has no value for (fewer than
-//! two samples, zero-width interval) render as **NULL** (not a NaN sentinel), so
-//! the assembler drops the series and downstream aggregates skip it — matching
-//! the interpreter, which omits no-value series before aggregating. A
-//! genuinely-computed value, even a legitimately-NaN one, stays a non-null float
-//! and propagates.
+//! All five functions take the same arity even though `irate` and `idelta`
+//! ignore `range_ms` and use only the last two samples. One uniform shape keeps
+//! the planner lowering simple.
+//!
+//! A cell that Prometheus has no value for renders
+//! as NULL, not as a NaN sentinel. Such a cell has fewer than two samples or a
+//! zero-width interval. The assembler then drops the series and downstream
+//! aggregates skip it, as in the interpreter, which omits no-value series before
+//! it aggregates. A value that a UDF computes stays a non-null float and
+//! propagates, even when that value is NaN.
 
 use std::sync::Arc;
 
@@ -72,8 +75,9 @@ impl RateFamily {
         }
     }
 
-    /// Evaluate one window. `eval_ts` is `range_end_ms`; `range` is the
-    /// selector width. Returns `None` where Prometheus yields no value.
+    /// Evaluates one window and returns `None` where Prometheus has no value.
+    ///
+    /// `eval_ts` is `range_end_ms`. `range` is the selector width.
     fn eval_window(
         self,
         timestamps: &[i64],
@@ -113,11 +117,13 @@ impl RateFamily {
     }
 }
 
-/// A `ScalarUDFImpl` over `RangeManipulate`'s windowed columns. One instance per
-/// [`RateFamily`] member; the family discriminates the math.
+/// A `ScalarUDFImpl` over `RangeManipulate`'s windowed columns.
 ///
-/// `ScalarUDFImpl` requires `Eq`/`Hash` (via `DynEq`/`DynHash`) so the planner
-/// can deduplicate and key on UDF identity; both fields derive them cleanly.
+/// There is one instance per [`RateFamily`] member, and the family selects the
+/// math.
+///
+/// `ScalarUDFImpl` needs `Eq` and `Hash` through `DynEq` and `DynHash` so that
+/// the planner can deduplicate and key on UDF identity. Both fields derive them.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct RateUdf {
     family: RateFamily,
@@ -136,7 +142,7 @@ impl RateUdf {
     }
 }
 
-/// Decode a `Dictionary<Int64, List<_>>` range column into a [`RangeArray`].
+/// Decodes a `Dictionary<Int64, List<_>>` range column into a [`RangeArray`].
 fn decode_range_column(array: &ArrayRef, arg: &str, udf: &str) -> DfResult<RangeArray> {
     let dict = array
         .as_any()
@@ -164,11 +170,13 @@ impl ScalarUDFImpl for RateUdf {
         Ok(DataType::Float64)
     }
 
-    /// `Signature::user_defined` requires bespoke coercion. The rate UDFs accept
-    /// their args verbatim — the `RangeArray` dictionary columns and the Int64
-    /// scalar are already the exact types `RangeManipulate` produces, so no
-    /// casting is wanted (and casting a `Dictionary<Int64, List<_>>` would be
-    /// nonsensical). Validate arity and pass the types through unchanged.
+    /// `Signature::user_defined` needs its own type coercion.
+    ///
+    /// The rate UDFs accept their arguments unchanged. The `RangeArray`
+    /// dictionary columns and the Int64 scalar are already the exact types that
+    /// `RangeManipulate` makes, so no cast is wanted, and a cast of a
+    /// `Dictionary<Int64, List<_>>` has no meaning. This method checks the arity
+    /// and returns the types unchanged.
     fn coerce_types(&self, arg_types: &[DataType]) -> DfResult<Vec<DataType>> {
         if arg_types.len() != 4 {
             return Err(DataFusionError::Plan(format!(
@@ -250,7 +258,7 @@ impl ScalarUDFImpl for RateUdf {
     }
 }
 
-/// Read a scalar `Int64` argument, accepting a single-row array fallback.
+/// Reads a scalar `Int64` argument, with a single-row array as a fallback.
 fn scalar_i64(value: &ColumnarValue, arg: &str, udf: &str) -> DfResult<i64> {
     match value {
         ColumnarValue::Scalar(scalar) => match scalar {
@@ -318,7 +326,7 @@ pub fn rate_family_udfs() -> Vec<ScalarUDF> {
     ]
 }
 
-/// Register every rate-family UDF on `ctx` so a planner can lower onto them.
+/// Registers every rate-family UDF on `ctx` so a planner can lower onto them.
 pub fn register_rate_udfs(ctx: &SessionContext) {
     for udf in rate_family_udfs() {
         ctx.register_udf(udf);
@@ -412,9 +420,11 @@ mod tests {
         }
     }
 
-    /// Build the four invoke args (`eval_ts`, `timestamp_range`, `value_range`,
-    /// `range_ms`) for a multi-step window set and run a `RateUdf` directly,
-    /// returning each step's value or `None` for a no-value (NULL) cell.
+    /// Builds the four invoke args for a window set and runs a `RateUdf`.
+    ///
+    /// The four args are `eval_ts`, `timestamp_range`, `value_range`, and
+    /// `range_ms`. This function returns each step's value, or `None` for a
+    /// no-value NULL cell.
     fn run_udf_nullable(
         udf: &RateUdf,
         steps: &[(i64, &[i64], &[f64])],
@@ -468,8 +478,9 @@ mod tests {
             .collect()
     }
 
-    /// Convenience wrapper asserting every step produced a (non-null) value,
-    /// returning the unwrapped floats. Tests that exercise the no-value (NULL)
+    /// Runs the UDF and asserts that every step made a non-null value.
+    ///
+    /// This function returns the unwrapped floats. Tests for the no-value NULL
     /// case call [`run_udf_nullable`] directly.
     fn run_udf(udf: &RateUdf, steps: &[(i64, &[i64], &[f64])], range_ms: i64) -> Vec<f64> {
         run_udf_nullable(udf, steps, range_ms)
@@ -551,8 +562,8 @@ mod tests {
         );
     }
 
-    /// `prom_rate` over the engine's counter window reproduces 5/300 — the same
-    /// number `engine.rs::instant_rate_extrapolates_counter_window` asserts.
+    /// `prom_rate` over the engine's counter window reproduces 5/300, the same
+    /// number that `engine.rs::instant_rate_extrapolates_counter_window` asserts.
     #[test]
     fn rate_udf_matches_engine_counter_window() {
         let udf = RateUdf::new(RateFamily::Rate);
@@ -570,9 +581,10 @@ mod tests {
         assert2::assert!(approx_eq(out[0], 5.0 / 300.0));
     }
 
-    /// `prom_rate` across multiple eval steps yields a per-step rate vector,
-    /// matching `engine.rs::range_rate_uses_each_step_as_window_end` (4/300,
-    /// 5/300 for the two steps at t=240s and t=300s).
+    /// `prom_rate` across multiple eval steps returns a per-step rate vector.
+    ///
+    /// The vector matches `engine.rs::range_rate_uses_each_step_as_window_end`:
+    /// 4/300 and 5/300 for the two steps at t=240s and t=300s.
     #[test]
     fn rate_udf_produces_per_step_vector() {
         let udf = RateUdf::new(RateFamily::Rate);
@@ -612,7 +624,7 @@ mod tests {
         assert2::assert!(approx_eq(out[0], 2.0));
     }
 
-    /// `prom_delta` is gauge mode: 4,3 -> -2.0 (matches the engine).
+    /// `prom_delta` is gauge mode: 4,3 -> -2.0, which matches the engine.
     #[test]
     fn delta_udf_is_gauge_delta() {
         let udf = RateUdf::new(RateFamily::Delta);
@@ -644,9 +656,10 @@ mod tests {
         assert2::assert!(approx_eq(out[0], 2.0));
     }
 
-    /// A window with fewer than two samples renders as NULL (no Prometheus
-    /// value), not a NaN sentinel — so the assembler drops the series and
-    /// aggregates skip it.
+    /// A window with fewer than two samples renders as NULL, not a NaN sentinel.
+    ///
+    /// Prometheus has no value for such a window. The assembler drops the series
+    /// and aggregates skip it.
     #[test]
     fn under_two_samples_yields_null() {
         let udf = RateUdf::new(RateFamily::Rate);
@@ -654,9 +667,10 @@ mod tests {
         assert2::assert!(out[0].is_none());
     }
 
-    /// A genuinely-computed value is kept as a non-null float even when it is
-    /// itself NaN (e.g. a delta over a window containing a NaN sample): the cell
-    /// is non-null, so downstream aggregates propagate it rather than skip it.
+    /// A computed value stays a non-null float even when the value is NaN.
+    ///
+    /// One example is a delta over a window that holds a NaN sample. The cell is
+    /// non-null, so downstream aggregates propagate it and do not skip it.
     #[test]
     fn genuine_nan_value_is_kept_non_null() {
         let udf = RateUdf::new(RateFamily::Delta);
@@ -691,8 +705,9 @@ mod tests {
         }
     }
 
-    /// End-to-end: register the UDF on a context and invoke it through a SQL
-    /// projection over a `RecordBatch` carrying the `RangeManipulate` columns.
+    /// End-to-end test: registers the UDF on a context, then invokes it through
+    /// a SQL projection over a `RecordBatch` that holds the `RangeManipulate`
+    /// columns.
     #[tokio::test]
     async fn rate_udf_runs_through_sql_projection() {
         use datafusion::datasource::MemTable;
@@ -738,7 +753,7 @@ mod tests {
         assert2::assert!(approx_eq(column.value(0), 5.0 / 300.0));
     }
 
-    /// Confirm the helper round-trips a `DictionaryArray` back into a `RangeArray`.
+    /// Confirms that the helper round-trips a `DictionaryArray` into a `RangeArray`.
     #[test]
     fn decode_range_column_round_trips() {
         let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef;

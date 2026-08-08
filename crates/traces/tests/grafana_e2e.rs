@@ -1,49 +1,54 @@
 //! Comprehensive Docker-backed Grafana end-to-end probe.
 //!
 //! This single `#[ignore]` test exercises EVERY traces integration point:
-//!   * every distributor ingest door (OTLP HTTP, Tempo `/api/push`, Zipkin v2,
-//!     Jaeger binary thrift, Jaeger compact thrift, OTLP gRPC, Jaeger gRPC);
+//!   * every distributor ingest door: OTLP HTTP, Tempo `/api/push`, Zipkin v2,
+//!     Jaeger binary thrift, Jaeger compact thrift, OTLP gRPC, Jaeger gRPC;
 //!   * every Tempo query endpoint, driven through a REAL Grafana container's
-//!     Tempo-datasource proxy (plus the protobuf trace-by-id content
-//!     negotiation, verified directly against the querier — see below);
-//!   * the full Service Graph loop (metrics-generator -> snappy/protobuf
+//!     Tempo-datasource proxy. This also covers the protobuf trace-by-id
+//!     content negotiation, verified directly against the querier, as described
+//!     below;
+//!   * the full Service Graph loop: metrics-generator -> snappy/protobuf
 //!     Prometheus `remote_write` -> real Prometheus -> Grafana Prometheus
-//!     datasource proxy -> `PromQL` result).
+//!     datasource proxy -> `PromQL` result.
 //!
-//! It is ignored by default because it pulls and runs upstream Docker images
-//! (`mirror.gcr.io/grafana/grafana`, `mirror.gcr.io/prom/prometheus`). Run explicitly with:
+//! The test is ignored by default because it pulls and runs upstream Docker
+//! images: `mirror.gcr.io/grafana/grafana` and `mirror.gcr.io/prom/prometheus`.
+//! Run it explicitly with:
 //!
 //! `cargo test -p crabka-traces --test grafana_e2e -- --ignored --nocapture`
 //!
 //! ## Door coverage (stated honestly)
 //!
-//! Doors D1..D7 below are all driven for real: the HTTP doors via `oneshot`
-//! through the production `distributor::router`, and the gRPC doors via the
-//! production service structs' trait methods (`OtlpGrpcService::export`,
-//! `JaegerGrpcService::post_spans`) — the same decode path a real tonic
-//! transport takes, only the socket is elided. Both Jaeger thrift decoders are
-//! exercised: the **binary** protocol via D4
-//! (`application/vnd.apache.thrift.binary` -> `decode_jaeger_binary_thrift`) and
-//! the **compact** protocol via D7 (`application/x-thrift` ->
-//! `decode_jaeger_thrift`).
+//! The test drives doors D1..D7 below for real. It drives the HTTP doors with
+//! `oneshot` through the production `distributor::router`, and the gRPC doors
+//! through the production service structs' trait methods
+//! (`OtlpGrpcService::export`, `JaegerGrpcService::post_spans`). That is the
+//! same decode path a real tonic transport takes, and only the socket is
+//! elided.
 //!
-//! The one entry point NOT driven here is the **Jaeger compact UDP** receiver
-//! (port 6831). Its datagram handler decodes with the very same
-//! `decode_jaeger_thrift` (compact) path that D7 drives over HTTP, so the decode
-//! logic itself IS covered; what is elided is only the live `UdpSocket`
-//! transport, whose handler is module-private and would add a flaky timing
+//! The test exercises both Jaeger thrift decoders. D4 drives the **binary**
+//! protocol (`application/vnd.apache.thrift.binary` ->
+//! `decode_jaeger_binary_thrift`). D7 drives the **compact** protocol
+//! (`application/x-thrift` -> `decode_jaeger_thrift`).
+//!
+//! The one entry point the test does NOT drive is the **Jaeger compact UDP**
+//! receiver on port 6831. Its datagram handler decodes with the very same
+//! compact `decode_jaeger_thrift` path that D7 drives over HTTP, so the test
+//! does cover the decode logic itself. Only the live `UdpSocket` transport is
+//! elided. Its handler is module-private, and it would add a flaky timing
 //! dependency for no extra API-surface coverage. This is the sole intentional
 //! omission.
 //!
 //! ## Service Graph faithfulness (stated honestly)
 //!
-//! The Service Graph leg closes the full production loop: real `EdgeStore`
-//! (inside the real `MetricsGenService`) -> real snappy/protobuf Prometheus
-//! remote-write v1 (`PrometheusRemoteWriteSink`) -> real Prometheus
-//! remote-write receiver -> Grafana Prometheus-datasource proxy -> `PromQL`
-//! result. The ONLY mock is `MockSpanSource`, standing in for the Kafka WAL
-//! consumer (Kafka is out of scope for a Grafana E2E). This is strictly
-//! stronger than the two-ends approximation in `tempo_differential.rs` LEG 5.
+//! The Service Graph leg closes the full production loop: a real `EdgeStore`
+//! inside the real `MetricsGenService` -> real snappy/protobuf Prometheus
+//! remote-write v1 (`PrometheusRemoteWriteSink`) -> a real Prometheus
+//! remote-write receiver -> the Grafana Prometheus-datasource proxy -> a
+//! `PromQL` result. The ONLY mock is `MockSpanSource`, which stands in for the
+//! Kafka WAL consumer, because Kafka is out of scope for a Grafana E2E. This
+//! leg is strictly stronger than the two-ends approximation in
+//! `tempo_differential.rs` LEG 5.
 
 use std::{
     collections::BTreeMap,
@@ -96,9 +101,11 @@ use tower::ServiceExt as _;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Mirror of Tempo's `TraceByIDResponse` (`message TraceByIDResponse { Trace
-/// trace = 1 }`) for decoding the v2 trace-by-id protobuf body. The inner
-/// `Trace` is wire-identical to OTLP `TracesData`, so we model it as such.
+/// Mirror of Tempo's `TraceByIDResponse`, which is
+/// `message TraceByIDResponse { Trace trace = 1 }`.
+///
+/// This type decodes the v2 trace-by-id protobuf body. The inner `Trace` is
+/// wire-identical to OTLP `TracesData`, so this type models it as such.
 #[derive(Clone, PartialEq, prost::Message)]
 struct TraceByIdResponse {
     #[prost(message, optional, tag = "1")]
@@ -111,8 +118,8 @@ const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
 const GRAFANA_HTTP_PORT: u16 = 3000;
 /// Prometheus HTTP port inside the container.
 const PROM_HTTP_PORT: u16 = 9090;
-/// Grafana admin username AND password (set via `GF_SECURITY_ADMIN_PASSWORD`,
-/// used as basic-auth on every Grafana API call).
+/// Grafana admin username AND password. `GF_SECURITY_ADMIN_PASSWORD` sets it,
+/// and every Grafana API call uses it as basic-auth.
 const GRAFANA_ADMIN: &str = "admin";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
 const GRAFANA_PROM_DATASOURCE_UID: &str = "crabka-service-graph";
@@ -162,10 +169,12 @@ fn now_minus_60s_ns() -> u64 {
         .saturating_sub(60_000_000_000)
 }
 
-/// Trace A — COMPLETE, 4 spans across two services. Drives search / tags /
-/// values / metrics. The `[0x0A] (client) -> [0x0B] (server)` pair across
-/// `checkout-frontend -> cart-backend` is the service-graph request edge; the
-/// error span `[0x04]` drives `{ span:status = error }` search.
+/// Trace A: COMPLETE, 4 spans across two services.
+///
+/// This trace drives search, tags, values and metrics. The
+/// `[0x0A] (client) -> [0x0B] (server)` pair across
+/// `checkout-frontend -> cart-backend` is the service-graph request edge. The
+/// error span `[0x04]` drives the `{ span:status = error }` search.
 fn trace_a_otlp_bytes() -> Vec<u8> {
     let base = now_minus_60s_ns();
     let scope = InstrumentationScope {
@@ -268,7 +277,7 @@ fn trace_a_otlp_bytes() -> Vec<u8> {
     .encode_to_vec()
 }
 
-/// Trace B — PARTIAL, 5 spans (> `MAX_TRACE_SPANS`).
+/// Trace B: PARTIAL, 5 spans, more than `MAX_TRACE_SPANS`.
 fn trace_b_otlp_bytes() -> Vec<u8> {
     let base = now_minus_60s_ns();
     let mut spans = Vec::new();
@@ -337,9 +346,11 @@ fn string_kv(key: &str, value: &str) -> OtlpKeyValue {
     }
 }
 
-/// Self-contained Jaeger binary-thrift batch (ported verbatim from
-/// `distributor::tests::jaeger_binary_batch`). Yields one span named
-/// `GET /binary` with service `checkout` from its embedded process.
+/// Self-contained Jaeger binary-thrift batch, ported verbatim from
+/// `distributor::tests::jaeger_binary_batch`.
+///
+/// It yields one span named `GET /binary`, with service `checkout` from its
+/// embedded process.
 fn jaeger_binary_batch() -> Vec<u8> {
     const T_STOP: u8 = 0;
     const T_BOOL: u8 = 2;
@@ -416,12 +427,16 @@ fn jaeger_binary_batch() -> Vec<u8> {
     out
 }
 
-/// Self-contained Jaeger **compact**-thrift batch (compact protocol: field-delta
-/// headers + zig-zag varints), mirroring the in-crate `decode_jaeger_thrift`
-/// round-trip fixtures. Drives the compact decoder via the `application/x-thrift`
-/// HTTP door (D7) — the same `decode_jaeger_thrift` path the compact UDP datagram
-/// receiver uses. Yields one span `compact thrift op`, service `compact-svc`,
-/// with the `error` tag set so the decoded status is ERROR.
+/// Self-contained Jaeger **compact**-thrift batch.
+///
+/// The compact protocol uses field-delta headers and zig-zag varints. This
+/// batch mirrors the in-crate `decode_jaeger_thrift` round-trip fixtures. It
+/// drives the compact decoder through the `application/x-thrift` HTTP door
+/// (D7), which is the same `decode_jaeger_thrift` path the compact UDP datagram
+/// receiver uses.
+///
+/// It yields one span `compact thrift op`, service `compact-svc`, with the
+/// `error` tag set so the decoded status is ERROR.
 fn jaeger_compact_batch() -> Vec<u8> {
     fn write_varint(out: &mut Vec<u8>, mut value: u64) {
         while value >= 0x80 {
@@ -521,8 +536,10 @@ fn jaeger_compact_batch() -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Build one `DistributorState` over a recording sink, drive EVERY ingest door
-/// against it, and return the captured `SpanRecord`s. All six doors write to the
-/// same `CapturingSink`, so the snapshot is read only after every door has run.
+/// against it, and return the captured `SpanRecord`s.
+///
+/// All six doors write to the same `CapturingSink`, so this function reads the
+/// snapshot only after every door has run.
 async fn ingest_all_doors() -> TestResult<Vec<SpanRecord>> {
     let sink = CapturingSink::default();
     let state = Arc::new(DistributorState::new(Arc::new(sink.clone())));
@@ -667,8 +684,10 @@ async fn ingest_all_doors() -> TestResult<Vec<SpanRecord>> {
     Ok(records)
 }
 
-/// Assert that every door's contribution landed in the captured records, with
-/// door-specific decode fidelity (not merely presence-by-name).
+/// Assert that every door's contribution landed in the captured records.
+///
+/// The assertions check door-specific decode fidelity, not merely
+/// presence-by-name.
 fn assert_all_doors_present(records: &[SpanRecord]) {
     let names: Vec<&str> = records.iter().map(|r| r.span.name.as_str()).collect();
     // D1 (OTLP HTTP, Trace A root), D2 (Tempo push, Trace B), D3 (Zipkin),
@@ -818,7 +837,7 @@ fn resource_attr<'a>(span: &'a Span, key: &str) -> Option<&'a str> {
         })
 }
 
-/// Metrics-generator span record helper (service-graph loop input).
+/// Metrics-generator span record helper, the service-graph loop input.
 fn metrics_span(
     service: &str,
     span_id: [u8; 8],
@@ -849,9 +868,10 @@ fn metrics_span(
 // ---------------------------------------------------------------------------
 
 struct CrabkaPair {
-    /// Reachable from containers (Grafana) via the host-gateway alias.
+    /// Reachable from containers such as Grafana, through the host-gateway
+    /// alias.
     container_base_url: String,
-    /// Reachable from this test process directly (loopback) — used for the
+    /// Reachable from this test process directly, over loopback. It serves the
     /// protobuf trace-by-id content negotiation that Grafana never requests.
     local_base_url: String,
     shutdown: tokio::sync::oneshot::Sender<()>,
@@ -1795,11 +1815,14 @@ async fn grafana_e2e_service_graph(
     Ok(())
 }
 
-/// In-process sanity check for the ingest half — runs WITHOUT Docker. Drives
-/// every distributor door and asserts each one's decode fidelity, validating the
-/// hand-rolled thrift / Zipkin / OTLP fixtures and the per-door decode mappings.
-/// (The Grafana/Prometheus query + service-graph half still needs containers and
-/// lives in the ignored `grafana_e2e_full_surface` above.)
+/// In-process sanity check for the ingest half. It runs WITHOUT Docker.
+///
+/// The test drives every distributor door and asserts each one's decode
+/// fidelity. That validates the hand-rolled thrift, Zipkin and OTLP fixtures,
+/// and the per-door decode mappings.
+///
+/// The Grafana/Prometheus query half and the service-graph half still need
+/// containers. They live in the ignored `grafana_e2e_full_surface` above.
 #[tokio::test]
 async fn ingest_all_doors_decode_correctly() -> TestResult {
     let records = ingest_all_doors().await?;

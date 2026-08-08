@@ -1,8 +1,8 @@
 //! Wire-level helpers for `[]<elem>` and nullable `[]<elem>` arrays.
 //!
-//! Non-flexible arrays use a 4-byte big-endian `INT32` length prefix (−1 for
-//! null).  Flexible (compact) arrays use an unsigned varint whose value is
-//! `len + 1` (0 means null).
+//! Non-flexible arrays use a 4-byte big-endian `INT32` length prefix, and −1
+//! means null. Flexible, compact arrays use an unsigned varint whose value is
+//! `len + 1`, and 0 means null.
 
 use bytes::{Buf, BufMut};
 
@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-/// Write a non-nullable array-length prefix.
+/// Writes a non-nullable array-length prefix.
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn put_array_len<B: BufMut>(buf: &mut B, n: usize, flexible: bool) {
@@ -25,8 +25,8 @@ pub fn put_array_len<B: BufMut>(buf: &mut B, n: usize, flexible: bool) {
     }
 }
 
-/// Write a nullable array-length prefix.  `None` encodes as −1 (non-flex) or
-/// 0 (flex).
+/// Writes a nullable array-length prefix. `None` encodes as −1 for
+/// non-flexible versions, or 0 for flexible versions.
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn put_nullable_array_len<B: BufMut>(buf: &mut B, len: Option<usize>, flexible: bool) {
@@ -62,8 +62,8 @@ pub fn nullable_array_len_prefix_len(len: Option<usize>, flexible: bool) -> usiz
     }
 }
 
-/// Read a non-nullable array length.  Returns an error if the encoded value is
-/// null (−1 / 0).
+/// Reads a non-nullable array length. Returns an error if the encoded value is
+/// null, which is −1 or 0.
 /// # Errors
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 /// # Panics
@@ -98,8 +98,8 @@ pub fn get_array_len<B: Buf>(buf: &mut B, flexible: bool) -> Result<usize, Proto
     Ok(n)
 }
 
-/// Read a nullable array length.  Returns `None` when the encoded value is
-/// null (−1 non-flex, 0 flex).
+/// Reads a nullable array length. Returns `None` when the encoded value is
+/// null, which is −1 for non-flexible versions and 0 for flexible versions.
 /// # Errors
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 /// # Panics

@@ -1,8 +1,8 @@
-//! `ReadShareGroupState` (`api_key=84`). Returns the durable delivery state
-//! (start offset + state batches) for each `(group, topic, partition)`. A
-//! partition this broker does not lead returns per-partition `NOT_COORDINATOR`;
-//! an unknown-but-led key returns the initial/empty state (`start_offset = -1`,
-//! no batches) with `error_code = 0`.
+//! `ReadShareGroupState` (`api_key=84`). The handler returns the durable
+//! delivery state for each `(group, topic, partition)`: the start offset and
+//! the state batches. A partition this broker does not lead returns
+//! per-partition `NOT_COORDINATOR`. An unknown-but-led key returns the initial
+//! empty state (`start_offset = -1`, no batches) with `error_code = 0`.
 
 use std::sync::Arc;
 

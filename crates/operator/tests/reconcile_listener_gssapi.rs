@@ -1,30 +1,33 @@
-//! Integration tests for the `gssapi` listener authentication variant +
-//! inter-broker Kerberos initiate config. Exercises the full reconcile
-//! path against the kube-mock harness:
+//! Integration tests for the `gssapi` listener authentication variant and
+//! for the inter-broker Kerberos initiate config.
 //!
-//!   1. Happy path: a `type: gssapi` listener with its keytab Secret
-//!      present renders the broker-global `[gssapi]` TOML block (with
-//!      `keytab_path` + `enabled_mechanisms = ["GSSAPI"]`) into the
-//!      broker-config `ConfigMap`, and the pool reconciler mounts the
+//! These tests exercise the full reconcile path against the kube-mock
+//! harness:
+//!
+//!   1. Happy path. A `type: gssapi` listener with its keytab Secret
+//!      present renders the broker-global `[gssapi]` TOML block into the
+//!      broker-config `ConfigMap`. That block holds `keytab_path` and
+//!      `enabled_mechanisms = ["GSSAPI"]`. The pool reconciler mounts the
 //!      `gssapi-keytab` projected-items volume at
 //!      `/etc/crabka/gssapi-keytab`.
-//!   2. Missing keytab Secret: the cluster reconciler short-circuits to a
-//!      `Ready=False` status condition with reason
-//!      `MissingGssapiKeytabSecret` (same shape as the OAuth
-//!      introspection missing-Secret path) and emits no `ConfigMap` PATCH.
-//!   3. Inter-broker GSSAPI: when `interBrokerListenerName` resolves to
+//!   2. Missing keytab Secret. The cluster reconciler stops early and
+//!      writes a `Ready=False` status condition with reason
+//!      `MissingGssapiKeytabSecret`. This has the same shape as the OAuth
+//!      introspection missing-Secret path. It emits no `ConfigMap` PATCH.
+//!   3. Inter-broker GSSAPI. When `interBrokerListenerName` resolves to
 //!      the gssapi listener and `spec.interBrokerKerberos` is set, the
 //!      `ConfigMap` TOML gains the `[inter_broker_credentials]` block with
-//!      `type = "gssapi"` + the client principal.
-//!   4. krb5.conf: `spec.krb5ConfSecretRef` drives a `krb5-conf` volume +
-//!      `/etc/crabka/krb5` mount and a `KRB5_CONFIG` env on the broker
-//!      container (asserted via the pool reconciler's `StatefulSet`).
+//!      `type = "gssapi"` and the client principal.
+//!   4. krb5.conf. `spec.krb5ConfSecretRef` gives a `krb5-conf` volume, a
+//!      `/etc/crabka/krb5` mount, and a `KRB5_CONFIG` env on the broker
+//!      container. The tests assert on the `StatefulSet` from the pool
+//!      reconciler.
 //!
-//! The pure validator + TOML render + pod-template render functions are
-//! covered by unit tests inside `controller/{listeners,kafka_node_pool}.rs`.
-//! The added value here is end-to-end wiring: the keytab-Secret existence
-//! check, the rendered TOML landing in the `ConfigMap`, and the mounts
-//! landing on the `StatefulSet`.
+//! Unit tests inside `controller/{listeners,kafka_node_pool}.rs` cover the
+//! pure validator, the TOML render, and the pod-template render. These
+//! tests add the end-to-end wiring: the check that the keytab Secret
+//! exists, the rendered TOML in the `ConfigMap`, and the mounts on the
+//! `StatefulSet`.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -56,10 +59,12 @@ const KEYTAB_KEY: &str = "krb5.keytab";
 const KRB5_SECRET_NAME: &str = "krb5-conf";
 const KRB5_KEY: &str = "krb5.conf";
 
-/// A plaintext internal listener with no authentication. Used as the
-/// resolved inter-broker listener in tests that want the gssapi listener
-/// to be a *client* listener only (so the inter-broker-gssapi guard,
-/// which requires `spec.interBrokerKerberos`, doesn't fire).
+/// A plaintext internal listener with no authentication.
+///
+/// It is the resolved inter-broker listener in the tests that want the
+/// gssapi listener to be a *client* listener only. The
+/// inter-broker-gssapi guard, which needs `spec.interBrokerKerberos`, then
+/// does not fire.
 fn plain_listener(name: &str, port: i32) -> Listener {
     Listener {
         name: name.into(),
@@ -127,8 +132,11 @@ fn kafka_cr(name: &str, namespace: &str, listeners: Vec<Listener>) -> Kafka {
     k
 }
 
-/// JSON body shaped like a `core/v1/Secret` with one base64-encoded data
-/// key. Used as the GET response for the keytab / krb5.conf Secret read.
+/// JSON body in the shape of a `core/v1/Secret` with one base64-encoded
+/// data key.
+///
+/// It is the GET response for the read of the keytab Secret and of the
+/// krb5.conf Secret.
 fn secret_body(name: &str, namespace: &str, key: &str, value: &[u8]) -> serde_json::Value {
     let b64 = base64::engine::general_purpose::STANDARD.encode(value);
     serde_json::json!({
@@ -140,7 +148,7 @@ fn secret_body(name: &str, namespace: &str, key: &str, value: &[u8]) -> serde_js
     })
 }
 
-/// Build a rule for `GET /secrets/<name>` returning the supplied body.
+/// Builds a rule for `GET /secrets/<name>` that returns the given body.
 fn rule_get_secret(name: &str, body: &serde_json::Value) -> MockRule {
     MockRule {
         method: Method::GET,
@@ -149,7 +157,7 @@ fn rule_get_secret(name: &str, body: &serde_json::Value) -> MockRule {
     }
 }
 
-/// Build a rule for `GET /secrets/<name>` returning a 404.
+/// Builds a rule for `GET /secrets/<name>` that returns a 404.
 fn rule_get_secret_404(name: &str) -> MockRule {
     MockRule {
         method: Method::GET,
@@ -162,12 +170,15 @@ fn rule_get_secret_404(name: &str) -> MockRule {
     }
 }
 
-/// Trim `happy_path_rules` for the keytab failure path: when the keytab
-/// Secret is absent the reconciler short-circuits (after CA convergence +
-/// pool list) to a `patch_status_with_condition` (GET status + PATCH
-/// status) before upserting per-broker objects. Drop the per-broker
-/// keystore / `ConfigMap` / status-PATCH rules so an unconsumed rule can't
-/// mask the assertion, then re-add the GET+PATCH status pair. Mirrors
+/// Trims `happy_path_rules` for the keytab failure path.
+///
+/// When the keytab Secret is absent, the reconciler stops early. After the
+/// CA convergence and the pool list, it calls
+/// `patch_status_with_condition`, which is a GET of the status and a PATCH
+/// of the status, and it upserts no per-broker objects. This function
+/// removes the per-broker keystore rule, the `ConfigMap` rule, and the
+/// status-PATCH rule, so that no unconsumed rule can hide the assertion.
+/// It then adds the GET and PATCH status pair again. It follows
 /// `reconcile_oauth_introspection.rs::rules_for_failure_path`.
 fn rules_for_failure_path(name: &str, namespace: &str) -> Vec<MockRule> {
     let mut rules = happy_path_rules(name, namespace, &[]);
@@ -189,11 +200,13 @@ fn rules_for_failure_path(name: &str, namespace: &str) -> Vec<MockRule> {
     rules
 }
 
-/// Find the `Ready=False` condition in the status PATCH body and assert
-/// its `reason` matches. The keytab-Secret failure path patches the
-/// `Ready` condition (per-listener validation already succeeded; the
-/// failure is in the Secret-touching code that runs *after* validation),
-/// exactly like the OAuth introspection missing-Secret path.
+/// Finds the `Ready=False` condition in the status PATCH body and asserts
+/// that its `reason` matches.
+///
+/// The keytab-Secret failure path patches the `Ready` condition. The
+/// per-listener validation already succeeded, and the failure is in the
+/// code that touches the Secret and runs *after* the validation. The OAuth
+/// introspection missing-Secret path behaves the same way.
 fn assert_ready_false_with_reason(
     observed: &[http::Request<hyper::body::Bytes>],
     cluster: &str,
@@ -221,8 +234,8 @@ fn assert_ready_false_with_reason(
     assert!(ready["reason"] == expected_reason, "body = {body}");
 }
 
-/// Extract the `broker-0.toml` string from the `ConfigMap` PATCH captured
-/// in `observed`.
+/// Extracts the `broker-0.toml` string from the `ConfigMap` PATCH that
+/// `observed` captured.
 fn extract_broker0_toml(observed: &[http::Request<hyper::body::Bytes>], cluster: &str) -> String {
     let cm_patch = observed
         .iter()
@@ -266,10 +279,12 @@ fn pool_cr(name: &str, namespace: &str, parent: &str, replicas: i32) -> KafkaNod
     p
 }
 
-/// Parent-Kafka body carrying a `type: gssapi` listener. When
-/// `krb5 = true`, also sets `spec.krb5ConfSecretRef`. Used as the GET
-/// response for the pool reconciler's parent-Kafka read so the rendered
-/// pod template picks up the keytab + krb5.conf mounts.
+/// Parent-Kafka body with a `type: gssapi` listener.
+///
+/// With `krb5 = true`, the body also sets `spec.krb5ConfSecretRef`. It is
+/// the GET response for the parent-Kafka read of the pool reconciler, so
+/// that the rendered pod template gets the keytab mount and the krb5.conf
+/// mount.
 fn parent_kafka_body_with_gssapi(name: &str, namespace: &str, krb5: bool) -> serde_json::Value {
     let mut spec = serde_json::json!({
         "kafkaVersion": "0.1.1",
@@ -312,11 +327,13 @@ fn parent_kafka_body_with_gssapi(name: &str, namespace: &str, krb5: bool) -> ser
     })
 }
 
-/// FIFO rule sequence the pool reconciler needs:
-///   1. GET kafkas/<parent>              → `parent_body`
-///   2. GET statefulsets/<parent>-<pool> → 404 (first reconcile)
-///   3. PATCH statefulsets/<parent>-<pool> (SSA)
-///   4. GET statefulsets/<parent>-<pool>  (post-apply status read)
+/// The FIFO rule sequence that the pool reconciler needs:
+///   1. GET kafkas/<parent>, which gives `parent_body`
+///   2. GET statefulsets/<parent>-<pool>, which gives 404 on the first
+///      reconcile
+///   3. PATCH statefulsets/<parent>-<pool> with SSA
+///   4. GET statefulsets/<parent>-<pool>, to read the status after the
+///      apply
 ///   5. PATCH kafkanodepools/<pool>/status
 fn pool_reconcile_rules(
     parent: &str,
@@ -370,10 +387,12 @@ fn pool_ctx(
 // ── test 1a: happy path — [gssapi] TOML block renders into the ConfigMap ────
 
 /// A `type: gssapi` listener with its keytab Secret present reconciles
-/// cleanly: the keytab Secret is GET'd + validated, and the broker-config
-/// `ConfigMap` embeds the broker-global `[gssapi]` block with
-/// `keytab_path = "/etc/crabka/gssapi-keytab/keytab"` plus the per-listener
-/// `sasl_config = { enabled_mechanisms = ["GSSAPI"] }` row.
+/// without an error.
+///
+/// The reconciler GETs the keytab Secret and validates it. The
+/// broker-config `ConfigMap` then holds the broker-global `[gssapi]` block
+/// with `keytab_path = "/etc/crabka/gssapi-keytab/keytab"`, and the
+/// per-listener row `sasl_config = { enabled_mechanisms = ["GSSAPI"] }`.
 #[tokio::test]
 async fn gssapi_listener_renders_gssapi_toml_block_and_mechanism() {
     let items = vec![fake_pool_list_item("brokers", "ns1", "c1", 1, 1)];
@@ -442,9 +461,9 @@ async fn gssapi_listener_renders_gssapi_toml_block_and_mechanism() {
 // ── test 1b: happy path — StatefulSet mounts the gssapi-keytab volume ───────
 
 /// The pool reconciler renders a pod template that mounts the keytab
-/// Secret as a projected-items `gssapi-keytab` volume at the fixed dir
-/// `/etc/crabka/gssapi-keytab`, with the user's key pinned to the item
-/// path `keytab`.
+/// Secret as a projected-items `gssapi-keytab` volume at the fixed
+/// directory `/etc/crabka/gssapi-keytab`. The key of the user is pinned to
+/// the item path `keytab`.
 #[tokio::test]
 async fn gssapi_listener_statefulset_mounts_keytab_volume() {
     let rules = pool_reconcile_rules(
@@ -502,12 +521,14 @@ async fn gssapi_listener_statefulset_mounts_keytab_volume() {
 
 // ── test 2: missing keytab Secret → Ready=False MissingGssapiKeytabSecret ───
 
-/// The keytab Secret is entirely absent (mock returns 404 on the
-/// `get_opt`). The cluster reconciler patches the `Kafka` CR `Ready`
-/// condition to `status: "False"` with reason
-/// `MissingGssapiKeytabSecret`, and no broker-config `ConfigMap` PATCH
-/// fires. Mirrors the OAuth introspection missing-Secret assertion
-/// (`reconcile_oauth_introspection.rs::assert_ready_false_with_reason`).
+/// The keytab Secret is absent, and the mock returns 404 on the
+/// `get_opt`.
+///
+/// The cluster reconciler patches the `Ready` condition of the `Kafka` CR
+/// to `status: "False"` with reason `MissingGssapiKeytabSecret`, and no
+/// broker-config `ConfigMap` PATCH fires. This follows the OAuth
+/// introspection missing-Secret assertion in
+/// `reconcile_oauth_introspection.rs::assert_ready_false_with_reason`.
 #[tokio::test]
 async fn gssapi_listener_missing_keytab_secret_rejects_with_missing_gssapi_keytab_secret() {
     let mut rules = rules_for_failure_path("c2", "ns2");
@@ -532,8 +553,8 @@ async fn gssapi_listener_missing_keytab_secret_rejects_with_missing_gssapi_keyta
 
 /// When `interBrokerListenerName` resolves to the gssapi listener AND
 /// `spec.interBrokerKerberos` is set, the broker-config `ConfigMap` TOML
-/// gains the `[inter_broker_credentials]` block with `type = "gssapi"`,
-/// the shared client principal, and the KDC URL.
+/// gains the `[inter_broker_credentials]` block. That block holds
+/// `type = "gssapi"`, the shared client principal, and the KDC URL.
 #[tokio::test]
 async fn inter_broker_gssapi_renders_inter_broker_credentials_block() {
     let items = vec![fake_pool_list_item("brokers", "ns3", "c3", 1, 1)];
@@ -573,15 +594,17 @@ async fn inter_broker_gssapi_renders_inter_broker_credentials_block() {
 
 // ── test 5: cross-crate contract — round-trip through the real broker parser ─
 
-/// Closes the operator↔broker TOML contract loop end-to-end: the operator
-/// renders a `[gssapi]` block (with `realm`/`kdc` set) AND an
-/// `[inter_broker_credentials]` block for a gssapi listener that doubles as
-/// the inter-broker listener, then we feed that *rendered* TOML straight
-/// through the broker's own `FileConfig` parser + `apply_to`. This proves
-/// the broker's `deny_unknown_fields` schema accepts every key the operator
-/// emits and that each one maps through to the live `BrokerConfig` with the
-/// right value — i.e. the wire contract is byte-exact, not just
-/// string-shaped.
+/// Closes the TOML contract loop between the operator and the broker,
+/// end to end.
+///
+/// The operator renders a `[gssapi]` block with `realm` and `kdc` set,
+/// AND an `[inter_broker_credentials]` block, for a gssapi listener that
+/// is also the inter-broker listener. The test then feeds that *rendered*
+/// TOML through the `FileConfig` parser of the broker and through
+/// `apply_to`. This proves that the `deny_unknown_fields` schema of the
+/// broker accepts every key that the operator writes, and that each key
+/// reaches the live `BrokerConfig` with the correct value. The wire
+/// contract is therefore byte-exact and not only string-shaped.
 #[tokio::test]
 async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
     let items = vec![fake_pool_list_item("brokers", "ns5", "c5", 1, 1)];
@@ -681,11 +704,13 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
 
 // ── test 4: krb5.conf → krb5-conf volume/mount + KRB5_CONFIG env ────────────
 
-/// `spec.krb5ConfSecretRef` drives a `krb5-conf` volume (sourcing the
-/// user's Secret with the key pinned to `krb5.conf`), a broker-container
-/// volumeMount at `/etc/crabka/krb5`, and a `KRB5_CONFIG` env pointing at
-/// `/etc/crabka/krb5/krb5.conf`. Asserted via the pool reconciler's
-/// rendered `StatefulSet` (the layer that mounts the volume + sets the env).
+/// `spec.krb5ConfSecretRef` gives three things: a `krb5-conf` volume from
+/// the Secret of the user, with the key pinned to `krb5.conf`, a
+/// volumeMount on the broker container at `/etc/crabka/krb5`, and a
+/// `KRB5_CONFIG` env that points at `/etc/crabka/krb5/krb5.conf`.
+///
+/// The test asserts on the `StatefulSet` that the pool reconciler renders,
+/// because that is the layer that mounts the volume and sets the env.
 #[tokio::test]
 async fn krb5_conf_statefulset_mounts_volume_and_sets_env() {
     let rules = pool_reconcile_rules(

@@ -619,8 +619,10 @@ fn yaml_mapping_json(value: &serde_yaml::Value, key: &str) -> Value {
         )
 }
 
-/// A rule-file duration key (`for:`, a group's `interval:`) as an extent. An
-/// absent or unparseable value is a zero extent.
+/// Returns the duration at a rule-file key as an extent.
+///
+/// The keys are `for:` and the `interval:` of a group. This function returns a
+/// zero extent for an absent or unparseable value.
 fn yaml_duration(value: &serde_yaml::Value, key: &str) -> Time {
     value
         .get(key)
@@ -629,9 +631,10 @@ fn yaml_duration(value: &serde_yaml::Value, key: &str) -> Time {
         .unwrap_or(Time::ZERO)
 }
 
-/// The `s`/`m`/`h` suffixes this surface accepts, and a bare number read as
-/// seconds. The amount parses as `u64`, so a negative or otherwise malformed
-/// value is `None` and reads as "no duration" rather than a backwards window.
+/// Parses a duration with an `s`, `m`, or `h` suffix, the suffixes this surface
+/// accepts. A bare number is a count of seconds. The amount parses as `u64`, so
+/// this function returns `None` for a negative or otherwise malformed value.
+/// The caller reads `None` as "no duration", not as a backwards window.
 fn parse_yaml_duration(value: &str) -> Option<Time> {
     let value = value.trim();
     let (amount, unit_seconds) = if let Some(amount) = value.strip_suffix('s') {

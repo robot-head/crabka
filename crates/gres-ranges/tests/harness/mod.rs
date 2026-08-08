@@ -386,7 +386,7 @@ async fn spawn_tls(
     address
 }
 
-/// Always-current range-0 end sampler: the follower replica shares range 0's
+/// Always-current range-0 end sampler. The follower replica shares range 0's
 /// store `Arc`, so the barrier needs no committed frames beyond offset -1.
 struct ZeroLagRange0End;
 
@@ -397,9 +397,9 @@ impl Range0EndSampler for ZeroLagRange0End {
     }
 }
 
-/// Record with placeholder endpoints; live addresses are published through
-/// [`RangeRegistry::refresh_from_tenant_record`] once both services are up.
-/// The layout mirrors the `"0,100,200"` boundaries: r0 = `[t0, t100)`,
+/// Record with placeholder endpoints. The test publishes the live addresses
+/// through [`RangeRegistry::refresh_from_tenant_record`] after both services
+/// come up. The layout mirrors the `"0,100,200"` boundaries: r0 = `[t0, t100)`,
 /// r1 = `[t100, t200)`, r2 = `[t200, ∞)`.
 fn two_compute_tenant_record(record_tenant: &str) -> TenantRecord {
     let entry = |range_id: u32, end_key: Option<RangeBoundary>| RangeLayoutEntry {
@@ -428,12 +428,12 @@ fn two_compute_tenant_record(record_tenant: &str) -> TenantRecord {
     .expect("layout")
 }
 
-/// A genuine split topology over real mTLS TCP: the LEFT compute hosts
-/// `{r0, r1}` and serves DDL plus the timestamp oracle; the RIGHT compute
-/// hosts r2 only, carries an always-current read-only range-0 replica, and
-/// reaches range 0 through the registry — so DDL issued on the right
-/// exercises `forward_ddl` plus the cluster-wide catalog barrier, and each
-/// side accepts DML for its hosted ranges.
+/// A true split topology over real mTLS TCP. The LEFT compute hosts `{r0, r1}`
+/// and serves DDL and the timestamp oracle. The RIGHT compute hosts r2 only,
+/// carries an always-current read-only range-0 replica, and reaches range 0
+/// through the registry. DDL issued on the right therefore exercises
+/// `forward_ddl` and the cluster-wide catalog barrier, and each side accepts DML
+/// for its hosted ranges.
 pub struct TwoComputeHarness {
     left_gateway: MultiRangeTenant,
     right_gateway: MultiRangeTenant,
@@ -535,8 +535,9 @@ impl TwoComputeHarness {
         }
     }
 
-    /// Issue DDL once through the RIGHT (non-r0) gateway: it must forward to
-    /// the left-hosted range-0 owner and barrier the catalog cluster-wide.
+    /// Issue DDL once through the RIGHT gateway, which does not host r0. That
+    /// gateway must forward to the left-hosted range-0 owner and barrier the
+    /// catalog cluster-wide.
     pub async fn create_table(&self, sql: &str) {
         let mut session = self.right_gateway.connect();
         run(&mut session, sql).await;
@@ -565,7 +566,8 @@ impl TwoComputeHarness {
         row_count(&rows)
     }
 
-    /// The gateway hosting `table_id`'s range: left for r0/r1, right for r2.
+    /// The gateway that hosts the range of `table_id`. That is the left gateway
+    /// for r0 and r1, and the right gateway for r2.
     fn session_for_table(&self, table_id: u64) -> crabka_gres_ranges::tenant::GatewaySession {
         if table_id < 200 {
             return self.left_gateway.connect();

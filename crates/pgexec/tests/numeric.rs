@@ -1,9 +1,12 @@
-//! SP32: arbitrary-precision `numeric` / `decimal` — end-to-end over the wire.
-//! Bare decimal literals are numeric (scale-faithful), exact arithmetic with
-//! `PostgreSQL` scale rules (incl. division/AVG display scale), `numeric(p,s)`
-//! rounding + overflow, the cast matrix, comparison/grouping, and the result type
-//! OID 1700. Values are read in TEXT mode (simple query) — the engine's own
-//! `numeric_out` — so the assertions are exact decimal strings.
+//! SP32: arbitrary-precision `numeric` and `decimal`, end to end over the wire.
+//!
+//! Bare decimal literals are numeric and scale-faithful. This file covers exact
+//! arithmetic with `PostgreSQL` scale rules, including the division and AVG
+//! display scale, `numeric(p,s)` rounding and overflow, the cast matrix,
+//! comparison and grouping, and the result type OID 1700.
+//!
+//! Values are read in TEXT mode, through the simple query protocol and the
+//! engine's own `numeric_out`, so the assertions are exact decimal strings.
 
 use std::sync::Arc;
 
@@ -36,7 +39,7 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
-/// All first-column values (text format) for a query, in row order.
+/// All first-column values of a query, in text format and in row order.
 async fn col0(client: &tokio_postgres::Client, sql: &str) -> Vec<Option<String>> {
     use tokio_postgres::SimpleQueryMessage;
     let mut out = Vec::new();

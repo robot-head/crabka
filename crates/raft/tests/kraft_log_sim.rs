@@ -1,12 +1,13 @@
-//! Slice 3b headline acceptance: the slice-3a consensus core driving a **real,
-//! on-disk** [`KraftLog`] in the deterministic multi-node simulation.
+//! Slice 3b headline acceptance: the slice-3a consensus core drives a real,
+//! on-disk [`KraftLog`] in the deterministic multi-node simulation.
 //!
-//! This reuses the exact `Sim` scheduler/action-translation from the shared
-//! [`sim_harness`] module (the same code path validated by `kraft_sim.rs` over
-//! the in-memory fake), but plugs in a [`KraftBackedLog`]: one `KraftLog` per
-//! node, each in its own `tempfile::tempdir()`. Election, pull-replication, and
-//! divergence-truncation are exercised against genuine byte-level log I/O, and
-//! the asserts compare committed *bytes*, not just offsets.
+//! This reuses the exact `Sim` scheduler and action translation from the shared
+//! [`sim_harness`] module, which is the same code path that `kraft_sim.rs`
+//! validates over the in-memory fake. It plugs in a [`KraftBackedLog`] instead:
+//! one `KraftLog` per node, each in its own `tempfile::tempdir()`. The test
+//! exercises election, pull-replication, and divergence-truncation against
+//! genuine byte-level log I/O, and the asserts compare the committed bytes and
+//! not only the offsets.
 
 mod sim_harness;
 
@@ -29,11 +30,12 @@ const UNBOUNDED_READ: ByteSize = gibibytes(1);
 // A real-KraftLog-backed per-node log for the simulation harness.
 // --------------------------------------------------------------------------
 
-/// Wraps a real [`KraftLog`] so it satisfies the harness's [`SimNodeLog`] trait.
-/// Each node owns its own tempdir (held alive for the lifetime of the log).
+/// Wraps a real [`KraftLog`] so that it satisfies the [`SimNodeLog`] trait of
+/// the harness. Each node owns its own tempdir, which stays alive for the
+/// lifetime of the log.
 struct KraftBackedLog {
     log: KraftLog,
-    /// Keeps the per-node temp directory alive; dropped with the log.
+    /// Keeps the per-node temp directory alive. It drops with the log.
     _dir: tempfile::TempDir,
 }
 
@@ -44,8 +46,8 @@ impl KraftBackedLog {
         Self { log, _dir: dir }
     }
 
-    /// All batches currently in the log, decoded (one record per batch in this
-    /// simulation, so one batch per offset).
+    /// All batches currently in the log, decoded. This simulation puts one
+    /// record in each batch, so there is one batch per offset.
     fn decoded(&self) -> Vec<RecordBatch> {
         let end = self.log.log_end_offset();
         if end <= 0 {
@@ -57,9 +59,9 @@ impl KraftBackedLog {
     }
 }
 
-/// Build a single-record batch stamped with `epoch`. `base_offset` is assigned
-/// by the log on `append` (leader path) or pinned by `append_at` (follower
-/// path), so the value here is just a placeholder.
+/// Builds a single-record batch stamped with `epoch`. The log assigns
+/// `base_offset` on `append`, which is the leader path, or `append_at` pins it,
+/// which is the follower path. The value here is therefore only a placeholder.
 fn make_batch(epoch: Epoch, value: &[u8]) -> RecordBatch {
     let epoch_i32 = i32::try_from(epoch).expect("epoch fits in i32");
     RecordBatch {
@@ -175,9 +177,10 @@ impl SimNodeLog for KraftBackedLog {
 }
 
 thread_local! {
-    /// Monotonic record-value counter (per test thread) so appended records
-    /// carry distinct, deterministic payloads. `cargo test` runs each test on
-    /// its own thread, so this resets between tests without cross-talk.
+    /// Monotonic record-value counter, one for each test thread, so that
+    /// appended records carry distinct, deterministic payloads. `cargo test`
+    /// runs each test on its own thread, so this counter resets between tests
+    /// with no cross-talk.
     static NEXT_VALUE: RefCell<u64> = const { RefCell::new(0) };
 }
 
@@ -186,11 +189,13 @@ fn new_with_kraft_log(voter_ids: &[NodeId]) -> Sim<KraftBackedLog> {
     Sim::new_with(voter_ids, |_id| KraftBackedLog::new())
 }
 
-/// The committed bytes of `node`'s log: the verbatim `.log` bytes for every
-/// batch below the node's high watermark, served through the real
-/// `read_committed` path. Each node's HWM is advanced to the consensus HWM by
-/// the harness (leaders via `AdvanceHighWatermark`, followers on fetch), so this
-/// is the byte-exact convergence target.
+/// The committed bytes of the log of `node`: the verbatim `.log` bytes for
+/// every batch below the node's high watermark, served through the real
+/// `read_committed` path.
+///
+/// The harness advances each node's HWM to the consensus HWM. It advances a
+/// leader through `AdvanceHighWatermark`, and a follower on fetch. This is
+/// therefore the byte-exact convergence target.
 fn committed_bytes(sim: &Sim<KraftBackedLog>, node: NodeId) -> bytes::Bytes {
     let log = &sim.node_log(node).log;
     let raw = log
@@ -199,7 +204,7 @@ fn committed_bytes(sim: &Sim<KraftBackedLog>, node: NodeId) -> bytes::Bytes {
     raw.bytes
 }
 
-/// Decoded committed batches of `node`'s log up to the consensus HWM.
+/// Decoded committed batches of the log of `node`, up to the consensus HWM.
 fn committed_batches(sim: &Sim<KraftBackedLog>, node: NodeId, hwm: i64) -> Vec<RecordBatch> {
     let log = &sim.node_log(node).log;
     log.read_decoded(Offset(0), UNBOUNDED_READ)

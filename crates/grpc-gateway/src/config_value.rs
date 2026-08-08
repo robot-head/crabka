@@ -1,11 +1,11 @@
 //! Validated scalar values accepted at gateway configuration boundaries.
 //!
 //! Two families live here. The `refined_integer!` newtypes wrap the
-//! *dimensionless counts* a gateway configures — a replication factor, a
-//! partition count, a retry budget — and reject an out-of-range value at parse
-//! time. Dimensioned settings (timeouts, body limits, ratios) use
-//! `crabka-units`; this module only names errors while validating quantities
-//! already deserialized from gateway config files.
+//! *dimensionless counts* a gateway configures, such as a replication factor, a
+//! partition count, and a retry budget. They reject an out-of-range value at
+//! parse time. Dimensioned settings, which are timeouts, body limits, and
+//! ratios, use `crabka-units`. This module only names errors while it validates
+//! quantities that are already deserialized from gateway config files.
 
 use std::str::FromStr;
 
@@ -70,7 +70,7 @@ refined_integer!(
 // Dimensioned values
 // ---------------------------------------------------------------------------
 
-/// Range-check an already-parsed time extent, naming the offending field.
+/// Range-check an already-parsed time extent. The message names the bad field.
 ///
 /// # Errors
 ///
@@ -96,7 +96,7 @@ pub fn non_negative_time(field: &str, value: Time) -> Result<Time, String> {
     }
 }
 
-/// Range-check an already-parsed byte count, naming the offending field.
+/// Range-check an already-parsed byte count. The message names the bad field.
 ///
 /// # Errors
 ///
@@ -109,7 +109,7 @@ pub fn positive_byte_size(field: &str, value: ByteSize) -> Result<ByteSize, Stri
     }
 }
 
-/// Range-check an already-parsed fraction, naming the offending field.
+/// Range-check an already-parsed fraction. The message names the bad field.
 ///
 /// # Errors
 ///

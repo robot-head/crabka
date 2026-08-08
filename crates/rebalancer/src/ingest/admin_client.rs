@@ -1,6 +1,6 @@
-//! Thin typed wrappers over `crabka_client_core::Client` for the
-//! three RPCs the ingester needs each tick. Returning typed responses
-//! keeps the `Ingester` free of `crabka_protocol` imports.
+//! Thin typed wrappers over `crabka_client_core::Client` for the three RPCs
+//! the ingester needs each tick. The typed responses keep the `Ingester` free
+//! of `crabka_protocol` imports.
 
 use crabka_client_core::{Client, ClientError};
 use crabka_protocol::owned::{
@@ -60,7 +60,8 @@ mod tests {
 
     use super::*;
 
-    /// Connect/request timeout for the deliberately-unreachable test client.
+    /// Connect and request timeout for the deliberately unreachable test
+    /// client.
     const CLIENT_TIMEOUT: Time = millis(50);
 
     #[test]

@@ -1,4 +1,5 @@
-//! `PolarsIpcSerde`: Arrow-IPC encoding of a polars `DataFrame` at the `Serde<T>` boundary.
+//! `PolarsIpcSerde`: Arrow-IPC encoding of a polars `DataFrame` at the `Serde<T>`
+//! boundary.
 
 use std::io::Cursor;
 
@@ -7,7 +8,8 @@ use bytes::Bytes;
 
 use crate::processor::serde::{DefaultSerde, Serde, SerdeAssociate, SerdeError};
 
-/// `Serde<DataFrame>` using the Arrow IPC stream format (schema embedded per message).
+/// A `Serde<DataFrame>` that uses the Arrow IPC stream format. Each message
+/// embeds its schema.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PolarsIpcSerde;
 

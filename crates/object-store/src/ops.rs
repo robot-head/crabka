@@ -1,8 +1,11 @@
-//! The shared object-store operation surface: an async, mockable [`ObjectOps`]
-//! trait and its single concrete implementation [`ObjectStoreClient`] over
-//! `object_store`. Consumers route their put/get/delete/multipart calls through
-//! this so the operation logic (notably the multipart-threshold branch and the
-//! `object_store::Error` -> [`ObjectStoreError`] mapping) lives in one place.
+//! The shared object-store operation surface.
+//!
+//! This module holds an async, mockable [`ObjectOps`] trait and its single
+//! concrete implementation [`ObjectStoreClient`] over `object_store`. Consumers
+//! route their put, get, delete, and multipart calls through it, so the
+//! operation logic lives in one place. That logic includes the
+//! multipart-threshold branch and the `object_store::Error` to
+//! [`ObjectStoreError`] mapping.
 
 use std::sync::Arc;
 
@@ -14,19 +17,22 @@ use tokio::io::AsyncReadExt as _;
 
 use crate::error::ObjectStoreError;
 
-/// Async object-store operations. `Send + Sync` so it can be shared across tasks.
+/// Async object-store operations. The trait is `Send + Sync`, so tasks can
+/// share it.
 ///
-/// Kept dyn-safe and `#[automock]`-able: multipart upload is expressed as
-/// [`ObjectOps::put_from_path`] over a filesystem path rather than a generic
-/// reader, so the trait mocks cleanly for mutation-testable IO decision logic.
+/// The trait stays dyn-safe and `#[automock]`-able. It expresses multipart
+/// upload as [`ObjectOps::put_from_path`] over a filesystem path, not over a
+/// generic reader. The trait thus mocks cleanly for mutation-testable IO
+/// decision logic.
 #[cfg_attr(test, mockall::automock)]
 #[async_trait::async_trait]
 pub trait ObjectOps: Send + Sync {
     /// Single-PUT an in-memory payload.
     async fn put(&self, key: &Path, bytes: Bytes) -> Result<(), ObjectStoreError>;
 
-    /// Upload a local file, choosing single-PUT below `threshold` bytes and
-    /// streaming multipart (in `chunk_size` parts) at or above it.
+    /// Upload a local file. The method uses single-PUT below `threshold`
+    /// bytes, and streaming multipart in `chunk_size` parts at or above
+    /// `threshold`.
     async fn put_from_path(
         &self,
         key: &Path,
@@ -41,7 +47,7 @@ pub trait ObjectOps: Send + Sync {
     /// Fetch a byte range of an object.
     async fn get_range(&self, key: &Path, range: GetRange) -> Result<Bytes, ObjectStoreError>;
 
-    /// Fetch object metadata (size, etag, ...).
+    /// Fetch object metadata, such as the size and the etag.
     async fn head(&self, key: &Path) -> Result<ObjectMeta, ObjectStoreError>;
 
     /// List objects under an optional prefix.
@@ -51,10 +57,11 @@ pub trait ObjectOps: Send + Sync {
     async fn delete(&self, key: &Path) -> Result<(), ObjectStoreError>;
 }
 
-/// The single concrete [`ObjectOps`] implementation, wrapping any
-/// `object_store::ObjectStore` handle (e.g. one built by
+/// The single concrete [`ObjectOps`] implementation.
+///
+/// It wraps any `object_store::ObjectStore` handle, for example a handle from
 /// [`build_object_store`](crate::build_object_store), or an
-/// `object_store::memory::InMemory` in tests).
+/// `object_store::memory::InMemory` handle in tests.
 #[derive(Clone)]
 pub struct ObjectStoreClient {
     inner: Arc<dyn object_store::ObjectStore>,
@@ -223,8 +230,8 @@ mod tests {
     }
 
     /// A delegating spy that counts which upload path `put_from_path` takes.
-    /// Both paths produce identical object bytes, so only call counts can pin
-    /// the threshold comparison (`len < threshold`) at its boundary.
+    /// Both paths produce identical object bytes. Only the call counts can thus
+    /// pin the threshold comparison `len < threshold` at its boundary.
     #[derive(Debug)]
     struct CountingStore {
         inner: object_store::memory::InMemory,
@@ -309,8 +316,8 @@ mod tests {
         }
     }
 
-    /// Pins the `len < threshold` boundary: one byte under the threshold must
-    /// take the single-PUT path (never multipart).
+    /// Pins the `len < threshold` boundary. One byte under the threshold must
+    /// take the single-PUT path and must never take multipart.
     #[tokio::test]
     async fn put_from_path_at_threshold_minus_one_takes_single_put() {
         let store = Arc::new(CountingStore::new());
@@ -324,8 +331,9 @@ mod tests {
         assert!(store.multiparts.load(std::sync::atomic::Ordering::SeqCst) == 0);
     }
 
-    /// Pins the boundary's other side: exactly the threshold must take the
-    /// multipart path (the comparison is strict `<`, not `<=`).
+    /// Pins the other side of the boundary. Exactly the threshold must take
+    /// the multipart path, because the comparison is a strict `<`, not a
+    /// `<=`.
     #[tokio::test]
     async fn put_from_path_at_exact_threshold_takes_multipart() {
         let store = Arc::new(CountingStore::new());

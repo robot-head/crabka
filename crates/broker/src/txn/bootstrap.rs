@@ -1,5 +1,6 @@
 //! Lazy creation of the `__transaction_state` internal topic.
-//! Mirrors the `__consumer_offsets` bootstrap.
+//!
+//! This mirrors the `__consumer_offsets` bootstrap.
 
 #![allow(dead_code)] // wired in by the FindCoordinator-TXN handler
 
@@ -11,9 +12,11 @@ use uuid::Uuid;
 
 pub const TOPIC: &str = "__transaction_state";
 
-/// Ensure `__transaction_state` exists in the controller's metadata.
-/// No-op if it already does. Tolerate `TopicExists` in case a concurrent
-/// `FindCoordinator(TRANSACTION)` already created it.
+/// Make sure `__transaction_state` exists in the controller's metadata.
+///
+/// The function does nothing if the topic already exists. It tolerates
+/// `TopicExists`, because a concurrent `FindCoordinator(TRANSACTION)` can
+/// create the topic first.
 pub(crate) async fn ensure_topic(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     num_partitions: i32,

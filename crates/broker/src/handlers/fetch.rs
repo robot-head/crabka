@@ -1,14 +1,16 @@
-//! `Fetch` (`api_key=1`) with long-poll support via per-partition
+//! `Fetch` (`api_key=1`) with long-poll support through per-partition
 //! `Notify::notified()` futures.
 //!
-//! Records are returned as verbatim `RecordsPayload::Raw` bytes — the
-//! on-disk `.log` bytes for whole v2 batches, read decode-free via
-//! `Log::read_raw` and clamped at the visibility window: the high watermark
-//! for `read_uncommitted` consumer fetches, `lso.min(hw)` for
-//! `read_committed`, and the log-end offset (LEO) for follower fetches.
-//! `read_committed` does NO server-side batch filtering — aborted/control
-//! batches stay in the byte stream and the consumer drops them client-side
-//! using the `aborted_transactions` list, matching Apache Kafka.
+//! The handler returns records as verbatim `RecordsPayload::Raw` bytes. These
+//! are the on-disk `.log` bytes for whole v2 batches. `Log::read_raw` reads
+//! them decode-free, and the handler clamps them at the visibility window:
+//! the high watermark for `read_uncommitted` consumer fetches, `lso.min(hw)`
+//! for `read_committed`, and the log-end offset (LEO) for follower fetches.
+//!
+//! `read_committed` does NO server-side batch filtering. Aborted batches and
+//! control batches stay in the byte stream, and the consumer drops them on
+//! the client side with the `aborted_transactions` list. This matches Apache
+//! Kafka.
 
 use std::{sync::Arc, time::Duration};
 
@@ -45,34 +47,37 @@ use crate::{
 
 type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
-/// Resolved read for a single requested (topic, partition) tuple, kept
-/// around so we can re-read after a long-poll wake.
+/// Resolved read for a single requested (topic, partition) tuple.
+///
+/// The handler keeps it so that it can read again after a long-poll wake.
 pub(crate) struct PendingRead {
     pub(crate) topic_name: String,
     pub(crate) topic_id: WireUuid,
     pub(crate) partition_index: i32,
     pub(crate) fetch_offset: i64,
     pub(crate) max_bytes: i32,
-    /// `true` when `isolation_level == 1` on a consumer fetch (not a
-    /// follower fetch). Causes batch-level LSO filtering and populates
+    /// `true` when `isolation_level == 1` on a consumer fetch, and not on a
+    /// follower fetch. It causes batch-level LSO filtering and fills
     /// `aborted_transactions` in the response.
     pub(crate) read_committed: bool,
-    /// `true` when `replica_id >= 0` — i.e., the request is from a follower
-    /// replicator rather than a consumer. Follower fetches see all records up
-    /// to LEO and report LEO as HW/LSO; consumer fetches are clamped at HW.
+    /// `true` when `replica_id >= 0`, that is, when the request comes from a
+    /// follower replicator and not from a consumer. Follower fetches see all
+    /// records up to LEO and report LEO as HW and LSO. The handler clamps
+    /// consumer fetches at HW.
     pub(crate) is_follower_fetch: bool,
-    /// `None` for unknown topic/partition or out-of-range — final response is
-    /// already filled out and won't be re-read on wake.
+    /// `None` for an unknown topic or partition, or for an out-of-range
+    /// offset. The final response is already complete, and the handler does
+    /// not read it again on a wake.
     pub(crate) partition: Option<Arc<Partition>>,
-    /// Per-partition output, mutated in place by `do_read`.
+    /// Per-partition output. `do_read` mutates it in place.
     pub(crate) out: PartitionData,
-    /// Accumulator for microseconds spent in this partition's `do_read`
-    /// calls (first pass plus any long-poll re-reads). Measured as an
-    /// `Instant` elapsed delta around each `do_read`. The heavy byte read
-    /// runs in `spawn_blocking`, so this charges the read work without
-    /// allocating a `tokio_metrics::TaskMonitor` per partition per fetch.
-    /// Drained into the response-emit loop's `record_partition_cpu_micros`
-    /// call.
+    /// Accumulator for the microseconds spent in this partition's `do_read`
+    /// calls. It covers the first pass and every long-poll re-read. The
+    /// handler measures an `Instant` elapsed delta around each `do_read`. The
+    /// heavy byte read runs in `spawn_blocking`, so this charges the read work
+    /// and allocates no `tokio_metrics::TaskMonitor` per partition per fetch.
+    /// The response-emit loop drains it into its
+    /// `record_partition_cpu_micros` call.
     pub(crate) cpu_micros: u64,
 }
 
@@ -100,12 +105,14 @@ impl PendingRead {
     }
 }
 
-/// Handle a `Fetch` request, returning the response **struct** (not yet
-/// encoded) plus the negotiated `version`. The dispatch layer turns this into
-/// either a zero-copy write-plan (v4+, the canonical codec) or a legacy
-/// copy-encoded frame (v0–v3). Returning the struct — rather than `Bytes` —
-/// lets the connection writer split out each partition's records region as a
-/// separate write segment instead of materializing the whole body.
+/// Handle a `Fetch` request and return the not-yet-encoded response
+/// **struct** with the negotiated `version`.
+///
+/// The dispatch layer turns the struct into a zero-copy write-plan for v4+
+/// with the canonical codec, or into a legacy copy-encoded frame for v0–v3.
+/// The function returns the struct and not `Bytes`, so the connection writer
+/// can split out each partition's records region as a separate write segment.
+/// It does not need to materialize the whole body.
 #[tracing::instrument(
     name = "handle_fetch",
     level = "info",
@@ -206,9 +213,10 @@ pub(crate) async fn handle(
     Ok((resp, version))
 }
 
-/// Projection of `FetchRequest::topics` / cached session partitions —
-/// the minimum the read loop needs. Built once at the top of the
-/// handler from either source.
+/// Projection of `FetchRequest::topics` or of the cached session partitions.
+///
+/// It holds the minimum that the read loop needs. The handler builds it once
+/// at the top, from either source.
 struct EffectiveTopic {
     topic: String,
     topic_id: WireUuid,
@@ -218,9 +226,9 @@ struct EffectiveTopic {
 struct EffectivePartition {
     partition: i32,
     current_leader_epoch: i32,
-    /// KIP-320: the leader epoch of the last fetched record as reported by
-    /// the fetcher. `-1` means "not set" (v0–v11 fetchers or session-cached
-    /// partitions that never set the field).
+    /// KIP-320: the leader epoch of the last fetched record, as the fetcher
+    /// reports it. `-1` means "not set". This happens with v0–v11 fetchers and
+    /// with session-cached partitions that never set the field.
     last_fetched_epoch: i32,
     fetch_offset: i64,
     partition_max_bytes: i32,
@@ -773,10 +781,12 @@ async fn execute_pending_reads(
     Ok(group_into_topic_responses(pending))
 }
 
-/// Re-group the flat `(key, state)` list returned by
-/// `FetchSessionCache::classify` into per-topic chunks. Topic order is
-/// the order in which keys first appear — `HashMap` iteration order is
-/// not stable across runs but is stable within a single classify call.
+/// Re-group the flat `(key, state)` list that `FetchSessionCache::classify`
+/// returns into per-topic chunks.
+///
+/// The topic order is the order in which the keys first appear. `HashMap`
+/// iteration order is not stable across runs, but it is stable within a single
+/// classify call.
 fn group_cached_into_effective_topics(
     cached: &[(FetchSessionKey, CachedPartitionState)],
 ) -> Vec<EffectiveTopic> {
@@ -809,10 +819,12 @@ fn group_cached_into_effective_topics(
 }
 
 /// Walk `responses` and snapshot every `(topic, partition)` row into a
-/// `CachedPartitionState` describing what was just emitted (the `last_*`
-/// fields) merged with the client's desired state for that partition
-/// from `effective` (`fetch_offset`, `max_bytes`, `leader_epoch`). Used to
-/// seed a brand-new session.
+/// `CachedPartitionState`.
+///
+/// Each snapshot describes what the handler just emitted, in the `last_*`
+/// fields. It merges that with the client's wanted state for the partition
+/// from `effective`, which is `fetch_offset`, `max_bytes`, and `leader_epoch`.
+/// The caller uses the result to seed a brand-new session.
 fn snapshot_response_state(
     effective: &[EffectiveTopic],
     responses: &[FetchableTopicResponse],
@@ -868,12 +880,13 @@ fn snapshot_response_state(
     out
 }
 
-/// KIP-227 incremental-response filter. Drops partitions whose
-/// outgoing state matches the cached `last_*` snapshot (the broker
-/// already told the client these values; re-sending wastes bytes).
-/// Returns the `(key, sent_state)` list for the partitions that
-/// survived — used by the caller to update the cache's `last_*` fields
-/// to reflect what was just emitted.
+/// KIP-227 incremental-response filter.
+///
+/// The function drops the partitions whose outgoing state matches the cached
+/// `last_*` snapshot. The broker already told the client these values, and a
+/// second send would waste bytes. The function returns the
+/// `(key, sent_state)` list for the partitions that survived. The caller uses
+/// that list to update the cache's `last_*` fields to what it just emitted.
 fn filter_incremental_response(
     responses: &mut Vec<FetchableTopicResponse>,
     cached: &std::collections::HashMap<FetchSessionKey, CachedPartitionState>,
@@ -926,10 +939,12 @@ fn filter_incremental_response(
     sent
 }
 
-/// Stable hash of the aborted-transaction list for the "did anything
-/// change?" comparison. Iteration order within a single response is
-/// deterministic (the list is produced by `do_read` in offset order)
-/// so a plain `DefaultHasher` over the sequence is enough.
+/// Stable hash of the aborted-transaction list for the "did anything change?"
+/// comparison.
+///
+/// The iteration order within a single response is deterministic, because
+/// `do_read` produces the list in offset order. A plain `DefaultHasher` over
+/// the sequence is therefore enough.
 fn hash_aborted_transactions(list: Option<&Vec<AbortedTransaction>>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -947,24 +962,28 @@ fn hash_aborted_transactions(list: Option<&Vec<AbortedTransaction>>) -> u64 {
     h.finish()
 }
 
-/// The pure read-path visibility decision: given a partition's watermarks and a
-/// fetch's parameters, what offsets this fetch may expose and what HW/LSO it
-/// reports. Extracted from [`do_read`] so it is the single source of truth for
-/// the response fields (previously computed in two places — the
-/// `OFFSET_OUT_OF_RANGE` path and the success path) and is exhaustively +
-/// property-tested in isolation (see `fetch_visibility_model.rs`).
+/// The pure read-path visibility decision.
+///
+/// From a partition's watermarks and a fetch's parameters, it gives the
+/// offsets that the fetch may expose and the HW and LSO that it reports. It
+/// sits apart from [`do_read`], so it is the single source of truth for the
+/// response fields on both the `OFFSET_OUT_OF_RANGE` path and the success
+/// path. `fetch_visibility_model.rs` covers it with exhaustive tests and
+/// property tests in isolation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct VisibilityWindow {
-    /// `fetch_offset < log_start` — caller returns `OFFSET_OUT_OF_RANGE`.
+    /// `fetch_offset < log_start`. The caller returns `OFFSET_OUT_OF_RANGE`.
     pub out_of_range: bool,
-    /// `fetch_offset >= upper_bound` — nothing to read (no bytes).
+    /// `fetch_offset >= upper_bound`. There is nothing to read, and no bytes
+    /// go out.
     pub empty: bool,
     /// Exclusive upper offset the raw read may expose: `[fetch_offset, limit_offset)`.
     pub limit_offset: Offset,
-    /// `read_committed` aborted-txn scan ceiling (`lso.min(hw)` for a
-    /// `read_committed` consumer, else `lso`).
+    /// `read_committed` aborted-txn scan ceiling. It is `lso.min(hw)` for a
+    /// `read_committed` consumer, and `lso` in every other case.
     pub effective_lso: Offset,
-    /// Whether to populate `aborted_transactions` (a `read_committed` consumer).
+    /// Whether to fill `aborted_transactions`, which happens for a
+    /// `read_committed` consumer.
     pub read_committed_aborts: bool,
     /// `out.high_watermark` to report.
     pub response_hw: Offset,
@@ -972,9 +991,9 @@ pub(crate) struct VisibilityWindow {
     pub response_lso: Offset,
 }
 
-/// Kafka invariants the caller upholds: `0 <= log_start <= hw <= log_end` and
-/// `lso <= hw`; `read_committed` is only set for consumer fetches, so
-/// `read_committed` implies `!is_follower`.
+/// Kafka invariants that the caller upholds: `0 <= log_start <= hw <= log_end`
+/// and `lso <= hw`. The caller sets `read_committed` for consumer fetches
+/// only, so `read_committed` implies `!is_follower`.
 pub(crate) fn compute_visibility_window(
     is_follower: bool,
     read_committed: bool,
@@ -1018,25 +1037,29 @@ pub(crate) fn compute_visibility_window(
     }
 }
 
-/// Hold the partition's log mutex briefly to read offsets + (optionally) the
-/// verbatim on-disk batch bytes via `Log::read_raw`. Populates `out` in place
-/// (with `RecordsPayload::Raw`) and returns the byte-size estimate of the
-/// records placed in `out` (0 if none).
+/// Hold the partition's log mutex for a short time to read the offsets, and
+/// optionally the verbatim on-disk batch bytes through `Log::read_raw`.
 ///
-/// When `read_committed` is `true` (consumer fetch with `isolation_level=1`):
-/// - raw bytes are clamped at `min(lso, hw)` (`base_offset < min(lso, hw)`)
-/// - NO server-side batch filtering: aborted/control batches stay in the
-///   byte stream; the consumer drops them client-side using the list below
+/// The read fills `out` in place with a `RecordsPayload::Raw`. It returns the
+/// byte-size estimate of the records it put in `out`, or 0 when it put none.
+///
+/// When `read_committed` is `true`, on a consumer fetch with
+/// `isolation_level=1`:
+/// - the raw bytes are clamped at `min(lso, hw)`, so
+///   `base_offset < min(lso, hw)`
+/// - there is NO server-side batch filtering. Aborted batches and control
+///   batches stay in the byte stream, and the consumer drops them on the
+///   client side with the list below
 /// - `out.last_stable_offset` is set to `min(lso, hw)`
-/// - `out.aborted_transactions` is populated from the partition's `.txnindex`
+/// - `out.aborted_transactions` comes from the partition's `.txnindex`
 ///
 /// When `is_follower_fetch` is `true`:
-/// - raw bytes up to LEO are returned (no HW clamping)
+/// - the raw bytes go up to LEO, with no HW clamp
 /// - `out.high_watermark` and `out.last_stable_offset` are set to `log_end`
 ///
-/// When `read_committed` is `false` and `is_follower_fetch` is `false`
-/// (consumer fetch in `read_uncommitted`):
-/// - raw bytes are clamped at HW (`base_offset < hw`)
+/// When `read_committed` is `false` and `is_follower_fetch` is `false`, on a
+/// consumer fetch in `read_uncommitted`:
+/// - the raw bytes are clamped at HW, so `base_offset < hw`
 /// - `out.high_watermark` and `out.last_stable_offset` are set to `hw`
 /// - `out.aborted_transactions` is `None`
 enum ReadPlan {
@@ -1305,11 +1328,13 @@ fn plan_read(
     (log_start, window, plan)
 }
 
-/// KIP-405: try to serve `p`'s requested offset from the remote
-/// tier when the local log returned `OFFSET_OUT_OF_RANGE` and the topic has
-/// `remote.storage.enable=true`. On success, replaces the partition's error +
-/// records and returns the encoded batch size; on miss / error / non-tiered,
-/// leaves `p.out` untouched and returns `None`.
+/// KIP-405: try to serve `p`'s requested offset from the remote tier when the
+/// local log returned `OFFSET_OUT_OF_RANGE` and the topic has
+/// `remote.storage.enable=true`.
+///
+/// On success the function replaces the partition's error and records, and
+/// returns the encoded batch size. On a miss, on an error, or for a
+/// non-tiered topic, it leaves `p.out` untouched and returns `None`.
 async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition) -> Option<usize> {
     let reader = broker.remote_reader.clone()?;
     let remote_storage_enable = {
@@ -1435,9 +1460,11 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
     }
 }
 
-/// Wait for any readable partition's `append_notify` to fire (with timeout),
-/// then re-read every partition once. Resets each partition's accumulated
-/// records before re-reading so the new read replaces the old one.
+/// Wait with a timeout for the `append_notify` of any readable partition to
+/// fire, then read every partition once more.
+///
+/// The function resets each partition's accumulated records before it reads
+/// again, so the new read replaces the old one.
 // cargo-mutants: long-poll serve-loop glue — parks on partition append/HW
 // notifiers, then replays `do_read` per partition. The surviving `Ok(())`
 // mutant only manifests under a live parked-consumer long poll (a notifier
@@ -1521,9 +1548,12 @@ async fn long_poll_then_reread(
 }
 
 /// KIP-73 leader-side throttle: walk `throttled_idxs` in order and drop
-/// whole-partition chunks until the remaining throttled bytes fit within
-/// `budget`. Partitions are dropped completely (records set to `None`) — no
-/// mid-batch truncation, since Kafka clients expect complete record batches.
+/// whole-partition chunks until the remaining throttled bytes fit in
+/// `budget`.
+///
+/// The function drops a partition completely and sets its records to `None`.
+/// It never truncates in the middle of a batch, because Kafka clients expect
+/// complete record batches.
 fn truncate_throttled_responses(
     responses: &mut [FetchableTopicResponse],
     throttled_idxs: &[(usize, usize)],
@@ -1543,8 +1573,10 @@ fn truncate_throttled_responses(
     }
 }
 
-/// Sum the encoded byte sizes of all record batches across all topic partitions
-/// in the assembled Fetch response. Used by the KIP-13 `consumer_byte_rate` hook.
+/// Sum the encoded byte sizes of all record batches across all topic
+/// partitions in the assembled Fetch response.
+///
+/// The KIP-13 `consumer_byte_rate` hook uses this sum.
 fn sum_response_bytes(responses: &[FetchableTopicResponse]) -> u64 {
     responses
         .iter()
@@ -1553,10 +1585,12 @@ fn sum_response_bytes(responses: &[FetchableTopicResponse]) -> u64 {
         .sum()
 }
 
-/// KIP-13 `consumer_byte_rate` enforcement. Looks up the matching quota for
-/// `(principal, client_id)`, consumes `bytes` from the bucket, and returns
-/// the throttle delay capped at 1 second. Returns `Duration::ZERO` when no
-/// quota is configured or the bucket has sufficient capacity.
+/// KIP-13 `consumer_byte_rate` enforcement.
+///
+/// The function looks up the matching quota for `(principal, client_id)`,
+/// takes `bytes` from the bucket, and returns the throttle delay capped at 1
+/// second. It returns `Duration::ZERO` when the config sets no quota, or when
+/// the bucket has enough capacity.
 fn consume_consumer_quota(
     image: &crabka_metadata::MetadataImage,
     buckets: &crate::quota::QuotaBuckets,
@@ -1591,11 +1625,13 @@ fn should_use_sendfile(total_bytes: usize, has_regions: bool, minimum_bytes: usi
     total_bytes >= minimum_bytes && has_regions
 }
 
-/// Group resolved `PendingRead`s back into per-topic response entries,
-/// preserving the order topics first appeared in the request. Returns the
-/// per-topic `cpu_micros` accumulators alongside, positionally aligned with
-/// the returned `Vec` (`cpu_micros[ti][pi]` matches `responses[ti].partitions[pi]`)
-/// so the caller can attribute CPU without re-keying by topic name.
+/// Group the resolved `PendingRead`s back into per-topic response entries, and
+/// keep the order in which the topics first appeared in the request.
+///
+/// The function also returns the per-topic `cpu_micros` accumulators. They
+/// line up by position with the returned `Vec`, so `cpu_micros[ti][pi]`
+/// matches `responses[ti].partitions[pi]`. The caller can then attribute CPU
+/// without a re-key by topic name.
 type GroupedResponses = (Vec<FetchableTopicResponse>, Vec<Vec<u64>>);
 
 fn group_into_topic_responses(pending: Vec<PendingRead>) -> GroupedResponses {
@@ -1629,9 +1665,11 @@ fn group_into_topic_responses(pending: Vec<PendingRead>) -> GroupedResponses {
     (responses, cpu_micros)
 }
 
-/// Encode a `FetchResponse` into a `BytesMut`, choosing the legacy
-/// `kafka_3_6_2` codec for Fetch v0-3 and the current canonical codec
-/// for v4+. The version boundary mirrors the request-decode boundary.
+/// Encode a `FetchResponse` into a `BytesMut`.
+///
+/// The function chooses the legacy `kafka_3_6_2` codec for Fetch v0-3 and the
+/// current canonical codec for v4+. This version boundary matches the
+/// request-decode boundary.
 pub(crate) fn encode_fetch_response(
     resp: FetchResponse,
     version: i16,
@@ -1706,8 +1744,9 @@ mod visibility_fuzz {
     use super::{Offset, compute_visibility_window};
 
     proptest! {
-        /// The per-fetch visibility contract over large-N random valid watermark
-        /// tuples (`log_start <= lso <= hw <= log_end`) + fetch params.
+        /// The per-fetch visibility contract over large-N random valid
+        /// watermark tuples, `log_start <= lso <= hw <= log_end`, together
+        /// with the fetch parameters.
         #[test]
         fn visibility_contract_holds(
             a in 0i64..1_000_000,
@@ -1760,8 +1799,8 @@ mod visibility_fuzz {
             }
         }
 
-        /// KIP-227 monotonicity: advancing hw/lso/log_end never lowers the
-        /// reported HW/LSO for any fixed fetch shape.
+        /// KIP-227 monotonicity: an advance of hw, lso, or log_end never
+        /// lowers the reported HW or LSO for any fixed fetch shape.
         #[test]
         fn response_monotonic(
             base in 0i64..100_000,

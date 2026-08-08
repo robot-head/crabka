@@ -1,15 +1,17 @@
 //! Substrate-backed durability for Crabka Gres tenant computes.
 //!
-//! Implements the engine's [`crabka_pgexec::Committer`] and
-//! [`crabka_pgexec::Linearizer`] seams over a per-range WAL topic
-//! (`__gres_wal.<tenant>.r<range>`): a single writer task group-commits framed batches
-//! inside Kafka transactions (the broker's coordinator-checked producer epoch
-//! is the zombie fence), and recovery replays the topic before serving.
+//! This crate implements the engine's [`crabka_pgexec::Committer`] and
+//! [`crabka_pgexec::Linearizer`] seams over a per-range WAL topic named
+//! `__gres_wal.<tenant>.r<range>`. A single writer task group-commits framed
+//! batches inside Kafka transactions, and the broker's coordinator-checked
+//! producer epoch is the zombie fence. Recovery replays the topic before
+//! serving.
 //!
 //! # Key Types
-//! - [`WalFrame`] — the `GRW1` record framing.
-//! - [`apply_frame`] — replay application with the engine's merge rules.
-//! - [`replay_committed_frames`] — pure replay over committed frame bytes.
+//!
+//! - [`WalFrame`]: the `GRW1` record framing.
+//! - [`apply_frame`]: replay application with the engine's merge rules.
+//! - [`replay_committed_frames`]: pure replay over committed frame bytes.
 
 pub mod apply;
 pub mod checkpoint;

@@ -1,14 +1,14 @@
-//! Serve the registry router over plain HTTP, or HTTPS (with optional mTLS
-//! client-cert → `Principal`). Models `grpc-gateway/src/serve.rs`.
+//! Serve the registry router over plain HTTP, or over HTTPS with an optional
+//! mTLS client-cert → `Principal`. It models `grpc-gateway/src/serve.rs`.
 //!
-//! The plaintext path ([`serve_http`]) is byte-for-byte the pre-security
+//! The plaintext path [`serve_http`] is byte-for-byte the pre-security
 //! `axum::serve` call, so existing tests and the no-security default are
-//! unaffected. The TLS path ([`serve_https`]) terminates rustls per connection
-//! in a manual accept loop and, after the handshake, extracts the peer
-//! certificate's subject DN into a [`crate::auth::MtlsPrincipal`] that it injects
-//! into every request's extensions for that connection. The registry's
-//! `auth_layer` consumes that as the highest-precedence credential; the peer
-//! `SocketAddr` is injected too, for host-scoped ACLs in `authz_layer`.
+//! unaffected. The TLS path [`serve_https`] terminates rustls per connection in
+//! a manual accept loop. After the handshake it extracts the peer certificate's
+//! subject DN into a [`crate::auth::MtlsPrincipal`] and injects that into every
+//! request's extensions for that connection. The registry's `auth_layer`
+//! consumes it as the highest-precedence credential. The path also injects the
+//! peer `SocketAddr`, for host-scoped ACLs in `authz_layer`.
 
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ use tower::ServiceExt;
 use crate::auth::MtlsPrincipal;
 
 /// Serve `app` on `listener` over plaintext HTTP. Returns when `shutdown` is
-/// cancelled. Identical to the pre-security `axum::serve` call.
+/// cancelled. This is identical to the pre-security `axum::serve` call.
 ///
 /// # Errors
 /// Propagates the `std::io` error from `axum::serve`.
@@ -38,11 +38,11 @@ pub async fn serve_http(
 
 /// Serve `app` on `listener` over HTTPS, terminating rustls per connection.
 ///
-/// After each handshake the peer certificate's subject DN (when present) is
-/// turned into an mTLS [`Principal`] and injected — wrapped in
-/// [`MtlsPrincipal`] — into every request's extensions for that connection,
-/// alongside the peer [`std::net::SocketAddr`]. Returns when `shutdown` is
-/// cancelled.
+/// After each handshake, this function turns the peer certificate's subject DN,
+/// when present, into an mTLS [`Principal`]. It wraps that in
+/// [`MtlsPrincipal`] and injects it into every request's extensions for that
+/// connection, together with the peer [`std::net::SocketAddr`]. Returns when
+/// `shutdown` is cancelled.
 ///
 /// # Errors
 /// Propagates [`crabka_security::TlsError`] if the server config fails to build,

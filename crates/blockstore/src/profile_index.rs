@@ -1,8 +1,8 @@
 //! Profiles block index.
 //!
-//! `ProfileIndex` embeds [`Index`] for label postings and matcher resolution,
-//! then layers the profile-type lookup and stacktrace-partition map required by
-//! Pyroscope-compatible profiles queries.
+//! `ProfileIndex` embeds [`Index`] for label postings and matcher resolution.
+//! It then adds the profile-type lookup and the stacktrace-partition map that
+//! Pyroscope-compatible profiles queries need.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,11 +33,12 @@ pub const LABEL_PROFILE_TYPE: &str = "__profile_type__";
 /// Maximum byte size of a profile-index snapshot object accepted by
 /// [`ProfileIndex::load`].
 ///
-/// Like [`crate::Index::load`], a profile-index snapshot is fully buffered in
-/// memory before `serde_json` parsing; a corrupt or maliciously oversized
-/// object from shared storage could otherwise OOM the process. The object is
-/// `head()`ed first and rejected above this cap, mirroring the profiles gunzip
-/// `max_decompressed` pattern. Defaults to 256 MiB.
+/// As with [`crate::Index::load`], a load fully buffers a profile-index
+/// snapshot in memory before the `serde_json` parse. A corrupt or maliciously
+/// oversized object from shared storage could otherwise OOM the process. The
+/// loader `head()`s the object first and rejects it above this cap. This
+/// mirrors the profiles gunzip `max_decompressed` pattern. The default is
+/// 256 MiB.
 pub const MAX_PROFILE_INDEX_SNAPSHOT_BYTES: ByteSize = mebibytes(256);
 
 #[derive(Default, Serialize, Deserialize)]

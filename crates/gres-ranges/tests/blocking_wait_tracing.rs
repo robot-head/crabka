@@ -1,18 +1,18 @@
 //! Trace assertions for the two unbounded blocking waits on a gres read path:
 //! the batched timestamp grant and the range-0 read barrier.
 //!
-//! Both are places where a statement stops for as long as another node takes,
-//! with nothing in a waterfall to show for it. The assertions below pin the
-//! fields that make the wait interpretable — whether a grant queued behind
-//! another, and how far behind the local range-0 tail was — not merely that a
-//! span exists.
+//! At both places a statement stops for as long as another node takes, with
+//! nothing in a waterfall to show for it. The assertions below pin the fields
+//! that make the wait interpretable: whether a grant queued behind another
+//! grant, and how far behind the local range-0 tail was. They do not only assert
+//! that a span exists.
 //!
-//! Harness rules, both learned the expensive way:
+//! Two harness rules apply, and each one was learned the expensive way:
 //!
 //! - Assert on exported [`SpanData`], never on a live `tracing::Span`.
 //!   `tracing-opentelemetry` resolves a span's parent, status and trace id when
 //!   the span *closes*.
-//! - Install with `set_global_default`, not `with_default`: the conveyor
+//! - Install with `set_global_default`, not `with_default`. The conveyor
 //!   flusher and the barrier's sampler both run on spawned tasks, which a
 //!   thread-local subscriber never reaches.
 //!
@@ -142,14 +142,14 @@ impl Range0EndSampler for ReleasableSampler {
     }
 }
 
-/// The sampler as the trait object [`Range0Barrier`] takes, keeping the
-/// concrete handle so a test can still release it.
+/// The sampler as the trait object [`Range0Barrier`] takes. The function keeps
+/// the concrete handle, so a test can still release it.
 fn as_sampler(sampler: &Arc<ReleasableSampler>) -> Arc<dyn Range0EndSampler> {
     Arc::clone(sampler) as Arc<dyn Range0EndSampler>
 }
 
-/// A fresh range-0 tail that has already applied through `applied_through`
-/// (negative for an empty tail).
+/// A fresh range-0 tail that has already applied through `applied_through`. A
+/// negative value gives an empty tail.
 fn tail_applied_through(applied_through: i64) -> Range0Tail {
     let tail = Range0Tail::new(Arc::new(MemKv::default()));
     if applied_through >= 0 {
@@ -159,9 +159,9 @@ fn tail_applied_through(applied_through: i64) -> Range0Tail {
     tail
 }
 
-/// The one field that makes a `tso.grant` span worth reading: a caller that
-/// queued behind an in-flight batch is measuring queueing, not oracle latency,
-/// and the two are indistinguishable from the duration alone.
+/// The one field that makes a `tso.grant` span worth reading. A caller that
+/// queued behind an in-flight batch measures queueing time, not oracle latency,
+/// and the duration alone cannot separate the two.
 #[tokio::test]
 async fn a_coalesced_timestamp_grant_is_recorded_as_batched() {
     let traces = Traces::install();
@@ -208,8 +208,8 @@ async fn a_coalesced_timestamp_grant_is_recorded_as_batched() {
     check!(starter.status == Status::Unset);
 }
 
-/// A fenced oracle is the failure an operator has to be able to find, and it
-/// must survive batching as its own discriminator rather than as generic RPC
+/// A fenced oracle is the failure an operator must be able to find. It must
+/// survive the batching as its own discriminator, and not as generic RPC
 /// noise.
 #[tokio::test]
 async fn a_failed_grant_records_the_error_variant_and_message() {
@@ -231,9 +231,9 @@ async fn a_failed_grant_records_the_error_variant_and_message() {
     check!(attribute(&span, "pg.tso.last").is_none());
 }
 
-/// The write-side barrier's whole job is to wait out a catch-up, so the span
-/// has to report the distance it waited: applied offset when it opened, and the
-/// offset it was waiting for.
+/// The only job of the write-side barrier is to wait out a catch-up, so the
+/// span must report the distance it waited. That is the applied offset when the
+/// barrier opened, and the offset the barrier waited for.
 #[tokio::test]
 async fn the_fresh_end_barrier_reports_the_catch_up_distance_it_waited_out() {
     let traces = Traces::install();
@@ -290,8 +290,8 @@ async fn the_read_gate_barrier_reports_its_own_mode() {
     check!(span.status == Status::Unset);
 }
 
-/// A tail that never catches up is the failure the barrier exists to surface;
-/// the span has to name it rather than collapse into the client-facing
+/// A tail that never catches up is the failure the barrier exists to surface.
+/// The span must name it, and must not collapse it into the client-facing
 /// "unavailable".
 #[tokio::test]
 async fn a_barrier_that_times_out_records_the_catch_up_failure() {

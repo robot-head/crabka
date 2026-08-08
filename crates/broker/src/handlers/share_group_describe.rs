@@ -1,10 +1,10 @@
-//! `ShareGroupDescribe` (`api_key` 77) — KIP-932. Returns one
-//! `DescribedGroup` per requested `group_id`, rendered from the share
-//! actor's `Describe` view.
+//! `ShareGroupDescribe` (`api_key` 77), from KIP-932. It returns one
+//! `DescribedGroup` per requested `group_id`, built from the share actor's
+//! `Describe` view.
 //!
-//! Intercepted inline in `network::dispatch` (not `build_table`) so the
-//! handler receives the per-connection principal + peer `SocketAddr` for the
-//! per-group `Describe` ACL gate.
+//! `network::dispatch` intercepts this request inline, not through
+//! `build_table`, so the handler receives the per-connection principal and the
+//! peer `SocketAddr` for the per-group `Describe` ACL gate.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};

@@ -1,18 +1,22 @@
-//! Kafka version + metadata-version model for upgrade orchestration.
+//! Kafka version and metadata-version model for upgrade orchestration.
 //!
-//! Crabka is `KRaft`-only, so the only feature-level knob we model is
-//! `metadata.version` — the runtime analog of the ZK-era
+//! Crabka supports only `KRaft`, so this module models one feature-level
+//! setting: `metadata.version`. It is the runtime equivalent of the ZK-era
 //! `inter.broker.protocol.version`. There is no
-//! `inter.broker.protocol.version` / `log.message.format.version` lineage.
+//! `inter.broker.protocol.version` or `log.message.format.version`
+//! lineage.
 //!
-//! The broker enforces metadata.version at runtime (`UpdateFeatures` handler +
-//! fail-fast range guard), consuming the value seeded by `crabka format
-//! --release-version`. The operator owns upgrade-window safety: the binary
-//! must always be `>= resolved metadata >= finalized metadata`.
+//! The broker enforces metadata.version at runtime, in the
+//! `UpdateFeatures` handler and in a fail-fast range guard. It reads the
+//! value that `crabka format --release-version` seeded. The operator owns
+//! the safety of the upgrade window. The binary must always be
+//! `>= resolved metadata >= finalized metadata`.
 
-/// A parsed Kafka version. Ordering is by `(major, minor, patch)`, but
-/// metadata-version comparisons use only `(major, minor)` — Kafka feature
-/// levels are keyed by the release minor, not the patch.
+/// A parsed Kafka version.
+///
+/// The order is by `(major, minor, patch)`. Metadata-version comparisons
+/// use only `(major, minor)`, because Kafka keys the feature levels by the
+/// release minor and not by the patch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct KafkaVersion {
     pub major: u32,
@@ -26,9 +30,9 @@ pub struct KafkaVersion {
 pub struct VersionError(pub String);
 
 impl KafkaVersion {
-    /// Parse `X`, `X.Y`, or `X.Y.Z`, tolerating a trailing IBP/feature
-    /// suffix (`3.7-IV2`). The suffix is dropped — feature levels within a
-    /// release minor are not modeled.
+    /// Parses `X`, `X.Y`, or `X.Y.Z`. A trailing IBP or feature suffix
+    /// such as `3.7-IV2` is acceptable. This method drops the suffix,
+    /// because the model has no feature levels inside a release minor.
     /// # Errors
     /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub fn parse(s: &str) -> Result<Self, VersionError> {
@@ -59,13 +63,13 @@ impl KafkaVersion {
         })
     }
 
-    /// The `(major, minor)` key used for metadata-version comparisons.
+    /// The `(major, minor)` key for the metadata-version comparisons.
     #[must_use]
     pub fn metadata_key(&self) -> (u32, u32) {
         (self.major, self.minor)
     }
 
-    /// Canonical `major.minor` rendering — the on-wire form for the
+    /// Canonical `major.minor` rendering. This is the on-wire form of the
     /// metadata version.
     #[must_use]
     pub fn short(&self) -> String {
@@ -98,29 +102,31 @@ impl VersionReason {
     }
 }
 
-/// Outcome of evaluating a `Kafka`'s declared versions against the
-/// finalized metadata version.
+/// Outcome of the evaluation of the declared versions of a `Kafka`
+/// against the finalized metadata version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionOutcome {
-    /// Versions are compatible. `resolved_metadata` is the canonical
-    /// `major.minor` to render into broker config and finalize in status.
+    /// The versions are compatible. `resolved_metadata` is the canonical
+    /// `major.minor` that the operator renders into the broker config and
+    /// finalizes in the status.
     Valid { resolved_metadata: String },
-    /// Versions are incompatible; the reason + human message feed a
-    /// `KafkaVersionValid=False` condition and block the roll.
+    /// The versions are incompatible. The reason and the message go into
+    /// a `KafkaVersionValid=False` condition and block the roll.
     Invalid {
         reason: VersionReason,
         message: String,
     },
 }
 
-/// Validate the declared `kafka_version` and (optional) pinned
-/// `spec_metadata_version` against the operator-finalized metadata version
-/// (`status.metadataVersion`).
+/// Validates the declared `kafka_version` and the optional pinned
+/// `spec_metadata_version` against the metadata version that the operator
+/// finalized in `status.metadataVersion`.
 ///
-/// Invariant on success: `binary >= resolved metadata >= finalized
-/// metadata`. The two inequalities are the downgrade window — a binary can
-/// never drop below the finalized metadata version, and the metadata
-/// version never regresses.
+/// On success this invariant holds:
+/// `binary >= resolved metadata >= finalized metadata`. The two
+/// inequalities define the downgrade window. A binary can never drop below
+/// the finalized metadata version, and the metadata version never goes
+/// backward.
 #[must_use]
 pub fn evaluate(
     kafka_version: &str,

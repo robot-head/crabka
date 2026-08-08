@@ -1,4 +1,4 @@
-//! In-memory `SpanStore` used by engine and planner tests.
+//! In-memory `SpanStore` for the engine tests and the planner tests.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},

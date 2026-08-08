@@ -1,12 +1,12 @@
-//! Postgres catalog + replication-slot operations the WAL source depends on.
+//! Postgres catalog and replication-slot operations that the WAL source needs.
 //!
-//! The trait exists to give [`crate::source`]'s connection-setup *logic*
-//! (publication/slot validation, slot orchestration, peek-result application) a
-//! mockable seam: `tokio_postgres::Row` is opaque and cannot be constructed in
-//! a test, so each method returns already-extracted plain data. The live
-//! row-extraction shim lives in [`TokioPgCatalog`] and is the only part that
-//! needs a running `PostgreSQL` — every decision is delegated back to the
-//! unit-tested pure helpers in `source.rs`.
+//! The trait gives the connection-setup *logic* of [`crate::source`] a mockable
+//! seam. That logic covers publication and slot validation, slot orchestration,
+//! and peek-result application. `tokio_postgres::Row` is opaque and a test
+//! cannot construct one, so each method returns plain data that the method
+//! already extracted. The live row-extraction shim is in [`TokioPgCatalog`],
+//! and it is the only part that needs a running `PostgreSQL`. Every decision
+//! goes back to the unit-tested pure helpers in `source.rs`.
 
 use async_trait::async_trait;
 use crabka_connect::ConnectError;
@@ -25,7 +25,8 @@ pub(crate) struct SlotMetadata {
     pub database: Option<String>,
 }
 
-/// A single peeked logical-decoding change (`lsn` text + raw pgoutput bytes).
+/// A single peeked logical-decoding change: the `lsn` text and the raw pgoutput
+/// bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlotChange {
     pub lsn: String,
@@ -38,7 +39,8 @@ pub(crate) trait PgCatalog: Send + Sync + std::fmt::Debug {
     /// `SELECT current_database()`.
     async fn current_database(&self) -> Result<String, ConnectError>;
 
-    /// Create the publication if it does not already exist (idempotent DDL).
+    /// Create the publication if it does not already exist. The DDL is
+    /// idempotent.
     async fn ensure_publication(&self, ddl: &str) -> Result<(), ConnectError>;
 
     /// Table names currently covered by `publication` in `schema`.
@@ -70,12 +72,15 @@ pub(crate) trait PgCatalog: Send + Sync + std::fmt::Debug {
         publication: &str,
     ) -> Result<Vec<SlotChange>, ConnectError>;
 
-    /// Advance `slot_name` to `lsn_text` (called after checkpoint durability).
+    /// Advance `slot_name` to `lsn_text`. The caller calls this after
+    /// checkpoint durability.
     async fn advance_slot(&self, slot_name: &str, lsn_text: &str) -> Result<(), ConnectError>;
 }
 
-/// Live `tokio_postgres`-backed [`PgCatalog`]. Every method runs a query and
-/// extracts opaque `Row` fields; the only un-mockable code in the connector.
+/// Live `tokio_postgres`-backed [`PgCatalog`].
+///
+/// Every method runs a query and extracts opaque `Row` fields. This is the only
+/// un-mockable code in the connector.
 #[derive(Debug)]
 pub(crate) struct TokioPgCatalog {
     client: Client,

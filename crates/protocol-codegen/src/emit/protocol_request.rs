@@ -1,8 +1,9 @@
 //! Emit `impl crate::ProtocolRequest for <RequestType>` blocks.
 //!
-//! Only emitted for `MessageType::Request` schemas. The matching Response
-//! type is derived by replacing the `Request` suffix with `Response` in
-//! the type name, and converting the result to a `snake_case` module name.
+//! This module emits blocks only for `MessageType::Request` schemas. It
+//! derives the matching Response type from the type name: it replaces the
+//! `Request` suffix with `Response`, then converts the result to a
+//! `snake_case` module name.
 
 use quote::{format_ident, quote};
 

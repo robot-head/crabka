@@ -1,13 +1,15 @@
-//! `RowBridge`: convert `Vec<row>` ↔ a polars payload `DataFrame`. The default
-//! impl goes through `serde_json` so it works for any `Serialize + DeserializeOwned`
-//! row type.
+//! `RowBridge`: convert `Vec<row>` ↔ a polars payload `DataFrame`.
+//!
+//! The default impl goes through `serde_json`, so it works for any row type that
+//! is `Serialize + DeserializeOwned`.
 
 use ::polars::prelude::*;
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::codec::BatchError;
 
-/// Convert decoded rows ↔ a payload `DataFrame` (no reserved columns).
+/// Convert decoded rows ↔ a payload `DataFrame`. The frame has no reserved
+/// columns.
 pub trait RowBridge<R>: Send + Sync + 'static {
     /// Assemble `rows` into a payload `DataFrame`.
     ///
@@ -21,13 +23,14 @@ pub trait RowBridge<R>: Send + Sync + 'static {
     fn frame_to_rows(&self, df: &DataFrame) -> Result<Vec<R>, BatchError>;
 }
 
-/// JSON-value-backed bridge: works for any `R: Serialize + DeserializeOwned`.
+/// A JSON-value-backed bridge. It works for any `R: Serialize +
+/// DeserializeOwned`.
 ///
-/// Convenience over fidelity: column dtypes are inferred by polars from the JSON,
-/// so numeric types can shift (e.g. an all-integer column round-trips fine, but a
-/// column mixing integers and nulls/floats may be widened to `f64`). For
-/// strongly-typed, lossless batches use a custom [`RowBridge`] over a binary
-/// encoding instead.
+/// This bridge chooses convenience over fidelity. Polars infers the column
+/// dtypes from the JSON, so a numeric type can shift. An all-integer column
+/// round-trips correctly, but polars can widen a column that mixes integers with
+/// nulls or floats to `f64`. For strongly-typed, lossless batches, use a custom
+/// [`RowBridge`] over a binary encoding instead.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JsonRowBridge;
 

@@ -17,8 +17,8 @@ pub enum RemoteStorageError {
     #[error("no remote log segment metadata for {0:?}")]
     SegmentNotFound(RemoteLogSegmentId),
 
-    /// `add_remote_log_segment_metadata` was called with a starting state
-    /// other than [`RemoteLogSegmentState::CopySegmentStarted`], or for a
+    /// A caller gave `add_remote_log_segment_metadata` a starting state
+    /// other than [`RemoteLogSegmentState::CopySegmentStarted`], or a
     /// segment id that already exists.
     #[error("invalid add for {id:?}: {reason}")]
     InvalidAdd {
@@ -28,7 +28,8 @@ pub enum RemoteStorageError {
         reason: String,
     },
 
-    /// A lifecycle transition was requested that the state machine forbids.
+    /// A caller requested a lifecycle transition that the state machine
+    /// forbids.
     #[error("invalid segment state transition for {id:?}: {from:?} -> {to:?}")]
     InvalidSegmentTransition {
         /// The segment whose transition was rejected.
@@ -39,7 +40,7 @@ pub enum RemoteStorageError {
         to: RemoteLogSegmentState,
     },
 
-    /// A partition-delete lifecycle transition was requested that the
+    /// A caller requested a partition-delete lifecycle transition that the
     /// state machine forbids.
     #[error("invalid partition delete transition for {tp:?}: {from:?} -> {to:?}")]
     InvalidPartitionDeleteTransition {
@@ -55,17 +56,18 @@ pub enum RemoteStorageError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
-    /// A backend (e.g. an object store) raised an error that doesn't map
-    /// cleanly to one of the structured variants above.
+    /// A backend, for example an object store, raised an error. The error
+    /// does not map cleanly to one of the structured variants above.
     #[error("remote storage backend error: {0}")]
     Backend(String),
 
-    /// The metadata partition that would answer this query is assigned to
-    /// this broker but its consumer has not yet caught up to the high-water
-    /// mark observed when the partition was assigned. The answer is unknown,
-    /// not "no segment" — callers should retry rather than treat it as a
-    /// definitive miss. `Ok(None)` is reserved for "caught up, no covering
-    /// segment" and for partitions this broker does not consume at all.
+    /// This broker holds the metadata partition that would answer this
+    /// query, but its consumer has not yet caught up to the high-water mark
+    /// that the broker observed when it took the assignment. The answer is
+    /// unknown, not "no segment". Callers should retry rather than treat it
+    /// as a definitive miss. `Ok(None)` is reserved for "caught up, no
+    /// covering segment" and for partitions this broker does not consume at
+    /// all.
     #[error("remote log metadata partition {partition} not ready (assigned but not caught up)")]
     NotReady {
         /// The `__remote_log_metadata` partition that is still catching up.

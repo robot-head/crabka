@@ -1,4 +1,4 @@
-//! Integration tests for CA + broker-keystore reconciliation.
+//! Integration tests for CA and broker-keystore reconciliation.
 //!
 //! Test list:
 //!   1. `default_flow_creates_cluster_ca_clients_ca_and_broker_keystore`
@@ -101,9 +101,9 @@ fn kafka_cr_byo(name: &str, namespace: &str) -> Kafka {
 // Local mock-body helpers
 // ---------------------------------------------------------------------------
 
-/// Minimal `Secret` body with ca.key and ca.crt populated (base64-encoded
-/// PEM content). Used for BYO tests where the operator must read existing
-/// CA material and re-use it.
+/// Minimal `Secret` body with ca.key and ca.crt filled in with base64-encoded
+/// PEM content. The BYO tests use it where the operator must read existing CA
+/// material and use it again.
 fn fake_ca_secret_with_pem(name: &str, namespace: &str, pem: &str) -> serde_json::Value {
     let b64 = base64::engine::general_purpose::STANDARD.encode(pem.as_bytes());
     json!({
@@ -115,9 +115,9 @@ fn fake_ca_secret_with_pem(name: &str, namespace: &str, pem: &str) -> serde_json
     })
 }
 
-/// Rule list for the no-op CA path (both GET -> existing Secret with PEM data,
-/// no PATCH needed for CA Secrets). The caller is responsible for injecting the
-/// appropriate GET responses (real PEM or 404).
+/// Rule list for the no-op CA path. Both GET calls give an existing Secret
+/// with PEM data, and the CA Secrets need no PATCH. The caller must inject the
+/// correct GET responses, either real PEM or 404.
 fn secret_rule_404(method: Method, path_substr: String) -> MockRule {
     MockRule {
         method,
@@ -929,7 +929,7 @@ fn broker_sans(
 }
 
 /// Locate the keystore PATCH in the observed request log and return its
-/// `data` map (raw base64-encoded values). Panics if no PATCH was issued.
+/// `data` map of raw base64-encoded values. Panics if no PATCH was issued.
 fn keystore_patch_data<B: AsRef<[u8]>>(
     observed: &[http::Request<B>],
     keystore_name: &str,

@@ -15,13 +15,13 @@ use crate::webhook_config::CompiledWebhook;
 /// Present ⇒ the gateway serves over rustls; absent ⇒ plaintext.
 #[derive(Debug, Clone)]
 pub struct TlsSettings {
-    /// Server cert chain (PEM). Doubles as the gateway's client identity when
-    /// forwarding (the cert is issued with server+client EKU).
+    /// Server cert chain (PEM). It is also the gateway's client identity on a
+    /// forward, because the cert carries both the server and the client EKU.
     pub cert_chain_path: PathBuf,
     pub private_key_path: PathBuf,
-    /// CA(s) the forwarder trusts when verifying a peer gateway's server cert.
+    /// CA(s) the forwarder trusts when it verifies a peer gateway's server cert.
     pub trust_roots_path: Option<PathBuf>,
-    /// CA(s) used to verify incoming client certs (mTLS). Required if
+    /// CA(s) that verify incoming client certs (mTLS). Required if
     /// `client_auth != Disabled`.
     pub client_ca_path: Option<PathBuf>,
     pub client_auth: ClientAuthMode,
@@ -30,7 +30,7 @@ pub struct TlsSettings {
 }
 
 impl TlsSettings {
-    /// Map to the `crabka-security` config used to build server/client configs.
+    /// Map to the `crabka-security` config that builds server and client configs.
     #[must_use]
     pub fn to_security(&self) -> crabka_security::TlsConfig {
         crabka_security::TlsConfig {
@@ -48,12 +48,13 @@ impl TlsSettings {
 /// Present ⇒ a [`BearerValidator`](crate::authz::BearerValidator) extension is
 /// mounted on the router; absent ⇒ only the mTLS principal (if any) is used.
 ///
-/// Currently supports only the **unsecured** (`alg:none`) JWS validator — the
-/// Kafka `OAuthBearerUnsecuredValidatorCallbackHandler` equivalent, intended for
-/// development / testing environments.
+/// Currently supports only the unsecured (`alg:none`) JWS validator. That
+/// validator is the equivalent of the Kafka
+/// `OAuthBearerUnsecuredValidatorCallbackHandler`, and it is for development
+/// and test environments.
 ///
-/// Signed JWKS-backed bearer validation is not part of this settings surface;
-/// callers that need it should configure validation in the broker-facing
+/// Signed JWKS-backed bearer validation is not part of this settings surface.
+/// Callers that need it should configure validation in the broker-facing
 /// security layer instead.
 #[derive(Debug, Clone)]
 pub struct BearerSettings {
@@ -61,7 +62,7 @@ pub struct BearerSettings {
     /// Defaults to `"sub"`.
     pub principal_claim_name: String,
     /// Allowable clock-skew tolerance for `exp`/`iat` checks. Defaults to 30
-    /// seconds, mirroring the JVM default.
+    /// seconds, the same as the JVM default.
     pub allowable_clock_skew: Time,
 }
 
@@ -77,14 +78,14 @@ impl Default for BearerSettings {
 impl BearerSettings {
     /// Build an [`crabka_security::OAuthBearerValidator`] from these settings.
     ///
-    /// Currently produces an `Unsecured(UnsecuredJwsValidator)` — the
-    /// development validator; always succeeds construction.
+    /// Currently produces an `Unsecured(UnsecuredJwsValidator)`, the
+    /// development validator. Construction always succeeds.
     ///
     /// # Errors
     ///
-    /// Currently infallible (returns `Ok`); the signature is `Result` to
-    /// accommodate future `Signed` / `Introspection` variants that may fail
-    /// at build time (e.g. bad JWKS URL, missing cert).
+    /// Currently infallible; it always returns `Ok`. The signature is `Result`
+    /// for future `Signed` and `Introspection` variants that can fail at build
+    /// time, for example on a bad JWKS URL or a missing cert.
     pub fn build(&self) -> Result<crabka_security::OAuthBearerValidator, String> {
         Ok(crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
@@ -232,8 +233,9 @@ pub struct GatewayConfig {
     pub dedup_ownership_group: String,
     /// `transactional.id` prefix; the per-partition id is `{prefix}-{p}`.
     pub dedup_txn_id_prefix: String,
-    /// Address other replicas reach THIS gateway at (host:port of `listen_addr`,
-    /// externally routable). Published to membership; used to forward.
+    /// Address other replicas reach THIS gateway at. It is the host:port of
+    /// `listen_addr` and must be externally routable. The gateway publishes it
+    /// to membership and uses it to forward.
     pub advertised_addr: String,
     /// Internal compacted topic carrying replica membership / owner routing.
     pub membership_topic: String,
@@ -244,17 +246,17 @@ pub struct GatewayConfig {
     pub broker_security: Option<crabka_client_core::security::ClientSecurity>,
     /// Authorization settings; `None` ⇒ `AllowAll` (no enforcement; default).
     pub authz: Option<AuthzSettings>,
-    /// Named webhook endpoints; compiled from a TOML config file at startup.
+    /// Named webhook endpoints, compiled from a TOML config file at startup.
     /// Empty ⇒ `/v1/webhooks/{name}` returns 404 for every name.
     pub webhooks: HashMap<String, CompiledWebhook>,
-    /// Outbound webhook subscriptions; compiled from a separate TOML config
-    /// file at startup. Empty ⇒ no outbound delivery tasks are spawned.
+    /// Outbound webhook subscriptions, compiled from a separate TOML config
+    /// file at startup. Empty ⇒ the gateway spawns no outbound delivery tasks.
     pub outbound: Vec<crate::outbound_config::CompiledSubscription>,
     /// Base URL of a Confluent-compatible Schema Registry (e.g.
     /// `http://schema-registry:8081`). When set, the gateway builds a
     /// [`crate::schema::codec::SchemaRegistryCodec`] and injects it into the
-    /// produce and consume paths. When absent, `RawCodec` (the identity
-    /// pass-through) is used — existing behaviour is unchanged.
+    /// produce and consume paths. When absent, the gateway uses `RawCodec`,
+    /// the identity pass-through.
     pub schema_registry_url: Option<String>,
     /// Common deployment policy for runtime components.
     pub runtime: GatewayRuntimeConfig,
@@ -296,8 +298,8 @@ mod tests {
         check!(PartitionCount::new(2_147_483_647).is_ok());
     }
 
-    /// The bearer tolerance is held as a `Time` and handed to `crabka-security`
-    /// as the raw millisecond count its validator expects.
+    /// The bearer tolerance is a `Time`. The gateway hands it to
+    /// `crabka-security` as the raw millisecond count that its validator expects.
     #[test]
     fn bearer_clock_skew_reaches_the_validator_in_milliseconds() {
         let validator = BearerSettings {

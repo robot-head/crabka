@@ -1,11 +1,11 @@
-//! Per-request bearer-token → Principal resolution.
+//! Per-request bearer-token to Principal resolution.
 //!
-//! Provides an axum middleware ([`resolve_principal`]) that resolves the
-//! caller's [`Principal`] from an `Authorization: Bearer <token>` header via
-//! an [`OAuthBearerValidator`] extension, falling through gracefully when the
-//! extension or header is absent.  A connection-level mTLS principal injected
-//! by `serve_tls` is the _base_ identity; a valid bearer header **overrides**
-//! it for per-request authz.
+//! The axum middleware [`resolve_principal`] resolves the caller's
+//! [`Principal`] from an `Authorization: Bearer <token>` header through an
+//! [`OAuthBearerValidator`] extension. It falls through cleanly when the
+//! extension or the header is absent. The connection-level mTLS principal that
+//! `serve_tls` injects is the _base_ identity, and a valid bearer header
+//! overrides it for per-request authz.
 
 use std::{
     net::SocketAddr,
@@ -16,10 +16,10 @@ use std::{
 use axum::{extract::Request, middleware::Next, response::Response};
 use crabka_security::{AuthMethod, OAuthBearerValidator, Principal};
 
-/// Extension wrapper around [`OAuthBearerValidator`] placed on the
-/// [`axum::Router`] so the [`resolve_principal`] middleware can reach it.
+/// Extension wrapper around [`OAuthBearerValidator`]. It sits on the
+/// [`axum::Router`], so the [`resolve_principal`] middleware can reach it.
 ///
-/// Wrap the validator in `Arc` to make it cheap to clone out of extensions.
+/// Wrap the validator in `Arc` to make it cheap to clone out of the extensions.
 ///
 /// ```rust,ignore
 /// router.layer(axum::Extension(BearerValidator(Arc::new(validator))))
@@ -27,8 +27,8 @@ use crabka_security::{AuthMethod, OAuthBearerValidator, Principal};
 #[derive(Debug, Clone)]
 pub struct BearerValidator(pub Arc<OAuthBearerValidator>);
 
-/// Return the Anonymous principal used when no authenticated identity is
-/// available.
+/// Return the Anonymous principal, which the gateway uses when no authenticated
+/// identity is available.
 #[must_use]
 pub fn anonymous() -> Principal {
     Principal {
@@ -38,17 +38,20 @@ pub fn anonymous() -> Principal {
     }
 }
 
-/// Axum middleware that attempts bearer-token validation and, on success,
-/// inserts the resolved [`Principal`] into request extensions (overriding any
-/// mTLS principal from `serve_tls`). Falls through on any of:
+/// Axum middleware that tries bearer-token validation. On success it puts the
+/// resolved [`Principal`] into the request extensions, which overrides any mTLS
+/// principal from `serve_tls`.
 ///
-/// - No [`BearerValidator`] extension (validator not configured).
-/// - No `Authorization: Bearer <token>` header present.
-/// - Token validation failure (logs at `debug` level; does NOT short-circuit
-///   the request — authz gating is a separate concern done in handlers).
+/// The middleware falls through on any of these:
 ///
-/// When none of the above apply AND validation succeeds, the new principal
-/// is inserted; the mTLS principal (if any) is replaced.
+/// - No [`BearerValidator`] extension, because no validator is configured.
+/// - No `Authorization: Bearer <token>` header.
+/// - Token validation failure. The middleware logs at `debug` level and does
+///   NOT short-circuit the request. Authz gating is a separate concern that the
+///   handlers do.
+///
+/// When none of the above apply AND validation succeeds, the middleware inserts
+/// the new principal and replaces the mTLS principal, if there is one.
 pub async fn resolve_principal(mut req: Request, next: Next) -> Response {
     if let Some(BearerValidator(validator)) = req.extensions().get::<BearerValidator>().cloned()
         && let Some(token) = bearer_token(&req)
@@ -69,8 +72,8 @@ pub async fn resolve_principal(mut req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// Extract the bearer token string from the `Authorization` header, if
-/// present and well-formed (`Authorization: Bearer <token>`).
+/// Extract the bearer token string from the `Authorization` header, if that
+/// header is present and has the form `Authorization: Bearer <token>`.
 pub fn bearer_token(req: &Request) -> Option<String> {
     let value = req.headers().get(axum::http::header::AUTHORIZATION)?;
     let s = value.to_str().ok()?;
@@ -82,12 +85,12 @@ pub fn bearer_token(req: &Request) -> Option<String> {
     }
 }
 
-/// Current time as Unix epoch milliseconds, used to pass `now_ms` to
+/// Current time as Unix epoch milliseconds. The caller passes it as `now_ms` to
 /// [`OAuthBearerValidator::validate`].
 ///
-/// Falls back to `0` on `SystemTime` clock anomalies (pre-epoch, overflow);
-/// in practice this means no token will ever validate on those machines —
-/// an acceptable safe-fail.
+/// This function falls back to `0` on a `SystemTime` clock anomaly, such as a
+/// pre-epoch time or an overflow. No token then validates on that machine,
+/// which is an acceptable safe-fail.
 #[must_use]
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -95,9 +98,9 @@ pub fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// Return the peer [`SocketAddr`] from request extensions, or the default
-/// `0.0.0.0:0` placeholder when absent (e.g. in plaintext test paths where
-/// no peer was injected).
+/// Return the peer [`SocketAddr`] from the request extensions, or the default
+/// `0.0.0.0:0` placeholder when it is absent. It is absent on a plaintext test
+/// path, for example, where nothing injected a peer.
 #[must_use]
 pub fn peer_or_default(req: &Request) -> SocketAddr {
     req.extensions()
@@ -180,7 +183,8 @@ mod tests {
         }
     }
 
-    /// Valid bearer overrides a pre-existing mTLS principal in extensions.
+    /// A valid bearer overrides an mTLS principal that is already in the
+    /// extensions.
     #[tokio::test]
     async fn bearer_overrides_mtls_principal() {
         async fn inject_mtls_principal(mut req: Request<Body>, next: Next) -> Response<Body> {

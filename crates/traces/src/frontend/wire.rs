@@ -1,16 +1,16 @@
 //! The Tempo HTTP-API JSON edge model the query-frontend renders and parses.
 //!
-//! This is the same body shape the querier (Slice 5, `querier/http`) emits; the
-//! frontend parses per-job partials, merges them (respecting `limit`/`spss`),
+//! This is the same body shape the querier emits from Slice 5, `querier/http`.
+//! The frontend parses per-job partials, merges them under `limit` and `spss`,
 //! accumulates the `metrics{}` job-accounting block, and re-emits this exact
-//! shape. The trace values it carries (`TraceResult`/`SpanSet`/`SpanRef`) are the
-//! pinned `crabka-traceql` (Slice 2) result types; this module is their HTTP
-//! projection.
+//! shape. The trace values it carries, `TraceResult`, `SpanSet` and `SpanRef`,
+//! are the pinned `crabka-traceql` result types from Slice 2. This module is
+//! their HTTP projection.
 //!
-//! Note: the `crabka-traceql` result types do **not** derive serde, so the
-//! search edge model is a standalone serde mirror with lossless `From` /
-//! reverse-`From` projections; the by-id edge model is a minimal typed OTLP-JSON
-//! mirror (`TraceByIdResponseJson`) shaped to the querier's v2 body.
+//! Note: the `crabka-traceql` result types do **not** derive serde. The search
+//! edge model is therefore a standalone serde mirror with lossless `From` and
+//! reverse-`From` projections. The by-id edge model is a minimal typed
+//! OTLP-JSON mirror, `TraceByIdResponseJson`, shaped to the querier's v2 body.
 
 use crabka_traceql::{AttrValue, SpanRef, SpanSet, TraceResult};
 use crabka_units::{
@@ -19,7 +19,8 @@ use crabka_units::{
 };
 use serde::{Deserialize, Serialize};
 
-/// The `/api/search` response: matched traces + the job-accounting metrics.
+/// The `/api/search` response: the matched traces plus the job-accounting
+/// metrics.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SearchResponseJson {
     #[serde(default)]
@@ -38,14 +39,17 @@ pub struct TraceJson {
     pub root_service_name: String,
     #[serde(default)]
     pub root_trace_name: String,
-    /// Nanos since epoch, **string-encoded** (Tempo quirk).
+    /// Nanos since epoch, **string-encoded**. This is a Tempo quirk.
     pub start_time_unix_nano: String,
-    /// How long the trace ran. Rendered as `durationMs`, a whole-millisecond
-    /// integer — the encoding Tempo's search response uses.
+    /// How long the trace ran.
     ///
-    /// Truncated rather than rounded, because Tempo integer-divides its
-    /// nanosecond duration and reporting a millisecond more than Tempo does for
-    /// the same span would show up as a diff in the differential suite.
+    /// This renders as `durationMs`, a whole-millisecond integer, which is the
+    /// encoding Tempo's search response uses.
+    ///
+    /// The value is truncated rather than rounded, because Tempo
+    /// integer-divides its nanosecond duration. A report of one millisecond
+    /// more than Tempo gives for the same span would show up as a diff in the
+    /// differential suite.
     #[serde(
         rename = "durationMs",
         default,
@@ -65,31 +69,33 @@ pub struct SpanSetJson {
     pub matched: u32,
 }
 
-/// A single matched span (string-encoded nanos, OTLP-KV attributes).
+/// A single matched span, with string-encoded nanos and OTLP-KV attributes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpanJson {
     #[serde(rename = "spanID")]
     pub span_id: String,
     pub start_time_unix_nano: String,
-    /// Nanos, **string-encoded** (Tempo quirk), so this mirrors the wire field
-    /// verbatim rather than holding a `Time`; the projections either side of it
-    /// convert.
+    /// Nanos, **string-encoded**. This is a Tempo quirk, so the field mirrors
+    /// the wire form verbatim rather than holding a `Time`. The projections on
+    /// either side of it convert.
     pub duration_nanos: String,
     #[serde(default)]
     pub attributes: Vec<KeyValueJson>,
 }
 
-/// OTLP key/value attribute form (matches the querier's `attrs_json`).
+/// OTLP key/value attribute form. It matches the querier's `attrs_json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct KeyValueJson {
     pub key: String,
     pub value: AnyValueJson,
 }
 
-/// OTLP `AnyValue` (the variants `TraceQL` surfaces). Tempo emits `intValue` as a
-/// string and groups multi-valued attributes under `arrayValue`, matching the
-/// querier's `attr_value_json` / `attr_values_json`.
+/// OTLP `AnyValue`, holding the variants `TraceQL` surfaces.
+///
+/// Tempo emits `intValue` as a string and groups multi-valued attributes under
+/// `arrayValue`. That matches the querier's `attr_value_json` and
+/// `attr_values_json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AnyValueJson {
     #[serde(rename = "stringValue")]
@@ -111,12 +117,13 @@ pub struct ArrayValueJson {
     pub values: Vec<AnyValueJson>,
 }
 
-/// The job-accounting `metrics{}` block. Additive over completed jobs.
+/// The job-accounting `metrics{}` block. It is additive over completed jobs.
 ///
-/// The querier (Slice 5) only populates `total_blocks`/`inspected_traces`/
-/// `inspected_bytes` today; `total_jobs`/`completed_jobs`/`inspected_spans` are
-/// frontend-owned (seeded from the plan / summed across jobs) — all serialize so
-/// the merged body carries the full accounting block.
+/// The Slice 5 querier populates only `total_blocks`, `inspected_traces` and
+/// `inspected_bytes` today. The frontend owns `total_jobs`, `completed_jobs`
+/// and `inspected_spans`. It seeds them from the plan and sums them across
+/// jobs. All six fields serialize, so the merged body carries the full
+/// accounting block.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Metrics {
@@ -135,7 +142,8 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Fold another job's accounting into this one (field-wise saturating sum).
+    /// Fold another job's accounting into this one, as a field-wise saturating
+    /// sum.
     pub fn add(&mut self, other: &Metrics) {
         self.total_jobs = self.total_jobs.saturating_add(other.total_jobs);
         self.completed_jobs = self.completed_jobs.saturating_add(other.completed_jobs);
@@ -147,7 +155,7 @@ impl Metrics {
 }
 
 /// Deserialize a `u64` that the querier may encode as a JSON number **or** a
-/// string (Tempo encodes some accounting counters as strings).
+/// string. Tempo encodes some accounting counters as strings.
 fn de_u64_lenient<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -179,7 +187,7 @@ pub fn hex8(id: &[u8; 8]) -> String {
     hex::encode(id)
 }
 
-/// Parse a lowercase-hex 16-byte trace id (lossless inverse of [`hex16`]).
+/// Parse a lowercase-hex 16-byte trace id, the lossless inverse of [`hex16`].
 #[must_use]
 pub fn parse_hex16(s: &str) -> [u8; 16] {
     let mut out = [0u8; 16];
@@ -187,7 +195,7 @@ pub fn parse_hex16(s: &str) -> [u8; 16] {
     out
 }
 
-/// Parse a lowercase-hex 8-byte span id (lossless inverse of [`hex8`]).
+/// Parse a lowercase-hex 8-byte span id, the lossless inverse of [`hex8`].
 #[must_use]
 pub fn parse_hex8(s: &str) -> [u8; 8] {
     let mut out = [0u8; 8];
@@ -364,16 +372,20 @@ pub struct ScopeSpansJson {
     pub spans: Vec<OtlpSpanJson>,
 }
 
-/// One OTLP span. `span_id` is extracted for dedup; the whole span is preserved
-/// in `rest` so serialization re-emits the querier's exact span shape.
+/// One OTLP span.
 ///
-/// GAP5 (confirmed correct, not a bug): the by-id span key is `spanId`
-/// **base64**-encoded — the standard OTLP protobuf-JSON byte-field encoding the
-/// querier's `trace_json` emits — whereas search results (`SpanJson`) key on
-/// `spanID` **hex** (Tempo's search shape). The two are different Tempo response
-/// formats, and each pipeline is internally consistent (by-id is base64
-/// end-to-end, search is hex end-to-end), so the respective dedup keys never mix
-/// encodings. No conversion is needed or correct here.
+/// This type extracts `span_id` for dedup and keeps the whole span in `rest`,
+/// so serialization re-emits the querier's exact span shape.
+///
+/// GAP5 is confirmed correct and is not a bug. The by-id span key is `spanId`,
+/// **base64**-encoded. That is the standard OTLP protobuf-JSON byte-field
+/// encoding the querier's `trace_json` emits. Search results (`SpanJson`)
+/// instead key on `spanID` in **hex**, which is Tempo's search shape.
+///
+/// The two are different Tempo response formats, and each pipeline is
+/// internally consistent: by-id is base64 end-to-end and search is hex
+/// end-to-end. The respective dedup keys therefore never mix encodings. No
+/// conversion is needed here, and none would be correct.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OtlpSpanJson {
     #[serde(rename = "spanId", default)]
@@ -394,7 +406,7 @@ impl TraceByIdResponseJson {
             .sum()
     }
 
-    /// Cheap size estimate of the assembled trace (serialized length).
+    /// Cheap size estimate of the assembled trace: the serialized length.
     #[must_use]
     pub fn approx_size(&self) -> ByteSize {
         serde_json::to_vec(&self.trace).map_or(<ByteSize as ByteSizeExt>::ZERO, |v| {
@@ -402,8 +414,9 @@ impl TraceByIdResponseJson {
         })
     }
 
-    /// True when this body carries no spans (a querier that did not hold the
-    /// trace returns an empty/None body, which we model as no resourceSpans).
+    /// True when this body carries no spans. A querier that did not hold the
+    /// trace returns an empty or `None` body, which this type models as no
+    /// resourceSpans.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.span_count() == 0

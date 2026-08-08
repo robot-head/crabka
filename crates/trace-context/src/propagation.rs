@@ -1,16 +1,16 @@
 //! W3C Trace Context propagation over Kafka record headers.
 //!
-//! The service's telemetry initialisation (`crabka_telemetry::init`) installs a
-//! global `TraceContextPropagator`, so a producer can serialise the current
-//! span's `traceparent`/`tracestate` into record headers (via
-//! [`current_trace_headers`]) and a consumer can rebuild that context (via
-//! [`extract_context`] / [`set_remote_parent`]) to make its own span a child of
-//! the producer's — stitching one distributed trace across services through the
-//! Kafka WAL / topics.
+//! The telemetry initialisation of the service, `crabka_telemetry::init`,
+//! installs a global `TraceContextPropagator`. A producer can then serialise
+//! the current span's `traceparent` and `tracestate` into record headers with
+//! [`current_trace_headers`]. A consumer can rebuild that context with
+//! [`extract_context`] and [`set_remote_parent`], and make its own span a child
+//! of the producer's span. One distributed trace then covers all the services
+//! that the Kafka WAL and topics connect.
 //!
-//! The helpers work in terms of `(key, value)` string/byte pairs so this crate
+//! The helpers work with `(key, value)` string and byte pairs, so this crate
 //! stays independent of the concrete `crabka_client_{producer,consumer}` header
-//! types; callers convert to/from their own `Header` at the edge.
+//! types. Callers convert to and from their own `Header` at the edge.
 
 use std::collections::HashMap;
 
@@ -20,13 +20,16 @@ use opentelemetry::{
 };
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
-/// The canonical W3C trace-context header keys. Producers should attach these
-/// (lower-case) keys to Kafka record headers.
+/// The canonical W3C trace-context header keys.
+///
+/// A producer should attach these keys, in lower case, to Kafka record headers.
 pub const TRACEPARENT: &str = "traceparent";
 pub const TRACESTATE: &str = "tracestate";
 
-/// Collects injected key/value pairs into a `Vec` for the caller to convert
-/// into its own header type (`crabka_client_producer::Header`, …).
+/// Collects injected key and value pairs into a `Vec`.
+///
+/// The caller converts each pair into its own header type, such as
+/// `crabka_client_producer::Header`.
 struct VecInjector<'a>(&'a mut Vec<(String, String)>);
 
 impl Injector for VecInjector<'_> {
@@ -48,10 +51,12 @@ impl Extractor for MapExtractor<'_> {
     }
 }
 
-/// W3C `traceparent` (and `tracestate` when present) for the **current**
-/// `tracing` span, as `(key, value)` pairs ready to attach to Kafka record
-/// headers. Returns an empty `Vec` when there is no active span, the span is
-/// not sampled/recorded, or OTLP is disabled — so it is always safe to call.
+/// The W3C trace-context headers for the **current** `tracing` span.
+///
+/// Returns the `traceparent`, and the `tracestate` when the span has one, as
+/// `(key, value)` pairs for Kafka record headers. Returns an empty `Vec` when
+/// there is no active span, when the span is not sampled or recorded, or when
+/// OTLP is disabled. It is always safe to call.
 ///
 /// ```no_run
 /// let span = tracing::info_span!("produce_order");
@@ -69,9 +74,11 @@ pub fn current_trace_headers() -> Vec<(String, String)> {
     out
 }
 
-/// Rebuild an OpenTelemetry [`Context`] from Kafka record headers (each a key
-/// plus a raw byte value). Non-UTF-8 values are skipped. Use the result as the
-/// remote parent of a consumer-side span (see [`set_remote_parent`]).
+/// Rebuild an OpenTelemetry [`Context`] from Kafka record headers.
+///
+/// Each header is a key plus a raw byte value. This function skips a non-UTF-8
+/// value. Use the result as the remote parent of a consumer-side span: see
+/// [`set_remote_parent`].
 #[must_use]
 pub fn extract_context<'a, I, V>(headers: I) -> Context
 where
@@ -89,9 +96,11 @@ where
     opentelemetry::global::get_text_map_propagator(|prop| prop.extract(&MapExtractor(&map)))
 }
 
-/// Make `span` a child of the trace carried in `headers` (the producer's
-/// context) so consumer-side work appears in the same distributed trace. A
-/// no-op when the headers carry no valid trace context.
+/// Make `span` a child of the trace that `headers` carries.
+///
+/// The headers hold the producer's context, so consumer-side work then appears
+/// in the same distributed trace. This function does nothing when the headers
+/// carry no valid trace context.
 pub fn set_remote_parent<'a, I, V>(span: &tracing::Span, headers: I)
 where
     I: IntoIterator<Item = (&'a str, V)>,
@@ -138,10 +147,11 @@ mod tests {
         assert2::assert!(!cx.span().span_context().is_valid());
     }
 
-    /// Run `f` under a subscriber wired to a real (export-less) `OTel` tracer
-    /// with `AlwaysOn` sampling, so spans created inside carry a valid,
-    /// *sampled* `OTel` context — a prerequisite for the inject / re-parent
-    /// helpers to do anything observable.
+    /// Run `f` under a subscriber wired to a real `OTel` tracer with
+    /// `AlwaysOn` sampling and no exporter.
+    ///
+    /// Spans created inside then carry a valid, *sampled* `OTel` context. The
+    /// inject and re-parent helpers do nothing observable without it.
     fn with_otel_subscriber(f: impl FnOnce()) {
         use opentelemetry::trace::TracerProvider as _;
         use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};

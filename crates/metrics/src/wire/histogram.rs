@@ -77,14 +77,15 @@ pub fn v2_histogram_to_native(histogram: &pb::v2::Histogram) -> Result<NativeHis
     })
 }
 
-/// Strict span/count validation matching Prometheus' appender, applied at the
-/// wire edge before a histogram is admitted.
+/// Strict span and count validation that matches the Prometheus appender. It
+/// runs at the wire edge before the module admits a histogram.
 ///
-/// For both the positive and negative buckets the sum of the span lengths must
-/// equal the number of decoded counts (Prometheus `Histogram.Validate` /
-/// `FloatHistogram.Validate`). For NHCB (schema `-53`, custom buckets) the
-/// histogram must carry no negative buckets, and `custom_values` must define an
-/// upper bound for every populated positive bucket.
+/// For both the positive and the negative buckets, the sum of the span lengths
+/// must equal the number of decoded counts. Prometheus does the same in
+/// `Histogram.Validate` and `FloatHistogram.Validate`. For NHCB, which is
+/// schema `-53` with custom buckets, the histogram must carry no negative
+/// buckets, and `custom_values` must define an upper bound for every populated
+/// positive bucket.
 fn validate_spans_and_counts(
     schema: i8,
     positive_spans: &[BucketSpan],

@@ -1,10 +1,10 @@
 //! KIP-584 feature framework. A [`Feature`] owns the *versioning facts* of one
-//! cluster feature — supported range, per-release default, downgrade floor,
-//! KIP-1022 dependencies, optional level name. The static [`feature_registry`]
-//! is the single source of truth consumed by `ApiVersions`, `UpdateFeatures`,
-//! `crabka format` bootstrap, and the Raft range guards. Behavioral *gating*
-//! (rejecting RPCs below a level) lives in the broker handlers that read the
-//! finalized level from the image — not here.
+//! cluster feature: the supported range, the per-release default, the downgrade
+//! floor, the KIP-1022 dependencies, and an optional level name. The static
+//! [`feature_registry`] is the single source of truth for `ApiVersions`,
+//! `UpdateFeatures`, the `crabka format` bootstrap, and the Raft range guards.
+//! Behavioral *gating*, that is, the rejection of RPCs below a level, lives in
+//! the broker handlers that read the finalized level from the image, not here.
 
 use std::collections::BTreeMap;
 
@@ -19,14 +19,14 @@ pub trait Feature: Sync {
     /// `ApiVersions.supported_features` and accepted by `UpdateFeatures`.
     fn supported_range(&self) -> (i16, i16);
 
-    /// The level finalized at `crabka format` given the bootstrap
-    /// `metadata.version` level (the resolved `--release-version`). Kafka
-    /// derives every feature's default from the release this way.
+    /// The level finalized at `crabka format` for the bootstrap
+    /// `metadata.version` level, which is the resolved `--release-version`.
+    /// Kafka derives the default of every feature from the release in this way.
     fn default_level(&self, bootstrap_mv: i16) -> i16;
 
-    /// Lowest level the live image permits finalizing/downgrading to — the
-    /// "unsafe downgrade" floor. Defaults to the supported min (no live-state
-    /// constraint).
+    /// Lowest level that the live image permits for a finalize or a downgrade:
+    /// the "unsafe downgrade" floor. It defaults to the supported min, where no
+    /// live-state constraint applies.
     fn min_required_floor(&self, _image: &MetadataImage) -> i16 {
         self.supported_range().0
     }
@@ -45,8 +45,8 @@ pub trait Feature: Sync {
     }
 }
 
-/// `metadata.version` (KIP-584 / KIP-778). Range, string table, and the
-/// SCRAM/delegation-token floor are reused from [`crate::metadata_version`].
+/// `metadata.version` (KIP-584 / KIP-778). The range, the string table, and the
+/// SCRAM and delegation-token floor come from [`crate::metadata_version`].
 pub struct MetadataVersionFeature;
 
 impl Feature for MetadataVersionFeature {
@@ -76,8 +76,8 @@ impl Feature for MetadataVersionFeature {
     }
 }
 
-/// `group.version` (KIP-848). Plain integer feature; default rises to 1 once
-/// the bootstrap metadata.version reaches the KIP-848 GA level.
+/// `group.version` (KIP-848). A plain integer feature. The default rises to 1
+/// once the bootstrap metadata.version reaches the KIP-848 GA level.
 pub struct GroupVersionFeature;
 
 impl Feature for GroupVersionFeature {
@@ -104,10 +104,10 @@ impl Feature for GroupVersionFeature {
     // declares no hard `UpdateFeatures` dependency for group.version.
 }
 
-/// `transaction.version` (KIP-890). Default jumps to 2 once the bootstrap
-/// metadata.version reaches 4.0-IV2; downgrade floor is the supported min
-/// (in-flight txn state lives in the `__transaction_state` log, not the
-/// [`MetadataImage`], so an image-derived floor is not computed here).
+/// `transaction.version` (KIP-890). The default jumps to 2 once the bootstrap
+/// metadata.version reaches 4.0-IV2. The downgrade floor is the supported min,
+/// because in-flight txn state lives in the `__transaction_state` log and not
+/// in the [`MetadataImage`], so this module computes no image-derived floor.
 pub struct TransactionVersionFeature;
 
 impl Feature for TransactionVersionFeature {
@@ -136,9 +136,9 @@ impl Feature for TransactionVersionFeature {
     // dependencies + min_required_floor: inherit the empty/supported-min defaults.
 }
 
-/// `share.version` (KIP-932). Plain integer feature gating share-group
-/// membership. Default stays at the supported min (0, disabled) until the
-/// bootstrap metadata.version reaches the KIP-932 GA level.
+/// `share.version` (KIP-932). A plain integer feature that gates share-group
+/// membership. The default stays at the supported min, 0, which is disabled,
+/// until the bootstrap metadata.version reaches the KIP-932 GA level.
 pub struct ShareVersionFeature;
 
 impl Feature for ShareVersionFeature {
@@ -160,10 +160,11 @@ impl Feature for ShareVersionFeature {
     // dependencies + min_required_floor: inherit the empty/supported-min defaults.
 }
 
-/// `streams.version` (KIP-1071). Plain integer feature gating the broker-side
-/// Streams rebalance protocol. Default stays at the supported min (0, disabled)
-/// — KIP-1071 is early access, so no released metadata.version enables it by
-/// default; an operator opts in via `UpdateFeatures`.
+/// `streams.version` (KIP-1071). A plain integer feature that gates the
+/// broker-side Streams rebalance protocol. The default stays at the supported
+/// min, 0, which is disabled. KIP-1071 is early access, so no released
+/// metadata.version enables it by default. An operator opts in through
+/// `UpdateFeatures`.
 pub struct StreamsVersionFeature;
 
 impl Feature for StreamsVersionFeature {
@@ -208,10 +209,10 @@ pub fn feature(name: &str) -> Option<&'static dyn Feature> {
 }
 
 /// KIP-584/1022 bootstrap: one `V1FeatureLevel` record per registered feature
-/// at its per-release default, derived from `bootstrap_mv` (the bootstrap
-/// metadata.version level). Used by both `crabka format` and the broker's
-/// standalone self-bootstrap so a fresh cluster finalizes every feature's
-/// release default.
+/// at its per-release default, derived from `bootstrap_mv`, the bootstrap
+/// metadata.version level. Both `crabka format` and the broker's standalone
+/// self-bootstrap use this, so a fresh cluster finalizes the release default of
+/// every feature.
 #[must_use]
 pub fn bootstrap_feature_records(bootstrap_mv: i16) -> Vec<crate::MetadataRecord> {
     bootstrap_feature_records_with_overrides(bootstrap_mv, &BTreeMap::new())
@@ -221,9 +222,10 @@ pub fn bootstrap_feature_records(bootstrap_mv: i16) -> Vec<crate::MetadataRecord
 /// feature, each at its explicit `--feature NAME=LEVEL` override if present in
 /// `overrides`, else its per-release default for `bootstrap_mv`.
 ///
-/// Mirrors `kafka-storage format`: a feature whose resolved level is `0` is
-/// **omitted** (level 0 = absent = disabled — the default state), so the seeded
-/// record set matches what Kafka writes to its `bootstrap.checkpoint`.
+/// Mirrors `kafka-storage format`: this function **omits** a feature whose
+/// resolved level is `0`. Level 0 means absent and disabled, which is the
+/// default state. The seeded record set therefore matches what Kafka writes to
+/// its `bootstrap.checkpoint`.
 #[must_use]
 pub fn bootstrap_feature_records_with_overrides(
     bootstrap_mv: i16,
@@ -246,12 +248,13 @@ pub fn bootstrap_feature_records_with_overrides(
         .collect()
 }
 
-/// KIP-1022 dependency validation for a fully-resolved feature→level map (as
-/// seeded by `crabka format`). For every finalized feature, each of its
+/// KIP-1022 dependency validation for a fully-resolved feature→level map, as
+/// seeded by `crabka format`. For every finalized feature, each of its
 /// `dependencies(level)` must be present in `resolved` at `>=` the required
-/// level. Returns `Err` naming the first unmet dependency. A no-op for today's
-/// registry (no feature declares dependencies) but enforces the rule at format
-/// time, mirroring the `UpdateFeatures` handler.
+/// level. Returns `Err` with the name of the first unmet dependency. The check
+/// does nothing for today's registry, because no feature declares dependencies,
+/// but it enforces the rule at format time in the same way as the
+/// `UpdateFeatures` handler.
 // cargo-mutants: no-op for today's registry (no feature declares deps).
 #[cfg_attr(test, mutants::skip)]
 /// # Errors

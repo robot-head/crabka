@@ -1,11 +1,12 @@
-//! Newtypes over the bare integers the driver and report layers thread
-//! around, so a mix-up between two same-typed values (a message count vs a
-//! window length, a wallclock epoch-ms vs a ms-into-run offset) is a compile
-//! error rather than a silently wrong benchmark number.
+//! Newtypes over the bare integers that the driver and report layers thread
+//! around. A mix-up between two same-typed values becomes a compile error and
+//! not a silently wrong benchmark number. Two such pairs are a message count
+//! against a window length, and a wallclock epoch-ms against a ms-into-run
+//! offset.
 //!
 //! Each type is `#[serde(transparent)]`, so the on-disk `RunOutput` JSON is
-//! byte-identical to the bare primitive it wraps — the report aggregator and
-//! any external tooling reading the artifacts see no change.
+//! byte-identical to the bare primitive it wraps. The report aggregator and
+//! any external tool that reads the artifacts see no change.
 
 use core::cmp::Ordering;
 
@@ -35,13 +36,13 @@ use crate::numeric::saturating_u64_to_i64;
 #[serde(transparent)]
 pub struct MessageCount(pub u64);
 
-/// Milliseconds **into a run** — a time-series sample offset relative to the
-/// measurement (or wallclock) window start. Ordered so it can key the
-/// per-offset averaging maps. Not to be confused with [`WallclockMs`], which
-/// is an absolute unix-epoch timestamp.
+/// Milliseconds **into a run**. This is a time-series sample offset relative to
+/// the start of the measurement window or the wallclock window. It is ordered,
+/// so it can key the per-offset averaging maps. Do not confuse it with
+/// [`WallclockMs`], which is an absolute unix-epoch timestamp.
 ///
-/// This stays an integer rather than becoming a [`Time`]: it is a *coordinate*
-/// on the fixed sampling grid, and the cross-run averaging in
+/// This stays an integer and does not become a [`Time`], because it is a
+/// *coordinate* on the fixed sampling grid. The cross-run averaging in
 /// [`crate::aggregate`] keys `BTreeMap`s by it, which a `f64`-backed quantity
 /// cannot do. [`Self::as_time`] and [`Self::since`] are the seams that turn a
 /// pair of coordinates into the extent between them.
@@ -71,18 +72,18 @@ impl TimeOffsetMs {
         Time::from_millis(saturating_u64_to_i64(self.0))
     }
 
-    /// The extent from `earlier` to this offset, or no time at all when the two
-    /// are the wrong way round.
+    /// The extent from `earlier` to this offset. This is no time at all when
+    /// the two are the wrong way round.
     #[must_use]
     pub fn since(self, earlier: Self) -> Time {
         Time::from_millis(saturating_u64_to_i64(self.0.saturating_sub(earlier.0)))
     }
 }
 
-/// An **absolute** wallclock timestamp in unix-epoch milliseconds (`i64` to
-/// match `chrono::Utc::now().timestamp_millis()`). Distinct from the
-/// run-relative [`TimeOffsetMs`] so the two paired start/end fields on
-/// `RunOutput` cannot be swapped.
+/// An **absolute** wallclock timestamp in unix-epoch milliseconds. It is an
+/// `i64` to match `chrono::Utc::now().timestamp_millis()`. It is distinct from
+/// the run-relative [`TimeOffsetMs`], so no one can swap the paired start and
+/// end fields on `RunOutput`.
 #[derive(
     Debug,
     Clone,

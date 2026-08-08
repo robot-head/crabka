@@ -16,26 +16,28 @@ use crate::{
 
 /// A [`Source`] implementation backed by a Kafka consumer on the source cluster.
 ///
-/// Wraps a [`Consumer`] and translates each [`crabka_client_consumer::ConsumerRecord`]
-/// into a [`ReplicatedRecord`] that carries the full envelope (topic, partition,
-/// offset, timestamp, headers) alongside the raw payload. The connect runtime
-/// receives the full `ReplicatedRecord` value, including source coordinates
-/// needed for offset-sync generation.
+/// This type wraps a [`Consumer`] and translates each
+/// [`crabka_client_consumer::ConsumerRecord`] into a [`ReplicatedRecord`]. That
+/// record carries the full envelope of topic, partition, offset, timestamp, and
+/// headers next to the raw payload. The connect runtime receives the whole
+/// `ReplicatedRecord` value, including the source coordinates that offset-sync
+/// generation needs.
 pub struct SourceConsumer {
     consumer: Option<Consumer>,
     buf: VecDeque<ReplicatedRecord>,
-    /// Next-offset-to-read per `"<topic>-<partition>"` key (i.e. `last_offset + 1`).
+    /// Next offset to read per `"<topic>-<partition>"` key, that is,
+    /// `last_offset + 1`.
     positions: BTreeMap<String, i64>,
     poll_timeout: Time,
 }
 
 /// Split a `"<topic>-<partition>"` checkpoint key back into its parts.
 ///
-/// The key is built by [`SourceConsumer::poll`] / [`checkpoint`] as
-/// `format!("{topic}-{partition}")`. Kafka topic names may themselves contain
-/// `-`, so we split on the **last** `-` and parse the suffix as the partition
-/// index. Returns `None` if there is no `-`, the suffix is not a valid `i32`,
-/// or the topic part is empty.
+/// [`SourceConsumer::poll`] and [`checkpoint`] build the key as
+/// `format!("{topic}-{partition}")`. Kafka topic names can themselves contain
+/// `-`, so this function splits on the **last** `-` and parses the suffix as
+/// the partition index. It returns `None` if there is no `-`, if the suffix is
+/// not a valid `i32`, or if the topic part is empty.
 ///
 /// [`checkpoint`]: SourceConsumer::checkpoint
 fn split_topic_partition(key: &str) -> Option<(String, i32)> {
@@ -48,11 +50,12 @@ fn split_topic_partition(key: &str) -> Option<(String, i32)> {
 }
 
 impl SourceConsumer {
-    /// Build and start a [`SourceConsumer`] subscribed to `topics` on the
-    /// cluster at `bootstrap`, joining `group_id`.
+    /// Build and start a [`SourceConsumer`] that subscribes to `topics` on the
+    /// cluster at `bootstrap` and joins `group_id`.
     ///
-    /// Offsets reset to earliest (no previously committed offset for the group).
-    /// Pass `security` when the source cluster requires authentication/TLS.
+    /// Offsets reset to earliest, because the group has no previously committed
+    /// offset. Pass `security` when the source cluster needs authentication or
+    /// TLS.
     ///
     /// # Errors
     ///
@@ -138,9 +141,9 @@ impl SourceConsumer {
 impl Source<(), ReplicatedRecord> for SourceConsumer {
     /// Poll the source cluster for the next record.
     ///
-    /// Returns `Ok(None)` when the consumer is momentarily caught up (the
-    /// runtime should back off and retry).  Returns `Ok(Some(_))` with the
-    /// next [`ReplicatedRecord`] otherwise.
+    /// Returns `Ok(None)` when the consumer is momentarily caught up. The
+    /// runtime should back off and retry. Returns `Ok(Some(_))` with the
+    /// next [`ReplicatedRecord`] in every other case.
     ///
     /// # Errors
     ///
@@ -187,7 +190,8 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
 
     /// Snapshot the current read positions for all partitions seen so far.
     ///
-    /// Returns `None` before the first successful poll (nothing to commit yet).
+    /// Returns `None` before the first successful poll, when there is nothing to
+    /// commit yet.
     fn checkpoint(&self) -> Option<SourceOffset> {
         if self.positions.is_empty() {
             return None;
@@ -202,27 +206,30 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
 
     /// Restore the read position from a previously-checkpointed [`SourceOffset`].
     ///
-    /// The runtime calls this once before the first [`poll`](Self::poll), passing
-    /// the position loaded from the durable checkpoint store on the target. Each
-    /// `position` entry is keyed `"<topic>-<partition>"` →
-    /// [`OffsetValue::Long`]`(next_offset)` (the value [`checkpoint`](Self::checkpoint)
-    /// wrote: `last_consumed + 1`). We decode each key back into `(topic,
-    /// partition)` and hand the offset to the consumer's
-    /// [`seek`](crabka_client_consumer::Consumer::seek).
+    /// The runtime calls this method once before the first [`poll`](Self::poll)
+    /// and passes the position that it loaded from the durable checkpoint store
+    /// on the target. Each `position` entry maps the key
+    /// `"<topic>-<partition>"` to [`OffsetValue::Long`]`(next_offset)`, the
+    /// value that [`checkpoint`](Self::checkpoint) wrote as `last_consumed + 1`.
+    /// This method decodes each key back into `(topic, partition)` and hands the
+    /// offset to the [`seek`](crabka_client_consumer::Consumer::seek) of the
+    /// consumer.
     ///
-    /// The consumer holds each seek as *pending* and materialises it at the top
-    /// of the first `poll` that sees the partition assigned — after the group's
-    /// post-assignment offset prime, but before any `Fetch` — so the sought
-    /// offset is the one fetched. That makes restart resume **from the last
-    /// fully-committed record** rather than re-reading the topic from offset 0:
-    /// no record below the sought offset is re-delivered, and none above it is
-    /// skipped (no data gap). Delivery remains **at-least-once** — a crash
-    /// between a sink flush and the checkpoint save can re-deliver the in-flight
-    /// batch, but never lose a record.
+    /// The consumer holds each seek as *pending*. It materialises the seek at
+    /// the top of the first `poll` that sees the partition assigned, after the
+    /// post-assignment offset prime of the group but before any `Fetch`. The
+    /// sought offset is therefore the offset that the consumer fetches. A
+    /// restart then resumes **from the last fully-committed record** and does
+    /// not re-read the topic from offset 0. No record below the sought offset is
+    /// re-delivered and no record above it is skipped, so there is no data gap.
+    /// Delivery stays **at-least-once**: a crash between a sink flush and the
+    /// checkpoint save can re-deliver the in-flight batch, but it never loses a
+    /// record.
     ///
-    /// A malformed key (no `-`, or a non-integer partition/offset) is skipped
-    /// with a warning rather than failing the restore: one corrupt entry must
-    /// not strand recovery for the partitions that decoded cleanly.
+    /// This method skips a malformed key with a warning and does not fail the
+    /// restore. A malformed key has no `-`, or a non-integer partition or
+    /// offset. One corrupt entry must not strand recovery for the partitions
+    /// that decoded cleanly.
     ///
     /// # Errors
     ///
@@ -263,9 +270,9 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
         Ok(())
     }
 
-    /// Close the underlying consumer, sending `LeaveGroup` so a restarted
-    /// replicator can rejoin the group immediately instead of waiting out the
-    /// departed member's session timeout.
+    /// Close the underlying consumer. The close sends `LeaveGroup`, so a
+    /// restarted replicator can rejoin the group immediately and does not wait
+    /// out the session timeout of the departed member.
     ///
     /// # Errors
     ///

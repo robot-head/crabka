@@ -1,6 +1,8 @@
-//! `Consumer` — public lifecycle handle. Built via [`Consumer::builder`].
-//! Subscribe-only — no `assign()`. Use `crabka-client-core` directly for
-//! manual partition consumption.
+//! `Consumer`, the public lifecycle handle. Build it with
+//! [`Consumer::builder`].
+//!
+//! The consumer is subscribe-only and has no `assign()`. Use
+//! `crabka-client-core` directly for manual partition consumption.
 
 use std::{
     collections::HashMap,
@@ -51,19 +53,20 @@ use crate::{
 pub struct Consumer {
     pub(crate) client: Client,
     pub(crate) group_id: String,
-    /// Node id of the group's coordinator broker, discovered via
-    /// `FindCoordinator` at build time and kept current by the coordinator task
-    /// (shared `Arc<AtomicI32>`). The commit path (`commit.rs`) reads it to route
+    /// Node id of the group's coordinator broker. `FindCoordinator` discovers it
+    /// at build time, and the coordinator task keeps it current through the
+    /// shared `Arc<AtomicI32>`. The commit path (`commit.rs`) reads it to route
     /// `OffsetCommit` to the coordinator over this data-path client.
     pub(crate) coordinator_id: Arc<AtomicI32>,
     pub(crate) retry_policy: CoordinatorRetryPolicy,
     pub(crate) member_id: String,
     pub(crate) group_instance_id: Option<String>,
-    /// The group generation the commit path stamps onto `OffsetCommit`. Shared
-    /// (`Arc<AtomicI32>`) with the coordinator task, which is the sole writer and
-    /// publishes the new value on every (re)join — so a commit issued after a
-    /// rebalance uses the *current* generation instead of a stale start-up
-    /// snapshot (which the broker rejects with `ILLEGAL_GENERATION`).
+    /// The group generation that the commit path stamps onto `OffsetCommit`.
+    /// This `Arc<AtomicI32>` is shared with the coordinator task, which is the
+    /// sole writer and publishes the new value on every join and rejoin. A
+    /// commit issued after a rebalance therefore uses the *current* generation
+    /// and not a stale start-up snapshot, which the broker rejects with
+    /// `ILLEGAL_GENERATION`.
     pub(crate) current_generation: Arc<AtomicI32>,
     pub(crate) subscribed_topics: Vec<String>,
     /// Current assigned partitions: `(topic, partition_index)`.
@@ -73,13 +76,13 @@ pub struct Consumer {
     /// KIP-320 per-partition leader-epoch metadata, keyed like `next_offsets`.
     pub(crate) positions: Arc<Mutex<HashMap<(String, i32), crate::position::PartitionPosition>>>,
     /// Pending [`seek`](Consumer::seek) targets: `(topic, partition) -> next
-    /// offset to fetch`. Applied at the top of `poll` once the partition is
-    /// assigned, *after* the coordinator's post-assignment prime — so a seek
-    /// requested before assignment is not overwritten by the prime (see
-    /// `seek.rs`). Empty in steady state.
+    /// offset to fetch`. `poll` applies them at its top once the partition is
+    /// assigned, *after* the coordinator's post-assignment prime. The prime
+    /// therefore does not overwrite a seek requested before assignment. See
+    /// `seek.rs`. The map is empty in steady state.
     pub(crate) pending_seeks: Arc<Mutex<HashMap<(String, i32), i64>>>,
-    /// Topic UUIDs resolved at build time. Required by Fetch v ≥ 13
-    /// (which carries `topic_id` instead of the topic name).
+    /// Topic UUIDs resolved at build time. Fetch v ≥ 13 needs them, because it
+    /// carries `topic_id` instead of the topic name.
     pub(crate) topic_ids: Arc<Mutex<HashMap<String, WireUuid>>>,
     pub(crate) session_timeout: Time,
     pub(crate) heartbeat_interval: Time,
@@ -87,14 +90,14 @@ pub struct Consumer {
     pub(crate) assignor: Assignor,
     pub(crate) coordinator_shutdown: CancellationToken,
     pub(crate) coordinator_handle: Option<JoinHandle<()>>,
-    /// Controls which records are returned by `poll`.
+    /// Controls which records `poll` returns.
     pub(crate) isolation_level: IsolationLevel,
     pub(crate) fetch_min: ByteSize,
     pub(crate) fetch_max: ByteSize,
     pub(crate) fetch_partition_max: ByteSize,
-    /// What `poll` does on a missing offset / detected truncation. `None`
-    /// surfaces `ConsumerError::LogTruncation`; otherwise the safe offset is
-    /// applied (KIP-320).
+    /// What `poll` does on a missing offset or a detected truncation. `None`
+    /// surfaces `ConsumerError::LogTruncation`. Any other value makes `poll`
+    /// apply the safe offset, per KIP-320.
     pub(crate) auto_offset_reset: AutoOffsetReset,
 }
 
@@ -484,8 +487,8 @@ impl Drop for Consumer {
     }
 }
 
-/// A per-record header key/value pair, as defined by the Kafka v2 record
-/// format. The key is a UTF-8 string; the value is optional raw bytes.
+/// A per-record header key/value pair, as the Kafka v2 record format defines
+/// it. The key is a UTF-8 string. The value is optional raw bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     pub key: String,
@@ -638,10 +641,10 @@ fn primed_position(committed_epoch: i32) -> crate::position::PartitionPosition {
 
 /// A protocol `int32` millisecond field, truncated rather than rounded.
 ///
-/// Every Kafka request field this feeds is compared by the coordinator against
-/// its own configured bounds, and the pre-quantity code reached them through
-/// `Duration::as_millis`, which truncates. Rounding to nearest would push a
-/// fractional-millisecond timeout one millisecond wider on the wire.
+/// The coordinator compares every Kafka request field that this feeds against
+/// its own configured bounds. The pre-quantity code reached those fields
+/// through `Duration::as_millis`, which truncates. Rounding to nearest would
+/// push a fractional-millisecond timeout one millisecond wider on the wire.
 pub(crate) fn protocol_millis_i32(value: Time) -> i32 {
     i32::try_from(value.millis_i64_trunc()).unwrap_or(i32::MAX)
 }
@@ -650,12 +653,13 @@ pub(crate) fn protocol_millis_i32(value: Time) -> i32 {
 impl Consumer {
     /// Build a [`Consumer`] subscribed to the given topics.
     ///
-    /// Validates configuration eagerly (fail-fast before any network I/O),
-    /// then calls the internal `start_once` operation with a per-attempt timeout. If an
-    /// attempt stalls (lost-wakeup during cold-boot group-join contention) or
-    /// returns a transient error, the timed-out future is dropped — cancelling
-    /// its in-flight connections — and a fresh attempt is started.  A genuine
-    /// misconfiguration or persistent error surfaces immediately.
+    /// This function validates the configuration eagerly and fails fast before
+    /// any network I/O. It then calls the internal `start_once` operation with a
+    /// per-attempt timeout. An attempt can stall on a lost wakeup during
+    /// cold-boot group-join contention, or return a transient error. The
+    /// function then drops the timed-out future, which cancels its in-flight
+    /// connections, and starts a fresh attempt. A genuine misconfiguration or a
+    /// persistent error surfaces immediately.
     #[builder(start_fn = builder, finish_fn = build)]
     #[tracing::instrument(
         name = "consumer.start",
@@ -812,14 +816,14 @@ impl Consumer {
     }
 
     /// Single attempt to build a [`Consumer`]: resolve bootstrap, `JoinGroup`
-    /// (twice), compute assignment if elected leader, `SyncGroup`, prime
-    /// offsets, then spawn the coordinator task.
+    /// twice, compute the assignment if this member is the elected leader,
+    /// `SyncGroup`, prime offsets, then spawn the coordinator task.
     ///
-    /// Called by [`Self::start`] under a per-attempt timeout.  Dropping the
-    /// returned future at any point before the final `tokio::spawn` cancels
-    /// all in-flight connections cleanly.  The coordinator task is only spawned
-    /// at the very end of this function (no `.await` follows it), so a
-    /// timed-out attempt can never orphan a coordinator task.
+    /// [`Self::start`] calls this under a per-attempt timeout. A drop of the
+    /// returned future at any point before the final `tokio::spawn` cancels all
+    /// in-flight connections cleanly. This function spawns the coordinator task
+    /// at its very end, with no `.await` after it, so a timed-out attempt can
+    /// never orphan a coordinator task.
     #[tracing::instrument(
         name = "consumer.start_once",
         level = "info",
@@ -1338,10 +1342,10 @@ async fn spawn_consumer(
     })
 }
 
-/// Returns `true` for transient startup errors where dropping the half-built
-/// consumer and retrying a fresh build is expected to succeed.
+/// Returns `true` for a transient startup error, where a fresh build after a
+/// drop of the half-built consumer is likely to succeed.
 ///
-/// Returns `false` for permanent misconfig or decode errors so those surface
+/// Returns `false` for a permanent misconfig or decode error, so those surface
 /// immediately without pointless retries.
 fn is_retriable_consumer_start_error(error: &ConsumerError) -> bool {
     // Retry only conditions that a fresh attempt a moment later is likely to
@@ -1378,23 +1382,24 @@ impl Consumer {
         &self.group_id
     }
 
-    /// The member id assigned by the coordinator at join time.
+    /// The member id that the coordinator assigned at join time.
     #[must_use]
     pub fn member_id(&self) -> &str {
         &self.member_id
     }
 
-    /// The current group generation, kept live by the coordinator task across
-    /// rejoins (shared `Arc<AtomicI32>`).
+    /// The current group generation. The coordinator task keeps it live across
+    /// rejoins through the shared `Arc<AtomicI32>`.
     #[must_use]
     pub fn generation_id(&self) -> i32 {
         self.current_generation.load(Ordering::Relaxed)
     }
 
     /// KIP-447 group metadata to hand to a transactional producer's
-    /// `send_offsets_to_transaction`. The generation id is the coordinator's
-    /// live generation (kept current across rejoins via the shared
-    /// `Arc<AtomicI32>`).
+    /// `send_offsets_to_transaction`.
+    ///
+    /// The generation id is the coordinator's live generation, which the shared
+    /// `Arc<AtomicI32>` keeps current across rejoins.
     #[must_use]
     pub fn group_metadata(&self) -> ConsumerGroupMetadata {
         ConsumerGroupMetadata {
@@ -1418,15 +1423,15 @@ impl Consumer {
 
     /// Stop the coordinator task so the broker evicts this member promptly.
     ///
-    /// The coordinator itself sends a best-effort `LeaveGroup` as the last
-    /// thing it does on shutdown (see `crate::coordinator::run`), using its
-    /// *live* `member_id`. That id can differ from the one captured at build
-    /// time — a from-scratch rejoin (`UNKNOWN_MEMBER_ID`) replaces it — so the
-    /// leave must come from the coordinator, which owns the current value;
-    /// sending it here with `self.member_id` would silently leave a stale id
-    /// and orphan the real member until its session expires. Cancel + join is
-    /// prompt because the coordinator races its in-tick RPCs against the
-    /// shutdown token.
+    /// The coordinator itself sends a best-effort `LeaveGroup` as the last thing
+    /// it does on shutdown. See `crate::coordinator::run`. It uses its *live*
+    /// `member_id`, which can differ from the one captured at build time,
+    /// because a from-scratch rejoin (`UNKNOWN_MEMBER_ID`) replaces it. The
+    /// leave must therefore come from the coordinator, which owns the current
+    /// value. A send here with `self.member_id` would silently leave a stale id
+    /// and orphan the real member until its session expires. The cancel and
+    /// join are prompt, because the coordinator races its in-tick RPCs against
+    /// the shutdown token.
     #[tracing::instrument(
         name = "consumer.close",
         level = "info",
@@ -1453,9 +1458,9 @@ mod protocol_millis_tests {
     use super::protocol_millis_i32;
 
     /// `session_timeout_ms` and `rebalance_timeout_ms` are `int32` wire fields
-    /// the group coordinator range-checks. The pre-quantity code reached them
-    /// through `Duration::as_millis`, which truncates, so a fractional
-    /// millisecond must still round *down* — `TimeExt::millis_i32` rounds to
+    /// that the group coordinator range-checks. The pre-quantity code reached
+    /// them through `Duration::as_millis`, which truncates, so a fractional
+    /// millisecond must still round *down*. `TimeExt::millis_i32` rounds to
     /// nearest and would report one millisecond more.
     #[test]
     fn protocol_millis_truncates_rather_than_rounding() {
@@ -1479,9 +1484,9 @@ mod protocol_millis_tests {
         }
     }
 
-    /// The saturation the `i32::try_from(...).unwrap_or(i32::MAX)` guard
-    /// provided is preserved: an absurd timeout clamps instead of wrapping
-    /// negative on the wire.
+    /// The code keeps the saturation that the
+    /// `i32::try_from(...).unwrap_or(i32::MAX)` guard provided. An absurd
+    /// timeout clamps and does not wrap negative on the wire.
     #[test]
     fn protocol_millis_saturates_at_i32_max() {
         check!(protocol_millis_i32(Time::from_secs(10_000_000_000)) == i32::MAX);
@@ -2172,12 +2177,13 @@ mod security_arg_tests {
         );
     }
 
-    /// Regression: the generation the commit path stamps must track the
-    /// coordinator's (re)joins, not a start-up snapshot. The coordinator is the
-    /// sole writer and publishes via the shared `current_generation` atomic; the
-    /// accessor + group-metadata + commit path all read it live, so a commit
-    /// issued after a rebalance carries the CURRENT generation instead of the
-    /// stale one the broker rejects with `ILLEGAL_GENERATION (22)`.
+    /// Regression: the generation that the commit path stamps must track the
+    /// coordinator's joins and rejoins, not a start-up snapshot. The coordinator
+    /// is the sole writer and publishes through the shared `current_generation`
+    /// atomic. The accessor, the group metadata, and the commit path all read it
+    /// live, so a commit issued after a rebalance carries the CURRENT generation
+    /// instead of the stale one that the broker rejects with
+    /// `ILLEGAL_GENERATION (22)`.
     #[tokio::test]
     async fn generation_tracks_coordinator_rejoins_via_shared_atomic() {
         let consumer = test_consumer().await;

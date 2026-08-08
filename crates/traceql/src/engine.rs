@@ -292,14 +292,15 @@ impl<S: SpanStore> TraceqlEngine<S> {
 
     /// Executes Tempo's attribute-comparison `compare()` metric.
     ///
-    /// Scans every span matching the outer spanset over the query range, then
-    /// partitions the matched spans into the `selection` group (spans that also
-    /// match the compare's `selection` spanset, optionally restricted to the
-    /// `[start, end]` sub-window) and the `baseline` group (the rest). For every
-    /// attribute present on the spans, it counts how many spans in each group
-    /// carry each distinct value per step bucket, keeps the `top_n` most-frequent
-    /// values per (group, attribute), and emits per-value series plus per-group
-    /// total series.
+    /// This method scans every span that matches the outer spanset over the
+    /// query range. It then splits the matched spans into two groups. The
+    /// `selection` group holds the spans that also match the compare
+    /// `selection` spanset, and the optional `[start, end]` sub-window narrows
+    /// that group. The `baseline` group holds the rest. For every attribute on
+    /// the spans, the method counts how many spans in each group carry each
+    /// distinct value per step bucket. It keeps the `top_n` most-frequent
+    /// values for each group and attribute, then emits per-value series and
+    /// per-group total series.
     async fn query_range_compare(
         &self,
         tenant: &str,
@@ -423,10 +424,12 @@ struct MetricPlan {
     compare: Option<CompareSpec>,
 }
 
-/// The parsed `compare({selection}, topN [, start, end])` spec carried on a
-/// `MetricPlan`. Execution scans the outer spanset and partitions its spans into
-/// the `selection` group (also matching `selection`) and the `baseline` group
-/// (the rest), then emits per-attribute value-distribution series.
+/// The parsed `compare({selection}, topN [, start, end])` spec on a `MetricPlan`.
+///
+/// Execution scans the outer spanset and splits its spans into two groups. The
+/// `selection` group holds the spans that also match `selection`. The
+/// `baseline` group holds the rest. Execution then emits per-attribute
+/// value-distribution series.
 #[derive(Clone)]
 struct CompareSpec {
     selection: crate::ast::SpansetExpr,
@@ -691,9 +694,11 @@ fn metric_plan_for(
     })
 }
 
-/// Builds the `MetricPlan` for a `compare()` stage. The function/value/by fields
-/// are inert placeholders — `query_range_compare` reads `compare` directly and
-/// never runs the `*_over_time()` machinery.
+/// Builds the `MetricPlan` for a `compare()` stage.
+///
+/// The `function`, `value`, and `by` fields are inert placeholders.
+/// `query_range_compare` reads `compare` directly, and never runs the
+/// `*_over_time()` machinery.
 fn metric_plan_with_compare(compare: CompareSpec) -> MetricPlan {
     MetricPlan {
         function: MetricFunction::CountOverTime,
@@ -717,9 +722,11 @@ async fn collect_planned_batches(
         .await?)
 }
 
-/// The reserved label key Tempo uses to tag a compare series with its group
-/// (`baseline` / `selection`) or per-group total (`baseline_total` /
-/// `selection_total`). Grafana's exploretraces Comparison view reads it.
+/// The reserved label key that Tempo uses to tag a compare series.
+///
+/// The tag holds the group, `baseline` or `selection`, or the per-group total,
+/// `baseline_total` or `selection_total`. Grafana's exploretraces Comparison
+/// view reads this key.
 const META_TYPE_KEY: &str = "__meta_type";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -744,10 +751,12 @@ impl CompareGroup {
     }
 }
 
-/// Validates that a compare selection spanset is a shape the per-row evaluator
-/// supports: a selector whose `FieldExpr` is a boolean combination of
-/// span/resource/intrinsic comparisons, or a spanset-level `And`/`Or` of such
-/// selectors. Structural operators and parent/event/link scopes are rejected.
+/// Validates that the per-row evaluator supports a compare selection spanset.
+///
+/// The evaluator supports a selector whose `FieldExpr` is a boolean
+/// combination of span, resource, and intrinsic comparisons. It also supports
+/// a spanset-level `And` or `Or` of such selectors. This function rejects
+/// structural operators and the parent, event, and link scopes.
 fn validate_compare_selection(selection: &SpansetExpr) -> Result<()> {
     match selection {
         SpansetExpr::Selector(fe) => validate_compare_field_expr(fe),
@@ -775,13 +784,16 @@ fn validate_compare_field_expr(fe: &FieldExpr) -> Result<()> {
     }
 }
 
-/// A span/resource attribute or selection-evaluable intrinsic, classified for
-/// per-row lookup. Returns an `Unsupported` error for scopes the single-span
-/// compare evaluator cannot resolve (parent/event/link and non-selection
-/// intrinsics like trace-level or nested-set fields).
+/// A span attribute, a resource attribute, or a selection-evaluable intrinsic.
+///
+/// The compare code classifies a field into this enum for per-row lookup. The
+/// classification returns an `Unsupported` error for scopes that the
+/// single-span compare evaluator cannot resolve. Those scopes are parent,
+/// event, and link, plus non-selection intrinsics such as trace-level fields
+/// and nested-set fields.
 enum CompareFieldClass {
-    /// A span- or resource-scoped attribute keyed by its raw key. `Both` matches
-    /// either scope; `Span`/`Resource` are scope-pinned.
+    /// A span-scoped or resource-scoped attribute, keyed by its raw key.
+    /// `Both` matches either scope. `Span` and `Resource` pin the scope.
     Attr { scope: Scope, key: String },
     /// A selection-evaluable intrinsic with its row value.
     Intrinsic(Intrinsic),
@@ -806,16 +818,19 @@ fn compare_field_class(field: &Field) -> Result<CompareFieldClass> {
     }
 }
 
-/// One scanned span row, projected into the values the compare needs: the span
-/// start time, every scoped attribute (for the distribution), and the
-/// selection-evaluable intrinsics (for membership).
+/// One scanned span row, projected into the values the compare needs.
+///
+/// The values are the span start time, every scoped attribute, and the
+/// selection-evaluable intrinsics. The compare uses the attributes for the
+/// distribution and the intrinsics for group membership.
 struct CompareRow {
     ts: UnixNano,
-    /// Fully-scoped attribute key (e.g. `span.http.method`,
-    /// `resource.service.name`) → display value, deduplicated.
+    /// Fully-scoped attribute key → display value, deduplicated. Example keys:
+    /// `span.http.method` and `resource.service.name`.
     attrs: Vec<(String, String)>,
-    /// Raw span/resource attribute key → typed values (repeated attrs allowed),
-    /// used to evaluate the selection's attribute comparisons.
+    /// Raw span or resource attribute key → typed values, with repeated
+    /// attributes allowed. The compare uses these values to evaluate the
+    /// selection's attribute comparisons.
     raw_span_attrs: Vec<(String, AttrValue)>,
     raw_resource_attrs: Vec<(String, AttrValue)>,
     name: Option<String>,
@@ -825,20 +840,24 @@ struct CompareRow {
     duration: Option<i64>,
 }
 
-/// Upper bound on distinct values tracked per `(group, attribute)` during
-/// accumulation, before `top_n` truncation. A high-cardinality attribute (a
-/// URL, request id, or UUID present on every span) would otherwise insert one
-/// bucket-length `Vec` per distinct value and exhaust memory. Once a
-/// `(group, attribute)` reaches this cap, new distinct values are dropped
-/// (already-tracked values keep counting); this keeps memory
-/// `O(attrs * cap * buckets)`. The cap is clamped to be at least `top_n` so the
-/// final `top_n` cut in `build_compare_series` is never starved.
+/// Upper bound on the distinct values tracked per `(group, attribute)`.
+///
+/// The bound applies during accumulation, before the `top_n` cut. Without the
+/// bound, a high-cardinality attribute such as a URL, a request id, or a UUID
+/// on every span inserts one bucket-length `Vec` per distinct value and
+/// exhausts memory. When a `(group, attribute)` reaches this cap, the code
+/// drops new distinct values, and the values it already tracks keep counting.
+/// Memory then stays at `O(attrs * cap * buckets)`. The code clamps the cap to
+/// at least `top_n`, so the final `top_n` cut in `build_compare_series` is
+/// never starved.
 type CompareCounts = BTreeMap<(CompareGroup, String, String), Vec<u64>>;
 type CompareTotals = BTreeMap<CompareGroup, Vec<u64>>;
-/// `attribute → value → group → per-bucket counts`. `build_compare_series`
-/// regroups the flat counts into this shape so a single shared value set per
-/// attribute can be chosen across both groups (Grafana renders the baseline and
-/// selection distributions side by side, so they must cover the same values).
+/// `attribute → value → group → per-bucket counts`.
+///
+/// `build_compare_series` regroups the flat counts into this shape. The shape
+/// lets the code choose one shared value set per attribute across both groups.
+/// Grafana shows the baseline distribution and the selection distribution side
+/// by side, so both must cover the same values.
 type CompareByAttr = BTreeMap<String, BTreeMap<String, BTreeMap<CompareGroup, Vec<u64>>>>;
 
 fn assemble_compare_response(
@@ -862,12 +881,14 @@ fn assemble_compare_response(
     Ok(TraceMetricsResponse { series })
 }
 
-/// Scans the batches and accumulates per-bucket span counts: `counts[(group,
-/// attr_key, value)][bucket]` and `totals[group][bucket]`. The number of
-/// DISTINCT values tracked per `(group, attr_key)` is bounded by
-/// `COMPARE_MAX_VALUES_PER_ATTR` (clamped up to `top_n`); once the bound is hit,
-/// new distinct values are dropped while already-tracked ones keep counting, so
-/// memory is `O(attrs * cap * buckets)` regardless of attribute cardinality.
+/// Scans the batches and accumulates per-bucket span counts.
+///
+/// The counts are `counts[(group, attr_key, value)][bucket]` and
+/// `totals[group][bucket]`. `COMPARE_MAX_VALUES_PER_ATTR` bounds the number of
+/// DISTINCT values tracked per `(group, attr_key)`, clamped up to `top_n`.
+/// When the count reaches that bound, this function drops new distinct values,
+/// and the values it already tracks keep counting. Memory stays at
+/// `O(attrs * cap * buckets)` for any attribute cardinality.
 fn accumulate_compare_counts(
     batches: &[RecordBatch],
     compare: &CompareSpec,
@@ -927,9 +948,11 @@ fn accumulate_compare_counts(
     Ok((counts, totals))
 }
 
-/// Determines a span row's compare group: `Selection` if it matches the compare
-/// selection spanset (and falls inside the optional `[start, end]` sub-window),
-/// otherwise `Baseline`.
+/// Determines the compare group of a span row.
+///
+/// The group is `Selection` when the row matches the compare selection spanset
+/// and falls inside the optional `[start, end]` sub-window. In every other
+/// case the group is `Baseline`.
 fn compare_group_for_row(
     row: &CompareRow,
     compare: &CompareSpec,
@@ -944,24 +967,29 @@ fn compare_group_for_row(
     }
 }
 
-/// Whether the row's start time lies within the compare's optional selection
-/// sub-window. With no window, every matched-outer span is eligible for the
-/// selection group.
+/// Tells whether the row start time is inside the compare selection window.
+///
+/// The selection sub-window is optional. With no window, every span that
+/// matched the outer spanset is eligible for the selection group.
 fn compare_row_in_selection_window(row: &CompareRow, compare: &CompareSpec) -> bool {
     compare.start.is_none_or(|start| row.ts >= start) && compare.end.is_none_or(|end| row.ts <= end)
 }
 
-/// Per-query cache of compiled selection regexes, keyed by the raw `=~`/`!~`
-/// pattern string. Each value is the pattern compiled as `^(?:pat)$` (matching
-/// `string_cmp`'s anchoring). Built once in `assemble_compare_response` and
-/// reused for every scanned row so a regex selection does not recompile per
-/// span. An uncompilable pattern is simply absent from the map, which the
-/// lookup treats as a non-match (preserving the prior best-effort semantics
-/// rather than failing the query).
+/// Per-query cache of compiled selection regexes, keyed by the raw pattern.
+///
+/// The key is the raw `=~`/`!~` pattern string. Each value is the pattern
+/// compiled as `^(?:pat)$`, which matches how `string_cmp` anchors a pattern.
+/// `assemble_compare_response` builds the cache once, and every scanned row
+/// reuses it, so a regex selection does not recompile per span. A pattern that
+/// does not compile stays absent from the map, and the lookup treats an absent
+/// pattern as a non-match. This keeps the earlier best-effort behavior instead
+/// of a failed query.
 type CompareRegexCache = HashMap<String, regex::Regex>;
 
-/// Collects every `=~`/`!~` literal pattern referenced by the selection and
-/// compiles each once into `cache`. Uncompilable patterns are skipped.
+/// Collects every `=~`/`!~` literal pattern in the selection.
+///
+/// This function compiles each pattern once into `cache`. It skips a pattern
+/// that does not compile.
 fn collect_selection_regexes(selection: &SpansetExpr, cache: &mut CompareRegexCache) {
     match selection {
         SpansetExpr::Selector(fe) => collect_field_expr_regexes(fe, cache),
@@ -1059,14 +1087,15 @@ fn compare_comparison_matches(
     }
 }
 
-/// Projects one scanned span row into a `CompareRow`: every scoped attribute
-/// (for the distribution) plus the selection-evaluable intrinsics.
+/// Projects one scanned span row into a `CompareRow`.
 ///
-/// Attributes come from two sources, mirroring `row_attrs`/`block_row_attrs`:
-/// the promoted `attr.<key>` schema columns (span-scoped) and the block
-/// attribute-list columns (`attr_keys`/`attr_value*`), where a `__resource.`
-/// prefix on the key marks a resource attribute. The root-service column is
-/// surfaced as `resource.service.name`.
+/// The projection holds every scoped attribute for the distribution, plus the
+/// selection-evaluable intrinsics. Attributes come from two sources, the same
+/// two that `row_attrs` and `block_row_attrs` read. The first source is the
+/// promoted `attr.<key>` schema columns, which are span-scoped. The second
+/// source is the block attribute-list columns `attr_keys` and `attr_value*`,
+/// where a `__resource.` prefix on the key marks a resource attribute. This
+/// function reports the root-service column as `resource.service.name`.
 fn compare_row(batch: &RecordBatch, row: usize, ts: UnixNano) -> Result<CompareRow> {
     let mut attrs: Vec<(String, String)> = Vec::new();
     let mut raw_span_attrs: Vec<(String, AttrValue)> = Vec::new();
@@ -1160,8 +1189,10 @@ fn attr_value_display(value: &AttrValue) -> String {
     }
 }
 
-/// Like `block_row_attrs`, but keeps `__resource.`-prefixed keys so the caller
-/// can split span vs resource scope (the search path drops resource attrs).
+/// Like `block_row_attrs`, but keeps the `__resource.`-prefixed keys.
+///
+/// The caller can then split the span scope from the resource scope. The
+/// search path drops the resource attributes.
 fn block_row_scoped_attrs(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue)>> {
     let Some(keys) = optional_list_column(batch, BLOCK_ATTR_KEYS)? else {
         return Ok(Vec::new());
@@ -1228,11 +1259,14 @@ fn compare_row_attr_values<'a>(
     out
 }
 
-/// Tempo array-attribute semantics: equality/`<`/`>`/regex match if ANY value
-/// satisfies the predicate; `!=`/`!~` match only if ALL values do; an absent
-/// attribute matches ONLY `= nil`. This mirrors the planner SQL (`NULL != v`
-/// excludes) and the in-memory store's nil rules: a span lacking the attribute
-/// is NOT pulled into the selection by a `!= <concrete>` / `!~` predicate.
+/// Applies Tempo array-attribute semantics to one attribute.
+///
+/// Equality, `<`, `>`, and regex match if ANY value satisfies the predicate.
+/// `!=` and `!~` match only if ALL values satisfy the predicate. An absent
+/// attribute matches ONLY `= nil`. This mirrors the planner SQL, where
+/// `NULL != v` excludes the row, and the nil rules of the in-memory store. A
+/// `!= <concrete>` or `!~` predicate does NOT pull a span without the
+/// attribute into the selection.
 fn compare_attr_values_match(
     values: &[&AttrValue],
     op: ComparisonOp,
@@ -1417,14 +1451,18 @@ fn kind_enum_name(code: i32) -> &'static str {
 
 /// Builds the compare time series from the accumulated per-bucket counts.
 ///
-/// For each attribute, picks ONE shared value set — the `top_n` values with the
-/// highest SELECTION-group count (ties broken by value ascending for
-/// determinism, since the selection is what the user is investigating) — and
-/// emits BOTH a baseline and a selection series for each of those values,
-/// labelled `{__meta_type=<group>, <attribute>=<value>}`. A value absent from a
-/// group is zero-filled so the baseline and selection distributions cover the
-/// same values (Grafana's Comparison view renders them side by side).
-/// Per-group totals are emitted as `{__meta_type=<group>_total}`.
+/// For each attribute, this function picks ONE shared value set: the `top_n`
+/// values with the highest SELECTION-group count. It breaks ties by value in
+/// ascending order, which makes the result deterministic. The selection is the
+/// group that the user investigates.
+///
+/// The function emits BOTH a baseline series and a selection series for each
+/// of those values, with the label
+/// `{__meta_type=<group>, <attribute>=<value>}`. It zero-fills a value that is
+/// absent from a group, so the baseline distribution and the selection
+/// distribution cover the same values. Grafana's Comparison view shows them
+/// side by side. The function emits per-group totals as
+/// `{__meta_type=<group>_total}`.
 fn build_compare_series(
     counts: CompareCounts,
     totals: &CompareTotals,
@@ -1947,12 +1985,14 @@ fn metric_labels(
         .collect()
 }
 
-/// The series label key for a `by(<field>)` grouping, matching real Tempo: the
-/// FULLY-SCOPED attribute name (e.g. `resource.service.name`, `span.http.method`),
-/// not the scope-stripped key. Grafana's Traces Drilldown keys its per-attribute
-/// breakdown panels on this exact name, so a stripped key (`service.name`) leaves
-/// the breakdown blank even though the underlying data is correct (verified
-/// against real Tempo by `tempo_differential`).
+/// The series label key for a `by(<field>)` clause, as in real Tempo.
+///
+/// The key is the FULLY-SCOPED attribute name, such as
+/// `resource.service.name` or `span.http.method`, not the scope-stripped key.
+/// Grafana's Traces Drilldown keys its per-attribute breakdown panels on this
+/// exact name. A stripped key such as `service.name` leaves the breakdown
+/// blank, even though the data below it is correct. `tempo_differential`
+/// verified this against real Tempo.
 fn metric_label_key(field: &Field) -> String {
     let prefix = match &field.scope {
         Scope::Resource => "resource.",
@@ -2053,9 +2093,10 @@ fn metric_label_value(batch: &RecordBatch, column: &str, row: usize) -> Result<S
 
 /// Extracts the numeric value of a metric fold field for one row.
 ///
-/// Returns `Ok(None)` when the row's value field is NULL (the target attribute
-/// is absent for that span), so callers can skip the span instead of folding a
-/// spurious `0.0` into sum/min/max/avg/histogram.
+/// This function returns `Ok(None)` when the row's value field is NULL, that
+/// is, when the target attribute is absent for that span. The caller can then
+/// skip the span instead of folding a false `0.0` into sum, min, max, avg, or
+/// histogram.
 fn metric_numeric_value(batch: &RecordBatch, row: usize, field: &Field) -> Result<Option<f64>> {
     let column = metric_field_column(field)?;
     let array = batch
@@ -5068,10 +5109,12 @@ mod tests {
 
     // ---- block-format nested attribute columns (List<List<T>>) ----
 
-    /// Builds `attr_keys` (List<Utf8>) plus the four typed value columns
-    /// (List<List<T>>) for a single row carrying four attributes: a string `s`,
-    /// an int `i`, a float `f`, and a bool `b`. Each attribute is populated only
-    /// in its own typed column; the others are empty inner lists.
+    /// Builds `attr_keys` and the four typed value columns for a single row.
+    ///
+    /// `attr_keys` is a `List<Utf8>`, and each typed value column is a
+    /// `List<List<T>>`. The row carries four attributes: a string `s`, an int
+    /// `i`, a float `f`, and a bool `b`. This function fills each attribute
+    /// only in its own typed column, and leaves the other inner lists empty.
     fn block_attr_batch() -> RecordBatch {
         use arrow::array::{
             BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder,
@@ -5660,7 +5703,7 @@ mod tests {
     // compare() — Tempo attribute-comparison metric
     // ---------------------------------------------------------------------
 
-    /// A span with explicit status, attrs and start time for compare tests.
+    /// A span with an explicit status, attributes, and start time for compare tests.
     fn compare_span(id: u8, start: i64, status: i32, attrs: Vec<(&str, AttrValue)>) -> InputSpan {
         InputSpan {
             trace_id: [1; 16],
@@ -5942,12 +5985,14 @@ mod tests {
 
     // ---- MAJOR 1: resource.service.name is the trace-root service only ----
 
-    /// Builds a single-row batch in the REAL store's block shape: the
-    /// `attr_keys`/typed-value list columns carry a per-span
-    /// `__resource.service.name` (which MUST be ignored), a plain resource attr
-    /// (`__resource.cluster`), and a span attr (`http.method`); plus the
-    /// standard scalar columns `compare_row` reads (name/status/kind/duration/
-    /// root-service/start). The root-service column is the canonical
+    /// Builds a single-row batch in the block shape of the REAL store.
+    ///
+    /// The `attr_keys` and typed-value list columns carry three attributes: a
+    /// per-span `__resource.service.name`, which the code MUST ignore, a plain
+    /// resource attribute `__resource.cluster`, and a span attribute
+    /// `http.method`. The batch also carries the standard scalar columns that
+    /// `compare_row` reads: name, status, kind, duration, root-service, and
+    /// start. The root-service column is the canonical
     /// `resource.service.name` source.
     fn compare_block_batch() -> RecordBatch {
         use arrow::array::{
@@ -6570,9 +6615,10 @@ mod tests {
 
     // ---- MAJOR 2: per-attribute value cardinality is bounded ----
 
-    /// Builds an `n`-row batch with a single promoted string column `attr.path`
-    /// whose value is unique per row (`/p/<i>`), all at start time 0. Drives the
-    /// high-cardinality accumulation path.
+    /// Builds an `n`-row batch with one promoted string column `attr.path`.
+    ///
+    /// The column value is unique per row, `/p/<i>`, and every row starts at
+    /// time 0. This batch drives the high-cardinality accumulation path.
     fn unique_path_batch(n: usize) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
             ArrowField::new(COL_START, DataType::Int64, false),

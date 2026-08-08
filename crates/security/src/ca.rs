@@ -1,8 +1,8 @@
 //! Pure X.509 CA + leaf-cert generation for the operator's
-//! clients-CA bootstrap. Reusable by inter-broker mTLS
-//! and cert hot-reload tests.
+//! clients-CA bootstrap. Inter-broker mTLS and cert hot-reload tests
+//! can reuse it.
 //!
-//! No async, no I/O — these helpers return PEM-encoded material
+//! No async, no I/O. These helpers return PEM-encoded material
 //! that callers persist to Kubernetes Secrets, files, or anywhere
 //! else.
 
@@ -40,14 +40,14 @@ pub struct UserCert {
 }
 
 /// SAN entry for a leaf cert. ECDSA leaf certs accept any mix of DNS
-/// names and IP addresses; the broker-cert path uses a mix.
+/// names and IP addresses, and the broker-cert path uses a mix.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SubjectAltName {
     Dns(String),
     Ip(IpAddr),
 }
 
-/// A broker leaf cert (server + client cert in one).
+/// A broker leaf cert, which is a server cert and a client cert in one.
 pub struct BrokerCert {
     pub cert_pem: String,
     pub key_pem: String,
@@ -95,11 +95,12 @@ pub fn generate_clients_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, C
     })
 }
 
-/// Generate a self-signed cluster CA. Same shape as
-/// [`generate_clients_ca`] (ECDSA P-256, CA:TRUE, KU keyCertSign +
-/// cRLSign) but the subject DN carries `OU=cluster` so the cluster CA
-/// and clients CA are trivially distinguishable in cert chains and
-/// audit logs.
+/// Generate a self-signed cluster CA.
+///
+/// The shape is the same as [`generate_clients_ca`]: ECDSA P-256, CA:TRUE, and
+/// KU keyCertSign + cRLSign. The subject DN carries `OU=cluster`, so a reader
+/// can tell the cluster CA and the clients CA apart in cert chains and audit
+/// logs.
 // Cluster-CA issuance. skip_all keeps the generated private key (a local)
 // out of span fields; only the non-sensitive CN + validity are recorded.
 // `err` surfaces rcgen / time failures (Debug).
@@ -131,15 +132,16 @@ pub fn generate_cluster_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, C
     })
 }
 
-/// Re-sign a cluster CA cert reusing an existing key (same-key renewal).
+/// Re-sign a cluster CA cert with an existing key, a same-key renewal.
 ///
-/// Generates a fresh self-signed cert with the SAME subject DN (`CN=<cn>,
-/// O=crabka, OU=cluster`), `CA:TRUE`, `KU keyCertSign|cRLSign`, and a new
-/// `validityDays` window, but keyed by `key_pem` rather than a freshly
-/// generated key. Because the public key (SPKI) and subject DN are identical to
-/// the cert this replaces, leaf certs issued under the old cert still chain to
-/// the renewed one — the renewal is non-disruptive. Returns the cert PEM only;
-/// the caller already holds the key.
+/// This function generates a fresh self-signed cert with the SAME subject DN,
+/// `CN=<cn>, O=crabka, OU=cluster`, plus `CA:TRUE`, `KU keyCertSign|cRLSign`,
+/// and a new `validityDays` window. It keys the cert with `key_pem` and not
+/// with a freshly generated key. The public key (SPKI) and the subject DN are
+/// identical to the cert this one replaces, so leaf certs issued under the old
+/// cert still chain to the renewed one. The renewal is non-disruptive. This
+/// function returns the cert PEM only, because the caller already holds the
+/// key.
 // Cluster-CA same-key renewal. skip_all keeps the `key_pem` secret out of span
 // fields; only the non-sensitive CN + validity are recorded. `err` surfaces
 // rcgen / time failures (Debug).
@@ -150,9 +152,10 @@ pub fn renew_cluster_ca(key_pem: &str, cn: &str, validity_days: u32) -> Result<S
     renew_ca(key_pem, cn, validity_days, true)
 }
 
-/// Re-sign a clients CA cert reusing an existing key (same-key renewal).
-/// Like [`renew_cluster_ca`] but with the clients-CA subject DN (no
-/// `OU=cluster`).
+/// Re-sign a clients CA cert with an existing key, a same-key renewal.
+///
+/// This works like [`renew_cluster_ca`] but uses the clients-CA subject DN,
+/// which has no `OU=cluster`.
 // Clients-CA same-key renewal. skip_all keeps the `key_pem` secret out of span
 // fields; only the non-sensitive CN + validity are recorded. `err` surfaces
 // rcgen / time failures (Debug).
@@ -186,14 +189,15 @@ fn renew_ca(key_pem: &str, cn: &str, validity_days: u32, cluster: bool) -> Resul
     Ok(cert.pem())
 }
 
-/// Sign a broker leaf cert: server cert + client cert in one
-/// (EKU = serverAuth + clientAuth, KU = digitalSignature +
-/// keyEncipherment). SANs accept a mix of DNS names and IPs. ECDSA
-/// P-256.
+/// Sign a broker leaf cert: a server cert and a client cert in one.
 ///
-/// Merges `base_sans` and `extra_sans` (e.g. external advertised addresses
-/// for `NodePort` or `LoadBalancer` listeners) into a single SAN list;
-/// duplicates are silently dropped.
+/// The cert carries `EKU = serverAuth + clientAuth` and
+/// `KU = digitalSignature + keyEncipherment`. SANs accept a mix of DNS names
+/// and IPs. The key is ECDSA P-256.
+///
+/// This function merges `base_sans` and `extra_sans` into a single SAN list and
+/// drops duplicates silently. `extra_sans` holds entries such as the external
+/// advertised addresses for `NodePort` or `LoadBalancer` listeners.
 // Broker leaf-cert issuance. skip_all keeps the signing `ca_key_pem` secret +
 // the generated leaf key (a local) out of span fields; only the non-sensitive
 // CN + validity are recorded. `err` surfaces rcgen / time failures (Debug).
@@ -258,10 +262,12 @@ pub fn issue_broker_cert(
     })
 }
 
-/// Sign a leaf client cert with `Subject = CN=<cn>` (bare RDN —
-/// matches Strimzi, avoids RFC 2253 vs 4514 ordering ambiguity).
-/// `ExtendedKeyUsage = clientAuth`, `KeyUsage = digitalSignature|keyEncipherment`.
-/// ECDSA P-256.
+/// Sign a leaf client cert with `Subject = CN=<cn>`.
+///
+/// The subject is a bare RDN. This matches Strimzi and avoids the RFC 2253
+/// against 4514 ordering ambiguity. The cert carries
+/// `ExtendedKeyUsage = clientAuth` and
+/// `KeyUsage = digitalSignature|keyEncipherment`. The key is ECDSA P-256.
 // User leaf-cert issuance. skip_all keeps the signing `ca_key_pem` secret + the
 // generated leaf key (a local) out of span fields; only the non-sensitive CN +
 // validity are recorded. `err` surfaces rcgen / time failures (Debug).

@@ -1,7 +1,7 @@
 //! KIP-392 replica selection. The partition leader runs `select` on every
 //! consumer Fetch that carries a `client.rack` (`rack_id`) and reports the
 //! chosen node id in `FetchResponse.preferred_read_replica`. Returning `-1`
-//! means "no preference — read from the leader".
+//! means "no preference, read from the leader".
 
 /// One replica's view as the leader sees it, for selection purposes.
 #[derive(Debug, Clone)]
@@ -15,8 +15,8 @@ pub(crate) struct ReplicaView {
 }
 
 /// Which built-in selector the broker uses. Maps to Kafka's
-/// `replica.selector.class`, but as a native enum (Crabka does not load
-/// JVM classes).
+/// `replica.selector.class`, but as a native enum. Crabka does not load
+/// JVM classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReplicaSelectorKind {
     /// Always read from the leader. Default.
@@ -40,7 +40,7 @@ impl ReplicaSelectorKind {
     }
 
     /// Choose the preferred read replica. Returns a node id, or `-1` for
-    /// "no preference — use the leader".
+    /// "no preference, use the leader".
     pub(crate) fn select(
         self,
         client_rack: Option<&str>,

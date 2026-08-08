@@ -1,5 +1,6 @@
-//! SP27: aggregate functions + GROUP BY / HAVING, end-to-end over the wire
-//! (simple + extended protocol), including result types and error SQLSTATEs.
+//! SP27: aggregate functions and GROUP BY / HAVING, end-to-end over the wire.
+//! The tests use the simple protocol and the extended protocol, and they check
+//! result types and error SQLSTATEs.
 
 use std::sync::Arc;
 

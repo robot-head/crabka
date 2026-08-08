@@ -1,19 +1,20 @@
-//! KIP-447 transactional consumer offsets become visible via `OffsetFetch`
-//! only AFTER the transaction's COMMIT marker (and never on ABORT).
+//! KIP-447 transactional consumer offsets become visible to `OffsetFetch`
+//! only AFTER the transaction's COMMIT marker, and never on ABORT.
 //!
 //! A consume-process-produce (EOS) producer folds its source offsets into its
 //! transaction: `AddOffsetsToTxn` → `TxnOffsetCommit` (api 28) → COMMIT marker
 //! (`EndTxn`). The broker buffers the `TxnOffsetCommit` offsets on the
-//! transaction coordinator and materializes them into the owning group's
-//! in-memory committed-offset map (the one `OffsetFetch` reads) when the COMMIT
-//! marker is written — matching Kafka's "visible only after the commit marker"
-//! semantics. On ABORT the buffer is dropped and `OffsetFetch` still reports
-//! `-1` (absent).
+//! transaction coordinator. When the broker writes the COMMIT marker, it
+//! materializes them into the in-memory committed-offset map of the owning
+//! group, the map that `OffsetFetch` reads. This matches Kafka's "visible only
+//! after the commit marker" semantics. On ABORT the broker drops the buffer,
+//! and `OffsetFetch` still reports `-1`, which means absent.
 //!
-//! This drives the transaction control plane directly with a low-level client
-//! (single-broker, so the admin client is itself the txn + group coordinator):
-//! `InitProducerId → AddOffsetsToTxn → TxnOffsetCommit → EndTxn` then reads back
-//! with `OffsetFetch`.
+//! This test drives the transaction control plane directly with a low-level
+//! client. The cluster has a single broker, so the admin client is itself the
+//! txn coordinator and the group coordinator. The test runs
+//! `InitProducerId → AddOffsetsToTxn → TxnOffsetCommit → EndTxn`, then reads
+//! back with `OffsetFetch`.
 
 use std::time::{Duration, Instant};
 
@@ -40,14 +41,15 @@ use crabka_protocol::{
     primitives::uuid::Uuid as WireUuid,
 };
 
-/// `NOT_COORDINATOR` — the `__transaction_state` partition leader is elected
-/// lazily on first access, so an early `InitProducerId` can race ahead of it.
+/// `NOT_COORDINATOR`. The broker elects the `__transaction_state` partition
+/// leader lazily on first access, so an early `InitProducerId` can race ahead
+/// of it.
 const NOT_COORDINATOR: i16 = 16;
 
-/// Poll `FindCoordinator(TRANSACTION, tid)` until the txn coordinator partition
-/// has a real leader, so the subsequent `InitProducerId` doesn't race the lazy
-/// leader election. Mirrors the retry-with-deadline idiom in the marker-fanout
-/// test.
+/// Poll `FindCoordinator(TRANSACTION, tid)` until the txn coordinator
+/// partition has a real leader, so the later `InitProducerId` does not race
+/// the lazy leader election. Mirrors the retry-with-deadline idiom in the
+/// marker-fanout test.
 async fn await_txn_coordinator(client: &crabka_client_core::Client, tid: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -77,7 +79,8 @@ async fn await_txn_coordinator(client: &crabka_client_core::Client, tid: &str) {
 
 const TOPIC: &str = "src";
 
-/// Create a single-partition topic and return nothing — we key offsets by name.
+/// Create a single-partition topic and return nothing. This test keys offsets
+/// by name.
 async fn create_topic(client: &crabka_client_core::Client) {
     let resp = client
         .send(CreateTopicsRequest {
@@ -95,9 +98,9 @@ async fn create_topic(client: &crabka_client_core::Client) {
     assert!(resp.topics[0].error_code == 0, "create topic: {resp:?}");
 }
 
-/// Resolve `TOPIC`'s `topic_id` via Metadata. The v8+ `OffsetFetch` `groups[]`
-/// shape keys topics by `topic_id` at v10 (the name is dropped from the wire),
-/// so the read must carry the id, not just the name.
+/// Resolve `TOPIC`'s `topic_id` with Metadata. At v10 the v8+ `OffsetFetch`
+/// `groups[]` shape keys topics by `topic_id`, and the wire drops the name. So
+/// the read must carry the id, not only the name.
 async fn topic_id_for(client: &crabka_client_core::Client) -> WireUuid {
     let resp = client
         .send(MetadataRequest {
@@ -116,11 +119,11 @@ async fn topic_id_for(client: &crabka_client_core::Client) -> WireUuid {
         .unwrap_or_default()
 }
 
-/// `OffsetFetch` for `(TOPIC, 0)` under `group_id`. Fills BOTH the legacy v0–7
-/// single-group fields and the v8+ `groups[]` shape (carrying `topic_id`, which
-/// v10 keys on) so the read is correct whatever wire version the client
-/// negotiates. Returns the committed offset, or `-1` when absent (the only
-/// signal this test asserts on).
+/// `OffsetFetch` for `(TOPIC, 0)` under `group_id`. This function fills BOTH
+/// the legacy v0–7 single-group fields and the v8+ `groups[]` shape, which
+/// carries the `topic_id` that v10 keys on. The read is then correct for
+/// whatever wire version the client negotiates. Returns the committed offset,
+/// or `-1` when it is absent. That is the only signal this test asserts on.
 async fn fetch_offset(
     client: &crabka_client_core::Client,
     group_id: &str,
@@ -169,8 +172,8 @@ async fn fetch_offset(
 }
 
 /// Drive `InitProducerId → AddOffsetsToTxn → TxnOffsetCommit(offset)` for
-/// `(tid, group_id)`. Returns `(producer_id, producer_epoch)` so the caller can
-/// finalize the transaction with `EndTxn`.
+/// `(tid, group_id)`. Returns `(producer_id, producer_epoch)` so the caller
+/// can finalize the transaction with `EndTxn`.
 async fn begin_and_commit_offsets(
     client: &crabka_client_core::Client,
     tid: &str,
@@ -250,9 +253,9 @@ async fn begin_and_commit_offsets(
     (pid, epoch)
 }
 
-/// COMMIT marker materializes the buffered txn offsets into the group's
-/// committed offsets: before `EndTxn(commit)` `OffsetFetch` reads `-1`, after it
-/// reads the committed offset.
+/// The COMMIT marker materializes the buffered txn offsets into the group's
+/// committed offsets. Before `EndTxn(commit)`, `OffsetFetch` reads `-1`. After
+/// it, `OffsetFetch` reads the committed offset.
 #[tokio::test]
 async fn txn_offset_commit_visible_via_offset_fetch_after_commit_marker() {
     let p = support::start().await;
@@ -294,8 +297,8 @@ async fn txn_offset_commit_visible_via_offset_fetch_after_commit_marker() {
     p.broker.shutdown().await;
 }
 
-/// ABORT drops the buffered txn offsets: `OffsetFetch` still reads `-1` after
-/// `EndTxn(abort)` — aborted offsets must never become committed.
+/// ABORT drops the buffered txn offsets. `OffsetFetch` still reads `-1` after
+/// `EndTxn(abort)`. Aborted offsets must never become committed.
 #[tokio::test]
 async fn txn_offset_commit_dropped_on_abort_marker() {
     let p = support::start().await;

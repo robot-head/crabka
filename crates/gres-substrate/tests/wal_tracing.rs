@@ -1,11 +1,11 @@
 //! Distributed-tracing behaviour of the substrate WAL path.
 //!
 //! Assertions run against exported [`SpanData`], never against live
-//! [`tracing::Span`] handles: `tracing-opentelemetry` resolves a span's trace
+//! [`tracing::Span`] handles. `tracing-opentelemetry` resolves a span's trace
 //! id and parent when the span *closes*, so a live handle reports neither.
-//! The subscriber is installed with `set_global_default` for the same reason a
-//! thread-local one would not do — the broker, the producer, and the commit all
-//! hop runtime worker threads.
+//! The subscriber is installed with `set_global_default` for the same reason
+//! that a thread-local one would not work. The broker, the producer, and the
+//! commit all move between runtime worker threads.
 
 use std::{
     sync::{
@@ -42,8 +42,8 @@ use tokio::sync::oneshot;
 use tracing::Instrument as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
-/// Serialises the tests: they share one process-wide subscriber and one
-/// in-memory exporter, and each drains everything the previous test left.
+/// Serialises the tests. They share one process-wide subscriber and one
+/// in-memory exporter, and each test drains everything the previous test left.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 static TRACING: OnceLock<(SdkTracerProvider, InMemorySpanExporter)> = OnceLock::new();
@@ -212,11 +212,12 @@ impl TransactionalWalWriter for SlowWalWriter {
 struct OnceAfterCommit(AtomicBool);
 
 /// Fails before the first record is sent, with a caller-chosen producer error.
-/// `BeforeFirstSend` is a clean rejection — unlike `AfterCommit`, whose outcome
-/// is indeterminate — so the writer maps the error and answers its caller.
 ///
-/// Holds a constructor rather than an error: `ProducerError` is not `Clone`,
-/// and the injector may be consulted more than once.
+/// `BeforeFirstSend` is a clean rejection, so the writer maps the error and
+/// answers its caller. The outcome of `AfterCommit` is indeterminate instead.
+///
+/// This type holds a constructor and not an error, because `ProducerError` is
+/// not `Clone` and the injector may be consulted more than once.
 struct FailFirstSend(fn() -> ProducerError);
 
 impl WalWriterFaultInjector for FailFirstSend {
@@ -361,9 +362,10 @@ async fn gate_wait_reflects_time_queued_behind_another_commit() {
     check!(waits[1] > 100.0);
 }
 
-/// An unknown commit outcome is the single most important span in the feature:
-/// the compute is about to be terminated, so the span has to carry `ERROR` and
-/// be closed *before* the handler runs, or it never leaves the process.
+/// An unknown commit outcome is the most important span in the feature. The
+/// compute is about to stop, so the span must carry `ERROR` and must close
+/// *before* the handler runs. If it does not, the span never leaves the
+/// process.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_indeterminate_append_exports_an_error_span_before_the_compute_dies() {
     let _serial = SERIAL.lock().await;
@@ -478,9 +480,9 @@ async fn failed_append_error_type(
 /// A fenced producer is reported as such, not as a generic failure.
 ///
 /// `map_producer_error` collapses a fenced producer to [`SubstrateError::Fenced`]
-/// and everything else to `Unavailable`, so a span carrying a constant would
-/// tell an operator nothing: "another writer took the generation" and "the WAL
-/// is unreachable" are different incidents with different responses.
+/// and everything else to `Unavailable`, so a span that carried a constant
+/// would tell an operator nothing. "another writer took the generation" and
+/// "the WAL is unreachable" are different incidents with different responses.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fenced_append_is_named_fenced() {
     let _serial = SERIAL.lock().await;
@@ -492,10 +494,10 @@ async fn a_fenced_append_is_named_fenced() {
 
 /// Every other *cleanly rejected* append is reported as unavailable.
 ///
-/// `TransactionAborted`, not something like `FlushTimeout`: only
-/// `classify_commit_failure`'s `Rejected` shapes answer the caller at all.
-/// Anything else is indeterminate by design and terminates the compute instead
-/// of returning, which is covered by its own test.
+/// This test uses `TransactionAborted` and not something like `FlushTimeout`,
+/// because only the `Rejected` shapes of `classify_commit_failure` answer the
+/// caller at all. Anything else is indeterminate by design and stops the
+/// compute instead of returning. Its own test covers that case.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn any_other_failed_append_is_named_unavailable() {
     let _serial = SERIAL.lock().await;

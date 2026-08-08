@@ -1,21 +1,23 @@
 //! Generic OTLP distributed-tracing pipeline for Crabka services.
 //!
 //! The consuming service always installs a structured-JSON `tracing_subscriber`
-//! `fmt` layer (stdout, gated by the usual `RUST_LOG` `EnvFilter`) so container
-//! log collectors (GKE / Cloud Logging, Loki, …) ingest each line as fields
-//! rather than ANSI-coloured human text. When OTLP export is
-//! configured via the environment, a second `tracing-opentelemetry` layer is
-//! attached that converts `tracing` spans into OpenTelemetry spans and
-//! batch-exports them over OTLP to a collector (gRPC `:4317` or
-//! HTTP/protobuf `:4318`).
+//! `fmt` layer. That layer writes to stdout and uses the usual `RUST_LOG`
+//! `EnvFilter`. Container log collectors such as GKE / Cloud Logging and Loki
+//! thus ingest each line as fields, not as ANSI-coloured human text.
+//!
+//! The environment can also configure OTLP export. This crate then attaches a
+//! second `tracing-opentelemetry` layer, which converts `tracing` spans into
+//! OpenTelemetry spans. That layer batch-exports the spans over OTLP to a
+//! collector: gRPC `:4317` or HTTP/protobuf `:4318`.
 //!
 //! ## Enabling
 //!
-//! OTLP is **off by default** — a service with no OTLP environment behaves
-//! byte-for-byte as before. It turns on when any endpoint is set
-//! (`CRABKA_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
-//! `OTEL_EXPORTER_OTLP_ENDPOINT`) or `CRABKA_OTLP_ENABLED=true`, and is
-//! force-disabled by `OTEL_SDK_DISABLED=true`.
+//! OTLP is **off by default**. A service with no OTLP environment keeps its
+//! behavior byte-for-byte. OTLP turns on when one of these variables sets an
+//! endpoint: `CRABKA_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or
+//! `OTEL_EXPORTER_OTLP_ENDPOINT`. `CRABKA_OTLP_ENABLED=true` also turns OTLP
+//! on. `OTEL_SDK_DISABLED=true` turns OTLP off and overrides the other
+//! variables.
 //!
 //! ## Resolve OTLP settings without touching the environment
 //!
@@ -41,9 +43,10 @@ pub mod profiling;
 
 /// W3C Trace Context propagation helpers.
 ///
-/// These live in the standalone, publishable `crabka-trace-context` crate so
-/// the wire-protocol crates can propagate a trace without linking the OTLP
-/// exporter, the admin HTTP server, or the profiler that this crate pulls in.
+/// These helpers live in the standalone, publishable `crabka-trace-context`
+/// crate. The wire-protocol crates can thus propagate a trace and do not link
+/// the OTLP exporter, the admin HTTP server, or the profiler that this crate
+/// depends on.
 pub use crabka_trace_context as propagation;
 use crabka_units::prelude::{Time, TimeExt, secs};
 use opentelemetry::{
@@ -65,9 +68,10 @@ use tracing_subscriber::{
     EnvFilter, Layer as _, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
-/// Errors building the OTLP pipeline. Carries the underlying exporter
-/// build failure so a misconfigured endpoint surfaces a clear message
-/// rather than a silent no-export.
+/// An error from the build of the OTLP pipeline.
+///
+/// The error carries the exporter build failure. A misconfigured endpoint thus
+/// gives a clear message and does not become a silent no-export.
 #[derive(Debug, thiserror::Error)]
 pub enum TelemetryError {
     #[error("invalid {name}: {message}")]
@@ -76,18 +80,23 @@ pub enum TelemetryError {
     Exporter(#[from] opentelemetry_otlp::ExporterBuildError),
 }
 
-/// OTLP transport. Mirrors the `OTEL_EXPORTER_OTLP_PROTOCOL` spec values.
+/// OTLP transport.
+///
+/// The variants mirror the `OTEL_EXPORTER_OTLP_PROTOCOL` spec values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OtlpProtocol {
-    /// gRPC (OTLP/gRPC), default collector port `4317`.
+    /// The OTLP/gRPC transport. Default collector port `4317`.
     Grpc,
-    /// HTTP with protobuf payloads (OTLP/HTTP), default collector port `4318`.
+    /// The OTLP/HTTP transport with protobuf payloads. Default collector port
+    /// `4318`.
     HttpProtobuf,
 }
 
 impl OtlpProtocol {
-    /// Parse an `OTEL_EXPORTER_OTLP_PROTOCOL`-style value. Unknown /
-    /// unsupported values fall back to gRPC (the SDK's transport default).
+    /// Parse an `OTEL_EXPORTER_OTLP_PROTOCOL`-style value.
+    ///
+    /// A value that this function does not recognize falls back to gRPC, the
+    /// SDK's default transport.
     #[must_use]
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
@@ -105,14 +114,17 @@ impl OtlpProtocol {
     }
 }
 
-/// Resolved OTLP configuration. Built by [`OtlpConfig::from_env`]; `Ok(None)`
-/// from that constructor means OTLP is disabled and no exporter is built.
+/// Resolved OTLP configuration.
+///
+/// [`OtlpConfig::from_env`] builds this configuration. `Ok(None)` from that
+/// constructor means that OTLP is disabled and that this crate builds no
+/// exporter.
 #[derive(Debug, Clone)]
 pub struct OtlpConfig {
     pub endpoint: String,
     pub protocol: OtlpProtocol,
-    /// Head sampling ratio in `[0.0, 1.0]`, wrapped in a parent-based
-    /// sampler so child spans honour an upstream sampling decision.
+    /// Head sampling ratio in `[0.0, 1.0]`. A parent-based sampler wraps this
+    /// ratio, so child spans keep an upstream sampling decision.
     pub sample_ratio: f64,
     pub service_name: String,
     pub service_version: String,
@@ -121,7 +133,7 @@ pub struct OtlpConfig {
     pub heartbeat_interval: Option<Time>,
 }
 
-/// Truthy parse for `*_ENABLED` / `*_DISABLED` style env values.
+/// Truthy parse of `*_ENABLED` and `*_DISABLED` style environment values.
 fn env_truthy(v: &str) -> bool {
     matches!(
         v.trim().to_ascii_lowercase().as_str(),
@@ -146,14 +158,16 @@ fn parse_time(name: &'static str, value: &str) -> Result<Time, TelemetryError> {
 }
 
 impl OtlpConfig {
-    /// Resolve OTLP config from the environment. `get` is the env lookup
-    /// (injected so this is a pure, testable function);
-    /// `service_instance_id` is the service instance id (e.g. broker node id),
-    /// `service_version` the crate version, and `default_service_name` is the
-    /// fallback used when `OTEL_SERVICE_NAME` is not set.
+    /// Resolve OTLP config from the environment.
     ///
-    /// Returns `Ok(None)` when OTLP is disabled — either nothing turned it on
-    /// or `OTEL_SDK_DISABLED` turned it off.
+    /// `get` is the environment lookup. The caller injects it, so this
+    /// function is pure and easy to test. `service_instance_id` is the service
+    /// instance id, for example the broker node id. `service_version` is the
+    /// crate version. `default_service_name` is the fallback name for when
+    /// `OTEL_SERVICE_NAME` is not set.
+    ///
+    /// Returns `Ok(None)` when OTLP is disabled. OTLP is disabled when nothing
+    /// turned it on, or when `OTEL_SDK_DISABLED` turned it off.
     ///
     /// # Errors
     ///
@@ -244,9 +258,11 @@ impl OtlpConfig {
         Ok(exporter)
     }
 
-    /// OTLP **log** exporter, mirroring [`Self::build_exporter`] (spans). Lets
-    /// services ship their `tracing` logs over OTLP to the logs pipeline instead
-    /// of relying on container-stdout tailing.
+    /// Build the OTLP **log** exporter.
+    ///
+    /// This function mirrors [`Self::build_exporter`], which builds the span
+    /// exporter. Services can thus send their `tracing` logs over OTLP to the
+    /// logs pipeline, and they do not depend on container-stdout tailing.
     fn build_log_exporter(&self) -> Result<LogExporter, TelemetryError> {
         let builder = LogExporter::builder();
         let exporter = match self.protocol {
@@ -280,18 +296,22 @@ impl OtlpConfig {
     }
 }
 
-/// Per-layer filter for the OTLP layer. Overridable with `CRABKA_OTLP_FILTER`
-/// for operators who want finer control; falls back to `default`.
+/// Per-layer filter for the OTLP layer.
+///
+/// Operators who want more control can override the filter with
+/// `CRABKA_OTLP_FILTER`. Without that variable, the filter falls back to
+/// `default`.
 fn otel_filter(default: &str, get: impl Fn(&str) -> Option<String>) -> EnvFilter {
     get("CRABKA_OTLP_FILTER")
         .and_then(|s| EnvFilter::try_new(s).ok())
         .unwrap_or_else(|| EnvFilter::new(default))
 }
 
-/// Owns the OTLP `SdkTracerProvider` so spans are flushed on shutdown.
-/// Dropping also flushes (the provider shuts down when its last clone
-/// drops), but call [`TelemetryGuard::shutdown`] explicitly before exit so
-/// the final batch is delivered before the process ends.
+/// Owns the OTLP `SdkTracerProvider`, so shutdown flushes the spans.
+///
+/// A drop of the guard also flushes: the provider shuts down when its last
+/// clone drops. But call [`TelemetryGuard::shutdown`] explicitly before exit,
+/// so the exporter delivers the final batch before the process ends.
 #[must_use = "hold the guard for the process lifetime and call shutdown() before exit"]
 pub struct TelemetryGuard {
     provider: Option<SdkTracerProvider>,
@@ -300,8 +320,9 @@ pub struct TelemetryGuard {
 }
 
 impl TelemetryGuard {
-    /// Flush and shut down the OTLP exporters (traces + logs). No-op when OTLP
-    /// is disabled.
+    /// Flush and shut down the OTLP exporters for traces and logs.
+    ///
+    /// This function does nothing when OTLP is disabled.
     pub fn shutdown(self) {
         if let Some(task) = self.heartbeat_task {
             task.abort();
@@ -319,16 +340,19 @@ impl TelemetryGuard {
     }
 }
 
-/// Install the global `tracing` subscriber: a stdout JSON `fmt` layer plus,
-/// when `otlp` is `Some`, a batch OTLP export layer.
+/// Install the global `tracing` subscriber.
+///
+/// The subscriber has a stdout JSON `fmt` layer. When `otlp` is `Some`, the
+/// subscriber also has a batch OTLP export layer.
 ///
 /// - `fmt_default_filter`: the `fmt` layer's filter when `RUST_LOG` is unset.
 /// - `otel_default_filter`: the OTLP layer's filter when `CRABKA_OTLP_FILTER`
 ///   is unset.
-/// - `tracer_name`: the name passed to `TracerProvider::tracer(...)`.
+/// - `tracer_name`: the name that this function passes to
+///   `TracerProvider::tracer(...)`.
 ///
-/// Must be called exactly once, from within the tokio runtime (the
-/// gRPC exporter captures the current runtime handle).
+/// You must call this function exactly one time, and from inside the tokio
+/// runtime. The gRPC exporter captures the current runtime handle.
 /// # Errors
 /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub fn init(

@@ -16,8 +16,8 @@ fn labels(pairs: &[(&str, &str)]) -> Labels {
     labels
 }
 
-/// Deterministic clock whose epoch-millis reading the test can advance, so
-/// TTL expiry can be exercised without sleeping.
+/// Deterministic clock whose epoch-millis reading the test can advance. The
+/// test can then exercise TTL expiry without a sleep.
 #[derive(Default)]
 struct ManualClock {
     now_ms: std::sync::atomic::AtomicI64,
@@ -1133,12 +1133,12 @@ async fn frontend_range_execution_uses_cache_and_merges_subquery_results() {
     );
 }
 
-/// Executor that blocks every sub-query on a shared barrier sized to the
-/// expected fan-out width. A sequential dispatcher can never satisfy the
-/// barrier (only one sub-query is ever in flight), so the surrounding
-/// `tokio::time::timeout` trips; a concurrent dispatcher releases all N at
-/// once. The executor also records the wall-clock order in which sub-queries
-/// were admitted to prove every planned sub-query was dispatched.
+/// Executor that blocks every sub-query on a shared barrier. The barrier size is
+/// the expected fan-out width. A sequential dispatcher can never satisfy the
+/// barrier, because only one sub-query is ever in flight, so the surrounding
+/// `tokio::time::timeout` trips. A concurrent dispatcher releases all N at once.
+/// The executor also records the wall-clock order in which it admitted the
+/// sub-queries, which proves that it dispatched every planned sub-query.
 struct ConcurrencyProbeExecutor {
     barrier: tokio::sync::Barrier,
     calls: Mutex<Vec<FrontendRangeQuery>>,

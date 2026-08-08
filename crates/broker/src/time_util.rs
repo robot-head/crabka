@@ -1,14 +1,15 @@
 //! Shared wall-clock time helpers.
 //!
-//! Single source of truth for the `SystemTime::now() → UNIX_EPOCH →
-//! as_millis() → i64` dance used by transaction, OAuth, and
-//! delegation-token handlers. Saturates on overflow or pre-epoch clock
-//! skew rather than panicking.
+//! This module is the single source of truth for the `SystemTime::now() →
+//! UNIX_EPOCH → as_millis() → i64` sequence that the transaction, OAuth, and
+//! delegation-token handlers use. The helpers saturate on overflow and on
+//! pre-epoch clock skew, and do not panic.
 
-/// Returns the current wall-clock time in milliseconds since the Unix
-/// epoch. Saturates to `0` if the system clock is set before the epoch
-/// and to `i64::MAX` if the duration overflows `i64` (~292 million
-/// years from now — safe in practice).
+/// Returns the current wall-clock time in milliseconds since the Unix epoch.
+///
+/// The value saturates to `0` if the system clock is set before the epoch. It
+/// saturates to `i64::MAX` if the duration overflows `i64`, which is about
+/// 292 million years from now and therefore safe in practice.
 #[inline]
 pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};

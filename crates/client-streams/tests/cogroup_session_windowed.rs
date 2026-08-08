@@ -1,4 +1,4 @@
-//! KIP-150 session-windowed cogroup — JVM 4.1 wire-topology + behavioral goldens.
+//! KIP-150 session-windowed cogroup: JVM 4.1 wire-topology and behavioral goldens.
 use crabka_client_streams::{
     Consumed, I64Serde, Materialized, Produced, SessionWindowedSerde, SessionWindows, StringSerde,
     dsl::StreamsBuilder,

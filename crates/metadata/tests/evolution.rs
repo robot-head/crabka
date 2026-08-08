@@ -1,7 +1,7 @@
 //! Proptest harness for `MetadataRecord` schema evolution. Today
-//! everything is V1; the future-version policy is "decode v2 →
-//! re-encode v1 round-trips for the fields v1 understands." We seed
-//! that contract by asserting v1 ↔ v1 round-trips here.
+//! everything is V1. The future-version policy is "decode v2 →
+//! re-encode v1 round-trips for the fields v1 understands." This harness
+//! seeds that contract with an assertion that v1 ↔ v1 round-trips.
 
 use crabka_metadata::{
     BrokerRegistrationRecord, DeleteTopicRecord, LeaderEpoch, MetadataRecord, NodeId,

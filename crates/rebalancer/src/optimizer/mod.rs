@@ -1,4 +1,4 @@
-//! Optimizer: runs an ordered list of `Goal`s over a `ClusterState`,
+//! Optimizer. It runs an ordered list of `Goal`s over a `ClusterState`,
 //! coalesces their movements, and emits a `Proposal`.
 
 use std::collections::HashMap;
@@ -31,10 +31,12 @@ pub struct OptimizeOutput {
     pub state_after: ClusterState,
 }
 
-/// Run the goals over `state` and produce a `Proposal`. Goals are
-/// applied in priority order (Hard before Soft). The cluster state
-/// passed to each goal reflects the cumulative effect of prior goals'
-/// movements — soft goals see post-hard-goal counts.
+/// Run the goals over `state` and produce a `Proposal`.
+///
+/// The optimizer applies the goals in priority order, Hard before Soft. The
+/// cluster state passed to each goal carries the cumulative effect of the
+/// earlier goals' movements, so soft goals see the counts that follow the hard
+/// goals.
 // One span per rebalance-plan compute (info): the entry point operators
 // care about. `skip_all` keeps the (large) `state`/`goals`/`ctx` out of the
 // span; `fields` carry the scale of the problem, `err` records the

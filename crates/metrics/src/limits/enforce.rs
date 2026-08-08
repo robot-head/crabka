@@ -13,13 +13,15 @@ use super::{LimitError, Limits};
 
 /// Default cap on the number of distinct tenants tracked for per-tenant
 /// ingestion-rate token buckets. The map is otherwise insert-only, so an
-/// unbounded set of tenant strings (e.g. from a misbehaving or hostile client)
-/// would grow memory without limit; once this many tenants are tracked, the
-/// least-recently-touched bucket is evicted to make room.
+/// unbounded set of tenant strings would grow memory without limit. A
+/// misbehaving or hostile client can send such a set. After this many tenants
+/// are tracked, the enforcer evicts the least-recently-touched bucket to make
+/// room.
 pub const DEFAULT_MAX_RATE_BUCKETS: usize = 100_000;
 
-/// Per-tenant ingestion-rate token bucket with a monotonic last-touch stamp
-/// used for least-recently-used eviction once `max_rate_buckets` is reached.
+/// Per-tenant ingestion-rate token bucket with a monotonic last-touch stamp.
+/// The enforcer uses that stamp for least-recently-used eviction after the map
+/// reaches `max_rate_buckets`.
 #[derive(Debug)]
 struct RateBucket {
     bucket: Arc<TokenBucket>,
@@ -31,7 +33,7 @@ pub struct IngestEnforcer {
     sample_rate_buckets: DashMap<String, RateBucket>,
     /// Maximum number of distinct tenants tracked in `sample_rate_buckets`.
     max_rate_buckets: usize,
-    /// Monotonic logical clock used to stamp bucket touches for LRU eviction.
+    /// Monotonic logical clock that stamps bucket touches for LRU eviction.
     touch_clock: AtomicU64,
 }
 
@@ -51,8 +53,8 @@ impl IngestEnforcer {
         Self::default()
     }
 
-    /// Construct an enforcer that tracks at most `max_rate_buckets` distinct
-    /// tenants for ingestion-rate limiting. A value of `0` is clamped to `1`.
+    /// Constructs an enforcer that tracks at most `max_rate_buckets` distinct
+    /// tenants for ingestion-rate limiting. A value of `0` clamps to `1`.
     #[must_use]
     pub fn with_max_rate_buckets(max_rate_buckets: usize) -> Self {
         Self {
@@ -71,11 +73,12 @@ impl IngestEnforcer {
         self.touch_clock.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Evict least-recently-touched tenants until the map is within the cap.
+    /// Evicts the least-recently-touched tenants until the map is within the
+    /// cap.
     ///
-    /// Called only on the cold path where a brand-new tenant is inserted while
-    /// the map is already at capacity, so the linear scan is bounded by
-    /// `max_rate_buckets` and does not run on the steady-state hot path.
+    /// This runs only on the cold path, where a new tenant arrives while the
+    /// map is already at capacity. `max_rate_buckets` bounds the linear scan,
+    /// and the scan never runs on the steady-state hot path.
     fn evict_if_over_cap(&self) {
         while self.sample_rate_buckets.len() > self.max_rate_buckets {
             let oldest = self
@@ -263,12 +266,13 @@ impl QueryEnforcer {
 }
 
 /// The extent between two epoch-millisecond instants, clamped at zero so a
-/// reversed range reads as "no span" rather than a negative one.
+/// reversed range reads as "no span" and not as a negative one.
 fn extent_between(start_ms: i64, end_ms: i64) -> Time {
     Time::from_millis(end_ms.saturating_sub(start_ms).max(0))
 }
 
-/// An extent in whole seconds, rounded up — the unit the limit errors report.
+/// An extent in whole seconds, rounded up. This is the unit the limit errors
+/// report.
 fn secs_ceil(extent: Time) -> u64 {
     extent.secs_f64().ceil().to_u64().unwrap_or(u64::MAX)
 }

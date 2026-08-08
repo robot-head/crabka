@@ -1,4 +1,5 @@
-//! Streaming Connect handlers: `SendStream` (produce) and `Subscribe` (consume).
+//! Streaming Connect handlers: `SendStream` for produce and `Subscribe` for
+//! consume.
 
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
@@ -59,8 +60,9 @@ async fn state_for(bootstrap: &str) -> Arc<AppState> {
 }
 
 /// On-behalf-of identity for the `*_inner` helpers: ANONYMOUS over the unknown
-/// host. State carries an `AllowAllAuthorizer`, so the value is immaterial to
-/// the decision (every record is allowed) — it just satisfies the signature.
+/// host. The state carries an `AllowAllAuthorizer`, so the value does not
+/// change the decision and every record is allowed. It only satisfies the
+/// signature.
 fn anon() -> (crabka_security::Principal, SocketAddr) {
     (
         crabka_security::Principal {
@@ -290,11 +292,13 @@ async fn streaming_wrappers_and_router_build() {
     broker.shutdown().await;
 }
 
-/// Connect proto content-type regression: a connect-go client posts a unary
-/// `application/proto` request and requires the 200 response to echo it. An
-/// all-default `SendRequest` (no records) encodes to an empty body and the
-/// `Send` handler returns 200 without producing. Before the `.build_connect()`
-/// fix the router replied `application/json`, which proto clients reject with
+/// Connect proto content-type regression.
+///
+/// A connect-go client posts a unary `application/proto` request and requires
+/// the 200 response to echo that content type. An all-default `SendRequest`,
+/// which has no records, encodes to an empty body, and the `Send` handler
+/// returns 200 without producing. A router without `.build_connect()` replies
+/// `application/json`, which a proto client rejects with
 /// `invalid content-type: "application/json"; expecting "application/proto"`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn send_echoes_proto_content_type() {

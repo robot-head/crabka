@@ -1,9 +1,9 @@
 //! Pluggable inbound handshake for the controller listener.
 //!
-//! Lets the broker terminate TLS + SASL on every accepted
-//! controller-listener connection before raft frames start flowing. The
+//! This hook lets the broker terminate TLS and SASL on every accepted
+//! controller-listener connection before the raft frames start to flow. The
 //! trait abstraction keeps `crabka-raft` free of any dependency on
-//! `crabka-broker` / `crabka-security`.
+//! `crabka-broker` and `crabka-security`.
 
 use thiserror::Error;
 use tokio::{
@@ -12,6 +12,7 @@ use tokio::{
 };
 
 /// Type-erased duplex stream returned by [`RaftListenerHandshake::upgrade`].
+///
 /// The raft connection handler is generic over `AsyncRead + AsyncWrite +
 /// Unpin + Send + 'static`, so a `Box<dyn DuplexStream>` plugs in directly.
 pub trait DuplexStream: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -29,10 +30,12 @@ pub enum RaftHandshakeError {
     Protocol(String),
 }
 
-/// Per-connection handshake hook. Implementations consume the raw
-/// `TcpStream` and return either an authenticated `Box<dyn DuplexStream>`
-/// (for raft frames to ride on) or a `RaftHandshakeError` (the listener
-/// drops the connection at debug level).
+/// Per-connection handshake hook.
+///
+/// Implementors consume the raw `TcpStream` and return one of two things. On
+/// success they return an authenticated `Box<dyn DuplexStream>` that carries
+/// the raft frames. On failure they return a `RaftHandshakeError`, and the
+/// listener then drops the connection at debug level.
 #[async_trait::async_trait]
 pub trait RaftListenerHandshake: Send + Sync {
     async fn upgrade(&self, stream: TcpStream)

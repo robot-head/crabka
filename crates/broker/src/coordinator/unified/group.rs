@@ -1,14 +1,17 @@
 //! Unified `Group` container for KIP-848 migration.
 //!
-//! One in-memory model for a consumer group regardless of which protocol its
-//! members speak. A `Group` is a discriminated container over the two existing,
-//! tested state machines — the classic 5-state machine ([`ClassicState`]) and
-//! the next-gen epoch machine ([`ConsumerState`]) — so the unified coordinator
-//! and persistence path can hold either behind one type.
+//! One in-memory model for a consumer group, whichever protocol its members
+//! speak.
 //!
-//! A group is single-type for its lifetime: the `kind` is chosen when the actor
-//! is spawned and never flipped. The container keeps the protocol-specific
-//! state machines behind one surface for coordinator and persistence code.
+//! A `Group` is a discriminated container over the two existing, tested state
+//! machines: the classic 5-state machine ([`ClassicState`]) and the next-gen
+//! epoch machine ([`ConsumerState`]). The unified coordinator and the
+//! persistence path can therefore hold either one behind a single type.
+//!
+//! A group keeps one type for its whole lifetime. The actor chooses the `kind`
+//! when it spawns, and never changes it. The container keeps the
+//! protocol-specific state machines behind one surface for the coordinator and
+//! persistence code.
 
 // The state machines are reused verbatim, relocated under `unified/`. These
 // aliases give the unified surface its types without renaming the moved code
@@ -20,7 +23,7 @@ pub(crate) use crate::coordinator::unified::{
     consumer_state::GroupState as ConsumerState,
 };
 
-/// Which protocol a [`Group`]'s members speak. The variant carries that
+/// Which protocol the members of a [`Group`] speak. The variant carries that
 /// protocol's full state machine.
 #[derive(Debug)]
 pub enum GroupKind {
@@ -35,11 +38,13 @@ pub enum GroupKind {
 pub struct CoordinatorGroup {
     pub group_id: String,
     pub kind: GroupKind,
-    /// Committed offsets (`__consumer_offsets` k0/k1). Protocol-agnostic — a
-    /// group's offsets are keyed by `(topic, partition)` regardless of which
-    /// protocol its members speak, so they live on the container, not inside
-    /// either state machine. This is what lets a future type flip (Slices
-    /// C–E) preserve committed offsets across a conversion untouched.
+    /// Committed offsets, from `__consumer_offsets` k0 and k1.
+    ///
+    /// They do not depend on the protocol. A group's offsets key by
+    /// `(topic, partition)` whichever protocol its members speak, so they live
+    /// on the container instead of inside either state machine. A later type
+    /// change, in slices C to E, can therefore carry the committed offsets
+    /// through a conversion untouched.
     pub committed_offsets: HashMap<(String, i32), OffsetEntry>,
 }
 
@@ -54,7 +59,7 @@ impl CoordinatorGroup {
         }
     }
 
-    /// A fresh, empty next-gen (consumer-protocol) group.
+    /// A fresh, empty next-gen group, on the consumer protocol.
     pub fn new_consumer(group_id: impl Into<String>) -> Self {
         let group_id = group_id.into();
         Self {
@@ -64,12 +69,12 @@ impl CoordinatorGroup {
         }
     }
 
-    /// `true` if this group speaks the classic protocol.
+    /// Returns `true` if this group speaks the classic protocol.
     pub fn is_classic(&self) -> bool {
         matches!(self.kind, GroupKind::Classic(_))
     }
 
-    /// `true` if this group speaks the next-gen protocol.
+    /// Returns `true` if this group speaks the next-gen protocol.
     pub fn is_consumer(&self) -> bool {
         matches!(self.kind, GroupKind::Consumer(_))
     }
@@ -102,8 +107,9 @@ impl CoordinatorGroup {
         }
     }
 
-    /// Mutable access to the discriminated `kind`, so a live-migration trigger
-    /// can replace `Classic(..)` with `Consumer(..)` in place (KIP-848 upgrade).
+    /// Gives mutable access to the discriminated `kind`, so that a
+    /// live-migration trigger can replace `Classic(..)` with `Consumer(..)` in
+    /// place. This is the KIP-848 upgrade.
     pub fn kind_mut(&mut self) -> &mut GroupKind {
         &mut self.kind
     }

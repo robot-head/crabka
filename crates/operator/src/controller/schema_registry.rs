@@ -1,6 +1,8 @@
-//! `SchemaRegistry` reconciler. Renders a stateless Deployment + headless
-//! Service + `ClusterIP` Service for the `crabka-schema-registry` binary,
-//! associated with a managed `Kafka` via the `crabka.io/cluster` label.
+//! `SchemaRegistry` reconciler.
+//!
+//! This reconciler renders a stateless Deployment, a headless Service, and a
+//! `ClusterIP` Service for the `crabka-schema-registry` binary. The
+//! `crabka.io/cluster` label associates them with a managed `Kafka`.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -52,6 +54,7 @@ const DEFAULT_IMAGE: &str = concat!(
 );
 
 /// # Errors
+///
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let sr_api: Api<SchemaRegistry> = Api::all(ctx.client.clone());
@@ -76,8 +79,9 @@ pub fn error_policy(_obj: Arc<SchemaRegistry>, err: &ReconcileError, ctx: Arc<Co
     common::error_requeue(ctx)
 }
 
-/// Reconcile entry point. Times the pass and records the reconcile
-/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
+/// Reconcile entry point. This function times the pass, records the reconcile
+/// counter and histogram, and then delegates to the internal `reconcile_inner`
+/// operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -89,6 +93,7 @@ pub fn error_policy(_obj: Arc<SchemaRegistry>, err: &ReconcileError, ctx: Arc<Co
     )
 )]
 /// # Errors
+///
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn reconcile(
     obj: Arc<SchemaRegistry>,
@@ -494,11 +499,11 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
     Ok(())
 }
 
-/// Stable label set used for Deployment `selector.matchLabels`, the pod
-/// template labels, and BOTH Services' `spec.selector`. Deployment
-/// selectors are immutable, so this map must NOT carry the version label
-/// (a churning value there would make the Deployment un-updatable, and a
-/// selector/template mismatch would mean pods never become Ready).
+/// Stable label set for the Deployment `selector.matchLabels`, the pod
+/// template labels, and BOTH Services' `spec.selector`. Deployment selectors
+/// are immutable, so this map must NOT carry the version label. A value that
+/// churns there would make the Deployment un-updatable, and a mismatch between
+/// the selector and the template would keep pods from becoming Ready.
 fn selector_labels(obj: &SchemaRegistry) -> BTreeMap<String, String> {
     let instance = obj.name_any();
     let mut m = BTreeMap::new();
@@ -511,8 +516,8 @@ fn selector_labels(obj: &SchemaRegistry) -> BTreeMap<String, String> {
     m
 }
 
-/// Metadata labels for the rendered objects: the stable selector labels
-/// plus the version / managed-by metadata labels. Used only for
+/// Metadata labels for the rendered objects: the stable selector labels plus
+/// the version and managed-by metadata labels. The operator uses them only for
 /// `metadata.labels`, never for selectors.
 fn meta_labels(obj: &SchemaRegistry) -> BTreeMap<String, String> {
     let mut m = selector_labels(obj);
@@ -644,9 +649,10 @@ fn render_deployment(
     Ok(dep)
 }
 
-/// Build the container args + the Secret volumes/mounts from the spec.
-/// Non-secret config → args; credentials → mounted Secret files referenced
-/// by path args. Returns (args, volumes, volumeMounts, `extra_env`) as JSON values.
+/// Build the container args and the Secret volumes and mounts from the spec.
+/// Non-secret config becomes args. Credentials become mounted Secret files
+/// that path args reference. Returns `args`, `volumes`, `volumeMounts`, and
+/// `extra_env` as JSON values.
 fn build_args_and_mounts(
     obj: &SchemaRegistry,
     bootstrap: &str,
@@ -848,10 +854,11 @@ fn build_args_and_mounts(
     (a, volumes, mounts, extra_env)
 }
 
-/// SSA-apply a `cert-manager.io/v1` `Certificate` CR using [`DynamicObject`]
-/// (avoids a cert-manager Rust crate dep — same pattern as `metrics.rs`).
+/// SSA-apply a `cert-manager.io/v1` `Certificate` CR with [`DynamicObject`].
+/// This avoids a dependency on a cert-manager Rust crate, and it is the same
+/// pattern as `metrics.rs`.
 ///
-/// DNS SANs: per-pod headless DNS + `ClusterIP` service DNS.
+/// The DNS SANs are the per-pod headless DNS and the `ClusterIP` service DNS.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -904,8 +911,8 @@ async fn apply_certificate_cr(
     }
 }
 
-/// Patch status with a single rolled-up `Ready` condition + a `KafkaReady`
-/// condition. `reason == "Available"` ⇒ Ready=True.
+/// Patch status with one rolled-up `Ready` condition and a `KafkaReady`
+/// condition. `reason == "Available"` means Ready=True.
 #[tracing::instrument(level = "info", skip_all, fields(name = %name, reason = %reason), err)]
 async fn set_status(
     api: &Api<SchemaRegistry>,

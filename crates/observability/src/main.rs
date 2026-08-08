@@ -1,5 +1,5 @@
-//! `crabka-observability` — role-selectable Loki-compatible logs service,
-//! self-instrumented (OTLP traces + JSON logs + CPU/heap pprof).
+//! `crabka-observability` is a role-selectable Loki-compatible logs service.
+//! It self-instruments with OTLP traces, JSON logs, and CPU and heap pprof.
 
 #[cfg(all(unix, feature = "heap-profiling"))]
 #[global_allocator]

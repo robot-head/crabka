@@ -1,8 +1,10 @@
 //! `SessionWindowedCogroupedStream<K, VOut>`: session-windowed KIP-150 cogroup.
-//! Built by `CogroupedKStream::windowed_by_session(SessionWindows)`. Terminal
-//! `aggregate_explicit` produces `KTable<Windowed<K>, VOut>` over a shared session
-//! store. Unlike the time- and sliding-windowed variants, the session aggregate
-//! requires a **merger** that combines two sessions when they are merged together.
+//!
+//! `CogroupedKStream::windowed_by_session(SessionWindows)` builds it. The
+//! terminal `aggregate_explicit` produces a `KTable<Windowed<K>, VOut>` over a
+//! shared session store. Unlike the time-windowed and sliding-windowed variants,
+//! the session aggregate needs a **merger** that combines two sessions when the
+//! runtime merges them.
 
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
@@ -27,11 +29,13 @@ where
     K: Any + Send + Sync + Clone,
     VOut: Any + Send + Sync + Clone,
 {
-    /// `windowedBy(SessionWindows)` → session-windowed cogroup (KIP-150).
+    /// `windowedBy(SessionWindows)`: switch to a session-windowed cogroup
+    /// (KIP-150).
     ///
-    /// Unlike time- and sliding-windowed cogroup, the terminal `aggregate_explicit`
-    /// requires a `merger` that combines two session aggregates when sessions are
-    /// merged due to inactivity-gap expiry.
+    /// Unlike the time-windowed and sliding-windowed cogroup, the terminal
+    /// `aggregate_explicit` needs a `merger`. The merger combines two session
+    /// aggregates when the runtime merges sessions after an inactivity gap
+    /// expires.
     #[must_use]
     pub fn windowed_by_session(
         self,
@@ -46,7 +50,7 @@ where
     }
 }
 
-/// Handle produced by [`CogroupedKStream::windowed_by_session`]; terminal
+/// Handle produced by [`CogroupedKStream::windowed_by_session`]. The terminal
 /// session-windowed aggregation consumes it.
 pub struct SessionWindowedCogroupedStream<K, VOut> {
     builder: Rc<RefCell<InternalStreamsBuilder>>,
@@ -60,15 +64,17 @@ where
     K: Any + Send + Sync + Clone,
     VOut: Any + Send + Sync + Clone,
 {
-    /// Session-windowed terminal aggregation → `KTable<Windowed<K>, VOut>`.
+    /// Session-windowed terminal aggregation. It produces a
+    /// `KTable<Windowed<K>, VOut>`.
     ///
-    /// The `merger` combines two session aggregates when sessions are merged
-    /// (required for session windows — no default merger exists).
+    /// The `merger` combines two session aggregates when the runtime merges
+    /// sessions. Session windows need it, because no default merger exists.
     ///
-    /// Note: the returned table carries no suppress factory, so calling
-    /// `.suppress(...)` on it fails at topology-build time. Suppress on windowed
-    /// cogroup outputs is a deferred follow-up (emit semantics are emit-on-update
-    /// across the cogroup surface, per the KIP-150 slice scope).
+    /// Note: the returned table carries no suppress factory, so a
+    /// `.suppress(...)` call on it fails at topology-build time. Suppress on
+    /// windowed cogroup outputs is a deferred follow-up. The emit semantics are
+    /// emit-on-update across the cogroup surface, which is the KIP-150 slice
+    /// scope.
     pub fn aggregate_explicit<KS, VS, I, M>(
         self,
         init: I,

@@ -1,5 +1,7 @@
-//! In-process broker: a streams member joins, converges to an assignment, and
-//! leaves cleanly. Requires `streams.version` finalized + source topic created.
+//! In-process broker test. A streams member joins, converges to an assignment,
+//! and leaves cleanly.
+//!
+//! The test needs a finalized `streams.version` and a created source topic.
 
 use std::time::Duration;
 

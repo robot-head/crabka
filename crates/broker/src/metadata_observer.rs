@@ -1,10 +1,10 @@
 //! Broker-only metadata observer (Component B).
 //!
-//! A broker-only `KRaft` node is not an openraft voter — it keeps its
+//! A broker-only `KRaft` node is not an openraft voter. It keeps its
 //! `MetadataImage` current by *fetching* the committed `__cluster_metadata`
-//! log from the controller quorum over `API_KEY_METADATA_FETCH`, decoding
+//! log from the controller quorum over `API_KEY_METADATA_FETCH`. It decodes
 //! each record batch through the `crabka_metadata` Kafka-record bridge, and
-//! applying records exactly as the controller state machine would.
+//! applies the records exactly as the controller state machine would.
 
 use std::sync::Arc;
 
@@ -23,15 +23,17 @@ use tracing::{debug, warn};
 /// Static configuration for the observer.
 #[derive(Clone)]
 pub struct ObserverConfig {
-    /// Capacity used by outbound observer connections.
+    /// Capacity of each outbound observer connection.
     pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
-    /// Maximum frame size used by outbound observer connections.
+    /// Maximum frame size of each outbound observer connection.
     pub client_frame_max: crabka_client_core::ClientFrameMax,
-    /// Controller-listener voter map `(id, "<host>:<port>")` from
-    /// `controller_quorum_voters`. The host is carried verbatim; the dialer
-    /// re-resolves it per connect so a rejoining peer's new pod IP is reached.
+    /// Controller-listener voter map `(id, "<host>:<port>")`, from
+    /// `controller_quorum_voters`. The map carries the host verbatim. The
+    /// dialer resolves it again on each connect, so it reaches the new pod IP
+    /// of a rejoining peer.
     pub voters: Vec<(NodeId, String)>,
-    /// Outbound dialer (same TLS/SASL path as the raft transport).
+    /// Outbound dialer. It uses the same TLS and SASL path as the raft
+    /// transport.
     pub dialer: Arc<dyn OutboundDialer>,
     /// `client_id` for the dial handshake.
     pub client_id: String,
@@ -41,14 +43,14 @@ pub struct ObserverConfig {
     pub max_bytes: ByteSize,
     /// Idle poll interval once caught up to the high watermark.
     pub poll_interval: Time,
-    /// Relative sleeper driving the idle poll cadence. Production uses
-    /// [`qubit_clock::sleep::SystemSleeper`] (real time); tests inject a
-    /// [`qubit_clock::sleep::MockSleeper`] so the poll interval fires on a
-    /// controlled mock timeline instead of wall-clock time.
+    /// Relative sleeper that drives the idle poll cadence. Production uses
+    /// [`qubit_clock::sleep::SystemSleeper`], which follows real time. Tests
+    /// inject a [`qubit_clock::sleep::MockSleeper`], so the poll interval
+    /// fires on a controlled mock timeline instead of wall-clock time.
     pub sleeper: Arc<dyn AsyncSleeper>,
 }
 
-/// Handle to a running observer. Holds the image watch and the background
+/// Handle to a running observer. It holds the image watch and the background
 /// fetch task.
 pub struct MetadataObserver {
     image: watch::Sender<Arc<MetadataImage>>,
@@ -58,8 +60,8 @@ pub struct MetadataObserver {
 }
 
 impl MetadataObserver {
-    /// Start the observer loop. The image watch begins at an empty image
-    /// for `cluster_id`; callers subscribe via [`Self::watch_image`].
+    /// Starts the observer loop. The image watch begins at an empty image for
+    /// `cluster_id`. Callers subscribe with [`Self::watch_image`].
     #[must_use]
     pub fn start(config: ObserverConfig) -> Arc<Self> {
         let (image_tx, _) = watch::channel(Arc::new(MetadataImage::new(config.cluster_id)));
@@ -93,7 +95,7 @@ impl MetadataObserver {
         self.leader.subscribe()
     }
 
-    /// Stop the fetch loop and drain the task.
+    /// Stops the fetch loop and drains the task.
     pub async fn cancel(&self) {
         self.shutdown.cancel();
         if let Some(h) = self.task.lock().await.take() {
@@ -107,9 +109,9 @@ impl MetadataObserver {
     }
 }
 
-/// One iteration: fetch from `addr` at `fetch_offset`, decode + apply, and
-/// return the new fetch offset (or `None` on a transport error so the
-/// caller fails over).
+/// Runs one iteration: it fetches from `addr` at `fetch_offset`, decodes and
+/// applies the records, and returns the new fetch offset. It returns `None` on
+/// a transport error, so that the caller fails over.
 async fn fetch_once(
     config: &ObserverConfig,
     addr: &str,
@@ -220,10 +222,13 @@ fn apply_fetch_records(
     new_offset.max(fetch_offset)
 }
 
-/// Round-robin pick into a non-empty voter list: index `idx` wrapped by the
-/// list length. Pulled out of the serve-loop so the wrap-around is unit-tested
-/// (a `/`-for-`%` slip would stop the observer rotating to the next voter when
-/// the current one is unreachable, stranding it on a dead voter).
+/// Round-robin pick into a non-empty voter list: the index `idx` wrapped by
+/// the list length.
+///
+/// This helper is separate from the serve loop so that a unit test covers the
+/// wrap-around. A `/` written for `%` would stop the observer from rotating to
+/// the next voter when the current one is unreachable, and strand it on a dead
+/// voter.
 fn voter_at(voters: &[(NodeId, String)], idx: usize) -> &(NodeId, String) {
     &voters[idx % voters.len()]
 }
@@ -428,7 +433,7 @@ mod tests {
         tx
     }
 
-    /// Per-fetch soft byte cap used by every observer fixture (1 MiB).
+    /// Per-fetch soft byte cap for every observer fixture: 1 MiB.
     const TEST_MAX_FETCH_BYTES: ByteSize = mebibytes(1);
 
     #[test]

@@ -2,9 +2,9 @@
 //!
 //! The crate owns the protocol-independent pieces of TLS, SASL, SCRAM,
 //! OAuth/OIDC, mTLS principal extraction, delegation-token HMACs, Kerberos
-//! exchange state, and principal modelling. Network I/O remains in the caller:
-//! OAuth introspection is represented by the async [`IntrospectionClient`] trait,
-//! and the broker/client crates provide concrete transports and wire the
+//! exchange state, and principal modelling. Network I/O stays in the caller.
+//! The async [`IntrospectionClient`] trait represents OAuth introspection, and
+//! the broker and client crates supply the concrete transports and wire the
 //! resulting validators into listener or connection handshakes.
 //!
 //! ## SASL/PLAIN verification

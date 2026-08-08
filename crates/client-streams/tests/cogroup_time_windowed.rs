@@ -1,4 +1,5 @@
-//! KIP-150 time-windowed cogroup — JVM 4.1 wire-topology + behavioral goldens.
+//! KIP-150 time-windowed cogroup: the JVM 4.1 wire-topology golden and the
+//! behavioral goldens.
 use crabka_client_streams::{
     Consumed, I64Serde, Materialized, Produced, StringSerde, TimeWindowedSerde, TimeWindows,
     dsl::StreamsBuilder,

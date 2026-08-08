@@ -1,10 +1,10 @@
 //! KIP-932 share-group membership configuration.
 use std::time::Duration;
 
-/// Transaction isolation applied to share-group reads. `ReadUncommitted`
-/// (Kafka's `share.group.isolation.level` default) exposes all records up to
-/// the high watermark; `ReadCommitted` clamps reads to the last stable offset
-/// so uncommitted transactional records are never acquired.
+/// Transaction isolation for share-group reads. `ReadUncommitted`, the
+/// default of Kafka's `share.group.isolation.level`, exposes all records up to
+/// the high watermark. `ReadCommitted` clamps reads to the last stable offset,
+/// so the group never acquires uncommitted transactional records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShareIsolationLevel {
     #[default]

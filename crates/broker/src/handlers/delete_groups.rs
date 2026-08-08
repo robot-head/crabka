@@ -1,5 +1,7 @@
-//! `DeleteGroups` (`api_key=42`). Drops empty groups from the in-memory
-//! registry. Non-empty groups are rejected with `NON_EMPTY_GROUP`.
+//! `DeleteGroups` (`api_key=42`).
+//!
+//! This handler drops empty groups from the in-memory registry. It rejects
+//! non-empty groups with `NON_EMPTY_GROUP`.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};

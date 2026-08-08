@@ -1,15 +1,14 @@
 //! Background TLS hot-reload watcher.
 //!
-//! Polls the cert / key / client-CA paths configured on the broker's
-//! [`crabka_security::TlsConfig`]. On any mtime change, rebuilds the
-//! `ServerConfig` and swaps it into the shared
-//! [`crabka_security::DynamicServerConfig`]. New TLS handshakes pick
-//! up the swap on the next `accept`; in-flight handshakes are not
-//! affected.
+//! The watcher polls the cert / key / client-CA paths configured on the
+//! broker's [`crabka_security::TlsConfig`]. On any mtime change it rebuilds
+//! the `ServerConfig` and swaps it into the shared
+//! [`crabka_security::DynamicServerConfig`]. New TLS handshakes get the swap
+//! on the next `accept`. The swap does not affect in-flight handshakes.
 //!
-//! Errors during rebuild are logged at `warn` and the previous config
-//! stays in place — better to keep serving with the old cert than to
-//! drop connections.
+//! If a rebuild fails, the watcher logs the error at `warn` and the previous
+//! config stays in place. This keeps the broker in service with the old cert
+//! instead of dropping connections.
 
 use std::{path::Path, sync::Arc, time::SystemTime};
 
@@ -37,7 +36,7 @@ fn snapshot_mtimes(cfg: &TlsConfig) -> PathMtimes {
     }
 }
 
-/// Spawned task entry point. Polls every `interval`. Cancels on the
+/// Spawned task entry point. The task polls every `interval` and stops on the
 /// `shutdown` token.
 pub(crate) async fn run(
     dynamic: Arc<DynamicServerConfig>,

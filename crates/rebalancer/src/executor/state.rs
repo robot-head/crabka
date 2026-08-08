@@ -1,6 +1,6 @@
-//! On-disk active-execution marker. `{data_dir}/in_flight.json` exists
-//! when an execution is in flight; its absence is the "idle" signal on
-//! startup. Written atomically; deleted on terminal.
+//! On-disk active-execution marker. `{data_dir}/in_flight.json` exists when an
+//! execution is in flight, and its absence is the "idle" signal on startup.
+//! The executor writes it atomically and deletes it on a terminal status.
 
 use std::{
     fs, io,
@@ -35,8 +35,9 @@ pub enum Phase {
     ClearThrottle,
 }
 
-/// `PartialEq` but not `Eq`: [`InFlightFile::throttle`] is an `f64`-backed
-/// quantity, so equality is not reflexive over the whole domain.
+/// `PartialEq` but not `Eq`, because [`InFlightFile::throttle`] is an
+/// `f64`-backed quantity, so equality is not reflexive over the whole
+/// domain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InFlightFile {
     pub version: u32,
@@ -45,8 +46,8 @@ pub struct InFlightFile {
     pub started_at_ms: i64,
     #[serde(with = "crabka_units::serde_units::numeric::bytes_per_sec_i64")]
     pub throttle: ByteRate,
-    /// Set when transitioning into `ClearThrottle` so a resume-during-clear
-    /// knows which terminal status to commit.
+    /// Set on the transition into `ClearThrottle`, so a resume during the
+    /// clear knows which terminal status to commit.
     #[serde(default)]
     pub target_terminal_status: Option<ProposalStatus>,
     /// Stamped at the same time as `target_terminal_status` when

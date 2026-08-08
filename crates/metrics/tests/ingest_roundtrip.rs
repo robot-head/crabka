@@ -1,5 +1,5 @@
-//! End-to-end metrics ingest: `remote_write` v1 -> distributor -> broker WAL ->
-//! compactor -> object-store block.
+//! End-to-end metrics ingest, from `remote_write` v1 to the distributor, then
+//! to the broker WAL, then to the compactor, then to an object-store block.
 
 use std::{
     collections::BTreeMap,

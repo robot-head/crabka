@@ -1,14 +1,14 @@
-//! Connect protocol smoke test. Builds the binary, runs it
-//! against a temporary single-broker Crabka, hits the Connect endpoint
-//! over HTTP+JSON, asserts a sane response. Proves the axum mount +
+//! Connect protocol smoke test. It builds the binary, runs it against a
+//! temporary single-broker Crabka, calls the Connect endpoint over HTTP+JSON,
+//! and asserts a sane response. It proves that the axum mount and the
 //! Connect-axum glue work end-to-end.
 //!
-//! Route format `/crabka.rebalancer.v1.Rebalancer/GetState` was
-//! discovered by reading the `RebalancerServiceBuilder` codegen in
-//! `target/debug/build/crabka-rebalancer-*/out/crabka.rebalancer.v1.rs`
-//! — it calls `router.route("/crabka.rebalancer.v1.Rebalancer/GetState",
-//! ...)` verbatim, matching the canonical Connect/gRPC path format
-//! (`<package>.<Service>/<Method>`).
+//! The route format `/crabka.rebalancer.v1.Rebalancer/GetState` comes from the
+//! `RebalancerServiceBuilder` codegen in
+//! `target/debug/build/crabka-rebalancer-*/out/crabka.rebalancer.v1.rs`. That
+//! codegen calls `router.route("/crabka.rebalancer.v1.Rebalancer/GetState",
+//! ...)` verbatim, which matches the canonical Connect and gRPC path format
+//! `<package>.<Service>/<Method>`.
 
 use std::time::{Duration, Instant};
 

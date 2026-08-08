@@ -1,5 +1,5 @@
-//! `BrokerDeath` rule — fires when a broker id present in some partition's
-//! replicas list is missing from the cluster snapshot for at least
+//! `BrokerDeath` rule. It fires when a broker id that is present in some
+//! partition's replicas list is missing from the cluster snapshot for at least
 //! `cfg.broker_death_threshold`.
 
 use std::collections::HashSet;

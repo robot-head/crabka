@@ -1,30 +1,35 @@
-//! Cluster orchestration: broker + `crabka-gres` nodes behind chaos proxies.
+//! Cluster orchestration: a broker and `crabka-gres` nodes behind chaos
+//! proxies.
 //!
-//! Launch sequence (adapted from `crates/gres-ranges/tests/harness/process.rs`
-//! and `scripts/gres-range-scaling.sh`):
+//! The launch sequence is adapted from
+//! `crates/gres-ranges/tests/harness/process.rs` and
+//! `scripts/gres-range-scaling.sh`:
 //!
-//! 1. Format a broker data dir and start `crabka-broker` as a child process
-//!    (a child, not in-process, so `/proc` CPU accounting attributes broker
-//!    cost separately from the harness).
-//! 2. Spawn one [`ChaosProxy`] per range-RPC endpoint and one per node SQL
-//!    front door.
-//! 3. Generate a range mTLS CA + peer cert via `crabka_security::ca` and
-//!    provision the tenant through `crabka_gres_control::Registry`: WAL
-//!    topics per range, `TenantRecord` whose range-layout endpoints point at
-//!    the **proxy** ports (so inter-node traffic is interceptable).
-//! 4. Spawn one `crabka-gres` child per node with `--host-ranges` for its
-//!    round-robin range subset (range `r` → node `r % nodes`), the
-//!    timestamp-source flags for the scenario mode, and per-node
-//!    `--hlc-wall-offset` skew. Parse `CRABKA_GRES_READY <sql> <range>`
-//!    from stdout for the OS-assigned ports, then point the proxies at them.
+//! 1. Format a broker data dir and start `crabka-broker` as a child process.
+//!    The broker is a child, not in-process, so `/proc` CPU accounting
+//!    attributes broker cost separately from the harness.
+//! 2. Spawn one [`ChaosProxy`] for each range-RPC endpoint and one for each
+//!    node SQL front door.
+//! 3. Generate a range mTLS CA and peer cert with `crabka_security::ca`, then
+//!    provision the tenant through `crabka_gres_control::Registry`. That step
+//!    creates the WAL topics for each range and a `TenantRecord` whose
+//!    range-layout endpoints point at the **proxy** ports, so the harness can
+//!    intercept inter-node traffic.
+//! 4. Spawn one `crabka-gres` child for each node. Each child gets
+//!    `--host-ranges` for its round-robin range subset, where range `r` goes
+//!    to node `r % nodes`, the timestamp-source flags for the scenario mode,
+//!    and its own `--hlc-wall-offset` skew. Parse
+//!    `CRABKA_GRES_READY <sql> <range>` from stdout for the OS-assigned ports,
+//!    then point the proxies at them.
 //!
-//! Schema DDL needs no special phase: any node's gateway routes DDL to
-//! every range engine and returns only after the cluster-wide catalog
-//! barrier, so callers issue it through an arbitrary [`Cluster::sql_endpoint`]
-//! once the topology is up.
+//! Schema DDL needs no special phase. Any node's gateway routes DDL to every
+//! range engine and returns only after the cluster-wide catalog barrier.
+//! Callers therefore issue DDL through an arbitrary
+//! [`Cluster::sql_endpoint`] once the topology is up.
 //!
-//! Node processes are `SIGKILL`ed on kill/shutdown (process-group kill), and a
-//! restart re-spawns with identical flags and repoints the node's proxies.
+//! On a kill or a shutdown the harness `SIGKILL`s the node processes, with a
+//! process-group kill. A restart spawns the node again with identical flags
+//! and repoints the node's proxies.
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
@@ -62,21 +67,22 @@ use crate::{
 const TENANT: &str = "loadtest";
 /// SQL login role provisioned for the tenant.
 const SQL_USER_NAME: &str = "loadtest";
-/// Password backing the provisioned SCRAM verifier, generated fresh per
-/// cluster launch. Nodes run `--auth trust`, so this is provisioning
-/// completeness, not a live credential check — generating it (rather than
-/// hard-coding one) just ensures no fixed string ever doubles as a real
-/// secret.
+/// Password behind the provisioned SCRAM verifier. The harness generates a
+/// fresh one for each cluster launch. Nodes run `--auth trust`, so this
+/// password gives provisioning completeness and not a live credential check.
+/// A generated password, rather than a hard-coded one, makes sure that no
+/// fixed string ever doubles as a real secret.
 fn generate_sql_password() -> String {
     use rand::RngExt as _;
     format!("loadtest-{:016x}", rand::rng().random::<u64>())
 }
-/// Database name clients connect to (mirrors the scaling script's conninfo).
+/// Database name that clients connect to. It mirrors the scaling script's
+/// conninfo.
 const SQL_DATABASE: &str = "crab";
 /// Range `i` starts at table id `i * RANGE_TABLE_STRIDE`, so workload tables
-/// `t0`, `t1000000`, ... land on ranges 0, 1, ... (mirrors the script).
+/// `t0`, `t1000000`, ... land on ranges 0, 1, ... This mirrors the script.
 const RANGE_TABLE_STRIDE: u64 = 1_000_000;
-/// Fixed broker cluster id (mirrors the scaling script).
+/// Fixed broker cluster id. It mirrors the scaling script.
 const BROKER_CLUSTER_ID: &str = "00000000-0000-0000-0000-000000000001";
 /// DNS identity on the range mTLS peer certificate.
 const TLS_SERVER_NAME: &str = "crabka-dev";
@@ -90,14 +96,15 @@ pub struct Binaries {
     pub gres: PathBuf,
     /// `crabka-broker` binary.
     pub broker: PathBuf,
-    /// `crabka` CLI binary (storage format and admin commands).
+    /// `crabka` CLI binary. It supplies the storage format and admin
+    /// commands.
     pub crabka_cli: PathBuf,
 }
 
 impl Binaries {
-    /// Resolves binary paths from `CRABKA_GRES_LOADTEST_{GRES,BROKER,CLI}_BIN`
-    /// env overrides, falling back to `target/debug/` relative to the
-    /// workspace root.
+    /// Resolves binary paths from the
+    /// `CRABKA_GRES_LOADTEST_{GRES,BROKER,CLI}_BIN` env overrides. Without an
+    /// override it uses `target/debug/` relative to the workspace root.
     ///
     /// # Errors
     ///
@@ -136,17 +143,19 @@ pub struct ClusterOptions {
     pub registry_policy: RegistryPolicy,
     /// Harness-owned process and proxy policy.
     pub runtime_policy: LoadtestRuntimePolicy,
-    /// Extra environment applied to every `crabka-gres` child on top of the
-    /// harness's own environment, and re-applied identically on restart.
+    /// Extra environment for every `crabka-gres` child, on top of the
+    /// harness's own environment. A restart applies it again unchanged.
     ///
-    /// The nodes are separate processes, so anything they read from the
-    /// environment — the OTLP endpoint and sampling ratio, say — cannot be set
-    /// by the harness calling `std::env::set_var` on itself: that is `unsafe`
-    /// in edition 2024 and would leak into every other test in the binary.
+    /// The nodes are separate processes. The harness therefore cannot set what
+    /// they read from the environment, such as the OTLP endpoint and the
+    /// sampling ratio, with a call to `std::env::set_var` on itself. That call
+    /// is `unsafe` in edition 2024 and would leak into every other test in the
+    /// binary.
     pub node_env: BTreeMap<String, String>,
 }
 
-/// Connection parameters for a node's SQL front door (via its chaos proxy).
+/// Connection parameters for a node's SQL front door, through its chaos
+/// proxy.
 #[derive(Debug, Clone)]
 pub struct SqlEndpoint {
     /// Proxy address to dial.
@@ -162,24 +171,26 @@ pub struct SqlEndpoint {
 /// A process the harness launched, for resource sampling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessInfo {
-    /// Human-readable label (`broker`, `node0`, ...).
+    /// Human-readable label, such as `broker` or `node0`.
     pub label: String,
     /// OS process id.
     pub pid: u32,
 }
 
-/// Live, append-only roster of every process the harness has launched for
-/// the current topology (broker plus every node incarnation). Shared with
-/// the `/proc` sampler, which re-snapshots it on every tick so a node
-/// restarted mid-run (fresh pid, `#N`-suffixed label) is attached as it
-/// appears. Cloning is cheap; clones share the same list.
+/// Live, append-only roster of every process the harness has launched for the
+/// current topology. It holds the broker and every node incarnation.
+///
+/// The harness shares this roster with the `/proc` sampler, which snapshots it
+/// again on every tick. A node restarted mid-run, with a fresh pid and a
+/// `#N`-suffixed label, therefore attaches as soon as it appears. A clone is
+/// cheap, and all clones share the same list.
 #[derive(Debug, Clone, Default)]
 pub struct ProcessRoster(Arc<Mutex<Vec<ProcessInfo>>>);
 
 impl ProcessRoster {
-    /// Appends a newly-launched process. Existing entries are never removed
-    /// or reordered, so index-based consumers only ever see new tail
-    /// entries.
+    /// Appends a newly-launched process. This method never removes or
+    /// reorders an existing entry, so index-based consumers only ever see new
+    /// tail entries.
     pub fn push(&self, process: ProcessInfo) {
         self.lock().push(process);
     }
@@ -197,7 +208,8 @@ impl ProcessRoster {
     }
 }
 
-/// A running cluster: broker child, node children, and their proxies.
+/// A running cluster: the broker child, the node children, and their
+/// proxies.
 #[derive(Debug)]
 pub struct Cluster {
     topology: TopologySpec,
@@ -365,7 +377,7 @@ impl Cluster {
         self.topology.nodes
     }
 
-    /// The node hosting a given range (round-robin assignment).
+    /// The node that hosts a given range, under round-robin assignment.
     #[must_use]
     pub fn node_for_range(&self, range: u16) -> u16 {
         node_for_range(range, self.topology.nodes)
@@ -392,7 +404,8 @@ impl Cluster {
         &self.sql_proxies[usize::from(node)]
     }
 
-    /// Launched processes (broker plus every live node) for `/proc` sampling.
+    /// Launched processes for `/proc` sampling: the broker and every live
+    /// node.
     #[must_use]
     pub fn processes(&self) -> Vec<ProcessInfo> {
         let mut processes = vec![ProcessInfo {
@@ -416,17 +429,17 @@ impl Cluster {
         &self.log_dir
     }
 
-    /// Live roster of every process launched for this topology (broker plus
-    /// every node incarnation). [`Cluster::restart_node`] appends the
-    /// replacement process under a `label#N` entry, so a `/proc` sampler
-    /// holding this roster attaches restarted nodes mid-run.
+    /// Live roster of every process launched for this topology, the broker
+    /// and every node incarnation. [`Cluster::restart_node`] appends the
+    /// replacement process under a `label#N` entry, so a `/proc` sampler that
+    /// holds this roster attaches restarted nodes mid-run.
     #[must_use]
     pub fn process_roster(&self) -> ProcessRoster {
         self.roster.clone()
     }
 
     /// SIGKILLs a node's process group. The node's proxies keep refusing
-    /// until [`Cluster::restart_node`].
+    /// connections until [`Cluster::restart_node`] runs.
     ///
     /// # Errors
     ///
@@ -491,12 +504,12 @@ impl Cluster {
         Ok(())
     }
 
-    /// Tears the cluster down: kills node processes, then the broker.
+    /// Tears the cluster down. It kills the node processes, then the broker.
     ///
     /// # Errors
     ///
-    /// Returns an error if teardown fails; the caller should still treat the
-    /// cluster as gone.
+    /// Returns an error if the teardown fails. The caller should still treat
+    /// the cluster as gone.
     pub async fn shutdown(mut self) -> anyhow::Result<()> {
         let mut failures = Vec::new();
         for index in 0..self.nodes.len() {
@@ -537,8 +550,8 @@ impl Cluster {
         }
     }
 
-    /// Repoints the proxies of every range hosted by `node` (plus its SQL
-    /// proxy) at the node's live listeners.
+    /// Repoints the proxies of every range that `node` hosts, and its SQL
+    /// proxy, at the node's live listeners.
     fn point_proxies_at(&self, node: u16) {
         let Some(process) = &self.nodes[usize::from(node)].running else {
             return;
@@ -568,10 +581,10 @@ impl Drop for BrokerProcess {
     }
 }
 
-/// One node's slot: its immutable spawn parameters plus the live child, if
-/// any (`None` between [`Cluster::kill_node`] and [`Cluster::restart_node`]).
-/// `incarnation` counts spawns of this slot (1 = original), naming roster
-/// entries for restarts.
+/// One node's slot: its immutable spawn parameters and the live child, if
+/// there is one. The child is `None` between [`Cluster::kill_node`] and
+/// [`Cluster::restart_node`]. `incarnation` counts the spawns of this slot,
+/// where 1 is the original, and it names the roster entries for restarts.
 #[derive(Debug)]
 struct NodeSlot {
     spec: NodeSpec,
@@ -579,19 +592,19 @@ struct NodeSlot {
     incarnation: u32,
 }
 
-/// Everything needed to (re-)spawn one node with identical flags.
+/// Everything needed to spawn, or respawn, one node with identical flags.
 #[derive(Debug)]
 struct NodeSpec {
     label: String,
     args: Vec<String>,
     cache_dir: PathBuf,
     log_path: PathBuf,
-    /// `taskset -c` CPU list pinning this node, when the topology asks for
+    /// `taskset -c` CPU list that pins this node, when the topology asks for
     /// fixed-capacity nodes.
     cpuset: Option<String>,
     registry_policy: RegistryPolicy,
-    /// Extra environment for this node's process, applied on every spawn so a
-    /// restart is configured identically to the original.
+    /// Extra environment for this node's process. Every spawn applies it, so
+    /// a restart has the same configuration as the original.
     env: BTreeMap<String, String>,
 }
 
@@ -606,15 +619,15 @@ struct CpuAllocation {
     nodes: Vec<String>,
 }
 
-/// Carves `available` CPUs into a broker slice (`0..broker_cpus`) and one
-/// disjoint `cpus_per_node`-wide slice per node, so each process behaves
-/// like a fixed-capacity host.
+/// Carves `available` CPUs into a broker slice, `0..broker_cpus`, and one
+/// disjoint slice of `cpus_per_node` width for each node. Each process then
+/// behaves like a fixed-capacity host.
 ///
 /// # Errors
 ///
-/// Returns an error if the machine has fewer CPUs than the layout needs;
-/// oversubscribed pinning would silently reintroduce the shared-CPU
-/// distortion the knob exists to remove.
+/// Returns an error if the machine has fewer CPUs than the layout needs.
+/// Oversubscribed pinning would quietly bring back the shared-CPU distortion
+/// that this knob exists to remove.
 fn cpu_allocation(
     node_count: u16,
     cpus_per_node: u32,
@@ -644,10 +657,10 @@ fn cpu_allocation(
 
 /// CPUs that exist on the machine, from `/sys/devices/system/cpu/online`.
 ///
-/// Deliberately NOT `available_parallelism()`: that respects the calling
-/// process's own affinity mask, and the recommended setup runs the harness
-/// under `taskset` on leftover CPUs — children may still be pinned to any
-/// online CPU regardless of the parent's mask.
+/// This function deliberately does NOT use `available_parallelism()`. That
+/// call respects the calling process's own affinity mask, and the recommended
+/// setup runs the harness under `taskset` on leftover CPUs. Children can still
+/// be pinned to any online CPU, whatever the parent's mask is.
 fn online_cpu_count() -> anyhow::Result<u32> {
     let raw = std::fs::read_to_string("/sys/devices/system/cpu/online")
         .context("read /sys/devices/system/cpu/online")?;
@@ -744,9 +757,9 @@ fn node_for_range(range: u16, nodes: u16) -> u16 {
     range % nodes
 }
 
-/// Roster label for the `incarnation`-th process spawned into a node slot
-/// (1-based): the first incarnation keeps the bare label, later ones get a
-/// `#N` suffix (`node2` → `node2#2`).
+/// Roster label for the `incarnation`-th process spawned into a node slot.
+/// The count is 1-based. The first incarnation keeps the bare label, and a
+/// later one gets a `#N` suffix, so `node2` becomes `node2#2`.
 fn incarnation_label(label: &str, incarnation: u32) -> String {
     if incarnation <= 1 {
         label.to_owned()
@@ -755,8 +768,8 @@ fn incarnation_label(label: &str, incarnation: u32) -> String {
     }
 }
 
-/// The `--ranges` boundary list: range `i` starts at table id
-/// `i * RANGE_TABLE_STRIDE` (for example `0,1000000,2000000`).
+/// The `--ranges` boundary list. Range `i` starts at table id
+/// `i * RANGE_TABLE_STRIDE`, for example `0,1000000,2000000`.
 fn ranges_flag(ranges: u16) -> String {
     (0..ranges)
         .map(|range| (u64::from(range) * RANGE_TABLE_STRIDE).to_string())
@@ -773,8 +786,8 @@ fn host_ranges_flag(node: u16, nodes: u16, ranges: u16) -> String {
         .join(",")
 }
 
-/// The registry range layout matching [`ranges_flag`], with each range's
-/// endpoint pointing at its chaos proxy.
+/// The registry range layout that matches [`ranges_flag`]. Each range's
+/// endpoint points at its chaos proxy.
 fn range_layout(ranges: u16, endpoints: &[SocketAddr]) -> Vec<RangeLayoutEntry> {
     (0..ranges)
         .map(|range| RangeLayoutEntry {
@@ -807,11 +820,13 @@ fn timestamp_args(mode: ModeSpec, skew: Time) -> Vec<String> {
     args
 }
 
-/// Diagnostic knob for the coordinator-vs-data per-write cost investigation:
-/// which nodes are launched with the local-checkpoint flags. Defaults to node 0
-/// only (the shipped harness behaviour). `CRABKA_GRES_LOADTEST_CHECKPOINT_NODES`
-/// may be set to `all` (every node checkpoints) or `none` (no node does) to
-/// A/B whether the node0/data-node CPU asymmetry tracks the checkpoint config.
+/// Diagnostic knob for the coordinator-against-data per-write cost
+/// investigation. It selects which nodes launch with the local-checkpoint
+/// flags. The default is node 0 only, which is the shipped harness behaviour.
+/// Set `CRABKA_GRES_LOADTEST_CHECKPOINT_NODES` to `all`, so that every node
+/// checkpoints, or to `none`, so that no node does. That A/B shows whether the
+/// CPU asymmetry between node 0 and the data nodes tracks the checkpoint
+/// config.
 fn checkpoints_enabled_for(node: u16) -> bool {
     match std::env::var("CRABKA_GRES_LOADTEST_CHECKPOINT_NODES")
         .ok()
@@ -824,8 +839,9 @@ fn checkpoints_enabled_for(node: u16) -> bool {
 }
 
 /// Builds the restart-stable spawn parameters for the real-topology node
-/// `node`: round-robin `--host-ranges`, checkpoint flags on node 0 (the
-/// range-0 host), and the node's configured HLC wall-clock skew.
+/// `node`. They are the round-robin `--host-ranges`, the checkpoint flags on
+/// node 0, which hosts range 0, and the node's configured HLC wall-clock
+/// skew.
 fn node_spec(node: u16, context: &SpecContext<'_>) -> NodeSpec {
     build_spec(
         &format!("node{node}"),
@@ -907,15 +923,15 @@ fn build_spec(
 /// The environment variable naming a process in the trace backend.
 const SERVICE_INSTANCE_ID_ENV: &str = "OTEL_SERVICE_INSTANCE_ID";
 
-/// One node's environment: the caller's, plus a `service.instance.id` naming
-/// the node unless the caller pinned one.
+/// One node's environment: the caller's environment, plus a
+/// `service.instance.id` that names the node, unless the caller pinned one.
 ///
-/// `crabka-gres` derives that id from its advertised range endpoint, which the
-/// harness sets to `127.0.0.1:0` so the OS assigns the port — meaning every node
-/// in a harness cluster would derive the same id and their spans would collapse
-/// into one process in the trace backend. The node label is the identity the
-/// harness uses everywhere else (logs, the process roster, reports), so it is
-/// the right name here too.
+/// `crabka-gres` derives that id from its advertised range endpoint. The
+/// harness sets that endpoint to `127.0.0.1:0` so the OS assigns the port.
+/// Every node in a harness cluster would therefore derive the same id, and
+/// their spans would collapse into one process in the trace backend. The node
+/// label is the identity the harness uses everywhere else, in logs, in the
+/// process roster, and in reports, so it is the right name here too.
 fn node_environment(label: &str, node_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     let mut env = node_env.clone();
     env.entry(SERVICE_INSTANCE_ID_ENV.to_owned())
@@ -948,8 +964,8 @@ fn registry_policy_args(policy: &RegistryPolicy) -> [String; 20] {
     ]
 }
 
-/// Spawns one `crabka-gres` child in its own process group, capturing
-/// stdout+stderr to the spec's log file and watching for the ready line.
+/// Spawns one `crabka-gres` child in its own process group. It captures
+/// stdout and stderr to the spec's log file and watches for the ready line.
 fn spawn_node(gres_binary: &Path, spec: &NodeSpec) -> anyhow::Result<NodeProcess> {
     let stderr = File::create(&spec.log_path)
         .with_context(|| format!("create {}", spec.log_path.display()))?;
@@ -1029,7 +1045,7 @@ async fn wait_node_ready(
     Ok(())
 }
 
-/// Copies a node's stdout into its log file line by line, resolving `ready`
+/// Copies a node's stdout into its log file line by line. It resolves `ready`
 /// on the first `CRABKA_GRES_READY` line.
 async fn pump_node_stdout(
     stdout: ChildStdout,
@@ -1068,8 +1084,8 @@ fn parse_ready_line(payload: &str) -> Option<NodeReady> {
     Some(NodeReady { sql, range })
 }
 
-/// Spawns `count` chaos proxies pointing at a refusing placeholder backend;
-/// they are repointed once nodes report ready.
+/// Spawns `count` chaos proxies that point at a refusing placeholder backend.
+/// The harness repoints them once the nodes report ready.
 async fn spawn_proxies(
     count: u16,
     policy: LoadtestRuntimePolicy,
@@ -1090,8 +1106,8 @@ fn placeholder_addr() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 1))
 }
 
-/// Runs `crabka format` for a standalone single-voter broker (mirrors
-/// `scripts/gres-range-scaling.sh`), logging to `logs/format.log`.
+/// Runs `crabka format` for a standalone single-voter broker, as
+/// `scripts/gres-range-scaling.sh` does. It logs to `logs/format.log`.
 async fn run_crabka_format(
     cli_binary: &Path,
     work_dir: &Path,
@@ -1128,8 +1144,8 @@ async fn run_crabka_format(
     Ok(())
 }
 
-/// Writes `broker.toml` and starts `crabka-broker` as a child process,
-/// waiting until its Kafka listener accepts connections.
+/// Writes `broker.toml` and starts `crabka-broker` as a child process. It
+/// waits until the broker's Kafka listener accepts connections.
 async fn start_broker(
     broker_binary: &Path,
     work_dir: &Path,
@@ -1218,7 +1234,7 @@ async fn wait_for_broker(
 }
 
 /// Creates the tenant's WAL topics and registry record. The record's range
-/// endpoints are the chaos proxies, which is the fault-injection seam.
+/// endpoints are the chaos proxies, and that is the fault-injection seam.
 async fn provision_tenant(
     bootstrap: &str,
     ranges: u16,
@@ -1266,8 +1282,8 @@ async fn provision_tenant(
     Ok(())
 }
 
-/// Builds the tenant registry record: SQL user + SCRAM verifier plus the
-/// proxy-fronted range layout.
+/// Builds the tenant registry record: the SQL user, the SCRAM verifier, and
+/// the proxy-fronted range layout.
 fn tenant_record(
     ranges: u16,
     range_endpoints: &[SocketAddr],
@@ -1298,8 +1314,8 @@ struct TlsPaths {
     ca: PathBuf,
 }
 
-/// Generates a throwaway range mTLS CA + peer certificate and writes the PEM
-/// files into `dir`.
+/// Generates a throwaway range mTLS CA and peer certificate, then writes the
+/// PEM files into `dir`.
 fn write_tls_fixture(dir: &Path) -> anyhow::Result<TlsPaths> {
     let ca = crabka_security::ca::generate_cluster_ca("loadtest-range-ca", 1)
         .context("generate range CA")?;
@@ -1328,8 +1344,8 @@ fn write_tls_fixture(dir: &Path) -> anyhow::Result<TlsPaths> {
     })
 }
 
-/// Picks two distinct free localhost ports (both probes held open together so
-/// they cannot collide).
+/// Picks two distinct free localhost ports. It holds both probes open at the
+/// same time, so the two ports cannot collide.
 async fn pick_free_ports() -> anyhow::Result<(u16, u16)> {
     let first = TcpListener::bind((IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
         .await
@@ -1343,8 +1359,8 @@ async fn pick_free_ports() -> anyhow::Result<(u16, u16)> {
     ))
 }
 
-/// SIGKILLs `child` (whole process group on Unix) and waits for it to be
-/// reaped. Succeeds if the child already exited on its own.
+/// SIGKILLs `child`, and on Unix the whole process group, then waits for the
+/// kernel to reap it. This succeeds if the child already exited on its own.
 async fn kill_child(
     label: &str,
     child: &mut Child,
@@ -1371,8 +1387,8 @@ async fn kill_child(
     Ok(())
 }
 
-/// SIGKILLs a process group by id (the group leader was spawned with
-/// `process_group(0)`, so its pid is the group id).
+/// SIGKILLs a process group by id. The harness spawned the group leader with
+/// `process_group(0)`, so the leader's pid is the group id.
 #[cfg(unix)]
 fn kill_process_group(process_group: u32) {
     let _ = std::process::Command::new("kill")
@@ -1397,7 +1413,7 @@ fn log_tail(path: &Path, line_cap: usize) -> String {
     }
 }
 
-/// Walks up from `start` to the first directory containing `Cargo.lock`.
+/// Walks up from `start` to the first directory that holds `Cargo.lock`.
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
@@ -1405,8 +1421,8 @@ fn find_workspace_root(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// The workspace root, found by walking up from the crate manifest dir and
-/// then the current dir.
+/// The workspace root. This function walks up from the crate manifest dir and
+/// then from the current dir.
 fn workspace_root() -> anyhow::Result<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if let Some(root) = find_workspace_root(&manifest_dir) {
@@ -1422,8 +1438,9 @@ fn workspace_root() -> anyhow::Result<PathBuf> {
     })
 }
 
-/// Resolves one binary: the env override wins, else `target/debug/<name>`
-/// under the workspace root. Errors if the file does not exist.
+/// Resolves one binary. The env override wins. Without one, the path is
+/// `target/debug/<name>` under the workspace root. This function returns an
+/// error if the file does not exist.
 fn resolve_binary(
     override_path: Option<PathBuf>,
     workspace_root: &Path,
@@ -1573,8 +1590,8 @@ mod tests {
         }
     }
 
-    /// Expected outcome of one [`cpu_allocation`] case: broker slice plus
-    /// per-node slices, or `None` for an overcommitted layout.
+    /// Expected outcome of one [`cpu_allocation`] case: the broker slice and
+    /// the per-node slices, or `None` for an overcommitted layout.
     type ExpectedAllocation = Option<(&'static str, &'static [&'static str])>;
 
     #[test]

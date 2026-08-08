@@ -1,18 +1,18 @@
 //! End-to-end integration tests for KIP-1071 streams-group membership (the
-//! Streams Rebalance Protocol), driven against an in-process Crabka broker via
-//! `crabka-client-core`.
+//! Streams Rebalance Protocol), driven against an in-process Crabka broker
+//! through `crabka-client-core`.
 //!
-//! The typed client works because `ApiVersions` advertises `api_keys` 88/89;
-//! `StreamsGroupHeartbeatRequest` / `StreamsGroupDescribeRequest` impl
+//! The typed client works because `ApiVersions` advertises `api_keys` 88/89.
+//! `StreamsGroupHeartbeatRequest` and `StreamsGroupDescribeRequest` implement
 //! `ProtocolRequest`, so `client.send(req)` returns the typed response and
 //! exercises the real wire path. Both streams RPCs are MIN=MAX=0, so the client
 //! negotiates v0.
 //!
 //! Unlike share groups, the streams heartbeat handler gates on BOTH the
 //! finalized `streams.version >= 1` feature (KIP-1071 early access) AND the
-//! `streams_group.enable` config kill-switch (true by default in
-//! `BrokerConfig::for_tests`). Every test therefore finalizes `streams.version`
-//! to level 1 via `UpdateFeatures` before issuing streams RPCs.
+//! `streams_group.enable` config kill-switch, which is true by default in
+//! `BrokerConfig::for_tests`. Every test therefore finalizes `streams.version`
+//! to level 1 with `UpdateFeatures` before it issues streams RPCs.
 
 use std::{sync::Arc, time::Duration};
 
@@ -71,7 +71,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
     );
 }
 
-/// Finalize `streams.version` to level 1 so the heartbeat/describe handlers
+/// Finalize `streams.version` to level 1 so the heartbeat and describe handlers
 /// stop returning `UNSUPPORTED_VERSION`. `upgrade_type: 1` is UPGRADE.
 async fn finalize_streams_version(client: &Client) {
     let resp = client
@@ -92,8 +92,8 @@ async fn finalize_streams_version(client: &Client) {
     );
 }
 
-/// A single-subtopology topology subscribing to one source topic, with the
-/// supplied changelog topics (empty → stateless).
+/// A single-subtopology topology that subscribes to one source topic, with the
+/// supplied changelog topics. An empty list means stateless.
 fn topology(source_topic: &str, changelogs: Vec<TopicInfo>) -> Topology {
     Topology {
         epoch: 0,
@@ -107,8 +107,8 @@ fn topology(source_topic: &str, changelogs: Vec<TopicInfo>) -> Topology {
     }
 }
 
-/// First-join heartbeat: empty member id (server mints one), epoch 0,
-/// process id + rebalance timeout + the supplied topology.
+/// First-join heartbeat. It sends an empty member id, so the server mints one,
+/// epoch 0, a process id, a rebalance timeout, and the supplied topology.
 fn first_join(group: &str, topo: Topology) -> StreamsGroupHeartbeatRequest {
     StreamsGroupHeartbeatRequest {
         group_id: group.into(),
@@ -121,8 +121,8 @@ fn first_join(group: &str, topo: Topology) -> StreamsGroupHeartbeatRequest {
     }
 }
 
-/// Follow-up heartbeat: known member id + its current epoch, echoing back the
-/// owned active tasks (as a steady-state member would).
+/// Follow-up heartbeat. It sends a known member id and its current epoch, and
+/// it echoes back the owned active tasks, as a steady-state member does.
 fn follow_up(
     group: &str,
     member_id: &str,
@@ -161,7 +161,8 @@ fn active_partitions_for(resp: &StreamsGroupHeartbeatResponse, sub: &str) -> Vec
     parts
 }
 
-/// The response status codes (KIP-1071 status enum: 3 == `MISSING_INTERNAL_TOPICS`).
+/// The response status codes. In the KIP-1071 status enum, 3 is
+/// `MISSING_INTERNAL_TOPICS`.
 fn status_codes(resp: &StreamsGroupHeartbeatResponse) -> Vec<i8> {
     resp.status
         .as_ref()
@@ -274,9 +275,10 @@ async fn stateless_single_member_converges() {
     );
 }
 
-/// A stateful subtopology (a state-changelog topic) drives the broker to
-/// auto-create the changelog internal topic. Once it exists the member
-/// converges with no `MISSING_INTERNAL_TOPICS` (status code 3) status.
+/// A stateful subtopology, that is, one with a state-changelog topic, drives
+/// the broker to auto-create the changelog internal topic. Once that topic
+/// exists, the member converges with no `MISSING_INTERNAL_TOPICS` status, which
+/// is status code 3.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stateful_member_triggers_internal_topic_creation() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -419,8 +421,8 @@ async fn describe_returns_the_group() {
     );
 }
 
-/// A member that has joined can leave via `member_epoch == -1`; the leave
-/// succeeds and a subsequent Describe shows the group with the member gone.
+/// A member that has joined can leave with `member_epoch == -1`. The leave
+/// succeeds, and a later Describe shows the group without that member.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn leave_removes_member() {
     let (_b, bootstrap, _dir) = boot().await;
@@ -466,10 +468,11 @@ async fn leave_removes_member() {
     );
 }
 
-/// `ListGroups` surfaces a live streams group with `group_type = "streams"`,
-/// honoring `types_filter = ["streams"]` — the exact path the JVM
-/// `kafka-streams-groups.sh` `AdminClient` (`listGroups(typesFilter=[Streams])`)
-/// uses before it will issue `StreamsGroupDescribe`.
+/// `ListGroups` surfaces a live streams group with `group_type = "streams"`
+/// and honors `types_filter = ["streams"]`. That is the exact path the JVM
+/// `kafka-streams-groups.sh` `AdminClient` uses with
+/// `listGroups(typesFilter=[Streams])` before it issues
+/// `StreamsGroupDescribe`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_groups_surfaces_streams_group() {
     let (_b, bootstrap, _dir) = boot().await;

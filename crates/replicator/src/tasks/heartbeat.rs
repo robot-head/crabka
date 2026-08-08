@@ -28,9 +28,9 @@ pub struct HeartbeatParams {
     /// Injectable clock: returns the current time in milliseconds since epoch.
     pub now_ms: fn() -> i64,
     /// Injectable async sleeper that paces the heartbeat interval. Production
-    /// uses [`qubit_clock::sleep::SystemSleeper`] (real tokio time); tests
-    /// inject a [`qubit_clock::sleep::MockSleeper`] so the interval fires on a
-    /// mock timeline instead of wall-clock time.
+    /// uses [`qubit_clock::sleep::SystemSleeper`], which is real tokio time.
+    /// Tests inject a [`qubit_clock::sleep::MockSleeper`], so the interval fires
+    /// on a mock timeline and not on wall-clock time.
     pub sleeper: std::sync::Arc<dyn qubit_clock::sleep::AsyncSleeper>,
     /// Optional TLS/SASL security for the target cluster.
     pub security: Option<crabka_client_core::security::ClientSecurity>,
@@ -211,7 +211,8 @@ mod tests {
 
     /// Number of heartbeat intervals to fire on the mock timeline.
     const TICKS: usize = 3;
-    /// Heartbeat cadence the mock timeline is advanced by, one tick at a time.
+    /// Heartbeat cadence that the test advances the mock timeline by, one tick
+    /// at a time.
     const INTERVAL: Time = millis(100);
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

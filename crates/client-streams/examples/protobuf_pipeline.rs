@@ -1,21 +1,21 @@
 // `#[tracing::instrument]` on the DSL runtime deepens this example's `main`
 // future past the default type-layout depth limit; raise it.
 #![recursion_limit = "512"]
-//! Protobuf schema-serde Streams pipeline using `StreamsApp` + the default-serde
-//! DSL. Requires a running broker (`127.0.0.1:9092`) and a Confluent-compatible
-//! registry (`http://127.0.0.1:8081`).
+//! Protobuf schema-serde Streams pipeline that uses `StreamsApp` and the
+//! default-serde DSL. It needs a running broker at `127.0.0.1:9092` and a
+//! Confluent-compatible registry at `http://127.0.0.1:8081`.
 //!
-//! Reads Protobuf `Order` records from `orders-pb`, doubles each total, and
-//! writes them to `orders-pb-doubled`. Mirrors the Avro/JSON examples — only the
-//! serde format differs.
+//! The pipeline reads Protobuf `Order` records from `orders-pb`, doubles each
+//! total, and writes them to `orders-pb-doubled`. It matches the Avro and JSON
+//! examples, and only the serde format differs.
 //!
 //! Run: `cargo run -p crabka-client-streams --example protobuf_pipeline`
 
 use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsApp};
 use crabka_schema_serde::format::protobuf::ProtobufSerde;
 
-/// Embedded descriptor set referenced by the generated `Order` (regenerate via
-/// examples/gen/regenerate.sh).
+/// Embedded descriptor set that the generated `Order` references. Regenerate it
+/// with examples/gen/regenerate.sh.
 pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] = include_bytes!("gen/file_descriptor_set.bin");
 
 mod order {

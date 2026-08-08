@@ -2,14 +2,15 @@
 //!
 //! The chain binds each record to all prior records: `new_head =
 //! SHA256(prev_head ‖ seq_be ‖ value)`. The writer stamps `(seq, prev_head)`
-//! on each record; the verifier recomputes the chain and checks continuity.
-//! Writer and verifier MUST use these functions — never reimplement the formula.
+//! on each record. The verifier recomputes the chain and checks continuity.
+//! The writer and the verifier must use these functions. Never reimplement the
+//! formula.
 
 use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
-/// Chain head before any record has been written.
+/// Chain head before the writer writes the first record.
 pub const GENESIS_HEAD: [u8; 32] = [0u8; 32];
 
 /// Canonical chain hash. `new_head = SHA256(prev ‖ seq.to_be_bytes() ‖ value)`.
@@ -44,15 +45,17 @@ impl ChainState {
         Self::default()
     }
 
-    /// Resume a chain from a recovered position (after restart / spool replay).
+    /// Resume a chain from a recovered position after a restart or a spool replay.
     #[must_use]
     pub fn resume(next_seq: u64, head: [u8; 32]) -> Self {
         Self { next_seq, head }
     }
 
-    /// Advance the chain for a record carrying `value`. Returns the `(seq,
-    /// prev_head)` to stamp on that record (the head as it was *before* this
-    /// record), then folds the record into the head.
+    /// Advance the chain for a record that holds `value`.
+    ///
+    /// Returns the `(seq, prev_head)` to stamp on that record. `prev_head` is
+    /// the head as it was *before* this record. The method then updates the
+    /// head with this record.
     #[tracing::instrument(level = "debug", skip_all, fields(seq = self.next_seq, bytes = value.len()))]
     pub fn extend(&mut self, value: &[u8]) -> (u64, [u8; 32]) {
         let seq = self.next_seq;
@@ -73,7 +76,7 @@ impl ChainState {
     }
 }
 
-/// Lowercase hex encoding.
+/// Encode `bytes` as lowercase hex.
 #[must_use]
 pub fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -83,7 +86,7 @@ pub fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Parse exactly 32 bytes of lowercase/uppercase hex.
+/// Parse exactly 32 bytes of lowercase or uppercase hex.
 #[must_use]
 pub fn from_hex32(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 {

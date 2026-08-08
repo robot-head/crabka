@@ -1,17 +1,19 @@
-//! COMPOSITIONAL end-to-end data-path model — the first model beyond the
-//! per-slice ones. It composes the four real seam cores — HWM/ISR
-//! (`ReplicaState`), leader-epoch truncation (`epoch_and_offset_for_entries`),
-//! failover selection (`failover_one`/`select_best_replica`), and fetch
-//! visibility (`compute_visibility_window`) — over a tiny cluster (3 brokers, 1
-//! partition) to verify the canonical broker guarantee end-to-end: an
-//! `acks=all` record is never lost across clean leader changes, every consumer
-//! read is consistent, and unclean-election loss is exactly characterized.
+//! COMPOSITIONAL end-to-end data-path model. It is the first model beyond the
+//! per-slice ones. It composes the four real seam cores over a tiny cluster of
+//! 3 brokers and 1 partition: HWM/ISR (`ReplicaState`), leader-epoch truncation
+//! (`epoch_and_offset_for_entries`), failover selection (`failover_one` and
+//! `select_best_replica`), and fetch visibility
+//! (`compute_visibility_window`). It verifies the canonical broker guarantee
+//! end-to-end. An `acks=all` record is never lost across clean leader changes,
+//! every consumer read is consistent, and unclean-election loss is exactly
+//! characterized.
 //!
-//! Per-broker log = `Vec<u8>` of leader epochs (offset = index, value ≡ offset).
-//! Durability is tracked by a ghost `committed` (epoch per offset ever ≤ HWM);
-//! read consistency is checked at the visibility seam. Built incrementally
-//! (DPC-1 spine → DPC-2 clean failover → DPC-3 unclean). State explosion is the
-//! central risk — see the bounds + the host memory watchdog.
+//! Each per-broker log is a `Vec<u8>` of leader epochs, where offset = index
+//! and value ≡ offset. A ghost `committed` tracks durability, with one epoch
+//! per offset that was ever ≤ HWM. The visibility seam checks read consistency.
+//! The model was built incrementally: DPC-1 spine → DPC-2 clean failover →
+//! DPC-3 unclean. State explosion is the central risk, so see the bounds and
+//! the host memory watchdog.
 
 // All arithmetic here is bounded to a tiny cluster (≤ 3 brokers, log-len ≤ 3),
 // so the offset/length/id casts below can never wrap or truncate.
@@ -126,13 +128,13 @@ impl Hash for DpState {
 
 // ----- real-core adapters (the wrap-real seams) -----
 
-/// The follower's effective LEO *as seen by the leader*: the length of the
-/// longest epoch-consistent common prefix with the leader's log. A real follower
-/// truncates any divergence (via `OffsetForLeaderEpoch`) BEFORE advancing its
-/// reported fetch offset, so the leader never sees — and never advances the HWM
-/// over — divergent follower data. Using raw `len()` here would let the HWM
-/// commit data a divergent follower hasn't actually reconciled (the bug this
-/// composition surfaced).
+/// The follower's effective LEO *as seen by the leader*. It is the length of
+/// the longest epoch-consistent common prefix with the leader's log. A real
+/// follower truncates any divergence with `OffsetForLeaderEpoch` BEFORE it
+/// advances its reported fetch offset, so the leader never sees divergent
+/// follower data and never advances the HWM over it. A raw `len()` here would
+/// let the HWM commit data that a divergent follower has not reconciled. That
+/// is the bug this composition surfaced.
 fn consistent_leo(follower_log: &[u8], leader_log: &[u8]) -> i64 {
     follower_log
         .iter()
@@ -143,9 +145,9 @@ fn consistent_leo(follower_log: &[u8], leader_log: &[u8]) -> i64 {
         .expect("bounded model offset fits in i64")
 }
 
-/// Drive the REAL HWM core: reconstruct a `ReplicaState` from the model's ISR +
-/// per-follower (consistent) LEOs and return the recomputed HWM (= min ISR LEO,
-/// clamped to the leader LEO).
+/// Drive the REAL HWM core. It reconstructs a `ReplicaState` from the model's
+/// ISR and the consistent per-follower LEOs, then returns the recomputed HWM.
+/// That HWM is the minimum ISR LEO, clamped to the leader LEO.
 fn real_hwm(s: &DpState, base: Instant) -> i64 {
     let leader = s.leader;
     let leader_leo = s.leader_leo();
@@ -179,9 +181,9 @@ fn real_hwm(s: &DpState, base: Instant) -> i64 {
     rs.recompute_hw_for_leader_append(Offset(leader_leo)).0
 }
 
-/// Drive the REAL diskless WAL durable-HW core. Slice 1 is local fsync only, so
-/// the model constrains the ISR to the leader broker and releases exactly the
-/// durable WAL prefix.
+/// Drive the REAL diskless WAL durable-HW core. Slice 1 uses local fsync only,
+/// so the model constrains the ISR to the leader broker and releases exactly
+/// the durable WAL prefix.
 fn real_wal_hwm(leader: u8, durable_leo: i64, base: Instant) -> i64 {
     let leader = crabka_audit::NodeId(node(leader));
     let mut rs = ReplicaState::new();
@@ -205,8 +207,8 @@ fn epoch_entries(log: &[u8]) -> Vec<EpochEntry> {
     out
 }
 
-/// Drive the REAL divergence core: the exclusive offset `follower` keeps when
-/// reconciling against `leader_log`.
+/// Drive the REAL divergence core. It returns the exclusive offset that
+/// `follower` keeps when it reconciles against `leader_log`.
 fn real_truncation_offset(follower_log: &[u8], leader_log: &[u8]) -> i64 {
     let leader_entries = epoch_entries(leader_log);
     let follower_latest = follower_log.last().map_or(-1, |&e| i32::from(e));
@@ -219,23 +221,25 @@ fn real_truncation_offset(follower_log: &[u8], leader_log: &[u8]) -> i64 {
     end.0.min(model_offset(follower_log.len()))
 }
 
-/// Whether follower `b` is genuinely in-sync and may be (re)admitted to the
-/// ISR: its log is an epoch-consistent prefix of the leader's (no unreconciled
-/// divergence) AND it is caught up to at least the HWM. This mirrors the real
-/// invariant — a follower's reported progress is only ever post-truncation
-/// consistent, so a divergent follower can never appear caught-up.
+/// Whether follower `b` is genuinely in-sync and may be admitted or re-admitted
+/// to the ISR. Its log must be an epoch-consistent prefix of the leader's, with
+/// no unreconciled divergence, AND it must be caught up to at least the HWM.
+/// This mirrors the real invariant. A follower's reported progress is only ever
+/// post-truncation consistent, so a divergent follower can never appear
+/// caught-up.
 fn isr_eligible(s: &DpState, b: u8) -> bool {
     let f = &s.log[usize::from(b)];
     let l = &s.log[usize::from(s.leader)];
     model_offset(f.len()) >= s.hwm && f.iter().enumerate().all(|(off, &e)| l.get(off) == Some(&e))
 }
 
-/// Apply a leader election: set leader/ISR, bump the epoch, and — for an UNCLEAN
-/// election — characterize any committed-data loss. The new (possibly less
-/// complete) leader keeps only the committed prefix it actually holds with the
-/// same epoch; any committed offset it lacks is LOST (flagged in `lost`, and the
-/// HWM clamped to the new leader's log). Clean elections (`unclean == false`)
-/// never lose committed data, so there is no truncation.
+/// Apply a leader election. It sets the leader and ISR, bumps the epoch, and,
+/// for an UNCLEAN election, characterizes any committed-data loss. The new
+/// leader, which can be less complete, keeps only the committed prefix that it
+/// holds with the same epoch. Any committed offset it lacks is LOST, so the
+/// function flags it in `lost` and clamps the HWM to the new leader's log. A
+/// clean election (`unclean == false`) never loses committed data, so there is
+/// no truncation.
 fn apply_elect(s: &mut DpState, new_leader: u8, isr_mask: u8, unclean: bool) {
     s.leader = new_leader;
     s.isr = isr_mask;
@@ -256,10 +260,10 @@ fn apply_elect(s: &mut DpState, new_leader: u8, isr_mask: u8, unclean: bool) {
     }
 }
 
-/// The controller's failover reaction to broker `dead` being down: drive the
-/// real `failover_one`, applying its decision (clean elect / ISR shrink), and —
-/// in the unclean config — driving the real KIP-966 `select_best_replica` for
-/// the empty-ISR `Recover` path.
+/// The controller's failover reaction when broker `dead` goes down. It drives
+/// the real `failover_one` and applies that decision, which is a clean elect or
+/// an ISR shrink. In the unclean config it also drives the real KIP-966
+/// `select_best_replica` for the empty-ISR `Recover` path.
 fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
     let isr_nodes: Vec<crabka_audit::NodeId> = (0..NB_U8)
         .filter(|&b| has(s.isr, b))

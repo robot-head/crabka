@@ -1,4 +1,5 @@
-//! `StreamsBuilder` (public) + `InternalStreamsBuilder` (graph + name counter).
+//! The public `StreamsBuilder` and the `InternalStreamsBuilder` that holds the
+//! graph and the name counter.
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
@@ -6,9 +7,10 @@ use crate::{
     processor::serde::{Consumed, DefaultSerde, Serde, SerdeAssociate},
 };
 
-/// A serde-carrying thunk that registers + connects a DSL-added state store to a
-/// processor by name during lowering. Looked up and invoked by `process` and
-/// `process_values`.
+/// A serde-carrying thunk that registers a DSL-added state store and connects it
+/// to a processor by name during lowering.
+///
+/// `process` and `process_values` look up this thunk and call it.
 pub(crate) type StoreConnectThunk =
     std::sync::Arc<dyn Fn(&mut crate::dsl::graph::LowerState, &str) + Send + Sync>;
 
@@ -16,8 +18,8 @@ pub(crate) struct InternalStreamsBuilder {
     pub graph: LogicalGraph,
     index: usize,
     /// Serde-carrying connect thunks for DSL-added stores, keyed by store name.
-    /// Populated by [`StreamsBuilder::add_state_store`]; looked up + invoked by a
-    /// `process`/`process_values` node during lowering.
+    /// [`StreamsBuilder::add_state_store`] fills this map. A `process` or
+    /// `process_values` node looks up a thunk and calls it during lowering.
     pub store_thunks: std::collections::HashMap<String, StoreConnectThunk>,
 }
 
@@ -30,20 +32,23 @@ impl InternalStreamsBuilder {
         }
     }
 
-    /// JVM `InternalStreamsBuilder.newProcessorName`: `prefix + %010d` then ++.
+    /// JVM `InternalStreamsBuilder.newProcessorName`. It returns
+    /// `prefix + %010d` and then increments the counter.
     pub fn new_processor_name(&mut self, prefix: &str) -> String {
         let n = format!("{prefix}{:010}", self.index);
         self.index += 1;
         n
     }
 
-    /// The connect thunk for an added store, if any (cloned `Arc`). Used by `process`.
+    /// The connect thunk for an added store, if one exists, as a cloned `Arc`.
+    /// `process` uses it.
     pub fn store_thunk(&self, name: &str) -> Option<StoreConnectThunk> {
         self.store_thunks.get(name).cloned()
     }
 }
 
-/// The DSL entry point. Build a topology, then `build`/`build_optimized`.
+/// The DSL entry point. Build a topology, then call `build` or
+/// `build_optimized`.
 pub struct StreamsBuilder {
     pub(crate) internal: Rc<RefCell<InternalStreamsBuilder>>,
 }
@@ -58,10 +63,10 @@ impl StreamsBuilder {
 
     /// Source a `KStream` from one or more topics with explicit serdes.
     ///
-    /// Prefer [`StreamsBuilder::stream`] (the default-serde form) for types that
-    /// implement [`DefaultSerde`]. Reach for this escape hatch when a type has no
-    /// default serde, or to override it — e.g. a hand-rolled `Serde<T>`, a
-    /// **key**-role schema serde (`AvroSerde::<T>::key(&cache)`), or a
+    /// Prefer [`StreamsBuilder::stream`], the default-serde form, for types that
+    /// implement [`DefaultSerde`]. Use this escape hatch when a type has no
+    /// default serde, or to override it. Examples are a hand-rolled `Serde<T>`,
+    /// a **key**-role schema serde (`AvroSerde::<T>::key(&cache)`), and a
     /// validation-on JSON serde (`JsonSerde::value(&cache, true)`).
     pub fn stream_explicit<KS, VS>(
         &self,
@@ -119,16 +124,20 @@ impl StreamsBuilder {
     }
 
     /// Source a materialized `KTable` from a changelog-style topic with explicit
-    /// serdes. Prefer [`StreamsBuilder::table`] (the default-serde form) for
-    /// [`DefaultSerde`] types; use this when a type has no default serde or to
-    /// override it (custom `Serde<T>`, key-role schema serde, validated JSON).
+    /// serdes.
     ///
-    /// Records a single `TableSource` logical node whose thunk lowers a source
-    /// node, the table-source processor, and the materialized state store. The
-    /// store name is taken from `Materialized` (else a fresh
-    /// `KTABLE-SOURCE-STATE-STORE` counter); the changelog topic is
+    /// Prefer [`StreamsBuilder::table`], the default-serde form, for
+    /// [`DefaultSerde`] types. Use this method when a type has no default serde
+    /// or to override it, for example with a custom `Serde<T>`, a key-role
+    /// schema serde, or validated JSON.
+    ///
+    /// The method records a single `TableSource` logical node. Its thunk lowers a
+    /// source node, the table-source processor, and the materialized state store.
+    /// The store name comes from `Materialized`, or from a fresh
+    /// `KTABLE-SOURCE-STATE-STORE` counter. The changelog topic is
     /// `<app>-<store>-changelog`, unless the `REUSE_KTABLE_SOURCE_TOPICS`
-    /// optimizer pass (run by `build_optimized`) makes it reuse the source topic.
+    /// optimizer pass, which `build_optimized` runs, makes it reuse the source
+    /// topic.
     pub fn table_explicit<KS, VS>(
         &self,
         topic: impl Into<String>,
@@ -294,20 +303,25 @@ impl StreamsBuilder {
         .with_versioned_retention(versioned_retention)
     }
 
-    /// Source a [`GlobalKTable`] from a topic with explicit serdes: a
-    /// fully-replicated lookup table, usable only as a join target. Prefer
-    /// [`StreamsBuilder::global_table`] (the default-serde form) for
-    /// [`DefaultSerde`] types; use this when a type has no default serde or to
-    /// override it (custom `Serde<T>`, key-role schema serde, validated JSON).
+    /// Source a [`GlobalKTable`] from a topic with explicit serdes. A
+    /// `GlobalKTable` is a fully-replicated lookup table and works only as a
+    /// join target.
     ///
-    /// Records a single `GlobalSource` logical node whose thunk lowers (via
-    /// [`Topology::add_global_store`]) a source + update-processor + a global KV
-    /// store. The store/source/processor are **invisible in the wire** (no
-    /// subtopology, no changelog), but the global source node still consumes a
-    /// node-group index during grouping — so declaring `global_table` before
-    /// `stream` shifts the stream subtopology id (e.g. to `"1"`). The store name
-    /// is taken from `materialized` (else a fresh `KTABLE-SOURCE-STATE-STORE`
-    /// counter), minted at the JVM position (before the source/processor names).
+    /// Prefer [`StreamsBuilder::global_table`], the default-serde form, for
+    /// [`DefaultSerde`] types. Use this method when a type has no default serde
+    /// or to override it, for example with a custom `Serde<T>`, a key-role
+    /// schema serde, or validated JSON.
+    ///
+    /// The method records a single `GlobalSource` logical node. Its thunk calls
+    /// [`Topology::add_global_store`] to lower a source node, an
+    /// update-processor, and a global KV store. The store, the source, and the
+    /// processor are **invisible in the wire**, with no subtopology and no
+    /// changelog. The global source node still takes a node-group index during
+    /// grouping, so a `global_table` declared before `stream` shifts the stream
+    /// subtopology id, for example to `"1"`. The store name comes from
+    /// `materialized`, or from a fresh `KTABLE-SOURCE-STATE-STORE` counter, and
+    /// it is minted at the JVM position, before the source name and the
+    /// processor name.
     ///
     /// [`GlobalKTable`]: crate::dsl::global_table::GlobalKTable
     /// [`Topology::add_global_store`]: crate::topology::Topology::add_global_store
@@ -399,7 +413,8 @@ impl StreamsBuilder {
     }
 
     /// Source a materialized `KTable` using each type's [`DefaultSerde`]. Use
-    /// [`StreamsBuilder::table_explicit`] to supply custom serdes / `Materialized`.
+    /// [`StreamsBuilder::table_explicit`] to supply custom serdes or a custom
+    /// `Materialized`.
     pub fn table<K, V>(
         &self,
         topic: impl Into<String>,
@@ -446,15 +461,18 @@ impl StreamsBuilder {
         )
     }
 
-    /// Register a state store the DSL can connect to a `process`/`process_values`
-    /// node by name. The store is registered + its (compact) changelog emitted when
-    /// a `process` call connects it. Call this BEFORE the `process` that names the
-    /// store.
+    /// Register a state store that the DSL can connect by name to a `process` or
+    /// `process_values` node.
     ///
-    /// The serdes are captured into a connect thunk that, during lowering, invokes
-    /// [`Topology::add_state_store`] with the named processor as the store's
-    /// connected processor — yielding the standard `<app>-<name>-changelog` compact
-    /// changelog. The thunk is recorded under `name` and looked up by `process`.
+    /// The store is registered and its compact changelog is emitted when a
+    /// `process` call connects it. Call this method BEFORE the `process` that
+    /// names the store.
+    ///
+    /// The method captures the serdes into a connect thunk. During lowering the
+    /// thunk calls [`Topology::add_state_store`] with the named processor as the
+    /// store's connected processor, which gives the standard
+    /// `<app>-<name>-changelog` compact changelog. The thunk is recorded under
+    /// `name`, and `process` looks it up.
     ///
     /// [`Topology::add_state_store`]: crate::topology::Topology::add_state_store
     pub fn add_state_store<KS, VS>(
@@ -488,15 +506,18 @@ impl StreamsBuilder {
         self
     }
 
-    /// Build the topology with no optimizer (the JVM `NO_OPTIMIZATION` default):
-    /// lower the logical graph straight to the Processor-API [`crate::topology::Topology`], then
-    /// finalize it into a [`BuiltTopology`].
+    /// Build the topology with no optimizer, which is the JVM
+    /// `NO_OPTIMIZATION` default.
     ///
-    /// Consumes the builder. This requires that no [`KStream`]/[`KTable`] handles
-    /// are still alive — each holds an `Rc` clone of the internal builder, so an
-    /// outstanding handle makes `Rc::try_unwrap` fail (→ panic). The fluent
-    /// `stream(..).map_values(..)..to_explicit(..)` form drops every intermediate handle
-    /// before `build`, satisfying this.
+    /// The method lowers the logical graph straight to the Processor-API
+    /// [`crate::topology::Topology`] and then finalizes it into a
+    /// [`BuiltTopology`].
+    ///
+    /// It consumes the builder, so no [`KStream`] or [`KTable`] handle may still
+    /// be alive. Each handle holds an `Rc` clone of the internal builder, so an
+    /// outstanding handle makes `Rc::try_unwrap` fail and the method panics. The
+    /// fluent `stream(..).map_values(..)..to_explicit(..)` form drops every
+    /// intermediate handle before `build`, which meets this requirement.
     ///
     /// [`KStream`]: crate::dsl::kstream::KStream
     /// [`KTable`]: crate::dsl::ktable::KTable
@@ -519,15 +540,19 @@ impl StreamsBuilder {
         topology.build(app_id)
     }
 
-    /// Build the topology with DSL optimizations enabled (JVM `optimization=all`):
-    /// run the optimizer passes over the logical graph, then lower to the
-    /// Processor-API [`crate::topology::Topology`] and finalize.
+    /// Build the topology with the DSL optimizations on, which matches the JVM
+    /// `optimization=all`.
     ///
-    /// The passes are `MERGE_REPARTITION_TOPICS` (two aggregations off one
-    /// key-changing op share a single repartition topic) and
-    /// `REUSE_KTABLE_SOURCE_TOPICS` (a `builder.table_explicit()` store reuses its source
-    /// topic as its changelog). They're independent, so order doesn't matter.
-    /// Same outstanding-handle requirement as [`build`](Self::build).
+    /// The method runs the optimizer passes over the logical graph, then lowers
+    /// the graph to the Processor-API [`crate::topology::Topology`] and
+    /// finalizes it.
+    ///
+    /// There are two passes. `MERGE_REPARTITION_TOPICS` makes two aggregations
+    /// off one key-changing op share a single repartition topic.
+    /// `REUSE_KTABLE_SOURCE_TOPICS` makes a `builder.table_explicit()` store
+    /// reuse its source topic as its changelog. The passes are independent, so
+    /// their order does not matter. The outstanding-handle requirement is the
+    /// same as for [`build`](Self::build).
     #[tracing::instrument(
         name = "streams.dsl.build_optimized",
         level = "info",
@@ -548,10 +573,11 @@ impl StreamsBuilder {
         topology.build(app_id)
     }
 
-    /// Unwrap the shared internal builder into its [`LogicalGraph`]. Requires that
-    /// no [`KStream`]/[`KTable`] handles are still alive (each holds an `Rc` clone
-    /// of the internal builder); an outstanding handle makes `Rc::try_unwrap`
-    /// fail → panic.
+    /// Unwrap the shared internal builder into its [`LogicalGraph`].
+    ///
+    /// No [`KStream`] or [`KTable`] handle may still be alive, because each one
+    /// holds an `Rc` clone of the internal builder. An outstanding handle makes
+    /// `Rc::try_unwrap` fail, and the method panics.
     ///
     /// [`KStream`]: crate::dsl::kstream::KStream
     /// [`KTable`]: crate::dsl::ktable::KTable

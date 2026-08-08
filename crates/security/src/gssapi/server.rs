@@ -8,11 +8,11 @@ use super::{
 /// Result of feeding one client token to the exchange.
 #[derive(Debug)]
 pub enum ServerStep {
-    /// Send this token as the `SaslAuthenticate` response `auth_bytes`; feed
-    /// the next client token to the returned exchange.
+    /// Send this token as the `SaslAuthenticate` response `auth_bytes`, then
+    /// feed the next client token to the returned exchange.
     Challenge(Vec<u8>, GssapiServerExchange),
-    /// Authentication complete; `principal` is the raw Kerberos source principal
-    /// (apply `auth_to_local` at the call site).
+    /// Authentication complete. `principal` is the raw Kerberos source
+    /// principal. Apply `auth_to_local` at the call site.
     Done { principal: String },
 }
 
@@ -63,9 +63,10 @@ impl std::fmt::Debug for AwaitingChoice {
 enum AcceptOutcome {
     /// Acceptor needs another client token.
     Continue(Vec<u8>, AcceptingContext),
-    /// Context established with a trailing AP-REP; offer sent on next round.
+    /// Context established with a trailing AP-REP. The offer goes out on the
+    /// next round.
     Offer(Vec<u8>, OfferingLayer),
-    /// Context established; the layer offer was sent inline.
+    /// Context established. The layer offer went out inline.
     Choice(Vec<u8>, AwaitingChoice),
 }
 
@@ -124,14 +125,15 @@ impl AwaitingChoice {
 
 /// SASL/GSSAPI server-side handshake, one type per negotiation phase.
 ///
-/// `Send + Sync` so a live `GssapiServerExchange` can live inside the
-/// per-connection `ConnectionAuth` state, which the broker's request-handling
-/// future holds across `.await` points (the `wrap`/`unwrap`/`src_principal`
-/// methods take `&self` and serialise interior mutability behind a mutex).
+/// The type is `Send + Sync`, so a live `GssapiServerExchange` can sit inside
+/// the per-connection `ConnectionAuth` state. The broker's request-handling
+/// future holds that state across `.await` points. The `wrap`, `unwrap`, and
+/// `src_principal` methods take `&self` and serialise interior mutability
+/// behind a mutex.
 ///
-/// The variant payload types are intentionally not exported: the phase is
-/// driven entirely through `step`/`ServerStep`, so callers never need to
-/// name `AcceptingContext`/`OfferingLayer`/`AwaitingChoice` directly.
+/// The variant payload types stay unexported on purpose. `step` and
+/// `ServerStep` drive the phase, so callers never need to name
+/// `AcceptingContext`, `OfferingLayer`, or `AwaitingChoice` directly.
 #[allow(private_interfaces)]
 pub enum GssapiServerExchange {
     AcceptingContext(AcceptingContext),

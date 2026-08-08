@@ -1,24 +1,23 @@
 //! Multi-broker integration coverage for the native `Consumer`'s per-leader
 //! RPC routing.
 //!
-//! The native consumer used to send every data-plane RPC (`Fetch`,
-//! `OffsetForLeaderEpoch`) over the bootstrap connection. On a multi-broker
-//! cluster that misroutes `Fetch`: a partition whose leader is *not* the
-//! bootstrap broker holds **no replica at all** (rf=1), so a bootstrap-routed
-//! `Fetch` gets `UNKNOWN_TOPIC_OR_PARTITION` and delivers nothing. The
-//! consumer now groups fetchable partitions by leader (via `Client::broker(id)`),
-//! so records flow from every leader regardless of which broker the consumer
-//! bootstrapped at.
+//! The native consumer used to send every data-plane RPC over the bootstrap
+//! connection, both `Fetch` and `OffsetForLeaderEpoch`. On a multi-broker
+//! cluster that behavior misroutes `Fetch`. At rf=1, a partition whose leader
+//! is *not* the bootstrap broker holds **no replica at all**, so a bootstrap-routed
+//! `Fetch` gets `UNKNOWN_TOPIC_OR_PARTITION` and delivers nothing. The consumer
+//! now groups fetchable partitions by leader with `Client::broker(id)`, so
+//! records flow from every leader whatever broker the consumer bootstrapped at.
 //!
 //! **Why rf=1 matters for test validity:** with rf=3, the bootstrap broker holds
-//! a follower replica of every partition and Crabka serves consumer fetches from
-//! any local replica up to the high-watermark (no leadership gate). A
-//! bootstrap-only consumer would still succeed in that setup, making the test
-//! hollow. With rf=1 each partition lives on exactly ONE broker; if the consumer
-//! doesn't route to that broker it gets nothing.
+//! a follower replica of every partition, and Crabka serves consumer fetches
+//! from any local replica up to the high-watermark. There is no leadership gate.
+//! A bootstrap-only consumer would still succeed in that setup, and the test
+//! would be hollow. With rf=1 each partition lives on exactly ONE broker. If the
+//! consumer does not route to that broker it gets nothing.
 //!
-//! Windows-gated like the other multi-broker tests (openraft's `debug_assert!`
-//! races on the hosted Windows scheduler).
+//! Windows-gated like the other multi-broker tests, because openraft's
+//! `debug_assert!` races on the hosted Windows scheduler.
 
 use std::{
     collections::HashSet,
@@ -43,18 +42,21 @@ use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
 
-/// Serialize the multi-broker tests in this binary: each boots a 3-node
-/// loopback cluster, and running them concurrently exhausts ephemeral ports
-/// and starves openraft election timing. Same rationale as the `cluster_lock`
-/// in `leader_epoch.rs` / `replication.rs`.
+/// Serialize the multi-broker tests in this binary.
+///
+/// Each test boots a 3-node loopback cluster. Two tests at the same time
+/// exhaust the ephemeral ports and starve openraft election timing. The
+/// `cluster_lock` in `leader_epoch.rs` and `replication.rs` has the same
+/// rationale.
 fn cluster_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Produce one single-record batch to a specific partition on the broker that
-/// owns it, retrying the metadata-apply race (`UNKNOWN_TOPIC_OR_PARTITION` = 3,
-/// `NOT_LEADER_OR_FOLLOWER` = 6).
+/// Produce one single-record batch to a partition on the broker that owns it.
+///
+/// The function retries the metadata-apply race, that is,
+/// `UNKNOWN_TOPIC_OR_PARTITION` = 3 and `NOT_LEADER_OR_FOLLOWER` = 6.
 async fn produce_one(
     client: &Client,
     topic: &str,
@@ -111,12 +113,12 @@ async fn produce_one(
 }
 
 /// A native `Consumer` against a 3-broker rf=1 cluster must fetch records from
-/// every partition, including partitions whose leader (and sole replica) is NOT
-/// the broker it bootstrapped at.
+/// every partition. This includes partitions whose leader, and sole replica, is
+/// NOT the broker it bootstrapped at.
 ///
-/// With rf=1 there is no replica on the bootstrap broker for partitions led by
-/// other nodes — a bootstrap-only consumer simply gets no records for those
-/// partitions. The consumer MUST route each Fetch to the actual partition leader.
+/// With rf=1 the bootstrap broker holds no replica for partitions led by other
+/// nodes. A bootstrap-only consumer gets no records for those partitions. The
+/// consumer MUST route each Fetch to the actual partition leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consumer_fetches_from_non_bootstrap_leaders() {
     let _g = cluster_lock().lock().await;

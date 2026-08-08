@@ -13,52 +13,52 @@ use crate::{
 /// PostgreSQL type OIDs (from pg_type.dat) for the slice's types.
 pub mod oids {
     pub const BOOL: u32 = 16;
-    /// PostgreSQL `record` — the anonymous composite type a bare `ROW(…)` has.
+    /// PostgreSQL `record`: the anonymous composite type a bare `ROW(…)` has.
     pub const RECORD: u32 = 2249;
     /// `record[]`.
     pub const RECORDARRAY: u32 = 2287;
-    /// SP40: `bytea` — variable-length binary string.
+    /// SP40: `bytea`: variable-length binary string.
     pub const BYTEA: u32 = 17;
     pub const INT8: u32 = 20;
-    /// PostgreSQL `smallint` — a 2-byte signed integer.
+    /// PostgreSQL `smallint`: a 2-byte signed integer.
     pub const INT2: u32 = 21;
     pub const INT4: u32 = 23;
     pub const TEXT: u32 = 25;
-    /// PostgreSQL `oid` — object identifier, an unsigned 4-byte integer.
+    /// PostgreSQL `oid`: object identifier, an unsigned 4-byte integer.
     ///
     /// Drivers send this OID for typeinfo-query parameters (e.g. tokio-postgres
     /// declares `WHERE t.oid = $1` with OID). Values live in the existing `Int4`
-    /// datum — the same representation the catalog's oid-valued columns use.
+    /// datum, the same representation the catalog's oid-valued columns use.
     pub const OID: u32 = 26;
-    /// PostgreSQL `regclass` — a relation's `pg_class` oid with name-based
+    /// PostgreSQL `regclass`: a relation's `pg_class` oid with name-based
     /// text input; values live in the `Int4` datum like `oid`.
     pub const REGCLASS: u32 = 2205;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
-    /// PostgreSQL `real` — single-precision IEEE-754 (`f32`).
+    /// PostgreSQL `real`: single-precision IEEE-754 (`f32`).
     pub const FLOAT4: u32 = 700;
     /// SP30: `double precision` (IEEE-754 f64).
     pub const FLOAT8: u32 = 701;
     /// SP32: arbitrary-precision `numeric`/`decimal`.
     pub const NUMERIC: u32 = 1700;
-    /// SP37: `date` — days since 2000-01-01, stored as i32.
+    /// SP37: `date`: days since 2000-01-01, stored as i32.
     pub const DATE: u32 = 1082;
-    /// SP37: `time without time zone` — microseconds since midnight, stored as i64.
+    /// SP37: `time without time zone`: microseconds since midnight, stored as i64.
     pub const TIME: u32 = 1083;
-    /// `time with time zone` — microseconds since midnight plus a UTC offset.
+    /// `time with time zone`: microseconds since midnight plus a UTC offset.
     pub const TIMETZ: u32 = 1266;
-    /// SP37: `timestamp without time zone` — microseconds since 2000-01-01 00:00:00.
+    /// SP37: `timestamp without time zone`: microseconds since 2000-01-01 00:00:00.
     pub const TIMESTAMP: u32 = 1114;
-    /// SP37: `timestamp with time zone` — microseconds since Unix epoch (UTC), stored as i64.
+    /// SP37: `timestamp with time zone`: microseconds since Unix epoch (UTC), stored as i64.
     pub const TIMESTAMPTZ: u32 = 1184;
-    /// SP37: `interval` — months (i32) + days (i32) + microseconds (i64), stored as 16 bytes.
+    /// SP37: `interval`: months (i32) + days (i32) + microseconds (i64), stored as 16 bytes.
     pub const INTERVAL: u32 = 1186;
-    /// PostgreSQL `uuid` — 128-bit universally unique identifier.
+    /// PostgreSQL `uuid`: 128-bit universally unique identifier.
     pub const UUID: u32 = 2950;
-    /// PostgreSQL `json` — accepted on input (parameters, casts) as an alias for
+    /// PostgreSQL `json`: accepted on input (parameters, casts) as an alias for
     /// `jsonb`; crabka never *reports* this OID.
     pub const JSON: u32 = 114;
-    /// PostgreSQL `jsonb` — the decomposed binary JSON type.
+    /// PostgreSQL `jsonb`: the decomposed binary JSON type.
     pub const JSONB: u32 = 3802;
     /// `json[]`.
     pub const JSONARRAY: u32 = 199;
@@ -108,10 +108,10 @@ pub mod oids {
 
 /// The element type of a SQL array.
 ///
-/// A separate `Copy` enum rather than a boxed [`ColumnType`] because
-/// `ColumnType` is passed by value throughout the executor; it is deliberately
-/// smaller than `ColumnType` — `regclass` and arrays themselves have no array
-/// form here and are refused with 0A000 by [`ElemType::from_column_type`].
+/// This is a separate `Copy` enum rather than a boxed [`ColumnType`], because
+/// the executor passes `ColumnType` by value everywhere. It is deliberately
+/// smaller than `ColumnType`: `regclass` and arrays themselves have no array
+/// form here, and [`ElemType::from_column_type`] refuses them with 0A000.
 /// `PostgreSQL` has no nested array type: `int[][]` *is* `int[]` (`_int4`), and
 /// the extra dimensions live in the value, not the type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,17 +132,18 @@ pub enum ElemType {
     Jsonb,
     Int2,
     Float4,
-    /// `character varying(n)[]` — the length modifier is applied to each element
-    /// on assignment, exactly as `PostgreSQL` applies it to a scalar `varchar(n)`.
+    /// `character varying(n)[]`: the length modifier applies to each element on
+    /// assignment, exactly as `PostgreSQL` applies it to a scalar `varchar(n)`.
     Varchar(Option<u16>),
-    /// `character(n)[]` — each element is blank-padded to `n` on assignment.
+    /// `character(n)[]`: each element is blank-padded to `n` on assignment.
     Char(Option<u16>),
 }
 
 impl ElemType {
     /// Every supported array element type, in `code()` order. The two
-    /// length-modified entries stand for their whole family — `from_code`
-    /// reconstructs the modifier, and neither the OID nor the name depends on it.
+    /// length-modified entries stand for their whole family. `from_code`
+    /// reconstructs the modifier, and neither the OID nor the name depends on
+    /// it.
     pub const ALL: [ElemType; 18] = [
         ElemType::Bool,
         ElemType::Int4,
@@ -164,8 +165,8 @@ impl ElemType {
         ElemType::Char(None),
     ];
 
-    /// The element type as a column type (`numeric` is unconstrained — an array
-    /// carries no element typmod).
+    /// The element type as a column type (`numeric` is unconstrained, because an
+    /// array carries no element typmod).
     pub fn column_type(self) -> ColumnType {
         match self {
             ElemType::Bool => ColumnType::Bool,
@@ -190,8 +191,9 @@ impl ElemType {
     }
 
     /// The element type for `elem`, or `None` when crabka has no array type for
-    /// it (`regclass`, and the array types themselves — `PostgreSQL` has no
-    /// nested array type, so `int[][]` resolves to `int[]` at the type level).
+    /// it (`regclass`, and the array types themselves, because `PostgreSQL` has
+    /// no nested array type, so `int[][]` resolves to `int[]` at the type
+    /// level).
     pub fn from_column_type(elem: ColumnType) -> Option<Self> {
         Some(match elem {
             ColumnType::Bool => ElemType::Bool,
@@ -293,10 +295,11 @@ impl ElemType {
         }
     }
 
-    /// A stable, **append-only** wire/storage code. Persisted by the row encoder
-    /// and the catalog's schema serializer, so existing values must never change.
-    /// It does **not** carry the length modifier of `varchar(n)`/`char(n)` — use
-    /// [`ElemType::write_code`] / [`ElemType::read_code`] for a lossless round trip.
+    /// A stable, **append-only** wire/storage code. The row encoder and the
+    /// catalog's schema serializer persist it, so existing values must never
+    /// change. It does **not** carry the length modifier of
+    /// `varchar(n)`/`char(n)`. Use [`ElemType::write_code`] /
+    /// [`ElemType::read_code`] for a lossless round trip.
     pub fn code(self) -> u8 {
         match self {
             ElemType::Bool => 0,
@@ -377,53 +380,54 @@ impl ElemType {
     }
 }
 
-/// A SQL column type. SP30 added `Float8`; SP32 added `Numeric` (which carries an
-/// optional `numeric(precision, scale)` modifier for column definitions / casts —
-/// `None` is unconstrained `numeric`). SP37 adds five date/time types.
+/// A SQL column type. SP30 added `Float8`; SP32 added `Numeric`, which carries
+/// an optional `numeric(precision, scale)` modifier for column definitions and
+/// casts, where `None` is unconstrained `numeric`. SP37 adds five date/time
+/// types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnType {
     Bool,
-    /// PostgreSQL `smallint` (OID 21) — a 2-byte signed integer.
+    /// PostgreSQL `smallint` (OID 21): a 2-byte signed integer.
     Int2,
     Int4,
     Int8,
     Text,
     Varchar(Option<u16>),
     Char(Option<u16>),
-    /// PostgreSQL `real` (OID 700) — an IEEE-754 `f32`.
+    /// PostgreSQL `real` (OID 700): an IEEE-754 `f32`.
     Float4,
     /// SP30: PostgreSQL `double precision` (an IEEE-754 `f64`).
     Float8,
     /// SP32: PostgreSQL `numeric`/`decimal`. The `Typmod` (precision, scale) is
     /// significant only when storing/casting; OID/name/typlen ignore it.
     Numeric(Option<Typmod>),
-    /// SP37: PostgreSQL `date` (OID 1082) — a calendar date with no time-of-day.
+    /// SP37: PostgreSQL `date` (OID 1082): a calendar date with no time-of-day.
     Date,
     /// SP37: PostgreSQL `time without time zone` (OID 1083).
     Time,
-    /// PostgreSQL `time with time zone` (OID 1266) — a clock reading plus the
+    /// PostgreSQL `time with time zone` (OID 1266): a clock reading plus the
     /// UTC offset it was read at.
     Timetz,
     /// SP37: PostgreSQL `timestamp without time zone` (OID 1114).
     Timestamp,
-    /// SP37: PostgreSQL `timestamp with time zone` (OID 1184) — stored as UTC.
+    /// SP37: PostgreSQL `timestamp with time zone` (OID 1184): stored as UTC.
     Timestamptz,
-    /// SP37: PostgreSQL `interval` (OID 1186) — months + days + microseconds.
+    /// SP37: PostgreSQL `interval` (OID 1186): months + days + microseconds.
     Interval,
-    /// SP40: PostgreSQL `bytea` (OID 17) — variable-length binary string.
+    /// SP40: PostgreSQL `bytea` (OID 17): variable-length binary string.
     Bytea,
-    /// PostgreSQL `uuid` (OID 2950) — 128-bit identifier.
+    /// PostgreSQL `uuid` (OID 2950): 128-bit identifier.
     Uuid,
-    /// PostgreSQL `regclass` (OID 2205) — a relation's `pg_class` oid. Values
+    /// PostgreSQL `regclass` (OID 2205): a relation's `pg_class` oid. Values
     /// are `Datum::Int4` like `oid`; what distinguishes the type is input
-    /// conversion (a non-numeric string is a relation name needing catalog
-    /// resolution, which the session/executor layers perform — the pure
+    /// conversion (a non-numeric string is a relation name that needs catalog
+    /// resolution, which the session/executor layers do, because the pure
     /// datum-parse path only accepts numeric strings).
     Regclass,
     /// PostgreSQL's normalized full-text document and query types.
     TsVector,
     TsQuery,
-    /// PostgreSQL `jsonb` (OID 3802) — decomposed JSON. `json` (114) is accepted
+    /// PostgreSQL `jsonb` (OID 3802): decomposed JSON. `json` (114) is accepted
     /// on input as an alias but never reported.
     Jsonb,
     /// A one-dimensional PostgreSQL array (OID = the element type's `typarray`).
@@ -433,7 +437,7 @@ pub enum ColumnType {
     Record(Option<UserTypeRef>),
     /// `CREATE TYPE … AS ENUM (…)`.
     Enum(UserTypeRef),
-    /// `CREATE DOMAIN … AS base` — a base type plus constraints. Values are the
+    /// `CREATE DOMAIN … AS base`: a base type plus constraints. Values are the
     /// base type's values; what the domain adds is the constraint check on
     /// assignment and cast, and the type it reports.
     Domain(DomainRef),
@@ -523,8 +527,8 @@ impl ColumnType {
     }
 
     /// The one-dimensional array type over `elem`, or `None` when crabka has no
-    /// array type for it (`varchar(n)`, `char(n)`, `regclass`, nested arrays) —
-    /// callers report that as 0A000.
+    /// array type for it (`varchar(n)`, `char(n)`, `regclass`, nested arrays).
+    /// Callers report that as 0A000.
     pub fn array_of(elem: ColumnType) -> Option<Self> {
         ElemType::from_column_type(elem).map(ColumnType::Array)
     }
@@ -630,8 +634,8 @@ impl ColumnType {
         }
     }
 
-    /// True for any `numeric` (ignoring its modifier) — the common "is this the
-    /// numeric type?" test used by the promotion/cast logic.
+    /// True for any `numeric`, whatever its modifier. This is the common "is
+    /// this the numeric type?" test that the promotion/cast logic uses.
     pub fn is_numeric(self) -> bool {
         matches!(self, ColumnType::Numeric(_))
     }
@@ -660,16 +664,18 @@ pub const MAX_DOMAIN_DEPTH: usize = 32;
 
 /// A runtime value.
 ///
-/// `PartialEq`/`Eq`/`Hash` are **hand-written** (SP30), not derived, because of the
-/// `Float8` variant: a raw `f64` is not `Eq`/`Hash` (`NaN != NaN`; `-0.0` and `+0.0`
-/// have distinct bit patterns yet compare equal). We instead implement PostgreSQL's
-/// *grouping* equality (the `float8` btree equality `GROUP BY`/`DISTINCT` use): all
-/// `NaN`s are one value, and `-0.0 == +0.0`. The four non-float variants behave exactly
-/// as the old derive did. This keys `GROUP BY` group maps and aggregate `DISTINCT` sets.
+/// `PartialEq`/`Eq`/`Hash` are **hand-written** (SP30), not derived, because of
+/// the `Float8` variant: a raw `f64` is not `Eq`/`Hash` (`NaN != NaN`; `-0.0`
+/// and `+0.0` have distinct bit patterns yet compare equal). This crate
+/// implements PostgreSQL's *grouping* equality instead (the `float8` btree
+/// equality `GROUP BY`/`DISTINCT` use): all `NaN`s are one value, and
+/// `-0.0 == +0.0`. The four non-float variants behave exactly as the derive did.
+/// This keys `GROUP BY` group maps and aggregate `DISTINCT` sets.
 ///
-/// SP37 adds five date/time variants using `jiff` types. Their `PartialEq`/`Hash` arms
-/// are added in Task 3 (grouping equality); for now they use the `_ => false` catch-all
-/// in `PartialEq` and real `Hash` arms (required because `Hash` is exhaustive).
+/// SP37 adds five date/time variants that use `jiff` types. Task 3 adds their
+/// `PartialEq`/`Hash` arms (grouping equality). For now they use the
+/// `_ => false` catch-all in `PartialEq` and real `Hash` arms (required because
+/// `Hash` is exhaustive).
 #[derive(Debug, Clone)]
 pub enum Datum {
     Null,
@@ -679,38 +685,38 @@ pub enum Datum {
     Int4(i32),
     Int8(i64),
     Text(String),
-    /// PostgreSQL `real` — single-precision float. Grouping equality and hashing
+    /// PostgreSQL `real`: single-precision float. Grouping equality and hashing
     /// follow the same rules as [`Datum::Float8`] (one NaN, `-0.0 == +0.0`).
     Float4(f32),
     /// SP30: PostgreSQL `double precision`.
     Float8(f64),
-    /// SP32: PostgreSQL `numeric` — an arbitrary-precision exact decimal, or one
+    /// SP32: PostgreSQL `numeric`: an arbitrary-precision exact decimal, or one
     /// of the `NaN` / `±Infinity` specials.
     Numeric(NumericValue),
-    /// SP37: PostgreSQL `date` — a calendar date (no time-of-day, no timezone).
+    /// SP37: PostgreSQL `date`: a calendar date (no time-of-day, no timezone).
     Date(jiff::civil::Date),
-    /// SP37: PostgreSQL `time without time zone` — time-of-day only.
+    /// SP37: PostgreSQL `time without time zone`: time-of-day only.
     Time(jiff::civil::Time),
-    /// PostgreSQL `time with time zone` — a clock reading and its UTC offset.
+    /// PostgreSQL `time with time zone`: a clock reading and its UTC offset.
     Timetz(crate::datetime::TimeTz),
-    /// SP37: PostgreSQL `timestamp without time zone` — date + time-of-day, no timezone.
+    /// SP37: PostgreSQL `timestamp without time zone`: date + time-of-day, no timezone.
     Timestamp(jiff::civil::DateTime),
-    /// SP37: PostgreSQL `timestamp with time zone` — an instant in UTC.
+    /// SP37: PostgreSQL `timestamp with time zone`: an instant in UTC.
     Timestamptz(jiff::Timestamp),
-    /// SP37: PostgreSQL `interval` — months + days + microseconds.
+    /// SP37: PostgreSQL `interval`: months + days + microseconds.
     Interval(crate::datetime::Interval),
-    /// SP40: PostgreSQL `bytea` — variable-length binary string (raw bytes).
+    /// SP40: PostgreSQL `bytea`: variable-length binary string (raw bytes).
     Bytea(Vec<u8>),
-    /// PostgreSQL `jsonb` — a decomposed JSON value in canonical form.
+    /// PostgreSQL `jsonb`: a decomposed JSON value in canonical form.
     Jsonb(crate::jsonb::JsonbValue),
     /// A one-dimensional PostgreSQL array.
     Array(ArrayValue),
-    /// A composite value — the anonymous `record` a `ROW(…)` produces, or a row
+    /// A composite value: the anonymous `record` a `ROW(…)` produces, or a row
     /// of a type created by `CREATE TYPE … AS (…)`.
     Record(RecordValue),
     /// A value of a `CREATE TYPE … AS ENUM` type.
     Enum(EnumValue),
-    /// PostgreSQL `regclass` — a relation's `pg_class` oid plus the name
+    /// PostgreSQL `regclass`: a relation's `pg_class` oid plus the name
     /// `regclassout` prints for it.
     Regclass(RegclassValue),
     /// PostgreSQL full-text document/query values.
@@ -722,12 +728,12 @@ pub enum Datum {
 /// resolves to.
 ///
 /// `PostgreSQL` stores `regclass` as a bare oid and only consults the catalog in
-/// `regclassout`. crabka cannot do that — the wire encoder and the `→ text` cast
-/// both live in this crate, which has no catalog handle — so the name is
-/// resolved once, where the catalog *is* in scope (the executor's cast), and
-/// travels with the value. The oid stays the identity: comparison, hashing and
-/// the binary wire form all use it, so `confrelid = 'pp'::regclass` is still an
-/// integer comparison.
+/// `regclassout`. crabka cannot do that, because the wire encoder and the
+/// `→ text` cast both live in this crate, which has no catalog handle. The
+/// executor's cast therefore resolves the name once, where the catalog *is* in
+/// scope, and the name travels with the value. The oid stays the identity:
+/// comparison, hashing and the binary wire form all use it, so
+/// `confrelid = 'pp'::regclass` is still an integer comparison.
 #[derive(Debug, Clone)]
 pub struct RegclassValue {
     /// The relation's `pg_class` oid.
@@ -767,10 +773,10 @@ impl RegclassValue {
 /// A composite (row) value.
 ///
 /// The field names travel with the value because the functions that consume a
-/// record — `row_to_json`, `to_jsonb`, `record_out` for a named composite — need
-/// them, and the record may be several joins away from the relation that named
-/// its columns. They are shared rather than cloned per row: one relation scan
-/// producing a record per row shares a single name vector.
+/// record need them: `row_to_json`, `to_jsonb`, and `record_out` for a named
+/// composite. The record may also be several joins away from the relation that
+/// named its columns. The names are shared rather than cloned per row, so one
+/// relation scan that produces a record per row shares a single name vector.
 #[derive(Debug, Clone)]
 pub struct RecordValue {
     /// The named composite type, or `None` for the anonymous `record` that a
@@ -822,10 +828,11 @@ impl RecordValue {
 }
 
 /// `PostgreSQL`'s `record_eq`: positional over the field values. Field *names*
-/// are not part of the value — `ROW(1,2) = ROW(1,2)` holds whatever the two
-/// rows' columns were called — and neither is the composite type, so a
-/// `t_rec` row equals the anonymous row with the same fields, exactly as
-/// `PostgreSQL`'s record comparison does after its implicit coercion.
+/// are not part of the value, so `ROW(1,2) = ROW(1,2)` holds whatever the two
+/// rows' columns were called. The composite type is not part of the value
+/// either, so a `t_rec` row equals the anonymous row with the same fields,
+/// exactly as `PostgreSQL`'s record comparison does after its implicit
+/// coercion.
 impl PartialEq for RecordValue {
     fn eq(&self, other: &Self) -> bool {
         self.values == other.values
@@ -841,8 +848,9 @@ impl std::hash::Hash for RecordValue {
 }
 
 /// A value of a `CREATE TYPE … AS ENUM` type: the type it belongs to and the
-/// label. The *ordering* is not stored — it is the label's position in the
-/// type's current label list, which is what `PostgreSQL` reads out of
+/// label. This crate does not store the *ordering*. The ordering is the label's
+/// position in the type's current label list, which is what `PostgreSQL` reads
+/// out of
 /// `pg_enum.enumsortorder` at comparison time, so `ALTER TYPE … ADD VALUE
 /// BEFORE` re-orders existing values just as it does there.
 #[derive(Debug, Clone, Eq)]
@@ -889,7 +897,7 @@ impl std::hash::Hash for EnumValue {
 ///
 /// `PostgreSQL` stores these as the parallel `lbound[]`/`dims[]` header arrays.
 /// The upper bound is `lower + len - 1`, and a dimension is never negative in
-/// length — `'[1:0]={}'` is rejected at input, not stored.
+/// length. `'[1:0]={}'` is rejected at input, not stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArrayDim {
     /// The subscript of this dimension's first slot.
@@ -923,11 +931,11 @@ pub const MAX_ARRAY_DIM: usize = 6;
 
 /// An array value: a flat row-major element vector plus its dimension header.
 ///
-/// The element type is carried alongside the elements so an empty array is still
-/// typed (`'{}'::int[]` knows it is `integer[]`) and so the binary wire encoding,
-/// which must emit the element OID, is context-free. `dims` is empty for the
-/// zero-dimensional empty array — the only array `PostgreSQL` renders as `{}`
-/// and the only one whose `array_ndims` is NULL.
+/// The element type travels alongside the elements, so an empty array is still
+/// typed (`'{}'::int[]` knows it is `integer[]`) and so the binary wire
+/// encoding, which must emit the element OID, is context-free. `dims` is empty
+/// for the zero-dimensional empty array, the only array `PostgreSQL` renders as
+/// `{}` and the only one whose `array_ndims` is NULL.
 #[derive(Debug, Clone)]
 pub struct ArrayValue {
     /// The array's element type.
@@ -940,7 +948,7 @@ pub struct ArrayValue {
 
 impl ArrayValue {
     /// A one-dimensional array of `elems` with `PostgreSQL`'s default lower
-    /// bound of 1 — empty input yields the zero-dimensional empty array.
+    /// bound of 1. Empty input yields the zero-dimensional empty array.
     pub fn new(elem: ElemType, elems: Vec<Datum>) -> Self {
         let dims = if elems.is_empty() {
             Vec::new()
@@ -952,15 +960,16 @@ impl ArrayValue {
 
     /// An array with an explicit dimension header.
     ///
-    /// The caller is responsible for `dims` matching `elems`; [`ArrayValue::new`]
-    /// covers the one-dimensional case and the array input/slice code builds the
-    /// header itself. A header whose lengths do not multiply out to `elems.len()`
-    /// is normalized back to one dimension rather than left inconsistent.
+    /// The caller must make `dims` match `elems`. [`ArrayValue::new`] covers
+    /// the one-dimensional case, and the array input/slice code builds the
+    /// header itself. This constructor normalizes a header whose lengths do not
+    /// multiply out to `elems.len()` back to one dimension, rather than leave it
+    /// inconsistent.
     ///
-    /// A header carrying **no elements** is likewise collapsed to zero
-    /// dimensions. `PostgreSQL` has no zero-length dimension — `array_recv`,
+    /// A header with **no elements** collapses to zero dimensions in the same
+    /// way. `PostgreSQL` has no zero-length dimension, because `array_recv`,
     /// `construct_md_array` and the slice code all funnel an empty result into
-    /// `construct_empty_array` — so `'{{},{}}'`, an out-of-order slice like
+    /// `construct_empty_array`. So `'{{},{}}'`, an out-of-order slice like
     /// `(ARRAY[1, 2, 3])[3:1]`, and the `ndim = 1, len = 0` header every libpq
     /// driver sends for an empty array are one and the same value, the one whose
     /// `array_ndims` is NULL.
@@ -985,7 +994,7 @@ impl ArrayValue {
         self.dims.len()
     }
 
-    /// Does any dimension start somewhere other than 1? Controls whether
+    /// Does any dimension start somewhere other than 1? This controls whether
     /// `array_out` emits the `[l:u]=` header.
     pub fn has_explicit_bounds(&self) -> bool {
         self.dims.iter().any(|d| d.lower != 1)
@@ -1003,8 +1012,8 @@ impl ArrayValue {
 }
 
 impl PartialEq for ArrayValue {
-    /// `PostgreSQL`'s `array_eq`: the dimension header — lengths **and** lower
-    /// bounds — must match before the elements are compared, so
+    /// `PostgreSQL`'s `array_eq`: the dimension header, lengths **and** lower
+    /// bounds, must match before this method compares the elements, so
     /// `'[2:4]={1,2,3}' = '{1,2,3}'` is false.
     fn eq(&self, other: &Self) -> bool {
         self.elem == other.elem && self.dims == other.dims && self.elems == other.elems
@@ -1173,8 +1182,8 @@ impl Datum {
 /// compare equal must encode identically. Four representations break that on
 /// their own: `numeric` scale (`1.0` vs `1.00`), float negative zero, `interval`
 /// field spelling (`1 mon` vs `30 days`), and the same inside `jsonb` and array
-/// elements. (Object key order is not a concern — `jsonb` is stored canonically
-/// ordered.)
+/// elements. Object key order is not a concern, because this crate stores
+/// `jsonb` in canonical order.
 ///
 /// This is the **key** form only. Row storage keeps every value exactly as
 /// given, so a stored `interval '1 mon'` still renders `1 mon`, not `30 days`.
@@ -1340,8 +1349,8 @@ mod tests {
     }
 
     /// `oid` resolves as a type name (drivers' typeinfo queries cast
-    /// `NULL::OID`) and aliases the executor's oid representation, `Int4` —
-    /// consistent with the catalog's oid-valued columns (`pg_type.oid`,
+    /// `NULL::OID`) and aliases the executor's oid representation, `Int4`. That
+    /// is consistent with the catalog's oid-valued columns (`pg_type.oid`,
     /// `pg_namespace.oid`, `pg_type.typnamespace`, …).
     #[test]
     fn oid_type_name_aliases_int4() {
@@ -1617,13 +1626,13 @@ mod tests {
         assert2::assert!(ColumnType::Timetz.type_size() == 12);
     }
 
-    /// SP37 mutation-killer: the `(Timestamptz, Timestamptz)` arm of `Datum`'s
-    /// `PartialEq` + `Hash` — two timestamptz Datums at the SAME absolute instant
-    /// (parsed from different wall-clock/offset spellings) are EQUAL and hash-equal,
-    /// and two at DIFFERENT instants are unequal. Pins the deleted-arm (#147),
-    /// `== → !=` (#148), and `hash with ()` (#149) mutants. The existing
-    /// `datetime_datum_grouping_equality_and_hash` covers Date/Interval but not
-    /// Timestamptz distinctly.
+    /// SP37 mutation-killer for the `(Timestamptz, Timestamptz)` arm of
+    /// `Datum`'s `PartialEq` + `Hash`. Two timestamptz Datums at the SAME
+    /// absolute instant (parsed from different wall-clock/offset spellings) are
+    /// EQUAL and hash-equal, and two at DIFFERENT instants are unequal. This
+    /// pins the deleted-arm (#147), `== → !=` (#148), and `hash with ()` (#149)
+    /// mutants. The existing `datetime_datum_grouping_equality_and_hash` covers
+    /// Date/Interval but not Timestamptz distinctly.
     #[test]
     fn timestamptz_datum_equality_and_hash_by_instant() {
         use std::{
@@ -1802,8 +1811,8 @@ mod tests {
         assert!(ElemType::read_code(&mut [16u8, 1, 0].as_slice()) == None);
     }
 
-    /// `PostgreSQL`'s `array_eq` compares the whole dimension header — lengths
-    /// AND lower bounds — before it looks at any element.
+    /// `PostgreSQL`'s `array_eq` compares the whole dimension header, lengths
+    /// AND lower bounds, before it looks at any element.
     #[test]
     fn array_equality_and_hashing_include_the_dimension_header() {
         use std::collections::HashSet;

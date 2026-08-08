@@ -15,8 +15,9 @@ pub const HA_TRACKER_TOPIC: &str = "__crabka_metrics_ha";
 /// Default elected-replica lease timeout before another replica may take over.
 pub const DEFAULT_HA_FAILOVER_TIMEOUT: Time = secs(30);
 
-/// In-memory elected replica view, rebuilt from the compacted HA-tracker topic
-/// and extended with in-process first-seen election for unseen pairs.
+/// In-memory elected replica view. The distributor rebuilds it from the
+/// compacted HA-tracker topic, and extends it with an in-process first-seen
+/// election for unseen pairs.
 #[derive(Debug, Default)]
 pub struct HaTracker {
     elected: Mutex<HashMap<(String, String), HaElectionRecord>>,
@@ -125,13 +126,14 @@ impl HaTracker {
             );
     }
 
-    /// Atomically decide-and-commit the HA election for `series` using the
-    /// current wall clock and the default failover timeout. See [`Self::elect`].
+    /// Decides and commits the HA election for `series` atomically, with the
+    /// current wall clock and the default failover timeout. See
+    /// [`Self::elect`].
     pub fn elect_now(&self, tenant: &str, series: &[DecodedSeries]) -> HaElection {
         self.elect(tenant, series, now_ms(), DEFAULT_HA_FAILOVER_TIMEOUT)
     }
 
-    /// Atomically decide-and-commit the HA election using the current wall
+    /// Decides and commits the HA election atomically, with the current wall
     /// clock and the supplied failover timeout.
     pub fn elect_now_with_timeout(
         &self,
@@ -142,11 +144,12 @@ impl HaTracker {
         self.elect(tenant, series, now_ms(), failover_timeout)
     }
 
-    /// Atomically decide the HA election for `series` and, when the decision is
-    /// `Elect`/`Update`, commit the in-memory winner under the same lock. This
-    /// closes the elect TOCTOU: a second racing replica that locks afterwards
-    /// observes the committed winner and is dropped. The DURABLE Kafka persist
-    /// is left to the caller and may proceed asynchronously after this returns.
+    /// Decides the HA election for `series` atomically. When the decision is
+    /// `Elect` or `Update`, it commits the in-memory winner under the same
+    /// lock. This closes the elect TOCTOU, because a second racing replica that
+    /// locks afterwards sees the committed winner and is dropped. The DURABLE
+    /// Kafka persist stays with the caller and can proceed asynchronously after
+    /// this function returns.
     /// # Panics
     /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn elect(
@@ -190,9 +193,9 @@ pub enum HaElection {
     Update(HaElectionRecord),
 }
 
-/// Inspect the first series' `cluster` and `__replica__` labels. Missing
-/// `__replica__` means HA is disabled for the request and the request is
-/// accepted. Otherwise, only the elected replica may write.
+/// Inspects the `cluster` and `__replica__` labels of the first series. A
+/// missing `__replica__` means HA is off for the request, and the distributor
+/// accepts the request. Otherwise only the elected replica may write.
 #[must_use]
 pub fn ha_election(tracker: &HaTracker, tenant: &str, series: &[DecodedSeries]) -> HaElection {
     ha_election_at(tracker, tenant, series, now_ms())
@@ -236,9 +239,9 @@ pub fn ha_election_at_with_timeout(
     )
 }
 
-/// Pure HA election decision against an already-locked elected view. Callers
-/// holding the tracker lock can decide and commit atomically; lock-free callers
-/// go through [`ha_election_at_with_timeout`].
+/// Pure HA election decision against an elected view that is already locked. A
+/// caller that holds the tracker lock can decide and commit atomically. A
+/// lock-free caller goes through [`ha_election_at_with_timeout`].
 fn decide_election(
     elected: &HashMap<(String, String), HaElectionRecord>,
     tenant: &str,
@@ -305,7 +308,7 @@ pub fn ha_decision(tracker: &HaTracker, tenant: &str, series: &[DecodedSeries]) 
     }
 }
 
-/// Remove the HA coordination label from series before WAL append.
+/// Removes the HA coordination label from the series before the WAL append.
 pub fn strip_replica_label(series: &mut [DecodedSeries]) {
     for series in series {
         series.labels = series

@@ -8,12 +8,12 @@ use super::{
 /// Result of feeding one server token to the initiate exchange.
 #[derive(Debug)]
 pub enum ClientStep {
-    /// Send this token to the server as `SaslAuthenticate` `auth_bytes`; feed
-    /// the server's reply to the returned exchange.
+    /// Send this token to the server as `SaslAuthenticate` `auth_bytes`, then
+    /// feed the server's reply to the returned exchange.
     Token(Vec<u8>, GssapiClientExchange),
-    /// Handshake complete: send this final token to the server, then check
-    /// the `SaslAuthenticate` response's `error_code` — no further `step()`
-    /// call is needed.
+    /// Handshake complete. Send this final token to the server, then check the
+    /// `SaslAuthenticate` response's `error_code`. No further `step()` call is
+    /// needed.
     Final(Vec<u8>),
 }
 
@@ -98,9 +98,9 @@ impl AwaitingOffer {
 
 /// SASL/GSSAPI client-side handshake, one type per negotiation phase.
 ///
-/// The variant payload types are intentionally not exported: the phase is
-/// driven entirely through `step`/`ClientStep`, so callers never need to
-/// name `Establishing`/`AwaitingOffer` directly.
+/// The variant payload types stay unexported on purpose. `step` and
+/// `ClientStep` drive the phase, so callers never need to name `Establishing`
+/// or `AwaitingOffer` directly.
 #[allow(private_interfaces)]
 pub enum GssapiClientExchange {
     Establishing(Establishing),
@@ -136,13 +136,13 @@ impl GssapiClientExchange {
         })
     }
 
-    /// Feed one server token (or `None` for the initial step) and advance the
-    /// negotiation.
+    /// Feed one server token and advance the negotiation. Pass `None` for the
+    /// initial step.
     ///
     /// # Errors
     /// Returns an error if a GSS context/wrap/unwrap operation fails, the
-    /// server's offer is malformed, or the server offers no security layer we
-    /// support.
+    /// server's offer is malformed, or the server offers no security layer that
+    /// Crabka supports.
     // Per-step GSSAPI initiate driver. skip_all keeps the opaque `server_token`
     // (GSS/Kerberos context bytes) out of span fields; only the non-sensitive
     // mechanism is recorded. `err` surfaces the failure (Debug).

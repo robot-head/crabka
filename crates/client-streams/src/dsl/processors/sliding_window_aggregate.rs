@@ -1,7 +1,9 @@
-//! Sliding-window aggregation processor (KIP-450): inclusive, data-defined
-//! windows of size `time_difference`. Ports JVM
-//! `KStreamSlidingWindowAggregate`. Supports both emit-on-update (the default)
-//! and emit-on-close (KIP-825) forwarding strategies.
+//! Sliding-window aggregation processor (KIP-450).
+//!
+//! The windows are inclusive and data-defined, with size `time_difference`.
+//! This module ports the JVM `KStreamSlidingWindowAggregate`. It supports both
+//! the emit-on-update forwarding strategy, which is the default, and the
+//! emit-on-close strategy (KIP-825).
 //!
 //! ## Algorithm overview
 //!
@@ -17,18 +19,18 @@
 //!   - Right window `[prev+1, prev+1+W]` is created for the most recent prior
 //!     record if it does not already exist.
 //!
-//! **Emission gate (emit-on-update)**: a window is only forwarded when
-//! `window_end >= window_close_time` where
-//! `window_close_time = stream_time - grace`. Windows that fall entirely
-//! before `window_close_time` are updated in the store but not forwarded (they
-//! are already "expired").
+//! **Emission gate (emit-on-update)**: a window is forwarded only when
+//! `window_end >= window_close_time`, where
+//! `window_close_time = stream_time - grace`. A window that falls entirely
+//! before `window_close_time` is updated in the store but is not forwarded,
+//! because it is already expired.
 //!
-//! **Emit-on-close (KIP-825)**: when `EmitStrategy::on_window_close()` is
-//! configured, the per-update forwards above are suppressed entirely; instead
-//! each window is forwarded exactly once — as a final `Change` with `old=None`
-//! — once stream-time advances past its close (`window_end <=
-//! window_close_time`). The store-update logic is identical in both modes; only
-//! the forwarding differs.
+//! **Emit-on-close (KIP-825)**: with `EmitStrategy::on_window_close()`, the
+//! per-update forwards above are suppressed entirely. Each window is instead
+//! forwarded exactly once, as a final `Change` with `old=None`, once
+//! stream-time advances past its close (`window_end <= window_close_time`). The
+//! store-update logic is identical in both modes. Only the forwarding
+//! differs.
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
@@ -51,29 +53,32 @@ type Marker<T> = PhantomData<fn() -> T>;
 /// Aggregate records into sliding windows (KIP-450), emit-on-update.
 ///
 /// A record at time `t` belongs to every window `[ws, ws + W]` that contains
-/// it. Windows are **data-defined** (not epoch-aligned): the left window has
-/// `ws = t - W` (or `0` if `t < W`) and the right window has `ws = t + 1` (only
-/// created if a later record already exists inside `[t+1, t+W]`). Existing
-/// windows whose range overlaps `t` are updated in place.
+/// it. Windows are **data-defined** and not epoch-aligned. The left window has
+/// `ws = t - W`, or `0` when `t < W`. The right window has `ws = t + 1`, and it
+/// is created only when a later record already exists inside `[t+1, t+W]`. An
+/// existing window whose range overlaps `t` is updated in place.
 ///
-/// Stream-time tracks the maximum observed record timestamp; records whose own
-/// window (`[t, t+W]`) ends before `stream_time - grace` are silently dropped.
+/// Stream-time tracks the maximum observed record timestamp. A record whose own
+/// window (`[t, t+W]`) ends before `stream_time - grace` is dropped without a
+/// message.
 #[allow(dead_code)]
 pub(crate) struct KStreamSlidingWindowAggregateProcessor<K, V, VA, I, A> {
     pub store_name: String,
     pub windows: SlidingWindows,
     pub init: I,
     pub agg: A,
-    /// Observed max record timestamp (per task instance).
+    /// The maximum record timestamp observed by this task instance.
     pub stream_time: i64,
-    /// Emit on every update (default) or only on window close (KIP-825).
+    /// Emit on every update, which is the default, or only on window close
+    /// (KIP-825).
     pub emit: crate::dsl::emit::EmitStrategy,
-    /// Highest `window_close_time` already emitted; prevents re-emit.
+    /// The highest `window_close_time` already emitted. It prevents a
+    /// re-emit.
     pub last_emitted_close: i64,
-    /// Forward-suppression seam: when the window store is record-cached the
-    /// per-update forwards are suppressed (the cache flush forwards the deduped
-    /// `Change`). Resolved in `init`. Only the emit-on-update path is wrapped —
-    /// emit-final stores are never cached.
+    /// Forward-suppression seam. When the window store is record-cached, the
+    /// per-update forwards are suppressed, because the cache flush forwards the
+    /// deduped `Change`. `init` resolves this field. Only the emit-on-update
+    /// path is wrapped, because an emit-final store is never cached.
     pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V, VA)>,
 }
@@ -145,7 +150,7 @@ where
     I: Fn() -> VA + Send + Sync + 'static,
     A: Fn(&K, &V, VA) -> VA + Send + Sync + 'static,
 {
-    /// JVM `processEarly`: handles records with `t < W`.
+    /// JVM `processEarly`. It handles records with `t < W`.
     ///
     /// The combined window `[0, W]` absorbs all early records. Scan `[0, t+1]`.
     async fn process_early(
@@ -333,7 +338,7 @@ where
         }
     }
 
-    /// JVM `processInOrder`: handles records with `t >= W`.
+    /// JVM `processInOrder`. It handles records with `t >= W`.
     ///
     /// Scan `[max(0, t-2W), t+1]` in ascending windowStart order.
     async fn process_normal(
@@ -575,27 +580,30 @@ where
     }
 }
 
-/// JVM `leftWindowNotEmpty`: returns true if the previous record falls inside
-/// the new left window `[t-W, t]`, i.e., `t - W <= prev_ts`.
+/// JVM `leftWindowNotEmpty`. It returns true when the previous record falls
+/// inside the new left window `[t-W, t]`, that is when `t - W <= prev_ts`.
 fn left_window_not_empty(prev_ts: Option<i64>, t: i64, w: i64) -> bool {
     prev_ts.is_some_and(|p| t - w <= p)
 }
 
 /// Reduce records into sliding windows (KIP-450).
 ///
-/// Like [`KStreamSlidingWindowAggregateProcessor`] but uses the first value in
-/// each window as the accumulator seed (no separate `init` function).
+/// Like [`KStreamSlidingWindowAggregateProcessor`], but it uses the first value
+/// in each window as the accumulator seed and has no separate `init`
+/// function.
 #[allow(dead_code)]
 pub(crate) struct KStreamSlidingWindowReduceProcessor<K, V, R> {
     pub store_name: String,
     pub windows: SlidingWindows,
     pub reducer: R,
     pub stream_time: i64,
-    /// Emit on every update (default) or only on window close (KIP-825).
+    /// Emit on every update, which is the default, or only on window close
+    /// (KIP-825).
     pub emit: crate::dsl::emit::EmitStrategy,
-    /// Highest `window_close_time` already emitted; prevents re-emit.
+    /// The highest `window_close_time` already emitted. It prevents a re-emit.
     pub last_emitted_close: i64,
-    /// Forward-suppression seam (see [`KStreamSlidingWindowAggregateProcessor::forwarder`]).
+    /// Forward-suppression seam. See
+    /// [`KStreamSlidingWindowAggregateProcessor::forwarder`].
     pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V)>,
 }
@@ -1161,8 +1169,9 @@ mod tests {
         }
     }
 
-    /// First record at t=20 (`>= W=10`) uses `process_normal`. Creates left window
-    /// `[10,20]` with count=1 (no prior records → empty left → init=0, +1=1).
+    /// The first record at t=20, which is `>= W=10`, uses `process_normal`. It
+    /// creates the left window `[10,20]` with count=1: no prior record means an
+    /// empty left window, so init=0 and +1 gives 1.
     #[tokio::test]
     async fn first_record_creates_left_window() {
         let mut stores = store();
@@ -1174,9 +1183,10 @@ mod tests {
         );
     }
 
-    /// Second record at t=25 creates left window `[15,25]`. The prior record at
-    /// t=20 is in `[15,25]` (since `25-10=15 <= 20`), so `leftWindowNotEmpty` is
-    /// true and the seed comes from `[10,20].agg=1` → count=2.
+    /// The second record at t=25 creates the left window `[15,25]`. The prior
+    /// record at t=20 is in `[15,25]`, because `25-10=15 <= 20`, so
+    /// `leftWindowNotEmpty` is true and the seed comes from `[10,20].agg=1`,
+    /// which gives count=2.
     #[tokio::test]
     async fn adjacent_record_seeds_new_left_window() {
         let mut stores = store();
@@ -1189,8 +1199,8 @@ mod tests {
         );
     }
 
-    /// Record at `t=3` with `W=10` (so `t < W`): exercises `process_early`.
-    /// The combined window `[0, 10]` is created with count=1.
+    /// A record at `t=3` with `W=10`, so `t < W`, drives `process_early`. The
+    /// combined window `[0, 10]` is created with count=1.
     #[tokio::test]
     async fn early_window_combined_for_t_below_w() {
         let mut stores = store();
@@ -1209,10 +1219,11 @@ mod tests {
     }
 
     /// A second EARLY record (`t=6 < W=10`) after a first early record (`t=3`)
-    /// exercises the `process_early` straddle/right-window branches: the combined
-    /// window `[0,10]` folds in the new record (count 1 → 2), and the previous
-    /// record's right window `[t_prev+1, ..]` (`[4,14]`) is created seeded from
-    /// init then aggregated (count 1).
+    /// drives the straddle branch and the right-window branch of
+    /// `process_early`. The combined window `[0,10]` folds in the new record, so
+    /// the count goes from 1 to 2. The previous record's right window
+    /// `[t_prev+1, ..]`, which is `[4,14]`, is created, seeded from init, and
+    /// then aggregated, which gives count 1.
     #[tokio::test]
     async fn early_path_second_record_updates_combined_and_prev_right_window() {
         let mut stores = store();
@@ -1232,9 +1243,9 @@ mod tests {
         );
     }
 
-    /// Build a count processor in emit-on-close mode with a generous grace so
-    /// freshly-created left windows (which end exactly at stream-time) stay open
-    /// until a far-future record forces them closed.
+    /// Build a count processor in emit-on-close mode with a large grace. A
+    /// freshly-created left window ends exactly at stream-time, so it stays open
+    /// until a far-future record forces it closed.
     fn count_proc_close() -> CountProcessor {
         let mut p = count_proc();
         p.windows = SlidingWindows::of_time_difference_and_grace(millis(10), millis(100));
@@ -1242,8 +1253,8 @@ mod tests {
         p
     }
 
-    /// Emit-on-close (KIP-825): no window is forwarded while it is still open;
-    /// once stream-time advances past a window's close, that window is forwarded
+    /// Emit-on-close (KIP-825): no window is forwarded while it is still open.
+    /// Once stream-time advances past a window's close, that window is forwarded
     /// exactly once as a final `Change { old: None, new: Some(count) }`. The set
     /// of forwarded windows must match exactly the store's windows whose `end`
     /// has closed, with no duplicates.
@@ -1330,8 +1341,8 @@ mod tests {
 
     // ── Reduce processor unit tests ─────────────────────────────────────────
 
-    /// Helper to build a `StoreRegistry` holding a `WindowBytesStore<String, String>`
-    /// for the reduce processor tests.
+    /// Helper that builds a `StoreRegistry` holding a
+    /// `WindowBytesStore<String, String>` for the reduce processor tests.
     fn str_store() -> StoreRegistry {
         let mut s = StoreRegistry::default();
         s.insert(Box::new(WindowBytesStore::<String, String>::in_memory(
@@ -1410,8 +1421,9 @@ mod tests {
             .collect()
     }
 
-    /// First record at t=20 seeds the left window `[10,20]` with the value
-    /// itself (no prior record → `value.clone()`).
+    /// The first record at t=20 seeds the left window `[10,20]` with the value
+    /// itself, because there is no prior record, so the seed is
+    /// `value.clone()`.
     #[tokio::test]
     async fn reduce_first_record_seeds_left_window() {
         let mut stores = str_store();
@@ -1423,9 +1435,9 @@ mod tests {
         );
     }
 
-    /// Second record at t=25 reduces the left window `[15,25]`. The prior
-    /// record at t=20 falls inside `[15,25]` (since `25-10=15 <= 20`), so the
-    /// seed is the existing `[10,20]` aggregate "v", and the fold yields "v|v".
+    /// The second record at t=25 reduces the left window `[15,25]`. The prior
+    /// record at t=20 falls inside `[15,25]`, because `25-10=15 <= 20`, so the
+    /// seed is the existing `[10,20]` aggregate "v" and the fold gives "v|v".
     #[tokio::test]
     async fn reduce_second_record_folds_into_new_left_window() {
         let mut stores = str_store();
@@ -1438,8 +1450,8 @@ mod tests {
         );
     }
 
-    /// First reduce record at `t=3` (`t < W=10`) drives the reduce
-    /// `process_early` path: the combined window `[0, W]` is seeded with the
+    /// The first reduce record at `t=3`, where `t < W=10`, drives the reduce
+    /// `process_early` path. The combined window `[0, W]` is seeded with the
     /// value itself.
     #[tokio::test]
     async fn reduce_early_record_seeds_combined_window() {
@@ -1457,8 +1469,8 @@ mod tests {
     }
 
     /// A second EARLY reduce record (`t=6`) folds into the combined window
-    /// `[0,10]` (`"v" -> "v|v"`) and creates the previous record's right window
-    /// `[4,14]` seeded from the current value.
+    /// `[0,10]`, so `"v"` becomes `"v|v"`. It also creates the previous record's
+    /// right window `[4,14]`, seeded from the current value.
     #[tokio::test]
     async fn reduce_early_path_second_record_updates_combined_and_prev_right_window() {
         let mut stores = str_store();
@@ -1481,11 +1493,15 @@ mod tests {
         );
     }
 
-    /// Emit-on-close reduce variant of `sliding_count_emit_final_emits_only_on_close`:
-    /// build a reduce processor with grace=100 so every window stays open while
-    /// records arrive, snapshot the store's closed windows, then a far-future
-    /// record closes them and each is forwarded exactly once as a final
-    /// `Change { old: None, new: Some(reduced) }` carrying the stored value.
+    /// The emit-on-close reduce variant of
+    /// `sliding_count_emit_final_emits_only_on_close`.
+    ///
+    /// The test builds a reduce processor with grace=100, so every window stays
+    /// open while the records arrive, and it snapshots the store's closed
+    /// windows. A far-future record then closes those windows, and each one is
+    /// forwarded exactly once as a final
+    /// `Change { old: None, new: Some(reduced) }` that carries the stored
+    /// value.
     fn reduce_proc_close()
     -> KStreamSlidingWindowReduceProcessor<String, String, fn(&String, &String) -> String> {
         let mut p = reduce_proc();

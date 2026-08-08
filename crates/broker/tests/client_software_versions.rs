@@ -1,15 +1,14 @@
 // Rust 1.95 annotate-snippets ICE on `clippy::pedantic` in test files
 // (same upstream bug as `tests/mtls.rs` etc).
 
-//! KIP-511 — `ApiVersions` v3+ client-information validation and the
+//! KIP-511: `ApiVersions` v3+ client-information validation and the
 //! `client_software_versions_total` Prometheus counter.
 //!
-//! These tests boot a broker on a plaintext loopback listener with the
+//! These tests boot a broker on a plaintext loopback listener, with the
 //! Prometheus exporter bound on `127.0.0.1:0`. Each test drives a raw
-//! `ApiVersions` request over TCP (rather than going through the
-//! `Client`) so we can pin the version and the exact
-//! `client_software_name` / `client_software_version` bytes the broker
-//! sees.
+//! `ApiVersions` request over TCP instead of going through the `Client`. That
+//! lets the test pin the version and the exact `client_software_name` and
+//! `client_software_version` bytes the broker sees.
 
 use std::{io, net::SocketAddr};
 
@@ -28,9 +27,9 @@ use tokio::{
 
 const INVALID_REQUEST: i16 = 42;
 
-/// Build a broker with the metrics endpoint enabled. Returns the Kafka
-/// listener address, the metrics endpoint address, and the
-/// `BrokerHandle` so the test can shut down cleanly.
+/// Builds a broker with the metrics endpoint enabled. It returns the Kafka
+/// listener address, the metrics endpoint address, and the `BrokerHandle`, so
+/// that the test can shut down cleanly.
 async fn boot() -> (
     SocketAddr,
     SocketAddr,
@@ -58,8 +57,8 @@ async fn boot() -> (
     (kafka_addr, metrics_addr, handle, tempdir)
 }
 
-/// Send one `ApiVersions` request at the requested version with the given
-/// client-info fields and return the decoded response.
+/// Sends one `ApiVersions` request at the requested version with the given
+/// client-info fields, and returns the decoded response.
 async fn send_api_versions(
     addr: SocketAddr,
     version: i16,

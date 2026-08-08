@@ -1,8 +1,8 @@
 //! Decode targets and pre-WAL ingest pipeline helpers.
 //!
-//! Push doors lower into these types, then the distributor applies relabeling,
+//! Push doors lower into these types. The distributor then applies relabeling,
 //! required labels, structural limits, and the `__session_id__` cardinality cap
-//! before writing to the profile WAL.
+//! before it writes to the profile WAL.
 
 pub mod legacy;
 pub mod otlp;
@@ -58,7 +58,7 @@ pub struct DecodedSample {
 /// Per-tenant ingest limits for structural validation.
 ///
 /// Not `Eq`: the label caps are [`ByteSize`] quantities, which store `f64`.
-/// These limits are only ever a map *value* (`TenantLimitConfig::tenants`), so
+/// These limits are only ever a map value in `TenantLimitConfig::tenants`, so
 /// nothing needs the derive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TenantLimits {
@@ -159,7 +159,7 @@ pub fn require_service_name(labels: &mut Labels) {
     }
 }
 
-/// Cardinality-cap `__session_id__` via stable modulo hash.
+/// Cap the cardinality of `__session_id__` with a stable modulo hash.
 pub fn cap_session_id(labels: &mut Labels, buckets: u64) {
     let Some(raw) = labels.get("__session_id__").map(str::to_owned) else {
         return;
@@ -211,7 +211,7 @@ pub fn enforce_limits(labels: &Labels, limits: &TenantLimits) -> Result<(), Prof
     Ok(())
 }
 
-/// Apply relabel rules in order. Returns `false` when the series is rejected.
+/// Apply relabel rules in order. Returns `false` when a rule rejects the series.
 pub fn apply_relabel(labels: &mut Labels, configs: &[RelabelConfig]) -> bool {
     for config in configs {
         let joined = config

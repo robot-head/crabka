@@ -93,8 +93,10 @@ impl TsVector {
         )
     }
 
-    /// Concatenate vectors, shifting the right-hand positions after the last
-    /// position in the left-hand document.
+    /// Concatenate two vectors.
+    ///
+    /// This function shifts the right-hand positions to after the last position
+    /// in the left-hand document.
     #[must_use]
     pub fn concat(&self, right: &Self) -> Self {
         let offset = self

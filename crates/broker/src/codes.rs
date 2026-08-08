@@ -1,47 +1,47 @@
 //! Kafka wire-level error codes used in this MVP.
 //!
-//! Per-(topic, partition) response fields use these `i16` values.
-//! JVM clients react to specific codes, so substituting them changes
-//! client behavior — values here mirror the canonical Apache Kafka
-//! table.
+//! Per-(topic, partition) response fields use these `i16` values. JVM clients
+//! react to specific codes, so a substitution changes client behavior. The
+//! values here mirror the canonical Apache Kafka table.
 
 #![allow(dead_code)] // codes are consumed by handlers as APIs are enabled.
 
 pub const NONE: i16 = 0;
 pub const UNKNOWN_SERVER_ERROR: i16 = -1;
 pub const OFFSET_OUT_OF_RANGE: i16 = 1;
-/// `CORRUPT_MESSAGE` (2) — the broker received a record batch whose bytes
-/// are malformed or whose CRC/magic does not match any supported format.
-/// Corresponds to `CORRUPT_MESSAGE` in the Apache Kafka error table.
+/// `CORRUPT_MESSAGE` (2): the broker received a record batch whose bytes are
+/// malformed, or whose CRC or magic does not match any supported format. It
+/// corresponds to `CORRUPT_MESSAGE` in the Apache Kafka error table.
 pub const CORRUPT_MESSAGE: i16 = 2;
 pub const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 pub const INVALID_FETCH_SIZE: i16 = 4;
 pub const LEADER_NOT_AVAILABLE: i16 = 5;
 pub const NOT_LEADER_OR_FOLLOWER: i16 = 6;
 pub const REQUEST_TIMED_OUT: i16 = 7;
-/// `REPLICA_NOT_AVAILABLE` (11, KIP-113) — the targeted replica is not
-/// hosted on this broker. Used by `AlterReplicaLogDirs` when the client
-/// names a `(topic, partition)` the broker doesn't own.
+/// `REPLICA_NOT_AVAILABLE` (11, KIP-113): this broker does not host the
+/// targeted replica. `AlterReplicaLogDirs` returns it when the client names a
+/// `(topic, partition)` that the broker does not own.
 pub const REPLICA_NOT_AVAILABLE: i16 = 11;
-/// `KAFKA_STORAGE_ERROR` (56, KIP-113) — a log-dir-level I/O failure
-/// (open, rename, remove) or a concurrent move with a conflicting target.
+/// `KAFKA_STORAGE_ERROR` (56, KIP-113): a log-dir-level I/O failure on open,
+/// rename, or remove, or a concurrent move with a conflicting target.
 pub const KAFKA_STORAGE_ERROR: i16 = 56;
-/// `LOG_DIR_NOT_FOUND` (57, KIP-113) — the destination directory in an
+/// `LOG_DIR_NOT_FOUND` (57, KIP-113): the destination directory in an
 /// `AlterReplicaLogDirs` request is not one of this broker's configured
 /// `log.dirs`.
 pub const LOG_DIR_NOT_FOUND: i16 = 57;
 pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
-/// `COORDINATOR_LOAD_IN_PROGRESS` (14, KIP-848) — the group coordinator is
-/// still loading state from `__consumer_offsets`; clients should retry after
-/// a brief back-off.
+/// `COORDINATOR_LOAD_IN_PROGRESS` (14, KIP-848): the group coordinator is
+/// still loading state from `__consumer_offsets`. Clients should retry after a
+/// brief back-off.
 pub const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 pub const NOT_COORDINATOR: i16 = 16;
 pub const INVALID_TOPIC_EXCEPTION: i16 = 17;
-/// `ILLEGAL_SASL_STATE` (34) — request received on a SASL listener before
-/// the connection has completed `SaslHandshake` + `SaslAuthenticate`, or in
-/// the wrong order. The broker closes the connection after emitting it.
+/// `ILLEGAL_SASL_STATE` (34): the broker received a request on a SASL
+/// listener before the connection completed `SaslHandshake` and
+/// `SaslAuthenticate`, or in the wrong order. The broker closes the connection
+/// after it emits this code.
 pub const ILLEGAL_SASL_STATE: i16 = 34;
-/// `UNSUPPORTED_SASL_MECHANISM` (33) — the client requested a SASL mechanism
+/// `UNSUPPORTED_SASL_MECHANISM` (33): the client requested a SASL mechanism
 /// the broker does not offer on this listener.
 pub const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
 pub const UNSUPPORTED_VERSION: i16 = 35;
@@ -50,9 +50,10 @@ pub const INVALID_PARTITIONS: i16 = 37;
 pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const NOT_CONTROLLER: i16 = 41;
 pub const INVALID_REQUEST: i16 = 42;
-/// Kafka error 87. Returned when a Produce payload is structurally
-/// malformed — e.g. a legacy v0/v1 `MessageSet` that fails CRC, has
-/// nested compression, or otherwise can't be parsed into v2 records.
+/// Kafka error 87. The broker returns it when a Produce payload is
+/// structurally malformed. For example, a legacy v0/v1 `MessageSet` that fails
+/// CRC, has nested compression, or that the broker cannot parse into v2
+/// records.
 pub const INVALID_RECORD: i16 = 87;
 
 // Phase 5 additions — group coordinator codes.
@@ -65,15 +66,15 @@ pub const MEMBER_ID_REQUIRED: i16 = 79;
 // Phase 6 additions — idempotent-producer codes.
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
-/// `INVALID_PRODUCER_EPOCH` (47) — per the canonical Apache Kafka error table.
+/// `INVALID_PRODUCER_EPOCH` (47): per the canonical Apache Kafka error table.
 /// Returned when the producer's epoch does not match the coordinator's current
 /// epoch, OR when no transaction state exists for the given
 /// (`transactional_id`, `producer_id`) pair. The Rust producer client maps
 /// this code to `ProducerError::FencedProducer`.
 pub const INVALID_PRODUCER_EPOCH: i16 = 47;
-/// Alias used in handlers that check for an unknown (tid, pid) mapping.
-/// Both cases produce error code 47 on the wire, matching Apache Kafka's
-/// behavior (it uses `INVALID_PRODUCER_EPOCH` for all epoch/pid mismatches).
+/// Alias for handlers that check for an unknown (tid, pid) mapping. Both cases
+/// produce error code 47 on the wire. This matches Apache Kafka, which uses
+/// `INVALID_PRODUCER_EPOCH` for every epoch and pid mismatch.
 pub const INVALID_PRODUCER_ID_MAPPING: i16 = INVALID_PRODUCER_EPOCH;
 pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
 
@@ -82,31 +83,32 @@ pub const INVALID_TXN_STATE: i16 = 24;
 pub const INVALID_TXN_TIMEOUT: i16 = 48;
 pub const CONCURRENT_TRANSACTIONS: i16 = 49;
 pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
-/// `TRANSACTION_ABORTABLE` (120, KIP-890) — the operation failed but the
-/// transaction can still be aborted by the client; e.g. `AddPartitionsToTxn`
-/// verify-only found a partition that is not part of the ongoing transaction.
+/// `TRANSACTION_ABORTABLE` (120, KIP-890): the operation failed, but the
+/// client can still abort the transaction. For example, `AddPartitionsToTxn`
+/// verify-only found a partition that is not part of the ongoing
+/// transaction.
 pub const TRANSACTION_ABORTABLE: i16 = 120;
 
-/// `FENCED_INSTANCE_ID` (82, KIP-345) — another client is currently pinned
-/// to the same `group.instance.id`. The losing client must exit; the broker
+/// `FENCED_INSTANCE_ID` (82, KIP-345): another client is currently pinned to
+/// the same `group.instance.id`. The losing client must exit. The broker
 /// fences it across `JoinGroup`, `SyncGroup`, `Heartbeat`, `OffsetCommit`,
 /// `TxnOffsetCommit`, and `LeaveGroup`.
 pub const FENCED_INSTANCE_ID: i16 = 82;
 
-/// `STALE_MEMBER_EPOCH` (113, KIP-848) — the supplied member epoch is older
+/// `STALE_MEMBER_EPOCH` (113, KIP-848): the supplied member epoch is older
 /// than the coordinator's current epoch for the consumer group member.
 pub const STALE_MEMBER_EPOCH: i16 = 113;
-/// `FENCED_MEMBER_EPOCH` (110, KIP-848) — the supplied member epoch is
-/// newer than the coordinator's; the consumer must rejoin from epoch 0.
+/// `FENCED_MEMBER_EPOCH` (110, KIP-848): the supplied member epoch is newer
+/// than the coordinator's. The consumer must rejoin from epoch 0.
 pub const FENCED_MEMBER_EPOCH: i16 = 110;
-/// `UNSUPPORTED_ASSIGNOR` (111, KIP-848) — the requested `server_assignor`
+/// `UNSUPPORTED_ASSIGNOR` (111, KIP-848): the requested `server_assignor`
 /// is not enabled on this broker.
 pub const UNSUPPORTED_ASSIGNOR: i16 = 111;
-/// `UNRELEASED_INSTANCE_ID` (114, KIP-848 + KIP-345) — the static
+/// `UNRELEASED_INSTANCE_ID` (114, KIP-848 + KIP-345): the static
 /// `instance_id` is still bound to a live member of the group.
 pub const UNRELEASED_INSTANCE_ID: i16 = 114;
-/// `UNKNOWN_SUBSCRIPTION_ID` (117, KIP-848) — the consumer's persisted
-/// subscription identifier was not found by the coordinator.
+/// `UNKNOWN_SUBSCRIPTION_ID` (117, KIP-848): the coordinator did not find the
+/// consumer's persisted subscription identifier.
 pub const UNKNOWN_SUBSCRIPTION_ID: i16 = 117;
 
 /// KIP-932: an acknowledgement targeted a record no longer Acquired.
@@ -121,85 +123,89 @@ pub const FENCED_STATE_EPOCH: i16 = 124;
 pub const SHARE_SESSION_LIMIT_REACHED: i16 = 133;
 
 // Admin handler codes.
-/// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.
+/// `INVALID_CONFIG` (40): a config key/value pair is invalid or unknown.
 pub const INVALID_CONFIG: i16 = 40;
-/// `NON_EMPTY_GROUP` (68) — group still has live members; cannot be deleted.
+/// `NON_EMPTY_GROUP` (68): the group still has live members, so the broker
+/// cannot delete it.
 pub const NON_EMPTY_GROUP: i16 = 68;
-/// `GROUP_ID_NOT_FOUND` (69) — no group with the given id exists.
+/// `GROUP_ID_NOT_FOUND` (69): no group with the given id exists.
 pub const GROUP_ID_NOT_FOUND: i16 = 69;
-/// `GROUP_SUBSCRIBED_TO_TOPIC` (86, KIP-496) — `OffsetDelete` refused
-/// because the (live, consumer-protocol) group still subscribes to the
-/// topic. The operator must stop consumers first.
+/// `GROUP_SUBSCRIBED_TO_TOPIC` (86, KIP-496): `OffsetDelete` refused the
+/// request because the live consumer-protocol group still subscribes to the
+/// topic. The operator must stop the consumers first.
 pub const GROUP_SUBSCRIBED_TO_TOPIC: i16 = 86;
-/// `INVALID_RESOURCE_TYPE` — alias for `INVALID_REQUEST` (42); the Kafka
-/// protocol does not assign a distinct wire code for unsupported resource
-/// types; `INVALID_REQUEST` is the correct response.
+/// `INVALID_RESOURCE_TYPE`, an alias for `INVALID_REQUEST` (42). The Kafka
+/// protocol assigns no distinct wire code for unsupported resource types, so
+/// `INVALID_REQUEST` is the correct response.
 pub const INVALID_RESOURCE_TYPE: i16 = INVALID_REQUEST;
 
 // `AlterUserScramCredentials` (KIP-554) result codes.
-/// `CLUSTER_AUTHORIZATION_FAILED` (31) — principal lacks cluster-level
-/// authorization. Used as a stand-in for ACL by the
-/// `AlterUserScramCredentials` handler when the request principal is not the
-/// configured super-user.
+/// `CLUSTER_AUTHORIZATION_FAILED` (31): the principal has no cluster-level
+/// authorization. The `AlterUserScramCredentials` handler returns it in place
+/// of an ACL check when the request principal is not the configured
+/// super-user.
 pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
-/// `RESOURCE_NOT_FOUND` (91) — resource named by the request does not exist.
-/// KIP-554 uses this for missing SCRAM credentials in both Alter deletion and
-/// Describe per-user result rows.
+/// `RESOURCE_NOT_FOUND` (91): the resource that the request names does not
+/// exist. KIP-554 uses it for missing SCRAM credentials, in both Alter
+/// deletion rows and Describe per-user result rows.
 pub const RESOURCE_NOT_FOUND: i16 = 91;
-/// `UNACCEPTABLE_CREDENTIAL` (93) — per-user error when an upsertion carries
-/// invalid SCRAM parameters (iterations < 4096, too many iterations, or an
-/// empty username). Canonical Apache Kafka assigns code 93 to this error.
+/// `UNACCEPTABLE_CREDENTIAL` (93): per-user error for an upsertion that
+/// carries invalid SCRAM parameters, such as iterations below 4096, too many
+/// iterations, or an empty username. Canonical Apache Kafka assigns code 93 to
+/// this error.
 pub const UNACCEPTABLE_CREDENTIAL: i16 = 93;
-/// `DUPLICATE_RESOURCE` (92) — per-user error when the same user appears
+/// `DUPLICATE_RESOURCE` (92): per-user error when the same user appears
 /// twice in one `AlterUserScramCredentials` or
 /// `DescribeUserScramCredentials` request.
 pub const DUPLICATE_RESOURCE: i16 = 92;
 
-/// `INVALID_UPDATE_VERSION` (95, KIP-584) — a feature-level update in
-/// `UpdateFeatures` is outside the broker's supported range, or attempts an
-/// unguarded downgrade / deletion of a finalized feature.
+/// `INVALID_UPDATE_VERSION` (95, KIP-584): a feature-level update in
+/// `UpdateFeatures` is outside the broker's supported range, or it tries an
+/// unguarded downgrade or deletion of a finalized feature.
 pub const INVALID_UPDATE_VERSION: i16 = 95;
 
-/// `FEATURE_UPDATE_FAILED` (96, KIP-584) — the cluster failed to persist a
-/// validated feature update (e.g., the metadata write to Raft was rejected
-/// or timed out).
+/// `FEATURE_UPDATE_FAILED` (96, KIP-584): the cluster failed to persist a
+/// validated feature update. For example, Raft rejected the metadata write, or
+/// the write timed out.
 pub const FEATURE_UPDATE_FAILED: i16 = 96;
 
 // ACL authorization codes.
-/// `TOPIC_AUTHORIZATION_FAILED` (29) — principal lacks permission on the topic.
+/// `TOPIC_AUTHORIZATION_FAILED` (29): principal lacks permission on the topic.
 pub const TOPIC_AUTHORIZATION_FAILED: i16 = 29;
-/// `GROUP_AUTHORIZATION_FAILED` (30) — principal lacks permission on the group.
+/// `GROUP_AUTHORIZATION_FAILED` (30): principal lacks permission on the group.
 pub const GROUP_AUTHORIZATION_FAILED: i16 = 30;
-/// `OPERATION_NOT_ATTEMPTED` (55) — returned for partitions/resources whose
-/// authorization check was short-circuited by an earlier error in the same
-/// request (e.g. when a prior resource already failed with an auth error).
+/// `OPERATION_NOT_ATTEMPTED` (55): the broker returns this for a partition or
+/// resource whose authorization check an earlier error in the same request
+/// short-circuited. For example, an earlier resource already failed with an
+/// auth error.
 pub const OPERATION_NOT_ATTEMPTED: i16 = 55;
 
 // Bulletproof EOS / acks=all codes.
-/// Per-partition error returned by `acks=all` Produce when the request
-/// completes without enough in-sync replicas confirming the write. The
-/// record is durably on the leader's log; the producer should retry.
+/// Per-partition error that `acks=all` Produce returns when the request
+/// completes without enough in-sync replicas that confirm the write. The
+/// record is durably on the leader's log. The producer should retry.
 pub const NOT_ENOUGH_REPLICAS: i16 = 19;
 
-/// Per-partition error returned by `acks=all` Produce when the request
-/// appended successfully on the leader but the HW timeout elapsed before
-/// enough in-sync replicas confirmed the write. The record is durably on
-/// the leader's log but not yet on every ISR follower.
+/// Per-partition error that `acks=all` Produce returns when the append
+/// succeeded on the leader but the HW timeout elapsed before enough in-sync
+/// replicas confirmed the write. The record is durably on the leader's log,
+/// but not yet on every ISR follower.
 pub const NOT_ENOUGH_REPLICAS_AFTER_APPEND: i16 = 20;
 
 /// KIP-101 fence: caller's `current_leader_epoch` is older than the
-/// partition's current `leader_epoch`. Caller should re-fetch metadata
-/// or call `OffsetForLeaderEpoch` to learn the truncation point.
+/// partition's current `leader_epoch`. The caller should re-fetch metadata, or
+/// call `OffsetForLeaderEpoch` to learn the truncation point.
 pub const FENCED_LEADER_EPOCH: i16 = 74;
 
-/// KIP-101: caller's `current_leader_epoch` is newer than the broker's
-/// view. Metadata propagation lag — caller retries after a brief wait.
+/// KIP-101: caller's `current_leader_epoch` is newer than the broker's view.
+/// This is metadata propagation lag. The caller retries after a brief wait.
 pub const UNKNOWN_LEADER_EPOCH: i16 = 75;
 
-/// `INELIGIBLE_REPLICA` (107, KIP-903) — an `AlterPartition` proposed a new
-/// ISR containing at least one ineligible replica: a broker not currently
-/// registered, or one whose stamped broker epoch is stale relative to the
-/// controller's registration epoch. The partition's ISR is left unchanged.
+/// `INELIGIBLE_REPLICA` (107, KIP-903): an `AlterPartition` proposed a new ISR
+/// that holds at least one ineligible replica. Such a replica is a broker that
+/// is not currently registered, or one whose stamped broker epoch is stale
+/// against the controller's registration epoch. The partition's ISR does not
+/// change.
 pub const INELIGIBLE_REPLICA: i16 = 107;
 
 // Leader election codes.
@@ -212,14 +218,15 @@ pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
 pub const NO_REASSIGNMENT_IN_PROGRESS: i16 = 85;
 
 // KIP-227 incremental-fetch-session codes.
-/// Returned at the top level of a `FetchResponse` when the request carried
-/// a non-zero `session_id` that is not present in the broker's session cache
-/// (evicted, never existed, or already closed).
+/// The broker returns this at the top level of a `FetchResponse` when the
+/// request carried a non-zero `session_id` that the broker's session cache
+/// does not hold. The session was evicted, never existed, or is already
+/// closed.
 pub const FETCH_SESSION_ID_NOT_FOUND: i16 = 70;
-/// Returned at the top level of a `FetchResponse` when the request's
-/// `session_epoch` does not match the cached session's current epoch, or
-/// when `session_id == 0` and `session_epoch` is neither `0` (new session)
-/// nor `-1` (sessionless full fetch).
+/// The broker returns this at the top level of a `FetchResponse` when the
+/// request's `session_epoch` does not match the cached session's current
+/// epoch. It also returns it when `session_id == 0` and `session_epoch` is
+/// neither `0` (new session) nor `-1` (sessionless full fetch).
 pub const INVALID_FETCH_SESSION_EPOCH: i16 = 71;
 
 // KIP-48 delegation-token codes. Numbers from
@@ -232,40 +239,41 @@ pub const DELEGATION_TOKEN_AUTHORIZATION_FAILED: i16 = 65;
 pub const DELEGATION_TOKEN_EXPIRED: i16 = 66;
 
 // KIP-630 FetchSnapshot (api_key 59) codes.
-/// `SNAPSHOT_NOT_FOUND` (98) — the requested `__cluster_metadata` snapshot
-/// does not exist (the controller has not generated one yet).
+/// `SNAPSHOT_NOT_FOUND` (98): the requested `__cluster_metadata` snapshot does
+/// not exist, because the controller has not generated one yet.
 pub const SNAPSHOT_NOT_FOUND: i16 = 98;
-/// `POSITION_OUT_OF_RANGE` (99) — the requested `position` is past the end
+/// `POSITION_OUT_OF_RANGE` (99): the requested `position` is past the end
 /// of the `__cluster_metadata` snapshot.
 pub const POSITION_OUT_OF_RANGE: i16 = 99;
-/// `INCONSISTENT_CLUSTER_ID` (104) — the request's `cluster_id` does not
+/// `INCONSISTENT_CLUSTER_ID` (104): the request's `cluster_id` does not
 /// match this cluster's id.
 pub const INCONSISTENT_CLUSTER_ID: i16 = 104;
-/// `UNKNOWN_TOPIC_ID` (100) — a request referenced a topic by UUID that this
+/// `UNKNOWN_TOPIC_ID` (100): a request referenced a topic by UUID that this
 /// cluster does not know about (KIP-516).
 pub const UNKNOWN_TOPIC_ID: i16 = 100;
-/// `INCONSISTENT_TOPIC_ID` (103) — a request supplied a topic UUID that does
+/// `INCONSISTENT_TOPIC_ID` (103): a request supplied a topic UUID that does
 /// not match the UUID stored for the named topic (KIP-516).
 pub const INCONSISTENT_TOPIC_ID: i16 = 103;
-/// `FETCH_SESSION_TOPIC_ID_ERROR` (106) — a fetch session referenced a topic
-/// UUID that no longer resolves (e.g. recreated mid-session) (KIP-516).
+/// `FETCH_SESSION_TOPIC_ID_ERROR` (106, KIP-516): a fetch session referred to
+/// a topic UUID that no longer resolves. For example, the topic was recreated
+/// during the session.
 pub const FETCH_SESSION_TOPIC_ID_ERROR: i16 = 106;
 
-/// `UNSUPPORTED_COMPRESSION_TYPE` (76) — KIP-714 `PushTelemetry` carried a
-/// `compression_type` the broker can't decompress.
+/// `UNSUPPORTED_COMPRESSION_TYPE` (76): a KIP-714 `PushTelemetry` carried a
+/// `compression_type` that the broker cannot decompress.
 pub const UNSUPPORTED_COMPRESSION_TYPE: i16 = 76;
 
-/// `THROTTLING_QUOTA_EXCEEDED` (89) — KIP-714 client pushed/fetched
+/// `THROTTLING_QUOTA_EXCEEDED` (89): a KIP-714 client pushed or fetched
 /// telemetry faster than the configured interval allows.
 pub const THROTTLING_QUOTA_EXCEEDED: i16 = 89;
 
-/// `TELEMETRY_TOO_LARGE` (118) — KIP-714 `PushTelemetry` payload exceeded
+/// `TELEMETRY_TOO_LARGE` (118): KIP-714 `PushTelemetry` payload exceeded
 /// `telemetry.max.bytes`.
 pub const TELEMETRY_TOO_LARGE: i16 = 118;
 
-/// Map an internal [`crate::error::BrokerError`] to a wire-level code.
-/// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
-/// pick more meaningful codes.
+/// Maps an internal [`crate::error::BrokerError`] to a wire-level code. Most
+/// internal errors map to `UNKNOWN_SERVER_ERROR`. Specific variants map to
+/// more meaningful codes.
 #[must_use]
 pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
     use crate::error::BrokerError;

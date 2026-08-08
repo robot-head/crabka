@@ -346,22 +346,22 @@ fn source_partitions(index: &ProfileIndex, block_key: &str) -> Vec<u64> {
     partitions
 }
 
-/// Build the source-partition -> destination-partition map for one input block.
+/// Build the source-partition to destination-partition map for one input block.
 ///
 /// The external partition scheme packs a per-block base in the high 32 bits and
 /// a local partition id in the low 32 bits: `external = base | local`. That is
-/// only collision-free while the local id fits the low 32 bits. After a block
-/// has already been compacted once, its stored partitions already occupy the
-/// high bits, so naively OR-ing a fresh base onto them folds bits together and
-/// can alias partitions across blocks (and trips `copy_partition_from`'s
-/// non-empty-destination reject).
+/// collision-free only while the local id fits the low 32 bits. After one
+/// compaction of a block, its stored partitions already occupy the high bits. A
+/// direct OR of a fresh base onto them then folds bits together, can alias
+/// partitions across blocks, and trips the non-empty-destination reject of
+/// `copy_partition_from`.
 ///
-/// To stay safe across repeated compactions we re-base each block's source
-/// partitions to a dense local `0..n` range first, so the high-bit base is only
-/// ever OR-ed with small local ids. `source_partitions` is sorted+deduped by the
-/// caller, so the dense assignment is deterministic. We also use checked
-/// arithmetic and error out rather than silently aliasing if a base or local id
-/// would not fit.
+/// To stay safe across repeated compactions, this function first re-bases the
+/// source partitions of each block to a dense local `0..n` range. The high-bit
+/// base is then only ever OR-ed with small local ids. The caller sorts and
+/// dedupes `source_partitions`, so the dense assignment is deterministic. The
+/// function also uses checked arithmetic and returns an error instead of a
+/// silent alias if a base or local id does not fit.
 fn destination_partitions(
     block_idx: usize,
     source_partitions: &[u64],

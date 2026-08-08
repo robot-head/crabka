@@ -1,6 +1,8 @@
-//! SP29: scalar (row) functions + the `||` operator — end-to-end over the wire.
-//! String (length/upper/lower/trim/substr/replace/concat), math (abs/mod),
-//! null/conditional (coalesce/nullif/greatest/least), `||`, the aggregate
+//! SP29: scalar (row) functions and the `||` operator, end-to-end over the wire.
+//!
+//! The tests cover string functions (length/upper/lower/trim/substr/replace/concat),
+//! math functions (abs/mod), null and conditional functions
+//! (coalesce/nullif/greatest/least), the `||` operator, the aggregate
 //! interaction, and the error SQLSTATEs (42883 / 42809 / 42804).
 
 use std::sync::Arc;
@@ -34,8 +36,10 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
-/// First column of the first row, as text (via the simple query protocol so the
-/// engine's own text encoding is exercised). Panics if there is no row.
+/// First column of the first row, as text. Panics if there is no row.
+///
+/// The helper uses the simple query protocol, so it exercises the engine's own
+/// text encoding.
 async fn scalar(client: &tokio_postgres::Client, sql: &str) -> Option<String> {
     use tokio_postgres::SimpleQueryMessage;
     for m in client.simple_query(sql).await.expect("query") {

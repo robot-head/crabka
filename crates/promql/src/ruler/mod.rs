@@ -33,7 +33,7 @@ pub use schedule::{
     filter_ruler_rule_set_for_shard_due_for_eval,
 };
 
-/// Errors from writing ruler output to the metrics WAL.
+/// Errors that occur when the ruler writes output to the metrics WAL.
 #[derive(Debug, thiserror::Error)]
 pub enum RulerWalError {
     #[error("ruler wal append failed: {0}")]
@@ -46,7 +46,7 @@ impl From<RulerWalError> for PromqlError {
     }
 }
 
-/// Sink for recording rule output records.
+/// Sink for recording-rule output records.
 #[async_trait::async_trait]
 pub trait RecordingRuleWalSink: Send + Sync {
     async fn append_recording_rule_record(&self, record: WalRecord) -> Result<(), RulerWalError>;
@@ -84,7 +84,7 @@ pub struct RulerGroupState {
 }
 
 impl RulerGroupState {
-    /// Apply one compacted group-state record to the in-memory group tracker.
+    /// Applies one compacted group-state record to the in-memory group tracker.
     pub fn apply_record(&mut self, record: RulerGroupStateRecord) {
         self.last_eval_ms.insert(
             RulerGroupStateKey {
@@ -96,7 +96,7 @@ impl RulerGroupState {
         );
     }
 
-    /// Rebuild group state from compacted group-state records.
+    /// Rebuilds group state from compacted group-state records.
     pub fn apply_records<I>(&mut self, records: I)
     where
         I: IntoIterator<Item = RulerGroupStateRecord>,
@@ -179,20 +179,21 @@ pub struct RulerGroupEvaluation {
 #[derive(Debug, Default)]
 pub struct RulerAlertState {
     active_since_ms: BTreeMap<AlertStateKey, i64>,
-    /// For each alert instance that has reached the firing state, the wall-clock
-    /// deadline (`eval_time + keep_firing_for`) until which it must keep firing
-    /// after its series stops matching. Presence also marks "this instance has
-    /// fired", so a series that only ever pended does not emit a resolved alert.
+    /// Wall-clock deadline for each alert instance that has reached the firing
+    /// state. The deadline is `eval_time + keep_firing_for`. The instance must
+    /// keep firing until that deadline after its series stops matching. An entry
+    /// here also marks the instance as fired, so a series that only ever pended
+    /// does not emit a resolved alert.
     ///
-    /// NOTE: this is in-memory session state only — it is intentionally not part
+    /// NOTE: this is in-memory session state only. It is deliberately not part
     /// of the compacted [`RulerAlertStateRecord`], so a ruler restart mid-window
-    /// loses the keep-firing deadline. Full durable keep-firing tracking is
-    /// deferred (it would require a wire change to the persisted record).
+    /// loses the keep-firing deadline. The keep-firing deadline is not yet
+    /// durable, because that would need a wire change to the persisted record.
     keep_firing_until_ms: BTreeMap<AlertStateKey, i64>,
 }
 
 impl RulerAlertState {
-    /// Apply one compacted alert-state record to the in-memory alert tracker.
+    /// Applies one compacted alert-state record to the in-memory alert tracker.
     pub fn apply_record(&mut self, record: RulerAlertStateRecord) {
         let key = AlertStateKey {
             tenant: record.tenant,
@@ -209,7 +210,7 @@ impl RulerAlertState {
         }
     }
 
-    /// Rebuild alert state from compacted alert-state records.
+    /// Rebuilds alert state from compacted alert-state records.
     pub fn apply_records<I>(&mut self, records: I)
     where
         I: IntoIterator<Item = RulerAlertStateRecord>,

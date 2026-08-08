@@ -4,18 +4,19 @@
 //! pair (`random`, `setseed`), and the full trigonometric / hyperbolic /
 //! logarithmic family.
 //!
-//! Like every other function family in this crate (`func`, `datetime_fn`,
-//! `format_fn`, `json_fn`, `array_fn`), each entry is a pure, deterministic
-//! transform over a single row's already-evaluated Datums — `random`/`setseed`
-//! being the sole exception, and they touch only the per-thread PRNG described
-//! at [`Prng`]. `func::is_scalar` routes these names here, so the module needs
-//! no separate dispatch point in `eval`.
+//! Each entry is a pure, deterministic transform over a single row's
+//! already-evaluated Datums, like every other function family in this crate:
+//! `func`, `datetime_fn`, `format_fn`, `json_fn` and `array_fn`.
+//! `random`/`setseed` are the sole exception, and they touch only the
+//! per-thread PRNG [`Prng`] describes. `func::is_scalar` routes these names
+//! here, so the module needs no separate dispatch point in `eval`.
 //!
 //! The degree-argument trigonometric functions reproduce PostgreSQL's
-//! `sind_q1`/`cosd_q1`/`asind_q1` stitching so that the exact-answer angles
-//! (0/30/45/60/90 and their reflections) come out exactly right rather than one
-//! ULP off, and `cbrt` reproduces the C library's routine rather than Rust's
-//! more accurate one, because PostgreSQL's answer is the C library's.
+//! `sind_q1`/`cosd_q1`/`asind_q1` stitching, so that the exact-answer angles
+//! come out exactly right rather than one ULP off. Those angles are 0, 30, 45,
+//! 60 and 90, and their reflections. `cbrt` reproduces the C library's routine
+//! rather than Rust's more accurate one, because PostgreSQL's answer is the C
+//! library's.
 
 use std::{cell::RefCell, cmp::Ordering};
 
@@ -78,7 +79,7 @@ enum MathFunc {
     Cbrt,
 }
 
-/// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
+/// Classify a lowercased function name. The lexer lowercases unquoted idents.
 fn math_func(name: &str) -> Option<MathFunc> {
     Some(match name {
         "gcd" => MathFunc::Gcd,
@@ -121,14 +122,14 @@ fn math_func(name: &str) -> Option<MathFunc> {
     })
 }
 
-/// Is `name` one of this module's functions? (`func::is_scalar` folds this in.)
+/// Is `name` one of this module's functions? `func::is_scalar` folds this in.
 pub(crate) fn is_math_func(name: &str) -> bool {
     math_func(name).is_some()
 }
 
 /// The numeric family an argument resolves into. PostgreSQL overloads the
 /// functions here on `int4`/`int8`/`numeric`/`float8`, and the *widest* argument
-/// picks the overload — so this is the only argument classification the module
+/// picks the overload. So this is the only argument classification the module
 /// needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum NumKind {
@@ -163,9 +164,9 @@ fn num_kind(t: ColumnType) -> Option<NumKind> {
 }
 
 /// The numeric family of one argument expression, or `None` for an argument
-/// PostgreSQL still calls `unknown` (a bare `NULL` or an unadorned string
-/// literal). An `unknown` argument constrains nothing: the *other* arguments
-/// pick the overload, and the literal is then coerced into it.
+/// PostgreSQL still calls `unknown`, that is a bare `NULL` or an unadorned
+/// string literal. An `unknown` argument constrains nothing. The *other*
+/// arguments pick the overload, and the literal is then coerced into it.
 fn arg_kind(arg: &Expr, scope: &Scope) -> Result<Option<NumKind>, ExecError> {
     if is_unknown_arg(arg) {
         return Ok(None);
@@ -175,10 +176,11 @@ fn arg_kind(arg: &Expr, scope: &Scope) -> Result<Option<NumKind>, ExecError> {
         .ok_or_else(no_matching_function)
 }
 
-/// The widest family across `args`, ignoring the `unknown` ones — the overload
-/// PostgreSQL picks. `default` is what an all-`unknown` list resolves to (the
-/// candidate set's preferred type); the ambiguous families reject that case
-/// through [`require_one_known`] before reaching here.
+/// The widest family across `args`, which ignores the `unknown` ones. This is
+/// the overload PostgreSQL picks. `default` is what an all-`unknown` list
+/// resolves to, that is the candidate set's preferred type. The ambiguous
+/// families reject that case through [`require_one_known`] before it reaches
+/// here.
 fn widest(args: &[Expr], scope: &Scope, default: NumKind) -> Result<NumKind, ExecError> {
     let mut resolved: Option<NumKind> = None;
     for a in args {
@@ -189,8 +191,9 @@ fn widest(args: &[Expr], scope: &Scope, default: NumKind) -> Result<NumKind, Exe
     Ok(resolved.unwrap_or(default))
 }
 
-/// Statically infer a math call's result type (for RowDescription), validating
-/// name, arity, and argument types (42883 for any mismatch).
+/// Statically infer a math call's result type, for RowDescription. This function
+/// validates the name, the arity and the argument types, and reports 42883 for
+/// any mismatch.
 pub(crate) fn math_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
     let f = math_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     let args = checked_args(fc)?;
@@ -279,7 +282,7 @@ pub(crate) fn math_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colu
 
 /// PostgreSQL cannot choose between `gcd`/`lcm`/`random`'s int4, int8 and
 /// numeric overloads when EVERY argument is still `unknown`, so it raises 42725
-/// rather than picking one. A single typed argument settles it.
+/// rather than choosing one. A single typed argument settles it.
 fn require_one_known(fc: &FuncCall, args: &[Expr]) -> Result<(), ExecError> {
     if args.iter().all(is_unknown_arg) {
         return Err(ambiguous_function(&fc.name, args.len()));
@@ -293,8 +296,8 @@ fn numeric_castable(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     arg_kind(arg, scope).map(|_| ())
 }
 
-/// Require an integer (or `unknown`) argument — `factorial`'s only parameter
-/// type is `bigint`, which `numeric` does not implicitly reach.
+/// Require an integer or `unknown` argument. `factorial`'s only parameter type
+/// is `bigint`, which `numeric` does not implicitly reach.
 fn int_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     match arg_kind(arg, scope)? {
         None | Some(NumKind::Int4 | NumKind::Int8 | NumKind::Float8) => Ok(()),
@@ -303,7 +306,7 @@ fn int_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
 }
 
 /// Evaluate a math call. Every function here is strict except `setseed`, which
-/// has no NULL fast path to skip because it is declared strict too — so the
+/// has no NULL fast path to skip because it is declared strict too. So the
 /// shared NULL short-circuit below covers the whole module.
 pub(crate) fn eval_math(
     fc: &FuncCall,
@@ -325,7 +328,7 @@ pub(crate) fn eval_math(
 
 /// Coerce every `unknown` literal argument into the parameter type the call
 /// resolved to, so `gcd('8', 12)` and `sind('30')` compute rather than reporting
-/// a text argument. PostgreSQL does this coercion at plan time; crabka's scalar
+/// a text argument. PostgreSQL does this coercion at plan time. crabka's scalar
 /// evaluator has no scope, so it re-derives the family from the values the
 /// *typed* arguments produced.
 fn coerce_unknown_args(
@@ -356,9 +359,9 @@ fn coerce_unknown_args(
     Ok(())
 }
 
-/// The parameter family a call resolved to, read off the already-evaluated
-/// typed arguments. `default` mirrors the preferred type each candidate set
-/// falls back to when nothing else constrains it.
+/// The parameter family a call resolved to, read off the already-evaluated typed
+/// arguments. `default` is the preferred type each candidate set falls back to
+/// when nothing else constrains it.
 fn value_family(f: MathFunc, args: &[Expr], vals: &[Datum]) -> NumKind {
     // A function with ONE parameter type coerces every `unknown` argument to
     // it, whatever the typed arguments happen to be.
@@ -501,9 +504,9 @@ fn display_scale(d: &BigDecimal) -> i32 {
     i32::try_from(d.fractional_digit_count().max(0)).unwrap_or(i32::MAX)
 }
 
-/// The same value with every insignificant trailing zero dropped — the smallest
-/// display scale that still represents it, which is what `min_scale` reports and
-/// `trim_scale` returns.
+/// The same value with every insignificant trailing zero dropped. This is the
+/// smallest display scale that still represents it, which is what `min_scale`
+/// reports and `trim_scale` returns.
 fn trimmed(d: &BigDecimal) -> BigDecimal {
     numeric::canonical(d.normalized())
 }
@@ -521,8 +524,8 @@ fn as_f64(d: &Datum) -> Result<f64, ExecError> {
 
 // ---- number theory ----
 
-/// `gcd`/`lcm` over the integer widths and `numeric`, with PostgreSQL's
-/// `22003` overflow behavior — notably `gcd(-2147483648, 0)`, whose exact
+/// `gcd`/`lcm` over the integer widths and `numeric`, with PostgreSQL's `22003`
+/// overflow behavior. The notable case is `gcd(-2147483648, 0)`, whose exact
 /// answer `2147483648` does not fit back into `int4`.
 fn gcd_lcm(f: MathFunc, a: &Datum, b: &Datum) -> Result<Datum, ExecError> {
     match (a, b) {
@@ -592,7 +595,7 @@ fn lcm_i64(a: i64, b: i64) -> Result<i64, ExecError> {
     lcm_i128(i128::from(a), i128::from(b)).map(|v| v as i64)
 }
 
-/// `lcm(a, b) = |a / gcd(a, b) * b|`, with `lcm(0, x) = 0` (PostgreSQL).
+/// `lcm(a, b) = |a / gcd(a, b) * b|`, with `lcm(0, x) = 0`, as PostgreSQL does.
 fn lcm_i128(a: i128, b: i128) -> Result<i128, ExecError> {
     if a == 0 || b == 0 {
         return Ok(0);
@@ -650,14 +653,15 @@ fn factorial(n: i64) -> Result<Datum, ExecError> {
 
 // ---- width_bucket ----
 
-/// 2201G (`invalid_argument_for_width_bucket_function`).
+/// 2201G, that is `invalid_argument_for_width_bucket_function`.
 fn width_bucket_error(message: &'static str) -> ExecError {
     domain("2201G", message)
 }
 
 /// `width_bucket(operand, low, high, count)`: which of `count` equal-width
-/// buckets spanning `[low, high)` the operand falls in, `0` below and
-/// `count + 1` above. A reversed `low`/`high` pair reverses the numbering.
+/// buckets spanning `[low, high)` the operand falls in. The result is `0` below
+/// the range and `count + 1` above it. A reversed `low`/`high` pair reverses the
+/// numbering.
 fn width_bucket(op: &Datum, low: &Datum, high: &Datum, count: i64) -> Result<Datum, ExecError> {
     if count <= 0 {
         return Err(width_bucket_error("count must be greater than zero"));
@@ -739,16 +743,17 @@ fn width_bucket(op: &Datum, low: &Datum, high: &Datum, count: i64) -> Result<Dat
     Ok(Datum::Int4(clamp_bucket(bucket, count_i32)))
 }
 
-/// Clamp a floored bucket offset into PostgreSQL's `[0, count + 1]` range: `0`
-/// for an operand below the range, `count + 1` for one at or above the top.
+/// Clamp a floored bucket offset into PostgreSQL's `[0, count + 1]` range. The
+/// result is `0` for an operand below the range, and `count + 1` for one at or
+/// above the top.
 fn clamp_bucket(offset: i64, count: i32) -> i32 {
     offset.saturating_add(1).clamp(0, i64::from(count) + 1) as i32
 }
 
 // ---- pseudo-random numbers ----
 
-/// The xoroshiro128\*\* generator behind `random()` and `setseed()` — the same
-/// algorithm and the same seeding shape as PostgreSQL's `pg_prng`, so the
+/// The xoroshiro128\*\* generator behind `random()` and `setseed()`. It is the
+/// same algorithm and the same seeding shape as PostgreSQL's `pg_prng`, so the
 /// distribution, the range handling and the "same seed, same sequence" contract
 /// all hold.
 ///
@@ -756,12 +761,13 @@ fn clamp_bucket(offset: i64, count: i32) -> i32 {
 ///
 /// - The *stream* is not PostgreSQL's. Its `pg_prng_seed` mixes the 64-bit seed
 ///   into the two state words with an internal constant that is not part of any
-///   documented interface, so a given `setseed(x)` produces a different (equally
-///   uniform) sequence here. Nothing observable depends on a specific draw.
+///   documented interface. So a given `setseed(x)` produces a different sequence
+///   here, which is equally uniform. Nothing observable depends on a specific
+///   draw.
 /// - The state is per-thread rather than per-session, because crabka has no
 ///   session-scoped evaluation slot to hang it from. The executor never `await`s
 ///   inside a statement, so `setseed(x)` and the `random()` calls of the *same*
-///   statement always share one generator; across statements the pairing holds
+///   statement always share one generator. Across statements the pairing holds
 ///   only while the session stays on one runtime worker.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Prng {
@@ -774,8 +780,9 @@ thread_local! {
 }
 
 impl Prng {
-    /// A generator seeded from a 64-bit value, mixing it across both state
-    /// words and spinning four times so nearby seeds diverge immediately.
+    /// A generator seeded from a 64-bit value. This function mixes the value
+    /// across both state words and spins four times, so nearby seeds diverge
+    /// immediately.
     pub(crate) fn seeded(seed: u64) -> Prng {
         let mut prng = Prng {
             s0: seed,
@@ -810,14 +817,14 @@ impl Prng {
     }
 
     /// A value in `[0, 1)` built from the top 52 bits, so every representable
-    /// mantissa is equally likely — PostgreSQL's `pg_prng_double` rule.
+    /// mantissa is equally likely. This is PostgreSQL's `pg_prng_double` rule.
     pub(crate) fn next_double(&mut self) -> f64 {
         (self.next_u64() >> 12) as f64 * f64::from_bits(0x3CB0_0000_0000_0000)
     }
 
-    /// A uniform value in `[0, range]` by bitmask-with-rejection — the method
-    /// PostgreSQL's `pg_prng_uint64_range` uses, so no value is favoured by a
-    /// modulo bias.
+    /// A uniform value in `[0, range]` by bitmask-with-rejection. This is the
+    /// method PostgreSQL's `pg_prng_uint64_range` uses, so a modulo bias favours
+    /// no value.
     pub(crate) fn next_below(&mut self, range: u64) -> u64 {
         if range == 0 {
             return 0;
@@ -831,9 +838,9 @@ impl Prng {
         }
     }
 
-    /// Run `body` against this thread's generator, seeding it from the system
-    /// entropy source on first use (PostgreSQL seeds each backend the same way,
-    /// so an unseeded `random()` is unpredictable in both).
+    /// Run `body` against this thread's generator, and seed it from the system
+    /// entropy source on first use. PostgreSQL seeds each backend the same way,
+    /// so an unseeded `random()` is unpredictable in both.
     fn with<R>(body: impl FnOnce(&mut Prng) -> R) -> R {
         PRNG.with(|cell| {
             let mut slot = cell.borrow_mut();
@@ -843,8 +850,9 @@ impl Prng {
     }
 }
 
-/// A one-off seed for a thread's first `random()`. Uses the wall clock and the
-/// thread identity so two workers never start from the same stream.
+/// A one-off seed for a thread's first `random()`. This function uses the wall
+/// clock and the thread identity, so two workers never start from the same
+/// stream.
 fn entropy_seed() -> u64 {
     use std::{
         hash::{BuildHasher, RandomState},
@@ -892,8 +900,8 @@ fn random_range(lo: &Datum, hi: &Datum) -> Result<Datum, ExecError> {
 
 /// `random(numeric, numeric)`: uniform over the values at the wider of the two
 /// input scales. Crabka draws the offset from the 64-bit generator rather than
-/// PostgreSQL's base-10000 digit-at-a-time walk, so the *distribution* and the
-/// result scale match but the seeded *sequence* does not — a documented
+/// PostgreSQL's base-10000 digit-at-a-time walk. So the *distribution* and the
+/// result scale match, but the seeded *sequence* does not. This is a documented
 /// divergence confined to the numeric overload.
 fn random_numeric(lo: &NumericValue, hi: &NumericValue) -> Result<Datum, ExecError> {
     // PostgreSQL's `random(numeric, numeric)` rejects a special bound outright.
@@ -921,14 +929,14 @@ fn random_numeric(lo: &NumericValue, hi: &NumericValue) -> Result<Datum, ExecErr
 // ---- trigonometry, hyperbolics, roots and logarithms ----
 
 /// PostgreSQL's `RADIANS_PER_DEGREE`. `degrees`/`radians` are defined against
-/// this literal — dividing by it is NOT the same double as multiplying by
+/// this literal. A division by it is NOT the same double as a multiplication by
 /// `180/π`, so the constant, and the direction of each operation, both matter.
 const RADIANS_PER_DEGREE: f64 = 0.017_453_292_519_943_295;
 
 /// `atan(1)`, the constant PostgreSQL divides by so `atand(1)` is exactly 45.
 const ATAN_1_0: f64 = std::f64::consts::FRAC_PI_4;
 
-/// 22003 for an argument outside a function's domain — PostgreSQL raises the
+/// 22003 for an argument outside a function's domain. PostgreSQL raises the
 /// same "input is out of range" for `asin(2)`, `acosh(0.5)` and `sin(inf)`.
 fn input_out_of_range() -> ExecError {
     domain("22003", "input is out of range")
@@ -1013,28 +1021,28 @@ fn float_log10(x: f64) -> Result<Datum, ExecError> {
     Ok(Datum::Float8(x.log10()))
 }
 
-/// `sin(x°) / sin(30°) / 2` — exactly `0.5` at 30 degrees.
+/// `sin(x°) / sin(30°) / 2`: exactly `0.5` at 30 degrees.
 fn sind_0_to_30(x: f64) -> f64 {
     ((x * RADIANS_PER_DEGREE).sin() / (30.0 * RADIANS_PER_DEGREE).sin()) / 2.0
 }
 
-/// `1 − (1 − cos(x°)) / (1 − cos(60°)) / 2` — exactly `1` at 0 and `0.5` at 60.
+/// `1 − (1 − cos(x°)) / (1 − cos(60°)) / 2`: exactly `1` at 0 and `0.5` at 60.
 fn cosd_0_to_60(x: f64) -> f64 {
     let one_minus_cos_60 = 1.0 - (60.0 * RADIANS_PER_DEGREE).cos();
     1.0 - ((1.0 - (x * RADIANS_PER_DEGREE).cos()) / one_minus_cos_60) / 2.0
 }
 
-/// `cbrt(x)` as the C library computes it: reduce the exponent with `frexp`,
+/// `cbrt(x)` as the C library computes it. Reduce the exponent with `frexp`,
 /// evaluate a sixth-degree minimax polynomial on the `[0.5, 1)` mantissa, refine
 /// with one Newton step, then scale back by `2^(e/3)` times the cube root of the
 /// leftover `e mod 3`.
 ///
 /// PostgreSQL's `cbrt()` is the platform `cbrt(3)`, and Rust's `f64::cbrt` is a
-/// *different* (more accurate) implementation — `cbrt(27.0)` is `3` there and
-/// `3.0000000000000004` in the C library. Reproducing the C routine is what
-/// makes crabka's answers identical to the oracle's rather than merely correct.
+/// *different*, more accurate implementation. `cbrt(27.0)` is `3` there and
+/// `3.0000000000000004` in the C library. A copy of the C routine is what makes
+/// crabka's answers identical to the oracle's rather than merely correct.
 fn cbrt(x: f64) -> f64 {
-    /// `2^(1/3)` and `2^(2/3)`, and their reciprocals: the correction applied
+    /// `2^(1/3)` and `2^(2/3)`, and their reciprocals. These are the correction
     /// for each possible `e mod 3`.
     const CBRT2: f64 = 1.259_921_049_894_873_2;
     const SQR_CBRT2: f64 = 1.587_401_051_968_199_6;
@@ -1116,8 +1124,8 @@ fn cosd_q1(x: f64) -> f64 {
     }
 }
 
-/// Fold an angle in degrees into the first quadrant, returning the reduced angle
-/// plus whether each of sine and cosine flips sign.
+/// Fold an angle in degrees into the first quadrant. Returns the reduced angle,
+/// and whether each of sine and cosine flips sign.
 fn reduce_degrees(x: f64) -> (f64, i32, i32) {
     let mut a = x % 360.0;
     let (mut sin_sign, mut cos_sign) = (1, 1);

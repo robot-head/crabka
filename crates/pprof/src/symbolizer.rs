@@ -17,10 +17,11 @@ use refined_type::{Refined, rule::GreaterU64};
 
 use crate::{Frame, RawLocation, SymbolDb, SymbolSource};
 
-/// Default hard cap on a debuginfo artifact downloaded from a debuginfod server.
+/// Default maximum size of a debuginfo artifact downloaded from a debuginfod
+/// server.
 pub const DEFAULT_DEBUGINFOD_MAX_ARTIFACT_SIZE: ByteSize = mebibytes(512);
 
-/// Default time allowed to establish a debuginfod connection.
+/// Default time allowed to open a debuginfod connection.
 pub const DEFAULT_DEBUGINFOD_CONNECT_TIMEOUT: Time = secs(5);
 
 /// Default time allowed for a whole debuginfod request, connection included.
@@ -39,9 +40,10 @@ impl DebuginfodConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error unless the artifact cap is a positive whole-byte value,
-    /// both timeouts are positive and finite, and the connect timeout does not
-    /// exceed the whole-request timeout.
+    /// Returns an error when the maximum artifact size is not a positive
+    /// whole-byte value. Returns an error when either timeout is not positive
+    /// and finite. Returns an error when the connect timeout is more than the
+    /// whole-request timeout.
     pub fn new(
         max_artifact_size: ByteSize,
         connect_timeout: Time,
@@ -110,10 +112,12 @@ fn validate_positive_timeout(name: &str, timeout: Time) -> Result<(), String> {
     Ok(())
 }
 
-/// Returns `true` iff `build_id` is a valid debuginfod build-id: a non-empty
-/// lowercase hex string. debuginfod build-ids are hex digests, so anything
-/// containing `/`, `.`, `..`, uppercase, or other bytes is rejected before it
-/// can be interpolated into a URL (SSRF / path-traversal defence).
+/// Returns `true` if and only if `build_id` is a valid debuginfod build-id.
+///
+/// A valid build-id is a non-empty lowercase hex string. debuginfod build-ids
+/// are hex digests, so this function rejects a build-id that holds `/`, `.`,
+/// `..`, uppercase, or other bytes. The rejection happens before the build-id
+/// can go into a URL. This is a defence against SSRF and path traversal.
 fn is_valid_build_id(build_id: &str) -> bool {
     build_id.len() >= 2
         && build_id
@@ -121,18 +125,21 @@ fn is_valid_build_id(build_id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Recover a poisoned mutex instead of propagating the panic. A single panicked
-/// worker must not permanently `DoS` the resolver, so we take ownership of the
-/// inner guard and carry on.
+/// Recover a poisoned mutex rather than propagate the panic.
+///
+/// One panicked worker must not permanently `DoS` the resolver. This function
+/// takes ownership of the inner guard and continues.
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Parse an untrusted ELF/DWARF blob with `object::File::parse`, catching any
-/// panic the parser might trigger on a crafted artifact. Returns `Ok(())` only
-/// when the bytes parse cleanly without panicking.
+/// Parse an untrusted ELF/DWARF blob with `object::File::parse`.
+///
+/// This function catches any panic that the parser can trigger on a crafted
+/// artifact. It returns `Ok(())` only when the bytes parse cleanly and the
+/// parser does not panic.
 fn parse_object_guarded(bytes: &[u8]) -> Result<(), String> {
     std::panic::catch_unwind(|| {
         object::File::parse(bytes)
@@ -241,12 +248,13 @@ impl DebuginfodResolver {
         Self::with_config(base_urls, DebuginfodConfig::default())
     }
 
-    /// Create a resolver with explicit debuginfod resource policy.
+    /// Create a resolver with an explicit debuginfod resource policy.
     ///
     /// # Errors
     ///
-    /// Returns an error when no base URL is supplied, a URL is invalid, or the
-    /// HTTP client cannot be built.
+    /// Returns an error when the caller gives no base URL. Returns an error
+    /// when a URL is invalid. Returns an error when `reqwest` cannot build the
+    /// HTTP client.
     pub fn with_config(base_urls: Vec<String>, config: DebuginfodConfig) -> Result<Self, String> {
         let base_urls = base_urls
             .into_iter()
@@ -272,10 +280,12 @@ impl DebuginfodResolver {
         })
     }
 
-    /// Build the `<base>/buildid/<build_id>/debuginfo` URL by pushing path
-    /// segments through the URL parser, so an attacker-controlled `build_id`
-    /// cannot alter the host or escape the path. Returns `None` if the base URL
-    /// cannot be a base (e.g. `mailto:`).
+    /// Build the `<base>/buildid/<build_id>/debuginfo` URL.
+    ///
+    /// This function pushes the path segments through the URL parser, so an
+    /// attacker-controlled `build_id` cannot alter the host or escape the path.
+    /// It returns `None` when the base URL cannot be a base, for example
+    /// `mailto:`.
     fn build_url(base: &reqwest::Url, build_id: &str) -> Option<reqwest::Url> {
         let mut url = base.clone();
         {
@@ -332,9 +342,11 @@ impl DebuginfodResolver {
     }
 }
 
-/// Read an HTTP body into memory, aborting (returning `None`) the moment the
-/// accumulated size would exceed `cap` bytes. Avoids the unbounded
-/// `response.bytes()` allocation.
+/// Read an HTTP body into memory.
+///
+/// This function stops and returns `None` as soon as the accumulated size is
+/// more than `cap` bytes. It avoids the unbounded `response.bytes()`
+/// allocation.
 fn read_capped(mut response: reqwest::blocking::Response, cap: u64) -> Option<Vec<u8>> {
     read_capped_reader(&mut response, cap)
 }

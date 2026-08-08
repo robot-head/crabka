@@ -6,7 +6,7 @@ use crabka_units::{Time, convert::TimeExt, minutes};
 /// Not `Eq`: [`Time`] stores `f64`. Nothing keys a map on this config.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrontendConfig {
-    /// Width of each shard the query range is split into.
+    /// Width of each shard that the query range splits into.
     pub shard_width: Time,
 }
 

@@ -1,12 +1,12 @@
 //! `pg_backend_pid()` over the session the wire loop opens.
 //!
-//! `PostgreSQL` guarantees the function answers with the same id the connection
-//! announced in `BackendKeyData`, which is how a client correlates a cancel
-//! request with the session it belongs to. `Engine::connect_with_pid` carries
-//! that id into the engine, so this file pins the two halves of the pairing:
-//! the answer is the id the session was opened with, and no two sessions share
-//! one. The wire half — that the announced id is the one handed to
-//! `connect_with_pid` — is pinned in `crabka-pgwire`'s `listen_notify` suite.
+//! `PostgreSQL` guarantees that the function answers with the same id the
+//! connection announced in `BackendKeyData`. A client uses that id to correlate
+//! a cancel request with the session it belongs to. `Engine::connect_with_pid`
+//! carries that id into the engine, so this file pins the two halves of the
+//! pairing: the answer is the id the session was opened with, and no two
+//! sessions share one. `crabka-pgwire`'s `listen_notify` suite pins the wire
+//! half, that the announced id is the one handed to `connect_with_pid`.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -70,9 +70,10 @@ async fn the_answer_does_not_change_over_the_life_of_a_session() {
     assert!(backend_pid(&mut session).await == "77");
 }
 
-/// The property a per-session `pg_temp_<backendid>` namespace rests on: two
-/// connections of one engine never report the same backend id. A session the
-/// engine opens for itself draws one from the same counter the wire layer
+/// The property a per-session `pg_temp_<backendid>` namespace rests on.
+///
+/// Two connections of one engine never report the same backend id. A session
+/// the engine opens for itself draws an id from the same counter the wire layer
 /// announces from, so this holds without a client behind either session.
 #[tokio::test]
 async fn two_sessions_of_one_engine_report_different_backend_ids() {
@@ -90,10 +91,12 @@ async fn two_sessions_of_one_engine_report_different_backend_ids() {
     assert!(second.parse::<i32>().expect("an integer pid") > 0);
 }
 
-/// `pg_stat_activity` describes the session asking, so its row's `pid` is the
-/// same id `pg_backend_pid()` answers with. `PostgreSQL` 18.4 answers 1 to the
-/// count below, and a client that looks itself up in `pg_stat_activity` — the
-/// shape every "is my session still there" probe takes — depends on it.
+/// `pg_stat_activity` describes the session that asks, so the `pid` of its row
+/// is the same id `pg_backend_pid()` answers with.
+///
+/// `PostgreSQL` 18.4 answers 1 to the count below. A client that looks itself
+/// up in `pg_stat_activity` depends on that, and every "is my session still
+/// there" probe takes that shape.
 #[tokio::test]
 async fn pg_stat_activity_reports_the_sessions_own_backend_pid() {
     let engine = SqlEngine::new();
@@ -115,8 +118,10 @@ async fn pg_stat_activity_reports_the_sessions_own_backend_pid() {
     assert!(pid == "5151");
 }
 
-/// `integer`, as `PostgreSQL` 18.4 declares it — a client that binds the result
-/// as int4 must not have to re-read the description.
+/// `integer`, as `PostgreSQL` 18.4 declares it.
+///
+/// A client that binds the result as int4 must not have to re-read the
+/// description.
 #[tokio::test]
 async fn the_result_is_described_as_int4() {
     let engine = SqlEngine::new();

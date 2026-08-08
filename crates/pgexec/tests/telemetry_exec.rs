@@ -1,14 +1,14 @@
 //! The executor's own spans: reads, scans, writes, row-lock waits, the
 //! referential drain, and the local commit.
 //!
-//! Every assertion runs against exported [`SpanData`] rather than a live
-//! `tracing::Span`, and the subscriber is installed with `set_global_default`
-//! rather than `with_default`. Both matter here more than anywhere else in the
-//! crate: these spans are opened on `spawn_blocking` pool threads and inside
-//! `std::thread::scope`, where a thread-local subscriber is invisible — a test
-//! using one would observe zero spans and pass while proving nothing.
-//! `nextest` runs each test in its own process, which is what makes one global
-//! default per test sound.
+//! Every assertion runs against exported [`SpanData`] and not against a live
+//! `tracing::Span`. The subscriber is installed with `set_global_default` and
+//! not with `with_default`. Both points matter here more than anywhere else in
+//! the crate. These spans are opened on `spawn_blocking` pool threads and
+//! inside `std::thread::scope`, where a thread-local subscriber is invisible. A
+//! test that used one would observe zero spans and pass while it proved
+//! nothing. `nextest` runs each test in its own process, which is what makes
+//! one global default per test sound.
 
 use std::{sync::Arc, time::Duration};
 
@@ -22,8 +22,8 @@ use tracing_subscriber::layer::SubscriberExt as _;
 /// Install a real `OTel` tracer as the process-wide subscriber, run `f` against
 /// a fresh in-memory engine, and return the spans that closed.
 ///
-/// The engine rather than a single session: the row-lock tests need two
-/// sessions contending over one lock table.
+/// This helper returns the engine and not a single session, because the
+/// row-lock tests need two sessions that contend over one lock table.
 fn traced<F, Fut>(f: F) -> Vec<SpanData>
 where
     F: FnOnce(Arc<SqlEngine>) -> Fut,
@@ -83,12 +83,13 @@ fn text(span: &SpanData, key: &str) -> Option<String> {
     attribute(span, key).map(std::string::ToString::to_string)
 }
 
-/// The integer an attribute carries, or `None` when it is absent — and a
-/// failure when it is present but not an OTLP integer.
+/// The integer an attribute carries, or `None` when the attribute is absent.
+/// The helper fails when the attribute is present but is not an OTLP integer.
 ///
 /// OTLP has no unsigned type, so a `u64` or `usize` field is exported as a
-/// *string*, which Grafana cannot sort or range-filter. Reading counts through
-/// here is what stops a regression to the stringified form passing unnoticed.
+/// *string*, which Grafana cannot sort or range-filter. A read of the counts
+/// through this helper is what stops a regression to the stringified form from
+/// passing unnoticed.
 fn number(span: &SpanData, key: &str) -> Option<i64> {
     match attribute(span, key) {
         None => None,

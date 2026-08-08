@@ -5,22 +5,24 @@
 //! the producer's (pid, epoch). The offsets are held under the partition's
 //! LSO until a `WriteTxnMarkers` commit or abort marker arrives.
 //!
-//! Versions 0–2: non-flexible (no `generation_id`/`member_id` fields).
-//! Versions 3–5: flexible (tagged fields; adds `generation_id`, `member_id`,
-//!               `group_instance_id`). On v3+ the consumer-group metadata is
-//!               validated via the shared `validate_group_commit` (KIP-447:
-//!               fencing "consistent with normal offset fencing") — classic
-//!               generation or KIP-848 next-gen member epoch.
+//! Versions 0 to 2 are non-flexible and carry no `generation_id` or
+//! `member_id` field. Versions 3 to 5 are flexible, carry tagged fields, and
+//! add `generation_id`, `member_id`, and `group_instance_id`.
+//!
+//! On v3 and above, the shared `validate_group_commit` validates the
+//! consumer-group metadata against the classic generation or the KIP-848
+//! next-gen member epoch. KIP-447 requires fencing that is "consistent with
+//! normal offset fencing".
 //!
 //! ## ACL preamble
 //!
 //! Three gates run in order:
-//! * `Write` on `TransactionalId(transactional_id)`. Deny → whole-response
-//!   `TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53)`.
-//! * `Read` on `Group(group_id)`. Deny → whole-response
+//! * `Write` on `TransactionalId(transactional_id)`. A deny gives the whole
+//!   response `TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53)`.
+//! * `Read` on `Group(group_id)`. A deny gives the whole response
 //!   `GROUP_AUTHORIZATION_FAILED (30)`.
-//! * Per-topic `Read` on `Topic(name)`. Deny → per-partition
-//!   `TOPIC_AUTHORIZATION_FAILED (29)` on the rows of that topic.
+//! * `Read` on `Topic(name)` for each topic. A deny gives every partition row
+//!   of that topic `TOPIC_AUTHORIZATION_FAILED (29)`.
 
 use bytes::{Bytes, BytesMut};
 use crabka_ids::PartitionIndex;
@@ -207,11 +209,13 @@ pub(crate) async fn handle(
 
 // ── batch construction ────────────────────────────────────────────────────────
 
-/// Append the transactional offset records to `__consumer_offsets` and return
-/// the same `(topic, partition) → OffsetEntry` rows so the caller can buffer
-/// them on the txn coordinator (to be materialized into the group's committed
-/// offsets when the COMMIT marker arrives). The returned vec is empty when
-/// every topic was denied (nothing was appended).
+/// Appends the transactional offset records to `__consumer_offsets`, and
+/// returns the same rows, which map `(topic, partition)` to an `OffsetEntry`.
+///
+/// The caller buffers those rows on the txn coordinator. The coordinator
+/// materializes them into the group's committed offsets when the COMMIT marker
+/// arrives. The returned vec is empty when the authorizer denied every topic,
+/// because this function then appended nothing.
 async fn append_txn_batch(
     req: &TxnOffsetCommitRequest,
     partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,

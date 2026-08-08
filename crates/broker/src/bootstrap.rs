@@ -1,9 +1,9 @@
-//! Read `bootstrap.records.bin` (produced by
-//! `crabka format --add-scram`) on broker first start.
+//! Reads `bootstrap.records.bin` on the broker's first start.
+//! `crabka format --add-scram` produces that file.
 //!
-//! File framing (matches `crates/cli/src/format.rs`):
+//! The file framing matches `crates/cli/src/format.rs`:
 //!   [`u32_le` length][serde_wincode-encoded MetadataRecord]
-//! Repeated until EOF.
+//! The pair repeats until EOF.
 
 use std::path::Path;
 
@@ -13,18 +13,21 @@ use wincode::Deserialize;
 
 use crate::error::BrokerError;
 
-/// Select a configured internal-topic replication factor, bounded by the
-/// registered broker count.
+/// Selects a configured internal-topic replication factor, bounded by the
+/// number of registered brokers.
 pub(crate) fn internal_topic_replication_factor(desired: i16, broker_count: usize) -> usize {
     broker_count.min(usize::try_from(desired).expect("replication factor is positive"))
 }
 
-/// Read this replica's stable directory id from `meta.properties.json`
-/// (written by `crabka format`). KIP-853 identifies each voter by
-/// `(node_id, directory_id)`, so the broker must recover its id across
-/// restarts rather than minting a fresh one.
+/// Reads this replica's stable directory id from `meta.properties.json`,
+/// which `crabka format` writes.
+///
+/// KIP-853 identifies each voter by `(node_id, directory_id)`, so the broker
+/// must recover its id across restarts instead of minting a fresh one.
+///
 /// # Errors
-/// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+/// Returns an error when log I/O fails, when a record or index is corrupt, or
+/// when the requested offset violates the segment state.
 pub fn read_directory_id(log_dir: &Path) -> Result<uuid::Uuid, BrokerError> {
     let path = log_dir.join("meta.properties.json");
     let bytes = std::fs::read(&path).map_err(|e| BrokerError::BootstrapFile {
@@ -45,10 +48,12 @@ pub fn read_directory_id(log_dir: &Path) -> Result<uuid::Uuid, BrokerError> {
         })
 }
 
-/// Extract the initial voter set from the bootstrap records. The last
-/// `V1Voters` record wins (mirrors how the controller applies a stream of
-/// `VotersRecord`s — the most recent one is authoritative). Returns an
-/// empty set when no `V1Voters` record is present (joiner path).
+/// Extracts the initial voter set from the bootstrap records.
+///
+/// The last `V1Voters` record wins. This mirrors how the controller applies a
+/// stream of `VotersRecord` values, where the most recent one is
+/// authoritative. The function returns an empty set when the records hold no
+/// `V1Voters` record, which is the joiner path.
 #[must_use]
 pub fn initial_voters(records: &[MetadataRecord]) -> crabka_metadata::VoterSet {
     records
@@ -62,7 +67,8 @@ pub fn initial_voters(records: &[MetadataRecord]) -> crabka_metadata::VoterSet {
 }
 
 /// # Errors
-/// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+/// Returns an error when log I/O fails, when a record or index is corrupt, or
+/// when the requested offset violates the segment state.
 pub fn load_bootstrap_records(log_dir: &Path) -> Result<Vec<MetadataRecord>, BrokerError> {
     let path = log_dir.join("bootstrap.records.bin");
     if !path.exists() {

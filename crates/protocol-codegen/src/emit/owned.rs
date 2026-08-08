@@ -1,8 +1,8 @@
 //! Emit Rust source for the owned flavor of a `MessageSpec`.
 //!
-//! Handles primitive fields, tagged fields, primitive arrays, and nested
-//! struct fields. Nested anonymous structs become sibling types in the same
-//! generated file. Supports `commonStructs`.
+//! This module handles primitive fields, tagged fields, primitive arrays, and
+//! nested struct fields. Nested anonymous structs become sibling types in the
+//! same generated file. The module also supports `commonStructs`.
 
 use std::collections::HashMap;
 
@@ -26,9 +26,10 @@ pub enum EmitError {
 
 /// Build the `use` items for a common-struct file body.
 ///
-/// Replicates the import selection that the (former) `emit_common_struct_file`
-/// used: it differs from `emit_imports` in that it has NO records-import block
-/// (common structs never carry `records` fields).
+/// This function replicates the import selection the former
+/// `emit_common_struct_file` used. It differs from `emit_imports` in one way:
+/// it has NO records-import block, because common structs never carry
+/// `records` fields.
 pub(crate) fn emit_common_imports(fields: &[FieldSpec], flex_min_val: i16) -> TokenStream {
     let types = used_field_types_recursive(fields);
     let has_flex = flex_min_val < i16::MAX;
@@ -90,8 +91,8 @@ pub(crate) fn emit_common_imports(fields: &[FieldSpec], flex_min_val: i16) -> To
     out
 }
 
-/// The `string_bytes` import list for string fields (nullable variant pulls in
-/// the nullable-string helpers too).
+/// The `string_bytes` import list for string fields. The nullable variant also
+/// pulls in the nullable-string helpers.
 fn string_import(use_nullable_string: bool) -> TokenStream {
     let names: &[&str] = if use_nullable_string {
         &[
@@ -150,8 +151,8 @@ fn bytes_import(use_non_nullable_bytes: bool, use_nullable_bytes: bool) -> Token
     quote!(use crate::primitives::string_bytes::{ #(#idents),* };)
 }
 
-/// The `tagged_fields` import line. `encode_to_bytes` is only pulled in when
-/// there are known tagged fields to encode.
+/// The `tagged_fields` import line. This function pulls in `encode_to_bytes`
+/// only when there are known tagged fields to encode.
 fn tagged_import(flex: bool, tagged: bool) -> TokenStream {
     if flex && tagged {
         quote!(
@@ -179,8 +180,8 @@ pub(crate) fn base_type(t: &str) -> &str {
     t.strip_prefix("[]").unwrap_or(t)
 }
 
-/// Collect the set of primitive schema types actually used by non-tagged fields,
-/// so we can emit only the imports that are needed.
+/// Collect the set of primitive schema types that non-tagged fields actually
+/// use, so the emitter writes only the imports it needs.
 fn used_field_types_recursive(fields: &[FieldSpec]) -> Vec<String> {
     let mut types: Vec<String> = Vec::new();
     for f in fields {
@@ -205,8 +206,9 @@ fn has_tagged_fields_recursive(fields: &[FieldSpec]) -> bool {
         .any(|f| f.tag.is_some() || has_tagged_fields_recursive(&f.fields))
 }
 
-/// Returns true if any field (recursively) is `float64`.
-/// `f64` does not implement `Eq`, so structs with `float64` fields must not derive `Eq`.
+/// Returns true if any field, at any depth, is `float64`.
+/// `f64` does not implement `Eq`, so structs with `float64` fields must not
+/// derive `Eq`.
 pub(crate) fn has_float64_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
@@ -242,9 +244,10 @@ fn uses_non_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
-/// True if a field needs the non-nullable codec for at least some versions:
-/// either it is never nullable, or its nullable range is narrower than its own
-/// version range (so a per-version split emits a non-nullable branch).
+/// True if a field needs the non-nullable codec for at least some versions.
+/// That happens when the field is never nullable, or when its nullable range
+/// is narrower than its own version range, so a per-version split emits a
+/// non-nullable branch.
 fn needs_non_nullable_codec(f: &FieldSpec) -> bool {
     f.nullable_versions.is_none() || nullable_split_cond(f).is_some()
 }
@@ -265,7 +268,8 @@ fn uses_non_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
-/// Returns true if any field (recursively) has a string type that is also nullable.
+/// Returns true if any field, at any depth, has a string type that is also
+/// nullable.
 fn uses_nullable_string_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
@@ -274,8 +278,8 @@ fn uses_nullable_string_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
-/// Returns true if any field has a non-array struct type with nullableVersions set.
-/// Such fields require `get_i8` for the nullable prefix byte in decode.
+/// Returns true if any field has a non-array struct type with nullableVersions
+/// set. Such fields need `get_i8` for the nullable prefix byte in decode.
 fn uses_nullable_struct_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let t = &f.field_type;
@@ -441,8 +445,9 @@ pub(crate) fn emit_constants(spec: &MessageSpec) -> TokenStream {
     }
 }
 
-/// Returns a Rust expression for the default value of an owned field, respecting the
-/// schema-level `default` attribute (e.g. `"-1"` for `ControllerId`).
+/// Returns a Rust expression for the default value of an owned field. It
+/// respects the schema-level `default` attribute, for example `"-1"` for
+/// `ControllerId`.
 pub(crate) fn owned_default_expr(f: &FieldSpec, res_map: &HashMap<String, Resolution>) -> String {
     let base = base_type(&f.field_type);
     let is_array = f.field_type.starts_with("[]");
@@ -517,8 +522,8 @@ fn parse_string_default_as_i64(s: &str) -> Option<i64> {
     s.trim().parse::<i64>().ok()
 }
 
-/// Returns true if any field in `fields` has a non-trivial schema default
-/// (one that differs from the Rust type's natural Default).
+/// Returns true if any field in `fields` has a non-trivial schema default,
+/// which is one that differs from the Rust type's natural Default.
 pub(crate) fn needs_manual_default(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
@@ -557,7 +562,8 @@ pub(crate) fn is_struct_type(t: &str) -> bool {
 }
 
 /// Build the populated-value expression for one owned field. `option` mirrors
-/// the field's Rust-type `Option<...>` wrapping as computed by `emit_struct`.
+/// the field's Rust-type `Option<...>` wrapping, which `emit_struct`
+/// computes.
 pub(crate) fn owned_populated_value(
     f: &FieldSpec,
     res_map: &HashMap<String, Resolution>,
@@ -609,14 +615,16 @@ fn owned_populated_scalar(
 
 // --- single-field encode/decode helpers -----------------------------------
 
-/// Returns `true` if this field has `"flexibleVersions": "none"` (per-field override),
-/// meaning it must always use the legacy (non-compact) codec even in flex message versions.
+/// Returns `true` if this field has the per-field override
+/// `"flexibleVersions": "none"`. Such a field must always use the legacy
+/// (non-compact) codec, even in flex message versions.
 pub(crate) fn field_forces_non_flex(f: &FieldSpec) -> bool {
     matches!(f.flexible_versions, Some(FlexibleVersions::None))
 }
 
-/// When a non-nullable decode is used but the field type is `Option<T>`, wrap the
-/// result in `Some`. For array-of-struct this wraps the whole block.
+/// Wrap the result in `Some` when the emitter uses a non-nullable decode but
+/// the field type is `Option<T>`. For an array of structs this wraps the whole
+/// block.
 pub(crate) fn wrap_non_nullable_for_option(
     _schema_type: &str,
     non_nullable_call: &str,
@@ -628,8 +636,9 @@ pub(crate) fn wrap_non_nullable_for_option(
 }
 
 /// Returns a Rust boolean expression that is `true` when the tagged field
-/// equals its schema-specified default. This is used to suppress tagged field
-/// serialization (JVM Kafka also omits tagged fields that equal their defaults).
+/// equals its schema-specified default. The emitter uses it to suppress
+/// tagged-field serialization. JVM Kafka also omits tagged fields that equal
+/// their defaults.
 pub(crate) fn tagged_is_default_cond(f: &FieldSpec) -> String {
     let field = name_conv::field_name(&f.name);
     let base = base_type(&f.field_type);
@@ -663,9 +672,10 @@ pub(crate) fn tagged_is_default_cond(f: &FieldSpec) -> String {
 
 // --- primitive encode/decode call generators ------------------------------
 
-/// Encode a field whose Rust type is `Option<T>` but the wire format is non-nullable
-/// (because `nullable_versions.min > field.versions.min`).
-/// Treats `None` as the empty/default value for the underlying type.
+/// Encode a field whose Rust type is `Option<T>` but whose wire format is
+/// non-nullable, because `nullable_versions.min > field.versions.min`.
+/// This function treats `None` as the empty or default value for the
+/// underlying type.
 pub(crate) fn encode_call_option_as_non_nullable(schema_type: &str, expr: &str) -> String {
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
@@ -704,7 +714,8 @@ pub(crate) fn encode_call_option_as_non_nullable(schema_type: &str, expr: &str) 
     }
 }
 
-/// Compute the `encoded_len` of a field whose Rust type is `Option<T>` but wire is non-nullable.
+/// Compute the `encoded_len` of a field whose Rust type is `Option<T>` but
+/// whose wire format is non-nullable.
 pub(crate) fn encoded_len_expr_option_as_non_nullable(schema_type: &str, expr: &str) -> String {
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
@@ -740,8 +751,9 @@ pub(crate) fn encoded_len_expr_option_as_non_nullable(schema_type: &str, expr: &
     }
 }
 
-/// Generate an encode call expression using a specific buffer variable name.
-/// This is used for tagged-field closures where the buffer is `b` not `buf`.
+/// Generate an encode call expression with a specific buffer variable name.
+/// The emitter uses this for tagged-field closures, where the buffer is `b`
+/// and not `buf`.
 pub(crate) fn encode_call_with_buf(
     schema_type: &str,
     expr: &str,
@@ -754,7 +766,7 @@ pub(crate) fn encode_call_with_buf(
     base.replace("buf", buf_var)
 }
 
-/// Generate a decode call expression using a specific buffer variable name.
+/// Generate a decode call expression with a specific buffer variable name.
 pub(crate) fn decode_call_with_buf(
     schema_type: &str,
     nullable: bool,
@@ -1063,7 +1075,8 @@ pub(crate) fn is_nullable(f: &FieldSpec) -> bool {
 /// range is narrower than the field's own version range (on either end), the
 /// codec must switch between nullable and non-nullable per version. Returns
 /// `Some(cond)` for that boundary expression, or `None` when nullability is
-/// constant across the whole field range (use `is_nullable(f)` directly).
+/// constant across the whole field range. In that case use `is_nullable(f)`
+/// directly.
 pub(crate) fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
     let r = f.nullable_versions?;
     let need_lower = r.min > f.versions.min;

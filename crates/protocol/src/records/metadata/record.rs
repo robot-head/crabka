@@ -1,7 +1,8 @@
 //! Dispatch enum over the generated KIP-631 record types, keyed by the `KRaft`
-//! metadata record apiKey (a namespace distinct from RPC apiKeys). Encodes and
-//! decodes through the value envelope. Unknown apiKeys decode to `Unknown` so a
-//! forward-compatible reader never chokes.
+//! metadata record apiKey. That apiKey namespace is distinct from the RPC
+//! apiKeys. The enum encodes and decodes through the value envelope. Unknown
+//! apiKeys decode to `Unknown`, so a forward-compatible reader can always read
+//! the record.
 //!
 //! Multi-version records (`RegisterBroker`, `Partition`,
 //! `BrokerRegistrationChange`, …) must re-encode at the same apiVersion they
@@ -66,24 +67,25 @@ pub enum KraftMetadataRecord {
     },
 }
 
-/// Widen a record apiVersion to the envelope's unsigned representation. Negative
-/// versions are not meaningful for metadata records, so they clamp to 0.
+/// Widens a record apiVersion to the envelope's unsigned representation.
+/// Negative versions have no meaning for metadata records, so they clamp to 0.
 fn api_version_to_u32(version: i16) -> u32 {
     u32::try_from(version).unwrap_or(0)
 }
 
-/// Narrow the envelope's apiVersion to the `i16` the generated codecs take.
+/// Narrows the envelope's apiVersion to the `i16` the generated codecs take.
 ///
 /// # Errors
 /// Returns [`ProtocolError::SchemaMismatch`] if the declared version does not
-/// fit in `i16` (no real metadata record version does).
+/// fit in `i16`. No real metadata record version is that large.
 fn api_version_to_i16(version: u32) -> Result<i16, ProtocolError> {
     i16::try_from(version).map_err(|_| ProtocolError::SchemaMismatch("metadata record apiVersion"))
 }
 
 impl KraftMetadataRecord {
     /// The fixed metadata-record apiKey this variant encodes as. The apiVersion
-    /// is a runtime value (carried by the envelope), not part of this mapping.
+    /// is a runtime value that the envelope carries, and it is not part of this
+    /// mapping.
     #[must_use]
     pub fn api_key(&self) -> u32 {
         match self {
@@ -112,11 +114,12 @@ impl KraftMetadataRecord {
         }
     }
 
-    /// Encode this record to its value bytes (envelope + body) at `api_version`.
+    /// Encodes this record to its value bytes, the envelope plus the body, at
+    /// `api_version`.
     ///
     /// For a faithful round-trip, pass the apiVersion returned by
     /// [`Self::decode_value`]. For freshly built records, pass the version you
-    /// intend to write (`FeatureLevelRecord` is always apiVersion 0).
+    /// intend to write. `FeatureLevelRecord` is always apiVersion 0.
     ///
     /// # Errors
     /// Propagates a [`ProtocolError`] from the underlying message encoder.
@@ -155,8 +158,10 @@ impl KraftMetadataRecord {
         ))
     }
 
-    /// Decode one record from its value bytes, returning the record and the
-    /// apiVersion the envelope declared (needed to re-encode byte-identically).
+    /// Decodes one record from its value bytes.
+    ///
+    /// Returns the record and the apiVersion the envelope declared. The caller
+    /// needs that apiVersion to re-encode the record byte-identically.
     ///
     /// # Errors
     /// Returns a [`ProtocolError`] if the envelope or body cannot be decoded.

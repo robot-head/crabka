@@ -1,19 +1,23 @@
-//! Docker-backed differential probe against real Grafana Mimir (the headline
-//! equality test for the metrics slice: Mimir is the system Crabka replaces, so
-//! corpus equality over identical `remote_write` input is the strongest single
-//! correctness signal).
+//! Docker-backed differential probe against real Grafana Mimir.
 //!
-//! Ignored by default because it pulls and runs `mirror.gcr.io/grafana/mimir` under Docker.
+//! This is the headline equality test for the metrics slice. Mimir is the
+//! system that Crabka replaces, so corpus equality over identical
+//! `remote_write` input is the strongest single correctness signal.
+//!
+//! Cargo ignores this test by default, because it pulls and runs
+//! `mirror.gcr.io/grafana/mimir` under Docker.
 //! Run with:
 //!
 //! `cargo test -p crabka-metrics-service --test diff_mimir -- --ignored --nocapture`
 //!
-//! Structure mirrors `diff_prometheus.rs`: one `remote_write` body is written to
-//! BOTH the in-process Crabka write+query path and a Mimir monolithic container,
-//! then `query_corpus()` is run against both and compared with
-//! `assert_query_equal`. The shared corpus/differ lives in the `crabka-metrics`
-//! crate and is path-included below, exactly as `diff_prometheus.rs` does it, so
-//! both differential suites share one corpus definition.
+//! The structure mirrors `diff_prometheus.rs`. The test writes one
+//! `remote_write` body to both the in-process Crabka write and query path and a
+//! Mimir monolithic container. The test then runs `query_corpus()` against both
+//! sides and compares the results with `assert_query_equal`.
+//!
+//! The shared corpus and differ live in the `crabka-metrics` crate. This file
+//! includes them by path below, exactly as `diff_prometheus.rs` does, so both
+//! differential suites share one corpus definition.
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -40,34 +44,43 @@ mod diff_corpus;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Fixed tenant header used on both sides. Mimir requires `X-Scope-OrgID` on
-/// every push/query (multitenancy is on; we simply pin one tenant), and Crabka's
-/// querier keys storage by the same header.
+/// Fixed tenant header used on both sides.
+///
+/// Mimir needs `X-Scope-OrgID` on every push and query, because multitenancy is
+/// on and this test pins one tenant. Crabka's querier keys storage by the same
+/// header.
 const TENANT: &str = "compliance";
 
-/// Mimir's default HTTP server port (serves `/ready`, `/api/v1/push`, and the
-/// `/prometheus/api/v1/query*` read endpoints in monolithic mode).
+/// Mimir's default HTTP server port.
+///
+/// In monolithic mode, this port serves `/ready`, `/api/v1/push`, and the
+/// `/prometheus/api/v1/query*` read endpoints.
 const MIMIR_PORT: u16 = 9009;
 
-/// Pinned Mimir image tag (no `:latest`). Override via `CRABKA_MIMIR_IMAGE_TAG`.
+/// Pinned Mimir image tag, never `:latest`.
+///
+/// Override it with the `CRABKA_MIMIR_IMAGE_TAG` environment variable.
 const MIMIR_IMAGE_TAG: &str = "2.16.1";
 
 /// Queries where Mimir legitimately diverges from Crabka and must be skipped.
 ///
 /// Each entry MUST carry a justification comment. The list is intentionally
-/// empty: `normalize()` already strips Mimir's volatile `warnings`/`infos`/
-/// `stats` envelope fields, and the corpus is curated to stay inside the
-/// ingester head window so no block-compaction / internal-label divergence is
-/// expected. If a future corpus addition surfaces a genuine Mimir-specific
-/// difference (e.g. a `__mimir__`-injected label on a particular query), add the
-/// `QueryCase::name` here with a one-line reason rather than loosening the
-/// differ.
+/// empty. `normalize()` already removes Mimir's volatile `warnings`, `infos`,
+/// and `stats` envelope fields. The corpus also stays inside the ingester head
+/// window by design, so no block-compaction or internal-label divergence is
+/// expected.
+///
+/// A future corpus addition can show a genuine Mimir-specific difference, for
+/// example a `__mimir__`-injected label on one query. Add the `QueryCase::name`
+/// here with a one-line reason. Do not loosen the differ.
 const MIMIR_KNOWN_DIVERGENCE: &[&str] = &[];
 
-/// Minimal Mimir monolithic config: single-binary (`-target=all` is passed on
-/// the CLI), filesystem object storage under `/tmp`, and native histograms
-/// enabled so the corpus's histogram cases are accepted. Multitenancy stays on
-/// (the test pins one `X-Scope-OrgID`).
+/// Minimal Mimir monolithic config.
+///
+/// The config is single-binary, and the CLI passes `-target=all`. Object
+/// storage is on the filesystem under `/tmp`. Native histograms are on, so
+/// Mimir accepts the histogram cases of the corpus. Multitenancy stays on, and
+/// the test pins one `X-Scope-OrgID`.
 const MIMIR_CONFIG: &str = r"
 multitenancy_enabled: true
 

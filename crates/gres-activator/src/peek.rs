@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::ActivatorError;
 
-/// Startup prelude captured before transparent piping begins.
+/// Startup prelude captured before the transparent pipe starts.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Prelude {
     /// Database parameter, used as the tenant wake key.

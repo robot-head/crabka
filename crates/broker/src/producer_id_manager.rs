@@ -1,14 +1,15 @@
-//! Allocates `(producer_id, producer_epoch)` pairs. Single-broker MVP:
-//! the id space is a single monotonic counter. Transactions
-//! will revisit this when transactional ids enter the picture.
+//! Allocates `(producer_id, producer_epoch)` pairs.
+//!
+//! This is the single-broker MVP: the id space is a single monotonic
+//! counter. Transactions will revisit this when transactional ids arrive.
 
 use std::sync::atomic::{AtomicI16, AtomicI64, Ordering};
 
 use crabka_log::ProducerId;
 use dashmap::DashMap;
 
-/// Lowest pid handed out. Mirrors Apache Kafka's `0` initial range
-/// (we start above the legacy non-idempotent sentinel of `-1`).
+/// Lowest pid handed out. This mirrors Apache Kafka's `0` initial range.
+/// Crabka starts above the legacy non-idempotent sentinel of `-1`.
 const PID_BASE: i64 = 1000;
 
 #[derive(Debug)]
@@ -39,11 +40,11 @@ impl ProducerIdManager {
         (pid, 0)
     }
 
-    /// Bump the epoch for an existing pid. Used by transactional producers
-    /// re-initialising under the same `transactional_id`. Returns the new
-    /// epoch.
+    /// Bump the epoch for an existing pid. Transactional producers call it
+    /// when they re-initialise under the same `transactional_id`. Returns
+    /// the new epoch.
     ///
-    /// Transactional producers use this on `InitProducerId` re-init.
+    /// Transactional producers call it on `InitProducerId` re-init.
     #[allow(dead_code)]
     pub fn bump_epoch(&self, pid: ProducerId) -> Option<i16> {
         self.epochs

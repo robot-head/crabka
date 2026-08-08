@@ -1,45 +1,45 @@
-//! Integration tests against a real Kafka via testcontainers.
+//! Integration tests against a real Kafka with testcontainers.
 //!
-//! All tests are gated with `#[ignore]` so `cargo test --workspace` doesn't
+//! All tests are gated with `#[ignore]` so `cargo test --workspace` does not
 //! pull Docker by default. Run with:
 //!
 //! ```text
 //! cargo test -p crabka-client-core --test integration -- --ignored --nocapture
 //! ```
 //!
-//! Each test spins up a fresh `mirror.gcr.io/confluentinc/cp-kafka:6.1.1` container and
-//! tears it down when the test exits.
+//! Each test starts a fresh `mirror.gcr.io/confluentinc/cp-kafka:6.1.1`
+//! container and removes it when the test exits.
 //!
 //! ## Why the Confluent image (and not `apache/kafka-native`)?
 //!
 //! `testcontainers-modules` v0.10 ships two Kafka modules: `apache` (using the
 //! `apache/kafka-native:3.8.0` `KRaft` image) and `confluent` (using
-//! `mirror.gcr.io/confluentinc/cp-kafka:6.1.1`). The `apache` module wires up advertised
-//! listeners through a clever chicken-and-egg trick: the container's `cmd`
-//! polls for a `testcontainers_start.sh` file that `exec_after_start` writes
-//! once the mapped host port is known. In CI this races: the broker's TCP
-//! listener on `0.0.0.0:9092` is bound (and Docker's userland proxy is happy
-//! to accept connections on the mapped port) before `KRaft` initialization
-//! finishes, so the first client request lands on a half-initialized broker
-//! that resets the connection mid-RPC. That surfaces in Crabka as
-//! `ClientError::Disconnected` on the bootstrap `ApiVersions` roundtrip.
+//! `mirror.gcr.io/confluentinc/cp-kafka:6.1.1`). The `apache` module sets up
+//! advertised listeners with a two-step trick: the container's `cmd` polls for
+//! a `testcontainers_start.sh` file that `exec_after_start` writes once the
+//! mapped host port is known. In CI this races. The broker binds its TCP
+//! listener on `0.0.0.0:9092`, and Docker's userland proxy accepts connections
+//! on the mapped port, before `KRaft` initialization finishes. The first
+//! client request therefore lands on a half-initialized broker that resets the
+//! connection mid-RPC. That surfaces in Crabka as `ClientError::Disconnected`
+//! on the bootstrap `ApiVersions` roundtrip.
 //!
 //! The Confluent module uses the standard `kafka-configs --alter` pattern in
-//! `exec_after_start` and waits for "Creating new log file" before returning,
-//! which gives us a fully-warm broker with correct advertised listeners on
-//! return from `start().await`. It is the battle-tested image used by the
-//! upstream `testcontainers-modules` Kafka examples.
+//! `exec_after_start` and waits for "Creating new log file" before it returns.
+//! `start().await` therefore returns a fully-warm broker with correct
+//! advertised listeners. The upstream `testcontainers-modules` Kafka examples
+//! use this same image.
 //!
 //! ## Why a retry helper on the first request?
 //!
 //! Even with the Confluent module's `WaitFor` strategy, the "Creating new log
-//! file" log line fires while the broker is still finishing controller
-//! election / `ApiVersions` table construction. On slow CI runners the first
+//! file" log line fires while the broker still finishes controller election
+//! and `ApiVersions` table construction. On slow CI runners the first
 //! `ApiVersions` RPC sometimes lands mid-bringup and the broker resets the
-//! TCP stream — Crabka surfaces this as `ClientError::Disconnected`. To make
-//! the suite robust without taking a dependency on broker internals, every
-//! test now bootstraps via [`bootstrap_client`], which retries the initial
-//! `ApiVersions` send for up to ~15s before giving up.
+//! TCP stream. Crabka surfaces this as `ClientError::Disconnected`. To keep
+//! the suite robust without a dependency on broker internals, every test
+//! bootstraps with [`bootstrap_client`], which retries the initial
+//! `ApiVersions` send for up to ~15s before it gives up.
 
 // Skip compilation on Windows runners where testcontainers + Docker reliability
 // is poor. On Linux CI the tests run via the `client-core-integration` job.
@@ -55,13 +55,14 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
 
 /// Maximum attempts for the initial `ApiVersions` round-trip while the broker
-/// is still warming up. With a 1s pause between attempts this gives ~15s of
+/// still warms up. With a 1s pause between attempts this gives ~15s of
 /// tolerance, which empirically covers slow CI runners.
 const BOOTSTRAP_MAX_ATTEMPTS: u32 = 15;
 const BOOTSTRAP_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Initialise a per-test tracing subscriber so `--nocapture` runs surface
-/// client-side connection / dispatch logs. Safe to call multiple times.
+/// client-side connection and dispatch logs. It is safe to call this many
+/// times.
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("crabka_client_core=debug,info")
@@ -83,14 +84,16 @@ async fn start_kafka() -> (testcontainers::ContainerAsync<Kafka>, String) {
 }
 
 /// Build a `Client` and drive the bootstrap `ApiVersions` round-trip with
-/// retry on `ClientError::Disconnected`. Returns a primed `Client` whose
-/// internal version map has already been negotiated against the broker.
+/// retry on `ClientError::Disconnected`.
+///
+/// This function returns a primed `Client` whose internal version map has
+/// already been negotiated against the broker.
 ///
 /// `Client::builder().build()` is lazy: it does not open a TCP connection.
-/// The first `send` is what actually negotiates `ApiVersions`, so retrying
-/// `send` is sufficient — we don't need to rebuild the client. However, on a
-/// hard `Disconnected` the underlying reader task has exited, so we rebuild
-/// the `Client` on each retry to get a fresh writer/reader pair.
+/// The first `send` is what actually negotiates `ApiVersions`, so a retry of
+/// `send` is enough and the client needs no rebuild. But on a hard
+/// `Disconnected` the underlying reader task has exited, so this function
+/// rebuilds the `Client` on each retry to get a fresh writer/reader pair.
 async fn bootstrap_client(bootstrap: &str) -> Client {
     let mut last_err: Option<ClientError> = None;
     for attempt in 1..=BOOTSTRAP_MAX_ATTEMPTS {

@@ -3,12 +3,14 @@
 
 //! TLS hot-reload.
 //!
-//! Starts a broker with cert A, completes a handshake against it,
-//! overwrites the cert files with cert B, triggers
-//! [`crabka_broker::BrokerHandle::reload_tls`], and verifies the next
-//! handshake serves cert B. The client pins exact DER blobs so the
-//! assertion is "the server presented cert X" — there's no way to
-//! satisfy a B-pinned verifier with the A cert (and vice-versa).
+//! This test starts a broker with cert A and completes a handshake against
+//! it. It then overwrites the cert files with cert B, calls
+//! [`crabka_broker::BrokerHandle::reload_tls`], and verifies that the next
+//! handshake serves cert B.
+//!
+//! The client pins exact DER blobs, so the assertion is "the server presented
+//! cert X". The A cert cannot satisfy a B-pinned verifier, and the B cert
+//! cannot satisfy an A-pinned verifier.
 
 use std::{io, path::PathBuf, sync::Arc};
 
@@ -36,9 +38,9 @@ fn write(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
     p
 }
 
-/// Pin a single end-entity cert by DER bytes. Mirrors the helpers in
-/// `mtls.rs` / `auth_handlers.rs`. Skips hostname / CA / validity
-/// checks — fine for fixture-pinned tests.
+/// Pins one end-entity cert by its DER bytes. It mirrors the helpers in
+/// `mtls.rs` and `auth_handlers.rs`. It skips the hostname, CA, and validity
+/// checks, which is acceptable for fixture-pinned tests.
 #[derive(Debug)]
 struct PinnedServerVerifier {
     pinned: CertificateDer<'static>,
@@ -108,10 +110,10 @@ fn cert_der_from_pem(pem: &str) -> CertificateDer<'static> {
         .clone()
 }
 
-/// Try a TLS handshake against `addr`, verifying the server cert
-/// against `pinned`. Returns `Ok(())` on a successful handshake, `Err`
-/// otherwise. We only care that the negotiation completed — the
-/// connection is dropped immediately after.
+/// Tries a TLS handshake against `addr` and verifies the server cert against
+/// `pinned`. It returns `Ok(())` on a successful handshake, and `Err` in every
+/// other case. Only the completed negotiation matters, so it drops the
+/// connection at once afterwards.
 async fn handshake_against(
     addr: std::net::SocketAddr,
     pinned: CertificateDer<'static>,
@@ -195,9 +197,9 @@ async fn reload_tls_swaps_served_cert() {
     handle.shutdown().await;
 }
 
-/// The periodic watcher reloads when files mtime-bump on disk —
-/// proves the mtime-polling path (not just the explicit `reload_tls`
-/// trigger). Uses a 100ms tick to keep the test fast.
+/// The periodic watcher reloads when the files' mtime changes on disk. This
+/// proves the mtime-polling path, not only the explicit `reload_tls` trigger.
+/// The test uses a 100 ms tick to stay fast.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn periodic_watcher_reloads_on_mtime_change() {
     let _ = rustls::crypto::ring::default_provider().install_default();

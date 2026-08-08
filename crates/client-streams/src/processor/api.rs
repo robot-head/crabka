@@ -11,14 +11,15 @@ use super::{
     record::{Record, RecordContext},
 };
 
-/// A stateless record processor. One instance is created per task via
-/// [`ProcessorSupplier::get`]. Mirrors `org.apache.kafka.streams.processor.api.Processor`.
+/// A stateless record processor. [`ProcessorSupplier::get`] creates one instance
+/// per task. This mirrors
+/// `org.apache.kafka.streams.processor.api.Processor`.
 ///
 /// ## Lifecycle
 ///
-/// The runtime invokes `init` once before the first record and `close` once at
-/// task shutdown. [`TopologyTestDriver`](crate::TopologyTestDriver) invokes
-/// `init` when it instantiates a topology for tests.
+/// The runtime calls `init` once before the first record and `close` once at
+/// task shutdown. [`TopologyTestDriver`](crate::TopologyTestDriver) calls `init`
+/// when it instantiates a topology for tests.
 #[async_trait]
 pub trait Processor<KIn: Send, VIn: Send, KOut: Send, VOut: Send>: Send + 'static {
     async fn init(&mut self, _ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {}
@@ -30,13 +31,13 @@ pub trait Processor<KIn: Send, VIn: Send, KOut: Send, VOut: Send>: Send + 'stati
     async fn close(&mut self) {}
 }
 
-/// A boxed processor is itself a [`Processor`], delegating to the inner value.
+/// A boxed processor is itself a [`Processor`] and delegates to the inner value.
 ///
-/// This is what lets a [`ProcessorSupplier`] closure return `Box<dyn
-/// Processor<…>>` when the concrete type is chosen at runtime: the boxed value
-/// still satisfies the supplier blanket impl (which only requires the closure's
-/// return type to be *some* `Processor`). For the common case, return the
-/// concrete processor directly (`|| MyProc`) and skip the box entirely.
+/// This lets a [`ProcessorSupplier`] closure return `Box<dyn Processor<…>>` when
+/// the code chooses the concrete type at runtime. The boxed value still
+/// satisfies the supplier blanket impl, which needs only *some* `Processor` as
+/// the closure's return type. In the common case, return the concrete processor
+/// directly with `|| MyProc` and skip the box.
 #[async_trait]
 impl<KIn, VIn, KOut, VOut> Processor<KIn, VIn, KOut, VOut>
     for Box<dyn Processor<KIn, VIn, KOut, VOut>>
@@ -61,7 +62,8 @@ where
     }
 }
 
-/// Factory for [`Processor`] instances (one per task → per-task isolation).
+/// Factory for [`Processor`] instances. It makes one instance per task, which
+/// gives per-task isolation.
 pub trait ProcessorSupplier<KIn, VIn, KOut, VOut>: Send + Sync + 'static {
     fn get(&self) -> Box<dyn Processor<KIn, VIn, KOut, VOut>>;
 }
@@ -86,14 +88,14 @@ where
     }
 }
 
-/// Handed to [`Processor::process`]. `forward` boxes the record and queues it
-/// for each child node (the driver drains the queue).
+/// The context handed to [`Processor::process`]. `forward` boxes the record and
+/// queues it for each child node, and the driver drains the queue.
 ///
-/// Two lifetimes: `'ctx` is the borrow of the `Dispatch` reference itself;
-/// `'d` is the lifetime of the data inside `Dispatch` (buffers, slices, etc.).
-/// Keeping them separate avoids lifetime-invariance issues when constructing a
-/// `ProcessorContext` from a `&mut Dispatch<'d>` with an independently-scoped
-/// outer borrow `'ctx`.
+/// There are two lifetimes. `'ctx` is the borrow of the `Dispatch` reference
+/// itself. `'d` is the lifetime of the data inside `Dispatch`, such as the
+/// buffers and the slices. Separate lifetimes avoid lifetime-invariance problems
+/// when the code builds a `ProcessorContext` from a `&mut Dispatch<'d>` with an
+/// independently-scoped outer borrow `'ctx`.
 pub struct ProcessorContext<'ctx, 'd, KOut, VOut> {
     dispatch: &'ctx mut Dispatch<'d>,
     _pd: PhantomData<fn(KOut, VOut)>,
@@ -111,10 +113,12 @@ where
         }
     }
 
-    /// Forward a record to all child nodes. The record is cloned per child for
-    /// fan-out; the last child receives the original by move (so the common
-    /// single-child case performs zero clones). Mirrors the JVM
-    /// `ProcessorContext.forward(Record)`, which takes the record by value.
+    /// Forward a record to all child nodes.
+    ///
+    /// The fan-out clones the record once per child. The last child receives the
+    /// original by move, so the common single-child case makes no clone. This
+    /// mirrors the JVM `ProcessorContext.forward(Record)`, which takes the
+    /// record by value.
     pub fn forward(&mut self, record: Record<KOut, VOut>) {
         // Copy the child-slice reference out so we can mutably borrow `buffer`.
         let children = self.dispatch.children;
@@ -140,8 +144,9 @@ where
             .push_back((last, ErasedRecord::new(key, value, ts)));
     }
 
-    /// Access a connected state store, typed. `None` if absent or the K/V types
-    /// don't match. Fetch it per-record (do not hold across `process` calls).
+    /// Access a connected state store, typed. It returns `None` when the store
+    /// is absent or the K and V types do not match. Fetch it once per record and
+    /// do not hold it across `process` calls.
     pub fn get_state_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
@@ -149,10 +154,13 @@ where
         self.dispatch.stores.get_kv::<K2, V2>(name)
     }
 
-    /// Look up a value in a connected GLOBAL store (fully-replicated, shared across
-    /// tasks). Returns an owned value — no borrow escapes the shared manager's lock,
-    /// so the lookup future need not be held across `forward`. `None` on miss /
-    /// type mismatch. Fetch it per-record (do not hold across `process` calls).
+    /// Look up a value in a connected GLOBAL store, which is fully replicated
+    /// and shared across tasks.
+    ///
+    /// The method returns an owned value. No borrow escapes the shared manager's
+    /// lock, so the caller need not hold the lookup future across `forward`. It
+    /// returns `None` on a miss or a type mismatch. Fetch it once per record and
+    /// do not hold it across `process` calls.
     pub async fn global_get<GK: Send + Sync + 'static, VG: Send + 'static>(
         &mut self,
         store: &str,
@@ -161,8 +169,9 @@ where
         self.dispatch.globals.get::<GK, VG>(store, key).await
     }
 
-    /// Access a connected window store, typed. `None` if absent or the K/V types
-    /// don't match. Fetch it per-record (do not hold across `process` calls).
+    /// Access a connected window store, typed. It returns `None` when the store
+    /// is absent or the K and V types do not match. Fetch it once per record and
+    /// do not hold it across `process` calls.
     pub fn get_window_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
@@ -170,9 +179,10 @@ where
         self.dispatch.stores.get_window::<K2, V2>(name)
     }
 
-    /// Access a connected join-window store (retainDuplicates), typed. `None` if
-    /// absent or the K/V types don't match. Fetch it per-record (do not hold
-    /// across `process` calls).
+    /// Access a connected join-window store (retainDuplicates), typed. It
+    /// returns `None` when the store is absent or the K and V types do not
+    /// match. Fetch it once per record and do not hold it across `process`
+    /// calls.
     pub fn get_join_window_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
@@ -180,8 +190,9 @@ where
         self.dispatch.stores.get_join_window::<K2, V2>(name)
     }
 
-    /// Access a connected session store, typed. `None` if absent or the K/V types
-    /// don't match. Fetch it per-record (do not hold across `process` calls).
+    /// Access a connected session store, typed. It returns `None` when the store
+    /// is absent or the K and V types do not match. Fetch it once per record and
+    /// do not hold it across `process` calls.
     pub fn get_session_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
@@ -189,9 +200,9 @@ where
         self.dispatch.stores.get_session::<K2, V2>(name)
     }
 
-    /// Access a connected versioned store (KIP-889), typed. `None` if absent or
-    /// the K/V types don't match. Fetch it per-record (do not hold across
-    /// `process` calls).
+    /// Access a connected versioned store (KIP-889), typed. It returns `None`
+    /// when the store is absent or the K and V types do not match. Fetch it once
+    /// per record and do not hold it across `process` calls.
     pub fn get_versioned_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
@@ -199,11 +210,13 @@ where
         self.dispatch.stores.get_versioned::<K2, V2>(name)
     }
 
-    /// Access a connected suppress store, typed. `None` if absent or the K/V types
-    /// don't match. Fetch it per-record (do not hold across `process` calls).
+    /// Access a connected suppress store, typed. It returns `None` when the
+    /// store is absent or the K and V types do not match. Fetch it once per
+    /// record and do not hold it across `process` calls.
     ///
-    /// `pub(crate)`: the returned trait surfaces `Change<V>` (crate-internal) and
-    /// the suppress store is a built-in DSL mechanism, not a user-facing store.
+    /// This method is `pub(crate)` for two reasons. The returned trait surfaces
+    /// the crate-internal `Change<V>`, and the suppress store is a built-in DSL
+    /// mechanism and not a user-facing store.
     pub(crate) fn get_suppress_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
@@ -211,13 +224,13 @@ where
         self.dispatch.stores.get_suppress::<K2, V2>(name)
     }
 
-    /// Access a connected join-grace buffer store (KIP-923), typed. `None` if
-    /// absent or the K/V types don't match. Fetch it per-record (do not hold
-    /// across `process` calls).
+    /// Access a connected join-grace buffer store (KIP-923), typed. It returns
+    /// `None` when the store is absent or the K and V types do not match. Fetch
+    /// it once per record and do not hold it across `process` calls.
     ///
-    /// `pub(crate)`: the grace buffer is a built-in DSL mechanism the stream–table
-    /// join's grace-flush processor reaches via the context, not a user-facing
-    /// store.
+    /// This method is `pub(crate)` because the grace buffer is a built-in DSL
+    /// mechanism, not a user-facing store. The stream-table join's grace-flush
+    /// processor reaches it through the context.
     pub(crate) fn get_join_grace_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
@@ -225,10 +238,11 @@ where
         self.dispatch.stores.get_join_grace::<K2, V2>(name)
     }
 
-    /// Access the connected FK subscription store. `None` if absent.
+    /// Access the connected FK subscription store. It returns `None` when the
+    /// store is absent.
     ///
-    /// `pub(crate)`: the subscription store is an internal KIP-213 FK-join
-    /// mechanism, not a user-facing store.
+    /// This method is `pub(crate)` because the subscription store is an internal
+    /// KIP-213 FK-join mechanism, not a user-facing store.
     pub(crate) fn get_fk_subscription_store(
         &mut self,
         name: &str,
@@ -236,22 +250,24 @@ where
         self.dispatch.stores.get_fk_subscription(name)
     }
 
-    /// Metadata of the source record currently being processed.
+    /// The metadata of the source record that this context processes now.
     #[must_use]
     pub fn record_context(&self) -> &RecordContext {
         self.dispatch.record_ctx
     }
 
-    /// Whether the named KV state store is record-cached (so this processor should
-    /// suppress its immediate forward and let the cache flush forward the deduped
-    /// change). False for absent/non-KV/uncached stores.
+    /// Whether the named KV state store is record-cached. When it is, this
+    /// processor should suppress its immediate forward and let the cache flush
+    /// forward the deduped change. The method returns false for an absent store,
+    /// a non-KV store, and an uncached store.
     #[must_use]
     pub fn store_is_cached(&self, name: &str) -> bool {
         self.dispatch.stores.kv_is_cached(name)
     }
 
-    /// Schedule a periodic [`Punctuator`]. Callable from `init` or `process`.
-    /// `interval` must be positive. Returns a [`Cancellable`] to stop it.
+    /// Schedule a periodic [`Punctuator`]. You can call this from `init` or from
+    /// `process`. `interval` must be positive. The method returns a
+    /// [`Cancellable`] that stops the punctuator.
     ///
     /// [`Punctuator`]: crate::processor::punctuation::Punctuator
     /// [`Cancellable`]: crate::processor::punctuation::Cancellable

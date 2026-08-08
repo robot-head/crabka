@@ -1,20 +1,21 @@
 //! `SIMILAR TO` pattern matching and the `ESCAPE` clause shared by `LIKE`,
 //! `ILIKE`, and `SIMILAR TO`.
 //!
-//! `PostgreSQL` does not implement SQL's `SIMILAR TO` directly: it rewrites the
-//! pattern into a POSIX regular expression and hands that to its regexp engine
-//! (`similar_to_escape` in `backend/utils/adt/regexp.c`). This module performs
-//! the same rewrite, so the wildcard/metacharacter split — `%` and `_` are SQL
-//! wildcards, while `| * + ? {} () []` keep their regexp meaning and everything
-//! else is literal — comes out identical.
+//! `PostgreSQL` does not implement SQL's `SIMILAR TO` directly. It rewrites the
+//! pattern into a POSIX regular expression and hands that to its regexp engine,
+//! through `similar_to_escape` in `backend/utils/adt/regexp.c`. This module does
+//! the same rewrite, so the wildcard and metacharacter split comes out
+//! identical. `%` and `_` are SQL wildcards, `| * + ? {} () []` keep their
+//! regexp meaning, and everything else is literal.
 
 use crabka_pgtypes::{Datum, TypeError};
 
 use crate::error::ExecError;
 
-/// The escape character an `ESCAPE` clause supplies. `Ok(None)` is `ESCAPE ''`,
-/// which disables escaping entirely; a string of more than one character is
-/// 22025, exactly as `PostgreSQL` reports it.
+/// The escape character an `ESCAPE` clause supplies.
+///
+/// `Ok(None)` is `ESCAPE ''`, which disables escaping completely. A string of
+/// more than one character is 22025, exactly as `PostgreSQL` reports it.
 pub(crate) fn escape_char(escape: &Datum) -> Result<Option<char>, ExecError> {
     let Datum::Text(s) = escape else {
         return Err(ExecError::TypeMismatch(
@@ -29,7 +30,7 @@ pub(crate) fn escape_char(escape: &Datum) -> Result<Option<char>, ExecError> {
     }
 }
 
-/// `s SIMILAR TO pattern` — true iff the whole of `s` matches.
+/// `s SIMILAR TO pattern`: true if and only if the whole of `s` matches.
 pub(crate) fn similar_match(
     s: &str,
     pattern: &str,
@@ -52,11 +53,11 @@ pub(crate) fn similar_match(
 /// Rewrite a SQL `SIMILAR TO` pattern as the POSIX regexp `PostgreSQL` would run.
 ///
 /// The whole pattern must match, so the output is wrapped in `^(?:…)$`.
-/// `%` becomes `.*` and `_` becomes `.`; a `(` becomes a non-capturing
-/// `(?:` (`PostgreSQL` reserves capture groups for `substring()`); the regexp
-/// metacharacters SQL does *not* give a meaning to — `. ^ $ \` — are escaped so
-/// they stay literal; and a bracket expression is copied through verbatim.
-/// `SUBSTRING(s SIMILAR pattern ESCAPE esc)` — the SQL-regex extraction form.
+/// `%` becomes `.*` and `_` becomes `.`. A `(` becomes a non-capturing `(?:`,
+/// because `PostgreSQL` reserves capture groups for `substring()`. SQL gives no
+/// meaning to the regexp metacharacters `. ^ $ \`, so the rewrite escapes them
+/// and they stay literal. It copies a bracket expression through verbatim.
+/// `SUBSTRING(s SIMILAR pattern ESCAPE esc)`: the SQL-regex extraction form.
 ///
 /// The region to return is delimited by the escape character followed by a
 /// double quote, so with `ESCAPE '#'` the pattern `%#"b_d#"%` returns whatever
@@ -92,9 +93,9 @@ pub(crate) fn similar_substring(
     ))
 }
 
-/// `capture_quoted` turns each `<escape>"` into a capture-group delimiter rather
-/// than a literal quote, which is how `SUBSTRING(… SIMILAR …)` marks the region
-/// to extract. Everything else translates identically.
+/// `capture_quoted` turns each `<escape>"` into a capture-group delimiter and
+/// not into a literal quote. This is how `SUBSTRING(… SIMILAR …)` marks the
+/// region to extract. Everything else translates identically.
 fn similar_to_regex(pattern: &str, escape: Option<char>, capture_quoted: bool) -> String {
     let mut out = String::with_capacity(pattern.len() + 8);
     out.push_str("^(?:");

@@ -1,4 +1,5 @@
-//! Round-trip a polars `DataFrame` through the `Serde<DataFrame>` boundary.
+//! Round-trips a polars `DataFrame` through the `Serde<DataFrame>` boundary.
+//!
 //! Run: `cargo run -p crabka-client-streams --features polars --example dataframe_serde`
 
 use crabka_client_streams::{Serde, columnar::serde::polars::PolarsIpcSerde};

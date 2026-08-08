@@ -2,15 +2,16 @@
 //! (`ReplicaState`).
 //!
 //! The model state holds the REAL `ReplicaState` and drives the production
-//! `install_isr` / `update_follower_leo` / `recompute_hw_for_leader_append`;
-//! the BFS checker explores every interleaving of leader append, follower
-//! fetch, and ISR shrink/expand, asserting the partition-replication safety
-//! invariants never break — above all no-committed-data-loss. Design:
+//! `install_isr` / `update_follower_leo` / `recompute_hw_for_leader_append`.
+//! The BFS checker explores every interleaving of leader append, follower
+//! fetch, and ISR shrink/expand. It asserts that the partition-replication
+//! safety invariants never break, above all no-committed-data-loss. Design:
 //! `docs/superpowers/specs/2026-06-13-crabka-isr-replica-state-model-design.md`.
 //!
 //! Memory safety: stateright BFS keeps every visited unique state resident, so
-//! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
-//! and MUST be executed under the host memory watchdog while bounds are tuned.
+//! this module fences each run with `within_boundary` + `target_state_count` +
+//! `timeout`. You MUST run each config under the host memory watchdog while you
+//! tune the bounds.
 
 use std::{
     collections::HashSet,
@@ -24,7 +25,7 @@ use stateright::{Checker, Model, Property};
 
 use super::ReplicaState;
 
-/// Hard backstop on generated states — bounds host memory even if
+/// Hard backstop on generated states. It bounds host memory even if
 /// `within_boundary` is looser than intended.
 const MAX_STATES: usize = 200_000;
 /// Depth backstop; must exceed each config's reachable-graph diameter.
@@ -32,16 +33,17 @@ const MAX_DEPTH: usize = 80;
 /// Wall-clock backstop.
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Bounded model config (held here, not in the fingerprinted state).
+/// Bounded model config. It is held here, not in the fingerprinted state.
 struct IsrModel {
-    /// Constant injected `now` — the model does not model wall-clock time
-    /// (ISR shrink/expand is an explicit action, not a time-based decision).
+    /// Constant injected `now`. The model does not model wall-clock time.
+    /// ISR shrink/expand is an explicit action, not a time-based decision.
     t0: Instant,
     /// `replicas[0]` is the fixed leader; the rest are followers.
     replicas: Vec<NodeId>,
     /// Leader-LEO / follower-LEO cap.
     max_offset: i64,
-    /// When set, followers may report a LEO above `leader_leo` (clamp test).
+    /// When set, followers may report a LEO above `leader_leo`. This is the
+    /// clamp test.
     test_overshoot: bool,
 }
 
@@ -89,9 +91,9 @@ struct IsrState {
 }
 
 impl IsrState {
-    /// Normalized, timestamp-free projection used for Eq/Hash: the real state
-    /// holds non-`Hash` `HashMap`/`HashSet` and non-deterministic timestamps,
-    /// neither of which is safety-relevant here.
+    /// Normalized, timestamp-free projection for Eq/Hash. The real state holds
+    /// non-`Hash` `HashMap`/`HashSet` and non-deterministic timestamps. Neither
+    /// of them is safety-relevant here.
     fn project(&self) -> (Vec<NodeId>, Vec<(NodeId, Offset)>, Offset, i32, Offset) {
         let mut isr: Vec<NodeId> = self.rs.isr.iter().copied().collect();
         isr.sort_unstable();
@@ -126,9 +128,10 @@ impl Hash for IsrState {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum IsrAction {
-    /// Leader appends one record (`leader_leo` += 1) and recomputes HW.
+    /// The leader appends one record and recomputes the HW. `leader_leo`
+    /// increases by 1.
     LeaderAppend,
-    /// A follower reports `leo` via fetch.
+    /// A follower reports `leo` in a fetch.
     FollowerFetch { follower: NodeId, leo: Offset },
     /// The controller installs a new committed ISR.
     InstallIsr { isr: Vec<NodeId> },
@@ -286,8 +289,8 @@ impl Model for IsrModel {
     }
 }
 
-/// Run one bounded config to completion; assert it was exhaustive (not
-/// cap/depth-truncated) and that all properties hold.
+/// Runs one bounded config to completion. Asserts that the run was exhaustive,
+/// that the cap or the depth did not truncate it, and that all properties hold.
 fn run(model: IsrModel, label: &str) {
     let checker = model
         .checker()

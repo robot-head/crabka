@@ -4,12 +4,11 @@
 //! `AlterUserScramCredentials` (upsert + delete in a single call),
 //! `CreateAcls`, `DeleteAcls`, `DescribeAcls`.
 //!
-//! Wire `i8` discriminants are kept private to this module; callers use
-//! the typed Rust enums below. `crates/client-admin` depends on
-//! `crabka-metadata` for shared image types (`DelegationToken`)
-//! but stays free of `crabka-broker` so the
-//! crate remains usable from out-of-process clients — the local enum
-//! copies are unit-tested for wire round-trip.
+//! Wire `i8` discriminants stay private to this module. Callers use the typed
+//! Rust enums below. `crates/client-admin` depends on `crabka-metadata` for
+//! shared image types such as `DelegationToken`, but it stays free of
+//! `crabka-broker`, so out-of-process clients can use the crate. Unit tests
+//! cover the wire round-trip of the local enum copies.
 
 use bytes::Bytes;
 use crabka_protocol::owned::{
@@ -73,7 +72,7 @@ pub enum AclOperation {
     TwoPhaseCommit,
 }
 
-/// A concrete (non-filter) ACL entry — every field populated. Matches
+/// A concrete, non-filter, ACL entry with every field populated. It matches
 /// the shape the broker stores in its metadata image.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AclEntry {
@@ -142,13 +141,15 @@ pub struct DeleteAclFilterOutcome {
 }
 
 impl AdminClient {
-    /// Upsert and/or delete SCRAM-SHA-512 credentials in a single call.
+    /// Upserts SCRAM-SHA-512 credentials, deletes them, or both, in a single
+    /// call.
     ///
-    /// `upsertions` carry plaintext passwords — the function generates a
-    /// fresh 16-byte salt per row and computes the KIP-554 wire
-    /// `salted_password` (PBKDF2-HMAC-SHA-512) client-side via
+    /// `upsertions` carry plaintext passwords. The function generates a fresh
+    /// 16-byte salt per row and computes the KIP-554 wire `salted_password`
+    /// (PBKDF2-HMAC-SHA-512) client-side with
     /// `crabka_security::pbkdf2_salted`. The broker never sees the raw
     /// password.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn alter_user_scram_credentials_sha512(
@@ -163,10 +164,11 @@ impl AdminClient {
     }
 
     /// SCRAM-SHA-256 sibling of
-    /// [`Self::alter_user_scram_credentials_sha512`]. Iteration counts,
-    /// salt generation, and salted-password derivation are identical
-    /// to the SHA-512 path; only the mechanism wire byte and HMAC
-    /// algorithm differ.
+    /// [`Self::alter_user_scram_credentials_sha512`].
+    ///
+    /// The iteration counts, the salt generation, and the salted-password
+    /// derivation are identical to the SHA-512 path. Only the mechanism wire
+    /// byte and the HMAC algorithm differ.
     ///
     /// # Errors
     ///
@@ -184,10 +186,12 @@ impl AdminClient {
         Ok(parse_alter_scram_results(resp))
     }
 
-    /// List ACLs matching `filter`. The broker's response is
-    /// resource-grouped on the wire (one block per `(resource_type,
-    /// resource_name, pattern_type)`); we flatten back into `AclEntry`
-    /// rows for diffing.
+    /// Lists ACLs that match `filter`.
+    ///
+    /// The broker's response is resource-grouped on the wire, with one block
+    /// per `(resource_type, resource_name, pattern_type)`. This method
+    /// flattens it back into `AclEntry` rows for the diff.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_acls(
@@ -229,7 +233,8 @@ impl AdminClient {
         parse_describe_user_scram_credentials_response(resp)
     }
 
-    /// Create the supplied ACLs.
+    /// Creates the supplied ACLs.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn create_acls(
@@ -250,9 +255,11 @@ impl AdminClient {
             .collect())
     }
 
-    /// Delete every ACL matching any of `filters`. Each filter's
-    /// response surfaces the matched ACL set so callers can confirm
-    /// the deletion converged on the expected rows.
+    /// Deletes every ACL that matches any of `filters`.
+    ///
+    /// Each filter's response surfaces the matched ACL set, so callers can
+    /// confirm that the deletion converged on the expected rows.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn delete_acls(
@@ -318,9 +325,8 @@ fn build_alter_scram_request_sha512(
     )
 }
 
-/// SCRAM-SHA-256 sibling of
-/// [`build_alter_scram_request_sha512`]. Pulled into
-/// [`build_alter_scram_request`] so the two helpers can't drift.
+/// SCRAM-SHA-256 sibling of [`build_alter_scram_request_sha512`]. It shares
+/// [`build_alter_scram_request`], so the two helpers cannot drift.
 fn build_alter_scram_request_sha256(
     upsertions: &[ScramUpsertion],
     deletions: &[ScramDeletion],
@@ -471,7 +477,7 @@ fn parse_describe_acls(
     Ok(out)
 }
 
-/// Pure: serialize an `AclEntry` to the wire representation
+/// Pure function. It serializes an `AclEntry` to the wire representation that
 /// `CreateAcls` expects.
 pub(crate) fn acl_to_creation(e: &AclEntry) -> AclCreation {
     AclCreation {
@@ -486,8 +492,8 @@ pub(crate) fn acl_to_creation(e: &AclEntry) -> AclCreation {
     }
 }
 
-/// Pure: serialize an `AclEntryFilter` to the wire `DeleteAcls` filter.
-/// `None` axes use the wire ANY discriminant.
+/// Pure function. It serializes an `AclEntryFilter` to the wire `DeleteAcls`
+/// filter. A `None` axis uses the wire ANY discriminant.
 pub(crate) fn acl_filter_to_wire(f: &AclEntryFilter) -> DeleteAclsFilter {
     let wire = acl_filter_wire_fields(f);
     DeleteAclsFilter {
@@ -530,8 +536,8 @@ fn acl_filter_wire_fields(f: &AclEntryFilter) -> AclFilterWireFields {
 // `crabka_broker::handlers::acl_wire`. Round-trip tests below lock the
 // encoding against the values Kafka's protocol-spec docs publish.
 
-/// Kafka `AclBindingFilter.ANY` discriminant — used as the
-/// "match anything" placeholder on filter requests.
+/// Kafka `AclBindingFilter.ANY` discriminant. Filter requests use it as the
+/// "match anything" placeholder.
 const WIRE_ANY: i8 = 1;
 
 macro_rules! acl_wire_enum {

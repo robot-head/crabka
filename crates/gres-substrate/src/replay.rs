@@ -30,9 +30,9 @@ pub struct ReplayOutcome {
 
 /// Decode and apply committed frames, stopping at this generation's barrier.
 ///
-/// Barriers never consume journal sequence numbers. Foreign barriers before
-/// `own_barrier_offset` are skipped; the barrier at or after `own_barrier_offset`
-/// terminates replay.
+/// Barriers never consume journal sequence numbers. This function skips foreign
+/// barriers before `own_barrier_offset`. The barrier at or after
+/// `own_barrier_offset` ends replay.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -90,8 +90,9 @@ pub fn replay_committed_frames_from_filtered(
 
 /// Decode committed frames while applying a stateful table-transfer closure.
 ///
-/// Unlike a range filter, selecting an MVCC tuple changes the selector state:
-/// CLOG operations later in the WAL for its xmin/xmax become required input.
+/// A range filter has no state, but the selection of an MVCC tuple changes the
+/// selector state. CLOG operations later in the WAL for its xmin/xmax then
+/// become required input.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -197,12 +198,13 @@ fn replay_committed_frames_from_with_filter(
 
 /// Drop the WAL-only cross-node `NOTIFY` records from one frame.
 ///
-/// Recovery rebuilds durable state, and notify records are not durable state:
-/// they are in-flight fan-out that must never reach the KV (a checkpoint would
-/// make them permanent) and that no listener exists to receive during recovery.
-/// Dropping them here also keeps them away from the range and table-transfer
-/// selectors, which have no notion of the namespace. Frames without notify
-/// records — every frame outside a `NOTIFY` — are borrowed, not copied.
+/// Recovery rebuilds durable state, and notify records are not durable state.
+/// They are in-flight fan-out. They must never reach the KV, because a
+/// checkpoint would make them permanent, and no listener exists to receive
+/// them during recovery. This function also keeps them away from the range and
+/// table-transfer selectors, which have no notion of the namespace. A frame
+/// without notify records, which is every frame outside a `NOTIFY`, is borrowed
+/// and not copied.
 fn without_notify_ops(ops: &[WriteOp]) -> Cow<'_, [WriteOp]> {
     if ops.iter().any(is_notify_op) {
         Cow::Owned(

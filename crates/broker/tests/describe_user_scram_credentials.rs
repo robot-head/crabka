@@ -5,14 +5,14 @@
 //! (`api_key` 50, KIP-554 read half).
 //!
 //! Tests:
-//! 1. `describe_all_users_round_trip` — seed alice's SCRAM credential via
-//!    `submit_metadata_record_for_test`; describe with `users=None`; assert
-//!    mechanism=2 (SCRAM-SHA-512) in the response.
-//! 2. `describe_unknown_user_returns_error` — describe `users=[ghost]`; assert
-//!    per-user `error_code = 91` (`RESOURCE_NOT_FOUND`).
+//! 1. `describe_all_users_round_trip`: seed alice's SCRAM credential with
+//!    `submit_metadata_record_for_test`, describe with `users=None`, then
+//!    assert mechanism=2 (SCRAM-SHA-512) in the response.
+//! 2. `describe_unknown_user_returns_error`: describe `users=[ghost]`, then
+//!    assert the per-user `error_code = 91` (`RESOURCE_NOT_FOUND`).
 //!
-//! Gated to non-Windows to match the multi-broker test convention from
-//! slices 10b/12b/14/15/15b/16.
+//! These tests are gated to non-Windows to match the multi-broker test
+//! convention from slices 10b/12b/14/15/15b/16.
 
 use std::{io, net::SocketAddr};
 
@@ -268,7 +268,7 @@ async fn seed_scram_credential(
 // Wire driver for DescribeUserScramCredentials
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `DescribeUserScramCredentials` (`api_key=50`) over a SASL/PLAIN
+/// Drives `DescribeUserScramCredentials` (`api_key=50`) over a SASL/PLAIN
 /// connection.
 ///
 /// Returns `(top_level_error, per_user_rows)` where each row is
@@ -333,9 +333,9 @@ async fn drive_describe_user_scram_credentials_sasl(
 // Integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 1: seed alice's SCRAM credential directly via
-/// `submit_metadata_record_for_test`; describe with `users=None`; assert
-/// mechanism=2 (SCRAM-SHA-512) appears in the response.
+/// Test 1: seed alice's SCRAM credential directly with
+/// `submit_metadata_record_for_test`, describe with `users=None`, then assert
+/// that mechanism=2 (SCRAM-SHA-512) appears in the response.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_all_users_round_trip() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -387,8 +387,8 @@ async fn describe_all_users_round_trip() {
     );
 }
 
-/// Test 2: describe a user that does not exist (`ghost`); assert that the
-/// per-user row carries `error_code = 91` (`RESOURCE_NOT_FOUND`).
+/// Test 2: describe the user `ghost`, which does not exist, then assert that
+/// the per-user row carries `error_code = 91` (`RESOURCE_NOT_FOUND`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_unknown_user_returns_error() {
     let (_handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(

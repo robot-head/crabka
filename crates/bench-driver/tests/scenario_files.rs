@@ -1,11 +1,11 @@
 //! Every checked-in benchmark scenario loads through the driver's own loader.
 //!
 //! `bench/scenarios/*.yaml` is an operator-written corpus that lives outside
-//! this crate, so nothing linked it to the `Scenario` type: when the dimensioned
-//! fields grew units, all twelve files silently stopped parsing and no test
-//! noticed. This harness closes that gap by running each file through the same
-//! `serde_yaml` path `main.rs` uses, one nextest process per scenario, so a
-//! broken file names itself.
+//! this crate, so nothing linked it to the `Scenario` type. When the dimensioned
+//! fields grew units, all twelve files stopped parsing and no test noticed.
+//! This harness closes that gap. It runs each file through the same `serde_yaml`
+//! path that `main.rs` uses, with one nextest process per scenario, so a broken
+//! file names itself.
 
 use std::path::Path;
 

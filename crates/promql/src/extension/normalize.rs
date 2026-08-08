@@ -1,4 +1,4 @@
-//! `SeriesNormalize`: apply offset, sort by timestamp, and drop stale values.
+//! `SeriesNormalize`: applies the offset, sorts by timestamp, and drops stale values.
 
 use std::{fmt, sync::Arc};
 
@@ -18,7 +18,7 @@ use datafusion::{
 };
 use futures::StreamExt;
 
-/// Logical node: normalize each single-series batch.
+/// Logical node that normalizes each single-series batch.
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct SeriesNormalize {
     pub offset_ms: i64,
@@ -71,7 +71,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
     }
 }
 
-/// Physical node that normalizes one-series batches.
+/// Physical node that normalizes single-series batches.
 #[derive(Debug)]
 pub struct SeriesNormalizeExec {
     offset_ms: i64,

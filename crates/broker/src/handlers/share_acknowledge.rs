@@ -1,17 +1,20 @@
-//! `ShareAcknowledge` (`api_key` 79) — KIP-932.
+//! `ShareAcknowledge` (`api_key` 79), from KIP-932.
 //!
-//! The ack-only counterpart of `ShareFetch`: it acknowledges previously
-//! acquired records without acquiring new ones. For every requested partition
-//! this broker leads, each acknowledgement batch is applied to the
-//! `(group, topic, partition)` [`AcquisitionState`] machine (Accept advances
-//! the SPSO, Release re-offers, Reject/Gap archives), and the result is
-//! persisted. Partitions this broker doesn't lead get `NOT_LEADER_OR_FOLLOWER`;
-//! an acknowledge that targets records not currently held by the member fails
-//! the partition row with `INVALID_RECORD_STATE`.
+//! This is the acknowledge-only counterpart of `ShareFetch`. It acknowledges
+//! records that a member acquired earlier, and acquires no new ones.
 //!
-//! Intercepted inline in `network::dispatch` so the handler receives the
-//! per-connection principal + peer `SocketAddr` for the per-topic `Read` ACL
-//! gate.
+//! For every requested partition that this broker leads, the handler applies
+//! each acknowledgement batch to the `(group, topic, partition)`
+//! [`AcquisitionState`] machine, and persists the result. Accept advances the
+//! SPSO, Release offers the records again, and Reject and Gap archive them.
+//!
+//! A partition that this broker does not lead gets `NOT_LEADER_OR_FOLLOWER`.
+//! An acknowledge that targets records the member does not currently hold
+//! fails that partition row with `INVALID_RECORD_STATE`.
+//!
+//! `network::dispatch` intercepts this request inline, so the handler receives
+//! the per-connection principal and the peer `SocketAddr` for the per-topic
+//! `Read` ACL gate.
 
 use std::time::Instant;
 
@@ -189,8 +192,8 @@ async fn process_topics(
     responses
 }
 
-/// Encode a top-level-error `ShareAcknowledgeResponse` (feature-gate or session
-/// failure) with no per-partition rows.
+/// Encodes a `ShareAcknowledgeResponse` that carries a top-level error and no
+/// per-partition row. The error is a feature-gate or session failure.
 fn encode_error_response(
     version: i16,
     error_code: i16,

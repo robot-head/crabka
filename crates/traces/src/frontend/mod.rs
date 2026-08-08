@@ -1,11 +1,13 @@
-//! The `query-frontend` role: search sharding (block/row-group jobs + a live
-//! shard), job queueing, querier fan-out, and spanSet/trace merge in front of N
-//! queriers.
+//! The `query-frontend` role, in front of N queriers.
+//!
+//! The role covers search sharding, job queueing, querier fan-out, and
+//! spanSet/trace merge. Search sharding produces block and row-group jobs plus
+//! a live shard.
 //!
 //! The pipeline composes as
 //! `plan jobs -> queue (bounded fan-out) -> per-job search -> merge (limit/spss)
-//! -> render Tempo JSON`, all over typed serde structs ([`wire`]) rather than
-//! raw `serde_json::Value`.
+//! -> render Tempo JSON`. It runs over the typed serde structs in [`wire`]
+//! rather than raw `serde_json::Value`.
 
 pub mod backend;
 pub mod config;
@@ -46,27 +48,31 @@ pub use wire::{
     TraceEnvelopeJson, TraceJson, hex8, hex16, parse_hex8, parse_hex16,
 };
 
-/// Map a block-catalog enumeration failure to a backend transport error so the
-/// endpoint surfaces a 5xx instead of silently returning only live-tier results.
+/// Map a block-catalog enumeration failure to a backend transport error.
 ///
-/// A search/tag query **partitions** the data across the live tier + disjoint
-/// cold blocks; an empty block set from a catalog error is indistinguishable
-/// from "no cold blocks", so swallowing it (`unwrap_or_default`) would drop the
-/// cold partitions and return a misleading `200`. This matches the
-/// partitioning-shard-errors-must-surface contract already applied to per-job
-/// search errors.
+/// The endpoint then surfaces a 5xx instead of a silent return of only
+/// live-tier results.
+///
+/// A search or tag query **partitions** the data across the live tier and
+/// disjoint cold blocks. An empty block set from a catalog error looks the same
+/// as "no cold blocks". To swallow the error with `unwrap_or_default` would
+/// therefore drop the cold partitions and return a misleading `200`. This
+/// matches the partitioning-shard-errors-must-surface contract that per-job
+/// search errors already follow.
 fn catalog_error(err: &CatalogError) -> BackendError {
     BackendError::Transport(err.to_string())
 }
 
-/// The query-frontend pipeline: plan jobs -> queue (bounded fan-out) -> per-job
-/// search -> merge (limit/spss) -> render Tempo JSON, in front of a
-/// [`QuerierBackend`] pool with a [`BlockCatalog`] for block enumeration.
+/// The query-frontend pipeline.
 ///
-/// By-id does **not** fan per-block (the querier reassembles a trace across
-/// blocks and exposes no block-scoped by-id); instead it queries every querier
-/// in the pool and unions their v2 responses — meaningful because different
-/// queriers' live-stores may hold different recent spans.
+/// It runs plan jobs -> queue (bounded fan-out) -> per-job search ->
+/// merge (limit/spss) -> render Tempo JSON. It sits in front of a
+/// [`QuerierBackend`] pool, with a [`BlockCatalog`] for block enumeration.
+///
+/// By-id does **not** fan per-block. The querier reassembles a trace across
+/// blocks and exposes no block-scoped by-id. By-id instead queries every
+/// querier in the pool and unions their v2 responses. That union is meaningful
+/// because different queriers' live-stores may hold different recent spans.
 pub struct QueryFrontend<B: QuerierBackend, C: BlockCatalog> {
     backend: Arc<B>,
     catalog: Arc<C>,
@@ -83,7 +89,8 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         }
     }
 
-    /// Test/inspection accessor for the backend (e.g. `MockQuerier::search_calls`).
+    /// Test and inspection accessor for the backend, such as
+    /// `MockQuerier::search_calls`.
     #[must_use]
     pub fn backend_ref(&self) -> &B {
         &self.backend
@@ -103,10 +110,10 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
 
     /// Run a `TraceQL` `/api/search` through the full pipeline.
     ///
-    /// Search shards **partition** the data (live tier + disjoint cold blocks),
-    /// so a failed shard means missing results — any job error propagates
-    /// (an invalid query fails on every shard and must surface, not silently
-    /// return an empty 200).
+    /// Search shards **partition** the data across the live tier and disjoint
+    /// cold blocks, so a failed shard means missing results. Any job error
+    /// therefore propagates. An invalid query fails on every shard and must
+    /// surface. It must not silently return an empty 200.
     ///
     /// # Errors
     /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -159,12 +166,13 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         Ok(resp)
     }
 
-    /// Run a `/api/v2/traces/{id}` by-id lookup, fanning one job per querier.
+    /// Run a `/api/v2/traces/{id}` by-id lookup, with one job per querier.
     ///
-    /// By-id queriers are **redundant** for a trace (each reassembles it from
-    /// object storage; their live-stores differ only in recent spans), so
-    /// per-querier failures are tolerated: the trace is assembled from any
-    /// successes and an error propagates only when *every* querier failed.
+    /// By-id queriers are **redundant** for a trace. Each one reassembles the
+    /// trace from object storage, and their live-stores differ only in recent
+    /// spans. This method therefore tolerates per-querier failures. It
+    /// assembles the trace from any successes, and an error propagates only
+    /// when *every* querier failed.
     ///
     /// # Errors
     /// Returns an error when every querier lookup fails.
@@ -215,7 +223,8 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         Ok((trace, metrics, status))
     }
 
-    /// Run `/api/v2/search/tags`: fan over the planned shards, union+dedupe.
+    /// Run `/api/v2/search/tags`: fan over the planned shards, then union and
+    /// dedupe.
     ///
     /// # Errors
     /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -262,7 +271,8 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         Ok((tags, metrics))
     }
 
-    /// Run `/api/v2/search/tag/{tag}/values`: fan over shards, union+dedupe.
+    /// Run `/api/v2/search/tag/{tag}/values`: fan over shards, then union and
+    /// dedupe.
     ///
     /// # Errors
     /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -310,16 +320,21 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         Ok((values, metrics))
     }
 
-    /// Run a `TraceQL`-metrics query (`/api/metrics/query_range` or `query`) as a
-    /// **single unsharded job** against one querier.
+    /// Run a `TraceQL`-metrics query as a **single unsharded job** against one
+    /// querier.
     ///
-    /// Metrics are deliberately NOT sharded across blocks. The per-shard *reduced*
-    /// results are not safely mergeable: summing them double-counts every cold
-    /// block (the no-restriction "live" job already scans cold-before-frontier +
-    /// live, which overlaps the per-block jobs), and summing is plain wrong for
-    /// the non-additive aggregates (`min`/`max`/`avg`/`quantile_over_time`). A
-    /// single unrestricted job lets one querier compute the full hot+cold union
-    /// correctly for every aggregate; only exemplar limiting is applied here.
+    /// The query is `/api/metrics/query_range` or `query`.
+    ///
+    /// Metrics are NOT sharded across blocks, on purpose. The per-shard
+    /// *reduced* results are not safely mergeable. A sum over them
+    /// double-counts every cold block, because the no-restriction "live" job
+    /// already scans cold-before-frontier and live, which overlaps the
+    /// per-block jobs. A sum is also plain wrong for the non-additive
+    /// aggregates `min`, `max`, `avg` and `quantile_over_time`.
+    ///
+    /// A single unrestricted job lets one querier compute the full hot and cold
+    /// union correctly for every aggregate. This method applies only exemplar
+    /// limiting.
     ///
     /// # Errors
     /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -496,7 +511,8 @@ mod orch_tests {
         assert2::assert!(matches!(status, TraceStatus::Complete));
     }
 
-    /// A catalog whose enumeration always fails (a partition is unreachable).
+    /// A catalog whose enumeration always fails, so a partition is
+    /// unreachable.
     struct FailingCatalog;
 
     #[async_trait::async_trait]

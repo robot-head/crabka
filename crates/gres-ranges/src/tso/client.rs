@@ -25,9 +25,9 @@ pub trait TsoRpc: Send + Sync + 'static {
 
 /// Timestamp client that coalesces concurrent requests into one range-0 grant.
 ///
-/// Grants ride a conveyor: at most one upstream RPC is in flight at a time,
-/// and requests arriving while it runs accumulate into the next single RPC,
-/// so batch size adapts to upstream latency without artificial delay.
+/// Grants ride a conveyor. At most one upstream RPC is in flight at a time, and
+/// the requests that arrive while it runs accumulate into the next single RPC.
+/// The batch size therefore adapts to upstream latency with no artificial delay.
 pub struct BatchedTsoClient<R> {
     rpc: Arc<R>,
     queue: Arc<Mutex<GrantQueue>>,
@@ -61,7 +61,7 @@ where
         }
     }
 
-    /// Record batch-fill activity into `stats` so an external poller can
+    /// Record batch-fill activity into `stats`, so an external poller can
     /// observe this client.
     #[must_use]
     pub fn with_stats(mut self, stats: Arc<TsoClientStats>) -> Self {
@@ -77,8 +77,8 @@ where
 
     /// Grant `count` contiguous timestamps, batched with concurrent callers.
     ///
-    /// Traced as [`grant_span`]: this is one of the two points where a
-    /// statement can block for an unbounded time on another node.
+    /// The trace shows this as [`grant_span`]. This is one of the two points
+    /// where a statement can block for an unbounded time on another node.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -87,8 +87,8 @@ where
         self.grant_batched(count).instrument(span).await
     }
 
-    /// The body of [`BatchedTsoClient::grant`], running inside its span so the
-    /// wait for the conveyor's reply is what the span measures.
+    /// The body of [`BatchedTsoClient::grant`]. It runs inside that method's
+    /// span, so the span measures the wait for the conveyor's reply.
     async fn grant_batched(&self, count: NonZeroU64) -> Result<GrantLease, TsoError> {
         let span = Span::current();
         let (sender, receiver) = oneshot::channel();
@@ -223,23 +223,22 @@ impl Drop for FlusherResetGuard {
 
 /// Build the `tso.grant` span covering one caller's wait for timestamps.
 ///
-/// `otel.kind = "client"`: the grant that actually reaches the oracle is a
-/// range-0 RPC whenever the engine is not running solo, so this is one of the
-/// few places a statement blocks on another node with nothing else to show for
-/// it.
+/// The span sets `otel.kind = "client"`. The grant that reaches the oracle is a
+/// range-0 RPC whenever the engine does not run solo, so this is one of the few
+/// places a statement blocks on another node with nothing else to show for it.
 ///
-/// `pg.tso.batched` is the field worth reading. The client runs a conveyor —
-/// at most one upstream RPC in flight, everything arriving behind it coalescing
-/// into the next one — so a caller either *starts* a batch (and waits one
-/// upstream round trip) or *joins* one (and waits for the in-flight round trip
-/// plus its own). A run of `tso.grant` spans that are all unbatched says the
-/// oracle is answering faster than requests arrive; a run that is all batched
-/// says the opposite, and the span duration is then queueing, not oracle
-/// latency.
+/// `pg.tso.batched` is the field worth reading. The client runs a conveyor, with
+/// at most one upstream RPC in flight and everything that arrives behind it
+/// coalesced into the next one. A caller therefore either *starts* a batch and
+/// waits one upstream round trip, or *joins* one and waits for the in-flight
+/// round trip plus its own. A run of `tso.grant` spans that are all unbatched
+/// says the oracle answers faster than requests arrive. A run that is all
+/// batched says the opposite, and the span duration is then queueing time, not
+/// oracle latency.
 ///
-/// Kept as an explicit builder rather than `#[instrument]` so the target can be
-/// the [`ROUTE_TARGET`] constant rather than a duplicated literal, and so the
-/// outcome fields can be declared [`Empty`] and filled in later.
+/// This is an explicit builder rather than `#[instrument]` for two reasons. The
+/// target can be the [`ROUTE_TARGET`] constant instead of a duplicated literal,
+/// and the outcome fields can be declared [`Empty`] and filled in later.
 fn grant_span(count: NonZeroU64) -> Span {
     tracing::debug_span!(
         target: ROUTE_TARGET,
@@ -271,9 +270,11 @@ fn record_grant(span: &Span, granted: Result<&GrantLease, &TsoError>) {
     }
 }
 
-/// The low-cardinality `error.type` for a failed grant. Deliberately the
-/// variant, not the message: a fenced epoch and a dead connection are different
-/// operational problems, while `TsoError::Rpc`'s payload is unbounded text.
+/// The low-cardinality `error.type` for a failed grant.
+///
+/// This is deliberately the variant and not the message. A fenced epoch and a
+/// dead connection are different operational problems, and the payload of
+/// `TsoError::Rpc` is unbounded text.
 const fn tso_error_type(error: &TsoError) -> &'static str {
     match error {
         TsoError::EmptyGrant => "empty_grant",
@@ -339,10 +340,10 @@ fn fail_batch(error: &TsoError, batch: Vec<PendingGrant>) {
 
 /// Reproduce the upstream failure for one coalesced caller.
 ///
-/// A fenced epoch must survive batching as [`TsoError::FencedEpoch`]: the
-/// range service maps it to a re-resolvable wire error so gateways find the
-/// successor oracle. Flattening it into [`TsoError::Rpc`] would make a
-/// failover read as a non-retryable failure.
+/// A fenced epoch must survive the batching as [`TsoError::FencedEpoch`]. The
+/// range service maps that variant to a re-resolvable wire error, so gateways
+/// find the successor oracle. A flatten of it into [`TsoError::Rpc`] would make
+/// a failover read as a non-retryable failure.
 fn fan_out_error(error: &TsoError) -> TsoError {
     match error {
         TsoError::FencedEpoch { epoch } => TsoError::FencedEpoch { epoch: *epoch },
@@ -473,9 +474,9 @@ mod tests {
         NonZeroU64::new(value).expect("test count is non-zero")
     }
 
-    /// Grant with a hang bound: any regression that turns a grant into an
-    /// unbounded wait (a flusher that never spawns or never re-arms) must
-    /// fail the suite promptly rather than stalling it past the
+    /// Grant with a hang bound. Any regression that turns a grant into an
+    /// unbounded wait, such as a flusher that never spawns or never re-arms,
+    /// must fail the suite quickly, and must not stall it past the
     /// mutation-testing budget.
     async fn grant_within<R: TsoRpc>(
         client: &BatchedTsoClient<R>,

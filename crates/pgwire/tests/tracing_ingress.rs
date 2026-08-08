@@ -1,14 +1,15 @@
 //! Trace ingress through the wire protocol.
 //!
 //! Every assertion here runs against exported [`SpanData`], never against a
-//! live `tracing::Span` handle: `tracing-opentelemetry` resolves a re-parented
-//! span's trace id when the span *closes*, not when `set_parent` runs, so a
-//! handle reports the wrong parent even for a span that exports correctly.
+//! live `tracing::Span` handle. `tracing-opentelemetry` resolves a re-parented
+//! span's trace id when the span *closes*, not when `set_parent` runs. A
+//! handle therefore reports the wrong parent even for a span that exports
+//! correctly.
 //!
 //! The session runs on a current-thread runtime driven inside
-//! `tracing::subscriber::with_default`, so the thread-local subscriber is
-//! visible to the session future — a multi-thread runtime would move it off the
-//! test thread and every test would silently pass with zero spans.
+//! `tracing::subscriber::with_default`, so the session future can see the
+//! thread-local subscriber. A multi-thread runtime would move the future off
+//! the test thread, and every test would then silently pass with zero spans.
 
 use std::{collections::BTreeMap, future::Future, net::SocketAddr, sync::Arc};
 
@@ -69,8 +70,8 @@ fn startup_params() -> Vec<(String, String)> {
 // ── Engine ──────────────────────────────────────────────────────────────────
 
 /// An engine that answers any statement with `row_count` rows, so a test can
-/// pin the row/page counters, and fails any statement containing `boom` with a
-/// syntax error, so a test can pin the error status.
+/// pin the row and page counters. It fails any statement that contains `boom`
+/// with a syntax error, so a test can pin the error status.
 struct TraceEngine {
     row_count: usize,
 }
@@ -304,7 +305,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Wire<S> {
         (header[0], body)
     }
 
-    /// Drain the server's startup burst, ending at the first `ReadyForQuery`.
+    /// Drain the server's startup burst and end at the first `ReadyForQuery`.
     async fn startup(&mut self) {
         loop {
             if self.read_message().await.0 == b'Z' {
@@ -367,9 +368,9 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Wire<S> {
 
     /// Issue a `CancelRequest` for this session out of band.
     ///
-    /// Sent while the session is idle, so the registry's sticky `pending` flag
-    /// fires it at the next statement — which is what makes the cancellation
-    /// deterministic instead of a race with a sleeping engine.
+    /// The test sends it while the session is idle, so the registry's sticky
+    /// `pending` flag fires it at the next statement. That makes the
+    /// cancellation deterministic instead of a race with a sleeping engine.
     fn request_cancel(&self) {
         let handle = self
             .cancel
@@ -403,9 +404,10 @@ impl Traced {
     }
 }
 
-/// The span's own attributes, with the bookkeeping `tracing-opentelemetry` adds
-/// to every span (source location, thread, busy/idle timings, target) filtered
-/// out — so a whole-map comparison stays a statement about what pgwire records.
+/// The span's own attributes, without the bookkeeping `tracing-opentelemetry`
+/// adds to every span: source location, thread, busy and idle timings, and
+/// target. A whole-map comparison therefore stays a statement about what
+/// pgwire records.
 fn attributes(span: &SpanData) -> BTreeMap<String, String> {
     const LAYER_KEYS: [&str; 3] = ["busy_ns", "idle_ns", "target"];
     span.attributes
@@ -516,10 +518,11 @@ where
 
 // ── Session span ────────────────────────────────────────────────────────────
 
-/// The one test that goes through `server::serve_conn_with_activity` — the
-/// funnel every accepted connection passes through, and the only place the
-/// session span is actually raised in production. Everything else here
-/// instruments `run_session` directly.
+/// The one test that goes through `server::serve_conn_with_activity`.
+///
+/// Every accepted connection passes through that function, and it is the only
+/// place production raises the session span. Everything else here instruments
+/// `run_session` directly.
 #[test]
 fn serving_a_real_connection_raises_a_session_span_for_its_peer() {
     let mut client_port = 0;
@@ -638,8 +641,8 @@ fn an_untagged_statement_stays_inside_the_session_trace() {
     check!(statement.links.is_empty());
 }
 
-/// A hostile `traceparent` must be discarded silently: the query it rode in on
-/// still runs, and the statement stays in the server's own trace.
+/// A hostile `traceparent` must be discarded silently. The query that carried
+/// it still runs, and the statement stays in the server's own trace.
 #[test]
 fn a_malformed_traceparent_is_ignored_and_the_statement_still_succeeds() {
     let malformed = [
@@ -772,9 +775,9 @@ fn policy_link_correlates_without_ceding_the_parent() {
 }
 
 /// `Resample` must *recompute* the sampled flag, not clear it. Under
-/// `ParentBased`, a non-sampled parent returns `Drop` outright — so clearing the
-/// bit would discard exactly the statements a client had instrumented, which is
-/// what the `Trust` half of each pair demonstrates going the other way.
+/// `ParentBased`, a non-sampled parent returns `Drop` outright. A cleared bit
+/// would therefore discard exactly the statements a client had instrumented.
+/// The `Trust` half of each pair shows the same point from the other side.
 #[test]
 fn resample_recomputes_the_sampled_flag_rather_than_honouring_it() {
     let cases: [(&str, IngressTracePolicy, f64, &str, bool); 4] = [
@@ -862,7 +865,7 @@ fn execute_inherits_the_trace_captured_at_parse() {
     }
 }
 
-/// A named statement surviving a `Sync` is genuinely being reused, and the trace
+/// A named statement that survives a `Sync` is genuinely reused, and the trace
 /// it was prepared under is stale by the time it runs again.
 #[test]
 fn a_named_statement_reused_after_sync_does_not_inherit_the_stale_trace() {

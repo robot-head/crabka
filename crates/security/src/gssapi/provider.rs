@@ -1,9 +1,9 @@
 //! `sspi`-rs-backed implementations of [`GssAcceptor`] and [`GssInitiator`].
 //!
-//! Both the acceptor and the initiator authenticate from a keytab: the
-//! acceptor uses the service key to decrypt incoming AP-REQs, and the
-//! initiator uses the client principal's long-term key (via
-//! [`sspi::KeytabIdentity`]) to drive the AS/TGS exchange with no password.
+//! Both the acceptor and the initiator authenticate from a keytab. The
+//! acceptor uses the service key to decrypt incoming AP-REQs. The initiator
+//! uses the client principal's long-term key, supplied through
+//! [`sspi::KeytabIdentity`], to drive the AS/TGS exchange with no password.
 use std::sync::Mutex;
 
 use crabka_units::{Time, convert::TimeExt as _};
@@ -20,8 +20,10 @@ use super::{
     keytab::{ENCTYPE_AES256_CTS_HMAC_SHA1_96, load_service_key, load_service_keys},
 };
 
-/// Default KDC URL used when `SSPI_KDC_URL` is unset. The accept path does not
-/// hit the network, but `KerberosConfig::new` requires a URL string.
+/// Default KDC URL for when `SSPI_KDC_URL` is unset.
+///
+/// The accept path does not touch the network, but `KerberosConfig::new` needs
+/// a URL string.
 const DEFAULT_KDC_URL: &str = "tcp://localhost:88";
 
 fn kdc_url_from_env() -> String {
@@ -39,7 +41,8 @@ fn wrap_err(e: impl std::fmt::Display) -> GssError {
 }
 
 /// GSS wrap (`encrypt_message`) with confidentiality disabled, per RFC 4752.
-/// Returns `token || data`.
+///
+/// This function returns `token || data`.
 fn gss_wrap(ctx: &mut Kerberos, plaintext: &[u8]) -> Result<Vec<u8>, GssError> {
     let trailer_len = ctx
         .query_context_sizes()
@@ -69,7 +72,7 @@ fn gss_unwrap(ctx: &mut Kerberos, token_bytes: &[u8]) -> Result<Vec<u8>, GssErro
     Ok(unwrap_buf[1].data().to_vec())
 }
 
-/// Treat a status as "context established" (vs. needing another round trip).
+/// Whether a status means "context established" and not "another round trip".
 fn is_established(status: SecurityStatus) -> bool {
     matches!(
         status,
@@ -85,9 +88,9 @@ pub struct SspiAcceptor {
 impl SspiAcceptor {
     /// Build an acceptor from a keytab file and the SPN's first component.
     ///
-    /// Reads `keytab_path`, extracts the highest-kvno aes256 key for
-    /// `service_name`, reconstructs the SPN components, and builds the sspi
-    /// server context.
+    /// This function reads `keytab_path` and extracts the highest-kvno aes256
+    /// key for `service_name`. It then reconstructs the SPN components and
+    /// builds the sspi server context.
     ///
     /// # Errors
     ///
@@ -206,10 +209,10 @@ impl GssAcceptor for SspiAcceptor {
 
 /// Client-side GSSAPI initiator backed by sspi + a keytab-extracted client key.
 ///
-/// Keytab-based (no password): the client principal's long-term key is loaded
-/// from a keytab and injected via [`sspi::KeytabIdentity`]. The client context
-/// and credentials handle must persist across
-/// [`GssInitiator::step`] calls, so they live in this struct.
+/// The initiator is keytab-based and uses no password. It loads the client
+/// principal's long-term key from a keytab and injects it through
+/// [`sspi::KeytabIdentity`]. The client context and the credentials handle must
+/// persist across [`GssInitiator::step`] calls, so they live in this struct.
 pub struct SspiInitiator {
     client: Mutex<Kerberos>,
     cred_handle: Mutex<<Kerberos as SspiImpl>::CredentialsHandle>,
@@ -219,12 +222,14 @@ pub struct SspiInitiator {
 impl SspiInitiator {
     /// Build a keytab-based initiator.
     ///
-    /// Reads `keytab_path`, extracts the aes256 key for `client_principal`'s
-    /// first component, and builds an sspi client that authenticates as
-    /// `client_principal` (e.g. `"alice@CRABKA.TEST"` or
-    /// `"kafka/host@CRABKA.TEST"`). `target_spn` is the service SPN without
-    /// realm (e.g. `"kafka/localhost"`), and `kdc_url` is the KDC endpoint
-    /// (e.g. `"tcp://localhost:88"`).
+    /// This function reads `keytab_path` and extracts the aes256 key for the
+    /// first component of `client_principal`. It then builds an sspi client
+    /// that authenticates as `client_principal`, for example
+    /// `"alice@CRABKA.TEST"` or `"kafka/host@CRABKA.TEST"`.
+    ///
+    /// `target_spn` is the service SPN without the realm, for example
+    /// `"kafka/localhost"`. `kdc_url` is the KDC endpoint, for example
+    /// `"tcp://localhost:88"`.
     ///
     /// # Errors
     ///

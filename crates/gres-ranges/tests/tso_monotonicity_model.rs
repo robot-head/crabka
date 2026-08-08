@@ -1,22 +1,22 @@
 //! Exhaustive Stateright model for the range-0 timestamp oracle protocol.
 //!
 //! The model keeps the protocol vocabulary deliberately close to the production
-//! seams: a request becomes a [`GrantLease`] reply, `durable_max_ts` represents
-//! [`crabka_gres_ranges::tso::oracle::MAX_TS_KEY`], and an oracle epoch is admitted only by the same liveness
-//! decision as [`HeartbeatVerdict`]. It explores two clients, variable grant
-//! sizes, delayed requests and replies, crash recovery, and a live fenced
-//! oracle that still has a client connection.
+//! seams. A request becomes a [`GrantLease`] reply, `durable_max_ts` represents
+//! [`crabka_gres_ranges::tso::oracle::MAX_TS_KEY`], and the model admits an
+//! oracle epoch only by the same liveness decision as [`HeartbeatVerdict`]. It
+//! explores two clients, variable grant sizes, delayed requests and replies,
+//! crash recovery, and a live fenced oracle that still has a client connection.
 //!
-//! Epoch liveness is amortized behind a certificate window rather than a
-//! per-grant heartbeat: a fenced replica whose liveness certificate has not yet
-//! lapsed keeps serving within-stride grants from memory, but it can never
-//! extend its reservation because the stride persist is epoch-fenced. The
-//! `successor_grace` knob models the successor grace rule: a successor may not
-//! serve its first grant while any older-epoch replica is still running inside
-//! its certificate window. To keep the exhaustive state space affordable the
-//! model reserves each recovering replica's first stride up front (see
-//! [`TsoModel::reserve_first_stride`]); every lazily-persisting production
-//! trace is order-isomorphic to a modeled trace.
+//! A certificate window amortizes epoch liveness, rather than a per-grant
+//! heartbeat. A fenced replica whose liveness certificate has not yet lapsed
+//! keeps serving within-stride grants from memory, but it can never extend its
+//! reservation, because the stride persist is epoch-fenced. The
+//! `successor_grace` control models the successor grace rule: a successor may
+//! not serve its first grant while any older-epoch replica still runs inside its
+//! certificate window. To keep the exhaustive state space affordable, the model
+//! reserves each recovering replica's first stride up front. See
+//! [`TsoModel::reserve_first_stride`]. Every production trace that persists
+//! lazily is order-isomorphic to a modeled trace.
 
 use std::num::NonZeroU64;
 
@@ -44,15 +44,15 @@ struct TsoModel {
     client_visible_max: ClientVisibleMax,
 }
 
-/// Whether grants persist a stride-ahead durable horizon before being served.
+/// Whether a grant persists a stride-ahead durable horizon before it is served.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StridePersistence {
     Ahead,
     Missing,
 }
 
-/// Whether serving requires a live epoch (fresh heartbeat or an unexpired
-/// liveness certificate).
+/// Whether serving needs a live epoch, which is either a fresh heartbeat or an
+/// unexpired liveness certificate.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EpochLiveness {
     Required,
@@ -60,7 +60,7 @@ enum EpochLiveness {
 }
 
 /// Whether a successor waits out the certificate windows of every older-epoch
-/// replica that is still running before serving its first grant.
+/// replica that still runs, before it serves its first grant.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SuccessorGrace {
     WaitsOutCertificate,
@@ -93,10 +93,11 @@ struct Replica {
     epoch: u8,
     next_ts: u8,
     running: bool,
-    /// Whether the amortized liveness certificate is still unexpired. Every
-    /// replica is created holding a live certificate (an active oracle renews
-    /// it on each stride persist or heartbeat, so the flag only becomes
-    /// meaningful once the replica is fenced).
+    /// Whether the amortized liveness certificate is still unexpired.
+    ///
+    /// Every replica starts with a live certificate. An active oracle renews it
+    /// on each stride persist or heartbeat, so the flag only becomes meaningful
+    /// after the replica is fenced.
     certificate_live: bool,
 }
 
@@ -413,14 +414,14 @@ impl TsoModel {
 
     /// Reserve the newly recovered active replica's first stride.
     ///
-    /// Production persists strides lazily on grant, but a lazy model needs an
-    /// extra warm-up grant before every fence just to open the deposed
-    /// replica's certificate window, which pushes the issued-grant history
-    /// bound (and the reachable state space) far past what exhaustive checking
-    /// affords. Reserving the first stride at recovery keeps every lazy trace
-    /// order-isomorphic to a modeled trace while only widening what a fenced
-    /// replica may serve, so `MAX_ISSUED_GRANTS` can stay a protocol-domain
-    /// bound of two.
+    /// Production persists strides lazily on grant. But a lazy model needs an
+    /// extra warm-up grant before every fence, only to open the deposed
+    /// replica's certificate window. That pushes the issued-grant history bound,
+    /// and with it the reachable state space, far past what exhaustive checking
+    /// affords. A reservation of the first stride at recovery keeps every lazy
+    /// trace order-isomorphic to a modeled trace, and it only widens what a
+    /// fenced replica may serve. `MAX_ISSUED_GRANTS` can therefore stay a
+    /// protocol-domain bound of two.
     fn reserve_first_stride(&self, state: &mut State) {
         if self.stride_persistence != StridePersistence::Ahead {
             return;
@@ -442,10 +443,12 @@ fn epoch_heartbeat(replica_epoch: u8, active_epoch: u8) -> HeartbeatVerdict {
     HeartbeatVerdict::Fenced
 }
 
-/// Inclusive horizon the replica may serve from memory: the shared durable
-/// horizon while it is the active writer, or the horizon captured when it was
-/// deposed. A fenced epoch can no longer persist, so its reservation stays
-/// frozen at fence time even though successors keep advancing `durable_max_ts`.
+/// Inclusive horizon the replica may serve from memory.
+///
+/// This is the shared durable horizon while the replica is the active writer,
+/// and otherwise the horizon captured when the replica was deposed. A fenced
+/// epoch can no longer persist, so its reservation stays frozen at fence time
+/// even while successors keep advancing `durable_max_ts`.
 fn reservation_ceiling(state: &State, replica_epoch: u8, fenced: bool) -> Option<u8> {
     if !fenced {
         return Some(state.durable_max_ts);

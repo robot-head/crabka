@@ -1,12 +1,13 @@
-//! `GetReplicaLogInfo` (`api_key` 93, KIP-966). Inter-broker RPC: the
-//! controller asks this broker for the log-end-offset and last-written
-//! leader epoch of partitions it hosts, to drive offset-aware unclean
-//! recovery. Served on the inter-broker listener via the handler table.
+//! `GetReplicaLogInfo` (`api_key` 93, KIP-966). This is an inter-broker RPC.
+//! The controller asks this broker for the log-end-offset and the last-written
+//! leader epoch of the partitions that it hosts, which drives offset-aware
+//! unclean recovery. The handler table serves it on the inter-broker listener.
 //!
-//! For each requested partition the broker hosts locally we answer with
-//! the local LEO + cached leader epoch. Partitions not hosted here get
-//! `REPLICA_NOT_AVAILABLE (11)` with sentinel offsets (`-1`), matching
-//! the JVM behaviour for a replica the broker isn't a member of.
+//! For each requested partition that this broker hosts locally, the handler
+//! answers with the local LEO and the cached leader epoch. A partition that
+//! this broker does not host gets `REPLICA_NOT_AVAILABLE (11)` with the
+//! sentinel offset `-1`. That matches the JVM behaviour for a replica that the
+//! broker is not a member of.
 
 use std::sync::atomic::Ordering;
 
@@ -124,8 +125,9 @@ pub(crate) fn handle(
     Ok(Bytes::from(body))
 }
 
-/// `ClusterAction` on `Cluster("kafka-cluster")` gate. Returns `true`
-/// when the principal is denied (inter-broker control-plane RPC).
+/// The `ClusterAction` gate on `Cluster("kafka-cluster")`. It returns `true`
+/// when the authorizer denies the principal. This is an inter-broker
+/// control-plane RPC.
 fn cluster_action_denied(
     authorizer: &dyn crate::authorizer::Authorizer,
     image: &crabka_metadata::MetadataImage,
@@ -144,10 +146,10 @@ fn cluster_action_denied(
     ) == AuthorizationResult::Deny
 }
 
-/// On Deny, echo every requested `(topic_id, partition)` with
-/// `CLUSTER_AUTHORIZATION_FAILED (31)` and sentinel offsets. The response
-/// carries no top-level error code, so the per-partition stamp is the
-/// channel for the authorization failure (mirrors `alter_replica_log_dirs`).
+/// On a Deny, this function echoes every requested `(topic_id, partition)`
+/// with `CLUSTER_AUTHORIZATION_FAILED (31)` and sentinel offsets. The response
+/// carries no top-level error code, so the per-partition stamp reports the
+/// authorization failure. This mirrors `alter_replica_log_dirs`.
 fn denied_response(version: i16, req_bytes: &[u8]) -> Result<Bytes, BrokerError> {
     let mut topic_results: Vec<TopicPartitionLogInfo> = Vec::new();
     let mut cur: &[u8] = req_bytes;
@@ -190,10 +192,10 @@ mod tests {
 
     use super::*;
 
-    /// A locally-hosted partition answers with its cached
-    /// `current_leader_epoch` (and `last_written_leader_epoch`) — a non-zero
+    /// A locally hosted partition answers with its cached
+    /// `current_leader_epoch` and `last_written_leader_epoch`. A non-zero
     /// epoch pins the struct field against the deletion mutant, which would
-    /// default it to 0.
+    /// set it to the default 0.
     #[tokio::test]
     async fn hosted_partition_reports_current_leader_epoch() {
         use std::sync::{Arc, atomic::Ordering};
@@ -288,8 +290,8 @@ mod tests {
         broker_handle.shutdown().await;
     }
 
-    /// Empty ACLs + no super-users → every principal is denied
-    /// `ClusterAction`, so the denied response carries
+    /// With empty ACLs and no super-users, the authorizer denies
+    /// `ClusterAction` to every principal, so the denied response carries
     /// `CLUSTER_AUTHORIZATION_FAILED`.
     #[test]
     fn cluster_action_denied_yields_cluster_authorization_failed() {

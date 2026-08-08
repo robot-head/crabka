@@ -1,10 +1,10 @@
 //! KIP-455 reassignment-completion background task.
 //!
-//! Runs on the controller leader. Watches the metadata image; when a
-//! reassignment's `adding_replicas` are all in ISR, atomically
-//! transitions to the target replica set. If the current leader is in
-//! `removing_replicas`, hands off leadership first to a target replica
-//! in ISR.
+//! This task runs on the controller leader and watches the metadata image.
+//! When every one of a reassignment's `adding_replicas` is in the ISR, the
+//! task moves atomically to the target replica set. When the current leader is
+//! in `removing_replicas`, the task first hands leadership to a target replica
+//! that is in the ISR.
 
 #![allow(dead_code)]
 
@@ -19,12 +19,14 @@ use tracing::{debug, info, warn};
 
 use crate::heartbeat::controller_state::ControllerLivenessState;
 
-/// Remap a partition's `directories` vector onto a new `replicas` ordering
-/// (KIP-455 reassignment changes replica membership/order). `directories`
-/// is index-parallel to `replicas`; a verbatim clone after the replica set
-/// changes would misalign the slots and break KIP-112 offline-dir failover.
-/// Surviving replicas keep their dir UUID; newly-added replicas get
-/// `Uuid::nil()` (UNASSIGNED) until they report via `AssignReplicasToDirs`.
+/// Remaps a partition's `directories` vector onto a new `replicas` order. A
+/// KIP-455 reassignment changes both the replica membership and the order.
+///
+/// `directories` runs index-parallel to `replicas`. A verbatim clone after the
+/// replica set changed would misalign the slots and break KIP-112 offline-dir
+/// failover. A surviving replica keeps its dir UUID. A newly added replica
+/// gets `Uuid::nil()`, which means UNASSIGNED, until it reports through
+/// `AssignReplicasToDirs`.
 pub(crate) fn remap_directories(
     old_replicas: &[NodeId],
     old_directories: &[uuid::Uuid],
@@ -41,8 +43,8 @@ pub(crate) fn remap_directories(
         .collect()
 }
 
-/// Minimal trait for the controller surface this task needs. Lets unit
-/// tests inject a mock without spinning up real raft.
+/// Minimal trait for the controller surface that this task needs. It lets a
+/// unit test inject a mock without a real raft cluster.
 #[async_trait]
 pub(crate) trait ReassignmentController: Send + Sync {
     fn is_leader(&self) -> bool;
@@ -51,7 +53,7 @@ pub(crate) trait ReassignmentController: Send + Sync {
     async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), String>;
 }
 
-/// Background task entry point. Driven by image-apply events.
+/// Background task entry point. Image-apply events drive it.
 pub(crate) async fn run(
     controller: Arc<dyn ReassignmentController>,
     liveness: Arc<ControllerLivenessState>,
@@ -89,11 +91,13 @@ pub(crate) async fn run(
     }
 }
 
-/// The pure per-partition reassignment decision: given a partition's current
-/// record and the alive set, return the next `PartitionRecord` (a leader
-/// handoff or a completion), or `None` to wait. No I/O. Extracted from
-/// `compute_reassignment_progress` so the policy is independently unit-testable
-/// and model-checkable.
+/// The pure per-partition reassignment decision. From a partition's current
+/// record and the alive set, it returns the next `PartitionRecord`, which is
+/// either a leader handoff or a completion. It returns `None` to wait.
+///
+/// The function does no I/O. It is separate from
+/// `compute_reassignment_progress` so that a unit test and a model checker can
+/// drive the policy on its own.
 pub(crate) fn reassign_one(
     pr: &PartitionRecord,
     alive: &std::collections::HashSet<NodeId>,
@@ -147,8 +151,9 @@ pub(crate) fn reassign_one(
     })
 }
 
-/// Pure logic: scan every in-flight reassignment; produce completion
-/// or leader-handoff records for those ready to advance.
+/// Pure logic. It scans every in-flight reassignment, and produces a
+/// completion record or a leader-handoff record for each one that is ready to
+/// advance.
 pub(crate) async fn compute_reassignment_progress(
     image: &MetadataImage,
     liveness: &ControllerLivenessState,
@@ -345,8 +350,8 @@ mod tests {
         assert!(new == vec![da, uuid::Uuid::nil()]);
     }
 
-    /// Build an image with explicit directories, to test that
-    /// `compute_reassignment_progress` keeps directories aligned after
+    /// Builds an image with explicit directories. It tests that
+    /// `compute_reassignment_progress` keeps the directories aligned after a
     /// completion removes a replica from the set.
     fn img_with_dirs(
         replicas: &[u64],

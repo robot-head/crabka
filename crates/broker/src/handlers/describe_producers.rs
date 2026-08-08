@@ -1,25 +1,27 @@
-//! `DescribeProducers` (`api_key=61`, KIP-664). Admin RPC that surfaces
-//! the broker's in-memory producer-state snapshot for a set of
-//! `(topic, partition)` pairs. Used by JVM `Admin.describeProducers`
-//! and `kafka-transactions --describe-producers` to debug stuck
-//! idempotent / transactional producers.
+//! `DescribeProducers` (`api_key=61`, KIP-664) shows the producer state of a
+//! set of partitions.
+//!
+//! This admin RPC returns the in-memory producer-state snapshot of the broker
+//! for a set of `(topic, partition)` pairs. JVM `Admin.describeProducers` and
+//! `kafka-transactions --describe-producers` use it to debug stuck idempotent
+//! or transactional producers.
 //!
 //! ## ACL
 //!
-//! Per-topic `Read` on `Topic(name)` (mirrors `Fetch` per KIP-664).
-//! Deny → every partition of that topic carries
-//! `TOPIC_AUTHORIZATION_FAILED (29)`. Unknown topic / out-of-range
-//! partition → per-partition `UNKNOWN_TOPIC_OR_PARTITION (3)`.
+//! The broker checks `Read` on `Topic(name)` for each topic. This mirrors
+//! `Fetch`, per KIP-664. On a Deny, every partition of that topic carries
+//! `TOPIC_AUTHORIZATION_FAILED (29)`. An unknown topic or an out-of-range
+//! partition gives a per-partition `UNKNOWN_TOPIC_OR_PARTITION (3)`.
 //!
 //! ## Field semantics
 //!
-//! `producer_id`, `producer_epoch`, `last_sequence`, `last_timestamp`
-//! come straight from `crate::producer_state`. The transactional
-//! fields `coordinator_epoch` and `current_txn_start_offset` aren't
-//! wired up — the broker doesn't track them per `(topic, partition)`
-//! today, so they default to `-1` (the schema's "unknown / no current
-//! txn" sentinel). When transactional in-flight tracking lands, only
-//! the row builder needs to look those up.
+//! `producer_id`, `producer_epoch`, `last_sequence`, and `last_timestamp`
+//! come straight from `crate::producer_state`. The transactional fields
+//! `coordinator_epoch` and `current_txn_start_offset` are not wired up. The
+//! broker does not track them for each `(topic, partition)` today, so they
+//! default to `-1`, the schema sentinel for "unknown / no current txn". When
+//! transactional in-flight tracking arrives, only the row builder needs to
+//! look them up.
 
 use bytes::Bytes;
 use crabka_metadata::AclOperation;

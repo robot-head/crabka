@@ -95,9 +95,9 @@ impl ProcessHarness {
 
     /// Start with an explicit `--checkpoint-frames` threshold on range 0.
     ///
-    /// The default is deliberately the runtime's own threshold, matching what
-    /// the operator gives a managed pod. Only a test that needs range 0 to
-    /// checkpoint within its own lifetime should lower it.
+    /// The default is deliberately the runtime's own threshold, which matches
+    /// what the operator gives a managed pod. Only a test that needs range 0 to
+    /// checkpoint inside its own lifetime should lower it.
     pub async fn start_with_checkpoint_frames(name: &str, frames: u64) -> Self {
         Self::start_inner(name, None, Some(frames)).await
     }
@@ -230,14 +230,15 @@ impl ProcessHarness {
 
     /// Catalog id of `relation`, read from `pg_class.oid`.
     ///
-    /// Range RPCs address a relation by catalog id and never by name: a name is
-    /// session-dependent once `search_path` and `pg_temp` exist, and the range
-    /// serving the RPC has no notion of the originating session. The id a store
-    /// hands out bears no relation to the routing suffix a fixture bakes into a
-    /// name, so callers have to ask the catalog rather than reuse the suffix.
+    /// A range RPC addresses a relation by catalog id and never by name. A name
+    /// depends on the session once `search_path` and `pg_temp` exist, and the
+    /// range that serves the RPC has no notion of the originating session. The
+    /// id a store hands out bears no relation to the routing suffix a fixture
+    /// bakes into a name, so a caller must ask the catalog rather than reuse the
+    /// suffix.
     ///
-    /// Memoized: a relation's id is fixed for the store's lifetime, and callers
-    /// poll these scans in tight loops.
+    /// This method memoizes the id. A relation's id is fixed for the store's
+    /// lifetime, and callers poll these scans in tight loops.
     pub async fn catalog_table_id(&self, relation: &str) -> u64 {
         if let Some(id) = self
             .catalog_ids
@@ -287,9 +288,10 @@ impl ProcessHarness {
 
     /// A connection whose asynchronous messages are observable.
     ///
-    /// A `NotificationResponse` arrives on the *connection*, not the client, so
-    /// the connection is driven with `poll_message` — [`Self::sql`] spawns it as
-    /// a bare future and every notification is swallowed.
+    /// A `NotificationResponse` arrives on the *connection*, not on the client,
+    /// so this type drives the connection with `poll_message`. [`Self::sql`]
+    /// spawns the connection as a bare future, which swallows every
+    /// notification.
     pub async fn sql_with_notifications(
         &self,
         range: u32,
@@ -329,9 +331,11 @@ impl ProcessHarness {
         RawPgConnection::connect(self.node(range).sql_port, &self.tenant).await
     }
 
-    /// The `--cache-dir` a node was started with: its range stores live under
-    /// `r<range>/`, and a node that does not host range 0 keeps its follower
-    /// replica of the range-0 catalog under `r0-follower-<generation>/`.
+    /// The `--cache-dir` the harness started a node with.
+    ///
+    /// The node's range stores live under `r<range>/`. A node that does not host
+    /// range 0 keeps its follower replica of the range-0 catalog under
+    /// `r0-follower-<generation>/`.
     pub fn cache_dir(&self, range: u32) -> PathBuf {
         self.root.path().join(format!("r{range}-cache"))
     }
@@ -435,7 +439,7 @@ impl ProcessHarness {
             .unwrap_or_else(|error| format!("<read {} failed: {error}>", path.display()))
     }
 
-    /// DDL through the non-r0 node: exercises forwarding plus the cluster barrier.
+    /// DDL through the non-r0 node. It exercises the forwarding and the cluster barrier.
     pub async fn create_table(&self, sql: &str) {
         self.sql(1)
             .await
@@ -529,9 +533,9 @@ impl ProcessHarness {
         self.finish_restart(range).await;
     }
 
-    /// Spawn the replacement child without waiting for its recovery-complete
+    /// Spawn the replacement child and do not wait for its recovery-complete
     /// readiness event, so a test can observe the child while it recovers.
-    /// Follow with [`Self::finish_restart`].
+    /// Follow this call with [`Self::finish_restart`].
     pub fn restart_spawned(&mut self, range: u32, hosted_ranges: &str) {
         let node_range = {
             let node = self.node(range);
@@ -1022,10 +1026,10 @@ async fn connect(port: u16, database: &str) -> tokio_postgres::Client {
 /// A hand-rolled pgwire connection that authenticates with SCRAM-SHA-256 and
 /// keeps the pid the server announced in `BackendKeyData`.
 ///
-/// `tokio_postgres` hides that pid, so a test pinning a
-/// `NotificationResponse.process_id` to the *originating* backend has to take
-/// the expected pid off the wire itself rather than recompute it from the same
-/// place the assertion reads.
+/// `tokio_postgres` hides that pid. A test that pins a
+/// `NotificationResponse.process_id` to the *originating* backend must
+/// therefore take the expected pid off the wire itself, and must not recompute
+/// it from the same place the assertion reads.
 // Only the multiprocess notify tests use this; the harness is also included by
 // `crates/gres`, where it is dead — the same reason the other helpers here carry
 // this attribute.
@@ -1068,7 +1072,7 @@ impl RawPgConnection {
         self.pid
     }
 
-    /// Run one simple-protocol Query, panicking on an `ErrorResponse`.
+    /// Run one simple-protocol Query. This method panics on an `ErrorResponse`.
     pub async fn simple_query(&mut self, sql: &str) {
         let mut body = sql.as_bytes().to_vec();
         body.push(0);
@@ -1080,8 +1084,8 @@ impl RawPgConnection {
     }
 }
 
-/// Drive the SASL exchange the tenant's SCRAM verifier demands, leaving the
-/// stream positioned on the post-authentication startup burst.
+/// Drive the SASL exchange the tenant's SCRAM verifier needs, and leave the
+/// stream at the post-authentication startup burst.
 async fn authenticate_scram(stream: &mut TcpStream) {
     use assert2::assert;
     use crabka_security::{SaslMechanism, scram::ScramClientExchange};
@@ -1161,7 +1165,7 @@ async fn read_backend_message(stream: &mut TcpStream) -> (u8, Vec<u8>) {
     (kind[0], body)
 }
 
-/// Write one frontend message; `kind` is absent only for the startup packet.
+/// Write one frontend message. `kind` is absent only for the startup packet.
 async fn write_message(stream: &mut TcpStream, kind: Option<u8>, body: &[u8]) {
     let mut message = Vec::with_capacity(body.len() + 5);
     message.extend(kind);

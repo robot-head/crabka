@@ -83,9 +83,11 @@ impl IngestEnforcer {
         Ok(())
     }
 
-    /// Enforce the per-attribute byte cap. Each entry is `(key, value_bytes)`
-    /// where `value_bytes` is the value's TRUE encoded byte length (so callers
-    /// must measure `Bytes`/`Int`/`Double` values, not stringify them).
+    /// Enforce the per-attribute byte cap.
+    ///
+    /// Each entry is `(key, value_bytes)`, where `value_bytes` is the value's
+    /// TRUE encoded byte length. Callers must therefore measure `Bytes`, `Int`
+    /// and `Double` values, and must not convert them to a string first.
     ///
     /// # Errors
     /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -156,14 +158,15 @@ fn f64_from_u64(value: u64) -> f64 {
 mod rate_bucket {
     use std::{sync::Mutex, time::Instant};
 
-    /// Token bucket with separately-configured refill rate and burst capacity
-    /// and all-or-nothing consumption.
+    /// Token bucket with a separately-configured refill rate and burst
+    /// capacity, and with all-or-nothing consumption.
     ///
-    /// The broker's `TokenBucket` couples capacity to the refill rate (a single
-    /// `set_rate` sets both) and only consumes partially, neither of which fits
-    /// the traces ingest limiter (distinct burst capacity + reject-without-spend
-    /// semantics). The refill arithmetic mirrors the broker bucket: tokens
-    /// accrue at `rate_per_sec` and saturate at `capacity`.
+    /// The broker's `TokenBucket` couples capacity to the refill rate, because
+    /// a single `set_rate` sets both, and it consumes only partially. Neither
+    /// behaviour fits the traces ingest limiter, which needs a distinct burst
+    /// capacity and reject-without-spend semantics. The refill arithmetic
+    /// mirrors the broker bucket: tokens accrue at `rate_per_sec` and saturate
+    /// at `capacity`.
     #[derive(Debug)]
     pub struct RateBucket {
         rate_per_sec: u64,
@@ -189,9 +192,11 @@ mod rate_bucket {
             }
         }
 
-        /// Consume `requested` tokens all-or-nothing. Returns `true` and spends
-        /// the tokens if the full amount is available after refill, otherwise
-        /// returns `false` and spends nothing.
+        /// Consume `requested` tokens all-or-nothing.
+        ///
+        /// This returns `true` and spends the tokens if the full amount is
+        /// available after refill. Otherwise it returns `false` and spends
+        /// nothing.
         pub fn try_consume_all(&self, requested: u64) -> bool {
             let now = Instant::now();
             let mut state = self

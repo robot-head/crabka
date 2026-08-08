@@ -1,9 +1,10 @@
-//! `KafkaUser` reconciler — unidirectional (CRD wins).
+//! `KafkaUser` reconciler. It works in one direction, and the CRD wins.
 //!
-//! Provisions SCRAM-SHA-512 credentials via `AlterUserScramCredentials`
-//! and keeps the ACL set in sync via `CreateAcls` / `DeleteAcls`. The
-//! generated password lives in a Kubernetes Secret owner-referenced to
-//! the `KafkaUser`, so cluster delete cascades automatically.
+//! The reconciler provisions SCRAM-SHA-512 credentials with
+//! `AlterUserScramCredentials`. It keeps the ACL set in sync with
+//! `CreateAcls` and `DeleteAcls`. The generated password lives in a
+//! Kubernetes Secret with an owner reference to the `KafkaUser`, so a
+//! delete of the cluster also deletes the Secret.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,7 +52,7 @@ use crate::{
 
 const FINALIZER: &str = "crabka.io/user-finalizer";
 
-/// Run the controller forever.
+/// Runs the controller forever.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
@@ -79,8 +80,9 @@ pub fn error_policy(_obj: Arc<KafkaUser>, err: &ReconcileError, ctx: Arc<Context
     common::error_requeue(ctx)
 }
 
-/// Reconcile entry point. Times the pass and records the reconcile
-/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
+/// Reconcile entry point. It times the pass, records the reconcile
+/// counter and histogram, then calls the internal `reconcile_inner`
+/// operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -868,8 +870,9 @@ async fn user_broker_error(
     Ok(common::requeue(error_requeue))
 }
 
-/// Build an `AclEntryFilter` that matches exactly one `AclEntry`.
-/// Used to scope `DeleteAcls` to a single tuple at a time.
+/// Builds an `AclEntryFilter` that matches exactly one `AclEntry`.
+///
+/// This limits `DeleteAcls` to one tuple at a time.
 pub(crate) fn entry_to_exact_filter(e: &AclEntry) -> AclEntryFilter {
     AclEntryFilter {
         resource_type: Some(e.resource_type),
@@ -882,10 +885,12 @@ pub(crate) fn entry_to_exact_filter(e: &AclEntry) -> AclEntryFilter {
     }
 }
 
-/// Kafka principal for the user. SCRAM and `tls-external` users use
-/// bare `User:<name>`; TLS users use `User:CN=<name>` (matches the
-/// cert's Subject DN, which is what the broker's
-/// `extract_principal_from_cert` returns at runtime).
+/// Returns the Kafka principal for the user.
+///
+/// A SCRAM user and a `tls-external` user get the plain `User:<name>`. A
+/// TLS user gets `User:CN=<name>`. That form matches the Subject DN of the
+/// cert, which is what `extract_principal_from_cert` in the broker returns
+/// at runtime.
 pub(crate) fn principal_for(name: &str, auth: &Authentication) -> String {
     match auth {
         Authentication::ScramSha512(_)
@@ -896,8 +901,10 @@ pub(crate) fn principal_for(name: &str, auth: &Authentication) -> String {
     }
 }
 
-/// Expand the CRD's `acls` list (one rule may carry many operations)
-/// into the per-tuple `AclEntry` set the broker stores. Empty when
+/// Expands the `acls` list of the CRD into the per-tuple `AclEntry` set
+/// that the broker stores.
+///
+/// One rule can carry many operations. The result is empty when
 /// `authorization` is absent.
 pub(crate) fn expand_spec_acls(auth: Option<&Authorization>, principal: &str) -> Vec<AclEntry> {
     let Some(Authorization::Simple(simple)) = auth else {
@@ -920,9 +927,12 @@ pub(crate) fn expand_spec_acls(auth: Option<&Authorization>, principal: &str) ->
     out
 }
 
-/// Pure: split `(desired, current)` into `(additions, deletions)`.
-/// `additions` are entries in `desired` but not in `current`; `deletions`
-/// are entries in `current` but not in `desired`.
+/// Splits `(desired, current)` into `(additions, deletions)`. This
+/// function is pure.
+///
+/// `additions` holds the entries that are in `desired` and not in
+/// `current`. `deletions` holds the entries that are in `current` and not
+/// in `desired`.
 pub(crate) fn diff_acls(
     current: &BTreeSet<AclEntry>,
     desired: &BTreeSet<AclEntry>,
@@ -1015,11 +1025,13 @@ fn op_to_admin(op: AclOp) -> AclOperation {
 
 // --- Secret management ---------------------------------------------------
 
-/// Get-or-create the password Secret. If a Secret already exists with a
-/// `password` key, reuse it (the SCRAM credential is regenerated each
-/// reconcile from the same plaintext so the operator-managed password
-/// is stable). On first reconcile the operator allocates
-/// `password_len_bytes` of cryptographically-random data and stores its
+/// Gets the password Secret, or creates it.
+///
+/// When a Secret with a `password` key already exists, this function
+/// reuses it. The operator builds the SCRAM credential again on each
+/// reconcile from the same plaintext, so the password that it manages
+/// stays the same. On the first reconcile, the operator allocates
+/// `password_len_bytes` of cryptographically random data and stores its
 /// URL-safe base64 encoding.
 #[tracing::instrument(level = "info", skip_all, fields(user = %obj.name_any()), err)]
 async fn ensure_password_secret(
@@ -1058,11 +1070,14 @@ fn random_password(len_bytes: u16) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }
 
-/// Render the user-credential Secret. Owner-ref'd to the `KafkaUser`
-/// so cluster delete cascades. Keys:
-///   - `password` (raw plaintext, used by `KafkaUser` admin RPCs and
-///     pasted into application configuration)
-///   - `sasl.jaas.config` (ready-to-paste JAAS line for JVM clients)
+/// Renders the user-credential Secret.
+///
+/// The Secret has an owner reference to the `KafkaUser`, so a delete of
+/// the cluster also deletes the Secret. It has two keys:
+///   - `password`, the raw plaintext. The `KafkaUser` admin RPCs use it,
+///     and a user can paste it into an application configuration.
+///   - `sasl.jaas.config`, a JAAS line that a JVM client can use
+///     directly.
 fn render_password_secret(obj: &KafkaUser, password: &str) -> Result<Secret, ReconcileError> {
     let name = obj.name_any();
     let jaas = format!(

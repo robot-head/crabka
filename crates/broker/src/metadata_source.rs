@@ -1,8 +1,10 @@
-//! `MetadataSource` — the metadata authority a broker reads from and
-//! writes through. Combined/controller nodes back it with a live
-//! `ControllerHandle` (openraft voter); broker-only nodes back it with a
-//! `MetadataObserver` (true `KRaft` observer) plus a write-forwarding path
-//! to the controller quorum. Handlers depend only on this trait.
+//! `MetadataSource`: the metadata authority a broker reads from and
+//! writes through.
+//!
+//! Combined and controller nodes back it with a live `ControllerHandle`,
+//! which is an openraft voter. Broker-only nodes back it with a
+//! `MetadataObserver`, a true `KRaft` observer, plus a write-forwarding
+//! path to the controller quorum. Handlers depend only on this trait.
 
 use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
@@ -27,16 +29,17 @@ pub trait MetadataSource: Send + Sync {
     ) -> Result<SubmitChangeResult, RaftError>;
     async fn change_membership(&self, new_voters: BTreeSet<NodeId>) -> Result<(), RaftError>;
     async fn add_learner(&self, node_id: NodeId, node: Node) -> Result<(), RaftError>;
-    /// The controller listener's bound address. Meaningful only on
-    /// controller/combined nodes; broker-only observers have no controller
-    /// listener and report an unspecified address.
+    /// The controller listener's bound address. It is meaningful only on
+    /// controller and combined nodes. Broker-only observers have no
+    /// controller listener and report an unspecified address.
     fn controller_bound_addr(&self) -> SocketAddr;
     /// Read a byte window of the latest metadata snapshot to serve
-    /// `FetchSnapshot`. Controller/combined nodes back this with their
-    /// on-disk checkpoint; broker-only observers have none to serve.
+    /// `FetchSnapshot`. Controller and combined nodes back this with their
+    /// on-disk checkpoint. Broker-only observers have none to serve.
     fn read_snapshot_range(&self, position: i64, max_bytes: i32) -> SnapshotRange;
-    /// Schedule a metadata snapshot. Meaningful only on controller/combined
-    /// nodes; broker-only observers have no log of their own to snapshot.
+    /// Schedule a metadata snapshot. It is meaningful only on controller and
+    /// combined nodes. Broker-only observers have no log of their own to
+    /// snapshot.
     async fn trigger_snapshot(&self) -> Result<(), RaftError>;
     async fn add_voter(&self, req: AddVoter) -> Result<ReconfigOutcome, RaftError>;
     async fn remove_voter(&self, req: RemoveVoter) -> Result<ReconfigOutcome, RaftError>;
@@ -199,8 +202,9 @@ impl MetadataSource for ObserverSource {
 /// voter list. Mirrors the `API_KEY_SUBMIT_CHANGE` request the controller
 /// already serves.
 pub struct QuorumForwarder {
-    /// Voter map `(id, "<host>:<port>")` — host carried verbatim; the dialer
-    /// re-resolves it per connect so a rejoining peer's new pod IP is reached.
+    /// Voter map `(id, "<host>:<port>")`. The map carries the host verbatim.
+    /// The dialer re-resolves it on each connect, so it reaches a rejoining
+    /// peer's new pod IP.
     pub(crate) voters: Vec<(NodeId, String)>,
     pub(crate) dialer: Arc<dyn OutboundDialer>,
     pub(crate) client_id: String,
@@ -242,9 +246,10 @@ impl QuorumForwarder {
 }
 
 /// Order the voters to try when forwarding `submit_change`: the hinted leader
-/// first (when known and present in the set), then every OTHER voter as a
-/// fallback. Pure so the ordering — especially the "every voter except the
-/// hint" fallback — is unit-tested without standing up a live quorum.
+/// first when it is known and present in the set, then every OTHER voter as a
+/// fallback. The function is pure, so a unit test can check the ordering
+/// without a live quorum. That includes the "every voter except the hint"
+/// fallback.
 fn build_forward_order(voters: &[(NodeId, String)], hint: Option<NodeId>) -> Vec<(NodeId, String)> {
     let mut order: Vec<(NodeId, String)> = Vec::new();
     if let Some(l) = hint

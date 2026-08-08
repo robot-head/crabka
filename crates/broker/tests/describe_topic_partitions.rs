@@ -1,4 +1,4 @@
-//! KIP-966 `DescribeTopicPartitions` (`api_key` 75) — paginated topic
+//! KIP-966 `DescribeTopicPartitions` (`api_key` 75): the paginated topic
 //! listing the JVM admin client uses for `kafka-topics --describe`
 //! against Kafka 3.7+ brokers.
 //!
@@ -6,8 +6,8 @@
 //!   * named-request, fetch-all, and unknown-topic paths
 //!   * `is_internal` flag set on Crabka's three internal topics
 //!   * `topic_authorized_operations` populated (KIP-430 helper) on every
-//!     Allow row — no opt-in flag in this API's v0 schema
-//!   * Pagination via `response_partition_limit` + the `cursor` /
+//!     Allow row. This API's v0 schema has no opt-in flag.
+//!   * Pagination through `response_partition_limit` and the `cursor` /
 //!     `next_cursor` round-trip
 //!   * Stable sort order on fetch-all (alphabetical)
 
@@ -217,11 +217,12 @@ async fn internal_topics_carry_is_internal_flag() {
     p.broker.shutdown().await;
 }
 
-/// JVM 3.8 admin client NPEs (in
-/// `DescribeTopicPartitionsResponse.partitionToTopicPartitionInfo`) when
-/// `eligibleLeaderReplicas` or `lastKnownElr` decode as `null`. The
+/// The JVM 3.8 admin client NPEs when `eligibleLeaderReplicas` or
+/// `lastKnownElr` decode as `null`. The NPE happens in
+/// `DescribeTopicPartitionsResponse.partitionToTopicPartitionInfo`. The
 /// schema marks both nullable, but real Kafka brokers always emit empty
-/// lists. Pin the empty-list shape so we don't regress.
+/// lists. This test pins the empty-list shape so the broker does not
+/// regress.
 #[tokio::test]
 async fn elr_lists_are_empty_not_null_for_jvm_3_8_admin_compatibility() {
     let p = support::start().await;

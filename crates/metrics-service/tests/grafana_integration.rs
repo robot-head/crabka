@@ -1,22 +1,27 @@
-//! Docker-backed Grafana end-to-end coverage: a real Grafana with a provisioned
-//! Prometheus-type datasource pointed at the in-process Crabka query API, driven
-//! across (a) the full `PromQL` query-shape matrix via Grafana's dashboard query
-//! path (`POST /api/ds/query`, instant + range) and (b) the metadata / label /
-//! series / exemplar / build-info surfaces via Grafana's datasource resource
-//! proxy (`/api/datasources/uid/<uid>/resources/...`). Every assertion exercises
-//! the full Grafana -> Prometheus-datasource -> Crabka path.
+//! Docker-backed Grafana end-to-end coverage.
 //!
-//! Ignored by default because it pulls and runs `mirror.gcr.io/grafana/grafana` under Docker.
+//! The test runs a real Grafana with a provisioned Prometheus-type datasource
+//! that points at the in-process Crabka query API. The test drives the full
+//! `PromQL` query-shape matrix through Grafana's dashboard query path:
+//! `POST /api/ds/query`, instant and range. The test also drives the metadata,
+//! label, series, exemplar, and build-info surfaces through Grafana's
+//! datasource resource proxy at `/api/datasources/uid/<uid>/resources/...`.
+//! Every assertion exercises the full Grafana -> Prometheus-datasource ->
+//! Crabka path.
+//!
+//! Cargo ignores this test by default, because it pulls and runs
+//! `mirror.gcr.io/grafana/grafana` under Docker.
 //! Run with:
 //!
 //! `cargo test -p crabka-metrics-service --test grafana_integration -- --ignored --nocapture`
 //!
-//! Host reachability (platform-specific knob): Grafana runs in a container and
-//! must reach the Crabka server running on the host. We bind Crabka to
-//! `0.0.0.0:0`, hand the mapped port to Grafana via a provisioned datasource URL
-//! of `http://host.docker.internal:<port>`, and add `host.docker.internal ->
-//! host-gateway` to the container (`with_host(.., Host::HostGateway)`), which is
-//! how Docker exposes the host from inside a container on Linux/macOS/Windows.
+//! Host reachability is platform-specific. Grafana runs in a container and must
+//! reach the Crabka server on the host. The test binds Crabka to `0.0.0.0:0`
+//! and gives the mapped port to Grafana in a provisioned datasource URL of
+//! `http://host.docker.internal:<port>`. The test also adds
+//! `host.docker.internal -> host-gateway` to the container with
+//! `with_host(.., Host::HostGateway)`. Docker exposes the host to a container
+//! this way on Linux, macOS, and Windows.
 
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
@@ -48,26 +53,33 @@ mod diff_corpus;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// Tenant header Grafana forwards to Crabka (provisioned as a static
-/// `X-Scope-OrgID` header on the datasource).
+/// Tenant header that Grafana forwards to Crabka.
+///
+/// The provisioned datasource carries it as a static `X-Scope-OrgID` header.
 const TENANT: &str = "grafana";
 
 /// Grafana's default HTTP port.
 const GRAFANA_PORT: u16 = 3000;
 
-/// Stable datasource UID referenced by the `/api/ds/query` payload.
+/// Stable datasource UID that the `/api/ds/query` payload references.
 const DATASOURCE_UID: &str = "crabka-prom";
 
-/// Pinned Grafana image tag (no `:latest`). Override via `CRABKA_GRAFANA_IMAGE_TAG`.
+/// Pinned Grafana image tag, never `:latest`.
+///
+/// Override it with the `CRABKA_GRAFANA_IMAGE_TAG` environment variable.
 const GRAFANA_IMAGE_TAG: &str = "11.6.1";
 
-/// The seed data spans t=0..45s; every instant query evaluates at this instant.
+/// The seed data spans t=0..45s.
+///
+/// Every instant query evaluates at this instant.
 const EVAL_MS: i64 = 45_000;
 
-/// Provisioned datasource pointing Grafana at Crabka via the host gateway. The
-/// `{PORT}` placeholder is substituted with the mapped Crabka port at runtime.
-/// `X-Scope-OrgID` is sent on every datasource request (queries AND resource
-/// calls) so Crabka keys storage by the test tenant.
+/// Provisioned datasource that points Grafana at Crabka through the host
+/// gateway.
+///
+/// The test replaces the `{PORT}` placeholder with the mapped Crabka port at
+/// runtime. Grafana sends `X-Scope-OrgID` on every datasource request, both
+/// queries and resource calls, so Crabka keys storage by the test tenant.
 const DATASOURCE_YAML_TEMPLATE: &str = r"apiVersion: 1
 datasources:
   - name: Crabka
@@ -1049,8 +1061,10 @@ impl Expect {
     }
 }
 
-/// Run an instant query through Grafana and assert the parsed series exactly
-/// match the expected `(label-subset, value)` set (order-independent).
+/// Run an instant query through Grafana and assert the parsed series.
+///
+/// The series must match the expected `(label-subset, value)` set exactly, in
+/// any order.
 async fn instant(
     client: &reqwest::Client,
     base: &str,
@@ -1092,8 +1106,10 @@ async fn instant(
     }
 }
 
-/// Assert an instant query renders exactly `count` series (values unchecked,
-/// only that the path rendered the right cardinality).
+/// Assert an instant query renders exactly `count` series.
+///
+/// This helper does not check the values. It checks only that the path rendered
+/// the right cardinality.
 async fn instant_count(
     client: &reqwest::Client,
     base: &str,
@@ -1141,7 +1157,7 @@ async fn instant_present(
     }
 }
 
-/// Assert an instant query renders no series (empty vector).
+/// Assert an instant query renders no series: an empty vector.
 async fn instant_empty(
     client: &reqwest::Client,
     base: &str,
@@ -1165,7 +1181,9 @@ async fn instant_empty(
 }
 
 /// Find the value of the parsed series whose labels include every `(k, v)` in
-/// `want` (label-subset match, ignoring `__name__`).
+/// `want`.
+///
+/// This is a label-subset match. It ignores `__name__`.
 fn series_value(series: &[(BTreeMap<String, String>, f64)], want: &[(&str, &str)]) -> Option<f64> {
     series
         .iter()
@@ -1177,8 +1195,11 @@ fn series_value(series: &[(BTreeMap<String, String>, f64)], want: &[(&str, &str)
 }
 
 /// Parse a Grafana `/api/ds/query` instant response into `(labels, value)` per
-/// series. Grafana renders each series as a numeric field carrying the series
-/// labels; the instant value is the field's last (only) datum.
+/// series.
+///
+/// Grafana renders each series as a numeric field that carries the series
+/// labels. The instant value is the last datum of the field, and the field has
+/// only one datum.
 fn parse_instant_series(resp: &Value) -> Vec<(BTreeMap<String, String>, f64)> {
     let mut out = Vec::new();
     let Some(frames) = resp["results"]["A"]["frames"].as_array() else {
@@ -1246,8 +1267,10 @@ fn parse_range_series(resp: &Value) -> Vec<Vec<f64>> {
     out
 }
 
-/// Issue a Grafana datasource query (`POST /api/ds/query`). `range` is
-/// `(start_ms, end_ms, step_secs)`; `None` is an instant query at `EVAL_MS`.
+/// Issue a Grafana datasource query with `POST /api/ds/query`.
+///
+/// The `range` parameter is `(start_ms, end_ms, step_secs)`. A `None` range
+/// makes an instant query at `EVAL_MS`.
 async fn ds_query(
     client: &reqwest::Client,
     base: &str,
@@ -1281,16 +1304,19 @@ async fn ds_query(
     Ok(response.json().await?)
 }
 
-/// GET a datasource resource path through Grafana's resource proxy, returning the
-/// raw Prometheus JSON the datasource produced. `path` is the datasource-relative
-/// path (e.g. `api/v1/labels`), already URL-encoded where needed.
+/// GET a datasource resource path through Grafana's resource proxy.
+///
+/// This function returns the raw Prometheus JSON that the datasource produced.
+/// The `path` parameter is the datasource-relative path, for example
+/// `api/v1/labels`. The `path` parameter is already URL-encoded where needed.
 async fn resource_json(client: &reqwest::Client, base: &str, path: &str) -> TestResult<Value> {
     let url = format!("{base}/api/datasources/uid/{DATASOURCE_UID}/resources/{path}");
     let response = client.get(url).send().await?.error_for_status()?;
     Ok(response.json().await?)
 }
 
-/// Extract a JSON string array (Prometheus `data` payloads for labels/values).
+/// Extract a JSON string array: the Prometheus `data` payloads for labels and
+/// values.
 fn string_array(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -1346,7 +1372,7 @@ async fn mapped_base_url(
 
 struct CrabkaServer {
     base_url: String,
-    /// Host-reachable port the container dials via host.docker.internal.
+    /// Host-reachable port that the container dials through host.docker.internal.
     host_port: u16,
     shutdown: Option<oneshot::Sender<()>>,
 }

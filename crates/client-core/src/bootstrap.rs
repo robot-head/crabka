@@ -17,9 +17,11 @@ where
     tokio::time::timeout(timeout.time().to_std(), lookup).await
 }
 
-/// Parse a comma-separated `host:port` list and resolve each entry via
-/// [`tokio::net::lookup_host`]. Silently skips entries that fail to resolve;
-/// returns [`ClientError::Disconnected`] if *none* resolve.
+/// Parse a comma-separated `host:port` list and resolve each entry with
+/// [`tokio::net::lookup_host`].
+///
+/// This function silently skips entries that fail to resolve. It returns
+/// [`ClientError::Disconnected`] if *none* resolve.
 #[tracing::instrument(level = "debug", skip_all, fields(bootstrap = %bootstrap), err)]
 pub async fn resolve(
     bootstrap: &str,

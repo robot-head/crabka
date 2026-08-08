@@ -1,15 +1,15 @@
 //! [`crate::codec::RecordCodec`] implementation backed by the Confluent Schema Registry.
 //!
-//! [`SchemaRegistryCodec`] wraps a [`SchemaResolver`] (in production, a
-//! [`super::client::SchemaRegistryClient`]) and, on the encode path, resolves
-//! the schema, serializes the structured body into the wire format, and
-//! prepends the Confluent frame. On the decode path it strips the frame, looks
-//! up the schema by id, and deserializes the payload to a JSON view.
+//! [`SchemaRegistryCodec`] wraps a [`SchemaResolver`], which in production is a
+//! [`super::client::SchemaRegistryClient`]. On the encode path the codec
+//! resolves the schema, serializes the structured body into the wire format,
+//! and prepends the Confluent frame. On the decode path it strips the frame,
+//! looks up the schema by id, and deserializes the payload to a JSON view.
 //!
 //! The codec depends on the registry through the small [`SchemaResolver`] trait
-//! rather than the concrete client, so the encode/decode logic is unit-testable
-//! against a fake resolver with no live registry. The live wiring (client →
-//! HTTP) is exercised by the integration test.
+//! rather than the concrete client. A unit test can therefore drive the encode
+//! and decode logic against a fake resolver, with no live registry. The
+//! integration test exercises the live client-to-HTTP wiring.
 
 use std::sync::Arc;
 
@@ -18,11 +18,11 @@ use bytes::Bytes;
 use super::client::SchemaRegistryClient;
 use crate::codec::{CodecError, Decoded, EncodeBody, SchemaFormat, SchemaMeta};
 
-/// Schema lookups the codec needs, factored out of the concrete client so the
-/// encode/decode paths can be unit-tested against a fake.
+/// Schema lookups the codec needs, held apart from the concrete client so a
+/// unit test can drive the encode and decode paths against a fake.
 ///
-/// [`SchemaRegistryClient`] implements this by delegating to its caching HTTP
-/// methods.
+/// [`SchemaRegistryClient`] implements this trait, and each method delegates to
+/// its caching HTTP methods.
 #[async_trait::async_trait]
 pub trait SchemaResolver: Send + Sync + 'static {
     /// Resolve `(schema string, format)` by numeric schema id.
@@ -42,26 +42,26 @@ impl SchemaResolver for SchemaRegistryClient {
     }
 }
 
-/// A [`crate::codec::RecordCodec`] that encodes/decodes record values via a
-/// Confluent Schema Registry.
+/// A [`crate::codec::RecordCodec`] that encodes and decodes record values with
+/// a Confluent Schema Registry.
 ///
-/// Constructed once at gateway startup and shared across all connection
-/// handlers via `Arc`.
+/// The gateway constructs it once at startup and shares it across all
+/// connection handlers in an `Arc`.
 pub struct SchemaRegistryCodec {
-    /// The schema resolver (in production, the caching HTTP client).
+    /// The schema resolver, which in production is the caching HTTP client.
     pub client: Arc<dyn SchemaResolver>,
-    /// When `true`, `EncodeBody::Raw` bytes are Confluent-framed using the
-    /// subject's latest registered schema id (the bytes are assumed already
-    /// serialized in that format). When `false` (default) raw bytes pass
-    /// through verbatim.
+    /// When `true`, the codec Confluent-frames `EncodeBody::Raw` bytes with the
+    /// subject's latest registered schema id. It assumes those bytes are
+    /// already serialized in that format. When `false`, the default, raw bytes
+    /// pass through unchanged.
     pub frame_raw: bool,
 }
 
 impl SchemaRegistryCodec {
     /// Construct a codec over the concrete [`SchemaRegistryClient`].
     ///
-    /// This is the constructor the gateway wiring uses; the client is boxed
-    /// behind the [`SchemaResolver`] trait object.
+    /// The gateway wiring uses this constructor. It boxes the client behind the
+    /// [`SchemaResolver`] trait object.
     #[must_use]
     pub fn new(client: Arc<SchemaRegistryClient>, frame_raw: bool) -> Self {
         Self {
@@ -70,8 +70,8 @@ impl SchemaRegistryCodec {
         }
     }
 
-    /// Construct a codec over an arbitrary [`SchemaResolver`] (used by tests
-    /// with a fake resolver).
+    /// Construct a codec over any [`SchemaResolver`]. Tests use it with a fake
+    /// resolver.
     #[must_use]
     pub fn with_resolver(client: Arc<dyn SchemaResolver>, frame_raw: bool) -> Self {
         Self { client, frame_raw }
@@ -178,9 +178,9 @@ mod tests {
         ]
     }"#;
 
-    /// A canned-schema resolver for unit tests — no live registry. Records the
-    /// id under which `latest` answers, and serves a single schema for both
-    /// lookup paths.
+    /// A canned-schema resolver for unit tests, with no live registry. It
+    /// records the id that `latest` answers with, and it serves a single schema
+    /// for both lookup paths.
     struct FakeResolver {
         id: i32,
         schema: String,

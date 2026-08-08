@@ -9,20 +9,20 @@
 //! Broker-side integration tests for KIP-73 replication throttle.
 //!
 //! Tests:
-//! 1. `broker_scoped_alter_persists_in_image` — `IncrementalAlterConfigs`
-//!    (`resource_type=Broker`) sets `leader.replication.throttled.rate`; visible
-//!    in `MetadataImage` via `controller_image_for_test`.
-//! 2. `topic_throttle_config_propagates` — `IncrementalAlterConfigs`
-//!    (`resource_type=Topic`) sets `leader.replication.throttled.replicas`; the
-//!    `TopicThrottle` helper reports it correctly.
-//! 3. `throttle_rate_caps_fetch_response_size` — produce 8 KB, set
-//!    leader-rate=512, then Fetch with `replica_id >= 0`; assert response is
-//!    well under 8 KB.
-//! 4. `unthrottled_partition_unaffected` — same setup without throttle
-//!    config; Fetch delivers the full 8 KB.
+//! 1. `broker_scoped_alter_persists_in_image`: `IncrementalAlterConfigs`
+//!    (`resource_type=Broker`) sets `leader.replication.throttled.rate`. The
+//!    value is visible in `MetadataImage` through `controller_image_for_test`.
+//! 2. `topic_throttle_config_propagates`: `IncrementalAlterConfigs`
+//!    (`resource_type=Topic`) sets `leader.replication.throttled.replicas`.
+//!    The `TopicThrottle` helper reports it correctly.
+//! 3. `throttle_rate_caps_fetch_response_size`: produce 8 KB, set
+//!    leader-rate=512, then Fetch with `replica_id >= 0`. Assert that the
+//!    response is well under 8 KB.
+//! 4. `unthrottled_partition_unaffected`: the same setup without throttle
+//!    config. Fetch delivers the full 8 KB.
 //!
-//! Gated to non-Windows to match the multi-broker test convention from
-//! slices 10b/12b/14/15.
+//! The suite is gated to non-Windows to match the multi-broker test convention
+//! from slices 10b/12b/14/15.
 
 use std::{io, net::SocketAddr};
 
@@ -211,7 +211,7 @@ async fn start_single_broker_plaintext() -> (BrokerHandle, TempDir, SocketAddr) 
     (handle, log_dir, addr)
 }
 
-/// Create a topic via SASL/PLAIN as the given admin user.
+/// Create a topic through SASL/PLAIN as the given admin user.
 /// Copied from `partition_reassignment.rs`.
 async fn create_topic_as_admin(
     addr: SocketAddr,
@@ -252,7 +252,8 @@ async fn create_topic_as_admin(
     );
 }
 
-/// Create a topic via PLAINTEXT (no SASL, compat shim = allow-all).
+/// Create a topic through PLAINTEXT. There is no SASL, and the compat shim
+/// allows everything.
 async fn create_topic_plaintext(addr: SocketAddr, topic: &str, partitions: i32, rf: i16) {
     use crabka_protocol::owned::{
         create_topics_request::{CreatableTopic, CreateTopicsRequest},
@@ -296,7 +297,8 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
 
 /// Drive `IncrementalAlterConfigs` (`api_key=44`) over a SASL/PLAIN connection.
 /// `resources` is a list of `(resource_type, name, [(config_name, value, op)])`.
-/// Returns the top-level error code from the first resource response (0 = success).
+/// Returns the top-level error code from the first resource response. 0 means
+/// success.
 async fn drive_incremental_alter_configs(
     addr: SocketAddr,
     user: &str,
@@ -352,8 +354,8 @@ async fn drive_incremental_alter_configs(
     resp.responses.first().map_or(0, |r| r.error_code)
 }
 
-/// Drive `IncrementalAlterConfigs` (`api_key=44`) over a PLAINTEXT connection
-/// (no SASL — compat shim allows everything).
+/// Drive `IncrementalAlterConfigs` (`api_key=44`) over a PLAINTEXT connection.
+/// There is no SASL, and the compat shim allows everything.
 async fn drive_incremental_alter_configs_plaintext(
     addr: SocketAddr,
     resources: ConfigResources,
@@ -526,9 +528,10 @@ async fn produce_plaintext(addr: SocketAddr, topic: &str, record_bytes: usize, c
     );
 }
 
-/// Issue a single Fetch request with `replica_id` (>= 0 = inter-broker
-/// replica fetch, subject to leader-side throttle) over a PLAINTEXT
-/// connection. Returns the raw response payload byte length.
+/// Issue a single Fetch request with `replica_id` over a PLAINTEXT
+/// connection. A value `>= 0` means an inter-broker replica fetch, which the
+/// leader-side throttle applies to. Returns the raw response payload byte
+/// length.
 async fn fetch_plaintext_replica(addr: SocketAddr, topic: &str, replica_id: i32) -> usize {
     const VERSION: i16 = 12; // flexible
 
@@ -596,7 +599,7 @@ async fn fetch_plaintext_replica(addr: SocketAddr, topic: &str, replica_id: i32)
 
 /// Test 1: `IncrementalAlterConfigs` with `resource_type=Broker` sets the
 /// `leader.replication.throttled.rate` key. The value must be visible in
-/// the metadata image via `controller_image_for_test`.
+/// the metadata image through `controller_image_for_test`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn broker_scoped_alter_persists_in_image() {
     let (handle, _dir, addr) =
@@ -634,7 +637,7 @@ async fn broker_scoped_alter_persists_in_image() {
 }
 
 /// Test 2: `IncrementalAlterConfigs` with `resource_type=Topic` sets
-/// `leader.replication.throttled.replicas`; `TopicThrottle::for_topic`
+/// `leader.replication.throttled.replicas`. `TopicThrottle::for_topic`
 /// returns the correct throttled-replica entries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_throttle_config_propagates() {
@@ -677,8 +680,8 @@ async fn topic_throttle_config_propagates() {
 /// `replica_id=2` must return a response well under 8 KB.
 ///
 /// The token bucket has a one-second burst capacity at the configured rate, so
-/// we set the rate to 512 bytes/sec; a 8 KB response must be capped to at
-/// most 512 bytes of record data.
+/// the test sets the rate to 512 bytes/sec. An 8 KB response must be capped to
+/// at most 512 bytes of record data.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn throttle_rate_caps_fetch_response_size() {
     let (handle, _dir, addr) = start_single_broker_plaintext().await;

@@ -1,11 +1,13 @@
-//! `SyncGroup` (`api_key=14`). Routes into the group's unified actor as a
-//! `ClassicSync` message. The leader's call installs assignments and the actor
-//! drains the parked followers; a follower with no assignment yet is parked
-//! until then (capped by the broker's configured follower wait).
+//! `SyncGroup` (`api_key=14`). The handler routes the request into the group's
+//! unified actor as a `ClassicSync` message.
 //!
-//! KIP-559 (v5+): the response carries `protocol_type` + `protocol_name`
-//! so an L7 proxy can route the call without remembering the prior
-//! `JoinGroup` exchange.
+//! The leader's call installs the assignments, and the actor then releases the
+//! parked followers. The actor parks a follower that has no assignment yet
+//! until that point, up to the broker's configured follower wait.
+//!
+//! From v5, KIP-559 makes the response carry `protocol_type` and
+//! `protocol_name`, so an L7 proxy can route the call without remembering the
+//! earlier `JoinGroup` exchange.
 
 use bytes::Bytes;
 use crabka_protocol::{

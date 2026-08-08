@@ -1,14 +1,17 @@
-//! Increment D end-to-end validation: produce a large (>64 KiB) records run,
-//! then consume it over the real loopback TCP socket and assert the record
-//! values round-trip **byte-for-byte**.
+//! Increment D end-to-end validation of a large-message fetch.
+//!
+//! The test produces a records run larger than 64 KiB. It then consumes the
+//! run over the real loopback TCP socket and asserts that the record values
+//! round-trip **byte-for-byte**.
 //!
 //! On Linux this fetch crosses the 32 KiB `sendfile` threshold on a plaintext
-//! `TcpStream`, so the records region is transmitted via the kernel
-//! `sendfile(2)` zero-copy path. If sendfile transmitted the wrong file range
-//! (or a partial-write loop bug dropped/duplicated bytes), the consumer's CRC
-//! check and the value comparison below would fail. On Windows / TLS the same
-//! test exercises the portable vectored (Increment C) fallback — the wire bytes
-//! are identical either way, so the assertions hold on every platform.
+//! `TcpStream`, so the kernel sends the records region through the
+//! `sendfile(2)` zero-copy path. The consumer's CRC check and the value
+//! comparison below fail if sendfile sends the wrong file range, or if a
+//! partial-write loop bug drops or duplicates bytes. On Windows and on TLS
+//! the same test exercises the portable vectored Increment C fallback. The
+//! wire bytes are identical either way, so the assertions hold on every
+//! platform.
 
 use assert2::assert;
 mod support;
@@ -62,8 +65,8 @@ async fn topic_id_for(p: &support::InProcess, name: &str) -> WireUuid {
         .unwrap_or_default()
 }
 
-/// Build `n` records whose values are distinct, sizeable, and content-addressed
-/// by index so any byte misplacement is detectable.
+/// Build `n` records whose values are distinct, large, and content-addressed
+/// by index. Any misplaced byte is then detectable.
 fn large_records(n: i32, value_len: usize) -> (RecordBatch, Vec<Bytes>) {
     let mut batch = RecordBatch {
         last_offset_delta: (n - 1).max(0),

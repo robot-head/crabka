@@ -1,30 +1,33 @@
-//! `DescribeTopicPartitions` (`api_key=75`, KIP-966). Paginated topic-+-partition
-//! listing the JVM admin client uses for `kafka-topics --describe`
-//! against Kafka 3.7+ brokers. Replaces the Metadata-fan-out the older
-//! admin client used for the same job.
+//! `DescribeTopicPartitions` (`api_key=75`, KIP-966) lists topics and their
+//! partitions in pages.
+//!
+//! The JVM admin client uses this API for `kafka-topics --describe` against
+//! Kafka 3.7+ brokers. It replaces the Metadata fan-out that the older admin
+//! client used for the same job.
 //!
 //! ## Request shape
 //!
-//! - `topics`: empty → return all topics (alphabetical). Non-empty →
-//!   return exactly those, in request order.
-//! - `response_partition_limit`: cap on partition rows in the response.
-//!   Default 2000.
-//! - `cursor`: optional resume point `(topic_name, partition_index)`.
-//!   When set, the response starts at that topic's partition, skipping
-//!   earlier topics entirely.
+//! - `topics`: if empty, the broker returns all topics in alphabetical order.
+//!   If not empty, the broker returns exactly those topics, in request order.
+//! - `response_partition_limit`: the maximum number of partition rows in the
+//!   response. Default 2000.
+//! - `cursor`: an optional resume point `(topic_name, partition_index)`. If
+//!   set, the response starts at that topic's partition and the broker skips
+//!   all earlier topics.
 //!
 //! ## ACL semantics
 //!
-//! Per-topic `Describe` on `Topic(name)`. For *named* requests, Deny →
-//! per-topic row with `error_code = TOPIC_AUTHORIZATION_FAILED (29)`.
-//! For *fetch-all* requests, Deny → silently omit (matches
-//! `Metadata`-fetch-all so the broker doesn't leak topic names to
-//! unauthorized clients).
+//! The broker checks `Describe` on `Topic(name)` for each topic. For a *named*
+//! request, a Deny gives a topic row with
+//! `error_code = TOPIC_AUTHORIZATION_FAILED (29)`. For a *fetch-all* request, a
+//! Deny makes the broker omit the topic. This matches `Metadata` fetch-all, so
+//! the broker does not leak topic names to unauthorized clients.
 //!
 //! ## KIP-430 integration
 //!
-//! Every Allow row carries `topic_authorized_operations` — the v0 schema
-//! always encodes this field (no opt-in flag, unlike Metadata).
+//! Every Allow row carries `topic_authorized_operations`. The v0 schema always
+//! encodes this field. Metadata has an opt-in flag for it, but this API does
+//! not.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
@@ -48,9 +51,10 @@ use crate::{
     handlers::authorized_operations::authorized_operations_bits,
 };
 
-/// Crabka's three internal topics. JVM clients display these with the
-/// `is_internal` flag set so `kafka-topics --list` and friends don't
-/// surface them by default.
+/// Returns `true` for Crabka's three internal topics.
+///
+/// Responses set the `is_internal` flag on these topics, so
+/// `kafka-topics --list` and related tools do not show them by default.
 fn is_internal_topic(name: &str) -> bool {
     matches!(
         name,
@@ -309,9 +313,9 @@ mod tests {
             .expect("seed topic + partition");
     }
 
-    /// The response partition echoes the metadata image's `leader_epoch`
-    /// verbatim (KIP-320). A non-zero epoch pins the field against the
-    /// struct-field-deletion mutant, which would default it to 0.
+    /// The response partition echoes the `leader_epoch` of the metadata image
+    /// exactly (KIP-320). A non-zero epoch pins the field against the
+    /// struct-field-deletion mutant, which would set it to 0.
     #[tokio::test]
     async fn response_partition_carries_leader_epoch() {
         let (broker_handle, _dir) =

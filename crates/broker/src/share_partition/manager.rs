@@ -1,10 +1,11 @@
 //! Share-partition leader manager (KIP-932).
 //!
-//! Owns one [`AcquisitionState`] machine per `(group, topic_id, partition)`
-//! this broker leads, lazily loaded from the durable `SharePersister` and
-//! re-persisted whenever it goes dirty. The `ShareFetch`/`ShareAcknowledge`
-//! handlers drive the per-cell state under its `tokio::sync::Mutex`; a
-//! background sweeper expires acquisition locks.
+//! The manager owns one [`AcquisitionState`] machine per
+//! `(group, topic_id, partition)` that this broker leads. It loads each machine
+//! lazily from the durable `SharePersister` and persists it again each time it
+//! goes dirty. The `ShareFetch` and `ShareAcknowledge` handlers drive the
+//! per-cell state under its `tokio::sync::Mutex`. A background sweeper expires
+//! the acquisition locks.
 //!
 //! Locking discipline: the `DashMap` guard is NEVER held across an `.await`.
 //! Callers clone the cell `Arc` out of the map first, then lock and await.
@@ -29,8 +30,10 @@ use crate::{
 /// Live acquisition-state machines keyed by `(group, topic_id, partition)`.
 type LeaderKey = (String, uuid::Uuid, i32);
 
-/// Per-broker owner of the share-partition acquisition state machines for the
-/// `(group, topic, partition)` triples this broker leads.
+/// Per-broker owner of the share-partition acquisition state machines.
+///
+/// The manager owns one machine for each `(group, topic, partition)` triple
+/// that this broker leads.
 pub(crate) struct SharePartitionLeaderManager {
     node_id: NodeId,
     partitions: Arc<PartitionRegistry>,
@@ -78,8 +81,9 @@ impl SharePartitionLeaderManager {
         }
     }
 
-    /// Validate (and advance) the share session for `(group, member)`. See
-    /// [`ShareSessionCache::validate`].
+    /// Validates the share session for `(group, member)` and advances it.
+    ///
+    /// See [`ShareSessionCache::validate`].
     pub(crate) fn validate_session(
         &self,
         group: &str,
@@ -89,10 +93,13 @@ impl SharePartitionLeaderManager {
         self.sessions.validate(group, member, epoch)
     }
 
-    /// Resolve the wire `(leader_id, leader_epoch)` for `(topic_id, partition)`
-    /// from the metadata image, for the `current_leader` redirect hint a
-    /// not-leader `ShareFetch`/`ShareAcknowledge` response carries. Returns
-    /// `(-1, -1)` when the topic/partition is unknown.
+    /// Resolves the wire `(leader_id, leader_epoch)` for
+    /// `(topic_id, partition)`.
+    ///
+    /// The values come from the metadata image. A not-leader `ShareFetch` or
+    /// `ShareAcknowledge` response carries them as the `current_leader`
+    /// redirect hint. This method returns `(-1, -1)` when the topic or the
+    /// partition is unknown.
     pub(crate) fn current_leader_of(&self, topic_id: uuid::Uuid, partition: i32) -> (i32, i32) {
         let image = self.controller.current_image();
         let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
@@ -105,10 +112,11 @@ impl SharePartitionLeaderManager {
             })
     }
 
-    /// Resolve the data-topic name for `topic_id` from the metadata image, or
-    /// `None` when the id is unknown. The share path carries only `topic_id`;
-    /// the handlers need the name to look up the local [`PartitionRegistry`]
-    /// entry and to key per-topic `Read` ACL checks.
+    /// Resolves the data-topic name for `topic_id` from the metadata image.
+    ///
+    /// Returns `None` when the id is unknown. The share path carries only
+    /// `topic_id`. The handlers need the name to look up the local
+    /// [`PartitionRegistry`] entry and to key the per-topic `Read` ACL checks.
     pub(crate) fn topic_name_for(&self, topic_id: uuid::Uuid) -> Option<String> {
         self.controller
             .current_image()
@@ -117,12 +125,14 @@ impl SharePartitionLeaderManager {
             .map(|t| t.name.clone())
     }
 
-    /// Returns `true` if this broker is the topic-partition leader for the
-    /// data topic identified by `topic_id`. Resolves the topic name from the
-    /// metadata image (the share path carries only `topic_id`) and compares
-    /// the partition leader to `node_id`.
+    /// Returns `true` if this broker leads the partition of the data topic
+    /// `topic_id`.
     ///
-    /// Consumed by the ShareFetch/ShareAcknowledge handlers.
+    /// The method resolves the topic name from the metadata image, because the
+    /// share path carries only `topic_id`. It then compares the partition
+    /// leader to `node_id`.
+    ///
+    /// The ShareFetch and ShareAcknowledge handlers call this method.
     pub(crate) fn topic_leader_is_self(&self, topic_id: uuid::Uuid, partition: i32) -> bool {
         let image = self.controller.current_image();
         let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
@@ -133,8 +143,10 @@ impl SharePartitionLeaderManager {
             .is_some_and(|p| p.leader == self.node_id)
     }
 
-    /// Current `leader_epoch` for `(topic_id, partition)` from the local
-    /// partition's atomic, or `0` when the partition isn't materialized here.
+    /// Current `leader_epoch` for `(topic_id, partition)`.
+    ///
+    /// The value comes from the atomic of the local partition. The method
+    /// returns `0` when the partition is not materialized on this broker.
     fn leader_epoch_for(&self, topic_id: uuid::Uuid, partition: i32) -> i32 {
         let image = self.controller.current_image();
         let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
@@ -148,15 +160,16 @@ impl SharePartitionLeaderManager {
             })
     }
 
-    /// Get (or lazily load) the acquisition-state cell for
-    /// `(group, topic_id, partition)`.
+    /// Gets the acquisition-state cell for `(group, topic_id, partition)`, and
+    /// loads it lazily on a miss.
     ///
-    /// On a cache miss the durable state is read from the persister and folded
-    /// into a fresh [`AcquisitionState`] (or an empty one when none exists).
-    /// The `DashMap` guard is dropped before the load `.await`; a concurrent
-    /// loader losing the insert race adopts the winner's cell.
+    /// On a cache miss the method reads the durable state from the persister
+    /// and folds it into a fresh [`AcquisitionState`]. If no durable state
+    /// exists, it uses an empty [`AcquisitionState`]. The method drops the
+    /// `DashMap` guard before the load `.await`. A concurrent loader that loses
+    /// the insert race adopts the cell of the winner.
     ///
-    /// Consumed by the ShareFetch/ShareAcknowledge handlers.
+    /// The ShareFetch and ShareAcknowledge handlers call this method.
     pub(crate) async fn get_or_load(
         &self,
         group: &str,
@@ -204,8 +217,10 @@ impl SharePartitionLeaderManager {
         self.leaders.entry(key).or_insert(cell).value().clone()
     }
 
-    /// Test-only: borrow the live acquisition cell without loading from the
-    /// persister (returns `None` if not currently led/loaded on this node).
+    /// Test-only: borrows the live acquisition cell without a persister load.
+    ///
+    /// Returns `None` if this node does not currently lead the partition or has
+    /// not loaded the cell.
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn peek_for_test(
         &self,
@@ -218,20 +233,25 @@ impl SharePartitionLeaderManager {
             .map(|c| c.value().clone())
     }
 
-    /// Drop the cached acquisition-state cell for `(group, topic_id, partition)`
-    /// so the next `get_or_load` re-reads the durable SPSO. The admin offset
-    /// RPCs call this after `AlterShareGroupOffsets`/`DeleteShareGroupOffsets`
-    /// rewrite the persister state, so an in-flight reset is observed by
-    /// subsequent `ShareFetch` on this broker. Cross-broker cells refresh on
-    /// their own next load, matching the classic offset-reset behavior.
+    /// Drops the cached acquisition-state cell for
+    /// `(group, topic_id, partition)`.
+    ///
+    /// The next `get_or_load` then re-reads the durable SPSO. The admin offset
+    /// RPCs call this method after `AlterShareGroupOffsets` or
+    /// `DeleteShareGroupOffsets` rewrites the persister state. A later
+    /// `ShareFetch` on this broker thus sees an in-flight reset. A cell on
+    /// another broker refreshes on its own next load, which matches the classic
+    /// offset-reset behavior.
     pub(crate) fn invalidate(&self, group: &str, topic_id: uuid::Uuid, partition: i32) {
         self.leaders
             .remove(&(group.to_string(), topic_id, partition));
     }
 
-    /// Persist `st` if it's dirty, then clear the dirty flag. Errors are
-    /// logged and swallowed — persistence is best-effort and never panics or
-    /// fails the calling fetch/ack.
+    /// Persists `st` if it is dirty, then clears the dirty flag.
+    ///
+    /// The method logs each error and then discards it. Persistence is
+    /// best-effort. It never panics, and it never fails the fetch or the ack
+    /// that called it.
     pub(crate) async fn persist_if_dirty(
         &self,
         group: &str,
@@ -266,12 +286,13 @@ impl SharePartitionLeaderManager {
         }
     }
 
-    /// Spawn the background acquisition-lock-timeout sweeper.
+    /// Spawns the background acquisition-lock-timeout sweeper.
     ///
-    /// Every `record_lock_duration / 2` (min 100ms) it snapshots the live
-    /// cells (cloning their `Arc`s out of the `DashMap` so no guard is held
-    /// across an `.await`), expires any timed-out locks, and re-persists the
-    /// ones that changed. Runs detached for the broker's lifetime.
+    /// The sweeper runs every `record_lock_duration / 2`, with a minimum of
+    /// 100ms. On each run it snapshots the live cells. It clones their `Arc`s
+    /// out of the `DashMap`, so it holds no guard across an `.await`. It then
+    /// expires each timed-out lock and persists again the cells that changed.
+    /// The sweeper runs detached for the lifetime of the broker.
     pub(crate) fn spawn_lock_sweeper(self: &Arc<Self>) {
         let mgr = Arc::clone(self);
         let period = (mgr.config.record_lock_duration / 2).max(Duration::from_millis(100));
@@ -323,11 +344,12 @@ mod tests {
         share_coordinator::{config::ShareCoordinatorConfig, coordinator::ShareCoordinator},
     };
 
-    /// Minimal `MetadataSource` over a fixed (empty-of-brokers) image. The
-    /// share-state topic can't be bootstrapped against it (no brokers), so the
-    /// persister's `read_state` short-circuits with an error before any
-    /// routing — exercising `get_or_load`'s best-effort empty-window fallback
-    /// without standing up an inter-broker server.
+    /// Minimal `MetadataSource` over a fixed image that holds no brokers.
+    ///
+    /// The bootstrap of the share-state topic cannot run against this image,
+    /// because it has no brokers. The `read_state` of the persister thus stops
+    /// early with an error, before any routing. This exercises the best-effort
+    /// empty-window fallback of `get_or_load` without an inter-broker server.
     struct MockSource {
         image: Arc<MetadataImage>,
         leader_rx: watch::Receiver<Option<NodeId>>,
@@ -402,8 +424,10 @@ mod tests {
         )
     }
 
-    /// A manager whose controller serves `image` (so `current_leader_of` and
-    /// friends resolve real topic/partition leadership).
+    /// A manager whose controller serves `image`.
+    ///
+    /// `current_leader_of` and the related methods thus resolve real topic and
+    /// partition leadership.
     fn manager_with_image(image: Arc<MetadataImage>) -> Arc<SharePartitionLeaderManager> {
         let reg = Arc::new(PartitionRegistry::new());
         let controller: Arc<dyn MetadataSource> = Arc::new(MockSource::with_image(image));

@@ -5,10 +5,10 @@
 //!   `last_offset`: i64 (big-endian)
 //!   `stamp`:       u64 (big-endian)
 //!
-//! The stamp is an additional internal coordinate — a packed
-//! `TimestampSource` reading — stored beside the wire-exact `.log`. The
-//! `.log` bytes are never touched; the stampindex is derived state,
-//! rebuildable by rescanning the log, and never leaves the broker on any
+//! The stamp is an additional internal coordinate, a packed
+//! `TimestampSource` reading, stored beside the wire-exact `.log`. Nothing
+//! ever touches the `.log` bytes. The stampindex is derived state, and a
+//! rescan of the log can rebuild it. It never leaves the broker on any
 //! client-facing API. This mirrors the `.txnindex` sidecar pattern.
 
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
@@ -24,8 +24,8 @@ use crate::error::LogError;
 
 const ENTRY_BYTES: usize = 24;
 
-/// One stamped offset range: the inclusive offsets `[base_offset,
-/// last_offset]` all carry `stamp`.
+/// One stamped offset range. The inclusive offsets
+/// `[base_offset, last_offset]` all carry `stamp`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StampEntry {
     pub base_offset: Offset,
@@ -33,8 +33,8 @@ pub struct StampEntry {
     pub stamp: u64,
 }
 
-/// On-disk byte layout of one `StampEntry`. Reinterpreted in place from
-/// the file bytes via `zerocopy`.
+/// On-disk byte layout of one `StampEntry`. `zerocopy` reinterprets it in
+/// place from the file bytes.
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct StampEntryRaw {
@@ -52,9 +52,9 @@ pub struct StampIndex {
 }
 
 impl StampIndex {
-    /// Open (or recover) a `.stampindex` file at the given path. Reads
-    /// the entire file into memory at startup. An empty / missing file
-    /// is fine — we treat that as zero stamped ranges.
+    /// Open or recover a `.stampindex` file at the given path. This method
+    /// reads the entire file into memory at startup. An empty file or a
+    /// missing file is acceptable and means zero stamped ranges.
     #[instrument(
         level = "debug",
         skip_all,
@@ -66,7 +66,7 @@ impl StampIndex {
     /// whole number of fixed-width entries.
     /// # Panics
     /// Panics if the in-place reinterpretation of a length-validated,
-    /// `Unaligned` byte buffer fails — an invariant that cannot hold false.
+    /// `Unaligned` byte buffer fails. That invariant cannot be false.
     pub fn open(path: PathBuf) -> Result<Self, LogError> {
         let mut entries = Vec::new();
         match std::fs::read(&path) {
@@ -100,11 +100,11 @@ impl StampIndex {
     /// Append one stamped-range entry.
     ///
     /// # Precondition
-    /// Entries are appended in nondecreasing offset order: each new
-    /// entry's `base_offset` is at least the previous entry's
-    /// `base_offset`. Stamps are folded to observe partition offset order
-    /// before they reach this method, so within a partition stamp order
-    /// never contradicts offset order.
+    /// Callers append entries in nondecreasing offset order. Each new
+    /// entry's `base_offset` is at least the previous entry's `base_offset`.
+    /// Stamps follow partition offset order before they reach this method, so
+    /// within a partition the stamp order never contradicts the offset
+    /// order.
     #[instrument(
         level = "debug",
         skip(self),
@@ -197,10 +197,10 @@ mod tests {
         );
     }
 
-    /// Only a genuine `NotFound` means "no index yet"; any other I/O error
+    /// Only a real `NotFound` means "no index yet". Every other I/O error
     /// must surface as `LogError::Io`. Here the path is a directory, so the
-    /// read fails with a non-`NotFound` kind — swallowing it would silently
-    /// return an empty index over a real error.
+    /// read fails with a kind other than `NotFound`. To swallow that error
+    /// would return an empty index over a real failure.
     #[test]
     fn open_surfaces_non_notfound_io_error() {
         let dir = TempDir::new().unwrap();

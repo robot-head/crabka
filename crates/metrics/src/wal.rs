@@ -70,7 +70,8 @@ pub struct WalRecord {
 }
 
 impl WalRecord {
-    /// Encode via `serde-wincode`, matching the codebase metadata-record codec.
+    /// Encodes with `serde-wincode`, which matches the codebase
+    /// metadata-record codec.
     /// # Errors
     /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn encode(&self) -> Result<Vec<u8>, WalError> {
@@ -78,7 +79,7 @@ impl WalRecord {
             .map_err(|error| WalError::Encode(error.to_string()))
     }
 
-    /// Decode a [`WalRecord`] from its `serde-wincode` bytes.
+    /// Decodes a [`WalRecord`] from its `serde-wincode` bytes.
     /// # Errors
     /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn decode(bytes: &[u8]) -> Result<Self, WalError> {
@@ -86,21 +87,22 @@ impl WalRecord {
             .map_err(|error| WalError::Decode(error.to_string()))
     }
 
-    /// Series fingerprint via blockstore's order-independent [`Labels`] hash.
+    /// Series fingerprint from the blockstore's order-independent [`Labels`]
+    /// hash.
     #[must_use]
     pub fn series_fingerprint(&self) -> u64 {
         self.labels().fingerprint()
     }
 
-    /// Build the blockstore label set for this record.
+    /// Builds the blockstore label set for this record.
     #[must_use]
     pub fn labels(&self) -> Labels {
         self.labels.iter().cloned().collect()
     }
 }
 
-/// Producer key for a tenant/fingerprint pair. The Kafka producer hashes this
-/// byte key to choose a partition, preserving per-series order.
+/// Producer key for a tenant and fingerprint pair. The Kafka producer hashes
+/// this byte key to choose a partition, which keeps the per-series order.
 #[must_use]
 pub fn partition_key(tenant: &str, fp: u64) -> Bytes {
     let mut bytes = Vec::with_capacity(tenant.len() + 1 + std::mem::size_of::<u64>());

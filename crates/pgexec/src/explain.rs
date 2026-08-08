@@ -1,16 +1,16 @@
 //! S6: `EXPLAIN` over the interpreter.
 //!
-//! Gres has no cost-based planner, so this module does not pretend to one: it
-//! renders the shape the interpreter will actually execute — the scan, the
-//! filter it pushes onto it, the aggregation, the sort, the limit — using
-//! `PostgreSQL`'s node names and text layout. `EXPLAIN (COSTS OFF)` over the
-//! statement shapes the engine executes therefore prints byte-identical text to
-//! `PostgreSQL` for single-relation plans; anything whose text depends on a
-//! planner decision (join order, index choice, parallelism) deliberately does
-//! not, and the compatibility matrix says so.
+//! Gres has no cost-based planner, so this module does not pretend to one. It
+//! renders the shape the interpreter will actually execute: the scan, the
+//! filter it pushes onto that scan, the aggregation, the sort, and the limit.
+//! It uses `PostgreSQL`'s node names and text layout. For single-relation
+//! plans, `EXPLAIN (COSTS OFF)` over the statement shapes the engine executes
+//! therefore prints text byte-identical to `PostgreSQL`. Text that depends on a
+//! planner decision, such as join order, index choice, or parallelism,
+//! deliberately does not, and the compatibility matrix says so.
 //!
 //! Estimates are the one thing that cannot be honest here, so `EXPLAIN` without
-//! `COSTS OFF` prints a fixed zero-cost estimate rather than inventing numbers.
+//! `COSTS OFF` prints a fixed zero-cost estimate and does not invent numbers.
 
 use std::fmt::Write as _;
 
@@ -360,9 +360,11 @@ fn deparse(expr: &Expr) -> String {
     deparse_with(expr, true)
 }
 
-/// Deparse `expr`, dropping single-relation column qualifiers when `qualify`
-/// is false — `PostgreSQL` prints a bare column name whenever the plan has one
-/// relation, and qualifies it only when more than one is in scope.
+/// Deparse `expr`, and drop single-relation column qualifiers when `qualify`
+/// is false.
+///
+/// `PostgreSQL` prints a bare column name whenever the plan has one relation.
+/// It qualifies the name only when more than one relation is in scope.
 fn deparse_with(expr: &Expr, qualify: bool) -> String {
     match expr {
         Expr::Binary { op, left, right } => format!(
@@ -384,7 +386,7 @@ fn deparse_with(expr: &Expr, qualify: bool) -> String {
     }
 }
 
-/// Deparse `expr` without the outermost parentheses — the spelling
+/// Deparse `expr` without the outermost parentheses. This is the spelling
 /// `PostgreSQL` uses in `Group Key`/`Sort Key` lists.
 fn deparse_bare(expr: &Expr) -> String {
     deparse_bare_with(expr, true)
@@ -594,8 +596,9 @@ const fn binary_op_text(op: BinaryOp) -> &'static str {
 }
 
 /// Render the plan for the wire, one output line per element.
-/// Render with `actual_rows` reported on the root node — the count
-/// `EXPLAIN ANALYZE` measured for the whole statement.
+///
+/// The root node reports `actual_rows`, which is the count `EXPLAIN ANALYZE`
+/// measured for the whole statement.
 pub(crate) fn render_with_rows(
     node: &PlanNode,
     options: &ExplainOptions,
@@ -812,10 +815,10 @@ mod tests {
         render_with_rows(&plan_statement(statement), options, 0)
     }
 
-    /// The deparser is two mutually recursive functions, so an expression form
-    /// neither of them matches used to bounce between them until the stack ran
-    /// out — aborting the whole process, not just the statement. Every filter
-    /// shape must therefore terminate and name itself.
+    /// The deparser is two mutually recursive functions. An expression form
+    /// that neither of them matches used to bounce between them until the stack
+    /// ran out. That aborted the whole process, not just the statement. Every
+    /// filter shape must therefore terminate and name itself.
     #[test]
     fn every_filter_expression_shape_deparses_without_recursing_forever() {
         let filters = [

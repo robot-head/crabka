@@ -1,5 +1,7 @@
-//! Profiling load generator: drive sustained produce (and optional fetch)
-//! traffic against a running `profile_server`. Prints achieved throughput.
+//! Profiling load generator for a running `profile_server`.
+//!
+//! This example drives sustained produce traffic, and optional fetch traffic,
+//! against a running `profile_server`. It prints the achieved throughput.
 //!
 //!   cargo run --release --example loadgen -p crabka-integration-tests
 //!

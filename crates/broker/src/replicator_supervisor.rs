@@ -3,11 +3,11 @@
 //!
 //! 1. **Materializes the local on-disk partition** for any
 //!    `(topic, partition)` where this broker is in `replicas`,
-//!    regardless of leader/follower role. The `CreateTopics` handler
-//!    used to do this itself, but with round-robin replica placement
-//!    the broker that handles the request usually isn't the partition
-//!    leader — so the lazy supervisor-driven path is the only one
-//!    that materializes the partition on the leader broker reliably.
+//!    regardless of leader/follower role. With round-robin replica
+//!    placement, the broker that handles a `CreateTopics` request is
+//!    usually not the partition leader. The lazy supervisor-driven path
+//!    is therefore the only one that materializes the partition on the
+//!    leader broker reliably.
 //!
 //! 2. **Spawns a `replicator::run` task** per `(topic, partition)`
 //!    where this broker is in `replicas` but is NOT the leader, and
@@ -34,14 +34,14 @@ use crate::{
     throttle::ThrottleState, txn::coordinator::TxnCoordinator,
 };
 
-/// A `(topic, partition)` pair — the key the supervisor tracks follower
-/// tasks, local materialization, and dir-assignment reports by.
+/// A `(topic, partition)` pair. The supervisor keys follower tasks, local
+/// materialization, and dir-assignment reports on this pair.
 pub(crate) type TopicPartition = (String, i32);
 
 /// `(topic, partition)` pairs where `node_id` is in `replicas` AND
-/// `leader != node_id` — i.e., the broker should run a follower
-/// replicator task. Single O(P) walk — this runs on every metadata-image
-/// change, so it must stay proportional to total partitions.
+/// `leader != node_id`. For each such pair the broker should run a follower
+/// replicator task. This is a single O(P) walk. It runs on every
+/// metadata-image change, so it must stay proportional to total partitions.
 pub(crate) fn desired_follower_set(
     node_id: NodeId,
     image: &MetadataImage,
@@ -54,9 +54,9 @@ pub(crate) fn desired_follower_set(
 }
 
 /// `(topic, partition)` pairs where `node_id` is in `replicas`,
-/// regardless of leader/follower role — every entry here means this
+/// regardless of leader/follower role. Every entry here means this
 /// broker hosts partition data on disk and must materialize the
-/// on-disk `Partition` locally. Single O(P) walk, same as
+/// on-disk `Partition` locally. This is a single O(P) walk, the same as
 /// [`desired_follower_set`].
 pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashSet<TopicPartition> {
     image
@@ -67,16 +67,17 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
 }
 
 /// Open (or recover) the on-disk `Partition` for `(topic, partition)` and
-/// insert it into `partitions` via `PartitionRegistry::materialize_if_vacant`.
+/// insert it into `partitions` with
+/// `PartitionRegistry::materialize_if_vacant`.
 ///
 /// This is the canonical, race-free materialization helper. Both the
 /// `ReplicatorSupervisor` reconcile loop and the `InitProducerId` handler
-/// (first-touch path) call this function — `materialize_if_vacant` runs the
-/// build closure under the per-key lock so two concurrent callers for the
+/// (first-touch path) call this function. `materialize_if_vacant` runs the
+/// build closure under the per-key lock, so two concurrent callers for the
 /// same key can never both spawn independent writer tasks.
 ///
-/// Returns `Ok(())` if the partition is already present (no-op) or was
-/// successfully opened. Returns `Err(String)` on I/O failure.
+/// Returns `Ok(())` if the partition is already present, which is a no-op, or
+/// if the function opened it. Returns `Err(String)` on I/O failure.
 pub(crate) struct MaterializePartitionConfig<'a> {
     pub partitions: &'a PartitionRegistry,
     pub topic: &'a str,
@@ -152,9 +153,9 @@ pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> R
 }
 
 /// Push topic-config overrides onto every locally-hosted partition in
-/// `desired`. Idempotent — sending the same `LogConfig` is a cheap noop
-/// write inside `Log::set_config`. Errors on individual partitions are
-/// logged via `warn!` but don't propagate.
+/// `desired`. The call is idempotent, because the same `LogConfig` sent twice
+/// is a cheap noop write inside `Log::set_config`. Errors on individual
+/// partitions log through `warn!` and do not propagate.
 pub(crate) async fn push_topic_configs(
     desired: &HashSet<TopicPartition>,
     partitions: &PartitionRegistry,
@@ -182,9 +183,10 @@ pub(crate) async fn push_topic_configs(
 /// - `tracker_updates`: `(topic_name, partition, dir_uuid)` to write into
 ///   `reported_dirs` on a successful send.
 ///
-/// Pure: reads each partition's current owning dir exactly once; no second load
-/// after the change-check, eliminating the TOCTOU race and O(n²) `Vec::contains`
-/// scan present in the previous double-iteration approach.
+/// This function is pure. It reads each partition's current owning dir exactly
+/// once and does not load again after the change-check. That removes both the
+/// TOCTOU race and the O(n²) `Vec::contains` scan of a double-iteration
+/// approach.
 type WireDirAssignment = (uuid::Uuid, i32, uuid::Uuid);
 type ReportedDirUpdate = (String, i32, uuid::Uuid);
 type ChangedAssignments = (Vec<WireDirAssignment>, Vec<ReportedDirUpdate>);
@@ -278,31 +280,31 @@ pub(crate) struct ReplicatorSupervisor {
     client_id: String,
     tasks: DashMap<TopicPartition, CancellationToken>,
     /// Per-follower-partition (leader, `leader_epoch`) tuple captured at
-    /// spawn time. On reconcile, if the tuple changes, the task is
-    /// cancelled and respawned pointed at the new leader.
+    /// spawn time. On reconcile, if the tuple changes, the supervisor
+    /// cancels the task and respawns it against the new leader.
     task_targets: DashMap<TopicPartition, (NodeId, crabka_metadata::LeaderEpoch)>,
     shutdown: CancellationToken,
     txn_coordinator: Option<Arc<TxnCoordinator>>,
-    /// KIP-932 share coordinator. Its view of locally-led
-    /// `__share_group_state` partitions is refreshed on each reconcile,
-    /// mirroring the txn coordinator.
+    /// KIP-932 share coordinator. Each reconcile refreshes its view of
+    /// locally-led `__share_group_state` partitions, the same as for the
+    /// txn coordinator.
     share_coordinator: Option<Arc<crate::share_coordinator::coordinator::ShareCoordinator>>,
-    /// Shared outbound dialer (TLS + SASL when configured, raw TCP
-    /// otherwise). Each spawned replicator clones this Arc.
+    /// Shared outbound dialer. It uses TLS and SASL when configured, and raw
+    /// TCP otherwise. Each spawned replicator clones this Arc.
     inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
-    /// Listener protocol used for inter-broker dials. Drives whether
-    /// the dialer runs TLS / SASL.
+    /// Listener protocol used for inter-broker dials. It decides whether
+    /// the dialer runs TLS and SASL.
     inter_broker_listener_protocol: crabka_security::ListenerProtocol,
     inter_broker_server_name: String,
     replication: ReplicationRuntimeConfig,
-    /// Name of the listener whose endpoint we resolve from the
-    /// metadata image when dialing peers.
+    /// Name of the listener whose endpoint the supervisor resolves from the
+    /// metadata image when it dials peers.
     inter_broker_listener_name: String,
     /// KIP-73: broker-wide throttle state forwarded to each spawned
     /// replicator so they can consult the follower-in token bucket.
     throttle_state: Arc<ThrottleState>,
     /// KIP-113 runtime offline-dir registry. Forwarded into each
-    /// `materialize_partition` + spawned `Replicator::Config` so the
+    /// `materialize_partition` and each spawned `Replicator::Config`, so the
     /// partition writer's storage-failure path can flip the dir
     /// offline broker-wide.
     log_dir_status: crate::log_dir_status::LogDirRegistry,
@@ -319,21 +321,22 @@ pub(crate) struct ReplicatorSupervisor {
     /// clones this so it can increment `replication_bytes_in` after a
     /// successful follower-side append.
     metrics: crate::metrics::BrokerMetrics,
-    /// KIP-858: stable UUID per configured log.dir. Used by the reconcile
-    /// loop to build `AssignReplicasToDirs` reports.
+    /// KIP-858: stable UUID per configured log.dir. The reconcile loop uses
+    /// these to build `AssignReplicasToDirs` reports.
     log_dir_ids: crate::log_dir_id::LogDirIds,
     /// Shared advisory cache for quorum-committed diskless WAL tails.
     hot_tail: Arc<crate::diskless::hot_tail::HotTailCache>,
     /// Registry exposed through the KIP-595 shard router for diskless WAL
     /// fetches to newly materialized partitions.
     wal_shards: Arc<crate::wal::quorum::registry::WalShardRegistry>,
-    /// KIP-858: tracks the last-reported dir UUID per (topic, partition) so
-    /// we only send `AssignReplicasToDirs` on first materialization or after
-    /// a KIP-113 log-dir swap.
+    /// KIP-858: tracks the last-reported dir UUID per (topic, partition), so
+    /// the supervisor sends `AssignReplicasToDirs` only on first
+    /// materialization or after a KIP-113 log-dir swap.
     reported_dirs: dashmap::DashMap<TopicPartition, uuid::Uuid>,
-    /// Topic identities observed by the preceding reconcile. Comparing UUIDs,
-    /// rather than names alone, also detects a delete followed by a same-name
-    /// recreation without treating startup-only on-disk logs as tombstoned.
+    /// Topic identities observed by the preceding reconcile. A comparison of
+    /// UUIDs, rather than names alone, also detects a delete followed by a
+    /// same-name recreation, and it does not treat startup-only on-disk logs
+    /// as tombstoned.
     known_topic_ids: Mutex<HashMap<String, uuid::Uuid>>,
     assign_dirs_reporter: Arc<dyn AssignDirsReporter>,
 }
@@ -798,8 +801,9 @@ mod tests {
 
     use super::*;
 
-    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
-    /// stall fails the test deterministically instead of spinning forever.
+    /// Yield-poll until `cond` holds, with a bounded hang-guard. A real
+    /// stall then fails the test deterministically instead of spinning
+    /// forever.
     async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
         for _ in 0..200_000 {
             if cond() {

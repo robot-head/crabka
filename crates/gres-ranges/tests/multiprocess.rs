@@ -125,19 +125,22 @@ async fn real_range_process_recovers_durable_forwarded_rows_after_kill() {
     computes.shutdown().await;
 }
 
-/// Deadline for a notification that has to cross the range-0 log: an append to
-/// a real broker, then the follower's 100 ms poll inside another OS process.
+/// Deadline for a notification that must cross the range-0 log. That path is an
+/// append to a real broker, then the follower's 100 ms poll inside another OS
+/// process.
 const CROSS_NODE_DELIVERY: Duration = Duration::from_secs(10);
 
-/// How long "nothing arrived" waits. A negative assertion can only false-pass,
-/// never flake, so it stays short — each one here is paired with a positive
-/// assertion on a second listener that proves the path was live meanwhile.
+/// How long a "nothing arrived" check waits.
+///
+/// A negative assertion can only false-pass, and it can never flake, so the wait
+/// stays short. Each such assertion here is paired with a positive assertion on
+/// a second listener, which proves the path was live at the same time.
 const QUIET: Duration = Duration::from_millis(500);
 
 type Notifications = tokio::sync::mpsc::UnboundedReceiver<tokio_postgres::Notification>;
 
-/// The next notification as `(channel, payload, process_id)` — the whole
-/// message in one value, so a case compares it in a single assertion.
+/// The next notification as `(channel, payload, process_id)`. This is the whole
+/// message in one value, so a case compares it in one assertion.
 async fn next_notification(delivered: &mut Notifications) -> (String, String, i32) {
     let notification = tokio::time::timeout(CROSS_NODE_DELIVERY, delivered.recv())
         .await
@@ -155,9 +158,9 @@ async fn no_notification(delivered: &mut Notifications) {
     assert!(idle.is_err(), "unexpected notification: {idle:?}");
 }
 
-/// A `NOTIFY` issued on the node hosting range 0 reaches a listener on the node
-/// that hosts no range 0 — the only place the follower tail actually runs — and
-/// arrives stamped with the *originating* backend's pid, taken off that
+/// A `NOTIFY` issued on the node that hosts range 0 reaches a listener on the
+/// node that hosts no range 0, which is the only place the follower tail runs.
+/// The notification arrives with the *originating* backend's pid, taken off that
 /// connection's own `BackendKeyData`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn range_zero_notify_reaches_a_listener_on_the_node_without_range_zero() {
@@ -250,15 +253,15 @@ async fn range_zero_notify_reaches_a_listener_on_the_node_without_range_zero() {
     computes.shutdown().await;
 }
 
-/// The property the whole design rests on: a notify record rides the range-0
-/// log and is fanned out from memory, but never lands in any key-value store.
+/// The property the whole design rests on. A notify record rides the range-0
+/// log and is fanned out from memory, but it never lands in any key-value store.
 ///
-/// Range 0's checkpoints snapshot its entire KV and the WAL topic is retained
-/// forever, so one stored record would be permanently in the catalog store, in
-/// every checkpoint taken afterwards, and restored onto every follower. Both
-/// nodes' stores are read off disk after the notifications are delivered — a
-/// checkpoint can only carry what the KV holds — and the nodes are then
-/// restarted to show the log replays no notification back out.
+/// Range 0's checkpoints snapshot its entire KV, and the WAL topic is retained
+/// forever. One stored record would therefore stay in the catalog store forever,
+/// in every checkpoint taken afterwards, and restored onto every follower. The
+/// test reads both nodes' stores off disk after the delivery of the
+/// notifications, because a checkpoint can only carry what the KV holds. It then
+/// restarts the nodes to show that the log replays no notification back out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delivered_notify_records_reach_neither_node_key_value_store() {
     let mut computes = ProcessHarness::start("tenant-notify-never-persists").await;
@@ -331,8 +334,8 @@ async fn delivered_notify_records_reach_neither_node_key_value_store() {
 /// The live range-0 follower cache under a node's `--cache-dir`.
 ///
 /// The follower opens a new cache generation whenever it has to rebuild from a
-/// checkpoint, sweeping the older ones, so the directory name carries the
-/// generation rather than being fixed.
+/// checkpoint, and it sweeps the older generations. The directory name therefore
+/// carries the generation and is not fixed.
 fn follower_store_dir(cache_dir: &Path) -> PathBuf {
     let mut generations = std::fs::read_dir(cache_dir)
         .unwrap_or_else(|error| panic!("list {}: {error}", cache_dir.display()))
@@ -366,9 +369,9 @@ fn scan_store(path: &Path) -> (usize, usize) {
     (total, notify)
 }
 
-/// The whole point of `--checkpoint-frames`: a live node must trim its own WAL
-/// without anybody asking it to. The harness starts r0 with
-/// `--checkpoint-store local --checkpoint-frames 1`, so committing a DDL has to
+/// The point of `--checkpoint-frames`. A live node must trim its own WAL with no
+/// request from anybody. The harness starts r0 with
+/// `--checkpoint-store local --checkpoint-frames 1`, so a committed DDL must
 /// produce a durable checkpoint manifest under the checkpoint root on its own.
 #[tokio::test]
 async fn a_live_node_writes_a_checkpoint_manifest_once_the_frame_threshold_is_crossed() {
@@ -398,15 +401,15 @@ async fn a_live_node_writes_a_checkpoint_manifest_once_the_frame_threshold_is_cr
 }
 
 /// Range 0 prunes its own WAL behind every checkpoint, and the node that does
-/// not host range 0 follows that WAL through a local replica. A trim that
-/// lands while the follower is between polls takes away the very frames it
-/// still needs: no later fetch can return them, so without a rebuild from the
-/// newest checkpoint the follower never applies again and every statement on
-/// that node stalls behind its range-0 read barrier.
+/// not host range 0 follows that WAL through a local replica. A trim that lands
+/// while the follower is between polls takes away the frames the follower still
+/// needs. No later fetch can return them. Without a rebuild from the newest
+/// checkpoint, the follower never applies again, and every statement on that
+/// node stalls behind its range-0 read barrier.
 ///
 /// `--checkpoint-frames 1` makes range 0 checkpoint and prune on every commit,
-/// so each iteration below is another chance for a trim to land in that
-/// window. The node without range 0 has to keep serving through all of them.
+/// so each iteration below is another chance for a trim to land in that window.
+/// The node without range 0 must keep serving through all of them.
 #[tokio::test]
 async fn the_node_without_range_zero_keeps_serving_while_range_zero_trims_its_wal() {
     let system = ProcessHarness::start_with_checkpoint_frames("tenant-follower-wal-trim", 1).await;
@@ -432,7 +435,7 @@ async fn the_node_without_range_zero_keeps_serving_while_range_zero_trims_its_wa
 }
 
 /// Poll the checkpoint root until the background threshold poll writes a
-/// manifest, bounded so a regression fails instead of hanging.
+/// manifest. The poll is bounded, so a regression fails instead of hangs.
 async fn wait_for_checkpoint_manifest(root: &Path) -> Vec<PathBuf> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {

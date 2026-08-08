@@ -44,26 +44,26 @@ struct ExemplarRow {
     value: f64,
 }
 
-/// Default head retention window: six hours of samples are kept hot.
+/// Default head retention window: the head keeps six hours of samples hot.
 pub const DEFAULT_RETENTION: Time = hours(6);
 
-/// Counts of what a [`InMemoryMetricStore::prune`] pass evicted.
+/// Counts of what an [`InMemoryMetricStore::prune`] pass evicted.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PruneStats {
     /// Float, histogram, and exemplar rows dropped because they fell out of the
     /// retention window.
     pub samples_dropped: usize,
-    /// Series (distinct fingerprints) that lost their last sample and were
-    /// therefore removed from the queryable index.
+    /// Series, counted by distinct fingerprint, that lost their last sample.
+    /// The store removed them from the queryable index.
     pub series_dropped: usize,
 }
 
 /// WAL offset watermarks materialized in the head for one partition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PartitionWatermark {
-    /// First WAL offset that was ingested into the head for this partition.
+    /// First WAL offset the store ingested into the head for this partition.
     pub low_water_offset: Offset,
-    /// Most recent WAL offset that was ingested into the head for this partition.
+    /// Most recent WAL offset the store ingested into the head for this partition.
     pub high_water_offset: Offset,
 }
 
@@ -79,8 +79,8 @@ pub struct InMemoryMetricStore {
     /// for [`InMemoryMetricStore::prune`].
     retention: Time,
     /// WAL offset range currently materialized in the head, keyed by partition.
-    /// Offsets track ingestion progress for observability and rebuild bounds;
-    /// they are independent of timestamp-based retention.
+    /// Offsets track ingestion progress for observability and rebuild bounds.
+    /// They are independent of timestamp-based retention.
     watermarks: BTreeMap<PartitionIndex, PartitionWatermark>,
 }
 
@@ -104,7 +104,7 @@ impl InMemoryMetricStore {
         Self::default()
     }
 
-    /// Build a store with an explicit retention window.
+    /// Builds a store with an explicit retention window.
     #[must_use]
     pub fn with_retention(retention: Time) -> Self {
         Self {
@@ -113,18 +113,18 @@ impl InMemoryMetricStore {
         }
     }
 
-    /// The retention window.
+    /// Returns the retention window.
     #[must_use]
     pub fn retention(&self) -> Time {
         self.retention
     }
 
-    /// Set the retention window.
+    /// Sets the retention window.
     pub fn set_retention(&mut self, retention: Time) {
         self.retention = retention;
     }
 
-    /// Distinct label sets matching the matchers within the time window.
+    /// Returns the distinct label sets that match the matchers in the time window.
     fn matched_series(
         &self,
         tenant: &str,

@@ -1,6 +1,8 @@
-//! `MurmurHash3` x64 128-bit — JVM `org.apache.kafka.streams.state.internals.Murmur3.hash128`.
-//! Consumed by the FK-join subscription-send / resolver processors (hashing the
-//! left value to staleness-check responses).
+//! `MurmurHash3` x64 128-bit, the JVM
+//! `org.apache.kafka.streams.state.internals.Murmur3.hash128`.
+//!
+//! The FK-join subscription-send and resolver processors use it. They hash the
+//! left value to staleness-check the responses.
 
 const C1: u64 = 0x87c3_7b91_1142_53d5;
 const C2: u64 = 0x4cf5_ad43_2745_937f;

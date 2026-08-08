@@ -1,5 +1,7 @@
-//! Replays frontend bytes recorded from a real psql/libpq session through our
-//! decoder. If libpq frames something we can't parse, this catches it.
+//! Replays frontend bytes recorded from a real psql/libpq session through the
+//! decoder.
+//!
+//! If libpq frames something the decoder cannot parse, this test catches it.
 
 use bytes::BytesMut;
 use crabka_pgwire::messages::frontend::{self, FrontendMessage, StartupPacket};

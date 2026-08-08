@@ -1,14 +1,16 @@
-//! `KafkaRebalance` CRD. Strimzi-shaped. The operator
-//! translates the spec into Connect-RPC calls against the standalone
-//! `crabka-rebalancer` service and surfaces the proposal
-//! lifecycle back through the CRD's `status` subresource.
+//! `KafkaRebalance` CRD, in the Strimzi shape.
 //!
-//! Workflow mirrors Strimzi's annotation-driven state machine: the
-//! operator computes a proposal (state `ProposalReady`), the human (or
-//! `GitOps`) approves it via the `crabka.io/rebalance: approve` annotation,
-//! the operator drives execution (`Rebalancing`) and polls to completion
-//! (`Ready` / `NotReady`). `refresh` recomputes; `stop` cancels a running
-//! execution.
+//! The operator translates the spec into Connect-RPC calls against the
+//! standalone `crabka-rebalancer` service. It reports the proposal
+//! lifecycle through the `status` subresource of the CRD.
+//!
+//! The workflow follows the annotation-driven state machine of Strimzi.
+//! The operator computes a proposal and enters the state
+//! `ProposalReady`. A person or a `GitOps` system approves the proposal
+//! with the `crabka.io/rebalance: approve` annotation. The operator then
+//! drives the execution in the state `Rebalancing` and polls until the
+//! state is `Ready` or `NotReady`. The `refresh` value computes the
+//! proposal again. The `stop` value cancels an execution that runs.
 
 use crabka_units::ByteRate;
 use kube::CustomResource;
@@ -31,15 +33,16 @@ use crate::ids::{LeaderMovementCount, MaxLeadersCount, MaxReplicasCount, Replica
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaRebalanceSpec {
-    /// Optimization goals to apply, by name (e.g. `RackAware`,
-    /// `ReplicaDistribution`). When omitted or empty the rebalancer uses
-    /// its full default goal registry in priority order.
+    /// Optimization goals to apply, by name, for example `RackAware` and
+    /// `ReplicaDistribution`. When this field is absent or empty, the
+    /// rebalancer uses its full default goal registry in priority
+    /// order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goals: Option<Vec<String>>,
 
-    /// Replication throttle (bytes/sec) applied while the proposal
-    /// executes (KIP-73). When omitted the rebalancer falls back to its
-    /// own `--default-throttle-bytes-per-sec`.
+    /// Replication throttle in bytes per second while the proposal
+    /// executes. This is KIP-73. When this field is absent, the rebalancer
+    /// uses its own `--default-throttle-bytes-per-sec`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -48,17 +51,20 @@ pub struct KafkaRebalanceSpec {
     #[schemars(with = "Option<i64>", range(min = 1))]
     pub throttle_bytes_per_sec: Option<ByteRate>,
 
-    /// Connect-RPC base URL of the `crabka-rebalancer` service, e.g.
-    /// `http://my-cluster-rebalancer.kafka.svc:9300`. When omitted the
-    /// operator derives `http://<cluster>-rebalancer.<namespace>.svc.cluster.local:9300`
+    /// Connect-RPC base URL of the `crabka-rebalancer` service, for
+    /// example `http://my-cluster-rebalancer.kafka.svc:9300`. When this
+    /// field is absent, the operator derives
+    /// `http://<cluster>-rebalancer.<namespace>.svc.cluster.local:9300`
     /// from the `crabka.io/cluster` label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
 }
 
-/// Projection of the rebalancer's `ProposalSummary` onto the CRD status.
-/// All fields default to `0` so a proposal with no movements still
-/// produces a complete (zeroed) result block.
+/// Projection of the `ProposalSummary` of the rebalancer onto the CRD
+/// status.
+///
+/// All fields default to `0`, so a proposal with no movements still gives
+/// a complete result block with zero values.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizationResult {
@@ -80,7 +86,7 @@ pub struct OptimizationResult {
     /// Max partitions led by any one broker after the proposal applies.
     #[serde(default)]
     pub max_leaders_after: MaxLeadersCount,
-    /// The goals the rebalancer actually applied (post-selection).
+    /// The goals that the rebalancer applied after the selection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub goals: Vec<String>,
 }
@@ -88,23 +94,26 @@ pub struct OptimizationResult {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaRebalanceStatus {
-    /// Kubernetes-style condition list. The active condition's `type`
-    /// carries the rebalance state: one of `PendingProposal`,
-    /// `ProposalReady`, `Rebalancing`, `Ready`, `NotReady`, `Stopped`.
+    /// Kubernetes-style condition list. The `type` of the active
+    /// condition holds the rebalance state. It is one of
+    /// `PendingProposal`, `ProposalReady`, `Rebalancing`, `Ready`,
+    /// `NotReady`, and `Stopped`.
     #[serde(default)]
     pub conditions: Vec<crate::crd::KafkaCondition>,
 
-    /// `metadata.generation` of the last spec that produced the current
-    /// proposal (advanced when a fresh proposal is computed).
+    /// `metadata.generation` of the last spec that gave the current
+    /// proposal. The operator advances it when it computes a new
+    /// proposal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
 
-    /// Rebalancer-assigned proposal id. Stored so `approve` / `stop` /
-    /// poll operations target the same proposal across reconciles.
+    /// Proposal id that the rebalancer assigned. The operator stores it,
+    /// so that the `approve`, `stop`, and poll operations reach the same
+    /// proposal in every reconcile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 
-    /// Summary of the most recently computed proposal.
+    /// Summary of the proposal that the operator computed last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optimization_result: Option<OptimizationResult>,
 }

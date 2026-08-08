@@ -1,7 +1,8 @@
-//! Integration test: drive KIP-113 (`AlterReplicaLogDirs` +
-//! `DescribeLogDirs`) through `AdminClient` so the typed admin
-//! wrappers in `crates/client-admin/src/log_dirs.rs` get exercised
-//! end-to-end against a live broker.
+//! Integration test for the KIP-113 log-dir admin RPCs.
+//!
+//! The test drives `AlterReplicaLogDirs` and `DescribeLogDirs` through
+//! `AdminClient`. This runs the typed admin wrappers in
+//! `crates/client-admin/src/log_dirs.rs` end-to-end against a live broker.
 
 use std::{collections::BTreeMap, time::Duration};
 

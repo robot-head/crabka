@@ -3,16 +3,16 @@
 //!
 //! # Multi-broker routing limitation
 //!
-//! `BrokerFetcher` opens a single connection to the bootstrap address and uses
-//! that connection for every `fetch_partition` call. In a single-node broker
-//! setup (the common test scenario) this is always correct because the
-//! bootstrap broker is the leader for all partitions. In a multi-broker
-//! cluster the fetch may be routed to a broker that is not the partition
-//! leader, resulting in `NOT_LEADER_OR_FOLLOWER` errors.
+//! `BrokerFetcher` opens one connection to the bootstrap address. It uses that
+//! connection for every `fetch_partition` call. In a single-node broker setup,
+//! the common test scenario, this is always correct, because the bootstrap
+//! broker is the leader for all partitions. In a multi-broker cluster the
+//! fetch can go to a broker that is not the partition leader. That broker then
+//! returns `NOT_LEADER_OR_FOLLOWER` errors.
 //!
 //! TODO: implement per-partition leader routing for `BrokerFetcher` to support
-//! multi-broker deployments (look up `leader_id` from metadata, dial the
-//! correct broker connection from a pool).
+//! multi-broker deployments. Look up `leader_id` from metadata, then dial the
+//! correct broker connection from a pool.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -52,18 +52,18 @@ use crate::{
 
 /// A [`RecordFetcher`] backed by a real Kafka broker.
 ///
-/// Uses a single connection to the bootstrap broker for all fetch calls.
-/// See module-level doc for the multi-broker routing limitation.
+/// This fetcher uses one connection to the bootstrap broker for all fetch
+/// calls. See the module-level doc for the multi-broker routing limitation.
 pub(crate) struct BrokerFetcher {
     /// Dedicated connection used for every `fetch_partition` call.
     conn: Connection,
     /// Metadata client used to resolve `topic_id` on cache miss.
     client: Client,
-    /// Cache of topic name → `topic_id` (populated lazily via metadata refresh).
+    /// Cache of topic name → `topic_id`. A metadata refresh fills it lazily.
     topic_ids: Mutex<HashMap<String, WireUuid>>,
     /// Maximum time the broker waits before returning an empty fetch.
     max_wait: Time,
-    /// Maximum the broker returns per partition per fetch.
+    /// Maximum size the broker returns for each partition for each fetch.
     partition_max: ByteSize,
     fetch_min: FetchMinBytes,
 }
@@ -124,10 +124,12 @@ impl RecordFetcher for BrokerFetcher {
         Ok(FetchBatch { records })
     }
 
-    /// Resolve the real partition list for `topic` via a topic-scoped
-    /// `MetadataRequest`, returning `0..partition_count`. The global consumer
-    /// reads every partition to materialize the fully-replicated global store, so
-    /// the default `vec![0]` would silently drop records on any partition > 0.
+    /// Resolves the real partition list for `topic` with a topic-scoped
+    /// `MetadataRequest` and returns `0..partition_count`.
+    ///
+    /// The global consumer reads every partition to materialize the
+    /// fully-replicated global store. The default `vec![0]` would silently drop
+    /// records on any partition > 0.
     async fn partitions(&self, topic: &str) -> Result<Vec<i32>, StreamsClientError> {
         let resp = self
             .client
@@ -159,8 +161,10 @@ impl RecordFetcher for BrokerFetcher {
 }
 
 impl BrokerFetcher {
-    /// Look up the `topic_id` in the local cache; on miss, refresh metadata
-    /// from the broker and populate the cache.
+    /// Looks up the `topic_id` in the local cache.
+    ///
+    /// On a cache miss, this method refreshes metadata from the broker and
+    /// fills the cache.
     async fn resolve_topic_id(&self, topic: &str) -> Result<WireUuid, StreamsClientError> {
         {
             let cache = self.topic_ids.lock().await;
@@ -186,11 +190,11 @@ impl BrokerFetcher {
 
 /// A [`RecordProducer`] backed by a real Kafka `Producer`.
 ///
-/// Pending ack receivers are accumulated in `pending` so that `flush` can
-/// observe per-record produce failures, preserving the at-least-once guarantee.
+/// This producer collects pending ack receivers in `pending`, so `flush` can
+/// see per-record produce failures. This keeps the at-least-once guarantee.
 pub(crate) struct BrokerProducer {
     inner: Producer,
-    /// Receivers from pending `Producer::send` calls. Drained by `flush`.
+    /// Receivers from pending `Producer::send` calls. `flush` drains them.
     pending: Mutex<Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>>>,
 }
 
@@ -240,9 +244,11 @@ impl RecordProducer for BrokerProducer {
         Ok(())
     }
 
-    /// Flush: first ask the inner producer to drain its batch buffer, then
-    /// await every pending per-record ack. Any `Err` result from a record ack
-    /// is surfaced so the caller knows a commit would be unsafe.
+    /// Flushes the inner producer, then awaits every pending per-record ack.
+    ///
+    /// This method first asks the inner producer to drain its batch buffer. It
+    /// then returns any `Err` result from a record ack, so the caller knows
+    /// that a commit would be unsafe.
     async fn flush(&self) -> Result<(), StreamsClientError> {
         self.inner
             .flush()
@@ -272,29 +278,33 @@ impl RecordProducer for BrokerProducer {
 // ─── BrokerTransactionalProducer ────────────────────────────────────────────────
 
 /// A transactional (EOS-v2 / KIP-447) [`RecordProducer`] backed by a real Kafka
-/// `Producer` built with a `transactional_id`. It implements
-/// [`crate::runtime::eos::TransactionalProducer`] so the runtime can wrap each
-/// process-then-commit cycle in a transaction.
+/// `Producer` built with a `transactional_id`.
 ///
-/// Unlike [`BrokerProducer`], this wrapper does NOT accumulate per-record ack
-/// receivers: the EOS commit path never calls `flush` — it goes
+/// This type implements [`crate::runtime::eos::TransactionalProducer`], so the
+/// runtime can wrap each process-then-commit cycle in a transaction.
+///
+/// Unlike [`BrokerProducer`], this wrapper does NOT collect per-record ack
+/// receivers. The EOS commit path never calls `flush`. It goes
 /// `send` → `send_offsets_to_transaction` → `commit_transaction`, and the inner
-/// `Transaction::commit` (via `end_transaction`) already flushes the batch
-/// buffer and blocks on every in-flight ack before sending the COMMIT marker.
-/// The dropped receiver
-/// does NOT cancel the send: the record's ack sender lives in the accumulator
-/// batch (see `Producer::send` / `Accumulator::try_append`), so the record is
-/// produced and durably committed regardless of whether the receiver is awaited.
-/// Accumulating receivers here would leak unboundedly for the app's lifetime.
+/// `Transaction::commit` already flushes the batch buffer through
+/// `end_transaction`. It also blocks on every in-flight ack before it sends the
+/// COMMIT marker.
+///
+/// The dropped receiver does NOT cancel the send. The record's ack sender lives
+/// in the accumulator batch. See `Producer::send` and `Accumulator::try_append`.
+/// The producer sends the record and commits it durably even when no code
+/// awaits the receiver. If this type collected receivers, they would leak
+/// without a bound for the lifetime of the app.
 pub(crate) struct BrokerTransactionalProducer {
     inner: Arc<Producer>,
-    /// The currently-open transaction, if any. Populated by `begin_transaction`
-    /// (via `Producer::begin_transaction_owned`, whose `OwnedTransaction` guard
-    /// must survive across the separate `commit_transaction`/`abort_transaction`
-    /// call that arrives on a later poll cycle — a borrowed `Transaction<'p>`
-    /// can't be stored in a struct field across that gap without either unsafe
-    /// self-reference or a lifetime parameter that would break the `'static`
-    /// `Arc<dyn TransactionalProducer>` storage this type is used behind).
+    /// The currently-open transaction, if any. `begin_transaction` fills this
+    /// field with `Producer::begin_transaction_owned`. The `OwnedTransaction`
+    /// guard must survive until the separate `commit_transaction` or
+    /// `abort_transaction` call, which arrives on a later poll cycle. A
+    /// borrowed `Transaction<'p>` cannot live in a struct field across that
+    /// gap. It would need either an unsafe self-reference or a lifetime
+    /// parameter, and that lifetime parameter would break the `'static`
+    /// `Arc<dyn TransactionalProducer>` storage that holds this type.
     txn: Mutex<Option<crabka_client_producer::OwnedTransaction>>,
 }
 
@@ -350,9 +360,11 @@ impl RecordProducer for BrokerTransactionalProducer {
         Ok(())
     }
 
-    /// No-op: the EOS path never calls `flush`. `commit_transaction` is the
-    /// durability barrier (it flushes the inner producer and awaits in-flight
-    /// acks before the COMMIT marker), so there is nothing to drain here.
+    /// Does nothing, because the EOS path never calls `flush`.
+    ///
+    /// `commit_transaction` is the durability barrier. It flushes the inner
+    /// producer and awaits in-flight acks before the COMMIT marker, so this
+    /// method has nothing to drain.
     async fn flush(&self) -> Result<(), StreamsClientError> {
         Ok(())
     }
@@ -437,23 +449,23 @@ impl TransactionalProducer for BrokerTransactionalProducer {
 
 /// An [`OffsetStore`] backed by a real Kafka broker.
 ///
-/// Uses the group coordinator protocol (`OffsetFetch` / `OffsetCommit` /
-/// `ListOffsets`) via the streams consumer group id.
+/// This store uses the group coordinator protocol (`OffsetFetch` /
+/// `OffsetCommit` / `ListOffsets`) with the streams consumer group id.
 ///
-/// Both `commit` and `committed` populate the v8+ `groups[]` shape AND set
-/// `topic_id` on each topic (required at v10). The codec encodes only the
-/// fields that are valid for the negotiated version, so a single request
+/// Both `commit` and `committed` fill the v8+ `groups[]` shape AND set
+/// `topic_id` on each topic, which v10 needs. The codec encodes only the
+/// fields that are valid for the negotiated version, so one request
 /// construction works across v0-10.
 pub(crate) struct BrokerOffsetStore {
     client: Client,
     group_id: String,
-    /// Cache of topic name → `topic_id` (populated lazily via metadata refresh).
+    /// Cache of topic name → `topic_id`. A metadata refresh fills it lazily.
     topic_ids: Mutex<HashMap<String, WireUuid>>,
 }
 
 impl BrokerOffsetStore {
-    /// Construct a `BrokerOffsetStore` directly. Used from integration tests and
-    /// from [`build`].
+    /// Constructs a `BrokerOffsetStore` directly. Integration tests and
+    /// [`build`] call it.
     pub(crate) fn new(client: Client, group_id: impl Into<String>) -> Self {
         Self {
             client,
@@ -462,7 +474,8 @@ impl BrokerOffsetStore {
         }
     }
 
-    /// Look up the `topic_id` for `topic`; refreshes metadata on cache miss.
+    /// Looks up the `topic_id` for `topic`. On a cache miss, this method
+    /// refreshes metadata.
     async fn resolve_topic_id(&self, topic: &str) -> Result<WireUuid, StreamsClientError> {
         {
             let cache = self.topic_ids.lock().await;
@@ -484,10 +497,12 @@ impl BrokerOffsetStore {
 
 #[async_trait::async_trait]
 impl OffsetStore for BrokerOffsetStore {
-    /// Fetch the committed offset for `(topic, partition)` from the group
-    /// coordinator. Sends the request using the v8+ `groups[]` shape (with
-    /// `topic_id` for v10). Parses the response from the `groups[]` field;
-    /// falls back to the legacy `topics` field for v0-7 responses.
+    /// Fetches the committed offset for `(topic, partition)` from the group
+    /// coordinator.
+    ///
+    /// This method sends the request in the v8+ `groups[]` shape, with
+    /// `topic_id` for v10. It parses the response from the `groups[]` field.
+    /// For v0-7 responses it falls back to the legacy `topics` field.
     async fn committed(
         &self,
         topic: &str,
@@ -643,10 +658,12 @@ impl OffsetStore for BrokerOffsetStore {
             )
     }
 
-    /// Commit `offsets` to the group coordinator. Each topic is tagged with its
-    /// `topic_id` (required at `OffsetCommit` v10; encoder ignores it at v0-9).
-    /// Returns an error if the broker reports a non-zero partition error code so
-    /// that a broken commit is never silently swallowed.
+    /// Commits `offsets` to the group coordinator.
+    ///
+    /// This method tags each topic with its `topic_id`. `OffsetCommit` v10
+    /// needs the `topic_id`, and the encoder ignores it at v0-9. The method
+    /// returns an error if the broker reports a non-zero partition error code,
+    /// so a broken commit is never silently swallowed.
     async fn commit(&self, offsets: &[(String, i32, i64)]) -> Result<(), StreamsClientError> {
         // Group offsets by topic name, resolving topic_ids in parallel.
         let mut by_topic: HashMap<String, Vec<(i32, i64)>> = HashMap::new();
@@ -756,12 +773,12 @@ fn fetch_connection_options(
     }
 }
 
-/// Construct the three broker-backed I/O trait objects from a single bootstrap
+/// Constructs the three broker-backed I/O trait objects from one bootstrap
 /// address.
 ///
 /// Returns `(BrokerFetcher, Arc<BrokerProducer>, Arc<BrokerOffsetStore>)`.
-/// The producer is `Arc`-wrapped so it can be shared across multiple
-/// `StreamTask`s within the same `StreamThread`.
+/// This function wraps the producer in an `Arc` so that many `StreamTask`s in
+/// the same `StreamThread` can share it.
 pub(crate) async fn build(
     bootstrap: &str,
     group_id: &str,
@@ -847,12 +864,14 @@ pub(crate) async fn build(
 
 // ─── build_eos ──────────────────────────────────────────────────────────────────
 
-/// Build broker I/O for EOS: a transactional producer (with `transactional_id`),
-/// plus the fetcher + offset store (for committed-offset reads / seek).
+/// Builds broker I/O for EOS.
 ///
-/// Mirrors [`build`] exactly, except the producer is constructed with a
-/// `transactional_id` (and `enable_idempotence` is implied by transactions) and
-/// wrapped in a [`BrokerTransactionalProducer`].
+/// This function returns a transactional producer with a `transactional_id`,
+/// plus the fetcher and the offset store for committed-offset reads and seek.
+///
+/// It mirrors [`build`] exactly, except that it constructs the producer with a
+/// `transactional_id` and wraps it in a [`BrokerTransactionalProducer`].
+/// Transactions imply `enable_idempotence`.
 pub(crate) async fn build_eos(
     bootstrap: &str,
     group_id: &str,
@@ -1070,12 +1089,16 @@ mod tests {
         );
     }
 
-    /// Round-trip test: `committed` returns `None` before any commit, `Some(42)`
-    /// after committing offset 42. This exercises both C1 (`topic_id` set on
-    /// `OffsetCommitRequestTopic`) and C2 (`groups[]` shape on `OffsetFetchRequest`).
+    /// Round-trip test: `committed` returns `None` before any commit, and
+    /// `Some(42)` after a commit of offset 42.
     ///
-    /// The test must FAIL with the old implementation (missing `topic_id` + legacy
-    /// topics-only request) and PASS with the fixed implementation.
+    /// This test exercises both C1, which sets `topic_id` on
+    /// `OffsetCommitRequestTopic`, and C2, which uses the `groups[]` shape on
+    /// `OffsetFetchRequest`.
+    ///
+    /// The test must FAIL with the old implementation, which misses `topic_id`
+    /// and sends a legacy topics-only request. It must PASS with the fixed
+    /// implementation.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn offset_store_commits_and_reads_back() {
         let (_broker, bootstrap, _dir) = boot().await;
@@ -1116,10 +1139,11 @@ mod tests {
         assert_eq!(after, Some(42), "expected committed offset 42 after commit");
     }
 
-    /// `abort_transaction` must consume the open guard: a second call with no
-    /// intervening `begin_transaction` has to report "no open transaction"
-    /// rather than silently succeeding again, which is what a no-op stub
-    /// (never touching `self.txn` or the broker) would do instead.
+    /// `abort_transaction` must consume the open guard.
+    ///
+    /// A second call with no `begin_transaction` between the two must report
+    /// "no open transaction". It must not succeed silently again. A no-op stub
+    /// that never touches `self.txn` or the broker would succeed silently.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn abort_transaction_consumes_the_open_guard() {
         let (_broker, bootstrap, _dir) = boot().await;

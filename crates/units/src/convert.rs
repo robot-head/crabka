@@ -1,14 +1,14 @@
 //! Conversions between quantities and the raw numbers at the edges of the system.
 //!
-//! Quantities live in the hand-written domain layer. At its edges — the generated
-//! Kafka codec, an on-disk record, a `tokio` timer, a Prometheus gauge — the value
-//! must be a plain integer, float, or [`core::time::Duration`]. These extension
-//! traits are that seam, so the rounding and saturation rules are written once
-//! here instead of at every boundary.
+//! Quantities live in the hand-written domain layer. At its edges the value must
+//! be a plain integer, float, or [`core::time::Duration`]. Those edges are the
+//! generated Kafka codec, an on-disk record, a `tokio` timer, and a Prometheus
+//! gauge. These extension traits are that seam, so this module states the
+//! rounding and saturation rules once instead of at every boundary.
 //!
 //! Conversions *into* a quantity are exact for every magnitude Kafka can express.
 //! Conversions *out* round to nearest and saturate at the target type's bounds
-//! rather than wrapping, and map `NaN` to zero.
+//! instead of wrapping, and they map `NaN` to zero.
 
 use core::{marker::PhantomData, time::Duration};
 
@@ -75,9 +75,9 @@ pub trait ByteSizeExt: Sized + Copy {
     /// A raw unsigned byte count.
     fn from_bytes(bytes: u64) -> Self;
 
-    /// A raw signed byte count. The sign is preserved, so this also carries a
-    /// *delta* — a quota balance that has gone into deficit, for instance. Kafka's
-    /// `-1` "unlimited" sentinel is not interpreted here; use
+    /// A raw signed byte count. This keeps the sign, so it also carries a
+    /// *delta*, for example a quota balance that has gone into deficit. This
+    /// function does not interpret Kafka's `-1` "unlimited" sentinel. Use
     /// [`wire::opt_size_from_bytes_i64`] for that.
     fn from_bytes_i64(bytes: i64) -> Self;
 
@@ -150,8 +150,8 @@ pub trait TimeExt: Sized + Copy {
     /// No elapsed time.
     const ZERO: Self;
 
-    /// A raw millisecond count — Kafka's unit for every configured timeout,
-    /// interval, and retention window.
+    /// A raw millisecond count. This is Kafka's unit for every configured
+    /// timeout, interval, and retention window.
     fn from_millis(millis: i64) -> Self;
 
     /// A raw microsecond count.
@@ -166,7 +166,7 @@ pub trait TimeExt: Sized + Copy {
     /// A fractional second count.
     fn from_secs_f64(secs: f64) -> Self;
 
-    /// A [`Duration`] — the unit `tokio`, `std`, and `qubit-clock` speak.
+    /// A [`Duration`], which is the unit `tokio`, `std`, and `qubit-clock` use.
     fn from_std(duration: Duration) -> Self;
 
     /// The extent as Kafka's `int32` millisecond fields (`session_timeout_ms`).
@@ -177,10 +177,10 @@ pub trait TimeExt: Sized + Copy {
 
     /// The extent in whole milliseconds, truncated toward zero.
     ///
-    /// [`Self::millis_i64`] rounds to nearest, which is what a value meant to be
-    /// read back as a duration wants. Reach for this one only to match an
-    /// external format that truncates: Tempo's `durationMs` is its nanosecond
-    /// duration integer-divided by a million, so rounding would report a
+    /// [`Self::millis_i64`] rounds to nearest, which is correct for a value that
+    /// a caller reads back as a duration. Use this function only to match an
+    /// external format that truncates. Tempo's `durationMs` is its nanosecond
+    /// duration integer-divided by a million, so rounding would report one
     /// millisecond more than Tempo does for the same span.
     fn millis_i64_trunc(self) -> i64;
 
@@ -198,9 +198,9 @@ pub trait TimeExt: Sized + Copy {
 
     /// The extent as a [`Duration`], for `tokio::time::sleep` and friends.
     ///
-    /// A negative or `NaN` extent — a deadline already passed — becomes
-    /// [`Duration::ZERO`], because `Duration` cannot represent it and sleeping for
-    /// no time is what every caller means.
+    /// A negative or `NaN` extent becomes [`Duration::ZERO`], because `Duration`
+    /// cannot represent it and every caller means "do not sleep". A deadline that
+    /// has already passed gives such an extent.
     fn to_std(self) -> Duration;
 }
 
@@ -294,8 +294,8 @@ pub trait ByteRateExt: Sized + Copy {
 
     /// How long transferring `size` takes at this rate.
     ///
-    /// A zero or negative rate yields [`TimeExt::ZERO`] rather than an infinity,
-    /// since "unlimited" is how every caller reads an unset quota.
+    /// A zero or negative rate gives [`TimeExt::ZERO`] and not an infinity,
+    /// because every caller reads an unset quota as "unlimited".
     fn time_to_transfer(self, size: ByteSize) -> Time;
 }
 
@@ -354,7 +354,7 @@ pub trait FrequencyExt: Sized + Copy {
 
     /// The interval between events at this rate.
     ///
-    /// A zero or negative rate yields [`TimeExt::ZERO`] rather than an infinity.
+    /// A zero or negative rate gives [`TimeExt::ZERO`] and not an infinity.
     fn period(self) -> Time;
 }
 
@@ -445,10 +445,10 @@ impl StdDurationExt for Duration {
 /// Kafka's `-1` sentinel, which means "unlimited", "none", or "no bound"
 /// depending on the field, mapped to and from [`Option`].
 ///
-/// A `None` means the field is unset; the caller decides what unset implies. Do
-/// not use these for fields where `-1` means something else — a `timeout_ms` of
-/// `-1` means "block indefinitely", which is a value, not an absence, and is
-/// better modelled by the calling code's own enum.
+/// A `None` means the field is unset, and the caller decides what unset implies.
+/// Do not use these functions for fields where `-1` means something else. A
+/// `timeout_ms` of `-1` means "block indefinitely", which is a value and not an
+/// absence, and the calling code's own enum models it better.
 pub mod wire {
     use super::{ByteRate, ByteRateExt, ByteSize, ByteSizeExt, Time, TimeExt};
 

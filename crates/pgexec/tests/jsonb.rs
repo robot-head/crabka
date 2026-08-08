@@ -1,9 +1,12 @@
-//! `jsonb` end to end: the operator matrix over literals and over stored
-//! columns, the four jsonb-null/SQL-NULL quadrants, containment, merge/delete,
-//! canonical text output, ordering/grouping, unique-index canonicalization,
-//! storage round-trips, and jsonb parameters in both wire formats.
+//! `jsonb` end to end.
 //!
-//! `json` is an input alias only — every jsonb-typed result reports OID 3802.
+//! This file covers the operator matrix over literals and over stored columns,
+//! the four jsonb-null and SQL-NULL quadrants, containment, merge and delete,
+//! canonical text output, ordering and grouping, unique-index
+//! canonicalization, storage round-trips, and jsonb parameters in both wire
+//! formats.
+//!
+//! `json` is an input alias only. Every jsonb-typed result reports OID 3802.
 
 use std::{error::Error, sync::Arc};
 
@@ -54,7 +57,7 @@ fn tag_of(r: &QueryResult) -> &str {
     }
 }
 
-/// Run `sql` (a single statement) and return its rows as text.
+/// Run `sql`, which is a single statement, and return its rows as text.
 async fn query(s: &mut SqlSession, sql: &str) -> Vec<Vec<Option<String>>> {
     rows_text(&run(s, sql).await[0])
 }
@@ -83,8 +86,10 @@ async fn err_code(s: &mut SqlSession, sql: &str) -> String {
     s.simple_query(sql).await.expect_err("expected error").code
 }
 
-/// A fresh engine with `setup` applied, plus one connected session. The engine
-/// is returned so the caller keeps it alive for the session's lifetime.
+/// A fresh engine with `setup` applied, plus one connected session.
+///
+/// This helper returns the engine so that the caller keeps it alive for the
+/// session's lifetime.
 async fn engine_with(setup: &[&str]) -> (SqlEngine, SqlSession) {
     let engine = SqlEngine::new();
     let mut s = engine.connect();
@@ -98,8 +103,8 @@ fn row(values: &[&str]) -> Vec<Option<String>> {
     values.iter().map(|v| Some((*v).to_string())).collect()
 }
 
-/// The `column_default` `information_schema` reports for one column — the
-/// `\d`-style rendering of a persisted DEFAULT.
+/// The `column_default` `information_schema` reports for one column, which is
+/// the `\d`-style rendering of a persisted DEFAULT.
 async fn column_default(s: &mut SqlSession, table: &str, column: &str) -> Option<String> {
     let sql = format!(
         "SELECT column_default FROM information_schema.columns \
@@ -112,8 +117,10 @@ async fn column_default(s: &mut SqlSession, table: &str, column: &str) -> Option
 // Operator matrix
 // ---------------------------------------------------------------------------
 
-/// Every jsonb operator, over literal operands. Both operands are explicitly
-/// typed; `untyped_literal_operands_resolve_against_a_jsonb_operand` covers the
+/// Every jsonb operator, over literal operands.
+///
+/// Both operands are explicitly typed.
+/// `untyped_literal_operands_resolve_against_a_jsonb_operand` covers the
 /// unadorned-literal spellings separately.
 const OPERATOR_MATRIX: &[(&str, Option<&str>)] = &[
     // `->` / `->>`: object key and array index, jsonb vs text result.
@@ -168,8 +175,8 @@ async fn operator_matrix_over_literals() {
     }
 }
 
-/// The same matrix again with the left operand read out of a stored jsonb
-/// column, so operator dispatch does not depend on the operand being a literal.
+/// The same matrix again, with the left operand read out of a stored jsonb
+/// column, so operator dispatch does not depend on a literal operand.
 #[tokio::test]
 async fn operator_matrix_over_a_stored_column() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (j jsonb)"]).await;
@@ -185,9 +192,10 @@ async fn operator_matrix_over_a_stored_column() {
     }
 }
 
-/// `->` takes an integer subscript on arrays (negative counts from the end) and
-/// a text key on objects; the wrong shape of subscript yields SQL NULL, exactly
-/// as `PostgreSQL` does.
+/// `->` takes an integer subscript on arrays, where a negative value counts
+/// from the end, and a text key on objects.
+///
+/// The wrong shape of subscript gives SQL NULL, exactly as `PostgreSQL` does.
 #[tokio::test]
 async fn arrow_indexes_arrays_by_int_and_objects_by_text() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -215,10 +223,11 @@ async fn arrow_indexes_arrays_by_int_and_objects_by_text() {
 
 /// The four quadrants of "null" in jsonb, plus the missing-key case.
 ///
-/// A JSON `null` is a *value*: `'null'::jsonb IS NULL` is false and
+/// A JSON `null` is a *value*. `'null'::jsonb IS NULL` is false, and
 /// `jsonb_typeof` calls it `null`. `->` on a present-but-null key returns that
-/// value (jsonb null, not SQL NULL); `->>` on the same key returns SQL NULL
-/// because there is no text for it. A *missing* key is SQL NULL for both.
+/// value, which is a jsonb null and not SQL NULL. `->>` on the same key returns
+/// SQL NULL, because there is no text for it. A *missing* key is SQL NULL for
+/// both.
 #[tokio::test]
 async fn jsonb_null_and_sql_null_quadrants() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -263,9 +272,9 @@ async fn jsonb_null_and_sql_null_quadrants() {
 // Containment
 // ---------------------------------------------------------------------------
 
-/// `@>` descends into nested objects and arrays, and reproduces `PostgreSQL`'s
-/// special case: a top-level array contains a *bare scalar* that is one of its
-/// elements (the exception to the "same shape" rule).
+/// `@>` descends into nested objects and arrays, and it reproduces
+/// `PostgreSQL`'s special case. A top-level array contains a *bare scalar* that
+/// is one of its elements. That is the exception to the "same shape" rule.
 #[tokio::test]
 async fn containment_nests_and_accepts_a_bare_scalar_element() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -305,9 +314,9 @@ async fn containment_nests_and_accepts_a_bare_scalar_element() {
 // Merge and delete
 // ---------------------------------------------------------------------------
 
-/// `||` merges objects with the right operand winning duplicate keys, and
-/// concatenates/wraps otherwise. `-` deletes by key, by index, and by path
-/// (a `text[]` right operand).
+/// `||` merges objects, and the right operand wins a duplicate key. In every
+/// other case `||` concatenates or wraps. `-` deletes by key, by index, and by
+/// path, where the right operand is a `text[]`.
 #[tokio::test]
 async fn concat_merges_right_wins_and_minus_deletes_key_index_and_path() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -348,9 +357,11 @@ async fn concat_merges_right_wins_and_minus_deletes_key_index_and_path() {
 // Canonical output
 // ---------------------------------------------------------------------------
 
-/// Canonical jsonb text: object keys come back sorted (shorter first, then
-/// bytewise), duplicate keys collapse last-wins, numeric scale survives, and
-/// nothing is rendered in scientific notation.
+/// Canonical jsonb text.
+///
+/// Object keys come back sorted, shorter first and then bytewise. Duplicate
+/// keys collapse to the last value. Numeric scale survives. Nothing is rendered
+/// in scientific notation.
 #[tokio::test]
 async fn canonical_output_sorts_keys_and_preserves_numeric_scale() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -400,9 +411,11 @@ async fn canonical_output_sorts_keys_and_preserves_numeric_scale() {
 // Ordering, grouping, and equality
 // ---------------------------------------------------------------------------
 
-/// jsonb btree order is by *kind* first — Object > Array > Bool > Number >
-/// String > Null — and `GROUP BY`/`DISTINCT` on a jsonb column group by the
-/// canonical value (so `1.0` and `1.00` are the same group).
+/// jsonb btree order is by *kind* first, in the order
+/// Object > Array > Bool > Number > String > Null.
+///
+/// `GROUP BY` and `DISTINCT` on a jsonb column group by the canonical value, so
+/// `1.0` and `1.00` are the same group.
 #[tokio::test]
 async fn ordering_grouping_and_equality_on_a_jsonb_column() {
     let (_engine, mut s) = engine_with(&[
@@ -466,7 +479,7 @@ async fn ordering_grouping_and_equality_on_a_jsonb_column() {
 // Unique-index canonicalization — the correctness crux
 // ---------------------------------------------------------------------------
 
-/// A unique jsonb index keys off the *canonical* value: neither object key
+/// A unique jsonb index keys off the *canonical* value. Neither object key
 /// order nor numeric scale may let a duplicate through. Both cases must raise
 /// 23505.
 #[tokio::test]
@@ -503,8 +516,9 @@ async fn unique_index_ignores_key_order_and_numeric_scale() {
 // ---------------------------------------------------------------------------
 
 /// A bare string literal in `INSERT … VALUES` is coerced to the column's jsonb
-/// type, canonicalized on the way in, and round-trips through storage —
-/// including a NULL column and an `UPDATE` that rewrites the value.
+/// type, canonicalized on the way in, and round-trips through storage.
+///
+/// This holds for a NULL column and for an `UPDATE` that rewrites the value.
 #[tokio::test]
 async fn literal_insert_coerces_and_round_trips_through_storage() {
     let (_engine, mut s) = engine_with(&[
@@ -558,7 +572,7 @@ async fn literal_insert_coerces_and_round_trips_through_storage() {
 }
 
 /// `json` is accepted as an input alias for `jsonb`, but nothing ever reports
-/// OID 114 back: the value is canonicalized and typed as jsonb.
+/// OID 114 back. The value is canonicalized and typed as jsonb.
 #[tokio::test]
 async fn json_is_an_input_alias_and_output_is_always_jsonb() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (j json)"]).await;
@@ -734,9 +748,11 @@ async fn error_sqlstates() {
 }
 
 /// `PostgreSQL` leaves an unadorned string literal `unknown` and resolves it
-/// against the other operand. Gres types it `text` immediately, so the jsonb
-/// operators adopt such a literal explicitly — otherwise `||` would silently
-/// degrade to *string* concatenation and return a plausible wrong answer.
+/// against the other operand.
+///
+/// Gres types the literal `text` immediately, so the jsonb operators adopt such
+/// a literal explicitly. Without that, `||` would silently degrade to *string*
+/// concatenation and return a plausible wrong answer.
 #[tokio::test]
 async fn untyped_literal_operands_resolve_against_a_jsonb_operand() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (j jsonb)"]).await;
@@ -781,9 +797,11 @@ async fn untyped_literal_operands_resolve_against_a_jsonb_operand() {
 }
 
 /// Function ARGUMENTS resolve unknown literals too, but by `PostgreSQL`'s
-/// polymorphic rules rather than by adopting jsonb: a parameter declared jsonb
-/// takes one, `anyarray`/`anyelement` unify against a typed sibling, and a call
-/// where nothing can resolve the polymorphic type is 42804 rather than 42883.
+/// polymorphic rules and not by an adoption of jsonb.
+///
+/// A parameter declared jsonb takes a jsonb value. `anyarray` and `anyelement`
+/// unify against a typed sibling. A call where nothing can resolve the
+/// polymorphic type is 42804 and not 42883.
 #[tokio::test]
 async fn untyped_literal_arguments_resolve_by_polymorphic_rules() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -828,8 +846,8 @@ async fn untyped_literal_arguments_resolve_by_polymorphic_rules() {
 }
 
 /// A jsonb *scalar* is stored as a one-element container, so it answers an
-/// integer subscript the way a one-element array does — but only for `->`/`->>`,
-/// never for a key subscript or the path operators.
+/// integer subscript the way a one-element array does. This holds only for `->`
+/// and `->>`, and never for a key subscript or the path operators.
 #[tokio::test]
 async fn a_scalar_answers_an_integer_subscript_like_a_one_element_array() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -865,8 +883,10 @@ async fn a_scalar_answers_an_integer_subscript_like_a_one_element_array() {
 
 /// A `jsonb` column DEFAULT is evaluated and canonicalized at DDL time, written
 /// into the catalog, applied to an INSERT that omits the column, and rendered
-/// back as a quoted literal — and all of that still holds for a fresh engine
-/// that re-reads the catalog from storage.
+/// back as a quoted literal.
+///
+/// All of that still holds for a fresh engine that re-reads the catalog from
+/// storage.
 #[tokio::test]
 async fn jsonb_column_defaults_persist_apply_and_render() {
     let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
@@ -917,10 +937,12 @@ async fn jsonb_column_defaults_persist_apply_and_render() {
 // Sharded tables
 // ---------------------------------------------------------------------------
 
-/// jsonb values live happily in a hash-sharded table (sharded on a supported
-/// key), and asking to shard *on* a jsonb column is refused at CREATE TABLE —
-/// a jsonb value has no shard-key hash, so the table is never created rather
-/// than failing at every INSERT.
+/// jsonb values work in a hash-sharded table that is sharded on a supported
+/// key.
+///
+/// A request to shard *on* a jsonb column is refused at CREATE TABLE. A jsonb
+/// value has no shard-key hash, so the table is never created, and it does not
+/// fail at every INSERT.
 #[tokio::test]
 async fn sharded_tables_store_jsonb_and_refuse_a_jsonb_shard_key() {
     let (_engine, mut s) = engine_with(&[
@@ -980,8 +1002,8 @@ async fn execute_rows(s: &mut SqlSession, portal: &str) -> Vec<Vec<Option<String
     }
 }
 
-/// A jsonb parameter bound in the *text* format: the client sends the raw JSON
-/// text, the engine parses and canonicalizes it.
+/// A jsonb parameter bound in the *text* format. The client sends the raw JSON
+/// text, and the engine parses and canonicalizes it.
 #[tokio::test]
 async fn text_format_jsonb_parameter_binds_and_stores() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (id int4, j jsonb)"]).await;

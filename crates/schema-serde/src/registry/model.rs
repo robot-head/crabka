@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// POST body for register/lookup. `schema_type` omitted ⇒ AVRO.
+/// POST body for register and lookup.
+///
+/// An omitted `schema_type` means AVRO.
 #[derive(Debug, Serialize)]
 pub struct SchemaPayload<'a> {
     pub schema: &'a str,
@@ -14,7 +16,9 @@ pub struct SchemaPayload<'a> {
     pub references: &'a [SchemaReference],
 }
 
-/// A reference to another registered schema (empty in this slice).
+/// A reference to another registered schema.
+///
+/// The register and lookup payloads send an empty reference list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SchemaReference {
     pub name: String,
@@ -22,13 +26,13 @@ pub struct SchemaReference {
     pub version: i32,
 }
 
-/// Response of register (`POST /subjects/{s}/versions`).
+/// Response of register: `POST /subjects/{s}/versions`.
 #[derive(Debug, Deserialize)]
 pub struct RegisterResponse {
     pub id: u32,
 }
 
-/// Response of lookup (`POST /subjects/{s}`) and version GETs.
+/// Response of lookup `POST /subjects/{s}` and of the version GETs.
 #[derive(Debug, Deserialize)]
 pub struct SubjectVersionResponse {
     pub id: u32,

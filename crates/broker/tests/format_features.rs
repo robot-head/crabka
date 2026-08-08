@@ -1,11 +1,11 @@
-//! KIP-1022 `crabka format --feature` end-to-end: a standalone-formatted log
-//! dir whose feature levels were set via `--feature` boots a broker that
+//! KIP-1022 `crabka format --feature` end-to-end test. A standalone-formatted
+//! log dir whose feature levels came from `--feature` boots a broker that
 //! finalizes exactly those levels and surfaces them through `ApiVersions`.
 //!
-//! `--standalone` is load-bearing: it writes a `VotersRecord`, so the broker
+//! `--standalone` is load-bearing. It writes a `VotersRecord`, so the broker
 //! uses the formatted voter set and *skips* the in-process self-bootstrap that
-//! would otherwise re-seed every feature at the latest release — proving the
-//! `--feature` overrides survive boot rather than being clobbered.
+//! would otherwise re-seed every feature at the latest release. That proves the
+//! `--feature` overrides survive boot and nothing overwrites them.
 
 use std::process::Command;
 
@@ -16,9 +16,10 @@ use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 
 mod support;
 
-/// Run `crabka format --standalone … --feature …` as a subprocess. Shelled
-/// out via `env!("CARGO")` (the `crabka-cli` `CARGO_BIN_EXE_*` isn't exported
-/// to this crate); the `crabka-cli` dev-dep keeps it a cache hit.
+/// Run `crabka format --standalone … --feature …` as a subprocess. The test
+/// shells out through `env!("CARGO")`, because this crate does not get the
+/// `crabka-cli` `CARGO_BIN_EXE_*` variable. The `crabka-cli` dev-dep keeps the
+/// build a cache hit.
 fn run_crabka_format_with_features(
     log_dir: &std::path::Path,
     node_id: u64,

@@ -1,7 +1,9 @@
-//! Forward-suppression seam for materializing processors. Mirrors JVM
-//! `TimestampedTupleForwarder`: when the backing store is record-cached, the
-//! immediate downstream forward is suppressed (the cache flush forwards the
-//! deduped `Change`); otherwise the processor forwards immediately.
+//! Forward-suppression seam for materializing processors.
+//!
+//! This seam mirrors the JVM `TimestampedTupleForwarder`. When the backing store
+//! is record-cached, the seam suppresses the immediate downstream forward,
+//! because the cache flush forwards the deduped `Change`. When the store is not
+//! cached, the processor forwards immediately.
 
 use crate::{
     dsl::processors::change::Change,
@@ -14,13 +16,14 @@ pub(crate) struct TupleForwarder {
 }
 
 impl TupleForwarder {
-    /// Resolve from the owning store's cache state (call in the processor's `init`).
+    /// Resolve from the owning store's cache state. Call this in the processor's
+    /// `init`.
     pub(crate) fn resolve(cached: bool) -> Self {
         Self { cached }
     }
 
-    /// Forward `Change::update(old,new)` unless the store is cached (then the
-    /// cache flush forwards the deduped change).
+    /// Forward `Change::update(old,new)` unless the store is cached. When the
+    /// store is cached, the cache flush forwards the deduped change.
     pub(crate) fn maybe_forward<K, VA>(
         &self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<VA>>,
@@ -38,11 +41,13 @@ impl TupleForwarder {
         ctx.forward(Record::new(Some(key), Change::update(old, new), ts));
     }
 
-    /// Forward an already-computed `Change` (which may be a tombstone, i.e.
-    /// `new == None`) unless the store is cached. Used by processors like
-    /// `KTable.filter` / `KTable.mapValues` whose change can carry a tombstone.
-    /// The store has already buffered the corresponding put/delete, so when
-    /// cached the deduped change is forwarded by the cache flush instead.
+    /// Forward an already-computed `Change` unless the store is cached. The
+    /// change can be a tombstone, that is, `new == None`.
+    ///
+    /// Processors such as `KTable.filter` and `KTable.mapValues` use this method,
+    /// because their change can carry a tombstone. The store has already buffered
+    /// the matching put or delete. When the store is cached, the cache flush
+    /// forwards the deduped change instead.
     pub(crate) fn maybe_forward_change<K, VA>(
         &self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<VA>>,
@@ -84,7 +89,7 @@ mod tests {
         }
     }
 
-    /// Run `maybe_forward` once over a single-child dispatch and return how many
+    /// Run `maybe_forward` once over a one-child dispatch and return how many
     /// records it enqueued.
     fn forwarded_count(forwarder: &TupleForwarder) -> usize {
         let mut stores = StoreRegistry::default();

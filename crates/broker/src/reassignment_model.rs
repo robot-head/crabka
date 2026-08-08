@@ -1,16 +1,17 @@
 //! Exhaustive stateright model of the pure KIP-455 reassignment-completion core
 //! (`reassign_one`).
 //!
-//! The model state holds a single partition's reassignment; `next_state` drives
-//! the real `reassign_one`; the BFS checker explores every interleaving of
-//! replica catch-up, broker liveness, and completion ticks, asserting the
-//! reassignment-safety invariants — above all that the replica set never
-//! switches off the leader. Design:
+//! The model state holds a single partition's reassignment, and `next_state`
+//! drives the real `reassign_one`. The BFS checker explores every interleaving
+//! of replica catch-up, broker liveness, and completion ticks, and it asserts
+//! the reassignment-safety invariants. The most important one is that the
+//! replica set never switches off the leader. Design:
 //! `docs/superpowers/specs/2026-06-13-crabka-reassignment-model-design.md`.
 //!
 //! Memory safety: stateright BFS keeps every visited unique state resident, so
-//! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
-//! and MUST be executed under the host memory watchdog while bounds are tuned.
+//! each run is fenced with `within_boundary`, `target_state_count`, and
+//! `timeout`. While bounds are tuned, every run MUST execute under the host
+//! memory watchdog.
 
 use std::{
     collections::{BTreeSet, HashSet},
@@ -27,7 +28,7 @@ const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 80;
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Bounded config for the reassignment model (held here, not in the state).
+/// Bounded config for the reassignment model. It lives here, not in the state.
 struct ReassignModel {
     replicas: Vec<NodeId>,
     adding: Vec<NodeId>,
@@ -113,7 +114,8 @@ fn in_flight(s: &ReassignState) -> bool {
     !s.adding.is_empty() || !s.removing.is_empty()
 }
 
-/// The target replica set the reassignment converges to: replicas − removing.
+/// The target replica set that the reassignment converges to, which is
+/// replicas − removing.
 fn target_of(s: &ReassignState) -> Vec<NodeId> {
     s.replicas
         .iter()
@@ -123,7 +125,7 @@ fn target_of(s: &ReassignState) -> Vec<NodeId> {
 }
 
 /// Build a `PartitionRecord` from the model state to drive the real
-/// `reassign_one`. `directories` is irrelevant to the safety properties.
+/// `reassign_one`. `directories` does not affect the safety properties.
 fn pr_of(s: &ReassignState) -> PartitionRecord {
     PartitionRecord {
         topic: "t".to_string(),
@@ -140,7 +142,7 @@ fn pr_of(s: &ReassignState) -> PartitionRecord {
 }
 
 /// Verify a `reassign_one` decision against the pre-state. These are the
-/// safety-critical invariants; they hold per-decision under any ordering.
+/// safety-critical invariants, and they hold per decision under any ordering.
 fn assert_step(pre: &ReassignState, next: &PartitionRecord) {
     assert!(
         next.leader_epoch >= pre.leader_epoch,

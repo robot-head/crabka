@@ -1,9 +1,10 @@
-//! Spawned actor task that owns the only `&mut Log` reference (via the
-//! shared `Arc<Mutex<Log>>`) and serializes appends for a single partition.
+//! Spawned actor task that serializes appends for a single partition.
 //!
-//! Reads bypass the actor — they take the same mutex briefly. The actor's
-//! contribution is: ordered acks back to producers + waking long-poll
-//! Fetch consumers via a shared `Notify` after every successful append.
+//! The task owns the only `&mut Log` reference, through the shared
+//! `Arc<Mutex<Log>>`. Reads bypass the actor. They take the same mutex for a
+//! short time. The actor sends ordered acks back to producers. It also wakes
+//! long-poll Fetch consumers with a shared `Notify` after each successful
+//! append.
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -27,19 +28,19 @@ use crate::{
     replica_state::ReplicaState,
 };
 
-/// Inspect a `BrokerError` returned by a partition-writer mutation
-/// (`append`, `append_at`, `truncate_to`, `reset_to`, `compact`,
-/// `trim_to_offset`) and, if it looks like an underlying storage
-/// failure (a `LogError::Io(_)`), mark the partition's owning log dir
-/// offline on the broker-wide registry.
+/// Mark a partition's log dir offline when a mutation hit a storage failure.
 ///
-/// We err on the side of pessimism: any `io::Error` propagated by the
-/// log layer is a credible "the disk just went sideways" signal. A
-/// false positive (e.g. a transient `ENOENT` from a misconfigured
-/// scratch path) costs one partition's availability — KIP-113 fail-over
-/// elsewhere on the cluster keeps the topic live. A false negative
-/// silently corrupts produce acks, which is the failure mode this
-/// whole slice exists to prevent.
+/// This function inspects a `BrokerError` returned by a partition-writer
+/// mutation: `append`, `append_at`, `truncate_to`, `reset_to`, `compact`, or
+/// `trim_to_offset`. If the error is a `LogError::Io(_)`, the function marks
+/// the partition's owning log dir offline on the broker-wide registry.
+///
+/// The function is pessimistic. Any `io::Error` from the log layer is a
+/// credible disk-failure signal. A false positive, for example a transient
+/// `ENOENT` from a misconfigured scratch path, costs one partition's
+/// availability. KIP-113 fail-over elsewhere on the cluster keeps the topic
+/// live. A false negative silently corrupts produce acks, and this slice
+/// exists to prevent that failure mode.
 fn flag_storage_failure(
     err: &crate::error::BrokerError,
     log_dir: &ArcSwap<PathBuf>,
@@ -53,24 +54,24 @@ fn flag_storage_failure(
     false
 }
 
-/// Lock the partition log, recovering the guard if the mutex was
-/// poisoned by a panic in some other critical section.
+/// Lock the partition log and recover the guard if the mutex is poisoned.
 ///
-/// In this greenfield single-writer model the log data is consistent
-/// enough to keep serving after a poison — the alternative (`expect`)
-/// silently kills the writer task (its `JoinHandle` is discarded),
-/// taking the whole partition offline. Recovering via `into_inner`
-/// keeps the partition live.
+/// A panic in some other critical section can poison the mutex. In this
+/// greenfield single-writer model the log data stays consistent enough to keep
+/// serving after a poison. The alternative, `expect`, silently kills the writer
+/// task because its `JoinHandle` is discarded. That takes the whole partition
+/// offline. `into_inner` recovers the guard and keeps the partition live.
 fn lock_log(log: &Mutex<Log>) -> std::sync::MutexGuard<'_, Log> {
     log.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Build a `BrokerError` standing in for a panic inside a
-/// `spawn_blocking` storage closure. A panic during `write_all` /
-/// `fsync` is a credible "the disk just went sideways" signal, so we
-/// model it as a `LogError::Io` — which `flag_storage_failure` then
-/// recognizes and uses to mark the owning log dir offline.
+/// Build a `BrokerError` that stands in for a panic in a storage closure.
+///
+/// The closure runs inside `spawn_blocking`. A panic during `write_all` or
+/// `fsync` is a credible disk-failure signal, so this function models it as a
+/// `LogError::Io`. `flag_storage_failure` recognizes that error and marks the
+/// owning log dir offline.
 pub(crate) fn storage_failure_error(
     context: &str,
     detail: impl std::fmt::Display,
@@ -79,12 +80,14 @@ pub(crate) fn storage_failure_error(
     crate::error::BrokerError::Log(crabka_log::LogError::Io(io))
 }
 
-/// Append a whole group of produce jobs under a single lock acquisition,
-/// returning the per-job results (base offset / error, in input order) plus the
-/// post-append log-end offset for the group's HW recompute. Verbatim jobs go
-/// straight to `append_verbatim`; owned jobs are recompressed to the topic's
-/// configured codec (read once under the same lock). Sequential appends stamp
-/// sequential base offsets, so ordering across the group is preserved.
+/// Append a whole group of produce jobs under a single lock acquisition.
+///
+/// The function returns the per-job results, a base offset or an error, in
+/// input order. It also returns the log-end offset after the append, for the
+/// group's HW recompute. Verbatim jobs go straight to `append_verbatim`. The
+/// function recompresses owned jobs to the topic's configured codec, which it
+/// reads once under the same lock. Sequential appends stamp sequential base
+/// offsets, so the function keeps the order across the group.
 fn append_produce_batch(
     log: &Mutex<Log>,
     datas: Vec<ProduceData>,
@@ -152,12 +155,14 @@ fn append_produce_batch_at(
     (results, leo)
 }
 
-/// Run [`append_produce_batch`] away from normal async polling. On the broker's
-/// multi-thread runtime, `block_in_place` avoids the per-batch `spawn_blocking`
-/// scheduling hop while letting Tokio hand the worker's other tasks to a
-/// replacement thread; current-thread test runtimes keep the `spawn_blocking`
-/// fallback because `block_in_place` is illegal there. The writer loop is still
-/// the single serializer for this partition, so append ordering is unchanged.
+/// Run [`append_produce_batch`] away from normal async polling.
+///
+/// On the broker's multi-thread runtime, `block_in_place` avoids the per-batch
+/// `spawn_blocking` scheduling hop. Tokio can still hand the worker's other
+/// tasks to a replacement thread. Current-thread test runtimes keep the
+/// `spawn_blocking` fallback because `block_in_place` is illegal there. The
+/// writer loop is still the single serializer for this partition, so the append
+/// order does not change.
 pub(crate) async fn run_produce_append_batch(
     log: Arc<Mutex<Log>>,
     datas: Vec<ProduceData>,
@@ -483,7 +488,8 @@ async fn handle_trim(
 }
 
 /// Loop on the receive side of the partition's `WriterMessage` channel.
-/// Exits when the channel closes (every sender dropped).
+///
+/// The loop stops when the channel closes, that is, when all senders drop.
 #[allow(dead_code)]
 pub async fn run(
     identity: (String, PartitionIndex),
@@ -634,14 +640,16 @@ pub async fn run_with_sequencer(
     }
 }
 
-/// KIP-113 intra-broker log-dir swap. Called from the writer task —
-/// holds the partition's `log` mutex for the duration of the rename so
-/// no other appender sees a half-swapped state.
+/// KIP-113 intra-broker log-dir swap.
 ///
-/// The future log MUST be caught up: its LEO == the current log's LEO.
-/// If a producer slipped a batch in between the caller's catch-up
-/// check and this writer cycle, we report `NotCaughtUp` so the
-/// replicator loop drains the lag and retries.
+/// The writer task calls this function. The function holds the partition's
+/// `log` mutex for the full rename, so no other appender sees a half-swapped
+/// state.
+///
+/// The future log MUST be caught up: its LEO == the current log's LEO. If a
+/// producer added a batch between the caller's catch-up check and this writer
+/// cycle, the function reports `NotCaughtUp`. The replicator loop then drains
+/// the lag and retries.
 fn swap_future_log(
     log: &Arc<Mutex<Log>>,
     log_dir: &Arc<ArcSwap<PathBuf>>,

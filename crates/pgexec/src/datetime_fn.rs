@@ -1,17 +1,18 @@
-//! SP37: date/time *functions* — the clock family, `extract`/`date_part`,
+//! SP37: date/time *functions*. The clock family, `extract`/`date_part`,
 //! `date_trunc`, `age`, and the `timezone` function (the `AT TIME ZONE` target).
 //!
-//! Mirrors `func.rs` (SP29 scalar functions): a `datetime_func(name)` registry, an
-//! `is_datetime_func` dispatch predicate, an `eval_datetime` value evaluator, and a
-//! `datetime_func_result_type` static result-type resolver. Like every breadth
-//! slice since SP27, each function is a pure, deterministic transform over a single
-//! row's already-evaluated Datums (the clock family reads the per-statement
-//! `EvalCtx`), so there is no new lock / visibility rule / write path / interleaving
-//! and thus no Stateright model — proven instead by the unit tests below + the
-//! Task-14 wire test + the Task-15 conformance corpus diffed against PostgreSQL.
+//! This mirrors `func.rs` (SP29 scalar functions): a `datetime_func(name)`
+//! registry, an `is_datetime_func` dispatch predicate, an `eval_datetime` value
+//! evaluator, and a `datetime_func_result_type` static result-type resolver.
+//! Like every breadth slice since SP27, each function is a pure, deterministic
+//! transform over a single row's already-evaluated Datums, and the clock family
+//! reads the per-statement `EvalCtx`. So there is no new lock, visibility rule,
+//! write path, or interleaving, and no Stateright model.
+//! The unit tests below, the Task-14 wire test, and the Task-15 conformance
+//! corpus diffed against PostgreSQL prove it instead.
 //!
-//! Field math (extract/date_part/date_trunc) is done here in jiff; only value-pure,
-//! reusable computations live in `crabka_pgtypes::datetime`.
+//! The field math (extract/date_part/date_trunc) happens here in jiff. Only
+//! value-pure, reusable computations live in `crabka_pgtypes::datetime`.
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
 use crabka_pgtypes::{ColumnType, Datum, datetime::Interval};
@@ -26,38 +27,40 @@ use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
 /// The date/time functions SP37 supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DtFunc {
-    /// `now()` / `current_timestamp` / `transaction_timestamp()` — the transaction
+    /// `now()` / `current_timestamp` / `transaction_timestamp()`: the transaction
     /// instant, as `timestamptz` (transaction-stable, like PostgreSQL).
     TransactionTimestamp,
-    /// `statement_timestamp()` — the statement instant, as `timestamptz`.
+    /// `statement_timestamp()`: the statement instant, as `timestamptz`.
     StatementTimestamp,
-    /// `clock_timestamp()` — the real-time clock, as `timestamptz`.
+    /// `clock_timestamp()`: the real-time clock, as `timestamptz`.
     ClockTimestamp,
-    /// `current_date` — the transaction date in the session zone.
+    /// `current_date`: the transaction date in the session zone.
     CurrentDate,
-    /// `current_time` / `localtime` — the transaction time-of-day in the session zone.
+    /// `current_time` / `localtime`: the transaction time-of-day in the session
+    /// zone.
     CurrentTime,
-    /// `localtimestamp` — the transaction wall-clock as a (civil) `timestamp`.
+    /// `localtimestamp`: the transaction wall-clock as a (civil) `timestamp`.
     LocalTimestamp,
     /// `extract(field, source)` → `numeric` (PG 14+).
     Extract,
     /// `date_part(text, source)` → `float8` (the historical double-precision form).
     DatePart,
-    /// `date_trunc(field, source [, tz])` — truncate to a unit.
+    /// `date_trunc(field, source [, tz])`: truncate to a unit.
     DateTrunc,
-    /// `age(ts1, ts2)` / `age(ts1)` — a symbolic interval with month borrowing.
+    /// `age(ts1, ts2)` / `age(ts1)`: a symbolic interval with month borrowing.
     Age,
-    /// `timezone(zone, value)` — the `AT TIME ZONE` target.
+    /// `timezone(zone, value)`: the `AT TIME ZONE` target.
     Timezone,
-    /// `isfinite(value)` — false for the non-finite date/timestamp/interval values.
+    /// `isfinite(value)`: false for the non-finite date/timestamp/interval
+    /// values.
     IsFinite,
-    /// `date_bin(stride, source, origin)` — snap `source` to a stride grid.
+    /// `date_bin(stride, source, origin)`: snap `source` to a stride grid.
     DateBin,
 }
 
-/// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
-/// `None` means "not a date/time function"; the caller then reports a misplaced
-/// aggregate / undefined function.
+/// Classify a lowercased function name. The lexer lowercases unquoted idents.
+/// `None` means "not a date/time function". The caller then reports a misplaced
+/// aggregate or an undefined function.
 fn datetime_func(name: &str) -> Option<DtFunc> {
     Some(match name {
         "now" | "current_timestamp" | "transaction_timestamp" => DtFunc::TransactionTimestamp,
@@ -77,7 +80,8 @@ fn datetime_func(name: &str) -> Option<DtFunc> {
     })
 }
 
-/// Is `name` a known date/time function? (The dispatch point in `eval`/`infer_type`.)
+/// Is `name` a known date/time function? This is the dispatch point in
+/// `eval`/`infer_type`.
 pub(crate) fn is_datetime_func(name: &str) -> bool {
     datetime_func(name).is_some()
 }
@@ -86,8 +90,8 @@ fn undefined_function(name: &str) -> ExecError {
     ExecError::UndefinedFunction(format!("function {name}(...) does not exist"))
 }
 
-/// The positional argument list. The clock family is niladic (`Exprs([])`) — `f(*)`
-/// is never valid for a date/time function.
+/// The positional argument list. The clock family is niladic (`Exprs([])`), and
+/// `f(*)` is never valid for a date/time function.
 fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
     match &fc.args {
         FuncArgs::Exprs(v) => Ok(v),
@@ -96,7 +100,8 @@ fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
 }
 
 /// 22023 (`InvalidParameterValue`) for an unknown extract/date_part field or an
-/// unknown `date_trunc`/`timezone` unit/zone — PostgreSQL's SQLSTATE for these.
+/// unknown `date_trunc`/`timezone` unit/zone. That is PostgreSQL's SQLSTATE for
+/// these.
 fn invalid_param(msg: impl Into<String>) -> ExecError {
     ExecError::InvalidParameterValue(msg.into())
 }
@@ -109,7 +114,7 @@ fn type_error(what: &str, got: &Datum) -> ExecError {
     ))
 }
 
-/// Statically infer a date/time call's result type (for RowDescription).
+/// Statically infer a date/time call's result type, for RowDescription.
 pub(crate) fn datetime_func_result_type(
     fc: &FuncCall,
     scope: &Scope,
@@ -182,8 +187,9 @@ pub(crate) fn datetime_func_result_type(
 }
 
 /// Evaluate a date/time call. `eval_child` evaluates each argument against the
-/// current row (the same `eval` used for scalar context, or `agg::eval_grouped` in
-/// a grouped context), so the math is shared and only the closure differs.
+/// current row. It is the same `eval` for a scalar context, or
+/// `agg::eval_grouped` for a grouped context, so the two share the math and only
+/// the closure differs.
 pub(crate) fn eval_datetime(
     fc: &FuncCall,
     ctx: &EvalCtx,
@@ -351,11 +357,11 @@ pub(crate) fn eval_datetime(
     }
 }
 
-/// `date_bin(stride, source, origin)` — snap `source` down to the start of the
+/// `date_bin(stride, source, origin)`: snap `source` down to the start of the
 /// `stride`-wide bin whose grid is anchored at `origin`.
 ///
-/// The stride must be a pure day-and-time interval: months are not a fixed
-/// number of microseconds, so PostgreSQL refuses them rather than guessing.
+/// The stride must be a pure day-and-time interval. Months are not a fixed
+/// number of microseconds, so PostgreSQL refuses them and does not guess.
 fn date_bin(
     stride: &Datum,
     source: &Datum,
@@ -439,8 +445,9 @@ fn require_arity(fc: &FuncCall, ok: bool) -> Result<(), ExecError> {
     }
 }
 
-/// The `extract` field, which the parser lowered to a `StringLiteral` (already
-/// lowercased). Anything else is a misuse → undefined function.
+/// The `extract` field, which the parser lowered to a `StringLiteral` that is
+/// already lowercased. Anything else is a misuse, and gives an undefined
+/// function.
 fn literal_field(e: &Expr) -> Result<String, ExecError> {
     match e {
         Expr::StringLiteral(s) => Ok(s.to_ascii_lowercase()),
@@ -450,8 +457,8 @@ fn literal_field(e: &Expr) -> Result<String, ExecError> {
     }
 }
 
-/// Resolve a zone-name text value to a jiff `TimeZone`. `UTC` and fixed-offset
-/// spellings are handled by jiff's tzdb; an unknown zone is 22023.
+/// Resolve a zone-name text value to a jiff `TimeZone`. Jiff's tzdb handles
+/// `UTC` and fixed-offset spellings. An unknown zone is 22023.
 fn zone_arg(d: &Datum) -> Result<TimeZone, ExecError> {
     let name = match d {
         Datum::Text(s) => s.as_str(),
@@ -467,7 +474,8 @@ fn zone_arg(d: &Datum) -> Result<TimeZone, ExecError> {
 }
 
 /// Coerce a temporal Datum to a civil `DateTime` for `age` arithmetic. A
-/// `timestamptz` is rendered in the session zone; a `date` promotes to midnight.
+/// `timestamptz` renders in the session zone, and a `date` promotes to
+/// midnight.
 fn as_datetime(d: &Datum, tz: &TimeZone) -> Result<DateTime, ExecError> {
     match d {
         Datum::Timestamp(dt) => Ok(*dt),
@@ -479,14 +487,15 @@ fn as_datetime(d: &Datum, tz: &TimeZone) -> Result<DateTime, ExecError> {
 
 // ---- extract / date_part field math ----
 
-/// The Unix epoch as a civil datetime (for `epoch` of timestamp/date — "as if UTC").
+/// The Unix epoch as a civil datetime, for `epoch` of timestamp/date ("as if
+/// UTC").
 fn unix_epoch_civil() -> DateTime {
     DateTime::constant(1970, 1, 1, 0, 0, 0, 0)
 }
 
-/// Canonicalize an extract/date_part unit, accepting every spelling PostgreSQL
-/// does. `None` means the word is not a unit at all, which is 22023; a unit the
-/// source type has no value for is a different error (0A000).
+/// Canonicalize an extract/date_part unit, and accept every spelling PostgreSQL
+/// accepts. `None` means the word is not a unit at all, which is 22023. A unit
+/// the source type has no value for is a different error (0A000).
 fn canonical_unit(field: &str) -> Option<&'static str> {
     Some(match field {
         "microsecond" | "microseconds" | "usecond" | "useconds" | "usec" | "usecs" | "us" => {
@@ -519,16 +528,17 @@ fn canonical_unit(field: &str) -> Option<&'static str> {
     })
 }
 
-/// 0A000 — a real unit the source type has no value for (`day` of a `time`).
+/// 0A000: a real unit the source type has no value for (`day` of a `time`).
 fn unsupported_field(field: &str, type_name: &str) -> ExecError {
     ExecError::Unsupported(format!(
         "unit \"{field}\" not supported for type {type_name}"
     ))
 }
 
-/// Compute one extract/date_part field of `source`, returned as a decimal STRING
-/// (so the numeric form keeps full precision and the float form just parses it).
-/// `tz` is the session zone, used only for the timezone-* fields of a timestamptz.
+/// Compute one extract/date_part field of `source` and return it as a decimal
+/// STRING. The numeric form then keeps full precision, and the float form only
+/// parses it. `tz` is the session zone, and only the timezone-* fields of a
+/// timestamptz use it.
 fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<String>, ExecError> {
     let unit = canonical_unit(field).ok_or_else(|| unknown_field(field))?;
     match source {
@@ -610,10 +620,10 @@ fn extract_field(field: &str, source: &Datum, tz: &TimeZone) -> Result<Option<St
 }
 
 /// The value of `unit` for a non-finite source, or `None` when the source is
-/// finite. PostgreSQL splits the units in two: the *monotonic* ones (which only
-/// grow with the value) become `Infinity`/`-Infinity`, while the *oscillating*
-/// ones (month, day, hour, …) have no limit and become NULL. A unit with no
-/// meaning at all for the type is still an error.
+/// finite. PostgreSQL splits the units in two. The *monotonic* ones, which only
+/// grow with the value, become `Infinity`/`-Infinity`. The *oscillating* ones
+/// (month, day, hour, …) have no limit and become NULL. A unit with no meaning
+/// at all for the type is still an error.
 fn non_finite_field(unit: &str, sign: i32) -> NonFinite {
     if sign == 0 {
         return NonFinite::Finite;
@@ -630,7 +640,7 @@ fn non_finite_field(unit: &str, sign: i32) -> NonFinite {
 /// What [`non_finite_field`] found: either the source is finite and the caller
 /// must compute the field itself, or it is not and the answer is already known.
 enum NonFinite {
-    /// The source is finite; compute the field normally.
+    /// The source is finite. Compute the field normally.
     Finite,
     /// A monotonic field of a non-finite source: `Infinity` / `-Infinity`.
     Value(String),
@@ -648,8 +658,9 @@ fn julian_day(date: Date) -> i64 {
         })
 }
 
-/// The Julian date of a timestamp: the day number plus the fraction of the day
-/// elapsed, at the twenty fractional digits PostgreSQL's numeric division gives.
+/// The Julian date of a timestamp: the day number plus the elapsed fraction of
+/// the day, at the twenty fractional digits PostgreSQL's numeric division
+/// gives.
 fn julian_datetime_str(dt: DateTime) -> String {
     let day = julian_day(dt.date());
     let micros = i128::from(crabka_pgtypes::datetime::time_to_micros_of_day(dt.time()));
@@ -659,9 +670,9 @@ fn julian_datetime_str(dt: DateTime) -> String {
     format!("{day}.{frac:020}")
 }
 
-/// Fields of a civil datetime. `tz_offset_secs` is `Some` only for a `timestamptz`
-/// source (so the `timezone*` fields resolve; for a plain timestamp they are
-/// undefined → 22023, matching PostgreSQL).
+/// Fields of a civil datetime. `tz_offset_secs` is `Some` only for a
+/// `timestamptz` source, so the `timezone*` fields resolve. For a plain
+/// timestamp they are undefined and give 22023, which matches PostgreSQL.
 fn extract_from_datetime(
     field: &str,
     dt: DateTime,
@@ -719,7 +730,7 @@ fn extract_from_datetime(
     })
 }
 
-/// Fields of a `time` value — only the clock fields, plus the zone fields when
+/// Fields of a `time` value: only the clock fields, plus the zone fields when
 /// the value is a `timetz` and so carries `tz_offset_secs`.
 fn extract_from_time(
     unit: &str,
@@ -760,7 +771,8 @@ fn extract_from_time(
 }
 
 /// Fields of an `interval`. PostgreSQL extracts the stored months/days/micros
-/// fields directly (no normalization): year = months/12, month = months%12, etc.
+/// fields directly and normalizes nothing: year = months/12, month = months%12,
+/// and so on.
 fn extract_from_interval(unit: &str, field: &str, iv: Interval) -> Result<String, ExecError> {
     let months = i64::from(iv.months);
     let secs_whole = iv.micros / 1_000_000;
@@ -820,7 +832,7 @@ fn int_str(n: i64) -> String {
 
 /// `second` (and the interval/time second) as a decimal. `extract` returns
 /// `numeric`, and PostgreSQL fixes this field's scale at 6, so the trailing
-/// zeros are significant: `3` prints as `3.000000`.
+/// zeros are significant. `3` prints as `3.000000`.
 fn seconds_str(secs: i64, subsec_nanos: i32) -> String {
     let total_micros = secs * 1_000_000 + i64::from(subsec_nanos / 1_000);
     decimal_micros_scaled(total_micros, 1_000_000)
@@ -839,9 +851,10 @@ fn micros_str(secs: i64, subsec_nanos: i32) -> String {
     total_micros.to_string()
 }
 
-/// Render `total_micros / divisor` at the fixed scale `divisor` implies (1000 →
-/// 3 fractional digits, 1_000_000 → 6). `extract` yields `numeric`, whose text
-/// form keeps every digit of the declared scale, so trailing zeros stay.
+/// Render `total_micros / divisor` at the fixed scale `divisor` implies: 1000
+/// gives 3 fractional digits, and 1_000_000 gives 6. `extract` yields `numeric`,
+/// whose text form keeps every digit of the declared scale, so trailing zeros
+/// stay.
 fn decimal_micros_scaled(total_micros: i64, divisor: i64) -> String {
     let neg = total_micros < 0;
     let abs = total_micros.unsigned_abs();
@@ -861,8 +874,8 @@ fn epoch_string_micros(total_micros: i64) -> String {
 /// `epoch` from a microsecond count too wide for `i64`.
 ///
 /// `extract(epoch FROM interval)` returns `numeric` in PostgreSQL, so a month
-/// count near the type's limits still has an answer; rendering from `i128`
-/// keeps it.
+/// count near the type's limits still has an answer. A render from `i128` keeps
+/// it.
 fn epoch_string_micros_wide(total_micros: i128) -> String {
     let seconds = total_micros / 1_000_000;
     let fraction = (total_micros % 1_000_000).abs();
@@ -876,9 +889,9 @@ fn epoch_string_micros_wide(total_micros: i128) -> String {
 
 // ---- date_trunc ----
 
-/// Truncate `source` to `unit`. timestamp/date(→timestamp)/interval truncate
-/// directly; timestamptz truncates in `zone` (3-arg) or `session_tz` (2-arg) and
-/// returns a timestamptz.
+/// Truncate `source` to `unit`. timestamp, date (to timestamp), and interval
+/// truncate directly. timestamptz truncates in `zone` (3-arg) or `session_tz`
+/// (2-arg) and returns a timestamptz.
 fn date_trunc(
     unit: &str,
     source: &Datum,
@@ -974,7 +987,7 @@ fn trunc_datetime(unit: &str, dt: DateTime) -> Result<DateTime, ExecError> {
     })
 }
 
-/// Truncate an interval to `unit` (zero out finer fields, on the stored fields).
+/// Truncate an interval to `unit`, and zero out the finer stored fields.
 fn trunc_interval(unit: &str, iv: Interval) -> Result<Interval, ExecError> {
     let months = iv.months;
     let days = iv.days;
@@ -1043,9 +1056,9 @@ fn trunc_interval(unit: &str, iv: Interval) -> Result<Interval, ExecError> {
 
 // ---- age ----
 
-/// PostgreSQL `age(end, start)`: a SYMBOLIC interval computed by subtracting each
-/// field and borrowing from the next-larger field (using the actual days in the
-/// borrowed month) when a smaller field goes negative. Returns months/days/micros.
+/// PostgreSQL `age(end, start)`: a SYMBOLIC interval. It subtracts each field
+/// and borrows from the next-larger field when a smaller field goes negative,
+/// with the actual days in the borrowed month. Returns months/days/micros.
 fn age(end: DateTime, start: DateTime) -> Interval {
     let mut years = i64::from(end.date().year()) - i64::from(start.date().year());
     let mut months = i64::from(end.date().month()) - i64::from(start.date().month());
@@ -1099,9 +1112,9 @@ fn prev_month(year: i16, month: i8) -> (i16, i8) {
     }
 }
 
-/// Days in the given month (1..=12), leap-aware via jiff.
+/// Days in the given month (1..=12), leap-aware through jiff.
 /// The length of `year`-`month`, or `None` when that month is outside the
-/// representable calendar — a caller walking months can step past the end.
+/// representable calendar. A caller that walks months can step past the end.
 fn days_in_month(year: i16, month: i8) -> Option<i8> {
     Date::new(year, month, 1).ok().map(Date::days_in_month)
 }

@@ -237,8 +237,8 @@ async fn recursive_errors_use_postgres_sqlstates() {
 
 /// `PostgreSQL` scopes its "no aggregate in the recursive term" rule to the
 /// query level that HOLDS the self-reference, not to the recursive term as a
-/// whole (`checkWellFormedRecursion` descends into a FROM-clause sub-SELECT and
-/// judges that level's own aggregation). So an aggregate one level above a
+/// whole. `checkWellFormedRecursion` descends into a FROM-clause sub-SELECT and
+/// judges that level's own aggregation. So an aggregate one level above a
 /// self-reference is legal, and one at the self-reference's own level is not,
 /// however deeply nested that level is.
 #[tokio::test]
@@ -307,7 +307,7 @@ async fn self_reference_on_the_nullable_side_of_an_outer_join_is_rejected() {
     assert!(code == "42P19");
 }
 
-/// A column alias list SHORTER than the query is legal: the trailing columns
+/// A column alias list SHORTER than the query is legal, and the trailing columns
 /// keep the names the query gave them. Only a longer list is 42P10.
 #[tokio::test]
 async fn a_short_column_alias_list_names_only_the_leading_columns() {
@@ -351,8 +351,8 @@ async fn a_short_column_alias_list_names_only_the_leading_columns() {
     );
 }
 
-/// `PostgreSQL` type-checks the recursive term at analysis time: the
-/// non-recursive term fixes each column's type and the UNION's common type must
+/// `PostgreSQL` type-checks the recursive term at analysis time. The
+/// non-recursive term fixes each column's type, and the UNION's common type must
 /// equal it. Both failures are 42804, raised before a single round runs.
 #[tokio::test]
 async fn a_recursive_term_that_changes_a_column_type_is_42804() {
@@ -410,7 +410,7 @@ async fn a_recursive_term_that_changes_a_column_type_is_42804() {
     );
 }
 
-/// A FROM-clause sub-SELECT is not a "subquery" for the self-reference rule —
+/// A FROM-clause sub-SELECT is not a "subquery" for the self-reference rule.
 /// `PostgreSQL` restricts SubLinks, not derived tables.
 #[tokio::test]
 async fn a_self_reference_inside_a_from_clause_subselect_is_allowed() {
@@ -438,8 +438,8 @@ async fn a_self_reference_inside_a_from_clause_subselect_is_allowed() {
 }
 
 /// The rules a derived table does NOT escape: an expression subquery is still
-/// 42P19, the reference is still counted for the once-only rule, and the
-/// nullable side of an outer join is still refused.
+/// 42P19, the reference still counts for the once-only rule, and the nullable
+/// side of an outer join is still refused.
 #[tokio::test]
 async fn a_derived_table_does_not_escape_the_remaining_recursion_rules() {
     let cases: &[&str] = &[

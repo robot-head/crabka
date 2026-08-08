@@ -1,11 +1,11 @@
 //! `PostgreSQL`-compatible decoding of date/time literal text.
 //!
-//! This mirrors the two-stage shape of `PostgreSQL`'s `datetime.c`: text is first
-//! split into *typed fields* (`ParseDateTime`), then the fields are interpreted
-//! against a running mask of what has already been seen (`DecodeDateTime`).
-//! Keeping that structure is what makes the accepted set match — the format a
-//! literal is in is not decided up front, it falls out of the order the fields
-//! arrive in and which slots are still free.
+//! This module mirrors the two-stage shape of `PostgreSQL`'s `datetime.c`. The
+//! first stage splits text into *typed fields* (`ParseDateTime`). The second
+//! stage interprets the fields against a running mask of what it has already
+//! seen (`DecodeDateTime`). That structure is what makes the accepted set match.
+//! Nothing decides the format of a literal up front. The format falls out of
+//! the order the fields arrive in and which slots are still free.
 //!
 //! The decoder is deliberately type-agnostic: it yields whichever of date, time
 //! and zone the text supplied, and each SQL type's input function decides what to
@@ -22,7 +22,7 @@ use jiff::{
 /// date with no unambiguous field is read (`01/02/03`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DateOrder {
-    /// `month/day/year` — `PostgreSQL`'s default.
+    /// `month/day/year`, `PostgreSQL`'s default.
     #[default]
     Mdy,
     /// `day/month/year`.
@@ -32,8 +32,9 @@ pub enum DateOrder {
 }
 
 impl DateOrder {
-    /// Read the ordering out of a `DateStyle` setting (`ISO, DMY`), ignoring the
-    /// output-format component. Text naming no ordering keeps the default.
+    /// Read the ordering out of a `DateStyle` setting (`ISO, DMY`) and ignore
+    /// the output-format component. Text that names no ordering keeps the
+    /// default.
     #[must_use]
     pub fn from_datestyle(style: &str) -> Self {
         for part in style.split(',') {
@@ -67,22 +68,22 @@ pub enum Special {
     Infinity,
     /// `-infinity`.
     NegInfinity,
-    /// `now` — the current transaction timestamp.
+    /// `now`: the current transaction timestamp.
     Now,
-    /// `today` — midnight of the current date.
+    /// `today`: midnight of the current date.
     Today,
-    /// `tomorrow` — midnight of the following date.
+    /// `tomorrow`: midnight of the following date.
     Tomorrow,
-    /// `yesterday` — midnight of the preceding date.
+    /// `yesterday`: midnight of the preceding date.
     Yesterday,
-    /// `epoch` — 1970-01-01 00:00:00 UTC.
+    /// `epoch`: 1970-01-01 00:00:00 UTC.
     Epoch,
 }
 
 /// The zone a literal named, if it named one.
 #[derive(Debug, Clone)]
 pub enum Zone {
-    /// A fixed UTC offset — `Z`, `-08`, `+05:30`, or a `POSIX` `GMT+8` spec.
+    /// A fixed UTC offset: `Z`, `-08`, `+05:30`, or a `POSIX` `GMT+8` spec.
     Offset(Offset),
     /// A zone-database name or dynamic abbreviation, whose offset depends on the
     /// instant it is applied to.
@@ -302,7 +303,7 @@ fn split_signed_field(chars: &[char], i: &mut usize) -> Result<Field, DecodeErro
 }
 
 /// Whether a letter run is a keyword in its own right, so a digit right after it
-/// starts a new field rather than continuing a zone name.
+/// starts a new field and does not continue a zone name.
 fn is_non_zone_keyword(word: &str) -> bool {
     matches!(
         word,
@@ -327,8 +328,8 @@ struct Tm {
     minute: Option<i32>,
     second: Option<i32>,
     micro: i64,
-    /// The year field came from one or two digits, so it needs the 1900/2000
-    /// window applied unless an era overrides it.
+    /// The year field came from one or two digits, so the decoder must apply
+    /// the 1900/2000 window unless an era overrides it.
     two_digit_year: bool,
 }
 
@@ -568,8 +569,8 @@ fn decode_time(text: &str, tm: &mut Tm) -> Result<(), DecodeError> {
     Ok(())
 }
 
-/// Decode a punctuated date field, taking any text month first so the numeric
-/// fields that remain are unambiguous.
+/// Decode a punctuated date field. This function takes any text month first, so
+/// the numeric fields that remain are unambiguous.
 fn decode_date(
     text: &str,
     order: DateOrder,
@@ -602,8 +603,9 @@ fn decode_date(
     Ok(())
 }
 
-/// Decode a standalone numeric field, choosing between the run-together forms
-/// (`19970210`, `173201`) and a single date or time component.
+/// Decode a standalone numeric field. This function chooses between the
+/// run-together forms (`19970210`, `173201`) and a single date or time
+/// component.
 fn decode_number_token(
     text: &str,
     order: DateOrder,
@@ -623,8 +625,8 @@ fn decode_number_token(
     }
 }
 
-/// Assign one numeric field to the next free date slot, following
-/// `PostgreSQL`'s `DecodeNumber`.
+/// Assign one numeric field to the next free date slot, as `PostgreSQL`'s
+/// `DecodeNumber` does.
 fn decode_number(
     text: &str,
     order: DateOrder,
@@ -813,8 +815,8 @@ fn lookup_zone_spec(text: &str) -> Result<Zone, DecodeError> {
     Err(DecodeError::UnknownZone(text.to_string()))
 }
 
-/// Look a name up in the zone database. Literals reach here lowercased, so the
-/// database's own capitalization is reconstructed before giving up.
+/// Look a name up in the zone database. Literals reach here lowercased, so this
+/// function reconstructs the database's own capitalization before it gives up.
 fn lookup_zone_name(name: &str) -> Option<Zone> {
     if name.eq_ignore_ascii_case("utc") || name.eq_ignore_ascii_case("gmt") {
         return Some(Zone::Offset(Offset::UTC));
@@ -856,7 +858,7 @@ fn title_case_zone(name: &str) -> String {
 /// abbreviations, a `POSIX` `STD±offset` spec, or a bare signed UTC offset.
 ///
 /// A bare offset follows the ISO sign convention here (`'-05:00'` is five hours
-/// *behind* UTC), matching what `PostgreSQL` accepts for `AT TIME ZONE`.
+/// *behind* UTC). That matches what `PostgreSQL` accepts for `AT TIME ZONE`.
 #[must_use]
 pub fn resolve_time_zone(name: &str) -> Option<TimeZone> {
     let trimmed = name.trim();
@@ -902,7 +904,7 @@ fn lookup_abbrev(word: &str) -> Option<Zone> {
 
 /// Convert a Julian Day Number to a calendar date.
 fn julian_to_date(jd: i32) -> Result<Date, DecodeError> {
-    /// The Julian Day Number of 2000-01-01, the anchor the offset is taken from.
+    /// The Julian Day Number of 2000-01-01, the anchor for the offset.
     const JD_2000_01_01: i32 = 2_451_545;
     let days = jd - JD_2000_01_01;
     Date::constant(2000, 1, 1)

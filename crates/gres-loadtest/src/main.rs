@@ -29,7 +29,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CliCommand {
-    /// Run one scenario and write its JSON + Markdown report.
+    /// Run one scenario and write its JSON and Markdown report.
     Run {
         #[command(flatten)]
         registry: RegistryOptions,
@@ -38,14 +38,15 @@ enum CliCommand {
         /// Path to the scenario YAML.
         #[arg(long)]
         scenario: PathBuf,
-        /// Override the scenario's timestamp-source mode
-        /// (`logical-tso` or `hlc`). Meaningless with `--external`.
+        /// Override the scenario's timestamp-source mode, either
+        /// `logical-tso` or `hlc`. It has no meaning with `--external`.
         #[arg(long, conflicts_with = "external")]
         mode: Option<String>,
         /// Output directory for reports.
         #[arg(long, default_value = "loadtest-out")]
         out: PathBuf,
-        /// Keep the cluster work dir (data + logs) after a successful run.
+        /// Keep the cluster work dir, with its data and logs, after a
+        /// successful run.
         #[arg(long)]
         keep_work_dir: bool,
         #[command(flatten)]
@@ -63,11 +64,12 @@ enum CliCommand {
         /// Output directory for reports.
         #[arg(long, default_value = "loadtest-out")]
         out: PathBuf,
-        /// Keep the cluster work dirs (data + logs) after successful runs.
+        /// Keep the cluster work dirs, with their data and logs, after
+        /// successful runs.
         #[arg(long)]
         keep_work_dir: bool,
-        /// Not supported here: `compare` contrasts crabka's timestamp-source
-        /// modes on a harness-launched cluster. Use `run --external` per
+        /// Not supported here. `compare` contrasts crabka's timestamp-source
+        /// modes on a harness-launched cluster. Use `run --external` for each
         /// target system instead.
         #[arg(long)]
         external: Option<String>,
@@ -322,36 +324,40 @@ fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
     FetchMinBytes::try_from(value).map(FetchMinBytes::size)
 }
 
-/// The `--external*` flag family: benchmark an existing pgwire-speaking SQL
-/// system (`CockroachDB`, `YugabyteDB`, `PostgreSQL`, a remote crabka cluster)
-/// instead of launching a crabka cluster.
+/// The `--external*` flag family. It benchmarks an existing pgwire-speaking
+/// SQL system, such as `CockroachDB`, `YugabyteDB`, `PostgreSQL`, or a remote
+/// crabka cluster, and launches no crabka cluster.
 #[derive(Args)]
 struct ExternalFlags {
-    /// Comma-separated `host:port` SQL endpoints of the external system;
-    /// enables external mode (no crabka processes are launched, the
-    /// scenario's faults must be empty, and its `mode` is ignored).
+    /// Comma-separated `host:port` SQL endpoints of the external system.
+    /// This flag enables external mode. The harness then launches no crabka
+    /// process, the scenario's faults must be empty, and the harness ignores
+    /// the scenario's `mode`.
     #[arg(long)]
     external: Option<String>,
-    /// SQL user for the external endpoints (required with `--external`).
+    /// SQL user for the external endpoints. It is required with
+    /// `--external`.
     #[arg(long, requires = "external")]
     external_user: Option<String>,
-    /// SQL password for the external endpoints (omit for no password).
+    /// SQL password for the external endpoints. Omit it for no password.
     #[arg(long, requires = "external")]
     external_password: Option<String>,
-    /// Database name on the external endpoints (required with `--external`).
+    /// Database name on the external endpoints. It is required with
+    /// `--external`.
     #[arg(long, requires = "external")]
     external_database: Option<String>,
-    /// Manual resource roster as comma-separated `label=pid` entries,
-    /// overriding port-based discovery — for multi-process systems (e.g. a
-    /// `YugabyteDB` master + tserver) or when `/proc` discovery is not
-    /// permitted.
+    /// Manual resource roster, as comma-separated `label=pid` entries. It
+    /// overrides the port-based discovery. Use it for a multi-process system,
+    /// such as a `YugabyteDB` master and tserver, or when `/proc` discovery is
+    /// not permitted.
     #[arg(long, requires = "external")]
     external_pids: Option<String>,
 }
 
-/// Builds the external target from the flag family: `None` without
-/// `--external`; with it, user and database are required (external mode
-/// never guesses credentials) and the password defaults to empty.
+/// Builds the external target from the flag family. Without `--external` the
+/// result is `None`. With it, the user and the database are required, because
+/// external mode never guesses credentials, and the password defaults to
+/// empty.
 fn external_target(flags: ExternalFlags) -> anyhow::Result<Option<ExternalTarget>> {
     let Some(endpoints) = flags.external else {
         return Ok(None);
@@ -377,8 +383,8 @@ fn external_target(flags: ExternalFlags) -> anyhow::Result<Option<ExternalTarget
     }))
 }
 
-/// Rejects `compare --external`: the comparison is between crabka's
-/// timestamp-source modes, which needs a harness-launched cluster.
+/// Rejects `compare --external`. The comparison is between crabka's
+/// timestamp-source modes, and that needs a harness-launched cluster.
 fn ensure_compare_is_internal(external: Option<&str>) -> anyhow::Result<()> {
     anyhow::ensure!(
         external.is_none(),
@@ -438,8 +444,8 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// The `run` subcommand: one scenario, optional mode override, optionally
-/// against an external system.
+/// The `run` subcommand. It drives one scenario, with an optional mode
+/// override, and optionally against an external system.
 async fn run(
     scenario_path: &Path,
     mode: Option<&str>,
@@ -478,8 +484,8 @@ async fn run(
     Ok(())
 }
 
-/// The `compare` subcommand: the same scenario under `logical-tso` then
-/// `hlc`, plus a side-by-side comparison report.
+/// The `compare` subcommand. It runs the same scenario under `logical-tso`
+/// and then `hlc`, and adds a side-by-side comparison report.
 async fn compare(
     scenario_path: &Path,
     out: &Path,
@@ -521,14 +527,15 @@ async fn compare(
     Ok(())
 }
 
-/// The `validate` subcommand: parse + validate, report `ok` or fail.
+/// The `validate` subcommand. It parses and validates the scenario, then
+/// reports `ok` or fails.
 fn validate(scenario_path: &Path) -> anyhow::Result<()> {
     let scenario = load_scenario(scenario_path)?;
     println!("ok: {}", scenario.name);
     Ok(())
 }
 
-/// Loads and validates a scenario, naming the path in the error.
+/// Loads and validates a scenario. The error names the path.
 fn load_scenario(path: &Path) -> anyhow::Result<Scenario> {
     Scenario::from_yaml_file(path).with_context(|| format!("load scenario {}", path.display()))
 }
@@ -546,7 +553,7 @@ fn parse_mode(mode: Option<&str>, hlc_max_offset: Time) -> anyhow::Result<Option
 }
 
 /// Prints the short human summary of one run to stdout. `slug` names the
-/// report files: a mode slug, or [`runner::EXTERNAL_MODE`].
+/// report files. It is a mode slug, or [`runner::EXTERNAL_MODE`].
 fn print_summary(report: &RunReport, out_dir: &Path, slug: &str) {
     let paths = runner::report_paths(out_dir, &report.scenario, slug);
     println!("scenario:  {} ({})", report.scenario, report.mode);
@@ -843,8 +850,9 @@ mod tests {
     fn external_target_requires_user_and_database_and_defaults_password() {
         use crabka_gres_loadtest::{cluster::ProcessInfo, external::HostPort};
 
-        /// One flag-combination case: `(external, user, password, database,
-        /// pids)` and whether building the target should succeed.
+        /// One flag-combination case. It holds
+        /// `(external, user, password, database, pids)` and whether the build
+        /// of the target must succeed.
         struct Case {
             flags: ExternalFlags,
             expected: Result<Option<ExternalTarget>, &'static str>,

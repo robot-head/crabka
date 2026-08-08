@@ -30,7 +30,7 @@ use crate::{
 };
 
 /// How many low bits of a backend id the per-session counter occupies. The
-/// remaining bits of the positive `int4` range carry [`PROCESS_TOKEN`].
+/// remaining bits of the positive `int4` range hold [`PROCESS_TOKEN`].
 const BACKEND_COUNTER_BITS: u32 = 15;
 
 /// The counter half of a backend id, so the composed value always fits the
@@ -41,44 +41,46 @@ static NEXT_PID: AtomicI32 = AtomicI32::new(0);
 
 /// The high half every backend id this process announces carries.
 ///
-/// Drawn once per process, never zero, so the composed id is positive and two
-/// processes serving one cluster do not hand out the same id. This is the same
-/// device the range layer already uses to tell one node's notification records
-/// from another's: `--range-listen` is a bind specification rather than a
-/// resolved address, so there is no stable node number to fold in and a random
-/// per-process draw is what distinguishes processes.
+/// Each process draws this value once, and it is never zero, so the composed
+/// id is positive and two processes that serve one cluster do not hand out the
+/// same id. The range layer already uses the same device to tell one node's
+/// notification records from another's. `--range-listen` is a bind
+/// specification rather than a resolved address, so there is no stable node
+/// number to fold in, and a random per-process draw is what distinguishes
+/// processes.
 static PROCESS_TOKEN: LazyLock<i32> =
     LazyLock::new(|| rand::rng().random_range(1..=(i32::MAX >> BACKEND_COUNTER_BITS)));
 
 /// Allocate the backend process id that identifies one session.
 ///
-/// `PostgreSQL` forks a backend per connection and the pid it announces in
+/// `PostgreSQL` forks a backend per connection, and the pid it announces in
 /// `BackendKeyData` is the one `pg_backend_pid()` reports, so a client can
 /// correlate a cancel request with the session it opened. crabka serves every
-/// session from one OS process, so a counter — not the process id — is what
-/// distinguishes them, and one counter serves the whole process so an engine
-/// opening a session with no client behind it (`Engine::connect`) draws an id
-/// that cannot collide with a connected session's.
+/// session from one OS process, so a counter distinguishes sessions instead of
+/// the process id. One counter serves the whole process, so an engine that
+/// opens a session with no client behind it (`Engine::connect`) draws an id
+/// that cannot collide with a connected session's id.
 ///
-/// The id is **not** only a session label: `pg_temp_<backend id>` names this
-/// session's temporary namespace in a catalog every gateway of a cluster
-/// shares, so a bare per-process counter would have two gateways name one
-/// namespace. Folding [`PROCESS_TOKEN`] into the high bits keeps the id inside
-/// `int4` — the width `BackendKeyData` and `CancelRequest` fix — while making
-/// it a cluster-wide name rather than a process-local one.
+/// The id is **not** only a session label. `pg_temp_<backend id>` names this
+/// session's temporary namespace in a catalog that every gateway of a cluster
+/// shares, so a bare per-process counter would let two gateways name one
+/// namespace. [`PROCESS_TOKEN`] folded into the high bits keeps the id inside
+/// `int4`, the width `BackendKeyData` and `CancelRequest` fix, and makes the
+/// id a cluster-wide name rather than a process-local one.
 ///
 /// The split costs id space in both directions: 32768 sessions per process
 /// before the counter wraps and repeats an id, and one chance in 65535 that
-/// two processes draw the same token. Neither can destroy data on its own —
-/// a temporary namespace is only ever emptied by a session that holds the sole
-/// claim on it — so what remains is that two sessions could share a namespace,
+/// two processes draw the same token. Neither one can destroy data on its own,
+/// because only a session that holds the sole claim on a temporary namespace
+/// ever empties it. What remains is that two sessions could share a namespace,
 /// not that either could lose one.
 pub fn next_backend_pid() -> i32 {
     let counter = NEXT_PID.fetch_add(1, Ordering::Relaxed) & BACKEND_COUNTER_MASK;
     (*PROCESS_TOKEN << BACKEND_COUNTER_BITS) | counter
 }
 
-/// Shared connection/activity accounting for lifecycle decisions outside pgwire.
+/// Shared connection and activity accounting for lifecycle decisions outside
+/// pgwire.
 #[derive(Debug)]
 pub struct ActivityTracker {
     accepting_sessions: AtomicBool,
@@ -94,7 +96,7 @@ impl Default for ActivityTracker {
 }
 
 impl ActivityTracker {
-    /// Build an activity tracker initialized as idle now and accepting sessions.
+    /// Build an activity tracker that starts idle now and accepts sessions.
     #[must_use]
     pub fn new() -> Self {
         Self::with_last_activity_unix_millis(current_unix_millis())
@@ -135,7 +137,8 @@ impl ActivityTracker {
         Arc::clone(&self.maintenance_gate).write_owned().await
     }
 
-    /// Atomically stop admitting new sessions so a lifecycle monitor can suspend safely.
+    /// Atomically stop the admission of new sessions, so a lifecycle monitor
+    /// can suspend safely.
     ///
     /// # Errors
     ///
@@ -171,7 +174,7 @@ impl ActivityTracker {
     }
 }
 
-/// Admission was already closed by a suspend attempt.
+/// A suspend attempt had already closed admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptingAlreadyClosed;
 
@@ -220,45 +223,45 @@ fn current_unix_millis() -> u64 {
 
 /// Combined cancellation target for one session.
 ///
-/// `slot` holds the current query's [`CancellationToken`] and is replaced at
-/// every `begin_query` call so a fired token cannot reach a later query.
+/// `slot` holds the current query's [`CancellationToken`]. Every `begin_query`
+/// call replaces it, so a fired token cannot reach a later query.
 ///
-/// `pending` closes the *extended-batch cancel window*: during an extended
-/// message sequence (Parse → Bind → Describe → Execute) no engine future is
-/// running, so a `CancelRequest` that arrives between messages would fire the
-/// spent token from the previous query and then be silently lost when
-/// `begin_query` replaces it.  Setting `pending = true` alongside the token
-/// fire lets `begin_query` detect the race and immediately cancel the fresh
-/// token — ensuring the next engine call sees a cancelled token right away.
+/// `pending` closes the *extended-batch cancel window*. During an extended
+/// message sequence (Parse → Bind → Describe → Execute) no engine future runs.
+/// A `CancelRequest` that arrives between messages would therefore fire the
+/// spent token from the previous query, and `begin_query` would then silently
+/// lose it at the replacement. `pending = true`, set together with the token
+/// fire, lets `begin_query` detect the race and immediately cancel the fresh
+/// token. The next engine call then sees a cancelled token right away.
 ///
-/// Conformance note: this means a cancel that arrives while the session is
-/// completely idle (no batch in flight) will also poison the next query.  Real
-/// Postgres treats such a cancel as a no-op for future queries.  Matching
-/// that behaviour exactly would require tracking whether an extended batch is
-/// in progress; that refinement is deferred — for now the simpler
-/// "best-effort" semantics are acceptable and the test suite covers both
-/// outcomes.
+/// Conformance note: a cancel that arrives while the session is completely
+/// idle, with no batch in flight, also poisons the next query. Real Postgres
+/// treats such a cancel as a no-op for future queries. An exact match would
+/// need a record of whether an extended batch is in progress. That refinement
+/// is deferred. For now the simpler "best-effort" semantics are acceptable,
+/// and the test suite covers both outcomes.
 struct CancelTarget {
     slot: Mutex<CancellationToken>,
-    /// Set by `CancelRegistry::cancel`; consumed (one-shot) by
-    /// `SessionCancel::begin_query` so that one cancel fires exactly one
-    /// engine call.
+    /// `CancelRegistry::cancel` sets this flag, and
+    /// `SessionCancel::begin_query` consumes it once, so that one cancel fires
+    /// exactly one engine call.
     pending: AtomicBool,
 }
 
 /// Maps (`process_id`, `secret_key`) -> the running query's cancellation target.
 ///
-/// The token inside the target is REPLACED at each query start so a fired
-/// token never cancels a later query.  The `pending` flag survives the
-/// replacement to handle cancels that race the extended-batch window.
+/// The registry REPLACES the token inside the target at each query start, so a
+/// fired token never cancels a later query. The `pending` flag survives the
+/// replacement and handles cancels that race the extended-batch window.
 #[derive(Default)]
 pub struct CancelRegistry {
     sessions: Mutex<HashMap<(i32, i32), Arc<CancelTarget>>>,
 }
 
 impl CancelRegistry {
-    /// Registers a new session; returns a guard that unregisters on drop,
-    /// carrying the pid, secret, and a shared cancellation target.
+    /// Registers a new session and returns a guard that unregisters on drop.
+    /// The guard carries the pid, the secret, and a shared cancellation
+    /// target.
     ///
     /// # Panics
     ///
@@ -286,7 +289,8 @@ impl CancelRegistry {
     /// sticky `pending` flag so a cancel that races the extended-batch window
     /// is not lost.
     ///
-    /// Silently ignores unknown keys, matching Postgres behaviour.
+    /// This method silently ignores unknown keys, which matches Postgres
+    /// behaviour.
     ///
     /// # Panics
     ///
@@ -306,8 +310,9 @@ impl CancelRegistry {
 
 /// Per-session handle to the cancel registry.
 ///
-/// Holds the pid/secret announced to the client and the shared cancellation
-/// target.  Automatically unregisters from the registry when dropped.
+/// The handle holds the pid and secret announced to the client, and the shared
+/// cancellation target. It unregisters from the registry automatically when it
+/// is dropped.
 pub struct SessionCancel {
     pub pid: i32,
     pub secret: i32,
@@ -317,13 +322,13 @@ pub struct SessionCancel {
 
 impl SessionCancel {
     /// Installs and returns a fresh [`CancellationToken`] for one query
-    /// execution.  A previously fired token is replaced so it cannot cancel
-    /// a subsequent query.
+    /// execution. This method replaces a previously fired token, so that token
+    /// cannot cancel a later query.
     ///
-    /// If a `CancelRequest` arrived while no engine future was running (the
-    /// extended-batch window), the `pending` flag will be set; this method
-    /// consumes it and immediately cancels the fresh token so the next
-    /// `tokio::select!` sees `cancelled()` right away.
+    /// The `pending` flag is set if a `CancelRequest` arrived while no engine
+    /// future was running, which is the extended-batch window. This method
+    /// then consumes the flag and immediately cancels the fresh token, so the
+    /// next `tokio::select!` sees `cancelled()` right away.
     ///
     /// # Panics
     ///
@@ -349,7 +354,8 @@ impl Drop for SessionCancel {
     }
 }
 
-/// Serve plaintext connections (no TLS). Convenience wrapper over [`serve_tls`].
+/// Serve plaintext connections without TLS. This is a convenience wrapper over
+/// [`serve_tls`].
 ///
 /// # Errors
 ///
@@ -364,11 +370,11 @@ pub async fn serve<E: Engine>(
 
 /// Serve connections with optional TLS upgrade support.
 ///
-/// When `tls` is `Some`, a client that sends an `SSLRequest` will be upgraded
-/// to a TLS stream; all subsequent protocol bytes flow over TLS.  When `tls`
-/// is `None`, an `SSLRequest` is answered with `'N'` (decline) and the
-/// connection continues in plaintext — matching the existing behaviour of
-/// [`serve`].
+/// When `tls` is `Some`, the server upgrades a client that sends an
+/// `SSLRequest` to a TLS stream, and all later protocol bytes flow over TLS.
+/// When `tls` is `None`, the server answers an `SSLRequest` with `'N'` to
+/// decline it, and the connection continues in plaintext. That matches the
+/// existing behaviour of [`serve`].
 ///
 /// # Errors
 ///
@@ -454,10 +460,12 @@ pub async fn serve_tls_with_activity_until<E: Engine>(
     }
 }
 
-/// Serve a SINGLE already-accepted connection (the per-connection body of
-/// [`serve_tls`]). Exposed so a front-end router (the cluster's leader-routing
-/// layer) can serve a leader-local connection itself. `registry` is shared
-/// across a server's connections so a Postgres `CancelRequest` on a separate
+/// Serve a SINGLE already-accepted connection, the per-connection body of
+/// [`serve_tls`].
+///
+/// This function is public so a front-end router, the cluster's leader-routing
+/// layer, can serve a leader-local connection itself. A server's connections
+/// share one `registry`, so a Postgres `CancelRequest` on a separate
 /// connection can find its target.
 ///
 /// # Errors
@@ -483,10 +491,10 @@ pub async fn serve_conn<E: Engine>(
 
 /// Serve a single connection while updating a shared activity tracker.
 ///
-/// This is the funnel every accepted connection passes through — the accept
-/// loop's `tokio::spawn` and a front-end router serving a leader-local
-/// connection alike — so it is where the connection's `gres.session` span is
-/// raised and instrumented over the whole connection future.
+/// Every accepted connection passes through this function. That includes the
+/// accept loop's `tokio::spawn` and a front-end router that serves a
+/// leader-local connection. This function therefore raises the connection's
+/// `gres.session` span and instruments it over the whole connection future.
 ///
 /// # Errors
 ///
@@ -569,10 +577,11 @@ async fn handle_conn<E: Engine>(
 
 /// Post-TLS-decision startup loop, generic over the stream type.
 ///
-/// Handles the remaining startup packets (`GssEncRequest` → 'N', `CancelRequest`,
-/// Startup) on any stream that implements `AsyncRead + AsyncWrite + Unpin`.
-/// A second `SSLRequest` (or one received over TLS) is declined with 'N' and
-/// the loop continues — the client may then send a normal Startup.
+/// This function handles the remaining startup packets on any stream that
+/// implements `AsyncRead + AsyncWrite + Unpin`: `GssEncRequest` → 'N',
+/// `CancelRequest`, and Startup. It declines a second `SSLRequest`, or one
+/// received over TLS, with 'N' and continues the loop. The client may then
+/// send a normal Startup.
 async fn startup_loop<S, E>(
     mut stream: S,
     mut buf: BytesMut,

@@ -1,8 +1,10 @@
 //! Thin [`Serde`] wrappers over the FK-join subscription wrappers, so they can
-//! flow as typed `Record` values across the registration / response repartition
-//! topics. The byte format is the JVM-exact `serialize`/`deserialize` of
-//! [`SubscriptionWrapper`] / [`SubscriptionResponseWrapper`] (pinned by the
-//! `--fkjoin` capture).
+//! flow as typed `Record` values across the registration repartition topic and
+//! the response repartition topic.
+//!
+//! The byte format is the JVM-exact `serialize` and `deserialize` of
+//! [`SubscriptionWrapper`] and [`SubscriptionResponseWrapper`]. The `--fkjoin`
+//! capture pins it.
 
 use bytes::Bytes;
 

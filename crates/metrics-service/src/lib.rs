@@ -1,4 +1,4 @@
-//! Role-selectable metrics service wiring for the Prometheus/Mimir-compatible backend.
+//! Role-selectable metrics service for the Prometheus/Mimir-compatible backend.
 
 // Proving the async service futures `Send` traverses DataFusion's deep
 // `sqlparser` AST type graph (reached through `SessionContext` held across
@@ -958,12 +958,14 @@ struct CachedMetricBlockStore {
     cold: MetricBlockStore,
 }
 
-/// Lookback substituted for an unbounded (`i64::MIN..i64::MAX`) query range so
-/// metadata-style requests don't force a full cold-manifest scan.
+/// Lookback that replaces an unbounded `i64::MIN..i64::MAX` query range.
+///
+/// With this lookback, metadata-style requests do not force a full
+/// cold-manifest scan.
 pub const DEFAULT_UNBOUNDED_COMPATIBILITY_LOOKBACK: Time = hours(1);
 
-/// How long a cached cold-block store snapshot is served before manifests are
-/// re-listed from the object store.
+/// Time that the service serves a cached cold-block store snapshot before it
+/// lists the manifests again from the object store.
 pub const DEFAULT_COLD_CACHE_TTL: Time = secs(30);
 
 impl CachedMetricBlockStore {
@@ -1427,11 +1429,15 @@ pub async fn serve_prometheus_router(
     Ok(bound)
 }
 
-/// Like [`serve_prometheus_router`], but hands the spawned server task back to the
-/// caller. Awaiting the returned [`JoinHandle`] after signalling `shutdown` lets the
-/// process drain in-flight requests (axum's `with_graceful_shutdown`) before exiting,
-/// rather than dropping the task detached. Used by the long-running service binaries,
-/// which join the handle before returning from their `run_*` entry points.
+/// Like [`serve_prometheus_router`], but returns the spawned server task to the
+/// caller.
+///
+/// Await the returned [`JoinHandle`] after you signal `shutdown`. The process
+/// then drains in-flight requests with axum's `with_graceful_shutdown` before
+/// it stops, instead of a detached drop of the task.
+///
+/// The long-running service binaries use this function. They join the handle
+/// before they return from their `run_*` entry points.
 ///
 /// # Errors
 /// Returns an error if the operation cannot be completed.

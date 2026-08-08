@@ -1,16 +1,16 @@
-//! Stream-globaltable join: each stream record looks up the (fully-replicated)
-//! global store by a key derived from the record, emitting `joiner(streamV,
-//! globalV)` keyed by the stream's own key.
+//! Stream-globaltable join: each stream record looks up the fully-replicated
+//! global store by a key derived from the record. The join emits
+//! `joiner(streamV, globalV)` keyed by the stream's own key.
 //!
-//! - **Inner** (`emit_on_miss = false`): only forwards when the global store has a
-//!   value for the derived lookup key.
-//! - **Left** (`emit_on_miss = true`): always forwards; on a miss the joiner
+//! - **Inner** (`emit_on_miss = false`): forwards only when the global store has
+//!   a value for the derived lookup key.
+//! - **Left** (`emit_on_miss = true`): always forwards. On a miss the joiner
 //!   receives `None` for the global-side value.
 //!
-//! Unlike the stream-table join, the lookup key is derived from the record via a
-//! `key_mapper(&streamKey, &streamValue) -> GK` rather than being the stream key
-//! itself — the global table is fully replicated, so any record can look up any
-//! key (no copartitioning, no repartition).
+//! A `key_mapper(&streamKey, &streamValue) -> GK` derives the lookup key from the
+//! record, and the lookup key is not the stream key itself. This is different
+//! from the stream-table join. The global table is fully replicated, so any
+//! record can look up any key, with no copartitioning and no repartition.
 
 use std::marker::PhantomData;
 
@@ -26,19 +26,20 @@ type Marker<T> = PhantomData<fn() -> T>;
 
 /// Stream-globaltable join processor.
 ///
-/// For each stream record, computes the lookup key `gk = key_mapper(&k, &v)` and
-/// reads the global key-value store. On a hit (or when `emit_on_miss`) it forwards
-/// `joiner(&stream_value, global_value)` keyed by the **stream key** with the
-/// stream timestamp.
+/// For each stream record it computes the lookup key `gk = key_mapper(&k, &v)`
+/// and reads the global key-value store. On a hit, or when `emit_on_miss` is set,
+/// it forwards `joiner(&stream_value, global_value)` keyed by the **stream key**,
+/// with the stream timestamp.
 pub(crate) struct KStreamGlobalTableJoinProcessor<K, V, GK, VG, VR, KM, J> {
     pub store_name: String,
     /// Lookup-key mapper: `Fn(&K, &V) -> GK`.
     pub key_mapper: KM,
     /// Joiner: `Fn(&V, Option<&VG>) -> VR`.
-    /// - Inner join: called only when the global value is `Some`.
-    /// - Left join: called always; `None` on a miss.
+    /// - Inner join: it runs only when the global value is `Some`.
+    /// - Left join: it always runs, and it gets `None` on a miss.
     pub joiner: J,
-    /// `false` = inner join (skip on miss), `true` = left join (emit on miss).
+    /// `false` is an inner join, which skips on a miss. `true` is a left join,
+    /// which emits on a miss.
     pub emit_on_miss: bool,
     pub _pd: Marker<(K, V, GK, VG, VR)>,
 }
@@ -88,11 +89,11 @@ mod tests {
         topology::{NodeHandle, Topology},
     };
 
-    /// Build a shared `GlobalStateManager` holding a global
-    /// `KeyValueBytesStore<String,String>` named `"g-store"` pre-seeded with
-    /// `("v", "gv")` (so a `key_mapper` of `|_k, v| v.clone()` finds it for a
-    /// record whose value is `"v"`). The store comes from the real
-    /// `add_global_store` → `build` path; the seed value is injected via `put`.
+    /// Build a shared `GlobalStateManager` that holds a global
+    /// `KeyValueBytesStore<String,String>` named `"g-store"`, pre-seeded with
+    /// `("v", "gv")`. A `key_mapper` of `|_k, v| v.clone()` then finds that entry
+    /// for a record whose value is `"v"`. The store comes from the real
+    /// `add_global_store` and `build` path, and `put` injects the seed value.
     async fn make_globals() -> GlobalStateManager {
         let mut t = Topology::new();
         t.add_global_store::<String, String, _, _>(
@@ -120,7 +121,7 @@ mod tests {
     }
 
     /// Drive one `(key, value)` record through `proc` and return the forwarded
-    /// `String` output, or `None` if nothing was forwarded.
+    /// `String` output, or `None` when it forwarded nothing.
     async fn run_one(
         proc: &mut KStreamGlobalTableJoinProcessor<
             String,
@@ -169,9 +170,8 @@ mod tests {
             .map(|(_, rec)| *rec.value.downcast::<String>().unwrap())
     }
 
-    /// Inner join: the lookup key is derived from the record value (NOT the
-    /// stream key), the stream key is preserved on the output, and a miss drops
-    /// the record.
+    /// Inner join: the lookup key comes from the record value and NOT from the
+    /// stream key, the output keeps the stream key, and a miss drops the record.
     #[tokio::test]
     async fn inner_join_hit_uses_derived_key_and_keeps_stream_key() {
         let globals = make_globals().await;

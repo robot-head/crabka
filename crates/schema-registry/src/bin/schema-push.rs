@@ -18,8 +18,8 @@ struct Args {
         default_value = "http://localhost:8081"
     )]
     registry_url: String,
-    /// Path to a binary `FileDescriptorSet`, typically produced by `protoc
-    /// --descriptor_set_out`.
+    /// Path to a binary `FileDescriptorSet`. `protoc --descriptor_set_out`
+    /// usually produces it.
     descriptor_set: PathBuf,
 }
 

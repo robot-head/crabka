@@ -1,5 +1,5 @@
-//! Per-task registry of erased stores + the typed downcast used by
-//! `get_state_store`.
+//! The per-task registry of erased stores, and the typed downcast that
+//! `get_state_store` uses.
 
 use std::collections::HashMap;
 
@@ -18,8 +18,9 @@ impl StoreRegistry {
         self.stores.insert(store.name().to_string(), store);
     }
 
-    /// Typed mutable access: downcast the erased store to the in-memory KV store
-    /// of the requested types. `None` if absent or the types don't match.
+    /// Typed mutable access. It downcasts the erased store to the in-memory KV
+    /// store of the requested types. It returns `None` when the store is absent
+    /// or the types do not match.
     pub fn get_kv<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
@@ -31,20 +32,22 @@ impl StoreRegistry {
         Some(concrete as &mut dyn KeyValueStore<K, V>)
     }
 
-    /// Store names (for restore + changelog drain, which iterate every store).
+    /// The store names, for the restore and the changelog drain, which both
+    /// iterate over every store.
     pub fn names(&self) -> Vec<String> {
         self.stores.keys().cloned().collect()
     }
 
-    /// Iterate every store mutably without allocating a `Vec<String>` of names
-    /// and re-looking-up each one. Used on the per-record changelog-drain hot
-    /// path (`Graph::drain_changelogs`).
+    /// Iterate mutably over every store without a `Vec<String>` of names and
+    /// without a second lookup per name. The per-record changelog-drain hot path
+    /// (`Graph::drain_changelogs`) uses this method.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut dyn StateStore> {
         self.stores.values_mut().map(std::convert::AsMut::as_mut)
     }
 
-    /// Typed mutable access: downcast the erased store to the window store
-    /// of the requested types. `None` if absent or the types don't match.
+    /// Typed mutable access. It downcasts the erased store to the window store
+    /// of the requested types. It returns `None` when the store is absent or the
+    /// types do not match.
     pub fn get_window<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
@@ -56,8 +59,9 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::window::WindowStore<K, V>)
     }
 
-    /// Typed mutable access: downcast the erased store to the join-window store
-    /// of the requested types. `None` if absent or the types don't match.
+    /// Typed mutable access. It downcasts the erased store to the join-window
+    /// store of the requested types. It returns `None` when the store is absent
+    /// or the types do not match.
     pub fn get_join_window<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
@@ -69,8 +73,9 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::join_window::JoinWindowStore<K, V>)
     }
 
-    /// Typed mutable access: downcast the erased store to the session store
-    /// of the requested types. `None` if absent or the types don't match.
+    /// Typed mutable access. It downcasts the erased store to the session store
+    /// of the requested types. It returns `None` when the store is absent or the
+    /// types do not match.
     pub fn get_session<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
@@ -82,8 +87,9 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::session::SessionStore<K, V>)
     }
 
-    /// Typed mutable access: downcast the erased store to the versioned store
-    /// of the requested types. `None` if absent or the types don't match.
+    /// Typed mutable access. It downcasts the erased store to the versioned
+    /// store of the requested types. It returns `None` when the store is absent
+    /// or the types do not match.
     pub fn get_versioned<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
@@ -95,8 +101,9 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::versioned::VersionedKeyValueStore<K, V>)
     }
 
-    /// Typed mutable access: downcast the erased store to the suppress store
-    /// of the requested types. `None` if absent or the types don't match.
+    /// Typed mutable access. It downcasts the erased store to the suppress store
+    /// of the requested types. It returns `None` when the store is absent or the
+    /// types do not match.
     pub(crate) fn get_suppress<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
@@ -108,8 +115,9 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::suppress_store::SuppressStore<K, V>)
     }
 
-    /// Typed mutable access: downcast the erased store to the join-grace buffer
-    /// store of the requested types. `None` if absent or the types don't match.
+    /// Typed mutable access. It downcasts the erased store to the join-grace
+    /// buffer store of the requested types. It returns `None` when the store is
+    /// absent or the types do not match.
     pub(crate) fn get_join_grace<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
@@ -120,7 +128,8 @@ impl StoreRegistry {
             .downcast_mut::<crate::store::join_grace_buffer::JoinGraceBufferStore<K, V>>()
     }
 
-    /// Mutable access to the FK subscription store. `None` if absent / wrong type.
+    /// Mutable access to the FK subscription store. It returns `None` when the
+    /// store is absent or has the wrong type.
     pub(crate) fn get_fk_subscription(
         &mut self,
         name: &str,
@@ -131,34 +140,40 @@ impl StoreRegistry {
             .downcast_mut::<crate::store::fk_subscription::SubscriptionBytesStore>()
     }
 
-    /// Mutable erased access by name — the `StateStore` trait surface
-    /// (`changelog_topic` / `take_changelog` / `apply_changelog` / `set_logging`) is
-    /// available on the returned `&mut dyn StateStore`.
+    /// Mutable erased access by name. The returned `&mut dyn StateStore` gives
+    /// the `StateStore` trait surface: `changelog_topic`, `take_changelog`,
+    /// `apply_changelog`, and `set_logging`.
     pub fn get_mut(&mut self, name: &str) -> Option<&mut dyn StateStore> {
         self.stores.get_mut(name).map(std::convert::AsMut::as_mut)
     }
 
-    /// IQ read view for the named store, if present and queryable.
+    /// The IQ read view for the named store, when that store is present and
+    /// queryable.
     pub(crate) fn iq_get(&self, name: &str) -> Option<&dyn crate::store::iq::IqQueryable> {
         self.stores.get(name).and_then(|s| s.as_iq())
     }
 
-    /// Whether the named KV store has its record cache enabled, via the erased
-    /// [`StateStore::is_cached_erased`] hook (no `K`/`V` needed). `false` for an
-    /// absent store or a store kind that isn't cache-aware. Used by
-    /// [`ProcessorContext::store_is_cached`] so a materializing processor can
-    /// suppress its immediate forward, and by build-time cache-wiring tests.
+    /// Whether the named KV store has its record cache on. The method uses the
+    /// erased [`StateStore::is_cached_erased`] hook, so it needs no `K` and no
+    /// `V`. It returns `false` for an absent store and for a store kind that is
+    /// not cache-aware.
+    ///
+    /// [`ProcessorContext::store_is_cached`] calls this method, so a
+    /// materializing processor can suppress its immediate forward. The
+    /// build-time cache-wiring tests also call it.
     ///
     /// [`ProcessorContext::store_is_cached`]: crate::processor::api::ProcessorContext::store_is_cached
     pub(crate) fn kv_is_cached(&self, name: &str) -> bool {
         self.stores.get(name).is_some_and(|s| s.is_cached_erased())
     }
 
-    /// Enable the record cache on the named store via the erased
-    /// [`StateStore::enable_cache_erased`] hook (no `K`/`V` needed). Returns
-    /// `true` if the store is present AND cache-aware (a KV store); `false` for an
-    /// absent store or a store kind whose caching hasn't landed yet (window/
-    /// session), so the caller can skip rooting a `cache_owner` entry for it.
+    /// Turn the record cache on for the named store, through the erased
+    /// [`StateStore::enable_cache_erased`] hook, which needs no `K` and no `V`.
+    ///
+    /// The method returns `true` when the store is present AND cache-aware, that
+    /// is a KV store. It returns `false` for an absent store and for a store kind
+    /// whose caching has not landed yet, such as a window store or a session
+    /// store. The caller can then skip the `cache_owner` entry for it.
     pub(crate) fn enable_cache(
         &mut self,
         name: &str,

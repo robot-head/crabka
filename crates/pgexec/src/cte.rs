@@ -1,19 +1,18 @@
 //! Materialized common table expression scope for SELECT execution, plus the
 //! `WITH RECURSIVE` fixpoint.
 //!
-//! Every `WITH` item is evaluated once, in list order, against a scope holding
-//! the items before it — `PostgreSQL`'s rule, which is why a forward reference is
-//! `42P01` rather than a silent empty relation. `MATERIALIZED` / `NOT
-//! MATERIALIZED` is accepted and ignored: it is purely an inlining hint, and this
-//! executor always materializes.
+//! The executor evaluates every `WITH` item once, in list order, against a scope
+//! that holds the items before it. That is `PostgreSQL`'s rule, and it is why a
+//! forward reference is `42P01` and not a silent empty relation. The executor
+//! accepts `MATERIALIZED` / `NOT MATERIALIZED` and ignores it: it is purely an
+//! inlining hint, and this executor always materializes.
 //!
-//! A `WITH RECURSIVE` item whose body references itself is evaluated by the
-//! standard iterative fixpoint: run the non-recursive term to seed a *working
-//! table*, then run the recursive term with the self-reference bound to that
-//! working table, and repeat with each round's output until a round is empty.
-//! `UNION` additionally drops rows already in the result, so it terminates
-//! whenever the reachable set is finite; `UNION ALL` terminates only when the
-//! query does.
+//! A `WITH RECURSIVE` item whose body references itself runs the standard
+//! iterative fixpoint. The non-recursive term runs first and seeds a *working
+//! table*. The recursive term then runs with the self-reference bound to that
+//! working table, and repeats with each round's output until a round is empty.
+//! `UNION` also drops rows already in the result, so it terminates whenever the
+//! reachable set is finite. `UNION ALL` terminates only when the query does.
 
 use std::collections::{HashMap, HashSet};
 
@@ -27,11 +26,12 @@ use crate::{error::ExecError, join::Relation, scope::Scope, subquery::SubCtx};
 
 /// Iteration bound for a recursive CTE.
 ///
-/// `PostgreSQL` imposes no such limit — an unterminated recursion there runs
-/// until the backend exhausts memory or the statement is cancelled. Crabka's
-/// blocking-query memory budget catches the usual runaway (the accumulated result
-/// grows without bound), and this cap catches a recursion that churns without
-/// growing, so a bad query fails fast instead of pinning the session forever.
+/// `PostgreSQL` imposes no such limit. An unterminated recursion there runs
+/// until the backend exhausts memory, or until the statement is cancelled.
+/// Crabka's blocking-query memory budget catches the usual runaway, where the
+/// accumulated result grows without bound. This cap catches a recursion that
+/// churns without growth, so a bad query fails fast and does not pin the session
+/// forever.
 const MAX_RECURSION_ITERATIONS: usize = 100_000;
 
 #[derive(Debug, Clone, Default)]
@@ -86,8 +86,9 @@ pub(crate) fn apply_cte_column_aliases(
     crate::values::requalify_derived(rel, name, columns)
 }
 
-/// Evaluate one `WITH` item to its materialized relation, choosing the recursive
-/// fixpoint when the item is part of a `WITH RECURSIVE` list and refers to itself.
+/// Evaluate one `WITH` item to its materialized relation. This chooses the
+/// recursive fixpoint when the item is part of a `WITH RECURSIVE` list and
+/// refers to itself.
 pub(crate) fn evaluate_cte_relation(
     ctx: &SubCtx<'_>,
     cte: &Cte,
@@ -129,10 +130,10 @@ fn dml_body(cte: &Cte) -> &crabka_pgparser::ast::Statement {
 
 /// The order the `WITH` items are evaluated in.
 ///
-/// A plain `WITH` list is evaluated left to right, which is why a forward
-/// reference there is `42P01`. `WITH RECURSIVE` instead sorts the list so that a
-/// referenced item is evaluated first, and rejects a genuine cycle between two
-/// items with `0A000` — `PostgreSQL` does not implement mutual recursion.
+/// A plain `WITH` list runs left to right, which is why a forward reference
+/// there is `42P01`. `WITH RECURSIVE` instead sorts the list so that a
+/// referenced item runs first, and rejects a genuine cycle between two items
+/// with `0A000`. `PostgreSQL` does not implement mutual recursion.
 fn evaluation_order(with: &WithClause) -> Result<Vec<usize>, ExecError> {
     let count = with.ctes.len();
     if !with.recursive {
@@ -170,12 +171,12 @@ fn cte_references(cte: &Cte, name: &str) -> bool {
 /// Is this a `WITH RECURSIVE` item that refers to itself?
 ///
 /// Such an item's body has to be analyzed with the item's own name already in
-/// scope, so the describe pass runs before the binder rather than after it.
+/// scope, so the describe pass runs before the binder, not after it.
 pub(crate) fn is_recursive_item(cte: &Cte, recursive: bool) -> bool {
     recursive && cte_references(cte, &cte.name)
 }
 
-/// `SEARCH` / `CYCLE` are only meaningful on a self-referential item;
+/// `SEARCH` / `CYCLE` have a meaning only on a self-referential item.
 /// `PostgreSQL` rejects them anywhere else with 42601.
 fn reject_search_and_cycle(cte: &Cte) -> Result<(), ExecError> {
     if cte.search.is_some() || cte.cycle.is_some() {
@@ -221,7 +222,7 @@ pub(crate) fn describe_with_clause(
 /// The row-less relation a `WITH` item produces, for `RowDescription`.
 ///
 /// A recursive item is described from its non-recursive term alone, which is
-/// where `PostgreSQL` also takes the CTE's column names and types from.
+/// also where `PostgreSQL` takes the CTE's column names and types from.
 pub(crate) fn describe_cte_relation(
     catalog_kv: &dyn crabka_pgkv::Kv,
     resolution: &crate::relname::ResolutionScope,
@@ -412,15 +413,16 @@ fn evaluate_recursive_cte(
 /// `PostgreSQL`'s `analyzeCTE` type check, run before the first round.
 ///
 /// The non-recursive term fixes each column's type, and the `UNION`'s overall
-/// type — the two terms' common type — must equal it. A recursive term that
-/// widens a column (`integer` seeded, `numeric` produced) is `42804`, as is one
-/// whose type will not unify with the seed's at all. `PostgreSQL` raises both at
-/// parse analysis, before any row exists, which is why this runs up front rather
-/// than surfacing as a per-row cast failure after the recursion has churned.
+/// type, which is the two terms' common type, must equal it. A recursive term
+/// that widens a column (`integer` seeded, `numeric` produced) is `42804`, as is
+/// one whose type will not unify with the seed's at all. `PostgreSQL` raises
+/// both at parse analysis, before any row exists, which is why this runs up
+/// front and does not surface as a per-row cast failure after the recursion has
+/// churned.
 ///
 /// An `unknown` recursive-term column (a bare `NULL` or string literal) adopts
-/// the seed's type instead of clashing with it, exactly as `select_common_type`
-/// does — `SELECT 1 UNION ALL SELECT 'x' FROM t` is well-typed here and fails at
+/// the seed's type and does not clash with it, exactly as `select_common_type`
+/// does. `SELECT 1 UNION ALL SELECT 'x' FROM t` is well-typed here and fails at
 /// run time with the cast's own `22P02`, which is `PostgreSQL`'s answer too.
 fn check_recursive_term_types(
     ctx: &SubCtx<'_>,
@@ -504,8 +506,8 @@ fn coerce_row(
 
 /// The columns `SEARCH`/`CYCLE` append to a recursive CTE's output.
 ///
-/// Both clauses are refused during execution, so this only has to keep the
-/// describe path consistent with that refusal by never adding a column.
+/// Execution refuses both clauses, so this only has to keep the describe path
+/// consistent with that refusal, and it never adds a column.
 fn appended_columns(cte: &Cte, base: &Relation) -> Result<Relation, ExecError> {
     if cte.search.is_some() || cte.cycle.is_some() {
         return Err(ExecError::Unsupported(
@@ -565,10 +567,10 @@ fn check_recursive_term(recursive: &SetExpr, name: &str) -> Result<(), ExecError
     Ok(())
 }
 
-/// Does this query level aggregate? Only an aggregate CALL counts: `PostgreSQL`
+/// Does this query level aggregate? Only an aggregate CALL counts. `PostgreSQL`
 /// accepts `GROUP BY`, `SELECT DISTINCT` and window functions in a recursive
-/// term (they just make the step idempotent, which is why such a query does not
-/// terminate under `UNION ALL`).
+/// term. They only make the step idempotent, which is why such a query does not
+/// terminate under `UNION ALL`.
 fn select_has_aggregate(select: &SelectStmt) -> bool {
     select.projection.iter().any(|item| match item {
         SelectItem::Expr { expr, .. } => crate::agg::contains_aggregate(expr),
@@ -583,7 +585,7 @@ fn select_has_aggregate(select: &SelectStmt) -> bool {
 /// Where a recursive term's self-references were found.
 #[derive(Debug, Default)]
 struct SelfRefs {
-    /// Directly in the term's own FROM join tree — the only legal position.
+    /// Directly in the term's own FROM join tree, the only legal position.
     top_level: usize,
     /// Inside a derived table or an expression subquery.
     nested: usize,
@@ -591,9 +593,10 @@ struct SelfRefs {
     outer_join: usize,
     /// Does the query level that directly holds a top-level self-reference
     /// aggregate? `PostgreSQL` scopes its aggregate ban to that level, not to
-    /// the recursive term as a whole, so `SELECT max(n)+1 FROM (SELECT n FROM t)
-    /// q` is legal (the aggregate is one level above the self-reference) while
-    /// `SELECT n+1 FROM (SELECT max(n) AS n FROM t) q` is not.
+    /// the recursive term as a whole. So `SELECT max(n)+1 FROM (SELECT n FROM
+    /// t) q` is legal, because the aggregate is one level above the
+    /// self-reference, while `SELECT n+1 FROM (SELECT max(n) AS n FROM t) q` is
+    /// not.
     aggregate_host: bool,
 }
 
@@ -605,7 +608,7 @@ impl SelfRefs {
 
 /// Scan the FROM items of one query level. `host_aggregated` is that level's own
 /// [`select_has_aggregate`], carried down so a self-reference found here can
-/// record whether the level holding it aggregates.
+/// record whether the level that holds it aggregates.
 fn scan_from(
     from: &[TableExpr],
     name: &str,
@@ -675,10 +678,10 @@ fn scan_table_expr(
     }
 }
 
-/// Scan a query expression reached through a FROM clause, keeping `nullable`
+/// Scan a query expression reached through a FROM clause, and keep `nullable`
 /// from the join position it sits in.
 ///
-/// A nested `WITH` item of the same name shadows the outer one; otherwise the
+/// A nested `WITH` item of the same name shadows the outer one. Otherwise the
 /// items' own bodies are part of what the FROM position can see, which is why
 /// `FROM (WITH x AS (SELECT n FROM t) SELECT n FROM x) q` is legal.
 fn scan_query(query: &QueryExpr, name: &str, nullable: bool, refs: &mut SelfRefs) {

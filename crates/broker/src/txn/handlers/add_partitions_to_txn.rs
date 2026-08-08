@@ -1,24 +1,24 @@
-//! `AddPartitionsToTxn` (`api_key=24`). Registers one or more
+//! `AddPartitionsToTxn` (`api_key=24`). It registers one or more
 //! (topic, partition) pairs with an ongoing transaction.
 //!
 //! Wire-format versions:
-//!  - v0-3: single `(transactional_id, producer_id, producer_epoch, topics)`
-//!    on the request; `results_by_topic_v3_and_below` on the response.
-//!  - v4-5: batched `transactions` array on the request;
+//!  - v0-3: one `(transactional_id, producer_id, producer_epoch, topics)` on
+//!    the request, and `results_by_topic_v3_and_below` on the response.
+//!  - v4-5: a batched `transactions` array on the request, and
 //!    `results_by_transaction` on the response.
 //!
-//! This broker only handles the single-tid case (the only shape a
-//! producer client ever sends). If a v4+ request carries more than one
-//! transaction entry we process them all sequentially.
+//! This broker handles only the single-tid case, which is the only shape a
+//! producer client ever sends. When a v4+ request carries more than one
+//! transaction entry, the handler processes them all in sequence.
 //!
 //! ## ACL preamble
 //!
-//! Per transaction in the request:
-//! * `Write` on `TransactionalId(tid)`. Deny → every topic row in that
-//!   transaction's results emits
-//!   `TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53)` on every partition.
-//! * Per topic, `Write` on `Topic(name)`. Deny → that topic's partition
-//!   rows emit `TOPIC_AUTHORIZATION_FAILED (29)`.
+//! For each transaction in the request:
+//! * `Write` on `TransactionalId(tid)`. On a deny, every topic row in that
+//!   transaction's results emits `TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53)`
+//!   on every partition.
+//! * For each topic, `Write` on `Topic(name)`. On a deny, that topic's
+//!   partition rows emit `TOPIC_AUTHORIZATION_FAILED (29)`.
 
 use std::net::SocketAddr;
 
@@ -218,9 +218,9 @@ async fn handle_v3(
 
 // ── shared per-transaction logic ──────────────────────────────────────────────
 
-/// Build the set of topic names denied `Write` on `Topic(name)` for this
-/// principal/host. Caller uses this to stamp `TOPIC_AUTHORIZATION_FAILED`
-/// on every partition row of denied topics.
+/// Builds the set of topic names that the authorizer denies `Write` on
+/// `Topic(name)` for this principal and host. The caller uses the set to stamp
+/// `TOPIC_AUTHORIZATION_FAILED` on every partition row of a denied topic.
 fn denied_topics(
     authorizer: &dyn Authorizer,
     image: &MetadataImage,
@@ -248,10 +248,11 @@ fn denied_topics(
         .collect()
 }
 
-/// Process a single `transactional_id` / `producer_id` / `producer_epoch`.
-/// Returns per-topic, per-partition result entries. Topics named in
-/// `denied` short-circuit with `TOPIC_AUTHORIZATION_FAILED`; the remaining
-/// topics go through the state-machine check and partition registration.
+/// Processes one `transactional_id`, `producer_id`, and `producer_epoch`
+/// triple. It returns per-topic and per-partition result entries. A topic
+/// named in `denied` short-circuits with `TOPIC_AUTHORIZATION_FAILED`. Every
+/// other topic goes through the state-machine check and the partition
+/// registration.
 // cargo-mutants: I/O over live txn state + partition registration
 struct TransactionRequest<'a> {
     transactional_id: &'a str,
@@ -363,9 +364,10 @@ async fn process_one_txn(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// KIP-890 `TV_2` verify-only per-partition decision: `NONE (0)` if the
-/// partition is already part of the ongoing transaction, else
-/// `TRANSACTION_ABORTABLE (120)`. Matches cp-kafka 4.0's verify-only path:
+/// KIP-890 `TV_2` verify-only per-partition decision. It gives `NONE (0)` when
+/// the partition is already part of the ongoing transaction, and
+/// `TRANSACTION_ABORTABLE (120)` in every other case. This matches the
+/// verify-only path in cp-kafka 4.0:
 /// `if txnMetadata.topicPartitions.contains(part) NONE else TRANSACTION_ABORTABLE`.
 fn verify_partition_code(entry: &crate::txn::state::TxnEntry, tp: &TopicPartition) -> i16 {
     if entry.partitions.contains(tp) {
@@ -375,10 +377,10 @@ fn verify_partition_code(entry: &crate::txn::state::TxnEntry, tp: &TopicPartitio
     }
 }
 
-/// Build the verify-only response. Same shape as the add path's
-/// `per_topic_with_denied`, but each partition carries the verify result
-/// rather than a single shared code. Denied topics still short-circuit to
-/// `TOPIC_AUTHORIZATION_FAILED` on every partition row.
+/// Builds the verify-only response. It has the same shape as
+/// `per_topic_with_denied` on the add path, but each partition carries its own
+/// verify result instead of one shared code. A denied topic still
+/// short-circuits to `TOPIC_AUTHORIZATION_FAILED` on every partition row.
 fn verify_partitions(
     entry: &crate::txn::state::TxnEntry,
     topics: &[AddPartitionsToTxnTopic],
@@ -418,9 +420,9 @@ fn verify_partitions(
         .collect()
 }
 
-/// Build a per-topic/per-partition result list. Topics named in `denied`
-/// get `TOPIC_AUTHORIZATION_FAILED (29)` on every partition row; the rest
-/// get `code`.
+/// Builds a per-topic and per-partition result list. A topic named in `denied`
+/// gets `TOPIC_AUTHORIZATION_FAILED (29)` on every partition row. Every other
+/// topic gets `code`.
 fn per_topic_with_denied(
     topics: &[AddPartitionsToTxnTopic],
     denied: &std::collections::HashSet<String>,
@@ -451,8 +453,9 @@ fn per_topic_with_denied(
         .collect()
 }
 
-/// Build a per-topic/per-partition result list with every partition carrying
-/// `error_code` (used by whole-txn errors like the txn-id ACL deny path).
+/// Builds a per-topic and per-partition result list in which every partition
+/// carries `error_code`. Whole-transaction errors use it, such as the txn-id
+/// ACL deny path.
 fn topic_error(
     topics: &[AddPartitionsToTxnTopic],
     code: i16,
@@ -519,8 +522,8 @@ mod tests {
         }
     }
 
-    /// Build a fully-pinned expected topic-result row: every field spelled
-    /// out explicitly so whole-value comparisons kill field-drop mutants.
+    /// Builds a fully pinned expected topic-result row. Every field is
+    /// explicit, so that whole-value comparisons kill field-drop mutants.
     fn topic_result(name: &str, rows: &[(i32, i16)]) -> AddPartitionsToTxnTopicResult {
         AddPartitionsToTxnTopicResult {
             name: name.into(),

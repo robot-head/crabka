@@ -1,34 +1,39 @@
-//! Newtypes for the two cluster-identity UUIDs the `format` subcommand
-//! threads around.
+//! Newtypes for the two cluster-identity UUIDs in the `format` subcommand.
 //!
-//! `format` mints (or accepts) a **cluster id** and mints a per-replica
-//! **directory id** (KIP-853 voter identity), then persists both to
-//! `meta.properties.json` and the bootstrap manifest. Both are `uuid::Uuid`,
-//! so a bare-`Uuid` signature like `write_meta_properties(_, cluster, dir)`
-//! happily compiles with the two transposed — and a swap silently corrupts
-//! the broker's stable identity (it would boot believing its directory id is
-//! the cluster id and vice versa). Wrapping each in a distinct newtype makes
-//! the compiler reject the mix-up.
+//! `format` makes a **cluster id**, or accepts one, and makes a per-replica
+//! **directory id**. The directory id is the KIP-853 voter identity. The
+//! subcommand writes both ids to `meta.properties.json` and to the bootstrap
+//! manifest.
+//!
+//! Both ids are `uuid::Uuid`. So a bare-`Uuid` signature such as
+//! `write_meta_properties(_, cluster, dir)` compiles with the two arguments
+//! transposed. A swap silently corrupts the broker's stable identity, because
+//! the broker then boots with the two ids exchanged. A distinct newtype for
+//! each id makes the compiler reject the mix-up.
 //!
 //! [`ClusterId`] derives `Serialize` with `#[serde(transparent)]` because it
-//! is a field of the serialized `BootstrapManifest`; the emitted JSON is a
+//! is a field of the serialized `BootstrapManifest`. The JSON output is a
 //! bare UUID string, byte-identical to the previous `Uuid` field.
-//! [`DirectoryId`] is never serialized as a whole value (it is rendered via
-//! `to_string()` into a hand-built JSON object, and unwrapped to the raw
-//! `Uuid` at the `crabka_voters::Voter` boundary), so it needs no serde.
+//! [`DirectoryId`] is never serialized as a whole value, so it needs no
+//! serde. The code writes it with `to_string()` into a hand-built JSON
+//! object, and unwraps it to the raw `Uuid` at the `crabka_voters::Voter`
+//! boundary.
 
 use derive_more::{Display, From, Into};
 use serde::Serialize;
 use uuid::Uuid;
 
-/// A Kafka cluster id (KIP-853): the shared identity every broker in the
-/// cluster agrees on. Distinct from [`DirectoryId`], which is per-replica.
+/// A Kafka cluster id (KIP-853): the identity that every broker shares.
+///
+/// This id is distinct from [`DirectoryId`], which is per-replica.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, From, Into, Serialize)]
 #[serde(transparent)]
 pub struct ClusterId(pub Uuid);
 
-/// A replica's stable directory id (KIP-853 voter identity), persisted to
-/// `meta.properties.json` and recovered on every boot. Distinct from
-/// [`ClusterId`] so the two cannot be transposed at a call site.
+/// A replica's stable directory id: the KIP-853 voter identity.
+///
+/// `format` writes this id to `meta.properties.json`, and the broker recovers
+/// it on every boot. The type is distinct from [`ClusterId`], so a call site
+/// cannot transpose the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, From, Into)]
 pub struct DirectoryId(pub Uuid);

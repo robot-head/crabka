@@ -1,5 +1,6 @@
-//! Avro: parse + Parsing Canonical Form via `apache-avro`. Also directional
-//! compatibility check via [`apache_avro::schema_compatibility::SchemaCompatibility`].
+//! Avro support: parse and Parsing Canonical Form through `apache-avro`. This
+//! module also runs the directional compatibility check through
+//! [`apache_avro::schema_compatibility::SchemaCompatibility`].
 
 use apache_avro::schema_compatibility::SchemaCompatibility;
 
@@ -35,8 +36,9 @@ impl ParsedSchema for AvroSchema {
     }
 }
 
-/// Directional Avro check: can a reader using `reader` read data written with
-/// `writer`? `Ok(())` if compatible, else `Err(messages)`.
+/// Directional Avro check. It answers whether a reader that uses `reader` can
+/// read data written with `writer`. It returns `Ok(())` when the pair is
+/// compatible, and `Err(messages)` otherwise.
 #[tracing::instrument(level = "debug", name = "avro.check", skip_all, fields(reader_refs = reader_refs.len(), writer_refs = writer_refs.len()))]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.

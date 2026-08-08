@@ -1,15 +1,15 @@
-//! Hard goal: enforce a per-broker `max_replicas` limit from the
-//! capacity config. Brokers without a config entry — or with
-//! `max_replicas: None` — are ignored.
+//! Hard goal: enforce a per-broker `max_replicas` limit from the capacity
+//! config. The goal ignores brokers without a config entry, and brokers with
+//! `max_replicas: None`.
 //!
-//! `propose` emits a movement per iteration that swaps one replica
-//! from an over-capacity broker to a broker with headroom. Greedy;
-//! stops when no broker exceeds its limit or no valid swap remains.
+//! `propose` emits one movement per iteration that swaps one replica from an
+//! over-capacity broker to a broker with headroom. The search is greedy. It
+//! stops when no broker exceeds its limit, or when no valid swap remains.
 //!
-//! `is_satisfied` returns `true` unconditionally because the `Goal`
-//! trait signature doesn't expose `GoalContext` to `is_satisfied`
-//! (the per-broker limits live in the context). Capacity enforcement
-//! happens at `propose` time only.
+//! `is_satisfied` returns `true` unconditionally, because the `Goal` trait
+//! signature does not expose `GoalContext` to `is_satisfied`, and the
+//! per-broker limits live in the context. The goal enforces capacity at
+//! `propose` time only.
 
 use std::collections::HashMap;
 
@@ -23,7 +23,7 @@ pub struct ReplicaCapacity;
 impl ReplicaCapacity {
     pub const NAME: &'static str = "ReplicaCapacity";
 
-    /// Replica counts per broker (cluster-wide).
+    /// Replica counts per broker, across the whole cluster.
     fn counts(parts: &[PartitionView], broker_ids: &[i32]) -> HashMap<i32, usize> {
         let mut m: HashMap<i32, usize> = broker_ids.iter().map(|b| (*b, 0)).collect();
         for p in parts {
@@ -35,11 +35,13 @@ impl ReplicaCapacity {
     }
 
     /// Find the broker with the largest excess over its configured
-    /// `max_replicas`. Ignore brokers without an entry or without a
-    /// `max_replicas` limit. Returns `None` when no broker is over.
-    /// Ties on excess resolve to the lowest `broker_id`, so the emitted
-    /// movement list is stable across runs for identical input
-    /// (`HashMap` iteration order is randomized).
+    /// `max_replicas`.
+    ///
+    /// This ignores brokers without an entry, and brokers without a
+    /// `max_replicas` limit. It returns `None` when no broker is over its
+    /// limit. Ties on excess resolve to the lowest `broker_id`, so the emitted
+    /// movement list is stable across runs for identical input. `HashMap`
+    /// iteration order is randomized.
     fn find_over_capacity(counts: &HashMap<i32, usize>, ctx: &GoalContext) -> Option<i32> {
         // Sort by broker_id ascending so ties on excess resolve
         // deterministically (lower broker_id wins).
@@ -65,14 +67,15 @@ impl ReplicaCapacity {
         over.map(|(b, _, _)| b)
     }
 
-    /// Pick a destination broker for the next replica eviction. Scores
-    /// brokers by current replica count (lower = better) so the
-    /// emptiest broker wins. Brokers with `max_replicas` already at or
-    /// above their limit are pushed to the back (score = `usize::MAX`).
-    /// Brokers with **no** capacity entry — or no `max_replicas` field —
-    /// compete on equal footing with under-capacity entry brokers
-    /// (operator hasn't expressed a constraint → fair game). Tie-breaks
-    /// on `broker_id` ascending.
+    /// Pick a destination broker for the next replica eviction.
+    ///
+    /// This scores brokers by current replica count, where lower is better, so
+    /// the emptiest broker wins. Brokers already at or above their
+    /// `max_replicas` limit go to the back with a score of `usize::MAX`.
+    /// Brokers with **no** capacity entry, and brokers with no `max_replicas`
+    /// field, compete on equal footing with under-capacity entry brokers,
+    /// because the operator has expressed no constraint for them. Ties break on
+    /// `broker_id` ascending.
     fn pick_cold(
         broker_ids: &[i32],
         hot: i32,

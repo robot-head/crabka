@@ -1,12 +1,12 @@
 //! Record-payload generator. The first 24 bytes of every produced record
-//! are reserved for `(magic_be, scenario_id_be, send_unix_nanos_be)` so
-//! consumers can compute end-to-end latency by re-reading the embedded
-//! `send_unix_nanos`. The remaining bytes are a deterministic filler so
+//! hold `(magic_be, scenario_id_be, send_unix_nanos_be)`, so a consumer can
+//! compute the end-to-end latency when it re-reads the embedded
+//! `send_unix_nanos`. The remaining bytes are a deterministic filler, so
 //! the wire size is exactly the scenario's message size.
 //!
-//! 24 bytes (not 16 as the plan sketched) because we want a magic to
-//! detect "this is one of ours" — Kafka's own producers leave their
-//! own headers in there and we don't want to misread their bytes.
+//! The header is 24 bytes and not the 16 the plan sketched, because it needs a
+//! magic to detect "this is one of ours". Kafka's own producers leave their own
+//! headers in there, and this driver must not misread their bytes.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,15 +15,14 @@ use crabka_units::prelude::*;
 
 use crate::numeric::saturating_u128_to_u64;
 
-/// Magic prefix on every record so consumers can confirm a record was
-/// produced by this driver and not (say) some pre-existing data left in
-/// the topic.
+/// Magic prefix on every record, so a consumer can confirm that this driver
+/// produced the record and that it is not data already in the topic.
 pub const MAGIC: [u8; 8] = *b"CRABKA_B";
 pub const HEADER_LEN: usize = MAGIC.len() + 8 + 8; // magic + scenario_id + send_nanos = 24
 
-/// Build a reusable filler template of exactly `msg_size` bytes (or the header
-/// length, whichever is larger). The first 24 bytes are zero and will be
-/// overwritten by `stamp_into` at send time; the remaining bytes are a
+/// Builds a reusable filler template of exactly `msg_size` bytes, or of the
+/// header length if that is larger. The first 24 bytes are zero, and
+/// `stamp_into` overwrites them at send time. The remaining bytes are a
 /// repeating pattern.
 #[must_use]
 pub fn template(msg_size: ByteSize) -> BytesMut {
@@ -38,9 +37,9 @@ pub fn template(msg_size: ByteSize) -> BytesMut {
     b
 }
 
-/// Stamp the magic + `scenario_id` + the current `unix_nanos` into the first
-/// 24 bytes of `buf`. Returns the value as a `Bytes` (cheap clone via
-/// `BytesMut::freeze`-style copy on the caller side).
+/// Stamps the magic, the `scenario_id`, and the current `unix_nanos` into the
+/// first 24 bytes of `buf`. Returns the value as a `Bytes`, which the caller
+/// clones cheaply with a `BytesMut::freeze`-style copy.
 pub fn stamp_into(buf: &mut BytesMut, scenario_id: u64) -> Bytes {
     debug_assert!(buf.len() >= HEADER_LEN, "buf too short for header");
     let nanos = SystemTime::now()
@@ -53,9 +52,9 @@ pub fn stamp_into(buf: &mut BytesMut, scenario_id: u64) -> Bytes {
     Bytes::copy_from_slice(buf)
 }
 
-/// Read the embedded `send_unix_nanos` if the record is one of ours.
-/// Returns `None` if the magic doesn't match or the record is too short
-/// — both treated as "skip silently" by the consumer.
+/// Reads the embedded `send_unix_nanos` if the record is one of ours.
+/// Returns `None` if the magic does not match, and also if the record is too
+/// short. The consumer skips both cases silently.
 #[must_use]
 pub fn read_send_nanos(value: &[u8], scenario_id: u64) -> Option<u64> {
     if value.len() < HEADER_LEN || value[..MAGIC.len()] != MAGIC {

@@ -1,12 +1,14 @@
-//! SQL sequences (`nextval`, `setval`, `SERIAL`, `GENERATED … AS IDENTITY`) on a
-//! substrate-backed engine (`PersistMode::Replicated`), where an advance cannot
-//! be written straight to the applied store and has to ride a commit batch.
+//! SQL sequences on a substrate-backed engine, `PersistMode::Replicated`.
+//!
+//! The tests cover `nextval`, `setval`, `SERIAL`, and
+//! `GENERATED … AS IDENTITY`. In this mode an advance cannot go straight to the
+//! applied store and must ride a commit batch.
 //!
 //! The centre of this file is the failover invariant: no value a writer handed
-//! to a client may be issued again by its successor. Everything else — the
-//! in-batch cache, name reuse, `setval`, rollback — is behaviour verified
-//! against `postgres:18.4` and asserted here in both persistence modes, because
-//! the two must not disagree about what a sequence does.
+//! to a client may be issued again by its successor. The in-batch cache, name
+//! reuse, `setval`, and rollback are behaviour verified against
+//! `postgres:18.4`. The tests assert them here in both persistence modes,
+//! because the two must not disagree about what a sequence does.
 
 use std::sync::{
     Arc,
@@ -19,9 +21,11 @@ use crabka_pgexec::{Committer, ExecError, Linearizer, SqlEngine};
 use crabka_pgkv::{Kv, MemKv, WriteOp};
 use crabka_pgwire::engine::{Engine, QueryResult, Session};
 
-/// Commits straight to a shared in-memory KV, standing in for the substrate
-/// committer. `accepting` models a writer that has lost its lease: the batch is
-/// refused, so nothing it carried becomes durable.
+/// Commits straight to a shared in-memory KV, and stands in for the substrate
+/// committer.
+///
+/// `accepting` models a writer that has lost its lease. The committer refuses
+/// the batch, so nothing it carried becomes durable.
 struct MemCommitter {
     kv: Arc<dyn Kv>,
     accepting: Arc<AtomicBool>,
@@ -94,8 +98,8 @@ async fn scalar(session: &mut crabka_pgexec::SqlSession, sql: &str) -> String {
     values.remove(0)
 }
 
-/// Both persistence modes, so a behaviour asserted below is asserted for the
-/// in-process engine and the substrate-backed one alike.
+/// Both persistence modes, so each test below asserts a behaviour for the
+/// in-process engine and for the substrate-backed engine alike.
 enum Mode {
     Durable,
     Replicated,
@@ -115,11 +119,12 @@ fn engine_for(mode: &Mode) -> SqlEngine {
 /// The correctness centre: a successor writer must never re-issue a value its
 /// predecessor already handed to a client.
 ///
-/// The predecessor advances a sequence through every shape that can advance one
-/// — a bare `nextval`, an identity `INSERT`, a multi-row `INSERT` — and dies. A
-/// new engine over the same applied store stands in for the new writer: its
-/// `SequenceManager` is fresh, so it re-seeds from the store, and every value it
-/// hands out must be strictly greater than everything the predecessor issued.
+/// The predecessor advances a sequence through every shape that can advance
+/// one: a bare `nextval`, an identity `INSERT`, and a multi-row `INSERT`. Then
+/// it dies. A new engine over the same applied store stands in for the new
+/// writer. Its `SequenceManager` is fresh, so it re-seeds from the store, and
+/// every value it hands out must be strictly greater than everything the
+/// predecessor issued.
 #[tokio::test]
 async fn a_successor_writer_never_reissues_a_value_its_predecessor_handed_out() {
     let (kv, engine, _accepting) = replicated();
@@ -202,7 +207,7 @@ async fn reseeding_a_live_engine_does_not_rewind_a_sequence() {
 
 /// A value is only safe to re-issue if it never reached a client. When the
 /// commit that would have recorded an advance is refused, the statement fails,
-/// so no value escapes — and the successor may legitimately start over.
+/// so no value escapes, and the successor may legitimately start over.
 #[tokio::test]
 async fn a_refused_commit_returns_no_value_to_the_client() {
     let (kv, engine, accepting) = replicated();
@@ -229,8 +234,8 @@ async fn a_refused_commit_returns_no_value_to_the_client() {
 // The in-batch cache
 // ---------------------------------------------------------------------------
 
-/// Successive advances inside one uncommitted statement have to come from the
-/// cache: the applied store still holds the pre-statement record, so a manager
+/// Successive advances inside one uncommitted statement must come from the
+/// cache. The applied store still holds the pre-statement record, so a manager
 /// that re-read it every time would hand the same value out for every row.
 #[tokio::test]
 async fn successive_advances_within_one_batch_are_distinct_and_increasing() {
@@ -281,15 +286,17 @@ async fn recreating_a_dropped_sequence_under_the_same_name_starts_over() {
     }
 }
 
-/// The same reuse through the implicit sequence of a `SERIAL` column, which
-/// neither `CREATE TABLE` nor `DROP SEQUENCE` spells the same way the cache key
-/// does — the invalidation has to come off the committed batch, not the DDL
-/// text, or the recreated table keeps advancing the dead sequence.
+/// The same reuse through the implicit sequence of a `SERIAL` column.
 ///
-/// The sequence is dropped explicitly because Gres does not track `SERIAL`
-/// sequence ownership, so `DROP TABLE` alone leaves `t_a_seq` behind (see the
-/// same gap behind `TRUNCATE … RESTART IDENTITY`). `PostgreSQL` drops it with
-/// the table; that divergence is not this test's subject.
+/// Neither `CREATE TABLE` nor `DROP SEQUENCE` spells that sequence the same way
+/// the cache key does. The invalidation must therefore come off the committed
+/// batch and not off the DDL text. If it does not, the recreated table keeps
+/// advancing the dead sequence.
+///
+/// The test drops the sequence explicitly because Gres does not track `SERIAL`
+/// sequence ownership, so `DROP TABLE` alone leaves `t_a_seq` behind. See the
+/// same gap behind `TRUNCATE … RESTART IDENTITY`. `PostgreSQL` drops the
+/// sequence with the table. That divergence is not this test's subject.
 #[tokio::test]
 async fn recreating_a_serial_table_restarts_its_implicit_sequence() {
     for mode in [Mode::Durable, Mode::Replicated] {
@@ -329,10 +336,11 @@ async fn setval_repositions_the_sequence() {
 // nextval is not transactional
 // ---------------------------------------------------------------------------
 
-/// `PostgreSQL` does not roll `nextval` back: on `postgres:18.4`, advancing,
-/// rolling back and advancing again yields 1 then 3, and the burned 2 is a
-/// normal gap. The replicated path folds the advance into the abort batch to
-/// keep that true.
+/// `PostgreSQL` does not roll `nextval` back.
+///
+/// On `postgres:18.4`, an advance, then a rollback, then a second advance gives
+/// 1 and then 3. The burned 2 is a normal gap. The replicated path folds the
+/// advance into the abort batch to keep that true.
 #[tokio::test]
 async fn a_rolled_back_transaction_still_burns_its_sequence_values() {
     for mode in [Mode::Durable, Mode::Replicated] {
@@ -376,7 +384,7 @@ async fn a_rolled_back_insert_keeps_the_identity_values_it_consumed() {
 
 /// `PostgreSQL` advances a sequence only for a column it actually defaults.
 /// Verified on `postgres:18.4` for all three spellings: insert `'one'`, then an
-/// explicit `100`, then `'three'`, and the generated values are 1 and 2 — never
+/// explicit `100`, then `'three'`, and the generated values are 1 and 2, never
 /// 1 and 3.
 #[tokio::test]
 async fn an_explicitly_supplied_value_does_not_consume_a_sequence_value() {
@@ -411,10 +419,10 @@ async fn an_explicitly_supplied_value_does_not_consume_a_sequence_value() {
     }
 }
 
-/// The choice is per row and per column, not per statement: within one
+/// The choice is per row and per column, not per statement. Within one
 /// multi-row `VALUES`, only the rows that wrote `DEFAULT` advance, and a
 /// supplied identity column does not stop a second identity column in the same
-/// row from advancing. Both verified on `postgres:18.4`.
+/// row from an advance. Both facts are verified on `postgres:18.4`.
 #[tokio::test]
 async fn defaults_are_consumed_per_row_and_per_column() {
     for mode in [Mode::Durable, Mode::Replicated] {

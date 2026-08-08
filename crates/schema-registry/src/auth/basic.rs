@@ -1,10 +1,10 @@
-//! HTTP Basic credential store (the only new auth primitive; the rest reuses
-//! `crabka-security`). A plaintext credential is cp `PropertyFileLoginModule`
-//! parity; a `$2…` value is bcrypt-verified.
+//! HTTP Basic credential store. It is the only new auth primitive, and the rest
+//! reuses `crabka-security`. A plaintext credential gives cp
+//! `PropertyFileLoginModule` parity. A `$2…` value is bcrypt-verified.
 use std::collections::HashMap;
 
-/// Username → credential map for HTTP Basic auth. A stored value beginning with
-/// `$2` is a bcrypt hash; anything else is a plaintext password.
+/// Username → credential map for HTTP Basic auth. A stored value that begins
+/// with `$2` is a bcrypt hash. Any other value is a plaintext password.
 #[derive(Debug, Clone, Default)]
 pub struct BasicAuthStore {
     users: HashMap<String, String>,
@@ -17,8 +17,8 @@ impl BasicAuthStore {
         Self { users }
     }
 
-    /// Build from config: htpasswd-style `user:cred` file lines, then the inline
-    /// `users` map layered on top (inline wins).
+    /// Build from config. It reads the htpasswd-style `user:cred` file lines
+    /// first, then layers the inline `users` map on top. The inline map wins.
     ///
     /// # Errors
     ///
@@ -41,8 +41,8 @@ impl BasicAuthStore {
         Ok(Self { users })
     }
 
-    /// Verify `user`/`pass`. `$2…` stored values are bcrypt; otherwise a
-    /// constant-time plaintext compare.
+    /// Verify `user`/`pass`. A stored `$2…` value is bcrypt. Any other value
+    /// gets a constant-time plaintext compare.
     #[must_use]
     pub fn verify(&self, user: &str, pass: &str) -> bool {
         let Some(stored) = self.users.get(user) else {
@@ -55,7 +55,8 @@ impl BasicAuthStore {
     }
 }
 
-/// Length-independent constant-time byte compare (no extra deps).
+/// Length-independent constant-time byte compare that needs no extra
+/// dependency.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

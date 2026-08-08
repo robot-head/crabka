@@ -1,10 +1,10 @@
 //! `LogQL` parser front-end for Crabka's Loki-compatible logs path.
 //!
-//! This slice covers stream selectors, line filters, `json` / `logfmt` /
-//! `pattern` / `regexp` parser stages, `line_format`, field filters, range
+//! This slice covers stream selectors, line filters, the `json`, `logfmt`,
+//! `pattern`, and `regexp` parser stages, `line_format`, field filters, range
 //! aggregations, vector aggregations, and unwrapped range aggregation samples.
-//! Binary operations and the wider `PromQL` expression surface stay out until the
-//! querier has the basic Loki path wired.
+//! Binary operations and the wider `PromQL` expression surface stay out until
+//! the querier has the basic Loki path wired.
 
 use std::collections::BTreeMap;
 

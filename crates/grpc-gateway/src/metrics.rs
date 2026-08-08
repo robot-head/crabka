@@ -1,9 +1,11 @@
-//! Gateway Prometheus metrics. A process-global `GatewayMetrics` (lazy) so
-//! any code path can record without threading a handle; `/metrics` renders it.
+//! Gateway Prometheus metrics.
 //!
-//! Naming follows Prometheus convention: `crabka_gateway_<subject>_<unit>`.
-//! The prefix is registered with `Registry::with_prefix("crabka_gateway")`;
-//! `prometheus-client` appends `_total` automatically for `Counter` metrics.
+//! A process-global `GatewayMetrics` initializes lazily, so any code path can
+//! record without a threaded handle. The `/metrics` route renders it.
+//!
+//! Names follow the Prometheus convention `crabka_gateway_<subject>_<unit>`.
+//! `Registry::with_prefix("crabka_gateway")` registers the prefix.
+//! `prometheus-client` appends `_total` to `Counter` metrics automatically.
 
 use std::sync::OnceLock;
 
@@ -14,9 +16,9 @@ use prometheus_client::{
     registry::Registry,
 };
 
-/// Latency histogram bucket boundaries, 1 ms – 5 s: the Go Prometheus defaults
-/// adapted for sub-second Kafka produce round-trips. Shared by the produce-path
-/// and the per-method request histograms.
+/// Latency histogram bucket boundaries, from 1 ms to 5 s. They are the Go
+/// Prometheus defaults, adapted for sub-second Kafka produce round-trips. The
+/// produce-path histogram and the per-method request histograms share them.
 const LATENCY_BUCKETS: [Time; 11] = [
     millis(1),
     millis(5),
@@ -64,9 +66,9 @@ pub struct MethodLabel {
 
 /// Process-global Prometheus metrics bundle for the gRPC gateway.
 ///
-/// Construct once via [`GatewayMetrics::new`] (or the global [`metrics()`]
-/// accessor). Every handle is cheaply clone-able; the underlying counters /
-/// gauges / histograms are Arc-backed.
+/// Construct it once with [`GatewayMetrics::new`], or with the global
+/// [`metrics()`] accessor. Every handle is cheap to clone, because the
+/// counters, gauges, and histograms are Arc-backed.
 pub struct GatewayMetrics {
     /// The registry that owns all metric descriptors. Exposed so the
     /// `/metrics` render handler can call
@@ -93,9 +95,9 @@ pub struct GatewayMetrics {
 }
 
 impl GatewayMetrics {
-    /// Build a fresh registry (prefix `crabka_gateway`), register all 11
-    /// metrics, and return the bundle. Typically called exactly once via the
-    /// global [`metrics()`] accessor.
+    /// Build a fresh registry with the prefix `crabka_gateway`, register all 11
+    /// metrics, and return the bundle. The global [`metrics()`] accessor
+    /// normally calls this exactly once.
     #[must_use]
     // flat registration of every metric family
     pub fn new() -> Self {
@@ -243,7 +245,7 @@ impl GatewayMetrics {
     }
 
     /// Record an end-to-end produce latency observation. Prometheus samples
-    /// are floats, so the extent is converted to seconds here.
+    /// are floats, so this method converts the extent to seconds.
     pub fn observe_produce_latency(&self, latency: Time) {
         self.produce_latency_seconds.observe(latency.secs_f64());
     }
@@ -276,14 +278,14 @@ impl GatewayMetrics {
         self.owned_partitions.set(n);
     }
 
-    /// Increment the active-subscriptions gauge (call at Subscribe stream
-    /// start).
+    /// Increment the active-subscriptions gauge. Call this at the start of a
+    /// Subscribe stream.
     pub fn inc_active_subscriptions(&self) {
         self.active_subscriptions.inc();
     }
 
-    /// Decrement the active-subscriptions gauge (call at Subscribe stream
-    /// end, on all exit paths).
+    /// Decrement the active-subscriptions gauge. Call this at the end of a
+    /// Subscribe stream, on all exit paths.
     pub fn dec_active_subscriptions(&self) {
         self.active_subscriptions.dec();
     }
@@ -306,12 +308,12 @@ impl GatewayMetrics {
             .inc();
     }
 
-    /// Bump the outbound webhook retry counter (once per backoff retry).
+    /// Bump the outbound webhook retry counter once per backoff retry.
     pub fn record_webhook_retry(&self) {
         self.webhook_retries_total.inc();
     }
 
-    /// Bump the dead-letter counter (once per message sent to the DLQ).
+    /// Bump the dead-letter counter once per message sent to the DLQ.
     pub fn record_dead_letter(&self) {
         self.dead_letter_total.inc();
     }
@@ -326,23 +328,24 @@ impl GatewayMetrics {
             .observe(latency.secs_f64());
     }
 
-    /// Increment the in-flight-requests gauge (call at handler entry).
+    /// Increment the in-flight-requests gauge. Call this at handler entry.
     pub fn inc_inflight(&self) {
         self.inflight_requests.inc();
     }
 
-    /// Decrement the in-flight-requests gauge (call at handler exit, on all
-    /// paths).
+    /// Decrement the in-flight-requests gauge. Call this at handler exit, on
+    /// all paths.
     pub fn dec_inflight(&self) {
         self.inflight_requests.dec();
     }
 
-    /// Begin an in-flight request for `method`: bumps the in-flight gauge and
-    /// starts a latency timer. The returned [`RequestGuard`] decrements the
-    /// gauge and observes the elapsed latency into
-    /// `request_duration_seconds{method}` on drop — covering every early-return
-    /// path of a handler with many exits (webhook guards) without threading a
-    /// `dec`/`observe` call through each one.
+    /// Begin an in-flight request for `method`.
+    ///
+    /// This method bumps the in-flight gauge and starts a latency timer. On
+    /// drop, the returned [`RequestGuard`] decrements the gauge and observes
+    /// the elapsed latency into `request_duration_seconds{method}`. The guard
+    /// covers every early-return path of a handler with many exits, such as the
+    /// webhook guards, so no path needs its own `dec` or `observe` call.
     #[must_use]
     pub fn begin_request(&'static self, method: &'static str) -> RequestGuard {
         self.inc_inflight();
@@ -354,8 +357,8 @@ impl GatewayMetrics {
     }
 }
 
-/// RAII guard returned by [`GatewayMetrics::begin_request`]. Decrements the
-/// in-flight gauge and records the handler latency on drop.
+/// RAII guard returned by [`GatewayMetrics::begin_request`]. On drop, it
+/// decrements the in-flight gauge and records the handler latency.
 pub struct RequestGuard {
     metrics: &'static GatewayMetrics,
     method: &'static str,
@@ -382,8 +385,9 @@ impl Default for GatewayMetrics {
 
 static METRICS: OnceLock<GatewayMetrics> = OnceLock::new();
 
-/// Return the process-global [`GatewayMetrics`] instance (lazy-initialized on
-/// first call). Safe to call before the binary inits anything else.
+/// Return the process-global [`GatewayMetrics`] instance. The first call
+/// initializes it. It is safe to call before the binary initializes anything
+/// else.
 #[must_use]
 pub fn metrics() -> &'static GatewayMetrics {
     METRICS.get_or_init(GatewayMetrics::new)
@@ -430,7 +434,7 @@ mod tests {
 
     use super::*;
 
-    /// A fresh `GatewayMetrics` (not the global) so each test is isolated.
+    /// A fresh `GatewayMetrics`, not the global one, so each test stays isolated.
     fn fresh() -> GatewayMetrics {
         GatewayMetrics::new()
     }

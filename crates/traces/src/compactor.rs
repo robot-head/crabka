@@ -52,7 +52,8 @@ pub fn compacted_object_key(
     )
 }
 
-/// Merge existing span block object keys into one replacement block and index entry.
+/// Merge existing span block object keys into one replacement block and one
+/// index entry.
 ///
 /// # Errors
 /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -323,13 +324,15 @@ fn recompute_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, TracesError
 
 /// Recompute the trace-level denormalized columns over the FULL merged trace.
 ///
-/// The write path (`span/batch.rs::root_info`) sets `trace_start_unix_nano` /
-/// `trace_duration_nanos` / `root_service_name` / `root_span_name` from only the
-/// spans in one flush-window block. After compacting several blocks of the same
-/// trace, each origin block's rows still carry that block's (partial, stale)
-/// values, so trace-level `TraceQL` matchers (`trace:duration`, `trace:rootName`,
-/// `trace:rootService`) read wrong data. Regroup by `trace_id` and recompute the
-/// four columns across all merged rows.
+/// The write path in `span/batch.rs::root_info` sets `trace_start_unix_nano`,
+/// `trace_duration_nanos`, `root_service_name` and `root_span_name` from only
+/// the spans in one flush-window block.
+///
+/// After a compaction of several blocks of the same trace, each origin block's
+/// rows still carry that block's partial and stale values. The trace-level
+/// `TraceQL` matchers `trace:duration`, `trace:rootName` and
+/// `trace:rootService` would then read wrong data. This function regroups by
+/// `trace_id` and recomputes the four columns across all merged rows.
 fn recompute_trace_level_columns(batch: &RecordBatch) -> Result<RecordBatch, TracesError> {
     let trace_ids = fixed_column(batch, SCOL_TRACE_ID, 16)?;
     let parent_span_ids = fixed_column(batch, SCOL_PARENT_SPAN_ID, 8)?;

@@ -1,10 +1,11 @@
-//! Generates Connect-RPC server stubs + prost message types from the vendored
+//! Generates Connect-RPC server stubs and prost message types from the vendored
 //! `push.v1`, `querier.v1`, and OTLP `profiles/v1development` protos.
 //!
-//! Drives codegen through a vendored `protoc` binary (`protoc-bin-vendored`) so
-//! the build is hermetic — no system `protoc` and no network fetch. The Connect
-//! generator (connectrpc-axum-build) always invokes a `protoc` binary, so the
-//! vendored one is supplied via `prost-build`'s `protoc_executable`.
+//! This script drives codegen through the vendored `protoc` binary from
+//! `protoc-bin-vendored`, so the build is hermetic. It needs no system `protoc`
+//! and no network fetch. The Connect generator `connectrpc-axum-build` always
+//! invokes a `protoc` binary, so this script supplies the vendored one through
+//! the `protoc_executable` option of `prost-build`.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [

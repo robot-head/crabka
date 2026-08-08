@@ -24,8 +24,8 @@ use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Mutex};
 
 /// Activator runtime configuration.
 ///
-/// Not `Eq`: the poll interval and cold-start timeout are `f64`-backed
-/// quantities.
+/// This type is not `Eq`, because the poll interval and the cold-start timeout
+/// are `f64`-backed quantities.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActivatorConfig {
     /// Address to accept frontend connections on.
@@ -36,7 +36,8 @@ pub struct ActivatorConfig {
     pub registry_poll: Time,
     /// Maximum time to hold a cold-starting connection.
     pub cold_start_timeout: Time,
-    /// Backend endpoint template used until registry records grow an endpoint field.
+    /// Backend endpoint template. The activator uses it until registry records
+    /// get an endpoint field.
     pub backend_endpoint_template: String,
 }
 
@@ -51,7 +52,8 @@ impl ActivatorConfig {
     }
 }
 
-/// A validated wake request derived from a frontend startup prelude or explicit event.
+/// A validated wake request from a frontend startup prelude or from an explicit
+/// event.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WakeRequest {
     tenant: TenantName,
@@ -77,7 +79,8 @@ impl WakeRequest {
 /// Registry operations required by the wake path.
 #[async_trait]
 pub trait WakeRegistry: Send + Sync {
-    /// Idempotently record that a suspended tenant should resume.
+    /// Record that a suspended tenant should resume. The operation is
+    /// idempotent.
     async fn request_resume(&self, request: &WakeRequest) -> Result<(), ActivatorError>;
 
     /// Return current readiness for the requested tenant.
@@ -265,7 +268,7 @@ pub enum ActivatorError {
     /// Frontend prelude was invalid.
     #[error("frontend prelude error: {0}")]
     Prelude(String),
-    /// Startup message omitted the database/tenant name.
+    /// Startup message omitted the database name or tenant name.
     #[error("startup message does not name a database")]
     MissingDatabase,
     /// Tenant was not found in the registry.
@@ -279,7 +282,8 @@ pub enum ActivatorError {
         /// Timeout that elapsed.
         timeout: Time,
     },
-    /// Current control record schema cannot represent `ResumeRequested` or endpoint.
+    /// Current control record schema cannot represent `ResumeRequested` or the
+    /// endpoint.
     #[error("gres-control registry lacks ResumeRequested/endpoint lifecycle fields")]
     RegistryLifecycleMissing,
 }

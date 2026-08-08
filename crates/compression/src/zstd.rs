@@ -1,4 +1,4 @@
-//! Zstd via the `zstd` crate (wraps libzstd).
+//! Zstd through the `zstd` crate, which wraps libzstd.
 
 use bytes::Bytes;
 

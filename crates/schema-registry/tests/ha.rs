@@ -24,7 +24,8 @@ fn cfg(bootstrap: &str, port: i32) -> RegistryConfig {
     }
 }
 
-/// Wait until `pred(state)` holds or `secs` elapses; returns the matching state.
+/// Wait until `pred(state)` holds, or until `secs` elapses. Returns the
+/// matching state.
 async fn await_state(
     rx: &mut tokio::sync::watch::Receiver<PrimaryState>,
     secs: u64,
@@ -67,9 +68,9 @@ struct Node {
     cancel: CancellationToken,
 }
 
-/// Boot a full registry node (store + forwarding router + election) on an
-/// ephemeral `127.0.0.1` port. Binds the listener FIRST so `advertised_url`
-/// carries the real port (no fixed-port collisions).
+/// Boot a full registry node with its store, forwarding router, and election on
+/// an ephemeral `127.0.0.1` port. It binds the listener FIRST, so
+/// `advertised_url` carries the real port and no fixed port can collide.
 async fn start_node(bootstrap: &str) -> Node {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -106,9 +107,10 @@ async fn start_node(bootstrap: &str) -> Node {
     }
 }
 
-/// Poll `GET url` until the body equals `expected` or `secs` elapses. The
-/// non-writing node reflects a forwarded write only once it consumes the
-/// `_schemas` record (eventually consistent), so a single assert would flake.
+/// Poll `GET url` until the body equals `expected`, or until `secs` elapses.
+/// The non-writing node reflects a forwarded write only after it consumes the
+/// `_schemas` record, so the view is eventually consistent and a single assert
+/// would flake.
 async fn await_get_body(http: &reqwest::Client, url: &str, expected: &str, secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {

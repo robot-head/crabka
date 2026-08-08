@@ -1,7 +1,7 @@
-//! SP31: explicit casts — `CAST(expr AS type)` and `expr::type` — end-to-end over
-//! the wire. Both spellings, the cast matrix (text↔numeric/bool, numeric↔numeric,
-//! bool↔int4, *→text), result-type OIDs, casts through a column, and the error
-//! SQLSTATEs (22P02 / 22003 / 42846).
+//! SP31: explicit casts, `CAST(expr AS type)` and `expr::type`, end-to-end over
+//! the wire. This covers both spellings, the cast matrix (text↔numeric/bool,
+//! numeric↔numeric, bool↔int4, *→text), result-type OIDs, casts through a
+//! column, and the error SQLSTATEs (22P02 / 22003 / 42846).
 
 use std::sync::Arc;
 
@@ -34,8 +34,8 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
-/// First column of the first row as text (simple query protocol → exercises the
-/// engine's own text encoding).
+/// First column of the first row as text. This uses the simple query protocol,
+/// which exercises the engine's own text encoding.
 async fn text(client: &tokio_postgres::Client, sql: &str) -> Option<String> {
     use tokio_postgres::SimpleQueryMessage;
     for m in client.simple_query(sql).await.expect("query") {

@@ -1,4 +1,4 @@
-//! JVM-acceptance tests for KIP-848 — drives the GA Kafka 4.0 client
+//! JVM-acceptance tests for KIP-848. They drive the GA Kafka 4.0 client
 //! against an in-process Crabka broker. `group.protocol=consumer`
 //! activates the next-gen heartbeat path on the client.
 
@@ -46,9 +46,9 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
     (handle, dir)
 }
 
-/// Pre-create a topic via the classic admin tooling. Crabka's broker does
-/// not auto-create topics on the produce path; tests must establish them
-/// explicitly, matching the existing `jvm_acceptance.rs` convention.
+/// Pre-create a topic with the classic admin tooling. Crabka's broker does
+/// not auto-create topics on the produce path, so tests must create them
+/// explicitly. This matches the existing `jvm_acceptance.rs` convention.
 fn create_topic(name: &str, partitions: i32) {
     let out = docker_run(
         KAFKA_IMAGE_CLASSIC,
@@ -75,10 +75,10 @@ fn create_topic(name: &str, partitions: i32) {
 }
 
 /// Spawn a console-consumer container on a blocking thread and return a handle
-/// resolving to its stdout. Used to run two overlapping consumers in the same
-/// group: the caller awaits both handles, so the containers run concurrently
-/// rather than back-to-back. `--add-host` mirrors `docker_run` so the
-/// container can reach the host-process broker via `host.docker.internal`.
+/// that resolves to its stdout. This runs two overlapping consumers in the same
+/// group. The caller awaits both handles, so the containers run concurrently
+/// and not back-to-back. `--add-host` mirrors `docker_run`, so the
+/// container can reach the host-process broker at `host.docker.internal`.
 fn spawn_consumer(image: &'static str, script: String) -> tokio::task::JoinHandle<String> {
     tokio::task::spawn_blocking(move || {
         let out = std::process::Command::new("docker")
@@ -102,9 +102,9 @@ fn spawn_consumer(image: &'static str, script: String) -> tokio::task::JoinHandl
 
 /// Extract the set of partition numbers from console-consumer stdout produced
 /// with `--property print.partition=true`. The `DefaultMessageFormatter`
-/// emits one `Partition:<n>` token per record line (e.g. `Partition:2\t<value>`
-/// when no key is printed); we tolerate any surrounding columns and just pull
-/// the integer following each `Partition:` marker.
+/// emits one `Partition:<n>` token per record line, for example
+/// `Partition:2\t<value>` when it prints no key. This function tolerates any
+/// surrounding columns and pulls the integer after each `Partition:` marker.
 fn parse_partitions(stdout: &str) -> std::collections::BTreeSet<i32> {
     let mut set = std::collections::BTreeSet::new();
     for line in stdout.lines() {
@@ -119,9 +119,9 @@ fn parse_partitions(stdout: &str) -> std::collections::BTreeSet<i32> {
     set
 }
 
-/// Run a docker container and return its output without asserting success.
+/// Run a docker container and return its output, with no success assertion.
 /// Consumer commands often exit non-zero on timeout even when they consumed
-/// messages, so callers are responsible for checking what matters.
+/// messages, so each caller must check what matters to it.
 fn docker_run(image: &str, args: &[&str]) -> std::process::Output {
     let out = Command::new("docker")
         .arg("run")
@@ -300,23 +300,23 @@ async fn jvm_kip848_coexists_with_classic() {
 /// Migration interop within a *single* consumer group, deterministically.
 ///
 /// Phase 1: a classic (cp-kafka 7.4.0) consumer forms group `g-migrate` and
-/// drains batch 1 — proving the group is served by the classic protocol. Phase
+/// drains batch 1. That proves the classic protocol serves the group. Phase
 /// 2: a next-gen (apache/kafka 4.0.0, `group.protocol=consumer`) consumer joins
 /// the SAME group and drains a freshly-produced batch 2. Crabka's unified
 /// coordinator runs the default `Bidirectional` policy with the consumer
-/// rebalance protocol enabled (`NextGenConfig::default`; `start_host_broker`
-/// does not override it), so the group is served to the consumer protocol in
-/// place, and the next-gen member reads batch 2 from the offsets the classic
-/// member committed — i.e. both protocols work against the same group with
-/// offset continuity across the migration.
+/// rebalance protocol enabled, from `NextGenConfig::default`, because
+/// `start_host_broker` does not override it. The consumer protocol therefore
+/// serves the group in place, and the next-gen member reads batch 2 from the
+/// offsets that the classic member committed. Both protocols work against the
+/// same group, with offset continuity across the migration.
 ///
 /// Each phase runs a SOLE member that owns all partitions, so the assignment is
-/// fixed and there is no concurrency/rebalance race (an earlier concurrent
-/// design flaked on CI: the lone classic member drained every record and
-/// committed offsets before the next-gen joined, starving it). The live,
-/// concurrent mixed-membership split is covered deterministically by the
-/// in-process suite in `coordinator::unified` (upgrade / downgrade / round-trip
-/// / gap-free assignment / static-membership / committed-offset survival).
+/// fixed and there is no concurrency or rebalance race. An earlier concurrent
+/// design flaked on CI, because the lone classic member drained every record
+/// and committed offsets before the next-gen member joined, which starved it.
+/// The in-process suite in `coordinator::unified` covers the live, concurrent
+/// mixed-membership split deterministically: upgrade, downgrade, round-trip,
+/// gap-free assignment, static membership, and committed-offset survival.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_kip848_classic_and_consumer_in_one_group_migrate() {

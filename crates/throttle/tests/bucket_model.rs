@@ -1,30 +1,34 @@
 //! Exhaustive stateright shared-memory interleaving model of the live
-//! `crabka_throttle::TokenBucket` concurrency, driving the production
-//! [`crabka_throttle::plan_consume`] arithmetic. State = the shared
-//! `{rate, available, pending}` atomics (modeled small; `available` is `i64` so
-//! the buggy underflow shows up as a catchable negative) plus a seqlock
-//! `generation` and a per-thread program counter for each in-flight
-//! `try_consume` / `set_rate`. Actions interleave one atomic step at a time.
+//! `crabka_throttle::TokenBucket` concurrency.
+//!
+//! The model drives the production [`crabka_throttle::plan_consume`]
+//! arithmetic. The state is the shared `{rate, available, pending}` atomics,
+//! modeled small, plus a seqlock `generation` and a per-thread program counter
+//! for each in-flight `try_consume` or `set_rate`. `available` is an `i64`, so
+//! the buggy underflow shows up as a catchable negative value. Actions
+//! interleave one atomic step at a time.
 //!
 //! A `cas` flag selects the algorithm:
 //!
-//! * `false` reproduces the OLD buggy read-modify-write (`Load` → `Store` →
-//!   `Sub` as three interleavable steps, where `Sub` can drive `available`
-//!   negative).
-//! * `true` models the FIXED seqlock CAS commit: the consume samples the
+//! * `false` reproduces the OLD buggy read-modify-write. `Load`, `Store`, and
+//!   `Sub` are three interleavable steps, and `Sub` can drive `available`
+//!   negative.
+//! * `true` models the FIXED seqlock CAS commit. The consume samples the
 //!   generation, and commits atomically *only if no `set_rate` reset straddled*
-//!   its claim window. A straddling reset (generation changed) forces the
-//!   consume to re-base against the post-reset `{available, pending}` instead of
-//!   clobbering the freshly reset `available` with a stale CAS — the net effect
-//!   of the `compare_exchange_weak` loop under the generation guard.
+//!   its claim window. A straddling reset changes the generation and forces the
+//!   consume to re-base against the post-reset `{available, pending}`. The
+//!   consume thus does not clobber the freshly reset `available` with a stale
+//!   CAS. This is the net effect of the `compare_exchange_weak` loop under the
+//!   generation guard.
 //!
-//! `set_rate` is modeled as a seqlock critical section: enter (generation →
-//! odd), three interleavable stores (`rate`, `available`, reset `pending`),
-//! leave (generation → even, advanced by 2). The headline invariant
-//! `0 <= available <= max_rate` is violated by the buggy path (the RED witness
-//! `race_underflows_without_cas` discovers a counterexample) and held by the CAS
-//! path even with concurrent `set_rate` (GREEN: `bucket_basic` / `bucket_wide`).
-//! See the design spec
+//! The model treats `set_rate` as a seqlock critical section. It enters the
+//! section and makes the generation odd. It then does three interleavable
+//! stores: `rate`, `available`, and a reset of `pending`. It then leaves the
+//! section and makes the generation even, advanced by 2. The buggy path
+//! violates the headline invariant `0 <= available <= max_rate`, and the RED
+//! witness `race_underflows_without_cas` discovers a counterexample. The CAS
+//! path holds the invariant even with a concurrent `set_rate`. The GREEN cases
+//! are `bucket_basic` and `bucket_wide`. See the design spec
 //! `docs/superpowers/specs/2026-06-14-crabka-token-bucket-quota-model-design.md`.
 
 use std::time::Duration;
@@ -321,8 +325,9 @@ fn bucket_wide() {
     );
 }
 
-/// RED witness: the OLD non-CAS algorithm violates `available_in_range` (the
-/// over-grant / underflow race). Assert that a counterexample is DISCOVERED.
+/// RED witness: the OLD non-CAS algorithm violates `available_in_range` in the
+/// over-grant and underflow race. This test asserts that the checker DISCOVERS
+/// a counterexample.
 #[test]
 fn race_underflows_without_cas() {
     let checker = BucketModel {

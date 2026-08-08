@@ -10,19 +10,22 @@ pub use overrides::{OverridesError, OverridesProvider};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
-    /// Tempo `ingestion_rate_limit_bytes` analog, counted as spans/sec; zero is unlimited.
+    /// Tempo `ingestion_rate_limit_bytes` analog, counted as spans/sec. Zero is
+    /// unlimited.
     #[serde(with = "crabka_units::serde_units::human::frequency")]
     pub ingestion_rate: Frequency,
     /// Tempo `ingestion_burst_size_bytes` analog, counted as spans.
     pub ingestion_burst_spans: u64,
-    /// Per-tenant ceiling for `/api/search`'s `limit` query parameter; `0` is unlimited.
+    /// Per-tenant ceiling for `/api/search`'s `limit` query parameter. `0` is
+    /// unlimited.
     pub max_traces_per_search: u64,
-    /// Tempo `max_bytes_per_trace` analog, counted as spans; `0` is unlimited.
+    /// Tempo `max_bytes_per_trace` analog, counted as spans. `0` is unlimited.
     pub max_spans_per_trace: u64,
-    /// Maximum size of any attribute key or string value; zero is unlimited.
+    /// Maximum size of any attribute key or string value. Zero is unlimited.
     #[serde(with = "crabka_units::serde_units::human::byte_size")]
     pub max_attribute: ByteSize,
-    /// Tempo `max_search_duration`; the `(end-start)` ceiling; zero is unlimited.
+    /// Tempo `max_search_duration`, the `(end-start)` ceiling. Zero is
+    /// unlimited.
     #[serde(with = "crabka_units::serde_units::human::time")]
     pub max_search_duration: Time,
 }
@@ -68,7 +71,8 @@ impl LimitError {
         }
     }
 
-    /// Human-readable Tempo-style cap message; exact wording is pinned by the real-Tempo suite.
+    /// Human-readable Tempo-style cap message. The real-Tempo suite pins the
+    /// exact wording.
     #[must_use]
     pub fn message(&self) -> String {
         self.to_string()

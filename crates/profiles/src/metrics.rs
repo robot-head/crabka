@@ -1,15 +1,15 @@
 //! Prometheus metrics for the profiles subsystem.
 //!
-//! Uses the `OpenMetrics` `prometheus-client` crate. A cheaply-clonable
-//! [`ServiceMetrics`] bundle is constructed once in the binary `main`, threaded
-//! into the distributor and querier state structs, and incremented from the
-//! ingest / query handler boundaries via the ergonomic [`ServiceMetrics::record_ingest`]
-//! / [`ServiceMetrics::record_query`] helpers. The exporter emits the
+//! This module uses the `OpenMetrics` `prometheus-client` crate. The binary
+//! `main` constructs one cheaply-clonable [`ServiceMetrics`] bundle and threads
+//! it into the distributor and querier state structs. The ingest and query
+//! handler boundaries increment it with the [`ServiceMetrics::record_ingest`]
+//! and [`ServiceMetrics::record_query`] helpers. The exporter emits the
 //! `OpenMetrics` text format.
 //!
-//! Counters are registered WITHOUT a `_total` suffix — `prometheus-client`
-//! appends it automatically at encode time. The registry prefix is
-//! `crabka_profiles`, so e.g. the `ingest_requests` counter renders on the wire
+//! This module registers counters WITHOUT a `_total` suffix.
+//! `prometheus-client` appends the suffix at encode time. The registry prefix
+//! is `crabka_profiles`, so the `ingest_requests` counter renders on the wire
 //! as `crabka_profiles_ingest_requests_total{status="ok"}`.
 
 use std::sync::Arc;
@@ -24,9 +24,11 @@ use tokio::sync::Mutex;
 
 use crate::ids::{IngestBytes, IngestItems};
 
-/// Shared registry owning every metric the service emits. `Arc<Mutex<…>>`
-/// because `prometheus-client` requires `&mut Registry` to register and the
-/// `/metrics` exporter needs shared read access.
+/// Shared registry that owns every metric the service emits.
+///
+/// The type is `Arc<Mutex<…>>` because `prometheus-client` needs
+/// `&mut Registry` to register a metric, and the `/metrics` exporter needs
+/// shared read access.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
 /// `status="ok" | "error"` label for the ingest-request counter family.
@@ -55,8 +57,9 @@ pub struct TenantLabel {
 }
 
 /// Cheaply-clonable bundle of metric handles plus the shared registry.
-/// Construct once via [`ServiceMetrics::new`]; clone freely (each clone is a
-/// handful of `Arc::clone`s).
+///
+/// Construct the bundle once with [`ServiceMetrics::new`], then clone it
+/// freely. Each clone is a small number of `Arc::clone` calls.
 #[derive(Clone)]
 pub struct ServiceMetrics {
     pub registry: SharedRegistry,
@@ -75,8 +78,9 @@ pub struct ServiceMetrics {
     /// `crabka_profiles_wal_append_failures_total`.
     pub wal_append_failures: Counter,
     /// Cumulative profile samples accepted, labelled by tenant. Renders as
-    /// `crabka_profiles_ingest_samples_total{tenant}`. Bumped once per ingest
-    /// request with the number of WAL samples that request produced.
+    /// `crabka_profiles_ingest_samples_total{tenant}`. The service adds to it
+    /// once per ingest request, by the number of WAL samples that the request
+    /// produced.
     pub ingest_samples: Family<TenantLabel, Counter>,
     /// Cumulative profile sample blocks flushed to object storage by the
     /// block-builder. Renders as `crabka_profiles_blocks_built_total`.
@@ -169,11 +173,11 @@ impl ServiceMetrics {
     }
 
     /// Record one ingest request outcome: bump the per-status request counter,
-    /// add to the cumulative bytes/items counters, and observe the latency.
+    /// add to the cumulative bytes and items counters, and observe the latency.
     ///
-    /// This does NOT touch `wal_append_failures` — increment that separately at
-    /// the actual WAL/produce error site (a 4xx client/validation error is an
-    /// `ok=false` request but not a WAL failure).
+    /// This method does NOT touch `wal_append_failures`. Increment that counter
+    /// separately at the WAL or produce error site. A 4xx client or validation
+    /// error is an `ok=false` request, but it is not a WAL failure.
     pub fn record_ingest(&self, ok: bool, bytes: IngestBytes, items: IngestItems, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
@@ -192,15 +196,17 @@ impl ServiceMetrics {
         self.ingest_duration.observe(elapsed.secs_f64());
     }
 
-    /// Record one WAL/produce append failure (the durable write to the profiles
-    /// WAL topic failed). Distinct from a 4xx client/validation rejection.
+    /// Record one WAL or produce append failure, that is, a failed durable write
+    /// to the profiles WAL topic. This is distinct from a 4xx client or
+    /// validation rejection.
     pub fn record_wal_append_failure(&self) {
         self.wal_append_failures.inc();
     }
 
     /// Add `samples` to the per-tenant cumulative ingested-samples counter.
-    /// Called once per ingest request with the number of WAL samples that
-    /// request produced (a no-op when `samples == 0`).
+    ///
+    /// Each ingest request calls this method once with the number of WAL samples
+    /// that the request produced. The method does nothing when `samples == 0`.
     pub fn record_ingest_samples(&self, tenant: &str, samples: u64) {
         if samples == 0 {
             return;
@@ -213,8 +219,10 @@ impl ServiceMetrics {
     }
 
     /// Add `blocks` to the cumulative block-builder blocks-flushed counter.
-    /// Called once per block-build poll batch with the number of blocks the
-    /// flush wrote to object storage (a no-op when `blocks == 0`).
+    ///
+    /// Each block-build poll batch calls this method once with the number of
+    /// blocks that the flush wrote to object storage. The method does nothing
+    /// when `blocks == 0`.
     pub fn record_blocks_built(&self, blocks: u64) {
         if blocks == 0 {
             return;
@@ -246,8 +254,8 @@ impl Default for ServiceMetrics {
     }
 }
 
-/// Build the `/metrics` router serving the `OpenMetrics` text exposition of
-/// `registry`. The pprof routes are merged separately by `serve_admin`.
+/// Build the `/metrics` router that serves the `OpenMetrics` text exposition of
+/// `registry`. `serve_admin` merges the pprof routes separately.
 pub fn metrics_router(registry: SharedRegistry) -> axum::Router {
     axum::Router::new()
         .route("/metrics", axum::routing::get(export))

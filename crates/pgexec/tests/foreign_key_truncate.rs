@@ -1,14 +1,16 @@
-//! `TRUNCATE` against foreign keys: the 0A000 that refuses a truncate leaving a
-//! referencing table behind, the two ways of satisfying it, and the fact that
-//! `CASCADE` widens the *set of relations truncated* rather than firing
+//! `TRUNCATE` against foreign keys.
+//!
+//! This file covers the 0A000 that refuses a truncate which would leave a
+//! referencing table behind, the two ways to satisfy that check, and the fact
+//! that `CASCADE` widens the *set of relations truncated* instead of firing
 //! `ON DELETE` actions. Every expectation is the behaviour of a live
 //! `PostgreSQL` 18.4.
 //!
-//! **Known divergence, asserted as current behaviour rather than fixed:**
-//! `PostgreSQL` emits `NOTICE: truncate cascades to table "c"` for each relation
-//! `CASCADE` pulls in. This engine has no `NoticeResponse` path at all, so no
-//! notice is produced and none is asserted here; the truncation itself is what
-//! these tests check.
+//! **Known divergence, asserted as current behaviour and not fixed:**
+//! `PostgreSQL` emits `NOTICE: truncate cascades to table "c"` for each
+//! relation `CASCADE` pulls in. This engine has no `NoticeResponse` path at
+//! all, so it produces no notice and none is asserted here. The truncation
+//! itself is what these tests check.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -60,8 +62,8 @@ fn no_rows() -> Vec<Vec<Option<String>>> {
     Vec::new()
 }
 
-/// The whole refusal: a feature-not-supported SQLSTATE with both a `DETAIL`
-/// naming the pair and a `HINT` spelling out the two ways forward.
+/// The whole refusal. It is a feature-not-supported SQLSTATE with a `DETAIL`
+/// that names the pair and a `HINT` that spells out the two ways forward.
 fn blocked_by(referencing: &str, referenced: &str) -> PgError {
     PgError::error(
         "0A000",
@@ -75,9 +77,11 @@ fn blocked_by(referencing: &str, referenced: &str) -> PgError {
     ))
 }
 
-/// A parent, a child that references it, and a row in each. The child's action
-/// is whatever the caller names, so the same fixture drives both the refusal and
-/// the "`CASCADE` is not `ON DELETE CASCADE`" cases.
+/// A parent, a child that references it, and a row in each.
+///
+/// The child's action is whatever the caller names, so the same fixture drives
+/// both the refusal cases and the "`CASCADE` is not `ON DELETE CASCADE`"
+/// cases.
 async fn pair_with(action: &str) -> (SqlEngine, SqlSession) {
     engine_with(&[
         "CREATE TABLE p (id int4 PRIMARY KEY)",
@@ -91,9 +95,9 @@ async fn pair_with(action: &str) -> (SqlEngine, SqlSession) {
 // ---------------------------------------------------------------------------
 // The refusal and the two ways past it
 
-/// Truncating a referenced table without its referencing table is refused
-/// whatever the referential action says — `TRUNCATE` does not run actions, so
-/// even `ON DELETE CASCADE` earns the same 0A000.
+/// A truncate of a referenced table without its referencing table is refused
+/// whatever the referential action says. `TRUNCATE` does not run actions, so
+/// even `ON DELETE CASCADE` gets the same 0A000.
 #[tokio::test]
 async fn truncate_refuses_a_child_outside_the_set() {
     for action in ["", "ON DELETE CASCADE", "ON DELETE SET NULL"] {
@@ -108,8 +112,8 @@ async fn truncate_refuses_a_child_outside_the_set() {
     }
 }
 
-/// Naming both relations in one `TRUNCATE` satisfies the check: the constraint's
-/// referencing side is inside the set being emptied, so nothing can be left
+/// A `TRUNCATE` that names both relations satisfies the check. The constraint's
+/// referencing side is inside the set that is emptied, so nothing can be left
 /// dangling.
 #[tokio::test]
 async fn truncate_naming_both_relations_succeeds() {
@@ -119,14 +123,14 @@ async fn truncate_naming_both_relations_succeeds() {
     assert!(query(&mut s, "SELECT id FROM c").await == no_rows());
 }
 
-/// `CASCADE` widens the *set of relations truncated*; it does not fire
+/// `CASCADE` widens the *set of relations truncated*. It does not fire
 /// `ON DELETE CASCADE`.
 ///
-/// The two are told apart by rows a referential action would never touch. A
-/// child row whose key is NULL references no parent row at all, and a child
-/// under `ON DELETE SET NULL` would survive a cascaded delete with its column
-/// nulled. `TRUNCATE p CASCADE` removes both, because it empties the relation
-/// rather than walking keys.
+/// Rows a referential action would never touch tell the two apart. A child row
+/// whose key is NULL references no parent row at all. A child under
+/// `ON DELETE SET NULL` would survive a cascaded delete with its column nulled.
+/// `TRUNCATE p CASCADE` removes both, because it empties the relation and does
+/// not walk keys.
 #[tokio::test]
 async fn truncate_cascade_widens_the_set_rather_than_firing_on_delete_actions() {
     for action in ["ON DELETE CASCADE", "ON DELETE SET NULL", ""] {
@@ -146,14 +150,14 @@ async fn truncate_cascade_widens_the_set_rather_than_firing_on_delete_actions() 
     }
 }
 
-/// `CASCADE` follows the references transitively: a grandchild that references
+/// `CASCADE` follows the references transitively. A grandchild that references
 /// the child is pulled into the set too, and a relation outside the closure is
 /// left alone.
 ///
-/// The oracle capture only exercises a two-relation `CASCADE`, so the grandchild
-/// hop here follows `TRUNCATE`'s documented rule — "any tables added to the
-/// group due to CASCADE" are themselves expanded — rather than a captured
-/// transcript.
+/// The oracle capture exercises only a two-relation `CASCADE`. The grandchild
+/// hop here therefore follows `TRUNCATE`'s documented rule, that "any tables
+/// added to the group due to CASCADE" are themselves expanded, and it does not
+/// follow a captured transcript.
 #[tokio::test]
 async fn truncate_cascade_expands_transitively_through_a_chain() {
     let (_engine, mut s) = engine_with(&[
@@ -177,8 +181,8 @@ async fn truncate_cascade_expands_transitively_through_a_chain() {
     assert!(query(&mut s, "SELECT id FROM unrelated").await == vec![text_row(&["7"])]);
 }
 
-/// A self-referencing table truncates on its own: the only relation referencing
-/// it is already in the set.
+/// A self-referencing table truncates on its own. The only relation that
+/// references it is already in the set.
 #[tokio::test]
 async fn truncate_of_a_self_referencing_table_succeeds() {
     let (_engine, mut s) = engine_with(&[
@@ -194,9 +198,9 @@ async fn truncate_of_a_self_referencing_table_succeeds() {
     assert!(query(&mut s, "SELECT id FROM tree").await == no_rows());
 }
 
-/// A mutually referencing pair behaves the same way: each is the other's
+/// A mutually referencing pair behaves the same way. Each one is the other's
 /// referencing relation, so either both are named or `CASCADE` pulls the other
-/// in.
+/// one in.
 #[tokio::test]
 async fn truncate_of_a_mutually_referencing_pair_needs_both() {
     let (_engine, mut s) = engine_with(&[

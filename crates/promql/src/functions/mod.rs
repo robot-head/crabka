@@ -1,15 +1,15 @@
 //! `PromQL` functions implemented as `DataFusion` `ScalarUDF`s over the
 //! windowed columns that [`crate::extension::range_manipulate`] emits.
 //!
-//! The rate family (`rate`, `increase`, `delta`, `irate`, `idelta`) lives in
-//! [`rate`]; the shared, interpreter-faithful extrapolation math lives in
+//! The rate family (`rate`, `increase`, `delta`, `irate`, `idelta`) is in
+//! [`rate`]. The shared extrapolation math, which matches the interpreter, is in
 //! [`extrapolate`]. The `*_over_time` family (`sum`, `avg`, `count`, `min`,
-//! `max`, `stddev`, `stdvar`, `last`, `present`, plus `quantile_over_time`)
-//! lives in [`over_time`], porting the engine's per-window reductions. A
-//! top-level `f(selector[range])` instant query over float-only series is
-//! lowered onto these UDFs by [`crate::planner::rate_range`] (registered on the
-//! planner's [`crate::extension::planner::prom_session_context`]); every nested
-//! or histogram-bearing form stays on the tree-walking interpreter.
+//! `max`, `stddev`, `stdvar`, `last`, `present`, and `quantile_over_time`) is in
+//! [`over_time`], a port of the engine's per-window reductions.
+//! [`crate::planner::rate_range`] lowers a top-level `f(selector[range])`
+//! instant query over float-only series onto these UDFs. The planner registers
+//! it on [`crate::extension::planner::prom_session_context`]. Every nested or
+//! histogram-bearing form stays on the tree-walking interpreter.
 
 pub mod aggregate_udaf;
 pub mod extrapolate;

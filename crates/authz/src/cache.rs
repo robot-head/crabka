@@ -1,11 +1,13 @@
-//! Gateway-side ACL snapshot: a flat `Vec<AclEntry>` (from `describe_acls`)
-//! that implements [`AclSource`] with EXACTLY the broker's matching semantics.
+//! Gateway-side ACL snapshot: a flat `Vec<AclEntry>` from `describe_acls`.
+//!
+//! The snapshot implements [`AclSource`] with EXACTLY the broker's matching
+//! semantics.
 
 use crabka_metadata::{AclEntry, PatternType, ResourceType};
 
 use crate::AclSource;
 
-/// Immutable ACL snapshot; rebuilt wholesale on each refresh.
+/// Immutable ACL snapshot. Each refresh rebuilds it wholesale.
 #[derive(Debug, Clone, Default)]
 pub struct AclCache {
     entries: Vec<AclEntry>,
@@ -66,10 +68,12 @@ mod tests {
         }
     }
 
-    /// A stable, comparable identity for an `AclEntry` so the two sources'
-    /// `matching_acls` outputs can be compared as sets regardless of order.
-    /// (The ACL enums derive `Debug` but not `Ord`, so we key on the debug
-    /// rendering of the identifying fields — a `String`, which is `Ord`.)
+    /// A stable, comparable identity for an `AclEntry`.
+    ///
+    /// A test can then compare the `matching_acls` output of the two sources as
+    /// sets, in any order. The ACL enums derive `Debug` but not `Ord`, so this
+    /// function keys on the debug rendering of the identifying fields. That
+    /// rendering is a `String`, which is `Ord`.
     fn key(e: &AclEntry) -> String {
         format!(
             "{:?}|{:?}|{}|{:?}",
@@ -83,10 +87,12 @@ mod tests {
         v
     }
 
-    /// Cross-validation guard: the same `AclEntry` set, built into BOTH a
-    /// `MetadataImage` (via `apply`) and an `AclCache`, must yield the SAME
-    /// matching set for every probe. This protects against drift between the
-    /// broker's image matching and the gateway cache's reimplementation.
+    /// Cross-validation guard for the two matching implementations.
+    ///
+    /// The test builds the same `AclEntry` set into BOTH a `MetadataImage`,
+    /// with `apply`, and an `AclCache`. The two must give the SAME matching set
+    /// for every probe. This protects against drift between the broker's image
+    /// matching and the gateway cache's reimplementation.
     #[test]
     fn cache_matches_image_for_every_probe() {
         // A representative ACL set: literal exact, the literal "*" wildcard,

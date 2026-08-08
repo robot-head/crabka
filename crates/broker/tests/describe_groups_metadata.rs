@@ -3,17 +3,19 @@
 // locally; the rest of the workspace still enforces the full pedantic gate.
 
 //! Byte-exactness pin for `DescribeGroups` (`api_key=15`) on a CLASSIC
-//! consumer group: the response must carry, per member, the `JoinGroup`
-//! protocol-metadata bytes (`member_metadata`) and, at the group level,
-//! the SELECTED protocol name (`protocol_data`). Both were previously
-//! dropped in the snapshot projection, returning empties and breaking
-//! wire byte-exactness with Apache Kafka (`kafka-consumer-groups
-//! --describe --members`, `AdminClient.describeClassicGroups`).
+//! consumer group.
 //!
-//! Drives a real classic `JoinGroup` → `SyncGroup` → `DescribeGroups` against
-//! the in-process broker over `crabka_client_core::Client`, mirroring
-//! `group_protocol_negotiation.rs` (the `MEMBER_ID_REQUIRED` two-step +
-//! `INITIAL_REBALANCE_DELAY` wait) and `unit.rs` (the `SyncGroup` shape).
+//! For each member, the response must carry the `JoinGroup` protocol-metadata
+//! bytes as `member_metadata`. At the group level, it must carry the SELECTED
+//! protocol name as `protocol_data`. Both matter for wire byte-exactness with
+//! Apache Kafka, which `kafka-consumer-groups --describe --members` and
+//! `AdminClient.describeClassicGroups` rely on.
+//!
+//! The test drives a real classic `JoinGroup`, `SyncGroup`, and
+//! `DescribeGroups` sequence against the in-process broker over
+//! `crabka_client_core::Client`. It mirrors `group_protocol_negotiation.rs`,
+//! for the two-step `MEMBER_ID_REQUIRED` flow and the
+//! `INITIAL_REBALANCE_DELAY` wait, and `unit.rs`, for the `SyncGroup` shape.
 
 use std::time::Duration;
 
@@ -62,33 +64,36 @@ fn assert_described_group(resp: &DescribeGroupsResponse) {
 const ERR_NONE: i16 = 0;
 const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 
-/// Upper bound on a rejoin `JoinGroup` round-trip: covers the broker's ~3 s
-/// initial-rebalance delay with generous headroom.
+/// Upper bound on a rejoin `JoinGroup` round trip. It covers the broker's
+/// initial-rebalance delay of about 3 s, with headroom.
 const JOIN_GROUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A fixed, recognizable `JoinGroup` protocol-metadata blob. The byte
-/// shape is arbitrary (not a real `ConsumerProtocolSubscription`) — the
-/// point is exact round-trip through stored state into `member_metadata`.
+/// A fixed, recognizable `JoinGroup` protocol-metadata blob. The byte shape is
+/// arbitrary and is not a real `ConsumerProtocolSubscription`. The test uses it
+/// to check the exact round trip through the stored state into
+/// `member_metadata`.
 const KNOWN_METADATA: &[u8] = b"\x00\x01rangemeta\xde\xad";
 /// The leader's `SyncGroup` assignment blob, echoed back as
 /// `member_assignment`.
 const ASSIGN: &[u8] = b"assign-bytes";
 
-/// The EXACT `ConsumerProtocolSubscription` bytes a real `RangeAssignor`
-/// console-consumer sent to `mirror.gcr.io/confluentinc/cp-kafka:7.4.0` (captured by the
-/// `describe_groups_jvm` Docker harness into
-/// `tests/fixtures/describe_groups/real_kafka_classic.json`, member
-/// `member_metadata_hex`). Wire shape: version `i16=3`, then one subscribed
-/// topic `"t"`, `userData=null`, empty `ownedPartitions`. This pins Crabka's
-/// `DescribeGroups` echo to a *realistic* subscription, not just an arbitrary
-/// blob — cp/JVM is the authority.
+/// The EXACT `ConsumerProtocolSubscription` bytes that a real `RangeAssignor`
+/// console-consumer sent to `mirror.gcr.io/confluentinc/cp-kafka:7.4.0`.
+///
+/// The `describe_groups_jvm` Docker harness captured them into
+/// `tests/fixtures/describe_groups/real_kafka_classic.json`, in the member
+/// field `member_metadata_hex`. The wire shape is version `i16=3`, then one
+/// subscribed topic `"t"`, `userData=null`, and an empty `ownedPartitions`.
+///
+/// This pins Crabka's `DescribeGroups` echo to a *realistic* subscription
+/// instead of an arbitrary blob. cp and the JVM are the authority.
 const REAL_KAFKA_SUBSCRIPTION: &[u8] = &[
     0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x74, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
     0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 ];
-/// The EXACT `ConsumerProtocolAssignment` bytes cp-kafka 7.4.0 returned for
-/// that member (fixture `member_assignment_hex`): version `i16=3`, topic `"t"`,
-/// partitions `[0, 1]`, `userData=null`.
+/// The EXACT `ConsumerProtocolAssignment` bytes that cp-kafka 7.4.0 returned
+/// for that member, in the fixture field `member_assignment_hex`: version
+/// `i16=3`, topic `"t"`, partitions `[0, 1]`, and `userData=null`.
 const REAL_KAFKA_ASSIGNMENT: &[u8] = &[
     0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x74, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff,
@@ -119,9 +124,10 @@ fn join_request(group_id: &str, member_id: &str, metadata: &'static [u8]) -> Joi
     }
 }
 
-/// A single-member classic consumer group: drive `JoinGroup` (handling the
-/// `MEMBER_ID_REQUIRED` two-step), then a leader `SyncGroup`, then assert
-/// `DescribeGroups` surfaces the protocol name + per-member metadata.
+/// A single-member classic consumer group. The test drives `JoinGroup`,
+/// including the two-step `MEMBER_ID_REQUIRED` flow, then a leader
+/// `SyncGroup`, then asserts that `DescribeGroups` reports the protocol name
+/// and the per-member metadata.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_groups_reports_member_metadata_and_protocol_name() {
     let (handle, bootstrap, _tempdir) = start_broker().await;
@@ -211,14 +217,17 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
     assert_described_group(&resp);
 }
 
-/// cp/JVM cross-validation: drive the SAME classic flow but with the EXACT
-/// `ConsumerProtocolSubscription` / `ConsumerProtocolAssignment` bytes a real
-/// `RangeAssignor` console-consumer exchanged with `mirror.gcr.io/confluentinc/cp-kafka:7.4.0`
-/// (captured by `describe_groups_jvm.rs` → `real_kafka_classic.json`). Crabka's
-/// `DescribeGroups` must reproduce real Kafka's authority semantics:
+/// cp and JVM cross-validation. The test drives the SAME classic flow, but
+/// with the EXACT `ConsumerProtocolSubscription` and
+/// `ConsumerProtocolAssignment` bytes that a real `RangeAssignor`
+/// console-consumer exchanged with
+/// `mirror.gcr.io/confluentinc/cp-kafka:7.4.0`. `describe_groups_jvm.rs`
+/// captured them into `real_kafka_classic.json`.
+///
+/// Crabka's `DescribeGroups` must reproduce real Kafka's semantics:
 /// `protocol_type == "consumer"`, `protocol_data == "range"`, and a byte-exact
-/// `member_metadata` echo of the realistic subscription (not just the arbitrary
-/// blob the test above pins).
+/// `member_metadata` echo of the realistic subscription, not only of the
+/// arbitrary blob that the test above pins.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_groups_matches_real_kafka_range_subscription() {
     let (handle, bootstrap, _tempdir) = start_broker().await;

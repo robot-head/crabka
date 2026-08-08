@@ -1,6 +1,8 @@
 //! Generates Zola markdown reference pages from Crabka's in-process
-//! source-of-truth data structures (CRDs, broker config schema, topic
-//! configs, protocol API catalog).
+//! source-of-truth data structures.
+//!
+//! These structures are the CRDs, the broker config schema, the topic configs,
+//! and the protocol API catalog.
 
 pub mod broker;
 pub mod emit;
@@ -9,8 +11,10 @@ pub mod scenarios;
 pub mod schema_md;
 pub mod snippets;
 
-/// Rewrite snippet blocks in every `.md` under `content_dir`, pulling code from
-/// source files under `crates_dir`. Returns the number of files changed.
+/// Rewrite snippet blocks in every `.md` under `content_dir`.
+///
+/// The function pulls the code from source files under `crates_dir`. It returns
+/// the number of files changed.
 ///
 /// # Errors
 /// Returns an error if a directory walk, file read/write, or snippet sync fails.

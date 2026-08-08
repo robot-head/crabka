@@ -1,12 +1,12 @@
 //! Poll-style counters for timestamp-oracle load observation.
 //!
-//! Both stat structs follow the substrate's hand-rolled counter pattern
-//! (shared through an [`Arc`], recorded at the seam, snapshotted by a
-//! poller), but use relaxed atomics instead of a mutex so recording never
-//! reintroduces a lock on the oracle's lock-free grant fast path. A snapshot
-//! reads each counter independently and may therefore be momentarily torn
-//! across fields under concurrent grants; rates computed from successive
-//! snapshots are unaffected.
+//! Both stat structs follow the substrate's hand-rolled counter pattern. The
+//! code shares them through an [`Arc`], records them at the seam, and lets a
+//! poller snapshot them. They use relaxed atomics instead of a mutex, so a
+//! record never reintroduces a lock on the oracle's lock-free grant fast path.
+//! A snapshot reads each counter independently, so under concurrent grants it
+//! can be momentarily torn across fields. Rates computed from successive
+//! snapshots stay correct.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -27,8 +27,8 @@ pub struct TsoOracleStatsSnapshot {
     pub grants_served: u64,
     /// Timestamps handed out across all served grants.
     pub timestamps_granted: u64,
-    /// Grants that crossed the durable horizon and waited on the slow path;
-    /// a high rate relative to `grants_served` signals an undersized stride.
+    /// Grants that crossed the durable horizon and waited on the slow path. A
+    /// high rate relative to `grants_served` shows an undersized stride.
     pub horizon_waits: u64,
     /// Durable horizon advances committed through range 0.
     pub horizon_persists: u64,
@@ -81,9 +81,9 @@ pub struct TsoClientStats {
 /// Point-in-time copy of [`TsoClientStats`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TsoClientStatsSnapshot {
-    /// Upstream grant RPCs actually issued.
+    /// Upstream grant RPCs the client issued.
     pub rpcs_issued: u64,
-    /// Caller requests coalesced into those RPCs; average batch fill is
+    /// Caller requests coalesced into those RPCs. The average batch fill is
     /// `requests_coalesced / rpcs_issued`.
     pub requests_coalesced: u64,
 }

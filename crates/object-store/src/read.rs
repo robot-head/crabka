@@ -1,6 +1,8 @@
-//! Capped buffered reads: `head()` an object, reject it if it exceeds a byte
-//! cap, then `get()` it. Centralises the OOM guard used before buffering a whole
-//! object (e.g. an index snapshot) into memory.
+//! Capped buffered reads.
+//!
+//! The module does a `head()` on an object, rejects the object if it exceeds a
+//! byte cap, then does a `get()`. It centralises the OOM guard that runs before
+//! the code buffers a whole object, such as an index snapshot, into memory.
 
 use std::sync::Arc;
 
@@ -9,10 +11,11 @@ use object_store::{ObjectStoreExt as _, path::Path};
 
 use crate::error::ObjectStoreError;
 
-/// Read a whole object, rejecting it if its size exceeds `max_bytes`.
+/// Read a whole object, and reject it if its size exceeds `max_bytes`.
 ///
-/// `head()`s first so an oversized object is refused *before* any bytes are
-/// buffered: the guard against OOM on a corrupt or malicious object.
+/// The function does a `head()` first, so it refuses an oversized object
+/// *before* it buffers any bytes. This is the guard against OOM on a corrupt or
+/// malicious object.
 ///
 /// # Errors
 ///

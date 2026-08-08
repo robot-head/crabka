@@ -1,9 +1,9 @@
 //! Exhaustive stateright model of producer-side failover routing.
 //!
-//! The model checks the sender contract at the client/server seam: stale
-//! metadata and a dead cached leader cannot make a prepared batch wedge forever.
-//! The batch either reaches the freshly elected leader quickly or fails within a
-//! bounded retry budget, and retry preserves producer identity.
+//! The model checks the sender contract at the client and server seam: stale
+//! metadata and a dead cached leader cannot make a prepared batch wedge
+//! forever. The batch either reaches the freshly elected leader quickly, or it
+//! fails within a bounded retry budget. A retry preserves producer identity.
 
 use std::{
     hash::{Hash, Hasher},

@@ -1,8 +1,8 @@
 //! Minimal `PromQL` engine entry point.
 //!
-//! This currently implements selector evaluation over the `MetricStore` contract.
-//! The rest of Slice 2's planner (functions, aggregations, binary ops) will build
-//! on this public API.
+//! This module implements selector evaluation over the `MetricStore` contract.
+//! The rest of the Slice 2 planner (functions, aggregations, binary ops) will
+//! build on this public API.
 
 mod aggregate_plan;
 mod aggregation;
@@ -90,7 +90,8 @@ use crate::{
 
 /// Static options for `PromQL` evaluation.
 ///
-/// Not `Eq`: the two windows are [`Time`] quantities, which store `f64`.
+/// This type is not `Eq`, because the two windows are [`Time`] quantities that
+/// store `f64`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EngineOpts {
     /// Maximum age of a sample considered by an instant-vector selector.
@@ -111,25 +112,26 @@ impl Default for EngineOpts {
     }
 }
 
-/// Maximum number of resolution points (steps) a single range/subquery series
-/// may span. Prometheus rejects a query whose `(end - start) / step + 1` exceeds
-/// this, capping abusive resolutions (e.g. `last_over_time(up[1000d:1ms])`)
-/// before the per-step loop runs.
+/// Maximum number of resolution points (steps) in one range or subquery series.
+/// Prometheus rejects a query whose `(end - start) / step + 1` is more than this
+/// limit. The limit stops an abusive resolution, for example
+/// `last_over_time(up[1000d:1ms])`, before the per-step loop runs.
 pub const MAX_RESOLUTION_POINTS: u64 = 11_000;
 
-/// Compute the resolution-point count `(end_ms - start_ms) / step + 1` for a
-/// range/subquery grid, rejecting an abusive resolution before any per-step
-/// evaluation runs.
+/// Returns the resolution-point count `(end_ms - start_ms) / step + 1`.
 ///
-/// The cap is applied to the *interval* count `(end - start) / step`, matching
-/// Prometheus' `(end-start)/step > 11000` rule and the HTTP front-gate
-/// byte-for-byte (error type, status, and message), so a query that the gate
-/// admits is never re-rejected by this backstop.
+/// The count is for a range or subquery grid. This function rejects an abusive
+/// resolution before any per-step evaluation runs. It applies the cap to the
+/// interval count `(end - start) / step`. That matches the Prometheus
+/// `(end-start)/step > 11000` rule, and it matches the HTTP front gate
+/// byte-for-byte in error type, status, and message. A query that the gate
+/// admits is therefore never rejected again by this backstop.
 ///
 /// # Errors
 ///
 /// Returns [`PromqlError::Plan`] (HTTP 400 `bad_data`) when `step` is not
-/// positive or when the interval count exceeds [`MAX_RESOLUTION_POINTS`].
+/// positive. Returns [`PromqlError::Plan`] (HTTP 400 `bad_data`) when the
+/// interval count is more than [`MAX_RESOLUTION_POINTS`].
 pub fn check_resolution_points(start_ms: i64, end_ms: i64, step: Time) -> Result<u64> {
     let step_ms = step.millis_i64();
     if step_ms <= 0 {
@@ -166,7 +168,8 @@ pub(super) struct QueryRangeContext {
     pub(super) start_ms: i64,
     /// Range end, an epoch-millisecond instant.
     pub(super) end_ms: i64,
-    /// Grid resolution — an extent, unlike the two bounds.
+    /// Grid resolution. This value is an extent, not an instant like the two
+    /// bounds.
     pub(super) step: Time,
 }
 
@@ -176,18 +179,20 @@ tokio::task_local! {
 }
 
 tokio::task_local! {
-    /// The active range query's `[start, end]` bounds, scoped by the per-step
-    /// planner range driver ([`PromqlEngine::eval_range_via_planner_scoped`]) so a
-    /// bare top-level selector carrying an `@ start()` / `@ end()` modifier
-    /// resolves those bounds to the QUERY's range bounds — per Prometheus — while
-    /// the planner still evaluates the selector at each grid step. Absent (no
-    /// task-local) for an instant query, where `@ start()`/`@ end()` is invalid and
-    /// the selector planner raises the same hard error the interpreter does.
+    /// The `[start, end]` bounds of the active range query. The per-step planner
+    /// range driver ([`PromqlEngine::eval_range_via_planner_scoped`]) scopes
+    /// them. A bare top-level selector with an `@ start()` or `@ end()` modifier
+    /// then resolves those bounds to the range bounds of the query, as
+    /// Prometheus does, and the planner still evaluates the selector at each grid
+    /// step. This task-local is absent for an instant query. There, `@ start()`
+    /// and `@ end()` are invalid, and the selector planner raises the same hard
+    /// error as the interpreter.
     static AT_MODIFIER_BOUNDS: AtModifierBounds;
 }
 
-/// The range bounds in scope for `@ start()`/`@ end()` resolution, or `None` when
-/// not inside a range query (an instant query).
+/// Returns the range bounds in scope for `@ start()` and `@ end()` resolution.
+///
+/// Returns `None` outside a range query, that is, in an instant query.
 fn current_at_modifier_bounds() -> Option<AtModifierBounds> {
     AT_MODIFIER_BOUNDS.try_with(|bounds| *bounds).ok()
 }

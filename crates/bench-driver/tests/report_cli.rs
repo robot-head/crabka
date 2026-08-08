@@ -43,9 +43,9 @@ fn failover_gate_exits_nonzero_without_failover_evidence() {
 }
 
 /// The `RunOutput` the driver writes must survive a round trip through the
-/// report binary: the aggregator reads the same JSON encoding the driver emits,
-/// renders the dimensioned values in the operator form, and writes back the
-/// unit-named CSV columns.
+/// report binary. The aggregator reads the same JSON encoding that the driver
+/// writes, renders the dimensioned values in the operator form, and writes back
+/// the unit-named CSV columns.
 #[test]
 fn report_reads_the_run_output_encoding_and_renders_operator_units() {
     let dir = tempfile::tempdir().expect("temp dir");

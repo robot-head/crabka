@@ -1,25 +1,29 @@
-//! Apache Kafka legacy (v0/v1) `MessageSet` codec, with bridges to and from
-//! the v2 `RecordBatch` types in [`crabka_protocol`].
+//! Apache Kafka legacy (v0/v1) `MessageSet` codec.
 //!
-//! See the [Kafka protocol docs] for the wire layout this crate
-//! implements. v0 carries no per-message timestamp; v1 adds an `i64`
-//! timestamp per message (KIP-32). Compression in both is signalled in
-//! the low 3 bits of the per-message `attributes` byte, with the
-//! compressed payload appearing as a single outer message whose `value`
-//! is a nested (uncompressed) `MessageSet`.
+//! This crate also bridges to and from the v2 `RecordBatch` types in
+//! [`crabka_protocol`].
+//!
+//! See the [Kafka protocol docs] for the wire layout that this crate
+//! implements. v0 carries no per-message timestamp. v1 adds one `i64`
+//! timestamp per message (KIP-32). Both versions signal compression in
+//! the low 3 bits of the per-message `attributes` byte. The compressed
+//! payload is a single outer message whose `value` is a nested,
+//! uncompressed `MessageSet`.
 //!
 //! [Kafka protocol docs]: https://kafka.apache.org/protocol.html#messageset
 //!
 //! ## Quick tour
 //!
-//! - [`Message`] / [`Magic`]: per-message wire format (CRC + fields).
+//! - [`Message`] / [`Magic`]: per-message wire format, with a CRC and the
+//!   message fields.
 //! - [`ParsedRecord`]: cross-format view of a single offset-tagged
 //!   record.
 //! - [`decode_message_set`] / [`encode_flat_message_set`] /
 //!   [`encode_compressed_message_set`]: top-level codec.
-//! - [`v2_to_legacy`] / [`legacy_to_v2`]: bridge to/from
+//! - [`v2_to_legacy`] / [`legacy_to_v2`]: bridge to and from
 //!   `crabka_protocol::records::RecordBatch`. Use these from the Fetch
-//!   (down-conversion) and Produce (up-conversion) handlers.
+//!   handler for down-conversion, and from the Produce handler for
+//!   up-conversion.
 //!
 //! ## Encode and decode a v1 `MessageSet`
 //!

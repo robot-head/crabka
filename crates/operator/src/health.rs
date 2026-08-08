@@ -12,8 +12,8 @@ use crate::telemetry::SharedRegistry;
 
 #[derive(Clone)]
 pub struct HealthState {
-    /// Shared metrics registry. Cloned by controllers that need to
-    /// register metrics; read by the `/metrics` handler.
+    /// Shared metrics registry. Controllers that must register metrics
+    /// clone it, and the `/metrics` handler reads it.
     pub registry: SharedRegistry,
     ready: Arc<AtomicBool>,
 }
@@ -27,7 +27,7 @@ impl HealthState {
         }
     }
 
-    /// Mark the operator as ready to serve. Reflected in `/readyz`.
+    /// Mark the operator as ready to serve. `/readyz` shows this state.
     pub fn mark_ready(&self) {
         self.ready.store(true, Ordering::Release);
     }
@@ -41,8 +41,10 @@ pub fn router(state: HealthState) -> Router {
         .with_state(state)
 }
 
-/// Bind and serve forever. Returns only on socket error or shutdown signal.
+/// Bind and serve forever. Returns only on a socket error or a shutdown signal.
+///
 /// # Errors
+///
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn serve(addr: SocketAddr, state: HealthState) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;

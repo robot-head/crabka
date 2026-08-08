@@ -1,14 +1,15 @@
 //! S2: SQL cursor position algebra.
 //!
-//! A Gres cursor materializes its whole result at `DECLARE` time — the executor
-//! materializes every query anyway — so all a cursor carries beyond its rows is
-//! a position. This module owns that position and `PostgreSQL`'s `FETCH`/`MOVE`
-//! direction semantics, independent of how a row is represented.
+//! A Gres cursor materializes its whole result at `DECLARE` time, because the
+//! executor materializes every query anyway. Beyond its rows, a cursor
+//! therefore carries only a position. This module owns that position and
+//! `PostgreSQL`'s `FETCH`/`MOVE` direction semantics, independent of how a row
+//! is represented.
 //!
 //! The position model is `PostgreSQL`'s: `0` means "before the first row",
 //! `1..=count` means "on that row", and `count + 1` means "after the last row".
-//! A `FETCH` moves first and reports the rows it moved over; a `MOVE` is the
-//! same walk with the rows discarded.
+//! A `FETCH` moves first and reports the rows it moved over. A `MOVE` is the
+//! same walk, but it discards the rows.
 
 use crabka_pgparser::ast::{FetchCount, FetchDirection};
 
@@ -25,8 +26,8 @@ pub(crate) struct CursorPosition {
 pub(crate) struct FetchPlan {
     /// One-based row numbers, in output order. A backward walk is descending.
     pub(crate) rows: Vec<usize>,
-    /// Whether the walk moved the position backward at any point — the check
-    /// `PostgreSQL` applies before running a `NO SCROLL` cursor's fetch.
+    /// Whether the walk moved the position backward at any point. This is the
+    /// check `PostgreSQL` applies before it runs a `NO SCROLL` cursor's fetch.
     pub(crate) backward: bool,
 }
 
@@ -36,8 +37,8 @@ impl CursorPosition {
         Self { position: 0, count }
     }
 
-    /// Walk `direction` from the current position, returning the rows crossed
-    /// and leaving the position where `PostgreSQL` leaves it.
+    /// Walk `direction` from the current position, return the rows crossed, and
+    /// leave the position where `PostgreSQL` leaves it.
     pub(crate) fn walk(&mut self, direction: FetchDirection) -> FetchPlan {
         match direction {
             FetchDirection::Relative(FetchCount::AllForward) => {
@@ -94,7 +95,7 @@ impl CursorPosition {
         }
     }
 
-    /// Move forward over at most `rows` rows, stopping one past the last.
+    /// Move forward over at most `rows` rows, and stop one past the last.
     fn forward(&mut self, rows: i64) -> FetchPlan {
         let mut crossed = Vec::new();
         for _ in 0..rows.max(0) {
@@ -114,7 +115,7 @@ impl CursorPosition {
         }
     }
 
-    /// Move backward over at most `rows` rows, stopping before the first.
+    /// Move backward over at most `rows` rows, and stop before the first.
     fn backward(&mut self, rows: i64) -> FetchPlan {
         let mut crossed = Vec::new();
         let moved = rows.max(0) > 0 && self.position > 0;
@@ -135,7 +136,7 @@ impl CursorPosition {
         }
     }
 
-    /// Land exactly on `target`, returning that one row when it exists.
+    /// Land exactly on `target`, and return that one row when it exists.
     fn jump(&mut self, target: i64, backward: bool) -> FetchPlan {
         let count = i64::try_from(self.count).unwrap_or(i64::MAX);
         if target < 1 {
@@ -176,7 +177,7 @@ mod tests {
     }
 
     /// The exact walk PostgreSQL 18.4 performs over a five-row cursor, captured
-    /// from the oracle: each step is `(spelling, rows returned, position after)`.
+    /// from the oracle. Each step is `(spelling, rows returned, position after)`.
     #[test]
     fn the_five_row_walk_matches_the_postgres_oracle() {
         let mut position = CursorPosition::new(5);

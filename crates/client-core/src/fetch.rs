@@ -1,9 +1,9 @@
 //! Minimal single-partition `Fetch` helper over a raw [`Connection`].
 //!
 //! `crabka-client-consumer`'s group `Consumer` owns subscription-style
-//! consumption; this helper is the manual building block for callers
-//! (e.g. the tiered-storage metadata-log consumer) that drive their own
-//! per-partition fetch loops with externally-owned offsets.
+//! consumption. This helper is the manual building block for callers that
+//! drive their own per-partition fetch loops with externally-owned offsets,
+//! for example the tiered-storage metadata-log consumer.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -83,13 +83,14 @@ impl Default for FetchMinBytes {
 /// The single live-IO dependency [`fetch_partition_with_isolation`] needs: send
 /// a typed [`FetchRequest`] and get the decoded [`FetchResponse`] back.
 ///
-/// Abstracting it behind a trait (mirroring `connect-postgres`'s `PgCatalog`
-/// seam) keeps the request-construction (`build_fetch_request`) and
-/// response-decode (`decode_fetch_response`) logic mockable without a socket:
-/// the trait method returns the already-decoded response, so a `mockall` mock
-/// drives every decode/offset/error-code decision under the crate's default
-/// feature set. The only un-mockable part — the actual frame write / read on
-/// the wire — stays in the [`Connection`] adapter.
+/// A trait hides this dependency, which mirrors `connect-postgres`'s
+/// `PgCatalog` seam. The trait keeps the request construction
+/// (`build_fetch_request`) and the response decode (`decode_fetch_response`)
+/// mockable without a socket. The trait method returns the already-decoded
+/// response, so a `mockall` mock drives every decode, offset, and error-code
+/// decision under the crate's default feature set. Only one part is
+/// un-mockable and it stays in the [`Connection`] adapter: the actual frame
+/// write and read on the wire.
 #[cfg_attr(test, mockall::automock)]
 #[async_trait::async_trait]
 pub(crate) trait FetchTransport: Send + Sync {
@@ -116,7 +117,7 @@ pub struct FetchedRecord {
     pub value: Option<Bytes>,
     /// Record timestamp (epoch millis): batch `base_timestamp` + per-record delta.
     pub timestamp: i64,
-    /// Record headers in Kafka wire order, preserving duplicate keys and null values.
+    /// Record headers in Kafka wire order, with duplicate keys and null values kept.
     pub headers: Vec<FetchedHeader>,
 }
 
@@ -137,8 +138,9 @@ pub struct IsolatedFetch<'a> {
 /// Records returned by a fetch together with the next safe partition offset.
 ///
 /// `next_offset` advances over every decoded batch, including control batches
-/// and batches filtered because their transaction aborted. Callers which own a
-/// fetch cursor must use it rather than deriving progress from `records`.
+/// and batches filtered because their transaction aborted. Callers that own a
+/// fetch cursor must use `next_offset` and must not derive progress from
+/// `records`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchPartitionResult {
     /// Visible records in offset order.
@@ -150,20 +152,19 @@ pub struct FetchPartitionResult {
 /// One Kafka record header decoded from a fetched record.
 pub type FetchedHeader = RecordHeader;
 
-/// Fetch up to `partition_max` from `(topic, partition)` starting
-/// at `fetch_offset`, decoding every v2 `RecordBatch` into
-/// [`FetchedRecord`]s.
+/// Fetch up to `partition_max` from `(topic, partition)` at `fetch_offset`.
 ///
-/// Records are returned in offset order. An empty result means the
-/// partition had nothing at/after `fetch_offset` within `max_wait`.
-/// Legacy (non-v2) message sets are skipped.
+/// This function decodes every v2 `RecordBatch` into [`FetchedRecord`]s and
+/// returns them in offset order. An empty result means the partition had
+/// nothing at or after `fetch_offset` within `max_wait`. This function skips
+/// legacy (non-v2) message sets.
 ///
 /// # Errors
 ///
-/// Returns [`ClientError`] on transport / version-negotiation failure,
-/// or [`ClientError::Server`] when the broker reports a non-zero
-/// partition-level `error_code` (e.g. `OFFSET_OUT_OF_RANGE`,
-/// `NOT_LEADER_OR_FOLLOWER`, `UNKNOWN_TOPIC_ID`) so the caller can react
+/// Returns [`ClientError`] on transport or version-negotiation failure.
+/// Returns [`ClientError::Server`] when the broker reports a non-zero
+/// partition-level `error_code`, for example `OFFSET_OUT_OF_RANGE`,
+/// `NOT_LEADER_OR_FOLLOWER`, or `UNKNOWN_TOPIC_ID`. The caller can then react
 /// instead of silently re-fetching the same offset forever.
 // cargo-mutants: thin wrapper over fetch_partition_on (tested core)
 #[cfg_attr(test, mutants::skip)]
@@ -194,9 +195,10 @@ pub async fn fetch_partition(
     .await
 }
 
-/// `FetchTransport`-generic body of [`fetch_partition`]; the public entry point
-/// is a thin `Connection` adapter so the build/decode logic is unit-testable
-/// against a `mockall` `FetchTransport`.
+/// `FetchTransport`-generic body of [`fetch_partition`].
+///
+/// The public entry point is a thin `Connection` adapter, so the build and
+/// decode logic is unit-testable against a `mockall` `FetchTransport`.
 async fn fetch_partition_on<T: FetchTransport + ?Sized>(
     conn: &T,
     topic: &str,
@@ -228,8 +230,8 @@ async fn fetch_partition_on<T: FetchTransport + ?Sized>(
 /// `Fetch.isolation_level` (`0` = `READ_UNCOMMITTED`, `1` = `READ_COMMITTED`).
 ///
 /// `READ_COMMITTED` restricts the result to records below the last stable
-/// offset and excludes records from aborted transactions — required for
-/// exactly-once changelog restore so that aborted writes are not replayed.
+/// offset and excludes records from aborted transactions. Exactly-once
+/// changelog restore needs this so that aborted writes are not replayed.
 ///
 /// # Errors
 ///
@@ -252,8 +254,8 @@ pub async fn fetch_partition_with_isolation(
 /// Fetch a partition with isolation and return both visible records and cursor
 /// progress across filtered transactional and control batches.
 ///
-/// In `READ_COMMITTED` mode this applies the response's
-/// `aborted_transactions` metadata client-side because Crabka brokers return
+/// In `READ_COMMITTED` mode this function applies the response's
+/// `aborted_transactions` metadata client-side, because Crabka brokers return
 /// the underlying record batches verbatim.
 ///
 /// # Errors
@@ -267,9 +269,11 @@ pub async fn fetch_partition_with_isolation_progress(
     fetch_partition_with_isolation_progress_on(conn, fetch).await
 }
 
-/// `FetchTransport`-generic body of [`fetch_partition_with_isolation`]. Holds the
-/// build-request → send → decode-response logic so it is killable against a
-/// `mockall` `FetchTransport` without a live broker socket.
+/// `FetchTransport`-generic body of [`fetch_partition_with_isolation`].
+///
+/// This function holds the build-request → send → decode-response logic, so
+/// it is killable against a `mockall` `FetchTransport` without a live broker
+/// socket.
 async fn fetch_partition_with_isolation_on<T: FetchTransport + ?Sized>(
     conn: &T,
     fetch: IsolatedFetch<'_>,
@@ -442,7 +446,7 @@ mod tests {
     }
 
     /// Build bytes directly from the Kafka record-batch v2 grammar. This
-    /// deliberately does not call either production encoder.
+    /// helper deliberately calls neither production encoder.
     fn hand_encoded_v2_header_batch() -> RecordBatch {
         let mut records = Vec::new();
         let mut empty = Vec::new();
@@ -746,8 +750,8 @@ mod tests {
     // `FetchResponse`, so build-request + decode-response decisions are killable
     // under the crate's default feature set.
 
-    /// The default `fetch_partition` path requests `isolation_level` 0 and decodes
-    /// the returned batch into absolute, offset-ordered records.
+    /// The default `fetch_partition` path requests `isolation_level` 0 and
+    /// decodes the returned batch into absolute, offset-ordered records.
     #[tokio::test]
     async fn fetch_partition_on_builds_request_and_decodes_response() {
         let topic_id = WireUuid([3; 16]);
@@ -858,8 +862,8 @@ mod tests {
         assert!(matches!(err, ClientError::Disconnected));
     }
 
-    /// A partition-level error code surfaces as `ClientError::Server` through the
-    /// full send→decode path (not just the isolated decode helper).
+    /// A partition-level error code surfaces as `ClientError::Server` through
+    /// the full send→decode path, not only the isolated decode helper.
     #[tokio::test]
     async fn fetch_partition_on_surfaces_partition_error_code() {
         let mut transport = MockFetchTransport::new();

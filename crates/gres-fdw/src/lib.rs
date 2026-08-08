@@ -1,4 +1,4 @@
-//! `PostgreSQL` foreign-data wrapper exposing Crabka Kafka topics as SQL tables.
+//! `PostgreSQL` foreign-data wrapper that exposes Crabka Kafka topics as SQL tables.
 use std::sync::Arc;
 
 use crabka_client_admin::AdminClient;
@@ -32,12 +32,12 @@ pub use types::{
 
 /// The Kafka foreign-data wrapper.
 ///
-/// The optional default bootstrap is process configuration, not catalog state:
-/// substrate-mode computes can make their own tenant cluster the default target
-/// while standalone/local computes keep PostgreSQL-compatible explicit server
-/// configuration.
+/// The optional default bootstrap is process configuration, not catalog state.
+/// Substrate-mode computes can make their own tenant cluster the default
+/// target. Standalone and local computes keep PostgreSQL-compatible explicit
+/// server configuration.
 ///
-/// Registered with the engine via
+/// The engine registers it with
 /// [`crabka_pgexec::SqlEngine::set_foreign_scanner`].
 #[derive(Debug, Default)]
 pub struct KafkaFdw {
@@ -52,7 +52,7 @@ pub struct KafkaFdw {
 }
 
 impl KafkaFdw {
-    /// Construct a scanner with an optional default bootstrap address list.
+    /// Constructs a scanner with an optional default bootstrap address list.
     #[must_use]
     pub fn with_defaults(default_bootstrap: Option<String>) -> Self {
         Self {
@@ -67,7 +67,7 @@ impl KafkaFdw {
         }
     }
 
-    /// Override the broker DNS lookup deadline for this scanner.
+    /// Overrides the broker DNS lookup deadline for this scanner.
     #[must_use]
     pub fn with_broker_dns_timeout(
         mut self,
@@ -77,13 +77,13 @@ impl KafkaFdw {
         self
     }
 
-    /// Return the broker DNS lookup deadline for this scanner.
+    /// Returns the broker DNS lookup deadline for this scanner.
     #[must_use]
     pub fn broker_dns_timeout(&self) -> crabka_client_core::ClientDnsTimeout {
         self.broker_dns_timeout
     }
 
-    /// Override client connection and fetch resource policy.
+    /// Overrides the client connection and fetch resource policy.
     #[must_use]
     pub fn with_client_resource_policy(
         mut self,
@@ -97,60 +97,61 @@ impl KafkaFdw {
         self
     }
 
-    /// Override per-scan broker fetch and connection policy.
+    /// Overrides the per-scan broker fetch and connection policy.
     #[must_use]
     pub fn with_scan_policy(mut self, policy: FdwScanPolicy) -> Self {
         self.scan_policy = policy;
         self
     }
 
-    /// Return per-scan broker fetch and connection policy.
+    /// Returns the per-scan broker fetch and connection policy.
     #[must_use]
     pub fn scan_policy(&self) -> FdwScanPolicy {
         self.scan_policy
     }
 
-    /// Override cold-cache schema resolution policy.
+    /// Overrides the cold-cache schema resolution policy.
     #[must_use]
     pub fn with_decode_policy(mut self, policy: FdwDecodePolicy) -> Self {
         self.decode_policy = policy;
         self
     }
 
-    /// Return cold-cache schema resolution policy.
+    /// Returns the cold-cache schema resolution policy.
     #[must_use]
     pub fn decode_policy(&self) -> FdwDecodePolicy {
         self.decode_policy
     }
 
-    /// Override the retry range for transient schema fetch failures.
+    /// Overrides the retry range for transient schema fetch failures.
     #[must_use]
     pub fn with_schema_fetch_retry_policy(mut self, policy: SchemaFetchRetryPolicy) -> Self {
         self.schema_fetch_retry_policy = policy;
         self
     }
 
-    /// Return the retry range for transient schema fetch failures.
+    /// Returns the retry range for transient schema fetch failures.
     #[must_use]
     pub fn schema_fetch_retry_policy(&self) -> SchemaFetchRetryPolicy {
         self.schema_fetch_retry_policy
     }
 
-    /// Return the configured default bootstrap, when this scanner has one.
+    /// Returns the configured default bootstrap, when this scanner has one.
     #[must_use]
     pub fn default_bootstrap(&self) -> Option<&str> {
         self.default_bootstrap.as_deref()
     }
 }
 
-/// Map a [`KafkaFdwError`] onto an [`ExecError`]. Both config and runtime
-/// failures surface as `0A000` (`Unsupported`) for now — the closest existing
-/// variant; a dedicated foreign-table error class can follow if needed.
+/// Maps a [`KafkaFdwError`] onto an [`ExecError`]. Both config and runtime
+/// failures surface as `0A000` (`Unsupported`) for now, which is the closest
+/// existing variant. A dedicated foreign-table error class can follow if
+/// needed.
 fn to_exec_err(err: &KafkaFdwError) -> ExecError {
     ExecError::Unsupported(err.to_string())
 }
 
-/// Build a [`SchemaCache`] for one scan from the profile's registry URL.
+/// Builds a [`SchemaCache`] for one scan from the profile's registry URL.
 fn build_cache(
     profile: &ConnProfile,
     fetch_retry_policy: SchemaFetchRetryPolicy,
@@ -284,14 +285,16 @@ impl ForeignScanner for KafkaFdw {
     }
 }
 
-/// Derive the value columns + wire format for one topic from its Schema
+/// Derives the value columns and wire format for one topic from its Schema
 /// Registry `"<topic>-value"` subject.
 ///
-/// Raw-fallback policy: a topic whose `"<topic>-value"` subject is NOT registered
-/// (or whose schema fails to parse / yields no columns) is still importable — it
-/// gets a single raw `value bytea` column and [`Wire::Raw`]. This makes EVERY
-/// topic queryable (matching the scanner's `Wire::Raw` path, which projects to
-/// one bytea column), rather than silently skipping un-schematized topics.
+/// Raw-fallback policy: a topic is still importable when its
+/// `"<topic>-value"` subject is NOT registered, when its schema fails to
+/// parse, or when its schema yields no columns. Such a topic gets a single
+/// raw `value bytea` column and [`Wire::Raw`]. This makes EVERY topic
+/// queryable, and it matches the scanner's `Wire::Raw` path, which projects
+/// to one bytea column. The import does not silently skip un-schematized
+/// topics.
 async fn value_columns_for_topic(
     registry: &RegistryClient,
     topic: &str,
@@ -314,18 +317,21 @@ fn wire_option(wire: Wire) -> &'static str {
     }
 }
 
-/// A single raw `value bytea` column — the import raw-fallback shape.
+/// A single raw `value bytea` column, the import raw-fallback shape.
 fn raw_value_column() -> Column {
     Column::new("value", ColumnType::Bytea)
 }
 
-/// Fetch the latest schema for `subject` and derive columns + the [`Wire`]
-/// format the columns were derived from. Returns `None` when the subject is
-/// unregistered, the fetch fails, or the schema is unparseable — the caller
-/// then applies the raw-fallback. Detection: explicit Schema Registry Protobuf
-/// metadata wins; otherwise a schema that parses as an Avro record yields Avro
-/// columns + [`Wire::Avro`]; otherwise it is treated as JSON Schema +
-/// [`Wire::Json`].
+/// Fetches the latest schema for `subject` and derives the columns and the
+/// [`Wire`] format they come from.
+///
+/// Returns `None` when the subject is unregistered, the fetch fails, or the
+/// schema is unparseable. The caller then applies the raw-fallback.
+///
+/// Detection order: explicit Schema Registry Protobuf metadata wins. If that
+/// is absent, a schema that parses as an Avro record gives Avro columns and
+/// [`Wire::Avro`]. If that also fails, the function treats the schema as JSON
+/// Schema and uses [`Wire::Json`].
 async fn fetch_value_columns(
     registry: &RegistryClient,
     subject: &str,

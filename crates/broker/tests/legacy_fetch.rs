@@ -1,10 +1,12 @@
-//! End-to-end: produce a v2 batch via the modern Produce path, then
-//! Fetch on a legacy version and expect a v0/v1 `MessageSet` on the wire
-//! that decodes back to the same records. Covers:
-//!   - Fetch v3 → `Magic::V1` (KIP-32 timestamps preserved).
-//!   - Fetch v0 → `Magic::V0` (per-message timestamps stripped).
-//!   - zstd-compressed batches re-compressed as snappy.
-//!   - control batches dropped from the down-converted response.
+//! End-to-end tests: produce a v2 batch through the modern Produce path, then
+//! Fetch on a legacy version. The wire must carry a v0 or v1 `MessageSet` that
+//! decodes back to the same records. The tests cover:
+//!   - Fetch v3, which gives `Magic::V1` and keeps the KIP-32 timestamps.
+//!   - Fetch v0, which gives `Magic::V0` and strips the per-message
+//!     timestamps.
+//!   - zstd-compressed batches, which the broker re-compresses as snappy.
+//!   - control batches, which the broker drops from the down-converted
+//!     response.
 
 use assert2::{assert, check};
 mod support;
@@ -31,9 +33,9 @@ use tokio::{
 
 // ── Wire helpers ──────────────────────────────────────────────────────────────
 
-/// Send a non-flexible (v0-11) Kafka request frame and return the response body
-/// bytes with `correlation_id` already stripped. No tagged-fields bytes for
-/// either direction since v3 is non-flexible.
+/// Sends a non-flexible Kafka request frame, v0 to v11, and returns the
+/// response body bytes with the `correlation_id` already stripped. Neither
+/// direction carries tagged-fields bytes, because v3 is non-flexible.
 async fn round_trip_nonflexible(
     stream: &mut TcpStream,
     api_key: i16,
@@ -89,7 +91,8 @@ async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUu
         .unwrap_or_default()
 }
 
-/// Create a single-partition topic via the modern client, asserting success.
+/// Creates a single-partition topic with the modern client and asserts that it
+/// succeeds.
 async fn create_topic(client: &crabka_client_core::Client, name: &str) {
     let cr = client
         .send(CreateTopicsRequest {
@@ -111,8 +114,8 @@ async fn create_topic(client: &crabka_client_core::Client, name: &str) {
     );
 }
 
-/// Produce a single v2 batch to (topic, partition=0) via a modern flexible
-/// `ProduceRequest` (version 9). Returns `Ok(())` on success.
+/// Produces a single v2 batch to (topic, partition=0) with a modern flexible
+/// `ProduceRequest`, version 9. Returns `Ok(())` on success.
 async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBatch) {
     const PRODUCE_VERSION: i16 = 9;
     let req = ProduceRequest {
@@ -173,11 +176,13 @@ async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBat
     );
 }
 
-/// Send a Fetch request at the given legacy `version` for (topic,
-/// partition=0) from offset 0 and return the raw response body bytes
-/// (`correlation_id` stripped). Encoding at a low version drops fields
-/// absent in that version (e.g. `max_bytes` is v3+), so the same struct
-/// works for v0–v3.
+/// Sends a Fetch request at the given legacy `version` for (topic,
+/// partition=0) from offset 0, and returns the raw response body bytes with
+/// the `correlation_id` stripped.
+///
+/// Encoding at a low version drops the fields that version does not have, for
+/// example `max_bytes`, which is v3+. One struct therefore works for v0 to
+/// v3.
 async fn fetch_legacy_raw(addr: std::net::SocketAddr, topic: &str, version: i16) -> Vec<u8> {
     use crabka_protocol::kafka_3_6_2::owned::fetch_request::{
         FetchPartition, FetchRequest, FetchTopic,
@@ -419,10 +424,12 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
 }
 
 /// Fetch v0 maps to `Magic::V0`, which has no per-message timestamp.
-/// Produce a batch carrying timestamps via the modern path, then fetch
-/// at v0 and confirm the down-converted `MessageSet` strips them — the
-/// `request_version < 2` branch of `down_convert_for_fetch`, exercised
-/// through the full Fetch handler rather than the unit helper.
+///
+/// The test produces a batch with timestamps through the modern path, then
+/// fetches at v0 and confirms that the down-converted `MessageSet` strips
+/// them. This drives the `request_version < 2` branch of
+/// `down_convert_for_fetch` through the full Fetch handler, not through the
+/// unit helper.
 #[tokio::test]
 async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
     let p = support::start().await;
@@ -482,11 +489,12 @@ async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
     p.broker.shutdown().await;
 }
 
-/// Control batches (txn markers) have no representation in the v0/v1
-/// `MessageSet` format and must be dropped from a down-converted Fetch
-/// response. Produce a single control batch, fetch at v3, and confirm the
-/// partition comes back with no records and no error — the `Ok(None)` arm
-/// of the Fetch handler's down-conversion loop.
+/// Control batches, that is txn markers, have no representation in the v0 and
+/// v1 `MessageSet` format, so a down-converted Fetch response must drop them.
+///
+/// The test produces a single control batch, fetches at v3, and confirms that
+/// the partition comes back with no records and no error. This drives the
+/// `Ok(None)` arm of the Fetch handler's down-conversion loop.
 #[tokio::test]
 async fn fetch_v3_drops_control_batch() {
     let p = support::start().await;

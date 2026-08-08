@@ -1,4 +1,4 @@
-//! HTTP surface: `AppState` + the merged Confluent route table.
+//! HTTP surface: `AppState` and the merged Confluent route table.
 
 pub mod compatibility;
 pub mod config;
@@ -77,7 +77,8 @@ fn subject_config(
     std::future::ready(config::get_subject(state, subject))
 }
 
-/// `latest` -> `None`; a positive integer -> `Some(n)`; else 42202.
+/// `latest` gives `None`, a positive integer gives `Some(n)`, and any other
+/// value gives 42202.
 fn parse_optional_version(v: &str) -> Result<Option<SchemaVersion>, SrError> {
     if v == "latest" {
         return Ok(None);
@@ -162,7 +163,7 @@ pub fn router_with_forwarding(state: AppState, fwd: forward::ForwardState) -> Ro
 pub struct SecurityLayers {
     /// Authentication (mTLS → Bearer → Basic → Anonymous).
     pub auth: crate::auth::AuthState,
-    /// Topic-ACL authorization. `None` disables authz entirely (allow-all).
+    /// Topic-ACL authorization. `None` disables authz entirely and allows all.
     pub authz: Option<std::sync::Arc<crate::authz::SchemaRegistryAuthz>>,
     /// Secondary → primary write-forwarding.
     pub forward: forward::ForwardState,
@@ -170,9 +171,9 @@ pub struct SecurityLayers {
 
 /// Router wrapped with the full security stack.
 ///
-/// axum runs the *last*-added `.layer()` first, so to get an execution order of
-/// auth → authz → forward → handler we add them in the reverse order (forward,
-/// then authz, then auth on the outside). Authentication therefore runs first
+/// axum runs the *last*-added `.layer()` first. To get an execution order of
+/// auth → authz → forward → handler, we add them in the reverse order: forward,
+/// then authz, then auth on the outside. Authentication therefore runs first
 /// and inserts the [`crabka_security::Principal`] that authorization reads.
 pub fn router_with_security(state: AppState, sec: SecurityLayers) -> Router {
     let mut r = router(state).layer(axum::middleware::from_fn_with_state(

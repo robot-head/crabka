@@ -97,8 +97,9 @@ impl Drop for Oracle {
 
 static SHARED: LazyLock<Mutex<Oracle>> = LazyLock::new(|| Mutex::new(Oracle::spawn()));
 
-/// Borrow the shared oracle. Tests serialize through the mutex so a single
-/// JVM is reused across all differential cases.
+/// Borrow the shared oracle.
+///
+/// Tests serialize through the mutex, so all differential cases use one JVM.
 pub fn shared() -> MutexGuard<'static, Oracle> {
     SHARED.lock().unwrap()
 }

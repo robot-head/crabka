@@ -1,20 +1,20 @@
-//! Reconcile-level integration tests for the delegation-token
-//! `KafkaUser` arm.
+//! Reconcile-level integration tests for the delegation-token `KafkaUser` arm.
 //!
 //! These tests exercise the production dispatch path in
-//! `controller::user::reconcile` — same harness as `reconcile_user.rs`
-//! (mock kube transport + injected `FakeAdminClient`). The fake's
-//! delegation-token RPCs are in-memory KIP-48: `Create` mints a fresh
-//! token with `expiry_ts = now + 7d` / `max_ts = now + 30d`; `Renew`
-//! advances `expiry_ts` to `min(now + 7d, max_ts)`; `Expire` tombstones
-//! the matching entry. The fake's per-call recording lets us assert on
-//! the exact RPC sequence the dispatch emits.
+//! `controller::user::reconcile`. The harness is the same as
+//! `reconcile_user.rs`: a mock kube transport and an injected
+//! `FakeAdminClient`.
 //!
-//! Why mock rather than a real broker: the operator's per-resource
-//! reconcile path is unit-isolated from broker I/O — the
-//! `DelegationTokenAdmin` trait gives us a substitution seam. The
-//! broker-side act-as wire path is covered by `crabka_broker`'s own
-//! integration tests.
+//! The delegation-token RPCs of the fake are in-memory KIP-48. `Create` mints
+//! a fresh token with `expiry_ts = now + 7d` and `max_ts = now + 30d`. `Renew`
+//! advances `expiry_ts` to `min(now + 7d, max_ts)`. `Expire` tombstones the
+//! matching entry. The fake records each call, so the tests can assert on the
+//! exact RPC sequence that the dispatch emits.
+//!
+//! These tests use a mock and not a real broker because the operator's
+//! per-resource reconcile path is unit-isolated from broker I/O. The
+//! `DelegationTokenAdmin` trait gives a substitution seam. The `crabka_broker`
+//! integration tests cover the broker-side act-as wire path.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -69,8 +69,8 @@ fn ready_kafka_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Echo body for the user-Secret PATCH. The operator only inspects this
-/// to confirm the apply succeeded; the test asserts on the request body.
+/// Echo body for the user-Secret PATCH. The operator examines it only to
+/// confirm that the apply succeeded. The test asserts on the request body.
 fn secret_body(name: &str, namespace: &str) -> serde_json::Value {
     json!({
         "apiVersion": "v1",
@@ -81,8 +81,8 @@ fn secret_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Echo body for the `KafkaUser` status PATCH. kube-rs requires the
-/// response deserialize back into a `KafkaUser`, so we echo a minimal
+/// Echo body for the `KafkaUser` status PATCH. kube-rs requires that the
+/// response deserializes back into a `KafkaUser`, so this body is a minimal
 /// valid shape.
 fn user_body(name: &str, namespace: &str) -> serde_json::Value {
     json!({
@@ -122,8 +122,8 @@ fn ku_delegation_token(name: &str, auth: DelegationTokenAuth) -> KafkaUser {
     ku
 }
 
-/// FIFO mock rules covering one happy-path reconcile of a
-/// delegation-token user: Kafka GET → Secret PATCH → status PATCH.
+/// FIFO mock rules for one happy-path reconcile of a delegation-token user:
+/// Kafka GET, then Secret PATCH, then status PATCH.
 fn happy_path_rules() -> Vec<MockRule> {
     vec![
         MockRule {
@@ -146,10 +146,10 @@ fn happy_path_rules() -> Vec<MockRule> {
 
 // ─── Test 1: first reconcile mints token + writes Secret + status ───────
 
-/// Spec §3.2: a fresh delegation-token user with no existing token
-/// results in `Describe → Create → Secret apply → status patch`. The
-/// Secret carries the four KIP-48 keys; status carries the token id /
-/// expiry, plus `Ready=True` and `TokenIssued=True` conditions.
+/// Spec §3.2: a fresh delegation-token user with no existing token gives
+/// `Describe → Create → Secret apply → status patch`. The Secret carries the
+/// four KIP-48 keys. The status carries the token id and expiry, plus the
+/// `Ready=True` and `TokenIssued=True` conditions.
 #[tokio::test]
 async fn delegation_token_user_reconcile_creates_secret_and_status() {
     let state = MockState::new(happy_path_rules());
@@ -265,10 +265,10 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
 // ─── Test 2: renewal fires when remaining lifetime ≤ threshold ──────────
 
 /// Spec §3.2: with `renew_before_expiry_ms = 7d` and a default 7d token
-/// lifetime, `expiry - now <= 7d` is always true → every reconcile
-/// fires the Renew path. We reconcile twice, asserting that the second
-/// pass calls Renew (not Create) and that the post-renew expiry has
-/// advanced (or held at `max_timestamp_ms` if we'd hit the ceiling).
+/// lifetime, `expiry - now <= 7d` is always true, so every reconcile runs the
+/// Renew path. The test reconciles twice. It asserts that the second pass
+/// calls Renew and not Create, and that the post-renew expiry has advanced or
+/// held at `max_timestamp_ms` at the ceiling.
 #[tokio::test]
 async fn delegation_token_user_reconcile_renews_when_within_threshold() {
     let mut rules = happy_path_rules();
@@ -371,12 +371,12 @@ async fn delegation_token_user_reconcile_renews_when_within_threshold() {
 
 // ─── Test 3: deletion expires the token and removes the Secret ──────────
 
-/// Spec §3.2: deleting the `KafkaUser` (`deletion_timestamp` set) triggers
-/// the finalizer. The finalizer calls `expire_owned_tokens` (which
-/// Describe-lists tokens owned by `User:<name>` and Expires each), then
-/// removes the finalizer. Owner-references on the Secret then cascade
-/// the Secret delete; the test verifies the fake's token store is empty
-/// and the finalizer-removal PATCH landed.
+/// Spec §3.2: a delete of the `KafkaUser`, with `deletion_timestamp` set,
+/// triggers the finalizer. The finalizer calls `expire_owned_tokens`. That
+/// function Describe-lists the tokens owned by `User:<name>` and Expires each
+/// one. The finalizer then removes itself. The owner-references on the Secret
+/// then cascade the Secret delete. The test verifies that the fake's token
+/// store is empty and that the finalizer-removal PATCH landed.
 #[tokio::test]
 async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
     // Pass 1: provision the token via the happy-path reconcile.

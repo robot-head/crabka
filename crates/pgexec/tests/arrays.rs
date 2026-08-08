@@ -1,8 +1,8 @@
 //! SQL arrays end to end: literals and construction, text output quoting,
-//! subscripting and slicing, `= ANY(...)` / `<> ALL(...)` (including the
-//! three-valued logic), `unnest` in FROM, `array_agg`, the operator and
-//! function surface, storage round-trips, array parameters in both wire
-//! formats, multiple dimensions, and bounded string element types.
+//! subscripting and slicing, `= ANY(...)` and `<> ALL(...)` with their
+//! three-valued logic, `unnest` in FROM, `array_agg`, the operator and function
+//! surface, storage round-trips, array parameters in both wire formats,
+//! multiple dimensions, and bounded string element types.
 
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use crabka_pgwire::{
 use tokio::net::TcpListener;
 use tokio_postgres::{NoTls, types::Type};
 
-/// `_int4` / `_text` — the OIDs an array-typed result reports.
+/// `_int4` / `_text`: the OIDs an array-typed result reports.
 const INT4_ARRAY_OID: u32 = 1007;
 const TEXT_ARRAY_OID: u32 = 1009;
 
@@ -43,7 +43,7 @@ fn rows_text(r: &QueryResult) -> Vec<Vec<Option<String>>> {
     }
 }
 
-/// Run `sql` (a single statement) and return its rows as text.
+/// Run `sql`, a single statement, and return its rows as text.
 async fn query(s: &mut SqlSession, sql: &str) -> Vec<Vec<Option<String>>> {
     rows_text(&run(s, sql).await[0])
 }
@@ -56,7 +56,8 @@ async fn scalar(s: &mut SqlSession, sql: &str) -> Option<String> {
     rows[0][0].clone()
 }
 
-/// Run `SELECT <expr>` and return the value plus the column's reported type OID.
+/// Run `SELECT <expr>` and return the value with the column's reported type
+/// OID.
 async fn typed_scalar(s: &mut SqlSession, expr: &str) -> (Option<String>, u32) {
     let sql = format!("SELECT {expr}");
     let results = run(s, &sql).await;
@@ -72,8 +73,9 @@ async fn err_code(s: &mut SqlSession, sql: &str) -> String {
     s.simple_query(sql).await.expect_err("expected error").code
 }
 
-/// A fresh engine with `setup` applied, plus one connected session. The engine
-/// is returned so the caller keeps it alive for the session's lifetime.
+/// A fresh engine with `setup` applied, plus one connected session. This
+/// function returns the engine so the caller keeps it alive for the session's
+/// lifetime.
 async fn engine_with(setup: &[&str]) -> (SqlEngine, SqlSession) {
     let engine = SqlEngine::new();
     let mut s = engine.connect();
@@ -87,8 +89,8 @@ fn row(values: &[&str]) -> Vec<Option<String>> {
     values.iter().map(|v| Some((*v).to_string())).collect()
 }
 
-/// The `column_default` `information_schema` reports for one column — the
-/// `\d`-style rendering of a persisted DEFAULT.
+/// The `column_default` `information_schema` reports for one column. This is
+/// the `\d`-style rendering of a persisted DEFAULT.
 async fn column_default(s: &mut SqlSession, table: &str, column: &str) -> Option<String> {
     let sql = format!(
         "SELECT column_default FROM information_schema.columns \
@@ -109,9 +111,9 @@ async fn expect_exprs(s: &mut SqlSession, cases: &[(&str, Option<&str>)]) {
 // Literals and construction
 // ---------------------------------------------------------------------------
 
-/// `ARRAY[...]` and `'{...}'::type[]` are two spellings of the same value, and
-/// the element type is inferred from the constructor (a bare `ARRAY[NULL]` is
-/// `text[]`, matching `PostgreSQL`).
+/// `ARRAY[...]` and `'{...}'::type[]` are two spellings of the same value. The
+/// constructor decides the element type, so a bare `ARRAY[NULL]` is `text[]`,
+/// which matches `PostgreSQL`.
 #[tokio::test]
 async fn array_literals_and_construction() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -153,9 +155,9 @@ async fn array_literals_and_construction() {
     assert!(err_code(&mut s, "SELECT ARRAY[]").await == "42P18");
 }
 
-/// Array text output quoting: only elements that would otherwise be ambiguous
-/// are quoted, and the literal string `NULL` is quoted so it is distinguishable
-/// from a SQL NULL element.
+/// Array text output quoting. The engine quotes only the elements that would
+/// otherwise be ambiguous, and it quotes the literal string `NULL` so a reader
+/// can tell it apart from a SQL NULL element.
 #[tokio::test]
 async fn text_output_quotes_only_what_it_must() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -198,8 +200,9 @@ async fn text_output_quotes_only_what_it_must() {
 // Subscripting
 // ---------------------------------------------------------------------------
 
-/// Subscripts are 1-based; every out-of-range subscript (0, negative, past the
-/// end) is SQL NULL rather than an error, and subscripting a NULL array is NULL.
+/// Subscripts are 1-based. Every out-of-range subscript is SQL NULL rather than
+/// an error, that is 0, a negative one, and one past the end. A subscript of a
+/// NULL array is NULL.
 #[tokio::test]
 async fn subscripting_is_one_based_and_out_of_range_is_null() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (id int4, a int4[])"]).await;
@@ -238,7 +241,7 @@ async fn subscripting_is_one_based_and_out_of_range_is_null() {
 // ---------------------------------------------------------------------------
 
 /// `= ANY(...)` and `<> ALL(...)` over array literals and against a real
-/// table's rows — the shape every ORM emits for an IN-list.
+/// table's rows. This is the shape every ORM emits for an IN-list.
 #[tokio::test]
 async fn any_and_all_over_literals_and_table_rows() {
     let (_engine, mut s) = engine_with(&[
@@ -300,7 +303,7 @@ async fn any_and_all_over_literals_and_table_rows() {
 }
 
 /// The three-valued logic of `ANY`/`ALL`. A non-matching probe against an array
-/// that contains NULLs is *unknown*, not false; `ANY(NULL)` is unknown; and the
+/// that contains NULLs is *unknown*, not false. `ANY(NULL)` is unknown. The
 /// empty array short-circuits to false for ANY and true for ALL.
 #[tokio::test]
 async fn any_and_all_are_three_valued() {
@@ -424,8 +427,9 @@ async fn unnest_in_from_expands_joins_and_handles_empty_input() {
 // array_agg
 // ---------------------------------------------------------------------------
 
-/// `array_agg` preserves input order, keeps NULL elements, and — the `PostgreSQL`
-/// behavior that surprises people — is SQL NULL over zero rows, not `{}`.
+/// `array_agg` preserves input order and keeps NULL elements. Over zero rows it
+/// is SQL NULL, not `{}`, which is the `PostgreSQL` behavior that surprises
+/// people.
 #[tokio::test]
 async fn array_agg_preserves_order_and_is_null_over_zero_rows() {
     let (_engine, mut s) = engine_with(&[
@@ -480,8 +484,9 @@ async fn array_agg_preserves_order_and_is_null_over_zero_rows() {
 // Operators
 // ---------------------------------------------------------------------------
 
-/// `||` in all three forms, plus the `PostgreSQL` quirk that concatenating a bare
-/// NULL leaves the array unchanged (the operand resolves as a NULL *array*).
+/// `||` in all three forms, plus the `PostgreSQL` quirk that a concatenation
+/// with a bare NULL leaves the array unchanged. The operand resolves as a NULL
+/// *array*.
 #[tokio::test]
 async fn concat_has_three_forms() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -537,7 +542,7 @@ async fn containment_overlap_and_ordering() {
 // ---------------------------------------------------------------------------
 
 /// `array_length` reports NULL for an empty array while `cardinality` reports
-/// 0 — the one place the two disagree.
+/// 0. This is the one place the two disagree.
 #[tokio::test]
 async fn array_length_and_cardinality_disagree_on_empty() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -615,9 +620,9 @@ async fn casts_between_text_and_arrays() {
 
 /// Every supported element type can be declared in DDL, stored, and read back.
 ///
-/// `bytea[]` is exercised only as DDL: the engine has no text → bytea cast, so
-/// a `bytea` array value cannot be written in SQL at all (only bound as a
-/// parameter).
+/// These tests exercise `bytea[]` only as DDL. The engine has no text → bytea
+/// cast, so no one can write a `bytea` array value in SQL at all. It can only be
+/// bound as a parameter.
 #[tokio::test]
 async fn every_element_type_round_trips_through_a_column() {
     for (type_name, literal, want) in [
@@ -671,8 +676,8 @@ async fn every_element_type_round_trips_through_a_column() {
 // Storage, ordering, unique indexes
 // ---------------------------------------------------------------------------
 
-/// Arrays round-trip through storage (including NULL elements and a NULL
-/// column), order element-wise, and group by value.
+/// Arrays round-trip through storage, including NULL elements and a NULL
+/// column. They order element-wise, and they group by value.
 #[tokio::test]
 async fn arrays_round_trip_through_storage_and_order_element_wise() {
     let (_engine, mut s) = engine_with(&[
@@ -703,7 +708,7 @@ async fn arrays_round_trip_through_storage_and_order_element_wise() {
     assert!(query(&mut s, "SELECT count(DISTINCT a) FROM t").await == vec![row(&["3"])]);
 }
 
-/// A unique array index keys off the canonical value: the two literal spellings
+/// A unique array index keys off the canonical value. The two literal spellings
 /// are one key, and numeric scale inside the elements does not create a second.
 #[tokio::test]
 async fn unique_index_canonicalizes_array_keys() {
@@ -736,10 +741,11 @@ async fn unique_index_canonicalizes_array_keys() {
 // Column defaults
 // ---------------------------------------------------------------------------
 
-/// An array column DEFAULT — literal or `ARRAY[...]`, empty, or holding NULL
-/// elements — is evaluated at DDL time, written into the catalog, applied to an
-/// INSERT that omits the column, and rendered back as a quoted literal; all of
-/// it still holds for a fresh engine that re-reads the catalog from storage.
+/// The engine evaluates an array column DEFAULT at DDL time, writes it into the
+/// catalog, applies it to an INSERT that omits the column, and renders it back
+/// as a quoted literal. That holds for a literal DEFAULT and an `ARRAY[...]`
+/// one, for an empty one, and for one that holds NULL elements. All of it still
+/// holds for a fresh engine that re-reads the catalog from storage.
 #[tokio::test]
 async fn array_column_defaults_persist_apply_and_render() {
     let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
@@ -786,9 +792,10 @@ async fn array_column_defaults_persist_apply_and_render() {
 // Slices, dimensions, and bounded element types
 // ---------------------------------------------------------------------------
 
-/// `array_get_slice`: a range clips to the array rather than erroring, an
-/// inverted or wholly-out-of-range range gives the empty array, an omitted bound
-/// takes the array's own, and a NULL bound makes the whole slice NULL.
+/// `array_get_slice`. A range clips to the array rather than reporting an
+/// error. An inverted or wholly-out-of-range range gives the empty array. An
+/// omitted bound takes the array's own. A NULL bound makes the whole slice
+/// NULL.
 #[tokio::test]
 async fn array_slices_clip_to_the_array_instead_of_erroring() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -814,8 +821,8 @@ async fn array_slices_clip_to_the_array_instead_of_erroring() {
 }
 
 /// Multidimensional arrays in both spellings, their dimension accessors, and the
-/// two ways of building a ragged one — which `PostgreSQL` rejects with distinct
-/// SQLSTATEs depending on whether the raggedness is in a literal or a
+/// two ways of building a ragged one. `PostgreSQL` rejects the two with distinct
+/// SQLSTATEs, which depend on whether the raggedness is in a literal or in a
 /// constructor.
 #[tokio::test]
 async fn multidimensional_arrays_carry_their_dimensions() {
@@ -867,9 +874,9 @@ async fn multidimensional_arrays_carry_their_dimensions() {
 }
 
 /// An array of a bounded string carries the modifier on its element type, so the
-/// bound is enforced per element — and survives the catalog round trip, which a
-/// bare element-code byte would have dropped, turning `varchar(3)[]` into an
-/// unbounded `varchar[]` that accepted anything.
+/// engine enforces the bound per element. The modifier also survives the catalog
+/// round trip. A bare element-code byte would have dropped it, and turned
+/// `varchar(3)[]` into an unbounded `varchar[]` that accepted anything.
 #[tokio::test]
 async fn an_array_of_a_bounded_string_enforces_the_bound_on_every_element() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE d (v varchar(3)[], c char(2)[])"]).await;
@@ -895,9 +902,9 @@ async fn an_array_of_a_bounded_string_enforces_the_bound_on_every_element() {
     );
 }
 
-/// Arrays live in hash-sharded tables; asking to shard *on* an array column is
-/// refused at CREATE TABLE — an array value has no shard-key hash, so the table
-/// is never created rather than failing at every INSERT.
+/// Arrays live in hash-sharded tables. A request to shard *on* an array column
+/// is refused at CREATE TABLE. An array value has no shard-key hash, so the
+/// engine never creates the table, rather than failing at every INSERT.
 #[tokio::test]
 async fn sharded_tables_store_arrays_and_refuse_an_array_shard_key() {
     let (_engine, mut s) = engine_with(&[
@@ -951,8 +958,9 @@ async fn execute_rows(s: &mut SqlSession, portal: &str) -> Vec<Vec<Option<String
     }
 }
 
-/// An array parameter bound in the *text* format: the client sends the `{…}`
-/// literal and the engine parses it, including the empty and NULL-element cases.
+/// An array parameter bound in the *text* format. The client sends the `{…}`
+/// literal and the engine parses it, including the empty and NULL-element
+/// cases.
 #[tokio::test]
 async fn text_format_array_parameters_bind_and_store() {
     let (_engine, mut s) = engine_with(&[
@@ -1028,9 +1036,9 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
-/// Binary-format array parameters and results through a real client — the shape
-/// every driver emits for `= ANY($1)`. The empty array's 12-byte `ndim = 0`
-/// header (what tokio-postgres sends) must round-trip.
+/// Binary-format array parameters and results through a real client. This is the
+/// shape every driver emits for `= ANY($1)`. The empty array's 12-byte
+/// `ndim = 0` header, which is what tokio-postgres sends, must round-trip.
 #[tokio::test]
 async fn binary_format_array_parameters_round_trip() {
     let client = connect(spawn().await).await;

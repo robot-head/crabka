@@ -1,8 +1,12 @@
-//! Referential actions: the five `ON DELETE` / `ON UPDATE` actions, the
-//! `NO ACTION` versus `RESTRICT` split that only deferral makes visible, and the
-//! termination of a cascade that walks back into itself. Every expectation here
-//! was captured from a live `PostgreSQL` 18.4 — SQLSTATEs, primary messages and
-//! `DETAIL` lines are that server's, verbatim.
+//! Referential actions.
+//!
+//! This file covers the five `ON DELETE` / `ON UPDATE` actions, the
+//! `NO ACTION` versus `RESTRICT` split that only deferral makes visible, and
+//! the termination of a cascade that walks back into itself.
+//!
+//! Every expectation here was captured from a live `PostgreSQL` 18.4.
+//! SQLSTATEs, primary messages and `DETAIL` lines are that server's,
+//! verbatim.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -68,8 +72,8 @@ fn no_rows() -> Vec<Vec<Option<String>>> {
 /// The parent-side 23503 `NO ACTION` reports for key 1 of `p`, still referenced
 /// from `c`.
 ///
-/// The `DETAIL` names the *referenced* columns — `p`'s `id`, not `c`'s `a` —
-/// because the key it reports is the parent row's, which is also why one
+/// The `DETAIL` names the *referenced* columns, which are `p`'s `id` and not
+/// `c`'s `a`. The key it reports is the parent row's key. That is also why one
 /// parent-side message can serve every child that references it.
 fn no_action_violation() -> PgError {
     PgError::error(
@@ -80,9 +84,11 @@ fn no_action_violation() -> PgError {
     .with_detail("Key (id)=(1) is still referenced from table \"c\".")
 }
 
-/// What `RESTRICT` reports for the same row: a different SQLSTATE (23001,
-/// `restrict_violation`), "violates RESTRICT setting of" in the message, and
-/// "is referenced" where `NO ACTION` says "is still referenced".
+/// What `RESTRICT` reports for the same row.
+///
+/// It reports a different SQLSTATE, 23001 `restrict_violation`, the words
+/// "violates RESTRICT setting of" in the message, and "is referenced" where
+/// `NO ACTION` says "is still referenced".
 fn restrict_violation() -> PgError {
     PgError::error(
         "23001",
@@ -95,9 +101,10 @@ fn restrict_violation() -> PgError {
 // ---------------------------------------------------------------------------
 // The five actions, on each side
 
-/// A parent/child pair carrying one referential action. `p` holds the key under
-/// test (1) and a second key (9) that is also the child's `DEFAULT`, so
-/// `SET DEFAULT` has somewhere to land.
+/// A parent/child pair that carries one referential action.
+///
+/// `p` holds the key under test, 1, and a second key, 9, that is also the
+/// child's `DEFAULT`, so `SET DEFAULT` has a row to point at.
 async fn pair_with(action: &str) -> (SqlEngine, SqlSession) {
     engine_with(&[
         "CREATE TABLE p (id int4 PRIMARY KEY)",
@@ -110,8 +117,10 @@ async fn pair_with(action: &str) -> (SqlEngine, SqlSession) {
     .await
 }
 
-/// Deleting a referenced parent row runs the child's `ON DELETE` action. All
-/// five actions, plus the omitted clause that means `NO ACTION`.
+/// A delete of a referenced parent row runs the child's `ON DELETE` action.
+///
+/// This case covers all five actions, plus the omitted clause that means
+/// `NO ACTION`.
 #[tokio::test]
 async fn every_on_delete_action_does_its_own_thing() {
     struct Case {
@@ -183,9 +192,10 @@ async fn every_on_delete_action_does_its_own_thing() {
     }
 }
 
-/// Moving a referenced key runs the child's `ON UPDATE` action. The parent-side
-/// messages are the same ones a delete reports — `PostgreSQL` words both as
-/// "update or delete on table".
+/// A move of a referenced key runs the child's `ON UPDATE` action.
+///
+/// The parent-side messages are the same ones a delete reports. `PostgreSQL`
+/// words both as "update or delete on table".
 #[tokio::test]
 async fn every_on_update_action_does_its_own_thing() {
     struct Case {
@@ -294,8 +304,10 @@ async fn on_update_cascade_propagates_a_key_change_to_every_child() {
 // ---------------------------------------------------------------------------
 // NO ACTION versus RESTRICT
 
-/// The pair for the deferral matrix: one child row referencing the one parent
-/// row, under whatever constraint tail the case names.
+/// The pair for the deferral matrix.
+///
+/// It is one child row that references the one parent row, under whatever
+/// constraint tail the case names.
 async fn deferral_pair(tail: &str) -> (SqlEngine, SqlSession) {
     engine_with(&[
         "CREATE TABLE p (id int4 PRIMARY KEY)",
@@ -306,10 +318,12 @@ async fn deferral_pair(tail: &str) -> (SqlEngine, SqlSession) {
     .await
 }
 
-/// Run an already-`BEGIN`-ning block in order and then `COMMIT`, reporting the
-/// first statement that failed and its error. *Where* the failure lands is the
-/// whole subject of the deferral cases, so the statement is part of the answer.
-/// The transaction is always closed, leaving the session usable.
+/// Run an already-`BEGIN`-ning block in order and then `COMMIT`, and report the
+/// first statement that failed and its error.
+///
+/// *Where* the failure lands is the whole subject of the deferral cases, so the
+/// statement is part of the answer. This helper always closes the transaction,
+/// so the session stays usable.
 async fn run_block(s: &mut SqlSession, block: &[&'static str]) -> Option<(&'static str, PgError)> {
     for sql in block {
         if let Err(e) = s.simple_query(sql).await {
@@ -325,12 +339,13 @@ async fn run_block(s: &mut SqlSession, block: &[&'static str]) -> Option<(&'stat
     }
 }
 
-/// `NO ACTION` and `RESTRICT` are not synonyms, and while the constraint is
-/// immediate the only difference is the error they raise. Deferral is what
-/// separates them behaviourally: `NO ACTION` inherits the constraint's
-/// deferrability and waits for `COMMIT`, while `RESTRICT`'s trigger is created
-/// non-deferrable whatever the clause says, so it fires at end of statement
-/// anyway.
+/// `NO ACTION` and `RESTRICT` are not synonyms.
+///
+/// While the constraint is immediate, the only difference is the error they
+/// raise. Deferral is what separates their behavior. `NO ACTION` inherits the
+/// constraint's deferrability and waits for `COMMIT`. `RESTRICT`'s trigger is
+/// created non-deferrable whatever the clause says, so it fires at end of
+/// statement anyway.
 #[tokio::test]
 async fn no_action_and_restrict_diverge_only_under_deferral() {
     struct Case {
@@ -371,11 +386,13 @@ async fn no_action_and_restrict_diverge_only_under_deferral() {
     }
 }
 
-/// Deleting a referenced key and putting it back inside one transaction is
+/// A delete of a referenced key and a put-back inside one transaction is
 /// accepted only when the check is deferred to `COMMIT`, where the re-probe
-/// finds the re-supplied row. The idiom is a property of *deferral*, not of
-/// `NO ACTION`: an immediate `NO ACTION` never sees the second statement, and a
-/// deferred `RESTRICT` does not defer in the first place.
+/// finds the re-supplied row.
+///
+/// The idiom is a property of *deferral*, and not of `NO ACTION`. An immediate
+/// `NO ACTION` never sees the second statement, and a deferred `RESTRICT` does
+/// not defer at all.
 #[tokio::test]
 async fn a_re_supplied_key_is_accepted_only_by_a_deferred_check() {
     struct Case {
@@ -427,8 +444,8 @@ async fn a_re_supplied_key_is_accepted_only_by_a_deferred_check() {
 // ---------------------------------------------------------------------------
 // SET NULL and SET DEFAULT
 
-/// `ON DELETE SET NULL (…)` nulls only the columns it names, leaving the rest of
-/// the key alone. Under `MATCH SIMPLE` a partly-null key passes, so the row
+/// `ON DELETE SET NULL (…)` nulls only the columns it names and leaves the rest
+/// of the key alone. Under `MATCH SIMPLE` a partly-null key passes, so the row
 /// survives.
 #[tokio::test]
 async fn set_null_with_a_column_list_nulls_only_those_columns() {
@@ -445,10 +462,12 @@ async fn set_null_with_a_column_list_nulls_only_those_columns() {
 }
 
 /// A cascaded `SET NULL` is an ordinary assignment and meets the ordinary
-/// not-null check: 23502, not a referential SQLSTATE. (`PostgreSQL` adds a
-/// `CONTEXT:` line naming the internal `UPDATE ONLY … SET "a" = NULL` statement,
-/// and a `DETAIL:` naming the failing row; this engine emits neither, which is
-/// why only the code and the primary message are asserted.)
+/// not-null check. The result is 23502, and not a referential SQLSTATE.
+///
+/// `PostgreSQL` adds a `CONTEXT:` line that names the internal
+/// `UPDATE ONLY … SET "a" = NULL` statement, and a `DETAIL:` that names the
+/// failing row. This engine emits neither, which is why this case asserts only
+/// the code and the primary message.
 #[tokio::test]
 async fn set_null_onto_a_not_null_column_is_23502() {
     let (_engine, mut s) = engine_with(&[
@@ -466,10 +485,12 @@ async fn set_null_onto_a_not_null_column_is_23502() {
     assert!(query(&mut s, "SELECT a FROM c").await == vec![text_row(&["1"])]);
 }
 
-/// `SET DEFAULT` writes the column's `DEFAULT` and then the write is checked
-/// like any other: a default with no parent row is a child-side 23503 naming the
-/// default value itself. That is the proof that a cascaded write re-enters the
-/// check path rather than bypassing it.
+/// `SET DEFAULT` writes the column's `DEFAULT`, and that write is then checked
+/// like any other write.
+///
+/// A default with no parent row is a child-side 23503 that names the default
+/// value itself. That is the proof that a cascaded write re-enters the check
+/// path and does not get past it.
 #[tokio::test]
 async fn set_default_re_enters_the_check_path() {
     struct Case {
@@ -531,9 +552,11 @@ async fn set_default_re_enters_the_check_path() {
 }
 
 /// A child row another part of the *same command* has already updated still
-/// references its parent, so the parent-side check counts it. `PostgreSQL`
-/// re-reads the row when the trigger queue runs and reports the ordinary 23503;
-/// what the row was touched by is irrelevant, only what its key now holds.
+/// references its parent, so the parent-side check counts it.
+///
+/// `PostgreSQL` re-reads the row when the trigger queue runs and reports the
+/// ordinary 23503. What touched the row does not matter. Only what its key
+/// holds now matters.
 #[tokio::test]
 async fn a_child_row_the_command_updated_off_key_still_blocks_the_delete() {
     let (_engine, mut s) = engine_with(&[
@@ -555,11 +578,13 @@ async fn a_child_row_the_command_updated_off_key_still_blocks_the_delete() {
     assert!(query(&mut s, "SELECT id, a, note FROM c").await == vec![text_row(&["100", "1", "0"])]);
 }
 
-/// The acting half of the same shape. `PostgreSQL` runs a referential action as
-/// a command of its own, so a child row an earlier part of the outer command
-/// modified off-key is re-read and the action applied to it: the cascade deletes
-/// it, and `SET NULL` / `SET DEFAULT` rewrite its key while the command's own
-/// change to the rest of the row survives.
+/// The acting half of the same shape.
+///
+/// `PostgreSQL` runs a referential action as a command of its own. A child row
+/// that an earlier part of the outer command modified off-key is therefore
+/// re-read, and the action applies to it. The cascade deletes it. `SET NULL`
+/// and `SET DEFAULT` rewrite its key, while the command's own change to the
+/// rest of the row survives.
 #[tokio::test]
 async fn a_referential_action_reaches_a_child_row_the_command_modified() {
     struct Case {
@@ -613,9 +638,10 @@ async fn a_referential_action_reaches_a_child_row_the_command_modified() {
     }
 }
 
-/// The same shape one relation deeper: the row the command modified is the
-/// *intermediate* of a two-hop cascade, so reaching it is also what lets the
-/// cascade reach the leaf below it.
+/// The same shape one relation deeper.
+///
+/// The row the command modified is the *intermediate* of a two-hop cascade, so
+/// the cascade must reach it to reach the leaf below it.
 #[tokio::test]
 async fn a_cascade_reaches_an_intermediate_row_the_command_modified() {
     let (_engine, mut s) = engine_with(&[
@@ -642,14 +668,16 @@ async fn a_cascade_reaches_an_intermediate_row_the_command_modified() {
 // Several actions reaching one child row
 
 /// Two foreign keys whose actions both land on the same child row both run.
-/// `PostgreSQL` issues each referential action as a query of its own against the
-/// row's current image, so the second one sees what the first wrote and adds to
-/// it rather than replacing it — leaving no column still pointing at a parent
-/// that is gone.
 ///
-/// The two shapes are the two ways one command can remove both referenced keys:
-/// one `DELETE` of a single parent row that both keys reference, and one command
-/// whose `WITH` list and body each empty a different parent relation.
+/// `PostgreSQL` issues each referential action as a query of its own against
+/// the row's current image. The second action therefore sees what the first
+/// wrote and adds to it instead of a replacement. No column is left pointing at
+/// a parent that is gone.
+///
+/// The two shapes are the two ways one command can remove both referenced keys.
+/// One is a `DELETE` of a single parent row that both keys reference. The other
+/// is one command whose `WITH` list and body each empty a different parent
+/// relation.
 #[tokio::test]
 async fn two_actions_on_one_child_row_both_run() {
     let (_engine, mut s) = engine_with(&[
@@ -687,8 +715,9 @@ async fn two_actions_on_one_child_row_both_run() {
     );
 }
 
-/// The actions need not be the same one. `SET NULL` and `SET DEFAULT` each write
-/// their own column, and a third foreign key joins in without disturbing either.
+/// The actions need not be the same action. `SET NULL` and `SET DEFAULT` each
+/// write their own column, and a third foreign key joins in without a
+/// disturbance to either.
 #[tokio::test]
 async fn actions_of_different_kinds_compose_on_one_child_row() {
     let (_engine, mut s) = engine_with(&[
@@ -722,10 +751,11 @@ async fn actions_of_different_kinds_compose_on_one_child_row() {
     );
 }
 
-/// `CASCADE` alongside `SET NULL` on *different* columns: the row goes, whichever
-/// of the two runs first. The cascade deletes a row the `SET NULL` has already
-/// rewritten, and a `SET NULL` whose row the cascade already deleted finds
-/// nothing left to write.
+/// `CASCADE` beside `SET NULL` on *different* columns.
+///
+/// The row goes, whichever of the two runs first. The cascade deletes a row the
+/// `SET NULL` has already rewritten. A `SET NULL` whose row the cascade already
+/// deleted finds nothing left to write.
 #[tokio::test]
 async fn a_cascade_beside_a_set_null_deletes_the_row_either_way() {
     for (a_action, b_action) in [
@@ -751,15 +781,17 @@ async fn a_cascade_beside_a_set_null_deletes_the_row_either_way() {
 }
 
 /// Two actions that genuinely conflict, because both foreign keys key on the
-/// *same* column: whether the row survives depends on which constraint runs
-/// first, and each action's search sees what the earlier one wrote.
+/// *same* column.
+///
+/// Whether the row survives depends on which constraint runs first, and each
+/// action's search sees what the earlier one wrote.
 ///
 /// `SET NULL` first leaves the row with no key for the `CASCADE`'s search to
-/// match, so the row survives; `CASCADE` first deletes it, and the `SET NULL`
-/// then has nothing to update. The constraints run in the order they were
-/// declared — see
-/// [`conflicting_actions_fire_in_declaration_order_whatever_the_names`] for what
-/// happens when their names disagree with that order.
+/// match, so the row survives. `CASCADE` first deletes the row, and the
+/// `SET NULL` then has nothing to update. The constraints run in the order they
+/// were declared. See
+/// [`conflicting_actions_fire_in_declaration_order_whatever_the_names`] for
+/// what happens when their names disagree with that order.
 #[tokio::test]
 async fn conflicting_actions_on_one_column_resolve_in_constraint_order() {
     struct Case {
@@ -807,18 +839,19 @@ async fn conflicting_actions_on_one_column_resolve_in_constraint_order() {
 /// The same conflict, with the constraints named so that name order and
 /// declaration order can disagree.
 ///
-/// `PostgreSQL` fires referential triggers in `pg_constraint.oid` order — the
-/// order the constraints were created in — so the one written first acts first
-/// whatever it is called. `zz` declared before `aa` nulls the key, and the
-/// `CASCADE` that follows finds nothing to match, so the row survives at
-/// `(100, NULL)`; the two names swapped keep that outcome, because the outcome
-/// never depended on the names. Ordering the constraints by name instead would
-/// invert both `zz`-first cases.
+/// `PostgreSQL` fires referential triggers in `pg_constraint.oid` order, which
+/// is the order the constraints were created in. The constraint written first
+/// therefore acts first, whatever its name is.
 ///
-/// Each pair is declared three ways — inline in `CREATE TABLE`, added by two
+/// `zz` declared before `aa` nulls the key, and the `CASCADE` that follows
+/// finds nothing to match, so the row survives at `(100, NULL)`. The two names
+/// swapped keep that outcome, because the outcome never depended on the names.
+/// An order by name instead would invert both `zz`-first cases.
+///
+/// Each pair is declared three ways: inline in `CREATE TABLE`, added by two
 /// separate `ALTER TABLE`s, and added by one `ALTER TABLE` with two
-/// subcommands — because the ids are handed out per statement and the last of
-/// those allocates two of them from one batch.
+/// subcommands. The ids are given out per statement, and the last of those
+/// three allocates two ids from one batch.
 #[tokio::test]
 async fn conflicting_actions_fire_in_declaration_order_whatever_the_names() {
     struct Case {
@@ -898,16 +931,18 @@ async fn conflicting_actions_fire_in_declaration_order_whatever_the_names() {
     }
 }
 
-/// Dropping a constraint and adding it back moves it to the *end* of the firing
-/// order, because the constraint that comes back is a new one with a new id —
-/// `PostgreSQL` gives it a fresh `pg_constraint.oid` rather than the one it had.
+/// A drop of a constraint and an add of it again moves it to the *end* of the
+/// firing order. The constraint that comes back is a new one with a new id, and
+/// `PostgreSQL` gives it a fresh `pg_constraint.oid` instead of the one it had.
 ///
-/// Renaming one, by contrast, keeps its place: `ALTER TABLE … RENAME CONSTRAINT`
-/// rewrites the name in place and never touches the oid.
+/// A rename keeps the constraint's place.
+/// `ALTER TABLE … RENAME CONSTRAINT` rewrites the name in place and never
+/// touches the oid.
 ///
-/// Both start from the same pair — `zz` `SET NULL` ahead of `aa` `CASCADE`,
-/// which leaves the row at `(100, NULL)`. Re-adding `zz` changes that outcome
-/// and renaming it does not, which is the whole difference between the two.
+/// Both cases start from the same pair: `zz` `SET NULL` ahead of `aa`
+/// `CASCADE`, which leaves the row at `(100, NULL)`. A re-add of `zz` changes
+/// that outcome and a rename of `zz` does not. That is the whole difference
+/// between the two.
 #[tokio::test]
 async fn re_adding_a_constraint_moves_it_last_while_renaming_one_leaves_it_put() {
     let declare = [
@@ -946,10 +981,12 @@ async fn re_adding_a_constraint_moves_it_last_while_renaming_one_leaves_it_put()
 // ---------------------------------------------------------------------------
 // Cascades that walk back into themselves
 
-/// Two relations that reference each other with `ON DELETE CASCADE`. The delete
-/// of `a`'s row cascades into `b`, whose delete cascades back into the very `a`
-/// row the statement already removed — and stops there, because a statement
-/// modifies a given row at most once. An unrelated pair is untouched.
+/// Two relations that reference each other with `ON DELETE CASCADE`.
+///
+/// The delete of `a`'s row cascades into `b`. The delete in `b` cascades back
+/// into the same `a` row the statement already removed, and it stops there,
+/// because a statement modifies a given row at most once. An unrelated pair is
+/// untouched.
 #[tokio::test]
 async fn a_two_table_cascade_cycle_terminates() {
     let (_engine, mut s) = engine_with(&[
@@ -972,9 +1009,11 @@ async fn a_two_table_cascade_cycle_terminates() {
     assert!(query(&mut s, "SELECT id FROM cyc_b").await == no_rows());
 }
 
-/// A self-referencing tree, including a row that references itself. The cascade
-/// walks down the tree once and converges; the self-reference is the degenerate
-/// case where the cascade's first hop is the row it started from.
+/// A self-referencing tree, including a row that references itself.
+///
+/// The cascade walks down the tree once and converges. The self-reference is
+/// the degenerate case, where the cascade's first hop is the row it started
+/// from.
 #[tokio::test]
 async fn a_self_referencing_cascade_terminates() {
     let (_engine, mut s) = engine_with(&[
@@ -996,10 +1035,12 @@ async fn a_self_referencing_cascade_terminates() {
 }
 
 /// The cycle again, entered at a row an earlier part of the same command
-/// modified off-key. Reaching that row and stopping at it are two different
-/// rules, and this is where they meet: the cascade must delete it — the outer
-/// command only touched a non-key column — and must still terminate when the
-/// cycle brings it back to what the cascade itself has already deleted.
+/// modified off-key.
+///
+/// Reaching that row and stopping at it are two different rules, and this is
+/// where they meet. The cascade must delete the row, because the outer command
+/// touched only a non-key column. The cascade must also still terminate when
+/// the cycle brings it back to what the cascade itself has already deleted.
 #[tokio::test]
 async fn a_cascade_cycle_entered_at_a_command_modified_row_terminates() {
     let (_engine, mut s) = engine_with(&[
@@ -1028,8 +1069,8 @@ async fn a_cascade_cycle_entered_at_a_command_modified_row_terminates() {
     );
 }
 
-/// A cascade crosses as many relations as the chain has: grandparent to parent
-/// to child, in one statement.
+/// A cascade crosses as many relations as the chain has, from grandparent to
+/// parent to child, in one statement.
 #[tokio::test]
 async fn a_cascade_walks_a_multi_level_chain() {
     let (_engine, mut s) = engine_with(&[
@@ -1050,10 +1091,11 @@ async fn a_cascade_walks_a_multi_level_chain() {
 }
 
 /// The rows a cascade deletes are themselves parents, and the checks they owe
-/// run against a third relation. Where that relation's own action is `CASCADE`
-/// the chain simply continues; where it is `NO ACTION` the whole statement is
-/// refused, and the message names the *cascaded* relation, not the one the user
-/// wrote.
+/// run against a third relation.
+///
+/// Where that relation's own action is `CASCADE`, the chain continues. Where it
+/// is `NO ACTION`, the whole statement is refused, and the message names the
+/// *cascaded* relation and not the one the user wrote.
 #[tokio::test]
 async fn a_cascade_fires_further_checks_on_a_third_table() {
     struct Case {

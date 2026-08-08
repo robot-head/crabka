@@ -1,4 +1,5 @@
-//! Kafka wire framing + request/response correlation. No schema knowledge.
+//! Kafka wire framing, and request and response correlation. This module has
+//! no schema knowledge.
 
 use std::collections::HashMap;
 
@@ -11,7 +12,7 @@ pub struct RequestPrefix {
     pub correlation_id: i32,
 }
 
-/// Parse the fixed request-header prefix common to every request type:
+/// Parse the fixed request-header prefix that every request type has:
 /// `api_key: i16, api_version: i16, correlation_id: i32`.
 #[must_use]
 pub fn parse_request_prefix(body: &[u8]) -> Option<RequestPrefix> {
@@ -25,8 +26,8 @@ pub fn parse_request_prefix(body: &[u8]) -> Option<RequestPrefix> {
     })
 }
 
-/// Every response body begins with `correlation_id: i32`, before any tagged
-/// header — true for flexible and non-flexible responses alike.
+/// Every response body starts with `correlation_id: i32`, before any tagged
+/// header. This is true for flexible and non-flexible responses alike.
 #[must_use]
 pub fn read_correlation_id(body: &[u8]) -> Option<i32> {
     if body.len() < 4 {
@@ -35,8 +36,9 @@ pub fn read_correlation_id(body: &[u8]) -> Option<i32> {
     Some(i32::from_be_bytes([body[0], body[1], body[2], body[3]]))
 }
 
-/// Per-connection map from correlation id to the (api_key, api_version) of the
-/// request that bore it, so responses can be classified.
+/// Per-connection map from a correlation id to the (api_key, api_version) of
+/// the request that carried it. The relay uses the map to classify the
+/// responses.
 #[derive(Default)]
 pub struct Pending {
     map: HashMap<i32, (ApiKey, ApiVersion)>,
@@ -58,7 +60,8 @@ pub struct CapturedFrame {
     pub api_key: ApiKey,
     pub version: ApiVersion,
     pub is_request: bool,
-    /// Full frame body, excluding the 4-byte length prefix (header + message).
+    /// Full frame body, that is the header and the message, without the
+    /// 4-byte length prefix.
     pub body: Vec<u8>,
 }
 

@@ -97,11 +97,11 @@ pub fn command_complete(out: &mut BytesMut, tag: &str) {
 
 /// Encode an asynchronous `NotificationResponse` for a `NOTIFY`.
 ///
-/// `process_id` is the notifying backend's process id — for a self-notify this
-/// is the receiving connection's own `BackendKeyData` pid. The message is
-/// delivered outside the request/response cycle, so it is only ever written
-/// between transactions (immediately before `ReadyForQuery` or while the
-/// connection is idle).
+/// `process_id` is the notifying backend's process id. For a self-notify this
+/// is the receiving connection's own `BackendKeyData` pid. The server delivers
+/// the message outside the request/response cycle, so it only ever writes the
+/// message between transactions: immediately before `ReadyForQuery`, or while
+/// the connection is idle.
 pub fn notification_response(out: &mut BytesMut, process_id: i32, channel: &str, payload: &str) {
     msg(out, b'A', |b| {
         b.put_i32(process_id);
@@ -224,7 +224,7 @@ pub fn error_response(out: &mut BytesMut, error: &PgError) {
 }
 
 /// Encode a `PostgreSQL` `NoticeResponse`. Its fields are identical to an
-/// `ErrorResponse`; only the leading message tag differs.
+/// `ErrorResponse`. Only the leading message tag differs.
 pub fn notice_response(out: &mut BytesMut, notice: &PgError) {
     debug_assert!(notice.severity.is_notice());
     diagnostic_response(out, b'N', notice);

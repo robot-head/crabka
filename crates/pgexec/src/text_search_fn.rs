@@ -358,7 +358,7 @@ fn validate_config(config: &str, catalog: Catalog<'_>) -> Result<bool, ExecError
     crate::text_search_catalog::config_is_simple(catalog, config)
 }
 
-/// Build a searchable vector without an index. Positions count source tokens,
+/// Build a searchable vector with no index. Positions count source tokens,
 /// including stop words, as PostgreSQL's parser does.
 pub(crate) fn to_tsvector(
     config: &str,
@@ -709,7 +709,7 @@ fn default_config() -> Result<String, ExecError> {
         .ok_or_else(|| ExecError::UnrecognizedParameter("default_text_search_config".into()))
 }
 
-/// Evaluate the immutable tsquery spellings accepted by the local GIN planner.
+/// Evaluate the immutable tsquery spellings the local GIN planner accepts.
 pub(crate) fn constant_query(expr: &Expr) -> Result<Option<TsQuery>, ExecError> {
     match expr {
         Expr::Const {

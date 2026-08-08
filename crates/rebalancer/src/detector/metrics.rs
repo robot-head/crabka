@@ -1,14 +1,14 @@
 //! Detector-specific metrics surface.
 //!
-//! Mirrors the shape of [`crate::metrics::RebalancerMetrics`]: a flat
-//! struct of `Counter` / `Gauge` handles, all registered against the
-//! shared `crabka_rebalancer_` registry so they share the existing
-//! `/metrics` endpoint.
+//! This mirrors the shape of [`crate::metrics::RebalancerMetrics`]: a flat
+//! struct of `Counter` and `Gauge` handles, all registered against the shared
+//! `crabka_rebalancer_` registry, so they share the existing `/metrics`
+//! endpoint.
 //!
-//! Explicit per-variant fields (rather than a `Family<AnomalyKind, _>`)
-//! keep the surface simple — four anomaly kinds, four counters per
-//! event, no extra `EncodeLabelSet` derive needed. Convenience helpers
-//! dispatch on `AnomalyKind` so callers don't need to know the field
+//! Explicit per-variant fields, rather than a `Family<AnomalyKind, _>`, keep
+//! the surface simple. There are four anomaly kinds and four counters per
+//! event, and no extra `EncodeLabelSet` derive is needed. Convenience helpers
+//! dispatch on `AnomalyKind`, so callers do not need to know the field
 //! names.
 
 use prometheus_client::{
@@ -18,8 +18,8 @@ use prometheus_client::{
 
 use crate::detector::AnomalyKind;
 
-/// Bundle of detector-side metric handles. Handles are `Arc`-backed so
-/// `Clone` is cheap; the detector tick and any future RPC handlers can
+/// Bundle of detector-side metric handles. The handles are `Arc`-backed, so
+/// `Clone` is cheap, and the detector tick and any future RPC handlers can
 /// share one instance.
 #[derive(Clone, Default)]
 pub struct DetectorMetrics {
@@ -52,8 +52,8 @@ pub struct DetectorMetrics {
 }
 
 impl DetectorMetrics {
-    /// Register all detector metrics against `registry` and return the
-    /// bundle of handles. Counter names omit `_total`; `prometheus-client`
+    /// Register all detector metrics against `registry` and return the bundle
+    /// of handles. Counter names omit `_total`, because `prometheus-client`
     /// appends it at encode time.
     #[must_use]
     // Flat per-variant registration is intentional.

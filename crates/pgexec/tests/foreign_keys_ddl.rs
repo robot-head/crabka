@@ -1,12 +1,13 @@
 //! `FOREIGN KEY` DDL against a real in-process engine: the validations a
-//! constraint definition has to survive, the name it is given, which referenced
+//! constraint definition must survive, the name it is given, which referenced
 //! objects it may target, `NOT VALID` and `VALIDATE CONSTRAINT`, and the
 //! dependency refusals a later `DROP` reports.
 //!
-//! Every SQLSTATE, message, `DETAIL` and `HINT` asserted here was captured from
-//! a live `PostgreSQL` 18.4 server — the same major/minor the conformance
-//! harness pins — rather than from documentation. Where this engine knowingly
-//! diverges the test pins the *current* behaviour and says so at the assertion.
+//! Every SQLSTATE, message, `DETAIL` and `HINT` asserted here comes from a live
+//! `PostgreSQL` 18.4 server, not from documentation. That is the same
+//! major/minor the conformance harness pins. Where this engine knowingly
+//! diverges, the test pins the *current* behaviour and says so at the
+//! assertion.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -50,9 +51,10 @@ async fn engine_with(setup: &[&str]) -> (SqlEngine, SqlSession) {
     (engine, s)
 }
 
-/// A failed statement, as everything `PostgreSQL` puts on the wire for it —
-/// compared as one value so a case states its whole expected error rather than a
-/// chain of field assertions.
+/// A failed statement, as everything `PostgreSQL` puts on the wire for it.
+///
+/// A case compares this as one value, so it states its whole expected error
+/// instead of a chain of field assertions.
 #[derive(Debug, PartialEq, Eq)]
 struct Failure {
     code: String,
@@ -103,7 +105,7 @@ const CASCADE_HINT: &str = "Use DROP ... CASCADE to drop the dependent objects t
 // DDL validation
 // ---------------------------------------------------------------------------
 
-/// Every validation a `FOREIGN KEY` clause has to survive before it becomes a
+/// Every validation a `FOREIGN KEY` clause must survive before it becomes a
 /// catalog record, with the SQLSTATE and wording `PostgreSQL` 18.4 reports.
 #[tokio::test]
 async fn foreign_key_ddl_validation_errors_match_postgresql() {
@@ -227,8 +229,10 @@ async fn foreign_key_ddl_validation_errors_match_postgresql() {
 // ---------------------------------------------------------------------------
 
 /// The derived name joins *every* referencing column, in the order the clause
-/// writes them, and a second unnamed key over the same columns takes the lowest
-/// free numeric suffix. An explicit name that collides is 42710.
+/// writes them.
+///
+/// A second unnamed key over the same columns takes the lowest free numeric
+/// suffix. An explicit name that collides is 42710.
 #[tokio::test]
 async fn default_constraint_name_joins_every_referencing_column_and_uniquifies() {
     let (_engine, mut s) = engine_with(&[
@@ -275,8 +279,10 @@ async fn default_constraint_name_joins_every_referencing_column_and_uniquifies()
 // What a foreign key may target
 // ---------------------------------------------------------------------------
 
-/// A bare `CREATE UNIQUE INDEX` — no constraint anywhere — is a legitimate
-/// target: `PostgreSQL` requires a unique *index*, not a unique constraint.
+/// A bare `CREATE UNIQUE INDEX`, with no constraint anywhere, is a legitimate
+/// target.
+///
+/// `PostgreSQL` needs a unique *index*, not a unique constraint.
 #[tokio::test]
 async fn a_foreign_key_may_target_a_bare_unique_index() {
     let (_engine, mut s) = engine_with(&[
@@ -336,9 +342,11 @@ async fn a_foreign_key_may_target_a_unique_constraint_or_the_primary_key_by_omis
     );
 }
 
-/// `CREATE TABLE t (… REFERENCES t …)` resolves against the relation being
-/// created: no catalog read can find its columns or the index its primary key is
-/// about to become.
+/// `CREATE TABLE t (… REFERENCES t …)` resolves against the relation that the
+/// statement creates.
+///
+/// No catalog read can find its columns or the index its primary key is about
+/// to become.
 #[tokio::test]
 async fn a_self_reference_inside_create_table_resolves_against_the_in_flight_definition() {
     let (_engine, mut s) = engine_with(&[
@@ -371,11 +379,12 @@ async fn a_self_reference_inside_create_table_resolves_against_the_in_flight_def
 
 /// A composite key written in a different order from the referenced index's.
 ///
-/// Both column lists are stored as written and paired positionally, and the
-/// probe permutes into the index's order — so `FOREIGN KEY (b, a) REFERENCES
-/// pperm (y, x)` over a `(x, y)` primary key must accept exactly the rows whose
-/// `(a, b)` equals `(x, y)`. Probing without the permutation reads a byte string
-/// that cannot exist while every single-column case still passes.
+/// The engine stores both column lists as written and pairs them positionally,
+/// and the probe permutes into the index's order. So `FOREIGN KEY (b, a)
+/// REFERENCES pperm (y, x)` over a `(x, y)` primary key must accept exactly the
+/// rows whose `(a, b)` equals `(x, y)`. A probe without the permutation reads a
+/// byte string that cannot exist, while every single-column case still
+/// passes.
 #[tokio::test]
 async fn a_composite_foreign_key_probes_the_permuted_key() {
     let (_engine, mut s) = engine_with(&[
@@ -409,9 +418,11 @@ async fn a_composite_foreign_key_probes_the_permuted_key() {
 // NOT VALID and VALIDATE CONSTRAINT
 // ---------------------------------------------------------------------------
 
-/// `ADD CONSTRAINT` scans the stored rows; `NOT VALID` skips that scan, still
-/// governs every later write, and `VALIDATE CONSTRAINT` runs the scan it skipped
-/// — reporting it in the same words a failing insert uses.
+/// `ADD CONSTRAINT` scans the stored rows.
+///
+/// `NOT VALID` skips that scan and still governs every later write.
+/// `VALIDATE CONSTRAINT` runs the scan it skipped, and reports it in the same
+/// words a failing insert uses.
 #[tokio::test]
 async fn not_valid_defers_back_validation_but_still_governs_new_writes() {
     let (_engine, mut s) = engine_with(&[
@@ -463,8 +474,10 @@ async fn not_valid_defers_back_validation_but_still_governs_new_writes() {
 }
 
 /// A key added beside the column it references back-validates the *rewritten*
-/// rows: storage still holds rows without the new column at all, so the scan has
-/// to see the back-filled default rather than a missing value.
+/// rows.
+///
+/// Storage still holds rows without the new column at all, so the scan must see
+/// the back-filled default and not a missing value.
 #[tokio::test]
 async fn a_foreign_key_added_beside_a_column_validates_the_rewritten_rows() {
     let (_engine, mut s) = engine_with(&[
@@ -507,10 +520,12 @@ async fn a_foreign_key_added_beside_a_column_validates_the_rewritten_rows() {
 // Drop dependencies
 // ---------------------------------------------------------------------------
 
-/// Dropping a table, an index, or a constraint a foreign key depends on is
-/// 2BP01, with one `DETAIL` line per dependent constraint and the `CASCADE`
-/// hint. A dropped *constraint* is named as a constraint in the message and as
-/// its backing index in the `DETAIL`.
+/// A DROP of a table, an index, or a constraint that a foreign key depends on
+/// is 2BP01.
+///
+/// The error carries one `DETAIL` line per dependent constraint and the
+/// `CASCADE` hint. A dropped *constraint* is named as a constraint in the
+/// message and as its backing index in the `DETAIL`.
 #[tokio::test]
 async fn dropping_a_referenced_object_lists_every_dependent_constraint() {
     struct Case {
@@ -579,9 +594,9 @@ async fn dropping_a_referenced_object_lists_every_dependent_constraint() {
 /// The `DETAIL` lists dependents in the order they were created, not by name.
 ///
 /// `PostgreSQL` walks `pg_depend` and reports what it finds in oid order, so
-/// `zz` declared before `aa` is named first — on the same child relation and on
-/// two different ones alike. Sorting the dependents by name would swap both
-/// pairs.
+/// `zz` declared before `aa` is named first. This holds on the same child
+/// relation and on two different ones alike. A sort of the dependents by name
+/// would swap both pairs.
 #[tokio::test]
 async fn dependent_constraints_are_listed_in_creation_order() {
     struct Case {
@@ -643,8 +658,9 @@ async fn dependent_constraints_are_listed_in_creation_order() {
     }
 }
 
-/// `CASCADE` drops the referencing *constraint*, not the referencing relation:
-/// the child survives and afterwards accepts anything.
+/// `CASCADE` drops the referencing *constraint*, not the referencing relation.
+///
+/// The child survives and afterwards accepts anything.
 #[tokio::test]
 async fn cascade_drops_the_referencing_constraint_not_the_referencing_table() {
     let (_engine, mut s) = engine_with(&[
@@ -677,8 +693,9 @@ async fn cascade_drops_the_referencing_constraint_not_the_referencing_table() {
     assert!(query(&mut s2, "SELECT a FROM c11").await == vec![text_row(&["99"])]);
 }
 
-/// Two relations that reference each other can be dropped in one statement:
-/// every dependent inside the drop set is discounted.
+/// One statement can drop two relations that reference each other.
+///
+/// The drop discounts every dependent inside the drop set.
 #[tokio::test]
 async fn a_mutually_referencing_pair_can_be_dropped_in_one_statement() {
     let (_engine, mut s) = engine_with(&[
@@ -756,7 +773,7 @@ async fn renaming_columns_and_the_constraint_keeps_the_key_enforced() {
     );
 }
 
-/// Dropping a *referencing* column drops the constraint with it, as
+/// A DROP of a *referencing* column drops the constraint with it, as
 /// `PostgreSQL` does.
 #[tokio::test]
 async fn dropping_a_referencing_column_drops_its_foreign_key() {
@@ -779,11 +796,12 @@ async fn dropping_a_referencing_column_drops_its_foreign_key() {
     assert!(query(&mut s, "SELECT keep FROM dc").await == vec![text_row(&["5"])]);
 }
 
-/// **Known divergence.** Dropping a *referenced* column is refused, but this
-/// engine reports the drop of the column's backing index rather than of the
-/// column: `PostgreSQL` 18.4 says `cannot drop column id of table dp because
-/// other objects depend on it`, with the same SQLSTATE, the same `DETAIL` and
-/// the same `HINT`. The error type carries no column variant, so the refusal
+/// **Known divergence.** A DROP of a *referenced* column is refused, but this
+/// engine reports the drop of the column's backing index and not of the column.
+///
+/// `PostgreSQL` 18.4 says `cannot drop column id of table dp because other
+/// objects depend on it`, with the same SQLSTATE, the same `DETAIL` and the
+/// same `HINT`. The error type carries no column variant, so the refusal
 /// borrows the index one. Pinned as-is.
 #[tokio::test]
 async fn dropping_a_referenced_column_reports_the_index_not_the_column() {

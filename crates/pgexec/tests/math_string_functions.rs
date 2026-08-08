@@ -1,7 +1,9 @@
-//! SP33: math & string functions — end-to-end over the wire. Rounding family
-//! (floor/ceil/round/trunc/sign), transcendental (sqrt/power/exp/ln/log/pi),
-//! string (lpad/rpad/left/right/repeat/reverse/strpos/initcap/ascii/chr), the
-//! result type OIDs, and the domain-error SQLSTATEs (2201E/2201F/54000).
+//! SP33: math and string functions, end to end over the wire. These tests cover
+//! the rounding family `floor`, `ceil`, `round`, `trunc` and `sign`, the
+//! transcendental family `sqrt`, `power`, `exp`, `ln`, `log` and `pi`, the
+//! string family `lpad`, `rpad`, `left`, `right`, `repeat`, `reverse`, `strpos`,
+//! `initcap`, `ascii` and `chr`, the result type OIDs, and the domain-error
+//! SQLSTATEs 2201E, 2201F and 54000.
 
 use std::sync::Arc;
 

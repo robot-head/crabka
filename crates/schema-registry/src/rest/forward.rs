@@ -1,6 +1,6 @@
-//! Write-forwarding middleware: a secondary proxies mutating REST to the
-//! elected primary; reads + primary-side writes pass through. A forwarded
-//! request carries `X-Forwarded-For-Registry` so the primary never re-forwards.
+//! Write-forwarding middleware. A secondary proxies a mutating REST request to
+//! the elected primary. Reads and primary-side writes pass through. A forwarded
+//! request carries `X-Forwarded-For-Registry`, so the primary never re-forwards.
 
 use axum::{
     body::Body,

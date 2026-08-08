@@ -1,13 +1,13 @@
 //! Mocked-client integration tests for the `Kafka` reconciler.
 //!
-//! `Kafka` is the parent/coordinator. It owns the cluster-level
-//! `Service`, `ConfigMap`, and cluster-id `Secret`, lists sibling
-//! `KafkaNodePool`s by label, and aggregates their statuses. Broker
-//! `StatefulSet`s live on the pool reconciler — the Kafka reconciler
-//! must never touch `/statefulsets/`.
+//! `Kafka` is the parent and the coordinator. It owns the cluster-level
+//! `Service`, the `ConfigMap`, and the cluster-id `Secret`. It lists sibling
+//! `KafkaNodePool`s by label and aggregates their statuses. Broker
+//! `StatefulSet`s belong to the pool reconciler, and the Kafka reconciler must
+//! never touch `/statefulsets/`.
 //!
-//! Request sequence on a fresh Kafka with no `spec.listeners` set
-//! (synthesized internal-default path):
+//! Request sequence on a fresh Kafka with no `spec.listeners` set, that is,
+//! the synthesized internal-default path:
 //!   1. PATCH services/<name>-broker-headless   (SSA)
 //!   2. GET   secrets/<name>-cluster-id         (-> 404)
 //!   3. POST  secrets                           (-> 201)
@@ -17,7 +17,7 @@
 //!   7. PATCH kafkas/<name>/status              (merge)
 //!
 //! The `ConfigMap` comes after the pool list because the operator derives one
-//! `broker-{id}.toml` key per pool — we have to enumerate the pools
+//! `broker-{id}.toml` key per pool. The operator must enumerate the pools
 //! first to know which keys to emit.
 
 use std::sync::Arc;
@@ -136,9 +136,8 @@ fn kafka_cr_with_network_policy(
     k
 }
 
-/// Variant carrying a `spec.config`. Uses
-/// `log.retention.hours=24` because the plan pins the expected hash on
-/// exactly that key/value pair.
+/// Variant carrying a `spec.config`. It uses `log.retention.hours=24` because
+/// the plan pins the expected hash on exactly that key and value pair.
 fn kafka_cr_with_config(
     name: &str,
     namespace: &str,
@@ -173,14 +172,14 @@ fn kafka_cr_with_config(
 }
 
 /// Build the rule list for a happy-path reconcile of `<name>` in
-/// `<namespace>`. The caller controls the rendered pool list (and thus
-/// the rolled-up status reason) via `pool_items`.
+/// `<namespace>`. The caller controls the rendered pool list with
+/// `pool_items`, and so controls the rolled-up status reason.
 ///
-/// The rules cover CA and keystore secret lifecycle calls:
-///   - 4 GET + 4 PATCH for cluster-ca + clients-ca secret pairs (no pre-existing CAs
-///     → operator generates new ones).
-///   - 1 GET + 1 PATCH for the broker keystore Secret (runs only in the
-///     validation-ok branch, which `happy_path` always exercises).
+/// The rules cover the CA and keystore secret lifecycle calls:
+///   - 4 GET and 4 PATCH for the cluster-ca and clients-ca secret pairs. There
+///     are no pre-existing CAs, so the operator generates new ones.
+///   - 1 GET and 1 PATCH for the broker keystore Secret. This runs only in the
+///     validation-ok branch, which `happy_path` always exercises.
 // the 10 CA+keystore rules make the function length inherent to mock-rule enumeration
 fn happy_path_rules(
     name: &str,
@@ -617,7 +616,7 @@ async fn kafka_patches_pool_label_with_config_hash() {
     check!(state.remaining_rules() == 0);
 }
 
-/// Variant carrying explicit `spec.kafkaVersion` + `spec.metadataVersion`
+/// Variant carrying explicit `spec.kafkaVersion` and `spec.metadataVersion`
 /// for version tests.
 fn kafka_cr_with_versions(
     name: &str,
@@ -801,8 +800,8 @@ async fn kafka_external_logging_reads_user_configmap() {
 }
 
 /// An external logging reference to a missing `ConfigMap` surfaces
-/// `LoggingReady=False` and renders no `rust.log` key (the broker keeps its
-/// built-in default filter).
+/// `LoggingReady=False` and renders no `rust.log` key. The broker then keeps
+/// its built-in default filter.
 #[tokio::test]
 async fn kafka_external_logging_missing_configmap_surfaces_condition() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -843,7 +842,7 @@ async fn kafka_external_logging_missing_configmap_surfaces_condition() {
 }
 
 /// Find the broker-config `ConfigMap` PATCH and return its serialized data
-/// map (`{ "broker-0.toml": "...", ... }`).
+/// map, for example `{ "broker-0.toml": "...", ... }`.
 fn configmap_data<B: AsRef<[u8]>>(observed: &[http::Request<B>]) -> serde_json::Value {
     let cm_patch = observed
         .iter()
@@ -1044,10 +1043,10 @@ async fn invalid_broker_tuning_sets_condition_and_skips_configmap() {
     assert!(state.remaining_rules() == 0);
 }
 
-/// A valid cluster echoes `kafkaVersion`, finalizes
-/// `metadataVersion` in status, and surfaces `KafkaVersionValid=True`.
-/// (`metadata.version` is finalized via the bootstrap feature record, not
-/// rendered into broker config — see `render_configmap`.)
+/// A valid cluster echoes `kafkaVersion`, finalizes `metadataVersion` in
+/// status, and surfaces `KafkaVersionValid=True`. The operator finalizes
+/// `metadata.version` through the bootstrap feature record and does not render
+/// it into broker config. See `render_configmap`.
 #[tokio::test]
 async fn kafka_status_finalizes_metadata_version() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -1087,8 +1086,8 @@ async fn kafka_status_finalizes_metadata_version() {
     assert!(state.remaining_rules() == 0);
 }
 
-/// A metadata version newer than the binary is rejected — no
-/// roll, finalized version not advanced.
+/// The operator rejects a metadata version that is newer than the binary.
+/// There is no roll, and the finalized version does not advance.
 #[tokio::test]
 async fn kafka_metadata_version_too_high_blocks() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -1210,11 +1209,11 @@ async fn kafka_status_synthesized_default_listener_is_valid_and_ready() {
     check!(state.remaining_rules() == 0);
 }
 
-/// A listener with `authentication=Tls` (mTLS) but `tls=false`
-/// (no transport TLS) is invalid. The status PATCH must show
+/// A listener with `authentication=Tls` for mTLS but `tls=false` for no
+/// transport TLS is invalid. The status PATCH must show
 /// `ListenersValid=False reason=ListenerMtlsRequiresTransportTls` and
-/// `ListenersReady=False reason=ListenersInvalid`, and the `ConfigMap`
-/// PATCH must be skipped (no broker should boot with an invalid spec).
+/// `ListenersReady=False reason=ListenersInvalid`. The operator must skip the
+/// `ConfigMap` PATCH, because no broker should boot with an invalid spec.
 #[tokio::test]
 async fn kafka_mtls_without_tls_blocks_broker_configmap_and_sets_conditions() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -1374,10 +1373,10 @@ fn fake_service_monitor_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// `podMonitor` set. Reconcile applies exactly one `PodMonitor`
-/// via SSA against `monitoring.coreos.com/v1`, then best-effort deletes
-/// the abandoned `ServiceMonitor` + metrics `Service`. The status surfaces
-/// `MetricsReady=True reason=Available`.
+/// `podMonitor` set. Reconcile applies exactly one `PodMonitor` with SSA
+/// against `monitoring.coreos.com/v1`. It then deletes the abandoned
+/// `ServiceMonitor` and the metrics `Service` on a best-effort basis. The
+/// status surfaces `MetricsReady=True reason=Available`.
 #[tokio::test]
 async fn pod_monitor_path_applies_one_resource() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -1466,9 +1465,10 @@ async fn pod_monitor_path_applies_one_resource() {
     check!(state.remaining_rules() == 0);
 }
 
-/// `serviceMonitor` set. Reconcile applies the headless metrics
-/// `Service` and then the `ServiceMonitor`. The abandoned `PodMonitor` is
-/// best-effort deleted. Status surfaces `MetricsReady=True reason=Available`.
+/// `serviceMonitor` set. Reconcile applies the headless metrics `Service` and
+/// then the `ServiceMonitor`. It deletes the abandoned `PodMonitor` on a
+/// best-effort basis. The status surfaces
+/// `MetricsReady=True reason=Available`.
 #[tokio::test]
 async fn service_monitor_path_applies_service_and_servicemonitor() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -1555,11 +1555,11 @@ async fn service_monitor_path_applies_service_and_servicemonitor() {
     check!(state.remaining_rules() == 0);
 }
 
-/// Both `podMonitor` and `serviceMonitor` set. Reconcile must
-/// short-circuit before any dynamic apply and surface
-/// `MetricsReady=False reason=MutuallyExclusive`. No request to the
-/// monitoring API may be issued — the harness's fallback 404 would itself
-/// fail the assertion below.
+/// Both `podMonitor` and `serviceMonitor` set. Reconcile must short-circuit
+/// before any dynamic apply and surface
+/// `MetricsReady=False reason=MutuallyExclusive`. The operator must issue no
+/// request to the monitoring API. The harness's fallback 404 would itself fail
+/// the assertion below.
 #[tokio::test]
 async fn mutually_exclusive_sets_condition_and_skips_apply() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -1601,10 +1601,10 @@ async fn mutually_exclusive_sets_condition_and_skips_apply() {
     check!(state.remaining_rules() == 0);
 }
 
-/// The Prometheus Operator CRDs are not installed — the dynamic
-/// PATCH against `monitoring.coreos.com/v1` 404s. Reconcile must surface
-/// `MetricsReady=False reason=PrometheusOperatorCrdsMissing` rather than
-/// fail; the status patch still lands.
+/// The Prometheus Operator CRDs are not installed, so the dynamic PATCH
+/// against `monitoring.coreos.com/v1` gives a 404. Reconcile must surface
+/// `MetricsReady=False reason=PrometheusOperatorCrdsMissing` and must not
+/// fail. The status patch still lands.
 #[tokio::test]
 async fn prom_operator_missing_sets_condition() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -1651,8 +1651,8 @@ async fn prom_operator_missing_sets_condition() {
     check!(state.remaining_rules() == 0);
 }
 
-/// `spec.networkPolicy=None` (the default in `kafka_cr`)
-/// must not touch `/networkpolicies/` at all and must surface
+/// `spec.networkPolicy=None`, which is the default in `kafka_cr`, must not
+/// touch `/networkpolicies/` at all and must surface
 /// `NetworkPolicyReady=False reason=Disabled`.
 #[tokio::test]
 async fn network_policy_disabled_no_apply() {
@@ -1752,8 +1752,8 @@ async fn network_policy_enabled_applies_one_resource() {
 }
 
 /// A Kafka CR with `status.conditions[NetworkPolicyReady].reason
-/// = "Available"` and `spec.networkPolicy = None` issues exactly one
-/// DELETE on `<name>-broker-policy` (orphan cleanup).
+/// = "Available"` and `spec.networkPolicy = None` issues exactly one DELETE on
+/// `<name>-broker-policy` for orphan cleanup.
 #[tokio::test]
 async fn network_policy_transition_deletes_on_disable() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -1809,8 +1809,8 @@ async fn network_policy_transition_deletes_on_disable() {
     assert!(deletes.len() == 1, "exactly one DELETE call on transition");
 }
 
-/// Cold disable (no prior `NetworkPolicyReady=Available`) must
-/// not call DELETE at all — avoids gratuitous API calls for clusters that
+/// A cold disable, with no earlier `NetworkPolicyReady=Available`, must not
+/// call DELETE at all. This avoids unnecessary API calls for clusters that
 /// never opted into `NetworkPolicy`.
 #[tokio::test]
 async fn network_policy_cold_disable_no_delete() {
@@ -1830,10 +1830,10 @@ async fn network_policy_cold_disable_no_delete() {
     );
 }
 
-/// When one listener has `network_policy_peers=Some(vec![])`,
-/// the rendered `NetworkPolicy` body sent on the PATCH must NOT contain a
-/// per-listener rule with empty `from` for that listener's port. (The
-/// operator-allow rule for that port is still present.)
+/// When one listener has `network_policy_peers=Some(vec![])`, the rendered
+/// `NetworkPolicy` body sent on the PATCH must NOT contain a per-listener rule
+/// with empty `from` for that listener's port. The operator-allow rule for
+/// that port is still present.
 #[tokio::test]
 async fn network_policy_listener_deny_all_skips_port_rule() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];

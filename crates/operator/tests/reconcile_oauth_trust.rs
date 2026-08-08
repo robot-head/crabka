@@ -1,12 +1,14 @@
-//! Integration tests for operator-managed
-//! oauth-jwks-trust Secret lifecycle. Verifies the full reconcile path:
-//! source Secret reads, PEM concatenation, managed Secret upsert,
-//! failure-mode status conditions, and pod-template volume/mount.
+//! Integration tests for the operator-managed oauth-jwks-trust Secret
+//! lifecycle.
 //!
-//! T3's unit tests in controller/kafka.rs cover the helper's no-op
-//! short-circuit paths (no canonical / empty trust certs). T6's
-//! integration tests exercise the Secret-touching code paths and the
-//! status-condition wiring end-to-end.
+//! These tests verify the full reconcile path: source Secret reads, PEM
+//! concatenation, managed Secret upsert, failure-mode status conditions, and
+//! the pod-template volume and mount.
+//!
+//! The T3 unit tests in controller/kafka.rs cover the no-op short-circuit
+//! paths of the helper, that is, no canonical trust certs and empty trust
+//! certs. The T6 integration tests exercise the Secret-touching code paths and
+//! the status-condition wiring end-to-end.
 
 use std::sync::Arc;
 
@@ -109,8 +111,8 @@ fn kafka_with_oauth_trust(name: &str, ns: &str, trust_certs: Vec<(&str, &str)>) 
     k
 }
 
-/// JSON body shaped like a `core/v1/Secret` with one base64-encoded data
-/// key. Used as the GET response for source-Secret reads inside the
+/// JSON body shaped like a `core/v1/Secret` with one base64-encoded data key.
+/// The tests use it as the GET response for source-Secret reads inside the
 /// trust-bundle assembly loop.
 fn source_secret_body(name: &str, namespace: &str, key: &str, value: &[u8]) -> serde_json::Value {
     let b64 = base64::engine::general_purpose::STANDARD.encode(value);
@@ -123,9 +125,9 @@ fn source_secret_body(name: &str, namespace: &str, key: &str, value: &[u8]) -> s
     })
 }
 
-/// JSON body shaped like a `core/v1/Secret` with **no** `data` field —
-/// used to exercise the `MissingOauthTrustKey` branch (Secret exists
-/// but lacks the named key).
+/// JSON body shaped like a `core/v1/Secret` with **no** `data` field. It
+/// exercises the `MissingOauthTrustKey` branch, where the Secret exists but
+/// does not have the named key.
 fn source_secret_body_no_data(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1",
@@ -136,8 +138,8 @@ fn source_secret_body_no_data(name: &str, namespace: &str) -> serde_json::Value 
 }
 
 /// Minimal managed-Secret response body for the trust-bundle PATCH. The
-/// reconciler only needs the response to deserialize back into a Secret;
-/// echo the same name/namespace.
+/// reconciler needs only that the response deserializes back into a Secret, so
+/// this body echoes the same name and namespace.
 fn managed_secret_body(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1",
@@ -191,11 +193,10 @@ fn extract_managed_ca_crt(
 
 // ── test 1: happy path — two source Secrets concat with newline glue ───────
 
-/// Two source Secrets each with one PEM. After reconcile, the managed
-/// Secret's `data.ca.crt` is `base64(PEM1 + "\n" + PEM2)` (since
-/// neither source PEM ends in newline). The leading-PEM-doesn't-end-
-/// in-newline branch is the one the implementation actually inserts a
-/// `\n` glue char into.
+/// Two source Secrets, each with one PEM. After reconcile, the managed
+/// Secret's `data.ca.crt` is `base64(PEM1 + "\n" + PEM2)`, because neither
+/// source PEM ends in a newline. The implementation inserts a `\n` glue
+/// character in the branch where the leading PEM does not end in a newline.
 #[tokio::test]
 async fn oauth_trust_creates_managed_secret_from_concatenated_pems() {
     let items = vec![fake_pool_list_item("brokers", "n1", "c1", 1, 1)];
@@ -237,9 +238,9 @@ async fn oauth_trust_creates_managed_secret_from_concatenated_pems() {
 
 // ── test 2: missing source Secret → MissingOauthTrustSecret ────────────────
 
-/// Source Secret entirely absent (mock returns 404 on the `get_opt`).
-/// After reconcile, the Kafka CR status PATCH carries a `Ready`
-/// condition with `status: "False"` and `reason: "MissingOauthTrustSecret"`.
+/// The source Secret is absent, and the mock returns 404 on the `get_opt`.
+/// After reconcile, the Kafka CR status PATCH carries a `Ready` condition with
+/// `status: "False"` and `reason: "MissingOauthTrustSecret"`.
 #[tokio::test]
 async fn oauth_trust_missing_source_secret_rejects_with_missing_oauth_trust_secret() {
     let mut rules = rules_for_failure_path("c2", "n2");
@@ -262,7 +263,8 @@ async fn oauth_trust_missing_source_secret_rejects_with_missing_oauth_trust_secr
 
 // ── test 3: Secret present but key absent → MissingOauthTrustKey ───────────
 
-/// Secret exists but lacks the named key. Reason: `MissingOauthTrustKey`.
+/// The Secret exists but does not have the named key. Reason:
+/// `MissingOauthTrustKey`.
 #[tokio::test]
 async fn oauth_trust_missing_key_in_source_secret_rejects_with_missing_oauth_trust_key() {
     let mut rules = rules_for_failure_path("c3", "n3");
@@ -281,7 +283,8 @@ async fn oauth_trust_missing_key_in_source_secret_rejects_with_missing_oauth_tru
 
 // ── test 4: Secret + key present but value zero bytes → EmptyOauthTrustValue ─
 
-/// Secret + key exist; value is zero bytes. Reason: `EmptyOauthTrustValue`.
+/// The Secret and the key exist, and the value is zero bytes. Reason:
+/// `EmptyOauthTrustValue`.
 #[tokio::test]
 async fn oauth_trust_empty_key_value_rejects_with_empty_oauth_trust_value() {
     let mut rules = rules_for_failure_path("c4", "n4");
@@ -300,10 +303,10 @@ async fn oauth_trust_empty_key_value_rejects_with_empty_oauth_trust_value() {
 
 // ── test 5: empty tls_trusted_certificates → no managed Secret ─────────────
 
-/// An OAuth listener with empty `tls_trusted_certificates` short-
-/// circuits inside `reconcile_oauth_jwks_trust` and never touches the
-/// Secret API. After reconcile, the observed-request log carries NO
-/// PATCH against `*-oauth-jwks-trust`.
+/// An OAuth listener with empty `tls_trusted_certificates` short-circuits
+/// inside `reconcile_oauth_jwks_trust` and never touches the Secret API. After
+/// reconcile, the observed-request log carries NO PATCH against
+/// `*-oauth-jwks-trust`.
 #[tokio::test]
 async fn oauth_trust_no_trust_certs_does_not_create_managed_secret() {
     let items = vec![fake_pool_list_item("brokers", "n5", "c5", 1, 1)];
@@ -328,11 +331,12 @@ async fn oauth_trust_no_trust_certs_does_not_create_managed_secret() {
 
 // ── test 6: source-rotation re-renders the managed Secret ──────────────────
 
-/// Reconcile once with the source Secret carrying value A → managed
-/// Secret's `data.ca.crt == base64(A)`. Reconcile again (separate
-/// mock + ctx) with the source carrying value B → managed Secret's
-/// `data.ca.crt == base64(B)`. Verifies the operator re-derives the
-/// bundle on every reconcile pass (no stale-input caching).
+/// Reconcile once with the source Secret that carries value A. The managed
+/// Secret's `data.ca.crt` is then `base64(A)`. Reconcile again, with a
+/// separate mock and ctx, with the source that carries value B. The managed
+/// Secret's `data.ca.crt` is then `base64(B)`. This test verifies that the
+/// operator derives the bundle again on every reconcile pass and does not
+/// cache the input.
 #[tokio::test]
 async fn oauth_trust_managed_secret_updates_when_source_changes() {
     const PEM_A: &[u8] = b"-----BEGIN CERTIFICATE-----\nROTATION-A\n-----END CERTIFICATE-----";
@@ -379,9 +383,9 @@ async fn oauth_trust_managed_secret_updates_when_source_changes() {
 // ── pool-reconcile fixtures (tests 7 + 8) ──────────────────────────────────
 
 /// Parent-Kafka body that carries an OAuth listener with
-/// `tls_trusted_certificates` populated. Used as the GET response for
-/// the pool reconciler's `kafka_api.get_opt(parent_name)` step so the
-/// rendered pod template picks up the `Some(...)` branch of
+/// `tls_trusted_certificates` filled in. The tests use it as the GET response
+/// for the pool reconciler's `kafka_api.get_opt(parent_name)` step, so that
+/// the rendered pod template takes the `Some(...)` branch of
 /// `oauth_jwks_trust_secret_name`.
 fn parent_kafka_body_with_oauth_trust(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
@@ -409,8 +413,8 @@ fn parent_kafka_body_with_oauth_trust(name: &str, namespace: &str) -> serde_json
     })
 }
 
-/// Parent-Kafka body with **no** listeners — pool reconciler sees no
-/// OAuth listener and skips the trust-bundle volume entirely.
+/// Parent-Kafka body with **no** listeners. The pool reconciler sees no OAuth
+/// listener and skips the trust-bundle volume.
 fn parent_kafka_body_no_listeners(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -421,10 +425,10 @@ fn parent_kafka_body_no_listeners(name: &str, namespace: &str) -> serde_json::Va
     })
 }
 
-/// A reconciled parent's cleared version model: the pool reconciler gates
-/// pod creation on `KafkaVersionValid=True` / a finalized metadata version
-/// (see `kafka_node_pool::version_gate`), so a parent fed to the pool
-/// reconciler must look like a validated cluster.
+/// The cleared version model of a reconciled parent. The pool reconciler
+/// gates pod creation on `KafkaVersionValid=True` and a finalized metadata
+/// version. See `kafka_node_pool::version_gate`. A parent given to the pool
+/// reconciler must therefore look like a validated cluster.
 fn cleared_version_status() -> serde_json::Value {
     serde_json::json!({
         "conditions": [{
@@ -440,11 +444,11 @@ fn cleared_version_status() -> serde_json::Value {
 
 // ── test 7: StatefulSet mounts the managed trust Secret when present ───────
 
-/// Full pool reconcile with a parent Kafka CR that carries an OAuth
-/// listener + `tls_trusted_certificates`. Capture the `StatefulSet`
-/// PATCH body and assert it contains both the `oauth-jwks-trust`
-/// pod volume (sourcing `<parent>-oauth-jwks-trust`) and the matching
-/// `volumeMount` at `/etc/crabka/oauth-jwks-trust` (readOnly).
+/// Full pool reconcile with a parent Kafka CR that carries an OAuth listener
+/// and `tls_trusted_certificates`. The test captures the `StatefulSet` PATCH
+/// body. It asserts that the body contains the `oauth-jwks-trust` pod volume,
+/// which sources `<parent>-oauth-jwks-trust`, and the matching `volumeMount`
+/// at `/etc/crabka/oauth-jwks-trust` with readOnly.
 #[tokio::test]
 async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
     let rules = pool_reconcile_rules(
@@ -508,9 +512,9 @@ async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
 
 // ── test 8: StatefulSet omits the trust volume/mount when no trust certs ──
 
-/// Same pool fixture, but the parent Kafka CR carries no listeners
-/// (and therefore no OAuth trust certs). The `StatefulSet` PATCH body
-/// must NOT carry the `oauth-jwks-trust` volume or mount.
+/// Same pool fixture, but the parent Kafka CR carries no listeners and thus
+/// no OAuth trust certs. The `StatefulSet` PATCH body must NOT carry the
+/// `oauth-jwks-trust` volume or mount.
 #[tokio::test]
 async fn statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs() {
     let rules = pool_reconcile_rules(

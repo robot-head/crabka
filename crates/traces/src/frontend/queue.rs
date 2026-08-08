@@ -1,18 +1,21 @@
-//! Bounded-concurrency fan-out of planned jobs across queriers. Results return
-//! in completion order; callers must key results by job identity (`traceID` /
-//! `(type,value)`), not position — the merge layer does exactly this.
+//! Bounded-concurrency fan-out of planned jobs across queriers.
+//!
+//! Results return in completion order. Callers must key results by job
+//! identity, such as `traceID` or `(type,value)`, and never by position. The
+//! merge layer does exactly this.
 //!
 //! This is the `futures::buffer_unordered` re-expression of the legacy
-//! `JoinSet` + `Semaphore` admission queue; both bound max-concurrency, this one
-//! more declaratively.
+//! `JoinSet` and `Semaphore` admission queue. Both bound max-concurrency, and
+//! this one does so more declaratively.
 
 use std::future::Future;
 
 use futures::stream::{self, StreamExt};
 
 /// Run `jobs` through `run` with at most `max_concurrency` in flight at once.
-/// Returns every result (completion order, unordered). A zero concurrency clamps
-/// to one.
+///
+/// This returns every result, in completion order and otherwise unordered. A
+/// zero concurrency clamps to one.
 pub async fn run_jobs<T, R, F, Fut>(jobs: Vec<T>, max_concurrency: usize, run: F) -> Vec<R>
 where
     F: Fn(T) -> Fut,

@@ -1,11 +1,12 @@
-//! Wire-surface tests: the unary `Send` Connect handler (Ok + error arms),
-//! the gateway router construction, and the health/readiness endpoints.
+//! Wire-surface tests: the unary `Send` Connect handler over its Ok and error
+//! arms, the gateway router construction, and the health and readiness
+//! endpoints.
 //!
-//! Handlers are called directly with a constructed `ConnectRequest` — the
-//! same level a real Connect call reaches, minus HTTP serialization —
-//! mirroring `crates/rebalancer/tests/end_to_end.rs`. The health router is
-//! driven through `tower`'s `oneshot` so the `/healthz` and `/readyz` route
-//! closures are exercised.
+//! These tests call the handlers directly with a constructed `ConnectRequest`.
+//! That is the level a real Connect call reaches, minus HTTP serialization, and
+//! it follows `crates/rebalancer/tests/end_to_end.rs`. The health router runs
+//! through `tower`'s `oneshot`, which exercises the `/healthz` and `/readyz`
+//! route closures.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -86,10 +87,12 @@ async fn health_endpoints_reflect_readiness() {
     assert2::assert!(resp.status() == StatusCode::OK);
 }
 
-/// Drive the `Send` handler for both result arms: an unkeyed record takes the
-/// plain path and succeeds; a keyed record routes to a dedup engine whose
-/// store has never run `run_ownership`, so it returns `Unavailable` and the
-/// handler maps it to a per-record `ErrorInfo`. Also constructs the Connect router.
+/// Drive the `Send` handler for both result arms.
+///
+/// An unkeyed record takes the plain path and succeeds. A keyed record routes
+/// to a dedup engine whose store has never run `run_ownership`, so it returns
+/// `Unavailable` and the handler maps it to a per-record `ErrorInfo`. This test
+/// also constructs the Connect router.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn send_handler_ok_and_error_arms() {
     let (broker, bootstrap, _dir) = boot().await;

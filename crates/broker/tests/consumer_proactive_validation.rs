@@ -1,68 +1,73 @@
 //! Integration coverage for the native `Consumer`'s **proactive** KIP-320
 //! position validation (`crates/client-consumer/src/validate.rs`).
 //!
-//! ## The path under test (proactive — distinct from the reactive paths)
+//! ## The path under test: proactive, not reactive
 //!
-//! `Consumer::poll` runs a validate pass at the very TOP, before fetching:
+//! `Consumer::poll` runs a validate pass at the very TOP, before it fetches:
 //!
 //!   1. [`refresh_leader_epochs`] reads `Metadata` and flags a partition
 //!      `awaiting_validation` when the metadata leader epoch ADVANCES past the
 //!      epoch the consumer last consumed at (`offset_epoch >= 0`).
-//!   2. [`validate_positions`] issues an `OffsetForLeaderEpoch` (OFLE,
-//!      `api_key` 23) RPC to the leader for each flagged partition and runs
-//!      `position::classify`. A `Truncated` outcome resets the partition; under
-//!      `auto.offset.reset = None` it surfaces `ConsumerError::LogTruncation`.
-//!      Crucially, an `awaiting_validation` partition is EXCLUDED from the
-//!      Fetch — so detection here cannot have come from a fetch response.
+//!   2. [`validate_positions`] sends an `OffsetForLeaderEpoch` (OFLE,
+//!      `api_key` 23) RPC to the leader for each flagged partition, and runs
+//!      `position::classify`. A `Truncated` outcome resets the partition.
+//!      Under `auto.offset.reset = None` it reports
+//!      `ConsumerError::LogTruncation`. The poll EXCLUDES an
+//!      `awaiting_validation` partition from the Fetch, so detection here
+//!      cannot have come from a fetch response.
 //!
-//! This is fundamentally different from the **reactive** truncation paths,
-//! which the consumer's own `tests/integration.rs` already covers:
+//! This differs from the **reactive** truncation paths, which the consumer's
+//! own `tests/integration.rs` already covers:
 //!   * in-band `diverging_epoch` on a Fetch response, and
 //!   * `OFFSET_OUT_OF_RANGE` (code 1) on a Fetch response.
 //!
-//! Both reactive paths are driven by a Fetch *response* and issue NO OFLE RPC.
+//! A Fetch *response* drives both reactive paths, and neither sends an OFLE
+//! RPC.
 //!
 //! ## Proving it was PROACTIVE, two independent ways
 //!
-//! 1. The partition is flagged `awaiting_validation` by the metadata
-//!    leader-epoch advance, so the poll EXCLUDES it from the Fetch entirely.
-//!    The `LogTruncation` therefore cannot originate from a `diverging_epoch`
-//!    or `OFFSET_OUT_OF_RANGE` fetch response — there is no fetch for this
+//! 1. The metadata leader-epoch advance flags the partition
+//!    `awaiting_validation`, so the poll EXCLUDES it from the Fetch. The
+//!    `LogTruncation` therefore cannot come from a `diverging_epoch` or an
+//!    `OFFSET_OUT_OF_RANGE` fetch response, because there is no fetch for this
 //!    partition this round. The error's `safe_offset` equals the OFLE-derived
-//!    epoch boundary (not a fetch `log_start_offset`).
+//!    epoch boundary, not a fetch `log_start_offset`.
 //! 2. A broker-side OFLE request counter
-//!    ([`BrokerHandle::offset_for_leader_epoch_count_for_test`]) increments
-//!    during the truncating poll — direct evidence the validate pass issued the
-//!    OFLE RPC. The reactive paths would leave it unchanged.
+//!    ([`BrokerHandle::offset_for_leader_epoch_count_for_test`]) increases
+//!    during the truncating poll. That is direct evidence that the validate
+//!    pass sent the OFLE RPC. The reactive paths would leave it unchanged.
 //!
 //! ## Inducing a genuine post-handoff divergence deterministically
 //!
-//! `classify` only returns `Truncated` if the leader's epoch-`e0` end offset is
-//! BELOW the consumer's position. A clean handoff (new leader has all the data)
-//! yields `Valid`. So we engineer real divergence on a single-broker cluster:
+//! `classify` returns `Truncated` only when the leader's epoch-`e0` end offset
+//! is BELOW the consumer's position. A clean handoff, where the new leader has
+//! all the data, gives `Valid`. This test therefore builds real divergence on
+//! a single-broker cluster:
 //!
 //!   1. Produce `N = 4` records at the partition's natural leader epoch 0.
-//!   2. Consumer (group, `auto.offset.reset = None`) consumes all 4 → its
-//!      `offset_epoch = 0`, `next_offset = 4`, observed metadata `leader_epoch
-//!      = 0`.
-//!   3. Truncate the leader's local log to offset 2 (`test_truncate_local_log`):
-//!      the epoch-0 boundary on the leader is now 2 — BELOW the consumer's
-//!      position 4. This is the "new leader is missing records the consumer
-//!      already saw" divergence the task requires.
-//!   4. Advance the metadata image's leader epoch to 1 by submitting a
-//!      `PartitionRecord` with `leader_epoch + 1` (same leader/replicas/ISR).
-//!      This is exactly the mechanism `tests/elect_leaders.rs` uses to advance a
-//!      partition's epoch via the controller; here it stands in for the
-//!      leadership handoff that bumps the epoch.
+//!   2. The consumer, in a group with `auto.offset.reset = None`, consumes all
+//!      4 records. Its `offset_epoch` is then 0, its `next_offset` is 4, and
+//!      the metadata `leader_epoch` it observed is 0.
+//!   3. Truncate the leader's local log to offset 2 with
+//!      `test_truncate_local_log`. The epoch-0 boundary on the leader is now
+//!      2, BELOW the consumer's position 4. This is the divergence the task
+//!      needs: the new leader is missing records that the consumer already
+//!      saw.
+//!   4. Advance the metadata image's leader epoch to 1 with a
+//!      `PartitionRecord` that carries `leader_epoch + 1` and the same leader,
+//!      replicas, and ISR. `tests/elect_leaders.rs` uses exactly this
+//!      mechanism to advance a partition's epoch through the controller. Here
+//!      it stands in for the leadership handoff that raises the epoch.
 //!
-//! On the next poll: `refresh_leader_epochs` sees epoch 1 > `offset_epoch` 0 →
-//! flags `awaiting_validation`; `validate_positions` issues OFLE → the handler
-//! answers `end_offset = 2, error_code = 0` → `classify(offset=4, offset_epoch=0,
-//! leader_epoch=1, leader_end_offset=2)` → `Truncated { safe_offset: 2 }` →
-//! `None` policy surfaces `LogTruncation { fetch_offset: 4, safe_offset: 2 }`.
+//! On the next poll, `refresh_leader_epochs` sees epoch 1 above `offset_epoch`
+//! 0 and flags `awaiting_validation`. `validate_positions` sends the OFLE, and
+//! the handler answers `end_offset = 2, error_code = 0`. Then
+//! `classify(offset=4, offset_epoch=0, leader_epoch=1, leader_end_offset=2)`
+//! gives `Truncated { safe_offset: 2 }`, and the `None` policy reports
+//! `LogTruncation { fetch_offset: 4, safe_offset: 2 }`.
 //!
-//! Windows-gated like the other broker integration tests (openraft's
-//! `debug_assert!` races on the hosted Windows scheduler).
+//! This test is Windows-gated like the other broker integration tests, because
+//! openraft's `debug_assert!` races on the hosted Windows scheduler.
 
 use std::time::{Duration, Instant};
 
@@ -100,11 +105,12 @@ async fn topic_id_for(client: &Client, name: &str) -> crabka_protocol::primitive
         .unwrap_or_default()
 }
 
-/// Produce each value as its OWN single-record batch (one batch per offset),
-/// retrying the `UNKNOWN_TOPIC_OR_PARTITION` (3) metadata-apply race. Separate
-/// batches keep offsets dense AND individually truncatable — `truncate_to`
-/// operates on whole batch boundaries, so a single multi-record batch could not
-/// be split at a mid-batch offset.
+/// Produces each value as its OWN single-record batch, one batch per offset,
+/// and retries the `UNKNOWN_TOPIC_OR_PARTITION` (3) metadata-apply race.
+///
+/// Separate batches keep the offsets dense, and they let the test truncate at
+/// any offset. `truncate_to` works on whole batch boundaries, so it could not
+/// split a single multi-record batch at a mid-batch offset.
 async fn produce(client: &Client, topic: &str, values: &[&str]) {
     let topic_id = topic_id_for(client, topic).await;
     for v in values {
@@ -176,17 +182,19 @@ async fn create_topic(client: &Client, name: &str) {
 
 /// PROACTIVE KIP-320 truncation detection.
 ///
-/// See the module docs for the full rationale. The discriminating assertions:
-///   * `poll()` returns `ConsumerError::LogTruncation` with `fetch_offset = 4`
-///     (the consumer's pre-divergence position) and `safe_offset = 2` (the
-///     OFLE-derived epoch-0 boundary — NOT a fetch `log_start_offset`);
+/// See the module docs for the full rationale. The discriminating assertions
+/// are these:
+///   * `poll()` returns `ConsumerError::LogTruncation` with `fetch_offset = 4`,
+///     the consumer's pre-divergence position, and `safe_offset = 2`, the
+///     OFLE-derived epoch-0 boundary and NOT a fetch `log_start_offset`;
 ///   * the broker's OFLE request counter strictly increased across the
-///     truncating poll, proving the validate pass issued the RPC.
+///     truncating poll, which proves that the validate pass sent the RPC.
 ///
-/// The honesty check (verified manually, reverted): no-op'ing either
+/// The honesty check was verified by hand and then reverted. If either
 /// `validate_positions` or the `awaiting_validation` flagging in
-/// `refresh_leader_epochs` makes this test FAIL (no truncation surfaced /
-/// counter unchanged), so it is genuinely discriminating.
+/// `refresh_leader_epochs` does nothing, this test FAILS, because no
+/// truncation is reported and the counter does not change. The test is
+/// therefore discriminating.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumer_proactively_validates_and_surfaces_truncation() {
     let dir = TempDir::new().unwrap();

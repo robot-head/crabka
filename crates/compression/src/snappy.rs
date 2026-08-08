@@ -10,10 +10,10 @@
 //! ( [BE u32 chunk length] [raw snappy block ...] )*   # zero or more chunks
 //! ```
 //!
-//! There is no end-of-stream marker; chunks run until EOF.
+//! There is no end-of-stream marker. Chunks run until EOF.
 //!
-//! JVM xerial-snappy byte equality is verified by the differential test
-//! suite once the oracle gains a `compress` op.
+//! The differential test suite verifies JVM xerial-snappy byte equality after
+//! the oracle gets a `compress` op.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_units::prelude::{ByteSize, ByteSizeExt as _, kibibytes};
@@ -26,9 +26,11 @@ const XERIAL_HEADER: [u8; 16] = [
     0x00, 0x00, 0x00, 0x01, // minCompatibleVersion = 1
 ];
 
-/// Largest single chunk Kafka writes. Kafka's `SnappyOutputStream` writes
-/// chunks up to 32 KiB by default; using the same size keeps our output
-/// byte-identical with the JVM for differential-equal cases.
+/// Largest single chunk Kafka writes.
+///
+/// Kafka's `SnappyOutputStream` writes chunks up to 32 KiB by default. The same
+/// size keeps our output byte-identical with the JVM for differential-equal
+/// cases.
 const XERIAL_CHUNK: ByteSize = kibibytes(32);
 
 pub fn compress(data: &[u8]) -> Result<Bytes, CompressionError> {

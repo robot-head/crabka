@@ -1,23 +1,25 @@
-//! `SharePersister` — the group-coordinator's client onto the share-state
+//! `SharePersister`, the group-coordinator's client onto the share-state
 //! persister (KIP-932). It bridges the share-group membership coordinator to
 //! the durable [`ShareCoordinator`]:
 //!
 //! - When a share group joins a topic, the coordinator calls
 //!   [`SharePersister::initialize`] for each newly-assigned `(topic, partition)`.
-//! - When a topic leaves the subscription (or the group empties), it calls
-//!   [`SharePersister::delete`].
+//! - When a topic leaves the subscription, or the group empties, the
+//!   coordinator calls [`SharePersister::delete`].
 //!
-//! Routing mirrors [`crate::handlers::find_coordinator`]: the share key
-//! `(group, topic_id, partition)` maps to a `__share_group_state` partition via
-//! [`ShareCoordinator::state_partition_for`]. If this broker leads that state
-//! partition the call dispatches into the local [`ShareCoordinator`] directly;
-//! otherwise it resolves the partition leader from the metadata image and sends
-//! the typed `InitializeShareGroupState` / `DeleteShareGroupState` RPC over the
-//! inter-broker client (the same shape as
-//! [`crate::txn::handlers::end_txn`]'s `WriteTxnMarkers` dial).
+//! Routing mirrors [`crate::handlers::find_coordinator`]:
+//! [`ShareCoordinator::state_partition_for`] maps the share key
+//! `(group, topic_id, partition)` to a `__share_group_state` partition. If
+//! this broker leads that state partition, the call dispatches into the local
+//! [`ShareCoordinator`] directly. If it does not, the client resolves the
+//! partition leader from the metadata image and sends the typed
+//! `InitializeShareGroupState` or `DeleteShareGroupState` RPC over the
+//! inter-broker client. That is the same shape as the `WriteTxnMarkers` dial
+//! in [`crate::txn::handlers::end_txn`].
 //!
-//! Errors are returned to the caller — the lifecycle hook treats them as
-//! best-effort and retries on the next heartbeat, never failing the heartbeat.
+//! This module returns errors to the caller. The lifecycle hook treats them as
+//! best-effort and retries on the next heartbeat. It never fails the
+//! heartbeat.
 
 use std::{sync::Arc, time::Duration};
 
@@ -55,10 +57,10 @@ use crate::{
     },
 };
 
-/// Group-coordinator-side client for the share-state persister. Constructed in
-/// `Broker::start` once both the [`ShareCoordinator`] and the `GroupCoordinator`
-/// exist, and handed to the `GroupCoordinator` so its per-group share actors can
-/// drive Initialize/Delete lifecycle calls.
+/// Group-coordinator-side client for the share-state persister. `Broker::start`
+/// constructs it after both the [`ShareCoordinator`] and the
+/// `GroupCoordinator` exist, and hands it to the `GroupCoordinator` so its
+/// per-group share actors can drive Initialize and Delete lifecycle calls.
 pub(crate) struct SharePersister {
     node_id: NodeId,
     share_coordinator: Arc<ShareCoordinator>,
@@ -96,14 +98,16 @@ impl SharePersister {
     }
 
     /// Initialize the share state for `(group, topic_id, partition)` at
-    /// `state_epoch` / `start_offset`. Local when this broker leads the target
-    /// `__share_group_state` partition, else routed to the leader via RPC.
+    /// `state_epoch` and `start_offset`. The call is local when this broker
+    /// leads the target `__share_group_state` partition. If it does not, the
+    /// client routes the call to the leader over RPC.
     ///
     /// # Errors
     ///
-    /// Returns [`BrokerError::Share`] if the local coordinator fences/rejects
-    /// the call, or [`BrokerError`] from the inter-broker dial/send on the
-    /// remote path. The caller logs and retries — it must not fail a heartbeat.
+    /// Returns [`BrokerError::Share`] if the local coordinator fences or
+    /// rejects the call, or [`BrokerError`] from the inter-broker dial or send
+    /// on the remote path. The caller logs and retries. It must not fail a
+    /// heartbeat.
     // cargo-mutants: the `topics` payload is only sent on the follower->leader
     // remote path (`send_to_leader` dials a real inter-broker socket); only the
     // live-broker integration suite exercises it, not in-file unit tests.
@@ -153,9 +157,10 @@ impl SharePersister {
         self.send_to_leader(state_partition, req).await
     }
 
-    /// Delete the share state for `(group, topic_id, partition)`. Local when
-    /// this broker leads the target `__share_group_state` partition, else routed
-    /// to the leader via RPC.
+    /// Delete the share state for `(group, topic_id, partition)`. The call is
+    /// local when this broker leads the target `__share_group_state`
+    /// partition. If it does not, the client routes the call to the leader
+    /// over RPC.
     ///
     /// # Errors
     ///
@@ -197,10 +202,11 @@ impl SharePersister {
         self.send_to_leader(state_partition, req).await
     }
 
-    /// Ensure `__share_group_state` exists and refresh this broker's view of
-    /// which of its partitions it leads. The topic is created lazily (idempotent
-    /// — tolerates an existing topic); the leadership refresh picks up any
-    /// partitions already materialized locally by the replicator supervisor.
+    /// Make sure `__share_group_state` exists, and refresh this broker's view
+    /// of which of its partitions it leads. This method creates the topic
+    /// lazily. The creation is idempotent and accepts an existing topic. The
+    /// leadership refresh picks up every partition that the replicator
+    /// supervisor has already materialized locally.
     async fn ensure_topic_and_refresh(
         &self,
         state_partition: PartitionIndex,
@@ -239,13 +245,15 @@ impl SharePersister {
         }
     }
 
-    /// Read the durable share state for `(group, topic_id, partition)`. Local
-    /// when this broker leads the target `__share_group_state` partition, else
-    /// routed to the leader via RPC and decoded from the typed response.
+    /// Read the durable share state for `(group, topic_id, partition)`. The
+    /// call is local when this broker leads the target `__share_group_state`
+    /// partition. If it does not, the client routes the call to the leader
+    /// over RPC and decodes the typed response.
     ///
     /// # Errors
     ///
-    /// As [`SharePersister::initialize`] (connect/send on the remote path).
+    /// As [`SharePersister::initialize`], from the connect or send on the
+    /// remote path.
     // Consumed by `SharePartitionLeaderManager::get_or_load`, which the
     // ShareFetch/ShareAcknowledge handlers drive.
     pub(crate) async fn read_state(
@@ -314,8 +322,9 @@ impl SharePersister {
     }
 
     /// Persist a `WriteShareGroupState` delta for `(group, topic_id,
-    /// partition)`. Local when this broker leads the target
-    /// `__share_group_state` partition, else routed to the leader via RPC.
+    /// partition)`. The call is local when this broker leads the target
+    /// `__share_group_state` partition. If it does not, the client routes the
+    /// call to the leader over RPC.
     ///
     /// # Errors
     ///
@@ -427,7 +436,7 @@ impl SharePersister {
             .map_err(|e| BrokerError::Share(format!("share-state connect to {host}:{port}: {e}")))
     }
 
-    /// Send `req` to the `state_partition` leader, discarding the response.
+    /// Send `req` to the `state_partition` leader and discard the response.
     async fn send_to_leader<R>(
         &self,
         state_partition: PartitionIndex,

@@ -1,5 +1,7 @@
-//! Broker configuration. Built directly (library use) or from CLI flags
-//! (binary entry point in `bin/broker.rs`).
+//! Broker configuration.
+//!
+//! Build the configuration directly for library use, or from CLI flags. The
+//! binary entry point is `bin/broker.rs`.
 
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -29,7 +31,8 @@ pub enum NodeRole {
     Broker,
 }
 
-/// A single named listener: the port the broker binds + what it tells clients.
+/// A single named listener: the port the broker binds and the address it
+/// gives to clients.
 #[derive(Debug, Clone)]
 pub struct ListenerSpec {
     /// Listener name (e.g. `"PLAINTEXT"`, `"SSL"`, `"SASL_SSL"`).
@@ -48,8 +51,10 @@ pub struct ListenerSpec {
     pub sasl_mechanisms: Option<Vec<SaslMechanism>>,
 }
 
-/// Credentials the broker uses when connecting *to* other brokers, one
-/// variant per SASL mechanism the inter-broker client can speak.
+/// Credentials the broker uses to connect *to* other brokers.
+///
+/// There is one variant for each SASL mechanism the inter-broker client
+/// supports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterBrokerCredentials {
     /// SASL/PLAIN: `\0username\0password`.
@@ -60,11 +65,11 @@ pub enum InterBrokerCredentials {
         username: String,
         password: String,
     },
-    /// SASL/GSSAPI: authenticate as `client_principal` using the long-term
-    /// key in `keytab_path` (no password). `service_name` is the target
-    /// broker's SPN primary (combined with the dialed host into
-    /// `service_name/host` at connect time); `kdc_url` is the KDC endpoint
-    /// (e.g. `tcp://kdc:88`).
+    /// SASL/GSSAPI: authenticate as `client_principal` with the long-term key
+    /// in `keytab_path`. This mechanism uses no password. `service_name` is
+    /// the target broker's SPN primary; the client combines it with the
+    /// dialed host into `service_name/host` at connect time. `kdc_url` is the
+    /// KDC endpoint, for example `tcp://kdc:88`.
     Gssapi {
         keytab_path: PathBuf,
         client_principal: String,
@@ -87,8 +92,8 @@ impl InterBrokerCredentials {
 
 /// Construction-time configuration for [`crate::Broker::start`].
 ///
-/// Build directly when embedding the broker as a library, or via the
-/// `crabka-broker` binary's clap CLI in production.
+/// Build it directly when you embed the broker as a library. In production,
+/// build it with the `crabka-broker` binary's clap CLI.
 #[derive(Debug, Clone, Copy)]
 pub struct BrokerFeatureFlags {
     pub oauthbearer_jwks_ignore_key_use: bool,
@@ -96,12 +101,13 @@ pub struct BrokerFeatureFlags {
     pub transaction_two_phase_commit_enable: bool,
 }
 
-/// Runtime policy used by follower replication tasks: the size and patience of
-/// each replication fetch, and the backoffs the follower loop waits out between
-/// them.
+/// Runtime policy for follower replication tasks.
 ///
-/// Not `Eq`: every knob here is a quantity, whose `f64` storage is only
-/// `PartialEq`. The three fetch knobs are the ones that reach the wire, as
+/// It sets the size and the maximum wait of each replication fetch, and the
+/// backoffs the follower loop applies between fetches.
+///
+/// This type is not `Eq`: every value here is a quantity, and its `f64`
+/// storage is only `PartialEq`. Three of the fields reach the wire, as
 /// `FetchRequest`'s `max_bytes`, `min_bytes`, and `max_wait_ms`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplicationRuntimeConfig {
@@ -299,8 +305,8 @@ pub struct BrokerConfig {
     /// Broker id reported in `Metadata` responses. Default: 1.
     pub broker_id: i32,
 
-    /// `KRaft` `process.roles`. Controls whether this node is a metadata
-    /// quorum voter (`Controller`), hosts data partitions + registers as a
+    /// `KRaft` `process.roles`. It controls whether this node is a metadata
+    /// quorum voter (`Controller`), hosts data partitions and registers as a
     /// broker (`Broker`), or both. Default: `[Controller, Broker]`.
     pub roles: Vec<NodeRole>,
 
@@ -311,18 +317,18 @@ pub struct BrokerConfig {
     /// advertised endpoint. Defaults to `listen_addr`'s string form.
     pub advertised_listener: String,
 
-    /// Primary log directory. Holds the `__cluster_metadata` raft log and
-    /// is used for bootstrap-mode detection. Also a data directory: when
-    /// [`extra_log_dirs`][Self::extra_log_dirs] is empty this is the only
-    /// place partition data lives. Created on startup if missing.
-    /// Default: `./crabka-data`.
+    /// Primary log directory. It holds the `__cluster_metadata` raft log, and
+    /// the broker reads it to detect bootstrap mode. It is also a data
+    /// directory: when [`extra_log_dirs`][Self::extra_log_dirs] is empty,
+    /// partition data lives only here. The broker creates the directory on
+    /// startup if it is missing. Default: `./crabka-data`.
     pub log_dir: PathBuf,
 
-    /// Additional JBOD data directories (KIP-113). When non-empty, new
-    /// partitions are spread across `[log_dir] + extra_log_dirs` by
-    /// least-loaded placement; `__cluster_metadata` always stays on
-    /// [`log_dir`][Self::log_dir]. Maps to Kafka's `log.dirs` having more
-    /// than one entry. Default: empty (single-directory broker).
+    /// Extra JBOD data directories (KIP-113). When this list is non-empty,
+    /// the broker spreads new partitions across `[log_dir] + extra_log_dirs`
+    /// by least-loaded placement. `__cluster_metadata` always stays on
+    /// [`log_dir`][Self::log_dir]. Maps to a Kafka `log.dirs` value with more
+    /// than one entry. Default: empty, which gives a single-directory broker.
     pub extra_log_dirs: Vec<PathBuf>,
 
     /// Per-log configuration applied to every partition this broker hosts.
@@ -336,17 +342,17 @@ pub struct BrokerConfig {
     pub controller_listen_addr: SocketAddr,
 
     /// Static voter set: `[(node_id, "<host>:<port>"), …]`. The address is the
-    /// peer controller listener's `<host>:<port>` carried verbatim (NOT
-    /// pre-resolved): the dialer re-resolves the host on every (re)connect so a
-    /// peer that restarts on a new pod IP stays reachable. Defaults to a
-    /// single-voter cluster of just this broker, so single-broker setups
-    /// upgrade to quorum-of-1 without config changes.
+    /// peer controller listener's `<host>:<port>`, carried verbatim and NOT
+    /// pre-resolved. The dialer resolves the host again on every connect and
+    /// reconnect, so a peer that restarts on a new pod IP stays reachable.
+    /// Defaults to a single-voter cluster of just this broker, so
+    /// single-broker setups get a quorum of one without config changes.
     pub controller_quorum_voters: Vec<(NodeId, String)>,
 
     /// TLS server name (SNI) presented when dialing a peer's controller
     /// listener for the KIP-595 quorum. Set to a SAN shared by every
-    /// broker's serving cert (the headless-Service FQDN) so mTLS validates
-    /// regardless of which peer (a pod IP) is dialed. `None` falls back to
+    /// broker's serving cert, the headless-Service FQDN, so mTLS validates
+    /// whichever peer the broker dials, even a pod IP. `None` falls back to
     /// `"localhost"`.
     pub controller_server_name: Option<String>,
 
@@ -359,19 +365,19 @@ pub struct BrokerConfig {
     /// `meta.properties.json` at boot. Identifies which voter this node *is*.
     pub directory_id: uuid::Uuid,
 
-    /// UUID identifying this specific broker process invocation. Persisted in
-    /// `{log_dir}/incarnation_id` and reloaded on restart. Populated before
-    /// self-registration by the internal `load_or_generate` helper.
-    /// Tests generate a random UUID per call via [`Self::for_tests`].
+    /// UUID for this broker process invocation. The broker keeps it in
+    /// `{log_dir}/incarnation_id` and reloads it on restart. The internal
+    /// `load_or_generate` helper sets it before self-registration. Tests
+    /// generate a random UUID for each call through [`Self::for_tests`].
     pub incarnation_id: uuid::Uuid,
 
     /// KIP-853: when true, an observer issues `AddVoter` for itself once it
-    /// has caught up to the leader, joining the quorum without operator
-    /// action. Maps to Kafka's `controller.quorum.auto.join.enable`.
+    /// has caught up to the leader. The observer joins the quorum without
+    /// operator action. Maps to Kafka's `controller.quorum.auto.join.enable`.
     pub auto_join: bool,
 
     /// KIP-853: maximum log-entry lag an observer may have and still be
-    /// promotable to a voter. Forwarded to `ControllerConfig`.
+    /// promotable to a voter. The broker forwards it to `ControllerConfig`.
     pub observer_lag_bound: u64,
 
     /// How often each broker sends `BrokerHeartbeat` to the controller
@@ -384,16 +390,17 @@ pub struct BrokerConfig {
     /// Default 30s.
     pub replica_lag_time_max: Time,
 
-    /// Openraft election timeout (sets `election_timeout_min`; max is 2×).
-    /// Indirectly sets `leader_lease = election_timeout_max` inside
-    /// openraft's engine — peers refuse to grant a new leader's vote
-    /// until the lease expires, so this is also the lower bound on how
-    /// fast a 3-broker cluster can recover from a dead controller leader.
-    /// Default 5s (conservative; avoids split-vote on slow runners).
+    /// Openraft election timeout. It sets `election_timeout_min`, and the
+    /// maximum is 2×. It also sets `leader_lease = election_timeout_max`
+    /// inside openraft's engine. Peers refuse to grant a new leader's vote
+    /// until the lease expires, so this value is also the lower bound on how
+    /// fast a 3-broker cluster recovers from a dead controller leader.
+    /// Default 5s. The default is conservative and avoids a split vote on
+    /// slow runners.
     pub controller_election_timeout: Time,
 
-    /// Openraft heartbeat interval. Default 500ms. Should be ≤
-    /// `controller_election_timeout / 3` per raft consensus norms.
+    /// Openraft heartbeat interval. Default 500ms. It should be ≤
+    /// `controller_election_timeout / 3` by raft consensus norms.
     pub controller_heartbeat_interval: Time,
     /// Whether the heartbeat interval was explicitly configured. Omitted
     /// values preserve the Raft engine's election-timeout-derived cadence.
@@ -419,21 +426,22 @@ pub struct BrokerConfig {
     /// an immutable 1 GiB security ceiling.
     pub metadata_snapshot_fetch_max: ByteSize,
 
-    /// How this broker participates in cluster formation. See
-    /// [`crabka_raft::BootstrapMode`] for the trade-offs. The first broker
-    /// of a fresh multi-broker cluster uses `Bootstrap`; subsequent brokers
-    /// use `Join`; a restart of any previously-formatted broker uses
-    /// `Rejoin`. Single-broker setups always use `Bootstrap`.
+    /// How this broker takes part in cluster formation. See
+    /// [`crabka_raft::BootstrapMode`] for the trade-offs. The first broker of
+    /// a fresh multi-broker cluster uses `Bootstrap`. Later brokers use
+    /// `Join`. A restart of any previously-formatted broker uses `Rejoin`.
+    /// Single-broker setups always use `Bootstrap`.
     pub bootstrap_mode: BootstrapMode,
 
-    /// Cluster UUID forwarded to `ControllerConfig::cluster_id`. Sourced
-    /// from the operator (the `KafkaCluster` UID) via `--cluster-id`.
-    /// `None` defaults to `Uuid::nil()` inside `Controller::start`.
+    /// Cluster UUID that the broker forwards to
+    /// `ControllerConfig::cluster_id`. The operator supplies it as the
+    /// `KafkaCluster` UID through `--cluster-id`. `None` defaults to
+    /// `Uuid::nil()` inside `Controller::start`.
     pub cluster_id: Option<uuid::Uuid>,
 
-    /// KIP-392: this broker's rack identifier (`broker.rack`). Reported in
-    /// its `BrokerRegistrationRecord` and used by the leader's rack-aware
-    /// replica selector. `None` (default) means no rack.
+    /// KIP-392: this broker's rack identifier (`broker.rack`). The broker
+    /// reports it in its `BrokerRegistrationRecord`, and the leader's
+    /// rack-aware replica selector reads it. `None` (default) means no rack.
     pub rack: Option<String>,
 
     /// KIP-392: which replica selector the leader runs to populate
@@ -442,16 +450,16 @@ pub struct BrokerConfig {
     pub replica_selector: crate::replica_selector::ReplicaSelectorKind,
 
     // ── Auth / listener registry ─────────────────────────────────────────
-    /// Named listener definitions. When empty, `effective_listeners()` synthesizes
-    /// a single PLAINTEXT listener from `listen_addr` + `advertised_listener`,
-    /// preserving full backward compatibility.
+    /// Named listener definitions. When this list is empty,
+    /// `effective_listeners()` builds a single PLAINTEXT listener from
+    /// `listen_addr` and `advertised_listener`.
     pub listeners: Vec<ListenerSpec>,
 
-    /// Protocol terminator for the controller listener. Default
-    /// `Plaintext` preserves the legacy raw-TCP raft transport.
-    /// Set to `SaslPlaintext` / `Ssl` / `SaslSsl` to require auth
-    /// on inbound raft RPCs (and outbound, when paired with
-    /// `inter_broker_credentials`).
+    /// Protocol terminator for the controller listener. The default
+    /// `Plaintext` keeps the legacy raw-TCP raft transport. Set it to
+    /// `SaslPlaintext`, `Ssl`, or `SaslSsl` to require auth on inbound raft
+    /// RPCs. Outbound raft RPCs also use auth when you pair this with
+    /// `inter_broker_credentials`.
     pub controller_listener_protocol: crabka_security::ListenerProtocol,
 
     /// Name of the listener used for inter-broker traffic (raft, replication,
@@ -460,39 +468,39 @@ pub struct BrokerConfig {
     pub inter_broker_listener_name: String,
 
     /// Credentials the broker uses for outbound inter-broker connections.
-    /// `None` means no SASL — plaintext inter-broker traffic (the default).
+    /// `None` means no SASL, which gives plaintext inter-broker traffic.
+    /// This is the default.
     pub inter_broker_credentials: Option<InterBrokerCredentials>,
 
-    /// Static PLAIN credentials: username → password.  Empty by default
-    /// (PLAIN auth disabled until mechanisms are explicitly enabled).
+    /// Static PLAIN credentials: username → password. Empty by default.
+    /// PLAIN auth stays disabled until you explicitly enable the mechanisms.
     pub plain_credentials: HashMap<String, String>,
 
     /// Usernames that bypass ACL checks (super-users). The
     /// `create_delegation_token` act-as gate reads this directly; the
     /// active [`crate::authorizer::Authorizer`] impl also reads it
-    /// (`SimpleAclAuthorizer` / `OpaAuthorizer`). Both are populated
-    /// from the same `[authorization]` TOML stanza by `file_config`.
+    /// (`SimpleAclAuthorizer` / `OpaAuthorizer`). `file_config` populates
+    /// both from the same `[authorization]` TOML stanza.
     pub super_users: std::collections::HashSet<String>,
 
-    /// Pluggable cluster authorizer. One boxed instance per
-    /// broker; configured via `[authorization]` in `broker.toml`. The
-    /// default is [`crate::authorizer::AllowAllAuthorizer`] — explicit
-    /// "allow everything" — which replaces the earlier
-    /// "no super-users + no ACLs ⇒ Allow" compat shim that previously
-    /// lived inside the ACL impl.
+    /// Pluggable cluster authorizer. There is one boxed instance for each
+    /// broker, configured through `[authorization]` in `broker.toml`. The
+    /// default is [`crate::authorizer::AllowAllAuthorizer`], an explicit
+    /// "allow everything" policy.
     pub authorizer: std::sync::Arc<dyn crate::authorizer::Authorizer>,
 
-    /// TLS configuration. `None` — no TLS (the default).
+    /// TLS configuration. `None` means no TLS, and is the default.
     pub tls_config: Option<TlsConfig>,
 
-    /// Which SASL mechanisms are enabled. Empty → no SASL.
+    /// Which SASL mechanisms are enabled. An empty set means no SASL.
     pub enabled_sasl_mechanisms: Vec<SaslMechanism>,
 
-    /// Validator for SASL/OAUTHBEARER bearer tokens. Only
-    /// consulted when `OAuthBearer` is in `enabled_sasl_mechanisms` (the
-    /// handshake won't advertise it otherwise). Defaults to the unsecured-JWS
-    /// validator with principal claim `sub`; configuring a JWKS endpoint
-    /// (`[oauthbearer].jwks_endpoint_uri`) selects the signed-JWT validator.
+    /// Validator for SASL/OAUTHBEARER bearer tokens. The broker reads it only
+    /// when `OAuthBearer` is in `enabled_sasl_mechanisms`; the handshake does
+    /// not advertise the mechanism otherwise. It defaults to the
+    /// unsecured-JWS validator with principal claim `sub`. Set a JWKS
+    /// endpoint in `[oauthbearer].jwks_endpoint_uri` to select the signed-JWT
+    /// validator.
     pub oauthbearer_validator: crabka_security::OAuthBearerValidator,
 
     /// SASL/GSSAPI (Kerberos) configuration. `Some` only when `Gssapi` is in
@@ -509,9 +517,9 @@ pub struct BrokerConfig {
     /// How often to re-fetch the JWKS. Default 5 minutes.
     pub oauthbearer_jwks_refresh_interval: Time,
 
-    /// Optional PEM path for outbound
-    /// HTTPS to the `IdP`. Shared across JWKS, introspection, and
-    /// userinfo. None → reqwest's default webpki-roots.
+    /// Optional PEM path for outbound HTTPS to the `IdP`. JWKS,
+    /// introspection, and userinfo all share it. `None` selects reqwest's
+    /// default webpki-roots.
     pub oauthbearer_idp_tls_trust: Option<std::path::PathBuf>,
 
     /// Optional ceiling on OAUTHBEARER session lifetime. When set, the
@@ -522,51 +530,58 @@ pub struct BrokerConfig {
     pub oauthbearer_max_session_lifetime: Option<Time>,
 
     /// Receiver half of the JWKS refresher signal channel.
-    /// `apply_to` creates the channel pair: the sender is wired into the
-    /// signed validator's `JwksHandle`; the receiver is parked here for
-    /// `Broker::start` to `take()` and pass to `JwksRefresher`. `None`
-    /// when JWKS validation isn't configured. `Arc<Mutex<…>>` so the
-    /// containing `BrokerConfig` can stay `Clone`; only `Broker::start`
-    /// `.lock().take()`s the receiver, and there is only ever one
-    /// `Broker::start` per validator construction.
+    ///
+    /// `apply_to` creates the channel pair. It connects the sender to the
+    /// signed validator's `JwksHandle` and stores the receiver here.
+    /// `Broker::start` calls `take()` on the receiver and passes it to
+    /// `JwksRefresher`. This field is `None` when JWKS validation is not
+    /// configured.
+    ///
+    /// The field is an `Arc<Mutex<…>>` so that the containing `BrokerConfig`
+    /// stays `Clone`. Only `Broker::start` locks and takes the receiver, and
+    /// there is only ever one `Broker::start` for each validator
+    /// construction.
     pub oauthbearer_jwks_signal_rx:
         std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>>,
 
     /// Shared timestamp of the last successful JWKS fetch.
-    /// `apply_to` creates it (`AtomicI64::new(0)`); the validator's
-    /// `JwksHandle` and the refresher both clone this `Arc` so the
-    /// refresher's writes are visible to the validator's expiry check.
+    ///
+    /// `apply_to` creates it as `AtomicI64::new(0)`. The validator's
+    /// `JwksHandle` and the refresher both clone this `Arc`, so the
+    /// validator's expiry check sees the refresher's writes.
     pub oauthbearer_jwks_last_successful_fetch_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
 
     /// Shared on-demand-refresh timestamp for rate-limiting.
-    /// `apply_to` creates it; `Broker::start` hands a clone to the
-    /// refresher. The validator never reads this — it's refresher-only
-    /// bookkeeping carried through `BrokerConfig` for symmetry.
+    ///
+    /// `apply_to` creates it, and `Broker::start` gives a clone to the
+    /// refresher. The validator never reads it. It is refresher-only
+    /// bookkeeping that `BrokerConfig` carries for symmetry.
     pub oauthbearer_jwks_last_on_demand_refresh_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
 
-    /// Minimum pause between on-demand JWKS refreshes
-    /// triggered by validator signals. `apply_to` sets this from
-    /// `FileOAuthBearerConfig::jwks_min_refresh_pause_seconds`;
-    /// `Broker::start` passes it into `JwksRefresher`. Strimzi default
-    /// 1 second; we default to 1 second too.
+    /// Minimum pause between on-demand JWKS refreshes that validator signals
+    /// trigger. `apply_to` sets it from
+    /// `FileOAuthBearerConfig::jwks_min_refresh_pause_seconds`, and
+    /// `Broker::start` passes it into `JwksRefresher`. Strimzi's default is
+    /// 1 second, and this default is 1 second too.
     pub oauthbearer_jwks_min_on_demand_pause: Time,
 
     /// Independent compatibility and protocol feature gates.
     pub features: BrokerFeatureFlags,
 
     /// KIP-98 / KIP-939: how often the idle-transaction reaper scans for
-    /// `Ongoing` transactions whose timeout has elapsed and aborts them (2PC
-    /// transactions are never reaped). Mirrors Kafka's
+    /// `Ongoing` transactions whose timeout has elapsed and aborts them. The
+    /// reaper never reaps 2PC transactions. Mirrors Kafka's
     /// `transaction.abort.timed.out.transaction.cleanup.interval.ms` (10s).
-    /// A zero interval disables the reaper entirely (no background task
-    /// spawned) — the default in `for_tests` so unit/integration tests aren't
-    /// disturbed by a background abort; tests that exercise the reaper set it
-    /// explicitly low.
+    /// A zero interval disables the reaper entirely and spawns no background
+    /// task. Zero is the default in `for_tests`, so a background abort does
+    /// not disturb unit and integration tests. Tests that exercise the reaper
+    /// set this value low explicitly.
     pub txn_abort_cleanup_interval: Time,
 
-    /// KIP-848 next-gen consumer group protocol configuration. Controls
-    /// which rebalance protocols are advertised, session/heartbeat
-    /// timeout bounds, and the set of enabled server-side assignors.
+    /// KIP-848 next-gen consumer group protocol configuration. It controls
+    /// which rebalance protocols the broker advertises, the session and
+    /// heartbeat timeout bounds, and the set of enabled server-side
+    /// assignors.
     pub next_gen_consumer_group: Box<crate::coordinator::unified::config::NextGenConfig>,
 
     /// KIP-932 share-group configuration.
@@ -575,7 +590,7 @@ pub struct BrokerConfig {
     /// KIP-1071 streams-group (Streams rebalance protocol) configuration.
     pub streams_group: Box<crate::coordinator::unified::streams::config::StreamsGroupConfig>,
 
-    /// KIP-932 share-coordinator (persister) configuration. Controls the
+    /// KIP-932 share-coordinator (persister) configuration. It controls the
     /// `__share_group_state` internal topic geometry and snapshot folding.
     pub share_coordinator: Box<crate::share_coordinator::config::ShareCoordinatorConfig>,
 
@@ -594,66 +609,66 @@ pub struct BrokerConfig {
     pub cleaner_interval_override: Option<Time>,
 
     /// How often the TLS reload watcher polls cert / key /
-    /// client-CA file mtimes and rebuilds the `ServerConfig` if any
-    /// changed. Defaults to 30s. Set lower in tests to keep watcher
-    /// latency tight. A zero interval disables the periodic watcher
-    /// — callers can still trigger an immediate reload via
+    /// client-CA file mtimes and rebuilds the `ServerConfig` if any of them
+    /// changed. Defaults to 30s. Set it lower in tests to keep the watcher
+    /// latency small. A zero interval disables the periodic watcher. Callers
+    /// can still trigger an immediate reload with
     /// [`crate::BrokerHandle::reload_tls`].
     pub tls_reload_interval: Time,
 
-    /// Bind address for the Prometheus `/metrics` HTTP
-    /// endpoint. `None` disables the server entirely (the broker still
-    /// updates its internal counters, but nothing scrapes them).
-    /// Defaults to `Some(0.0.0.0:9404)` in production (the same port
-    /// the JMX exporter uses for vanilla Kafka), `None` in
-    /// `for_tests` so unit tests don't fight over port allocation.
+    /// Bind address for the Prometheus `/metrics` HTTP endpoint. `None`
+    /// disables the server entirely. The broker still updates its internal
+    /// counters, but nothing scrapes them. The default is
+    /// `Some(0.0.0.0:9404)` in production, the same port the JMX exporter
+    /// uses for vanilla Kafka. The default is `None` in `for_tests`, so unit
+    /// tests do not compete for port allocation.
     pub metrics_listen_addr: Option<SocketAddr>,
 
     /// CPU and heap profiling endpoint policy.
     pub profiling: crabka_telemetry::profiling::ProfilingConfig,
 
     /// Optional OTLP endpoint for KIP-714 client metrics forwarding.
-    /// Populated by binaries from their parsed runtime configuration rather
-    /// than read from the environment while the broker starts.
+    /// Binaries populate it from their parsed runtime configuration. The
+    /// broker does not read it from the environment at startup.
     pub client_metrics_otlp_endpoint: Option<String>,
 
     /// KIP-227: maximum number of incremental-fetch sessions kept in the
     /// per-broker cache. Each session tracks the (topic, partition) set a
-    /// client is subscribed to so subsequent fetches can be deltas. When
-    /// full, a non-privileged (consumer) session is evicted LRU; privileged
-    /// (follower-fetch) sessions are evicted only by other privileged
-    /// sessions. Matches Apache Kafka's `max.incremental.fetch.session.cache.slots`
-    /// (default 1000).
+    /// client is subscribed to, so later fetches can be deltas. When the
+    /// cache is full, the broker evicts a non-privileged (consumer) session
+    /// in LRU order. Only another privileged session evicts a privileged
+    /// (follower-fetch) session. Matches Apache Kafka's
+    /// `max.incremental.fetch.session.cache.slots` (default 1000).
     pub max_incremental_fetch_session_cache_slots: usize,
 
-    /// Maximum number of live broker connections across all listeners.
-    /// New connections accepted past this ceiling are closed immediately
-    /// (Kafka silently drops them). Matches Apache Kafka's
-    /// `max.connections`; default `usize::MAX` (unlimited, mirroring
-    /// Kafka's `Integer.MAX_VALUE`).
+    /// Maximum number of live broker connections across all listeners. The
+    /// broker immediately closes any new connection it accepts past this
+    /// ceiling; Kafka silently drops them. Matches Apache Kafka's
+    /// `max.connections`. The default is `usize::MAX`, which is unlimited
+    /// and mirrors Kafka's `Integer.MAX_VALUE`.
     pub max_connections: usize,
 
-    /// Maximum number of live connections from any single client IP.
-    /// Connections past this per-IP ceiling are closed immediately.
-    /// Matches Apache Kafka's `max.connections.per.ip`; default
-    /// `usize::MAX` (unlimited).
+    /// Maximum number of live connections from any single client IP. The
+    /// broker immediately closes connections past this per-IP ceiling.
+    /// Matches Apache Kafka's `max.connections.per.ip`. The default is
+    /// `usize::MAX`, which is unlimited.
     pub max_connections_per_ip: usize,
 
-    /// Partition disk-usage scan cadence. A zero interval
-    /// disables the scanner entirely (no background task spawned).
-    /// Production default: 60s. The scanner walks every known
-    /// (topic, partition) under `log_dir` each tick, sums regular-file
-    /// sizes, and updates the `partition_disk_bytes` gauge consumed by
-    /// the rebalancer's usage scraper.
+    /// Partition disk-usage scan cadence. A zero interval disables the
+    /// scanner entirely and spawns no background task. Production default:
+    /// 60s. On each tick the scanner walks every known (topic, partition)
+    /// under `log_dir`, sums the regular-file sizes, and updates the
+    /// `partition_disk_bytes` gauge that the rebalancer's usage scraper
+    /// reads.
     pub partition_disk_scan_interval: Time,
 
-    /// KIP-48: HMAC-SHA-256 master key used to mint + verify
-    /// delegation tokens. When `None`, the broker rejects all four
-    /// delegation-token RPCs with `DELEGATION_TOKEN_AUTH_DISABLED` and
-    /// SCRAM cannot fall back to token lookup. Sourced from
-    /// `CRABKA_DELEGATION_TOKEN_SECRET_KEY` (env wins) or
-    /// `[delegation_token] secret_key` in `broker.toml`. Wrapped in
-    /// `SecretBytes` so `Debug` redacts the bytes.
+    /// KIP-48: HMAC-SHA-256 master key that mints and verifies delegation
+    /// tokens. When `None`, the broker rejects all four delegation-token RPCs
+    /// with `DELEGATION_TOKEN_AUTH_DISABLED`, and SCRAM cannot fall back to
+    /// token lookup. The broker reads the key from
+    /// `CRABKA_DELEGATION_TOKEN_SECRET_KEY` or from `[delegation_token]
+    /// secret_key` in `broker.toml`; the environment variable wins. The key
+    /// is wrapped in `SecretBytes`, so `Debug` redacts the bytes.
     pub delegation_token_secret_key: Option<crabka_security::SecretBytes>,
 
     /// KIP-48: hard upper bound on delegation-token lifetime.
@@ -669,23 +684,22 @@ pub struct BrokerConfig {
     /// 1 hour (`delegation.token.expiry.check.interval.ms` in Kafka).
     pub delegation_token_expiry_check_interval: Time,
 
-    /// KIP-48: default renew period used as the *initial*
-    /// `expiry_timestamp_ms` offset at create time, and as the implicit
-    /// renew period when `RenewDelegationToken.renew_period_ms == -1`.
-    /// Distinct from `delegation_token_max_lifetime` (the absolute
-    /// ceiling that `expiry_timestamp_ms` can never be pushed past via
-    /// `Renew`): a fresh token gets `expiry_timestamp_ms = now +
-    /// min(default_renew_period, chosen_max_lifetime)` while
-    /// `max_timestamp_ms = now + chosen_max_lifetime`. Default 24 hours
+    /// KIP-48: default renew period. The broker uses it as the *initial*
+    /// `expiry_timestamp_ms` offset at create time, and as the implicit renew
+    /// period when `RenewDelegationToken.renew_period_ms == -1`. It differs
+    /// from `delegation_token_max_lifetime`, the absolute ceiling that
+    /// `Renew` can never push `expiry_timestamp_ms` past. A fresh token gets
+    /// `expiry_timestamp_ms = now + min(default_renew_period,
+    /// chosen_max_lifetime)` and `max_timestamp_ms = now +
+    /// chosen_max_lifetime`. Default 24 hours
     /// (`delegation.token.expiry.time.ms` in Kafka).
     pub delegation_token_default_renew_period: Time,
 
-    /// KIP-405: tiered-storage backend selection. `Some(_)`
-    /// enables tiered storage broker-wide (collapsing Kafka's
-    /// `remote.log.storage.system.enable` plus the RSM selection into one
-    /// knob) and spawns the `RemoteLogManager` copy task; per-topic
-    /// offload is still gated by `remote.storage.enable`. `None`
-    /// (default) leaves tiered storage off.
+    /// KIP-405: tiered-storage backend selection. `Some(_)` enables tiered
+    /// storage broker-wide and spawns the `RemoteLogManager` copy task. This
+    /// one field replaces Kafka's `remote.log.storage.system.enable` plus the
+    /// RSM selection. `remote.storage.enable` still gates per-topic offload.
+    /// `None` (default) leaves tiered storage off.
     ///
     /// TOML:
     /// - Local: `[remote_storage] storage_dir = "..."`
@@ -700,15 +714,17 @@ pub struct BrokerConfig {
     pub remote_log_manager_interval: Time,
 
     /// KIP-405: which RLMM the broker runs when tiered storage is enabled.
-    /// Defaults to [`RlmmKind::TopicBacked`] in production; [`RlmmKind::InMemory`]
-    /// for in-process tests. Ignored when `remote_storage_backend` is `None`.
+    /// It defaults to [`RlmmKind::TopicBacked`] in production, and to
+    /// [`RlmmKind::InMemory`] for in-process tests. The broker ignores it
+    /// when `remote_storage_backend` is `None`.
     pub remote_log_metadata: RlmmKind,
 
     /// Whether the audit subsystem is active (`FedRAMP` MLA).
     pub audit_enabled: bool,
     /// Internal topic name for audit records.
     pub audit_topic: String,
-    /// Path to the PKCS#8 Ed25519 audit checkpoint signing key (None = no checkpoints).
+    /// Path to the PKCS#8 Ed25519 audit checkpoint signing key. `None` means
+    /// no checkpoints.
     pub audit_signing_key_path: Option<std::path::PathBuf>,
     /// Key id recorded on checkpoints (for rotation).
     pub audit_signing_key_id: Option<String>,
@@ -716,7 +732,8 @@ pub struct BrokerConfig {
     pub audit_checkpoint_every_n: u64,
     /// Emit a checkpoint at least this often.
     pub audit_checkpoint_every: Time,
-    /// Directory for the durable audit spool (relative paths resolve under the broker's log dir).
+    /// Directory for the durable audit spool. A relative path resolves under
+    /// the broker's log dir.
     pub audit_spool_dir: std::path::PathBuf,
     /// Cap on the audit spool size.
     pub audit_spool_max: ByteSize,
@@ -734,9 +751,9 @@ pub struct KafkaRlmmConfig {
     pub dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     /// Maximum frame size for every Kafka metadata-log client.
     pub frame_max: crabka_client_core::ClientFrameMax,
-    /// `host:port` the manager dials to reach its own broker (loopback
-    /// in a single-broker setup, the inter-broker listener in a
-    /// multi-broker setup).
+    /// `host:port` the manager dials to reach its own broker. It is loopback
+    /// in a single-broker setup, and the inter-broker listener in a
+    /// multi-broker setup.
     pub bootstrap: String,
     /// Partition count to create `__remote_log_metadata` with on first
     /// startup. Ignored when the topic already exists.
@@ -759,18 +776,18 @@ pub struct KafkaRlmmConfig {
     pub fetch_retry_backoff: Time,
     /// Capacity of the shared metadata-event delivery queue.
     pub event_queue_capacity: crabka_remote_storage_topic::MetadataEventQueueCapacity,
-    /// Directory the RLMM cache snapshot is written to (one
-    /// `snapshot` file). Derived from the broker `log.dir`.
+    /// Directory the manager writes the RLMM cache snapshot to, as one
+    /// `snapshot` file. The broker derives the path from `log.dir`.
     pub snapshot_dir: std::path::PathBuf,
-    /// Client TLS/SASL security for the metadata client. `None` =
-    /// plaintext loopback (single-broker / fully-plaintext clusters).
-    /// The broker overrides this at runtime in `bootstrap_topic_rlmm`
-    /// from the inter-broker listener; the TOML path always supplies
-    /// `None`.
+    /// Client TLS/SASL security for the metadata client. `None` means
+    /// plaintext loopback, which suits single-broker and fully-plaintext
+    /// clusters. The broker overrides this at runtime in
+    /// `bootstrap_topic_rlmm` from the inter-broker listener. The TOML path
+    /// always supplies `None`.
     ///
-    /// Boxed to keep `KafkaRlmmConfig` (and the enclosing `BrokerConfig`)
-    /// small: `BrokerConfig` is moved by value into the large
-    /// `Broker::start` future.
+    /// The field is boxed to keep `KafkaRlmmConfig` and the enclosing
+    /// `BrokerConfig` small, because `Broker::start` moves `BrokerConfig` by
+    /// value into a large future.
     pub security: Option<Box<crabka_client_core::security::ClientSecurity>>,
 }
 
@@ -780,11 +797,11 @@ pub const DEFAULT_RLMM_SNAPSHOT_INTERVAL: Time = minutes(1);
 
 /// Which `RemoteLogMetadataManager` the broker runs when tiered storage is enabled.
 ///
-/// Topic-backed is the production default (matches Kafka's
-/// `TopicBasedRemoteLogMetadataManager`, the only production RLMM). In-memory
+/// Topic-backed is the production default. It matches Kafka's
+/// `TopicBasedRemoteLogMetadataManager`, the only production RLMM. In-memory
 /// is an explicit opt-out for in-process integration tests that have no real
-/// listener to loop the metadata client back to. Ignored entirely when
-/// [`BrokerConfig::remote_storage_backend`] is `None`.
+/// listener to loop the metadata client back to. The broker ignores this enum
+/// entirely when [`BrokerConfig::remote_storage_backend`] is `None`.
 #[derive(Debug, Clone)]
 pub enum RlmmKind {
     /// Durable `__remote_log_metadata`-backed manager. `cfg.bootstrap` and
@@ -818,7 +835,7 @@ impl Default for KafkaRlmmConfig {
 }
 
 impl KafkaRlmmConfig {
-    /// Validate the shared metadata transport and RLMM snapshot policy.
+    /// Validates the shared metadata transport and RLMM snapshot policy.
     ///
     /// # Errors
     ///
@@ -865,12 +882,13 @@ pub enum RemoteStorageBackend {
         /// Root directory for the segment store.
         dir: PathBuf,
     },
-    /// S3-compatible `S3RemoteStorage`. Production backend; works with
-    /// AWS S3, `MinIO`, Cloudflare R2, and GCS via S3 compatibility.
+    /// S3-compatible `S3RemoteStorage`. This is a production backend. It
+    /// works with AWS S3, `MinIO`, Cloudflare R2, and GCS through S3
+    /// compatibility.
     S3(crabka_remote_storage::S3Config),
-    /// Native Google Cloud Storage `S3RemoteStorage` engine. Production
-    /// backend for GKE deployments; supports keyless Workload Identity /
-    /// ADC auth (leave all credential fields unset).
+    /// Native Google Cloud Storage `S3RemoteStorage` engine. This is the
+    /// production backend for GKE deployments. It supports keyless Workload
+    /// Identity and ADC auth; leave all credential fields unset for that.
     Gcs(crabka_remote_storage::GcsConfig),
 }
 
@@ -981,11 +999,14 @@ pub const DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL: Time = hours(1);
 pub const DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD: Time = hours(24);
 
 impl BrokerConfig {
-    /// Helpful for tests: a config that listens on an OS-assigned port
-    /// under a tempdir.
+    /// Builds a test config that listens on an OS-assigned port under a
+    /// tempdir.
     #[must_use]
     /// # Panics
-    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
+    /// Panics if the synchronized log state is poisoned.
+    ///
+    /// Panics if a segment that validated as nonempty is unexpectedly missing
+    /// its required batch or index entry.
     pub fn for_tests(log_dir: PathBuf) -> Self {
         let listen_addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
         let controller_addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
@@ -1207,11 +1228,11 @@ impl BrokerConfig {
         Ok(())
     }
 
-    /// Validate the listener and auth configuration.
+    /// Validates the listener and auth configuration.
     ///
-    /// Called by [`crate::Broker::start`] before any side effects so
-    /// mis-configurations surface immediately with a descriptive error rather
-    /// than at first connection.
+    /// [`crate::Broker::start`] calls this before any side effects, so a
+    /// mis-configuration shows immediately with a descriptive error instead
+    /// of at the first connection.
     ///
     /// # Errors
     ///
@@ -1440,7 +1461,7 @@ impl BrokerConfig {
         self.validate_leader_rebalance()
     }
 
-    /// Build the validated Kafka record decompression policy.
+    /// Builds the validated Kafka record decompression policy.
     ///
     /// # Errors
     ///
@@ -1846,9 +1867,9 @@ impl BrokerConfig {
     }
 
     /// All log directories this broker stores partition data in, primary
-    /// first, de-duplicated. This is the placement + `DescribeLogDirs`
-    /// surface (KIP-113). `__cluster_metadata` is excluded — it lives on
-    /// [`log_dir`][Self::log_dir] only.
+    /// first and de-duplicated. This is the placement and `DescribeLogDirs`
+    /// surface (KIP-113). The list excludes `__cluster_metadata`, which lives
+    /// on [`log_dir`][Self::log_dir] only.
     #[must_use]
     pub fn all_log_dirs(&self) -> Vec<PathBuf> {
         let mut out = vec![self.log_dir.clone()];
@@ -1862,10 +1883,9 @@ impl BrokerConfig {
 
     /// Returns the effective listener list.
     ///
-    /// When [`listeners`][Self::listeners] is empty (the default),
-    /// synthesizes a single `PLAINTEXT` listener from the legacy
-    /// `listen_addr` + `advertised_listener` fields so all existing code
-    /// continues to work without changes.
+    /// When [`listeners`][Self::listeners] is empty (the default), this
+    /// method builds a single `PLAINTEXT` listener from the legacy
+    /// `listen_addr` and `advertised_listener` fields.
     #[must_use]
     pub fn effective_listeners(&self) -> Vec<ListenerSpec> {
         if !self.listeners.is_empty() {
@@ -2094,7 +2114,7 @@ impl Default for BrokerConfig {
     }
 }
 
-/// Rejects a non-positive time extent, naming the config field in the error.
+/// Rejects a non-positive time extent. The error names the config field.
 fn require_positive_time(name: &str, value: Time) -> Result<(), BrokerError> {
     if value <= <Time as TimeExt>::ZERO {
         return Err(BrokerError::InvalidRuntimeConfig(format!(
@@ -2104,7 +2124,7 @@ fn require_positive_time(name: &str, value: Time) -> Result<(), BrokerError> {
     Ok(())
 }
 
-/// Rejects a non-positive byte count, naming the config field in the error.
+/// Rejects a non-positive byte count. The error names the config field.
 fn require_positive_size(name: &str, value: ByteSize) -> Result<(), BrokerError> {
     if value <= <ByteSize as ByteSizeExt>::ZERO {
         return Err(BrokerError::InvalidRuntimeConfig(format!(

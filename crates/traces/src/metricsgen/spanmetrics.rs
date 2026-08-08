@@ -129,17 +129,21 @@ impl SpanMetricsRegistry {
 
     /// Emit the registry's RED series for this collection interval.
     ///
-    /// Counters (`calls_total`/`size_total`) and the latency histogram are
-    /// **cumulative**: the registry accumulates across intervals and emits the
-    /// running total each time (Tempo's persistent-registry semantics), so the
-    /// `_total` series are monotonic and the consuming PromQL/Mimir `rate()` /
-    /// `increase()` work. Previously `drain` reset the accumulator every interval,
-    /// emitting per-interval deltas under `_total` names — which `PromQL` reads as a
-    /// counter reset on (almost) every scrape, corrupting the headline RED rates.
-    /// Only the per-sample **exemplars** are drained each interval (they carry
-    /// their own timestamp and must not be re-emitted). The accumulator resets
-    /// only on process restart (the registry is rebuilt from WAL offsets), which
-    /// `PromQL` treats as a normal counter reset.
+    /// The counters `calls_total` and `size_total`, and the latency histogram,
+    /// are **cumulative**. The registry accumulates across intervals and emits
+    /// the running total each time, which is Tempo's persistent-registry
+    /// semantics. The `_total` series are therefore monotonic, and the
+    /// consuming PromQL or Mimir `rate()` and `increase()` work.
+    ///
+    /// An earlier `drain` reset the accumulator every interval and emitted
+    /// per-interval deltas under `_total` names. `PromQL` reads that as a
+    /// counter reset on almost every scrape, which corrupts the headline RED
+    /// rates.
+    ///
+    /// This drains only the per-sample **exemplars** each interval. They carry
+    /// their own timestamp and must not be re-emitted. The accumulator resets
+    /// only on a process restart, when the registry is rebuilt from WAL
+    /// offsets, and `PromQL` treats that as a normal counter reset.
     #[must_use]
     pub fn drain(&mut self, timestamp_ms: i64) -> Vec<Series> {
         let mut series = Vec::with_capacity(self.entries.len() * 3 + self.services.len());

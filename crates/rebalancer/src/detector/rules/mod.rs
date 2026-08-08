@@ -1,7 +1,7 @@
-//! Anomaly rules. Each rule inspects a `RuleCtx` and returns a list of
-//! currently-active anomalies. The tick loop diffs each rule's output
-//! against the open set in `AnomalyStore` to compute new vs. updated
-//! vs. resolved transitions.
+//! Anomaly rules. Each rule inspects a `RuleCtx` and returns a list of the
+//! anomalies that are active now. The tick loop diffs each rule's output
+//! against the open set in `AnomalyStore`, and from that it computes the new,
+//! updated, and resolved transitions.
 
 pub mod broker_death;
 pub mod disk_pressure;
@@ -22,8 +22,9 @@ use crate::{
     scraper::UsageStore,
 };
 
-/// Rule input — passed to every rule on each tick. Borrowed because
-/// rules don't own state (the tick loop owns the history + stores).
+/// Rule input. The tick loop passes it to every rule on each tick. It is
+/// borrowed because rules own no state: the tick loop owns the history and the
+/// stores.
 pub struct RuleCtx<'a> {
     pub snapshot: &'a ClusterState,
     pub history: &'a SnapshotHistory,
@@ -35,9 +36,9 @@ pub struct RuleCtx<'a> {
 
 /// A single anomaly detection rule.
 ///
-/// Implementations return ALL currently-active anomalies of their kind
-/// — not "newly fired". The tick loop computes new/resolved transitions
-/// by diffing against `AnomalyStore`.
+/// Implementations return ALL anomalies of their kind that are active now,
+/// not only the newly fired ones. The tick loop computes the new and resolved
+/// transitions by diffing against `AnomalyStore`.
 pub trait Rule: Send + Sync {
     fn kind(&self) -> AnomalyKind;
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<RuleHit>;

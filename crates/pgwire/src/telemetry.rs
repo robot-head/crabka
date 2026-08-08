@@ -1,24 +1,25 @@
 //! Session- and statement-scoped tracing for the `PostgreSQL` wire protocol.
 //!
-//! pgwire is the single ingress choke point for both gres engine
-//! implementations, so this module owns two things: the spans that describe one
-//! connection and the statements executed on it, and the policy that decides how
-//! much of a *client-supplied* trace context those spans are allowed to inherit.
+//! pgwire is the single ingress point for both gres engine implementations, so
+//! this module owns two things. It owns the spans that describe one connection
+//! and the statements executed on it. It also owns the policy that decides how
+//! much of a *client-supplied* trace context those spans may inherit.
 //!
 //! # Zero cost when off
 //!
-//! Every span here is emitted at `DEBUG` under the dedicated [`SESSION_TARGET`]
-//! target, which only the OTLP layer enables (see `crabka_gres::telemetry`). A
-//! disabled callsite costs a load and a branch — but its *field expressions
-//! still evaluate*, so anything more expensive than a field read is built behind
-//! an explicit `tracing::enabled!` check with a [`tracing::Span::none`]
-//! fallback. The two costs worth avoiding are the `getpeername` call behind
-//! [`session_span`]'s peer address (guarded by its caller) and the sqlcommenter
-//! scan in [`ingress_from_sql`] (guarded by the span it would attach to).
+//! This module emits every span at `DEBUG` under the dedicated
+//! [`SESSION_TARGET`] target, which only the OTLP layer enables. See
+//! `crabka_gres::telemetry`. A disabled callsite costs a load and a branch, but
+//! its *field expressions still evaluate*. Anything more expensive than a field
+//! read therefore sits behind an explicit `tracing::enabled!` check with a
+//! [`tracing::Span::none`] fallback. Two costs are worth avoiding: the
+//! `getpeername` call behind [`session_span`]'s peer address, which its caller
+//! guards, and the sqlcommenter scan in [`ingress_from_sql`], which the span it
+//! would attach to guards.
 //!
-//! Spans are built by hand rather than with `#[instrument]`: the attribute
-//! cannot express that guard, and every span here records outcome fields after
-//! the fact.
+//! This module builds spans by hand rather than with `#[instrument]`. The
+//! attribute cannot express that guard, and every span here records outcome
+//! fields after the fact.
 //!
 //! # Attributes
 //!
@@ -26,13 +27,14 @@
 //! exists (`db.*`, `network.*`, `error.type`), and are prefixed `pg.` where the
 //! value is `PostgreSQL`-specific. `otel.kind`, `otel.name`, `otel.status_code`
 //! and `otel.status_description` are the fields `tracing-opentelemetry` lifts
-//! onto the `OpenTelemetry` span itself rather than exporting as attributes —
-//! note `status_description`, not the `status_message` the semantic conventions
-//! name: the field the layer looks for is the one that has to be spelled here.
+//! onto the `OpenTelemetry` span itself rather than export as attributes. Note
+//! `status_description`, not the `status_message` the semantic conventions
+//! name. The field the layer looks for is the one this module must spell.
 //!
-//! `db.query.text` is deliberately **not** recorded here. Verbatim SQL is off by
-//! default behind `CRABKA_OTLP_SQL_TEXT` and is attached by the engine, which is
-//! also where the parsed statement needed for `db.query.summary` exists.
+//! This module deliberately does **not** record `db.query.text`. Verbatim SQL
+//! is off by default behind `CRABKA_OTLP_SQL_TEXT`, and the engine attaches it.
+//! The engine is also where the parsed statement that `db.query.summary` needs
+//! exists.
 
 use std::net::SocketAddr;
 
@@ -43,25 +45,25 @@ use crate::error::{PgError, sqlstate};
 
 /// `tracing` target carrying the pgwire session and statement spans.
 ///
-/// Spelled out rather than imported: `crabka-gres` names the same string in its
-/// default OTLP `EnvFilter`, but `crabka-pgwire` cannot depend on it without a
-/// cycle. The two must stay in step — `crabka_gres::telemetry` has a test that
-/// its filter enables every target.
+/// This crate spells the target out rather than imports it. `crabka-gres`
+/// names the same string in its default OTLP `EnvFilter`, but `crabka-pgwire`
+/// cannot depend on it without a cycle. The two must stay in step, and
+/// `crabka_gres::telemetry` has a test that its filter enables every target.
 pub const SESSION_TARGET: &str = "crabka_pgwire::session";
 
 /// Sampling ratio assumed when nothing configures one, matching
 /// `CRABKA_OTLP_SAMPLE_RATIO`'s own default.
 pub const DEFAULT_SAMPLE_RATIO: f64 = 1.0;
 
-/// A span status is a human-readable description, not a payload; a runaway
+/// A span status is a human-readable description, not a payload. A runaway
 /// engine message must not become the largest field on the span.
 const MAX_STATUS_MESSAGE_BYTES: usize = 512;
 
 /// The `sampled` bit of the W3C `traceparent` trace-flags byte.
 const TRACE_FLAG_SAMPLED: u8 = 0x01;
 
-/// `2^63`, exactly. The size of the space `TraceIdRatioBased` samples over: it
-/// compares the low 63 bits of the trace-id against `ratio * 2^63`.
+/// `2^63`, exactly. This is the size of the space `TraceIdRatioBased` samples
+/// over. It compares the low 63 bits of the trace-id against `ratio * 2^63`.
 const SAMPLING_SPACE: f64 = 9_223_372_036_854_775_808.0;
 
 /// How much of a client-supplied W3C trace context this server honours.
@@ -69,33 +71,33 @@ const SAMPLING_SPACE: f64 = 9_223_372_036_854_775_808.0;
 /// The client controls the `traceparent` it appends to its SQL, and the OTLP
 /// pipeline samples with `Sampler::ParentBased(TraceIdRatioBased(ratio))`. A
 /// *sampled* remote parent makes `ParentBased` return `RecordAndSample`
-/// unconditionally, so a client that stamps `-01` on every statement forces
-/// 100% export of every gres span it touches — on every range owner in the
-/// cluster. This is the knob that decides whether that is allowed.
+/// unconditionally. A client that stamps `-01` on every statement therefore
+/// forces 100% export of every gres span it touches, on every range owner in
+/// the cluster. This setting decides whether that is allowed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IngressTracePolicy {
     /// Ignore ingress context entirely. Gres traces are always its own.
     Off,
 
-    /// Record the client's context as an `OpenTelemetry` **link** rather than as
-    /// a parent, and let gres head-sample independently. Correlation without
-    /// ceding the sampling decision.
+    /// Record the client's context as an `OpenTelemetry` **link** rather than
+    /// as a parent, and let gres head-sample independently. This gives
+    /// correlation and keeps the sampling decision.
     Link,
 
     /// Accept the client's context as the parent, but **recompute** the sampled
     /// flag locally from the incoming trace-id at `ratio`.
     ///
-    /// Recompute, not clear: `ParentBased` returns `Drop` for a *non-sampled*
-    /// parent — it does not fall through to the root sampler — so clearing the
-    /// bit would drop exactly the statements the client took the trouble to
-    /// instrument. Because `TraceIdRatioBased` is a pure function of the
-    /// trace-id, a client and gres running at the same ratio agree by
-    /// construction and traces stay whole across the boundary.
+    /// Recompute, do not clear. `ParentBased` returns `Drop` for a
+    /// *non-sampled* parent and does not fall through to the root sampler, so
+    /// a cleared bit would drop exactly the statements the client took the
+    /// trouble to instrument. `TraceIdRatioBased` is a pure function of the
+    /// trace-id, so a client and gres at the same ratio agree by construction
+    /// and traces stay whole across the boundary.
     ///
     /// `ratio` must be the same value the OTLP pipeline was built with
-    /// (`CRABKA_OTLP_SAMPLE_RATIO`); it is carried here because pgwire has no
-    /// access to the tracer provider. Use [`IngressTracePolicy::resample`] to
-    /// build one from an unvalidated number.
+    /// (`CRABKA_OTLP_SAMPLE_RATIO`). This enum carries it because pgwire has
+    /// no access to the tracer provider. Use [`IngressTracePolicy::resample`]
+    /// to build one from an unvalidated number.
     Resample {
         /// Head-sampling ratio in `[0.0, 1.0]`.
         ratio: f64,
@@ -106,9 +108,9 @@ pub enum IngressTracePolicy {
 }
 
 impl Default for IngressTracePolicy {
-    /// [`IngressTracePolicy::Resample`] at [`DEFAULT_SAMPLE_RATIO`] — the client
-    /// gets to say *which* trace a statement belongs to, gres keeps the say over
-    /// how much of it is exported.
+    /// [`IngressTracePolicy::Resample`] at [`DEFAULT_SAMPLE_RATIO`]. The
+    /// client says *which* trace a statement belongs to, and gres keeps the
+    /// say over how much of that trace is exported.
     fn default() -> Self {
         Self::Resample {
             ratio: DEFAULT_SAMPLE_RATIO,
@@ -117,8 +119,8 @@ impl Default for IngressTracePolicy {
 }
 
 impl IngressTracePolicy {
-    /// Build a [`IngressTracePolicy::Resample`] policy, clamping `ratio` into
-    /// `[0.0, 1.0]` exactly as the OTLP pipeline clamps its own.
+    /// Build a [`IngressTracePolicy::Resample`] policy. This method clamps
+    /// `ratio` into `[0.0, 1.0]` exactly as the OTLP pipeline clamps its own.
     #[must_use]
     pub fn resample(ratio: f64) -> Self {
         Self::Resample {
@@ -131,7 +133,8 @@ impl IngressTracePolicy {
     }
 
     /// Relate `span` to the client context in `carrier` according to this
-    /// policy. A no-op for an empty carrier or a disabled span.
+    /// policy. This method does nothing for an empty carrier or a disabled
+    /// span.
     pub fn attach(self, carrier: &TraceCarrier, span: &tracing::Span) {
         if carrier.is_empty() || span.is_disabled() {
             return;
@@ -147,10 +150,11 @@ impl IngressTracePolicy {
 
 /// Re-render `carrier` with the sampled flag recomputed locally at `ratio`.
 ///
-/// The carrier's `traceparent` has already been validated and re-rendered by
-/// [`TraceCarrier::from_w3c`], so the round trip through [`TraceCarrier::span_context`]
-/// cannot lose anything. Trace-flag bits other than `sampled` are preserved: the
-/// W3C specification requires unknown flags to be forwarded untouched.
+/// [`TraceCarrier::from_w3c`] has already validated and re-rendered the
+/// carrier's `traceparent`, so the round trip through
+/// [`TraceCarrier::span_context`] cannot lose anything. This function keeps
+/// every trace-flag bit other than `sampled`, because the W3C specification
+/// requires unknown flags to be forwarded untouched.
 fn resampled(carrier: &TraceCarrier, ratio: f64) -> TraceCarrier {
     let Some(context) = carrier.span_context() else {
         return TraceCarrier::default();
@@ -170,11 +174,12 @@ fn resampled(carrier: &TraceCarrier, ratio: f64) -> TraceCarrier {
 
 /// The `TraceIdRatioBased` head-sampling decision for `trace_id`.
 ///
-/// A byte-for-byte restatement of `opentelemetry_sdk`'s
-/// `sample_based_on_probability`, which is what makes a client and gres running
-/// at the same ratio reach the same answer for the same trace. Reimplemented
-/// rather than called because `opentelemetry_sdk` is an exporter-side dependency
-/// that has no business inside a wire-protocol crate.
+/// This is a byte-for-byte restatement of `opentelemetry_sdk`'s
+/// `sample_based_on_probability`, which is what makes a client and gres at the
+/// same ratio reach the same answer for the same trace. This crate
+/// reimplements it rather than calls it, because `opentelemetry_sdk` is an
+/// exporter-side dependency that does not belong inside a wire-protocol
+/// crate.
 fn sampled_by_ratio(trace_id: [u8; 16], ratio: f64) -> bool {
     if ratio >= 1.0 {
         return true;
@@ -214,13 +219,13 @@ impl StatementProtocol {
 
 /// Build the per-connection `gres.session` span.
 ///
-/// `peer` is the only attribute known at connection time; the startup
-/// parameters, backend pid and TLS decision arrive later and are filled in by
-/// [`record_session_startup`] and [`record_session_tls`].
+/// `peer` is the only attribute known at connection time. The startup
+/// parameters, the backend pid, and the TLS decision arrive later, and
+/// [`record_session_startup`] and [`record_session_tls`] fill them in.
 ///
-/// Callers should build this behind a `tracing::enabled!` check — resolving the
-/// peer address is a syscall, and the argument evaluates whether or not the
-/// callsite is enabled.
+/// Callers should build this behind a `tracing::enabled!` check. The peer
+/// address resolves through a syscall, and the argument evaluates whether or
+/// not the callsite is enabled.
 #[must_use]
 pub fn session_span(peer: Option<SocketAddr>) -> tracing::Span {
     let span = tracing::debug_span!(
@@ -247,11 +252,11 @@ pub fn session_span(peer: Option<SocketAddr>) -> tracing::Span {
     span
 }
 
-/// Record the attributes a connection only learns once its `StartupMessage` has
-/// been read and its backend id allocated.
+/// Record the attributes a connection only learns after it reads its
+/// `StartupMessage` and allocates its backend id.
 ///
-/// Takes the raw startup parameters so the three lookups happen only when the
-/// span is live.
+/// This function takes the raw startup parameters, so the three lookups happen
+/// only when the span is live.
 pub fn record_session_startup(
     span: &tracing::Span,
     startup_params: &[(String, String)],
@@ -285,10 +290,10 @@ pub fn record_session_tls(span: &tracing::Span, tls: bool) {
 
 /// Build the `gres.statement` span covering one executed statement message.
 ///
-/// `otel.name` stays [`tracing::field::Empty`]: the engine records
-/// `db.query.summary` onto it once the statement has been parsed, and until then
-/// the span keeps its generic name. Every outcome field is declared here so the
-/// caller can fold the statement's result onto it with
+/// `otel.name` stays [`tracing::field::Empty`]. The engine records
+/// `db.query.summary` onto it once it has parsed the statement, and until then
+/// the span keeps its generic name. This function declares every outcome
+/// field, so the caller can fold the statement's result onto the span with
 /// [`record_statement_rows`] and [`record_statement_error`].
 #[must_use]
 pub fn statement_span(protocol: StatementProtocol) -> tracing::Span {
@@ -311,7 +316,7 @@ pub fn statement_span(protocol: StatementProtocol) -> tracing::Span {
 
 /// Build the `gres.parse` span.
 ///
-/// `Parse` earns a span of its own because it is not always local work: for a
+/// `Parse` earns a span of its own because it is not always local work. For a
 /// sharded table the gateway forwards the prepare to the range owner, a real
 /// network hop that would otherwise be invisible between `Query` boundaries.
 #[must_use]
@@ -345,7 +350,7 @@ pub fn bind_span(portal: &str, statement: &str) -> tracing::Span {
 }
 
 /// Build the `gres.describe` span. `kind` is the wire byte: `S` for a prepared
-/// statement, `P` for a portal.
+/// statement, and `P` for a portal.
 #[must_use]
 pub fn describe_span(kind: u8, name: &str) -> tracing::Span {
     tracing::debug_span!(
@@ -371,7 +376,7 @@ fn describe_kind(kind: u8) -> &'static str {
 
 /// Record the result size of one statement, once, after the caller's page loop.
 ///
-/// Streaming sinks get no spans of their own: a 100k-row result would emit a
+/// Streaming sinks get no spans of their own. A 100k-row result would emit a
 /// hundred page spans that the exporter drops, for one number an operator can
 /// read off the statement.
 pub fn record_statement_rows(span: &tracing::Span, rows: usize, pages: usize) {
@@ -382,8 +387,8 @@ pub fn record_statement_rows(span: &tracing::Span, rows: usize, pages: usize) {
     span.record("pg.result_pages", pages);
 }
 
-/// Fold a failed statement's outcome onto its `gres.statement` span, including
-/// the cancellation flag when the failure was a `CancelRequest`.
+/// Fold a failed statement's outcome onto its `gres.statement` span. This
+/// includes the cancellation flag when the failure was a `CancelRequest`.
 pub fn record_statement_error(span: &tracing::Span, error: &PgError) {
     record_error(span, error);
     if error.code == sqlstate::QUERY_CANCELED {
@@ -395,13 +400,13 @@ pub fn record_statement_error(span: &tracing::Span, error: &PgError) {
 
 /// Mark `span` failed.
 ///
-/// Only the error case is ever recorded: `tracing-opentelemetry` leaves a span
-/// `Unset` without an `otel.status_code`, and `Unset` — not `OK` — is what the
-/// `OpenTelemetry` specification says a *server* span means by success.
+/// This module records only the error case. `tracing-opentelemetry` leaves a
+/// span `Unset` without an `otel.status_code`, and the `OpenTelemetry`
+/// specification says a *server* span means success by `Unset`, not by `OK`.
 ///
 /// `db.response.status_code` and `error.type` both carry the five-character
 /// SQLSTATE, which is the correctly low-cardinality discriminator for a
-/// `PostgreSQL` failure; the message goes in `otel.status_description`,
+/// `PostgreSQL` failure. The message goes in `otel.status_description`,
 /// truncated.
 pub fn record_error(span: &tracing::Span, error: &PgError) {
     if span.is_disabled() {
@@ -433,13 +438,13 @@ fn truncate_message(message: &str) -> &str {
 /// to it under `policy`, and return the carrier so the extended protocol can
 /// reuse it at `Execute` time.
 ///
-/// The SQL text is never rewritten. `crabka_pgparser`'s lexer discards comments
-/// without emitting a token, so the tag changes no AST — and the parser keeps
-/// the original string, so a `ParseError`'s byte offset still points at the
-/// right character in the SQLSTATE 42601 the client receives.
+/// This function never rewrites the SQL text. `crabka_pgparser`'s lexer
+/// discards comments without a token, so the tag changes no AST. The parser
+/// also keeps the original string, so a `ParseError`'s byte offset still
+/// points at the right character in the SQLSTATE 42601 the client receives.
 ///
-/// A malformed `traceparent` yields an empty carrier and nothing else: a bad
-/// trace header must never fail the query it rode in on, and
+/// A malformed `traceparent` yields an empty carrier and nothing else. A bad
+/// trace header must never fail the query that carried it, and
 /// [`TraceCarrier::from_w3c`] never embeds the offending input in its error.
 ///
 /// [sqlcommenter]: https://google.github.io/sqlcommenter/
@@ -481,9 +486,9 @@ mod tests {
             .to_bytes()
     }
 
-    /// The sampling decision is what keeps a client and gres agreeing about one
-    /// trace, so it is pinned against the ratios either side of each boundary
-    /// rather than merely exercised.
+    /// The sampling decision is what keeps a client and gres in agreement
+    /// about one trace. This test therefore pins it against the ratios on
+    /// either side of each boundary rather than only exercises it.
     #[test]
     fn ratio_sampling_is_a_pure_function_of_the_trace_id() {
         let low = trace_id_of(LOW_TRACE);
@@ -512,7 +517,7 @@ mod tests {
         }
     }
 
-    /// `Resample` must *recompute* the flag: clearing it unconditionally would
+    /// `Resample` must *recompute* the flag. An unconditional clear would
     /// make `ParentBased` drop every statement a client had instrumented.
     #[test]
     fn resample_rewrites_only_the_sampled_bit() {
@@ -622,9 +627,9 @@ mod tests {
         tracing::subscriber::with_default(tracing_subscriber::registry(), f)
     }
 
-    /// Which statements yield a client context, and which are discarded — a
-    /// hostile or absent `traceparent` must never fail the statement it rode in
-    /// on, so every rejection is silent.
+    /// Which statements yield a client context, and which the server
+    /// discards. A hostile or absent `traceparent` must never fail the
+    /// statement that carried it, so every rejection is silent.
     #[test]
     fn ingress_extraction_follows_the_policy_and_never_fails_a_statement() {
         let cases: [(&str, IngressTracePolicy, &str, Option<&str>); 7] = [

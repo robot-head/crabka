@@ -1,9 +1,10 @@
 //! Integration tests for the `ca-renewal-check` `CronJob` entry
 //! (`crabka_operator::controller::cluster_ca::run_renewal_check`).
 //!
-//! Each test seeds the mock client with canned CA + broker-keystore Secrets
-//! (using real PEM material from `crabka_security::ca`), calls
-//! `run_renewal_check`, and asserts on the observed request log.
+//! Each test fills the mock client with canned CA Secrets and
+//! broker-keystore Secrets, which hold real PEM material from
+//! `crabka_security::ca`. It then calls `run_renewal_check` and asserts on
+//! the observed request log.
 
 use assert2::{assert, check};
 #[path = "shared/mod.rs"]
@@ -41,7 +42,7 @@ fn pem_secret(name: &str, namespace: &str, entries: &[(&str, &str)]) -> serde_js
     })
 }
 
-/// Build a `KafkaList` body that contains a single Kafka object.
+/// Builds a `KafkaList` body that holds one Kafka object.
 fn kafka_list_body(name: &str, namespace: &str, generate_ca: bool) -> serde_json::Value {
     let mut cluster_ca_spec = serde_json::json!({
         "generateCertificateAuthority": generate_ca,
@@ -70,8 +71,8 @@ fn kafka_list_body(name: &str, namespace: &str, generate_ca: bool) -> serde_json
     })
 }
 
-/// Build a minimal Kafka status GET response (for the `get_status` call
-/// inside `flag_ca_if_expiring`).
+/// Builds a minimal Kafka status GET response for the `get_status` call
+/// inside `flag_ca_if_expiring`.
 fn kafka_status_body(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -82,8 +83,8 @@ fn kafka_status_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Faked Event creation response — kube-rs POSTs Events and needs a body
-/// that deserializes back into an `Event`.
+/// A faked Event creation response. kube-rs POSTs an Event and needs a
+/// body that deserializes back into an `Event`.
 fn fake_event_body(namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1",
@@ -103,14 +104,15 @@ fn fake_event_body(namespace: &str) -> serde_json::Value {
 // Test 1: broker leaf certs within renewal window → reissued
 // ---------------------------------------------------------------------------
 
-/// Seed a broker keystore Secret with a leaf cert whose `notAfter` is
-/// 5 days out (< 30-day renewal window). `run_renewal_check` must:
-///   1. PATCH the broker-keystore Secret with a new `0.crt` (i.e. make
-///      exactly one PATCH to the `-kafka-brokers` Secret).
+/// The test seeds a broker keystore Secret with a leaf cert whose
+/// `notAfter` is 5 days away, which is inside the 30-day renewal window.
+/// `run_renewal_check` must:
+///   1. PATCH the broker-keystore Secret with a new `0.crt`. That is
+///      exactly one PATCH to the `-kafka-brokers` Secret.
 ///   2. POST a `Normal` Event with reason `BrokerCertRenewed`.
 ///
-/// The cluster CA and clients CA are intentionally fresh (365-day validity)
-/// so the CA-expiry path is NOT triggered.
+/// The cluster CA and the clients CA are fresh, with a 365-day validity,
+/// and this is on purpose. The CA-expiry path must NOT run.
 #[tokio::test]
 async fn cronjob_reissues_aging_broker_leafs() {
     let ns = "default";
@@ -307,15 +309,19 @@ async fn cronjob_reissues_aging_broker_leafs() {
 // Test 2: expiring cluster CA → Warning event + status PATCH, no CA rotation
 // ---------------------------------------------------------------------------
 
-/// Seed a cluster CA with `notAfter = now + 25 days` (< 30-day renewal
-/// window). The `CronJob` does not flag rotation disruptively — it
-/// nudges the reconciler. `run_renewal_check` must:
-///   1. NOT PATCH the cluster-ca Secret (the reconciler owns rotation).
-///   2. PATCH the Kafka CR metadata stamping `crabka.io/ca-renew-after`.
+/// The test seeds a cluster CA with `notAfter = now + 25 days`, which is
+/// inside the 30-day renewal window.
+///
+/// The `CronJob` does not flag the rotation in a disruptive way. It only
+/// signals the reconciler. `run_renewal_check` must:
+///   1. NOT PATCH the cluster-ca Secret, because the reconciler owns the
+///      rotation.
+///   2. PATCH the metadata of the Kafka CR and stamp
+///      `crabka.io/ca-renew-after` on it.
 ///   3. POST a `Normal` Event with reason `CaRenewalScheduled`.
 ///
-/// Clients CA and broker keystore are fresh / absent so they don't trigger
-/// additional paths.
+/// The clients CA is fresh and the broker keystore is absent, so neither
+/// starts another path.
 #[tokio::test]
 async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
     let ns = "default";
@@ -485,11 +491,13 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
 // Test 3: BYO CA expiring → ByoCaExpiringSoon Warning, no CA PATCH, no status
 // ---------------------------------------------------------------------------
 
-/// Seed a BYO CA (`generateCertificateAuthority: false`) with an expiring
-/// `notAfter`. `run_renewal_check` must:
+/// The test seeds a BYO CA, which has
+/// `generateCertificateAuthority: false`, with a `notAfter` that is near.
+/// `run_renewal_check` must:
 ///   1. NOT PATCH the CA Secret.
 ///   2. POST a `Warning` Event with reason `ByoCaExpiringSoon`.
-///   3. NOT set a `CaRotationRequired` status condition (BYO = admin's responsibility).
+///   3. NOT set a `CaRotationRequired` status condition, because the admin
+///      owns a BYO CA.
 #[tokio::test]
 async fn cronjob_byo_ca_expiring_emits_byo_event() {
     let ns = "default";

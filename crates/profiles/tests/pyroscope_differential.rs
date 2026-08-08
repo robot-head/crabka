@@ -154,25 +154,27 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     Ok(())
 }
 
-/// Differential coverage for the two RPCs the grafana-pyroscope-app v2.0.7 "all
-/// services" drilldown grid issues *before* it decides whether to fan out the
-/// per-panel time-series queries:
+/// Differential coverage for the two RPCs that the grafana-pyroscope-app v2.0.7
+/// "all services" drilldown grid issues before it decides whether to fan out
+/// the per-panel time-series queries:
 ///
-///   * `querier.v1.QuerierService/GetProfileStats` (empty request body), and
+///   * `querier.v1.QuerierService/GetProfileStats` with an empty request body,
+///     and
 ///   * `querier.v1.QuerierService/Series` with `matchers:[]` and
-///     `labelNames:["service_name","__profile_type__"]` (and, as a control, the
-///     full-label-set form `labelNames:[]`).
+///     `labelNames:["service_name","__profile_type__"]`. As a control, the test
+///     also issues the full-label-set form `labelNames:[]`.
 ///
-/// If the drilldown shows "No data" on every panel without a JS error, the most
-/// likely cause is a response *shape* deviation in one of these two RPCs that
-/// makes the app's response parser silently bail (rather than throw). This test
-/// ingests one identical goroutine profile into both real Pyroscope and crabka,
-/// issues the exact same calls to both, and compares the responses field by
-/// field: JSON key casing, presence/absence of a spurious empty labelset, label
-/// key NAMES + ORDER within each set, the SET of `(service_name,__profile_type__)`
-/// tuples, `int64`-as-string-vs-number for the `GetProfileStats` times, and any
-/// extra/missing top-level fields. It always prints both raw bodies under
-/// `--nocapture` so the deviation (if any) is quotable.
+/// If the drilldown shows "No data" on every panel and reports no JS error, the
+/// most likely cause is a response shape deviation in one of these two RPCs.
+/// Such a deviation makes the response parser of the app stop silently instead
+/// of throw. This test ingests one identical goroutine profile into both real
+/// Pyroscope and crabka, issues the same calls to both, and compares the
+/// responses field by field. The compared fields are the JSON key casing, the
+/// presence or absence of a spurious empty labelset, the label key NAMES and
+/// ORDER within each set, the SET of `(service_name,__profile_type__)` tuples,
+/// `int64`-as-string-vs-number for the `GetProfileStats` times, and any extra
+/// or missing top-level fields. The test always prints both raw bodies under
+/// `--nocapture`, so a deviation is quotable.
 #[tokio::test]
 #[ignore = "requires Docker and the mirror.gcr.io/grafana/pyroscope image"]
 async fn real_pyroscope_series_and_stats_match_crabka_after_identical_ingest() -> TestResult {
@@ -343,9 +345,9 @@ async fn real_pyroscope_series_and_stats_match_crabka_after_identical_ingest() -
     Ok(())
 }
 
-/// `GetProfileStats` is "ready" once the backend reports any ingested data; in
-/// canonical proto-JSON `dataIngested:false` is omitted, so treat a present-and-
-/// true `dataIngested` as the readiness signal.
+/// `GetProfileStats` is "ready" once the backend reports any ingested data.
+/// Canonical proto-JSON omits `dataIngested:false`, so a present and true
+/// `dataIngested` is the readiness signal.
 fn profile_stats_has_data(value: &Value) -> bool {
     value
         .get("dataIngested")
@@ -355,17 +357,19 @@ fn profile_stats_has_data(value: &Value) -> bool {
 }
 
 /// A `Series` response is "ready" once it carries at least one non-empty label
-/// set (the `labelsSet` key; the `labels_set` spelling is accepted as a
-/// fallback).
+/// set under the `labelsSet` key. This function also accepts the `labels_set`
+/// spelling.
 fn series_has_labelsets(value: &Value) -> bool {
     series_label_sets(value).is_some_and(|sets| sets.iter().any(|set| !set.is_empty()))
 }
 
-/// Extract the `Series` label sets as ordered `(name, value)` vectors, preserving
-/// the on-the-wire key order within each set. Accepts either the `labelsSet` key
-/// (canonical proto-JSON / connect-go) or the `labels_set` spelling.
-/// Returns `None` only when neither key is present at all (which is itself a
-/// shape signal distinct from "present but empty").
+/// Extracts the `Series` label sets as ordered `(name, value)` vectors and keeps
+/// the on-the-wire key order within each set.
+///
+/// The function accepts the `labelsSet` key of canonical proto-JSON and
+/// connect-go, or the `labels_set` spelling. It returns `None` only when
+/// neither key is present. That state is itself a shape signal, and it differs
+/// from "present but empty".
 fn series_label_sets(value: &Value) -> Option<Vec<Vec<(String, String)>>> {
     let sets = value
         .get("labelsSet")
@@ -393,10 +397,12 @@ fn series_label_sets(value: &Value) -> Option<Vec<Vec<(String, String)>>> {
     )
 }
 
-/// True if the `Series` response contains a label set that, as an unordered
-/// `(name,value)` collection, equals `tuple`. Used both as a Pyroscope readiness
-/// predicate and as the crabka assertion target. Order-insensitive within the
-/// set because key order is checked separately by [`assert_series_key_order`].
+/// True if the `Series` response contains a label set that equals `tuple` as an
+/// unordered `(name,value)` collection.
+///
+/// The test uses this both as a Pyroscope readiness predicate and as the crabka
+/// assertion target. The comparison ignores order within the set, because
+/// [`assert_series_key_order`] checks key order separately.
 fn series_contains_tuple(value: &Value, tuple: &[(String, String)]) -> bool {
     let want = tuple.iter().cloned().collect::<BTreeSet<_>>();
     series_label_sets(value).is_some_and(|sets| {
@@ -405,17 +411,20 @@ fn series_contains_tuple(value: &Value, tuple: &[(String, String)]) -> bool {
     })
 }
 
-/// Compare a *projected* `Series` response (the drilldown's
-/// `labelNames=[service_name,__profile_type__]` call) between Pyroscope and
-/// crabka along the axes that gate the drilldown:
-///   1. the wire key (`labelsSet` vs `labels_set` vs absent),
+/// Compares a projected `Series` response between Pyroscope and crabka.
+///
+/// A projected response comes from the drilldown's
+/// `labelNames=[service_name,__profile_type__]` call. The comparison covers the
+/// axes that gate the drilldown:
+///   1. the wire key, `labelsSet` or `labels_set` or absent,
 ///   2. absence of a spurious empty `{}` label set on the crabka side,
-///   3. the shared `(api, goroutines:...)` tuple is present on BOTH (this is the
-///      core regression: crabka must return it even with no time range), and
+///   3. the shared `(api, goroutines:...)` tuple is present on BOTH. This is
+///      the core regression: crabka must return it even with no time range.
 ///   4. the per-set key ORDER agrees for that shared tuple.
 ///
-/// The FULL set of tuples is intentionally not compared: real Pyroscope also
-/// self-instruments, so its enumeration is a strict superset of crabka's.
+/// The comparison deliberately leaves out the FULL set of tuples. Real
+/// Pyroscope also self-instruments, so its enumeration is a strict superset of
+/// crabka's.
 fn assert_series_drilldown_compatible(
     pyroscope: &Value,
     crabka: &Value,
@@ -457,9 +466,11 @@ fn assert_series_drilldown_compatible(
     assert_series_key_order("Series(projected)", pyroscope, crabka, shared_tuple)
 }
 
-/// Compare a *full-label-set* `Series` response (`labelNames=[]`) between the two
-/// backends: no spurious empty set on either side, and crabka returns the full
-/// label set for the shared `api` series (not a projection or an empty set).
+/// Compares a full-label-set `Series` response between the two backends.
+///
+/// The full-label-set form is `labelNames=[]`. The check confirms that neither
+/// side has a spurious empty set, and that crabka returns the full label set
+/// for the shared `api` series and not a projection or an empty set.
 fn assert_series_full_compatible(pyroscope: &Value, crabka: &Value) -> TestResult {
     let py_key = series_wire_key(pyroscope);
     let cr_key = series_wire_key(crabka);
@@ -514,9 +525,9 @@ fn assert_series_full_compatible(pyroscope: &Value, crabka: &Value) -> TestResul
     Ok(())
 }
 
-/// For the shared tuple, assert the per-set key ORDER matches between the two
-/// backends. Both sides project onto the requested `labelNames`, so the on-the-
-/// wire key order should be identical.
+/// Asserts that the per-set key ORDER of the shared tuple matches between the
+/// two backends. Both sides project onto the requested `labelNames`, so the
+/// on-the-wire key order must be identical.
 fn assert_series_key_order(
     label: &str,
     pyroscope: &Value,
@@ -552,22 +563,24 @@ fn series_wire_key(value: &Value) -> Option<&'static str> {
     }
 }
 
-/// Compare `GetProfileStats` between Pyroscope and crabka. The Drilldown only
-/// gates on `dataIngested` being truthy; the time window is used to seed a
-/// default range, not to decide whether to fan out panel queries. So this checks
-/// the axes that could actually break the app's parser or its gate:
-///   1. the `dataIngested` wire key (casing) + truthiness, and
-///   2. for any time field *present on both sides*, the int64-as-string-vs-
-///      number JSON representation.
+/// Compares `GetProfileStats` between Pyroscope and crabka.
 ///
-/// What is intentionally NOT a failure: a time field present on one side and
-/// omitted on the other, or differing timestamp magnitudes. Canonical proto-JSON
-/// omits fields equal to their zero default, and the goroutine pprof carries no
-/// `time_nanos`, so the two backends legitimately disagree on whether
-/// `oldestProfileTime` is 0 (omitted) or the ingest instant. A `0`-vs-now
-/// `oldestProfileTime` does not stop the drilldown from issuing panel queries;
-/// treating it as a hard failure would be a false positive. The deviation is
-/// still surfaced via the always-on `eprintln!` of both raw bodies.
+/// The Drilldown gates only on a truthy `dataIngested`. It uses the time window
+/// to seed a default range, not to decide whether to fan out panel queries.
+/// This function therefore checks the axes that can break the parser of the app
+/// or its gate:
+///   1. the casing of the `dataIngested` wire key and its truthiness, and
+///   2. for any time field present on both sides, the
+///      int64-as-string-vs-number JSON representation.
+///
+/// Two states are deliberately NOT a failure: a time field present on one side
+/// and omitted on the other, and different timestamp magnitudes. Canonical
+/// proto-JSON omits fields equal to their zero default, and the goroutine pprof
+/// carries no `time_nanos`. The two backends therefore disagree legitimately on
+/// whether `oldestProfileTime` is 0, which proto-JSON omits, or the ingest
+/// instant. A `0`-vs-now `oldestProfileTime` does not stop the drilldown from
+/// issuing panel queries, so a hard failure there would be a false positive.
+/// The always-on `eprintln!` of both raw bodies still shows the deviation.
 fn assert_get_profile_stats_compatible(pyroscope: &Value, crabka: &Value) -> TestResult {
     let py_obj = pyroscope
         .as_object()
@@ -633,10 +646,12 @@ fn stats_field_key(
     }
 }
 
-/// A stats boolean is truthy if present and `true`, or present as a non-zero
-/// number (Pyroscope's proto types `data_ingested` as bool, but tolerate a
-/// numeric encoding so an int-vs-bool deviation surfaces as a *representation*
-/// difference, not a crash).
+/// A stats boolean is truthy if it is present and `true`, or present as a
+/// non-zero number.
+///
+/// Pyroscope's proto types `data_ingested` as a bool. This function also
+/// accepts a numeric encoding, so an int-vs-bool deviation shows as a
+/// representation difference and not as a crash.
 fn stats_truthy(
     obj: &serde_json::Map<String, Value>,
     camel: &'static str,
@@ -651,8 +666,9 @@ fn stats_truthy(
         || value.as_str().is_some_and(|s| s == "true" || s == "1")
 }
 
-/// Classify a JSON number-ish value as `"string"` or `"number"` so int64-as-
-/// string (canonical proto-JSON) vs int64-as-number deviations are caught.
+/// Classifies a JSON number-like value as `"string"` or `"number"`. The
+/// classification catches deviations between int64-as-string, which canonical
+/// proto-JSON uses, and int64-as-number.
 fn json_number_repr(value: &Value) -> Option<&'static str> {
     if value.is_string() {
         Some("string")
@@ -2183,11 +2199,15 @@ fn connect_diff_differential_rejects_tick_drift() {
 //       X-Scope-OrgID header injection.
 // ---------------------------------------------------------------------------
 
-/// Regression for the Grafana-compat bug surfaced by `grafana_renders_crabka_profiles_end_to_end`:
-/// Grafana's built-in Pyroscope datasource is a connect-go client that issues unary requests
-/// with `Content-Type: application/proto` and rejects any 200 response whose content-type does
-/// not echo `application/proto`. The Docker-free reproduction sends a real `application/proto`
-/// `ProfileTypes` request and asserts the response content-type echoes it. (Docker-free, runs in CI.)
+/// Regression for the Grafana-compat bug that
+/// `grafana_renders_crabka_profiles_end_to_end` found.
+///
+/// Grafana's built-in Pyroscope datasource is a connect-go client. It issues
+/// unary requests with `Content-Type: application/proto` and rejects any 200
+/// response whose content-type does not echo `application/proto`. This
+/// reproduction sends a real `application/proto` `ProfileTypes` request and
+/// asserts that the response content-type echoes it. The test needs no Docker
+/// and runs in CI.
 #[tokio::test]
 async fn querier_echoes_proto_content_type_for_proto_requests() -> TestResult {
     let store = WalTailProfileStore::new();
@@ -2337,8 +2357,9 @@ async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
     Ok(())
 }
 
-/// Build a tiny, deterministic single-sample-type CPU pprof (gzipped) with two known
-/// functions (`main.work`, `main.hotloop`) so the flamegraph names are assertable.
+/// Builds a small, deterministic single-sample-type CPU pprof in gzip form. It
+/// holds the two known functions `main.work` and `main.hotloop`, so the
+/// flamegraph names are assertable.
 fn synthetic_cpu_pprof(time_nanos: i64) -> TestResult<Vec<u8>> {
     // string_table: 0="" 1="cpu" 2="nanoseconds" 3=main.work 4=main.hotloop 5="app.go"
     let profile = proto::Profile {
@@ -2476,9 +2497,9 @@ impl CrabkaPublic {
     }
 }
 
-/// Like `start_crabka_pair`, but binds the querier on all interfaces so the Grafana
-/// container can reach it via `host.docker.internal:<port>`. The distributor stays
-/// host-local (the test pushes to it directly).
+/// Like `start_crabka_pair`, but binds the querier on all interfaces so the
+/// Grafana container can reach it at `host.docker.internal:<port>`. The
+/// distributor stays host-local, because the test pushes to it directly.
 async fn start_crabka_public(
     sink: CapturingSink,
     store: WalTailProfileStore,
@@ -2611,10 +2632,13 @@ struct GrafanaQuery<'a> {
     to_ms: i64,
 }
 
-/// Collect the function names and a positive-value flag returned for a profile query,
-/// driven through Grafana. Tries the real `/api/ds/query` Explore path first (the backend
-/// plugin applies the datasource's X-Scope-OrgID header), then the data-source proxy →
-/// Crabka flamebearer as a best-effort second source. The union is returned.
+/// Collects the function names and a positive-value flag that a profile query
+/// returns through Grafana.
+///
+/// The function tries the real `/api/ds/query` Explore path first, where the
+/// backend plugin applies the X-Scope-OrgID header of the datasource. It then
+/// tries the data-source proxy to the Crabka flamebearer as a best-effort
+/// second source. It returns the union of both.
 async fn grafana_profile_evidence(
     client: &reqwest::Client,
     query: &GrafanaQuery<'_>,
@@ -2690,9 +2714,10 @@ async fn ds_query_profile(client: &reqwest::Client, query: &GrafanaQuery<'_>) ->
         .map_err(|err| format!("/api/ds/query returned non-JSON `{text}`: {err}").into())
 }
 
-/// Walk the Grafana dataframe response column-major: collect every string cell as a
-/// candidate frame name and flag any strictly-positive numeric cell. Schema-agnostic so it
-/// tolerates Grafana version drift in field names.
+/// Walks the Grafana dataframe response column-major. It collects every string
+/// cell as a candidate frame name and flags any strictly-positive numeric cell.
+/// The walk is schema-agnostic, so it tolerates Grafana version drift in field
+/// names.
 fn evidence_from_ds_query(value: &Value) -> (BTreeSet<String>, bool) {
     let mut names = BTreeSet::new();
     let mut positive = false;
@@ -2724,9 +2749,9 @@ fn evidence_from_ds_query(value: &Value) -> (BTreeSet<String>, bool) {
     (names, positive)
 }
 
-/// Best-effort: query Crabka's legacy flamebearer render through Grafana's data-source
-/// proxy. Returns `None` if the proxy route is unavailable (then `/api/ds/query` carries
-/// the test).
+/// Queries Crabka's legacy flamebearer render through Grafana's data-source
+/// proxy on a best-effort basis. Returns `None` if the proxy route is not
+/// available. The `/api/ds/query` path then carries the test.
 async fn proxy_render(client: &reqwest::Client, query: &GrafanaQuery<'_>) -> Option<Value> {
     let render_query = format!("{}{}", query.profile_type, query.selector);
     let encoded = url::form_urlencoded::Serializer::new(String::new())

@@ -1,4 +1,4 @@
-//! Load driver + report aggregator for the Crabka vs Strimzi benchmark
+//! Load driver and report aggregator for the Crabka vs Strimzi benchmark
 //! harness on Kubernetes.
 //!
 //! Scenarios describe a target Kafka stack, a workload shape, and optional
@@ -9,20 +9,20 @@
 //!
 //! The crate ships two binaries:
 //!
-//! - `crabka-bench-driver` — runs one scenario against one Kafka stack
-//!   (Crabka or Strimzi/Kafka), captures throughput / latency / disturbance
-//!   data, queries Prometheus for resource usage, and writes a single
-//!   `RunOutput` JSON file.
+//! - `crabka-bench-driver` — runs one scenario against one Kafka stack,
+//!   either Crabka or Strimzi/Kafka. It captures throughput, latency, and
+//!   disturbance data, queries Prometheus for resource usage, and writes a
+//!   single `RunOutput` JSON file.
 //! - `crabka-bench-report` — walks a directory of `RunOutput` files,
-//!   groups them by scenario name, and emits a side-by-side Markdown
+//!   groups them by scenario name, and writes a side-by-side Markdown
 //!   summary.
 //!
 //! ## Dimensioned values
 //!
-//! Sizes, durations, and rates are [`crabka_units`] quantities throughout, not
-//! bare numbers: a scenario's `msg_size` is a `ByteSize`, its `linger` and
+//! Sizes, durations, and rates are [`crabka_units`] quantities throughout, and
+//! not bare numbers. A scenario's `msg_size` is a `ByteSize`, its `linger` and
 //! `duration` are a `Time`, and a paced run's `rate` is a `Frequency`. The
-//! operator writes them with units (`512B`, `5ms`, `20000/s`) and the measured
+//! operator writes them with units (`512B`, `5ms`, `20000/s`), and the measured
 //! `RunOutput` encodes them as exact integers. See [`scenario`] for the
 //! encoding of each field and [`docs/uom-adoption.md`] for the vocabulary.
 //!

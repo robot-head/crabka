@@ -1,7 +1,8 @@
-//! SP34: uncorrelated subquery expressions — scalar `(SELECT …)`, `x [NOT] IN
-//! (SELECT …)`, `[NOT] EXISTS (…)`, and `x op ANY|SOME|ALL (…)` — end-to-end over
-//! the wire (simple query protocol → exercises the engine's own execution + text
-//! encoding), plus the 21000 / 42601 error surface.
+//! SP34: uncorrelated subquery expressions, end-to-end over the wire.
+//!
+//! Covers scalar `(SELECT …)`, `x [NOT] IN (SELECT …)`, `[NOT] EXISTS (…)`, and
+//! `x op ANY|SOME|ALL (…)`, plus the 21000 / 42601 error surface. The simple
+//! query protocol exercises the engine's own execution and text encoding.
 
 use std::sync::Arc;
 
@@ -173,9 +174,10 @@ async fn error_surface() {
     );
 }
 
-/// A subquery in FROM may omit its alias, as it has since `PostgreSQL` 16. Several
-/// unnamed subqueries can appear in one FROM without colliding, and the columns
-/// they expose are usable unqualified.
+/// A subquery in FROM may omit its alias, as it has since `PostgreSQL` 16.
+///
+/// Several unnamed subqueries can appear in one FROM without collision, and the
+/// columns they expose are usable unqualified.
 #[tokio::test]
 async fn a_from_subquery_may_omit_its_alias() {
     use assert2::assert;

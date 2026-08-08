@@ -3,16 +3,18 @@
 //! The parser lifts every `f(…) OVER …` call out of the expression tree onto
 //! [`SelectStmt::window_calls`] and leaves a
 //! [`crabka_pgparser::ast::window_placeholder`] column reference behind. This
-//! module is the plan node that fills those columns in: it takes the rows the
-//! `WHERE` (and, for a grouped query, the `GROUP BY`/`HAVING`) already produced,
-//! appends one synthetic column per window call, and hands the widened rows back
-//! to the ordinary projection path. Windowing therefore sits exactly where
-//! `PostgreSQL` puts it — above `WHERE`/`GROUP BY`/`HAVING`, below `DISTINCT`,
-//! `ORDER BY` and `LIMIT` — without any other expression code knowing it exists.
+//! module is the plan node that fills those columns in. It takes the rows the
+//! `WHERE` already produced, and for a grouped query the rows the
+//! `GROUP BY`/`HAVING` produced. It appends one synthetic column per window
+//! call, and it hands the widened rows back to the ordinary projection path.
 //!
-//! Aggregates used as window functions are folded by [`crate::agg`] over the
-//! frame's rows, so every aggregate the engine implements is usable over a
-//! window with no per-aggregate work here.
+//! Windowing therefore sits exactly where `PostgreSQL` puts it: above
+//! `WHERE`/`GROUP BY`/`HAVING`, and below `DISTINCT`, `ORDER BY` and `LIMIT`.
+//! No other expression code knows it exists.
+//!
+//! [`crate::agg`] folds aggregates used as window functions over the frame's
+//! rows. Every aggregate the engine implements is therefore usable over a
+//! window, with no per-aggregate work here.
 
 use std::{cmp::Ordering, collections::HashMap};
 
@@ -72,8 +74,10 @@ impl WindowFunc {
     }
 }
 
-/// Is `name` a window-only function — one that `PostgreSQL` refuses without an
-/// `OVER` clause (42809) rather than reporting an undefined function?
+/// Is `name` a window-only function?
+///
+/// `PostgreSQL` refuses such a function without an `OVER` clause and raises
+/// 42809. It does not report an undefined function.
 #[must_use]
 pub(crate) fn is_window_only_function(name: &str) -> bool {
     !matches!(WindowFunc::classify(name), WindowFunc::Aggregate)
@@ -107,7 +111,7 @@ pub(crate) fn has_window_calls(s: &SelectStmt) -> bool {
     !s.window_calls.is_empty()
 }
 
-/// Does `expr` (or a subexpression) stand in for a window call?
+/// Does `expr`, or a subexpression of it, stand in for a window call?
 fn contains_placeholder(expr: &Expr) -> bool {
     if crabka_pgparser::ast::window_placeholder_index(expr).is_some() {
         return true;
@@ -170,8 +174,8 @@ fn reject_clause(expr: Option<&Expr>, clause: &str) -> Result<(), ExecError> {
 }
 
 /// `PostgreSQL` rejects a window call in every clause evaluated at or below the
-/// window plan node (42P20). Checked before the `WHERE` runs, so the placeholder
-/// column never reaches expression evaluation.
+/// window plan node, with 42P20. This function checks before the `WHERE` runs,
+/// so the placeholder column never reaches expression evaluation.
 pub(crate) fn reject_misplaced_calls(s: &SelectStmt) -> Result<(), ExecError> {
     if !has_window_calls(s) {
         return Ok(());
@@ -214,9 +218,9 @@ struct PlannedCall {
     filter: Option<Expr>,
     spec: WindowSpec,
     result_ty: ColumnType,
-    /// The type an `unknown` literal `RANGE` offset adopts — the one the
-    /// ordering column's `in_range` support function declares. `None` when no
-    /// bound is written as a bare literal.
+    /// The type an `unknown` literal `RANGE` offset adopts. This is the type
+    /// the ordering column's `in_range` support function declares. `None` when
+    /// no bound is written as a bare literal.
     range_offset_ty: Option<ColumnType>,
 }
 
@@ -253,7 +257,7 @@ fn lookup_window<'a>(
         })
 }
 
-/// Fold `OVER (w …)` onto the window `w` names, applying `PostgreSQL`'s three
+/// Fold `OVER (w …)` onto the window `w` names, with `PostgreSQL`'s three
 /// override rules.
 fn merge_base(
     spec: &WindowSpec,
@@ -290,8 +294,8 @@ fn merge_base(
     })
 }
 
-/// Validate one call's shape and resolve its result type against `scope` — the
-/// scope its arguments are written against.
+/// Validate one call's shape and resolve its result type against `scope`, which
+/// is the scope its arguments are written against.
 fn plan_call(
     call: &WindowCall,
     windows: &[(String, WindowSpec)],
@@ -372,8 +376,8 @@ fn plan_call(
 ///
 /// `PostgreSQL` reports 42809 when the call resolves to a real function and
 /// 42883 when nothing of that name and argument list exists at all, so the
-/// scalar resolver decides which — `upper(t) OVER ()` is 42809, `nosuchfn()
-/// OVER ()` and `abs(t) OVER ()` are 42883.
+/// scalar resolver decides which one. `upper(t) OVER ()` is 42809.
+/// `nosuchfn() OVER ()` and `abs(t) OVER ()` are 42883.
 fn over_on_plain_function(call: &FuncCall, scope: &Scope) -> ExecError {
     match crate::eval::infer_type(&Expr::Func(call.clone()), scope) {
         Ok(_) => ExecError::FunctionError {
@@ -387,8 +391,9 @@ fn over_on_plain_function(call: &FuncCall, scope: &Scope) -> ExecError {
     }
 }
 
-/// `PostgreSQL`'s 42883 for a window call no signature accepts, spelling the
-/// argument types the way its "function … does not exist" message does.
+/// `PostgreSQL`'s 42883 for a window call no signature accepts, with the
+/// argument types spelled the way its "function … does not exist" message
+/// spells them.
 fn undefined_window_function(name: &str, args: &[Expr], scope: &Scope) -> ExecError {
     let mut spelled = Vec::with_capacity(args.len());
     for arg in args {
@@ -418,7 +423,7 @@ fn require_arity(
 
 /// The counting argument of `ntile`/`lag`/`lead`/`nth_value` is declared
 /// `integer`. `PostgreSQL` widens `smallint` into it implicitly and lets an
-/// `unknown` literal adopt it, but there is no `bigint` or `numeric` overload —
+/// `unknown` literal adopt it, but there is no `bigint` or `numeric` overload.
 /// `lag(v, 1::bigint)` is 42883 there, not a narrowing cast.
 fn require_integer_arg(
     name: &str,
@@ -437,9 +442,9 @@ fn require_integer_arg(
 }
 
 /// `lag`/`lead`'s `anycompatible` result: the value argument's type unified with
-/// the default's, with an `unknown` literal on either side adopting the other.
-/// A pair with no common type is 42883, exactly as an unresolvable
-/// `anycompatible` is in `PostgreSQL`.
+/// the default's. An `unknown` literal on either side adopts the other. A pair
+/// with no common type is 42883, exactly as an unresolvable `anycompatible` is
+/// in `PostgreSQL`.
 fn compatible_value_type(
     name: &str,
     args: &[Expr],
@@ -472,8 +477,8 @@ fn extend_scope(scope: &Scope, calls: &[PlannedCall], names: &[String]) -> Scope
 }
 
 /// The scope a SELECT's expressions resolve against once its window results are
-/// bound — the shape `RowDescription` is derived from, for `Describe` as much as
-/// for execution.
+/// bound. `RowDescription` is derived from this shape, for `Describe` as much
+/// as for execution.
 pub(crate) fn describe_scope(s: &SelectStmt, scope: &Scope) -> Result<Scope, ExecError> {
     let windows = resolve_window_clause(&s.windows)?;
     let mut calls = Vec::with_capacity(s.window_calls.len());
@@ -491,8 +496,8 @@ pub(crate) type WindowOutput = (Vec<FieldDescription>, Vec<ColumnType>, Vec<Vec<
 /// Run a SELECT whose projection, `DISTINCT ON` keys or `ORDER BY` calls window
 /// functions, over the rows `WHERE` already kept.
 ///
-/// Returns the output field descriptions, their types, and the projected rows —
-/// `DISTINCT`, `ORDER BY`, `OFFSET` and `LIMIT` all applied, exactly as the
+/// Returns the output field descriptions, their types, and the projected rows.
+/// `DISTINCT`, `ORDER BY`, `OFFSET` and `LIMIT` are all applied, exactly as the
 /// non-window path applies them.
 pub(crate) fn execute(
     s: &SelectStmt,
@@ -591,9 +596,10 @@ fn canonical_call_indices(s: &SelectStmt) -> Vec<usize> {
 
 /// Rewrite every window placeholder in `expr` onto its canonical call.
 ///
-/// Only the sort and dedup keys are canonicalized: the select list keeps every
-/// call as written, because `PostgreSQL` evaluates two textually identical calls
-/// separately (`first_value(random()) OVER w` twice gives two values).
+/// This function canonicalizes only the sort and dedup keys. The select list
+/// keeps every call as written, because `PostgreSQL` evaluates two textually
+/// identical calls separately. `first_value(random()) OVER w` written twice
+/// gives two values.
 fn canonicalize_calls(
     expr: &Expr,
     canonical: &[usize],
@@ -616,7 +622,7 @@ fn canonicalize_calls(
 
 /// The window plan node's input: the rows it runs over, the scope they resolve
 /// against, and the select-list / sort / `DISTINCT ON` expressions rewritten to
-/// match when grouping lowered them onto synthetic columns.
+/// match when the grouping step lowered them onto synthetic columns.
 struct WindowInput {
     scope: Scope,
     rows: Vec<Vec<Datum>>,
@@ -627,7 +633,7 @@ struct WindowInput {
     calls: Option<Vec<WindowCall>>,
 }
 
-/// Is this SELECT grouped — does anything below the window node aggregate?
+/// Is this SELECT grouped? Does anything below the window node aggregate?
 fn is_grouped(s: &SelectStmt, out_exprs: &[Expr], calls: &[WindowCall]) -> bool {
     !s.group_by.is_empty()
         // `GROUP BY GROUPING SETS (())` has no grouping expression at all, yet it
@@ -763,10 +769,10 @@ fn grouped_leaf_expr(index: usize) -> Expr {
 /// The `GROUP BY` list is resolved against the *original* select list first,
 /// because a SQL92 output reference (`GROUP BY 1`, `GROUP BY <alias>`) names a
 /// column of that list, not of the leaf projection that replaces it. That list
-/// is the one already resolved against the window-widened scope: resolving it
-/// again against the source scope alone cannot see the window results, so a
-/// window query's `GROUP BY 1` would report the select list's window column as
-/// an unknown one.
+/// is the one already resolved against the window-widened scope. A second
+/// resolution against the source scope alone cannot see the window results, so
+/// a window query's `GROUP BY 1` would report the select list's window column
+/// as an unknown one.
 fn grouped_leaf_select(
     s: &SelectStmt,
     scope: &Scope,
@@ -816,7 +822,7 @@ fn is_output_label(s: &SelectStmt, expr: &Expr) -> bool {
 }
 
 /// Replace every maximal window-free subexpression of `expr` with a reference to
-/// the grouped leaf projection, registering it there on first sight.
+/// the grouped leaf projection, and register it there on first sight.
 fn split(expr: &Expr, leaves: &mut Vec<Expr>) -> Result<Expr, ExecError> {
     if crabka_pgparser::ast::window_placeholder_index(expr).is_some() {
         return Ok(expr.clone());
@@ -1145,7 +1151,7 @@ fn order_cmp(a: &[Datum], b: &[Datum], order_by: &[OrderItem]) -> Ordering {
     crate::exec::order_cmp(a, b, order_by)
 }
 
-/// Group row indices by partition key, keeping first-appearance order.
+/// Group row indices by partition key, and keep first-appearance order.
 fn partitions(keys: &[Vec<Datum>], len: usize) -> Vec<Vec<usize>> {
     if keys.first().is_none_or(Vec::is_empty) {
         return vec![(0..len).collect()];
@@ -1164,7 +1170,8 @@ fn partitions(keys: &[Vec<Datum>], len: usize) -> Vec<Vec<usize>> {
     out
 }
 
-/// A frame whose offsets have been evaluated (they may not reference the row).
+/// A frame whose offsets have been evaluated. The offsets may not reference the
+/// row.
 enum ResolvedFrame {
     /// `PostgreSQL`'s default: `RANGE UNBOUNDED PRECEDING AND CURRENT ROW`.
     Default,
@@ -1340,10 +1347,10 @@ fn validate_range_offsets(
     Ok(used)
 }
 
-/// The offset type an `unknown` literal adopts for each ordering-column type —
-/// the one `PostgreSQL`'s `in_range` support function for that column declares,
-/// which is what its "invalid input syntax for type …" names when the literal
-/// does not parse.
+/// The offset type an `unknown` literal adopts for each ordering-column type.
+/// This is the type `PostgreSQL`'s `in_range` support function for that column
+/// declares, and it is what its "invalid input syntax for type …" message names
+/// when the literal does not parse.
 fn range_offset_unknown_type(column: ColumnType) -> Option<ColumnType> {
     match column {
         ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 | ColumnType::Numeric(_) => {
@@ -1516,7 +1523,8 @@ fn is_negative(value: &Datum, ctx: &EvalCtx) -> Result<bool, ExecError> {
 
 /// Is `value` a floating-point or `numeric` `NaN`? `NaN` sorts above every other
 /// value, so a row ordered by one has no arithmetic neighbourhood and `PostgreSQL`
-/// frames it exactly like a NULL — and never admits it to another row's frame.
+/// frames it exactly like a NULL. `PostgreSQL` never admits it to another row's
+/// frame.
 fn is_nan(value: &Datum) -> bool {
     match value {
         Datum::Float4(f) => f.is_nan(),
@@ -1555,7 +1563,7 @@ fn offset_count(value: &Datum) -> usize {
 }
 
 /// One planned window call together with the frame its `OVER` clause resolved
-/// to — the pair every position of the partition is evaluated against.
+/// to. Every position of the partition is evaluated against this pair.
 struct FramedCall<'a> {
     call: &'a PlannedCall,
     frame: &'a ResolvedFrame,
@@ -1651,7 +1659,7 @@ fn nth_frame_value(
 }
 
 /// `lag`/`lead`: the value `offset` rows behind/ahead in the partition,
-/// independent of the frame, falling back to the `default` argument.
+/// independent of the frame. It falls back to the `default` argument.
 fn offset_value(
     call: &PlannedCall,
     partition: &Partition<'_>,
@@ -1706,13 +1714,13 @@ fn offset_value(
     )?)
 }
 
-/// `ntile`'s bucket run over one partition, reproducing `PostgreSQL`'s streaming
-/// `window_ntile` exactly.
+/// `ntile`'s bucket run over one partition, which reproduces `PostgreSQL`'s
+/// streaming `window_ntile` exactly.
 ///
 /// The bucket count is read from the argument ONCE per partition and reused for
 /// every later row, so `ntile(<non-constant>)` follows the partition's FIRST row
 /// in window order and a zero on any later row is never even looked at. A NULL
-/// there is the one case that does not arm the run: that row alone is NULL and
+/// there is the one case that does not arm the run. That row alone is NULL and
 /// the next row re-reads the argument, which is what `PostgreSQL`'s
 /// "first call" test does when it returns NULL before storing any state.
 #[derive(Default)]
@@ -1788,9 +1796,9 @@ fn positive_count(
     Ok(Some(count))
 }
 
-/// Fold an ordinary aggregate over the frame's rows by running it as a bare
-/// aggregate query — so every aggregate the engine implements, including its
-/// empty-input value, works over a window with no per-aggregate code here.
+/// Fold an ordinary aggregate over the frame's rows, and run it as a bare
+/// aggregate query. Every aggregate the engine implements then works over a
+/// window with no per-aggregate code here, including its empty-input value.
 fn aggregate_over_frame(
     call: &PlannedCall,
     partition: &Partition<'_>,
@@ -1817,8 +1825,9 @@ fn aggregate_over_frame(
         .unwrap_or(Datum::Null))
 }
 
-/// `SELECT <aggregate>` over the frame rows — no FROM (the rows are supplied
-/// directly), no grouping, no result-level modifiers.
+/// `SELECT <aggregate>` over the frame rows. There is no FROM, because the
+/// caller supplies the rows directly. There is no grouping, and there are no
+/// result-level modifiers.
 fn bare_aggregate_select(call: &FuncCall) -> SelectStmt {
     SelectStmt {
         projection: vec![SelectItem::Expr {
@@ -1841,7 +1850,7 @@ fn bare_aggregate_select(call: &FuncCall) -> SelectStmt {
     }
 }
 
-/// The positions (within the ordered partition) the frame spans, before
+/// The positions within the ordered partition that the frame spans, before
 /// `EXCLUDE` is applied.
 fn frame_positions(
     frame: &ResolvedFrame,
@@ -1887,13 +1896,13 @@ fn as_i64(value: usize) -> i64 {
 }
 
 /// A row count as `f64` for `percent_rank`/`cume_dist`. The conversion is
-/// lossless through `u32`; a partition wider than that cannot be materialized.
+/// lossless through `u32`. A partition wider than that cannot be materialized.
 fn as_f64(value: usize) -> f64 {
     f64::from(u32::try_from(value).unwrap_or(u32::MAX))
 }
 
-/// Resolve one frame bound to a position (possibly outside `0..total`, which the
-/// caller clamps into an empty or truncated frame).
+/// Resolve one frame bound to a position. The position may fall outside
+/// `0..total`, and the caller clamps it into an empty or truncated frame.
 fn bound_position(
     mode: FrameMode,
     bound: &ResolvedBound,
@@ -1972,11 +1981,11 @@ fn bound_position(
 /// `RANGE <offset> PRECEDING/FOLLOWING`: the bound is the first (for a start) or
 /// last (for an end) row whose ordering value has reached `current ± offset` in
 /// the direction the `ORDER BY` sorts. A NULL ordering value has no arithmetic,
-/// so its frame is exactly its own peer group — the run of NULLs.
+/// so its frame is exactly its own peer group, which is the run of NULLs.
 /// `current ∓ offset` for a `RANGE` bound.
 ///
 /// An integer ordering column computes in a wider domain and CLAMPS on overflow,
-/// as `PostgreSQL`'s integer `in_range` support functions do — `RANGE BETWEEN
+/// as `PostgreSQL`'s integer `in_range` support functions do. `RANGE BETWEEN
 /// 2147483647 PRECEDING AND 2147483647 FOLLOWING` over an `integer` column is a
 /// whole-partition frame there, not an out-of-range error.
 fn offset_limit(
@@ -2013,8 +2022,9 @@ fn offset_limit(
 
 /// What `current ± offset` bounds a `RANGE` frame at.
 enum RangeLimit {
-    /// The bound reaches past every ordering value there is — `PostgreSQL`'s
-    /// infinity-against-infinity case, which admits everything except `NaN`.
+    /// The bound reaches past every ordering value there is. This is
+    /// `PostgreSQL`'s infinity-against-infinity case, which admits everything
+    /// except `NaN`.
     EveryOrderedValue,
     Value(Datum),
 }

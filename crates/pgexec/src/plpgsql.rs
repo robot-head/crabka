@@ -1,8 +1,8 @@
 //! Small PL/pgSQL interpreter layered on the ordinary SQL executor.
 //!
 //! The procedural layer owns only control flow and lexical variables. Embedded
-//! SQL remains ordinary parsed SQL and therefore keeps the session's MVCC,
-//! locking, constraint, savepoint, and command-tag behaviour.
+//! SQL stays ordinary parsed SQL, so it keeps the session's MVCC, locking,
+//! constraint, savepoint, and command-tag behaviour.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -436,9 +436,9 @@ pub(crate) async fn execute_table_function(
     Ok(collector.rows)
 }
 
-/// Execute the expression/control subset of a scalar PL/pgSQL function from
-/// the synchronous row evaluator. SQL-bearing bodies continue to use the
-/// session interpreter; they cannot borrow an async session from scalar eval.
+/// Execute the expression and control subset of a scalar PL/pgSQL function from
+/// the synchronous row evaluator. SQL-bearing bodies keep using the session
+/// interpreter, because they cannot borrow an async session from scalar eval.
 pub(crate) fn eval_scalar_function(
     routine: &Routine,
     values: &[Datum],
@@ -471,7 +471,7 @@ pub(crate) fn eval_scalar_function(
 }
 
 /// Whether a scalar body needs the owning SQL session rather than the pure
-/// expression/control interpreter.
+/// expression and control interpreter.
 pub(crate) fn scalar_function_requires_session(
     catalog: &dyn crabka_pgkv::Kv,
     routine: &Routine,

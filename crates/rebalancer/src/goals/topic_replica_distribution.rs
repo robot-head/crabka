@@ -1,10 +1,9 @@
 //! Soft goal: per-topic, balance replica counts across brokers.
 //!
-//! Distinct from `ReplicaDistribution`, which balances cluster-wide
-//! replica counts (sum across all topics). A cluster can be evenly
-//! balanced overall while one topic is concentrated on a single
-//! broker — that case is invisible to `ReplicaDistribution` but
-//! fixed by this goal.
+//! This differs from `ReplicaDistribution`, which balances cluster-wide
+//! replica counts, summed across all topics. A cluster can be evenly balanced
+//! overall while one topic sits on a single broker. `ReplicaDistribution`
+//! cannot see that case, and this goal fixes it.
 
 use std::collections::{HashMap, HashSet};
 

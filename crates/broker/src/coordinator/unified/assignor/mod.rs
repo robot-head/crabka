@@ -22,10 +22,10 @@ pub struct MemberSubscription {
 pub struct TopicMetadata {
     pub partitions_per_topic: HashMap<Uuid, i32>,
     /// Per-`(topic_id, partition_index)` set of racks on which the
-    /// partition has at least one replica. Empty (or the key missing
-    /// entirely) for partitions whose replicas have no rack info — the
-    /// assignor then falls back to its non-rack-aware behavior.
-    /// Populated by the coordinator's metadata snapshot.
+    /// partition has at least one replica. The value is empty, or the key
+    /// is missing, for partitions whose replicas have no rack info. The
+    /// assignor then falls back to its non-rack-aware behavior. The
+    /// coordinator's metadata snapshot fills this map.
     pub partition_racks: HashMap<(Uuid, i32), Vec<String>>,
 }
 

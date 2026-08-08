@@ -102,8 +102,10 @@ async fn cardinality_label_values_inner<S: MetricStore>(
     .into_response()
 }
 
-/// Resolve the series set a cardinality request operates on: the selector match
-/// when a `selector` is provided, otherwise every active series for the tenant.
+/// Resolves the series set a cardinality request operates on.
+///
+/// The result is the selector match when the request gives a `selector`. If the
+/// request gives no `selector`, the result is every active series for the tenant.
 async fn cardinality_series<S: MetricStore>(
     state: &PrometheusApiState<S>,
     tenant: &str,

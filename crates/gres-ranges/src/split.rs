@@ -154,7 +154,8 @@ pub struct ConvertTableCommand {
 pub enum SplitOperation {
     /// A proper interval split.
     Split,
-    /// A whole-range move through the same checkpoint/restore/prologue/park path.
+    /// A whole-range move through the same checkpoint, restore, prologue, and
+    /// park path.
     Move,
     /// Adjacent ranges folded into the left range id.
     Merge,
@@ -178,7 +179,7 @@ pub enum SplitStep {
     CommitMapVersion,
     /// Start successor restore from the predecessor checkpoint.
     StartSuccessorRestore,
-    /// Run successor fence/prologue before serving.
+    /// Run the successor fence and prologue before serving.
     SuccessorFencePrologue,
     /// Copy in-doubt markers whose keys belong to the successor interval.
     InheritInDoubtMarkers,
@@ -511,7 +512,7 @@ pub trait SplitStateStore: Send + Sync {
 /// Idempotent side-effect seams used by the orchestrator.
 #[async_trait::async_trait]
 pub trait SplitHooks: Send + Sync {
-    /// Pause writes before the conversion checkpoint/rewrite pass starts.
+    /// Pause writes before the conversion checkpoint and rewrite pass starts.
     async fn pause_conversion_writes(&self, state: &SplitState) -> Result<(), SplitError>;
     /// Force a durable predecessor checkpoint.
     async fn force_predecessor_checkpoint(
@@ -555,7 +556,7 @@ pub trait SplitHooks: Send + Sync {
     async fn park_predecessor(&self, state: &SplitState) -> Result<(), SplitError>;
     /// Park the right-side predecessor after a merge.
     async fn park_right_predecessor(&self, state: &SplitState) -> Result<(), SplitError>;
-    /// Unpause serving once the operation is complete.
+    /// Unpause serving after the operation completes.
     async fn unpause_serving(&self, state: &SplitState) -> Result<(), SplitError>;
 }
 
@@ -853,7 +854,7 @@ pub enum SplitError {
         /// Offending key.
         key: RangeKey,
     },
-    /// Conversion was attempted while an unresolved prepared marker still existed.
+    /// A conversion started while an unresolved prepared marker still existed.
     #[error("table {table_id} conversion found in-doubt prepared transaction {transaction_id}")]
     ConversionInDoubtPrepared {
         /// Table being converted.
@@ -875,7 +876,7 @@ pub enum SplitError {
     /// A split side-effect seam failed.
     #[error("split hook failed: {0}")]
     Hook(String),
-    /// A required integration operation was not supplied to the production hook adapter.
+    /// The caller did not supply a required integration operation to the production hook adapter.
     #[error("split hook operation is unavailable: {operation:?}")]
     UnavailableHookOperation {
         /// Missing operation.

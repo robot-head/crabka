@@ -1,4 +1,5 @@
-//! KIP-150 non-windowed cogroup — JVM 4.1 wire-topology + behavioral goldens.
+//! KIP-150 non-windowed cogroup: the JVM 4.1 wire-topology and behavioral
+//! goldens.
 use crabka_client_streams::{
     Consumed, I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
 };
@@ -86,8 +87,9 @@ fn cogroup_matches_jvm_behavior() {
     );
 }
 
-/// The default-serde `aggregate(init, store_name)` convenience (no explicit
-/// `Materialized`) folds across both inputs the same as `aggregate_explicit`.
+/// The default-serde `aggregate(init, store_name)` convenience, which takes no
+/// explicit `Materialized`, folds across both inputs the same as
+/// `aggregate_explicit`.
 #[test]
 fn cogroup_default_serde_aggregate_runs() {
     let b = StreamsBuilder::new();
@@ -118,7 +120,7 @@ fn cogroup_default_serde_aggregate_runs() {
 }
 
 /// `Materialized::with_logging(false)` registers the shared cogroup store with no
-/// changelog → the wire topology has no `*-cg-store-changelog` entry.
+/// changelog, so the wire topology has no `*-cg-store-changelog` entry.
 #[test]
 fn cogroup_logging_false_omits_changelog() {
     let b = StreamsBuilder::new();

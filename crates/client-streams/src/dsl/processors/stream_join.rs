@@ -1,9 +1,12 @@
-//! Windowed stream-stream join processors (one per side): inner matches + KIP-633
-//! left/outer window-close emission. Each puts its record into its own
-//! retainDuplicates window store, fetches the OTHER store over the (swapped)
-//! window, emits `joiner(this, Some(other))` per match, and — for left/outer —
-//! buffers unmatched records in a shared outer KV store and emits the null-padded
-//! result once their window closes (stream-time-driven; no wall-clock throttle).
+//! Windowed stream-stream join processors, one per side: inner matches, plus the
+//! KIP-633 left and outer window-close emission.
+//!
+//! Each processor puts its record into its own retainDuplicates window store. It
+//! fetches the OTHER store over the swapped window, and it emits
+//! `joiner(this, Some(other))` for each match. For left and outer it also buffers
+//! the unmatched records in a shared outer KV store, and it emits the
+//! null-padded result once their window closes. That emission is stream-time
+//! driven, with no wall-clock throttle.
 use std::{
     marker::PhantomData,
     sync::{Arc, Mutex},
@@ -27,15 +30,16 @@ use crate::{
 
 type Marker<T> = PhantomData<fn() -> T>;
 
-/// One side of a windowed stream-stream join (inner + KIP-633 left/outer).
+/// One side of a windowed stream-stream join: inner, plus KIP-633 left and outer.
 ///
-/// The `joiner` is stored in per-side OUTER form `Fn(&VThis, Option<&VOther>) -> VO`:
-/// the DSL specializes the user joiner so a match calls `joiner(&this, Some(&other))`
-/// and a null result calls `joiner(&this, None)`, with the `(A, B)` arg order kept
-/// correct for each side.
+/// The struct stores the `joiner` in the per-side OUTER form
+/// `Fn(&VThis, Option<&VOther>) -> VO`. The DSL specializes the user joiner, so a
+/// match calls `joiner(&this, Some(&other))` and a null result calls
+/// `joiner(&this, None)`. The `(A, B)` argument order stays correct for each side.
 ///
-/// For INNER: `emit_unmatched = false`, `outer_store/tracker/key_serde/value_serde`
-/// are `None` — the left/outer block is skipped entirely.
+/// For INNER, `emit_unmatched` is `false`, and `outer_store`, `tracker`,
+/// `key_serde`, and `value_serde` are all `None`. The left and outer block is
+/// skipped completely.
 pub(crate) struct KStreamKStreamJoinProcessor<K, VThis, VOther, VO, F> {
     pub own_store: String,
     pub other_store: String,
@@ -249,7 +253,7 @@ mod tests {
         stores
     }
 
-    /// Inner-only processor: no shared outer store / tracker / serdes.
+    /// Inner-only processor: no shared outer store, no tracker, and no serdes.
     fn make_proc() -> KStreamKStreamJoinProcessor<
         String,
         String,
@@ -387,10 +391,10 @@ mod tests {
         assert_eq!(rec2.timestamp, 5);
     }
 
-    /// A left-side processor with no matching right record buffers the record into
-    /// the shared outer store (no forward yet). A later record that advances
-    /// stream-time past `ts + after` triggers the close-scan, emitting the
-    /// null-padded `joiner(a, None)`.
+    /// A left-side processor with no matching right record buffers the record
+    /// into the shared outer store, and it forwards nothing yet. A later record
+    /// that advances stream-time past `ts + after` triggers the close-scan, which
+    /// emits the null-padded `joiner(a, None)`.
     #[tokio::test]
     async fn left_buffers_then_emits_on_close() {
         let mut stores = make_stores();

@@ -1,12 +1,12 @@
 //! End-to-end gate for schema-registry slice 1: REST -> register -> produce to
 //! `_schemas` -> group-less reader replay -> in-memory store -> GET, against a
-//! real in-process Crabka broker. Drives the registry's REST router via `tower`'s
-//! `oneshot` (no live HTTP socket needed) while the `KafkaStore` talks to the
-//! broker over the wire.
+//! real in-process Crabka broker. It drives the registry's REST router through
+//! `tower`'s `oneshot`, so it needs no live HTTP socket, while the `KafkaStore`
+//! talks to the broker over the wire.
 //!
-//! `flavor = "multi_thread", worker_threads = 2` is required: a single-threaded
-//! runtime can't drive the broker's accept loop concurrently with the registry's
-//! producer/reader tasks and the test body.
+//! `flavor = "multi_thread", worker_threads = 2` is required. A single-threaded
+//! runtime cannot drive the broker's accept loop at the same time as the
+//! registry's producer and reader tasks and the test body.
 
 use axum::{
     body::Body,
@@ -1491,9 +1491,10 @@ async fn rest_admin_edge_and_error_branches() {
 
 // ── REST: schema references (slice 4) ────────────────────────────────────────
 
-/// A self-contained Avro record (its single field is a primitive, NOT a named
-/// reference) — so it parses pre-Task-4. Reference *bookkeeping* (validation,
-/// referencedby, delete-protection, GET) is format-agnostic and works now.
+/// A self-contained Avro record whose single field is a primitive and NOT a
+/// named reference, so it parses pre-Task-4. Reference *bookkeeping* is
+/// format-agnostic and works now. That covers validation, referencedby,
+/// delete-protection, and GET.
 fn av_named(name: &str, field_type: &str) -> String {
     format!(
         r#"{{"type":"record","name":"{name}","fields":[{{"name":"f","type":"{field_type}"}}]}}"#

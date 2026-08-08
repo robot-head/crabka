@@ -55,7 +55,7 @@ pub enum ControlError {
         /// Kafka error code.
         code: i16,
     },
-    /// The compacted registry topic was still absent after create/describe.
+    /// The compacted registry topic was still absent after create or describe.
     #[error("registry topic {0} not found after create")]
     TopicMissing(String),
     /// The registry backend cannot make the requested mutation safely.

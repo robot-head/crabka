@@ -1,11 +1,11 @@
 //! JSON Schema format: serialize / deserialize / validate.
 //!
-//! For JSON Schema the wire payload IS JSON (no binary transcoding), so
-//! `serialize` / `deserialize` are near-identity: they validate the bytes
-//! against the schema and return them unchanged.
+//! For JSON Schema the wire payload IS JSON, with no binary transcoding, so
+//! `serialize` and `deserialize` are close to the identity. Each one validates
+//! the bytes against the schema and returns them unchanged.
 //!
-//! Validation is performed via [`jsonschema`] (draft 2020-12 by default in
-//! 0.26) using [`jsonschema::validator_for`].
+//! [`jsonschema::validator_for`] from [`jsonschema`] does the validation. That
+//! crate defaults to draft 2020-12 in 0.26.
 
 use bytes::Bytes;
 use serde_json::Value;
@@ -14,8 +14,8 @@ use crate::codec::CodecError;
 
 /// Validate that `json` is a valid instance of JSON Schema `schema`.
 ///
-/// Returns `Ok(())` on success.  On failure, all validation error messages are
-/// joined and returned as [`CodecError::Validate`].
+/// Returns `Ok(())` on success. On failure, this function joins all validation
+/// error messages and returns them as [`CodecError::Validate`].
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn validate(schema: &str, json: &[u8]) -> Result<(), CodecError> {
@@ -46,8 +46,8 @@ pub fn validate(schema: &str, json: &[u8]) -> Result<(), CodecError> {
 
 /// Serialize `json` against JSON Schema `schema`.
 ///
-/// The JSON wire format is the JSON document itself (the Confluent JSON serde
-/// puts JSON bytes on the wire; framing is added by `wire.rs`).  This function
+/// The JSON wire format is the JSON document itself. The Confluent JSON serde
+/// puts JSON bytes on the wire, and `wire.rs` adds the framing. This function
 /// validates the bytes and returns them unchanged.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
@@ -58,8 +58,8 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
 
 /// Deserialize a JSON-format `payload`.
 ///
-/// Validates `payload` against `schema` and returns the bytes unchanged — the
-/// payload is already JSON.
+/// This function validates `payload` against `schema` and returns the bytes
+/// unchanged, because the payload is already JSON.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {

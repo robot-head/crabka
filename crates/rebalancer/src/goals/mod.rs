@@ -12,9 +12,9 @@ use crate::{
     scraper::UsageStore,
 };
 
-/// Wall-clock millis since the Unix epoch. Goals that read usage data
-/// pass this to `UsageStore` queries so stale-broker samples are
-/// excluded from the window. Saturates to 0 / `i64::MAX` on overflow.
+/// Wall-clock millis since the Unix epoch. Goals that read usage data pass
+/// this to `UsageStore` queries, so the queries exclude stale-broker samples
+/// from the window. The value saturates to 0 or `i64::MAX` on overflow.
 #[must_use]
 pub fn now_ms() -> i64 {
     crate::time::now_ms()
@@ -35,8 +35,8 @@ pub(crate) fn imbalance_ratio_usize(counts: &HashMap<i32, usize>) -> Ratio {
     }
 }
 
-/// Same spread, over per-broker totals that are already floats (summed
-/// byte counts, rates, or core counts).
+/// Same spread, over per-broker totals that are already floats: summed byte
+/// counts, rates, or core counts.
 pub(crate) fn imbalance_ratio_f64(totals: &HashMap<i32, f64>) -> Ratio {
     let vals: Vec<f64> = totals.values().copied().collect();
     let total: f64 = vals.iter().sum();
@@ -185,8 +185,8 @@ pub enum GoalPriority {
     /// still has unfulfilled movements, the optimizer returns
     /// `OptimizeError::HardGoalUnsatisfied`.
     Hard,
-    /// Soft goals improve placement on a best-effort basis. Movements
-    /// that don't fit under the cap are simply skipped.
+    /// Soft goals improve placement on a best-effort basis. The optimizer
+    /// skips movements that do not fit under the cap.
     Soft,
 }
 
@@ -203,10 +203,10 @@ pub struct GoalContext {
     pub min_topic_leaders_per_broker: u32,
     /// Per-broker capacity limits for the five capacity goals.
     pub broker_capacities: Arc<BrokerCapacities>,
-    /// Per-partition usage data (counters + gauges) from the metric
-    /// scraper. Empty default = usage-driven goals see no data and
-    /// return empty `Vec<Movement>` (same self-limiting pattern as
-    /// the capacity stubs).
+    /// Per-partition usage data, counters and gauges, from the metric
+    /// scraper. With the empty default, usage-driven goals see no data and
+    /// return an empty `Vec<Movement>`. This is the same self-limiting pattern
+    /// as the capacity stubs.
     pub broker_usages: Arc<UsageStore>,
 }
 
@@ -221,20 +221,19 @@ pub trait Goal: Send + Sync {
     /// post-application state before accepting it.
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement>;
 
-    /// Returns true if the goal's invariant holds against `state`
-    /// alone (no `GoalContext` access). Soft goals use the default
-    /// (always true); hard goals that don't depend on context (e.g.
-    /// `PreferredLeaderIdempotency`, `RackAware`) override.
+    /// Returns true if the goal's invariant holds against `state` alone,
+    /// without `GoalContext` access. Soft goals use the default, which is
+    /// always true. Hard goals that do not depend on context, such as
+    /// `PreferredLeaderIdempotency` and `RackAware`, override it.
     fn is_satisfied(&self, _state: &ClusterState) -> bool {
         true
     }
 
-    /// Same as `is_satisfied` but with `GoalContext` access. The
-    /// optimizer's incremental hard-goal validation calls this so
-    /// capacity goals can consult `broker_capacities` /
-    /// `broker_usages` when deciding whether a tentative movement
-    /// keeps their invariant intact. Default forwards to
-    /// `is_satisfied`.
+    /// Same as `is_satisfied`, but with `GoalContext` access. The optimizer's
+    /// incremental hard-goal validation calls this, so capacity goals can read
+    /// `broker_capacities` and `broker_usages` when they decide whether a
+    /// tentative movement keeps their invariant intact. The default forwards
+    /// to `is_satisfied`.
     fn is_satisfied_with_ctx(&self, state: &ClusterState, _ctx: &GoalContext) -> bool {
         self.is_satisfied(state)
     }
@@ -246,9 +245,9 @@ pub mod tests {
 
     use super::*;
 
-    /// Minimal goal that returns a fixed movement list. Used by
-    /// `optimizer::tests` to exercise the optimizer without depending
-    /// on any concrete goal implementation.
+    /// Minimal goal that returns a fixed movement list. `optimizer::tests`
+    /// uses it to exercise the optimizer without a dependency on any concrete
+    /// goal implementation.
     #[allow(dead_code)] // Consumed by optimizer tests.
     pub struct FixedGoal {
         pub name: &'static str,
@@ -294,12 +293,12 @@ pub mod tests {
     /// A spread between two whole percentage points still counts against the
     /// threshold.
     ///
-    /// The spread used to be compared as a truncated integer percentage, so a
-    /// 10.9% imbalance read as 10 and sat exactly on a 10% threshold without
-    /// tripping it — the goal declared the cluster balanced and moved nothing.
-    /// Comparing `Ratio` to `Ratio` keeps the fraction, so it now trips. Goals
-    /// treat the threshold as inclusive (`imbalance <= threshold` is balanced),
-    /// which the boundary case below pins.
+    /// A comparison as a truncated integer percentage reads a 10.9% imbalance
+    /// as 10. That sits exactly on a 10% threshold without tripping it, so the
+    /// goal declares the cluster balanced and moves nothing. A comparison of
+    /// `Ratio` to `Ratio` keeps the fraction and therefore trips. Goals treat
+    /// the threshold as inclusive, so `imbalance <= threshold` is balanced.
+    /// The boundary case below pins that rule.
     #[test]
     fn fractional_spread_is_not_rounded_away_at_the_threshold() {
         let threshold = percent(10);

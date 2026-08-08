@@ -1,20 +1,23 @@
-//! End-to-end integration tests for KIP-932 Slice D: share-group admin offset
-//! RPCs — `DescribeShareGroupOffsets` (`api_key` 90), `AlterShareGroupOffsets`
-//! (91), `DeleteShareGroupOffsets` (92).
+//! End-to-end integration tests for the KIP-932 Slice D admin offset RPCs.
 //!
-//! The typed client works because `ApiVersions` advertises `api_keys` 90/91/92 and
-//! all three requests impl `ProtocolRequest`, so `client.send(req)` exercises
-//! the real wire path (frame parse → handler → encode, version-negotiated).
+//! The RPCs are `DescribeShareGroupOffsets` (`api_key` 90),
+//! `AlterShareGroupOffsets` (91), and `DeleteShareGroupOffsets` (92).
+//!
+//! The typed client works because `ApiVersions` advertises `api_keys` 90/91/92
+//! and all three requests impl `ProtocolRequest`. `client.send(req)` thus
+//! exercises the real wire path: frame parse, then handler, then a
+//! version-negotiated encode.
 //!
 //! These tests prove:
-//! - Describe reflects the durable SPSO after a consume+Accept advances it, and
-//!   reports lag = HWM − SPSO for a locally-led partition;
-//! - Alter on an *empty* group resets the SPSO (state-epoch bump + re-init) AND
-//!   invalidates the share-partition leader cache so a subsequent `ShareFetch`
-//!   acquires starting at the new offset;
-//! - Alter on a *non-empty* (live-member) group is rejected with `NON_EMPTY_GROUP`;
-//! - Delete removes the durable share-state for a topic (Describe then reads the
-//!   partition as missing → `start_offset` -1);
+//! - Describe reflects the durable SPSO after a consume and an Accept advance
+//!   it. Describe also reports lag = HWM − SPSO for a locally-led partition.
+//! - Alter on an *empty* group resets the SPSO. It bumps the state epoch,
+//!   re-initializes, AND invalidates the share-partition leader cache, so a
+//!   later `ShareFetch` acquires from the new offset.
+//! - Alter on a *non-empty* group with a live member is rejected with
+//!   `NON_EMPTY_GROUP`.
+//! - Delete removes the durable share-state for a topic. Describe then reads
+//!   the partition as missing and reports `start_offset` -1.
 //! - Describe of an unknown topic returns `UNKNOWN_TOPIC_OR_PARTITION` per
 //!   partition.
 
@@ -229,9 +232,11 @@ async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32
     panic!("partition never became produceable for {topic}:{partition}");
 }
 
-/// Join `group` subscribed to `topic`, driving steady-state heartbeats so the
-/// lifecycle hook initializes the subscribed partitions' share state. Returns
-/// `(member_id, member_epoch)` so the caller can leave with the live epoch.
+/// Joins `group` with a subscription to `topic`.
+///
+/// The function drives steady-state heartbeats, so the lifecycle hook
+/// initializes the share state of the subscribed partitions. It returns
+/// `(member_id, member_epoch)`, so the caller can leave with the live epoch.
 async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
     let resp = client
         .send(ShareGroupHeartbeatRequest {
@@ -267,8 +272,9 @@ async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
     (member_id, epoch)
 }
 
-/// Leave the group via `member_epoch == -1`; the group is retained but reported
-/// with zero members (state "Empty").
+/// Leaves the group with `member_epoch == -1`.
+///
+/// The broker keeps the group but reports zero members, in state "Empty".
 async fn leave(client: &Client, group: &str, member_id: &str) {
     let resp = client
         .send(ShareGroupHeartbeatRequest {
@@ -413,8 +419,10 @@ async fn fetch_until_acquired(
 // Admin-offset request helpers (the RPCs under test).
 // ────────────────────────────────────────────────────────────────────────
 
-/// `DescribeShareGroupOffsets` for a single `(group, topic, partitions)`.
-/// Returns the (single) topic row. `partitions` empty ⇒ "all initialized".
+/// Sends `DescribeShareGroupOffsets` for one `(group, topic, partitions)`.
+///
+/// The function returns the single topic row. An empty `partitions` list means
+/// "all initialized".
 async fn describe_offsets(
     client: &Client,
     group: &str,
@@ -444,8 +452,9 @@ async fn describe_offsets(
 // Tests.
 // ────────────────────────────────────────────────────────────────────────
 
-/// Describe reflects the SPSO after a consume that Accepts all records: the
-/// SPSO advances to 3 and the (locally-led) partition reports lag 0.
+/// Describe reflects the SPSO after a consume that Accepts all records.
+///
+/// The SPSO advances to 3, and the locally-led partition reports lag 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_reflects_spso_after_consume() {
     let _permit = broker_test_permit().await;
@@ -507,8 +516,9 @@ async fn describe_reflects_spso_after_consume() {
     );
 }
 
-/// Poll Describe until the partition reports the expected SPSO (the persister
-/// write of the advanced SPSO is asynchronous after the Accept ack).
+/// Polls Describe until the partition reports the expected SPSO.
+///
+/// The persister writes the advanced SPSO asynchronously after the Accept ack.
 async fn describe_until(
     client: &Client,
     group: &str,
@@ -533,18 +543,21 @@ async fn describe_until(
     last
 }
 
-/// Alter resets the SPSO of an empty group: the persister state is re-initialized
-/// at the requested offset, the leader cache is invalidated, and a subsequent
-/// `ShareFetch` acquires starting at the new offset.
+/// Alter resets the SPSO of an empty group.
 ///
-/// The group has *no members* when Alter runs, so the share-state has never been
-/// seeded by the membership lifecycle (a member join/leave would reap the state
-/// when the group empties). Alter therefore initializes-from-absent at
-/// `state_epoch = 1` with `start_offset = 5`. A subsequent first-join then
-/// reconciles at `group_epoch = 1`; its lifecycle re-init (`initialize(1, 0)`) is
-/// *fenced* by the equal-or-higher durable `state_epoch`, so the Alter's SPSO
-/// survives and the first `ShareFetch` acquires from offset 5 — exercising the
-/// real acquire path against the reset (and invalidated) leader cache.
+/// The persister re-initializes its state at the requested offset, the broker
+/// invalidates the leader cache, and a later `ShareFetch` acquires from the new
+/// offset.
+///
+/// The group has *no members* when Alter runs, so the membership lifecycle has
+/// never seeded the share-state. A member join and leave would reap the state
+/// when the group empties. Alter thus initializes from absent at
+/// `state_epoch = 1` with `start_offset = 5`. A later first join then
+/// reconciles at `group_epoch = 1`. The equal-or-higher durable `state_epoch`
+/// *fences* the lifecycle re-init `initialize(1, 0)`, so the SPSO from Alter
+/// survives and the first `ShareFetch` acquires from offset 5. The test thus
+/// exercises the real acquire path against the reset and invalidated leader
+/// cache.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_resets_empty_group() {
     let _permit = broker_test_permit().await;
@@ -612,8 +625,9 @@ async fn alter_resets_empty_group() {
     );
 }
 
-/// Alter on a non-empty (live-member) group is rejected top-level with
-/// `NON_EMPTY_GROUP`.
+/// Alter on a non-empty group is rejected at the top level.
+///
+/// The group has a live member, so the response carries `NON_EMPTY_GROUP`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_non_empty_group_fenced() {
     let _permit = broker_test_permit().await;
@@ -654,8 +668,10 @@ async fn alter_non_empty_group_fenced() {
     );
 }
 
-/// Delete removes the durable share-state for a topic of an empty group; a
-/// subsequent Describe reads the partition as missing (`start_offset` -1).
+/// Delete removes the durable share-state for a topic of an empty group.
+///
+/// A later Describe reads the partition as missing and reports
+/// `start_offset` -1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_removes_topic() {
     let _permit = broker_test_permit().await;
@@ -748,8 +764,10 @@ async fn describe_unknown_topic() {
     );
 }
 
-/// With `share_group.enable = false` the admin offset RPCs are not implemented:
-/// `DescribeShareGroupOffsets` marks each requested group `UNSUPPORTED_VERSION`.
+/// With `share_group.enable = false` the admin offset RPCs are not implemented.
+///
+/// `DescribeShareGroupOffsets` marks each requested group
+/// `UNSUPPORTED_VERSION`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_offsets_rejected_when_share_disabled() {
     let _permit = broker_test_permit().await;
@@ -772,14 +790,17 @@ async fn admin_offsets_rejected_when_share_disabled() {
 // Slice F tests.
 // ────────────────────────────────────────────────────────────────────────
 
-/// F3 (lag restore): the cumulative `delivery_complete_count` (number of
-/// terminally-acknowledged records — the basis for share-group lag) survives a
-/// broker restart. Before Slice F, `load_from` hard-reset it to 0, so the
-/// recovered group under-reported its completed work.
+/// F3, lag restore: `delivery_complete_count` survives a broker restart.
 ///
-/// Produce N, consume + Accept all (SPSO advances to N, dcc = N), wait for the
-/// persist, restart on the same dir (Rejoin), then read the share-state summary:
-/// its 4th element (`delivery_complete_count`) must be the restored N, not 0.
+/// The cumulative `delivery_complete_count` is the number of
+/// terminally-acknowledged records and is the basis for share-group lag. Before
+/// Slice F, `load_from` reset it to 0, so the recovered group under-reported
+/// its completed work.
+///
+/// Produce N. Consume and Accept all records, so the SPSO advances to N and
+/// dcc = N. Wait for the persist. Restart on the same dir with Rejoin. Then
+/// read the share-state summary. Its 4th element, `delivery_complete_count`,
+/// must be the restored N, not 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delivery_complete_count_restored_across_restart() {
     const N: i64 = 4;
@@ -859,16 +880,18 @@ async fn delivery_complete_count_restored_across_restart() {
     }
 }
 
-/// F6 (delete-metadata rewrite): `DeleteShareGroupOffsets` rewrites the v14
-/// state-partition-metadata record so the deleted topic is gone from the
-/// group's initialized set — and STAYS gone after a restart (the seed no longer
-/// re-lists it).
+/// F6, delete-metadata rewrite: `DeleteShareGroupOffsets` rewrites the v14
+/// state-partition-metadata record.
+///
+/// The deleted topic is then gone from the initialized set of the group, and it
+/// STAYS gone after a restart, because the seed no longer lists it again.
 ///
 /// A describe with an explicit topic name but an EMPTY partitions list
-/// enumerates the group's *initialized* partitions for that topic (read from the
-/// v14 metadata cache). Before delete that returns partition [0]; after the
-/// delete rewrite the topic has no initialized partitions, so the row's
-/// `partitions` list is empty — before AND after a restart.
+/// enumerates the *initialized* partitions of the group for that topic, read
+/// from the v14 metadata cache. Before the delete, that returns partition [0].
+/// After the delete rewrite, the topic has no initialized partitions, so the
+/// `partitions` list of the row is empty. This holds before AND after a
+/// restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_rewrites_metadata_topic_absent_after_restart() {
     let _permit = broker_test_permit().await;

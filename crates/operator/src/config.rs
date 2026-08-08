@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// A validated positive operator configuration value.
 ///
-/// The `refined_type` rule rejects zero, making an instance proof of a usable
+/// The `refined_type` rule rejects zero, so an instance is proof of a usable
 /// dimensionless count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u64", into = "u64")]
@@ -50,15 +50,17 @@ impl FromStr for PositiveU64 {
 
 /// Operator runtime configuration.
 ///
-/// All fields can be set via CLI (`--watch-namespaces`, `--health-addr`, …)
-/// or via env (`WATCH_NAMESPACES`, `HEALTH_ADDR`, …). CLI wins on conflict.
+/// You can set all fields with a CLI flag such as `--watch-namespaces` or
+/// `--health-addr`, or with an env variable such as `WATCH_NAMESPACES` or
+/// `HEALTH_ADDR`. The CLI value wins on a conflict.
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 pub struct OperatorConfig {
-    /// Comma-separated namespaces to watch. Empty = cluster-scoped.
+    /// Comma-separated namespaces to watch. An empty value means
+    /// cluster-scoped.
     #[arg(long, env = "WATCH_NAMESPACES", value_delimiter = ',', num_args = 0..)]
     pub watch_namespaces: Vec<String>,
 
-    /// Namespace the operator runs in (used for the leader-election Lease).
+    /// Namespace the operator runs in. The leader-election Lease uses it.
     #[arg(long, env = "OPERATOR_NAMESPACE", default_value = "crabka-operator")]
     pub operator_namespace: String,
 
@@ -66,7 +68,7 @@ pub struct OperatorConfig {
     #[arg(long, env = "LEASE_NAME", default_value = "crabka-operator-leader")]
     pub lease_name: String,
 
-    /// Identity advertised in the Lease (typically the pod name).
+    /// Identity advertised in the Lease. This is usually the pod name.
     #[arg(long, env = "POD_NAME", default_value = "crabka-operator-local")]
     pub pod_name: String,
 
@@ -92,7 +94,7 @@ pub struct OperatorConfig {
     )]
     pub client_frame_max: ByteSize,
 
-    /// Tracing filter (e.g. `info,kube=warn`).
+    /// Tracing filter, for example `info,kube=warn`.
     #[arg(
         long,
         env = "RUST_LOG",
@@ -290,8 +292,9 @@ pub struct OperatorConfig {
     )]
     pub delegation_token_max_requeue: Time,
 
-    /// Durable checkpoint object store used to verify a suspended tenant before
-    /// its WAL topics are deleted. Parking is disabled when this is unset.
+    /// Durable checkpoint object store. The operator uses it to verify a
+    /// suspended tenant before it deletes the tenant's WAL topics. Parking is
+    /// disabled when this is unset.
     #[arg(long, env = "GRES_CHECKPOINT_STORE", value_enum)]
     pub gres_checkpoint_store: Option<GresCheckpointStoreKind>,
     /// Bucket containing Gres checkpoint manifests.
@@ -306,10 +309,12 @@ pub struct OperatorConfig {
     /// Permit an HTTP object-store endpoint, intended for explicitly configured development stores.
     #[arg(long, env = "GRES_CHECKPOINT_ALLOW_HTTP", default_value_t = false)]
     pub gres_checkpoint_allow_http: bool,
-    /// Optional explicit S3 access key id; otherwise the provider chain is used.
+    /// Optional explicit S3 access key id. If it is unset, the operator uses
+    /// the provider chain.
     #[arg(long, env = "GRES_CHECKPOINT_ACCESS_KEY_ID")]
     pub gres_checkpoint_access_key_id: Option<String>,
-    /// Optional explicit S3 secret access key; otherwise the provider chain is used.
+    /// Optional explicit S3 secret access key. If it is unset, the operator
+    /// uses the provider chain.
     #[arg(long, env = "GRES_CHECKPOINT_SECRET_ACCESS_KEY")]
     pub gres_checkpoint_secret_access_key: Option<String>,
     /// Optional GCS service-account JSON path.

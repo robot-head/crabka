@@ -115,11 +115,13 @@ pub(crate) fn parse_bytes_literal(value: &str) -> Option<ByteSize> {
     Some(ByteSize::from_bytes_f64(amount * multiplier))
 }
 
-/// The size units the `LogQL` grammar itself admits, which is why the table is
-/// here rather than deferred to `crabka_units::parse::byte_size`: Loki matches
-/// them case-sensitively, accepting `KiB`, `kB`, `KB`, and `MB` while rejecting
-/// `kib` and `mb`, and the shared parser is case-insensitive. Reusing it would
-/// widen the query language this crate is a compatible front-end for.
+/// The size units that the `LogQL` grammar itself admits.
+///
+/// The table is here and not in `crabka_units::parse::byte_size` because Loki
+/// matches these units case-sensitively. Loki accepts `KiB`, `kB`, `KB`, and
+/// `MB`, and it rejects `kib` and `mb`. The shared parser is case-insensitive,
+/// and its use would widen the query language that this crate is a compatible
+/// front-end for.
 fn bytes_unit_multiplier(unit: &str) -> Option<f64> {
     match unit {
         "" | "B" => Some(1.0),

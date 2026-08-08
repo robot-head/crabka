@@ -1,10 +1,12 @@
 //! `SlidingWindowedKGroupedStream<K,V>`: the handle between
 //! `KGroupedStream::windowed_by_sliding(SlidingWindows)` and a terminal sliding
-//! (KIP-450) aggregation. Sibling of
-//! [`crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream`]: same grouped
-//! lineage + window store, but the aggregate processor implements the KIP-450
-//! left/right-window algorithm and the windows are data-defined inclusive
-//! windows of size `time_difference`.
+//! (KIP-450) aggregation.
+//!
+//! This type is a sibling of
+//! [`crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream`]. It holds the
+//! same grouped lineage and window store. Its aggregate processor implements the
+//! KIP-450 left-window and right-window algorithm, and its windows are
+//! data-defined inclusive windows of size `time_difference`.
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
 use crate::{
@@ -25,7 +27,7 @@ use crate::{
     topology::NodeHandle,
 };
 
-/// Handle produced by [`KGroupedStream::windowed_by_sliding`]; terminal sliding
+/// Handle that [`KGroupedStream::windowed_by_sliding`] produces. Terminal sliding
 /// aggregations consume it.
 ///
 /// [`KGroupedStream::windowed_by_sliding`]: crate::dsl::kgrouped::KGroupedStream::windowed_by_sliding
@@ -68,9 +70,9 @@ where
 
     /// Emit on every update (default) or only on window close (KIP-825).
     ///
-    /// In `on_window_close`, records whose window has already closed are dropped
-    /// (so no duplicate final is emitted — unlike the session variant, which may
-    /// re-emit under `grace < gap`).
+    /// In `on_window_close`, the operator drops a record whose window has already
+    /// closed, so it emits no duplicate final. The session variant differs: it
+    /// may re-emit under `grace < gap`.
     #[must_use]
     pub fn emit_strategy(mut self, emit: EmitStrategy) -> Self {
         self.emit = emit;

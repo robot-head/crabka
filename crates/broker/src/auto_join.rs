@@ -1,24 +1,23 @@
 //! KIP-853 controller auto-join.
 //!
-//! A broker started in [`crate::BootstrapMode::Join`] with
-//! `auto_join = true` is NOT yet a member of the controller raft group: its
-//! raft log is empty and it waits in openraft's `Learner` state. This module
-//! drives the joiner side of the dance — it discovers the leader via the
-//! configured `bootstrap_servers` and sends the **Kafka `AddRaftVoter` wire
-//! RPC** (`api_key` 80) carrying its own voter identity. The leader-side
-//! handler (`crate::handlers::add_raft_voter`) runs `add_learner` (dialing
-//! this joiner's controller listener to replicate the log), waits for the
-//! observer to catch up, promotes it via `change_membership`, and submits the
-//! authoritative `V1Voters` record. Once the joiner sees itself in the
-//! committed voter set it stops.
+//! A broker started in [`crate::BootstrapMode::Join`] with `auto_join = true`
+//! is NOT yet a member of the controller raft group. Its raft log is empty and
+//! it waits in openraft's `Learner` state. This module drives the joiner side.
+//! It discovers the leader through the configured `bootstrap_servers` and sends
+//! the **Kafka `AddRaftVoter` wire RPC**, `api_key` 80, with its own voter
+//! identity. The leader-side handler `crate::handlers::add_raft_voter` runs
+//! `add_learner`, which dials this joiner's controller listener to replicate the
+//! log. The handler then waits for the observer to catch up, promotes it with
+//! `change_membership`, and submits the authoritative `V1Voters` record. The
+//! joiner stops once it sees itself in the committed voter set.
 //!
-//! The joiner advertises its **real bound** controller endpoint (not the
-//! configured `controller_listen_addr`, which may carry port 0 for an
-//! OS-assigned port) so the leader's `add_learner` can dial it back.
+//! The joiner advertises its **real bound** controller endpoint, so the leader's
+//! `add_learner` can dial it back. It does not advertise the configured
+//! `controller_listen_addr`, which can carry port 0 for an OS-assigned port.
 //!
-//! This is purely a client-side driver: it does NOT touch the reconfiguration
-//! coordinator or openraft membership directly. All the lockstep safety lives
-//! on the leader.
+//! This module is only a client-side driver. It does NOT touch the
+//! reconfiguration coordinator or openraft membership directly. All the lockstep
+//! safety lives on the leader.
 
 use std::sync::Arc;
 
@@ -34,11 +33,13 @@ use crabka_units::{Time, convert::TimeExt as _};
 
 use crate::codes;
 
-/// Everything the auto-join driver needs, pulled out of `BrokerConfig` +
-/// `Broker` so the loop can be spawned *before* the full `Broker` Arc exists.
-/// A `Join` broker's `Broker::start` blocks waiting for a leader, and that
-/// leader only appears once this loop has driven the leader-side `add_learner`
-/// + promotion — so the two must run concurrently.
+/// Everything the auto-join driver needs, taken from `BrokerConfig` and
+/// `Broker`.
+///
+/// This struct lets the caller spawn the loop *before* the full `Broker` Arc
+/// exists. A `Join` broker's `Broker::start` blocks and waits for a leader. That
+/// leader appears only after this loop drives the leader-side `add_learner` and
+/// the promotion, so the two must run at the same time.
 pub(crate) struct AutoJoinParams {
     pub auto_join: bool,
     pub retry_backoff: Time,
@@ -47,18 +48,20 @@ pub(crate) struct AutoJoinParams {
     pub directory_id: uuid::Uuid,
     pub cluster_id: Option<uuid::Uuid>,
     pub bootstrap_servers: Vec<std::net::SocketAddr>,
-    /// Protocol of the bootstrap server's data-plane listener (the
-    /// inter-broker listener protocol) — `AddRaftVoter` is served there.
+    /// Protocol of the bootstrap server's data-plane listener, that is, the
+    /// inter-broker listener protocol. `AddRaftVoter` is served there.
     pub listener_protocol: crabka_security::ListenerProtocol,
     pub inter_broker_server_name: String,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
 }
 
-/// Drive the auto-join loop. Returns immediately (without touching the
-/// network) when `auto_join` is disabled. Otherwise loops until this broker
-/// appears in the committed voter set, rotating across `bootstrap_servers`.
-/// Intended to be spawned as a detached background task during `Broker::start`.
+/// Drive the auto-join loop.
+///
+/// The function returns immediately, and does not touch the network, when
+/// `auto_join` is disabled. If not, it loops until this broker appears in the
+/// committed voter set, and it rotates across `bootstrap_servers`. The caller
+/// spawns it as a detached background task during `Broker::start`.
 pub(crate) async fn run(params: AutoJoinParams) {
     if !params.auto_join {
         return;
@@ -180,9 +183,10 @@ enum JoinOutcome {
     Unexpected(i16),
 }
 
-/// Log the leader's `AddRaftVoter` reply at the appropriate level. None of the
-/// outcomes terminate the loop — the `voters().contains` check at the top of
-/// `run` is the sole exit — so this is purely diagnostic.
+/// Log the leader's `AddRaftVoter` reply at the correct level.
+///
+/// No outcome ends the loop. The `voters().contains` check at the top of `run`
+/// is the only exit, so this function is diagnostic only.
 fn log_join_outcome(
     self_id: crabka_raft::NodeId,
     target: std::net::SocketAddr,
@@ -244,9 +248,10 @@ fn log_join_outcome(
     }
 }
 
-/// Dial `target`'s controller listener (terminating TLS / SASL as the
-/// protocol demands) and send a single `AddRaftVoter` request, returning the
-/// decoded response. A fresh connection per attempt mirrors
+/// Dial `target`'s controller listener and send one `AddRaftVoter` request.
+///
+/// The function terminates TLS and SASL as the protocol demands, and returns the
+/// decoded response. It opens a new connection for each attempt, which mirrors
 /// `Controller::forward_submit_to`.
 async fn send_add_raft_voter(
     client: &crate::network::client::InterBrokerClient,
@@ -534,12 +539,14 @@ mod tests {
         assert!(err.contains("dial"), "unexpected error: {err}");
     }
 
-    /// `run` returns immediately when `auto_join` is disabled — no panic, no
-    /// network dial. Build params with a real controller + inter-broker client
-    /// but `auto_join = false`, and a deliberately bogus bootstrap server. If
-    /// `run` honoured the flag it never dials; if it regressed and dialed, the
-    /// loop would spin against the unreachable address and the timeout would
-    /// fire (failing the test).
+    /// `run` returns immediately when `auto_join` is disabled, with no panic
+    /// and no network dial.
+    ///
+    /// The test builds params with a real controller and inter-broker client,
+    /// `auto_join = false`, and a deliberately bogus bootstrap server. If `run`
+    /// obeys the flag it never dials. If it regressed and dialed, the loop would
+    /// spin against the unreachable address and the timeout would fire, which
+    /// fails the test.
     #[tokio::test]
     async fn run_returns_immediately_when_auto_join_disabled() {
         let tempdir = tempfile::tempdir().expect("tempdir");

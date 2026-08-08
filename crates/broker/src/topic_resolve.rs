@@ -1,18 +1,21 @@
-//! KIP-516 strict topic resolution. A single place that maps a request's
-//! `(name, topic_id)` pair to a `TopicRecord`, applying the KIP-516
-//! strictness rules. The `Err` carries the wire error code to surface for
-//! the offending topic/partition.
+//! KIP-516 strict topic resolution.
+//!
+//! This module is the one place that maps a request's `(name, topic_id)` pair
+//! to a `TopicRecord` under the KIP-516 strictness rules. The `Err` carries
+//! the wire error code to report for the offending topic or partition.
 
 use crabka_metadata::{MetadataImage, TopicRecord};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::codes;
 
-/// Resolve a requested topic to its record.
+/// Resolves a requested topic to its record.
 ///
-/// - non-zero `id`, unknown ⇒ `UNKNOWN_TOPIC_ID`
-/// - non-zero `id` + non-empty `name` whose stored name differs ⇒ `INCONSISTENT_TOPIC_ID`
-/// - zero `id`, `name` resolves ⇒ name path; unknown name ⇒ `UNKNOWN_TOPIC_OR_PARTITION`
+/// - a non-zero `id` that is unknown gives `UNKNOWN_TOPIC_ID`
+/// - a non-zero `id` with a non-empty `name` whose stored name differs gives
+///   `INCONSISTENT_TOPIC_ID`
+/// - a zero `id` with a `name` that resolves takes the name path. An unknown
+///   name gives `UNKNOWN_TOPIC_OR_PARTITION`.
 pub(crate) fn resolve<'a>(
     image: &'a MetadataImage,
     name: &str,

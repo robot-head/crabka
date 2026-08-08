@@ -13,23 +13,24 @@ fn now() -> jiff::Timestamp {
     jiff::Timestamp::now()
 }
 
-/// The Lease duration as k8s's `leaseDurationSeconds` (`Option<i32>`). The
-/// field belongs to `k8s_openapi`'s generated `LeaseSpec`, so the validated
-/// extent narrows to whole seconds here.
+/// The Lease duration as the Kubernetes `leaseDurationSeconds` field, of type
+/// `Option<i32>`. The field belongs to the `LeaseSpec` that `k8s_openapi`
+/// generates, so the validated extent narrows to whole seconds here.
 fn lease_duration_seconds(extent: Time) -> anyhow::Result<i32> {
     i32::try_from(extent.secs_i64()).map_err(Into::into)
 }
 
 /// Block until this process holds the Lease.
 ///
-/// Simplistic implementation: poll every 2s, try to take the Lease if it
-/// is unowned or expired, otherwise wait. KIP-style precise election
-/// can be a follow-up if needed.
+/// The implementation is simple. It polls every 2s and tries to take the
+/// Lease if the Lease is unowned or expired. If not, it waits. A precise
+/// KIP-style election can be a follow-up if needed.
 ///
 /// # Errors
 ///
 /// Returns an error if the Kubernetes API call fails for a reason other
-/// than a 409 create-race (which is handled internally by retrying).
+/// than a 409 create-race. The function retries internally on a 409
+/// create-race.
 pub async fn acquire(
     client: Client,
     namespace: &str,

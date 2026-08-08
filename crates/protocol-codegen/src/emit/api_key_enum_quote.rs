@@ -1,23 +1,24 @@
 //! The `ApiKey` enum, built as a `proc_macro2` token stream via `quote!`
 //! instead of hand-written `write!` string templating.
 //!
-//! Compare with `api_key_enum::emit`. The structural payload — which variants,
-//! discriminants, doc text — is identical; only the *emission mechanism*
-//! differs. Things to notice:
+//! Compare with `api_key_enum::emit`. The structural payload is identical:
+//! the same variants, discriminants, and doc text. Only the *emission
+//! mechanism* differs. Things to notice:
 //!
-//! * No manual brace/indent bookkeeping. The `quote!` block reads like the
-//!   target code; repetition is `#(#variants)*` instead of a `for` loop that
-//!   `writeln!`s fragments.
-//! * `syn::parse2` validates the output is real Rust *at generation time*. A
-//!   malformed template fails here with a parse error, not three crates
-//!   downstream when the generated file is compiled.
-//! * `emit` returns the raw token string; the `rustfmt` pass in `crate::fmt`
-//!   (run by the regeneration binary) does the formatting.
+//! * No manual brace or indent bookkeeping. The `quote!` block reads like the
+//!   target code, and repetition is `#(#variants)*` instead of a `for` loop
+//!   that `writeln!`s fragments.
+//! * `syn::parse2` validates that the output is real Rust *at generation
+//!   time*. A malformed template fails here with a parse error, not three
+//!   crates downstream when the compiler reads the generated file.
+//! * `emit` returns the raw token string. The `rustfmt` pass in `crate::fmt`,
+//!   which the regeneration binary runs, does the formatting.
 //!
-//! The one wart: `//`-style line comments aren't tokens, so the
-//! `// AUTO-GENERATED` banner is prepended as a string. Doc comments become
-//! `#[doc = "…"]` attributes; rustfmt keeps them in that form (it does not
-//! rewrite them to `///` without the unstable `normalize_doc_attributes`).
+//! One drawback remains. `//`-style line comments are not tokens, so this
+//! module prepends the `// AUTO-GENERATED` banner as a string. Doc comments
+//! become `#[doc = "…"]` attributes, and rustfmt keeps them in that form. It
+//! does not rewrite them to `///` without the unstable
+//! `normalize_doc_attributes`.
 
 use std::collections::BTreeMap;
 

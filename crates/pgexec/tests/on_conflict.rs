@@ -1,11 +1,11 @@
 //! `INSERT … ON CONFLICT` semantics: arbiter resolution, `DO NOTHING`,
-//! `DO UPDATE` (including `excluded`, action `WHERE`, and `RETURNING`), command
-//! tags, intra-statement conflicts, transaction interaction, and the SQLSTATEs
-//! of every refused conflict target.
+//! `DO UPDATE` with `excluded`, action `WHERE` and `RETURNING`, command tags,
+//! intra-statement conflicts, transaction interaction, and the SQLSTATEs of
+//! every refused conflict target.
 //!
-//! NOTE: this file is deliberately named `on_conflict.rs` — a test target whose
-//! name contains the substring `update` trips Windows UAC installer detection
-//! (os error 740). See the note at the top of `mutation_semantics.rs`.
+//! NOTE: this file is deliberately named `on_conflict.rs`. A test target whose
+//! name contains the substring `update` trips Windows UAC installer detection,
+//! which is os error 740. See the note at the top of `mutation_semantics.rs`.
 
 use assert2::assert;
 use bytes::Bytes;
@@ -37,12 +37,12 @@ fn rows_text(r: &QueryResult) -> Vec<Vec<Option<String>>> {
     }
 }
 
-/// Run `sql` (a single statement) and return its command tag.
+/// Run `sql`, a single statement, and return its command tag.
 async fn tag(s: &mut SqlSession, sql: &str) -> String {
     tag_of(&run(s, sql).await[0]).to_string()
 }
 
-/// Run `sql` (a single statement) and return its result rows as text.
+/// Run `sql`, a single statement, and return its result rows as text.
 async fn query(s: &mut SqlSession, sql: &str) -> Vec<Vec<Option<String>>> {
     rows_text(&run(s, sql).await[0])
 }
@@ -51,8 +51,9 @@ async fn err_code(s: &mut SqlSession, sql: &str) -> String {
     s.simple_query(sql).await.expect_err("expected error").code
 }
 
-/// A fresh engine with `setup` applied, plus one connected session. The engine
-/// is returned so the caller keeps it alive for the session's lifetime.
+/// A fresh engine with `setup` applied, plus one connected session. This
+/// function returns the engine so the caller keeps it alive for the session's
+/// lifetime.
 async fn engine_with(setup: &[&str]) -> (SqlEngine, SqlSession) {
     let engine = SqlEngine::new();
     let mut s = engine.connect();
@@ -70,9 +71,9 @@ fn row(values: &[&str]) -> Vec<Option<String>> {
 // DO NOTHING
 // ---------------------------------------------------------------------------
 
-/// A bare `ON CONFLICT DO NOTHING` (no conflict target) arbitrates over every
-/// unique index; an explicit column target arbitrates the matching one. Both
-/// skip the conflicting row, insert the rest, and count only the inserts.
+/// A bare `ON CONFLICT DO NOTHING`, with no conflict target, arbitrates over
+/// every unique index. An explicit column target arbitrates the matching one.
+/// Both skip the conflicting row, insert the rest, and count only the inserts.
 #[tokio::test]
 async fn do_nothing_skips_conflicting_row_with_and_without_a_target() {
     for target in ["", "(id)", "ON CONSTRAINT t_pkey"] {
@@ -93,7 +94,7 @@ async fn do_nothing_skips_conflicting_row_with_and_without_a_target() {
     }
 }
 
-/// Two `VALUES` rows carrying the same new key: the first inserts, the second
+/// Two `VALUES` rows carry the same new key. The first inserts, and the second
 /// conflicts with a key that exists only in this statement's pending batch.
 #[tokio::test]
 async fn do_nothing_skips_an_intra_statement_duplicate() {
@@ -138,8 +139,8 @@ async fn conflict_on_a_non_arbiter_unique_index_is_still_23505() {
     );
 }
 
-/// `DO NOTHING` on a table with no unique index at all: nothing can ever
-/// arbitrate, so every row inserts (an empty arbiter set is not an error).
+/// `DO NOTHING` on a table with no unique index at all. Nothing can ever
+/// arbitrate, so every row inserts. An empty arbiter set is not an error.
 #[tokio::test]
 async fn do_nothing_on_a_table_without_unique_indexes_inserts_every_row() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (id int4, v text)"]).await;
@@ -155,8 +156,8 @@ async fn do_nothing_on_a_table_without_unique_indexes_inserts_every_row() {
     assert!(query(&mut s, "SELECT count(*) FROM t").await == vec![row(&["2"])]);
 }
 
-/// NOT NULL is checked on the proposed row before arbitration, exactly as
-/// Postgres does: `DO NOTHING` never excuses a 23502.
+/// The engine checks NOT NULL on the proposed row before arbitration, exactly
+/// as Postgres does. `DO NOTHING` never excuses a 23502.
 #[tokio::test]
 async fn not_null_still_fires_under_do_nothing() {
     let (_engine, mut s) = engine_with(&[
@@ -177,7 +178,7 @@ async fn not_null_still_fires_under_do_nothing() {
 }
 
 /// SQL unique indexes treat NULLs as distinct, so a NULL in an arbiter key can
-/// never conflict: repeated NULL rows all insert.
+/// never conflict. Repeated NULL rows all insert.
 #[tokio::test]
 async fn null_in_the_arbiter_key_never_conflicts() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (v text UNIQUE, n int4)"]).await;
@@ -201,8 +202,8 @@ async fn null_in_the_arbiter_key_never_conflicts() {
     assert!(query(&mut s, "SELECT count(*) FROM t").await == vec![row(&["3"])]);
 }
 
-/// `RETURNING` reports exactly the rows that were actually inserted — skipped
-/// rows produce no output row.
+/// `RETURNING` reports exactly the rows the statement inserted. A skipped row
+/// produces no output row.
 #[tokio::test]
 async fn do_nothing_returning_reports_only_inserted_rows() {
     let (_engine, mut s) = engine_with(&[
@@ -225,8 +226,8 @@ async fn do_nothing_returning_reports_only_inserted_rows() {
 // DO UPDATE
 // ---------------------------------------------------------------------------
 
-/// The core upsert: the conflicting row is updated from `excluded`, the
-/// non-conflicting row is inserted, and the tag counts BOTH.
+/// The core upsert. The statement updates the conflicting row from `excluded`,
+/// inserts the non-conflicting row, and the tag counts BOTH.
 #[tokio::test]
 async fn do_update_upserts_and_counts_inserted_plus_updated() {
     let (_engine, mut s) = engine_with(&[
@@ -286,8 +287,8 @@ async fn do_update_with_a_false_action_where_touches_nothing() {
 }
 
 /// `SET` right-hand sides must qualify a column that exists in BOTH the target
-/// and `excluded` scopes; a bare duplicate name is ambiguous (42702), exactly
-/// as in Postgres. Both qualifications work.
+/// and `excluded` scopes. A bare duplicate name is ambiguous, which is 42702,
+/// exactly as in Postgres. Both qualifications work.
 #[tokio::test]
 async fn do_update_set_expression_scopes() {
     struct Case {
@@ -345,8 +346,8 @@ async fn do_update_set_expression_scopes() {
     }
 }
 
-/// `excluded` is not in scope in `RETURNING` (Postgres raises 42P01 for the
-/// missing FROM-clause entry).
+/// `excluded` is not in scope in `RETURNING`. Postgres raises 42P01 for the
+/// missing FROM-clause entry.
 #[tokio::test]
 #[expect(non_snake_case, reason = "SQLSTATE in the test name")]
 async fn returning_excluded_is_42P01() {
@@ -367,9 +368,10 @@ async fn returning_excluded_is_42P01() {
     );
 }
 
-/// A `DO UPDATE` may only touch a given row once per statement — both when the
-/// duplicate key exists only in this statement (`VALUES (1), (1)`) and when two
-/// `VALUES` rows conflict onto the same STORED row. Both are 21000.
+/// A `DO UPDATE` may only touch a given row once per statement. That holds both
+/// when the duplicate key exists only in this statement, as in
+/// `VALUES (1), (1)`, and when two `VALUES` rows conflict onto the same STORED
+/// row. Both are 21000.
 #[tokio::test]
 async fn do_update_affecting_a_row_twice_is_21000() {
     struct Case {
@@ -407,7 +409,7 @@ async fn do_update_affecting_a_row_twice_is_21000() {
     }
 }
 
-/// A `DO UPDATE` is free to change the arbiter key itself: the row keeps its
+/// A `DO UPDATE` is free to change the arbiter key itself. The row keeps its
 /// identity but moves to a new key, and the old key becomes insertable.
 #[tokio::test]
 async fn do_update_may_change_the_arbiter_key() {
@@ -436,7 +438,7 @@ async fn do_update_may_change_the_arbiter_key() {
 }
 
 /// A `DO UPDATE` whose post-image collides on a DIFFERENT unique index is a
-/// plain 23505 — the arbiter excuses only its own key.
+/// plain 23505. The arbiter excuses only its own key.
 #[tokio::test]
 async fn do_update_tripping_another_unique_index_is_23505() {
     let (_engine, mut s) = engine_with(&[
@@ -459,8 +461,8 @@ async fn do_update_tripping_another_unique_index_is_23505() {
     );
 }
 
-/// An upsert inside an explicit transaction is undone by ROLLBACK: the stored
-/// row returns to its pre-statement image and the inserted row disappears.
+/// ROLLBACK undoes an upsert inside an explicit transaction. The stored row
+/// returns to its pre-statement image, and the inserted row disappears.
 #[tokio::test]
 async fn upsert_is_rolled_back_with_its_transaction() {
     let (_engine, mut s) = engine_with(&[
@@ -486,10 +488,10 @@ async fn upsert_is_rolled_back_with_its_transaction() {
     assert!(query(&mut s, "SELECT id, v FROM t ORDER BY id").await == vec![row(&["1", "a"])]);
 }
 
-/// Upserting onto a row this same transaction inserted: the uncommitted row is
+/// An upsert onto a row this same transaction inserted. The uncommitted row is
 /// visible to its own xid, so the conflict is real and the update overwrites it
 /// in place. Columns the `SET` list does not mention keep the first insert's
-/// values, and the row is stored exactly once.
+/// values, and the engine stores the row exactly once.
 #[tokio::test]
 async fn upsert_onto_a_row_inserted_by_the_same_transaction() {
     let (_engine, mut s) =
@@ -511,9 +513,9 @@ async fn upsert_onto_a_row_inserted_by_the_same_transaction() {
     assert!(query(&mut s, "SELECT id, v, n FROM t").await == vec![row(&["1", "second", "10"])]);
 }
 
-/// Deleting a row and upserting its key in the same transaction: the deleted
-/// row is invisible to the arbiter, so the statement INSERTS a fresh row rather
-/// than resurrecting the old one.
+/// A delete of a row and an upsert of its key in the same transaction. The
+/// deleted row is invisible to the arbiter, so the statement INSERTS a fresh row
+/// rather than resurrecting the old one.
 #[tokio::test]
 async fn delete_then_upsert_in_one_transaction_inserts() {
     let (_engine, mut s) = engine_with(&[
@@ -667,7 +669,8 @@ async fn refused_conflict_targets_and_their_sqlstates() {
 }
 
 /// A sharded table's unique keys live on other ranges, so `ON CONFLICT` cannot
-/// arbitrate there and is refused permanently (0A000), like `RETURNING`.
+/// arbitrate there. The engine refuses it permanently with 0A000, as it refuses
+/// `RETURNING`.
 #[tokio::test]
 async fn on_conflict_on_a_sharded_table_is_0a000() {
     let (_engine, mut s) =

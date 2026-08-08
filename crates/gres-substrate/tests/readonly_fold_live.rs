@@ -2,7 +2,7 @@
 //!
 //! `committed_fold_snapshot_live` is the durable-inspection entry point the
 //! gres binary calls, and it is the only production path that reaches
-//! `CommittedWalReader::committed_from` on the Kafka reader — recovery and the
+//! `CommittedWalReader::committed_from` on the Kafka reader. Recovery and the
 //! apply loop both use the `_traced` variant. Nothing exercised it, so a reader
 //! that returned no records at all still passed every test.
 
@@ -61,9 +61,9 @@ impl GenerationWitness for FixedGeneration {
 
 /// A fold over a WAL with committed frames must return those frames' rows.
 ///
-/// With the reader's `committed_from` short-circuited to an empty vector the
-/// fold still succeeds — it just reports a snapshot with no records — so the
-/// assertion has to be on the rows, not on the call.
+/// When the reader's `committed_from` is short-circuited to an empty vector,
+/// the fold still succeeds and reports a snapshot with no records. The
+/// assertion must therefore be on the rows and not on the call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_live_fold_returns_the_rows_the_wal_committed() {
     let (_broker, bootstrap, _dir) = boot().await;

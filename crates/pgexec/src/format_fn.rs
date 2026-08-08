@@ -1,18 +1,21 @@
 //! SP38: date/time formatting + constructor functions + numeric `to_char`.
 //!
-//! Exposes the Task 1–5 `crabka_pgtypes::{datetime,numeric}` value engines as SQL
-//! functions: `to_char` (temporal + numeric), `to_timestamp`, `to_date`, the
-//! `make_*` constructors, and the `justify_*` interval normalizers.
+//! This module exposes the Task 1–5 `crabka_pgtypes::{datetime,numeric}` value
+//! engines as SQL functions: `to_char` for temporal and numeric values,
+//! `to_timestamp`, `to_date`, the `make_*` constructors, and the `justify_*`
+//! interval normalizers.
 //!
-//! Mirrors `datetime_fn.rs` (SP37) / `func.rs` (SP29): a `format_func(name)`
-//! registry, an `is_format_func` dispatch predicate, an `eval_format` value
-//! evaluator, and a `format_func_result_type` static result-type resolver. Like
-//! every breadth slice since SP27, each function is a pure, deterministic
-//! transform over a single row's already-evaluated Datums (+ the per-statement
-//! `EvalCtx` session zone for the timestamptz cases), so there is no new lock /
-//! visibility rule / write path / interleaving and thus no Stateright model — the
-//! "pure-data / single-node refactor" carve-out. Proven by the unit tests below +
-//! the Task-8 wire test + the Task-9 conformance corpus diffed against PostgreSQL.
+//! It follows `datetime_fn.rs` (SP37) and `func.rs` (SP29). It holds a
+//! `format_func(name)` registry, an `is_format_func` dispatch predicate, an
+//! `eval_format` value evaluator, and a `format_func_result_type` static
+//! result-type resolver. Like every breadth slice since SP27, each function is a
+//! pure, deterministic transform over a single row's already-evaluated Datums,
+//! plus the per-statement `EvalCtx` session zone for the timestamptz cases. So
+//! there is no new lock, no new visibility rule, no new write path and no new
+//! interleaving, and so no Stateright model. That is the "pure-data /
+//! single-node refactor" carve-out. The unit tests below prove it, together with
+//! the Task-8 wire test and the Task-9 conformance corpus diffed against
+//! PostgreSQL.
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
 use crabka_pgtypes::{
@@ -26,11 +29,11 @@ use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
 /// The SP38 formatting / constructor functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FmtFunc {
-    /// `to_char(value, template)` — temporal OR numeric value → formatted text.
+    /// `to_char(value, template)`: temporal OR numeric value → formatted text.
     ToChar,
     ToNumber,
-    /// `to_timestamp(epoch_seconds)` (1-arg) or `to_timestamp(text, template)`
-    /// (2-arg) → `timestamptz`.
+    /// `to_timestamp(epoch_seconds)` with one argument, or
+    /// `to_timestamp(text, template)` with two, → `timestamptz`.
     ToTimestamp,
     /// `to_date(text, template)` → `date`.
     ToDate,
@@ -52,7 +55,7 @@ enum FmtFunc {
     JustifyInterval,
 }
 
-/// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
+/// Classify a lowercased function name. The lexer lowercases unquoted idents.
 /// `None` means "not an SP38 formatting/constructor function".
 fn format_func(name: &str) -> Option<FmtFunc> {
     Some(match name {
@@ -72,15 +75,16 @@ fn format_func(name: &str) -> Option<FmtFunc> {
     })
 }
 
-/// Is `name` an SP38 formatting/constructor function? (The dispatch point.)
+/// Is `name` an SP38 formatting/constructor function? This is the dispatch
+/// point.
 pub(crate) fn is_format_func(name: &str) -> bool {
     format_func(name).is_some()
 }
 
 // ---- result-type inference ----
 
-/// Statically infer an SP38 call's result type (for RowDescription). Arity / arg
-/// type mismatches surface as 42883 here (plan time), before any row is produced.
+/// Statically infer an SP38 call's result type, for RowDescription. An arity or
+/// argument-type mismatch is 42883 here, at plan time, before any row exists.
 pub(crate) fn format_func_result_type(
     fc: &FuncCall,
     scope: &Scope,
@@ -175,7 +179,8 @@ fn is_formattable(t: ColumnType) -> bool {
     )
 }
 
-/// A numeric-like type (int/float/numeric) — the `to_timestamp(epoch)` arg domain.
+/// A numeric-like type, that is int, float or numeric. This is the
+/// `to_timestamp(epoch)` argument domain.
 fn is_numeric_like(t: ColumnType) -> bool {
     matches!(
         t,
@@ -188,8 +193,9 @@ fn is_numeric_like(t: ColumnType) -> bool {
     )
 }
 
-/// Both args of a (text, text) call must be a string type (plan-time 42883
-/// otherwise) — `varchar`/`char` included, as they coerce to `text`.
+/// Both arguments of a (text, text) call must be a string type, and any other
+/// type is a plan-time 42883. `varchar` and `char` count, because they coerce to
+/// `text`.
 fn require_text_args(fc: &FuncCall, args: &[Expr], scope: &Scope) -> Result<(), ExecError> {
     for a in args {
         if !crate::eval::infer_type(a, scope)?.is_string() {
@@ -201,12 +207,13 @@ fn require_text_args(fc: &FuncCall, args: &[Expr], scope: &Scope) -> Result<(), 
 
 // ---- evaluation ----
 
-/// Evaluate an SP38 call. `eval_child` evaluates each argument against the current
-/// row (the same `eval` used for scalar context, or `agg::eval_grouped` in a
-/// grouped context), so the math is shared and only the closure differs.
+/// Evaluate an SP38 call. `eval_child` evaluates each argument against the
+/// current row. It is the same `eval` the scalar context uses, or
+/// `agg::eval_grouped` in a grouped context. So the math is shared and only the
+/// closure differs.
 ///
-/// Every SP38 function is STRICT: any NULL argument yields `Datum::Null` (matching
-/// PostgreSQL's `to_*`/`make_*`/`justify_*`).
+/// Every SP38 function is STRICT: any NULL argument yields `Datum::Null`, which
+/// matches PostgreSQL's `to_*`/`make_*`/`justify_*`.
 pub(crate) fn eval_format(
     fc: &FuncCall,
     ctx: &EvalCtx,
@@ -351,11 +358,13 @@ pub(crate) fn eval_format(
     }
 }
 
-/// `to_char(value, template)`: dispatch on the value type. Temporal values render
-/// through `format_datetime`/`format_interval`; numeric/int/float through
-/// `format_numeric`. A non-formattable type is 42883.
-/// `to_char` of a non-finite date/time or interval is NULL in PostgreSQL — not
-/// the empty string and not an error — because there is no calendar field to
+/// `to_char(value, template)`: dispatch on the value type. Temporal values
+/// render through `format_datetime`/`format_interval`, and numeric, int and
+/// float values render through `format_numeric`. A non-formattable type is
+/// 42883.
+///
+/// `to_char` of a non-finite date/time or interval is NULL in PostgreSQL. It is
+/// not the empty string and not an error, because there is no calendar field to
 /// render. Every template behaves the same way, so the check is on the value.
 fn non_finite_to_char(value: &Datum) -> bool {
     match value {
@@ -367,23 +376,26 @@ fn non_finite_to_char(value: &Datum) -> bool {
     }
 }
 
+/// `to_number(input, template)`: read a `numeric` out of `input`.
+///
+/// PostgreSQL uses the template to say WHERE the digits are, rather than to
+/// validate the input strictly. This function skips the decoration a `to_char`
+/// template would have emitted, that is group separators, currency, sign markers
+/// and literal text, and reads what is left as a number. So
+/// `to_number('-34,338,492', '99G999G999')` is -34338492 and
+/// `to_number('0.01', 'FM9.99')` is 0.01.
+///
+/// The decimal separator comes from the template. `D` or a literal `.` marks it,
+/// and `G` or a literal `,` marks a group separator that this function drops.
+///
 /// Divergence: PostgreSQL consumes the input POSITIONALLY against the template,
-/// so leading whitespace eats digit positions — `to_number('  123', '999')` is 12
-/// there and 123 here. That is why the template is accepted and not read: under
-/// the C locale the decimal point is `.` and the group separator `,` whatever
-/// the template spells them as (`D`/`G` or the literals), so scanning the input
-/// alone reproduces PostgreSQL for every template the corpus uses. Everything
-/// else in the numeric template family agrees.
-/// `to_number(input, template)` — read a `numeric` out of `input`.
-///
-/// PostgreSQL uses the template to say WHERE the digits are rather than to
-/// validate the input strictly: the decoration a `to_char` template would have
-/// emitted (group separators, currency, sign markers, literal text) is skipped,
-/// and what is left is read as a number. So `to_number('-34,338,492',
-/// '99G999G999')` is -34338492 and `to_number('0.01', 'FM9.99')` is 0.01.
-///
-/// The decimal separator is taken from the template: `D` or a literal `.` marks
-/// it, and `G` or a literal `,` marks a group separator that is dropped.
+/// so leading whitespace eats digit positions. `to_number('  123', '999')` is 12
+/// there and 123 here. That is why this function accepts the template and does
+/// not read it. Under the C locale the decimal point is `.` and the group
+/// separator is `,`, whatever the template spells them as, either `D`/`G` or the
+/// literals. So a scan of the input alone reproduces PostgreSQL for every
+/// template the corpus uses. Everything else in the numeric template family
+/// agrees.
 fn to_number(input: &str, _template: &str, name: &str) -> Result<Datum, ExecError> {
     let mut digits = String::with_capacity(input.len());
     let mut seen_decimal = false;
@@ -477,8 +489,8 @@ fn to_char(value: &Datum, template: &str, ctx: &EvalCtx, name: &str) -> Result<D
     Ok(Datum::Text(text))
 }
 
-/// `to_timestamp(epoch_seconds)`: Unix epoch seconds (possibly fractional) → an
-/// absolute instant (`timestamptz`).
+/// `to_timestamp(epoch_seconds)`: Unix epoch seconds, which may be fractional, →
+/// an absolute instant, that is a `timestamptz`.
 fn to_timestamp_epoch(value: &Datum, name: &str) -> Result<Datum, ExecError> {
     let secs = f64_arg(value, name)?;
     if !secs.is_finite() {
@@ -502,7 +514,7 @@ fn to_timestamp_epoch(value: &Datum, name: &str) -> Result<Datum, ExecError> {
         })
 }
 
-/// `to_timestamp(input, template)`: parse `input` by `template`, then interpret the
+/// `to_timestamp(input, template)`: parse `input` by `template`, then read the
 /// resulting wall-clock in the session zone → `timestamptz`.
 fn to_timestamp_template(template: &str, input: &str, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let p = datetime::parse_by_template(template, input).map_err(map_type)?;
@@ -527,8 +539,8 @@ fn to_date(template: &str, input: &str) -> Result<Datum, ExecError> {
     Ok(Datum::Date(date))
 }
 
-/// Build a civil `DateTime` from a `ParsedDateTime`, mapping a jiff
-/// range/validity error (e.g. Feb 30) to 22008.
+/// Build a civil `DateTime` from a `ParsedDateTime`. This function maps a jiff
+/// range or validity error, such as Feb 30, to 22008.
 fn civil_from_parsed(p: &datetime::ParsedDateTime) -> Result<jiff::civil::DateTime, ExecError> {
     jiff::civil::DateTime::new(
         p.year as i16,
@@ -568,8 +580,8 @@ fn require_arity(fc: &FuncCall, ok: bool) -> Result<(), ExecError> {
     }
 }
 
-/// Validate just the arity for `f` (used on the NULL short-circuit path so a NULL
-/// with the wrong number of args still reports 42883).
+/// Validate just the arity for `f`. The NULL short-circuit path uses this, so a
+/// NULL with the wrong number of arguments still reports 42883.
 fn check_arity(f: FmtFunc, fc: &FuncCall, n: usize) -> Result<(), ExecError> {
     let ok = match f {
         FmtFunc::ToChar | FmtFunc::ToDate | FmtFunc::ToNumber => n == 2,
@@ -583,8 +595,8 @@ fn check_arity(f: FmtFunc, fc: &FuncCall, n: usize) -> Result<(), ExecError> {
     require_arity(fc, ok)
 }
 
-/// Map a `crabka_pgtypes::TypeError` (22007/22008/22003/…) onto the executor error so its
-/// SQLSTATE propagates to the wire.
+/// Map a `crabka_pgtypes::TypeError`, such as 22007, 22008 or 22003, onto the
+/// executor error, so its SQLSTATE propagates to the wire.
 fn map_type(e: TypeError) -> ExecError {
     ExecError::Type(e)
 }
@@ -604,7 +616,7 @@ fn text_value<'a>(d: &'a Datum, name: &str) -> Result<&'a str, ExecError> {
     }
 }
 
-/// An integer argument at runtime, narrowed to i32 (the `make_*` field width).
+/// An integer argument at runtime, narrowed to i32, the `make_*` field width.
 fn int_arg(d: &Datum, name: &str) -> Result<i32, ExecError> {
     match d {
         Datum::Int2(n) => Ok(i32::from(*n)),
@@ -618,7 +630,7 @@ fn int_arg(d: &Datum, name: &str) -> Result<i32, ExecError> {
     }
 }
 
-/// A floating argument at runtime, promoted to f64 (int/float/numeric).
+/// A floating argument at runtime, promoted to f64, from int, float or numeric.
 fn f64_arg(d: &Datum, name: &str) -> Result<f64, ExecError> {
     Ok(match d {
         Datum::Int2(n) => f64::from(*n),
@@ -631,7 +643,7 @@ fn f64_arg(d: &Datum, name: &str) -> Result<f64, ExecError> {
     })
 }
 
-/// An interval argument at runtime (the `justify_*` domain).
+/// An interval argument at runtime, the `justify_*` domain.
 fn interval_value(d: &Datum, name: &str) -> Result<Interval, ExecError> {
     match d {
         Datum::Interval(iv) => Ok(*iv),
@@ -639,8 +651,8 @@ fn interval_value(d: &Datum, name: &str) -> Result<Interval, ExecError> {
     }
 }
 
-/// Resolve a zone-name text value to a jiff `TimeZone`. `UTC` and fixed-offset
-/// spellings are handled by jiff's tzdb; an unknown zone is 22023.
+/// Resolve a zone-name text value to a jiff `TimeZone`. jiff's tzdb handles
+/// `UTC` and the fixed-offset spellings. An unknown zone is 22023.
 fn zone_arg(d: &Datum, name: &str) -> Result<jiff::tz::TimeZone, ExecError> {
     let zone = match d {
         Datum::Text(s) => s.as_str(),
@@ -691,7 +703,7 @@ mod tests {
         .code
     }
 
-    /// `to_number` reads the digits out of a decorated string, dropping the
+    /// `to_number` reads the digits out of a decorated string, and drops the
     /// decoration a `to_char` template would have emitted. Every expectation is
     /// PostgreSQL 18.4's.
     #[test]

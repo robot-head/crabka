@@ -75,7 +75,7 @@ impl Oracle {
         v
     }
 
-    /// Like `call` but returns Err with the oracle error message instead of panicking.
+    /// Like `call`, but returns Err with the oracle error message instead of a panic.
     #[allow(dead_code)]
     pub fn try_call(&mut self, req: &Value) -> Result<Value, String> {
         let line = serde_json::to_string(req).unwrap();
@@ -172,8 +172,10 @@ impl Drop for Oracle {
 
 static SHARED: LazyLock<Mutex<Oracle>> = LazyLock::new(|| Mutex::new(Oracle::spawn()));
 
-/// Borrow the shared oracle. Tests serialize through the mutex so a single
-/// JVM is reused across all differential cases.
+/// Borrow the shared oracle.
+///
+/// Tests serialize through the mutex, so all differential cases reuse a single
+/// JVM.
 pub fn shared() -> MutexGuard<'static, Oracle> {
     SHARED.lock().unwrap()
 }

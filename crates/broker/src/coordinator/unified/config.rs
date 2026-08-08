@@ -6,9 +6,10 @@ use qubit_clock::sleep::{AsyncSleeper, SystemSleeper};
 
 use super::assignor::{Assignor, RangeAssignor, UniformAssignor};
 
-/// `group.consumer.migration.policy` — governs classic ↔ next-gen consumer
-/// group conversion. Default `Bidirectional`, matching Apache Kafka 4.0
-/// (verified empirically against `mirror.gcr.io/apache/kafka:4.0.0`).
+/// `group.consumer.migration.policy` governs classic ↔ next-gen consumer
+/// group conversion. The default is `Bidirectional`, which matches Apache
+/// Kafka 4.0, verified empirically against
+/// `mirror.gcr.io/apache/kafka:4.0.0`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConsumerGroupMigrationPolicy {
     /// No conversion in either direction.
@@ -62,7 +63,8 @@ impl FromStr for ConsumerGroupMigrationPolicy {
 
 #[derive(Clone)]
 pub struct NextGenConfig {
-    /// Comma-separated list; "consumer" enables KIP-848. Default "classic,consumer".
+    /// Comma-separated list. "consumer" enables KIP-848. Default
+    /// "classic,consumer".
     pub rebalance_protocols: Vec<RebalanceProtocol>,
     pub session_timeout: Duration,
     pub heartbeat_interval: Duration,
@@ -74,20 +76,20 @@ pub struct NextGenConfig {
     pub actor_mailbox_capacity: usize,
     pub shutdown_ack_timeout: Duration,
     pub classic_initial_rebalance_delay: Duration,
-    /// Registered server-side assignors. The list IS the registry; the
-    /// client's `server_assignor` field is matched against `Assignor::name()`
-    /// by string equality. `Default` seeds the two built-ins
-    /// (`uniform`, `range`); operators add their own via
+    /// Registered server-side assignors. The list IS the registry. The
+    /// broker matches the client's `server_assignor` field against
+    /// `Assignor::name()` by string equality. `Default` seeds the two
+    /// built-ins, `uniform` and `range`. Operators add their own with
     /// `register_assignor` before `Broker::start`.
     pub assignors: Vec<Arc<dyn Assignor>>,
     pub max_size: usize,
-    /// `group.consumer.migration.policy` — governs classic ↔ next-gen
-    /// conversion. Consulted by the conversion triggers.
+    /// `group.consumer.migration.policy` governs classic ↔ next-gen
+    /// conversion. The conversion triggers consult it.
     pub migration_policy: ConsumerGroupMigrationPolicy,
-    /// Relative sleeper driving the per-group actor's session-expiry tick
-    /// cadence. Production uses [`qubit_clock::sleep::SystemSleeper`] (real
-    /// time); tests inject a [`qubit_clock::sleep::MockSleeper`] so the tick
-    /// fires on a controlled mock timeline instead of wall-clock time.
+    /// Relative sleeper that drives the per-group actor's session-expiry tick
+    /// cadence. Production uses [`qubit_clock::sleep::SystemSleeper`], which is
+    /// real time. Tests inject a [`qubit_clock::sleep::MockSleeper`] so the
+    /// tick fires on a controlled mock timeline instead of wall-clock time.
     pub sleeper: Arc<dyn AsyncSleeper>,
 }
 
@@ -125,8 +127,9 @@ pub enum RebalanceProtocol {
 }
 
 /// Returned by [`NextGenConfig::register_assignor`] when the supplied
-/// assignor's `name()` collides with one that is already registered
-/// (either a built-in or a previously-registered custom).
+/// assignor's `name()` collides with one that is already registered. The
+/// existing entry can be a built-in or a previously-registered custom
+/// assignor.
 #[derive(Debug, thiserror::Error)]
 pub enum AssignorRegistrationError {
     #[error("an assignor named {0} is already registered")]
@@ -191,9 +194,9 @@ impl NextGenConfig {
     }
 
     /// Register an additional assignor. Returns an error if the name is
-    /// already taken. Built-ins (`uniform`, `range`) are registered by
-    /// [`Default::default`]; calling `register_assignor` with either
-    /// name surfaces as a duplicate-name error.
+    /// already taken. [`Default::default`] registers the built-ins
+    /// `uniform` and `range`, so a `register_assignor` call with either
+    /// name returns a duplicate-name error.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn register_assignor(
@@ -208,13 +211,13 @@ impl NextGenConfig {
         Ok(())
     }
 
-    /// Resolve a registered assignor by name. Cloning an `Arc` is cheap.
+    /// Resolve a registered assignor by name. An `Arc` clone is cheap.
     #[must_use]
     pub fn find_assignor(&self, name: &str) -> Option<Arc<dyn Assignor>> {
         self.assignors.iter().find(|a| a.name() == name).cloned()
     }
 
-    /// `true` when a client may legally request this name via
+    /// `true` when a client may legally request this name in
     /// `ConsumerGroupHeartbeatRequest::server_assignor`.
     #[must_use]
     pub fn assignor_enabled(&self, name: &str) -> bool {

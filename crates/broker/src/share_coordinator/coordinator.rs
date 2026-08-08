@@ -1,16 +1,18 @@
-//! Per-broker `ShareCoordinator` (KIP-932 persister). Owns the in-memory
-//! per-`(group, topicId, partition)` delivery state for every
-//! `__share_group_state` partition this broker hosts as leader. Persists
-//! every state change as a `ShareSnapshot` / `ShareUpdate` record in the
-//! corresponding `__share_group_state` partition, and recovers state on
-//! `Broker::start` by replaying those partitions.
+//! Per-broker `ShareCoordinator`, the KIP-932 persister.
 //!
-//! Mirrors [`crate::txn::coordinator::TxnCoordinator`].
+//! The coordinator owns the in-memory delivery state for each
+//! `(group, topicId, partition)` of every `__share_group_state` partition that
+//! this broker hosts as leader. It writes each state change as a
+//! `ShareSnapshot` or `ShareUpdate` record in the matching
+//! `__share_group_state` partition. On `Broker::start` it replays those
+//! partitions to recover the state.
 //!
-//! Leadership: the wire handlers check [`ShareCoordinator::is_leader`]
-//! before dispatching, so the state-machine methods here (`initialize`,
-//! `write`, `read`, `delete`) assume this broker leads the relevant
-//! `__share_group_state` partition. `persist_record` still defends against a
+//! This coordinator mirrors [`crate::txn::coordinator::TxnCoordinator`].
+//!
+//! Leadership: the wire handlers check [`ShareCoordinator::is_leader`] before
+//! they dispatch. The state-machine methods here are `initialize`, `write`,
+//! `read`, and `delete`. They assume that this broker leads the related
+//! `__share_group_state` partition. `persist_record` still guards against a
 //! missing local partition log and returns [`BrokerError::Share`] in that case.
 
 // The state-machine methods are consumed by the persister RPC handlers and
@@ -46,29 +48,39 @@ use crate::{
 /// In-memory map key: `(group_id, topic_id, partition)`.
 type ShareStateKey3 = (String, uuid::Uuid, i32);
 
-/// KIP-932 share-group state epoch: bumped on (re-)initialization (e.g.
-/// `AlterShareGroupOffsets`); a write or initialize carrying an older epoch is
-/// fenced with `FENCED_STATE_EPOCH`.
+/// KIP-932 share-group state epoch.
+///
+/// The coordinator bumps this epoch on initialization and on
+/// re-initialization, for example `AlterShareGroupOffsets`. It fences a write
+/// or initialize that carries an older epoch with `FENCED_STATE_EPOCH`.
 pub(crate) type StateEpoch = i32;
 
-/// Leader epoch of the share-partition leader that issued a state write; a
-/// stale value is fenced with `FENCED_LEADER_EPOCH`.
+/// Leader epoch of the share-partition leader that issued a state write.
+///
+/// The coordinator fences a stale value with `FENCED_LEADER_EPOCH`.
 pub(crate) type LeaderEpoch = i32;
 
-/// Kafka wire error code (see [`crate::codes`]) returned per partition when a
-/// state-machine operation fails.
+/// Per-partition Kafka wire error code for a failed state-machine operation.
+///
+/// See [`crate::codes`].
 pub(crate) type ShareErrorCode = i16;
 
-/// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)` as
-/// returned by [`ShareCoordinator::read_summary`].
+/// Summary tuple that [`ShareCoordinator::read_summary`] returns.
+///
+/// The fields are `state_epoch`, `leader_epoch`, `start_offset`, and
+/// `delivery_complete_count`.
 pub(crate) type ShareStateSummary = (StateEpoch, LeaderEpoch, Offset, i32);
 
-/// `start_offset` sentinel meaning "no persisted share state": tells the
-/// share-partition leader to initialize delivery from scratch (KIP-932).
+/// `start_offset` sentinel for "no persisted share state".
+///
+/// This value tells the share-partition leader to initialize delivery from
+/// scratch (KIP-932).
 pub(crate) const UNINITIALIZED_START_OFFSET: i64 = -1;
 
-/// Per-broker share-state coordinator. Constructed in `Broker::start` and
-/// shared via `Arc` with the share-state wire handlers.
+/// Per-broker share-state coordinator.
+///
+/// `Broker::start` constructs the coordinator and shares it with the
+/// share-state wire handlers through an `Arc`.
 pub(crate) struct ShareCoordinator {
     pub(crate) node_id: crabka_metadata::NodeId,
     pub(crate) partitions: Arc<PartitionRegistry>,
@@ -94,9 +106,10 @@ impl ShareCoordinator {
         }
     }
 
-    /// Recompute which `__share_group_state` partitions this broker leads
-    /// from the current `MetadataImage`. Called from `recover` and on every
-    /// metadata change.
+    /// Recomputes which `__share_group_state` partitions this broker leads.
+    ///
+    /// The coordinator reads the current `MetadataImage`. `recover` calls this
+    /// method, and the broker calls it again on every metadata change.
     pub(crate) async fn refresh_leader_partitions(&self, image: &MetadataImage) {
         let mut set = HashSet::new();
         for p in image.partitions_of(bootstrap::TOPIC) {
@@ -150,15 +163,17 @@ impl ShareCoordinator {
         ))
     }
 
-    /// Initialize the share state for `(group, topic_id, partition)` at
-    /// `state_epoch` / `start_offset`. Fences with `FENCED_STATE_EPOCH` if a
-    /// state with `state_epoch >= new state_epoch` already exists. Writes a
+    /// Initializes the share state for `(group, topic_id, partition)`.
+    ///
+    /// The new state starts at `state_epoch` and `start_offset`. This method
+    /// fences with `FENCED_STATE_EPOCH` if a state with
+    /// `state_epoch >= new state_epoch` already exists. If not, it writes a
     /// `ShareSnapshot` record and seeds the in-memory state.
     ///
     /// # Errors
     ///
-    /// Returns the per-partition error code on a fenced epoch or a persist
-    /// failure (`COORDINATOR_NOT_AVAILABLE`).
+    /// Returns the per-partition error code on a fenced epoch. Returns
+    /// `COORDINATOR_NOT_AVAILABLE` if the persist fails.
     pub(crate) async fn initialize(
         &self,
         group: &str,
@@ -207,16 +222,18 @@ impl ShareCoordinator {
         Ok(())
     }
 
-    /// Apply a `WriteShareGroupState` delta. Fences a stale `state_epoch`
-    /// (`FENCED_STATE_EPOCH`) and a stale `leader_epoch` (`FENCED_LEADER_EPOCH`),
-    /// then applies the update, persists a `ShareUpdate`, and — every
-    /// `snapshot_update_records_per_snapshot` updates — folds a full
-    /// `ShareSnapshot` and prunes redundant log prefix.
+    /// Applies a `WriteShareGroupState` delta.
+    ///
+    /// This method fences a stale `state_epoch` with `FENCED_STATE_EPOCH` and a
+    /// stale `leader_epoch` with `FENCED_LEADER_EPOCH`. If not fenced, it
+    /// applies the update and persists a `ShareUpdate`. Every
+    /// `snapshot_update_records_per_snapshot` updates it also folds a full
+    /// `ShareSnapshot` and prunes the redundant log prefix.
     ///
     /// # Errors
     ///
-    /// Returns the per-partition error code on a fenced epoch or a persist
-    /// failure (`COORDINATOR_NOT_AVAILABLE`).
+    /// Returns the per-partition error code on a fenced epoch. Returns
+    /// `COORDINATOR_NOT_AVAILABLE` if the persist fails.
     pub(crate) async fn write(
         &self,
         group: &str,
@@ -304,7 +321,7 @@ impl ShareCoordinator {
         Ok(())
     }
 
-    /// Clone the current state for `(group, topic_id, partition)`.
+    /// Clones the current state for `(group, topic_id, partition)`.
     pub(crate) async fn read(
         &self,
         group: &str,
@@ -317,7 +334,7 @@ impl ShareCoordinator {
         Some(st.clone())
     }
 
-    /// Summary `(state_epoch, leader_epoch, start_offset, delivery_complete_count)`.
+    /// Returns `(state_epoch, leader_epoch, start_offset, delivery_complete_count)`.
     pub(crate) async fn read_summary(
         &self,
         group: &str,
@@ -335,8 +352,10 @@ impl ShareCoordinator {
         ))
     }
 
-    /// Delete the share state for `(group, topic_id, partition)`: write a
-    /// tombstone (snapshot key, null value) and drop the in-memory entry.
+    /// Deletes the share state for `(group, topic_id, partition)`.
+    ///
+    /// This method writes a tombstone with the snapshot key and a null value.
+    /// It then drops the in-memory entry.
     ///
     /// # Errors
     ///
@@ -365,13 +384,15 @@ impl ShareCoordinator {
         Ok(())
     }
 
-    /// Append a single `(key, value)` record to `__share_group_state`-`p` and
-    /// return its base offset. A `None` value writes a tombstone.
+    /// Appends one `(key, value)` record to `__share_group_state`-`p`.
+    ///
+    /// This method returns the base offset of the record. A `None` value writes
+    /// a tombstone.
     ///
     /// # Errors
     ///
     /// Returns [`BrokerError::Share`] if the partition log is not open
-    /// locally, or the underlying append error if `produce_batch` fails.
+    /// locally. Returns the append error if `produce_batch` fails.
     async fn persist_record(
         &self,
         state_partition: PartitionIndex,
@@ -397,12 +418,15 @@ impl ShareCoordinator {
         part.produce_batch(batch).await
     }
 
-    /// Best-effort log-prefix pruning for `state_partition`. Computes the
-    /// smallest `last_snapshot_offset` across every live key mapped to that
-    /// state partition (`redundant_offset`); if it exceeds the partition's
-    /// current `log_start_offset`, trims the log up to it. Every retained key
-    /// keeps its latest snapshot, so the trim is safe. Errors are logged and
-    /// swallowed — pruning never fails a write.
+    /// Prunes the log prefix of `state_partition` on a best-effort basis.
+    ///
+    /// This method computes `redundant_offset`, the smallest
+    /// `last_snapshot_offset` across every live key mapped to that state
+    /// partition. If `redundant_offset` is more than the current
+    /// `log_start_offset` of the partition, the method trims the log up to it.
+    /// Every retained key keeps its latest snapshot, so the trim is safe. The
+    /// method logs each error and then discards it. A prune never fails a
+    /// write.
     async fn maybe_prune(&self, state_partition: PartitionIndex) {
         let Some(part) = self.partitions.get(bootstrap::TOPIC, state_partition) else {
             return;
@@ -438,13 +462,16 @@ impl ShareCoordinator {
         }
     }
 
-    /// Replay every locally-led `__share_group_state` partition into the
-    /// in-memory state map. Called from `Broker::start`.
+    /// Replays every locally-led `__share_group_state` partition.
+    ///
+    /// The replayed records go into the in-memory state map. `Broker::start`
+    /// calls this method.
     ///
     /// # Errors
     ///
-    /// Returns [`BrokerError`] if refreshing leadership fails. Per-partition
-    /// read errors are logged and skipped (treated as "nothing to replay").
+    /// Returns [`BrokerError`] if the leadership refresh fails. The method logs
+    /// a per-partition read error and then skips that partition, as if it holds
+    /// nothing to replay.
     pub(crate) async fn recover(&self, image: &MetadataImage) -> Result<(), BrokerError> {
         self.refresh_leader_partitions(image).await;
         self.replay_led_partitions().await;
@@ -455,9 +482,11 @@ impl ShareCoordinator {
         Ok(())
     }
 
-    /// Replay every currently-led `__share_group_state` partition's log into
-    /// the in-memory state map. Assumes `leader_partitions` is already
-    /// populated (via `refresh_leader_partitions`).
+    /// Replays the log of every currently-led `__share_group_state` partition.
+    ///
+    /// The replayed records go into the in-memory state map. This method
+    /// assumes that `refresh_leader_partitions` already filled
+    /// `leader_partitions`.
     async fn replay_led_partitions(&self) {
         let local_partitions: Vec<PartitionIndex> = self
             .leader_partitions
@@ -525,9 +554,10 @@ impl ShareCoordinator {
         }
     }
 
-    /// Fold one replayed record value into the in-memory state map. Snapshot
-    /// records reset the state and record `last_snapshot_offset`; update
-    /// records apply a delta.
+    /// Folds one replayed record value into the in-memory state map.
+    ///
+    /// A snapshot record resets the state and records `last_snapshot_offset`.
+    /// An update record applies a delta.
     fn replay_value(
         &self,
         key: &ShareStateKey,
@@ -596,8 +626,10 @@ mod tests {
         }
     }
 
-    /// Build a real `__share_group_state`-`p` partition (with a live writer)
-    /// and register it. Mirrors `partition_registry`'s `fixture_partition`.
+    /// Builds a real `__share_group_state`-`p` partition and registers it.
+    ///
+    /// The partition has a live writer. This function mirrors
+    /// `fixture_partition` in `partition_registry`.
     fn open_state_partition(reg: &PartitionRegistry, log_dir: &Path, p: i32) {
         let part_dir = crate::log_dir::partition_dir(log_dir, bootstrap::TOPIC, p);
         std::fs::create_dir_all(&part_dir).unwrap();
@@ -614,8 +646,9 @@ mod tests {
         reg.insert(bootstrap::TOPIC.to_string(), PartitionIndex(p), part);
     }
 
-    /// A coordinator that leads every state partition it touches, with all
-    /// 50 `__share_group_state` partitions opened locally.
+    /// A coordinator that leads every state partition it touches.
+    ///
+    /// All 50 `__share_group_state` partitions are open locally.
     fn coordinator(dir: &Path) -> (ShareCoordinator, Arc<PartitionRegistry>) {
         let reg = Arc::new(PartitionRegistry::new());
         for p in 0..ShareCoordinatorConfig::default().state_topic_num_partitions {
@@ -1008,8 +1041,9 @@ mod tests {
         check!(st.last_snapshot_offset == 2);
     }
 
-    /// Replaying ONLY batch A pins the per-record offset arithmetic in
-    /// isolation: the snapshot at `offset_delta 1` over `base_offset 0` records
+    /// A replay of ONLY batch A pins the per-record offset arithmetic.
+    ///
+    /// The snapshot at `offset_delta 1` over `base_offset 0` records
     /// `last_snapshot_offset == 1`, not `Offset(-1)`.
     #[tokio::test]
     async fn replay_snapshot_offset_is_base_plus_delta() {
@@ -1083,10 +1117,11 @@ mod tests {
         check!(st.last_snapshot_offset == 1);
     }
 
-    /// After a snapshot fold, `maybe_prune` must trim the state-partition log
-    /// prefix up to the redundant offset (the folded snapshot's offset). The
-    /// partition's `log_start_offset` advances past 0; if pruning is skipped it
-    /// stays at 0.
+    /// After a snapshot fold, `maybe_prune` must trim the state-partition log.
+    ///
+    /// The trim goes up to the redundant offset, which is the offset of the
+    /// folded snapshot. The `log_start_offset` of the partition then advances
+    /// past 0. If the prune does not run, `log_start_offset` stays at 0.
     #[tokio::test]
     async fn snapshot_fold_prunes_log_prefix() {
         let dir = tempdir().unwrap();

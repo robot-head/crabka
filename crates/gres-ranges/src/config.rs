@@ -78,8 +78,10 @@ impl RangeRuntimePolicy {
     /// Validate relationships between independently parsed policy values.
     ///
     /// # Errors
-    /// Returns an error when a value is non-positive/non-finite or coupled
-    /// limits are inconsistent.
+    ///
+    /// Returns an error when a value is not positive or is not finite.
+    ///
+    /// Returns an error when coupled limits are inconsistent.
     pub fn validate(&self) -> Result<(), String> {
         self.join.validate().map_err(|error| error.to_string())?;
         for (name, value) in [

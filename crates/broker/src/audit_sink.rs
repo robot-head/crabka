@@ -1,5 +1,7 @@
-//! Kafka-native audit sink: appends OCSF records to this broker's partition of
-//! the internal audit topic (broker-affinity write path).
+//! Kafka-native audit sink.
+//!
+//! The sink appends OCSF records to this broker's partition of the internal
+//! audit topic. This is the broker-affinity write path.
 
 use std::sync::Arc;
 
@@ -12,7 +14,9 @@ use crabka_protocol::records::{Record, RecordBatch, RecordHeader};
 use crate::{metrics::BrokerMetrics, partition_registry::PartitionRegistry};
 
 /// Writes audit records to a single partition of the audit topic that this
-/// broker leads. Slice 1: the partition index is resolved once at construction.
+/// broker leads.
+///
+/// Slice 1: the sink resolves the partition index once at construction.
 pub struct KafkaTopicAuditSink {
     partitions: Arc<PartitionRegistry>,
     topic: String,

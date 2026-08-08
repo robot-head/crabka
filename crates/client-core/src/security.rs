@@ -1,7 +1,7 @@
 //! Client-side TLS/SASL security surface for [`crate::Client`].
 //!
-//! Mirrors the broker's inter-broker credential + TLS shapes so the
-//! public clients and the inter-broker dialer negotiate the same way.
+//! This module mirrors the broker's inter-broker credential + TLS shapes so
+//! the public clients and the inter-broker dialer negotiate the same way.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -11,33 +11,38 @@ use tokio_rustls::TlsConnector;
 
 pub use crate::sasl::SaslCredentials;
 
-/// Client-side TLS trust + SNI. Mirrors the trust-roots half of the
-/// broker's `crabka_security::TlsConfig::build_client_config`.
+/// Client-side TLS trust + SNI.
+///
+/// This struct mirrors the trust-roots half of the broker's
+/// `crabka_security::TlsConfig::build_client_config`.
 #[derive(Debug, Clone)]
 pub struct TlsConnectorConfig {
     /// PEM file of CA certs the client trusts to verify the broker's
-    /// server cert. `None` → empty root store (handshake fails unless
-    /// the server cert chains to a webpki default, which we do not
-    /// install — mirrors the broker's strict `build_client_config`).
+    /// server cert. `None` gives an empty root store. The handshake then
+    /// fails unless the server cert chains to a webpki default, which this
+    /// crate does not install. This mirrors the broker's strict
+    /// `build_client_config`.
     pub trust_roots_pem: Option<PathBuf>,
     /// SNI / server-name used for the TLS handshake and as the
     /// canonical hostname for any GSSAPI SPN.
     pub server_name: String,
     /// Optional mTLS client identity: `(cert_chain_pem, private_key_pem)`.
     ///
-    /// When `Some`, the cert chain and key are loaded from the given PEM
-    /// files and presented to the server during the TLS handshake
-    /// (mutual TLS / client authentication).  `None` → one-way TLS; the
-    /// client does not present a certificate (`with_no_client_auth`).
+    /// When `Some`, the client loads the cert chain and key from the given
+    /// PEM files and presents them to the server during the TLS handshake.
+    /// This is mutual TLS, also called client authentication. `None` gives
+    /// one-way TLS: the client does not present a certificate
+    /// (`with_no_client_auth`).
     pub client_identity: Option<(PathBuf, PathBuf)>,
 }
 
 impl TlsConnectorConfig {
     /// Build a `rustls::ClientConfig`.
     ///
-    /// When [`Self::client_identity`] is `Some`, the cert chain and key are
-    /// loaded and the config is built with mutual TLS client authentication.
-    /// When `None`, the client presents no certificate (`with_no_client_auth`).
+    /// When [`Self::client_identity`] is `Some`, this method loads the cert
+    /// chain and key and builds the config with mutual TLS client
+    /// authentication. When `None`, the client presents no certificate
+    /// (`with_no_client_auth`).
     ///
     /// # Errors
     /// Returns a string error if any PEM file fails to load or parse.
@@ -82,16 +87,18 @@ impl TlsConnectorConfig {
     }
 }
 
-/// Full client security policy: which listener protocol to speak, plus
-/// the TLS and SASL material it implies. `None` fields are required to
-/// match `protocol` (a `SaslSsl` policy needs both `tls` and `sasl`).
+/// Full client security policy: the listener protocol to speak, plus the TLS
+/// and SASL material it implies.
+///
+/// The `None` fields must match `protocol`. A `SaslSsl` policy needs both
+/// `tls` and `sasl`.
 #[derive(Debug, Clone)]
 pub struct ClientSecurity {
     pub protocol: ListenerProtocol,
     pub tls: Option<TlsConnectorConfig>,
     pub sasl: Option<SaslCredentials>,
-    /// Canonical hostname for the SASL handshake — the GSSAPI service
-    /// principal host (`service_name/<sasl_host>`). Meaningful whenever
+    /// Canonical hostname for the SASL handshake. This is the GSSAPI service
+    /// principal host (`service_name/<sasl_host>`). It is meaningful whenever
     /// the protocol [`requires_sasl`], independent of TLS: a
     /// `SASL_PLAINTEXT` listener has no `tls` to source the host from, so
     /// without this GSSAPI would fall back to `localhost` and Kerberos
@@ -103,12 +110,13 @@ pub struct ClientSecurity {
 }
 
 impl ClientSecurity {
-    /// Resolve the hostname handed to the SASL handshake (the GSSAPI SPN
-    /// host). Prefers the explicit [`Self::sasl_host`], then the TLS SNI
-    /// ([`TlsConnectorConfig::server_name`]), then the connection's target
-    /// `host` if known, falling back to `"localhost"`.
+    /// Resolve the hostname handed to the SASL handshake, the GSSAPI SPN host.
     ///
-    /// TLS SNI is unaffected — it is always sourced from `tls.server_name`.
+    /// This method prefers the explicit [`Self::sasl_host`], then the TLS SNI
+    /// ([`TlsConnectorConfig::server_name`]), then the connection's target
+    /// `host` if known. If it knows none of them, it returns `"localhost"`.
+    ///
+    /// TLS SNI is unaffected. It always comes from `tls.server_name`.
     #[must_use]
     pub fn sasl_handshake_host<'a>(&'a self, target_host: Option<&'a str>) -> &'a str {
         if let Some(h) = self.sasl_host.as_deref() {

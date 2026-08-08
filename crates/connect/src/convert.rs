@@ -1,15 +1,16 @@
 //! The converter layer: bridge a connector's typed payload `T` to and from the
 //! raw [`Bytes`] that travel on the Kafka wire.
 //!
-//! Sources and sinks work in the connector's domain types; the runtime applies
+//! Sources and sinks work in the connector's domain types. The runtime applies
 //! a [`Converter`] to each of a record's key and value to cross the wire
 //! boundary. Two converters ship here:
 //!
-//! - [`ByteIdentity`] — `T = Bytes`, a byte-for-byte passthrough that preserves
-//!   exact wire bytes (the Kafka-compatibility constraint that always matters).
-//! - [`SchemaConverter`] — bridges the Confluent schema-registry serdes from
-//!   `crabka-schema-serde`, so a connector can read and write typed Avro /
-//!   Protobuf / JSON records.
+//! - [`ByteIdentity`]: `T = Bytes`, a byte-for-byte passthrough that preserves
+//!   exact wire bytes. That is the Kafka-compatibility constraint that always
+//!   matters.
+//! - [`SchemaConverter`]: bridges the Confluent schema-registry serdes from
+//!   `crabka-schema-serde`, so a connector can read and write typed Avro,
+//!   Protobuf, and JSON records.
 
 use std::sync::Arc;
 
@@ -20,9 +21,9 @@ use crate::error::ConnectError;
 
 /// Bridges a connector's typed payload `T` to and from wire [`Bytes`].
 ///
-/// `topic` is passed to both directions so schema-aware converters can derive
-/// their registry subject (`<topic>-key` / `<topic>-value`); byte-oriented
-/// converters ignore it. Mirrors Kafka Connect's `Converter`.
+/// The runtime passes `topic` to both directions, so a schema-aware converter
+/// can derive its registry subject, `<topic>-key` or `<topic>-value`. A
+/// byte-oriented converter ignores it. This mirrors Kafka Connect's `Converter`.
 pub trait Converter<T>: Send + Sync + 'static {
     /// Encode `value` to its on-wire bytes.
     ///
@@ -41,10 +42,10 @@ pub trait Converter<T>: Send + Sync + 'static {
 
 /// A byte-for-byte passthrough converter: `T = Bytes`.
 ///
-/// `serialize` clones the bytes through unchanged (a cheap `Bytes` refcount
-/// bump) and `deserialize` copies the input into an owned `Bytes`. Use this for
-/// connectors that move opaque records without touching the payload, where
-/// preserving exact wire bytes is the point.
+/// `serialize` clones the bytes through unchanged, which is a cheap `Bytes`
+/// refcount bump, and `deserialize` copies the input into an owned `Bytes`. Use
+/// this for connectors that move opaque records and do not touch the payload,
+/// where exact wire bytes are the point.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ByteIdentity;
 
@@ -58,13 +59,14 @@ impl Converter<Bytes> for ByteIdentity {
     }
 }
 
-/// A schema-registry-backed converter: serializes via a [`SchemaSerializer`]
-/// and deserializes via a [`SchemaDeserializer`] from `crabka-schema-serde`.
+/// A schema-registry-backed converter. It serializes with a
+/// [`SchemaSerializer`] and deserializes with a [`SchemaDeserializer`] from
+/// `crabka-schema-serde`.
 ///
-/// Pair one format serde's serializer and deserializer (e.g. an `AvroSerde`'s)
-/// to read and write typed records framed in the Confluent wire format
-/// (`magic | schema_id | body`). The schema-serde error is surfaced as
-/// [`ConnectError::Convert`].
+/// Pair the serializer and the deserializer of one format serde, for example
+/// those of an `AvroSerde`, to read and write typed records framed in the
+/// Confluent wire format `magic | schema_id | body`. A schema-serde error
+/// becomes a [`ConnectError::Convert`].
 pub struct SchemaConverter<T> {
     serializer: Arc<dyn SchemaSerializer<T>>,
     deserializer: Arc<dyn SchemaDeserializer<T>>,
@@ -104,8 +106,8 @@ mod tests {
 
     use super::*;
 
-    /// A serde whose output encodes its inputs, so a test can prove
-    /// [`SchemaConverter`] forwards to it rather than fabricating a value.
+    /// A serde whose output encodes its inputs, so a test can prove that
+    /// [`SchemaConverter`] forwards to it and does not fabricate a value.
     struct FakeSerde;
 
     impl SchemaSerializer<String> for FakeSerde {

@@ -4,9 +4,11 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// A pool of nodes (pods) that share role + image + resources.
-/// One `StatefulSet` per pool; pods are addressed via the shared
-/// headless `Service` owned by the parent `Kafka`.
+/// A pool of nodes, which are pods, that share the role, the image, and
+/// the resources.
+///
+/// There is one `StatefulSet` for each pool. Clients address the pods
+/// through the shared headless `Service` that the parent `Kafka` owns.
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "crabka.io",
@@ -21,11 +23,11 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaNodePoolSpec {
-    /// Roles each node in this pool fulfills. Only
-    /// the union `{Controller, Broker}` is supported.
+    /// Roles that each node in this pool has. Only the union
+    /// `{Controller, Broker}` is supported.
     pub roles: Vec<NodeRole>,
 
-    /// Number of pods. Validation: must equal 1.
+    /// Number of pods. Validation: it must equal 1.
     #[serde(default = "default_replicas")]
     #[schemars(range(min = 1, max = 1))]
     pub replicas: i32,
@@ -34,7 +36,8 @@ pub struct KafkaNodePoolSpec {
     #[schemars(range(min = 0, max = 999_999))]
     pub node_id_start: i32,
 
-    /// Container image. Falls back to operator `--default-broker-image`.
+    /// Container image. The operator uses `--default-broker-image` when
+    /// this field is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
@@ -56,12 +59,12 @@ pub struct KafkaNodePoolSpec {
     #[schemars(with = "Option<String>")]
     pub client_frame_max: Option<ByteSize>,
 
-    /// Optional pod-level customization applied to every pod in this pool.
+    /// Optional pod-level customization for every pod in this pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<PodTemplate>,
 
-    /// Storage configuration. `None` (field absent) → emptyDir (the
-    /// default). See [`Storage`].
+    /// Storage configuration. `None`, which means that the field is
+    /// absent, gives an emptyDir. That is the default. See [`Storage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<Storage>,
 }
@@ -100,22 +103,25 @@ pub enum NodeRole {
     Broker,
 }
 
-/// Storage configuration for the pool's pods. Three variants:
-/// - `Ephemeral` (or field absent) — `emptyDir` volume, no PVC.
-///   Suitable for dev clusters.
-/// - `PersistentClaim` — single PVC per pod via the `StatefulSet`'s
-///   `volumeClaimTemplates`. Production-shaped.
-/// - `Jbod` — multiple PVCs per pod, one per JBOD disk. The
-///   broker spreads partition data across every disk. The
-///   lowest-`id` volume is the primary metadata disk.
+/// Storage configuration for the pods of the pool.
 ///
-/// The wire shape is flat (Strimzi-shaped): `type` is the discriminator
-/// and each variant's fields (`PersistentClaim`: `size`, `class`,
-/// `deleteClaim`; `Jbod`: `volumes`, `deleteClaim`) are siblings of
-/// `type`. The custom `schema_with` hand-rolls a structural schema
-/// because kube-rs 3.x's `StructuralSchemaRewriter` panics when `oneOf`
-/// branches share a `type` property with differing enum values (the
-/// default schemars output for tagged-union enums).
+/// There are three variants:
+/// - `Ephemeral`, which is also the value when the field is absent. It
+///   gives an `emptyDir` volume and no PVC. Use it for dev clusters.
+/// - `PersistentClaim`. It gives one PVC for each pod through the
+///   `volumeClaimTemplates` of the `StatefulSet`. Use it in production.
+/// - `Jbod`. It gives more than one PVC for each pod, one for each JBOD
+///   disk. The broker spreads the partition data across every disk. The
+///   volume with the lowest `id` is the primary metadata disk.
+///
+/// The wire shape is flat, in the Strimzi form. `type` is the
+/// discriminator, and the fields of each variant are siblings of `type`.
+/// `PersistentClaim` has `size`, `class`, and `deleteClaim`. `Jbod` has
+/// `volumes` and `deleteClaim`. The custom `schema_with` writes a
+/// structural schema by hand, because the `StructuralSchemaRewriter` of
+/// kube-rs 3.x panics when two `oneOf` branches share a `type` property
+/// with different enum values. That is the default schemars output for
+/// tagged-union enums.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type")]
 #[schemars(schema_with = "storage_schema")]
@@ -125,12 +131,14 @@ pub enum Storage {
     Jbod(JbodSpec),
 }
 
-/// Hand-rolled structural schema for `Storage`. See the doc comment on
-/// [`Storage`] for why this is necessary. The schema validates only
-/// the discriminator (`type ∈ {Ephemeral, PersistentClaim, Jbod}`) and
-/// the per-variant field types; cross-variant constraints (e.g.
-/// "`size` must be present when `type=PersistentClaim`") are enforced
-/// by the operator at reconcile time, not by the apiserver.
+/// Structural schema for `Storage`, written by hand.
+///
+/// The doc comment on [`Storage`] gives the reason for this. The schema
+/// validates only the discriminator, where `type` is one of `Ephemeral`,
+/// `PersistentClaim`, and `Jbod`, and the field types of each variant. The
+/// operator enforces the cross-variant constraints at reconcile time, and
+/// the apiserver does not. One such constraint is that `size` must be
+/// present when `type=PersistentClaim`.
 fn storage_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "object",
@@ -159,53 +167,64 @@ fn storage_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     })
 }
 
-/// `PersistentClaim` configuration. Mirrors Strimzi's
-/// `KafkaNodePool.spec.storage` flat shape.
+/// `PersistentClaim` configuration.
+///
+/// It follows the flat shape of `KafkaNodePool.spec.storage` in Strimzi.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistentClaimSpec {
-    /// K8s `Quantity` (e.g., `"10Gi"`, `"500Mi"`). Validated at
-    /// reconcile time.
+    /// K8s `Quantity`, for example `"10Gi"` or `"500Mi"`. The operator
+    /// validates it at reconcile time.
     pub size: String,
-    /// Storage class name. `None` = cluster default.
+    /// Storage class name. `None` means the cluster default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
-    /// `true` → `persistentVolumeClaimRetentionPolicy.whenDeleted: Delete`.
-    /// Default `false` (Retain) is the safe option.
+    /// `true` gives
+    /// `persistentVolumeClaimRetentionPolicy.whenDeleted: Delete`. The
+    /// default `false`, which is Retain, is the safe option.
     #[serde(default)]
     pub delete_claim: bool,
 }
 
-/// `Jbod` configuration: a set of persistent disks, one PVC
-/// per disk. The broker spreads partition data across all of them
-/// (JBOD / KIP-113). The lowest-`id` volume is the primary metadata
-/// disk and keeps the PVC name `data` / mount
-/// `/var/lib/crabka/data`; every other volume `id = N` is mounted at
-/// `/var/lib/crabka/data-{N}` (PVC `data-{N}`) and handed to the broker
-/// via `CRABKA_EXTRA_LOG_DIRS`.
+/// `Jbod` configuration: a set of persistent disks with one PVC for each
+/// disk.
+///
+/// The broker spreads the partition data across all of them. This is JBOD
+/// from KIP-113. The volume with the lowest `id` is the primary metadata
+/// disk. It keeps the PVC name `data` and the mount
+/// `/var/lib/crabka/data`. Every other volume with `id = N` has the PVC
+/// `data-{N}` and the mount `/var/lib/crabka/data-{N}`, and the operator
+/// gives it to the broker in `CRABKA_EXTRA_LOG_DIRS`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct JbodSpec {
-    /// One persistent volume per JBOD disk. Must be non-empty with unique
-    /// ids (validated at reconcile time).
+    /// One persistent volume for each JBOD disk. The list must be
+    /// non-empty and the ids must be unique. The operator validates this
+    /// at reconcile time.
     pub volumes: Vec<JbodVolume>,
-    /// `true` → `persistentVolumeClaimRetentionPolicy.whenDeleted: Delete`
-    /// for *every* JBOD PVC. A `StatefulSet`'s retention policy is
-    /// set-wide — K8s offers no per-`volumeClaimTemplate` retention — so
-    /// this single flag covers all disks. Default `false` (Retain).
+    /// `true` gives
+    /// `persistentVolumeClaimRetentionPolicy.whenDeleted: Delete` for
+    /// *every* JBOD PVC. The retention policy of a `StatefulSet` applies
+    /// to the whole set, because K8s has no retention setting for one
+    /// `volumeClaimTemplate`. This one flag therefore covers all disks.
+    /// The default is `false`, which is Retain.
     #[serde(default)]
     pub delete_claim: bool,
 }
 
-/// One JBOD disk. `id` is a stable per-disk identifier; the lowest id is
-/// the primary metadata disk.
+/// One JBOD disk.
+///
+/// `id` is a stable identifier for the disk. The disk with the lowest id
+/// is the primary metadata disk.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct JbodVolume {
-    /// Stable disk id (>= 0). Drives the PVC name / mount path for
-    /// non-primary disks (`data-{id}` / `/var/lib/crabka/data-{id}`).
+    /// Stable disk id, 0 or more. For a non-primary disk it gives the PVC
+    /// name `data-{id}` and the mount path
+    /// `/var/lib/crabka/data-{id}`.
     pub id: i32,
-    /// K8s `Quantity` (e.g., `"100Gi"`). Validated at reconcile time.
+    /// K8s `Quantity`, for example `"100Gi"`. The operator validates it
+    /// at reconcile time.
     pub size: String,
     /// Storage class name. `None` = cluster default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -215,16 +234,16 @@ pub struct JbodVolume {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PodTemplate {
-    /// Extra labels / annotations on the pod template.
+    /// Extra labels and annotations on the pod template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<MetadataTemplate>,
-    /// Forwarded to `PodSpec.affinity`.
+    /// The operator copies this to `PodSpec.affinity`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affinity: Option<k8s_openapi::api::core::v1::Affinity>,
-    /// Forwarded to `PodSpec.tolerations`.
+    /// The operator copies this to `PodSpec.tolerations`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tolerations: Vec<k8s_openapi::api::core::v1::Toleration>,
-    /// Forwarded to `PodSpec.nodeSelector`.
+    /// The operator copies this to `PodSpec.nodeSelector`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_selector: Option<std::collections::BTreeMap<String, String>>,
 }
@@ -244,10 +263,10 @@ pub struct KafkaNodePoolStatus {
     /// Standard Kubernetes-style condition list.
     #[serde(default)]
     pub conditions: Vec<crate::crd::kafka::KafkaCondition>,
-    /// Mirrors `StatefulSet.status.replicas`.
+    /// The same value as `StatefulSet.status.replicas`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<i32>,
-    /// Mirrors `StatefulSet.status.readyReplicas`.
+    /// The same value as `StatefulSet.status.readyReplicas`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_replicas: Option<i32>,
 }

@@ -1,16 +1,17 @@
 //! Durable-across-process-crash local spool for the AU-5 degraded path.
 //!
-//! Holds exactly the chained audit records not yet written to the topic, in
-//! order. Appends are flushed to the OS page cache (not `fsync`'d), and a torn
-//! tail frame from a crash mid-append is healed on `open`; so this survives a
-//! process crash, but an OS/power loss between append and replay can still lose
-//! not-yet-replayed records. (Real `fsync` durability is a prerequisite for the
-//! future fail-closed mode — tracked separately.)
+//! The spool holds exactly the chained audit records that are not yet written
+//! to the topic, in order. `append` flushes to the OS page cache and does not
+//! call `fsync`. `open` heals a torn tail frame from a crash during an append,
+//! so the spool survives a process crash. But an OS failure or a power loss
+//! between an append and a replay can still lose the records that are not yet
+//! replayed. Real `fsync` durability is a prerequisite for the future
+//! fail-closed mode, which is tracked separately.
 //!
-//! Frame: `[u32 len][record]`; record: `[u8 class_tag][u32 value_len]
-//! [value][u32 header_count]([u32 klen][k][u32 vlen][v])*`. Synchronous
-//! `std::fs` (degraded, low-frequency path); a truncated tail frame is treated
-//! as end-of-data.
+//! Frame: `[u32 len][record]`. Record: `[u8 class_tag][u32 value_len]
+//! [value][u32 header_count]([u32 klen][k][u32 vlen][v])*`. This module uses
+//! synchronous `std::fs`, because the path is degraded and low-frequency. It
+//! treats a truncated tail frame as end-of-data.
 
 use std::{
     fs::{File, OpenOptions},
@@ -38,10 +39,10 @@ fn io<E: std::fmt::Display>(e: E) -> AuditError {
 
 /// Append-only durable spool file.
 ///
-/// The byte cap and the running total are held as raw [`MaxSpoolBytes`] /
-/// [`SpoolBytes`] newtypes: both are accumulated and compared exactly, which a
-/// `f64`-backed [`ByteSize`] cannot promise. The quantity is the boundary type —
-/// [`Spool::open`] takes one and [`Spool::size`] hands one back.
+/// The byte cap and the running total are raw [`MaxSpoolBytes`] and
+/// [`SpoolBytes`] newtypes. The spool adds and compares both of them exactly,
+/// which an `f64`-backed [`ByteSize`] cannot promise. The quantity stays the
+/// boundary type: [`Spool::open`] takes one and [`Spool::size`] returns one.
 #[derive(Debug)]
 pub struct Spool {
     path: PathBuf,
@@ -52,7 +53,9 @@ pub struct Spool {
 }
 
 impl Spool {
-    /// Open (creating the dir + file if needed) and recover existing contents.
+    /// Open the spool and recover its existing contents.
+    ///
+    /// This function creates the directory and the file if they do not exist.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -60,7 +63,8 @@ impl Spool {
         err
     )]
     /// # Errors
-    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+    /// Returns an error if the spool directory cannot be created. Returns an
+    /// error if the spool file cannot be opened, read, or truncated.
     pub fn open(dir: &Path, max_size: ByteSize) -> Result<Self, AuditError> {
         std::fs::create_dir_all(dir).map_err(io)?;
         let path = dir.join(SPOOL_FILE);
@@ -106,14 +110,16 @@ impl Spool {
         self.count
     }
 
-    /// How much the spool currently holds.
+    /// How many bytes the spool currently holds.
     #[must_use]
     pub fn size(&self) -> ByteSize {
         ByteSize::from_bytes(self.bytes.0)
     }
 
-    /// Append a record. Returns `Ok(false)` if it would exceed the configured
-    /// cap.
+    /// Append a record to the spool.
+    ///
+    /// Returns `Ok(false)` if the record would make the spool exceed the
+    /// configured cap.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -121,7 +127,8 @@ impl Spool {
         err
     )]
     /// # Errors
-    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+    /// Returns an error if the seek, the write, or the flush on the spool file
+    /// fails.
     pub fn append(&mut self, record: &AuditRecord) -> Result<bool, AuditError> {
         let frame = encode_frame(record);
         let frame_len = SpoolBytes(u64::try_from(frame.len()).unwrap_or(u64::MAX));
@@ -136,10 +143,12 @@ impl Spool {
         Ok(true)
     }
 
-    /// Scan the spool file, returning decoded records and the byte offset
-    /// immediately after the last complete, successfully-decoded frame (the
-    /// "logical length"). A truncated or corrupt tail frame is treated as
-    /// end-of-data; `valid_bytes` points to just before that torn frame.
+    /// Scan the spool file for the decoded records and the logical length.
+    ///
+    /// The logical length is the byte offset immediately after the last
+    /// complete frame that decoded successfully. This method treats a truncated
+    /// or corrupt tail frame as end-of-data. `valid_bytes` then points to the
+    /// position immediately before that torn frame.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -178,7 +187,7 @@ impl Spool {
 
     /// Read every record from the start of the spool, in order.
     /// # Errors
-    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+    /// Returns an error if the spool file cannot be opened or read.
     pub fn read_all(&self) -> Result<Vec<AuditRecord>, AuditError> {
         Ok(self.scan()?.0)
     }
@@ -186,7 +195,8 @@ impl Spool {
     /// Replace the spool contents with exactly `remaining`, atomically.
     #[tracing::instrument(level = "debug", skip_all, fields(remaining = remaining.len()), err)]
     /// # Errors
-    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+    /// Returns an error if the temporary file cannot be written. Returns an
+    /// error if the rename or the reopen of the spool file fails.
     pub fn rewrite(&mut self, remaining: &[AuditRecord]) -> Result<(), AuditError> {
         let tmp = self.path.with_extension("spool.tmp");
         {
@@ -218,7 +228,8 @@ impl Spool {
     /// Clear the spool.
     #[tracing::instrument(level = "debug", skip_all, fields(count = self.count.0, bytes = self.bytes.0), err)]
     /// # Errors
-    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+    /// Returns an error if the spool file cannot be truncated, or if the seek
+    /// or the flush that follows fails.
     pub fn truncate(&mut self) -> Result<(), AuditError> {
         self.file.set_len(0).map_err(io)?;
         self.file.seek(SeekFrom::Start(0)).map_err(io)?;
@@ -228,11 +239,13 @@ impl Spool {
         Ok(())
     }
 
-    /// `(next_seq, head)` implied by the last chained (non-checkpoint) record,
-    /// or `None` if the spool has no chained records.
+    /// The `(next_seq, head)` from the last chained record in the spool.
+    ///
+    /// A chained record is a record that is not a checkpoint. Returns `None` if
+    /// the spool has no chained record.
     #[tracing::instrument(level = "debug", skip_all, fields(count = self.count.0), err)]
     /// # Errors
-    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+    /// Returns an error if the spool file cannot be opened or read.
     pub fn resume_point(&self) -> Result<Option<(u64, [u8; 32])>, AuditError> {
         let records = self.read_all()?;
         Ok(records
@@ -243,8 +256,10 @@ impl Spool {
     }
 }
 
-/// Compute `(next_seq, head_after)` from a single chained record's headers +
-/// value. Returns `None` for checkpoints or records missing chain headers.
+/// Compute `(next_seq, head_after)` from one chained record.
+///
+/// The computation uses the record's headers and its value. Returns `None` for
+/// a checkpoint, and for a record without the chain headers.
 fn resume_from_record(rec: &AuditRecord) -> Option<(Seq, [u8; 32])> {
     if rec.class == AuditEventClass::Checkpoint {
         return None;
@@ -340,7 +355,7 @@ mod tests {
         sink::{AuditRecord, HEADER_PREV_HASH, HEADER_SEQ},
     };
 
-    /// Cap large enough that no test hits it by accident.
+    /// A cap that is large enough that no test reaches it by accident.
     const ROOMY_CAP: ByteSize = mebibytes(1);
 
     fn chained_record(seq: u64, prev: &[u8; 32], value: &[u8]) -> AuditRecord {

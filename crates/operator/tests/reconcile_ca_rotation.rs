@@ -1,11 +1,11 @@
-//! Integration tests for CA rotation via the full `reconcile`.
+//! Integration tests for CA rotation through the full `reconcile`.
 //!
-//! These drive the reconciler against the FIFO mock with *existing* cluster-CA
-//! Secrets seeded so the rotation paths (same-key renewal, staged key
-//! replacement) actually fire, and assert the observable Secret patches +
-//! `CaRotation` condition. The pure decision logic is covered exhaustively by
-//! the `controller::cluster_ca::rotation_tests` unit module; here we verify the
-//! reconciler wiring.
+//! These tests drive the reconciler against the FIFO mock. They seed
+//! *existing* cluster-CA Secrets so that the rotation paths run: same-key
+//! renewal and staged key replacement. They then assert the observable Secret
+//! patches and the `CaRotation` condition. The
+//! `controller::cluster_ca::rotation_tests` unit module covers the decision
+//! logic in full. These tests verify the reconciler wiring.
 
 use assert2::{assert, check};
 #[path = "shared/mod.rs"]
@@ -34,7 +34,7 @@ fn b64(s: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
 }
 
-/// A Secret body with base64 `data` + plain `annotations`.
+/// A Secret body with base64 `data` and plain `annotations`.
 fn secret_with(name: &str, ns: &str, data: &[(&str, &str)], anns: &[(&str, &str)]) -> Value {
     let data_map: serde_json::Map<String, Value> = data
         .iter()
@@ -125,9 +125,9 @@ fn kafka_cr(name: &str, ns: &str, anns: &[(&str, &str)]) -> Kafka {
     k
 }
 
-/// The non-CA half of the reconcile call sequence (service, cluster-id,
-/// pool LIST) plus the tail (keystore, CM, pool adopt, status). The CA GET/PATCH
-/// rules are spliced in between by each test.
+/// The non-CA half of the reconcile call sequence: service, cluster-id, and
+/// pool LIST. It also holds the tail: keystore, CM, pool adopt, and status.
+/// Each test splices the CA GET and PATCH rules in between.
 fn head_rules(c: &str, ns: &str) -> Vec<MockRule> {
     vec![
         patch(

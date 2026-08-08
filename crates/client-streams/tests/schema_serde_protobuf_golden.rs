@@ -1,8 +1,10 @@
-//! Asserts our Protobuf framing (magic+id+message-index+body) matches bytes
-//! captured from Confluent's `ProtobufSerializer`. The golden in
-//! `testdata/schema_serde/protobuf/order.hex` was captured against
-//! `mirror.gcr.io/confluentinc/cp-schema-registry` (schema id 2; top-level message-index is
-//! the single `0x00` byte) via `tests/schema-serde-capture/run.sh`.
+//! Asserts that our Protobuf framing matches the bytes captured from Confluent's
+//! `ProtobufSerializer`. That framing is magic, id, message-index, and body.
+//!
+//! `tests/schema-serde-capture/run.sh` captured the golden in
+//! `testdata/schema_serde/protobuf/order.hex` against
+//! `mirror.gcr.io/confluentinc/cp-schema-registry`. The schema id is 2, and the
+//! top-level message-index is the single `0x00` byte.
 
 use assert2::check;
 use crabka_schema_serde::{
@@ -11,7 +13,8 @@ use crabka_schema_serde::{
     format::{SchemaSerializer, protobuf::ProtobufSerde},
 };
 
-/// Embedded descriptor set referenced by the generated `Order` (see ../examples/gen/regenerate.sh).
+/// Embedded descriptor set that the generated `Order` references. See
+/// ../examples/gen/regenerate.sh.
 pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] =
     include_bytes!("../examples/gen/file_descriptor_set.bin");
 

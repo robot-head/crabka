@@ -5,14 +5,16 @@
 //! ## Flow
 //!
 //! For each marker entry in the request:
-//! 1. Determine commit vs abort from `transaction_result`.
+//! 1. Determine commit or abort from `transaction_result`.
 //! 2. For each (topic, partition) named in the marker:
-//!    - If the partition is locally led (found in `broker.partitions`):
-//!      build a marker batch and call `Partition::produce_batch`.
-//!    - If not local: return `NOT_LEADER_OR_FOLLOWER` per-partition.
+//!    - If the partition is locally led, that is, if it is in
+//!      `broker.partitions`, build a marker batch and call
+//!      `Partition::produce_batch`.
+//!    - If it is not local, return per-partition `NOT_LEADER_OR_FOLLOWER`.
 //! 3. Return a nested per-marker → per-topic → per-partition response.
 //!
-//! Wire format: v1 flexible (tagged fields), v2 flexible + `transaction_version`.
+//! Wire format: v1 flexible with tagged fields, and v2 flexible with
+//! `transaction_version`.
 
 use bytes::{Bytes, BytesMut};
 use crabka_ids::PartitionIndex;

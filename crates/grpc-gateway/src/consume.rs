@@ -1,6 +1,8 @@
 //! Consume core: a group-subscribed session that yields records and commits
-//! offsets. The streaming/poll wire (later plan) drives this. Records are
-//! decoded through the codec on the way out.
+//! offsets.
+//!
+//! The streaming/poll wire (later plan) drives this session. The codec decodes
+//! each record on the way out.
 
 use std::sync::Arc;
 
@@ -27,9 +29,9 @@ pub struct DecodedConsumerRecord {
 }
 
 pub struct ConsumeSession {
-    /// Held in an `Option` so [`Drop`] can `take()` the consumer and tear down
-    /// its background coordinator (see the `Drop` impl). Always `Some` while the
-    /// session is alive; only `None` transiently inside `drop`.
+    /// Held in an `Option` so [`Drop`] can `take()` the consumer and stop its
+    /// background coordinator. See the `Drop` impl. This field is always `Some`
+    /// while the session is alive, and `None` only for a moment inside `drop`.
     consumer: Option<Consumer>,
     codec: Arc<dyn RecordCodec>,
 }
@@ -87,7 +89,7 @@ impl ConsumeSession {
         })
     }
 
-    /// Poll a batch; record values are decoded through the codec.
+    /// Poll a batch. The codec decodes each record value.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     /// # Panics
@@ -126,7 +128,8 @@ impl ConsumeSession {
         Ok(decoded_batch)
     }
 
-    /// Commit current positions (at-least-once: call after delivery is acked).
+    /// Commit the current positions. For at-least-once, call this after the
+    /// receiver acknowledges delivery.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     /// # Panics

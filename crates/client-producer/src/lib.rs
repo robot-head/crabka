@@ -1,14 +1,14 @@
 //! Idempotent producer client for Apache Kafka in Rust.
 //!
-//! Builds on [`crabka_client_core`] for transport. Adds full
+//! It builds on [`crabka_client_core`] for transport, and adds full
 //! idempotent-producer semantics: `InitProducerId` on connect, per-batch
-//! `(producer_id, producer_epoch, base_sequence)`, retries that re-frame
+//! `(producer_id, producer_epoch, base_sequence)`, and retries that re-frame
 //! the same `RecordBatch` so the broker's dedup catches them.
 //!
-//! Also supports transactional (exactly-once) production —
-//! `init_transactions`, `begin_transaction` (which returns a [`Transaction`]
-//! guard whose `commit`/`abort` finishes it), and `send_offsets_to_transaction`
-//! for the consume-process-produce (KIP-447) pattern.
+//! It also supports transactional, exactly-once production:
+//! `init_transactions`, `begin_transaction`, which returns a [`Transaction`]
+//! guard whose `commit`/`abort` finishes it, and `send_offsets_to_transaction`
+//! for the consume-process-produce pattern of KIP-447.
 //!
 //! ## Quick start
 //!
@@ -47,10 +47,11 @@
 //! This crate owns producer-facing semantics: batching, compression,
 //! idempotence, retries, per-record partition overrides, transactional RPCs,
 //! and `send_offsets_to_transaction` for consume-process-produce flows. The
-//! built-in partitioner is sticky/hash based; set `ProducerRecord::partition`
-//! to pin an individual record. Serialization is deliberately caller-owned —
-//! `key` and `value` are raw `Bytes`, so schema-registry or serde integration
-//! can be layered without constraining the producer API.
+//! built-in partitioner is sticky and hash based. Set
+//! `ProducerRecord::partition` to pin an individual record. Serialization is
+//! deliberately owned by the caller: `key` and `value` are raw `Bytes`, so a
+//! schema-registry or serde integration can sit on top without constraining the
+//! producer API.
 
 #![doc(html_root_url = "https://docs.rs/crabka-client-producer/0.3.9")]
 

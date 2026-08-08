@@ -1,20 +1,22 @@
 //! Kafka wire-protocol compression codecs.
 //!
-//! Kafka uses four codecs on the wire — gzip, snappy, lz4, zstd — each with
-//! specific framing conventions:
+//! Kafka uses four codecs on the wire: gzip, snappy, lz4, and zstd. Each codec
+//! has specific framing conventions.
 //!
-//! - **gzip**: standard RFC-1952 gzip via `flate2` (pure-Rust `miniz_oxide`
-//!   backend).
+//! - **gzip**: standard RFC-1952 gzip through `flate2`, which uses the
+//!   pure-Rust `miniz_oxide` backend.
 //! - **snappy**: xerial-snappy framing over `snap` raw blocks. Kafka does not
-//!   use the standard Google Snappy stream format; it uses the xerial framing
-//!   (8-byte magic header, two 4-byte version fields, then a sequence of
-//!   `u32-BE` length-prefixed raw snappy chunks).
-//! - **lz4**: LZ4 frame format (magic `0x04 22 4D 18`) with independent blocks
-//!   and 64 KiB block size, matching `KafkaLZ4BlockOutputStream`'s defaults.
-//! - **zstd**: plain zstd at compression level 3 (Kafka's default).
+//!   use the standard Google Snappy stream format. It uses the xerial framing:
+//!   an 8-byte magic header, two 4-byte version fields, then a sequence of
+//!   `u32-BE` length-prefixed raw snappy chunks.
+//! - **lz4**: LZ4 frame format with magic `0x04 22 4D 18`, independent blocks,
+//!   and 64 KiB block size. These are the defaults of
+//!   `KafkaLZ4BlockOutputStream`.
+//! - **zstd**: plain zstd at compression level 3, which is Kafka's default.
 //!
-//! Each codec is behind a Cargo feature (`gzip`, `snappy`, `lz4`, `zstd`), all
-//! enabled by default. Disabling a feature leaves the API stable but returns
+//! Each codec is behind a Cargo feature: `gzip`, `snappy`, `lz4`, and `zstd`.
+//! All of them are enabled by default. If you disable a feature, the API stays
+//! the same, but the call returns
 //! `Err(`[`CompressionError::FeatureDisabled`]`)` at runtime.
 //!
 //! ## Compress and decompress a record payload
@@ -145,9 +147,9 @@ fn validated_whole_bytes(name: &str, value: ByteSize) -> Result<u64, String> {
 
 /// Compress `data` using the codec identified by `ct`.
 ///
-/// For `CompressionType::None`, returns the input unchanged (wrapped in a
-/// new `Bytes`). For other codecs, dispatches to the per-codec module.
-/// If the codec's Cargo feature is not enabled, returns
+/// For `CompressionType::None`, the function returns the input unchanged in a
+/// new `Bytes`. For the other codecs, it dispatches to the per-codec module. If
+/// the codec's Cargo feature is not enabled, it returns
 /// `Err(CompressionError::FeatureDisabled(_))`.
 /// # Errors
 /// Returns an error when input is malformed, compression or decompression fails, or runtime rate-limit state cannot be updated.
@@ -163,12 +165,13 @@ pub fn compress(ct: CompressionType, data: &[u8]) -> Result<Bytes, CompressionEr
 
 /// Decompress `data` using the codec identified by `ct`. See `compress`.
 ///
-/// `max_output` bounds the size of the decompressed output: if decompression
-/// would produce more than `max_output` bytes, returns
-/// `Err(CompressionError::TooLarge { .. })` without materializing the oversized
-/// buffer. This guards against decompression bombs on the untrusted decode
-/// path. Callers that handle wire input should derive `max_output` from the
-/// compressed length (e.g. a bounded ratio plus an absolute ceiling).
+/// `max_output` bounds the size of the decompressed output. If decompression
+/// would produce more than `max_output` bytes, the function returns
+/// `Err(CompressionError::TooLarge { .. })` and does not materialize the
+/// oversized buffer. This guards against decompression bombs on the untrusted
+/// decode path. Callers that handle wire input should derive `max_output` from
+/// the compressed length, for example from a bounded ratio plus an absolute
+/// ceiling.
 /// # Errors
 /// Returns an error when input is malformed, compression or decompression fails, or runtime rate-limit state cannot be updated.
 pub fn decompress(

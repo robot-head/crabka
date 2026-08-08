@@ -1,27 +1,28 @@
 //! One-shot Linux kTLS support probe (Increment F).
 //!
 //! `ktls::config_ktls_server` consumes the post-handshake `TlsStream` **by
-//! value**, so if it fails mid-stream the connection cannot fall back to
-//! userspace TLS — the stream has already been moved/partially consumed.
-//! Rather than risk that per connection, the broker probes kTLS support **once
-//! at startup** and stores the result in `Broker::ktls_enabled`. The
-//! per-connection path only attempts the kTLS transition when the probe
-//! succeeded; otherwise it serves the exact userspace rustls path.
+//! value**. If it fails mid-stream, the connection cannot fall back to
+//! userspace TLS, because the stream is already moved or partly consumed. The
+//! broker does not take that risk per connection. It probes kTLS support
+//! **once at startup** and stores the result in `Broker::ktls_enabled`. The
+//! per-connection path tries the kTLS transition only when the probe
+//! succeeded. If the probe failed, it serves the exact userspace rustls path.
 //!
-//! The probe is authoritative: it runs a real loopback TLS 1.3 handshake with a
-//! throwaway self-signed cert and then drives `config_ktls_server`, exercising
-//! the precise kernel path the data plane uses — `TCP_ULP="tls"` plus the
-//! `crypto_info` install for the negotiated AEAD. Anything that would make a
-//! production kTLS connection fail (kernel < 4.13, `tls` module absent,
-//! unmappable cipher suite) makes the probe return `false` here.
+//! The probe is authoritative. It runs a real loopback TLS 1.3 handshake with
+//! a throwaway self-signed cert and then drives `config_ktls_server`. This
+//! exercises the exact kernel path the data plane uses: `TCP_ULP="tls"` plus
+//! the `crypto_info` install for the negotiated AEAD. Anything that would make
+//! a production kTLS connection fail makes the probe return `false` here. That
+//! includes a kernel below 4.13, an absent `tls` module, and an unmappable
+//! cipher suite.
 //!
-//! On non-Linux targets the whole kTLS feature is `#[cfg]`-compiled out and the
-//! probe is a trivial `false`.
+//! On non-Linux targets the whole kTLS feature is `#[cfg]`-compiled out, and
+//! the probe is a constant `false`.
 
 /// Probe whether this host supports Linux kTLS TX. Returns `true` only when a
-/// full loopback TLS handshake followed by `ktls::config_ktls_server`
-/// succeeds — i.e. the kernel `tls` module is present and the negotiated cipher
-/// suite is installable into the socket's `crypto_info`.
+/// full loopback TLS handshake and then `ktls::config_ktls_server` succeed.
+/// That means the kernel `tls` module is present and the socket's
+/// `crypto_info` accepts the negotiated cipher suite.
 #[cfg(target_os = "linux")]
 pub(crate) async fn probe_ktls_support() -> bool {
     #[cfg(test)]
@@ -32,7 +33,7 @@ pub(crate) async fn probe_ktls_support() -> bool {
     ktls_probe_result_to_bool(try_probe_ktls().await)
 }
 
-/// On non-Linux targets kTLS does not exist; the probe is a constant `false`
+/// On non-Linux targets kTLS does not exist. The probe is a constant `false`,
 /// and TLS listeners always serve the userspace rustls path.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn probe_ktls_support() -> std::future::Ready<bool> {

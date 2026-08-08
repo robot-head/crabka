@@ -2,16 +2,18 @@
 //!
 //! Two routes are provided:
 //!
-//! * `POST /v1/webhooks/{name}` — named endpoint: body size-limited, optional
-//!   HMAC-SHA256 signature verification (with replay guard), idempotency-key
-//!   extraction, and record-key extraction — all configured per-endpoint in
-//!   [`crate::webhook_config::CompiledWebhook`].
-//! * `POST /v1/produce/{topic}` — generic produce-by-topic endpoint: no HMAC;
-//!   optional `Idempotency-Key` header; caller identity from the injected
-//!   principal extension (mTLS / bearer) or ANONYMOUS.
+//! * `POST /v1/webhooks/{name}` is the named endpoint. It limits the body size,
+//!   does optional HMAC-SHA256 signature verification with a replay guard, and
+//!   extracts the idempotency key and the record key.
+//!   [`crate::webhook_config::CompiledWebhook`] configures all of that per
+//!   endpoint.
+//! * `POST /v1/produce/{topic}` is the generic produce-by-topic endpoint. It has
+//!   no HMAC and an optional `Idempotency-Key` header. The caller identity comes
+//!   from the injected principal extension, which holds the mTLS or bearer
+//!   identity, and it falls back to ANONYMOUS.
 //!
-//! Both routes produce via [`crate::produce::ProduceCore::produce`] and return
-//! a [`WebhookResponse`] JSON body on success.
+//! Both routes produce through [`crate::produce::ProduceCore::produce`] and
+//! return a [`WebhookResponse`] JSON body on success.
 
 use std::{
     net::SocketAddr,
@@ -79,7 +81,7 @@ pub fn webhook_router(state: Arc<AppState>) -> Router {
 // Named webhook handler
 // ---------------------------------------------------------------------------
 
-/// `POST /v1/webhooks/{name}` — named, config-driven inbound webhook.
+/// `POST /v1/webhooks/{name}`, the named, config-driven inbound webhook.
 // HTTP request entry (info): one span per inbound webhook, tagged with the
 // endpoint name. The RED signals (in-flight gauge + latency histogram under
 // method="webhook_in") are recorded by the drop-guard on every return path.
@@ -224,11 +226,12 @@ pub async fn webhook_handler(
 // Generic produce handler
 // ---------------------------------------------------------------------------
 
-/// `POST /v1/produce/{topic}` — generic produce-by-topic endpoint.
+/// `POST /v1/produce/{topic}`, the generic produce-by-topic endpoint.
 ///
-/// No HMAC; enforces the configured generic-produce body cap, respects an
-/// optional `Idempotency-Key` header, and uses the injected caller
-/// [`Principal`] (from mTLS / bearer auth) or falls back to ANONYMOUS.
+/// This route has no HMAC. It enforces the configured generic-produce body cap
+/// and it respects an optional `Idempotency-Key` header. It uses the injected
+/// caller [`Principal`] from mTLS or bearer auth, and it falls back to
+/// ANONYMOUS.
 // HTTP request entry (info): one span per generic produce-by-topic call,
 // tagged with the target topic. RED signals recorded via the drop-guard under
 // method="produce_http".
@@ -275,8 +278,8 @@ pub async fn produce_handler(
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when `cfg` has at least one `Source::JsonPath` source,
-/// meaning the raw body must be parsed as JSON before extraction.
+/// Returns `true` when `cfg` has at least one `Source::JsonPath` source. In
+/// that case the caller must parse the raw body as JSON before extraction.
 fn needs_json(cfg: &crate::webhook_config::CompiledWebhook) -> bool {
     let json_src = |src: &Source| matches!(src, Source::JsonPath(_));
     cfg.idempotency_source.as_ref().is_some_and(json_src)
@@ -285,8 +288,9 @@ fn needs_json(cfg: &crate::webhook_config::CompiledWebhook) -> bool {
 
 /// Produce the record and map [`GatewayError`] variants to HTTP status codes.
 ///
-/// Authorizes `(ResourceType::Topic, rec.topic, AclOperation::Write)` for the
-/// effective principal before producing; returns `403 FORBIDDEN` on `Deny`.
+/// This function authorizes `(ResourceType::Topic, rec.topic,
+/// AclOperation::Write)` for the effective principal before it produces. It
+/// returns `403 FORBIDDEN` on `Deny`.
 async fn produce_and_respond(
     state: Arc<AppState>,
     rec: GatewayRecord,
@@ -375,9 +379,9 @@ mod tests {
         webhook_config::{CompiledWebhook, SigEncoding},
     };
 
-    /// A codec stub that rejects every `encode` with a fixed [`CodecError`],
-    /// exercising the produce path's error→HTTP-status mapping without a
-    /// registry. `decode` is unused on the inbound path.
+    /// A codec stub that rejects every `encode` with a fixed [`CodecError`]. It
+    /// exercises the produce path's error-to-HTTP-status mapping without a
+    /// registry. The inbound path never calls `decode`.
     struct FailingEncodeCodec(fn(String) -> CodecError);
 
     #[async_trait::async_trait]
@@ -410,7 +414,7 @@ mod tests {
         m
     }
 
-    /// Minimal signed endpoint with the given name / topic.
+    /// Minimal signed endpoint with the given name and topic.
     fn signed_cfg(topic: &str) -> CompiledWebhook {
         CompiledWebhook {
             target_topic: topic.to_string(),
@@ -429,7 +433,7 @@ mod tests {
         }
     }
 
-    /// Minimal unsigned endpoint (no HMAC).
+    /// Minimal unsigned endpoint, with no HMAC.
     fn unsigned_cfg(topic: &str) -> CompiledWebhook {
         CompiledWebhook {
             target_topic: topic.to_string(),
@@ -449,17 +453,19 @@ mod tests {
     }
 
     /// Build an `AppState` backed by a non-idempotent `ProduceCore` that does
-    /// NOT require a real broker. The producer connects lazily, so route-layer
-    /// tests that short-circuit before reaching produce (404, 413, 401, 400)
-    /// work without a running broker. Tests that exercise the produce path see
-    /// a 500/503 transport error, which is the expected assertion in those cases.
+    /// NOT need a real broker.
+    ///
+    /// The producer connects lazily, so route-layer tests that stop before they
+    /// reach produce (404, 413, 401, 400) work without a running broker. A test
+    /// that exercises the produce path sees a 500 or 503 transport error, which
+    /// is the expected assertion in that case.
     async fn state_with_webhooks(webhooks: HashMap<String, CompiledWebhook>) -> Arc<AppState> {
         state_with_webhooks_codec(webhooks, Arc::new(RawCodec)).await
     }
 
-    /// As [`state_with_webhooks`] but with a caller-supplied codec wired into the
-    /// `ProduceCore` (so a codec that errors on `encode` exercises the produce
-    /// path's error→status mapping).
+    /// As [`state_with_webhooks`], but with a caller-supplied codec in the
+    /// `ProduceCore`. A codec that errors on `encode` then exercises the produce
+    /// path's error-to-status mapping.
     async fn state_with_webhooks_codec(
         webhooks: HashMap<String, CompiledWebhook>,
         codec: Arc<dyn RecordCodec>,
@@ -639,8 +645,9 @@ mod tests {
     // webhook_handler: schema-bound (structured) body
     // -----------------------------------------------------------------------
 
-    /// A schema-bound endpoint builds a STRUCTURED `GatewayRecord`: the body
-    /// bytes plus a `SchemaSelector` carrying the configured subject/format.
+    /// A schema-bound endpoint builds a STRUCTURED `GatewayRecord`. It holds the
+    /// body bytes and a `SchemaSelector` that carries the configured subject and
+    /// format.
     #[test]
     fn schema_bound_builds_structured_record() {
         let mut cfg = unsigned_cfg("orders");

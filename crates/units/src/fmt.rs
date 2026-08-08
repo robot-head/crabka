@@ -1,20 +1,20 @@
 //! Rendering a quantity in the form an operator wrote it.
 //!
 //! `uom`'s own formatting needs the unit named at the call site
-//! (`size.into_format_args(mebibyte, Abbreviation)`), which is the wrong shape for
-//! a log line or a config dump where the magnitude decides the unit. [`Human`]
+//! (`size.into_format_args(mebibyte, Abbreviation)`). That is the wrong shape for
+//! a log line or a config dump, where the magnitude decides the unit. [`Human`]
 //! picks the unit for you: `536870912` bytes prints as `512MiB`, `604800` seconds
 //! as `7d`, `1536` bytes as `1.5KiB`.
 //!
 //! # Exactness
 //!
-//! Sizes, time extents, and byte rates round-trip: whatever these types print,
-//! [`crate::parse`] reads back as the same value. That is what picks the unit —
-//! the largest one that leaves the magnitude at or above one *and* representable
-//! in at most three decimal places, so `1TiB + 1B` prints as `1099511627777B`
-//! rather than rounding to `1TiB`. A quantity that is not a whole number of base
-//! units, or is too large for that arithmetic, prints its base-unit value, which
-//! reads back exactly as well.
+//! Sizes, time extents, and byte rates round-trip. [`crate::parse`] reads back
+//! whatever these types print as the same value. That requirement picks the unit.
+//! [`Human`] uses the largest unit that leaves the magnitude at or above one
+//! *and* representable in at most three decimal places, so `1TiB + 1B` prints as
+//! `1099511627777B` and does not round to `1TiB`. A quantity that is not a whole
+//! number of base units, or is too large for that arithmetic, prints its
+//! base-unit value, which also reads back exactly.
 //!
 //! Fractions and event rates render to nine decimal places and are for display
 //! only. A non-finite quantity prints its raw value and base unit, for diagnostics.
@@ -45,7 +45,7 @@ const TIMES: &[(i128, &str)] = &[
     (1, "ns"),
 ];
 
-/// Nanoseconds per second: the sub-unit [`TIMES`] counts in.
+/// Nanoseconds per second, which is the sub-unit [`TIMES`] counts in.
 const NANOS_PER_SECOND: f64 = 1e9;
 
 /// One thousandth, the resolution a rendered magnitude may use.
@@ -55,17 +55,17 @@ const MILLI: i128 = 1_000;
 /// as that sub-unit count.
 ///
 /// The base unit is `f64`, and 250 nanoseconds has no exact representation in
-/// seconds; scaling it back up lands a few parts in 10^16 away from `250`. A
+/// seconds. Scaling it back up lands a few parts in 10^16 away from `250`. A
 /// tolerance a few orders of magnitude above that accepts every quantity built
-/// from whole sub-units while still rejecting a genuinely fractional one — half a
-/// byte is nowhere near this close to zero or one.
+/// from whole sub-units and still rejects a truly fractional one. Half a byte is
+/// not this close to zero or one.
 const INTEGRAL_TOLERANCE: f64 = 1e-9;
 
-/// Writes `value` — a magnitude in `base` units — in the largest unit of `units`
-/// it fits exactly.
+/// Writes `value`, a magnitude in `base` units, in the largest unit of `units`
+/// that it fits exactly.
 ///
-/// `subunits_per_base` scales `value` into the integer sub-unit that `units` is
-/// tabulated in (bytes for sizes, nanoseconds for extents).
+/// `subunits_per_base` scales `value` into the integer sub-unit that the `units`
+/// table counts in: bytes for sizes, and nanoseconds for extents.
 fn write_scaled(
     f: &mut Formatter<'_>,
     value: f64,
@@ -118,7 +118,7 @@ fn write_units(
     }
 }
 
-/// Writes `thousandths` / 1000, dropping a zero fraction and trailing zeros.
+/// Writes `thousandths` / 1000. This drops a zero fraction and trailing zeros.
 fn write_thousandths(f: &mut Formatter<'_>, thousandths: i128) -> fmt::Result {
     if thousandths < 0 {
         f.write_str("-")?;

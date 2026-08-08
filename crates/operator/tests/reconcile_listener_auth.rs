@@ -1,4 +1,5 @@
-//! Integration tests for listener authentication wiring — SCRAM-SHA-512, SCRAM-SHA-256, mTLS, and `NodePort` SAN injection.
+//! Integration tests for listener authentication wiring: SCRAM-SHA-512,
+//! SCRAM-SHA-256, mTLS, and `NodePort` SAN injection.
 
 use std::sync::Arc;
 
@@ -177,8 +178,8 @@ async fn scram_sha_256_renders_sasl_ssl_with_256_mechanism() {
 // ── test 4 ────────────────────────────────────────────────────────────────────
 
 /// A SCRAM-SHA-512 listener with zero `KafkaUser`s reconciles cleanly.
-/// The Kafka reconciler never consults `KafkaUser`s — those are handled by the
-/// `KafkaUser` reconciler — so an empty cluster is not an error.
+/// The Kafka reconciler never consults `KafkaUser`s, because the `KafkaUser`
+/// reconciler handles them. An empty cluster is not an error.
 #[tokio::test]
 async fn scram_listener_without_kafkausers_still_reconciles() {
     let items = vec![fake_pool_list_item("brokers", "ns4", "c4", 1, 1)];
@@ -266,7 +267,7 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
 
 // ── test 6 ────────────────────────────────────────────────────────────────────
 
-/// Changing auth config (SCRAM-SHA-512 → mTLS) produces a different
+/// A change of auth config from SCRAM-SHA-512 to mTLS produces a different
 /// `crabka.io/config-hash` label on the pool owner-ref PATCH.
 #[tokio::test]
 async fn auth_change_bumps_config_hash() {
@@ -348,11 +349,12 @@ async fn auth_change_bumps_config_hash() {
 
 // ── test 7 ────────────────────────────────────────────────────────────────────
 
-/// A `NodePort` listener with TLS + SCRAM causes `observe_listener_addresses`
-/// to GET the node list. The external IP observed from a node with
-/// `ExternalIP=203.0.113.10` must be included in the per-broker cert's SAN
-/// set, as evidenced by the `0.sans-digest` stored in the keystore Secret
-/// PATCH matching the digest computed from SANs that include that IP.
+/// A `NodePort` listener with TLS and SCRAM causes
+/// `observe_listener_addresses` to GET the node list. The per-broker cert's
+/// SAN set must include the external IP observed from a node with
+/// `ExternalIP=203.0.113.10`. The proof is that the `0.sans-digest` stored in
+/// the keystore Secret PATCH matches the digest computed from SANs that
+/// include that IP.
 fn assert_nodeport_san_digest(
     observed: &[http::Request<hyper::body::Bytes>],
     keystore_name: &str,

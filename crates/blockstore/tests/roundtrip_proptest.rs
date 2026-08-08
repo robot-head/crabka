@@ -1,10 +1,11 @@
 //! Property tests for the block store.
 //!
-//! `write_then_read_preserves_all_rows` (logs, blockstore plan Task 8) generates
-//! arbitrary log rows, writes them to a Parquet block, reads them back, and
-//! asserts the round-trip preserves every row (as a multiset) and the
-//! descriptor's fingerprint set. The deterministic example-based round-trips
-//! live in `tests/parquet.rs`; this is the generative complement.
+//! `write_then_read_preserves_all_rows` (logs, blockstore plan Task 8)
+//! generates arbitrary log rows, writes them to a Parquet block, reads them
+//! back, and asserts that the round-trip keeps every row, as a multiset, and
+//! the descriptor's fingerprint set. The deterministic example-based
+//! round-trips live in `tests/parquet.rs`. This file is the generative
+//! complement.
 //!
 //! `equality_matcher_returns_only_matching_series` writes a block and asserts an
 //! equality matcher returns exactly the rows whose fingerprint matches within
@@ -27,9 +28,9 @@ use crabka_blockstore::{
 use object_store::{ObjectStore, memory::InMemory};
 use proptest::prelude::*;
 
-/// A total ordering over a row's full contents, so the read-back (sorted by
-/// `(fingerprint, timestamp)`) and the input compare as multisets even when two
-/// rows share a `(fingerprint, timestamp)` pair.
+/// A total order over a row's full contents, so the read-back, which is sorted
+/// by `(fingerprint, timestamp)`, and the input compare as multisets even when
+/// two rows share a `(fingerprint, timestamp)` pair.
 fn row_sort_key(row: &LogRow) -> (u64, i64, String, BTreeMap<String, String>) {
     (
         row.series_fingerprint,

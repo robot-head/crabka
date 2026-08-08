@@ -25,10 +25,11 @@ use crate::{
     session::{SessionId, SessionRecord, SessionStore},
 };
 
-/// How long the broker may take to finish a UI-issued topic mutation before it
-/// answers with a timeout error, carried on `CreateTopics`/`DeleteTopics`/
-/// `CreatePartitions` as Kafka's `timeout_ms` field.
-/// The configured topic-mutation timeout, as the quantity `AdminClient` takes.
+/// The configured topic-mutation timeout, as the quantity that `AdminClient` takes.
+///
+/// The broker gets this much time to finish a UI-issued topic mutation. After that
+/// time, the broker answers with a timeout error. `CreateTopics`, `DeleteTopics`,
+/// and `CreatePartitions` carry the value as Kafka's `timeout_ms` field.
 fn mutation_timeout(cfg: &AdminUiConfig) -> Time {
     cfg.topic_mutation_timeout
 }

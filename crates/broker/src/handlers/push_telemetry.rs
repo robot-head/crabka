@@ -1,6 +1,8 @@
-//! `PushTelemetry` (`api_key=72`, KIP-714). Validates the push against the
-//! client's subscription + throttle state, decompresses + decodes the OTLP
-//! payload, and fans it out to the Prometheus + OTLP sinks.
+//! `PushTelemetry` (`api_key=72`, KIP-714).
+//!
+//! The handler validates the push against the client's subscription and
+//! throttle state, decompresses and decodes the OTLP payload, and fans it out
+//! to the Prometheus and OTLP sinks.
 
 use bytes::Bytes;
 use crabka_compression::CompressionType;
@@ -110,8 +112,9 @@ pub(crate) fn handle(
     crate::handlers::encode_response(&resp, version)
 }
 
-/// Flatten an OTLP `MetricsData` into Prometheus data points (Sum/Gauge
-/// numbers; Histogram → count/sum gauges). Best-effort — unknown shapes skipped.
+/// Flattens an OTLP `MetricsData` into Prometheus data points. Sum and Gauge
+/// become numbers, and a Histogram becomes count and sum gauges. The function
+/// is best-effort and skips unknown shapes.
 fn flatten_for_prometheus(
     md: &opentelemetry_proto::tonic::metrics::v1::MetricsData,
     instance: &str,

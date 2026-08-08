@@ -1,8 +1,9 @@
 //! KIP-1071 classic→streams cold upgrade integration tests.
 //!
-//! Verifies that a `StreamsGroupHeartbeat` for a **drained** classic group
-//! converts it in place (committed offsets survive) and that a classic group
-//! with **live members** is rejected with `GROUP_ID_NOT_FOUND` (69).
+//! The tests verify that a `StreamsGroupHeartbeat` for a **drained** classic
+//! group converts it in place, and that committed offsets survive. They also
+//! verify that the broker rejects a classic group with **live members** with
+//! `GROUP_ID_NOT_FOUND` (69).
 
 use std::{sync::Arc, time::Duration};
 
@@ -333,9 +334,10 @@ async fn streams_join_and_converge(
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-/// A drained classic group (zero live members, committed offsets retained) is
-/// converted to a streams group when a `StreamsGroupHeartbeat` arrives.
-/// Committed offsets survive the flip and are readable via `OffsetFetch`.
+/// The broker converts a drained classic group to a streams group when a
+/// `StreamsGroupHeartbeat` arrives. A drained group has zero live members and
+/// keeps its committed offsets. Committed offsets survive the flip, and
+/// `OffsetFetch` can read them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drained_classic_group_converts_and_preserves_offsets() {
     let (broker, bootstrap, _dir) = boot().await;

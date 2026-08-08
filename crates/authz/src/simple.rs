@@ -1,12 +1,13 @@
-//! ACL-based authorizer behind the [`Authorizer`] trait. Super-user
-//! bypass + deny-wins-over-allow + LITERAL/PREFIXED matching +
-//! principal/host/operation wildcards.
+//! ACL-based authorizer behind the [`Authorizer`] trait.
 //!
-//! There is no "empty source + no super-users ⇒ Allow" compat shim —
-//! that case lives in [`crate::AllowAllAuthorizer`].
-//! [`SimpleAclAuthorizer`] with an empty source + empty super-users
-//! denies everything (default-deny), which matches Kafka's
-//! `StandardAuthorizer` once an authorizer is explicitly configured.
+//! The authorizer applies the super-user bypass, deny-wins-over-allow, LITERAL
+//! and PREFIXED matching, and principal, host, and operation wildcards.
+//!
+//! There is no "empty source + no super-users ⇒ Allow" compatibility shim. That
+//! case lives in [`crate::AllowAllAuthorizer`]. [`SimpleAclAuthorizer`] with an
+//! empty source and empty super-users denies everything. This default-deny
+//! behavior matches Kafka's `StandardAuthorizer` once an operator explicitly
+//! configures an authorizer.
 
 use std::collections::HashSet;
 
@@ -14,10 +15,13 @@ use crabka_metadata::{AclEntry, AclOperation, PermissionType};
 
 use crate::{AclSource, AuthorizationRequest, AuthorizationResult, Authorizer};
 
-/// Authorizer that consults the cluster's persisted ACLs (the
-/// [`AclSource`] is supplied per call — a `MetadataImage` for the broker,
-/// an `AclCache` for the gateway). Holds the configured super-user set;
-/// principals in this set bypass ACL evaluation and always get `Allow`.
+/// Authorizer that consults the cluster's persisted ACLs.
+///
+/// The caller supplies the [`AclSource`] per call: a `MetadataImage` for the
+/// broker, an `AclCache` for the gateway.
+///
+/// This type holds the configured super-user set. Principals in this set bypass
+/// ACL evaluation and always get `Allow`.
 #[derive(Debug)]
 pub struct SimpleAclAuthorizer {
     super_users: HashSet<String>,
@@ -96,10 +100,11 @@ fn matches_host(entry: &AclEntry, host: &str) -> bool {
     entry.host == "*" || entry.host == host
 }
 
-/// Returns true when an ACL with `stored` operation grants access for
-/// an authorization request with `requested` operation. Beyond exact
-/// match and the `All` wildcard, applies Kafka's operation-implication
-/// table:
+/// Returns true when an ACL with the `stored` operation grants access for an
+/// authorization request with the `requested` operation.
+///
+/// Beyond an exact match and the `All` wildcard, this function applies Kafka's
+/// operation-implication table:
 ///
 /// | stored          | implies                |
 /// |-----------------|------------------------|
@@ -110,7 +115,7 @@ fn matches_host(entry: &AclEntry, host: &str) -> bool {
 /// | `AlterConfigs`  | `DescribeConfigs`      |
 /// | All             | Everything             |
 ///
-/// The table is one-way: Describe does NOT imply Read, etc.
+/// The table is one-way: Describe does NOT imply Read, and so on.
 fn matches_operation(stored: AclOperation, requested: AclOperation) -> bool {
     if stored == requested {
         return true;

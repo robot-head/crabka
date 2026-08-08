@@ -1,5 +1,6 @@
-//! `ShareGroupHeartbeat` (`api_key` 76) — KIP-932 share-group membership.
-//! Routes the request to the per-group share actor in `GroupCoordinator`.
+//! `ShareGroupHeartbeat` (`api_key` 76), KIP-932 share-group membership. The
+//! handler routes the request to the per-group share actor in
+//! `GroupCoordinator`.
 
 use bytes::Bytes;
 use crabka_protocol::{
@@ -84,7 +85,8 @@ pub(crate) async fn handle(
     }
 }
 
-/// Response returned when share groups are disabled on this broker.
+/// The response the handler returns when share groups are disabled on this
+/// broker.
 fn disabled_response() -> ShareGroupHeartbeatResponse {
     error(codes::UNSUPPORTED_VERSION)
 }

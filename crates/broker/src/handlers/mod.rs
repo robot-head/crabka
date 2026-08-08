@@ -4,14 +4,16 @@
 //!       -> Result<bytes::Bytes, BrokerError>`
 //!
 //! Handlers decode the request, do their work, encode the response, and
-//! return the encoded bytes ready to ship after the response header is
-//! prepended in `network::dispatch`.
+//! return the encoded bytes. The bytes are ready to send after
+//! `network::dispatch` prepends the response header.
 
 #![allow(dead_code)] // handler modules are registered as each API is enabled.
 
-/// Raw wire `api_key` (i16) selecting the RPC — the numeric form of a
-/// [`crabka_protocol::api_key::ApiKey`] variant, kept as `i16` because it
-/// arrives off the wire and may name an API this broker doesn't know.
+/// Raw wire `api_key` (i16) that selects the RPC.
+///
+/// This is the numeric form of a [`crabka_protocol::api_key::ApiKey`] variant.
+/// It stays an `i16` because it arrives off the wire and may name an API that
+/// this broker does not know.
 pub type ApiKeyCode = i16;
 
 /// Negotiated Kafka request/response schema version for a single RPC.
@@ -20,7 +22,7 @@ pub type ApiVersion = i16;
 /// Kafka wire error code (`crate::codes::*`), `0` = NONE.
 pub type ErrorCode = i16;
 
-/// Client-chosen request correlation id, echoed verbatim in the response header.
+/// Client-chosen request correlation id. The response header echoes it exactly.
 pub type CorrelationId = i32;
 
 use bytes::{Bytes, BytesMut};
@@ -229,11 +231,12 @@ pub(crate) mod unregister_broker;
 pub(crate) mod update_features;
 pub(crate) mod update_raft_voter;
 
-/// Emit an `AdminOperation` audit event for a completed admin request.
+/// Emits an `AdminOperation` audit event for a completed admin request.
 ///
-/// Call this on the SUCCESS path of each admin handler after the operation
-/// has been applied and the set of successfully-affected resources is known.
-/// A no-op when `resources` is empty (caller guards with `if !resources.is_empty()`).
+/// Call this on the SUCCESS path of each admin handler, after the broker
+/// applies the operation and knows the set of resources that it changed
+/// successfully. This function does nothing when `resources` is empty. The
+/// caller guards with `if !resources.is_empty()`.
 pub(crate) fn audit_admin(
     audit_log: &crabka_audit::AuditLog,
     ctx: &RequestContext<'_>,

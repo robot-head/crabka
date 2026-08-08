@@ -1,4 +1,4 @@
-//! `Consumer::poll` — issues one `Fetch` covering every assigned partition,
+//! `Consumer::poll` issues one `Fetch` that covers every assigned partition,
 //! advances next-offsets, and returns the decoded records.
 
 use std::collections::HashMap;
@@ -20,9 +20,11 @@ use crate::{
     error::ConsumerError,
 };
 
-/// Synthetic leader id meaning "leader unknown → use the bootstrap connection".
-/// Matches `BrokerPool`'s bootstrap slot so a fallback Fetch is sent via
-/// `Client::send` rather than `Client::broker(id)`.
+/// Synthetic leader id that means "leader unknown → use the bootstrap
+/// connection".
+///
+/// It matches `BrokerPool`'s bootstrap slot, so a fallback Fetch goes out
+/// through `Client::send` and not `Client::broker(id)`.
 const BOOTSTRAP_LEADER: i32 = -1;
 const UNKNOWN_FETCH_OFFSET: i64 = -1;
 const UNKNOWN_LEADER_ID: i32 = -1;
@@ -159,14 +161,17 @@ fn build_latest_offsets_request(by_topic: HashMap<String, Vec<i32>>) -> ListOffs
 }
 
 impl Consumer {
-    /// Returns the records from every v2 batch the broker returned per
-    /// assigned partition, or an empty vec on timeout. Under
-    /// `read_committed` isolation, control batches and records belonging to
-    /// aborted transactions are filtered client-side using the response's
-    /// `aborted_transactions` list (the broker returns verbatim bytes).
-    /// Rebalances are handled transparently by the internal coordinator
-    /// task, which mutates the live `assigned` snapshot in place; `poll()`
-    /// simply reads it on each call.
+    /// Returns the records from every v2 batch that the broker returned per
+    /// assigned partition, or an empty vec on timeout.
+    ///
+    /// Under `read_committed` isolation, this method filters out control
+    /// batches and records that belong to aborted transactions on the client
+    /// side, with the response's `aborted_transactions` list. The broker returns
+    /// verbatim bytes.
+    ///
+    /// The internal coordinator task handles rebalances transparently and
+    /// mutates the live `assigned` snapshot in place. `poll()` reads that
+    /// snapshot on each call.
     #[tracing::instrument(
         name = "consumer.poll",
         level = "debug",
@@ -608,9 +613,11 @@ impl Consumer {
 }
 
 /// The offset to fetch next after consuming `batches`: one past the highest
-/// `base_offset + last_offset_delta` across all decoded batches. `None` when
-/// there are no batches (offset unchanged). Used so the consumer advances past
-/// control/aborted batches that emit no records, instead of re-fetching them.
+/// `base_offset + last_offset_delta` across all decoded batches.
+///
+/// This function returns `None` when there are no batches, which leaves the
+/// offset unchanged. The consumer uses it to advance past control and aborted
+/// batches that emit no records, instead of re-fetching them.
 fn next_offset_after(batches: &[crabka_protocol::records::RecordBatch]) -> Option<i64> {
     batches
         .iter()
@@ -619,9 +626,10 @@ fn next_offset_after(batches: &[crabka_protocol::records::RecordBatch]) -> Optio
 }
 
 impl Consumer {
-    /// Replace any `i64::MAX` sentinels in `next_offsets` (planted by
-    /// `auto_offset_reset = Latest` at build time) with the real log-end
+    /// Replace any `i64::MAX` sentinel in `next_offsets` with the real log-end
     /// offset from `ListOffsets(timestamp=-1)`.
+    ///
+    /// `auto_offset_reset = Latest` plants those sentinels at build time.
     #[tracing::instrument(
         name = "consumer.resolve_latest_sentinels",
         level = "debug",
@@ -658,9 +666,11 @@ impl Consumer {
 }
 
 impl Consumer {
-    /// Apply truncations detected by the proactive validate pass to
-    /// `next_offsets`, honoring `auto.offset.reset` (None → error on the first
-    /// truncated partition).
+    /// Apply the truncations that the proactive validate pass detected to
+    /// `next_offsets`.
+    ///
+    /// This method honors `auto.offset.reset`. With `None` it errors on the
+    /// first truncated partition.
     #[tracing::instrument(
         name = "consumer.apply_truncation",
         level = "debug",
@@ -688,7 +698,7 @@ impl Consumer {
         Ok(())
     }
 
-    /// In-band `diverging_epoch` handler used inside the poll loop while the
+    /// In-band `diverging_epoch` handler for use inside the poll loop, while the
     /// `next_offsets` guard is already held.
     fn handle_truncation_in_poll(
         &self,

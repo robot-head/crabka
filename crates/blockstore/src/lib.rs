@@ -2,9 +2,9 @@
 //!
 //! A *block* is a tenant-scoped, time-bounded Parquet file on object storage
 //! with mandatory identity/time columns (`series_fingerprint`, `timestamp`)
-//! plus arbitrary signal payload columns. An `Index` prunes a query to candidate
-//! blocks before any scan; `DataFusion` handles intra-block row-group pruning and
-//! pushdown.
+//! plus arbitrary signal payload columns. An `Index` prunes a query to
+//! candidate blocks before any scan. `DataFusion` handles the intra-block
+//! row-group prune and the pushdown.
 
 #![forbid(unsafe_code)]
 

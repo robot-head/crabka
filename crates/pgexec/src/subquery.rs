@@ -1,14 +1,15 @@
 //! SP34: uncorrelated subquery resolution (scalar / IN / EXISTS / ANY-ALL).
 //!
-//! An uncorrelated subquery's result is identical for every outer row, so it is
-//! evaluated ONCE here — before the outer row loop — and the node is rewritten into
-//! already-supported nodes (`Expr::Const`; an `InList` of consts; an `OR`/`AND`
-//! fold of comparisons). The pure `eval`/`agg` evaluators then run unchanged over
-//! the rewritten tree. Subqueries run through the SP33 join read path
-//! (`exec::select_to_relation`) under the SAME snapshot handles as the outer query,
-//! so the read is consistent and read-your-writes holds. Correlation (a reference
-//! to an outer column) is out of scope: a subquery's scope is built solely from its
-//! own FROM, so an outer-column reference fails name resolution (42703).
+//! An uncorrelated subquery's result is identical for every outer row, so this
+//! module evaluates it ONCE, before the outer row loop, and rewrites the node
+//! into already-supported nodes: an `Expr::Const`, an `InList` of consts, or an
+//! `OR`/`AND` fold of comparisons. The pure `eval`/`agg` evaluators then run
+//! unchanged over the rewritten tree. Subqueries run through the SP33 join read
+//! path (`exec::select_to_relation`) under the SAME snapshot handles as the
+//! outer query, so the read is consistent and read-your-writes holds.
+//! Correlation, which is a reference to an outer column, is out of scope. A
+//! subquery's scope comes solely from its own FROM, so an outer-column reference
+//! fails name resolution (42703).
 
 use crabka_pgparser::ast::{
     BinaryOp, Expr, FuncArgs, FuncCall, OrderItem, QueryExpr, SelectItem, SelectStmt, ValuesStmt,
@@ -17,9 +18,9 @@ use crabka_pgtypes::{ColumnType, Datum, ElemType};
 
 use crate::error::ExecError;
 
-/// The read-side handles a subquery needs to execute (mirrors `execute_read`'s
-/// parameters). Threaded through the resolution recursion so each nested subquery
-/// reads under the outer query's snapshot.
+/// The read-side handles a subquery needs to execute. They mirror
+/// `execute_read`'s parameters. The resolution recursion threads them through, so
+/// each nested subquery reads under the outer query's snapshot.
 #[derive(Clone, Copy)]
 pub(crate) struct SubCtx<'a> {
     pub catalog_kv: &'a dyn crabka_pgkv::Kv,
@@ -29,11 +30,13 @@ pub(crate) struct SubCtx<'a> {
     pub snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
     pub own: Option<u64>,
     pub ctes: &'a crate::cte::CteContext,
-    /// The session eval context (zone + clock) — forwarded to the subquery's read
-    /// path so a temporal expression inside a subquery evaluates in the session zone.
+    /// The session eval context (zone and clock), forwarded to the subquery's
+    /// read path so a temporal expression inside a subquery evaluates in the
+    /// session zone.
     pub eval_ctx: &'a crate::clock::EvalCtx,
-    /// SP40: the foreign-table read context (scanner + current user) — forwarded so a
-    /// subquery referencing a foreign table reads through the registered scanner.
+    /// SP40: the foreign-table read context (scanner and current user),
+    /// forwarded so a subquery that references a foreign table reads through the
+    /// registered scanner.
     pub fctx: crate::exec::ForeignCtx<'a>,
     /// G-8: ordinary table scanner seam forwarded through nested subqueries.
     pub range_scanner: &'a dyn crate::scanner::RangeScanner,
@@ -62,9 +65,10 @@ impl<'a> SubCtx<'a> {
     }
 }
 
-/// Rewrite every uncorrelated subquery in `s`'s expr-bearing clauses to a resolved
-/// constant form. The FROM clause (base tables, joins, derived tables) is left to
-/// the SP33 join read path; only expression positions are rewritten here.
+/// Rewrite every uncorrelated subquery in `s`'s expr-bearing clauses to a
+/// resolved constant form. The FROM clause, which holds base tables, joins and
+/// derived tables, belongs to the SP33 join read path. This rewrites only
+/// expression positions.
 pub(crate) fn resolve_in_select(ctx: &SubCtx, s: &SelectStmt) -> Result<SelectStmt, ExecError> {
     let mut out = s.clone();
     for item in &mut out.projection {
@@ -145,7 +149,7 @@ pub(crate) fn resolve_row_counts(
 
 /// Rewrite subqueries in query-expression ORDER BY tail items. Non-SELECT query
 /// bodies apply these tails outside `resolve_in_select`, but they need the same
-/// snapshot-consistent subquery folding before scalar `eval`.
+/// snapshot-consistent subquery fold before scalar `eval`.
 pub(crate) fn resolve_order_items(
     ctx: &SubCtx,
     order_by: &[OrderItem],
@@ -426,12 +430,13 @@ fn run_relation(ctx: &SubCtx, q: &QueryExpr) -> Result<crate::join::Relation, Ex
     crate::query::query_to_relation_with_ctes(ctx, q)
 }
 
-/// Run a subquery to its raw rows (any shape) — used by `EXISTS`.
+/// Run a subquery to its raw rows, in any shape. `EXISTS` uses this.
 fn run_rows(ctx: &SubCtx, q: &QueryExpr) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(run_relation(ctx, q)?.rows)
 }
 
-/// Run a scalar subquery: exactly one column, at most one row → `(value, type)`.
+/// Run a scalar subquery: exactly one column and at most one row, which gives
+/// `(value, type)`.
 fn run_scalar(ctx: &SubCtx, q: &QueryExpr) -> Result<(Datum, ColumnType), ExecError> {
     let rel = run_relation(ctx, q)?;
     if rel.scope.width() != 1 {
@@ -450,7 +455,8 @@ fn run_scalar(ctx: &SubCtx, q: &QueryExpr) -> Result<(Datum, ColumnType), ExecEr
     Ok((value, ty))
 }
 
-/// Run a single-column subquery → its column type + every value (in row order).
+/// Run a single-column subquery, and return its column type plus every value,
+/// in row order.
 fn run_single_column(ctx: &SubCtx, q: &QueryExpr) -> Result<(ColumnType, Vec<Datum>), ExecError> {
     let rel = run_relation(ctx, q)?;
     if rel.scope.width() != 1 {
@@ -461,9 +467,10 @@ fn run_single_column(ctx: &SubCtx, q: &QueryExpr) -> Result<(ColumnType, Vec<Dat
     Ok((ty, col))
 }
 
-/// Lower `lhs op ANY|SOME|ALL (values)` to an `OR`/`AND` fold of comparisons, with
-/// PostgreSQL's empty-set semantics (ANY → false, ALL → true). NULL three-valued
-/// logic falls out of the existing `ops::or`/`ops::and`/`ops::compare`.
+/// Lower `lhs op ANY|SOME|ALL (values)` to an `OR`/`AND` fold of comparisons,
+/// with PostgreSQL's empty-set semantics: ANY gives false, and ALL gives true.
+/// NULL three-valued logic falls out of the existing
+/// `ops::or`/`ops::and`/`ops::compare`.
 fn lower_quantified(
     lhs: &Expr,
     op: BinaryOp,
@@ -548,7 +555,8 @@ pub(crate) fn resolve_types_in_values_with_ctes(
     })
 }
 
-/// Recursively replace scalar subqueries with `Const { Null, <type> }` (type-only).
+/// Recursively replace scalar subqueries with `Const { Null, <type> }`. This is
+/// type-only.
 fn resolve_types_in_expr(
     catalog_kv: &dyn crabka_pgkv::Kv,
     resolution: &crate::relname::ResolutionScope,

@@ -1,20 +1,20 @@
 //! Kafka Streams-compatible client runtime for Crabka.
 //!
-//! `crabka-client-streams` provides three layers that can be used independently:
+//! `crabka-client-streams` has three layers. You can use each layer on its own:
 //!
 //! - [`StreamsBuilder`] builds JVM-compatible KStream/KTable topologies for
 //!   common application code: map/filter chains, aggregations, joins, windows,
 //!   suppression, global tables, and custom Processor-API nodes.
 //! - [`Topology`] is the typed Processor API for applications that want explicit
 //!   source, processor, sink, and state-store wiring.
-//! - [`KafkaStreams`] runs a built topology against a Kafka-compatible broker by
-//!   joining a KIP-1071 streams group, processing assigned input partitions,
-//!   producing sink records, restoring changelog-backed stores, and serving local
+//! - [`KafkaStreams`] runs a built topology against a Kafka-compatible broker. It
+//!   joins a KIP-1071 streams group, processes the assigned input partitions,
+//!   produces sink records, restores changelog-backed stores, and serves local
 //!   interactive queries.
 //!
-//! For broker-free tests, [`TopologyTestDriver`] executes the same built topology
+//! For broker-free tests, [`TopologyTestDriver`] runs the same built topology
 //! in process. The driver is the fastest way to exercise business logic and state
-//! stores before running with [`KafkaStreams`].
+//! stores before you run them with [`KafkaStreams`].
 //!
 //! ## Quick start
 //!
@@ -90,8 +90,8 @@
 //! );
 //! ```
 //!
-//! Nodes are wired by handle, not by string name, so a mis-typed edge is a
-//! **compile error** rather than a `build()`-time failure:
+//! You wire nodes by handle, not by string name, so a mis-typed edge is a
+//! **compile error**, not a `build()`-time failure:
 //!
 //! ```compile_fail
 //! use crabka_client_streams::{NodeHandle, Topology};
@@ -105,9 +105,9 @@
 //!
 //! ## State stores
 //!
-//! Processors can persist and restore keyed state via a named [`KeyValueStore`].
-//! The store is attached to the topology with `add_state_store`, and accessed
-//! inside `process` via [`ProcessorContext::get_state_store`].
+//! Processors can persist and restore keyed state with a named [`KeyValueStore`].
+//! Attach the store to the topology with `add_state_store`. Read and write it
+//! inside `process` with [`ProcessorContext::get_state_store`].
 //!
 //! ```
 //! use crabka_client_streams::{
@@ -156,61 +156,70 @@
 //! ## DSL (KStream/KTable)
 //!
 //! [`StreamsBuilder`] is the high-level DSL entry point. It wires a topology
-//! from source streams through stateless transforms, aggregations, and sinks
-//! without writing explicit [`Processor`] implementations. The resulting
-//! [`BuiltTopology`] is interchangeable with the Processor-API variant — run it
-//! with [`TopologyTestDriver`] for broker-free testing or [`KafkaStreams`] for
-//! production.
+//! from source streams through stateless transforms, aggregations, and sinks,
+//! and you write no explicit [`Processor`] implementations. The resulting
+//! [`BuiltTopology`] is interchangeable with the Processor-API variant. Run it
+//! with [`TopologyTestDriver`] for broker-free tests, or with [`KafkaStreams`]
+//! in production.
 //!
-//! A [`KTable`] is internally a *change stream*: each record carries a
-//! `Change { old_value, new_value }` and `filter` emits tombstones (a row whose
-//! key stops matching is deleted downstream with `new_value = None`).
-//! [`KStream::to_table`] materializes a stream into a [`KTable`] backed by a
-//! named [`Materialized`] store. [`KTable::to_stream`] forwards update records
-//! and drops tombstones from the output stream.
+//! A [`KTable`] is internally a *change stream*. Each record carries a
+//! `Change { old_value, new_value }`, and `filter` emits tombstones. When a row's
+//! key no longer matches, the downstream side deletes that row with
+//! `new_value = None`. [`KStream::to_table`] materializes a stream into a
+//! [`KTable`] backed by a named [`Materialized`] store. [`KTable::to_stream`]
+//! forwards update records and drops tombstones from the output stream.
 //!
 //! [`KStream::join_table`] and [`KStream::left_join_table`] join a stream against
-//! a **materialized** `KTable`: the stream side drives, and for each record the
-//! table store is looked up by key. An inner join emits only when the table has a
-//! matching entry; a left join always emits (with `None` as the table value when
-//! absent). The stream must be **copartitioned** with the table (same key serde
-//! and partition count); a key-changing stream must be `.repartition(..)`-ed
-//! before joining — the join itself inserts no implicit repartition. (The plain
-//! [`KStream::join`]/[`KStream::left_join`] names are the windowed *stream-stream*
-//! join below — Rust can't overload by argument type as the JVM does.)
+//! a **materialized** `KTable`. The stream side drives the join, and each record
+//! looks up the table store by key. An inner join emits only when the table holds
+//! a matching entry. A left join always emits, and it supplies `None` as the
+//! table value when the entry is absent.
+//!
+//! The stream must be **copartitioned** with the table, which means the same key
+//! serde and the same partition count. Call `.repartition(..)` on a key-changing
+//! stream before you join it, because the join itself inserts no implicit
+//! repartition. The plain [`KStream::join`] and [`KStream::left_join`] names are
+//! the windowed *stream-stream* join below. Rust cannot overload by argument type
+//! as the JVM does.
 //!
 //! [`KTable::join`], [`KTable::left_join`], and [`KTable::outer_join`] join two
-//! **materialized** `KTables`. Unlike the stream-table join, a change on *either*
-//! side recomputes the join: the changed side re-reads the other side's current
-//! value from its store and forwards a `Change` (a tombstone when the joined row
-//! stops existing). Inner emits only when both sides hold a value; left emits
-//! whenever the left side is present; outer emits whenever either side is. The two
-//! source topics are declared as a **copartition group**, and the result is an
-//! unmaterialized `KTable` (no result store/changelog — materialize a downstream op
-//! to persist it).
+//! **materialized** `KTables`. A change on *either* side recomputes the join,
+//! which is different from the stream-table join. The changed side re-reads the
+//! other side's current value from its store and forwards a `Change`. That
+//! `Change` is a tombstone when the joined row no longer exists.
+//!
+//! Inner emits only when both sides hold a value. Left emits whenever the left
+//! side is present, and outer emits whenever either side is present. The DSL
+//! declares the two source topics as a **copartition group**. The result is an
+//! unmaterialized `KTable` with no result store and no changelog. Materialize a
+//! downstream op to persist it.
 //!
 //! ## Foreign-key joins
 //!
 //! [`KTable::join_on_foreign_key`] and [`KTable::left_join_on_foreign_key`]
-//! (KIP-213) join two `KTable`s on a **foreign key** rather than the primary key:
-//! for each left row, an `fk_extractor(&leftValue)` selects the foreign key, which
-//! looks up a row in the right table. The relationship is **many-to-one** — many
-//! left rows can reference the same right row, and a change on *either* side
-//! re-evaluates every affected pair: a left-value change re-selects the foreign
-//! key, and a right-row change re-emits for every left row currently subscribed to
-//! that foreign key. **Inner** emits `joiner(&left, &right)` only when the foreign
-//! row exists (a foreign key with no match retracts with a tombstone); **left**
-//! emits for every left row, passing `None` for the foreign value on a miss.
+//! (KIP-213) join two `KTable`s on a **foreign key** instead of the primary key.
+//! For each left row, an `fk_extractor(&leftValue)` selects the foreign key, and
+//! that foreign key looks up a row in the right table. The relationship is
+//! **many-to-one**: many left rows can reference the same right row.
 //!
-//! Both input tables must be **materialized source tables** — built with
-//! [`StreamsBuilder::table`] (the join reads each side's store and serdes). The
-//! result is an **unmaterialized** `KTable` (no result store/changelog; materialize
-//! a downstream op to persist it). Because the foreign key differs from the primary
-//! key, the join cannot be copartitioned directly; it lowers to the KIP-213
-//! two-subtopology graph — a *subscription registration* repartition topic (keyed
-//! by foreign key), a *subscription response* repartition topic (keyed back by
-//! primary key), and a subscription state store that tracks which primary keys
-//! subscribe to each foreign key — all created and copartitioned automatically.
+//! A change on *either* side re-evaluates every affected pair. A left-value
+//! change re-selects the foreign key. A right-row change re-emits for every left
+//! row that currently subscribes to that foreign key. **Inner** emits
+//! `joiner(&left, &right)` only when the foreign row exists, and a foreign key
+//! with no match retracts with a tombstone. **Left** emits for every left row,
+//! and it supplies `None` for the foreign value on a miss.
+//!
+//! Both input tables must be **materialized source tables** built with
+//! [`StreamsBuilder::table`], because the join reads each side's store and
+//! serdes. The result is an **unmaterialized** `KTable` with no result store and
+//! no changelog. Materialize a downstream op to persist it.
+//!
+//! The foreign key differs from the primary key, so the join cannot be
+//! copartitioned directly. It lowers to the KIP-213 two-subtopology graph: a
+//! *subscription registration* repartition topic keyed by foreign key, a
+//! *subscription response* repartition topic keyed back by primary key, and a
+//! subscription state store that tracks which primary keys subscribe to each
+//! foreign key. The DSL creates and copartitions all three automatically.
 //!
 //! ```no_run
 //! use crabka_client_streams::{StreamsBuilder, StringSerde};
@@ -234,119 +243,149 @@
 //! ```
 //!
 //! [`KGroupedStream::windowed_by`] turns a grouped stream into time-windowed
-//! aggregations: `windowed_by(TimeWindows::of_size(..))` then `count`/`reduce`/
-//! `aggregate` yields a [`KTable`]`<`[`Windowed`]`<K>, V>`. [`TimeWindows`] are
-//! tumbling (`of_size`) or hopping (`.advance_by(..)`); each record is aggregated
-//! into every window it falls into, and a result is emitted on **every update**.
-//! Add [`KTable::suppress`] with [`Suppressed::until_window_closes`] when the
-//! application wants one final result after the window closes. The windowed store is a
-//! [`Window`]-keyed store over the same pluggable backend, with a `compact,delete`
-//! changelog (`retention.ms = size + grace + 1 day`). Read the windowed output
-//! with [`TimeWindowedSerde`] (the key carries the window start).
+//! aggregations. `windowed_by(TimeWindows::of_size(..))` followed by
+//! `count`/`reduce`/`aggregate` yields a [`KTable`]`<`[`Windowed`]`<K>, V>`.
+//! [`TimeWindows`] are tumbling with `of_size`, or hopping with
+//! `.advance_by(..)`. The aggregator adds each record to every window the record
+//! falls into, and it emits a result on **every update**. Add
+//! [`KTable::suppress`] with [`Suppressed::until_window_closes`] when the
+//! application wants one final result after the window closes.
+//!
+//! The windowed store is a [`Window`]-keyed store over the same pluggable
+//! backend. Its changelog is `compact,delete` with
+//! `retention.ms = size + grace + 1 day`. Read the windowed output with
+//! [`TimeWindowedSerde`]. The key carries the window start.
 //!
 //! [`KGroupedStream::windowed_by_session`] groups records into data-driven
-//! **session windows**: records for a key form one session `[start, end]` while
-//! they stay within an inactivity [`SessionWindows`] gap. Terminal `count` /
-//! `reduce` / `aggregate` (the last taking a session merger) yield a
-//! [`KTable`]`<`[`Windowed`]`<K>, V>`. Each record merges every session within the
-//! gap into one `[minStart, maxEnd]` session — emitting a tombstone for each
-//! merged-away session and the new merged session (KIP session semantics,
-//! emit-on-update). The session store keys by `key‖end‖start` (a third typed store
-//! over the pluggable backend); read the output with [`SessionWindowedSerde`].
+//! **session windows**. Records for a key form one session `[start, end]` while
+//! they stay within an inactivity [`SessionWindows`] gap. The terminal `count`,
+//! `reduce`, and `aggregate` operators yield a
+//! [`KTable`]`<`[`Windowed`]`<K>, V>`, and `aggregate` also takes a session
+//! merger. Each record merges every session within the gap into one
+//! `[minStart, maxEnd]` session. The operator then emits a tombstone for each
+//! merged-away session, plus the new merged session. This is the KIP session
+//! semantics, emit-on-update.
+//!
+//! The session store keys by `key‖end‖start`, and it is a third typed store over
+//! the pluggable backend. Read the output with [`SessionWindowedSerde`].
 //!
 //! [`KGroupedStream::windowed_by_sliding`] produces a
 //! [`SlidingWindowedKGroupedStream`] with `count`/`reduce`/`aggregate`. Sliding
 //! windows are **data-defined** inclusive windows of fixed size
-//! `time_difference`: a record at time `t` falls into every window
-//! `[ws, ws + time_difference]` with `ws ∈ [t - time_difference, t]`. Unlike
-//! tumbling/hopping windows there is no epoch alignment; the aggregator
-//! discovers affected windows by scanning the window store and emits on update.
-//! Out-of-order records within `time_difference + grace` are folded into the
-//! windows they belong to. The output is a `KTable<Windowed<K>, _>` reusing the
-//! [`TimeWindowedSerde`] output-key layout (`key‖windowStart:8B-BE`).
+//! `time_difference`. A record at time `t` falls into every window
+//! `[ws, ws + time_difference]` with `ws ∈ [t - time_difference, t]`. There is no
+//! epoch alignment, which is different from tumbling and hopping windows. The
+//! aggregator finds the affected windows when it scans the window store, and it
+//! emits on update.
+//!
+//! The aggregator folds an out-of-order record within `time_difference + grace`
+//! into the windows the record belongs to. The output is a
+//! `KTable<Windowed<K>, _>`. It reuses the [`TimeWindowedSerde`] output-key
+//! layout, `key‖windowStart:8B-BE`.
 //!
 //! [`KTable::suppress`]`(`[`Suppressed`]`::until_window_closes(`[`BufferConfig`]`::unbounded()))`
-//! turns a windowed table's emit-on-update change-stream into **final results**: it
-//! buffers each window's updates and forwards the window's final value exactly once,
-//! when stream-time passes `window.end + grace` (the grace comes from the upstream
-//! windowed/session aggregation). [`Suppressed::until_time_limit`] is the
-//! rate-limiter variant for *any* table — it emits at most one update per key per
-//! wait (stream-time), a newer record resetting the timer.
+//! turns a windowed table's emit-on-update change-stream into **final results**.
+//! It buffers each window's updates. It then forwards the window's final value
+//! exactly once, when stream-time passes `window.end + grace`. The grace comes
+//! from the upstream windowed or session aggregation.
+//! [`Suppressed::until_time_limit`] is the rate-limiter variant for *any* table.
+//! It emits at most one update per key per wait in stream-time, and a newer
+//! record resets the timer.
 //!
-//! The buffer is a **registered, durable state store** (a time-ordered
-//! `SuppressBytesStore` keyed by the serialized record key). With logging on (the
-//! default) it writes a **JVM-byte-exact** changelog — `BufferValue` +
-//! `ProcessorRecordContext` value, a plain `cleanup.policy=compact` topic
-//! `app-KTABLE-SUPPRESS-STATE-STORE-<n>-changelog` — and restores the buffered
-//! records on restart via the same machinery as every other store, so windows that
-//! were still buffered re-emit on close after a restart. [`Suppressed::with_logging_disabled`]
-//! keeps the buffer in memory only (no changelog topic). The serdes reach the store
-//! from the producing op (the windowed/session aggregation or [`StreamsBuilder::table`]).
+//! The buffer is a **registered, durable state store**: a time-ordered
+//! `SuppressBytesStore` keyed by the serialized record key. Logging is on by
+//! default, and the buffer then writes a **JVM-byte-exact** changelog. That
+//! changelog holds a `BufferValue` plus a `ProcessorRecordContext` value, in a
+//! plain `cleanup.policy=compact` topic named
+//! `app-KTABLE-SUPPRESS-STATE-STORE-<n>-changelog`. The buffer restores its
+//! records on restart through the same machinery as every other store, so a
+//! window that was still buffered re-emits on close after a restart.
 //!
-//! The buffer is bounded by [`BufferConfig`]: [`BufferConfig::unbounded`]`().with_max_records(n)`
-//! / [`BufferConfig::with_max_bytes`]`(n)` cap it (bytes = serialized key + value
-//! summed); exceeding a cap either shuts the task down (`shutDownWhenFull`, the
-//! `until_window_closes` default) or — with `BufferConfig::max_records(n)` /
-//! [`BufferConfig::max_bytes`] (eager) / [`BufferConfig::emit_early_when_full`] —
-//! evicts + emits the oldest buffered record (`emitEarlyWhenFull`).
+//! [`Suppressed::with_logging_disabled`] keeps the buffer in memory only, with no
+//! changelog topic. The serdes reach the store from the op that produces the
+//! table: the windowed or session aggregation, or [`StreamsBuilder::table`].
+//!
+//! [`BufferConfig`] bounds the buffer.
+//! [`BufferConfig::unbounded`]`().with_max_records(n)` and
+//! [`BufferConfig::with_max_bytes`]`(n)` cap it, where bytes is the sum of the
+//! serialized key and value. A buffer that exceeds a cap shuts the task down
+//! (`shutDownWhenFull`), which is the `until_window_closes` default. The eager
+//! configs `BufferConfig::max_records(n)`, [`BufferConfig::max_bytes`], and
+//! [`BufferConfig::emit_early_when_full`] instead evict and emit the oldest
+//! buffered record (`emitEarlyWhenFull`).
 //!
 //! [`KStream::join`], [`KStream::left_join`], and [`KStream::outer_join`] are the
-//! windowed **stream-stream** joins: two streams join over a [`JoinWindows`] time
-//! window, configured with [`StreamJoined`] serdes. Each side buffers its records
-//! in its own `retainDuplicates` window store (so two records at the same time
-//! both survive); a record from one side joins every record on the other side
-//! within `[t - before, t + after]`, emitting `joiner(a, b)` at `max(ts)`. The two
-//! window-store changelogs use `cleanup.policy=delete` (`retention.ms = before +
-//! after + grace + 1 day`), and the two source topics form a copartition group. An
-//! inner join emits only on a match; **left**/**outer** additionally emit the
-//! null-padded result for a record that finds no match, once its window has closed
-//! (KIP-633 stream-time-driven emission — there is no wall-clock throttle). Left/
-//! outer buffer the as-yet-unmatched records in a shared `KSTREAM-OUTERSHARED-`
-//! KV store (a compact changelog) and rename their per-side processors to
-//! `KSTREAM-OUTERTHIS-`/`KSTREAM-OUTEROTHER-` to match the JVM. As with the other
-//! joins, a key-changing stream must `.repartition(..)` before joining.
+//! windowed **stream-stream** joins. Two streams join over a [`JoinWindows`] time
+//! window, and [`StreamJoined`] serdes configure them. Each side buffers its
+//! records in its own `retainDuplicates` window store, so two records at the same
+//! time both survive. A record from one side joins every record on the other side
+//! within `[t - before, t + after]`, and it emits `joiner(a, b)` at `max(ts)`.
 //!
-//! [`StreamsBuilder::global_table`] sources a [`GlobalKTable`]: a **fully-replicated**
-//! lookup table. Every application instance reads *all* partitions of the source
-//! topic into one shared global store, so the source topic itself is the truth —
-//! there is **no copartitioning, no repartition, and no changelog** (the global
-//! store is rebuilt from the source on startup). The store is *invisible in the
-//! wire topology* (no subtopology of its own), though its global source node still
-//! consumes a node-group index during grouping (so declaring `global_table` before
-//! `stream` shifts the stream subtopology id). [`KStream::join_global`] /
-//! [`KStream::left_join_global`] join a stream to it by a **per-record-derived
-//! key** — `key_mapper(&streamKey, &streamValue)` selects the global key (which may
-//! differ from the stream key) — and emit `joiner(&streamValue, &globalValue)` keyed
-//! by the *stream* key. An inner `join_global` skips a record on a store miss; a
-//! `left_join_global` always emits, passing `None` for the global side. Because the
-//! store is fully replicated, any record can look up any key on every instance.
-//! The runtime's global consumer **bootstraps** the store — draining every partition
-//! of the source topic to end-of-log — *before* any task begins processing, so the
-//! first joined record already sees the complete global table.
+//! The two window-store changelogs use `cleanup.policy=delete` with
+//! `retention.ms = before + after + grace + 1 day`, and the two source topics
+//! form a copartition group. An inner join emits only on a match. **Left** and
+//! **outer** also emit the null-padded result for a record that finds no match,
+//! once that record's window has closed. This is the KIP-633 stream-time-driven
+//! emission, and there is no wall-clock throttle.
+//!
+//! Left and outer buffer the records that are not yet matched in a shared
+//! `KSTREAM-OUTERSHARED-` KV store with a compact changelog. They also rename
+//! their per-side processors to `KSTREAM-OUTERTHIS-` and `KSTREAM-OUTEROTHER-` to
+//! match the JVM. A key-changing stream must call `.repartition(..)` before it
+//! joins, as with the other joins.
+//!
+//! [`StreamsBuilder::global_table`] sources a [`GlobalKTable`], a
+//! **fully-replicated** lookup table. Every application instance reads *all*
+//! partitions of the source topic into one shared global store, so the source
+//! topic itself is the truth. There is **no copartitioning, no repartition, and
+//! no changelog**, and the runtime rebuilds the global store from the source at
+//! startup.
+//!
+//! The store is *invisible in the wire topology* and has no subtopology of its
+//! own. Its global source node still consumes a node-group index during the
+//! grouping step, so a `global_table` declared before `stream` shifts the stream
+//! subtopology id.
+//!
+//! [`KStream::join_global`] and [`KStream::left_join_global`] join a stream to the
+//! global table by a **per-record-derived key**.
+//! `key_mapper(&streamKey, &streamValue)` selects the global key, which may
+//! differ from the stream key. The join emits
+//! `joiner(&streamValue, &globalValue)` keyed by the *stream* key. An inner
+//! `join_global` skips a record on a store miss. A `left_join_global` always
+//! emits, and it supplies `None` for the global side.
+//!
+//! The store is fully replicated, so any record can look up any key on every
+//! instance. The runtime's global consumer **bootstraps** the store *before* any
+//! task starts to process records. The consumer drains every partition of the
+//! source topic to end-of-log, so the first joined record already sees the
+//! complete global table.
 //!
 //! [`KStream::process`] and [`KStream::process_values`] (KIP-820) drop a custom
-//! Processor-API node into a DSL pipeline: a user-written [`Processor`] (for
-//! `process`) or [`FixedKeyProcessor`] (for `process_values`) that reads and writes
-//! state stores connected by name. Register the store first with
-//! [`StreamsBuilder::add_state_store`] (a compact-changelog [`KeyValueStore`]), then
-//! pass its name to the `process`/`process_values` call that uses it — the named
-//! store is attached to that node and its `app-<store>-changelog` topic appears in
-//! the wire. `process` may rewrite the record key, so its result is
-//! **key-changing**: a downstream `group_by_key`/join inserts a repartition.
-//! `process_values` is **fixed-key** — it can change the value but not the key — so
-//! it carries the upstream key lineage and forces **no** repartition. That guarantee
-//! is structural: a [`FixedKeyProcessor`] only ever receives and forwards a
-//! [`FixedKeyRecord`], whose key is fixed from the input and preserved through
-//! [`FixedKeyRecord::with_value`]; the context's only `forward` re-attaches that key,
-//! so the processor cannot emit a different one. (An `add_state_store` store that no
-//! `process`/`process_values` connects is simply never instantiated — no changelog,
-//! no runtime store.)
+//! Processor-API node into a DSL pipeline. You write a [`Processor`] for
+//! `process`, or a [`FixedKeyProcessor`] for `process_values`, and it reads and
+//! writes state stores connected by name. Register the store first with
+//! [`StreamsBuilder::add_state_store`], which gives a [`KeyValueStore`] with a
+//! compact changelog. Then pass the store name to the `process` or
+//! `process_values` call that uses it. The builder attaches the named store to
+//! that node, and the store's `app-<store>-changelog` topic appears in the wire.
+//!
+//! `process` may rewrite the record key, so its result is **key-changing**, and a
+//! downstream `group_by_key` or join inserts a repartition. `process_values` is
+//! **fixed-key**: it can change the value but not the key. It carries the
+//! upstream key lineage and forces **no** repartition.
+//!
+//! That guarantee is structural. A [`FixedKeyProcessor`] only ever receives and
+//! forwards a [`FixedKeyRecord`]. The input fixes the key of that record, and
+//! [`FixedKeyRecord::with_value`] preserves the key. The context's only `forward`
+//! re-attaches that key, so the processor cannot emit a different one. An
+//! `add_state_store` store that no `process` or `process_values` connects is never
+//! instantiated, and it gets no changelog and no runtime store.
 //!
 //! ### Enriching a stream with a fully replicated table
 //!
 //! `GlobalKTable` is useful for reference data such as customer profiles,
-//! product catalogs, or fraud watchlists where every app instance should be able
-//! to look up any key without repartitioning the stream:
+//! product catalogs, or fraud watchlists. Every app instance can then look up any
+//! key, and the stream needs no repartition:
 //!
 //! ```
 //! use crabka_client_streams::{StreamsBuilder, StringSerde};
@@ -367,9 +406,10 @@
 //! assert_eq!(built.list_source_topics(), vec!["orders".to_string()]);
 //! ```
 //!
-//! The same enrichment with **Avro** payloads and rich compound types — declare
-//! each type's default serde once and the DSL reads/writes Confluent-framed
-//! records resolved against the schema registry (no per-call serde wiring):
+//! The same enrichment works with **Avro** payloads and compound types. Declare
+//! each type's default serde once. The DSL then reads and writes Confluent-framed
+//! records that it resolves against the schema registry, with no per-call serde
+//! wiring:
 //!
 //! ```
 //! use apache_avro::AvroSchema;
@@ -448,7 +488,7 @@
 //!
 //! Windowed aggregations emit on every update by default. Add `suppress` when
 //! downstream systems should receive only the final value after the window grace
-//! has elapsed:
+//! has passed:
 //!
 //! ```
 //! use crabka_client_streams::{BufferConfig, StreamsBuilder, Suppressed, TimeWindows};
@@ -470,9 +510,9 @@
 //! );
 //! ```
 //!
-//! The same windowed aggregation over **Avro** orders, accumulating a compound
-//! per-window revenue record (the aggregation state is itself an Avro record in
-//! the windowed store):
+//! The same windowed aggregation over **Avro** orders builds a compound
+//! per-window revenue record. The aggregation state is itself an Avro record in
+//! the windowed store:
 //!
 //! ```
 //! use apache_avro::AvroSchema;
@@ -588,9 +628,9 @@
 //!
 //! ### Applied: projecting Avro records
 //!
-//! A realistic stateless projection over compound **Avro** types — keep paid
-//! orders and bill each into a summary (a nested `Vec` of line items, an
-//! `Option`, and an enum, all carried as one Avro record per topic):
+//! A stateless projection over compound **Avro** types keeps the paid orders and
+//! bills each one into a summary. One Avro record per topic carries a nested
+//! `Vec` of line items, an `Option`, and an enum:
 //!
 //! ```
 //! use apache_avro::AvroSchema;
@@ -664,26 +704,31 @@
 //!
 //! ## Punctuation (timers)
 //!
-//! A Processor-API node can register **punctuators** — periodic callbacks — via
+//! A Processor-API node can register **punctuators**, which are periodic
+//! callbacks. Register them with
 //! [`ProcessorContext::schedule`]`(interval, `[`PunctuationType`]`, `[`Punctuator`]`)`,
-//! typically from `init`. A [`Punctuator`] is a trait object (like [`Processor`])
-//! that on each fire receives a `ProcessorContext` positioned at the scheduling node,
-//! so it may `forward(...)` records downstream and read/write state stores; share
-//! mutable state with the owning processor via `Arc<Mutex<_>>`. `schedule` returns a
-//! [`Cancellable`] (`.cancel()` stops it). Two clocks drive firing:
+//! usually from `init`. A [`Punctuator`] is a trait object like [`Processor`]. On
+//! each fire it receives a `ProcessorContext` positioned at the node that
+//! scheduled it, so it can `forward(...)` records downstream and read and write
+//! state stores. Share mutable state with the owning processor through
+//! `Arc<Mutex<_>>`. `schedule` returns a [`Cancellable`], and `.cancel()` stops
+//! the schedule.
 //!
-//! - [`PunctuationType::StreamTime`] — driven by the task's observed max record
-//!   timestamp (deterministic; advances as records are piped).
-//! - [`PunctuationType::WallClockTime`] — driven by the system clock between polls
-//!   (in tests, by [`TopologyTestDriver::advance_wall_clock_time`]).
+//! Two clocks drive the firing:
 //!
-//! Both fire **at most once per driving action**, passing the **current** time
-//! (stream-time / wall-clock) to `punctuate`; a schedule that has fallen more than one
-//! interval behind resyncs ahead rather than replaying every missed boundary. A
-//! stream-time schedule first-fires on the first record; a wall-clock schedule first-
-//! fires one interval after it was scheduled. (Punctuation is invisible in the wire
-//! topology — it is purely runtime behavior; these semantics match the JVM
-//! `TopologyTestDriver`.)
+//! - [`PunctuationType::StreamTime`] uses the task's observed max record
+//!   timestamp. It is deterministic and advances as you pipe records.
+//! - [`PunctuationType::WallClockTime`] uses the system clock between polls. In
+//!   tests, [`TopologyTestDriver::advance_wall_clock_time`] drives it.
+//!
+//! Both clocks fire **at most once per driving action**, and they pass the
+//! **current** stream-time or wall-clock time to `punctuate`. A schedule that has
+//! fallen more than one interval behind resyncs ahead. It does not replay every
+//! missed boundary. A stream-time schedule first-fires on the first record. A
+//! wall-clock schedule first-fires one interval after you scheduled it.
+//!
+//! Punctuation is invisible in the wire topology, because it is purely runtime
+//! behavior. These semantics match the JVM `TopologyTestDriver`.
 //!
 //! ```
 //! use std::time::Duration;
@@ -748,9 +793,9 @@
 //!
 //! ## Running an app (`KafkaStreams`)
 //!
-//! Once built, run a topology against a broker with the managed runtime — it
+//! Run a built topology against a broker with the managed runtime. The runtime
 //! joins the streams group, fetches its assigned partitions, processes records,
-//! produces to sink topics, and commits offsets (at-least-once):
+//! produces to sink topics, and commits offsets at-least-once:
 //!
 //! ```no_run
 //! use async_trait::async_trait;
@@ -791,27 +836,30 @@
 //!
 //! ## State stores & backends
 //!
-//! The execution path is **async**: [`Processor::process`](processor::Processor)
-//! is an `async fn`, and a processor reads/writes its connected state store with
-//! `ctx.get_state_store::<K, V>(name).get(&k).await` / `.put(k, v).await`.
+//! The execution path is **async**. [`Processor::process`](processor::Processor)
+//! is an `async fn`, and a processor reads and writes its connected state store
+//! with `ctx.get_state_store::<K, V>(name).get(&k).await` and `.put(k, v).await`.
 //!
-//! State stores are **pluggable** via a byte-level backend. A
-//! [`KeyValueStore`] is a typed view ([`KeyValueBytesStore`]) over a backend
-//! selected by [`StoreBackend`]: `InMemory` (a `BTreeMap`; the default and the
-//! test backend) or `Turso` (a pure-Rust `SQLite` engine persisting under a state
-//! dir, used by the managed runtime). The backend is a *materialized cache* — the
-//! changelog topic is the source of truth, so on assignment the store is rebuilt
-//! from the changelog (clean-slate replay), and a missing/corrupt local store is
-//! recovered by replay rather than data loss. Select it on the builder:
+//! State stores are **pluggable** through a byte-level backend. A
+//! [`KeyValueStore`] is a typed view, [`KeyValueBytesStore`], over a backend that
+//! [`StoreBackend`] selects. `InMemory` is a `BTreeMap`, and it is both the
+//! default and the test backend. `Turso` is a pure-Rust `SQLite` engine that
+//! persists under a state dir, and the managed runtime uses it.
+//!
+//! The backend is a *materialized cache*, and the changelog topic is the source
+//! of truth. On assignment the runtime rebuilds the store from the changelog, a
+//! clean-slate replay. A missing or corrupt local store is recovered by replay,
+//! so there is no data loss. Select the backend on the builder:
 //! `KafkaStreams::builder().store_backend(StoreBackend::Turso { state_dir })`.
 //!
 //! ## Interactive Queries
 //!
 //! Read a running instance's local state stores from outside the topology with
 //! [`KafkaStreams::key_value_store`], [`KafkaStreams::window_store`], and
-//! [`KafkaStreams::session_store`]. Each returns a typed, read-only view —
-//! [`ReadOnlyKeyValueStore`] / [`ReadOnlyWindowStore`] / [`ReadOnlySessionStore`]
-//! — whose accessors round-trip through the running supervisor:
+//! [`KafkaStreams::session_store`]. Each one returns a typed, read-only view:
+//! [`ReadOnlyKeyValueStore`], [`ReadOnlyWindowStore`], or
+//! [`ReadOnlySessionStore`]. The accessors of these views round-trip through the
+//! running supervisor:
 //!
 //! ```no_run
 //! # use crabka_client_streams::{KafkaStreams, StringSerde, I64Serde};
@@ -827,38 +875,42 @@
 //! # }
 //! ```
 //!
-//! Queries reach only the **local active** stores (a composite read across every
-//! partition this instance owns), matching the JVM default `StoreQueryParameters`.
-//! [`ReadOnlyKeyValueStore`] exposes `get` / `range` (inclusive) / `all` /
-//! `approximate_num_entries`; [`ReadOnlyWindowStore`] exposes `fetch_single` /
-//! `fetch`; [`ReadOnlySessionStore`] exposes `fetch`. Failures surface as
-//! [`StreamsClientError::InteractiveQuery`] wrapping an [`IqError`]:
-//! [`IqError::StoreNotFound`] (no such store assigned here),
-//! [`IqError::WrongStoreKind`] (queried the wrong store kind), or
-//! [`IqError::RebalanceInProgress`] (no tasks assigned yet — retry).
+//! Queries reach only the **local active** stores. Each query is a composite read
+//! across every partition this instance owns, which matches the JVM default
+//! `StoreQueryParameters`. [`ReadOnlyKeyValueStore`] exposes `get`, `range`
+//! (inclusive), `all`, and `approximate_num_entries`. [`ReadOnlyWindowStore`]
+//! exposes `fetch_single` and `fetch`. [`ReadOnlySessionStore`] exposes `fetch`.
+//!
+//! A failure surfaces as [`StreamsClientError::InteractiveQuery`] that wraps an
+//! [`IqError`]. [`IqError::StoreNotFound`] means no such store is assigned here.
+//! [`IqError::WrongStoreKind`] means the caller queried the wrong store kind.
+//! [`IqError::RebalanceInProgress`] means no tasks are assigned yet, so retry.
 //!
 //! ## Exactly-once (EOS v2)
 //!
-//! The runtime's delivery guarantee is set by
-//! [`ProcessingGuarantee`]: [`AtLeastOnce`](ProcessingGuarantee::AtLeastOnce)
-//! (the default — produce, then commit source offsets; a crash mid-cycle may
-//! replay) or [`ExactlyOnceV2`](ProcessingGuarantee::ExactlyOnceV2) (KIP-447
-//! `exactly_once_v2`). Under EOS-v2 the [`StreamThread`] runs **one Kafka
-//! transaction per commit interval** over a single transactional producer
-//! (`transactional.id = <application.id>-<thread>`): it `begin`s the txn,
-//! produces sink **and** changelog records into it, commits the consumed source
-//! offsets *inside* the same transaction (`send_offsets_to_transaction`), and
-//! `commit`s — so output, changelog, and offsets land atomically. On any error
-//! in the cycle it `abort`s, rewinds the source offsets, and rolls back state
-//! stores by wiping + re-restoring from the **committed** changelog
-//! (`read_committed`). State-store restore under EOS reads `read_committed`, so
-//! aborted changelog writes are never replayed.
+//! [`ProcessingGuarantee`] sets the runtime's delivery guarantee.
+//! [`AtLeastOnce`](ProcessingGuarantee::AtLeastOnce) is the default: it produces,
+//! then commits the source offsets, and a crash mid-cycle may replay.
+//! [`ExactlyOnceV2`](ProcessingGuarantee::ExactlyOnceV2) is the KIP-447
+//! `exactly_once_v2` guarantee.
 //!
-//! Committed source offsets are surfaced through `OffsetFetch` once the
-//! transaction's COMMIT marker lands, so a restarted instance resumes from the
-//! committed offset (the committed input is processed **exactly once across the
-//! restart** — it is not re-read/double-counted), rebuilding its stores from the
-//! committed changelog.
+//! Under EOS-v2 the [`StreamThread`] runs **one Kafka transaction per commit
+//! interval** over a single transactional producer with
+//! `transactional.id = <application.id>-<thread>`. The thread `begin`s the txn,
+//! produces sink **and** changelog records into it, commits the consumed source
+//! offsets *inside* the same transaction with `send_offsets_to_transaction`, and
+//! then `commit`s. So output, changelog, and offsets land atomically.
+//!
+//! On any error in the cycle the thread `abort`s, rewinds the source offsets, and
+//! rolls back the state stores. It wipes each store and re-restores it from the
+//! **committed** changelog (`read_committed`). State-store restore under EOS
+//! reads `read_committed`, so the runtime never replays aborted changelog writes.
+//!
+//! `OffsetFetch` surfaces the committed source offsets once the transaction's
+//! COMMIT marker lands. A restarted instance then resumes from the committed
+//! offset and rebuilds its stores from the committed changelog. The runtime
+//! processes the committed input **exactly once across the restart**. It does not
+//! re-read or double-count that input.
 //!
 //! [`StreamThread`]: runtime
 //!
@@ -886,9 +938,9 @@
 //! ## Versioned tables (KIP-889)
 //!
 //! `builder.table(..., Materialized::as_versioned(name, history_retention))`
-//! materializes a table into a versioned key-value store, so out-of-order
-//! records are recorded as historical versions without clobbering the latest,
-//! and point-in-time reads are available via `get_as_of`.
+//! materializes a table into a versioned key-value store. The store records
+//! out-of-order records as historical versions and keeps the latest version
+//! intact. `get_as_of` gives point-in-time reads.
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.9")]
 
 pub mod columnar;

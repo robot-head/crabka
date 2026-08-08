@@ -1,13 +1,16 @@
-//! Interactive-query channel protocol. The `KafkaStreams` handle sends byte-level
-//! `IqRequest`s to the supervisor task, which resolves them against local stores
-//! with `answer_iq` and replies on a `oneshot`.
+//! The interactive-query channel protocol.
+//!
+//! The `KafkaStreams` handle sends byte-level `IqRequest`s to the supervisor
+//! task. The supervisor resolves them against the local stores with `answer_iq`
+//! and replies on a `oneshot`.
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
 use crate::store::iq::{IqQueryable, StoreKind};
 
-/// A byte-level query op. No `K`/`V` — the typed view (de)serializes.
+/// A byte-level query operation. It carries no `K` and no `V`, because the typed
+/// view serializes and deserializes.
 #[derive(Debug)]
 pub(crate) enum IqOp {
     Validate,
@@ -68,10 +71,12 @@ pub(crate) struct IqRequest {
     pub reply: oneshot::Sender<Result<IqPayload, IqError>>,
 }
 
-/// Resolve one op against every local store named `store` (composite across
-/// partitions). `matching` is the set of `IqQueryable` views for that name on
-/// this instance; `any_tasks` distinguishes "rebalancing" (no tasks at all)
-/// from "store genuinely not assigned" (have tasks, none host this store).
+/// Resolve one operation against every local store named `store`, which gives a
+/// composite result across the partitions.
+///
+/// `matching` is the set of `IqQueryable` views for that name on this instance.
+/// `any_tasks` separates two cases: the instance is rebalancing and has no tasks
+/// at all, or the instance has tasks but none of them hosts this store.
 pub(crate) async fn answer_iq(
     matching: Vec<&dyn IqQueryable>,
     kind: StoreKind,

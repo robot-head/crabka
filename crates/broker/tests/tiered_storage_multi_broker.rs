@@ -7,22 +7,27 @@
 //! ## Design
 //!
 //! Three in-process Crabka brokers boot with:
-//! - advertised listeners on `127.0.0.1:<port>` (no Docker/host.docker.internal)
-//! - a **shared** `Local` remote-storage backend (same temp dir) on all three
-//! - topic-backed RLMM, all clients bootstrap to broker 1's loopback port
-//!   (`num_partitions=1, replication=1` — all metadata on broker 1's partition 0)
+//! - advertised listeners on `127.0.0.1:<port>`, with no Docker and no
+//!   host.docker.internal
+//! - a **shared** `Local` remote-storage backend, the same temp dir, on all
+//!   three
+//! - topic-backed RLMM. All clients bootstrap to broker 1's loopback port with
+//!   `num_partitions=1, replication=1`, so all metadata lives on broker 1's
+//!   partition 0.
 //!
-//! A **3-broker quorum** is required so that after killing the partition leader
-//! (broker 1), the surviving quorum (2/3 = majority) can still commit the
-//! partition-leader-election record for broker 2.  A 2-voter cluster (1/2 < majority)
-//! would break the raft quorum and the partition leader could never be moved.
+//! The test needs a **3-broker quorum**. After it kills the partition leader,
+//! broker 1, the surviving quorum of 2 out of 3 is still a majority and can
+//! commit the partition-leader-election record for broker 2. A 2-voter cluster
+//! leaves 1 out of 2, which is not a majority, so the raft quorum would break
+//! and the partition leader could never move.
 //!
-//! The metadata-sharing claim: broker 2's RLMM consumer reads `CopySegment*`
-//! events from broker 1's `__remote_log_metadata` partition 0 over loopback and
-//! caches segment metadata locally.  When broker 1 is shut down, broker 2 uses
-//! the already-consumed cached metadata to serve remote reads.  The leader-epoch
-//! fallback in `remote_reader.rs` (`list_remote_log_segments` scan) handles the
-//! epoch change from broker 1's epoch to broker 2's new leader epoch.
+//! The metadata-sharing claim is this. Broker 2's RLMM consumer reads
+//! `CopySegment*` events from broker 1's `__remote_log_metadata` partition 0
+//! over loopback and caches the segment metadata locally. When broker 1 shuts
+//! down, broker 2 serves remote reads from that already-consumed cached
+//! metadata. The leader-epoch fallback in `remote_reader.rs`, the
+//! `list_remote_log_segments` scan, handles the change from broker 1's epoch
+//! to broker 2's new leader epoch.
 //!
 //! Scenario:
 //! 1. Three brokers boot concurrently (3-voter static bootstrap).
@@ -31,22 +36,25 @@
 //!    `local.retention.bytes=1` so every sealed segment is evicted locally.
 //!    With 3 registered brokers and rf=2, the round-robin assignment places
 //!    the partition on broker 1 (leader) + broker 2 (follower).
-//! 4. Produce 160 records via broker 1; wait until several segments land
-//!    in the shared remote dir (leader ran the copy task and published
-//!    `CopySegment*` events to `__remote_log_metadata`).
-//! 5. Wait 8s for broker 2's RLMM consumer to consume the `CopySegment` events.
-//! 6. Shut down broker 1 (the partition leader).  The surviving quorum (2/3)
-//!    commits a new partition leader record; broker 2 wins the election.
-//! 7. Consume ALL records from broker 2 at offset 0.  These can only come
-//!    from the shared remote tier — broker 2's local log is evicted and it
-//!    never ran the copy task.  Broker 2 serves them using cached metadata.
+//! 4. Produce 160 records through broker 1, then wait until several segments
+//!    land in the shared remote dir. The leader has then run the copy task and
+//!    published `CopySegment*` events to `__remote_log_metadata`.
+//! 5. Wait 8s for broker 2's RLMM consumer to read the `CopySegment` events.
+//! 6. Shut down broker 1, the partition leader. The surviving quorum of 2 out
+//!    of 3 commits a new partition leader record, and broker 2 wins the
+//!    election.
+//! 7. Consume ALL records from broker 2 at offset 0. They can come only from
+//!    the shared remote tier, because broker 2's local log is evicted and
+//!    broker 2 never ran the copy task. Broker 2 serves them from the cached
+//!    metadata.
 //!
 //! ## Discriminating property
 //!
-//! The survivor never ran the copy task for these segments and its local copy is
-//! evicted; it can only serve via the shared Local tier + shared RLMM metadata.
-//! With a per-broker in-memory RLMM the survivor would have no metadata and the
-//! consume would fail.  Do NOT weaken the assertion (must require all records back).
+//! The survivor never ran the copy task for these segments, and its local copy
+//! is evicted. It can serve them only through the shared Local tier and the
+//! shared RLMM metadata. With a per-broker in-memory RLMM, the survivor would
+//! have no metadata and the consume would fail. Do NOT weaken the assertion; it
+//! must require all records back.
 
 use assert2::assert;
 mod support;
@@ -73,12 +81,15 @@ use tempfile::TempDir;
 const TOPIC: &str = "tiered-multi-broker-itest";
 const RECORDS: usize = 160;
 
-/// Boot three in-process brokers with a shared Local remote tier and topic-backed
-/// RLMM.  A 3-voter quorum is required so the surviving 2/3 can commit the
-/// partition-leader-election record after broker 1 is shut down.
+/// Boots three in-process brokers with a shared Local remote tier and a
+/// topic-backed RLMM.
 ///
-/// Returns `(broker1, broker2, broker3, dirs[], shared_remote_dir)`.
-/// The remote dir is shared so all brokers write/read the same object store.
+/// The test needs a 3-voter quorum, so that the surviving 2 out of 3 can commit
+/// the partition-leader-election record after broker 1 shuts down.
+///
+/// Returns `(broker1, broker2, broker3, dirs[], shared_remote_dir)`. All
+/// brokers share the remote dir, so they write to and read from the same object
+/// store.
 async fn start_three_tiered_brokers() -> (
     BrokerHandle,
     BrokerHandle,
@@ -173,7 +184,8 @@ async fn start_three_tiered_brokers() -> (
     (b1, b2, b3, log_dirs, remote_dir)
 }
 
-/// Wait until all three brokers see each other registered (`broker_count` >= 3).
+/// Waits until all three brokers see each other registered, that is, until
+/// `broker_count` >= 3.
 async fn await_all_brokers_registered(b1: &BrokerHandle, b2: &BrokerHandle, b3: &BrokerHandle) {
     // Each broker's own metadata image must show all 3 brokers registered.
     b1.wait_until_brokers_registered(3).await;
@@ -181,7 +193,7 @@ async fn await_all_brokers_registered(b1: &BrokerHandle, b2: &BrokerHandle, b3: 
     b3.wait_until_brokers_registered(3).await;
 }
 
-/// Wait until the topic-backed RLMM is active on all three brokers.
+/// Waits until the topic-backed RLMM is active on all three brokers.
 async fn await_all_rlmm_active(b1: &BrokerHandle, b2: &BrokerHandle, b3: &BrokerHandle) {
     // Topic-backed RLMM going live flips the tiered_storage_rlmm_topic_backed
     // gauge to 1 on each broker (the same signal rlmm_topic_backed_active_for_test
@@ -200,7 +212,8 @@ async fn await_all_rlmm_active(b1: &BrokerHandle, b2: &BrokerHandle, b3: &Broker
     .await;
 }
 
-/// Fetch the topic-id for `name` from the given client (Metadata request).
+/// Fetches the topic-id for `name` from the given client with a Metadata
+/// request.
 async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
     let resp = client
         .send(MetadataRequest {
@@ -219,9 +232,9 @@ async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
         .unwrap_or_default()
 }
 
-/// Count files named `log` anywhere under `root` — the `LocalTieredStorage`
-/// segment-bytes object for each copied segment (same helper as
-/// `tiered_storage_topic_rlmm.rs`).
+/// Counts the files named `log` anywhere under `root`. Each one is the
+/// `LocalTieredStorage` segment-bytes object of a copied segment. This is the
+/// same helper as in `tiered_storage_topic_rlmm.rs`.
 fn count_remote_log_files(root: &std::path::Path) -> usize {
     fn walk(dir: &std::path::Path, count: &mut usize) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -241,9 +254,9 @@ fn count_remote_log_files(root: &std::path::Path) -> usize {
     count
 }
 
-/// Fetch all records from `(topic, partition)` starting at `start_offset`
-/// from the broker at `bootstrap`, retrying until `expected_count` records
-/// arrive or the deadline expires.  Returns the total record count.
+/// Fetches all records from `(topic, partition)`, starting at `start_offset`,
+/// from the broker at `bootstrap`. It retries until `expected_count` records
+/// arrive or the deadline passes. Returns the total record count.
 async fn fetch_all_records(
     bootstrap: &str,
     topic: &str,
@@ -449,15 +462,15 @@ async fn produce_and_await_remote_segments(admin: &Client, remote_dir: &std::pat
 
 /// In-process multi-broker tiered metadata-sharing proof.
 ///
-/// Three brokers share a `Local` remote tier and a topic-backed RLMM with
-/// rf=2 metadata replication.  Broker 1 leads the rf=2 user partition and
-/// runs the RLM copy task; broker 2 only consumes `__remote_log_metadata`
-/// to learn segment locations.  After broker 1 is shut down, the surviving
-/// 2/3 quorum commits a new partition-leader record and broker 2 serves all
-/// records from the remote tier — proving the RLMM metadata sharing claim.
+/// Three brokers share a `Local` remote tier and a topic-backed RLMM with rf=2
+/// metadata replication. Broker 1 leads the rf=2 user partition and runs the
+/// RLM copy task. Broker 2 only consumes `__remote_log_metadata` to learn the
+/// segment locations. After broker 1 shuts down, the surviving 2-out-of-3
+/// quorum commits a new partition-leader record, and broker 2 serves all
+/// records from the remote tier. That proves the RLMM metadata-sharing claim.
 ///
-/// Runs under plain `cargo test` (no Docker, no `MinIO`, no
-/// host.docker.internal).
+/// The test runs under plain `cargo test`, with no Docker, no `MinIO`, and no
+/// host.docker.internal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tiered_storage_metadata_sharing_via_survivor() {
     let (b1, b2, b3, _dirs, remote_dir) = start_three_tiered_brokers().await;

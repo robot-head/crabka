@@ -1,5 +1,7 @@
-//! Catalog as a stateless view over a `Kv` store: tables, their columns, and
-//! CRUD with `PostgreSQL` error codes. Persistence via SP3's KV layer.
+//! Catalog as a stateless view over a `Kv` store.
+//!
+//! The catalog holds tables and their columns, and does CRUD with `PostgreSQL`
+//! error codes. SP3's KV layer stores the data.
 
 #![doc(html_root_url = "https://docs.rs/crabka-pgcatalog/0.3.9")]
 
@@ -35,28 +37,27 @@ pub type IndexId = u32;
 
 /// OID-style foreign-key identifier (never 0; 0 is reserved/invalid).
 ///
-/// It is drawn from one monotonic counter, so comparing two of them compares
-/// the order the constraints were created in — which is the order `PostgreSQL`
-/// fires their referential-integrity triggers, and the order it lists them as
-/// dependents of an object being dropped.
+/// One monotonic counter supplies these ids. A comparison of two ids therefore
+/// compares the order in which the constraints were created. `PostgreSQL` fires
+/// their referential-integrity triggers in that order, and lists them in that
+/// order as dependents of an object that is dropped.
 pub type ForeignKeyId = u32;
 
-/// A relation's resolved name: the schema it lives in, and its name within
-/// that schema.
+/// A relation's resolved name: the schema, and the name within that schema.
 ///
-/// The two halves are never flattened into one string, because they are not
-/// recoverable from one. `PostgreSQL` lets a relation called `a.b` in `public`
-/// and a relation called `b` in schema `a` exist at the same time with
-/// distinct contents, and a `schema.relation` string cannot tell them apart —
-/// which is why every catalog key that names a relation is built from these
-/// two parts, each length-prefixed.
+/// The catalog never flattens the two halves into one string, because it cannot
+/// recover them from one. `PostgreSQL` lets a relation called `a.b` in `public`
+/// and a relation called `b` in schema `a` exist at the same time with distinct
+/// contents, and a `schema.relation` string cannot tell them apart. Every
+/// catalog key that names a relation is therefore built from these two parts,
+/// each length-prefixed.
 ///
-/// Constructing one is the only way to reach a catalog lookup, so an
-/// unqualified name cannot silently mean "whatever `public` holds": it has to
-/// pass through the resolver that knows the search path.
+/// This type is the only way to reach a catalog lookup. An unqualified name
+/// therefore cannot silently mean "whatever `public` holds". It must pass
+/// through the resolver that knows the search path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RelationName {
-    /// The schema, always resolved — never a qualifier as written.
+    /// The schema, always resolved. This is never a qualifier as written.
     pub schema: String,
     /// The relation's name within [`RelationName::schema`].
     pub name: String,
@@ -71,8 +72,8 @@ impl RelationName {
         }
     }
 
-    /// A relation in `public` — where the default search path puts every
-    /// unqualified name, and where the bootstrap and test fixtures live.
+    /// A relation in `public`, the schema where the default search path puts
+    /// every unqualified name and where the bootstrap and test fixtures live.
     pub fn public(name: impl Into<String>) -> Self {
         Self::new(PUBLIC_SCHEMA, name)
     }
@@ -83,8 +84,8 @@ impl RelationName {
         self.schema == PUBLIC_SCHEMA
     }
 
-    /// Another object in the same schema — an index or a sequence beside the
-    /// table that owns it, which is where `PostgreSQL` puts both.
+    /// Another object in the same schema, such as an index or a sequence beside
+    /// the table that owns it. `PostgreSQL` puts both there.
     #[must_use]
     pub fn sibling(&self, name: impl Into<String>) -> Self {
         Self::new(self.schema.clone(), name)
@@ -92,9 +93,9 @@ impl RelationName {
 }
 
 impl std::fmt::Display for RelationName {
-    /// Spelled the way `PostgreSQL` spells a relation in a diagnostic: bare in
-    /// `public`, which the default search path makes the unqualified name, and
-    /// `schema.name` anywhere else.
+    /// Spelled the way `PostgreSQL` spells a relation in a diagnostic. A
+    /// relation in `public` is bare, because the default search path makes that
+    /// the unqualified name. Every other relation is `schema.name`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_public() {
             f.write_str(&self.name)
@@ -116,10 +117,10 @@ pub enum ColumnDefault {
 /// How a `GENERATED … AS IDENTITY` column reacts to a user-supplied value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityKind {
-    /// `GENERATED ALWAYS AS IDENTITY` — a non-DEFAULT value is rejected (428C9)
+    /// `GENERATED ALWAYS AS IDENTITY`. A non-DEFAULT value causes error 428C9
     /// unless the statement says `OVERRIDING SYSTEM VALUE`.
     Always,
-    /// `GENERATED BY DEFAULT AS IDENTITY` — a supplied value wins over the
+    /// `GENERATED BY DEFAULT AS IDENTITY`. A supplied value wins over the
     /// sequence.
     ByDefault,
 }
@@ -151,20 +152,23 @@ impl Column {
     }
 }
 
-/// A named table `CHECK` constraint. The predicate is stored as source text and
-/// re-parsed when a row is written, which is also what makes it rewriteable:
-/// `ALTER TABLE … RENAME COLUMN` rewrites the text through the parser's lexer
-/// (a `CHECK` predicate is scoped to exactly one relation, so every bare column
-/// reference in it belongs to that relation).
+/// A named table `CHECK` constraint.
+///
+/// The catalog stores the predicate as source text and parses it again when a
+/// row is written. That also makes the predicate rewriteable:
+/// `ALTER TABLE … RENAME COLUMN` rewrites the text through the parser's lexer.
+/// A `CHECK` predicate is scoped to exactly one relation, so every bare column
+/// reference in it belongs to that relation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckConstraint {
     pub name: String,
     /// Source text of the predicate, without the enclosing parentheses.
     pub expr: String,
-    /// `pg_constraint.convalidated`: false for a constraint added `NOT VALID`,
-    /// which is enforced for new writes but was never checked against the rows
-    /// already stored. `ALTER TABLE … VALIDATE CONSTRAINT` runs that scan and
-    /// flips it to true.
+    /// `pg_constraint.convalidated`. This is false for a constraint added
+    /// `NOT VALID`. The catalog enforces such a constraint for new writes, but
+    /// never checked it against the rows already stored.
+    /// `ALTER TABLE … VALIDATE CONSTRAINT` runs that scan and sets the field to
+    /// true.
     pub validated: bool,
 }
 
@@ -173,7 +177,7 @@ pub struct CheckConstraint {
 pub struct ForeignTableMeta {
     /// The foreign server name this table is attached to.
     pub server: String,
-    /// Table-level OPTIONS (e.g. `topic = 'orders'`).
+    /// Table-level OPTIONS, for example `topic = 'orders'`.
     pub options: Vec<(String, String)>,
 }
 
@@ -201,7 +205,7 @@ pub struct HashSharding {
 pub enum IndexPlacement {
     /// Index entries live with the base row's owning range.
     Local,
-    /// Index entries live in separate index ranges and must ride timestamp txns.
+    /// Index entries live in separate index ranges and must use timestamp txns.
     Global,
 }
 
@@ -253,9 +257,11 @@ pub struct NewIndex {
     pub constraint: Option<IndexConstraint>,
 }
 
-/// What a foreign key does to the referencing rows when the referenced row is
-/// deleted (`ON DELETE`) or its key columns are updated (`ON UPDATE`) —
+/// What a foreign key does to the referencing rows, from
 /// `pg_constraint.confdeltype` / `confupdtype`.
+///
+/// The action applies when the referenced row is deleted (`ON DELETE`) or its
+/// key columns are updated (`ON UPDATE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferentialAction {
     /// Refuse at the end of the statement, deferring the check when the
@@ -271,7 +277,7 @@ pub enum ReferentialAction {
     SetDefault,
 }
 
-/// How a foreign key treats a partly-NULL composite key —
+/// How a foreign key treats a partly-NULL composite key, from
 /// `pg_constraint.confmatchtype`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchType {
@@ -284,31 +290,32 @@ pub enum MatchType {
 
 /// A `FOREIGN KEY` constraint, as stored in the catalog.
 ///
-/// The identity is `(table_id, name)` — constraint names are per-relation in
-/// `PostgreSQL`, so two relations may each carry a `fk_owner`. The referent is
-/// identified by [`ForeignKey::referenced_table_id`] and
-/// [`ForeignKey::referenced_index_id`], the analogues of
-/// `pg_constraint.confrelid` and `conindid`; [`ForeignKey::referenced_table`]
-/// and [`ForeignKey::referenced_index`] are denormalized display copies for
-/// error messages and `pg_get_constraintdef`, rewritten on rename. Columns are
-/// stored as names, like [`Index::columns`].
+/// The identity is `(table_id, name)`. Constraint names are per-relation in
+/// `PostgreSQL`, so two relations may each carry a `fk_owner`.
+///
+/// [`ForeignKey::referenced_table_id`] and [`ForeignKey::referenced_index_id`]
+/// identify the referent. They are the analogues of `pg_constraint.confrelid`
+/// and `conindid`. [`ForeignKey::referenced_table`] and
+/// [`ForeignKey::referenced_index`] are denormalized display copies for error
+/// messages and `pg_get_constraintdef`, and a rename rewrites them. The catalog
+/// stores columns as names, like [`Index::columns`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKey {
     /// Creation-order id, the stand-in for `pg_constraint.oid`.
     ///
-    /// Not the identity — that stays `(table_id, name)`, because a constraint
-    /// is looked up by the name a statement writes. This orders constraints
+    /// This is not the identity. The identity stays `(table_id, name)`, because
+    /// a lookup uses the name a statement writes. This id orders constraints
     /// against each other, and it survives a rename, exactly as an OID does.
     pub id: ForeignKeyId,
     /// Constraint name, unique within the child relation.
     pub name: String,
-    /// Child relation name — a display copy, rewritten on rename.
+    /// Child relation name, a display copy that a rename rewrites.
     pub table: RelationName,
     /// Child relation id; the authority, and the `fk/by-table` key.
     pub table_id: TableId,
     /// Referencing columns, in written order.
     pub columns: Vec<String>,
-    /// Referenced relation name — a display copy, rewritten on rename.
+    /// Referenced relation name, a display copy that a rename rewrites.
     pub referenced_table: RelationName,
     /// Referenced relation id; the authority, and the `fk/by-ref` key.
     pub referenced_table_id: TableId,
@@ -317,21 +324,21 @@ pub struct ForeignKey {
     /// The unique index that proves the referenced columns are a key, resolved
     /// once at DDL time.
     pub referenced_index_id: IndexId,
-    /// Referenced index name — a display copy.
+    /// Referenced index name, a display copy.
     pub referenced_index: String,
     pub match_type: MatchType,
     pub on_delete: ReferentialAction,
     pub on_update: ReferentialAction,
-    /// `ON DELETE SET {NULL|DEFAULT} (a, b)` — empty means all of
+    /// `ON DELETE SET {NULL|DEFAULT} (a, b)`. Empty means all of
     /// [`ForeignKey::columns`].
     pub set_columns: Vec<String>,
     /// The constraint may be `SET CONSTRAINTS … DEFERRED` within a transaction.
     pub deferrable: bool,
     /// The constraint starts each transaction deferred; implies `deferrable`.
     pub initially_deferred: bool,
-    /// `pg_constraint.convalidated`: false for a constraint added `NOT VALID`,
-    /// which is enforced for new writes but was never checked against the rows
-    /// already stored.
+    /// `pg_constraint.convalidated`. This is false for a constraint added
+    /// `NOT VALID`. The catalog enforces such a constraint for new writes, but
+    /// never checked it against the rows already stored.
     pub validated: bool,
 }
 
@@ -376,7 +383,7 @@ impl Sequence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignDataWrapper {
     pub name: String,
-    /// OPTIONS (e.g. handler, validator).
+    /// OPTIONS, for example the handler and the validator.
     pub options: Vec<(String, String)>,
 }
 
@@ -386,7 +393,7 @@ pub struct ForeignServer {
     pub name: String,
     /// The FDW this server belongs to.
     pub wrapper: String,
-    /// Server-level OPTIONS (e.g. `bootstrap_servers`).
+    /// Server-level OPTIONS, for example `bootstrap_servers`.
     pub options: Vec<(String, String)>,
 }
 
@@ -453,8 +460,8 @@ pub enum CatalogError {
     WrongObjectType(String),
     #[error("column \"{0}\" does not exist")]
     UndefinedColumn(String),
-    /// `PostgreSQL` creates indexes in the relation namespace, so a name
-    /// collision is reported against the *relation*, not the index.
+    /// `PostgreSQL` creates indexes in the relation namespace, so it reports a
+    /// name collision against the *relation*, not the index.
     #[error("relation \"{0}\" already exists")]
     DuplicateIndex(String),
     #[error("index \"{0}\" does not exist")]
@@ -462,8 +469,8 @@ pub enum CatalogError {
     #[error("cannot drop index \"{0}\" because it is required by a table constraint")]
     DependentObjectsStillExist(String),
     /// A relation already carries a constraint of this name. Constraint names
-    /// are per-relation, so `PostgreSQL` reports the relation alongside the
-    /// name — and reports 42710, not the 42P07 an index name collision gets.
+    /// are per-relation, so `PostgreSQL` reports the relation beside the name.
+    /// It reports 42710, not the 42P07 that an index name collision gets.
     #[error("constraint \"{name}\" for relation \"{relation}\" already exists")]
     DuplicateConstraint { name: String, relation: String },
     /// A constraint lookup or `ALTER TABLE … DROP CONSTRAINT` named a
@@ -476,26 +483,26 @@ pub enum CatalogError {
     UndefinedSequence(String),
     #[error("invalid sequence definition: {0}")]
     InvalidSequence(String),
-    /// A sharding definition describing a table this engine has no encoding
-    /// for. Reported as 0A000 rather than 22023: the spec is well formed, the
-    /// shape it asks for is simply not supported.
+    /// A sharding definition that describes a table this engine has no encoding
+    /// for. The code is 0A000 rather than 22023, because the spec is well
+    /// formed and only the shape it asks for is not supported.
     #[error("invalid sharding definition: {0}")]
     InvalidSharding(String),
     #[error("relation \"{0}\" is not an ordinary table")]
     NotOrdinaryTable(String),
     #[error("table conversion rewrite does not remove every existing physical tuple")]
     IncompleteConversionRewrite,
-    /// A stored view names the relation being renamed in a position the
-    /// catalog cannot rewrite (views are stored as SQL text, not as a parsed
-    /// rule over relation oids).
+    /// A stored view names the relation under rename in a position the catalog
+    /// cannot rewrite. The catalog stores views as SQL text, not as a parsed
+    /// rule over relation oids.
     #[error(
         "cannot rename relation \"{0}\": a stored view references it in a position this catalog cannot rewrite"
     )]
     StoredViewDependency(String),
-    /// Generic "object already exists" (42710) — for FDW, server, user-mapping.
+    /// Generic "object already exists" (42710), for FDW, server, user-mapping.
     #[error("object \"{0}\" already exists")]
     DuplicateObject(String),
-    /// Generic "undefined object" (42704) — for FDW, server, user-mapping.
+    /// Generic "undefined object" (42704), for FDW, server, user-mapping.
     #[error("object \"{0}\" does not exist")]
     UndefinedObject(String),
     /// `CREATE SCHEMA` named a schema that already exists (42P06).
@@ -511,7 +518,7 @@ pub enum CatalogError {
     #[error("cannot drop schema {0} because it is required by the database system")]
     SystemSchemaDrop(String),
     /// `DROP SCHEMA … RESTRICT` found relations still in the schema (2BP01).
-    /// Distinct from [`CatalogError::DependentObjectsStillExist`], whose
+    /// This differs from [`CatalogError::DependentObjectsStillExist`], whose
     /// message is about an index and whose payload is an index name.
     #[error("cannot drop schema {0} because other objects depend on it")]
     SchemaNotEmpty(String),
@@ -566,49 +573,58 @@ pub struct Schema {
     pub owner: String,
 }
 
-/// The bootstrap superuser every object is owned by.
+/// The bootstrap superuser that owns every object.
 const BOOTSTRAP_ROLE: &str = "postgres";
 
-/// `public`'s owner. `PostgreSQL` gives the schema to the implicit
-/// `pg_database_owner` role rather than to the bootstrap superuser, so that
-/// whoever owns the database owns the schema it starts with.
+/// `public`'s owner.
+///
+/// `PostgreSQL` gives the schema to the implicit `pg_database_owner` role
+/// rather than to the bootstrap superuser. Whoever owns the database therefore
+/// owns the schema the database starts with.
 pub const PUBLIC_SCHEMA_OWNER: &str = "pg_database_owner";
 
 /// The schemas a database has before anything is created in it, each with the
 /// owner `PostgreSQL` bootstraps it under.
 ///
-/// None of them is stored: a fresh catalog holds no schema rows at all, and
-/// [`list_schemas`] synthesises these three until a stored row supersedes one
-/// or a tombstone removes it. `public` is an ordinary schema that merely
-/// happens to exist already — it can be dropped and created again — while the
-/// [`SYSTEM_SCHEMAS`] cannot be dropped and cannot be created, the latter
-/// because their names are covered by [`RESERVED_SCHEMA_PREFIX`] or already
-/// taken.
+/// The catalog stores none of them. A fresh catalog holds no schema rows at
+/// all, and [`list_schemas`] synthesises these three until a stored row
+/// supersedes one or a tombstone removes it. `public` is an ordinary schema
+/// that merely happens to exist already, so it can be dropped and created
+/// again. The [`SYSTEM_SCHEMAS`] cannot be dropped and cannot be created,
+/// because [`RESERVED_SCHEMA_PREFIX`] covers their names or the names are
+/// already taken.
 pub const BOOTSTRAP_SCHEMAS: &[(&str, &str)] = &[
     ("pg_catalog", BOOTSTRAP_ROLE),
     ("information_schema", BOOTSTRAP_ROLE),
     ("public", PUBLIC_SCHEMA_OWNER),
 ];
 
-/// The bootstrap schemas the database system itself needs. `DROP SCHEMA`
-/// refuses them with 2BP01 however empty they are.
+/// The bootstrap schemas the database system itself needs.
+///
+/// `DROP SCHEMA` refuses them with 2BP01 even when they are empty.
 pub const SYSTEM_SCHEMAS: &[&str] = &["pg_catalog", "information_schema"];
 
-/// The schema-name prefix `PostgreSQL` reserves for system schemas. `CREATE
-/// SCHEMA` refuses any name carrying it, before it looks for a duplicate.
+/// The schema-name prefix `PostgreSQL` reserves for system schemas.
+///
+/// `CREATE SCHEMA` refuses any name that carries it, before it looks for a
+/// duplicate.
 pub const RESERVED_SCHEMA_PREFIX: &str = "pg_";
 
 /// The qualifier that names *this* session's temporary namespace, whatever it
-/// is called. `CREATE TABLE pg_temp.t` creates a temporary relation, and
-/// `search_path` may name it to place the temporary namespace explicitly.
+/// is called.
+///
+/// `CREATE TABLE pg_temp.t` creates a temporary relation. `search_path` may
+/// name this qualifier to place the temporary namespace explicitly.
 pub const PG_TEMP_ALIAS: &str = "pg_temp";
 
 /// The prefix every session's temporary namespace carries.
 const TEMP_SCHEMA_PREFIX: &str = "pg_temp_";
 
-/// The temporary namespace belonging to the session the wire layer announced
-/// `backend_id` for. Verified against `postgres:18.4`, where a session's
-/// `current_schemas(true)` reports `pg_temp_<n>` first.
+/// The temporary namespace of the session the wire layer announced
+/// `backend_id` for.
+///
+/// Verified against `postgres:18.4`, where a session's `current_schemas(true)`
+/// reports `pg_temp_<n>` first.
 #[must_use]
 pub fn temp_schema_name(backend_id: i32) -> String {
     format!("{TEMP_SCHEMA_PREFIX}{backend_id}")
@@ -616,10 +632,12 @@ pub fn temp_schema_name(backend_id: i32) -> String {
 
 /// True when `name` is some session's temporary namespace.
 ///
-/// A relation's persistence is derived from the schema holding it rather than
-/// stored beside it: `PostgreSQL` keeps every temporary relation — table, view,
-/// index and the sequence behind a `serial` column — in the owning session's
-/// temporary namespace and nothing else there, so the two are the same fact.
+/// A relation's persistence comes from the schema that holds it, and the
+/// catalog does not store it beside the relation. `PostgreSQL` keeps every
+/// temporary relation in the owning session's temporary namespace, and keeps
+/// nothing else there. This covers tables, views, indexes and the sequence
+/// behind a `serial` column. The schema and the persistence are therefore the
+/// same fact.
 #[must_use]
 pub fn is_temp_schema(name: &str) -> bool {
     name.strip_prefix(TEMP_SCHEMA_PREFIX)
@@ -635,8 +653,8 @@ pub fn relpersistence_of(schema: &str) -> char {
 /// The op that records a session's temporary namespace.
 ///
 /// [`create_schema_ops`] refuses a `pg_`-prefixed name, as `CREATE SCHEMA`
-/// must; a temporary namespace is created by the engine on the session's
-/// behalf, never by a statement naming it.
+/// must. The engine creates a temporary namespace on the session's behalf.
+/// A statement that names the namespace never creates it.
 #[must_use]
 pub fn create_temp_schema_op(name: &str) -> WriteOp {
     WriteOp::Put {
@@ -647,9 +665,11 @@ pub fn create_temp_schema_op(name: &str) -> WriteOp {
 
 const SCHEMA_PREFIX: &[u8] = b"\0\0\0\0catalog_schema/by-name/";
 
-/// Tombstones for dropped [`BOOTSTRAP_SCHEMAS`]. A bootstrap schema is
-/// synthesised rather than stored, so its absence is what has to be recorded;
-/// only `public` is droppable, so only `public` ever lands here.
+/// Tombstones for dropped [`BOOTSTRAP_SCHEMAS`].
+///
+/// The catalog synthesises a bootstrap schema rather than storing it, so it
+/// must record the absence instead. Only `public` can be dropped, so only
+/// `public` ever reaches this prefix.
 const DROPPED_SCHEMA_PREFIX: &[u8] = b"\0\0\0\0catalog_schema/dropped/";
 
 /// Key for a relation's stored schema record.
@@ -675,12 +695,12 @@ fn catalog_by_id_op(table_id: TableId, relation: &RelationName) -> WriteOp {
 
 /// The relation `table_id` names, or `None` when no table carries that id.
 ///
-/// A range RPC ships a table id rather than a relation name, because a name is
-/// session-dependent once `search_path` and `pg_temp` exist and the receiving
-/// node has no notion of the originating session. This is the lookup that
-/// serves it: an id-keyed index entry maintained by the create/drop/rename
-/// batches, so resolving one costs a `get` instead of a scan of every table in
-/// the catalog.
+/// A range RPC ships a table id rather than a relation name. A name is
+/// session-dependent once `search_path` and `pg_temp` exist, and the receiving
+/// node has no notion of the originating session. This function serves that
+/// RPC. It reads an id-keyed index entry that the create, drop and rename
+/// batches maintain, so one lookup costs a `get` instead of a scan of every
+/// table in the catalog.
 ///
 /// # Errors
 ///
@@ -739,7 +759,7 @@ fn dropped_schema_key(name: &str) -> Vec<u8> {
     key
 }
 
-/// The owner `name` is bootstrapped under, when it is a bootstrap schema.
+/// The owner that `name` is bootstrapped under, when it is a bootstrap schema.
 fn bootstrap_schema_owner(name: &str) -> Option<&'static str> {
     BOOTSTRAP_SCHEMAS
         .iter()
@@ -749,9 +769,9 @@ fn bootstrap_schema_owner(name: &str) -> Option<&'static str> {
 
 /// Every schema, bootstrap ones included, sorted by name.
 ///
-/// A stored row wins over the bootstrap row of the same name, so
-/// `ALTER SCHEMA … OWNER TO` on a bootstrap schema replaces it rather than
-/// duplicating it.
+/// A stored row wins over the bootstrap row of the same name.
+/// `ALTER SCHEMA … OWNER TO` on a bootstrap schema therefore replaces that row
+/// rather than adding a second one.
 ///
 /// # Errors
 ///
@@ -798,9 +818,9 @@ pub fn schema_exists(kv: &dyn Kv, name: &str) -> Result<bool, CatalogError> {
 
 /// Build the write batch for `CREATE SCHEMA`.
 ///
-/// The reserved-prefix rule is checked before the name is looked up, which is
-/// why `CREATE SCHEMA pg_catalog` reports an unacceptable name rather than a
-/// duplicate.
+/// This function applies the reserved-prefix rule before it looks up the name.
+/// `CREATE SCHEMA pg_catalog` therefore reports an unacceptable name rather
+/// than a duplicate.
 ///
 /// # Errors
 ///
@@ -852,11 +872,11 @@ pub fn set_schema_owner_ops(
 
 /// The names of every relation, view and sequence stored in `schema`.
 ///
-/// Each family is a prefix scan over the schema's own subtree. With a flat
-/// namespace this could only be answered by listing the entire catalog and
-/// filtering, which is also why `CREATE TABLE "a/b"` used to escape
-/// `DROP SCHEMA … CASCADE`: the scan recovered names by rejecting any key
-/// suffix holding a `/`.
+/// Each family is a prefix scan over the schema's own subtree. A flat namespace
+/// could answer this only by a list of the whole catalog and a filter over it.
+/// That is also why `CREATE TABLE "a/b"` used to escape
+/// `DROP SCHEMA … CASCADE`. The scan recovered names, and it rejected any key
+/// suffix that held a `/`.
 ///
 /// # Errors
 ///
@@ -883,10 +903,10 @@ pub fn schema_contents(kv: &dyn Kv, schema: &str) -> Result<Vec<RelationName>, C
 
 /// Recover the `(schema, name)` a relation-family key was built from.
 ///
-/// A key that does not decode as exactly two length-prefixed parts belongs to
-/// a neighbouring family and is skipped — a structural rejection, where the
-/// flat layout had to guess by looking for a separator character the name was
-/// assumed not to contain.
+/// A key that does not decode as exactly two length-prefixed parts belongs to a
+/// neighbouring family, and this function skips it. The rejection is
+/// structural. The flat layout instead had to guess: it looked for a separator
+/// character that the name was assumed not to contain.
 fn relation_name_from_key(family_prefix: &[u8], stored: &[u8]) -> Option<RelationName> {
     let suffix = stored.strip_prefix(family_prefix)?;
     let [schema, name] = key::key_parts(suffix, 2)?[..] else {
@@ -897,12 +917,13 @@ fn relation_name_from_key(family_prefix: &[u8], stored: &[u8]) -> Option<Relatio
 
 /// Build the write batch for dropping an empty schema.
 ///
-/// The caller drops the schema's contents first when `CASCADE` was written;
-/// this refuses a non-empty schema with 2BP01, exactly as `RESTRICT` does in
-/// `PostgreSQL`, and refuses a [system schema](SYSTEM_SCHEMAS) outright.
+/// The caller drops the schema's contents first when the statement wrote
+/// `CASCADE`. This function refuses a non-empty schema with 2BP01, exactly as
+/// `RESTRICT` does in `PostgreSQL`. It refuses a
+/// [system schema](SYSTEM_SCHEMAS) outright.
 ///
-/// Dropping a bootstrap schema leaves a tombstone behind, because there is no
-/// stored row to delete: the schema exists only because [`list_schemas`]
+/// A drop of a bootstrap schema leaves a tombstone behind, because there is no
+/// stored row to delete. The schema exists only because [`list_schemas`]
 /// synthesises it.
 ///
 /// # Errors
@@ -937,14 +958,16 @@ pub fn drop_schema_ops(
 
 /// Build the atomic catalog batch for renaming an ordinary or foreign table.
 ///
-/// Rows and local secondary-index entries are keyed by immutable IDs, so their
+/// Immutable IDs key the rows and the local secondary-index entries, so their
 /// physical keys do not move. Index *metadata* and table privileges carry the
-/// table name and are rewritten in the same batch. Index names are preserved.
-/// Foreign keys are id-keyed on both sides, so only the denormalized display
-/// names in their payloads are rewritten — on the table's own constraints and
-/// on every constraint that references it. Stored views retain SQL text rather
-/// than dependency identities; until that representation can be rewritten
-/// safely, any stored view blocks a rename.
+/// table name, and the same batch rewrites them. Index names do not change.
+///
+/// Foreign keys are id-keyed on both sides, so the batch rewrites only the
+/// denormalized display names in their payloads. It does this on the table's
+/// own constraints and on every constraint that references the table. Stored
+/// views retain SQL text rather than dependency identities. Any stored view
+/// therefore blocks a rename, until that representation can be rewritten
+/// safely.
 ///
 /// # Errors
 ///
@@ -1013,11 +1036,14 @@ pub fn rename_table_ops(
     Ok(ops)
 }
 
-/// Build the write batch for creating a table (schema + sequence init +
-/// `next_table_id` bump) WITHOUT writing — caller persists the ops. Returns the
-/// allocated `TableId` alongside the batch. Used by the executor so DDL writes can
-/// be routed through the durable-write seam (and replicated). Validation
-/// (duplicate-table check, `next_table_id` read) is identical to `create_table`.
+/// Build the write batch for creating a table WITHOUT writing it.
+///
+/// The batch holds the schema record, the sequence init and the
+/// `next_table_id` bump. The caller persists the ops. This function returns the
+/// allocated `TableId` beside the batch. The executor uses it, so that DDL
+/// writes go through the durable-write seam and get replicated. Validation is
+/// identical to `create_table`: the duplicate-table check and the
+/// `next_table_id` read.
 ///
 /// # Errors
 ///
@@ -1037,21 +1063,20 @@ pub fn create_table_ops(
     )
 }
 
-/// Where the id a new table is created under comes from.
+/// Where the id for a new table comes from.
 ///
-/// The shared counter's read-bump-commit is only atomic while the caller holds
-/// the lock that covers it, so a session that has already claimed a block of
-/// ids under that lock hands one out itself rather than touching the counter
-/// again — which is what keeps `CREATE TEMP TABLE` off the cluster-wide
-/// critical path. The cost is that ids stop being densely allocated in creation
-/// order.
+/// The shared counter's read-bump-commit is atomic only while the caller holds
+/// the lock that covers it. A session that already claimed a block of ids under
+/// that lock therefore hands one out itself, and does not touch the counter
+/// again. That is what keeps `CREATE TEMP TABLE` off the cluster-wide critical
+/// path. The cost is that ids stop being dense in creation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableIdSource {
     /// Read the shared counter and bump it in the same batch. The caller must
     /// hold whatever lock makes that pair atomic.
     Counter,
-    /// Use an id the caller already reserved. The counter is not read and not
-    /// written.
+    /// Use an id the caller already reserved. This does not read the counter
+    /// and does not write it.
     Reserved(TableId),
 }
 
@@ -1171,7 +1196,8 @@ pub fn list_views(kv: &dyn Kv) -> Result<Vec<View>, CatalogError> {
     Ok(views)
 }
 
-/// Overwrite a stored view record in place (same name, new definition/columns).
+/// Overwrite a stored view record in place, keeping the name and replacing the
+/// definition and the columns.
 #[must_use]
 pub fn put_view_op(view: &View) -> WriteOp {
     WriteOp::Put {
@@ -1198,9 +1224,11 @@ pub fn put_index_ops(index: &Index) -> Vec<WriteOp> {
 }
 
 /// Build the write batch that replaces an ordinary table's column list and
-/// `CHECK` constraints, preserving its id, storage options, and foreign
-/// metadata. Every `ALTER TABLE` subcommand that only edits the schema record
-/// funnels through here so the encoding lives in exactly one place.
+/// `CHECK` constraints.
+///
+/// The batch keeps the table's id, storage options, and foreign metadata. Every
+/// `ALTER TABLE` subcommand that only edits the schema record goes through this
+/// function, so the encoding lives in exactly one place.
 ///
 /// # Errors
 ///
@@ -1276,8 +1304,10 @@ pub fn create_table_with_sharding_ops(
     Ok((table_id, ops))
 }
 
-/// Create a table: allocate a `TableId`, persist the schema, init the sequence —
-/// all in one atomic batch. Caller serializes concurrent DDL.
+/// Create a table in one atomic batch.
+///
+/// The batch allocates a `TableId`, persists the schema, and inits the
+/// sequence. The caller serializes concurrent DDL.
 ///
 /// # Errors
 ///
@@ -1429,13 +1459,15 @@ pub fn set_table_sharding_ops(
     Ok(vec![op])
 }
 
-/// Complete a table conversion batch by atomically publishing sharded visibility
-/// and replacing optional physical sharding metadata.
+/// Complete a table conversion batch.
+///
+/// The batch atomically publishes sharded visibility and replaces the optional
+/// physical sharding metadata.
 ///
 /// `rewrite_ops` must contain the complete physical data transition for the
-/// table. Callers must commit the returned batch as one unit; publishing this
-/// metadata without the rewrite makes existing xid-MVCC rows unreadable to
-/// timestamp scans.
+/// table. Callers must commit the returned batch as one unit. A batch that
+/// publishes this metadata without the rewrite makes existing xid-MVCC rows
+/// unreadable to timestamp scans.
 ///
 /// # Errors
 ///
@@ -1560,14 +1592,14 @@ const COMMENT_PREFIX: &[u8] = b"\0\0\0\0catalog_comment/";
 
 /// What a `COMMENT ON` statement attached its comment to.
 ///
-/// A column comment names a *pair* — the relation and the column — and a
-/// relation name is itself a pair, so flattening either into one dotted string
-/// loses the boundary: `COMMENT ON COLUMN s.t.c` and a relation literally
-/// called `s.t.c` would land on the same key. Each part is stored
-/// length-prefixed instead.
+/// A column comment names a *pair*, the relation and the column, and a relation
+/// name is itself a pair. A dotted string that flattens either pair loses the
+/// boundary: `COMMENT ON COLUMN s.t.c` and a relation literally called `s.t.c`
+/// would land on the same key. The catalog stores each part length-prefixed
+/// instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentObject<'a> {
-    /// A relation — a table, view, index or sequence.
+    /// A relation: a table, view, index or sequence.
     Relation(&'a RelationName),
     /// One column of a relation.
     Column(&'a RelationName, &'a str),
@@ -1595,7 +1627,8 @@ fn comment_key(object_kind: &str, object: CommentObject<'_>) -> Vec<u8> {
     out
 }
 
-/// Build the write op that sets (or, for `None`, clears) an object comment.
+/// Build the write op that sets an object comment, or clears it for `None`.
+///
 /// `object_kind` is the lowercase `COMMENT ON <kind>` keyword.
 #[must_use]
 pub fn set_comment_op(
@@ -1633,7 +1666,9 @@ pub fn get_comment(
 }
 
 /// Build the write ops that delete every comment attached to a relation and its
-/// columns, so a `DROP`/rename never leaves an orphaned comment behind.
+/// columns.
+///
+/// A `DROP` or a rename therefore never leaves an orphaned comment behind.
 ///
 /// # Errors
 ///
@@ -1794,11 +1829,13 @@ pub fn create_index_on_table_ops(
 }
 
 /// Build the write batch for creating one constraint-backed index on an
-/// existing table, returning the full allocated [`Index`] so the caller can
+/// existing table.
+///
+/// This function returns the full allocated [`Index`], so the caller can
 /// backfill index entries into the same durable batch.
 ///
-/// Unlike [`create_index_on_table_ops`] this honors every [`NewIndex`] field —
-/// including `constraint` — so `ALTER TABLE … ADD PRIMARY KEY` records the
+/// Unlike [`create_index_on_table_ops`], it honors every [`NewIndex`] field,
+/// `constraint` included. `ALTER TABLE … ADD PRIMARY KEY` therefore records the
 /// constraint marker that blocks `DROP INDEX` and a second primary key.
 ///
 /// # Errors
@@ -1848,9 +1885,11 @@ pub fn create_constraint_index_ops(
 }
 
 /// Build the write batch that marks the named columns NOT NULL on a table's
-/// schema record (`ALTER TABLE … ADD PRIMARY KEY` sets its key columns NOT
-/// NULL, matching `PostgreSQL`). Sharding metadata and foreign-table linkage
-/// are preserved; already-NOT-NULL columns are idempotently kept.
+/// schema record.
+///
+/// `ALTER TABLE … ADD PRIMARY KEY` sets its key columns NOT NULL, which matches
+/// `PostgreSQL`. The batch keeps the sharding metadata and the foreign-table
+/// linkage, and it keeps an already-NOT-NULL column unchanged.
 ///
 /// # Errors
 ///
@@ -1976,7 +2015,7 @@ pub fn get_index(kv: &dyn Kv, name: &RelationName) -> Result<Index, CatalogError
 
 /// Build the metadata write batch for dropping an index without persisting it.
 ///
-/// The returned definition lets the executor remove corresponding local-index
+/// The returned definition lets the executor remove the matching local-index
 /// entries in the same durable write batch.
 ///
 /// # Errors
@@ -2001,9 +2040,11 @@ pub fn drop_index_ops(
 }
 
 /// Build the write batch that removes a secondary-index catalog record,
-/// including a constraint-backed one. `DROP INDEX` must refuse those (2BP01),
-/// but `ALTER TABLE … DROP CONSTRAINT` and `DROP COLUMN` drop them by design,
-/// so they reach the record removal directly.
+/// a constraint-backed one included.
+///
+/// `DROP INDEX` must refuse a constraint-backed index (2BP01). By design,
+/// `ALTER TABLE … DROP CONSTRAINT` and `DROP COLUMN` do drop one, so they reach
+/// the record removal directly.
 ///
 /// # Errors
 ///
@@ -2046,18 +2087,20 @@ pub fn list_indexes(kv: &dyn Kv) -> Result<Vec<Index>, CatalogError> {
 
 /// Authoritative foreign-key records, keyed `<child table id BE u32>/<name>`.
 ///
-/// `(child_table_id, name)` *is* a constraint's identity: constraint names are
-/// per-relation in `PostgreSQL`, so the child id has to be part of the key. The
-/// key is id-based rather than name-based so a later wave that re-keys the
-/// name-keyed catalog families by schema does not have to touch this one — a
-/// relation can move or be renamed and its foreign keys stay put.
+/// `(child_table_id, name)` *is* a constraint's identity. Constraint names are
+/// per-relation in `PostgreSQL`, so the child id must be part of the key. The
+/// key is id-based rather than name-based, so a later wave that re-keys the
+/// name-keyed catalog families by schema does not have to touch this one. A
+/// relation can move or get a new name, and its foreign keys stay put.
 const FOREIGN_KEY_BY_TABLE_PREFIX: &[u8] = b"\0\0\0\0catalog_fk/by-table/";
 
 /// Reverse index over the referenced side, keyed
 /// `<parent table id BE u32>/<child table id BE u32>/<name>` with an empty
-/// payload: the parent side needs "who references me?" on every DELETE or
-/// UPDATE of a referenced table, and scanning every foreign key in the catalog
-/// for that would make the check O(constraints in the database).
+/// payload.
+///
+/// The parent side needs "who references me?" on every DELETE or UPDATE of a
+/// referenced table. A scan of every foreign key in the catalog would make that
+/// check O(constraints in the database).
 const FOREIGN_KEY_BY_REF_PREFIX: &[u8] = b"\0\0\0\0catalog_fk/by-ref/";
 
 fn meta_next_foreign_key_id_key() -> Vec<u8> {
@@ -2075,25 +2118,27 @@ fn read_next_foreign_key_id(kv: &dyn Kv) -> Result<ForeignKeyId, CatalogError> {
     }
 }
 
-/// Hands out the [`ForeignKeyId`]s that one write batch's new constraints are
-/// stamped with.
+/// Hands out the [`ForeignKeyId`]s that stamp one write batch's new
+/// constraints.
 ///
-/// A single statement can create several — `CREATE TABLE` with two `FOREIGN
-/// KEY` clauses, `ALTER TABLE` with two `ADD CONSTRAINT` subcommands — and none
-/// of them are in the KV until the batch commits, so every one of them would
-/// read the same stored counter. The cursor is held in memory across the batch
-/// instead, and each [`create_foreign_key_ops`] carries the counter write that
-/// moves the stored value past the id it stamped; the last one applied leaves
-/// the counter correct.
+/// A single statement can create several constraints. `CREATE TABLE` can carry
+/// two `FOREIGN KEY` clauses, and `ALTER TABLE` can carry two `ADD CONSTRAINT`
+/// subcommands. None of them are in the KV until the batch commits, so every
+/// one of them would read the same stored counter.
+///
+/// The cursor stays in memory across the batch instead. Each
+/// [`create_foreign_key_ops`] carries the counter write that moves the stored
+/// value past the id it stamped. The last write applied leaves the counter
+/// correct.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ForeignKeyIds {
-    /// `None` until the first id is asked for — a statement that creates no
+    /// `None` until a caller asks for the first id. A statement that creates no
     /// constraint must not read the counter at all.
     next: Option<ForeignKeyId>,
 }
 
 impl ForeignKeyIds {
-    /// The next creation-order id, reading the shared counter the first time.
+    /// The next creation-order id. The first call reads the shared counter.
     ///
     /// # Errors
     ///
@@ -2141,8 +2186,10 @@ fn catalog_referencing_foreign_key_prefix(referenced_table_id: TableId) -> Vec<u
 }
 
 /// Recover `(referenced table id, child table id, constraint name)` from a
-/// `fk/by-ref` key. Both ids are fixed-width and the name closes the key, so a
-/// constraint name containing the separator stays unambiguous.
+/// `fk/by-ref` key.
+///
+/// Both ids are fixed-width and the name closes the key. A constraint name that
+/// contains the separator therefore stays unambiguous.
 fn foreign_key_ref_key_parts(key: &[u8]) -> Result<(TableId, TableId, String), CatalogError> {
     let corrupt = || CatalogError::Storage(KvError::CorruptRow("malformed fk/by-ref key".into()));
     let suffix = key
@@ -2167,10 +2214,10 @@ fn split_key_table_id(bytes: &[u8]) -> Option<(TableId, &[u8])> {
 /// by-ref keys the catalog maintains.
 ///
 /// Both keys derive from the ids, so this is an in-place rewrite of one
-/// constraint: it is the right call for a display-name rewrite, and the wrong
-/// one for a change of `table_id` or `referenced_table_id`, which moves the
-/// record and needs [`drop_foreign_key_ops`] plus [`create_foreign_key_ops`] so
-/// the old keys are removed.
+/// constraint. Use it for a display-name rewrite. Do not use it for a change of
+/// `table_id` or `referenced_table_id`. Such a change moves the record, and
+/// needs [`drop_foreign_key_ops`] plus [`create_foreign_key_ops`] to remove the
+/// old keys.
 #[must_use]
 pub fn put_foreign_key_ops(fk: &ForeignKey) -> Vec<WriteOp> {
     vec![
@@ -2188,9 +2235,9 @@ pub fn put_foreign_key_ops(fk: &ForeignKey) -> Vec<WriteOp> {
 /// Build the write batch that records a new foreign-key constraint.
 ///
 /// The caller has already resolved the referent, the backing unique index and
-/// the [`ForeignKeyId`] (from a [`ForeignKeyIds`] cursor); this only refuses a
-/// name the child relation already uses, and adds the counter write that keeps
-/// the next constraint's id above this one's.
+/// the [`ForeignKeyId`] from a [`ForeignKeyIds`] cursor. This function only
+/// refuses a name the child relation already uses, and adds the counter write
+/// that keeps the next constraint's id above this one's.
 ///
 /// # Errors
 ///
@@ -2259,12 +2306,11 @@ pub fn get_foreign_key(
     Ok(deserialize_foreign_key(&bytes)?)
 }
 
-/// Every foreign key declared *on* a table — the child side — in creation
-/// order.
+/// Every foreign key declared *on* a table, the child side, in creation order.
 ///
-/// The order is what a row violating two of them reports: `PostgreSQL` fires
-/// the constraints' triggers in OID order, so the constraint declared first
-/// raises the 23503, whatever the two are called.
+/// The order decides what a row that violates two of them reports.
+/// `PostgreSQL` fires the constraints' triggers in OID order, so the constraint
+/// declared first raises the 23503, whatever the two are called.
 ///
 /// # Errors
 ///
@@ -2282,16 +2328,16 @@ pub fn list_table_foreign_keys(
     Ok(foreign_keys)
 }
 
-/// Every foreign key that *references* a table — the parent side — in creation
+/// Every foreign key that *references* a table, the parent side, in creation
 /// order.
 ///
-/// This is the read behind referential maintenance: a DELETE or key UPDATE on a
-/// referenced table asks it for the constraints that must be enforced, and the
+/// This is the read behind referential maintenance. A DELETE or key UPDATE on a
+/// referenced table asks it for the constraints that must be enforced. The
 /// order is load-bearing whenever two of them act on the same referencing
-/// column. `PostgreSQL` fires their RI triggers in OID order, so `ON DELETE SET
-/// NULL` declared before `ON DELETE CASCADE` clears the key the cascade would
-/// have matched and the row survives — the opposite outcome to firing them the
-/// other way round. [`ForeignKeyId`] is that order, and it is a total order
+/// column. `PostgreSQL` fires their RI triggers in OID order. An `ON DELETE SET
+/// NULL` declared before an `ON DELETE CASCADE` therefore clears the key the
+/// cascade would have matched, and the row survives. The other order gives the
+/// opposite outcome. [`ForeignKeyId`] is that order, and it is a total order
 /// across relations, so the several children a parent may have need no
 /// tie-break.
 ///
@@ -2315,9 +2361,11 @@ pub fn list_referencing_foreign_keys(
     Ok(foreign_keys)
 }
 
-/// Read the record a reverse-index entry points at. A miss here is catalog
-/// corruption — the reverse entry exists — not the ordinary "no such
-/// constraint" a caller-supplied name can produce.
+/// Read the record a reverse-index entry points at.
+///
+/// A miss here is catalog corruption, because the reverse entry exists. It is
+/// not the ordinary "no such constraint" that a caller-supplied name can
+/// produce.
 fn read_indexed_foreign_key(
     kv: &dyn Kv,
     table_id: TableId,
@@ -2332,7 +2380,7 @@ fn read_indexed_foreign_key(
 }
 
 /// Every foreign key in the catalog, in child-table-id then constraint-name
-/// order — the enumeration behind `pg_constraint` introspection.
+/// order. This is the enumeration behind `pg_constraint` introspection.
 ///
 /// # Errors
 ///
@@ -2347,11 +2395,11 @@ pub fn list_foreign_keys(kv: &dyn Kv) -> Result<Vec<ForeignKey>, CatalogError> {
 }
 
 /// The write ops that remove every foreign key a table owns as the *child*,
-/// from both key families, plus any reverse entry naming it as a child whose
-/// record has already gone missing.
+/// from both key families. The ops also remove any reverse entry that names the
+/// table as a child and whose record has already gone missing.
 ///
-/// Constraints that *reference* the table are left alone: refusing (or
-/// cascading) that drop is a policy decision above the catalog.
+/// These ops leave constraints that *reference* the table alone. To refuse such
+/// a drop, or to cascade it, is a policy decision above the catalog.
 fn drop_table_foreign_key_ops(
     kv: &dyn Kv,
     table_id: TableId,
@@ -2375,12 +2423,12 @@ fn drop_table_foreign_key_ops(
     Ok(ops)
 }
 
-/// The write ops that rewrite the denormalized relation names every foreign key
-/// touching `table_id` carries, for a relation renamed to `new_name`.
+/// The write ops that rewrite the denormalized relation names carried by every
+/// foreign key that touches `table_id`, for a relation renamed to `new_name`.
 ///
-/// Both key families are id-keyed, so nothing moves — only payloads are
-/// rewritten. A self-referencing constraint appears on both sides and is
-/// rewritten once, with both names updated.
+/// Both key families are id-keyed, so nothing moves and the ops rewrite only
+/// payloads. A self-referencing constraint appears on both sides. The ops
+/// rewrite it once and update both names.
 fn rename_table_foreign_key_ops(
     kv: &dyn Kv,
     table_id: TableId,
@@ -2438,9 +2486,9 @@ pub fn create_sequence_ops(
 
 /// Every sequence in the catalog, name and record, sorted by name.
 ///
-/// The catalog introspection relations (`pg_class` rows of kind `S`,
-/// `pg_sequence`, `information_schema.sequences`) enumerate sequences through
-/// this; nothing else needs the whole set.
+/// The catalog introspection relations enumerate sequences through this
+/// function: `pg_class` rows of kind `S`, `pg_sequence`, and
+/// `information_schema.sequences`. Nothing else needs the whole set.
 ///
 /// # Errors
 ///
@@ -2460,11 +2508,12 @@ pub fn list_sequences(kv: &dyn Kv) -> Result<Vec<(RelationName, Sequence)>, Cata
 
 /// The string `version()` reports.
 ///
-/// Clients parse this: JDBC, npgsql and `SQLAlchemy` all read the major/minor
-/// version out of it with a `PostgreSQL <major>.<minor>` prefix match, so the
-/// prefix is PostgreSQL-shaped and names the same 18.4 the wire-level
-/// `server_version_num` reports. The parenthesised build tag says which engine
-/// actually answered, exactly as a packaged `PostgreSQL` names its distribution.
+/// Clients parse this string. JDBC, npgsql and `SQLAlchemy` all read the
+/// major/minor version out of it with a `PostgreSQL <major>.<minor>` prefix
+/// match. The prefix is therefore PostgreSQL-shaped, and it names the same 18.4
+/// that the wire-level `server_version_num` reports. The parenthesised build
+/// tag says which engine answered, exactly as a packaged `PostgreSQL` names its
+/// distribution.
 #[must_use]
 pub fn server_version_string() -> String {
     format!(
@@ -2489,10 +2538,10 @@ pub fn get_sequence(kv: &dyn Kv, name: &RelationName) -> Result<Sequence, Catalo
 /// The sequence a catalog key names, or `None` when the key belongs to another
 /// family.
 ///
-/// This is how a caller holding a finished write batch can tell which sequences
-/// it touches without re-deriving them from the statement — the batch is the
-/// authority on what actually reached the catalog, including the implicit
-/// sequence behind a `SERIAL` column and one a `DROP TABLE` cascaded to.
+/// A caller that holds a finished write batch uses this to tell which sequences
+/// the batch touches, without a second derivation from the statement. The batch
+/// is the authority on what reached the catalog. That includes the implicit
+/// sequence behind a `SERIAL` column, and one that a `DROP TABLE` cascaded to.
 #[must_use]
 pub fn sequence_name_from_key(key: &[u8]) -> Option<RelationName> {
     relation_name_from_key(SEQUENCE_PREFIX, key)
@@ -2574,12 +2623,14 @@ fn validate_index_columns(table: &Table, columns: &[String]) -> Result<(), Catal
 /// A hash sharding names exactly one column.
 ///
 /// That is the arity the executor's row encoder hashes to place a row, and the
-/// only arity it agrees with the gateway on: the gateway derives a statement's
-/// route from *every* hash column's bytes, so a two-column key would store rows
-/// under the hash of the first column alone, in a range routing never visits.
-/// The SQL grammar already caps `SHARDED BY HASH (…)` at one column; this gates
-/// the callers that build a [`HashSharding`] against this API directly, so a
-/// table that could never be written to is never created either.
+/// only arity it agrees with the gateway on. The gateway derives a statement's
+/// route from *every* hash column's bytes. A two-column key would therefore
+/// store rows under the hash of the first column alone, in a range that routing
+/// never visits.
+///
+/// The SQL grammar already caps `SHARDED BY HASH (…)` at one column. This check
+/// gates the callers that build a [`HashSharding`] against this API directly,
+/// so nothing ever creates a table that could never be written to.
 fn validate_hash_sharding_arity(hash: &HashSharding) -> Result<(), CatalogError> {
     if hash.columns.len() == 1 {
         return Ok(());
@@ -2612,15 +2663,18 @@ fn validate_hash_sharding_column_defs(
     Ok(())
 }
 
-/// Build the write batch for dropping a table (catalog entry + sequence + every
-/// row) WITHOUT writing — caller persists the ops. Errors (42P01 on a missing
-/// table) are identical to `drop_table`. Used by the executor to route DDL
-/// writes through the durable-write seam.
+/// Build the write batch for dropping a table WITHOUT writing it.
+///
+/// The batch removes the catalog entry, the sequence and every row. The caller
+/// persists the ops. The errors are identical to `drop_table`, including 42P01
+/// on a missing table. The executor uses this to route DDL writes through the
+/// durable-write seam.
 ///
 /// The table's own foreign keys go with it, from both the by-table and the
-/// by-ref key family. Foreign keys *referencing* the table are left in place:
-/// refusing such a drop, or cascading it, is a policy decision above the
-/// catalog, and the constraints belong to relations that still exist.
+/// by-ref key family. The batch leaves foreign keys that *reference* the table
+/// in place. To refuse such a drop, or to cascade it, is a policy decision
+/// above the catalog, and those constraints belong to relations that still
+/// exist.
 ///
 /// # Errors
 ///
@@ -2654,8 +2708,9 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, 
     Ok(ops)
 }
 
-/// Drop a table: delete the catalog entry, the sequence, and all its rows — one
-/// atomic batch.
+/// Drop a table in one atomic batch.
+///
+/// The batch deletes the catalog entry, the sequence, and all the table's rows.
 ///
 /// # Errors
 ///
@@ -2909,12 +2964,12 @@ fn deserialize_table_privilege(bytes: &[u8]) -> Result<TablePrivilege, CatalogEr
 
 // ── User-defined types ────────────────────────────────────────────────────────
 
-/// The write batch that records a new user-defined type, allocating its oid.
+/// The write batch that records a new user-defined type and allocates its oid.
 ///
-/// Rejects a duplicate name with `PostgreSQL`'s 42710. The oid counter is a
-/// catalog key so oids survive a restart and agree across nodes; the returned
-/// [`UserType`] carries the allocated oid so the caller can register it in the
-/// process type registry in the same step.
+/// This function rejects a duplicate name with `PostgreSQL`'s 42710. The oid
+/// counter is a catalog key, so oids survive a restart and agree across nodes.
+/// The returned [`UserType`] carries the allocated oid, so the caller can
+/// register the type in the process type registry in the same step.
 ///
 /// # Errors
 ///
@@ -2946,8 +3001,8 @@ pub fn create_user_type_ops(
     Ok((ty, ops))
 }
 
-/// The write batch that replaces an existing type's definition in place,
-/// preserving its oid (`ALTER TYPE` / `ALTER DOMAIN`).
+/// The write batch that replaces an existing type's definition in place and
+/// keeps its oid, for `ALTER TYPE` and `ALTER DOMAIN`.
 #[must_use]
 pub fn put_user_type_op(ty: &UserType) -> WriteOp {
     WriteOp::Put {
@@ -3002,8 +3057,10 @@ pub fn list_user_types(kv: &dyn Kv) -> Result<Vec<UserType>, CatalogError> {
 }
 
 /// The first oid handed out to a user-defined type, and the stride between two
-/// of them. The stride leaves room for each type's derived relation and array
-/// oids; both must match `crabka_pgtypes::usertype`.
+/// of them.
+///
+/// The stride leaves room for each type's derived relation and array oids. Both
+/// values must match `crabka_pgtypes::usertype`.
 const FIRST_USER_TYPE_OID: u32 = 300_000;
 const USER_TYPE_OID_STRIDE: u32 = 4;
 
@@ -3257,7 +3314,7 @@ pub fn drop_user_mapping_ops(
 
 // ── Foreign table ─────────────────────────────────────────────────────────────
 
-/// The envelope columns prepended to every foreign (Kafka) table.
+/// The envelope columns that go in front of every foreign (Kafka) table.
 fn envelope_columns() -> Vec<Column> {
     vec![
         Column::new("_partition", ColumnType::Int4),
@@ -3270,8 +3327,9 @@ fn envelope_columns() -> Vec<Column> {
 
 /// Create a foreign table linked to an existing server.
 ///
-/// The server must already exist (returns `UndefinedObject` otherwise).
-/// Envelope columns are prepended; user-supplied value columns follow.
+/// The server must already exist. If it does not, this function returns
+/// `UndefinedObject`. The envelope columns come first, and the user-supplied
+/// value columns follow.
 ///
 /// # Errors
 ///
@@ -3340,11 +3398,11 @@ pub fn create_foreign_table_ops(
     Ok((next, batch))
 }
 
-/// Read the next `TableId` (defaults to 1 when the meta key is absent).
+/// Read the next `TableId`. This is 1 when the meta key is absent.
 ///
-/// Public because the session claims a block of ids from this counter under a
-/// lock of its own, rather than letting every `CREATE TABLE` read and bump it
-/// under the cluster-wide catalog lock.
+/// This function is public because the session claims a block of ids from this
+/// counter under a lock of its own. Every `CREATE TABLE` therefore does not
+/// read and bump the counter under the cluster-wide catalog lock.
 ///
 /// # Errors
 ///
@@ -3400,8 +3458,8 @@ mod tests {
     }
 
     /// A catalog nobody has written to still reports three schemas, each with
-    /// the owner `PostgreSQL` bootstraps it under. Nothing is stored for them,
-    /// so this is what [`list_schemas`] synthesises.
+    /// the owner `PostgreSQL` bootstraps it under. The catalog stores nothing
+    /// for them, so [`list_schemas`] synthesises all three.
     #[test]
     fn a_fresh_catalog_reports_the_bootstrap_schemas() {
         use assert2::assert;
@@ -3420,9 +3478,9 @@ mod tests {
         assert!(!schema_exists(&kv, "nosuch").expect("exists"));
     }
 
-    /// `public` is a real schema rather than a projection: it cannot be created
-    /// over, it can be dropped, it stays dropped, and creating it again gives an
-    /// ordinary schema owned by its creator.
+    /// `public` is a real schema rather than a projection. Nothing can create
+    /// over it, it can be dropped, and it stays dropped. A second creation
+    /// gives an ordinary schema owned by its creator.
     #[test]
     fn public_is_a_droppable_schema_that_already_exists() {
         use assert2::assert;
@@ -3463,8 +3521,8 @@ mod tests {
         );
     }
 
-    /// The system schemas refuse a drop however empty they are, and re-owning
-    /// one replaces its synthesised row rather than adding a second.
+    /// The system schemas refuse a drop even when they are empty. A new owner
+    /// replaces the synthesised row rather than adding a second one.
     #[test]
     fn system_schemas_refuse_a_drop_and_are_not_duplicated_by_a_stored_row() {
         use assert2::assert;
@@ -3497,9 +3555,9 @@ mod tests {
         ));
     }
 
-    /// The reserved prefix is checked before the name is looked up, so
-    /// `pg_catalog` — which does exist — reports an unacceptable name rather
-    /// than a duplicate, and every SQLSTATE follows from the variant.
+    /// The catalog applies the reserved prefix before it looks up the name.
+    /// `pg_catalog`, which does exist, therefore reports an unacceptable name
+    /// rather than a duplicate. Every SQLSTATE follows from the variant.
     #[test]
     fn the_reserved_prefix_outranks_the_duplicate_check() {
         use assert2::assert;
@@ -3524,7 +3582,7 @@ mod tests {
     }
 
     /// `CHECK` constraints, identity kinds, and generated-column expressions
-    /// survive the catalog round trip alongside the columns they belong to.
+    /// survive the catalog round trip beside the columns they belong to.
     #[test]
     fn table_checks_and_column_metadata_round_trip() {
         use assert2::assert;
@@ -3575,8 +3633,8 @@ mod tests {
         assert!(table.checks == checks);
     }
 
-    /// `replace_table_schema_ops` swaps the column list and CHECK list while
-    /// preserving the table id and storage options — the contract every
+    /// `replace_table_schema_ops` swaps the column list and CHECK list and
+    /// keeps the table id and storage options. That is the contract every
     /// `ALTER TABLE` subcommand relies on.
     #[test]
     fn replacing_a_table_schema_preserves_its_identity() {
@@ -3607,9 +3665,9 @@ mod tests {
         );
     }
 
-    /// Comments are keyed by object kind and name, cleared by `None`, and a
-    /// relation drop takes its column comments with it without touching a
-    /// same-prefixed sibling.
+    /// The catalog keys comments by object kind and name, and `None` clears
+    /// one. A relation drop takes its column comments with it, and does not
+    /// touch a same-prefixed sibling.
     #[test]
     fn comments_round_trip_and_drop_with_their_relation() {
         use assert2::assert;
@@ -4005,9 +4063,9 @@ mod tests {
     }
 
     /// A hash sharding names exactly one column, whichever seam attaches it.
-    /// A wider key has no row encoding, so the table it would describe is
-    /// refused at creation rather than created and then unwritable. The column
-    /// must still exist — the arity gate does not swallow that rejection.
+    /// A wider key has no row encoding, so the catalog refuses the table it
+    /// would describe at creation, and does not create an unwritable table. The
+    /// column must still exist. The arity gate does not swallow that rejection.
     #[test]
     fn creating_a_table_refuses_a_hash_sharding_that_is_not_one_column() {
         use assert2::assert;
@@ -4167,8 +4225,8 @@ mod tests {
 
     /// F-2: `pg_class` rows of kind `S`, `pg_sequence` and
     /// `information_schema.sequences` all enumerate sequences through
-    /// [`list_sequences`], which must report every record, name and all,
-    /// sorted — and must not confuse a name that prefixes another.
+    /// [`list_sequences`]. It must report every record, name and all, sorted.
+    /// It must not confuse a name that prefixes another.
     #[test]
     fn list_sequences_reports_every_sequence_by_name_in_order() {
         use assert2::assert;
@@ -4270,7 +4328,7 @@ mod tests {
 
     /// A created foreign key is readable by its `(child, name)` identity, from
     /// the child side, from the parent side, and from the whole-catalog
-    /// enumeration — with the two key families in agreement.
+    /// enumeration. The two key families agree.
     #[test]
     fn creating_a_foreign_key_indexes_it_from_both_sides() {
         use assert2::assert;
@@ -4305,9 +4363,9 @@ mod tests {
         assert_foreign_key_families_agree(&kv);
     }
 
-    /// Constraint names are per-relation: the same name on a second child is
-    /// fine, a second one on the same child is 42710. Both then reach the
-    /// parent, in creation order — which is a total order even when the two
+    /// Constraint names are per-relation. The same name on a second child is
+    /// correct, and a second one on the same child is 42710. Both then reach
+    /// the parent, in creation order. That order is total even when the two
     /// share a name.
     #[test]
     fn constraint_names_are_unique_per_relation_not_per_catalog() {
@@ -4341,9 +4399,9 @@ mod tests {
         assert_foreign_key_families_agree(&kv);
     }
 
-    /// A self-referencing constraint is indexed once on each side, and the
-    /// parent-side lookup reports it exactly once even though the child and the
-    /// parent are the same relation.
+    /// The catalog indexes a self-referencing constraint once on each side. The
+    /// parent-side lookup reports it exactly once, even though the child and
+    /// the parent are the same relation.
     #[test]
     fn a_self_referencing_foreign_key_is_reported_once() {
         use assert2::assert;
@@ -4374,7 +4432,7 @@ mod tests {
         assert_foreign_key_families_agree(&kv);
     }
 
-    /// Dropping a constraint clears both key families and leaves a sibling
+    /// A drop of one constraint clears both key families, and leaves a sibling
     /// constraint on the same relation untouched.
     #[test]
     fn dropping_a_foreign_key_clears_both_key_families() {
@@ -4402,8 +4460,8 @@ mod tests {
         assert!(get_foreign_key(&kv, child_id, "fk_dropped").is_err());
     }
 
-    /// `DROP TABLE` takes the relation's own constraints out of both families —
-    /// including a reverse entry orphaned by an earlier partial write — while a
+    /// `DROP TABLE` takes the relation's own constraints out of both families,
+    /// including a reverse entry that an earlier partial write orphaned. A
     /// constraint owned by another relation survives.
     #[test]
     fn dropping_a_table_removes_its_foreign_keys_from_both_families() {
@@ -4442,7 +4500,7 @@ mod tests {
         assert_foreign_key_families_agree(&kv);
     }
 
-    /// A rename rewrites only the denormalized display names: the id-keyed
+    /// A rename rewrites only the denormalized display names. The id-keyed
     /// records stay where they are, on the child's own constraints and on every
     /// constraint that references the renamed relation.
     #[test]
@@ -4477,9 +4535,9 @@ mod tests {
         assert_foreign_key_families_agree(&kv);
     }
 
-    /// Renaming a self-referencing relation must rewrite both display names —
-    /// the constraint is reached from the child scan and the parent scan, and
-    /// the second pass must not undo the first.
+    /// A rename of a self-referencing relation must rewrite both display names.
+    /// The child scan and the parent scan both reach the constraint, and the
+    /// second pass must not undo the first.
     #[test]
     fn renaming_a_self_referencing_relation_rewrites_both_display_names() {
         use assert2::assert;
@@ -4535,8 +4593,8 @@ mod tests {
     }
 
     /// Both per-relation listings report constraints in creation order, not by
-    /// name: `PostgreSQL` fires referential triggers in OID order, so a
-    /// constraint declared first acts first however late its name sorts.
+    /// name. `PostgreSQL` fires referential triggers in OID order, so a
+    /// constraint declared first acts first even when its name sorts late.
     #[test]
     fn per_relation_listings_are_ordered_by_creation_not_by_name() {
         use assert2::assert;
@@ -4557,10 +4615,11 @@ mod tests {
         assert!(list_referencing_foreign_keys(&kv, parent_id).expect("parent side") == expected);
     }
 
-    /// The id cursor hands out ascending ids without re-reading the counter, so
-    /// several constraints created in one batch are ordered against each other;
-    /// the counter each `create` op carries then leaves the stored value past
-    /// the last id used, so the next batch does not repeat them.
+    /// The id cursor hands out ascending ids and does not read the counter
+    /// again, so several constraints created in one batch are ordered against
+    /// each other. The counter that each `create` op carries then leaves the
+    /// stored value past the last id used, so the next batch does not repeat
+    /// them.
     #[test]
     fn the_foreign_key_id_cursor_spans_a_batch_and_leaves_the_counter_past_it() {
         use assert2::assert;
@@ -4589,7 +4648,7 @@ mod tests {
     }
 
     /// A reverse entry whose authoritative record has gone missing is catalog
-    /// corruption, not an empty result — the parent-side read must not silently
+    /// corruption, not an empty result. The parent-side read must not silently
     /// skip a constraint it is meant to enforce.
     #[test]
     fn a_reverse_entry_without_a_record_is_reported_as_corruption() {
@@ -4607,8 +4666,8 @@ mod tests {
         assert!(error.to_string().contains("ghost_fkey"));
     }
 
-    /// The string `version()` reports: clients parse the `PostgreSQL` version out
-    /// of the prefix, so the prefix is fixed even as the build tag moves.
+    /// The string `version()` reports. Clients parse the `PostgreSQL` version
+    /// out of the prefix, so the prefix is fixed even as the build tag moves.
     #[test]
     fn the_server_version_string_is_postgresql_shaped() {
         use assert2::assert;

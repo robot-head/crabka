@@ -1,11 +1,12 @@
 //! `KGroupedTable` processors (`KTable.groupBy` aggregation).
 //!
-//! - [`KTableRepartitionMapProcessor`]: `Change<V>` in → keyed `Change<VR>` out.
-//!   Maps each present side of the change through the user mapper; on a
-//!   grouping-key change it forwards a subtract-only record to the old key and
-//!   an add-only record to the new key.
-//! - [`KTableAggregateProcessor`]: `Change<VR>` in → `Change<T>` out. Subtracts the
-//!   old value's contribution then adds the new value's, over a `KeyValueStore`.
+//! - [`KTableRepartitionMapProcessor`]: it takes a `Change<V>` and emits a keyed
+//!   `Change<VR>`. It maps each present side of the change through the user
+//!   mapper. On a grouping-key change it forwards a subtract-only record to the
+//!   old key and an add-only record to the new key.
+//! - [`KTableAggregateProcessor`]: it takes a `Change<VR>` and emits a
+//!   `Change<T>`. It subtracts the old value's contribution, then adds the new
+//!   value's contribution, over a `KeyValueStore`.
 
 use std::marker::PhantomData;
 
@@ -21,9 +22,10 @@ use crate::{
 
 type Marker<T> = PhantomData<fn() -> T>;
 
-/// Maps the upstream `Change<V>` to the grouped key/value, splitting a
-/// grouping-key change into a subtract-only (old key) and add-only (new key)
-/// record so the downstream aggregate nets the change in the right groups.
+/// Maps the upstream `Change<V>` to the grouped key and value. It splits a
+/// grouping-key change into a subtract-only record on the old key and an add-only
+/// record on the new key, so the downstream aggregate nets the change in the
+/// correct groups.
 #[allow(dead_code)]
 pub(crate) struct KTableRepartitionMapProcessor<K, V, KR, VR, M> {
     pub mapper: M,
@@ -86,9 +88,9 @@ where
     }
 }
 
-/// Subtract-then-add table aggregation over a `KeyValueStore` keyed `KR`,
-/// holding the accumulator `T`. `init` seeds an empty group; `subtractor`
-/// removes the old value's contribution; `adder` adds the new value's.
+/// Subtract-then-add table aggregation over a `KeyValueStore` keyed `KR` that
+/// holds the accumulator `T`. `init` seeds an empty group. `subtractor` removes
+/// the old value's contribution, and `adder` adds the new value's contribution.
 #[allow(dead_code)]
 pub(crate) struct KTableAggregateProcessor<KR, VR, T, I, Add, Sub> {
     pub store_name: String,
@@ -396,8 +398,9 @@ mod tests {
         stores
     }
 
-    /// Run `init` then two same-key `process` calls (adds 2 then 6) through the
-    /// table aggregate, returning how many records reached the downstream buffer.
+    /// Run `init`, then run two same-key `process` calls through the table
+    /// aggregate, which add 2 and then 6. Return how many records reached the
+    /// downstream buffer.
     async fn agg_run_two(stores: &mut StoreRegistry) -> usize {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -446,17 +449,17 @@ mod tests {
         buffer.len()
     }
 
-    /// Uncached store → the aggregate forwards each record immediately (today's
-    /// behavior, unchanged): two records → two forwards.
+    /// Uncached store: the aggregate forwards each record at once, which is the
+    /// current behavior. Two records give two forwards.
     #[tokio::test]
     async fn uncached_table_aggregate_forwards_each_record() {
         let mut stores = agg_registry(false);
         check!(agg_run_two(&mut stores).await == 2);
     }
 
-    /// Cached store → the immediate forward is suppressed (the cache flush will
-    /// forward the deduped change): two records → zero immediate forwards, and the
-    /// cached store still holds the dirty entry to flush.
+    /// Cached store: the aggregate suppresses the immediate forward, because the
+    /// cache flush forwards the deduped change. Two records give zero immediate
+    /// forwards, and the cached store still holds the dirty entry to flush.
     #[tokio::test]
     async fn cached_table_aggregate_suppresses_immediate_forward() {
         let mut stores = agg_registry(true);

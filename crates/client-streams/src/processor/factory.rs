@@ -1,20 +1,23 @@
-//! `NodeFactory`: the construction closures for one topology node. Stored on
-//! `Topology` during construction; moved into `BuiltTopology` at `build()` to
-//! enable `BuiltTopology::instantiate()`.
+//! `NodeFactory`, the construction closures for one topology node.
 //!
-//! Node *types* are no longer tracked here — parent→child type matching is
-//! enforced at compile time by the typed [`NodeHandle`](crate::topology::NodeHandle)
-//! wiring, so the factory only needs to know how to build the node.
+//! `Topology` holds the factory during construction, and `build()` moves it into
+//! `BuiltTopology` so that `BuiltTopology::instantiate()` can use it.
+//!
+//! The factory does not track node *types*. The typed
+//! [`NodeHandle`](crate::topology::NodeHandle) wiring enforces parent→child type
+//! matching at compile time, so the factory only needs to know how to build the
+//! node.
 
 use super::{
     erased::{ErasedRecord, ProcessorError},
     node::ErasedNode,
 };
 
-/// Closure that constructs a fresh [`ErasedNode`] (processor or sink).
+/// A closure that builds a fresh [`ErasedNode`], which is a processor or a
+/// sink.
 pub(crate) type MakeNode = Box<dyn Fn() -> Box<dyn ErasedNode> + Send + Sync>;
 
-/// Closure that constructs a fresh deserialization function (source).
+/// A closure that builds a fresh deserialization function for a source.
 pub(crate) type MakeDeser = Box<
     dyn Fn()
             -> Box<dyn Fn(Option<&[u8]>, &[u8], i64) -> Result<ErasedRecord, ProcessorError> + Send>
@@ -22,12 +25,13 @@ pub(crate) type MakeDeser = Box<
         + Sync,
 >;
 
-/// The construction closures needed to instantiate a node: a source carries a
-/// `make_deser`, a processor or sink a `make_node`.
+/// The construction closures that instantiate a node. A source carries a
+/// `make_deser`. A processor or a sink carries a `make_node`.
 pub(crate) struct NodeFactory {
-    /// Constructs a fresh [`ErasedNode`]; `None` for sources.
+    /// Builds a fresh [`ErasedNode`]. It is `None` for a source.
     pub make_node: Option<MakeNode>,
 
-    /// Constructs a fresh deserialization closure; `None` for non-sources.
+    /// Builds a fresh deserialization closure. It is `None` for any node that is
+    /// not a source.
     pub make_deser: Option<MakeDeser>,
 }

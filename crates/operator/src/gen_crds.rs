@@ -5,8 +5,8 @@ use crate::crd::{
     KafkaTopic, KafkaUser, SchemaRegistry,
 };
 
-/// Write every CRD this operator owns into `out_dir` as
-/// `<group>_<plural>.yaml`. Existing files are overwritten.
+/// Writes every CRD that this operator owns into `out_dir` as
+/// `<group>_<plural>.yaml`. This function overwrites an existing file.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub fn write_all(out_dir: &Path) -> anyhow::Result<()> {

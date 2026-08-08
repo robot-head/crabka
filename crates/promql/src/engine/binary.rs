@@ -101,8 +101,10 @@ impl BinaryOp {
         )
     }
 
-    /// `PromQL` surface symbol for this operator, matching Prometheus
-    /// annotation text (e.g. `==`, `!=`, `>`, `>=`).
+    /// Returns the `PromQL` surface symbol for this operator.
+    ///
+    /// The symbol matches the Prometheus annotation text, for example `==`,
+    /// `!=`, `>`, and `>=`.
     fn symbol(self) -> &'static str {
         match self {
             Self::Add => "+",
@@ -282,18 +284,20 @@ fn validate_set_modifier(modifier: Option<&BinModifier>) -> Result<()> {
     Ok(())
 }
 
-/// Combine two **already-evaluated** instant operands under `binary`'s operator
-/// and modifier, producing the binary result.
+/// Combines two already-evaluated instant operands into the binary result.
 ///
-/// This is the shared core of `PromQL` binary evaluation: the interpreter
-/// (`PromqlEngine::eval_instant_binary`) evaluates both operands through the
-/// interpreter and calls this; the operator path (`PromqlEngine::plan_binary_expr`)
-/// recurses both operands through the planner, assembles each to an
-/// [`InstantValue`], and calls this same function. Because both callers funnel
-/// their operands through one combine routine, the two paths are byte-for-byte
-/// identical once their operand vectors match - set ops, vector matching,
-/// `__name__` dropping, the `bool` modifier, and `group_left`/`group_right`
-/// copying are all decided here, not at the call site.
+/// This function applies the operator and the modifier of `binary`. It is the
+/// shared core of `PromQL` binary evaluation. The interpreter function
+/// `PromqlEngine::eval_instant_binary` evaluates both operands through the
+/// interpreter and then calls this function. The operator path
+/// `PromqlEngine::plan_binary_expr` recurses both operands through the planner,
+/// assembles each one to an [`InstantValue`], and then calls this same function.
+///
+/// Both callers send their operands through one combine routine, so the two
+/// paths are byte-for-byte identical once their operand vectors match. This
+/// function decides the set operations, the vector matching, the `__name__`
+/// dropping, the `bool` modifier, and the `group_left` and `group_right`
+/// copying. The call site decides none of them.
 pub(super) fn combine_instant_binary(
     binary: &BinaryExpr,
     lhs: InstantValue,

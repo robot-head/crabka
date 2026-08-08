@@ -1,4 +1,4 @@
-//! Profile samples table column contract.
+//! Column contract for the profile samples table.
 
 pub use crabka_blockstore::{
     COL_FINGERPRINT, COL_TIMESTAMP, PCOL_PROFILE_TYPE, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,

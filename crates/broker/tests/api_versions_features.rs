@@ -1,25 +1,29 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
 
-//! KIP-584 write-side surface — `ApiVersions` v3+ exposes the feature
-//! surface the JVM admin tooling consumes. `supported_features` advertises
-//! `metadata.version` over the supported range `min = 7` (`3.3-IV3`) ..
-//! `max = 25` (`4.0-IV3`), driven by the broker-wide `features` table. A
-//! standalone (self-bootstrapped) broker behaves like a freshly-formatted 4.0
-//! cluster: it finalizes every registered feature at its release default
-//! (`metadata.version = 25`, `group.version = 1`, `transaction.version = 2`)
-//! and surfaces a real
-//! (`>= 0`) `finalized_features_epoch`. `UpdateFeatures` (`api_key` 57) then
-//! moves those levels — that path is exercised in `tests/feature_finalization.rs`.
+//! The KIP-584 write-side surface. `ApiVersions` v3 and above expose the
+//! feature surface that the JVM admin tooling reads. `supported_features`
+//! advertises `metadata.version` over the supported range `min = 7`
+//! (`3.3-IV3`) to `max = 25` (`4.0-IV3`), from the broker-wide `features`
+//! table.
 //!
-//! Advertising a `supported_features` entry whose `max_version` is above a
-//! connecting client's known `MetadataVersion` enum, or a finalized
-//! `metadata.version` entry with `finalized_features_epoch = 0`, breaks every
-//! JVM admin client whose enum doesn't enumerate the level — it throws
+//! A standalone, self-bootstrapped broker behaves like a freshly formatted 4.0
+//! cluster. It finalizes every registered feature at its release default,
+//! which is `metadata.version = 25`, `group.version = 1`, and
+//! `transaction.version = 2`. It also reports a real `finalized_features_epoch`
+//! of `>= 0`. `UpdateFeatures` (`api_key` 57) then moves those levels.
+//! `tests/feature_finalization.rs` exercises that path.
+//!
+//! Two shapes break every JVM admin client whose enum does not list the level:
+//! a `supported_features` entry whose `max_version` is above the connecting
+//! client's known `MetadataVersion` enum, and a finalized `metadata.version`
+//! entry with `finalized_features_epoch = 0`. Such a client throws
 //! `IllegalArgumentException` out of `MetadataVersion.fromFeatureLevel(N)` on
-//! the first handshake (this took down 19 `broker-jvm-acceptance` tests
-//! historically). The advertised range `7 .. 25` (`3.3-IV3` .. `4.0-IV3`)
-//! tracks Kafka's own `MetadataVersion` enum; this test guards the
-//! fresh-broker surface.
+//! the first handshake. That failure once broke 19 `broker-jvm-acceptance`
+//! tests.
+//!
+//! The advertised range `7` to `25`, that is `3.3-IV3` to `4.0-IV3`, tracks
+//! Kafka's own `MetadataVersion` enum. This test guards the fresh-broker
+//! surface.
 
 use assert2::assert;
 mod support;

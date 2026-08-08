@@ -1,4 +1,6 @@
-//! OCSF (Open Cybersecurity Schema Framework) serialization for audit events.
+//! OCSF serialization for audit events.
+//!
+//! OCSF is the Open Cybersecurity Schema Framework.
 
 use crabka_ids::NodeId;
 use serde_json::json;
@@ -8,7 +10,7 @@ use crate::{
     ids::EpochMs,
 };
 
-/// Product identity stamped into every OCSF record's `metadata`.
+/// Product identity for every OCSF record's `metadata` field.
 #[derive(Debug, Clone)]
 pub struct ProductInfo {
     pub vendor_name: String,

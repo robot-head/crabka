@@ -11,7 +11,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Write the full reference tree (operator + broker) under --out.
+    /// Write the full reference tree for the operator and the broker under --out.
     All {
         #[arg(long)]
         out: PathBuf,
@@ -21,7 +21,7 @@ enum Command {
         /// Website content dir to scan (default: website/content).
         #[arg(long, default_value = "website/content")]
         content: std::path::PathBuf,
-        /// Crates dir snippet paths are relative to (default: crates).
+        /// Crates dir that snippet paths are relative to (default: crates).
         #[arg(long, default_value = "crates")]
         crates: std::path::PathBuf,
     },

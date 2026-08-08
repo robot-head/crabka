@@ -30,12 +30,14 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Plan an `Expr::Aggregate` onto an inner planner plan wrapped in a
-    /// `DataFusion` aggregate, when the op is a simple float aggregation and the
-    /// inner expression is itself planner-supported and float-only.
+    /// Plans an `Expr::Aggregate` onto an inner planner plan in a `DataFusion` aggregate.
     ///
-    /// Returns `None` (interpreter fallback) for param aggregations, histogram
-    /// inputs, or any inner expression the recursive planner does not support.
+    /// This method applies when the op is a simple float aggregation and the
+    /// inner expression is planner-supported and float-only.
+    ///
+    /// Returns `None` for param aggregations, histogram inputs, and any inner
+    /// expression the recursive planner does not support. The caller then falls
+    /// back to the interpreter.
     pub(super) async fn plan_simple_aggregate_expr(
         &self,
         tenant: &str,
@@ -131,21 +133,25 @@ impl<S: MetricStore> PromqlEngine<S> {
         )))
     }
 
-    /// Reduce a simple aggregation over a **histogram-bearing** (or otherwise
-    /// `Precomputed`) inner through the shared interpreter kernel, returning the
-    /// finished vector as [`PlannedInstant::Precomputed`].
+    /// Reduces a simple aggregation through the shared interpreter kernel.
     ///
-    /// Assembles the inner expression to a `Vec<InstantSample>` that carries
-    /// native histograms as `SampleValue::Histogram` (via
-    /// [`Self::histogram_fold_inner_vector`], the same direct-selection helper the
-    /// native histogram folds use), then applies [`apply_simple_aggregate`] — the
-    /// exact same free function that backs the interpreter
-    /// (`Self::eval_instant_aggregate`) — so the operator path matches Prometheus
-    /// by construction (sum/avg merge, count/group count, min/max/stddev/stdvar
-    /// ignore histograms, mixed float+histogram groups dropped).
+    /// This method handles a histogram-bearing inner and any other
+    /// `Precomputed` inner. It returns the finished vector as
+    /// [`PlannedInstant::Precomputed`].
     ///
-    /// Returns `None` (interpreter fallback) only when the inner cannot be
-    /// assembled (an inner expression the recursive planner cannot evaluate).
+    /// The method assembles the inner expression to a `Vec<InstantSample>` that
+    /// carries native histograms as `SampleValue::Histogram`. It uses
+    /// [`Self::histogram_fold_inner_vector`] for this, the same direct-selection
+    /// helper that the native histogram folds use. It then applies
+    /// [`apply_simple_aggregate`], the same free function that backs the
+    /// interpreter method `Self::eval_instant_aggregate`. The operator path
+    /// matches Prometheus by construction: `sum` and `avg` merge, `count` and
+    /// `group` count, `min`, `max`, `stddev`, and `stdvar` ignore histograms,
+    /// and the kernel drops groups that mix floats and histograms.
+    ///
+    /// Returns `None` only when the method cannot assemble the inner, which
+    /// happens for an inner expression the recursive planner cannot evaluate.
+    /// The caller then falls back to the interpreter.
     async fn plan_simple_aggregate_via_kernel(
         &self,
         tenant: &str,
@@ -173,32 +179,37 @@ impl<S: MetricStore> PromqlEngine<S> {
         Ok(Some(PlannedInstant::Precomputed(aggregated)))
     }
 
-    /// Plan a **parameterized** aggregation
-    /// (`topk`/`bottomk`/`quantile`/`count_values`/`stddev`/`stdvar`) onto the
-    /// operator path: recurse the inner instant-vector expression through the
-    /// planner, assemble it to a `Vec<InstantSample>` (preserving genuine NaN and
-    /// the full labelset, including `__name__`), then apply the **shared**
-    /// interpreter routine in pure Rust and return the result as a
-    /// [`PlannedInstant::Precomputed`]. Because the same `apply_*` free function
-    /// backs the interpreter (`Self::eval_instant_aggregate` and its callees),
-    /// the operator path matches Prometheus by construction.
+    /// Plans a parameterized aggregation onto the operator path.
     ///
-    /// The experimental `limitk`/`limit_ratio` ops are also handled here: their
-    /// scalar parameter is resolved through the SAME interpreter helpers
-    /// (`Self::eval_limitk_parameter` / `Self::eval_limit_ratio_parameter`,
-    /// including `limit_ratio`'s deduplicated `InvalidRatioWarning`), a `0`
-    /// parameter short-circuits to the empty vector *before* the inner is
-    /// evaluated (matching the interpreter), and the SHARED selection kernel
-    /// ([`apply_limitk_aggregate`] / [`apply_limit_ratio_aggregate`]) is applied.
+    /// The parameterized ops are `topk`, `bottomk`, `quantile`, `count_values`,
+    /// `stddev`, and `stdvar`. This method recurses the inner instant-vector
+    /// expression through the planner and assembles it to a
+    /// `Vec<InstantSample>`. The assembled vector keeps genuine NaN and the full
+    /// labelset, including `__name__`. The method then applies the shared
+    /// interpreter routine in pure Rust and returns the result as a
+    /// [`PlannedInstant::Precomputed`]. The same `apply_*` free function backs
+    /// the interpreter through `Self::eval_instant_aggregate` and its callees,
+    /// so the operator path matches Prometheus by construction.
     ///
-    /// An invalid / non-literal / out-of-range parameter is a hard error: each arm
-    /// raises the SAME canonical [`PromqlError`] the interpreter does (propagated,
-    /// never swallowed into `Ok(None)` — the planner is total, so an `Ok(None)` on
-    /// a genuine validation error would surface as the generic "planner returned no
-    /// result" message instead of the real error).
+    /// This method also handles the experimental `limitk` and `limit_ratio` ops.
+    /// It resolves their scalar parameter with the same interpreter helpers,
+    /// `Self::eval_limitk_parameter` and `Self::eval_limit_ratio_parameter`.
+    /// These helpers include the deduplicated `InvalidRatioWarning` of
+    /// `limit_ratio`. A `0` parameter short-circuits to the empty vector before
+    /// the method evaluates the inner, as the interpreter does. The method then
+    /// applies the shared selection kernel, [`apply_limitk_aggregate`] or
+    /// [`apply_limit_ratio_aggregate`].
     ///
-    /// Returns `None` (interpreter fallback) only for:
-    /// - a non-param op (handled by [`Self::plan_simple_aggregate_expr`]),
+    /// An invalid, non-literal, or out-of-range parameter is a hard error. Each
+    /// arm raises the same canonical [`PromqlError`] that the interpreter raises
+    /// and propagates it. No arm ever swallows such an error into `Ok(None)`.
+    /// The planner is total, so an `Ok(None)` on a genuine validation error
+    /// would show the generic "planner returned no result" message instead of
+    /// the real error.
+    ///
+    /// Returns `None` only for the cases below, and the caller then falls back
+    /// to the interpreter:
+    /// - a non-param op, which [`Self::plan_simple_aggregate_expr`] handles,
     /// - an inner expression the recursive planner cannot evaluate, or a
     ///   histogram-bearing inner.
     pub(super) async fn plan_param_aggregate_expr(
@@ -381,21 +392,23 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
     }
 
-    /// Evaluate the inner instant-vector argument of a parameterized aggregation
-    /// into a `Vec<InstantSample>`, preserving genuine (non-stale) NaN, the full
-    /// labelset (including `__name__`), and — crucially — native-histogram series
-    /// as `SampleValue::Histogram` rows. These are exactly the samples the
-    /// interpreter would aggregate. Returns `None` (caller falls back) only for an
-    /// inner expression the recursive planner cannot evaluate.
+    /// Evaluates the inner instant-vector argument of a parameterized aggregation.
     ///
-    /// Shares [`Self::histogram_fold_inner_vector`], which selects a bare instant-
-    /// vector selector directly through the interpreter's own
-    /// [`Self::eval_instant_selector`] (carrying histogram samples) and recurses
-    /// every other plannable inner expression. Feeding histogram-bearing samples
-    /// is correct for every param op: `topk`/`bottomk`/`quantile`/`stddev`/
-    /// `stdvar` IGNORE histogram samples (their shared `apply_*` routines skip
-    /// them), and `count_values` formats a histogram value as its JSON label
-    /// value — all matching the interpreter byte-for-byte.
+    /// This method returns a `Vec<InstantSample>` that keeps genuine non-stale
+    /// NaN, the full labelset with `__name__`, and native-histogram series as
+    /// `SampleValue::Histogram` rows. These are the samples the interpreter
+    /// aggregates. Returns `None` only for an inner expression the recursive
+    /// planner cannot evaluate, and the caller then falls back to the
+    /// interpreter.
+    ///
+    /// The method uses [`Self::histogram_fold_inner_vector`], which selects a
+    /// bare instant-vector selector through the interpreter's own
+    /// [`Self::eval_instant_selector`] and carries the histogram samples. That
+    /// helper recurses every other plannable inner expression. Histogram-bearing
+    /// samples are correct for every param op. `topk`, `bottomk`, `quantile`,
+    /// `stddev`, and `stdvar` ignore histogram samples, because their shared
+    /// `apply_*` routines skip them. `count_values` formats a histogram value as
+    /// its JSON label value. Both behaviors match the interpreter byte-for-byte.
     async fn param_aggregate_inner_vector(
         &self,
         tenant: &str,

@@ -1,9 +1,12 @@
-//! Pure reassembly state machine for a follower fetching a KIP-630 snapshot
-//! over `FetchSnapshot` (api key 59). IO-free: the async engine
-//! (`controller.rs`) owns the transport and applies the [`SnapshotFetchStep`]
-//! this returns. Chunks must arrive in order (position == bytes received so
-//! far); any mismatch or a changed snapshot id aborts the transfer so the
-//! engine restarts cleanly against the current leader.
+//! Pure reassembly state machine for a follower that fetches a KIP-630
+//! snapshot over `FetchSnapshot` (api key 59).
+//!
+//! This module is IO-free. The async engine (`controller.rs`) owns the
+//! transport and applies the [`SnapshotFetchStep`] that this module returns.
+//!
+//! Chunks must arrive in order, that is, `position` must equal the number of
+//! bytes received so far. Any mismatch or a changed snapshot id aborts the
+//! transfer, so the engine restarts cleanly against the current leader.
 
 use bytes::{Bytes, BytesMut};
 use crabka_units::prelude::{ByteSize, ByteSizeExt as _, gibibytes};
@@ -11,17 +14,18 @@ use refined_type::rule::MinMaxU64;
 
 use crate::types::NodeId;
 
-/// Snapshot identity: (`end_offset` exclusive, epoch). Matches KIP-630 `SnapshotId`.
+/// Snapshot identity: (`end_offset` exclusive, epoch), as KIP-630 `SnapshotId`.
 pub type SnapshotId = (i64, i32);
 
 /// Hard ceiling on the total bytes a follower will reassemble for one snapshot.
 ///
-/// The `__cluster_metadata` snapshot is bounded by the size of cluster metadata
-/// (topics, partitions, ACLs, configs, broker registrations) — realistically
-/// tens of MiB even for very large clusters. 1 GiB is generous-but-finite: no
-/// legitimate cluster reaches it, while it caps the memory a peer the follower
-/// believes is the leader can force it to allocate (denial-of-service finding
-/// M-3). A peer declaring (or streaming) more than this aborts the transfer.
+/// The size of the cluster metadata bounds the `__cluster_metadata` snapshot:
+/// topics, partitions, ACLs, configs, and broker registrations. That is tens of
+/// MiB even for very large clusters. 1 GiB is generous but finite. No
+/// legitimate cluster reaches it, and it caps the memory that a peer which the
+/// follower believes is the leader can force it to allocate (denial-of-service
+/// finding M-3). A peer that declares or streams more than this aborts the
+/// transfer.
 pub const METADATA_SNAPSHOT_FETCH_HARD_MAX: ByteSize = gibibytes(1);
 
 const METADATA_SNAPSHOT_FETCH_HARD_MAX_BYTES: u64 = 1_073_741_824;
@@ -29,8 +33,8 @@ type RefinedMetadataSnapshotFetchBytes = MinMaxU64<1, METADATA_SNAPSHOT_FETCH_HA
 
 /// Validated deployment limit for one metadata snapshot fetch.
 ///
-/// Operators may lower this limit, but the fixed 1 GiB security ceiling cannot
-/// be raised through configuration.
+/// Operators may lower this limit. No configuration can raise the fixed 1 GiB
+/// security ceiling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MetadataSnapshotFetchMax(u64);
 
@@ -74,15 +78,15 @@ pub struct SnapshotFetchState {
     max_size: MetadataSnapshotFetchMax,
 }
 
-/// What the engine should do after feeding a chunk in.
+/// What the engine should do after it feeds a chunk in.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotFetchStep {
-    /// Request the next byte range starting at `next_position`.
+    /// Request the next byte range that starts at `next_position`.
     Continue { next_position: i64 },
-    /// All bytes received; holds the assembled snapshot.
+    /// All bytes arrived; this variant holds the assembled snapshot.
     Complete(Bytes),
-    /// Abort: id mismatch / out-of-order / leader change. Engine discards
-    /// this state and falls back to a normal Fetch.
+    /// Abort after an id mismatch, an out-of-order chunk, or a leader change.
+    /// The engine discards this state and falls back to a normal Fetch.
     Restart,
 }
 
@@ -108,14 +112,16 @@ impl SnapshotFetchState {
         }
     }
 
-    /// The byte position to request next (bytes received so far).
+    /// The byte position to request next, that is, the bytes received so far.
     #[must_use]
     pub fn next_position(&self) -> i64 {
         i64::try_from(self.buf.len()).unwrap_or(i64::MAX)
     }
 
-    /// Feed one response chunk. `id`/`size`/`position` come from the
-    /// `FetchSnapshot` response; `chunk` is `unaligned_records` bytes.
+    /// Feed one response chunk.
+    ///
+    /// `id`, `size`, and `position` come from the `FetchSnapshot` response.
+    /// `chunk` holds the `unaligned_records` bytes.
     pub fn on_chunk(
         &mut self,
         id: SnapshotId,

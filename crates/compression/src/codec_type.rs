@@ -15,7 +15,8 @@ pub enum CompressionType {
 
 impl CompressionType {
     /// Decode the lowest three bits of a Kafka record-batch attribute byte.
-    /// Returns `None` for codec ids outside `0..=4`.
+    ///
+    /// The method returns `None` for codec ids outside `0..=4`.
     #[must_use]
     pub fn from_attribute_bits(b: u8) -> Option<Self> {
         match b & 0b0000_0111 {

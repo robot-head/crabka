@@ -1,6 +1,8 @@
-//! Concrete `Processor` impls the DSL lowering attaches to the Processor-API
-//! `Topology`. Each op's lowering thunk constructs one of these, capturing the
-//! user closure; the four KV type parameters are inferred from the impl.
+//! The concrete `Processor` impls that the DSL lowering attaches to the
+//! Processor-API `Topology`.
+//!
+//! Each op's lowering thunk builds one of these and captures the user closure.
+//! The compiler infers the four KV type parameters from the impl.
 pub(crate) mod aggregate;
 pub(crate) mod change;
 pub(crate) mod cogroup_merge;

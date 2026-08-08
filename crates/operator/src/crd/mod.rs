@@ -1,6 +1,8 @@
-//! CRD type definitions. Each kind lives in its own submodule and is the
-//! single source of truth for both the runtime types and the generated
-//! CRD YAML manifest (see `gen_crds`).
+//! CRD type definitions.
+//!
+//! Each kind lives in its own submodule. That submodule is the single
+//! source of truth for the runtime types and for the generated CRD YAML
+//! manifest. See `gen_crds`.
 
 pub mod ca;
 pub mod connector;

@@ -1,5 +1,5 @@
-//! KIP-48 delegation token primitives — HMAC and secret-key
-//! wrapper that keeps the bytes out of Debug.
+//! KIP-48 delegation token primitives: the HMAC and a secret-key wrapper that
+//! keeps the bytes out of Debug.
 
 use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};

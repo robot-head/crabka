@@ -1,11 +1,12 @@
 //! Exhaustive stateright enumeration of the classic consumer-group membership
-//! state machine (KIP-345/62), wrapping the real [`super::ClassicGroup`]. Drives the
-//! real `add_member` / `remove_member` / `complete_rebalance` /
-//! `install_assignments` / `expire_dead_members` + the handler's KIP-345 fence
-//! pre-check (`current_member_id_for_instance`) under every interleaving of join
-//! (dynamic / static / fenced), heartbeat, leave, rebalance completion, sync,
-//! and session-timeout expiry. Asserts static-index coherence, single-owner,
-//! and static-never-expired invariants. See the design spec at
+//! state machine (KIP-345/62). It wraps the real [`super::ClassicGroup`] and
+//! drives the real `add_member`, `remove_member`, `complete_rebalance`,
+//! `install_assignments`, and `expire_dead_members`, plus the handler's KIP-345
+//! fence pre-check (`current_member_id_for_instance`). It covers every
+//! interleaving of join, which can be dynamic, static, or fenced, heartbeat,
+//! leave, rebalance completion, sync, and session-timeout expiry. It asserts
+//! the static-index coherence, single-owner, and static-never-expired
+//! invariants. See the design spec at
 //! `docs/superpowers/specs/2026-06-14-crabka-classic-group-fencing-model-design.md`.
 
 use std::{
@@ -56,8 +57,9 @@ fn mk_member(mid: &str, iid: Option<&str>, clock: i64) -> Member {
     m
 }
 
-/// Every index entry points at a live member carrying the matching instance id,
-/// and every static member has a matching index entry (bidirectional mirror).
+/// Every index entry points at a live member that carries the matching instance
+/// id, and every static member has a matching index entry. The two mirror each
+/// other in both directions.
 fn index_coherent(g: &ClassicGroup) -> bool {
     for (iid, mid) in &g.static_members {
         match g.members.get(mid) {
@@ -75,7 +77,8 @@ fn index_coherent(g: &ClassicGroup) -> bool {
     true
 }
 
-/// No two live members share a `group.instance.id` (no fencing-bypass).
+/// No two live members share a `group.instance.id`, so nothing bypasses
+/// fencing.
 fn single_owner(g: &ClassicGroup) -> bool {
     let mut seen = std::collections::HashSet::new();
     for m in g.members.values() {
@@ -94,8 +97,9 @@ struct ClassicModel {
     max_clock: i64,
 }
 
-/// Model state: a real `ClassicGroup` plus the logical clock. `Hash`/`Eq` are manual
-/// over a canonical projection because `ClassicGroup` holds `HashMap`s.
+/// Model state: a real `ClassicGroup` plus the logical clock. `Hash` and `Eq`
+/// are manual over a canonical projection, because `ClassicGroup` holds
+/// `HashMap`s.
 #[derive(Clone, Debug)]
 struct GrpState {
     g: ClassicGroup,
@@ -415,9 +419,9 @@ mod fuzz {
     }
 
     proptest! {
-        /// Large-N random op sequences over a real `ClassicGroup` (mirroring the handler
-        /// fence guards + leave retrigger): the membership invariants hold after
-        /// every step.
+        /// Large-N random op sequences over a real `ClassicGroup`, which mirror
+        /// the handler fence guards and the leave retrigger. The membership
+        /// invariants hold after every step.
         #[test]
         fn classic_invariants_hold(ops in proptest::collection::vec(op_strategy(), 0..300)) {
             let mids = ["a", "b", "c"];

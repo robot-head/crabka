@@ -1,11 +1,11 @@
 //! Physical planning for the custom `PromQL` logical operators.
 //!
-//! `DataFusion` does not know how to turn the [`SeriesDivide`],
-//! [`SeriesNormalize`], and [`InstantManipulate`] logical nodes into
-//! [`ExecutionPlan`]s on its own. This module supplies an [`ExtensionPlanner`]
-//! that maps each logical node to its `Exec` counterpart, plus a
-//! [`prom_session_context`] helper that builds a [`SessionContext`] wired with
-//! that planner so `execute_logical_plan` can run the operator chain.
+//! `DataFusion` cannot turn the [`SeriesDivide`], [`SeriesNormalize`], and
+//! [`InstantManipulate`] logical nodes into [`ExecutionPlan`]s on its own. This
+//! module supplies an [`ExtensionPlanner`] that maps each logical node to its
+//! `Exec` counterpart. It also supplies the [`prom_session_context`] helper,
+//! which builds a [`SessionContext`] that holds that planner, so
+//! `execute_logical_plan` can run the operator chain.
 
 use std::sync::Arc;
 
@@ -101,8 +101,8 @@ fn single_input(physical_inputs: &[Arc<dyn ExecutionPlan>]) -> DfResult<Arc<dyn 
     }
 }
 
-/// Query planner that teaches the default physical planner about the custom
-/// `PromQL` operator nodes.
+/// Query planner that adds the custom `PromQL` operator nodes to the default
+/// physical planner.
 #[derive(Debug, Default)]
 struct PromQueryPlanner;
 
@@ -121,12 +121,14 @@ impl QueryPlanner for PromQueryPlanner {
     }
 }
 
-/// Build a [`SessionContext`] whose physical planner understands the custom
-/// `PromQL` operator nodes ([`SeriesDivide`], [`SeriesNormalize`],
-/// [`InstantManipulate`], [`RangeManipulate`]) and whose function registry holds
-/// the rate-family, `*_over_time`, and per-row scalar-math `ScalarUDF`s plus the
-/// NaN-ignoring `prom_min`/`prom_max` aggregate UDAFs so a range-function,
-/// scalar-math, or `min`/`max` aggregation can lower onto them.
+/// Builds a [`SessionContext`] for the custom `PromQL` operator nodes.
+///
+/// The physical planner of the returned context handles [`SeriesDivide`],
+/// [`SeriesNormalize`], [`InstantManipulate`], and [`RangeManipulate`]. Its
+/// function registry holds the rate-family, `*_over_time`, and per-row
+/// scalar-math `ScalarUDF`s. The registry also holds the NaN-ignoring
+/// `prom_min` and `prom_max` aggregate UDAFs. A range-function, scalar-math, or
+/// `min`/`max` aggregation can then lower onto them.
 #[must_use]
 pub fn prom_session_context() -> SessionContext {
     // Pin single-partition execution. The custom PromQL operator chain

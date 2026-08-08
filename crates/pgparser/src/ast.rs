@@ -4,9 +4,9 @@ use crabka_pgtypes::{ColumnType, Datum};
 
 /// A relation name exactly as written: an optional schema qualifier and a name.
 ///
-/// This is deliberately *unresolved*. The parser has no catalog, so `s.t` is
-/// carried as the pair `(Some("s"), "t")` whether or not `s` exists, and what a
-/// missing schema is reported as is left to the executor — `PostgreSQL` reports
+/// This is deliberately *unresolved*. The parser has no catalog, so it carries
+/// `s.t` as the pair `(Some("s"), "t")` whether or not `s` exists. The executor
+/// decides how to report a missing schema. `PostgreSQL` reports
 /// `3F000 schema "s" does not exist` from a utility statement such as
 /// `DROP TABLE s.t` but `42P01 relation "s.t" does not exist` from a
 /// `SELECT`-style reference, a distinction the parser cannot draw.
@@ -31,7 +31,7 @@ pub struct RelationRef {
 }
 
 impl RelationRef {
-    /// An unqualified reference — `t`.
+    /// An unqualified reference: `t`.
     #[must_use]
     pub fn bare(name: impl Into<String>) -> Self {
         Self {
@@ -40,7 +40,7 @@ impl RelationRef {
         }
     }
 
-    /// A schema-qualified reference — `s.t`.
+    /// A schema-qualified reference: `s.t`.
     #[must_use]
     pub fn qualified(schema: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
@@ -61,7 +61,7 @@ impl std::fmt::Display for RelationRef {
 
 impl From<&str> for RelationRef {
     /// The whole string is the relation's name. A dot in it is part of the
-    /// name, exactly as a quoted `"a.b"` is — use [`RelationRef::qualified`]
+    /// name, exactly as a quoted `"a.b"` is. Use [`RelationRef::qualified`]
     /// for a qualifier.
     fn from(name: &str) -> Self {
         Self::bare(name)
@@ -220,10 +220,10 @@ pub enum Statement {
         constraints: Vec<TableConstraint>,
         sharded: bool,
         sharding: Option<ShardingSpec>,
-        /// `CREATE TABLE IF NOT EXISTS` — an existing relation is a notice, not
+        /// `CREATE TABLE IF NOT EXISTS`: an existing relation is a notice, not
         /// a `42P07`.
         if_not_exists: bool,
-        /// `CREATE TEMP`/`TEMPORARY TABLE` — the relation lives only for the
+        /// `CREATE TEMP`/`TEMPORARY TABLE`: the relation lives only for the
         /// creating session.
         temporary: bool,
         /// `(LIKE source [INCLUDING …])` clauses, in the order written.
@@ -232,17 +232,18 @@ pub enum Statement {
         inherits: Vec<RelationRef>,
         /// `ON COMMIT {PRESERVE ROWS | DELETE ROWS | DROP}` for a temp table.
         on_commit: Option<OnCommitAction>,
-        /// `PARTITION BY <strategy> (<key>, …)` — the relation is a partitioned
+        /// `PARTITION BY <strategy> (<key>, …)`: the relation is a partitioned
         /// parent and holds no rows of its own.
         partition_by: Option<PartitionBy>,
-        /// `PARTITION OF <parent> <bound>` — the relation is a leaf (or an
+        /// `PARTITION OF <parent> <bound>`: the relation is a leaf (or an
         /// intermediate parent, when `partition_by` is also set).
         partition_of: Option<PartitionOf>,
     },
     CreateIndex {
-        /// An index name is never schema-qualified in `PostgreSQL`'s grammar —
-        /// an index lands in its table's schema — so this carries a qualifier
-        /// only for the `CREATE SEQUENCE` spelling, which shares this variant.
+        /// An index name is never schema-qualified in `PostgreSQL`'s grammar,
+        /// because an index lands in its table's schema. So this carries a
+        /// qualifier only for the `CREATE SEQUENCE` spelling, which shares this
+        /// variant.
         name: Option<RelationRef>,
         table: RelationRef,
         keys: Vec<IndexKey>,
@@ -250,7 +251,7 @@ pub enum Statement {
         placement: IndexPlacement,
         if_not_exists: bool,
         concurrently: bool,
-        /// `USING <method>` — the access method name, lowercased.
+        /// `USING <method>`: the access method name, lowercased.
         method: Option<String>,
         /// `INCLUDE (col, …)` non-key payload columns.
         include: Vec<String>,
@@ -279,13 +280,14 @@ pub enum Statement {
         definition: String,
         /// Parsed definition used by the executor to validate the view schema.
         query: QueryExpr,
-        /// `CREATE OR REPLACE VIEW` — an existing view of the same name is
-        /// redefined in place instead of being 42P07, provided the new query
-        /// keeps every existing output column's name, type and collation.
+        /// `CREATE OR REPLACE VIEW`: the statement redefines an existing view
+        /// of the same name in place and does not report 42P07, if the new
+        /// query keeps every existing output column's name, type and
+        /// collation.
         or_replace: bool,
-        /// `CREATE TEMP VIEW` — the view lives in the session's temporary
+        /// `CREATE TEMP VIEW`: the view lives in the session's temporary
         /// namespace and dies with the session. A view over a temporary
-        /// relation is converted to one whether or not this was written.
+        /// relation becomes one whether or not this was written.
         temporary: bool,
         /// The optional `VIEW name (a, b, c)` alias list, which renames the
         /// query's output columns positionally.
@@ -359,7 +361,7 @@ pub enum Statement {
     },
     /// `COMMIT`/`END [WORK|TRANSACTION] [AND [NO] CHAIN]`.
     Commit {
-        /// `AND CHAIN` — end this block and immediately open another with the
+        /// `AND CHAIN`: end this block and immediately open another with the
         /// same transaction characteristics.
         chain: bool,
     },
@@ -372,11 +374,11 @@ pub enum Statement {
         table: RelationRef,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
-        /// `UPDATE t AS x …` — the target's alias, which replaces the table name
+        /// `UPDATE t AS x …`: the target's alias, which replaces the table name
         /// as the qualifier every expression in the statement resolves against.
         alias: Option<String>,
         assignments: Vec<Assignment>,
-        /// `UPDATE … FROM a, b …` — extra relations joined to the target. Empty
+        /// `UPDATE … FROM a, b …`: extra relations joined to the target. Empty
         /// for the plain form.
         from: Vec<TableExpr>,
         filter: Option<Expr>,
@@ -386,9 +388,9 @@ pub enum Statement {
         table: RelationRef,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
-        /// `DELETE FROM t AS x …` — see [`Statement::Update`]'s `alias`.
+        /// `DELETE FROM t AS x …`: see [`Statement::Update`]'s `alias`.
         alias: Option<String>,
-        /// `DELETE … USING a, b …` — `USING` is `DELETE`'s spelling of `FROM`.
+        /// `DELETE … USING a, b …`: `USING` is `DELETE`'s spelling of `FROM`.
         using: Vec<TableExpr>,
         filter: Option<Expr>,
         returning: Option<Returning>,
@@ -429,7 +431,7 @@ pub enum Statement {
         restart_identity: bool,
         /// `CASCADE` was given, widening the truncated set to every table
         /// holding a foreign key onto one of `names` (and, transitively, onto
-        /// those). `RESTRICT` — the default — instead refuses with `0A000` when
+        /// those). `RESTRICT`, the default, instead refuses with `0A000` when
         /// such a table is not itself listed. `CASCADE` does not fire
         /// `ON DELETE` actions; it only enlarges the set.
         cascade: bool,
@@ -551,13 +553,13 @@ pub enum Statement {
         server: String,
         into_schema: String,
     },
-    /// `LISTEN <channel>` — subscribe the session to an asynchronous notification
+    /// `LISTEN <channel>`: subscribe the session to an asynchronous notification
     /// channel. The channel is an identifier (unquoted spellings fold to
     /// lowercase; quoted spellings keep their case).
     Listen {
         channel: String,
     },
-    /// `NOTIFY <channel> [, '<payload>']` — queue a notification for delivery at
+    /// `NOTIFY <channel> [, '<payload>']`: queue a notification for delivery at
     /// commit. `payload` is `None` for the bare form (`PostgreSQL` delivers an
     /// empty payload).
     Notify {
@@ -568,7 +570,7 @@ pub enum Statement {
     Unlisten {
         target: UnlistenTarget,
     },
-    /// S1: `SAVEPOINT <name>` — open a named sub-transaction level.
+    /// S1: `SAVEPOINT <name>`. Opens a named sub-transaction level.
     Savepoint {
         name: String,
     },
@@ -607,8 +609,8 @@ pub enum Statement {
         name: String,
         param_types: Vec<ColumnType>,
         /// The whole query string the `PREPARE` arrived in, verbatim.
-        /// `PostgreSQL` stores the parse state's source text — not the
-        /// statement's own slice of it — so a `PREPARE` sent alongside other
+        /// `PostgreSQL` stores the parse state's source text, not the
+        /// statement's own slice of it. So a `PREPARE` sent alongside other
         /// statements reports all of them, and a trailing semicolon or trailing
         /// whitespace survives into `pg_prepared_statements.statement`.
         source: String,
@@ -705,16 +707,16 @@ pub enum Statement {
 /// What a `CREATE TYPE` creates.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CreateTypeDefinition {
-    /// `AS (field type, …)` — a composite type. The list may be empty
+    /// `AS (field type, …)`: a composite type. The list may be empty
     /// (`CREATE TYPE t AS ()` is legal and creates a zero-attribute type).
     Composite(Vec<CompositeFieldDef>),
-    /// `AS ENUM ('a', 'b', …)` — the labels in declaration order, which is the
+    /// `AS ENUM ('a', 'b', …)`: the labels in declaration order, which is the
     /// order `<` uses. The list may be empty.
     Enum(Vec<String>),
-    /// `AS RANGE (SUBTYPE = …, …)` — parsed so the statement is recognised and
+    /// `AS RANGE (SUBTYPE = …, …)`: parsed so the statement is recognised and
     /// refused with a clear message rather than a syntax error.
     Range,
-    /// A bare `CREATE TYPE name` — a shell type.
+    /// A bare `CREATE TYPE name`: a shell type.
     Shell,
 }
 
@@ -723,7 +725,7 @@ pub enum CreateTypeDefinition {
 pub struct CompositeFieldDef {
     pub name: String,
     pub ty: ColumnType,
-    /// `COLLATE "name"`, accepted and ignored — every collation the engine has
+    /// `COLLATE "name"`, accepted and ignored. Every collation the engine has
     /// orders text by byte value.
     pub collation: Option<String>,
 }
@@ -741,7 +743,7 @@ pub enum AlterTypeAction {
     RenameValue { from: String, to: String },
     /// `RENAME TO new_name`.
     RenameTo(String),
-    /// `OWNER TO role` — accepted and ignored; the engine has one type owner.
+    /// `OWNER TO role`: accepted and ignored; the engine has one type owner.
     OwnerTo(String),
 }
 
@@ -755,7 +757,7 @@ pub enum EnumValuePosition {
 /// One constraint clause of a `CREATE DOMAIN`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DomainConstraint {
-    /// `DEFAULT <expr>` — the source text, which the executor evaluates.
+    /// `DEFAULT <expr>`: the source text, which the executor evaluates.
     Default(String),
     NotNull,
     Null,
@@ -790,7 +792,7 @@ pub enum AlterDomainAction {
     RenameConstraint { from: String, to: String },
     /// `RENAME TO new_name`.
     RenameTo(String),
-    /// `OWNER TO role` — accepted and ignored.
+    /// `OWNER TO role`: accepted and ignored.
     OwnerTo(String),
 }
 
@@ -885,7 +887,7 @@ pub enum FetchDirection {
     Relative(FetchCount),
     /// `ABSOLUTE n`, `FIRST` (`ABSOLUTE 1`), `LAST` (`ABSOLUTE -1`).
     Absolute(i64),
-    /// `RELATIVE n` — one row, `n` positions from the current one.
+    /// `RELATIVE n`: one row, `n` positions from the current one.
     RelativeOne(i64),
 }
 
@@ -894,9 +896,9 @@ pub enum FetchDirection {
 pub enum FetchCount {
     /// A signed row count; negative means backward.
     Rows(i64),
-    /// `ALL` — every remaining row forward.
+    /// `ALL`: every remaining row forward.
     AllForward,
-    /// `BACKWARD ALL` — every remaining row backward.
+    /// `BACKWARD ALL`: every remaining row backward.
     AllBackward,
 }
 
@@ -998,21 +1000,21 @@ pub enum ExplainFormat {
 /// The target of an `UNLISTEN` statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnlistenTarget {
-    /// `UNLISTEN <channel>` — drop one subscription.
+    /// `UNLISTEN <channel>`: drop one subscription.
     Channel(String),
-    /// `UNLISTEN *` — drop every subscription held by the session.
+    /// `UNLISTEN *`: drop every subscription held by the session.
     All,
 }
 
 /// Where an `INSERT`'s rows come from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InsertSource {
-    /// `VALUES (…), (…)` — a row may contain `DEFAULT` in any position.
+    /// `VALUES (…), (…)`: a row may contain `DEFAULT` in any position.
     Values(Vec<Vec<Expr>>),
-    /// `INSERT … <query>` — a `SELECT`, a set operation, a `TABLE t`, or a
+    /// `INSERT … <query>`: a `SELECT`, a set operation, a `TABLE t`, or a
     /// `VALUES` carrying its own `ORDER BY`/`LIMIT`.
     Query(Box<QueryExpr>),
-    /// `DEFAULT VALUES` — exactly one row, every column defaulted.
+    /// `DEFAULT VALUES`: exactly one row, every column defaulted.
     DefaultValues,
 }
 
@@ -1035,8 +1037,8 @@ pub struct Assignment {
     pub targets: Vec<String>,
     /// The subscripts of a subscripted target (`SET j['a'][0] = e`,
     /// `SET a[1:2] = ARRAY[…]`); empty for an ordinary column assignment. Only
-    /// the single-target form can carry them, and the assignment then *updates*
-    /// the column rather than replacing it — so, unlike a plain assignment, two
+    /// the single-target form can carry them. The assignment then *updates* the
+    /// column and does not replace it. So, unlike a plain assignment, two
     /// subscripted entries may name the same column.
     pub subscripts: Vec<ArraySubscript>,
     pub value: AssignmentValue,
@@ -1045,12 +1047,12 @@ pub struct Assignment {
 /// The right-hand side of an [`Assignment`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssignmentValue {
-    /// `SET a = e` — one expression for one target.
+    /// `SET a = e`: one expression for one target.
     Expr(Expr),
-    /// `SET (a, b) = ROW(e1, e2)` or `SET (a, b) = (e1, e2)` — one expression
+    /// `SET (a, b) = ROW(e1, e2)` or `SET (a, b) = (e1, e2)`: one expression
     /// per target.
     Row(Vec<Expr>),
-    /// `SET (a, b) = (SELECT …)` — a single-row subquery whose column count
+    /// `SET (a, b) = (SELECT …)`: a single-row subquery whose column count
     /// must equal the target count. Zero rows assign NULL to every target.
     Subquery(Box<QueryExpr>),
 }
@@ -1081,11 +1083,11 @@ pub struct MergeWhen {
 /// Which side of the join a `MERGE` `WHEN` clause fires on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeMatchKind {
-    /// `WHEN MATCHED` — a source row that joined a target row.
+    /// `WHEN MATCHED`: a source row that joined a target row.
     Matched,
-    /// `WHEN NOT MATCHED [BY TARGET]` — a source row with no target match.
+    /// `WHEN NOT MATCHED [BY TARGET]`: a source row with no target match.
     NotMatchedByTarget,
-    /// `WHEN NOT MATCHED BY SOURCE` (`PostgreSQL` 17) — a target row that no
+    /// `WHEN NOT MATCHED BY SOURCE` (`PostgreSQL` 17): a target row that no
     /// source row joined.
     NotMatchedBySource,
 }
@@ -1114,7 +1116,7 @@ pub struct OnConflict {
 /// How the conflicting unique index is chosen ("arbiter inference").
 #[derive(Debug, Clone, PartialEq)]
 pub enum OnConflictTarget {
-    /// No inference specification — legal only with `DO NOTHING`, where every
+    /// No inference specification: legal only with `DO NOTHING`, where every
     /// unique index arbitrates.
     None,
     /// `( col, … ) [WHERE <index_predicate>]`. Entries are plain column names;
@@ -1125,14 +1127,14 @@ pub enum OnConflictTarget {
         /// predicate). Retained for parse fidelity; the executor refuses it.
         index_predicate: Option<Expr>,
     },
-    /// `ON CONSTRAINT <name>` — arbitrate by constraint name.
+    /// `ON CONSTRAINT <name>`: arbitrate by constraint name.
     OnConstraint(String),
 }
 
 /// What to do with a row that conflicts.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OnConflictAction {
-    /// `DO NOTHING` — skip the row.
+    /// `DO NOTHING`: skip the row.
     DoNothing,
     /// `DO UPDATE SET a = e, … [WHERE <filter>]`. Assignment right-hand sides and
     /// the filter may reference the target table and the pseudo-table `excluded`.
@@ -1156,8 +1158,8 @@ pub enum RefusalCommand {
     AlterServer,
     AlterUserMapping,
     /// P5: extended planner statistics objects. Gres has no planner statistics,
-    /// so the whole family is recognized and refused rather than persisted as
-    /// metadata nothing reads.
+    /// so the parser recognizes the whole family and refuses it. It does not
+    /// persist metadata that nothing reads.
     CreateStatistics,
     AlterStatistics,
     DropStatistics,
@@ -1520,7 +1522,7 @@ pub enum AlterTableAction {
         new_name: String,
     },
     ValidateConstraint(String),
-    /// `SET (param = value, …)` — heap storage parameters.
+    /// `SET (param = value, …)`: heap storage parameters.
     SetStorageParameters(Vec<(String, Option<String>)>),
     /// `RESET (param, …)`.
     ResetStorageParameters(Vec<String>),
@@ -1541,8 +1543,8 @@ pub enum AlterTableAction {
         finalize: bool,
     },
     /// `SET SCHEMA name`, `SET TABLESPACE name`, `SET {LOGGED|UNLOGGED}`,
-    /// `CLUSTER ON`, `SET WITHOUT CLUSTER`, `{EN,DIS}ABLE TRIGGER`, … — the
-    /// subcommands that parse but have no counterpart in Crabka's storage
+    /// `CLUSTER ON`, `SET WITHOUT CLUSTER`, `{EN,DIS}ABLE TRIGGER`, and the
+    /// other subcommands that parse but have no counterpart in Crabka's storage
     /// model. `label` is the `PostgreSQL` subcommand text for the refusal.
     Unsupported(String),
 }
@@ -1577,7 +1579,7 @@ pub struct PartitionKeyElem {
 pub struct PartitionOf {
     pub parent: RelationRef,
     pub bound: PartitionBound,
-    /// `(a NOT NULL, b WITH OPTIONS DEFAULT 0)` — extra constraints on columns
+    /// `(a NOT NULL, b WITH OPTIONS DEFAULT 0)`: extra constraints on columns
     /// the partition inherits from its parent. A partition declares no types of
     /// its own, so only the qualifier list is written.
     pub column_options: Vec<(String, Vec<ColumnConstraint>)>,
@@ -1590,7 +1592,7 @@ pub struct PartitionOf {
 /// mismatch as 42P16 `invalid bound specification for a list partition`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PartitionBound {
-    /// `DEFAULT` — the catch-all partition.
+    /// `DEFAULT`: the catch-all partition.
     Default,
     /// `FOR VALUES IN (…)`.
     List(Vec<Expr>),
@@ -1676,7 +1678,7 @@ impl LikeClause {
 pub struct IndexKey {
     /// The referenced column for a plain key; `None` for an expression key.
     pub column: Option<String>,
-    /// Source text of the key — the column name, or the expression as written.
+    /// Source text of the key: the column name, or the expression as written.
     pub text: String,
     pub descending: bool,
     /// `NULLS FIRST` (`Some(true)`) / `NULLS LAST` (`Some(false)`); `None` when
@@ -1731,9 +1733,9 @@ pub type OptionList = Vec<(String, String)>;
 pub enum ImportSelector {
     /// Import all tables (no filter clause).
     All,
-    /// `LIMIT TO (table, …)` — import only the listed tables.
+    /// `LIMIT TO (table, …)`: import only the listed tables.
     LimitTo(Vec<String>),
-    /// `EXCEPT (table, …)` — import all tables except the listed ones.
+    /// `EXCEPT (table, …)`: import all tables except the listed ones.
     Except(Vec<String>),
 }
 
@@ -1746,9 +1748,9 @@ pub enum SetValue {
     /// The comma-separated items as written, each already joined from the
     /// space-adjacent tokens that make it up (`SET statement_timeout = 1 min`
     /// is one item). The items stay separate because a *list* parameter
-    /// re-quotes each one on output — `SET search_path = "MySchema", public`
-    /// has to report back as `"MySchema", public`, and an item holding a comma
-    /// has no representation at all once they are joined.
+    /// re-quotes each one on output. `SET search_path = "MySchema", public`
+    /// has to report back as `"MySchema", public`, and an item that holds a
+    /// comma has no representation at all once they are joined.
     Value(Vec<String>),
 }
 
@@ -1894,7 +1896,7 @@ pub struct ForeignKeyRef {
     pub match_type: MatchType,
     pub on_delete: ReferentialAction,
     pub on_update: ReferentialAction,
-    /// `ON DELETE SET { NULL | DEFAULT } (a, b)` — the referencing columns the
+    /// `ON DELETE SET { NULL | DEFAULT } (a, b)`: the referencing columns the
     /// action writes to, in written order. Empty means every referencing
     /// column, which is also the only possibility for `ON UPDATE`: a column
     /// list there is a `0A000` refusal.
@@ -1917,7 +1919,7 @@ pub struct ConstraintAttributes {
     /// Writing `INITIALLY DEFERRED` alone implies it.
     pub deferrable: bool,
     /// `INITIALLY DEFERRED`: the constraint starts each transaction deferred.
-    /// Never true without [`ConstraintAttributes::deferrable`] — `NOT
+    /// Never true without [`ConstraintAttributes::deferrable`], because `NOT
     /// DEFERRABLE INITIALLY DEFERRED` is a `42601` refusal.
     pub initially_deferred: bool,
 }
@@ -1936,15 +1938,15 @@ pub struct ColumnConstraint {
     pub name: Option<String>,
     pub kind: ColumnConstraintKind,
     /// The deferrability written after this one constraint. `not_valid` is
-    /// always false here — `PostgreSQL` accepts `NOT VALID` only on a table
-    /// constraint.
+    /// always false here, because `PostgreSQL` accepts `NOT VALID` only on a
+    /// table constraint.
     pub attributes: ConstraintAttributes,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnConstraintKind {
     NotNull,
-    /// An explicit `NULL` column constraint — `PostgreSQL` accepts it and it
+    /// An explicit `NULL` column constraint. `PostgreSQL` accepts it and it
     /// means "not NOT NULL".
     Null,
     Default(Expr),
@@ -2011,9 +2013,9 @@ impl RowLockStrength {
 pub enum LockWaitPolicy {
     /// Block until the conflicting transaction ends (the default).
     Wait,
-    /// `NOWAIT` — fail immediately with `55P03`.
+    /// `NOWAIT`: fail immediately with `55P03`.
     NoWait,
-    /// `SKIP LOCKED` — omit the row from the result.
+    /// `SKIP LOCKED`: omit the row from the result.
     SkipLocked,
 }
 
@@ -2027,7 +2029,7 @@ pub enum LockWaitPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockingClause {
     pub strength: RowLockStrength,
-    /// `OF table [, …]` — empty means every relation in the FROM clause.
+    /// `OF table [, …]`: empty means every relation in the FROM clause.
     pub of: Vec<String>,
     pub wait: LockWaitPolicy,
 }
@@ -2035,11 +2037,11 @@ pub struct LockingClause {
 /// `SELECT`'s duplicate-elimination clause.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DistinctClause {
-    /// No `DISTINCT` — the `ALL` default.
+    /// No `DISTINCT`: the `ALL` default.
     All,
-    /// `SELECT DISTINCT` — dedup whole projected output rows.
+    /// `SELECT DISTINCT`: dedup whole projected output rows.
     Distinct,
-    /// `SELECT DISTINCT ON (expr, …)` — keep the first row of each key group in
+    /// `SELECT DISTINCT ON (expr, …)`: keep the first row of each key group in
     /// ORDER BY order. Never empty: `DISTINCT ON ()` is a syntax error.
     On(Vec<Expr>),
 }
@@ -2064,7 +2066,7 @@ impl DistinctClause {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStmt {
     pub projection: Vec<SelectItem>,
-    /// SP33: the FROM clause — a list of join trees. Empty for a FROM-less SELECT;
+    /// SP33: the FROM clause, a list of join trees. Empty for a FROM-less SELECT;
     /// the comma form (`FROM a, b`) is a `Vec<TableExpr>` with len > 1 (implicit
     /// cross join).
     pub from: Vec<TableExpr>,
@@ -2084,17 +2086,17 @@ pub struct SelectStmt {
     /// `WINDOW name AS (…)` definitions, in declaration order.
     pub windows: Vec<NamedWindow>,
     /// Every `f(…) OVER …` call written in this SELECT, in the order the parser
-    /// met them. Each call's place in the expression tree is held by a
-    /// [`window_placeholder`] carrying its index here, so an ordinary
-    /// expression walk never has to know about windowing.
+    /// met them. A [`window_placeholder`] that carries the call's index here
+    /// holds each call's place in the expression tree. So an ordinary
+    /// expression walk never has to know about the window calls.
     pub window_calls: Vec<WindowCall>,
     pub order_by: Vec<OrderItem>,
     /// `LIMIT <expr>` / `FETCH FIRST <expr> ROWS ONLY`. `None` covers both an
     /// absent limit and the explicit `LIMIT ALL`, which mean the same thing.
     pub limit: Option<Expr>,
-    /// SP28: `OFFSET <expr>` — skip the first n output rows (before LIMIT).
+    /// SP28: `OFFSET <expr>`. Skips the first n output rows (before LIMIT).
     pub offset: Option<Expr>,
-    /// `FETCH … WITH TIES` — also emit rows whose ORDER BY key ties the last
+    /// `FETCH … WITH TIES`: also emit rows whose ORDER BY key ties the last
     /// row the limit admits.
     pub with_ties: bool,
     pub locking: Option<LockingClause>,
@@ -2102,13 +2104,13 @@ pub struct SelectStmt {
 
 /// The set-producing structure of a `GROUP BY` clause (PG18 `group_clause`).
 ///
-/// Present only when the clause needs expansion into several grouping sets — that
-/// is, whenever `ROLLUP`, `CUBE`, `GROUPING SETS`, the empty grouping set `()`, or
-/// the `DISTINCT` modifier appears. A plain `GROUP BY a, b` leaves
-/// [`SelectStmt::grouping`] `None` and is executed by the ordinary grouped path.
+/// Present only when the clause needs expansion into several grouping sets,
+/// that is, whenever `ROLLUP`, `CUBE`, `GROUPING SETS`, the empty grouping set
+/// `()`, or the `DISTINCT` modifier appears. A plain `GROUP BY a, b` leaves
+/// [`SelectStmt::grouping`] `None`, and the ordinary grouped path executes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupingClause {
-    /// `GROUP BY DISTINCT …` — deduplicate the expanded grouping sets. `ALL` is
+    /// `GROUP BY DISTINCT …`: deduplicate the expanded grouping sets. `ALL` is
     /// the default and is recorded as `false`.
     pub distinct: bool,
     /// The clause's items in source order; the expansion is their cross product.
@@ -2127,13 +2129,13 @@ pub enum GroupItem {
     /// The empty grouping set, `()`.
     Empty,
     /// `(a, b)` used inside `ROLLUP`/`CUBE`/`GROUPING SETS` as one composite
-    /// element — the whole tuple joins or leaves a grouping set together.
+    /// element. The whole tuple joins or leaves a grouping set together.
     Composite(Vec<usize>),
-    /// `ROLLUP (e1, e2, …)` — the n+1 prefixes of the element list, longest first.
+    /// `ROLLUP (e1, e2, …)`: the n+1 prefixes of the element list, longest first.
     Rollup(Vec<GroupItem>),
-    /// `CUBE (e1, e2, …)` — every subset of the element list.
+    /// `CUBE (e1, e2, …)`: every subset of the element list.
     Cube(Vec<GroupItem>),
-    /// `GROUPING SETS (item, …)` — the listed sets, which may nest.
+    /// `GROUPING SETS (item, …)`: the listed sets, which may nest.
     GroupingSets(Vec<GroupItem>),
 }
 
@@ -2151,8 +2153,8 @@ pub struct QueryExpr {
     pub locking: Option<LockingClause>,
 }
 
-/// SP39: a VALUES row constructor list. Every row is non-empty; cross-row arity
-/// is checked during executor analysis so it gets `PostgreSQL`'s analysis SQLSTATE.
+/// SP39: a VALUES row constructor list. Every row is non-empty. Executor
+/// analysis checks cross-row arity, so it gets `PostgreSQL`'s analysis SQLSTATE.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValuesStmt {
     pub rows: Vec<Vec<Expr>>,
@@ -2171,7 +2173,7 @@ pub struct Cte {
     pub body: CteBody,
     /// `MATERIALIZED` / `NOT MATERIALIZED`. `None` is `PostgreSQL`'s default, which
     /// inlines a side-effect-free CTE referenced exactly once. This is an optimizer
-    /// hint only — it never changes the rows a CTE produces.
+    /// hint only. It never changes the rows a CTE produces.
     pub materialized: Option<bool>,
     /// `SEARCH BREADTH FIRST BY … SET col` / `SEARCH DEPTH FIRST BY … SET col`.
     pub search: Option<CteSearch>,
@@ -2187,7 +2189,7 @@ pub struct CteSearch {
     pub depth_first: bool,
     /// The `BY` column list, naming columns of the CTE's own output.
     pub by: Vec<String>,
-    /// The `SET` column — the name of the appended ordering column.
+    /// The `SET` column: the name of the appended ordering column.
     pub set: String,
 }
 
@@ -2197,12 +2199,12 @@ pub struct CteSearch {
 pub struct CteCycle {
     /// The cycle key columns, naming columns of the CTE's own output.
     pub by: Vec<String>,
-    /// The `SET` column — the appended cycle mark.
+    /// The `SET` column: the appended cycle mark.
     pub set: String,
-    /// `TO value DEFAULT default` — the marked/unmarked values. `None` is
+    /// `TO value DEFAULT default`: the marked/unmarked values. `None` is
     /// `PostgreSQL`'s default of `TRUE`/`FALSE`, which makes the column boolean.
     pub mark_values: Option<(Expr, Expr)>,
-    /// The `USING` column — the appended path column.
+    /// The `USING` column: the appended path column.
     pub using: String,
 }
 
@@ -2273,7 +2275,7 @@ pub enum SetOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectItem {
     Wildcard,
-    /// SP33: `a.*` — every column of one table in scope.
+    /// SP33: `a.*`, every column of one table in scope.
     QualifiedWildcard(String),
     Expr {
         expr: Expr,
@@ -2281,9 +2283,9 @@ pub enum SelectItem {
     },
 }
 
-/// SP33: one entry in the FROM clause — a base table, a derived table
-/// (subquery), or a join of two table-exprs. The comma form (`FROM a, b`) is a
-/// `Vec<TableExpr>` with len > 1 (implicit cross join).
+/// SP33: one entry in the FROM clause. An entry is a base table, a derived
+/// table (subquery), or a join of two table-exprs. The comma form (`FROM a, b`)
+/// is a `Vec<TableExpr>` with len > 1 (implicit cross join).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableExpr {
     Table {
@@ -2300,7 +2302,7 @@ pub enum TableExpr {
         subquery: QueryExpr,
         alias: String, // PG requires a derived table to be aliased
         columns: Option<Vec<String>>,
-        /// `LATERAL (subquery)` — the subquery may reference columns of FROM
+        /// `LATERAL (subquery)`: the subquery may reference columns of FROM
         /// items to its left, and is re-evaluated for each of their rows.
         lateral: bool,
     },
@@ -2312,8 +2314,8 @@ pub enum TableExpr {
     },
     /// One or more set-returning functions in FROM position
     /// (`unnest(a) AS u(x)`, `ROWS FROM (f(…), g(…)) WITH ORDINALITY`). The
-    /// parser accepts any function name and argument list; which functions are
-    /// actually table-producing is decided by the executor.
+    /// parser accepts any function name and argument list. The executor decides
+    /// which functions are actually table-producing.
     Function {
         /// The calls this item expands. Longer than one element only for the
         /// `ROWS FROM (…)` spelling.
@@ -2322,7 +2324,7 @@ pub enum TableExpr {
         /// `ROWS FROM` differs from a bare call only in that a bare call may
         /// carry a column-definition list directly.
         rows_from: bool,
-        /// `WITH ORDINALITY` — append a `bigint` column counting output rows
+        /// `WITH ORDINALITY`: append a `bigint` column counting output rows
         /// from 1.
         with_ordinality: bool,
         /// Explicit `LATERAL`. Function arguments are lateral in `PostgreSQL`
@@ -2340,7 +2342,7 @@ pub enum TableExpr {
 pub struct TableFuncCall {
     pub name: String,
     pub args: Vec<Expr>,
-    /// `AS (col type, …)` — a column-definition list, which `PostgreSQL` allows
+    /// `AS (col type, …)`: a column-definition list, which `PostgreSQL` allows
     /// only for functions returning `record`.
     pub column_defs: Option<Vec<TableFuncColumnDef>>,
 }
@@ -2382,22 +2384,22 @@ pub enum JoinConstraint {
 pub struct OrderItem {
     pub expr: Expr,
     pub asc: bool,
-    /// Where NULLs sort. The parser resolves `PostgreSQL`'s defaults here —
-    /// `NULLS LAST` for ASC, `NULLS FIRST` for DESC — so comparison never has to
+    /// Where NULLs sort. The parser resolves `PostgreSQL`'s defaults here:
+    /// `NULLS LAST` for ASC, `NULLS FIRST` for DESC. So comparison never has to
     /// re-derive them from `asc`.
     pub nulls_first: bool,
 }
 
-/// One entry of a subscript chain — `a[i]`, `a[lo:hi]`, `a[:hi]`, `a[lo:]`.
+/// One entry of a subscript chain: `a[i]`, `a[lo:hi]`, `a[:hi]`, `a[lo:]`.
 ///
 /// An omitted slice bound means "this dimension's own bound", which the
 /// executor fills in from the array being read or written; `PostgreSQL` has no
 /// syntax for an omitted bound outside a slice.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArraySubscript {
-    /// `a[i]` — one element of this dimension.
+    /// `a[i]`: one element of this dimension.
     Index(Expr),
-    /// `a[lo:hi]` — a range of this dimension, either bound omissible.
+    /// `a[lo:hi]`: a range of this dimension, either bound omissible.
     Slice {
         lower: Option<Expr>,
         upper: Option<Expr>,
@@ -2436,7 +2438,7 @@ pub enum Expr {
     IntLiteral(String),
     /// SP32: a decimal/exponent literal. `PostgreSQL` types these as `numeric`
     /// (SP30 typed them `float8`; SP32 introduced `numeric`, so a bare `1.5`/`1e3`
-    /// is now scale-faithful `numeric` — `float8` requires an explicit cast).
+    /// is now scale-faithful `numeric`, and `float8` needs an explicit cast).
     NumericLiteral(String),
     StringLiteral(String),
     BoolLiteral(bool),
@@ -2461,15 +2463,15 @@ pub enum Expr {
         right: Box<Expr>,
     },
     /// SP27: a function call, e.g. `count(*)`, `sum(a + 1)`, `count(DISTINCT x)`.
-    /// Whether a name is an aggregate (vs. an unknown/undefined function) is
-    /// decided by the executor, not the parser.
+    /// The executor decides whether a name is an aggregate or an
+    /// unknown/undefined function. The parser does not.
     Func(FuncCall),
     /// SP28: `expr IS [NOT] NULL`. Never evaluates to NULL itself.
     IsNull {
         expr: Box<Expr>,
         negated: bool,
     },
-    /// SP28: `expr [NOT] IN (e1, e2, …)` — value-list membership (not a subquery).
+    /// SP28: `expr [NOT] IN (e1, e2, …)`, value-list membership (not a subquery).
     InList {
         expr: Box<Expr>,
         list: Vec<Expr>,
@@ -2500,24 +2502,24 @@ pub enum Expr {
         whens: Vec<(Expr, Expr)>,
         else_result: Option<Box<Expr>>,
     },
-    /// SP31: an explicit cast — `CAST(expr AS ty)` or `expr::ty`. The target type
-    /// is resolved to a [`ColumnType`] by the parser (an unknown type name is a
-    /// parse error); the executor performs the value conversion.
+    /// SP31: an explicit cast, `CAST(expr AS ty)` or `expr::ty`. The target type
+    /// The parser resolves the target type to a [`ColumnType`], and an unknown
+    /// type name is a parse error. The executor does the value conversion.
     Cast {
         expr: Box<Expr>,
         ty: ColumnType,
     },
-    /// `(expr).field` — one attribute of a composite value. Only reachable
+    /// `(expr).field`: one attribute of a composite value. Only reachable
     /// after a parenthesised expression, which is what distinguishes it from
     /// the table-qualified column reference `a.b`.
     FieldSelect {
         base: Box<Expr>,
         field: String,
     },
-    /// `(expr).*` — every attribute of a composite value, expanded into as many
+    /// `(expr).*`: every attribute of a composite value, expanded into as many
     /// output columns.
     FieldSelectAll(Box<Expr>),
-    /// `expr COLLATE "name"` — a collation derivation. It never changes the
+    /// `expr COLLATE "name"`: a collation derivation. It never changes the
     /// value, only the collation the comparison and ordering of that value use.
     /// The engine has exactly the collations `pg_collation` reports (`default`,
     /// `C`, `POSIX`), which all order text by byte value, so every collation it
@@ -2528,13 +2530,13 @@ pub enum Expr {
         expr: Box<Expr>,
         collation: String,
     },
-    /// SP34: a scalar subquery `(SELECT …)` — one row, one column, usable as an
+    /// SP34: a scalar subquery `(SELECT …)`, one row, one column, usable as an
     /// expression. Resolved (uncorrelated) to `Const` by the executor pre-pass.
     ScalarSubquery(Box<QueryExpr>),
-    /// SP34: `EXISTS (SELECT …)` — true iff the subquery returns ≥1 row. `NOT
+    /// SP34: `EXISTS (SELECT …)`, true if and only if the subquery returns ≥1 row. `NOT
     /// EXISTS` is the prefix `NOT` wrapping this.
     Exists(Box<QueryExpr>),
-    /// SP34: `expr [NOT] IN (SELECT …)` — subquery membership (single-column subquery).
+    /// SP34: `expr [NOT] IN (SELECT …)`, subquery membership (single-column subquery).
     InSubquery {
         expr: Box<Expr>,
         subquery: Box<QueryExpr>,
@@ -2548,25 +2550,26 @@ pub enum Expr {
         all: bool,
         subquery: Box<QueryExpr>,
     },
-    /// `expr op ANY|SOME|ALL (<array expression>)` — the array form of a
-    /// quantified comparison, as emitted by every driver that binds an IN-list as
-    /// one parameter (`= ANY($1)`). The subquery form is [`Expr::Quantified`];
-    /// the two are disambiguated by lookahead after the quantifier's `(`.
+    /// `expr op ANY|SOME|ALL (<array expression>)`: the array form of a
+    /// quantified comparison, which every driver that binds an IN-list as one
+    /// parameter emits (`= ANY($1)`). The subquery form is
+    /// [`Expr::Quantified`]. Lookahead after the quantifier's `(` tells the two
+    /// apart.
     QuantifiedArray {
         expr: Box<Expr>,
         op: BinaryOp,
         all: bool,
         array: Box<Expr>,
     },
-    /// `ARRAY[e1, e2, …]` — an array constructor. The element list may be empty
+    /// `ARRAY[e1, e2, …]`: an array constructor. The element list may be empty
     /// (`ARRAY[]`), in which case the executor needs a cast to type it. A
     /// nested constructor (`ARRAY[[1,2],[3,4]]`, `ARRAY[ARRAY[1,2]]`) is an
     /// element that is itself an `ArrayLiteral`, and adds a dimension.
     ArrayLiteral(Vec<Expr>),
-    /// `ARRAY(subquery)` — the array aggregation of a single-column subquery's
+    /// `ARRAY(subquery)`: the array aggregation of a single-column subquery's
     /// rows, in the subquery's own order.
     ArraySubquery(Box<QueryExpr>),
-    /// A row constructor — `ROW(a, b, …)` or the bare parenthesised `(a, b, …)`
+    /// A row constructor: `ROW(a, b, …)` or the bare parenthesised `(a, b, …)`
     /// with two or more elements. `ROW(x)` and `ROW()` are rows too; a bare
     /// `(x)` is ordinary grouping, not a one-element row.
     ///
@@ -2574,7 +2577,7 @@ pub enum Expr {
     /// and `IS [NOT] DISTINCT FROM`, and follow `PostgreSQL`'s field-wise
     /// `IS NULL` rule (`ROW(1, NULL) IS NULL` is false).
     Row(Vec<Expr>),
-    /// `base[index]` — a single-subscript reference. This is the jsonb
+    /// `base[index]`: a single-subscript reference. This is the jsonb
     /// subscripting form as well as the one-dimensional array one, and a chain
     /// of jsonb subscripts nests as `Subscript { base: Subscript { … } }`.
     Subscript {
@@ -2583,21 +2586,21 @@ pub enum Expr {
     },
     /// `base[s1][s2]…` where the chain is longer than one plain subscript or
     /// contains a slice. `PostgreSQL` treats the whole chain as **one** array
-    /// reference — `a[2][3]` picks an element of a two-dimensional array rather
-    /// than subscripting `a[2]` — so it cannot be modelled by nesting
-    /// [`Expr::Subscript`].
+    /// reference. `a[2][3]` picks an element of a two-dimensional array and
+    /// does not subscript `a[2]`. So a nest of [`Expr::Subscript`] cannot model
+    /// it.
     ArrayRef {
         base: Box<Expr>,
         subscripts: Vec<ArraySubscript>,
     },
-    /// SP34: an executor-produced literal — a resolved subquery folded to a value
+    /// SP34: an executor-produced literal, a resolved subquery folded to a value
     /// carrying its static type. The parser NEVER emits this; `ty` matters because a
     /// zero-row scalar subquery is a typed NULL.
     Const {
         value: Datum,
         ty: ColumnType,
     },
-    /// One of the SQL/JSON standard expression forms — `IS JSON`, the
+    /// One of the SQL/JSON standard expression forms: `IS JSON`, the
     /// `JSON_OBJECT`/`JSON_ARRAY` constructors, and the
     /// `JSON_EXISTS`/`JSON_VALUE`/`JSON_QUERY` query functions. Boxed because
     /// the payload is much larger than every other variant.
@@ -2630,14 +2633,14 @@ pub enum SqlJsonExpr {
         absent_on_null: bool,
         returning: Option<ColumnType>,
     },
-    /// `JSON_SCALAR(expr)` — the SQL value as the JSON scalar it maps to.
+    /// `JSON_SCALAR(expr)`: the SQL value as the JSON scalar it maps to.
     Scalar(Expr),
-    /// `JSON_SERIALIZE(expr [RETURNING type])` — a JSON value rendered as text.
+    /// `JSON_SERIALIZE(expr [RETURNING type])`: a JSON value rendered as text.
     Serialize {
         expr: Expr,
         returning: Option<ColumnType>,
     },
-    /// `JSON(expr [FORMAT JSON] [{WITH | WITHOUT} UNIQUE [KEYS]])` — parse text
+    /// `JSON(expr [FORMAT JSON] [{WITH | WITHOUT} UNIQUE [KEYS]])`: parse text
     /// as a JSON document.
     Parse { expr: Expr, unique_keys: bool },
     /// `JSON_EXISTS` / `JSON_VALUE` / `JSON_QUERY`. Boxed: it is by far the
@@ -2647,8 +2650,8 @@ pub enum SqlJsonExpr {
 
 impl SqlJsonExpr {
     /// Every sub-expression this node evaluates, in evaluation order. The
-    /// executor's expression walks drive this, so a new field carrying an
-    /// `Expr` must be listed here or it will be invisible to them.
+    /// executor's expression walks drive this. You must list a new field that
+    /// carries an `Expr` here. If you do not, those walks cannot see it.
     #[must_use]
     pub fn children(&self) -> Vec<&Expr> {
         match self {
@@ -2766,22 +2769,22 @@ pub enum JsonItemType {
 /// One of the three SQL/JSON query functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonQueryOp {
-    /// `JSON_EXISTS` — boolean, "does the path match anything?".
+    /// `JSON_EXISTS`: boolean, "does the path match anything?".
     Exists,
-    /// `JSON_VALUE` — one SQL scalar, unquoted.
+    /// `JSON_VALUE`: one SQL scalar, unquoted.
     Value,
-    /// `JSON_QUERY` — one JSON value.
+    /// `JSON_QUERY`: one JSON value.
     Query,
 }
 
 /// `JSON_QUERY`'s array-wrapper option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonWrapper {
-    /// `WITHOUT WRAPPER` — the default; more than one item is an error.
+    /// `WITHOUT WRAPPER`: the default; more than one item is an error.
     Without,
-    /// `WITH CONDITIONAL WRAPPER` — wrap only when the result is not a single item.
+    /// `WITH CONDITIONAL WRAPPER`: wrap only when the result is not a single item.
     Conditional,
-    /// `WITH [UNCONDITIONAL] WRAPPER` — always wrap in an array.
+    /// `WITH [UNCONDITIONAL] WRAPPER`: always wrap in an array.
     Unconditional,
 }
 
@@ -2806,7 +2809,7 @@ pub struct JsonQuery {
     pub context: Expr,
     /// The jsonpath, as an expression (usually a string literal).
     pub path: Expr,
-    /// `PASSING v AS name, …` — the jsonpath variables.
+    /// `PASSING v AS name, …`: the jsonpath variables.
     pub passing: Vec<(String, Expr)>,
     pub returning: Option<ColumnType>,
     pub wrapper: JsonWrapper,
@@ -2823,12 +2826,14 @@ pub struct FuncCall {
     /// `true` for `f(DISTINCT …)`. `ALL` (the default) parses to `false`.
     pub distinct: bool,
     pub args: FuncArgs,
-    /// `agg(args) FILTER (WHERE predicate)` — only rows for which the predicate
-    /// is true are fed to the aggregate. `None` when the call had no clause.
+    /// `agg(args) FILTER (WHERE predicate)`: the aggregate receives only the
+    /// rows for which the predicate is true. `None` when the call had no
+    /// clause.
     ///
     /// Meaningful only for an aggregate (and, in `PostgreSQL`, an aggregate used
-    /// as a window function); a plain scalar call cannot carry one, and any path
-    /// that cannot honour it refuses rather than silently dropping it.
+    /// as a window function). A plain scalar call cannot carry one, and any
+    /// path that cannot honour it refuses and never drops it without a
+    /// message.
     pub filter: Option<Box<Expr>>,
 }
 
@@ -2840,8 +2845,8 @@ pub enum FuncArgs {
     Exprs(Vec<Expr>),
 }
 
-/// The scope qualifier under which a `SELECT`'s window-function results are
-/// bound while its expressions are evaluated.
+/// The scope qualifier that binds a `SELECT`'s window-function results during
+/// the evaluation of its expressions.
 ///
 /// `$` cannot begin an unquoted identifier, so no user column can collide with
 /// a window binding and no user expression can name one.
@@ -2862,8 +2867,10 @@ pub fn window_binding_parts(name: &str) -> Option<(usize, &str)> {
     Some((index.parse().ok()?, label))
 }
 
-/// The expression standing in for the window call at `index` — a reference to
-/// the synthetic column its value is computed into.
+/// The expression that stands in for the window call at `index`.
+///
+/// The expression is a reference to the synthetic column that holds the
+/// window call's value.
 #[must_use]
 pub fn window_placeholder(index: usize, label: &str) -> Expr {
     Expr::Column {
@@ -2890,8 +2897,8 @@ pub fn window_placeholder_index(expr: &Expr) -> Option<usize> {
 
 /// One `f(…) [FILTER (WHERE …)] OVER …` call lifted out of a `SELECT`.
 ///
-/// The call's place in the expression tree is held by a [`window_placeholder`]
-/// carrying this call's index in [`SelectStmt::window_calls`].
+/// A [`window_placeholder`] that carries this call's index in
+/// [`SelectStmt::window_calls`] holds the call's place in the expression tree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowCall {
     /// The function name, lowercased by the lexer.
@@ -2899,7 +2906,7 @@ pub struct WindowCall {
     /// `true` for `f(DISTINCT …) OVER …`, which `PostgreSQL` refuses (0A000).
     pub distinct: bool,
     pub args: FuncArgs,
-    /// `FILTER (WHERE …)` — allowed only on an ordinary aggregate.
+    /// `FILTER (WHERE …)`: allowed only on an ordinary aggregate.
     pub filter: Option<Expr>,
     pub over: WindowRef,
 }
@@ -2963,7 +2970,7 @@ pub enum FrameBound {
     UnboundedFollowing,
 }
 
-/// `EXCLUDE …` — which rows the frame drops around the current row.
+/// `EXCLUDE …`: which rows the frame drops around the current row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FrameExclusion {
     /// `EXCLUDE NO OTHERS`, the default.
@@ -2977,24 +2984,24 @@ pub enum FrameExclusion {
 /// Which pattern language an [`Expr::Like`] node's pattern is written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchKind {
-    /// `LIKE` — `%` and `_` wildcards, case-sensitive.
+    /// `LIKE`: `%` and `_` wildcards, case-sensitive.
     Like,
-    /// `ILIKE` — `LIKE` with ASCII case folding.
+    /// `ILIKE`: `LIKE` with ASCII case folding.
     ILike,
-    /// `SIMILAR TO` — the SQL-standard regular-expression dialect, which
-    /// `PostgreSQL` implements by translating the pattern to a POSIX regexp.
+    /// `SIMILAR TO`: the SQL-standard regular-expression dialect. `PostgreSQL`
+    /// implements it and translates the pattern to a POSIX regexp.
     Similar,
 }
 
 /// A one-operand operator: the prefix forms (`NOT`, unary `-`, `~`, `@`, `|/`,
 /// `||/`) and SQL's six postfix boolean tests. The tests belong here because
-/// that is exactly what they are — one boolean operand in, one never-NULL
+/// that is exactly what they are: one boolean operand in, one never-NULL
 /// boolean out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
     Neg,
-    /// Prefix `+` — identity on the numeric types, and defined on nothing else
+    /// Prefix `+`: identity on the numeric types, and defined on nothing else
     /// (`+'x'::text` is 42883 in `PostgreSQL`, not a no-op). It is an operator,
     /// not a sign: `ORDER BY +1` sorts by the constant `1`, where `ORDER BY -1`
     /// is the output position -1.
@@ -3007,81 +3014,81 @@ pub enum UnaryOp {
     IsFalse,
     /// `expr IS NOT FALSE`
     IsNotFalse,
-    /// `expr IS UNKNOWN` — `IS NULL` restricted to a boolean operand.
+    /// `expr IS UNKNOWN`: `IS NULL` restricted to a boolean operand.
     IsUnknown,
     /// `expr IS NOT UNKNOWN`
     IsNotUnknown,
-    /// Prefix `~` — bitwise NOT. Spelled like the infix regex-match operator;
+    /// Prefix `~`: bitwise NOT. Spelled like the infix regex-match operator;
     /// only the position tells them apart.
     BitNot,
-    /// Prefix `@` — absolute value.
+    /// Prefix `@`: absolute value.
     Abs,
-    /// Prefix `|/` — square root (`float8`).
+    /// Prefix `|/`: square root (`float8`).
     Sqrt,
-    /// Prefix `||/` — cube root (`float8`).
+    /// Prefix `||/`: cube root (`float8`).
     Cbrt,
-    /// Prefix `!!` — tsquery boolean negation.
+    /// Prefix `!!`: tsquery boolean negation.
     TsNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Add,
-    /// `-`. Also the jsonb/array "delete key/element" operator — the operand
+    /// `-`. Also the jsonb/array "delete key/element" operator. The operand
     /// types disambiguate at evaluation time, not at parse time.
     Sub,
     Mul,
     Div,
     /// SP29: `||` string concatenation. Also jsonb and array concatenation.
     Concat,
-    /// jsonb `->` — object field / array element, as jsonb.
+    /// jsonb `->`: object field / array element, as jsonb.
     JsonGet,
-    /// jsonb `->>` — object field / array element, as text.
+    /// jsonb `->>`: object field / array element, as text.
     JsonGetText,
-    /// jsonb `#>` — value at a text path, as jsonb.
+    /// jsonb `#>`: value at a text path, as jsonb.
     JsonGetPath,
-    /// jsonb `#>>` — value at a text path, as text.
+    /// jsonb `#>>`: value at a text path, as text.
     JsonGetPathText,
-    /// jsonb/array `@>` — left contains right.
+    /// jsonb/array `@>`: left contains right.
     Contains,
-    /// jsonb/array `<@` — left is contained by right.
+    /// jsonb/array `<@`: left is contained by right.
     ContainedBy,
-    /// jsonb `?` — the string exists as a top-level key (or array element).
+    /// jsonb `?`: the string exists as a top-level key (or array element).
     KeyExists,
-    /// jsonb `?|` — any of the given strings exist as top-level keys.
+    /// jsonb `?|`: any of the given strings exist as top-level keys.
     KeyExistsAny,
-    /// jsonb `?&` — all of the given strings exist as top-level keys.
+    /// jsonb `?&`: all of the given strings exist as top-level keys.
     KeyExistsAll,
-    /// jsonb `@?` — the jsonpath on the right finds at least one item.
+    /// jsonb `@?`: the jsonpath on the right finds at least one item.
     JsonPathExists,
-    /// jsonb `@@` — the jsonpath predicate on the right, as a three-valued boolean.
+    /// jsonb `@@`: the jsonpath predicate on the right, as a three-valued boolean.
     JsonPathMatch,
-    /// array `&&` — the two arrays have at least one element in common.
+    /// array `&&`: the two arrays have at least one element in common.
     Overlaps,
-    /// `tsquery <-> tsquery` — adjacent phrase composition.
+    /// `tsquery <-> tsquery`: adjacent phrase composition.
     Phrase,
-    /// `~` — the left string matches the POSIX regular expression on the right.
+    /// `~`: the left string matches the POSIX regular expression on the right.
     Match,
-    /// `~*` — [`BinaryOp::Match`], case-insensitively.
+    /// `~*`: [`BinaryOp::Match`], case-insensitively.
     MatchCi,
-    /// `!~` — the negation of [`BinaryOp::Match`].
+    /// `!~`: the negation of [`BinaryOp::Match`].
     NotMatch,
-    /// `!~*` — the negation of [`BinaryOp::MatchCi`].
+    /// `!~*`: the negation of [`BinaryOp::MatchCi`].
     NotMatchCi,
-    /// `&` — bitwise AND on two integers of the same width.
+    /// `&`: bitwise AND on two integers of the same width.
     BitAnd,
-    /// `|` — bitwise OR on two integers of the same width.
+    /// `|`: bitwise OR on two integers of the same width.
     BitOr,
-    /// `#` — bitwise XOR on two integers of the same width.
+    /// `#`: bitwise XOR on two integers of the same width.
     BitXor,
-    /// `<<` — bitwise left shift.
+    /// `<<`: bitwise left shift.
     Shl,
-    /// `>>` — bitwise (arithmetic) right shift.
+    /// `>>`: bitwise (arithmetic) right shift.
     Shr,
-    /// `^` — exponentiation. `float8` unless an operand is `numeric`, and
+    /// `^`: exponentiation. `float8` unless an operand is `numeric`, and
     /// LEFT-associative in `PostgreSQL` (`2^3^2` is 64, not 512).
     Pow,
-    /// `%` — modulo. Integer and `numeric` only; `float8` has no `%`.
+    /// `%`: modulo. Integer and `numeric` only; `float8` has no `%`.
     Mod,
     Eq,
     Ne,
@@ -3089,10 +3096,10 @@ pub enum BinaryOp {
     Le,
     Gt,
     Ge,
-    /// `IS DISTINCT FROM` — null-safe inequality. Two NULLs are *not* distinct,
+    /// `IS DISTINCT FROM`: null-safe inequality. Two NULLs are *not* distinct,
     /// a NULL and a non-NULL are; the result is never NULL.
     IsDistinctFrom,
-    /// `IS NOT DISTINCT FROM` — null-safe equality, the negation of
+    /// `IS NOT DISTINCT FROM`: null-safe equality, the negation of
     /// [`BinaryOp::IsDistinctFrom`]. Never returns NULL.
     IsNotDistinctFrom,
     And,
@@ -3135,8 +3142,8 @@ pub enum RoutineArgMode {
 }
 
 impl RoutineArgMode {
-    /// True when the mode contributes to the routine's *input* signature —
-    /// the type list that identifies a routine for overload resolution.
+    /// True when the mode contributes to the routine's *input* signature, the
+    /// type list that identifies a routine for overload resolution.
     #[must_use]
     pub const fn is_input(self) -> bool {
         matches!(self, Self::In | Self::InOut | Self::Variadic)
@@ -3186,9 +3193,10 @@ pub struct RoutineArg {
 
 /// P2: a type written in a routine signature.
 ///
-/// A routine may name a composite type by naming a relation, which the parser
-/// cannot resolve; those names are carried through as [`RoutineType::Named`]
-/// and resolved against the catalog when the routine is created.
+/// A routine may name a composite type with a relation name, which the parser
+/// cannot resolve. The parser carries those names through as
+/// [`RoutineType::Named`], and the catalog resolves them when the routine is
+/// created.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoutineType {
     /// The resolved built-in type, absent when the name is not a built-in.
@@ -3227,7 +3235,7 @@ pub struct RoutineTableColumn {
 /// P2: what a routine returns.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoutineReturn {
-    /// No `RETURNS` clause — a procedure, or a function whose whole result
+    /// No `RETURNS` clause: a procedure, or a function whose whole result
     /// comes from its `OUT`/`INOUT` parameters.
     Unspecified,
     /// `RETURNS [SETOF] <type>`. `void` and `record` arrive here as named types.
@@ -3281,7 +3289,7 @@ impl RoutineParallel {
 /// P2: a routine's body.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoutineBody {
-    /// `AS 'text'` / `AS $$ … $$` — the body exactly as written.
+    /// `AS 'text'` / `AS $$ … $$`: the body exactly as written.
     Source(String),
     /// `PostgreSQL` 14's `BEGIN ATOMIC … END` SQL body, parsed at definition
     /// time. `text` is the source of the statement list, used to render
@@ -3315,7 +3323,7 @@ pub enum RoutineOption {
         name: String,
         value: Option<String>,
     },
-    /// `TRANSFORM FOR TYPE …` — recorded but not otherwise interpreted.
+    /// `TRANSFORM FOR TYPE …`: recorded but not otherwise interpreted.
     Transform(Vec<String>),
 }
 

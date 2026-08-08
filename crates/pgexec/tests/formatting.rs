@@ -1,9 +1,11 @@
-//! SP38: `to_char` / `to_timestamp` / `to_date` / make_* / justify_* — end-to-end over the wire.
+//! SP38: `to_char`, `to_timestamp`, `to_date`, make_* and justify_*, end to end
+//! over the wire.
 //!
-//! Exercises the SP38 formatting + construction functions through the full
-//! pgwire → executor stack. Values are read in TEXT mode (simple query protocol)
-//! so the assertions exercise the engine's own text encodings directly; result
-//! OIDs are read from the binary-query `RowDescription`.
+//! These tests exercise the SP38 formatting and construction functions through
+//! the full pgwire to executor stack. Values are read in TEXT mode, through the
+//! simple query protocol, so the assertions exercise the engine's own text
+//! encodings directly. Result OIDs are read from the binary-query
+//! `RowDescription`.
 
 use std::sync::Arc;
 
@@ -12,7 +14,7 @@ use crabka_pgwire::session::SessionConfig;
 use tokio::net::TcpListener;
 use tokio_postgres::NoTls;
 
-/// The fixed "now" used for all clock-function tests.
+/// The fixed "now" that all clock-function tests use.
 const FIXED_NOW: &str = "2024-01-15T12:00:00Z";
 
 fn fixed_clock() -> Arc<FixedClock> {
@@ -48,7 +50,8 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
-/// First column of the first row as text (simple query → engine's own text encoding).
+/// First column of the first row as text, through the simple query protocol and
+/// the engine's own text encoding.
 async fn text(client: &tokio_postgres::Client, sql: &str) -> Option<String> {
     use tokio_postgres::SimpleQueryMessage;
     for m in client.simple_query(sql).await.expect(sql) {
@@ -59,7 +62,7 @@ async fn text(client: &tokio_postgres::Client, sql: &str) -> Option<String> {
     panic!("no row for `{sql}`");
 }
 
-/// All first-column values (text format) for a query, in row order.
+/// All first-column values of a query, in text format and in row order.
 #[allow(dead_code)]
 async fn col0(client: &tokio_postgres::Client, sql: &str) -> Vec<Option<String>> {
     use tokio_postgres::SimpleQueryMessage;

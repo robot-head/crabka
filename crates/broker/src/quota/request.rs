@@ -1,9 +1,11 @@
-//! KIP-124 `request_percentage` helper. The request quota throttles on the
-//! server-side time spent handling a request (a percentage of one
-//! request-handler thread). Called from the per-connection dispatch loop for
-//! most APIs, and inline from the `Produce`/`Fetch` handlers so the request
-//! throttle can be combined (`max`) with the data (byte-rate) throttle into a
-//! single `throttle_time_ms` and a single channel mute (KIP-219).
+//! KIP-124 `request_percentage` helper.
+//!
+//! The request quota throttles on the server-side time a request takes, as a
+//! percentage of one request-handler thread. The per-connection dispatch loop
+//! calls this helper for most APIs. The `Produce` and `Fetch` handlers call it
+//! inline, so that the broker can combine the request throttle with the
+//! byte-rate data throttle, with `max`, into one `throttle_time_ms` and one
+//! channel mute (KIP-219).
 
 use crabka_metadata::MetadataImage;
 use crabka_units::{Time, convert::TimeExt};
@@ -12,14 +14,16 @@ use super::{
     QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota, positive_f64_to_u64,
 };
 
-/// Consume `elapsed_micros` of request-handler time from the
-/// `request_percentage` bucket for `(principal, client_id)`. Returns the
-/// throttle delay to apply before sending the response. A zero extent
-/// if no quota is configured, the rate is non-positive, or there was no
-/// overage. Capped at `maximum_delay`.
+/// Consumes `elapsed_micros` of request-handler time from the
+/// `request_percentage` bucket for `(principal, client_id)`.
 ///
-/// `request_percentage` is expressed as a percentage of one thread-second:
-/// `100.0` ⇒ a 1 000 000 µs/sec budget. The bucket therefore meters in
+/// It returns the throttle delay to apply before the broker sends the
+/// response. The delay is a zero extent when no quota is configured, when the
+/// rate is not positive, or when there was no overage. `maximum_delay` caps
+/// the returned delay.
+///
+/// `request_percentage` is a percentage of one thread-second, so `100.0` gives
+/// a budget of 1 000 000 µs per second. The bucket therefore meters in
 /// microseconds, the same unit as `elapsed_micros`.
 #[must_use]
 pub fn consume_request_quota(

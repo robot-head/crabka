@@ -15,7 +15,8 @@ pub struct TaskAssignment {
     pub source_topic_partitions: Vec<TopicPartition>,
 }
 
-/// The active/standby/warmup tasks assigned to this member.
+/// The active tasks, the standby tasks, and the warmup tasks assigned to this
+/// member.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StreamsAssignment {
     pub active: Vec<TaskAssignment>,
@@ -30,7 +31,8 @@ pub struct TaskOffsetTracker {
     pub task_end_offsets: std::collections::HashMap<(String, i32), i64>,
 }
 
-/// A non-ready status reported by the coordinator (KIP-1071 status codes).
+/// A non-ready status that the coordinator reports, using the KIP-1071 status
+/// codes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamsStatus {
     StaleTopology(String),
@@ -47,8 +49,10 @@ pub enum StreamsStatus {
 pub enum StreamsEvent {
     /// A new assignment was adopted.
     Assigned(StreamsAssignment),
-    /// The group is not ready (e.g. missing source/internal topics).
+    /// The group is not ready, for example because a source topic or an
+    /// internal topic is missing.
     NotReady(Vec<StreamsStatus>),
-    /// We were fenced and auto-rejoined; a fresh assignment will follow.
+    /// The broker fenced this member and the client rejoined automatically. A
+    /// fresh assignment follows.
     Fenced,
 }

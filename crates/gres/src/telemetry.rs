@@ -1,21 +1,21 @@
 //! Gres tracing + OTLP distributed-tracing pipeline.
 //!
 //! `crabka-gres` always installs a structured-JSON `tracing_subscriber` `fmt`
-//! layer (stdout, gated by the usual `RUST_LOG` `EnvFilter`) so container log
-//! collectors ingest fields rather than ANSI text. When OTLP export is
-//! configured via the environment, a second `tracing-opentelemetry` layer is
-//! attached that converts `tracing` spans into OpenTelemetry spans and
-//! batch-exports them over OTLP to a collector (gRPC `:4317` or HTTP/protobuf
-//! `:4318`). The pipeline itself is [`crabka_telemetry`]; this module only
-//! supplies the gres-specific filters and documents the knobs.
+//! layer on stdout, gated by the usual `RUST_LOG` `EnvFilter`, so container log
+//! collectors ingest fields rather than ANSI text. When the environment
+//! configures OTLP export, gres attaches a second `tracing-opentelemetry`
+//! layer. That layer converts `tracing` spans into OpenTelemetry spans and
+//! batch-exports them over OTLP to a collector, either gRPC `:4317` or
+//! HTTP/protobuf `:4318`. The pipeline itself is [`crabka_telemetry`]. This
+//! module only supplies the gres-specific filters and documents the knobs.
 //!
 //! # Enabling
 //!
-//! OTLP is **off by default** — a gres with no OTLP environment behaves exactly
-//! as before, stdout logging only. It turns on when any endpoint is set
-//! (`CRABKA_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
-//! `OTEL_EXPORTER_OTLP_ENDPOINT`) or `CRABKA_OTLP_ENABLED=true`, and is
-//! force-disabled by `OTEL_SDK_DISABLED=true`.
+//! OTLP is **off by default**. A gres with no OTLP environment does stdout
+//! logging only. It turns on when any endpoint is set, that is
+//! `CRABKA_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or
+//! `OTEL_EXPORTER_OTLP_ENDPOINT`, or when `CRABKA_OTLP_ENABLED=true`.
+//! `OTEL_SDK_DISABLED=true` force-disables it.
 //!
 //! # Span targets
 //!
@@ -30,32 +30,32 @@
 //! | `crabka_gres_ranges::route` | `DEBUG`/`TRACE` | `pg.timestamp_scatter`, `pg.prewrite`, `pg.resolve`, `gres.range_rpc`, `gres.range_serve`, `tso.grant`, `range.barrier` at `DEBUG`; `pg.route` at `TRACE` |
 //! | `crabka_gres_substrate::wal` | `DEBUG`/`TRACE` | `pg.commit`, `gres.wal_append`, `gres.wal_apply` at `DEBUG`; `wal.chunk` at `TRACE` |
 //!
-//! Only the OTLP layer enables those targets, via [`OTEL_DEFAULT_FILTER`]. The
-//! stdout `fmt` layer's default ([`FMT_DEFAULT_FILTER`]) deliberately names none
-//! of them: every per-statement span would otherwise be printed to stdout on a
-//! gres that is not even exporting.
+//! Only the OTLP layer enables those targets, through [`OTEL_DEFAULT_FILTER`].
+//! The stdout `fmt` layer's default, [`FMT_DEFAULT_FILTER`], deliberately names
+//! none of them. Otherwise a gres that does not even export would print every
+//! per-statement span to stdout.
 //!
 //! # Operator filter recipes
 //!
-//! Set `CRABKA_OTLP_FILTER` to override [`OTEL_DEFAULT_FILTER`] wholesale; it is
-//! read by the pipeline when the OTLP layer is built.
+//! Set `CRABKA_OTLP_FILTER` to override [`OTEL_DEFAULT_FILTER`] wholesale. The
+//! pipeline reads it when it builds the OTLP layer.
 //!
-//! - **Statement level only** — one span per session and per statement, nothing
-//!   about routing or storage. Cheapest useful setting for always-on production
-//!   tracing:
+//! - **Statement level only** — one span per session and per statement, and
+//!   nothing about routing or storage. This is the cheapest useful setting for
+//!   always-on production tracing:
 //!
 //!   ```text
 //!   CRABKA_OTLP_FILTER=info,crabka_pgwire::session=debug,crabka_pgexec::statement=debug
 //!   ```
 //!
 //! - **Default** — the statement tier plus routing, cross-node RPC hops, the 2PC
-//!   rounds and the WAL append; the waterfall an operator needs to tell *which
-//!   step* was slow. This is [`OTEL_DEFAULT_FILTER`]; unset `CRABKA_OTLP_FILTER`
-//!   to get it.
+//!   rounds and the WAL append. This is the waterfall an operator needs to tell
+//!   *which step* was slow. It is [`OTEL_DEFAULT_FILTER`]. Unset
+//!   `CRABKA_OTLP_FILTER` to get it.
 //!
 //! - **Full internal detail** — adds the per-scan, per-read-context and
-//!   contended-row-lock spans. A single large scan emits many spans, so use it
-//!   for a targeted investigation, not steady state:
+//!   contended-row-lock spans. A single large scan emits many spans, so use this
+//!   setting for a targeted investigation, not for steady state:
 //!
 //!   ```text
 //!   CRABKA_OTLP_FILTER=info,crabka_pgwire::session=debug,crabka_pgexec::statement=debug,crabka_pgexec::exec=trace,crabka_gres_ranges::route=trace,crabka_gres_substrate::wal=trace
@@ -64,22 +64,23 @@
 //! # SQL text on spans
 //!
 //! `CRABKA_OTLP_SQL_TEXT=true` attaches the **verbatim** SQL of each statement as
-//! the `db.query.text` span attribute. It is **off by default** and is the only
-//! setting here that can export secrets or personal data: the query text is the
-//! statement as the client sent it, literals included — `INSERT INTO users
-//! VALUES ('123-45-6789', …)`, `ALTER ROLE app PASSWORD 'hunter2'`. Anything
-//! that reaches the collector reaches everyone who can read the trace backend.
+//! the `db.query.text` span attribute. It is **off by default**, and it is the
+//! only setting here that can export secrets or personal data. The query text
+//! is the statement as the client sent it, literals included, for example
+//! `INSERT INTO users VALUES ('123-45-6789', …)` or
+//! `ALTER ROLE app PASSWORD 'hunter2'`. Anything that reaches the collector
+//! reaches everyone who can read the trace backend.
 //!
-//! With it off, spans still carry `db.query.summary` (for example
-//! `"SELECT orders"`), plus `db.operation.name`, `db.collection.name`,
-//! `db.namespace` and `pg.table_id` — enough to group and attribute latency
-//! without reproducing any literal.
+//! With the flag off, spans still carry `db.query.summary`, for example
+//! `"SELECT orders"`, plus `db.operation.name`, `db.collection.name`,
+//! `db.namespace` and `pg.table_id`. That is enough to group and attribute
+//! latency without any literal.
 //!
-//! The flag is read where the attribute is recorded (`crabka-pgexec` and
+//! The flag is read where the attribute is recorded. `crabka-pgexec` and
 //! `crabka-gres-ranges` each hold a `LazyLock<bool>`, which keeps those crates
-//! free of a `crabka-telemetry` dependency), so the value is sampled once per
-//! process at first use and changing the environment afterwards has no effect.
-//! This module is the single place it is documented.
+//! free of a `crabka-telemetry` dependency. The value is therefore sampled once
+//! per process at first use, and a later change to the environment has no
+//! effect. This module is the single place that documents the flag.
 
 // Re-export the generic OTLP pipeline from crabka-telemetry.
 pub use crabka_telemetry::{OtlpConfig, OtlpProtocol, TelemetryError, TelemetryGuard, init};
@@ -87,22 +88,22 @@ pub use crabka_telemetry::{OtlpConfig, OtlpProtocol, TelemetryError, TelemetryGu
 /// Default filter for the stdout JSON `fmt` layer, used when `RUST_LOG` is
 /// unset.
 ///
-/// Names none of the five span targets on purpose: they sit at `DEBUG`, so
-/// naming one here would print a span line per statement — or per scan — to
+/// This names none of the five span targets on purpose. They sit at `DEBUG`,
+/// so a name here would print a span line per statement, or per scan, to
 /// stdout on every gres, exporting or not.
 pub const FMT_DEFAULT_FILTER: &str = "crabka_gres=info,info";
 
 /// Default filter for the OTLP layer, used when `CRABKA_OTLP_FILTER` is unset.
 ///
-/// Enables the query-path targets at `DEBUG`: session, statement, executor,
-/// routing and WAL. The `TRACE`-level spans within those targets (per-scan,
-/// per-read-context, contended row locks, WAL chunks) stay off; widen a single
-/// target to `=trace` to get them.
+/// This enables the query-path targets at `DEBUG`: session, statement,
+/// executor, routing and WAL. The `TRACE`-level spans inside those targets stay
+/// off. Those are the per-scan, per-read-context, contended row lock and WAL
+/// chunk spans. Widen a single target to `=trace` to get them.
 pub const OTEL_DEFAULT_FILTER: &str = "info,crabka_pgwire::session=debug,crabka_pgexec::statement=debug,crabka_pgexec::exec=debug,crabka_gres_ranges::route=debug,crabka_gres_substrate::wal=debug";
 
-/// Environment variable gating verbatim SQL (`db.query.text`) on statement
-/// spans. Off unless set to a truthy value; see the module docs for why it is
-/// off by default.
+/// Environment variable that gates verbatim SQL, `db.query.text`, on statement
+/// spans. It is off unless set to a truthy value. The module docs explain why
+/// it is off by default.
 pub const SQL_TEXT_ENV: &str = "CRABKA_OTLP_SQL_TEXT";
 
 /// `tracing` target for the pgwire session and statement spans.
@@ -120,31 +121,31 @@ pub const RANGES_ROUTE_TARGET: &str = "crabka_gres_ranges::route";
 /// `tracing` target for the substrate WAL append and apply paths.
 pub const SUBSTRATE_WAL_TARGET: &str = "crabka_gres_substrate::wal";
 
-/// Resolve `service.instance.id` — the resource attribute that separates one
+/// Resolve `service.instance.id`, the resource attribute that separates one
 /// gres process's spans from another's in the trace backend. `get` is the
-/// environment lookup, injected so this is a pure, testable function.
+/// environment lookup, injected so that this stays a pure, testable function.
 ///
 /// `OTEL_SERVICE_INSTANCE_ID` wins when set, so a deployment can pin the id to
-/// whatever it already calls the node (a pod name, say). Otherwise the id is
-/// derived from the node's own addresses: the advertised range endpoint, which
-/// is what the cluster identifies a compute node by (see `node_identity`),
-/// falling back to the `PostgreSQL` listen address for a single-node gres that
-/// serves no ranges. Both are stable across a restart, unlike a generated uuid,
-/// so a node's traces stay attributable across a roll.
+/// whatever it already calls the node, such as a pod name. Otherwise the id
+/// comes from the node's own addresses. The first choice is the advertised
+/// range endpoint, which is what the cluster identifies a compute node by; see
+/// `node_identity`. The fallback is the `PostgreSQL` listen address, for a
+/// single-node gres that serves no ranges. Both are stable across a restart,
+/// unlike a generated uuid, so a node's traces stay attributable across a roll.
 ///
-/// `HOSTNAME` is prefixed when the container runtime provides it, because the
-/// listen addresses default to loopback: without it, every pod of a `StatefulSet`
-/// left on the defaults would report the same instance id and collapse into one
-/// resource.
+/// The function prefixes `HOSTNAME` when the container runtime provides it,
+/// because the listen addresses default to loopback. Without that prefix, every
+/// pod of a `StatefulSet` left on the defaults would report the same instance
+/// id and collapse into one resource.
 ///
 /// A configured port of `0` asks the kernel for an ephemeral port, so the
-/// address is not an identity at all — every such process would report
-/// `127.0.0.1:0` and collapse into a single resource, exactly the failure the
-/// `HOSTNAME` prefix guards against. Those ids get a random suffix. A random
-/// value rather than the process id because a containerized gres is pid 1, so
-/// pids collide across precisely the processes that need separating; and no
-/// stability is lost, since a node that let the kernel pick its port has no
-/// stable address to be identified by in the first place.
+/// address is not an identity at all. Every such process would report
+/// `127.0.0.1:0` and collapse into a single resource, which is exactly the
+/// failure the `HOSTNAME` prefix guards against. Those ids get a random suffix.
+/// The suffix is a random value rather than the process id, because a
+/// containerized gres is pid 1, so pids collide across precisely the processes
+/// that need separating. This loses no stability: a node that let the kernel
+/// pick its port has no stable address to be identified by.
 pub fn service_instance_id(
     serve: &crate::ServeArgs,
     get: impl Fn(&str) -> Option<String>,
@@ -171,8 +172,8 @@ pub fn service_instance_id(
 }
 
 /// Whether `endpoint` asks the kernel for an ephemeral port, that is, whether
-/// its port component is `0`. Handles the bracketed IPv6 form (`[::1]:0`) by
-/// only ever looking after the last colon.
+/// its port component is `0`. It handles the bracketed IPv6 form `[::1]:0`,
+/// because it only ever looks after the last colon.
 fn ephemeral_port(endpoint: &str) -> bool {
     endpoint
         .rsplit_once(':')
@@ -197,8 +198,8 @@ mod tests {
             .serve
     }
 
-    /// The same, for a node that advertises a range endpoint: `--range-listen`
-    /// is only accepted alongside the multi-range substrate arguments.
+    /// The same, for a node that advertises a range endpoint. `--range-listen`
+    /// is accepted only alongside the multi-range substrate arguments.
     fn range_serve_args(range_listen: &str) -> crate::ServeArgs {
         serve_args(&[
             "--substrate-bootstrap",
@@ -212,16 +213,17 @@ mod tests {
         ])
     }
 
-    /// Both defaults must parse — a typo would silently degrade to whatever
-    /// `EnvFilter::new` salvages, which is how a target quietly stops exporting.
+    /// Both defaults must parse. A typo would silently degrade to whatever
+    /// `EnvFilter::new` salvages, which is how a target quietly stops
+    /// exporting.
     #[test]
     fn default_filters_parse() {
         check!(EnvFilter::try_new(FMT_DEFAULT_FILTER).is_ok());
         check!(EnvFilter::try_new(OTEL_DEFAULT_FILTER).is_ok());
     }
 
-    /// The stdout filter must not name a span target, or every statement span
-    /// is printed to stdout on a gres with no OTLP configured at all.
+    /// The stdout filter must not name a span target. Otherwise a gres with no
+    /// OTLP configured at all prints every statement span to stdout.
     #[test]
     fn fmt_filter_names_no_span_target() {
         for target in [
@@ -235,8 +237,8 @@ mod tests {
         }
     }
 
-    /// The OTLP filter must enable every span target, else a whole tier of the
-    /// waterfall is missing by default.
+    /// The OTLP filter must enable every span target. Otherwise a whole tier of
+    /// the waterfall is missing by default.
     #[test]
     fn otel_filter_enables_every_span_target() {
         for target in [
@@ -253,7 +255,7 @@ mod tests {
         }
     }
 
-    /// `OtlpConfig::from_env` is what keeps OTLP off by default: with no OTLP
+    /// `OtlpConfig::from_env` keeps OTLP off by default. With no OTLP
     /// environment at all it yields `None`, and `init` then installs the stdout
     /// layer alone.
     #[test]
@@ -264,7 +266,7 @@ mod tests {
     }
 
     /// `--range-listen …:0` binds an ephemeral port, so the configured address
-    /// identifies nothing: every process would report `127.0.0.1:0` and its
+    /// identifies nothing. Every process would report `127.0.0.1:0`, and its
     /// spans would land in one resource with every other node's.
     #[test]
     fn ephemeral_range_port_yields_a_distinct_id_per_process() {
@@ -291,8 +293,8 @@ mod tests {
         check!(first.starts_with("127.0.0.1:0#"));
     }
 
-    /// A deployment that pins the id — to a pod name, say — keeps it, ephemeral
-    /// port or not.
+    /// A deployment that pins the id, to a pod name for example, keeps it,
+    /// ephemeral port or not.
     #[test]
     fn pinned_instance_id_wins() {
         let serve = range_serve_args("127.0.0.1:0");
@@ -307,7 +309,8 @@ mod tests {
     }
 
     /// A real configured port is a stable identity across a restart, which is
-    /// worth more than uniqueness-by-nonce: it must not pick up a suffix.
+    /// worth more than uniqueness from a nonce. It must not pick up a
+    /// suffix.
     #[test]
     fn configured_port_keeps_a_stable_id() {
         let serve = range_serve_args("10.0.0.4:7654");

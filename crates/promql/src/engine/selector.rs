@@ -68,22 +68,24 @@ fn build_label_matchers(
 struct CompiledLabelMatcher {
     name: String,
     op: MatchOp,
-    /// The literal comparand for `Eq`/`Neq`; the precompiled, anchored regex's
-    /// source is `value` too, but the compiled form lives in `regex`.
+    /// The literal comparand for `Eq`/`Neq`. This field is also the source of the
+    /// precompiled, anchored regex, but the compiled form lives in `regex`.
     value: String,
     regex: Option<Regex>,
 }
 
-/// A set of [`CompiledLabelMatcher`]s, so a hot loop can match many labelsets
-/// without recompiling each `=~`/`!~` regex per call (the bug `labels_match` has
-/// when invoked per sample).
+/// A set of [`CompiledLabelMatcher`]s for a hot match loop.
+///
+/// The loop can match many label sets without a recompile of each `=~`/`!~`
+/// regex per call. `labels_match` has that bug when a caller invokes it per
+/// sample.
 pub(super) struct CompiledLabelMatchers {
     matchers: Vec<CompiledLabelMatcher>,
 }
 
 impl CompiledLabelMatchers {
-    /// Whether `labels` satisfies every compiled matcher, the precompiled
-    /// equivalent of `labels_match`.
+    /// Returns `true` when `labels` satisfies every compiled matcher. This method
+    /// is the precompiled equivalent of `labels_match`.
     pub(super) fn matches(&self, labels: &Labels) -> bool {
         for matcher in &self.matchers {
             let value = labels.get(&matcher.name).unwrap_or("");
@@ -110,8 +112,10 @@ impl CompiledLabelMatchers {
     }
 }
 
-/// Compile a matcher set once, precompiling each `=~`/`!~` regex (anchored
-/// `^(?:...)$`). Returns the same regex-compile error `labels_match` would.
+/// Compiles a matcher set once and precompiles each `=~`/`!~` regex.
+///
+/// Each regex is anchored `^(?:...)$`. This function returns the same
+/// regex-compile error that `labels_match` returns.
 pub(super) fn compile_label_matchers(matchers: &[LabelMatcher]) -> Result<CompiledLabelMatchers> {
     let mut compiled = Vec::with_capacity(matchers.len());
     for matcher in matchers {
@@ -219,8 +223,9 @@ fn duration_to_i64_ms(duration: std::time::Duration) -> Result<i64> {
         .map_err(|_| PromqlError::Plan("@ modifier timestamp is too large".to_string()))
 }
 
-/// The signed extent an `offset` modifier shifts a selector's evaluation instant
-/// by. `offset 5m` looks 5 minutes further back, so it is a negative extent.
+/// The signed extent by which an `offset` modifier shifts a selector's
+/// evaluation instant. `offset 5m` looks 5 minutes further back, so it is a
+/// negative extent.
 fn selector_offset(offset: Option<&Offset>) -> Result<Time> {
     let Some(offset) = offset else {
         return Ok(Time::ZERO);
@@ -242,13 +247,13 @@ pub(super) fn timestamp_seconds(timestamp_ms: i64) -> f64 {
     timestamp_ms.to_f64().unwrap_or(f64::MAX) / 1000.0
 }
 
-/// A `PromQL` duration literal (`5m`, `1h`, the `[…]` of a matrix selector) as a
-/// time extent.
+/// A `PromQL` duration literal as a time extent.
 ///
-/// The `i64`-millisecond round trip is the range check, not a unit conversion:
-/// a literal wider than [`i64::MAX`] milliseconds is rejected here rather than
-/// silently losing precision downstream, where the extent is applied to
-/// millisecond instants.
+/// The literal is a form such as `5m`, `1h`, or the `[…]` of a matrix selector.
+/// The `i64`-millisecond round trip is the range check, not a unit conversion.
+/// This function rejects a literal wider than [`i64::MAX`] milliseconds here,
+/// instead of a silent loss of precision downstream, where the caller applies
+/// the extent to millisecond instants.
 pub(super) fn selector_duration(duration: std::time::Duration) -> Result<Time> {
     i64::try_from(duration.as_millis())
         .map(Time::from_millis)

@@ -1,34 +1,36 @@
 //! I/O-primitive benchmark to decide whether memory-mapping the log
 //! segments would help the fetch read path.
 //!
-//! The existing `crabka-log` `log` bench measures `Log::read` against a
-//! single warm active segment immediately after writing — useful, but it
-//! bundles the batch decode with the I/O and never isolates the part mmap
-//! would actually replace: pulling raw bytes out of an on-disk `.log`
-//! segment.
+//! The existing `crabka-log` `log` bench measures `Log::read` against a single
+//! warm active segment immediately after a write. That measurement is useful,
+//! but it bundles the batch decode with the I/O. It never isolates the part
+//! that mmap would replace, which is the read of raw bytes out of an on-disk
+//! `.log` segment.
 //!
-//! This bench builds a realistic multi-segment log on disk, then races the
-//! current strategy (`File::seek` + `read_to_end`, mirroring
-//! `Segment::read_log_range`) against several mmap variants on the *same*
-//! files:
+//! This bench builds a realistic multi-segment log on disk. It then races the
+//! current strategy against several mmap variants on the *same* files. The
+//! current strategy is `File::seek` with `read_to_end`, which mirrors
+//! `Segment::read_log_range`. The variants are:
 //!
-//! - `pread_to_vec` — current behaviour: fresh Vec per read.
-//! - `pread_reuse_buf` — same syscall, buffer reused across reads.
-//! - `mmap_once_copy` — map once, copy the range into a Vec each read (what
-//!   Crabka would still need today, since the wire path re-encodes every batch).
-//! - `mmap_once_borrow` — map once, read the range in place with no copy (the
-//!   zero-copy *upper bound* — only reachable if a sendfile/splice-style path
-//!   skipped decode).
-//! - `mmap_per_call` — map+unmap each read (lazy-mapping overhead).
+//! - `pread_to_vec`: the current behaviour, with a fresh Vec per read.
+//! - `pread_reuse_buf`: the same syscall, with one buffer reused across reads.
+//! - `mmap_once_copy`: map once, then copy the range into a Vec on each read.
+//!   Crabka would still need this copy today, because the wire path re-encodes
+//!   every batch.
+//! - `mmap_once_borrow`: map once, then read the range in place with no copy.
+//!   This is the zero-copy *upper bound*, and it is reachable only if a
+//!   sendfile-style or splice-style path skips the decode.
+//! - `mmap_per_call`: map and unmap on each read, which shows the lazy-mapping
+//!   overhead.
 //!
-//! Finally `full_path_decoded` runs the real `Log::read` so the I/O numbers
-//! can be read against the cost of the decode/re-encode round trip they sit
-//! inside.
+//! `full_path_decoded` then runs the real `Log::read`, so you can read the I/O
+//! numbers against the cost of the decode and re-encode round trip that they
+//! sit inside.
 //!
-//! Caveat: this measures the **warm page-cache** steady state (the file was
-//! just written and is resident). That is the realistic case for a broker
-//! serving recent data; a cold-cache comparison would need root to drop
-//! caches and isn't portable in CI.
+//! Caveat: this bench measures the **warm page-cache** steady state. The code
+//! has just written the file, and the file is resident. That is the realistic
+//! case for a broker that serves recent data. A cold-cache comparison would
+//! need root to drop the caches, and it is not portable in CI.
 
 use std::{
     fs::{File, OpenOptions},
@@ -48,8 +50,9 @@ use tempfile::TempDir;
 const READ_LEN: ByteSize = mebibytes(1);
 /// A small scattered read, where mmap's random-access edge would show.
 const SMALL_READ_LEN: ByteSize = kibibytes(16);
-/// Segment size for the fixture log: big enough that a [`READ_LEN`] read stays
-/// inside one sealed segment, small enough to accumulate several of them.
+/// Segment size for the fixture log. It is large enough that a [`READ_LEN`]
+/// read stays inside one sealed segment, and small enough to accumulate several
+/// such segments.
 const SEGMENT_SIZE: ByteSize = mebibytes(8);
 
 fn make_batch(n: i32, payload_size: usize) -> RecordBatch {
@@ -68,9 +71,11 @@ fn make_batch(n: i32, payload_size: usize) -> RecordBatch {
     b
 }
 
-/// Build a log with several *sealed* segments and return the dir (kept
-/// alive), the open `Log`, a fully-populated sealed `.log` file path, and its
-/// size.
+/// Build a log with several *sealed* segments.
+///
+/// The function returns the directory, which the caller keeps alive, the open
+/// `Log`, the path of a fully-populated sealed `.log` file, and the size of
+/// that file.
 fn build_log() -> (TempDir, Log, PathBuf, u64) {
     let dir = tempfile::tempdir().unwrap();
     // 8 MiB segments so a 1 MiB read stays inside one sealed segment and we
@@ -103,7 +108,8 @@ fn build_log() -> (TempDir, Log, PathBuf, u64) {
     (dir, log, chosen, size)
 }
 
-/// Mirrors `Segment::read_log_range`: clone handle, seek, bounded read_to_end.
+/// Mirrors `Segment::read_log_range`: clone the handle, seek, then do a bounded
+/// read_to_end.
 fn pread_into(file: &File, start: u64, len: usize, buf: &mut Vec<u8>) {
     buf.clear();
     let mut f = file.try_clone().unwrap();
@@ -112,7 +118,8 @@ fn pread_into(file: &File, start: u64, len: usize, buf: &mut Vec<u8>) {
     bounded.read_to_end(buf).unwrap();
 }
 
-/// Sum bytes so the optimizer can't elide the read of a borrowed slice.
+/// Sum the bytes, so the optimizer cannot elide the read of a borrowed
+/// slice.
 fn checksum(bytes: &[u8]) -> u64 {
     bytes
         .iter()
@@ -181,9 +188,11 @@ fn bench_segment_io(c: &mut Criterion) {
     }
 }
 
-/// The full `Log::read` path (index lookup + I/O + batch decode), so the raw
-/// I/O numbers above can be read in context: if this dwarfs `pread_to_vec`,
-/// the decode dominates and swapping the I/O for mmap can't help much.
+/// The full `Log::read` path: the index lookup, the I/O, and the batch decode.
+///
+/// This puts the raw I/O numbers above in context. If this path is much slower
+/// than `pread_to_vec`, the decode dominates and a change from the current I/O
+/// to mmap cannot help much.
 fn bench_full_path(c: &mut Criterion) {
     let (_dir, log, _path, _size) = build_log();
     let end = log.log_end_offset();

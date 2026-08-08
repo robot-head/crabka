@@ -1,4 +1,4 @@
-//! pprof wire model wrapper.
+//! Wrapper for the pprof wire model.
 
 use prost::Message;
 

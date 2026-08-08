@@ -1,17 +1,16 @@
-//! Per-series ring buffer of timestamped samples + a thread-safe
+//! Per-series ring buffer of timestamped samples, plus a thread-safe
 //! `UsageStore` that the scraper writes to and the goals read from.
 //!
-//! Stored series key is `(broker_id, topic, partition, MetricKind)`.
-//! Samples older than `config.retention` are dropped on each insert.
-//! Counter-reset detection: if `latest.value < earliest.value`, the
-//! rate query returns `None` (broker restarted; goals should ignore).
+//! The stored series key is `(broker_id, topic, partition, MetricKind)`. Each
+//! insert drops samples older than `config.retention`. Counter-reset detection
+//! works like this: if `latest.value < earliest.value`, the rate query returns
+//! `None`, because the broker restarted and the goals should ignore the series.
 //!
-//! Stale-data protection: every query method takes `now_ms` (the
-//! caller's wall-clock) and treats the window as `[now_ms - W,
-//! now_ms]`. If the latest sample is older than `now_ms - W` the
-//! method returns `None`, so a broker that stops emitting (crash,
-//! network partition) doesn't keep producing stable results from its
-//! last few samples forever.
+//! Stale-data protection works like this: every query method takes `now_ms`,
+//! the caller's wall-clock, and treats the window as `[now_ms - W, now_ms]`.
+//! If the latest sample is older than `now_ms - W` the method returns `None`.
+//! A broker that stops emitting, after a crash or a network partition, then
+//! cannot keep producing stable results from its last few samples forever.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -21,9 +20,10 @@ use parking_lot::RwLock;
 
 use crate::scraper::parse::{MetricKind, ParsedSample};
 
-/// CPU microseconds spent per wall-clock second by one fully-busy core. The
-/// broker's CPU counter is in microseconds, so this is the one place the
-/// micros-per-second rate becomes a core count.
+/// CPU microseconds spent per wall-clock second by one fully busy core.
+///
+/// The broker's CPU counter is in microseconds, so this is the one place where
+/// the micros-per-second rate becomes a core count.
 const MICROS_PER_CORE_SECOND: f64 = 1e6;
 
 #[derive(Debug, Clone, Copy)]
@@ -112,9 +112,9 @@ impl UsageStore {
         }
     }
 
-    /// Insert one scrape tick's worth of samples for a single broker.
-    /// `at_ms` is the wall-clock millis at scrape time. Drops samples
-    /// older than `config.retention`.
+    /// Insert one scrape tick's worth of samples for a single broker. `at_ms`
+    /// is the wall-clock millis at scrape time. The insert drops samples older
+    /// than `config.retention`.
     pub fn insert(&self, broker_id: i32, samples: Vec<ParsedSample>, at_ms: i64) {
         let cutoff = at_ms - self.config.retention.millis_i64();
         let mut map = self.inner.write();
@@ -136,12 +136,14 @@ impl UsageStore {
         }
     }
 
-    /// Rate of `BytesIn` within `window`, derived from the earliest +
-    /// latest samples in the window. Returns `None` if there are fewer
-    /// than 2 samples in the window, a counter reset is detected
-    /// (`latest.value < earliest.value`), or the latest sample is older
-    /// than `now_ms - window` (data is too stale to represent the
-    /// requested window).
+    /// Rate of `BytesIn` within `window`, derived from the earliest and the
+    /// latest samples in the window.
+    ///
+    /// Returns `None` if the window holds fewer than 2 samples. Returns `None`
+    /// if it detects a counter reset, that is, `latest.value <
+    /// earliest.value`. Returns `None` if the latest sample is older than
+    /// `now_ms - window`, because the data is then too stale to represent the
+    /// requested window.
     #[must_use]
     pub fn bytes_in_rate(
         &self,
@@ -182,10 +184,11 @@ impl UsageStore {
         .map(ByteRate::from_bytes_per_sec_f64)
     }
 
-    /// CPU seconds burned per wall-clock second within `window` — the
+    /// CPU seconds burned per wall-clock second within `window`, that is, the
     /// equivalent number of busy cores, as a dimensionless [`Ratio`].
-    /// Returns `None` on insufficient samples, counter reset, or stale
-    /// data (same guards as `bytes_in_rate`).
+    ///
+    /// Returns `None` on too few samples, on a counter reset, or on stale
+    /// data. These are the same guards as `bytes_in_rate`.
     #[must_use]
     pub fn cpu_cores_rate(
         &self,
@@ -207,8 +210,9 @@ impl UsageStore {
     }
 
     /// Average disk-bytes gauge over the window `[now_ms - W, now_ms]`.
-    /// Returns `None` if no samples fall inside the window, or if the
-    /// latest sample is older than `now_ms - W` (stale broker).
+    ///
+    /// Returns `None` if no sample falls inside the window, or if the latest
+    /// sample is older than `now_ms - W`, which means the broker is stale.
     #[must_use]
     pub fn disk_bytes_avg(
         &self,
@@ -447,9 +451,9 @@ mod tests {
         assert2::assert!(rate == bytes_per_sec(0));
     }
 
-    /// Regression: a broker that stops emitting must not keep producing
-    /// a stable rate from its last two samples once `now_ms` advances
-    /// past the window boundary.
+    /// Regression: a broker that stops emitting must not keep producing a
+    /// stable rate from its last two samples once `now_ms` advances past the
+    /// window boundary.
     #[test]
     fn counter_rate_returns_none_when_latest_sample_predates_window() {
         let s = UsageStore::default();

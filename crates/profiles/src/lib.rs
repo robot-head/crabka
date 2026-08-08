@@ -1,7 +1,10 @@
-//! Crabka profiles ingest service: distributor (push.v1 / `/ingest` / OTLP
-//! `v1development` profiles doors) -> `(tenant, series_fingerprint)`-partitioned
-//! WAL, and the block-builder consumer group (samples fact table + dedup
-//! per-block `SymbolDb` + `ProfileIndex`).
+//! Crabka profiles ingest service.
+//!
+//! The distributor serves the push.v1, `/ingest`, and OTLP `v1development`
+//! profiles doors and writes to a WAL partitioned by
+//! `(tenant, series_fingerprint)`. The block-builder consumer group builds the
+//! samples fact table, the deduped per-block `SymbolDb`, and the
+//! `ProfileIndex`.
 #![forbid(unsafe_code)]
 
 pub mod blockbuilder;

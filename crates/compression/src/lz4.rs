@@ -1,10 +1,9 @@
 //! LZ4 frame format (LZ4F), independent blocks.
 //!
-//! Kafka writes LZ4 in the frame format (magic `0x04 22 4D 18`) with these
-//! choices: 64 KiB block size, independent blocks, no block checksum, no
-//! content-size in the header. We match those defaults so produced bytes
-//! line up with `KafkaLZ4BlockOutputStream`'s output for differential
-//! testing.
+//! Kafka writes LZ4 in the frame format, with magic `0x04 22 4D 18`, and makes
+//! these choices: 64 KiB block size, independent blocks, no block checksum, and
+//! no content-size in the header. We match those defaults, so our bytes agree
+//! with the output of `KafkaLZ4BlockOutputStream` for differential testing.
 
 use std::io::{Read, Write};
 

@@ -33,7 +33,8 @@ pub enum TracesError {
 }
 
 impl TracesError {
-    /// Map to the ingest-edge HTTP status used by Tempo-shaped push endpoints.
+    /// Map to the ingest-edge HTTP status that Tempo-shaped push endpoints
+    /// use.
     #[must_use]
     pub fn status_code(&self) -> u16 {
         match self {

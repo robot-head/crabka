@@ -1,4 +1,4 @@
-//! End-to-end traces ingest: distributor -> WAL -> block-builder.
+//! End-to-end traces ingest, from distributor to WAL to block-builder.
 
 mod support;
 

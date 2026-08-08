@@ -1,12 +1,13 @@
 //! SP34: validate the numeric transcendental functions against a live
-//! PostgreSQL oracle. `#[ignore]` by default (needs a running PostgreSQL). Run
-//! locally to confirm / finalize the display-scale (rscale) rules:
+//! PostgreSQL oracle. These tests are `#[ignore]` by default because they need
+//! a running PostgreSQL. Run them locally to confirm and finalize the
+//! display-scale (rscale) rules:
 //!
 //!   $env:PGPASSWORD="postgres"
 //!   cargo nextest run -p pgtypes --test numeric_transcendental_oracle --run-ignored all
 //!
 //! The oracle is PostgreSQL 17.10 at localhost:5432 (user `postgres`, db
-//! `postgres`). The diff is on `numeric_out` text — value AND display scale.
+//! `postgres`). The diff is on `numeric_out` text: value AND display scale.
 
 #![expect(
     clippy::doc_markdown,
@@ -17,8 +18,10 @@ use std::process::Command;
 
 const PSQL: &str = r"C:\Program Files\PostgreSQL\17\bin\psql.exe";
 
-/// Run a SQL scalar through PostgreSQL and return its trimmed text (empty on a
-/// domain error — those rows are skipped, the unit tests cover the error surface).
+/// Run a SQL scalar through PostgreSQL and return its trimmed text.
+///
+/// The text is empty on a domain error. Those rows are skipped, and the unit
+/// tests cover the error surface.
 fn pg(sql: &str) -> String {
     let out = Command::new(PSQL)
         .args([

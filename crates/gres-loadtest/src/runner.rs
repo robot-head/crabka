@@ -1,18 +1,25 @@
-//! Ties one scenario run together: cluster, workload, faults, sampling.
+//! Ties one scenario run together: the cluster, the workload, the faults, and
+//! the sampling.
 //!
-//! Sequence: apply the mode override and re-validate → launch the cluster in
-//! a scratch work dir → prepare the workload schema through the last node's
-//! gateway (any gateway routes DDL and DML; picking a node that does not
-//! host range 0 exercises exactly that) → start the `/proc` sampler → run
-//! the workload (it warms up, then measures) concurrently with the fault
-//! schedule anchored at the measurement-window start → stop the sampler →
-//! shut the cluster down → assemble a [`RunReport`] and write
-//! `<out_dir>/<scenario>-<mode-slug>.json` plus the rendered Markdown
-//! alongside it.
+//! The sequence is:
 //!
-//! On a failure after launch the cluster is still shut down, the work dir
-//! (holding every process log) is kept, and the error names its log
-//! directory so the node logs can be inspected.
+//! 1. Apply the mode override and validate the scenario again.
+//! 2. Launch the cluster in a scratch work dir.
+//! 3. Prepare the workload schema through the last node's gateway. Any
+//!    gateway routes DDL and DML, and a node that does not host range 0
+//!    exercises exactly that.
+//! 4. Start the `/proc` sampler.
+//! 5. Run the workload, which warms up and then measures, at the same time as
+//!    the fault schedule anchored at the start of the measurement window.
+//! 6. Stop the sampler and shut the cluster down.
+//! 7. Assemble a [`RunReport`], then write
+//!    `<out_dir>/<scenario>-<mode-slug>.json` and the rendered Markdown
+//!    beside it.
+//!
+//! After a failure that comes after the launch, the runner still shuts the
+//! cluster down and keeps the work dir, which holds every process log. The
+//! error names that log directory, so an operator can inspect the node
+//! logs.
 
 use std::{
     path::{Path, PathBuf},
@@ -38,8 +45,8 @@ use crate::{
     workload::{self, WorkloadOutcome},
 };
 
-/// Mode string recorded in external-mode reports; the crabka
-/// timestamp-source modes do not apply to an external system.
+/// Mode string recorded in external-mode reports. The crabka timestamp-source
+/// modes do not apply to an external system.
 pub const EXTERNAL_MODE: &str = "external";
 
 /// Configuration for one scenario run.
@@ -47,14 +54,16 @@ pub const EXTERNAL_MODE: &str = "external";
 pub struct RunConfig {
     /// The parsed scenario.
     pub scenario: Scenario,
-    /// Overrides the scenario's timestamp mode when set (the `compare`
-    /// command runs the same scenario under both modes).
+    /// Overrides the scenario's timestamp mode when set. The `compare`
+    /// command runs the same scenario under both modes.
     pub mode_override: Option<ModeSpec>,
-    /// Directory for reports and (on failure or request) retained logs.
+    /// Directory for reports, and for retained logs after a failure or on
+    /// request.
     pub out_dir: PathBuf,
     /// Binaries to launch.
     pub binaries: Binaries,
-    /// Keep the cluster work dir (data + logs) after a successful run.
+    /// Keep the cluster work dir, with its data and logs, after a successful
+    /// run.
     pub keep_work_dir: bool,
     /// Shared registry policy used by provisioning and spawned computes.
     pub registry_policy: RegistryPolicy,
@@ -71,8 +80,8 @@ pub struct ReportPaths {
     pub markdown: PathBuf,
 }
 
-/// File-name slug for a mode: its display form with any parenthesized
-/// suffix stripped (`logical-tso`, `hlc`).
+/// File-name slug for a mode. It is the mode's display form without any
+/// parenthesized suffix, such as `logical-tso` or `hlc`.
 #[must_use]
 pub fn mode_slug(mode: ModeSpec) -> String {
     let display = mode.to_string();
@@ -82,8 +91,8 @@ pub fn mode_slug(mode: ModeSpec) -> String {
     }
 }
 
-/// Report file paths for one scenario × mode slug (a [`mode_slug`] or
-/// [`EXTERNAL_MODE`]) under `out_dir`.
+/// Report file paths for one scenario and mode slug under `out_dir`. The slug
+/// is a [`mode_slug`] or [`EXTERNAL_MODE`].
 #[must_use]
 pub fn report_paths(out_dir: &Path, scenario: &str, slug: &str) -> ReportPaths {
     ReportPaths {
@@ -96,10 +105,11 @@ pub fn report_paths(out_dir: &Path, scenario: &str, slug: &str) -> ReportPaths {
 ///
 /// # Errors
 ///
-/// Returns an error on harness failures (an invalid mode override, launch,
-/// provisioning, IO); the error context names the retained log directory
-/// when a cluster was involved. Workload errors caused by injected faults
-/// are part of the report, not an error.
+/// Returns an error on a harness failure, such as an invalid mode override, a
+/// launch failure, a provisioning failure, or an IO failure. The error context
+/// names the retained log directory when a cluster was involved. Workload
+/// errors that injected faults caused belong in the report and are not an
+/// error.
 pub async fn run_scenario(config: RunConfig) -> anyhow::Result<RunReport> {
     let scenario = effective_scenario(config.scenario.clone(), config.mode_override)
         .context("apply mode override")?;
@@ -198,8 +208,8 @@ fn cluster_options_for_run(
 /// Configuration for one external-cluster scenario run.
 #[derive(Debug, Clone)]
 pub struct ExternalRunConfig {
-    /// The parsed scenario. Its `mode` is ignored (with a logged notice) and
-    /// its fault timeline must be empty; `topology.ranges` still sets the
+    /// The parsed scenario. The runner ignores its `mode` and logs a notice,
+    /// and its fault timeline must be empty. `topology.ranges` still sets the
     /// number of workload tables.
     pub scenario: Scenario,
     /// The external system to drive.
@@ -210,14 +220,16 @@ pub struct ExternalRunConfig {
     pub runtime_policy: LoadtestRuntimePolicy,
 }
 
-/// Runs one scenario against an external pgwire-speaking system and writes
-/// the same report files as [`run_scenario`]: identical schema preparation,
-/// workload, measurement window, and rendering — with no crabka processes
-/// launched and no faults injected. The report's `mode` is
-/// [`EXTERNAL_MODE`]. Resource rows cover the target's manual
-/// `--external-pids` roster, or the local processes discovered listening on
-/// the loopback endpoints' ports; when neither yields anything the run
-/// proceeds with an empty roster (throughput and latency are unaffected).
+/// Runs one scenario against an external pgwire-speaking system and writes the
+/// same report files as [`run_scenario`].
+///
+/// The schema preparation, the workload, the measurement window, and the
+/// rendering are identical. This function launches no crabka process and
+/// injects no fault. The report's `mode` is [`EXTERNAL_MODE`]. The resource
+/// rows cover the target's manual `--external-pids` roster, or the local
+/// processes found listening on the loopback endpoints' ports. When neither
+/// gives anything, the run continues with an empty roster, and that changes
+/// neither throughput nor latency.
 ///
 /// # Errors
 ///
@@ -302,7 +314,7 @@ pub async fn run_external_scenario(config: ExternalRunConfig) -> anyhow::Result<
     Ok(report)
 }
 
-/// Serializes and writes the JSON + Markdown report pair for one run.
+/// Serializes and writes the JSON and Markdown report pair for one run.
 fn write_reports(
     report: &RunReport,
     out_dir: &Path,
@@ -326,9 +338,10 @@ fn write_reports(
     Ok(())
 }
 
-/// The scenario actually run: the mode override applied, then re-validated
-/// (an override can produce an invalid combination, e.g. `logical-tso` with
-/// per-node clock skew configured).
+/// The scenario the runner really runs. It applies the mode override, then
+/// validates the result again, because an override can give an invalid
+/// combination, for example `logical-tso` with per-node clock skew
+/// configured.
 fn effective_scenario(
     mut scenario: Scenario,
     mode_override: Option<ModeSpec>,
@@ -340,9 +353,10 @@ fn effective_scenario(
     Ok(scenario)
 }
 
-/// The cluster's scratch directory: a temp dir removed on success, or a
-/// caller-requested kept directory under the out dir. Either variant is
-/// persisted when a failure makes the process logs worth keeping.
+/// The cluster's scratch directory. It is either a temp dir that the runner
+/// removes on success, or a kept directory under the out dir that the caller
+/// asked for. The runner persists either variant when a failure makes the
+/// process logs worth keeping.
 #[derive(Debug)]
 struct WorkDir {
     path: PathBuf,
@@ -354,8 +368,8 @@ impl WorkDir {
         &self.path
     }
 
-    /// Keeps the directory on disk (disables temp-dir cleanup) and returns
-    /// its path.
+    /// Keeps the directory on disk, which disables the temp-dir cleanup, and
+    /// returns its path.
     fn persist(mut self) -> PathBuf {
         match self.temp.take() {
             Some(temp) => temp.keep(),
@@ -364,9 +378,9 @@ impl WorkDir {
     }
 }
 
-/// Creates the work dir: a fresh temp dir by default, or
-/// `<out_dir>/<scenario>-<mode-slug>-work/` (recreated empty) when the
-/// caller asked to keep it.
+/// Creates the work dir. The default is a fresh temp dir. When the caller
+/// asked to keep it, the dir is `<out_dir>/<scenario>-<mode-slug>-work/`, and
+/// this function recreates it empty.
 fn prepare_work_dir(
     out_dir: &Path,
     scenario: &str,
@@ -400,8 +414,9 @@ struct Driven {
     faults: Vec<AppliedFault>,
 }
 
-/// Runs the measured window against a live cluster (schema already
-/// prepared): `/proc` sampler + workload + fault schedule.
+/// Runs the measured window against a live cluster whose schema is already
+/// prepared. It drives the `/proc` sampler, the workload, and the fault
+/// schedule.
 async fn drive(
     cluster: &mut Cluster,
     scenario: &Scenario,
@@ -445,9 +460,9 @@ async fn drive(
     })
 }
 
-/// Assembles the report from the measured window's outcome, resource
-/// totals, and applied-fault log. `mode` is the report's mode string: the
-/// scenario mode's display form, or [`EXTERNAL_MODE`].
+/// Assembles the report from the measured window's outcome, the resource
+/// totals, and the applied-fault log. `mode` is the report's mode string,
+/// either the display form of the scenario mode or [`EXTERNAL_MODE`].
 fn assemble_report(scenario: &Scenario, mode: &str, driven: Driven) -> RunReport {
     let Driven {
         started_unix_ms,
@@ -499,8 +514,8 @@ fn assemble_report(scenario: &Scenario, mode: &str, driven: Driven) -> RunReport
 }
 
 /// `count` events spread over `window`, or no rate at all when the window is
-/// empty (dividing by it would be an infinity, and "nothing measured" is what
-/// every reader of the report wants there).
+/// empty. A division by an empty window would give an infinity, and "nothing
+/// measured" is what every reader of the report wants there.
 fn rate_over(count: u64, window: Time) -> Frequency {
     if window <= Time::ZERO {
         return Frequency::ZERO;
@@ -508,14 +523,14 @@ fn rate_over(count: u64, window: Time) -> Frequency {
     u64_as_f64(count) / window
 }
 
-/// Unix milliseconds at which the measurement window opens: now, plus the
-/// warmup the workload runs first.
+/// Unix milliseconds at which the measurement window opens. It is now, plus
+/// the warmup that the workload runs first.
 fn window_start_unix_ms(now: SystemTime, warmup: Time) -> u64 {
     let warmup_ms = u64::try_from(warmup.millis_i64()).unwrap_or(0);
     unix_ms(now).saturating_add(warmup_ms)
 }
 
-/// Unix milliseconds of a wall-clock time (0 for a pre-epoch clock).
+/// Unix milliseconds of a wall-clock time. It is 0 for a pre-epoch clock.
 fn unix_ms(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
         .ok()
@@ -523,8 +538,9 @@ fn unix_ms(time: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-/// Lossless-for-practical-values `u64` → `f64` conversion built from exact
-/// `u32` → `f64` conversions, avoiding a precision-losing `as` cast.
+/// A `u64` → `f64` conversion that is lossless for practical values. It is
+/// built from exact `u32` → `f64` conversions, so it needs no `as` cast, which
+/// would lose precision.
 fn u64_as_f64(value: u64) -> f64 {
     const TWO_POW_32: f64 = 4_294_967_296.0;
     let high = u32::try_from(value >> 32).expect("u64 >> 32 fits in u32");

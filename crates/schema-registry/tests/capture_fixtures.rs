@@ -12,8 +12,8 @@
 //! broker listens on `0.0.0.0:9092` and advertises `host.docker.internal:9092`.
 //! The container is launched with `--add-host=host.docker.internal:host-gateway`
 //! so the JVM Kafka client inside it can reach the host broker, while the
-//! host-side raw `_schemas` read connects **directly** to `127.0.0.1:9092`
-//! (a host process can't resolve `host.docker.internal`).
+//! host-side raw `_schemas` read connects **directly** to `127.0.0.1:9092`,
+//! because a host process cannot resolve `host.docker.internal`.
 //!
 //! Gated `#[ignore]` so `cargo test --workspace` never pulls Docker. Run with:
 //!
@@ -41,9 +41,9 @@ use crabka_client_core::{Connection, ConnectionOptions, fetch_partition};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_units::prelude::*;
 
-/// The broker binds host port 9092 (embedded in [`LISTEN`]) and
-/// cp-schema-registry's Kafka client reaches it via `host.docker.internal:9092`
-/// (embedded in [`ADVERTISED`]).
+/// The broker binds host port 9092, which [`LISTEN`] embeds.
+/// cp-schema-registry's Kafka client reaches it at `host.docker.internal:9092`,
+/// which [`ADVERTISED`] embeds.
 const LISTEN: &str = "0.0.0.0:9092";
 const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 /// Advertised listener: a name the container can resolve through
@@ -51,7 +51,7 @@ const CONTROLLER_LISTEN: &str = "0.0.0.0:9093";
 const ADVERTISED: &str = "host.docker.internal:9092";
 /// Host-side direct address for the raw `_schemas` read. We connect here and
 /// fetch on THIS connection so we never follow the advertised
-/// `host.docker.internal` address (unresolvable from a host process).
+/// `host.docker.internal` address, which a host process cannot resolve.
 const DIRECT_ADDR: &str = "127.0.0.1:9092";
 
 const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
@@ -112,7 +112,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
 
 // ── docker helpers ───────────────────────────────────────────────────────────
 
-/// `docker pull <image>`, allowing several minutes for the large SR image.
+/// `docker pull <image>`. This allows several minutes for the large SR image.
 fn docker_pull(image: &str) {
     eprintln!("CAPTURE docker pull {image} (large; may take minutes)...");
     let out = Command::new("docker")
@@ -186,8 +186,8 @@ fn docker_rm_f(id: &str) {
     eprintln!("CAPTURE removed container {id}");
 }
 
-/// RAII guard: force-removes the container on drop, so an assertion failure
-/// (panic) anywhere in the capture body never leaks a running container.
+/// RAII guard. It force-removes the container on drop, so an assertion failure
+/// anywhere in the capture body never leaks a running container.
 struct ContainerGuard {
     id: String,
 }
@@ -222,8 +222,8 @@ async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &st
     );
 }
 
-/// Register a schema, returning the verbatim response body. `schema_type` is
-/// `None` for AVRO (the field is omitted, matching the SR default).
+/// Register a schema and return the verbatim response body. `schema_type` is
+/// `None` for AVRO, which omits the field and matches the SR default.
 async fn register_schema(
     http: &reqwest::Client,
     base: &str,
@@ -312,8 +312,8 @@ async fn resolve_schemas_topic_id() -> WireUuid {
     }
 }
 
-/// Read every record from `_schemas` partition 0 (offset 0..) over a dedicated
-/// direct connection, writing one fixture per record in offset order.
+/// Read every record from `_schemas` partition 0, from offset 0, over a
+/// dedicated direct connection. Write one fixture per record in offset order.
 async fn capture_schemas_log(topic_id: WireUuid) {
     let addr: SocketAddr = DIRECT_ADDR.parse().expect("direct addr");
     let conn = Connection::connect_with_options(addr, ConnectionOptions::default())

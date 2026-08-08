@@ -1,8 +1,8 @@
 //! Per-format serialize / deserialize / validate dispatch.
 //!
 //! [`serialize`], [`deserialize`], and [`validate`] are the three operations
-//! the gateway codec needs; each dispatches to the appropriate sub-module
-//! based on the [`SchemaFormat`].
+//! the gateway codec needs. Each one dispatches to the correct sub-module for
+//! the given [`SchemaFormat`].
 
 pub mod avro;
 pub mod json;
@@ -12,8 +12,8 @@ use bytes::Bytes;
 
 use crate::codec::{CodecError, SchemaFormat};
 
-/// Serialize a JSON-encoded value (`json`) into the wire format for `fmt`
-/// using `schema` as the schema descriptor.
+/// Serialize the JSON-encoded value `json` into the wire format for `fmt`,
+/// with `schema` as the schema descriptor.
 ///
 /// Returns the serialized bytes ready for Confluent framing.
 /// # Errors
@@ -26,8 +26,8 @@ pub fn serialize(fmt: SchemaFormat, schema: &str, json: &[u8]) -> Result<Bytes, 
     }
 }
 
-/// Deserialize a wire payload (`payload`) in `fmt` back to a JSON-encoded
-/// value using `schema` as the schema descriptor.
+/// Deserialize the wire payload `payload` in `fmt` back to a JSON-encoded
+/// value, with `schema` as the schema descriptor.
 ///
 /// Returns the JSON bytes.
 /// # Errors

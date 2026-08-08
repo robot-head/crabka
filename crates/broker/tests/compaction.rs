@@ -3,11 +3,11 @@
 
 //! Log compaction end-to-end broker integration test.
 //!
-//! Produces 30 records across 3 keys (k1, k2, k3) into a compacted topic,
-//! waits for a compaction pass, force-rolls the active segment, waits for
-//! another pass, then fetches and asserts exactly 3 distinct keys survive with
-//! only their latest values (v10-kN). Old values v0..v9 must be gone from
-//! sealed segments.
+//! The test produces 30 records across 3 keys, k1, k2, and k3, into a compacted
+//! topic. It waits for a compaction pass, force-rolls the active segment, and
+//! waits for another pass. It then fetches the records and asserts that exactly
+//! 3 distinct keys survive with only their latest values, v10-kN. Old values
+//! v0..v9 must be gone from the sealed segments.
 //!
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15.
@@ -106,7 +106,7 @@ async fn start_broker_with_fast_cleaner() -> (BrokerHandle, TempDir, SocketAddr)
 // Protocol helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Create a topic with config overrides (PLAINTEXT, no SASL).
+/// Create a topic with config overrides, on PLAINTEXT and with no SASL.
 async fn create_topic_with_configs(
     addr: SocketAddr,
     topic: &str,
@@ -151,7 +151,7 @@ async fn create_topic_with_configs(
     );
 }
 
-/// Get `topic_id` via Metadata (needed for Produce/Fetch v9+).
+/// Get `topic_id` with Metadata. Produce and Fetch v9+ need it.
 async fn get_topic_id(addr: SocketAddr, topic: &str) -> Uuid {
     let req = MetadataRequest {
         topics: Some(vec![MetadataRequestTopic {
@@ -176,7 +176,7 @@ async fn get_topic_id(addr: SocketAddr, topic: &str) -> Uuid {
         .unwrap_or_default()
 }
 
-/// Produce a single record with an explicit key+value to (topic, partition 0).
+/// Produce one record with an explicit key and value to (topic, partition 0).
 async fn produce_record(addr: SocketAddr, topic: &str, topic_id: Uuid, key: &[u8], value: &[u8]) {
     let record = Record {
         offset_delta: 0,
@@ -230,14 +230,15 @@ struct FlatRecord {
     value: Vec<u8>,
 }
 
-/// Fetch all records from (topic, partition 0) starting at offset 0.
-/// Returns a flat list of (key, value) pairs from all batches.
+/// Fetch all records from (topic, partition 0) and start at offset 0.
 ///
-/// The generated `FetchResponse` codec decodes only the FIRST batch from
-/// each partition's `records` field (the rest of the byte stream is
-/// silently discarded). To collect every batch we re-fetch repeatedly,
-/// advancing `fetch_offset` past the last batch we saw, until the broker
-/// returns no batch.
+/// The function returns a flat list of (key, value) pairs from all batches.
+///
+/// The generated `FetchResponse` codec decodes only the FIRST batch from each
+/// partition's `records` field and silently discards the rest of the byte
+/// stream. To collect every batch, the function fetches again and again. Each
+/// time it moves `fetch_offset` past the last batch it saw. It stops when the
+/// broker returns no batch.
 async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRecord> {
     let version: i16 = 12; // flexible
     let mut out: Vec<FlatRecord> = Vec::new();
@@ -348,14 +349,15 @@ fn assert_latest_records_survive(records: &[FlatRecord]) {
 ///
 /// 1. Boot a single broker with cleaner interval = 1s.
 /// 2. Create topic `compacted` with `cleanup.policy=compact` and `segment.bytes=256`.
-/// 3. Produce 30 records (10 × 3 keys), values v0-k1..v9-k3.
-/// 4. Wait for a compaction pass so the sealed segments are compacted.
-/// 5. Force-roll the active segment by producing v10-k1, v10-k2, v10-k3.
-/// 6. Wait for another compaction pass so the newly-sealed segments get compacted.
+/// 3. Produce 30 records, 10 for each of the 3 keys, values v0-k1..v9-k3.
+/// 4. Wait for a compaction pass so the cleaner compacts the sealed segments.
+/// 5. Force-roll the active segment. Produce v10-k1, v10-k2, and v10-k3.
+/// 6. Wait for another compaction pass so the cleaner compacts the newly-sealed
+///    segments.
 /// 7. Fetch all records from offset 0.
-/// 8. Assert exactly 3 distinct keys survive.
-/// 9. Assert no stale (v0-* to v9-*) values remain.
-/// 10. Assert each key has its latest value (v10-kN).
+/// 8. Assert that exactly 3 distinct keys survive.
+/// 9. Assert that no stale value from v0-* to v9-* remains.
+/// 10. Assert that each key has its latest value, v10-kN.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn compaction_dedupes_via_native_client() {
     let (handle, _dir, addr) = start_broker_with_fast_cleaner().await;

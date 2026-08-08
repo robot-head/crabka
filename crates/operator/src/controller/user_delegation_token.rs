@@ -1,31 +1,34 @@
 //! Reconcile arm for
 //! `KafkaUser.spec.authentication.type: delegation-token`.
 //!
-//! Talks to the cluster's admin API (the operator is a super-user and
-//! uses KIP-48 act-as) to maintain one delegation token per user, owned
-//! by `User:<KafkaUser.metadata.name>`. Persists the token credentials
-//! into a Kubernetes Secret + reflects token lifetime + condition into
-//! `KafkaUserStatus`.
+//! This arm talks to the admin API of the cluster to keep one delegation
+//! token for each user. The operator is a super-user and uses KIP-48
+//! act-as. `User:<KafkaUser.metadata.name>` owns the token. The arm writes
+//! the token credentials into a Kubernetes Secret, and it writes the token
+//! lifetime and the condition into `KafkaUserStatus`.
 //!
 //! # Decisions
 //!
-//! `decide` is a pure function over `(spec, existing token, now)` and
+//! `decide` is a pure function over `(spec, existing token, now)`. It
 //! returns one of four `ReconcileDecision` arms. The reconcile loop
-//! dispatches per arm:
+//! dispatches on the arm:
 //!
-//! - `Create` — no matching token; call `CreateDelegationToken` (act-as).
-//! - `NoOp`   — token healthy and well within its expiry horizon.
-//! - `Renew`  — token within `renew_before_expiry`; call `RenewDelegationToken`.
-//! - `Cycle`  — renewer set diverged from spec; expire + create (KIP-48's
-//!   `Renew` cannot mutate the renewer set, so the old token must be
-//!   tombstoned).
+//! - `Create`: there is no matching token. Call `CreateDelegationToken`
+//!   with act-as.
+//! - `NoOp`: the token is healthy and far from its expiry horizon.
+//! - `Renew`: the token is inside `renew_before_expiry`. Call
+//!   `RenewDelegationToken`.
+//! - `Cycle`: the renewer set differs from the spec. Expire the old token
+//!   and create a new one. `Renew` in KIP-48 cannot change the renewer
+//!   set, so the operator must tombstone the old token.
 //!
 //! # I/O isolation
 //!
 //! The admin client surface is the `DelegationTokenAdmin` trait. The
-//! Kubernetes I/O surface is the `SecretWriter` + `KafkaUserStatusWriter`
-//! trait pair. Unit tests substitute trivial in-memory mocks; production
-//! wires `kube::Api<Secret>` / `kube::Api<KafkaUser>` adapters.
+//! Kubernetes I/O surface is the pair of traits `SecretWriter` and
+//! `KafkaUserStatusWriter`. Unit tests substitute simple in-memory mocks.
+//! Production wires the `kube::Api<Secret>` and `kube::Api<KafkaUser>`
+//! adapters.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -56,7 +59,7 @@ use crate::{
 /// Default renewal lead time when the spec omits it.
 pub(crate) const DEFAULT_RENEW_BEFORE_EXPIRY: Time = hours(24);
 
-/// Broker error codes the spec §2.5 table calls out.
+/// Broker error codes that the §2.5 table of the spec names.
 const CODE_INVALID_REQUEST: i16 = 42;
 const CODE_DELEGATION_TOKEN_AUTH_DISABLED: i16 = 61;
 const CODE_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED: i16 = 64;
@@ -65,18 +68,21 @@ const CODE_DELEGATION_TOKEN_AUTHORIZATION_FAILED: i16 = 65;
 /// Output of [`decide`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReconcileDecision {
-    /// No matching token; issue a fresh one.
+    /// There is no matching token. Issue a new one.
     Create,
-    /// Token exists and is well within its expiry horizon. No-op.
+    /// The token exists and is far from its expiry horizon. Do nothing.
     NoOp,
-    /// Token exists but `expiry_ts - now <= renew_before_expiry` — renew.
+    /// The token exists, but `expiry_ts - now <= renew_before_expiry`.
+    /// Renew it.
     Renew,
-    /// Renewer set has diverged from spec; cycle (expire old + create new).
+    /// The renewer set differs from the spec. Cycle the token: expire the
+    /// old one and create a new one.
     Cycle,
 }
 
-/// Pure decision over `(spec, existing token, now_ms)`. Used by both the
-/// production reconcile loop and the unit tests.
+/// Makes a pure decision over `(spec, existing token, now_ms)`.
+///
+/// The production reconcile loop and the unit tests both use it.
 pub(crate) fn decide(
     auth: &DelegationTokenAuth,
     existing: Option<&DelegationToken>,
@@ -104,15 +110,19 @@ pub(crate) fn decide(
     }
 }
 
-/// Admin-client surface used by [`reconcile`]. The production impl lives
-/// in `crabka-client-admin` (task O3) and proxies onto `AdminClient`'s
-/// 4 delegation-token methods. Unit tests substitute an in-memory mock.
+/// Admin-client surface that [`reconcile`] uses.
+///
+/// The production implementation lives in `crabka-client-admin`, task O3.
+/// It proxies onto the 4 delegation-token methods of `AdminClient`. Unit
+/// tests substitute an in-memory mock.
 #[async_trait]
 pub(crate) trait DelegationTokenAdmin: Send + Sync {
-    /// KIP-48 act-as: the operator (a super-user) mints a token owned by
-    /// `owner_principal_name` (a `User:` principal). `renewers` is the
-    /// list of `"User:<name>"` principal strings. A `max_lifetime` of
-    /// `None` defers to the broker's `delegation.token.max.lifetime.ms`.
+    /// Mints a token with KIP-48 act-as.
+    ///
+    /// The operator is a super-user. `owner_principal_name`, which is a
+    /// `User:` principal, owns the new token. `renewers` is the list of
+    /// `"User:<name>"` principal strings. A `max_lifetime` of `None` gives
+    /// the broker value `delegation.token.max.lifetime.ms`.
     async fn create_delegation_token_as_owner(
         &self,
         owner_principal_name: &str,
@@ -120,32 +130,40 @@ pub(crate) trait DelegationTokenAdmin: Send + Sync {
         max_lifetime: Option<Time>,
     ) -> Result<DelegationToken, AdminError>;
 
-    /// Extend the token's `expiry_timestamp_ms` (clamped by
-    /// `max_timestamp_ms` on the broker side). `-1` lifetime defers to
-    /// the broker's default renew period.
+    /// Extends the `expiry_timestamp_ms` of the token.
+    ///
+    /// The broker clamps the new value at `max_timestamp_ms`. A lifetime
+    /// of `-1` gives the default renew period of the broker.
     async fn renew_delegation_token(&self, hmac: &[u8]) -> Result<DelegationToken, AdminError>;
 
-    /// Immediate tombstone of the token. `-1` period = expire-now.
+    /// Tombstones the token immediately. A period of `-1` means
+    /// expire-now.
     async fn expire_delegation_token(&self, hmac: &[u8]) -> Result<(), AdminError>;
 
-    /// `DescribeDelegationToken` filtered to a single owner principal
-    /// string (e.g. `"User:alice"`). Empty vec = no matching tokens.
+    /// Runs `DescribeDelegationToken` for one owner principal string,
+    /// for example `"User:alice"`.
+    ///
+    /// An empty vec means that there are no matching tokens.
     async fn describe_delegation_tokens_owned_by(
         &self,
         owner_principal: &str,
     ) -> Result<Vec<DelegationToken>, AdminError>;
 }
 
-/// Persist the user's token credentials. Production impl wraps
-/// `kube::Api<Secret>` server-side-apply; unit tests substitute an
-/// in-memory `Mutex<Option<Secret>>`.
+/// Writes the token credentials of the user.
+///
+/// The production implementation wraps a server-side apply on
+/// `kube::Api<Secret>`. Unit tests substitute an in-memory
+/// `Mutex<Option<Secret>>`.
 #[async_trait]
 pub(crate) trait SecretWriter: Send + Sync {
     async fn apply(&self, secret: &Secret) -> Result<(), ReconcileError>;
 }
 
-/// Patch the status subresource of a `KafkaUser`. Production impl wraps
-/// `kube::Api<KafkaUser>` merge-patch; unit tests record the JSON body.
+/// Patches the status subresource of a `KafkaUser`.
+///
+/// The production implementation wraps a merge patch on
+/// `kube::Api<KafkaUser>`. Unit tests record the JSON body.
 #[async_trait]
 pub(crate) trait KafkaUserStatusWriter: Send + Sync {
     async fn patch_status(&self, name: &str, body: serde_json::Value)
@@ -202,8 +220,11 @@ pub(crate) struct ReconcileOutcome {
     pub action: Action,
 }
 
-/// Top-level reconcile entrypoint. Pure of any single-impl concrete
-/// type — admin client + I/O writers are passed in as trait objects.
+/// Top-level reconcile entry point.
+///
+/// This function holds no concrete type with a single implementation. The
+/// caller passes the admin client and the I/O writers in as trait
+/// objects.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -332,8 +353,10 @@ pub(crate) async fn reconcile(
     })
 }
 
-/// `Create` arm: issue a new token via act-as. The lifetime falls back to
-/// the broker ceiling when the spec omits the field.
+/// Runs the `Create` arm and issues a new token with act-as.
+///
+/// When the spec omits the lifetime field, the token gets the broker
+/// ceiling.
 async fn issue_new_token(
     name: &str,
     auth: &DelegationTokenAuth,
@@ -344,10 +367,12 @@ async fn issue_new_token(
         .await
 }
 
-/// Build the per-user Secret per spec §2.3. Keys: `token-id`, `hmac`
-/// (raw bytes), `password` (base64-of-hmac, ready-to-paste), and
-/// `sasl.jaas.config` (the JAAS line a JVM client can drop into
-/// `--producer.config`).
+/// Builds the per-user Secret that §2.3 of the spec defines.
+///
+/// The Secret has four keys. `token-id` holds the token id. `hmac` holds
+/// the raw bytes. `password` holds the base64 form of the hmac, which the
+/// user can paste directly. `sasl.jaas.config` holds the JAAS line that a
+/// JVM client can put into `--producer.config`.
 pub(crate) fn build_secret(
     obj: &KafkaUser,
     token: &DelegationToken,
@@ -385,7 +410,7 @@ pub(crate) fn build_secret(
     })
 }
 
-/// Pure helper for the Secret's `data` map.
+/// Pure helper that builds the `data` map of the Secret.
 pub(crate) fn build_secret_data(token: &DelegationToken) -> BTreeMap<String, ByteString> {
     let hmac_b64 = base64::engine::general_purpose::STANDARD.encode(&token.hmac);
     // KIP-48 client JAAS: SCRAM-SHA-256 mechanism, `tokenauth="true"`
@@ -424,11 +449,11 @@ fn user_owner_ref(obj: &KafkaUser) -> Result<OwnerReference, ReconcileError> {
     })
 }
 
-/// Wait until roughly `renew_before_expiry` before expiry, clamped to
+/// Waits until about `renew_before_expiry` before the expiry, clamped to
 /// the configured minimum and maximum requeue extents.
 ///
-/// `expiry_timestamp_ms` and `now_ms` are instants; their difference (less the
-/// renewal lead time is the extent.
+/// `expiry_timestamp_ms` and `now_ms` are instants. Their difference,
+/// less the renewal lead time, is the extent.
 pub(crate) fn compute_requeue(
     token: &DelegationToken,
     auth: &DelegationTokenAuth,
@@ -445,19 +470,20 @@ pub(crate) fn compute_requeue(
         .min(max_requeue)
 }
 
-/// Compute the `Ready` + `TokenIssued` + `TokenExpiring` conditions.
+/// Computes the `Ready`, `TokenIssued`, and `TokenExpiring` conditions.
 ///
 /// - `TokenIssued = True` on the success path with reason `Issued`.
-/// - `TokenIssued = False` on the error path with the spec §2.5 reason.
+/// - `TokenIssued = False` on the error path with the reason from §2.5 of
+///   the spec.
 /// - `Ready = True` on the success path with reason `TokenReady`. The
-///   reconcile loop only calls this after the Secret has been written,
-///   so `Ready = True` is the spec §2.4 aggregator (`TokenIssued=True
-///   AND Secret exists`).
+///   reconcile loop calls this function only after it wrote the Secret, so
+///   `Ready = True` is the aggregator from §2.4 of the spec:
+///   `TokenIssued=True AND Secret exists`.
 /// - `Ready = False` on the error path with the same reason as
-///   `TokenIssued`, so `kubectl describe kafkauser` surfaces the
-///   correlated cause without cross-referencing two conditions.
-/// - `TokenExpiring = True` when `expiry_ts - now < renew_before * 2`,
-///   else `False`. Reason: `WithinRenewalHorizon` / `Healthy`.
+///   `TokenIssued`. `kubectl describe kafkauser` then shows the correlated
+///   cause, and the reader does not have to compare two conditions.
+/// - `TokenExpiring = True` when `expiry_ts - now < renew_before * 2`, and
+///   `False` if not. The reason is `WithinRenewalHorizon` or `Healthy`.
 pub(crate) fn compute_conditions(
     token: &DelegationToken,
     auth: &DelegationTokenAuth,
@@ -508,10 +534,12 @@ pub(crate) fn compute_conditions(
     out
 }
 
-/// Build the merge-patch JSON body for `KafkaUserStatus` after a
-/// successful reconcile. Only sets the delegation-token specific fields
-/// plus the two new conditions; existing status fields (managed by the
-/// shared SCRAM/TLS path) are not touched.
+/// Builds the merge-patch JSON body for `KafkaUserStatus` after a
+/// reconcile that succeeded.
+///
+/// The body sets only the delegation-token fields and the two new
+/// conditions. It does not touch the other status fields, which the shared
+/// SCRAM and TLS path manages.
 pub(crate) fn build_status_patch(
     token: &DelegationToken,
     conditions: &[KafkaCondition],
@@ -528,8 +556,10 @@ pub(crate) fn build_status_patch(
     })
 }
 
-/// Build the merge-patch JSON body for a failure path. Patches only
-/// the `TokenIssued = False` condition (no token fields to surface).
+/// Builds the merge-patch JSON body for a failure path.
+///
+/// The body patches only the `TokenIssued = False` condition, because
+/// there are no token fields to report.
 pub(crate) fn build_failure_status_patch(conditions: &[KafkaCondition]) -> serde_json::Value {
     json!({
         "status": {
@@ -538,10 +568,11 @@ pub(crate) fn build_failure_status_patch(conditions: &[KafkaCondition]) -> serde
     })
 }
 
-/// Map an `AdminError` to (Action, status patch) per spec §2.5.
+/// Maps an `AdminError` to an `(Action, status patch)` pair, as §2.5 of
+/// the spec defines.
 ///
-/// - `0` is unreachable (success path doesn't call here).
-/// - `42` `INVALID_REQUEST`        → `InvalidSpec`, no automatic retry (long requeue).
+/// - `0` is unreachable, because the success path does not call here.
+/// - `42` `INVALID_REQUEST`        → `InvalidSpec`, with a long requeue and no automatic retry.
 /// - `61` `AUTH_DISABLED`          → `BrokerAuthDisabled`, 5m backoff.
 /// - `64` `REQUEST_NOT_ALLOWED`    → `OperatorTokenAuthed`, 5m backoff.
 /// - `65` `AUTHORIZATION_FAILED`   → `OperatorNotSuperUser`, 5m backoff.
@@ -606,9 +637,11 @@ async fn on_admin_error(
     })
 }
 
-/// `expire_owned_tokens` is called from the user.rs finalizer arm on
-/// deletion. Best-effort: errors are logged by the caller and never
-/// block finalizer removal.
+/// Expires the tokens that the user owns.
+///
+/// The finalizer arm in user.rs calls this function on a delete. The call
+/// is best-effort. The caller logs an error, and an error never blocks the
+/// removal of the finalizer.
 pub(crate) async fn expire_owned_tokens(
     name: &str,
     admin: &dyn DelegationTokenAdmin,
@@ -623,14 +656,16 @@ pub(crate) async fn expire_owned_tokens(
     Ok(())
 }
 
-/// Production `DelegationTokenAdmin` impl over the operator's
-/// `AdminClientHandle` (an `Arc<Mutex<dyn AdminClientLike + Send>>`).
-/// Each method locks the inner mutex and delegates to the four
-/// `AdminClientLike` delegation-token methods.
+/// Production `DelegationTokenAdmin` implementation over the
+/// `AdminClientHandle` of the operator.
 ///
-/// The trait surface uses `&self`, so the mutex is taken per call —
-/// matching the SCRAM/ACL/quota arms in `user.rs` which also lock the
-/// same handle on each admin RPC.
+/// `AdminClientHandle` is an `Arc<Mutex<dyn AdminClientLike + Send>>`.
+/// Each method locks the inner mutex and calls one of the four
+/// delegation-token methods of `AdminClientLike`.
+///
+/// The trait surface uses `&self`, so each call takes the mutex. The
+/// SCRAM, ACL, and quota arms in `user.rs` also lock the same handle on
+/// each admin RPC.
 #[async_trait]
 impl DelegationTokenAdmin for crate::context::AdminClientHandle {
     async fn create_delegation_token_as_owner(
@@ -765,10 +800,11 @@ mod tests {
 
     // --- Mock admin client + writers --------------------------------------
 
-    /// Recorded call against the mock admin client. Tests assert on
-    /// this to verify the reconciler called the right RPC with the
-    /// right shape.
-    /// Not `Eq`: `Create` carries a `Time`, whose `f64` storage is only
+    /// One recorded call against the mock admin client.
+    ///
+    /// Tests assert on this to confirm that the reconciler called the
+    /// correct RPC with the correct shape. The type is not `Eq`, because
+    /// `Create` carries a `Time`, and the `f64` storage of `Time` is only
     /// `PartialEq`.
     #[derive(Debug, Clone, PartialEq)]
     enum MockCall {
@@ -792,13 +828,14 @@ mod tests {
     struct MockDelegationTokenAdmin {
         tokens: StdMutex<Vec<DelegationToken>>,
         calls: StdMutex<Vec<MockCall>>,
-        /// If set, the next `create` extends `expiry_timestamp_ms` by
-        /// this delta over `now` (proxied via tests setting issue ts).
+        /// When set, the next `create` extends `expiry_timestamp_ms` by
+        /// this delta over `now`. The tests set the issue timestamp to
+        /// control it.
         create_expiry_offset_ms: i64,
-        /// If set, the next `renew` adds this delta to the existing
-        /// token's expiry (capped at `max_timestamp_ms`).
+        /// When set, the next `renew` adds this delta to the expiry of
+        /// the existing token, with a cap at `max_timestamp_ms`.
         renew_delta_ms: i64,
-        /// Optional canned error code returned from every RPC.
+        /// Optional canned error code that every RPC returns.
         force_broker_error: Option<i16>,
     }
 

@@ -1,4 +1,4 @@
-//! Profiles engine error type.
+//! Error type for the profiles engine.
 
 /// Errors across profiles decode, planning, execution, storage, and symbolization.
 #[derive(Debug, thiserror::Error)]

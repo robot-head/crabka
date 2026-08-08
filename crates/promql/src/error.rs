@@ -1,6 +1,6 @@
 //! The crate's error type.
 
-/// Errors raised by the `PromQL` engine.
+/// Errors the `PromQL` engine raises.
 #[derive(Debug, thiserror::Error)]
 pub enum PromqlError {
     #[error("parse error: {0}")]

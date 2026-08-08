@@ -1,9 +1,10 @@
-//! Stateright model of the KIP-595/996 `KRaft` consensus core. The model state
-//! holds the REAL `QuorumStateMachine` per node plus an in-memory log and an
-//! unordered message network; `next_state` runs the production `on_event` and
-//! the checker explores every interleaving. The committed-log linearizability
-//! tester lives here too, and message-loss/duplication and node crashes are
-//! modeled as explicit `ModelAction`s.
+//! Stateright model of the KIP-595 and KIP-996 `KRaft` consensus core.
+//!
+//! The model state holds the REAL `QuorumStateMachine` for each node, plus an
+//! in-memory log and an unordered message network. `next_state` runs the
+//! production `on_event`, and the checker explores every interleaving. The
+//! committed-log linearizability tester lives here too. Message loss, message
+//! duplication, and node crashes are modeled as explicit `ModelAction`s.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,21 +23,23 @@ use stateright::{
 };
 
 /// Constant logical time. Timeouts are modeled as nondeterministic actions, so
-/// the core never needs a varying clock; constant `now` keeps role deadlines
-/// constant and the state space finite.
+/// the core never needs a varying clock. A constant `now` keeps the role
+/// deadlines constant and the state space finite.
 const NOW: SimInstant = SimInstant(0);
 
 /// Identifies a client request thread for the linearizability tester. Each
 /// `ClientAppend` uses a fresh id, so every "thread" has exactly one in-flight
-/// operation (invoke once, return once).
+/// operation: one invoke and one return.
 pub type ClientId = u64;
 
-/// Sequential reference model of the committed log: appends return the assigned
-/// offset; a read returns the committed value sequence. A committed Kafka log is
-/// an append-only sequence (not a single-value register), so we define our own
-/// `SequentialSpec` rather than reuse the built-in register. The linearization
-/// point of an append is when the value enters the committed prefix (the
-/// leader's high-watermark passes its offset).
+/// Sequential reference model of the committed log. An append returns the
+/// assigned offset, and a read returns the committed value sequence.
+///
+/// A committed Kafka log is an append-only sequence and not a single-value
+/// register, so this module defines its own `SequentialSpec` instead of a reuse
+/// of the built-in register. The linearization point of an append is the moment
+/// the value enters the committed prefix, that is when the leader's high
+/// watermark passes its offset.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct KraftLogSpec {
     committed: Vec<u64>,
@@ -49,11 +52,12 @@ pub enum LogOp {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum LogRet {
-    /// The committed client-value prefix (in commit order) up to and including
-    /// this append, observed at the moment it committed. Using the value prefix
-    /// rather than a physical offset avoids the leader-change control records
-    /// that occupy raft offsets, and makes a lost/reordered committed entry
-    /// produce an unserializable history.
+    /// The committed client-value prefix, in commit order, up to and including
+    /// this append, observed at the moment it committed.
+    ///
+    /// The value prefix avoids the leader-change control records that occupy
+    /// raft offsets, which a physical offset would not. It also makes a lost or
+    /// reordered committed entry produce an unserializable history.
     Committed(Vec<u64>),
 }
 
@@ -68,9 +72,9 @@ impl SequentialSpec for KraftLogSpec {
     }
 }
 
-/// In-memory replicated log: `epochs[i]` is the leader epoch of offset `i`.
-/// (A self-contained copy of the sim-harness `SimLog`, made `Eq + Hash` so it
-/// can live in fingerprinted model state.)
+/// In-memory replicated log, where `epochs[i]` is the leader epoch of offset
+/// `i`. This is a self-contained copy of the sim-harness `SimLog`, made
+/// `Eq + Hash` so that it can live in fingerprinted model state.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ModelLog {
     epochs: Vec<Epoch>,
@@ -121,7 +125,8 @@ impl LogView for ModelLog {
     }
 }
 
-/// One node: the real consensus machine + its log + its committed high-watermark.
+/// One node: the real consensus machine, its log, and its committed high
+/// watermark.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NodeModel {
     pub machine: QuorumStateMachine,
@@ -140,28 +145,37 @@ pub struct Envelope {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ModelState {
     pub nodes: BTreeMap<NodeId, NodeModel>,
-    /// Unordered in-flight messages. `BTreeSet` => deterministic Hash/Eq and
-    /// identical duplicate envelopes collapse to one; explicit `DuplicateDeliver`
-    /// actions model network duplication without accumulating copies in the set.
+    /// Unordered in-flight messages. A `BTreeSet` gives a deterministic `Hash`
+    /// and `Eq`, and identical duplicate envelopes collapse to one. Explicit
+    /// `DuplicateDeliver` actions model network duplication without an
+    /// accumulation of copies in the set.
     pub network: BTreeSet<Envelope>,
-    /// Linearizability auxiliary state, recomputed + fingerprinted per state.
+    /// Linearizability auxiliary state, recomputed and fingerprinted for each
+    /// state.
     pub linz: LinearizabilityTester<ClientId, KraftLogSpec>,
-    /// Client appends not yet observed committed, keyed by the leader-assigned
-    /// offset they were written at. When some node's high-watermark passes an
-    /// offset, that append's `on_return` is recorded.
+    /// Client appends not yet observed as committed, keyed by the
+    /// leader-assigned offset they were written at. When the high watermark of
+    /// some node passes an offset, the model records that append's `on_return`.
     pub pending: BTreeMap<i64, (ClientId, u64)>,
-    /// Authoritative committed client values, in commit order. Grown as appends
-    /// commit; the linearizability return values are checked against it.
+    /// Authoritative committed client values, in commit order. It grows as
+    /// appends commit, and the linearizability return values are checked
+    /// against it.
     pub committed: Vec<u64>,
-    /// Total client appends issued so far (bounded by `ConsensusModel::max_appends`).
+    /// Total client appends issued so far. `ConsensusModel::max_appends`
+    /// bounds it.
     pub appends_issued: u32,
-    /// Crashed (unreachable) nodes. Omission model: a crashed node sends/receives
-    /// nothing and is offered no actions until `Recover`; on `Crash` we also drop
-    /// its in-flight messages (conservative — a real crash-stop could still have
-    /// already-sent messages arrive, so a violation needing that delivery would be
-    /// missed; sound because it only removes interleavings). Its
-    /// `QuorumStateMachine` retains its (durable) state — modelling volatile-state
-    /// loss on restart is out of scope for this phase (no public reset API).
+    /// Crashed, that is unreachable, nodes.
+    ///
+    /// This is an omission model. A crashed node sends nothing, receives
+    /// nothing, and is offered no actions until `Recover`. On `Crash` the model
+    /// also drops its in-flight messages. That is conservative: a real
+    /// crash-stop can still let already-sent messages arrive, so the model would
+    /// miss a violation that needs such a delivery. It stays sound, because it
+    /// only removes interleavings.
+    ///
+    /// The node's `QuorumStateMachine` keeps its durable state. A model of
+    /// volatile-state loss on restart is out of scope for this phase, because
+    /// there is no public reset API.
     pub crashed: BTreeSet<NodeId>,
 }
 
@@ -169,43 +183,46 @@ pub struct ModelState {
 pub enum ModelAction {
     Deliver(Envelope),
     Timeout(NodeId, TimerKind),
-    /// A client appends `value` (as `client`) to the single current leader.
+    /// A client appends `value`, as `client`, to the single current leader.
     ClientAppend(ClientId, u64),
     /// A diskless WAL appender connected to `via` reserves through the same
     /// ordered controller path, so the append still lands at the current leader.
     AppendVia(NodeId, ClientId, u64),
-    /// Drop an in-flight message without delivering it (network loss).
+    /// Drops an in-flight message without a delivery. This models network
+    /// loss.
     DropMsg(Envelope),
-    /// Deliver a copy of an in-flight message but leave the original queued
-    /// (network duplication).
+    /// Delivers a copy of an in-flight message and leaves the original queued.
+    /// This models network duplication.
     DuplicateDeliver(Envelope),
-    /// A node crashes (becomes unreachable). Omission model.
+    /// A node crashes and becomes unreachable. This is the omission model.
     Crash(NodeId),
-    /// A crashed node recovers (becomes reachable again).
+    /// A crashed node recovers and becomes reachable again.
     Recover(NodeId),
 }
 
 pub struct ConsensusModel {
     pub voter_ids: Vec<NodeId>,
-    /// Max client appends issued across a path. `0` disables the client-append /
-    /// linearizability machinery entirely (election/log-matching focus).
+    /// Maximum client appends issued across a path. `0` disables the
+    /// client-append and linearizability machinery entirely, which leaves the
+    /// focus on election and log matching.
     pub max_appends: u32,
-    /// Cap on in-flight messages (state-space bound).
+    /// Cap on in-flight messages. This bounds the state space.
     pub max_inflight: usize,
-    /// Cap on leader epoch (state-space bound).
+    /// Cap on the leader epoch. This bounds the state space.
     pub max_epoch: Epoch,
-    /// Enable message loss + duplication faults.
+    /// Enables the message-loss and message-duplication faults.
     pub enable_loss_dup: bool,
-    /// Max concurrently-crashed nodes (`0` = no crashes).
+    /// Maximum number of nodes crashed at the same time. `0` means no
+    /// crashes.
     pub max_crashes: usize,
     /// Offer appends through every live node, not just direct leader appends.
     pub enable_append_via: bool,
 }
 
 impl ConsensusModel {
-    /// Election + log-matching focus: NO client appends, so the space stays the
-    /// small/fast one from the scaffolding task. Exercises leader election and
-    /// log replication safety across N voters.
+    /// Election and log-matching focus. There are NO client appends, so the
+    /// space stays the small, fast one from the scaffolding task. This exercises
+    /// leader election and log replication safety across N voters.
     pub fn elections(voter_ids: &[NodeId]) -> Self {
         Self {
             voter_ids: voter_ids.to_vec(),
@@ -218,9 +235,10 @@ impl ConsensusModel {
         }
     }
 
-    /// Linearizability focus: client appends ENABLED but with tight bounds, since
-    /// the linearizability tester (history in the fingerprinted state) makes the
-    /// space far larger. Kept small enough to exhaust exactly.
+    /// Linearizability focus. Client appends are ENABLED, but the bounds are
+    /// tight, because the linearizability tester keeps the history in the
+    /// fingerprinted state and so makes the space far larger. The bounds stay
+    /// small enough to exhaust the space exactly.
     pub fn linearizable(voter_ids: &[NodeId], max_appends: u32) -> Self {
         Self {
             voter_ids: voter_ids.to_vec(),
@@ -233,10 +251,11 @@ impl ConsensusModel {
         }
     }
 
-    /// Fault-injection focus: message loss + duplication + a single crash/recover,
-    /// over very tight bounds (faults multiply the action space). No client
-    /// appends — this exercises election + log-matching safety under an adversarial
-    /// network, which is where the bounded space stays exhaustible.
+    /// Fault-injection focus: message loss, message duplication, and a single
+    /// crash and recover, over very tight bounds, because faults multiply the
+    /// action space. There are no client appends. This exercises election and
+    /// log-matching safety under an adversarial network, which is where the
+    /// bounded space stays exhaustible.
     pub fn faults(voter_ids: &[NodeId]) -> Self {
         Self {
             voter_ids: voter_ids.to_vec(),
@@ -249,9 +268,9 @@ impl ConsensusModel {
         }
     }
 
-    /// Diskless append focus: client appends are offered through every live node
-    /// to model stateless appenders, but the ordered controller log remains the
-    /// linearization point.
+    /// Diskless append focus. Client appends are offered through every live
+    /// node, which models stateless appenders, but the ordered controller log
+    /// stays the linearization point.
     pub fn append_via(voter_ids: &[NodeId], max_appends: u32) -> Self {
         Self {
             voter_ids: voter_ids.to_vec(),
@@ -264,9 +283,10 @@ impl ConsensusModel {
         }
     }
 
-    /// The base election timeout configured for node `id`, staggered by id so
-    /// timer ties break deterministically. The model's clock stays a constant
-    /// [`SimInstant`]; this is the extent the core is constructed with.
+    /// The base election timeout configured for node `id`. It is staggered by
+    /// id, so timer ties break deterministically. The model's clock stays a
+    /// constant [`SimInstant`], and this is the extent the core is constructed
+    /// with.
     fn election_timeout_of(id: NodeId) -> Time {
         Time::from_millis(i64::try_from(1000 + id.0 * 50).unwrap_or(i64::MAX))
     }
@@ -282,9 +302,10 @@ impl ConsensusModel {
         }))
     }
 
-    /// Translate one `Action` emitted by `id` into mutations of `state`
-    /// (network envelopes / log / HWM). Ported from `sim_harness` `apply_action`,
-    /// minus the timer arming (timeouts are model actions here).
+    /// Translates one `Action` emitted by `id` into mutations of `state`, which
+    /// are the network envelopes, the log, and the HWM. This is ported from
+    /// `apply_action` in `sim_harness`, without the timer arming, because here
+    /// the timeouts are model actions.
     // A single match over every `Action` variant: long by nature, and `action`
     // is logically consumed (translated) here, so take it by value.
     fn apply_action(&self, state: &mut ModelState, id: NodeId, action: &Action) {
@@ -430,9 +451,10 @@ impl ConsensusModel {
         });
     }
 
-    /// Deliver `event` to `dst`: run the real machine and translate emitted
-    /// actions. Also synthesizes the leader's fetch RESPONSE (the core emits
-    /// HWM/Truncate, not a response message) — ported from `sim_harness` `step`.
+    /// Delivers `event` to `dst`. The method runs the real machine and
+    /// translates the emitted actions. It also synthesizes the leader's fetch
+    /// RESPONSE, because the core emits HWM and Truncate actions and not a
+    /// response message. This is ported from `step` in `sim_harness`.
     fn step(&self, state: &mut ModelState, dst: NodeId, event: Event) {
         let fetch_from = if let Event::ReceiveFetch { from, .. } = &event {
             Some(*from)
@@ -484,14 +506,15 @@ fn node_high_watermark(n: &NodeModel) -> i64 {
     }
 }
 
-/// True iff `n` currently believes itself leader.
+/// True if and only if `n` currently believes it is the leader.
 fn is_leader(n: &NodeModel) -> bool {
     n.machine.role().is_leader()
 }
 
-/// Record `on_return` for any pending append whose offset is now committed (the
-/// max high-watermark across nodes has passed it). Returns are recorded in
-/// ascending offset order — the order in which the committed prefix grows.
+/// Records `on_return` for every pending append whose offset is now committed,
+/// that is every append the maximum high watermark across the nodes has passed.
+/// The returns are recorded in ascending offset order, which is the order in
+/// which the committed prefix grows.
 fn settle_committed(state: &mut ModelState) {
     let max_hwm = state
         .nodes

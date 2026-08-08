@@ -2,22 +2,24 @@
 //! internal-topic management.
 //!
 //! A streams *topology* is a DAG of subtopologies. Each subtopology consumes
-//! some external *source topics* (and/or regex-matched topics), may produce
-//! *repartition sink* topics that another subtopology re-consumes as
-//! *repartition source* topics, and maintains *state changelog* topics backing
-//! its local stores. A *task* is `(subtopology_id, partition)`; the number of
-//! tasks for a subtopology equals its partition count, which is derived from
-//! the partition counts of the topics it reads.
+//! external *source topics*, regex-matched topics, or both. It can produce
+//! *repartition sink* topics that another subtopology consumes again as
+//! *repartition source* topics. It also keeps the *state changelog* topics that
+//! back its local stores. A *task* is `(subtopology_id, partition)`. The number
+//! of tasks for a subtopology equals its partition count, which comes from the
+//! partition counts of the topics it reads.
 //!
-//! This module is pure-ish: every function except [`ensure_internal_topics`]
-//! is synchronous and side-effect-free, taking a [`MetadataImage`] for topic
-//! lookups. The coordinator drives the flow: ingest the client's topology into
-//! a [`StreamsGroupTopologyValue`] ([`to_stored_topology`]), derive task counts
-//! and the external-topic partition snapshot ([`derive_tasks`]), validate it
-//! ([`validate_topology`]), materialize the internal topics it needs
-//! ([`required_internal_topics`] + [`ensure_internal_topics`]), and report any
-//! not-yet-satisfied conditions as a status list ([`validate_topology`] plus
-//! the still-missing internal topics).
+//! This module is almost pure. Every function except [`ensure_internal_topics`]
+//! is synchronous and has no side effects, and each one takes a
+//! [`MetadataImage`] for topic lookups. The coordinator drives the flow.
+//! [`to_stored_topology`] ingests the topology of the client into a
+//! [`StreamsGroupTopologyValue`]. [`derive_tasks`] derives the task counts and
+//! the external-topic partition snapshot. [`validate_topology`] validates that
+//! result. [`required_internal_topics`] and [`ensure_internal_topics`]
+//! materialize the internal topics that the topology needs. The coordinator
+//! then reports each unsatisfied condition as a status list, which holds the
+//! output of [`validate_topology`] and the internal topics that are still
+//! missing.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -42,13 +44,15 @@ use crate::{error::BrokerError, metadata_source::MetadataSource};
 // A. Request -> stored topology conversion
 // ---------------------------------------------------------------------------
 
-/// Convert a client-supplied [`wire::Topology`] (from a
-/// `StreamsGroupHeartbeat` request) into the persisted
-/// [`StreamsGroupTopologyValue`] the coordinator stores and reasons over.
+/// Converts a client-supplied [`wire::Topology`] into a persisted
+/// [`StreamsGroupTopologyValue`].
 ///
-/// This is a straight field-for-field map; `KeyValue` config pairs collapse to
-/// `(String, String)` tuples and the per-subtopology `CopartitionGroup` /
-/// `TopicInfo` structs become their `Stored*` analogs.
+/// The [`wire::Topology`] comes from a `StreamsGroupHeartbeat` request. The
+/// coordinator stores the [`StreamsGroupTopologyValue`] and reasons over it.
+///
+/// This function is a straight field-for-field map. `KeyValue` config pairs
+/// collapse to `(String, String)` tuples. The per-subtopology
+/// `CopartitionGroup` and `TopicInfo` structs become their `Stored*` analogs.
 #[must_use]
 pub fn to_stored_topology(t: &wire::Topology) -> StreamsGroupTopologyValue {
     StreamsGroupTopologyValue {
@@ -108,8 +112,10 @@ fn to_stored_copartition_group(c: &wire::CopartitionGroup) -> StoredCopartitionG
 // B. Status codes (StreamsGroupHeartbeatResponse.Status)
 // ---------------------------------------------------------------------------
 
-/// KIP-1071 heartbeat-response status codes. A non-empty status list keeps the
-/// member in a `NotReady` state until the offending condition clears.
+/// KIP-1071 heartbeat-response status codes.
+///
+/// A non-empty status list keeps the member in a `NotReady` state until the
+/// condition that caused it clears.
 // Byte values for the Kafka StreamsGroupHeartbeatResponse.Status enum.
 pub mod status {
     pub const STALE_TOPOLOGY: i8 = 0;
@@ -123,31 +129,39 @@ pub mod status {
 // C. Task derivation
 // ---------------------------------------------------------------------------
 
-/// The result of resolving a topology against the current metadata image:
-/// per-subtopology task counts (number of partitions) and the partition-count
-/// snapshot of every external source topic that exists.
+/// The result of a topology resolution against the current metadata image.
+///
+/// The result holds the per-subtopology task counts, which are partition
+/// counts. It also holds the partition-count snapshot of every external source
+/// topic that exists.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DerivedTasks {
-    /// subtopology id -> number of tasks (partition count). Subtopologies whose
-    /// count never resolves are absent from this map.
+    /// Subtopology id -> number of tasks, which is the partition count.
+    ///
+    /// A subtopology with a count that never resolves is not in this map.
     pub num_tasks: BTreeMap<String, i32>,
-    /// Partition metadata for the external source topics present in the image,
-    /// to be persisted as the group's `StreamsGroupPartitionMetadataValue`.
+    /// Partition metadata for the external source topics in the image.
+    ///
+    /// The coordinator persists this data as the
+    /// `StreamsGroupPartitionMetadataValue` of the group.
     pub partition_metadata: StreamsGroupPartitionMetadataValue,
 }
 
-/// Derive task counts for every subtopology via a bounded fixpoint over the
+/// Derives task counts for every subtopology with a bounded fixpoint over the
 /// topology DAG.
 ///
-/// Seeding: a subtopology's external source topic present in `image`
-/// contributes its `topic_partition_count`; a `repartition_source_topics` or
-/// `state_changelog_topics` entry with an explicit `partitions > 0` contributes
-/// that. Linkage: a `repartition_sink_topics` name in subtopology A is a
-/// `repartition_source_topics` name in subtopology B, so once `num_tasks(A)` is
-/// known the repartition topic carries `num_tasks(A)` partitions into B. We
-/// iterate `subtopologies.len() + 1` times (or until a pass makes no change) to
-/// propagate through chained repartitions. Subtopologies with no resolvable
-/// input are left unresolved.
+/// Seeding: an external source topic of a subtopology that is present in
+/// `image` contributes its `topic_partition_count`. A
+/// `repartition_source_topics` or `state_changelog_topics` entry with an
+/// explicit `partitions > 0` contributes that value.
+///
+/// Linkage: a `repartition_sink_topics` name in subtopology A is a
+/// `repartition_source_topics` name in subtopology B. Once `num_tasks(A)` is
+/// known, the repartition topic carries `num_tasks(A)` partitions into B.
+///
+/// This function iterates `subtopologies.len() + 1` times, or until one pass
+/// makes no change, to propagate through chained repartitions. It leaves a
+/// subtopology with no resolvable input unresolved.
 #[must_use]
 pub fn derive_tasks(topology: &StreamsGroupTopologyValue, image: &MetadataImage) -> DerivedTasks {
     let mut num_tasks: BTreeMap<String, i32> = BTreeMap::new();
@@ -235,8 +249,9 @@ pub fn derive_tasks(topology: &StreamsGroupTopologyValue, image: &MetadataImage)
     }
 }
 
-/// Expand per-subtopology task counts into the full universe of tasks: for each
-/// subtopology, the partition list `0..num_tasks`.
+/// Expands the per-subtopology task counts into the full set of tasks.
+///
+/// Each subtopology gets the partition list `0..num_tasks`.
 #[must_use]
 pub fn task_set(num_tasks: &BTreeMap<String, i32>) -> BTreeMap<String, Vec<i32>> {
     num_tasks
@@ -249,10 +264,12 @@ pub fn task_set(num_tasks: &BTreeMap<String, i32>) -> BTreeMap<String, Vec<i32>>
 // D. Validation -> status list
 // ---------------------------------------------------------------------------
 
-/// Validate the topology against the metadata image, returning a list of
-/// `(status_code, message)` pairs describing every unsatisfied condition. An
-/// empty vec means the topology is fully ready (all source topics exist and all
-/// copartition groups are consistently partitioned).
+/// Validates the topology against the metadata image.
+///
+/// This function returns a list of `(status_code, message)` pairs, one pair for
+/// each unsatisfied condition. An empty vec means that the topology is fully
+/// ready: all source topics exist, and all copartition groups have consistent
+/// partition counts.
 #[must_use]
 pub fn validate_topology(
     topology: &StreamsGroupTopologyValue,
@@ -320,8 +337,10 @@ pub fn validate_topology(
     out
 }
 
-/// Map a copartition-group `i16` index (a non-negative array offset) to a
-/// `usize`. Negative indices (never emitted by the client) clamp to `0`.
+/// Maps a copartition-group `i16` index to a `usize`.
+///
+/// The index is a non-negative array offset. A negative index clamps to `0`.
+/// The client never emits a negative index.
 fn idx_to_usize(idx: i16) -> usize {
     usize::try_from(idx).unwrap_or(0)
 }
@@ -330,25 +349,32 @@ fn idx_to_usize(idx: i16) -> usize {
 // E. Internal-topic specs + creation
 // ---------------------------------------------------------------------------
 
-/// A fully-resolved internal topic the coordinator must materialize:
-/// repartition or changelog topic with its partition count, replication factor
-/// (0 = "use the cluster default"), and config overrides.
+/// A fully-resolved internal topic that the coordinator must materialize.
+///
+/// The topic is a repartition topic or a changelog topic. The spec holds its
+/// partition count, its replication factor, and its config overrides. A
+/// replication factor of 0 means "use the cluster default".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InternalTopicSpec {
     pub name: String,
     pub partitions: i32,
-    /// Replication factor as requested by the client; `0` uses the configured
-    /// cluster default capped by the number of available brokers.
+    /// Replication factor that the client requested.
+    ///
+    /// A value of `0` uses the configured cluster default, with a cap at the
+    /// number of available brokers.
     pub replication_factor: i16,
     pub configs: BTreeMap<String, String>,
 }
 
-/// Compute the internal topics (repartition + changelog) the topology requires,
-/// sized by the owning subtopology's derived task count. Changelog topics get
-/// `cleanup.policy=compact`; repartition topics get `cleanup.policy=delete`
-/// (each layered on top of any client-supplied configs). De-duplicated by name;
-/// the first occurrence wins. Subtopologies whose task count has not resolved
-/// contribute no specs (we can't size them yet).
+/// Computes the internal repartition and changelog topics that the topology
+/// needs.
+///
+/// The derived task count of the owning subtopology sizes each topic. A
+/// changelog topic gets `cleanup.policy=compact`. A repartition topic gets
+/// `cleanup.policy=delete`. Each policy layers on top of the configs that the
+/// client supplied. This function de-duplicates by name, and the first
+/// occurrence wins. A subtopology with an unresolved task count contributes no
+/// spec, because this function cannot size it yet.
 #[must_use]
 pub fn required_internal_topics(
     topology: &StreamsGroupTopologyValue,
@@ -399,17 +425,20 @@ fn add_spec(
     );
 }
 
-/// Create any of `specs` not already present in the controller's metadata,
-/// mirroring `crate::txn::bootstrap::ensure_topic`: round-robin replica
-/// assignment, replication factor `spec.replication_factor` if `> 0` else the
-/// configured default, bounded by the available brokers, plus a
-/// `V1TopicConfig` record when the spec carries configs. `TopicExists` (a
-/// concurrent create) is tolerated.
+/// Creates the topics in `specs` that the metadata of the controller does not
+/// already hold.
 ///
-/// Returns the names of topics that are STILL absent from the (freshly
-/// re-read) image after the attempt, so the caller can emit
+/// This function mirrors `crate::txn::bootstrap::ensure_topic`. It assigns
+/// replicas round-robin. It uses `spec.replication_factor` as the replication
+/// factor if that value is `> 0`, and the configured default if not, with a
+/// bound at the available brokers. It also writes a `V1TopicConfig` record when
+/// the spec carries configs. The function tolerates `TopicExists`, which a
+/// concurrent create causes.
+///
+/// The function re-reads the image and then returns the names of the topics
+/// that are STILL absent after the attempt. The caller can then emit
 /// `MISSING_INTERNAL_TOPICS` and keep the member `NotReady` until a later
-/// heartbeat observes them.
+/// heartbeat sees them.
 /// # Errors
 /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
 /// # Panics
@@ -533,8 +562,10 @@ mod tests {
         }
     }
 
-    /// Build an image with each `(name, id, partitions)` topic present, backed
-    /// by `partitions` partition records (so `topic_partition_count` resolves).
+    /// Builds an image that holds each `(name, id, partitions)` topic.
+    ///
+    /// Each topic has `partitions` partition records, so
+    /// `topic_partition_count` resolves.
     fn image_with(topics: &[(&str, u8, i32)]) -> MetadataImage {
         let mut image = MetadataImage::new(Uuid::nil());
         for &(name, id, partitions) in topics {

@@ -1,8 +1,10 @@
-//! Component B integration test: a controller-only node + a broker-only
-//! observer. The observer replicates metadata via fetch (not openraft), a
-//! `CreateTopics` forwarded through it lands on the controller and
-//! propagates back to the observer's image, and the observer never joins
-//! the voter set.
+//! Component B integration test, with a controller-only node and a
+//! broker-only observer.
+//!
+//! The observer replicates metadata through fetch, not through openraft. A
+//! `CreateTopics` forwarded through the observer reaches the controller and
+//! comes back to the observer's image. The observer never joins the voter
+//! set.
 
 use std::collections::BTreeSet;
 

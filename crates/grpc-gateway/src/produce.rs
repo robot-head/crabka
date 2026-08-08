@@ -1,7 +1,9 @@
-//! Core produce engine. Keyed records (with an `idempotency_key`) go
-//! through the dedup engine for EOS; unkeyed records take the plain
-//! idempotent path (`acks=all`). Transport-agnostic — front-ends convert
-//! to `GatewayRecord` and receive `RecordOutcome`.
+//! Core produce engine.
+//!
+//! Keyed records, which carry an `idempotency_key`, go through the dedup engine
+//! for EOS. Unkeyed records take the plain idempotent path (`acks=all`). The
+//! engine is transport-agnostic. Front-ends convert to `GatewayRecord` and
+//! receive `RecordOutcome`.
 
 use std::sync::Arc;
 
@@ -79,9 +81,9 @@ impl ProduceCore {
         })
     }
 
-    /// Build a non-idempotent producer for unit tests that don't need a real
-    /// broker. The producer will fail at first send (no bootstrap available),
-    /// but route-layer tests that short-circuit before producing can use this.
+    /// Build a non-idempotent producer for unit tests that do not need a real
+    /// broker. The producer fails at the first send because no bootstrap is
+    /// available. Route-layer tests that stop before they produce can use it.
     ///
     /// # Errors
     /// Returns an error if the test producer cannot be configured.
@@ -113,8 +115,8 @@ impl ProduceCore {
         self
     }
 
-    /// Enable active-active forwarding: non-owned keyed records route to the
-    /// owner named by the membership routing table.
+    /// Enable active-active forwarding. A keyed record this replica does not
+    /// own routes to the owner named by the membership routing table.
     #[must_use]
     pub fn with_forwarding(
         mut self,
@@ -135,11 +137,13 @@ impl ProduceCore {
         &self.codec
     }
 
-    /// Public produce entry point. A keyed record whose dedup-partition this
-    /// replica does not own is forwarded to the owner (per the membership
-    /// routing table); everything else is produced locally. `principal` is the
-    /// resolved caller identity, relayed on a forward so the owning replica can
-    /// re-authorize the original caller (it is unused on the local path).
+    /// Public produce entry point.
+    ///
+    /// A keyed record whose dedup-partition this replica does not own goes to
+    /// the owner named by the membership routing table. Every other record is
+    /// produced locally. `principal` is the resolved caller identity. A forward
+    /// relays it so the owning replica can re-authorize the original caller.
+    /// The local path does not use it.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     /// # Panics
@@ -176,9 +180,12 @@ impl ProduceCore {
         }
     }
 
-    /// Local produce (NO forwarding): keyed → dedup engine (owner/warm gate),
-    /// unkeyed → plain idempotent producer. Used by the public path when this
-    /// replica owns the key, and by the internal forward endpoint.
+    /// Local produce, with NO forwarding.
+    ///
+    /// A keyed record goes to the dedup engine, behind the owner and warm gate.
+    /// An unkeyed record goes to the plain idempotent producer. The public path
+    /// calls this when this replica owns the key, and so does the internal
+    /// forward endpoint.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn produce_local(&self, rec: GatewayRecord) -> Result<RecordOutcome, GatewayError> {

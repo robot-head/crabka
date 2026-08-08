@@ -1,4 +1,4 @@
-//! Kafka-backed schema store — reads/writes from the `_schemas` compacted topic.
+//! Kafka-backed schema store. It reads and writes the `_schemas` compacted topic.
 
 pub mod reader;
 pub mod record;
@@ -23,13 +23,15 @@ use crate::{
 /// Valid `mode` strings for the global / per-subject mode endpoints.
 const VALID_MODES: &[&str] = &["READWRITE", "READONLY", "IMPORT"];
 
-/// Facade over the `_schemas`-backed store: owns the writer, the reader's shared
-/// store + offset watch, and a write-serialisation gate. Only the elected
-/// primary writes `_schemas`; secondaries forward mutating requests to it (see
-/// `rest::forward`), so this facade trusts that any write reaching it is
-/// primary-authorised. Every mutating request takes the gate, decides on a clone
-/// of the store, produces the record, and waits for the reader to apply it
-/// (read-your-writes).
+/// Facade over the `_schemas`-backed store.
+///
+/// It owns the writer, the reader's shared store and offset watch, and a
+/// write-serialisation gate. Only the elected primary writes `_schemas`.
+/// Secondaries forward mutating requests to it, as described in
+/// `rest::forward`, so this facade trusts that any write that reaches it is
+/// primary-authorised. Every mutating request takes the gate, decides on a
+/// clone of the store, produces the record, and waits for the reader to apply
+/// it. That wait gives read-your-writes.
 pub struct KafkaStore {
     pub store: Arc<RwLock<StoreState>>,
     applied_rx: watch::Receiver<i64>,
@@ -51,13 +53,13 @@ pub struct RegisterSchema<'a> {
 impl KafkaStore {
     /// Create `_schemas`, start the reader, build the writer.
     ///
-    /// NOTE: does not block for full initial replay before serving. A
-    /// freshly-promoted primary whose reader has not yet drained the prior
-    /// primary's last records could briefly mis-assign ids/versions until it
-    /// catches up — catch-up-before-write on promotion (and fencing the brief
-    /// rebalance multi-writer window) is a documented deferred limitation of the
-    /// HA support. Tests start from a fresh (empty) `_schemas`, so there is nothing
-    /// to replay.
+    /// NOTE: this function does not block for full initial replay before
+    /// serving. A freshly-promoted primary whose reader has not yet drained the
+    /// prior primary's last records can briefly mis-assign ids and versions
+    /// until it catches up. Catch-up-before-write on promotion, and the fence
+    /// for the brief rebalance multi-writer window, are documented deferred
+    /// limitations of the HA support. Tests start from a fresh, empty
+    /// `_schemas`, so there is nothing to replay.
     #[tracing::instrument(
         level = "info",
         name = "kafkastore.start",
@@ -96,8 +98,8 @@ impl KafkaStore {
         self.store.read().effective_mode(subject).to_string()
     }
 
-    /// `Err(OperationNotPermitted)` if the subject's effective mode is
-    /// `READONLY`; `Ok(())` otherwise.
+    /// Returns `Err(OperationNotPermitted)` if the subject's effective mode is
+    /// `READONLY`, and `Ok(())` in every other case.
     fn ensure_writable(&self, subject: &str) -> Result<(), SrError> {
         if self.effective_mode(subject) == "READONLY" {
             Err(SrError::OperationNotPermitted(subject.to_string()))
@@ -106,10 +108,12 @@ impl KafkaStore {
         }
     }
 
-    /// Register a schema. In `IMPORT` mode, persists at the explicit
-    /// `import_id`/`import_version` (no id-assignment, no compat check). In
-    /// `READONLY` mode, rejected. Otherwise the path is dedup → compat →
-    /// assign → persist → read-your-writes.
+    /// Register a schema.
+    ///
+    /// In `IMPORT` mode, this method persists at the explicit `import_id` and
+    /// `import_version`, with no id assignment and no compatibility check. In
+    /// `READONLY` mode, it rejects the request. In every other mode the path is
+    /// dedup → compat → assign → persist → read-your-writes.
     #[tracing::instrument(
         level = "info",
         name = "kafkastore.register",
@@ -225,8 +229,8 @@ impl KafkaStore {
         Ok(reg)
     }
 
-    /// Persist + apply a global compatibility level (stored, not enforced in
-    /// current API surface).
+    /// Persist and apply a global compatibility level. The level is stored, and
+    /// the current API surface does not enforce it.
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn set_global_compat(&self, level: String) -> Result<(), SrError> {
@@ -289,7 +293,7 @@ impl KafkaStore {
         Ok(())
     }
 
-    /// Soft-delete a version: re-emit its SCHEMA record with `deleted=true`.
+    /// Soft-delete a version. This re-emits its SCHEMA record with `deleted=true`.
     #[tracing::instrument(level = "info", name = "kafkastore.soft_delete_version", skip_all, fields(subject = %subject, version = version.0), err)]
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.

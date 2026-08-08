@@ -19,13 +19,13 @@ pub enum SaslMechanism {
     ScramSha256,
     #[strum(serialize = "SCRAM-SHA-512")]
     ScramSha512,
-    /// SASL/OAUTHBEARER (KIP-255 / RFC 7628). The bearer token is validated
-    /// by the broker's configured token validator.
+    /// SASL/OAUTHBEARER (KIP-255 / RFC 7628). The broker's configured token
+    /// validator validates the bearer token.
     #[strum(serialize = "OAUTHBEARER")]
     OAuthBearer,
-    /// SASL/GSSAPI (Kerberos, RFC 4752). Context establishment and the
-    /// RFC 4752 security-layer negotiation are driven by the broker's
-    /// configured service keytab via the GSS provider.
+    /// SASL/GSSAPI (Kerberos, RFC 4752). The GSS provider drives context
+    /// establishment and the RFC 4752 security-layer negotiation from the
+    /// broker's configured service keytab.
     #[strum(serialize = "GSSAPI")]
     Gssapi,
 }
@@ -41,9 +41,10 @@ impl SaslMechanism {
         s.parse().ok()
     }
 
-    /// `true` for SCRAM mechanisms (SHA-256 and SHA-512). Used by
-    /// handshake / authenticate code that treats both the same way at
-    /// the dispatch level.
+    /// `true` for the SCRAM mechanisms, SHA-256 and SHA-512.
+    ///
+    /// The handshake and authenticate code uses this where it treats both the
+    /// same way at the dispatch level.
     #[must_use]
     pub fn is_scram(self) -> bool {
         matches!(self, Self::ScramSha256 | Self::ScramSha512)
@@ -75,10 +76,10 @@ mod tests {
         }
     }
 
-    /// Wire-exactness guard: only the canonical Kafka mechanism strings
-    /// parse. The Rust variant names and other casings must NOT, so the
-    /// `strum(serialize = ...)` attributes can never silently loosen the
-    /// SASL handshake's accepted mechanism set.
+    /// Wire-exactness guard: only the canonical Kafka mechanism strings parse.
+    /// The Rust variant names and other casings must NOT parse, so the
+    /// `strum(serialize = ...)` attributes can never silently loosen the SASL
+    /// handshake's accepted mechanism set.
     #[test]
     fn from_wire_rejects_variant_names_and_casing() {
         for wire in [

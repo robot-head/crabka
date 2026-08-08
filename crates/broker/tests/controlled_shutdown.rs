@@ -3,17 +3,16 @@
 
 //! `BrokerHandle::controlled_shutdown` integration test.
 //!
-//! A 3-broker PLAINTEXT cluster, rf=3 topic on which broker 1 is the
-//! preferred leader of every partition. `controlled_shutdown(broker 1)`
+//! The test uses a 3-broker PLAINTEXT cluster and an rf=3 topic. Broker 1 is
+//! the preferred leader of every partition. `controlled_shutdown(broker 1)`
 //! must:
 //! 1. Move leadership of every partition off broker 1, and
-//! 2. Return `Ok(())` once the controller has acknowledged
-//!    `should_shut_down=true` (i.e. zero partitions still leadered by
-//!    broker 1).
+//! 2. Return `Ok(())` after the controller acknowledges
+//!    `should_shut_down=true`. Broker 1 then leads zero partitions.
 //!
-//! Gated to non-Windows to match the multi-broker convention from
-//! slices 10b/12b (openraft `debug_assert!` races on the hosted
-//! Windows task scheduler are unrelated to the protocol under test).
+//! The test is gated to non-Windows to match the multi-broker convention from
+//! slices 10b/12b. The openraft `debug_assert!` races on the hosted Windows
+//! task scheduler are unrelated to the protocol under test.
 
 use std::{io, net::SocketAddr, time::Duration};
 
@@ -113,17 +112,16 @@ async fn create_topic(addr: SocketAddr, name: &str, partitions: i32, rf: i16) {
     );
 }
 
-/// Wait until `(topic, partition)` appears in `handle`'s metadata
-/// image.
+/// Waits until `(topic, partition)` appears in the metadata image of
+/// `handle`.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
     handle.wait_until_partition_present(topic, partition).await;
 }
 
-/// Inject a `PartitionRecord` forcing `target` to be the leader for
-/// every partition of `topic`. Uses `submit_metadata_record_for_test`
-/// to bypass the public wire path so the test doesn't have to drive
-/// `ElectLeaders`. Returns once every partition is observed as
-/// `leader=target` in the image.
+/// Injects a `PartitionRecord` that makes `target` the leader for every
+/// partition of `topic`. It uses `submit_metadata_record_for_test` to bypass
+/// the public wire path, so the test does not have to drive `ElectLeaders`.
+/// It returns after the image shows `leader=target` for every partition.
 async fn force_leadership_for_test(
     leader_handle: &BrokerHandle,
     topic: &str,
@@ -175,8 +173,8 @@ async fn force_leadership_for_test(
         .await;
 }
 
-/// Returns the count of partitions in `topic` currently led by `target`
-/// according to `observer`'s image.
+/// Returns the number of partitions in `topic` that `target` currently leads,
+/// according to the image of `observer`.
 fn leader_count(observer: &BrokerHandle, topic: &str, partitions: i32, target: u64) -> usize {
     let mut count = 0usize;
     for p in 0..partitions {

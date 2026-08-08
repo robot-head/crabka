@@ -1,5 +1,7 @@
 //! Schema formats: parse, canonical storage form, and directional
-//! compatibility checks. Canonical form is the global-id deduplication key.
+//! compatibility checks.
+//!
+//! The canonical form is the global-id deduplication key.
 
 pub mod avro;
 pub mod json;
@@ -34,15 +36,17 @@ impl SchemaType {
     }
 }
 
-/// A successfully-parsed schema. `canonical_form()` is a stable string used as
-/// the global-id dedup key; identical schemas (modulo formatting) collide.
+/// A successfully-parsed schema. `canonical_form()` is a stable string that
+/// serves as the global-id dedup key. Two schemas that differ only in
+/// formatting collide.
 pub trait ParsedSchema {
     fn canonical_form(&self) -> String;
 }
 
 /// A referenced schema resolved from the store, ready to feed a format parser.
-/// `name` is the format-specific reference label (Protobuf import path, Avro
-/// type name, JSON `$ref` target); `ty`/`schema` are the referenced version.
+/// `name` is the format-specific reference label: a Protobuf import path, an
+/// Avro type name, or a JSON `$ref` target. `ty` and `schema` are the
+/// referenced version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedReference {
     pub name: String,
@@ -50,8 +54,8 @@ pub struct ResolvedReference {
     pub schema: String,
 }
 
-/// Parse `schema` as `ty` with its resolved references available, returning a
-/// boxed parsed form or `SrError::InvalidSchema`.
+/// Parse `schema` as `ty` with its resolved references available. Returns a
+/// boxed parsed form, or `SrError::InvalidSchema`.
 #[tracing::instrument(level = "debug", name = "format.parse", skip_all, fields(schema_type = ?ty, refs = refs.len()), err)]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
@@ -70,9 +74,11 @@ pub fn parse(
 }
 
 /// Parse `schema` as `ty` and return the normalised storage form.
-/// For AVRO and JSON, the raw input is returned (cp-schema-registry echoes
-/// them verbatim). For Protobuf, a pretty-printed canonical text is returned
-/// matching the format cp-schema-registry produces.
+///
+/// For AVRO and JSON, this function returns the raw input, because
+/// cp-schema-registry echoes them verbatim. For Protobuf, it returns a
+/// pretty-printed canonical text that matches the format cp-schema-registry
+/// produces.
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn normalized_storage_form(
@@ -93,9 +99,10 @@ pub fn normalized_storage_form(
     }
 }
 
-/// Directional compatibility check: can a reader using `reader` read data
-/// written with `writer`, per format `ty`? `Err(messages)` on incompatibility.
-/// Avro is backed by `apache-avro`; Protobuf and JSON Schema are permissive.
+/// Directional compatibility check. It answers whether a reader that uses
+/// `reader` can read data written with `writer`, per format `ty`. It returns
+/// `Err(messages)` on incompatibility. `apache-avro` backs the Avro check.
+/// The Protobuf and JSON Schema checks are permissive.
 #[tracing::instrument(level = "debug", name = "format.check", skip_all, fields(schema_type = ?ty, reader_refs = reader_refs.len(), writer_refs = writer_refs.len()))]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.

@@ -1,9 +1,10 @@
-//! Generates Connect-RPC server stubs + prost message types from the `.proto`.
+//! Generates Connect-RPC server stubs and prost message types from the
+//! `.proto`.
 //!
-//! Drives codegen through a vendored `protoc` binary (`protoc-bin-vendored`) so
-//! the build is hermetic — no system `protoc` and no network fetch. The Connect
-//! generator (connectrpc-axum-build) always invokes a `protoc` binary, so the
-//! vendored one is supplied via `prost-build`'s `protoc_executable`.
+//! Codegen runs through a vendored `protoc` binary, `protoc-bin-vendored`, so
+//! the build is hermetic. It needs no system `protoc` and no network fetch. The
+//! Connect generator, connectrpc-axum-build, always invokes a `protoc` binary,
+//! so `prost-build`'s `protoc_executable` supplies the vendored one.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto = "proto/crabka/gateway/v1/gateway.proto";

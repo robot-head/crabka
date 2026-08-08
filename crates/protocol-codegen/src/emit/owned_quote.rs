@@ -1,19 +1,20 @@
 //! A `quote!`-based reimplementation of the `owned` emitter.
 //!
-//! The structural scaffolding — struct definition, `Default`, the `Encode` /
-//! `Decode` impls, tagged-field framing, nested structs and the `populated`
-//! constructor — is built as a `proc_macro2::TokenStream` instead of being
-//! concatenated with `write!`. `emit` returns the raw token text (plus a banner
-//! and the reused `default_json` / `ProtocolRequest` tails); the rustfmt pass in
-//! `crate::fmt`, run by the regeneration binary, formats it.
+//! This module builds the structural scaffolding as a
+//! `proc_macro2::TokenStream` instead of a concatenation with `write!`. That
+//! scaffolding is the struct definition, `Default`, the `Encode` and `Decode`
+//! impls, tagged-field framing, nested structs, and the `populated`
+//! constructor. `emit` returns the raw token text, plus a banner and the
+//! reused `default_json` and `ProtocolRequest` tails. The rustfmt pass in
+//! `crate::fmt`, which the regeneration binary runs, formats it.
 //!
-//! Wire correctness is guaranteed by *reuse*: the leaf codec expressions
-//! (`encode_call` / `decode_call` / `encoded_len_expr` and their variants), the
-//! import/constant blocks, the `default_json` tail and the common-struct files
-//! all come verbatim from `super::owned`, whose bytes are already covered by the
-//! protocol crate's round-trip and JVM-differential tests. Only the *shape*
-//! around those leaves is rebuilt here, which is where the `write!` templating
-//! was densest. Each leaf string is parsed into tokens with `parse_expr`.
+//! *Reuse* guarantees wire correctness. The leaf codec expressions
+//! (`encode_call`, `decode_call`, `encoded_len_expr`, and their variants), the
+//! import and constant blocks, the `default_json` tail, and the common-struct
+//! files all come verbatim from `super::owned`, whose bytes the protocol
+//! crate's round-trip and JVM-differential tests already cover. This module
+//! rebuilds only the *shape* around those leaves, which is where the `write!`
+//! templating was densest. `parse_expr` parses each leaf string into tokens.
 
 use std::str::FromStr;
 
@@ -43,8 +44,8 @@ use crate::{
 
 type ResMap = std::collections::HashMap<String, Resolution>;
 
-/// Parse an emitter-produced Rust fragment into tokens. The fragment came from a
-/// trusted generator, so a lex error is a bug, not bad input.
+/// Parse an emitter-produced Rust fragment into tokens. The fragment came from
+/// a trusted generator, so a lex error is a bug and not bad input.
 fn parse_expr(s: &str) -> TokenStream {
     TokenStream::from_str(s).expect("leaf generator produced an unlexable fragment")
 }
@@ -79,8 +80,9 @@ fn tagged_should_encode_from_default(f: &FieldSpec) -> TokenStream {
     }
 }
 
-/// `is_flexible(version)` for top-level messages, `version >= N` (the message's
-/// flexible threshold) for nested structs whose version flows in from a parent.
+/// `is_flexible(version)` for top-level messages, and `version >= N` for
+/// nested structs whose version flows in from a parent. `N` is the message's
+/// flexible threshold.
 enum FlexSource {
     TopLevel,
     Nested(i16),
@@ -152,10 +154,11 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
 
 /// Emit the standalone `.rs` file bodies for the message's `commonStructs`.
 ///
-/// `commonStructs` are message-local: each is emitted under a per-message nested
-/// module `common/<message_snake>/<struct_snake>`. The `commons` key is the
-/// relative path stem `<message_snake>/<struct_snake>`; the caller turns that
-/// into the on-disk body path and the wrapper module nesting.
+/// `commonStructs` are message-local. The emitter writes each one under a
+/// per-message nested module `common/<message_snake>/<struct_snake>`. The
+/// `commons` key is the relative path stem `<message_snake>/<struct_snake>`.
+/// The caller turns that stem into the on-disk body path and the wrapper
+/// module nesting.
 fn emit_commons(
     spec: &MessageSpec,
     res_map: &ResMap,
@@ -228,9 +231,10 @@ fn version_err(spec: &MessageSpec) -> TokenStream {
     }
 }
 
-/// A struct definition, its `Default` (when non-trivial), the `Encode`/`Decode`
-/// impls and the test `populated` constructor. Shared by the top-level message
-/// type and every nested struct (they differ only in flex source and guard).
+/// A struct definition, its `Default` when that is non-trivial, the `Encode`
+/// and `Decode` impls, and the test `populated` constructor. The top-level
+/// message type and every nested struct share this function, and they differ
+/// only in flex source and guard.
 fn struct_block(
     name: &str,
     fields: &[FieldSpec],
@@ -354,8 +358,8 @@ fn flex_binding(body: &TokenStream, flex_source: &TokenStream) -> Option<TokenSt
         .then(|| quote!(let flex = #flex_source;))
 }
 
-/// Fields in emission order: non-tagged first, then tagged (matches the string
-/// emitter so struct layout and round-trips are identical).
+/// Fields in emission order: non-tagged first, then tagged. This matches the
+/// string emitter, so struct layout and round-trips are identical.
 fn ordered(fields: &[FieldSpec]) -> impl Iterator<Item = &FieldSpec> {
     fields
         .iter()
@@ -465,8 +469,8 @@ fn encode_one(f: &FieldSpec) -> TokenStream {
     quote!(if #cond { #inner })
 }
 
-/// `flexibleVersions: "none"` on a field forces the legacy codec: shadow `flex`
-/// to `false` for that field's body.
+/// `flexibleVersions: "none"` on a field forces the legacy codec. This
+/// function shadows `flex` to `false` for that field's body.
 fn non_flex_wrap(f: &FieldSpec, body: TokenStream) -> TokenStream {
     if field_forces_non_flex(f) {
         quote!({ let flex = false; #body })
@@ -727,8 +731,8 @@ fn populated_impl(ty: &proc_macro2::Ident, fields: &[FieldSpec], res_map: &ResMa
 }
 
 /// Sibling struct definitions for every field that has its own `fields:` list,
-/// depth-first. `flex_min_val` is the message's flexible threshold, which all
-/// nested structs inherit.
+/// depth-first. `flex_min_val` is the message's flexible threshold, and every
+/// nested struct inherits it.
 fn nested_structs(
     fields: &[FieldSpec],
     flex_min_val: i16,

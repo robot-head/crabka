@@ -1,7 +1,7 @@
-//! Write-path xid chain pruning on replicated engines: superseded row
-//! versions are reclaimed in the same commit batch as the write, so hot-row
-//! chains stay bounded on the engine kind the multi-range cluster actually
-//! runs (`SqlEngine::replicated`), where the background vacuum never runs.
+//! Write-path xid chain pruning on replicated engines. The same commit batch as
+//! the write reclaims superseded row versions, so hot-row chains stay bounded on
+//! the engine kind the multi-range cluster actually runs
+//! (`SqlEngine::replicated`), where the background vacuum never runs.
 
 use std::sync::Arc;
 
@@ -11,8 +11,8 @@ use crabka_pgexec::{Committer, ExecError, LocalLinearizer, SqlEngine};
 use crabka_pgkv::{Kv, MemKv, WriteOp};
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
 
-/// Applies batches straight to the store, standing in for the replicated
-/// state machine (which applies exactly the same batches in WAL order).
+/// Applies batches straight to the store, and stands in for the replicated
+/// state machine, which applies exactly the same batches in WAL order.
 struct StoreCommitter {
     kv: Arc<dyn Kv>,
 }

@@ -1,14 +1,16 @@
 //! Golden `"sr"`-election capture harness for Crabka Schema Registry slice 5 (HA).
 //!
 //! Boots **two** real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` containers against
-//! an in-process Crabka broker (same networking as `capture_admin_fixtures.rs` /
-//! `capture_references_fixtures.rs`: the broker binds `0.0.0.0:9092` and
-//! advertises `host.docker.internal:9092`, while the host connects directly on
-//! `127.0.0.1:9092`). Both cp nodes are pointed at the same Crabka broker and
-//! share the same election group id, so they form the `"sr"` Kafka group and
-//! elect a master *through our coordinator* — a cp node only answers
-//! `GET /subjects` with 200 once that election has completed, so each node's
-//! REST readiness PROVES the election round-tripped end-to-end against Crabka.
+//! an in-process Crabka broker, with the same networking as
+//! `capture_admin_fixtures.rs` and `capture_references_fixtures.rs`. The broker
+//! binds `0.0.0.0:9092` and advertises `host.docker.internal:9092`, while the
+//! host connects directly on `127.0.0.1:9092`.
+//!
+//! Both cp nodes point at the same Crabka broker and share the same election
+//! group id, so they form the `"sr"` Kafka group and elect a master *through
+//! our coordinator*. A cp node answers `GET /subjects` with 200 only after that
+//! election has completed, so each node's REST readiness PROVES the election
+//! round-tripped end-to-end against Crabka.
 //!
 //! Once both nodes are ready, the harness reads the group via `DescribeGroups`
 //! from the host side and captures, per member, the exact `member_metadata`
@@ -16,16 +18,17 @@
 //! (cp's `SchemaRegistryGroupAssignment` JSON), plus the group's `protocol_type`
 //! and protocol name. Two fixtures are produced:
 //!
-//!   * `tests/fixtures/election/members.json` — per member: `member_id`,
-//!     `client_id`, `client_host`, the UTF-8-lossy `member_metadata` +
-//!     `member_assignment` JSON, and `is_leader` (whether cp's group leader
-//!     `member_id` matches). This is the oracle that pins our
-//!     `SchemaRegistryIdentity` / `SchemaRegistryGroupAssignment` encoders.
-//!   * `tests/fixtures/election/group.json` — the group-level shape:
-//!     `group_id`, `group_state`, `protocol_type` (expect `"sr"`),
-//!     `protocol_name` (the captured `SR_PROTOCOL_NAME`), the leader `member_id`,
-//!     and the elected master identity (decoded from the assignment) — the
-//!     oracle for `SR_PROTOCOL_NAME` and the `select_master` comparator.
+//!   * `tests/fixtures/election/members.json`: per member, the `member_id`,
+//!     `client_id`, `client_host`, the UTF-8-lossy `member_metadata` and
+//!     `member_assignment` JSON, and `is_leader`, which says whether cp's group
+//!     leader `member_id` matches. This is the oracle that pins our
+//!     `SchemaRegistryIdentity` and `SchemaRegistryGroupAssignment` encoders.
+//!   * `tests/fixtures/election/group.json`: the group-level shape. It holds
+//!     `group_id`, `group_state`, `protocol_type` with the expected value
+//!     `"sr"`, `protocol_name` with the captured `SR_PROTOCOL_NAME`, the leader
+//!     `member_id`, and the elected master identity decoded from the
+//!     assignment. It is the oracle for `SR_PROTOCOL_NAME` and the
+//!     `select_master` comparator.
 //!
 //! ```text
 //! cargo test -p crabka-schema-registry --test capture_election_fixtures -- --ignored --nocapture
@@ -120,14 +123,15 @@ fn docker_pull(image: &str) {
     assert2::assert!(out.status.success());
 }
 
-/// Start one cp-schema-registry node with a distinct `host_name` and a published
-/// (ephemeral host → in-container `8081`) REST port, pointed at the shared
-/// Crabka broker + the shared election group. Returns the container id.
+/// Start one cp-schema-registry node with a distinct `host_name` and a
+/// published REST port that maps an ephemeral host port to in-container `8081`.
+/// The node points at the shared Crabka broker and the shared election group.
+/// Returns the container id.
 ///
 /// `SCHEMA_REGISTRY_SCHEMA_REGISTRY_GROUP_ID` is cp's env var for the *election*
-/// group id (the doubled `SCHEMA_REGISTRY_` prefix is correct: cp maps the
-/// `schema.registry.group.id` property by prefixing `SCHEMA_REGISTRY_`). Both
-/// nodes share it so they join the same `"sr"` group.
+/// group id. The doubled `SCHEMA_REGISTRY_` prefix is correct, because cp maps
+/// the `schema.registry.group.id` property with a `SCHEMA_REGISTRY_` prefix.
+/// Both nodes share it so they join the same `"sr"` group.
 fn docker_run_schema_registry(host_name: &str) -> String {
     let out = Command::new("docker")
         .args([
@@ -229,8 +233,8 @@ async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &st
 // ── DescribeGroups capture ──────────────────────────────────────────────────────
 
 /// Connect host-side directly to `127.0.0.1:9092`, `DescribeGroups` the `"sr"`
-/// group, and write the per-member metadata/assignment bytes + group-level
-/// protocol shape to the two election fixtures.
+/// group, and write the per-member metadata and assignment bytes and the
+/// group-level protocol shape to the two election fixtures.
 async fn capture_group() {
     // The broker implements api_key 15 (DescribeGroups); connect a plain Client.
     let client = Client::builder()

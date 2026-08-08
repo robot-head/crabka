@@ -1,6 +1,8 @@
-//! Timestamp-version reclamation: write-path opportunistic pruning of
-//! sharded-table version chains, reclaim-floor admission, and pinned-read
-//! protection (see `crabka_pgexec::ts_gc`).
+//! Timestamp-version reclamation.
+//!
+//! The write path prunes the version chains of sharded tables when it can. The
+//! reclaim floor controls admission, and pinned reads stay protected. See
+//! `crabka_pgexec::ts_gc`.
 
 use std::sync::Arc;
 
@@ -29,8 +31,9 @@ async fn int_cell(session: &mut crabka_pgexec::SqlSession, sql: &str) -> String 
     String::from_utf8(cell.text.to_vec()).expect("utf8")
 }
 
-/// Count the stored timestamp tuple versions of a table (its whole physical
-/// chain across every row).
+/// Count the stored timestamp tuple versions of a table.
+///
+/// This is the whole physical chain across every row.
 fn ts_version_count(kv: &dyn Kv, table_name: &str) -> usize {
     let table = crabka_pgcatalog::get_table(kv, &RelationName::public(table_name)).expect("table");
     kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))

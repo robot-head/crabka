@@ -1,7 +1,7 @@
 //! `ElectLeaders` (`api_key` 43, KIP-460).
 //!
 //! Operator-triggered leader election. PREFERRED type moves leadership
-//! back to `replicas[0]` after operator intervention; UNCLEAN type
+//! back to `replicas[0]` after operator intervention. UNCLEAN type
 //! elects outside the ISR when every ISR member is dead.
 //!
 //! Authorization: `Alter` on `Cluster("kafka-cluster")`. On Deny the

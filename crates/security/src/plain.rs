@@ -6,12 +6,12 @@ use crate::{AuthError, AuthMethod, Principal};
 
 /// Verifies a SASL/PLAIN auth attempt against a static credential map.
 ///
-/// On a known user, password comparison is constant-time. On an unknown
-/// user, returns `UnknownUser` (but the wire response collapses both to
-/// `SASL_AUTHENTICATION_FAILED` upstream).
+/// On a known user, the password comparison is constant-time. On an unknown
+/// user, this function returns `UnknownUser`. The wire response upstream
+/// collapses both outcomes to `SASL_AUTHENTICATION_FAILED`.
 ///
-/// `skip_all` keeps `creds` and the raw `password` bytes out of span fields;
-/// only the non-sensitive `user` and mechanism name are recorded. `err`
+/// `skip_all` keeps `creds` and the raw `password` bytes out of the span
+/// fields. Only the non-sensitive `user` and mechanism name are recorded. `err`
 /// surfaces `AuthError` (Debug) without leaking the password.
 #[tracing::instrument(
     level = "debug",

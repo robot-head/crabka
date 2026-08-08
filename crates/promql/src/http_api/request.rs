@@ -63,10 +63,11 @@ pub(super) fn timestamp_ms(value: &str) -> Result<i64, ApiError> {
         .map_err(|()| ApiError::bad_data("invalid timestamp"))
 }
 
-/// A Prometheus query-API duration parameter (`step`, a lookback) as an extent.
+/// Returns a Prometheus query-API duration parameter as an extent.
 ///
-/// Accepts both encodings the API allows: a bare (possibly fractional) second
-/// count, and a Prometheus duration string such as `5m` or `1h30m`.
+/// The parameter is a `step` or a lookback. This function accepts both
+/// encodings the API allows: a bare second count, which can be fractional, and
+/// a Prometheus duration string such as `5m` or `1h30m`.
 pub(super) fn duration_param(value: &str) -> Result<Time, ApiError> {
     let millis = seconds_to_ms(value)
         .or_else(|()| prometheus_duration_ms(value).ok_or(()))
@@ -86,15 +87,15 @@ pub(super) fn validate_timestamp_range(start_ms: i64, end_ms: i64) -> Result<(),
     Ok(())
 }
 
-/// Reject a range query whose resolution exceeds the per-timeseries point cap.
+/// Rejects a range query whose resolution exceeds the per-timeseries point cap.
 ///
-/// Prometheus enforces this unconditionally (independent of any configured
-/// per-tenant limit) in `web/api/v1/api.go`: it rejects when
-/// `(end - start) / step > maxResolution` (integer division, where
-/// `maxResolution` is [`MAX_RESOLUTION_POINTS`]). The error message and the
-/// comma-formatted bound are matched byte-for-byte so Prometheus/Grafana clients
-/// that string-match on it behave identically. `step` is already validated
-/// positive by [`duration_param`].
+/// Prometheus applies this cap in `web/api/v1/api.go` for every query, and no
+/// configured per-tenant limit changes it. Prometheus rejects the query when
+/// `(end - start) / step > maxResolution`, with integer division, where
+/// `maxResolution` is [`MAX_RESOLUTION_POINTS`]. This function matches the error
+/// message and the comma-formatted bound byte-for-byte, so Prometheus and
+/// Grafana clients that string-match on the message behave the same.
+/// [`duration_param`] has already checked that `step` is positive.
 pub(super) fn check_range_resolution(
     start_ms: i64,
     end_ms: i64,

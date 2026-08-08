@@ -1,11 +1,11 @@
-//! `StreamsMembership` — public handle for a KIP-1071 streams group.
+//! `StreamsMembership`: the public handle for a KIP-1071 streams group.
 //!
-//! `start` generates a member id, sends the join heartbeat (epoch 0 with
-//! topology), captures the broker-assigned epoch / heartbeat interval / initial
-//! assignment, then spawns the background heartbeat loop on its own connection
-//! (the broker serves a connection serially).
+//! `start` generates a member id and sends the join heartbeat, which is epoch 0
+//! with the topology. It captures the broker-assigned epoch, the heartbeat
+//! interval, and the initial assignment. It then spawns the background heartbeat
+//! loop on its own connection, because the broker serves a connection serially.
 //!
-//! `next_event` drains coordinator events; `close` leaves the group.
+//! `next_event` drains coordinator events. `close` leaves the group.
 
 use std::{sync::Arc, time::Duration};
 
@@ -59,8 +59,8 @@ impl StreamsJoinRetryBackoff {
     ///
     /// # Errors
     ///
-    /// Returns an error for zero, fractional milliseconds, or a value whose
-    /// milliseconds cannot be represented as `u64`.
+    /// Returns an error for zero, for fractional milliseconds, or for a value
+    /// whose milliseconds do not fit in `u64`.
     pub fn new(value: Duration) -> Result<Self, String> {
         validate_positive_whole_milliseconds("streams join retry backoff", value)?;
         Ok(Self(value))
@@ -99,8 +99,8 @@ impl StreamsLeaveHeartbeatTimeout {
     ///
     /// # Errors
     ///
-    /// Returns an error for zero, fractional milliseconds, or a value whose
-    /// milliseconds cannot be represented as `u64`.
+    /// Returns an error for zero, for fractional milliseconds, or for a value
+    /// whose milliseconds do not fit in `u64`.
     pub fn new(value: Duration) -> Result<Self, String> {
         validate_positive_whole_milliseconds("streams leave heartbeat timeout", value)?;
         Ok(Self(value))
@@ -191,8 +191,8 @@ impl Default for StreamsRebalanceTimeout {
     }
 }
 
-/// Hook invoked once at membership start to resolve schema ids before
-/// processing. Implemented by `SchemaCache` under the `schema-serde` feature.
+/// Hook that runs once at membership start to resolve schema ids before
+/// processing. `SchemaCache` implements it under the `schema-serde` feature.
 #[async_trait::async_trait]
 pub trait SchemaPrewarm: Send + Sync {
     async fn prewarm(&self) -> Result<(), StreamsClientError>;
@@ -202,8 +202,9 @@ pub trait SchemaPrewarm: Send + Sync {
 pub struct StreamsMembership {
     member_id: String,
     group_id: String,
-    /// Shared with the coordinator loop; reads the live member epoch for
-    /// [`group_metadata`](Self::group_metadata) (EOS `send_offsets_to_transaction`).
+    /// Shared with the coordinator loop. It reads the live member epoch for
+    /// [`group_metadata`](Self::group_metadata), which EOS uses in
+    /// `send_offsets_to_transaction`.
     member_epoch: Arc<Mutex<i32>>,
     events: mpsc::UnboundedReceiver<StreamsEvent>,
     shutdown: CancellationToken,
@@ -213,7 +214,7 @@ pub struct StreamsMembership {
 
 #[bon::bon]
 impl StreamsMembership {
-    /// Join a streams group and start heartbeating.
+    /// Join a streams group and start the heartbeat loop.
     #[builder(start_fn = builder, finish_fn = build)]
     #[tracing::instrument(
         name = "streams.membership.start",
@@ -377,10 +378,10 @@ impl StreamsMembership {
 
     /// Streams group metadata for the EOS `send_offsets_to_transaction` call.
     ///
-    /// The `generation_id` maps to the live member epoch (next-gen
-    /// "generation"). The epoch lives behind the coordinator's async `Mutex`, so
-    /// this reader is `async` (a sync accessor would have to `blocking_lock`,
-    /// which panics inside the runtime's async supervisor).
+    /// The `generation_id` maps to the live member epoch, the next-generation
+    /// "generation". The epoch lives behind the coordinator's async `Mutex`, so
+    /// this reader is `async`. A sync accessor would have to `blocking_lock`,
+    /// which panics inside the runtime's async supervisor.
     #[tracing::instrument(
         name = "streams.membership.group_metadata",
         level = "debug",
@@ -397,15 +398,18 @@ impl StreamsMembership {
         }
     }
 
-    /// Await the next membership event (assignment / not-ready / fenced).
-    /// Returns [`StreamsClientError::Closed`] once the heartbeat loop has ended.
+    /// Await the next membership event: assignment, not-ready, or fenced.
+    ///
+    /// This method returns [`StreamsClientError::Closed`] once the heartbeat loop
+    /// has ended.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn next_event(&mut self) -> Result<StreamsEvent, StreamsClientError> {
         self.events.recv().await.ok_or(StreamsClientError::Closed)
     }
 
-    /// Leave the group and stop heartbeating.
+    /// Leave the group and stop the heartbeat loop.
     #[tracing::instrument(
         name = "streams.membership.close",
         level = "info",

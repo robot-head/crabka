@@ -16,15 +16,15 @@ use crate::{ExecError, commit::Committer};
 /// Errors raised when constructing or ordering timestamp-transaction values.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum TimestampTxnError {
-    /// Timestamp zero is reserved so missing timestamps cannot masquerade as real
-    /// transaction times.
+    /// Timestamp zero is reserved so that a missing timestamp cannot look like a
+    /// real transaction time.
     #[error("timestamp transaction values must be greater than zero")]
     ZeroTimestamp,
     /// A commit timestamp must sort strictly after the transaction's start
     /// timestamp.
     #[error("commit timestamp {commit_ts} must be greater than start timestamp {start_ts}")]
     CommitNotAfterStart { start_ts: u64, commit_ts: u64 },
-    /// The allocator reached `u64::MAX` and cannot hand out another non-zero
+    /// The allocator reached `u64::MAX` and cannot give another non-zero
     /// timestamp.
     #[error("timestamp transaction allocator exhausted the u64 timestamp space")]
     TimestampExhausted,
@@ -147,9 +147,10 @@ pub trait TimestampSource: Send + Sync {
     }
 
     /// Fold a timestamp learned from another source into this one so that every
-    /// subsequent allocation strictly exceeds it (the Lamport/HLC receive rule).
+    /// later allocation is strictly greater than it. This is the Lamport/HLC
+    /// receive rule.
     ///
-    /// The default is a no-op: a centralized source such as `LogicalTso` is the
+    /// The default is a no-op. A centralized source such as `LogicalTso` is the
     /// sole timestamp authority for its tenant and learns nothing from peer
     /// timestamps. Distributed (HLC) and range-local sources override this to
     /// advance their clock past the observed value.
@@ -159,11 +160,11 @@ pub trait TimestampSource: Send + Sync {
     /// must treat as uncertain above its read timestamp (see
     /// [`crabka_pgmvcc::visibility::read_verdict`]).
     ///
-    /// The default is `0` — an empty window. A centralized source such as
+    /// The default is `0`, an empty window. A centralized source such as
     /// `LogicalTso` is the sole authority, so a commit above the read timestamp
     /// is genuinely concurrent and never uncertain. A distributed (HLC) source
     /// overrides this with its configured `max_offset`, and only that non-zero
-    /// value can ever yield an [`Uncertain`] verdict.
+    /// value can ever give an [`Uncertain`] verdict.
     ///
     /// [`Uncertain`]: crabka_pgmvcc::visibility::ReadVerdict::Uncertain
     fn uncertainty_window(&self) -> u64 {
@@ -171,7 +172,7 @@ pub trait TimestampSource: Send + Sync {
     }
 }
 
-/// Default in-process timestamp source preserving single-engine behavior.
+/// Default in-process timestamp source that keeps single-engine behavior.
 #[derive(Debug, Default)]
 pub struct LocalTimestampSource {
     allocator: Mutex<MonotonicTimestampAllocator>,
@@ -408,9 +409,11 @@ impl From<ReadTimestamp> for u64 {
     }
 }
 
-/// Monotone local timestamp allocator used by pgexec tests and future TSO client
-/// adapters. It does not pretend to be a distributed oracle; callers must persist
-/// and fence distributed grants outside this primitive.
+/// Monotone local timestamp allocator for pgexec tests and future TSO client
+/// adapters.
+///
+/// This allocator is not a distributed oracle. Callers must persist and fence
+/// distributed grants outside this primitive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonotonicTimestampAllocator {
     next: NonZeroU64,
@@ -596,9 +599,10 @@ pub enum PrimaryTxnDecision {
     Committed(CommitTimestamp),
 }
 
-/// Durable range-0 record for a distributed timestamp transaction.  The record
-/// is deliberately separate from participant intents: range 0 is the only
-/// authority that can make the transaction logically visible.
+/// Durable range-0 record for a distributed timestamp transaction.
+///
+/// The record is deliberately separate from participant intents. Range 0 is the
+/// only authority that can make the transaction logically visible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimestampTxnDescriptor {
     /// TSO start timestamp naming this transaction.
@@ -635,8 +639,10 @@ pub struct TimestampTxnOperation {
 }
 
 /// The immutable primary identity attached to every distributed participant
-/// intent.  `global_xid` fences an old coordinator; `primary_range` tells a
-/// remote resolver where the authoritative decision lives.
+/// intent.
+///
+/// `global_xid` fences an old coordinator. `primary_range` tells a remote
+/// resolver where the authoritative decision is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimestampTxnIdentity {
     /// The transaction start timestamp.
@@ -685,8 +691,9 @@ pub fn timestamp_intent_identities(
 }
 
 impl TimestampTxnDescriptor {
-    /// Create a begun descriptor.  The caller must provide a canonical,
-    /// duplicate-free participant set.
+    /// Create a begun descriptor.
+    ///
+    /// The caller must give a canonical, duplicate-free participant set.
     #[must_use]
     pub fn begun(
         start_ts: TimestampTransactionId,
@@ -1047,8 +1054,10 @@ pub fn decode_timestamp_txn_descriptor_value(
     })
 }
 
-/// Enumerate all durable range-0 timestamp descriptors. Malformed keys and values
-/// are corruption: recovery must stop rather than guess a transaction decision.
+/// Enumerate all durable range-0 timestamp descriptors.
+///
+/// Malformed keys and values are corruption. Recovery must stop and must not
+/// guess a transaction decision.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -1087,8 +1096,8 @@ pub fn timestamp_txn_descriptors(
 /// and range-0 transaction descriptors on this store.
 ///
 /// This is a full store scan. Per-statement paths use the cached
-/// [`TimestampHorizonSource`] instead and fall back to this scan only to seed
-/// the cache (engine open/recovery) or when the store is applied externally.
+/// [`TimestampHorizonSource`] instead. They use this scan only to seed the cache
+/// at engine open or recovery, or when the store is applied externally.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -1134,12 +1143,12 @@ pub fn durable_timestamp_horizon_with_catalog(
 /// Cached [`durable_timestamp_horizon`] for one KV store, shared process-wide
 /// by every engine handle over the same store `Arc`.
 ///
-/// `max` only grows, and every value folded into it was durably written to (or
-/// scanned from) the store, so it is always a valid read-timestamp floor.
-/// `epoch`/`seeded_epoch` implement invalidation: bumping `epoch` forces the
-/// next [`Self::current`] to fold in a fresh full scan, used when the store may
-/// have received timestamp writes this process did not commit itself (for
-/// example on a replication leadership change).
+/// `max` only grows, and the store durably holds every value folded into it.
+/// `max` is therefore always a valid read-timestamp floor. `epoch` and
+/// `seeded_epoch` implement invalidation. An increase of `epoch` forces the next
+/// [`Self::current`] to fold in a fresh full scan. Callers increase `epoch` when
+/// the store may have received timestamp writes this process did not commit
+/// itself, for example on a replication leadership change.
 #[derive(Debug)]
 pub(crate) struct StoreHorizonCache {
     epoch: AtomicU64,
@@ -1181,13 +1190,14 @@ impl StoreHorizonCache {
     }
 }
 
-/// Return the process-wide horizon cache for `kv`'s store identity. Handles
-/// over the same store share one cache, so a bump made through any engine in
-/// this process (for example range 0's descriptor decisions on the store a
-/// data-range engine uses as its catalog) is visible to every reader.
+/// Return the process-wide horizon cache for `kv`'s store identity.
+///
+/// Handles over the same store share one cache. Every reader therefore sees an
+/// increase made through any engine in this process, for example range 0's
+/// descriptor decisions on the store a data-range engine uses as its catalog.
 ///
 /// Every strong holder of the returned cache also holds the store `Arc`, so a
-/// live registry entry can never alias a new store reusing the allocation.
+/// live registry entry can never alias a new store that reuses the allocation.
 fn store_horizon_cache(kv: &Arc<dyn crabka_pgkv::Kv>) -> Arc<StoreHorizonCache> {
     static CACHES: OnceLock<Mutex<HashMap<usize, Weak<StoreHorizonCache>>>> = OnceLock::new();
 
@@ -1209,14 +1219,16 @@ fn store_horizon_cache(kv: &Arc<dyn crabka_pgkv::Kv>) -> Arc<StoreHorizonCache> 
 /// local and catalog stores.
 ///
 /// The first lookup per store seeds the shared [`StoreHorizonCache`] with one
-/// full [`durable_timestamp_horizon`] scan; afterwards the horizon is a pair of
-/// atomic loads. Every durable batch an engine commits flows through
-/// [`HorizonObservingCommitter`], which folds newly written timestamp state
-/// into the store's cache, so the cache never falls below the store's true
-/// horizon for writes made in this process. A catalog replica applied by
-/// another process (`rescan_catalog`) keeps the full-scan behavior for the
-/// catalog side because its timestamp descriptors are decided elsewhere and
-/// arrive through the replication apply path, not through a local committer.
+/// full [`durable_timestamp_horizon`] scan. After that, the horizon is a pair of
+/// atomic loads. Every durable batch an engine commits goes through
+/// [`HorizonObservingCommitter`], which folds newly written timestamp state into
+/// the store's cache. The cache therefore never falls below the store's true
+/// horizon for writes made in this process.
+///
+/// A catalog replica applied by another process, marked with `rescan_catalog`,
+/// keeps the full-scan behavior on the catalog side. Another process decides its
+/// timestamp descriptors, and they arrive through the replication apply path,
+/// not through a local committer.
 #[derive(Clone)]
 pub(crate) struct TimestampHorizonSource {
     kv: Arc<dyn crabka_pgkv::Kv>,
@@ -1246,8 +1258,8 @@ impl TimestampHorizonSource {
         }
     }
 
-    /// The read/transaction-timestamp floor: the greatest durable timestamp on
-    /// either store.
+    /// The read/transaction-timestamp floor, which is the greatest durable
+    /// timestamp on either store.
     pub(crate) fn current(&self) -> Result<u64, crabka_pgkv::KvError> {
         let local = self.kv_cache.current(self.kv.as_ref())?;
         if Arc::ptr_eq(&self.kv_cache, &self.catalog_cache) {
@@ -1276,18 +1288,20 @@ impl TimestampHorizonSource {
 }
 
 /// [`Committer`] decorator that folds committed timestamp state into the
-/// store's horizon cache, keeping [`TimestampHorizonSource::current`] exact for
-/// every durable write made through pgexec without rescanning the store.
+/// store's horizon cache.
+///
+/// The decorator keeps [`TimestampHorizonSource::current`] exact for every
+/// durable write made through pgexec, and it does not rescan the store.
 pub(crate) struct HorizonObservingCommitter {
     inner: Arc<dyn Committer>,
-    /// Pins the store so the registry entry cannot alias a new store reusing
-    /// the same allocation.
+    /// Pins the store so the registry entry cannot alias a new store that
+    /// reuses the same allocation.
     _kv: Arc<dyn crabka_pgkv::Kv>,
     cache: Arc<StoreHorizonCache>,
 }
 
 impl HorizonObservingCommitter {
-    /// Wrap `inner`, observing every batch it commits into `kv`'s store.
+    /// Wrap `inner` and observe every batch it commits into `kv`'s store.
     pub(crate) fn wrap(
         inner: Arc<dyn Committer>,
         kv: &Arc<dyn crabka_pgkv::Kv>,
@@ -1312,10 +1326,12 @@ impl Committer for HorizonObservingCommitter {
     }
 }
 
-/// The greatest timestamp `ops` makes durable, mirroring what a fresh
-/// [`durable_timestamp_horizon`] scan would newly discover: start and commit
-/// timestamps of timestamp tuple versions, plus start timestamps and committed
-/// commit timestamps of range-0 transaction descriptors.
+/// The greatest timestamp `ops` makes durable.
+///
+/// This value matches what a fresh [`durable_timestamp_horizon`] scan would
+/// newly discover: start and commit timestamps of timestamp tuple versions, plus
+/// start timestamps and committed commit timestamps of range-0 transaction
+/// descriptors.
 fn max_timestamp_in_ops(ops: &[crabka_pgkv::WriteOp]) -> Option<u64> {
     const DESCRIPTOR_PREFIX: &[u8] = b"\0\0\0\0meta/ts_txn/";
 
@@ -1366,7 +1382,9 @@ fn max_timestamp_in_ops(ops: &[crabka_pgkv::WriteOp]) -> Option<u64> {
 }
 
 /// Build idempotent physical-abort operations for every timestamp intent on this
-/// range. It deliberately discovers intents from durable MVCC state so crash
+/// range.
+///
+/// This function deliberately finds the intents in durable MVCC state, so crash
 /// recovery does not depend on a coordinator's volatile write list.
 /// # Errors
 ///
@@ -1466,10 +1484,10 @@ pub struct TimestampTxnParticipant {
     committer: std::sync::Arc<dyn Committer>,
     primary_barrier: Option<std::sync::Arc<dyn crate::read_gate::Linearizer>>,
     sequence: Option<std::sync::Arc<crate::seq::SequenceManager>>,
-    /// Timestamp-version GC state for opportunistic dead-version pruning and
-    /// reclaim-floor admission (`None` on bare participants, which then
-    /// neither prune nor enforce the floor in memory — the durable floor
-    /// still fences prewrites through [`prewrite_ops`]).
+    /// Timestamp-version GC state for opportunistic dead-version prunes and
+    /// reclaim-floor admission. This field is `None` on bare participants, which
+    /// then neither prune nor enforce the floor in memory. The durable floor
+    /// still fences prewrites through [`prewrite_ops`].
     ts_gc: Option<std::sync::Arc<crate::ts_gc::TsVersionGc>>,
     range_id: u32,
 }
@@ -1501,18 +1519,20 @@ impl TimestampTxnParticipant {
         }
     }
 
-    /// Attach timestamp-version GC state: commit resolutions then fold
-    /// opportunistic dead-version prune ops into their batches (see
-    /// [`crate::ts_gc::TsVersionGc::prune_batch_ops`]).
+    /// Attach timestamp-version GC state.
+    ///
+    /// Commit resolutions then fold opportunistic dead-version prune ops into
+    /// their batches. See [`crate::ts_gc::TsVersionGc::prune_batch_ops`].
     #[must_use]
     pub fn with_ts_gc(mut self, ts_gc: std::sync::Arc<crate::ts_gc::TsVersionGc>) -> Self {
         self.ts_gc = Some(ts_gc);
         self
     }
 
-    /// Opportunistic prune ops for the rows `writes` just resolved, when GC
-    /// state is attached and the decision publishes committed/deleted
-    /// versions; empty otherwise.
+    /// Opportunistic prune ops for the rows `writes` just resolved.
+    ///
+    /// The result is empty unless GC state is attached and the decision
+    /// publishes committed or deleted versions.
     fn commit_prune_ops(
         &self,
         decision: TimestampTxnDecision,
@@ -1531,13 +1551,16 @@ impl TimestampTxnParticipant {
     }
 
     /// Publish closure for a durably committed decision through the attached
-    /// GC state (a no-op on bare participants or aborts). Commit resolution
-    /// is the closure source that works under a pure-write workload: served
-    /// reads also publish closure, but a range whose reads all arrive at the
-    /// owner timestamp (`u64::MAX` never reconciles) would otherwise never
-    /// advance its closed timestamp, and a reclaim floor derived from it
-    /// would sit at zero forever with every dead version left in place.
-    /// Call only after the resolve batch is durably committed.
+    /// GC state. This is a no-op on bare participants and on aborts.
+    ///
+    /// Commit resolution is the closure source that works under a pure-write
+    /// workload. Served reads also publish closure, but consider a range whose
+    /// reads all arrive at the owner timestamp, where `u64::MAX` never
+    /// reconciles. That range would otherwise never advance its closed
+    /// timestamp, and a reclaim floor derived from it would stay at zero, with
+    /// every dead version left in place.
+    ///
+    /// Call this only after the resolve batch is durably committed.
     fn observe_committed_decision(&self, decision: TimestampTxnDecision) {
         if let Some(ts_gc) = &self.ts_gc
             && let TimestampTxnDecision::Committed(commit_ts)
@@ -1588,8 +1611,10 @@ impl TimestampTxnParticipant {
     }
 
     /// Prewrite intents for a transaction whose authoritative decision is the
-    /// primary-range descriptor. The descriptor already contains the complete
-    /// participant set, so no per-intent sidecar is needed for recovery.
+    /// primary-range descriptor.
+    ///
+    /// The descriptor already holds the complete participant set, so recovery
+    /// needs no per-intent sidecar.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1617,7 +1642,9 @@ impl TimestampTxnParticipant {
     }
 
     /// Atomically persist the pending primary record and the primary range's
-    /// intents. The transaction's first write range calls this exactly once.
+    /// intents.
+    ///
+    /// The transaction's first write range calls this exactly once.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1661,8 +1688,10 @@ impl TimestampTxnParticipant {
         Ok(())
     }
 
-    /// Persist secondary intents carrying the immutable primary identity. The
-    /// authenticated gateway updates the primary descriptor after this returns.
+    /// Persist secondary intents that carry the immutable primary identity.
+    ///
+    /// The authenticated gateway updates the primary descriptor after this
+    /// function returns.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1930,9 +1959,12 @@ impl TimestampTxnParticipant {
         Ok(())
     }
 
-    /// Idempotently settle durable operations after recovering a terminal range-0
-    /// descriptor. Unlike normal resolution, restart recovery has no volatile
-    /// `TimestampWrite` list to reconstruct global-index keys from.
+    /// Idempotently settle durable operations after recovery of a terminal
+    /// range-0 descriptor.
+    ///
+    /// Normal resolution has a volatile `TimestampWrite` list, but restart
+    /// recovery does not. Restart recovery therefore cannot rebuild
+    /// global-index keys from that list.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -2402,8 +2434,10 @@ fn encode_timestamp_intent_identity(identity: TimestampTxnIdentity, range_id: u3
 }
 
 /// Prove that a local version belongs to the exact committed distributed
-/// transaction recorded by the range-0 descriptor. Missing or malformed intent
-/// identity is deliberately not treated as a legacy version.
+/// transaction recorded by the range-0 descriptor.
+///
+/// This function deliberately does not treat a missing or malformed intent
+/// identity as a legacy version.
 pub(crate) fn local_intent_matches_descriptor(
     kv: &dyn crabka_pgkv::Kv,
     descriptor: &TimestampTxnDescriptor,
@@ -2473,8 +2507,10 @@ pub(crate) fn local_terminal_operation_matches_descriptor(
     })
 }
 
-/// Build prewrite intent operations, failing before any write if the row has a
-/// conflicting intent or a version committed after `start_ts`.
+/// Build prewrite intent operations.
+///
+/// This function fails before any write if the row has a conflicting intent or
+/// a version committed after `start_ts`.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -2746,8 +2782,10 @@ fn resolve_recovered_global_index_intents(
     Ok(ops)
 }
 
-/// Read the newest visible timestamp version for one row at `read_ts`, excluding
-/// unresolved or aborted intents and honoring delete tombstones.
+/// Read the newest visible timestamp version for one row at `read_ts`.
+///
+/// This function excludes unresolved and aborted intents, and it honors delete
+/// tombstones.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -3099,8 +3137,8 @@ impl TimestampVersionState {
         self.decision
     }
 
-    /// Timestamp visibility: only committed versions with `commit_ts <= read_ts`
-    /// are visible. Pending intents and aborted versions are excluded.
+    /// Timestamp visibility. Only committed versions with `commit_ts <= read_ts`
+    /// are visible. This function excludes pending intents and aborted versions.
     #[must_use]
     pub fn is_visible_at(self, read_ts: ReadTimestamp) -> bool {
         match self.decision {

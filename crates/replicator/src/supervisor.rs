@@ -20,11 +20,12 @@ use crate::{
     worker::{FlowWorker, FlowWorkerParams},
 };
 
-/// Owned, `Clone`-able inputs needed to rebuild a [`FlowWorkerParams`] (and thus
-/// a fresh [`FlowWorker`]) when the supervision loop restarts a failed worker.
+/// Owned, `Clone`-able inputs that rebuild a [`FlowWorkerParams`], and with it a
+/// fresh [`FlowWorker`], when the supervision loop restarts a failed worker.
 ///
-/// `FlowWorkerParams` itself lives in another module and is not `Clone`, so we
-/// keep the resolved inputs here and reconstruct the params via [`make_params`].
+/// `FlowWorkerParams` itself lives in another module and is not `Clone`. This
+/// type therefore keeps the resolved inputs, and [`make_params`] reconstructs
+/// the params from them.
 #[derive(Clone)]
 struct RebuildSpec {
     flow_name: String,
@@ -43,7 +44,7 @@ struct RebuildSpec {
 }
 
 /// Build a fresh [`FlowWorkerParams`] from a [`RebuildSpec`]. All security is
-/// `None` in Slice 1 (plaintext).
+/// `None` in Slice 1, which is plaintext.
 fn make_params(spec: &RebuildSpec) -> FlowWorkerParams {
     FlowWorkerParams {
         flow_name: spec.flow_name.clone(),
@@ -67,10 +68,11 @@ fn make_params(spec: &RebuildSpec) -> FlowWorkerParams {
 /// Returns `true` if `name` is a Kafka or replicator internal topic that must
 /// never be selected as a replication source.
 ///
-/// Excludes Kafka internals (anything starting with `__`) and the replicator's
-/// own state topics: heartbeats, the consolidated offsets topic, per-flow
-/// checkpoint topics (`*.checkpoints.internal`), and MM2 offset-sync topics
-/// (`mm2-offset-syncs.*`).
+/// The function excludes Kafka internals, that is, any name that starts with
+/// `__`. It also excludes the replicator's own state topics: heartbeats, the
+/// consolidated offsets topic, the per-flow checkpoint topics
+/// `*.checkpoints.internal`, and the MM2 offset-sync topics
+/// `mm2-offset-syncs.*`.
 fn is_internal(name: &str) -> bool {
     name.starts_with("__")
         || name == "heartbeats"
@@ -100,9 +102,10 @@ impl FlowSupervisor {
     /// spawn a supervision loop that owns the workers and restarts any that
     /// enter [`RuntimeState::Failed`].
     ///
-    /// For each flow the source cluster's topics are listed and filtered by the
-    /// flow's topic selector, excluding already-remote topics (default-naming
-    /// loop guard) and Kafka/replicator internal topics.
+    /// For each flow this method lists the topics of the source cluster and
+    /// filters them by the topic selector of the flow. It excludes
+    /// already-remote topics, which is the default-naming loop guard, and Kafka
+    /// and replicator internal topics.
     ///
     /// # Errors
     ///

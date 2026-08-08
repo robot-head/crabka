@@ -1,24 +1,24 @@
 //! End-to-end tests that drive the official Apache Kafka command-line
-//! tools (running inside `mirror.gcr.io/confluentinc/cp-kafka:6.1.1` containers) against
-//! a Rust `crabka-broker` running on the host.
+//! tools against a Rust `crabka-broker` that runs on the host. The tools
+//! run inside `mirror.gcr.io/confluentinc/cp-kafka:6.1.1` containers.
 //!
 //! Both tests are gated `#[ignore = "requires Docker"]` so `cargo test`
-//! doesn't pull Docker by default. Run with `--ignored`.
+//! does not pull Docker by default. Run with `--ignored`.
 //!
 //! Networking: the Rust broker listens on `0.0.0.0:9092` of the host. The
 //! Kafka CLI containers use Docker's default bridge network plus
-//! `--add-host=host.docker.internal:host-gateway`, which on both Docker
-//! Desktop and Linux Docker 20.10+ maps `host.docker.internal` to the
-//! bridge gateway IP that the host's `0.0.0.0:9092` is bound on. The
-//! broker's advertised listener is `host.docker.internal:9092` so the
-//! `AdminClient`'s *second* connect (post-Metadata) targets a hostname the
-//! container can resolve.
+//! `--add-host=host.docker.internal:host-gateway`. On Docker Desktop and on
+//! Linux Docker 20.10+, that flag maps `host.docker.internal` to the bridge
+//! gateway IP that the host binds `0.0.0.0:9092` on. The broker advertises
+//! `host.docker.internal:9092`. The `AdminClient` connects a second time
+//! after Metadata, and that connect targets a hostname the container can
+//! resolve.
 //!
-//! We deliberately do NOT use `--network host`: on hosted GitHub Actions
-//! ubuntu-24.04 runners, that mode silently fails to share the host's
-//! loopback (the container can `nc -zv 127.0.0.1 9092` but a Java NIO
-//! `SocketChannel.connect()` to the same address times out), and we have
-//! no good way to debug that from a Rust integration test.
+//! These tests deliberately do NOT use `--network host`. On hosted GitHub
+//! Actions ubuntu-24.04 runners, that mode silently fails to share the
+//! host's loopback. The container can run `nc -zv 127.0.0.1 9092`, but a
+//! Java NIO `SocketChannel.connect()` to the same address times out, and a
+//! Rust integration test gives no good way to debug it.
 
 // `clippy::unnecessary_unwrap` fires on the `l.unwrap()` inside
 // `if l.is_some() && l != Some(1)` in `jvm_kafka_leader_election_preferred`
@@ -35,35 +35,35 @@ use crabka_log::LogConfig;
 
 const HOST_PORT: u16 = 9092;
 /// Address the Kafka CLI containers use for bootstrap AND that the broker
-/// advertises in `Metadata`. Resolved via `--add-host=host.docker.internal:
-/// host-gateway` in [`docker_run_kafka_tool`].
+/// advertises in `Metadata`. [`docker_run_kafka_tool`] resolves it with
+/// `--add-host=host.docker.internal:host-gateway`.
 const BOOTSTRAP: &str = "host.docker.internal:9092";
-/// Bind to all interfaces so the Docker bridge can reach us via the host
-/// gateway IP.
+/// Bind to all interfaces so the Docker bridge can reach the broker at the
+/// host gateway IP.
 const LISTEN: &str = "0.0.0.0:9092";
 const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:6.1.1";
-/// Newer Kafka image used for tests that require tools not bundled in
-/// [`KAFKA_IMAGE`]. Currently referenced by:
+/// Newer Kafka image for tests that need tools not bundled in
+/// [`KAFKA_IMAGE`]. These tests use it:
 ///
-/// - `kafka_cluster_describe`: `kafka-cluster` binary is absent from
-///   `cp-kafka:6.1.1` but present in `cp-kafka:7.5.0`.
+/// - `kafka_cluster_describe`: `cp-kafka:6.1.1` has no `kafka-cluster`
+///   binary, but `cp-kafka:7.5.0` has one.
 ///
-/// NOTE: `cp-kafka:7.5.0`'s bundled `kafka-verifiable-producer` does NOT
-/// support `--transactional-id` despite shipping Kafka 3.5. The test that
-/// requires that flag is gated behind `CRABKA_RUN_TXN_JVM_TEST` and
-/// deferred pending a custom Java snippet harness.
+/// NOTE: the `kafka-verifiable-producer` bundled in `cp-kafka:7.5.0` does
+/// NOT support `--transactional-id`, although the image ships Kafka 3.5.
+/// `CRABKA_RUN_TXN_JVM_TEST` gates the test that needs that flag. The test
+/// waits for a custom Java snippet harness.
 const KAFKA_IMAGE_TXN: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.5.0";
-/// Kafka 0.10.1 console tools (Confluent Platform 3.1.2), used by the
-/// legacy-client acceptance tests (`jvm_legacy_010_*`). The
-/// 0.10.x-era producer emits v1 `MessageSet` (KIP-32 per-message
-/// timestamps) by default; the consumer negotiates Fetch v0–3. This
-/// exercises the broker's `kafka_3_6_2`-namespace handlers and the
-/// up/down-conversion paths landed in slices 2b+2c (#226).
+/// Kafka 0.10.1 console tools from Confluent Platform 3.1.2. The
+/// legacy-client acceptance tests (`jvm_legacy_010_*`) use them. The
+/// 0.10.x-era producer emits v1 `MessageSet` records by default, with
+/// KIP-32 per-message timestamps. The consumer negotiates Fetch v0–3. This
+/// image exercises the broker's `kafka_3_6_2`-namespace handlers and the
+/// up/down-conversion paths from slices 2b+2c (#226).
 const KAFKA_IMAGE_LEGACY: &str = "mirror.gcr.io/confluentinc/cp-kafka:3.1.2";
 
-/// Spawn the broker, listening on `LISTEN`. The advertised listener is
-/// `host.docker.internal:9092`; inside the cp-kafka containers we add a
-/// hosts entry pointing that name at the bridge gateway.
+/// Spawn the broker on `LISTEN`. The advertised listener is
+/// `host.docker.internal:9092`. Inside the cp-kafka containers, the test
+/// adds a hosts entry that points that name at the bridge gateway.
 async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -122,14 +122,14 @@ fn nc_check_connectivity() {
 }
 
 /// Run `docker run --rm --add-host=host.docker.internal:host-gateway
-/// <image> <args...>`, asserting success.
+/// <image> <args...>` and assert that it succeeds.
 fn docker_run_kafka_tool(args: &[&str]) -> std::process::Output {
     docker_run_kafka_tool_with_image(KAFKA_IMAGE, args)
 }
 
 /// Like [`docker_run_kafka_tool`] but lets the caller choose the image.
-/// Used when a specific test needs a newer image (e.g. `kafka-cluster`
-/// is only bundled in `cp-kafka:7.5.0`, not `6.1.1`).
+/// Use it when a test needs a newer image. For example, `cp-kafka:7.5.0`
+/// bundles `kafka-cluster` and `6.1.1` does not.
 fn docker_run_kafka_tool_with_image(image: &str, args: &[&str]) -> std::process::Output {
     let out = Command::new("docker")
         .arg("run")
@@ -2010,7 +2010,7 @@ async fn kafka_consumer_groups_list_describe() {
 /// `kafka-consumer-groups --delete-offsets` exercises `OffsetDelete`
 /// (`api_key` 47, KIP-496) end-to-end against `cp-kafka:6.1.1`. The JVM
 /// `AdminClient` flow under this CLI runs `FindCoordinator` →
-/// `DescribeGroups` → `OffsetDelete`; after the consumer exits the group
+/// `DescribeGroups` → `OffsetDelete`. After the consumer exits, the group
 /// is `Empty`, so the KIP-496 subscription guard skips and the tombstone
 /// path runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2202,7 +2202,7 @@ async fn kafka_cluster_describe() {
 // ────────────────────────────────────────────────────────────────────────
 
 /// Build a JAAS config string for the `PlainLoginModule`. The trailing `;`
-/// is mandatory — Kafka's JAAS parser rejects the entry without it.
+/// is mandatory. Kafka's JAAS parser rejects the entry without it.
 fn plain_jaas(user: &str, pass: &str) -> String {
     format!(
         "org.apache.kafka.common.security.plain.PlainLoginModule required \
@@ -2210,8 +2210,8 @@ fn plain_jaas(user: &str, pass: &str) -> String {
     )
 }
 
-/// Build a JAAS config string for the `ScramLoginModule`. Used by the
-/// SCRAM-SHA-512 acceptance test.
+/// Build a JAAS config string for the `ScramLoginModule`. The
+/// SCRAM-SHA-512 acceptance test uses it.
 fn scram_jaas(user: &str, pass: &str) -> String {
     format!(
         "org.apache.kafka.common.security.scram.ScramLoginModule required \
@@ -2220,8 +2220,9 @@ fn scram_jaas(user: &str, pass: &str) -> String {
 }
 
 /// Spawn the broker with a single `SASL_PLAINTEXT` listener on
-/// `0.0.0.0:9092` (advertised as `host.docker.internal:9092`), pre-populated
-/// with the given PLAIN `users`. Mirrors [`start_host_broker`] otherwise.
+/// `0.0.0.0:9092`, advertised as `host.docker.internal:9092`. The listener
+/// starts with the given PLAIN `users` already installed. Mirrors
+/// [`start_host_broker`] otherwise.
 fn start_sasl_plaintext_broker(
     users: &[(&str, &str)],
 ) -> impl std::future::Future<Output = (crabka_broker::BrokerHandle, tempfile::TempDir)> {
@@ -2286,12 +2287,12 @@ fn start_sasl_plaintext_broker(
 /// PLAIN, SCRAM-SHA-256, and SCRAM-SHA-512 mechanisms, plus a single PLAIN
 /// super-user (`admin` / `admin_pass`). The super-user designation grants
 /// the admin principal `CLUSTER_AUTHORIZATION` on
-/// `AlterUserScramCredentials` (51), so the JVM `kafka-configs --alter
-/// --entity-type users` tool — which the admin runs over PLAIN — can
-/// provision SCRAM credentials for other users.
+/// `AlterUserScramCredentials` (51). The admin runs the JVM `kafka-configs
+/// --alter --entity-type users` tool over PLAIN, so that tool can provision
+/// SCRAM credentials for other users.
 ///
-/// Used by `jvm_sasl_scram_sha512_produce_consume` and
-/// `jvm_sasl_scram_sha256_produce_consume`.
+/// `jvm_sasl_scram_sha512_produce_consume` and
+/// `jvm_sasl_scram_sha256_produce_consume` use this broker.
 fn start_dual_mech_broker(
     admin: &str,
     admin_pass: &str,
@@ -2359,11 +2360,11 @@ fn start_dual_mech_broker(
     })
 }
 
-/// Write `props` to a `tempfile::NamedTempFile` and (on unix) chmod it to
-/// `0644` so the cp-kafka container's non-root user can read it once it's
-/// bind-mounted. `tempfile` creates files `0600` by default which causes a
-/// silent `IOException: client.properties (Permission denied)` inside the
-/// JVM tool. Returned object holds the tempfile open; drop it after the
+/// Write `props` to a `tempfile::NamedTempFile` and chmod it to `0644` on
+/// unix, so the non-root user of the cp-kafka container can read it once it
+/// is bind-mounted. `tempfile` creates files `0600` by default, which causes
+/// a silent `IOException: client.properties (Permission denied)` inside the
+/// JVM tool. The returned object holds the tempfile open. Drop it after the
 /// last docker invocation that needs the mount.
 fn write_client_props(props: &str) -> ClientPropsFile {
     let tmp = tempfile::NamedTempFile::new().expect("tmp");
@@ -2383,8 +2384,8 @@ struct ClientPropsFile {
 }
 
 impl ClientPropsFile {
-    /// `<host_path>:/client.properties:ro` — the second positional arg to
-    /// `docker run -v`. Inside the container the file is always at
+    /// `<host_path>:/client.properties:ro`, the second positional argument
+    /// to `docker run -v`. Inside the container the file is always at
     /// `/client.properties`, so JVM tool flags can use a fixed path.
     fn mount_str(&self) -> String {
         format!("{}:/client.properties:ro", self.tmp.path().display())
@@ -2392,14 +2393,15 @@ impl ClientPropsFile {
 }
 
 /// Run a cp-kafka tool with an extra `-v <mount>` bind. Otherwise identical
-/// to [`docker_run_kafka_tool`]: asserts success, captures stdout+stderr.
+/// to [`docker_run_kafka_tool`]: it asserts success and captures
+/// stdout+stderr.
 fn docker_run_kafka_tool_with_mount(mount: &str, args: &[&str]) -> std::process::Output {
     docker_run_kafka_tool_with_image_and_mount(KAFKA_IMAGE, mount, args)
 }
 
 /// Like [`docker_run_kafka_tool_with_mount`] but lets the caller choose the
-/// image. Used by the SCRAM-SHA-512 acceptance test, which needs
-/// `cp-kafka:7.5.0` because `kafka-configs --alter --entity-type users` in
+/// image. The SCRAM-SHA-512 acceptance test uses it and needs
+/// `cp-kafka:7.5.0`, because `kafka-configs --alter --entity-type users` on
 /// `cp-kafka:6.1.1` (Kafka 2.7) sends `IncrementalAlterConfigs (api_key 44)`
 /// rather than `AlterUserScramCredentials (51)`. Kafka 3.5+ uses the typed
 /// KIP-554 request, which is what the broker implements.
@@ -2437,8 +2439,8 @@ fn docker_run_kafka_tool_with_image_and_mount(
 /// End-to-end `SASL_PLAINTEXT` + PLAIN drive of the JVM `kafka-topics`,
 /// `kafka-console-producer`, and `kafka-console-consumer` tools against a
 /// Rust broker with a `SASL_PLAINTEXT` listener and a single provisioned
-/// PLAIN user. Verifies the produce/consume round-trip end-to-end through
-/// the official Kafka client.
+/// PLAIN user. The test verifies the produce/consume round-trip end-to-end
+/// through the official Kafka client.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_sasl_plain_produce_consume() {
@@ -2553,9 +2555,10 @@ async fn jvm_sasl_plain_produce_consume() {
 
 /// JAAS config for the JVM `OAuthBearerLoginModule` built-in *unsecured*
 /// token issuer. `unsecuredLoginStringClaim_sub` mints an
-/// `alg:none` JWS with `sub=<user>`, `iat=now`, `exp=now+3600s` — exactly the
-/// token shape Crabka's [`crabka_security::UnsecuredJwsValidator`] accepts.
-/// Pairs with `OAuthBearerUnsecuredLoginCallbackHandler` on the client.
+/// `alg:none` JWS with `sub=<user>`, `iat=now`, `exp=now+3600s`. That is
+/// exactly the token shape Crabka's
+/// [`crabka_security::UnsecuredJwsValidator`] accepts. It pairs with
+/// `OAuthBearerUnsecuredLoginCallbackHandler` on the client.
 fn oauthbearer_jaas(sub: &str) -> String {
     format!(
         "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required \
@@ -2616,9 +2619,9 @@ async fn start_oauthbearer_broker() -> (crabka_broker::BrokerHandle, tempfile::T
 
 /// End-to-end `SASL_PLAINTEXT` + OAUTHBEARER drive of the JVM
 /// `kafka-topics` / `kafka-console-producer` / `kafka-console-consumer`
-/// tools. The JVM client uses the built-in unsecured login module
-/// to mint an `alg:none` JWS for `sub=admin`; Crabka parses the RFC 7628
-/// client initial response and validates the token, deriving `User:admin`.
+/// tools. The JVM client uses the built-in unsecured login module to mint an
+/// `alg:none` JWS for `sub=admin`. Crabka parses the RFC 7628 client initial
+/// response, validates the token, and derives `User:admin`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_sasl_oauthbearer_produce_consume() {
@@ -2732,18 +2735,18 @@ async fn jvm_sasl_oauthbearer_produce_consume() {
 /// against a Rust broker. Exercises two distinct authentication paths in a
 /// single run:
 ///
-/// 1. **PLAIN as super-user.** The admin user authenticates via PLAIN and
+/// 1. **PLAIN as super-user.** The admin user authenticates with PLAIN and
 ///    runs `kafka-configs --alter --entity-type users --add-config
 ///    'SCRAM-SHA-512=[password=...]'`. On `cp-kafka:7.5.0` (Kafka 3.5+) the
-///    JVM tool translates this to `AlterUserScramCredentials (api_key 51)`
-///    — the KIP-554 typed request, which is what the broker's handler
-///    accepts. (On the older `cp-kafka:6.1.1` / Kafka 2.7 image the same
+///    JVM tool translates this to `AlterUserScramCredentials (api_key 51)`,
+///    the KIP-554 typed request, which is what the broker's handler
+///    accepts. On the older `cp-kafka:6.1.1` / Kafka 2.7 image the same
 ///    CLI invocation falls back to `IncrementalAlterConfigs (44)` with
-///    `entity_type=USER`, which the broker does not implement.)
+///    `entity_type=USER`, which the broker does not implement.
 ///
 /// 2. **SCRAM-SHA-512 as the provisioned user.** Alice then drives
 ///    `kafka-topics`, `kafka-console-producer`, and `kafka-console-consumer`
-///    using `sasl.mechanism=SCRAM-SHA-512`, exercising the RFC 5802 state
+///    with `sasl.mechanism=SCRAM-SHA-512`. This exercises the RFC 5802 state
 ///    machine end-to-end through the official Kafka client.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
@@ -2925,8 +2928,8 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
 }
 
 /// SHA-256 analog of `jvm_sasl_scram_sha512_produce_consume`.
-/// Provisions alice's credential via `kafka-configs --add-config
-/// 'SCRAM-SHA-256=[password=...]'` (KIP-554 wire byte 1) then drives
+/// The test provisions alice's credential with `kafka-configs --add-config
+/// 'SCRAM-SHA-256=[password=...]'` (KIP-554 wire byte 1), then drives
 /// produce + consume with `sasl.mechanism=SCRAM-SHA-256`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
@@ -3092,9 +3095,9 @@ async fn jvm_sasl_scram_sha256_produce_consume() {
 }
 
 /// Spawn the broker with a single `SSL` listener on `0.0.0.0:9092`
-/// (advertised as `host.docker.internal:9092`) using the dev cert/key from
+/// (advertised as `host.docker.internal:9092`) with the dev cert/key from
 /// `crates/security/tests/fixtures/`. No SASL. Mirrors
-/// [`start_host_broker`] otherwise but flips the protocol to `Ssl` and
+/// [`start_host_broker`] otherwise, but flips the protocol to `Ssl` and
 /// supplies a [`TlsConfig`].
 async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
     use crabka_broker::config::ListenerSpec;
@@ -3180,19 +3183,19 @@ async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) 
     (handle, dir)
 }
 
-/// Build a JKS truststore from the dev cert PEM by shelling out to
-/// `keytool` inside a one-shot Docker container. Returns the host-side
-/// path to a `ts.jks` file (chmod `0644` so the cp-kafka container's
-/// non-root user can read it once bind-mounted).
+/// Build a JKS truststore from the dev cert PEM. This function runs
+/// `keytool` inside a one-shot Docker container. It returns the host-side
+/// path to a `ts.jks` file, chmod `0644` so the non-root user of the
+/// cp-kafka container can read it once it is bind-mounted.
 ///
-/// Caches the result under `<tmp>/crabka-jvm-truststore/ts.jks` so
-/// repeated invocations (across both this test and the `SASL_SSL` test)
-/// skip the keytool round-trip.
+/// The result is cached under `<tmp>/crabka-jvm-truststore/ts.jks`, so later
+/// calls from this test and from the `SASL_SSL` test skip the keytool
+/// round-trip.
 ///
-/// The cp-kafka:6.1.1 image ships its own JRE + `keytool` binary, so we
-/// reuse it via `--entrypoint keytool` rather than pulling `openjdk:17`.
-/// The image is guaranteed to be on disk because the SSL test itself
-/// invokes `kafka-broker-api-versions` from the same image.
+/// The cp-kafka:6.1.1 image ships its own JRE and `keytool` binary, so this
+/// function reuses them with `--entrypoint keytool` instead of pulling
+/// `openjdk:17`. The image is always on disk, because the SSL test itself
+/// runs `kafka-broker-api-versions` from the same image.
 fn prepare_jks_truststore() -> std::path::PathBuf {
     let cache_dir = std::env::temp_dir().join("crabka-jvm-truststore");
     std::fs::create_dir_all(&cache_dir).expect("mkdir truststore cache");
@@ -3255,20 +3258,20 @@ fn prepare_jks_truststore() -> std::path::PathBuf {
     ts_path
 }
 
-/// End-to-end TLS handshake check against an `SSL`-only listener. Drives
-/// `kafka-broker-api-versions` from inside the cp-kafka container with a
-/// JKS truststore containing the broker's dev cert. Verifies the JVM
-/// client completes the TLS handshake and exchanges an `ApiVersions`
-/// request over the encrypted channel.
+/// End-to-end TLS handshake check against an `SSL`-only listener. The test
+/// drives `kafka-broker-api-versions` from inside the cp-kafka container
+/// with a JKS truststore that holds the broker's dev cert. It verifies that
+/// the JVM client completes the TLS handshake and exchanges an
+/// `ApiVersions` request over the encrypted channel.
 ///
-/// Hostname verification is disabled
-/// (`ssl.endpoint.identification.algorithm=`) because the dev cert's CN
+/// The test turns off hostname verification with
+/// `ssl.endpoint.identification.algorithm=`, because the CN of the dev cert
 /// is `crabka-dev`, not `host.docker.internal`. The dev cert is a
-/// self-signed ECDSA P-256 end-entity (regenerated in this task from the
-/// original ED25519 + CA:TRUE fixture — cp-kafka:6.1.1 ships Java 11
-/// whose `SunJSSE` does not advertise `ed25519` signature schemes during
-/// the TLS handshake, so the JVM client would reject ED25519 server
-/// certs with `NoSignatureSchemesInCommon`).
+/// self-signed ECDSA P-256 end-entity, regenerated from the original
+/// ED25519 + CA:TRUE fixture. cp-kafka:6.1.1 ships Java 11, whose
+/// `SunJSSE` does not advertise `ed25519` signature schemes during the TLS
+/// handshake, so the JVM client would reject ED25519 server certs with
+/// `NoSignatureSchemesInCommon`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_ssl_handshake_succeeds() {
@@ -3325,8 +3328,8 @@ async fn jvm_ssl_handshake_succeeds() {
 // ────────────────────────────────────────────────────────────────────────
 
 /// Like [`docker_run_kafka_tool_with_image_and_mount`] but supports multiple
-/// bind mounts. Needed by the `SASL_SSL` test, which mounts both
-/// a `client.properties` file and a JKS truststore into the same container.
+/// bind mounts. The `SASL_SSL` test needs this, because it mounts both a
+/// `client.properties` file and a JKS truststore into the same container.
 fn docker_run_kafka_tool_with_image_and_mounts(
     image: &str,
     mounts: &[&str],
@@ -3357,13 +3360,13 @@ fn docker_run_kafka_tool_with_image_and_mounts(
     out
 }
 
-/// Spawn the broker with a single `SASL_SSL` listener — PLAIN +
-/// SCRAM-SHA-512 mechanisms enabled, the dev cert/key wired up for TLS,
-/// and `admin` provisioned as the super-user PLAIN identity so it can
+/// Spawn the broker with a single `SASL_SSL` listener. The listener enables
+/// the PLAIN and SCRAM-SHA-512 mechanisms, uses the dev cert/key for TLS,
+/// and gets `admin` as the super-user PLAIN identity, so `admin` can call
 /// `AlterUserScramCredentials` to provision SCRAM users.
 ///
 /// This is the dual-mech broker from [`start_dual_mech_broker`] flipped
-/// from `SaslPlaintext` to `SaslSsl` with a `TlsConfig` attached — i.e.
+/// from `SaslPlaintext` to `SaslSsl` with a `TlsConfig` attached. That is
 /// the production-shape listener configuration.
 fn start_sasl_ssl_broker(
     admin: &str,
@@ -3450,16 +3453,16 @@ fn start_sasl_ssl_broker(
     })
 }
 
-/// End-to-end `SASL_SSL` drive of the JVM tools — the production-shape auth
-/// path: TLS handshake + SCRAM-SHA-512 SASL exchange over the encrypted
-/// channel. Mirrors `jvm_sasl_scram_sha512_produce_consume` but
-/// with the `SASL_PLAINTEXT` listener swapped for `SASL_SSL` and the JVM
-/// client configured with a JKS truststore.
+/// End-to-end `SASL_SSL` drive of the JVM tools. This is the
+/// production-shape auth path: a TLS handshake, then a SCRAM-SHA-512 SASL
+/// exchange over the encrypted channel. It mirrors
+/// `jvm_sasl_scram_sha512_produce_consume`, but swaps the `SASL_PLAINTEXT`
+/// listener for `SASL_SSL` and gives the JVM client a JKS truststore.
 ///
-/// Uses cp-kafka:7.5.0 so admin's `kafka-configs --alter --entity-type users
-/// --add-config 'SCRAM-SHA-512=[...]'` translates to KIP-554's
-/// `AlterUserScramCredentials (api_key 51)` rather than the legacy
-/// `IncrementalAlterConfigs (44)` path that the broker doesn't implement.
+/// The test uses cp-kafka:7.5.0, so admin's `kafka-configs --alter
+/// --entity-type users --add-config 'SCRAM-SHA-512=[...]'` translates to
+/// KIP-554's `AlterUserScramCredentials (api_key 51)` rather than the legacy
+/// `IncrementalAlterConfigs (44)` path that the broker does not implement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_sasl_ssl_full_stack() {
@@ -3642,19 +3645,20 @@ async fn jvm_sasl_ssl_full_stack() {
 /// `SASL_PLAINTEXT` listener of broker 0 binds `0.0.0.0:9092` (advertised as
 /// `host.docker.internal:9092`) and broker 1 binds `0.0.0.0:9094`
 /// (advertised as `host.docker.internal:9094`). Inter-broker traffic flows
-/// over the same listeners — each broker resolves `host.docker.internal`
-/// to its peer's bound port via the host's resolver.
+/// over the same listeners. Each broker uses the host's resolver to resolve
+/// `host.docker.internal` to its peer's bound port.
 const HOST_PORT_B1: u16 = 9094;
 const BOOTSTRAP_B1: &str = "host.docker.internal:9094";
 const LISTEN_B1: &str = "0.0.0.0:9094";
 
 /// Spawn two in-process brokers that share a single inter-broker SASL
-/// credential. Each broker has one `SASL_PLAINTEXT` listener; both
-/// `plain_credentials[admin] = admin_pass` so each broker can authenticate
-/// to the other via the same admin identity. The inter-broker listener
+/// credential. Each broker has one `SASL_PLAINTEXT` listener. Both set
+/// `plain_credentials[admin] = admin_pass`, so each broker can authenticate
+/// to the other with the same admin identity. The inter-broker listener
 /// name on both is `"SASL_PLAINTEXT"`, so the broker peers dial each
-/// other's advertised host (which we set to `host.docker.internal:<port>`
-/// so the JVM containers can use the same metadata response).
+/// other's advertised host. This function sets that host to
+/// `host.docker.internal:<port>`, so the JVM containers can use the same
+/// metadata response.
 async fn start_two_sasl_brokers(
     admin: &str,
     admin_pass: &str,
@@ -3777,30 +3781,31 @@ async fn start_two_sasl_brokers(
     (broker0, broker1, dir0, dir1)
 }
 
-/// JVM-driven 2-broker test exercising the `SASL_PLAINTEXT` inter-broker
-/// listener. Both brokers boot with the same shared `admin` credential
-/// (mechanism=PLAIN); the raft layer authenticates each peer in both
+/// JVM-driven 2-broker test for the `SASL_PLAINTEXT` inter-broker
+/// listener. Both brokers boot with the same shared `admin` credential and
+/// mechanism=PLAIN. The raft layer authenticates each peer in both
 /// directions before the cluster converges on a 2-broker metadata view.
 /// A JVM client then SASL-authenticates as the same `admin` identity over
 /// the data-plane listener, creates a topic, and produces 50 records.
 ///
 /// Why this test is *not* a follower-replication assertion: the brokers
 /// in this test advertise `host.docker.internal:<port>` so the JVM
-/// container can reach them via `--add-host=...:host-gateway`. Under WSL2
-/// that hostname resolves to the Windows host IP (e.g. `10.0.0.170`),
-/// which is *not* routable back into the WSL VM where the broker peers
-/// live. So follower-fetch traffic that flows broker→broker
-/// (`InterBrokerClient` dialing the peer's advertised address from
-/// `MetadataImage`) cannot complete on this network topology. That isn't
-/// a SASL or replication bug — it's a Docker-on-WSL networking limitation.
-/// The Rust-driven equivalent — `tests/auth_handlers.rs::two_broker_sasl::
-/// two_broker_sasl_plaintext_replication` — uses 127.0.0.1 advertised
-/// addresses for both brokers and *does* exercise end-to-end inter-broker
-/// SASL replication. Use that as the load-bearing inter-broker SASL test.
+/// container can reach them with `--add-host=...:host-gateway`. Under WSL2
+/// that hostname resolves to the Windows host IP, for example
+/// `10.0.0.170`, which is *not* routable back into the WSL VM where the
+/// broker peers live. So follower-fetch traffic that flows broker→broker
+/// cannot complete on this network topology. That traffic is the
+/// `InterBrokerClient` dialing the peer's advertised address from
+/// `MetadataImage`. This is not a SASL or replication bug. It is a
+/// Docker-on-WSL networking limit. The Rust-driven equivalent is
+/// `tests/auth_handlers.rs::two_broker_sasl::two_broker_sasl_plaintext_replication`.
+/// It uses 127.0.0.1 advertised addresses for both brokers and *does*
+/// exercise end-to-end inter-broker SASL replication. Use that as the
+/// load-bearing inter-broker SASL test.
 ///
 /// What this test *does* assert end-to-end through the JVM client:
 ///
-/// 1. Two brokers boot with `SASL_PLAINTEXT` inter-broker auth, exchanging
+/// 1. Two brokers boot with `SASL_PLAINTEXT` inter-broker auth and exchange
 ///    raft `AppendEntries` + `BrokerHeartbeat` traffic over SASL.
 /// 2. The cluster converges on a 2-broker metadata view (both brokers'
 ///    `broker_count() >= 2`).
@@ -3922,12 +3927,12 @@ async fn jvm_inter_broker_replication_authed() {
 
 /// Spawn two in-process brokers that share an inter-broker SASL
 /// credential AND both terminate TLS on the data plane and the controller
-/// quorum listener. Mirrors [`start_two_sasl_brokers`] but with the `SASL_SSL`
-/// listener protocol + `controller_listener_protocol = ctrl` (typically
-/// `ListenerProtocol::SaslSsl`). Each broker advertises
-/// `host.docker.internal:<port>` so the JVM containers can reach them via
+/// quorum listener. Mirrors [`start_two_sasl_brokers`] but with the
+/// `SASL_SSL` listener protocol and `controller_listener_protocol = ctrl`,
+/// which is usually `ListenerProtocol::SaslSsl`. Each broker advertises
+/// `host.docker.internal:<port>` so the JVM containers can reach them with
 /// `--add-host=host.docker.internal:host-gateway` AND so each broker can
-/// dial its peer using the same host name.
+/// dial its peer with the same host name.
 async fn start_two_sasl_ssl_brokers_with_controller_protocol(
     ctrl_protocol: crabka_security::ListenerProtocol,
     admin: &str,
@@ -4083,19 +4088,19 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
 }
 
 /// Two-broker `SASL_SSL` cluster with `controller_listener_protocol =
-/// SaslSsl`. Provisions a SCRAM user, produces rf=2 via JVM client, asserts
-/// both brokers replicate the records. Supersedes the earlier simplified
-/// inter-broker test (which only proved metadata convergence) by exercising
+/// SaslSsl`. The test provisions a SCRAM user, produces rf=2 through the JVM
+/// client, and asserts that both brokers replicate the records. It exercises
 /// the full production-shape stack: TLS-terminated controller raft RPC,
-/// TLS-terminated data-plane SASL, and rf=2 follower replication.
+/// TLS-terminated data-plane SASL, and rf=2 follower replication. The
+/// earlier simplified inter-broker test only proved metadata convergence.
 ///
-/// Networking: like the `SASL_PLAINTEXT` inter-broker test, this advertises
-/// `host.docker.internal:<port>` so the JVM containers can reach the
-/// brokers. Under WSL2 the broker→broker `InterBrokerClient` hop may fail
-/// because `host.docker.internal` resolves to the Windows host IP, not the
-/// WSL VM where the peers live. The CI runner's `/etc/hosts` setup makes
-/// that hop work end-to-end; on WSL the test may time out at the rf=2
-/// offset check even though `SASL_SSL` itself is correctly wired.
+/// Networking: like the `SASL_PLAINTEXT` inter-broker test, this test
+/// advertises `host.docker.internal:<port>` so the JVM containers can reach
+/// the brokers. Under WSL2 the broker→broker `InterBrokerClient` hop can
+/// fail, because `host.docker.internal` resolves to the Windows host IP and
+/// not to the WSL VM where the peers live. The CI runner's `/etc/hosts`
+/// setup makes that hop work end-to-end. On WSL the test can time out at
+/// the rf=2 offset check even when `SASL_SSL` itself is correctly wired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_inter_broker_sasl_ssl_raft_replication() {
@@ -4274,12 +4279,12 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
 
 /// Spawn the broker with a single `SASL_PLAINTEXT` listener that enables
 /// PLAIN, plus a configured PLAIN super-user. Mirrors
-/// [`start_sasl_plaintext_broker`] otherwise. Used by the ACL
-/// JVM acceptance tests: the super-user authenticates via PLAIN and runs
-/// `kafka-acls --add/--remove/--list` (which hit `CreateAcls (30)` /
-/// `DeleteAcls (31)` / `DescribeAcls (29)`, all of which require the
-/// `Cluster Alter` or `Cluster Describe` operation — the super-user bypass
-/// in `authorize()` short-circuits that check).
+/// [`start_sasl_plaintext_broker`] otherwise. The ACL JVM acceptance tests
+/// use it: the super-user authenticates with PLAIN and runs
+/// `kafka-acls --add/--remove/--list`. Those flags hit `CreateAcls (30)`,
+/// `DeleteAcls (31)`, and `DescribeAcls (29)`, which all need the
+/// `Cluster Alter` or `Cluster Describe` operation. The super-user bypass
+/// in `authorize()` short-circuits that check.
 fn start_sasl_plaintext_broker_with_super_user(
     super_user: &str,
     users: &[(&str, &str)],
@@ -4345,18 +4350,18 @@ fn start_sasl_plaintext_broker_with_super_user(
     })
 }
 
-/// JVM acceptance — `kafka-acls.sh` end-to-end provision flow.
+/// JVM acceptance: `kafka-acls.sh` end-to-end provision flow.
 ///
-/// Drives the modern `kafka-acls.sh` flag set (cp-kafka:7.5.0, Kafka 3.5+)
-/// against the Rust broker's `CreateAcls (30)` / `DescribeAcls (29)` /
-/// `DeleteAcls (31)` handlers. Admin authenticates as PLAIN super-user
-/// — its `Cluster Alter`/`Cluster Describe` checks bypass via the
-/// super-user short-circuit in `authorize()`.
+/// The test drives the modern `kafka-acls.sh` flag set (cp-kafka:7.5.0,
+/// Kafka 3.5+) against the Rust broker's `CreateAcls (30)`,
+/// `DescribeAcls (29)`, and `DeleteAcls (31)` handlers. Admin authenticates
+/// as PLAIN super-user, so the super-user short-circuit in `authorize()`
+/// bypasses its `Cluster Alter` and `Cluster Describe` checks.
 ///
 /// Sequence:
 /// 1. `--add` an Allow Read on `Topic LITERAL "foo"` for `User:alice`.
 /// 2. `--list --topic foo` must show that binding.
-/// 3. `--remove --force` removes it; `--list --topic foo` must be empty.
+/// 3. `--remove --force` removes it. `--list --topic foo` must be empty.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_kafka_acls_provision_via_cli() {
@@ -4468,23 +4473,23 @@ async fn jvm_kafka_acls_provision_via_cli() {
     broker.shutdown().await;
 }
 
-/// JVM acceptance — authorized produce + consume round-trip.
+/// JVM acceptance: authorized produce + consume round-trip.
 ///
 /// Admin (PLAIN super-user) provisions alice with:
 /// - `Allow Read+Write Topic LITERAL "foo"`
 /// - `Allow Read Group LITERAL "cg-foo"`
 ///
-/// ACL implications grant Describe from Read/Write on the same resource, so no
-/// explicit Describe ACL is seeded here — the Metadata per-topic check
+/// ACL implications grant Describe from Read/Write on the same resource, so
+/// the test seeds no explicit Describe ACL. The Metadata per-topic check
 /// relies on the implication path.
 ///
-/// Then alice (PLAIN, no super-user, no cluster perms) drives
+/// Alice (PLAIN, no super-user, no cluster perms) then drives
 /// `kafka-console-producer` and `kafka-console-consumer --group cg-foo`
-/// against the broker. Exercises the full `Produce`/`Fetch`/`JoinGroup`/
-/// `OffsetFetch`/`OffsetCommit` authorize preambles end-to-end.
+/// against the broker. This exercises the full `Produce`/`Fetch`/
+/// `JoinGroup`/`OffsetFetch`/`OffsetCommit` authorize preambles end-to-end.
 ///
-/// Topic auto-creation is intentionally avoided: admin pre-creates `foo`
-/// before granting alice access, so the Produce path doesn't have to
+/// The test deliberately avoids topic auto-creation. Admin creates `foo`
+/// before it grants alice access, so the Produce path does not have to
 /// short-circuit on a missing topic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
@@ -4669,20 +4674,20 @@ async fn jvm_authorized_produce_consume() {
     broker.shutdown().await;
 }
 
-/// JVM acceptance — produce by an unauthorized principal must fail.
+/// JVM acceptance: produce by an unauthorized principal must fail.
 ///
-/// Admin (PLAIN super-user) provisions alice with Read+Write on topic `foo`
-/// (Describe is implied by Read; same effective ACLs as
-/// `jvm_authorized_produce_consume`). Bob has valid PLAIN credentials but
+/// Admin (PLAIN super-user) provisions alice with Read+Write on topic `foo`.
+/// Read implies Describe, so these are the same effective ACLs as
+/// `jvm_authorized_produce_consume`. Bob has valid PLAIN credentials but
 /// no ACLs at all. Bob's `kafka-console-producer` must be denied.
 ///
 /// Assertion strategy: `kafka-console-producer` is a fire-and-forget shell
-/// wrapper around the Java client. As of cp-kafka 7.5.0 it logs
+/// wrapper around the Java client. In cp-kafka 7.5.0 it logs
 /// `TopicAuthorizationException` on every Metadata-denied response, but
-/// the wrapper itself exits 0 — it retries silently and never propagates
-/// the underlying broker-side AUTH failure into a non-zero exit code. So
-/// the contract we assert is stderr-shaped, not exit-code-shaped: stderr
-/// must contain `TopicAuthorizationException`.
+/// the wrapper itself exits 0. It retries silently and never turns the
+/// broker-side AUTH failure into a non-zero exit code. So the contract this
+/// test asserts is stderr-shaped, not exit-code-shaped: stderr must contain
+/// `TopicAuthorizationException`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_unauthorized_produce_fails() {
@@ -4811,15 +4816,15 @@ async fn jvm_unauthorized_produce_fails() {
     broker.shutdown().await;
 }
 
-/// JVM acceptance — consumer denied on the group-resource path.
+/// JVM acceptance: consumer denied on the group-resource path.
 ///
-/// Alice has Read on topic `foo` (Describe implied by Read) but no ACL
-/// on group `cg-other`. `kafka-console-consumer --group cg-other` must fail
-/// with `GroupAuthorizationException` (denied at `JoinGroup`/`OffsetFetch`,
-/// before any Fetch happens).
+/// Alice has Read on topic `foo`, which implies Describe, but she has no
+/// ACL on group `cg-other`. `kafka-console-consumer --group cg-other` must
+/// fail with `GroupAuthorizationException`. The broker denies her at
+/// `JoinGroup`/`OffsetFetch`, before any Fetch happens.
 ///
-/// Assertion strategy: stderr-shaped. We assert on stderr content for
-/// symmetry with `jvm_unauthorized_produce_fails` and to keep the
+/// Assertion strategy: stderr-shaped. This test asserts on stderr content
+/// for symmetry with `jvm_unauthorized_produce_fails` and to keep the
 /// contract stable across cp-kafka versions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
@@ -4937,19 +4942,19 @@ async fn jvm_unauthorized_consumer_fails_group_check() {
     broker.shutdown().await;
 }
 
-/// JVM acceptance — prefixed topic ACL grants exactly the prefix.
+/// JVM acceptance: a prefixed topic ACL grants exactly the prefix.
 ///
 /// Admin provisions:
 /// - `Allow Read Topic PREFIXED "team-"` for alice (Describe implied by Read)
 /// - `Allow Read Group LITERAL "cg-prefixed"` for alice (Describe implied by Read)
 ///
-/// Then pre-creates two topics: `team-foo` (covered by the prefix) and
-/// `other-foo` (NOT covered). Seeds one record into each via the admin
-/// (super-user, bypasses authorize).
+/// Admin then creates two topics: `team-foo`, which the prefix covers, and
+/// `other-foo`, which it does NOT cover. Admin seeds one record into each.
+/// Admin is a super-user, so it bypasses authorize.
 ///
 /// Alice's consumer:
-/// 1. `--topic team-foo` succeeds and reads the seeded record (exercises
-///    the PREFIXED Read path in `authorize`).
+/// 1. `--topic team-foo` succeeds and reads the seeded record. This
+///    exercises the PREFIXED Read path in `authorize`.
 /// 2. `--topic other-foo` fails with `TopicAuthorizationException`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
@@ -5183,15 +5188,15 @@ const HOST_PORT_B2: u16 = 9096;
 const BOOTSTRAP_B2: &str = "host.docker.internal:9096";
 const LISTEN_B2: &str = "0.0.0.0:9096";
 
-/// Spawn three in-process brokers sharing a single inter-broker SASL credential.
+/// Spawn three in-process brokers that share one inter-broker SASL credential.
 ///
 /// * Broker 1: 0.0.0.0:9092 (data) / 0.0.0.0:9093 (controller)
 /// * Broker 2: 0.0.0.0:9094 (data) / 0.0.0.0:9095 (controller)
 /// * Broker 3: 0.0.0.0:9096 (data) / 0.0.0.0:9097 (controller)
 ///
 /// Returns `(h1, h2, h3, cfg1, cfg2, cfg3, dir1, dir2, dir3)`.
-/// The `cfg*` values are needed to revive a broker after shutdown
-/// (pass with `BootstrapMode::Rejoin`).
+/// A caller needs the `cfg*` values to revive a broker after shutdown.
+/// Pass them with `BootstrapMode::Rejoin`.
 async fn start_three_broker_sasl_plaintext_jvm_cluster(
     admin: &str,
     admin_pass: &str,
@@ -5412,19 +5417,21 @@ async fn wait_three_brokers_registered(
 
 /// JVM acceptance test for `kafka-leader-election --election-type preferred`.
 ///
-/// Uses a **3-broker** `SASL_PLAINTEXT` cluster so that the raft quorum (2/3)
-/// survives killing broker 1 (the preferred replica). A 2-broker cluster
-/// would lose quorum (1/2) when broker 1 dies and could not commit the
-/// partition-leader change that the PREFERRED election requires.
+/// The test uses a **3-broker** `SASL_PLAINTEXT` cluster so that the raft
+/// quorum (2/3) survives the kill of broker 1, the preferred replica. A
+/// 2-broker cluster would lose quorum (1/2) when broker 1 dies and could not
+/// commit the partition-leader change that the PREFERRED election needs.
 ///
 /// Scenario:
-/// 1. Boot 3-broker `SASL_PLAINTEXT` cluster; create rf=2 topic.
-/// 2. Wait for the cluster to assign a leader (expected: broker 1 = preferred).
-/// 3. Kill broker 1 → broker 2 (or 3) leads partition 0 via automatic failover.
-/// 4. Revive broker 1 (Rejoin); wait for it to re-enter the ISR on broker 2's
-///    view.
-/// 5. Run `kafka-leader-election --election-type preferred` via the JVM CLI
-///    image (cp-kafka:7.5.0 — older images don't ship this tool).
+/// 1. Boot a 3-broker `SASL_PLAINTEXT` cluster and create an rf=2 topic.
+/// 2. Wait for the cluster to assign a leader. Expect broker 1, the
+///    preferred replica.
+/// 3. Kill broker 1. Broker 2 or broker 3 then leads partition 0 through
+///    automatic failover.
+/// 4. Revive broker 1 with Rejoin. Wait for it to re-enter the ISR in
+///    broker 2's view.
+/// 5. Run `kafka-leader-election --election-type preferred` from the JVM CLI
+///    image cp-kafka:7.5.0. Older images do not ship this tool.
 /// 6. Assert Docker exits 0.
 /// 7. Poll until broker 1 is leader again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5590,7 +5597,8 @@ struct TempFileMount {
 }
 
 impl TempFileMount {
-    /// `<host_path>:<container_path>` — caller appends `:ro` if desired.
+    /// `<host_path>:<container_path>`. The caller appends `:ro` if it wants
+    /// a read-only mount.
     fn host_path(&self) -> String {
         self.tmp.path().display().to_string()
     }
@@ -6207,8 +6215,8 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_users(
 
 /// JVM acceptance: `kafka-configs --entity-type users` client quota round-trip.
 ///
-/// Three-broker SASL/PLAINTEXT cluster; alter + describe + delete on a
-/// user-scoped `producer_byte_rate` via the JVM admin CLI.
+/// Three-broker SASL/PLAINTEXT cluster. The JVM admin CLI runs alter,
+/// describe, and delete on a user-scoped `producer_byte_rate`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
@@ -6339,10 +6347,11 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
 
 /// JVM acceptance: `kafka-configs --entity-type ips` KIP-612 round-trip.
 ///
-/// Three-broker SASL/PLAINTEXT cluster; alter + describe (stdout substring) +
-/// delete-config on (ip=127.0.0.1) `connection_creation_rate` via the JVM admin CLI.
-/// Wall-time enforcement is not exercised here (single connection doesn't trigger
-/// the rate limit); the Rust integration test in `tests/ip_quotas.rs` covers that.
+/// Three-broker SASL/PLAINTEXT cluster. The JVM admin CLI runs alter,
+/// describe (stdout substring), and delete-config on the
+/// `connection_creation_rate` of `ip=127.0.0.1`. This test does not exercise
+/// wall-time enforcement, because a single connection does not trigger the
+/// rate limit. The Rust integration test in `tests/ip_quotas.rs` covers that.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
@@ -6467,11 +6476,12 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
 
 /// JVM acceptance: `kafka-configs --entity-type users controller_mutation_rate` round-trip.
 ///
-/// Three-broker SASL/PLAINTEXT cluster; alter + describe (stdout substring) +
-/// delete-config on (user=alice) `controller_mutation_rate` via the JVM admin CLI.
-/// No wall-time enforcement test — single `kafka-topics --create` is one request,
-/// max throttle 1 s. The Rust integration test in `tests/controller_mutation_quota.rs`
-/// covers enforcement.
+/// Three-broker SASL/PLAINTEXT cluster. The JVM admin CLI runs alter,
+/// describe (stdout substring), and delete-config on the
+/// `controller_mutation_rate` of `user=alice`. This test does not check
+/// wall-time enforcement: a single `kafka-topics --create` is one request,
+/// with a maximum throttle of 1 s. The Rust integration test in
+/// `tests/controller_mutation_quota.rs` covers enforcement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
@@ -6603,9 +6613,10 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
 /// JVM acceptance: `kafka-configs --describe --entity-type users` round-trip for
 /// SCRAM credentials (KIP-554 read half, `api_key` 50).
 ///
-/// Three-broker SASL/PLAINTEXT cluster; provision alice's SCRAM-SHA-512 credential
-/// via `kafka-configs --alter --add-config SCRAM-SHA-512=[...]`, then describe and
-/// assert exit 0 + `SCRAM-SHA-512` in stdout.
+/// Three-broker SASL/PLAINTEXT cluster. The test provisions alice's
+/// SCRAM-SHA-512 credential with `kafka-configs --alter --add-config
+/// SCRAM-SHA-512=[...]`, then describes it and asserts exit 0 and
+/// `SCRAM-SHA-512` in stdout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_kafka_configs_describe_users_scram_credentials_end_to_end() {
@@ -6687,13 +6698,13 @@ async fn jvm_kafka_configs_describe_users_scram_credentials_end_to_end() {
 /// 2. `kafka-topics --create --topic compacted-jvm --config cleanup.policy=compact
 ///    --config segment.bytes=256 --partitions 1 --replication-factor 1`
 /// 3. `kafka-console-producer --property parse.key=true --property key.separator=:`
-///    piping stdin:
+///    with this stdin:
 ///      k1:v1
 ///      k1:v2
 ///      k2:v3
 ///      k1:v4
 ///      k3:v5
-/// 4. Sleep 8s to allow the 3s cleaner tick + segment rolls.
+/// 4. Sleep 8s to let the 3s cleaner tick and the segment rolls happen.
 /// 5. `kafka-console-consumer --topic compacted-jvm --from-beginning --timeout-ms 5000`
 /// 6. Assert stdout contains `v4`, `v3`, `v5` (latest per-key values).
 /// 7. Assert stdout does NOT contain `v1` or `v2` (stale values compacted away).
@@ -6897,7 +6908,7 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
 }
 
 /// Like [`start_host_broker`] but configures a second JBOD data directory
-/// (KIP-113). Returns the two host-side log dirs alongside the handle so
+/// (KIP-113). Returns the two host-side log dirs with the handle, so
 /// the test can assert which absolute paths `DescribeLogDirs` reports.
 async fn start_host_broker_jbod() -> (
     crabka_broker::BrokerHandle,
@@ -6938,8 +6949,8 @@ async fn start_host_broker_jbod() -> (
 }
 
 /// KIP-113: `kafka-log-dirs --describe` against a two-directory
-/// JBOD broker. Asserts the JVM tool sees both configured log directories
-/// and that the created topic's partitions are spread across them.
+/// JBOD broker. The test asserts that the JVM tool sees both configured log
+/// directories and that the new topic spreads its partitions across them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_kafka_log_dirs_describe_reports_jbod_spread() {
@@ -7009,13 +7020,12 @@ async fn jvm_kafka_log_dirs_describe_reports_jbod_spread() {
 /// Like [`start_three_broker_sasl_plaintext_jvm_cluster_with_users`] but
 /// also enables `SCRAM-SHA-256` on the listener and installs the given
 /// `secret_key` as the HMAC master for KIP-48 delegation tokens on every
-/// broker. The admin user is provisioned as PLAIN (so the JVM CLI's
+/// broker. The admin user is provisioned as PLAIN, so the JVM CLI's
 /// `kafka-delegation-tokens --create/--describe/--expire` calls can
-/// authenticate over PLAIN), while the SCRAM-SHA-256 mechanism is needed
-/// for the *token consumer* — `kafka-console-producer` authenticates as
-/// the freshly minted token using SCRAM-SHA-256, which the broker
-/// satisfies via the token-fallback path (`TokenID` → username, HMAC →
-/// password).
+/// authenticate over PLAIN. The *token consumer* needs the SCRAM-SHA-256
+/// mechanism: `kafka-console-producer` authenticates as the new token with
+/// SCRAM-SHA-256, and the broker satisfies that on the token-fallback path,
+/// where `TokenID` becomes the username and the HMAC becomes the password.
 ///
 /// Returns `(h1, h2, h3, cfg1, cfg2, cfg3, dir1, dir2, dir3)`.
 async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
@@ -7183,8 +7193,8 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
 
 /// Parse the JVM `kafka-delegation-tokens --create` stdout for a line
 /// matching `<key>\t<value>` or `<key>=<value>` and return `<value>`.
-/// The tool prints both a header row and a data row separated by tabs;
-/// we scan every line and return the first occurrence whose key matches.
+/// The tool prints both a header row and a data row separated by tabs. This
+/// function scans every line and returns the first match on the key.
 fn extract_jvm_kv(stdout: &str, key: &str) -> String {
     // The kafka-delegation-tokens tool prints output in three forms
     // across versions and code paths:
@@ -7241,27 +7251,27 @@ fn extract_jvm_kv(stdout: &str, key: &str) -> String {
     panic!("could not extract key={key} from stdout: {stdout}");
 }
 
-/// JVM acceptance: KIP-48 delegation-token round-trip via the official
+/// JVM acceptance: KIP-48 delegation-token round-trip through the official
 /// `kafka-delegation-tokens` admin CLI.
 ///
 /// 3-broker `SASL_PLAINTEXT` cluster with both `PLAIN` (admin auth) and
 /// `SCRAM-SHA-256` (token auth) mechanisms enabled, plus a master
 /// delegation-token HMAC key. The flow:
 ///
-/// 1. Admin (PLAIN) calls `kafka-delegation-tokens --create` → broker
-///    mints a token, replicates `V1DelegationToken` via raft, returns
-///    `(TokenID, HMAC, …)`.
-/// 2. Build a `token.properties` referencing those credentials via
+/// 1. Admin (PLAIN) calls `kafka-delegation-tokens --create`. The broker
+///    mints a token, replicates `V1DelegationToken` through raft, and
+///    returns `(TokenID, HMAC, …)`.
+/// 2. Build a `token.properties` that references those credentials with
 ///    `sasl.mechanism=SCRAM-SHA-256`.
 /// 3. `kafka-console-producer --producer.config token.properties` produces
-///    one record — authenticates against the token-fallback path of the
+///    one record. It authenticates against the token-fallback path of the
 ///    SCRAM handler.
 /// 4. `kafka-delegation-tokens --describe --owner-principal User:admin`
-///    lists the token (substring match on `TokenID`).
+///    lists the token. The test matches a substring on `TokenID`.
 /// 5. `kafka-delegation-tokens --expire --expiry-time-period -1 --hmac
 ///    <hmac>` deletes the token.
 ///
-/// `#[ignore = "requires Docker"]` — run with `--ignored`.
+/// `#[ignore = "requires Docker"]`, so run with `--ignored`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_kafka_delegation_tokens_end_to_end() {
@@ -7439,14 +7449,14 @@ async fn jvm_kafka_delegation_tokens_end_to_end() {
 }
 
 /// KIP-429 JVM acceptance: drive `kafka-console-consumer` with the JVM
-/// `CooperativeStickyAssignor` against Crabka. Validates that Crabka's
-/// `JoinGroup` vote rule accepts `cooperative-sticky` and that the broker
-/// correctly forwards the negotiated `protocol_name` so the JVM client's
-/// `AbstractCoordinator.onJoinComplete` accepts the response.
+/// `CooperativeStickyAssignor` against Crabka. The test validates that
+/// Crabka's `JoinGroup` vote rule accepts `cooperative-sticky` and that the
+/// broker forwards the negotiated `protocol_name` correctly, so the JVM
+/// client's `AbstractCoordinator.onJoinComplete` accepts the response.
 ///
-/// Uses `cp-kafka:7.5.0` (= [`KAFKA_IMAGE_TXN`]): the cooperative-sticky
-/// assignor in `cp-kafka:6.1.1` (Kafka 2.7) had several rebalance race
-/// fixes that didn't land until Kafka 3.x.
+/// The test uses `cp-kafka:7.5.0` (= [`KAFKA_IMAGE_TXN`]). The
+/// cooperative-sticky assignor in `cp-kafka:6.1.1` (Kafka 2.7) still lacked
+/// several rebalance race fixes that landed in Kafka 3.x.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn cooperative_sticky_kafka_console_consumer() {
@@ -7560,14 +7570,15 @@ const MINIO_BUCKET: &str = "crabka-tiered";
 /// landed in Apache Kafka 3.6 / Confluent Platform 7.6. The default
 /// [`KAFKA_IMAGE`] (`mirror.gcr.io/confluentinc/cp-kafka:6.1.1` / Kafka 2.7)
 /// and [`KAFKA_IMAGE_TXN`] (`mirror.gcr.io/confluentinc/cp-kafka:7.5.0` /
-/// Kafka 3.5) both predate KIP-405 — their
-/// `TopicCommand` client validates `--config` keys against the local
-/// `LogConfig.configNames` set and rejects unknown ones before sending
-/// the `CreateTopics` request, so we can't reuse them for the tiered-
-/// storage test. `mirror.gcr.io/confluentinc/cp-kafka:7.8.8` ships Kafka 3.8 where KIP-405 is GA.
+/// Kafka 3.5) both predate KIP-405. Their `TopicCommand` client validates
+/// `--config` keys against the local `LogConfig.configNames` set and rejects
+/// unknown ones before it sends the `CreateTopics` request, so the
+/// tiered-storage test cannot reuse them.
+/// `mirror.gcr.io/confluentinc/cp-kafka:7.8.8` ships Kafka 3.8, where
+/// KIP-405 is GA.
 const KAFKA_IMAGE_TIERED: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.8.8";
 
-/// Owns a `docker run -d` `MinIO` container; tears it down on drop.
+/// Owns a `docker run -d` `MinIO` container and tears it down on drop.
 struct MinioContainer {
     name: String,
 }
@@ -7610,8 +7621,8 @@ impl MinioContainer {
     }
 }
 
-/// Poll the published host port until `MinIO`'s HTTP listener answers, so
-/// we don't race the very-fast image's first health check.
+/// Poll the published host port until `MinIO`'s HTTP listener answers. This
+/// avoids a race with the first health check of the fast-starting image.
 fn wait_for_minio_ready() {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{MINIO_PORT}")
         .parse()
@@ -7701,17 +7712,17 @@ impl Drop for MinioContainer {
 }
 
 /// Same shape as [`start_host_broker`] but with the S3 tiered-storage
-/// backend wired in and the `RemoteLogManager` tick lowered so the
-/// acceptance loop completes in seconds rather than the 30s production
-/// default.
+/// backend wired in and a lower `RemoteLogManager` tick, so the acceptance
+/// loop completes in seconds rather than at the 30s production default.
 ///
-/// `rlmm` controls which [`crabka_broker::RlmmKind`] is used. Pass
-/// `RlmmKind::InMemory` for tests that only need a single-run round-trip;
-/// pass `RlmmKind::TopicBacked(…)` when the test needs durable metadata that
+/// `rlmm` selects the [`crabka_broker::RlmmKind`]. Pass
+/// `RlmmKind::InMemory` for tests that only need a single-run round-trip.
+/// Pass `RlmmKind::TopicBacked(…)` when the test needs durable metadata that
 /// survives a broker restart.
 ///
-/// Returns the broker handle, the temp dir (caller must keep it alive), and
-/// the `BrokerConfig` so the caller can re-use it for a restart.
+/// Returns the broker handle, the temp dir, and the `BrokerConfig` so the
+/// caller can reuse it for a restart. The caller must keep the temp dir
+/// alive.
 fn start_host_broker_with_minio_tier(
     s3: crabka_remote_storage::S3Config,
     rlmm: crabka_broker::RlmmKind,
@@ -7770,15 +7781,16 @@ fn start_host_broker_with_minio_tier(
 /// Create a KIP-405 tiered topic and wait for the config overrides to propagate
 /// into the partition's `LogConfig`.
 ///
-/// Uses `segment.bytes=2048` and `local.retention.bytes=1` so a modest produce
-/// batch seals several segments and every copied segment is immediately evicted
-/// from local disk, forcing subsequent reads through the remote tier.
+/// This function uses `segment.bytes=2048` and `local.retention.bytes=1`, so
+/// a small produce batch seals several segments and the broker evicts every
+/// copied segment from local disk at once. Later reads must then go through
+/// the remote tier.
 ///
-/// Waits up to 10 s for `ReplicatorSupervisor::reconcile` to apply the config
-/// to the live partition — without this gate the producer's first batches land
-/// in a default-config `Log` (1 GiB segments, `remote_storage_enable=false`)
-/// and the tier-copy path is never triggered. See `compact_log_cleaner_round_trip`
-/// for the same pattern.
+/// The function waits up to 10 s for `ReplicatorSupervisor::reconcile` to
+/// apply the config to the live partition. Without this gate, the producer's
+/// first batches land in a default-config `Log` with 1 GiB segments and
+/// `remote_storage_enable=false`, and nothing triggers the tier-copy path.
+/// See `compact_log_cleaner_round_trip` for the same pattern.
 async fn create_tiered_topic(broker: &crabka_broker::BrokerHandle, topic: &str) {
     // Uses the KIP-405-aware `cp-kafka:7.8.8` image — older clients' `TopicCommand`
     // validates `--config` keys client-side and rejects `remote.storage.enable` /
@@ -7830,13 +7842,14 @@ async fn create_tiered_topic(broker: &crabka_broker::BrokerHandle, topic: &str) 
     }
 }
 
-/// Stream `n` records (format `record-NNNN`) into `topic` via the JVM console
-/// producer.
+/// Stream `n` records with the format `record-NNNN` into `topic` through the
+/// JVM console producer.
 ///
-/// Forces per-record batches (`batch.size=1`, `linger.ms=0`) so the broker
-/// rolls segments at `segment.bytes=2048` — without this the JVM producer
-/// accumulates everything into one big batch written into a single segment,
-/// defeating the segment-roll trigger and starving the tier-copy path.
+/// This function forces per-record batches with `batch.size=1` and
+/// `linger.ms=0`, so the broker rolls segments at `segment.bytes=2048`.
+/// Without that, the JVM producer collects everything into one large batch
+/// and writes it into a single segment. Nothing then triggers a segment
+/// roll, and the tier-copy path gets no work.
 fn produce_records(topic: &str, n: usize) {
     let mut payload = String::with_capacity(n * 12);
     for i in 0..n {
@@ -7882,12 +7895,12 @@ fn produce_records(topic: &str, n: usize) {
     );
 }
 
-/// Poll `mc ls --recursive local/<bucket>` until at least `min_log_objects`
-/// entries whose path ends with `/log` are present, then return the full
-/// listing.
+/// Poll `mc ls --recursive local/<bucket>` until it lists at least
+/// `min_log_objects` entries whose path ends with `/log`, then return the
+/// full listing.
 ///
-/// Polls at 500 ms intervals for up to 20 s (40 iterations). Panics if the
-/// threshold is never reached.
+/// The poll runs at 500 ms intervals for up to 20 s (40 iterations). It
+/// panics if the listing never reaches the threshold.
 async fn wait_for_minio_segments(bucket: &str, min_log_objects: usize) -> String {
     let mut bucket_listing = String::new();
     let mut copied_log_objects = 0usize;
@@ -7910,12 +7923,13 @@ async fn wait_for_minio_segments(bucket: &str, min_log_objects: usize) -> String
     );
 }
 
-/// Consume up to `max` records from `topic` (partition 0, from-beginning) via
-/// the JVM console consumer, returning the number of non-empty output lines.
+/// Consume up to `max` records from `topic` (partition 0, from-beginning)
+/// with the JVM console consumer. Returns the number of non-empty output
+/// lines.
 ///
-/// `bootstrap_host_port` is the Kafka bootstrap address visible from inside the
-/// Docker container (e.g. `host.docker.internal:9092`). Single-broker callers
-/// should pass `BOOTSTRAP`.
+/// `bootstrap_host_port` is the Kafka bootstrap address that is visible from
+/// inside the Docker container, for example `host.docker.internal:9092`.
+/// Single-broker callers should pass `BOOTSTRAP`.
 fn consume_records(topic: &str, max: usize, timeout_ms: u64, bootstrap_host_port: &str) -> usize {
     let consumer_out = docker_run_kafka_tool_with_image(
         KAFKA_IMAGE_TIERED,
@@ -8136,10 +8150,10 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
 /// Test 1: pure-legacy round-trip.
 ///
 /// A Kafka 0.10.1 console-producer (cp-kafka:3.1.2) sends 3 records
-/// via Produce v0–2 with v1 `MessageSet` records. A Kafka 0.10.1
-/// console-consumer reads them back via Fetch v0–3. Exercises both
-/// up-conversion (Produce handler) and down-conversion (Fetch
-/// handler) end-to-end.
+/// with Produce v0–2 and v1 `MessageSet` records. A Kafka 0.10.1
+/// console-consumer reads them back with Fetch v0–3. The test exercises
+/// both up-conversion in the Produce handler and down-conversion in the
+/// Fetch handler, end-to-end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_legacy_010_round_trip() {
@@ -8246,11 +8260,11 @@ async fn jvm_legacy_010_round_trip() {
 
 /// Test 2: legacy producer, modern consumer.
 ///
-/// A Kafka 0.10.1 console-producer sends 3 records; a Kafka 2.6
-/// console-consumer (cp-kafka:6.1.1) reads them back via Fetch v11+.
-/// Validates that what the up-conversion writes to the log is a
-/// well-formed v2 `RecordBatch` that a modern client can decode —
-/// not just bytes a Crabka broker accepts on its own.
+/// A Kafka 0.10.1 console-producer sends 3 records. A Kafka 2.6
+/// console-consumer (cp-kafka:6.1.1) reads them back with Fetch v11+.
+/// The test validates that the up-conversion writes a well-formed v2
+/// `RecordBatch` to the log that a modern client can decode, and not
+/// only bytes that a Crabka broker accepts on its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_legacy_010_produce_modern_consume() {
@@ -8335,12 +8349,12 @@ async fn jvm_legacy_010_produce_modern_consume() {
 
 /// Test 3: modern producer, legacy consumer.
 ///
-/// A Kafka 2.6 console-producer (cp-kafka:6.1.1) sends 3 records via
+/// A Kafka 2.6 console-producer (cp-kafka:6.1.1) sends 3 records with
 /// Produce v9. A Kafka 0.10.1 console-consumer (cp-kafka:3.1.2) reads
-/// them via Fetch v0–3. Validates that the bytes
-/// `down_convert_for_fetch` emits are parseable as a v0/v1
-/// `MessageSet` by a real Kafka 0.10.x client — the load-bearing
-/// concern for down-conversion correctness.
+/// them with Fetch v0–3. The test validates that a real Kafka 0.10.x
+/// client can parse the bytes `down_convert_for_fetch` emits as a v0/v1
+/// `MessageSet`. That is the load-bearing concern for down-conversion
+/// correctness.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_modern_produce_legacy_010_consume() {
@@ -8441,11 +8455,12 @@ async fn jvm_modern_produce_legacy_010_consume() {
 /// Test 4: gzip-compressed legacy round-trip.
 ///
 /// A Kafka 0.10.1 console-producer with `compression.type=gzip`
-/// sends ~50 records as a single outer-wrapped gzip `MessageSet`
-/// (the v0/v1 way of representing compressed batches). A Kafka 2.6
-/// console-consumer (cp-kafka:6.1.1) reads them back. Validates the
-/// gzip path through `legacy_to_v2` (decompress legacy → re-emit as
-/// a v2 `RecordBatch` with the same compression marker).
+/// sends ~50 records as a single outer-wrapped gzip `MessageSet`. That
+/// is how v0/v1 represents compressed batches. A Kafka 2.6
+/// console-consumer (cp-kafka:6.1.1) reads them back. The test validates
+/// the gzip path through `legacy_to_v2`, which decompresses the legacy
+/// batch and re-emits it as a v2 `RecordBatch` with the same compression
+/// marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_legacy_010_compressed_round_trip() {
@@ -8548,15 +8563,14 @@ async fn jvm_legacy_010_compressed_round_trip() {
 ///
 /// A Kafka 0.10.1 console-producer with `compression.type=snappy` sends
 /// ~50 records as a single outer-wrapped snappy `MessageSet`. A Kafka 2.6
-/// console-consumer (cp-kafka:6.1.1) reads them back. Validates the
-/// snappy path through `legacy_to_v2` (xerial-framed snappy → v2
-/// `RecordBatch`).
+/// console-consumer (cp-kafka:6.1.1) reads them back. The test validates
+/// the snappy path through `legacy_to_v2`, which converts xerial-framed
+/// snappy to a v2 `RecordBatch`.
 ///
-/// NOTE: 0.10.x-era snappy-java framing is known to be fragile against
-/// newer JVMs — slice 2d deferred this test for that reason and exercised
-/// only gzip live. It is kept here as the documented follow-up; if it
-/// proves flaky in CI it may need to pin a specific snappy-java version
-/// rather than be deleted.
+/// NOTE: 0.10.x-era snappy-java framing is fragile against newer JVMs. For
+/// that reason slice 2d deferred this test and exercised only gzip live.
+/// This test stays here as the documented follow-up. If it proves flaky in
+/// CI, pin a specific snappy-java version rather than delete it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn jvm_legacy_010_snappy_round_trip() {
@@ -8691,9 +8705,10 @@ async fn jvm_legacy_010_snappy_round_trip() {
 // task itself), so the test still proves cross-broker durable metadata sharing.
 // ---------------------------------------------------------------------------
 
-/// Loopback address of broker 1's data listener. Both brokers' RLMM clients
-/// use this as their bootstrap so they reach the single `__remote_log_metadata`
-/// partition (hosted on broker 1) without needing `host.docker.internal`.
+/// Loopback address of broker 1's data listener. The RLMM clients of both
+/// brokers use it as their bootstrap, so they reach the single
+/// `__remote_log_metadata` partition on broker 1 without
+/// `host.docker.internal`.
 const RLMM_BOOTSTRAP: &str = "127.0.0.1:9092";
 
 /// Boot a two-broker plaintext cluster with an S3 tiered-storage backend and a
@@ -8703,16 +8718,17 @@ const RLMM_BOOTSTRAP: &str = "127.0.0.1:9092";
 ///   broker 1: data `0.0.0.0:9092` / `host.docker.internal:9092`, controller `0.0.0.0:9093`
 ///   broker 2: data `0.0.0.0:9094` / `host.docker.internal:9094`, controller `0.0.0.0:9095`
 ///
-/// Both brokers' RLMM clients bootstrap explicitly to `127.0.0.1:9092`
-/// (broker 1's loopback). See the module-level routing note above.
+/// The RLMM clients of both brokers bootstrap explicitly to
+/// `127.0.0.1:9092`, broker 1's loopback. See the module-level routing note
+/// above.
 ///
-/// Accelerated heartbeat / replica-lag timers (200 ms / 2 s / 2 s) so leader
-/// failover is detected quickly inside the test.
+/// The heartbeat and replica-lag timers are shortened to 200 ms / 2 s / 2 s,
+/// so the test detects leader failover quickly.
 ///
-/// Both brokers are spawned concurrently and joined — awaiting only broker 1
-/// first would deadlock because a majority-quorum leader election requires
-/// both voters to be up. See [`start_two_sasl_brokers`] for a detailed
-/// explanation.
+/// This function spawns both brokers concurrently and then joins them. An
+/// await on broker 1 alone would deadlock, because a majority-quorum leader
+/// election needs both voters up. See [`start_two_sasl_brokers`] for the
+/// full explanation.
 async fn start_two_brokers_with_minio_tier(
     s3: crabka_remote_storage::S3Config,
 ) -> (
@@ -8835,29 +8851,31 @@ async fn start_two_brokers_with_minio_tier(
     (broker0, broker1, dir0, dir1)
 }
 
-/// Multi-broker tiered-storage test: proves that `__remote_log_metadata`
-/// shares segment metadata from the partition leader to broker 2 via the
-/// topic-backed RLMM, so the *surviving* broker can serve a remote read using
-/// metadata it consumed from the topic — without having run the copy task itself.
+/// Multi-broker tiered-storage test. It proves that `__remote_log_metadata`
+/// shares segment metadata from the partition leader to broker 2 through the
+/// topic-backed RLMM. The *surviving* broker can then serve a remote read
+/// with metadata it consumed from the topic, and it never runs the copy task
+/// itself.
 ///
 /// Discriminating property: broker 2 (b2) never ran the copy task for the
-/// user-topic segments (only the leader copies). After the local log is evicted
-/// (`local.retention.bytes=1`), b2 can only serve offset-0 reads by fetching
-/// the segment from S3 using metadata it learned by consuming from
-/// `__remote_log_metadata`. An in-memory RLMM would leave b2 with no metadata
-/// and the consume would fail.
+/// user-topic segments, because only the leader copies. After the broker
+/// evicts the local log at `local.retention.bytes=1`, b2 can serve offset-0
+/// reads only by fetching the segment from S3 with metadata it learned from
+/// `__remote_log_metadata`. An in-memory RLMM would leave b2 with no
+/// metadata, and the consume would fail.
 ///
 /// See the `start_two_brokers_with_minio_tier` doc for the networking
-/// work-around used to route both RLMM clients through broker 1's loopback.
+/// work-around that routes both RLMM clients through broker 1's loopback.
 ///
-/// This test requires an environment where the advertised inter-broker address
-/// (`host.docker.internal`) is resolvable from the broker host processes
-/// (Linux CI with Docker bridge networking).  On macOS Docker Desktop,
-/// `host.docker.internal` is not resolvable from host processes, so
-/// inter-broker replication fails.  The same metadata-sharing claim is proven
-/// by the in-process `tiered_storage_metadata_sharing_via_survivor` test in
-/// `tests/tiered_storage_multi_broker.rs`, which uses `127.0.0.1` advertised
-/// addresses and runs under plain `cargo test` (no Docker required).
+/// This test needs an environment where the broker host processes can
+/// resolve the advertised inter-broker address `host.docker.internal`, such
+/// as Linux CI with Docker bridge networking. On macOS Docker Desktop, host
+/// processes cannot resolve `host.docker.internal`, so inter-broker
+/// replication fails. The in-process
+/// `tiered_storage_metadata_sharing_via_survivor` test in
+/// `tests/tiered_storage_multi_broker.rs` proves the same metadata-sharing
+/// claim. It uses `127.0.0.1` advertised addresses and runs under plain
+/// `cargo test`, with no Docker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker + Linux host networking + CRABKA_RUN_JVM_MULTI_BROKER_TIER=1; in-process multi-broker test is the CI-validated proof"]
 async fn tiered_storage_topic_rlmm_multi_broker_metadata_sharing() {

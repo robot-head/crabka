@@ -1,9 +1,10 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
 
-//! KIP-664 `ListTransactions` (`api_key` 66) + `DescribeTransactions`
+//! KIP-664 `ListTransactions` (`api_key` 66) and `DescribeTransactions`
 //! (`api_key` 65). Both surface the broker's local `TxnCoordinator`
-//! state — `(transactional_id, producer_id, state)` summary for List,
-//! full per-tid detail (timeout, start time, partitions) for Describe.
+//! state. List returns a `(transactional_id, producer_id, state)` summary.
+//! Describe returns the full per-tid detail: timeout, start time, and
+//! partitions.
 
 use std::{sync::Arc, time::Duration};
 
@@ -74,9 +75,9 @@ async fn admin_client(bootstrap: &str) -> crabka_client_core::Client {
 }
 
 /// Boot a broker, init a transactional producer with the given tid,
-/// begin a txn, and produce one record to `topic`. Leaves the txn
-/// in `Ongoing` so the admin APIs can see it. Returns the broker +
-/// producer (caller closes both).
+/// begin a txn, and produce one record to `topic`. It leaves the txn
+/// in `Ongoing` so the admin APIs can see it. It returns the broker and the
+/// producer, and the caller closes both.
 async fn boot_with_ongoing_txn(
     tid: &str,
     topic: &str,

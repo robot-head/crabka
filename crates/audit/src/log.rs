@@ -1,5 +1,7 @@
-//! The `AuditLog` handle (synchronous, non-blocking emit) and the background
-//! `AuditWriter` that drains events into a sink.
+//! The `AuditLog` handle and the background `AuditWriter`.
+//!
+//! `AuditLog::emit` is synchronous and does not block. The `AuditWriter` drains
+//! events into a sink.
 
 use std::sync::{
     Arc,
@@ -24,8 +26,8 @@ use crate::{
 
 /// Cloneable, cheap handle that broker code calls to record events.
 ///
-/// `emit` is synchronous and never blocks — safe to call from the synchronous
-/// `Authorizer::authorize` trait as well as from async request handlers.
+/// `emit` is synchronous and never blocks. It is safe to call from the
+/// synchronous `Authorizer::authorize` trait and from async request handlers.
 #[derive(Debug)]
 pub struct AuditLog {
     tx: Option<mpsc::Sender<AuditEvent>>,
@@ -33,7 +35,7 @@ pub struct AuditLog {
 }
 
 impl AuditLog {
-    /// Create an enabled log plus the receiver to hand to an [`AuditWriter`].
+    /// Create an enabled log and the receiver for an [`AuditWriter`].
     #[must_use]
     pub fn new(capacity: usize) -> (Arc<Self>, mpsc::Receiver<AuditEvent>) {
         let (tx, rx) = mpsc::channel(capacity);
@@ -46,7 +48,7 @@ impl AuditLog {
         )
     }
 
-    /// A no-op log used when auditing is disabled.
+    /// A no-op log for a disabled audit subsystem.
     #[must_use]
     pub fn disabled() -> Arc<Self> {
         Arc::new(Self {
@@ -55,8 +57,10 @@ impl AuditLog {
         })
     }
 
-    /// Record an event. Non-blocking; on a full queue the event is dropped and
-    /// counted (durable spooling is Slice 3 / AU-5).
+    /// Record an event.
+    ///
+    /// This method does not block. If the queue is full, it drops the event and
+    /// counts the drop. Durable spooling is Slice 3 / AU-5.
     pub fn emit(&self, event: AuditEvent) {
         let Some(tx) = &self.tx else { return };
         if tx.try_send(event).is_err() {
@@ -65,7 +69,7 @@ impl AuditLog {
         }
     }
 
-    /// Count of events dropped due to backpressure.
+    /// Count of events dropped because of backpressure.
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
@@ -77,26 +81,29 @@ pub struct AuditWriterParams {
     pub sink: Arc<dyn AuditSink>,
     pub product: ProductInfo,
     pub signer: Option<Arc<dyn SigningKeyProvider>>,
-    /// Emit a checkpoint once this many records have been chained since the
-    /// last one. A count, not an extent; `0` disables the count trigger.
+    /// Emit a checkpoint after the writer chains this many records since the
+    /// last checkpoint. This field is a count, not an extent. `0` disables the
+    /// count trigger.
     pub checkpoint_every_n: u64,
     pub checkpoint_every: Time,
     /// Chain state, possibly resumed from a recovered position.
     pub chain: ChainState,
-    /// Durable spool for the AU-5 degraded path (None disables spooling).
+    /// Durable spool for the AU-5 degraded path. `None` disables spooling.
     pub spool: Option<Spool>,
     pub stats: Arc<AuditStats>,
-    /// How often to attempt draining the spool while in spool mode.
+    /// How often the writer tries to drain the spool in spool mode.
     pub replay_every: Time,
-    /// Relative sleeper driving the checkpoint/replay cadence. Production uses
-    /// [`qubit_clock::sleep::SystemSleeper`]; tests inject a
-    /// [`qubit_clock::sleep::MockSleeper`] so the two tickers fire on a
-    /// controlled mock timeline instead of real wall-clock time.
+    /// Relative sleeper that drives the checkpoint and replay cadence.
+    /// Production uses [`qubit_clock::sleep::SystemSleeper`]. Tests inject a
+    /// [`qubit_clock::sleep::MockSleeper`], so the two tickers fire on a
+    /// controlled mock timeline and not on real wall-clock time.
     pub sleeper: Arc<dyn AsyncSleeper>,
 }
 
-/// Background task: chains + writes audit events, spooling on sink failure and
-/// replaying on recovery, emitting signed checkpoints on a cadence.
+/// Background task that chains and writes audit events.
+///
+/// The writer spools records when the sink fails, and it replays them when the
+/// sink recovers. It also emits signed checkpoints on a cadence.
 pub struct AuditWriter {
     rx: mpsc::Receiver<AuditEvent>,
     sink: Arc<dyn AuditSink>,
@@ -137,8 +144,9 @@ impl AuditWriter {
         }
     }
 
-    /// Drain the channel until all senders drop; emit a final checkpoint for
-    /// any pending tail.
+    /// Drain the channel until all senders drop.
+    ///
+    /// The writer then emits a final checkpoint for any pending tail.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -222,8 +230,10 @@ impl AuditWriter {
         self.since_checkpoint = 0;
     }
 
-    /// Write to the sink, or to the spool if we're in (sticky) spool mode or
-    /// the sink write fails.
+    /// Write to the sink, or to the spool.
+    ///
+    /// This method writes to the spool when the writer is in spool mode, which
+    /// is sticky, or when the sink write fails.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -263,8 +273,9 @@ impl AuditWriter {
         }
     }
 
-    /// Drain the spool to the sink in order; exit spool mode when fully
-    /// drained.
+    /// Drain the spool to the sink in order.
+    ///
+    /// The writer exits spool mode when the spool is fully drained.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -313,7 +324,7 @@ impl AuditWriter {
     }
 }
 
-/// Epoch-millis clock for checkpoint timestamps.
+/// Epoch-millisecond clock for the checkpoint timestamps.
 // cargo-mutants: wall-clock read; no deterministic assertion.
 #[cfg_attr(test, mutants::skip)]
 fn now_ms() -> i64 {
@@ -429,15 +440,15 @@ mod tests {
         }
     }
 
-    /// Replay ticker cadence used by the test params. Tests advance the mock
+    /// Replay ticker cadence for the test params. Tests advance the mock
     /// timeline by this amount to fire the replay ticker exactly once.
     const REPLAY_EVERY: Time = millis(20);
 
-    /// A cadence no test advances the mock timeline far enough to reach, so the
-    /// ticker it drives stays dormant.
+    /// A cadence that no test reaches. No test advances the mock timeline that
+    /// far, so the ticker this cadence drives stays dormant.
     const DORMANT: Time = hours(1);
 
-    /// Spool cap large enough that no test hits it by accident.
+    /// A spool cap that is large enough that no test reaches it by accident.
     const ROOMY_CAP: ByteSize = mebibytes(1);
 
     fn params(sink: Arc<dyn AuditSink>, spool: Spool, stats: Arc<AuditStats>) -> AuditWriterParams {
@@ -458,9 +469,11 @@ mod tests {
         }
     }
 
-    /// Like [`params`], but returns the mock [`MockTimeline`] backing the
-    /// checkpoint/replay tickers so a test can fire them deterministically with
-    /// `timeline.advance(replay_every)` instead of sleeping for real time.
+    /// Like [`params`], but also returns the mock [`MockTimeline`].
+    ///
+    /// The timeline backs the checkpoint and replay tickers. A test can fire
+    /// them deterministically with `timeline.advance(replay_every)` instead of
+    /// a sleep in real time.
     fn params_with_timeline(
         sink: Arc<dyn AuditSink>,
         spool: Spool,
@@ -473,11 +486,12 @@ mod tests {
         (p, timeline)
     }
 
-    /// Polls `cond` on every executor turn until it holds, yielding so the
-    /// spawned writer task can make progress. This replaces fixed `sleep`s that
-    /// waited for the writer to drain the channel: it returns the instant the
-    /// observable condition is true (deterministic), with a large iteration cap
-    /// only as a hang guard.
+    /// Polls `cond` on every executor turn until it holds.
+    ///
+    /// The function yields, so the spawned writer task can make progress. It
+    /// replaces the fixed `sleep` calls that waited for the writer to drain the
+    /// channel. It returns at the instant the observable condition is true,
+    /// which is deterministic. The large iteration cap is only a hang guard.
     async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
         for _ in 0..1_000_000 {
             if cond() {

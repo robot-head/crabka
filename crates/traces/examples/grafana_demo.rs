@@ -1,14 +1,17 @@
-//! Standalone Crabka traces querier preloaded with a rich, multi-service demo
-//! fixture, for pointing a real Grafana Tempo datasource at Crabka and running
-//! complex `TraceQL` queries by hand (or via a headless browser).
+//! Standalone Crabka traces querier, preloaded with a multi-service demo
+//! fixture.
 //!
-//! Serves the Tempo query API on `0.0.0.0:3201` (override with `CRABKA_DEMO_ADDR`).
+//! Use it to point a real Grafana Tempo datasource at Crabka and run complex
+//! `TraceQL` queries by hand, or through a headless browser.
+//!
+//! It serves the Tempo query API on `0.0.0.0:3201`. `CRABKA_DEMO_ADDR`
+//! overrides that address.
 //!
 //! Run: `cargo run -p crabka-traces --example grafana_demo`
 //!
-//! The fixture is timestamped at "a few minutes ago" so it falls inside
-//! Grafana's default "last 1 hour" window. Showcased queries (all valid against
-//! the engine):
+//! The fixture is timestamped at "a few minutes ago", so it falls inside
+//! Grafana's default "last 1 hour" window. These queries are all valid against
+//! the engine:
 //!   * `{ resource.service.name = "checkout-frontend" }`   (root-service selector)
 //!   * `{ span:status = error }`                            (error spans)
 //!   * `{ span:duration > 100ms }`                          (slow spans)

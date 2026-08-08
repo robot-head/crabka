@@ -1,7 +1,7 @@
 //! Confluent Schema Registry-compatible REST service for Crabka.
 //!
-//! Standalone binary; a Kafka *client* of a Crabka broker. State lives in the
-//! `_schemas` compacted topic.
+//! This is a standalone binary and a Kafka *client* of a Crabka broker. State
+//! lives in the `_schemas` compacted topic.
 //!
 //! ## Runtime configuration
 //!

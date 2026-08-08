@@ -3,27 +3,28 @@
 //! KIP-714 client-metrics telemetry handshake, push, and error-path coverage.
 //!
 //! Crabka implements the full KIP-714 receiver. The broker:
-//!   - Assigns a fresh `client_instance_id` when the caller sends nil; echoes
-//!     nil when the caller sends a non-nil id.
-//!   - Returns `accepted_compression_types = [4,3,1,2]` (ZSTD,LZ4,GZIP,SNAPPY),
-//!     `telemetry_max_bytes = 1_048_576`, `delta_temporality = true`.
-//!   - With no subscriptions configured: `requested_metrics` is empty and
-//!     `push_interval_ms = 300_000`.
-//!   - With a matching subscription: `requested_metrics` reflects the matched
-//!     prefix set and `push_interval_ms` = min matched interval.
-//!   - `PushTelemetry` from an unknown/unregistered instance → `error_code 42`
-//!     (`INVALID_REQUEST`).
-//!   - `PushTelemetry` with a stale `subscription_id` → `error_code 117`
-//!     (`UNKNOWN_SUBSCRIPTION_ID`).
-//!   - `PushTelemetry` with an unsupported `compression_type` → `error_code 76`
-//!     (`UNSUPPORTED_COMPRESSION_TYPE`).
-//!   - Valid push → `error_code 0`.
+//!   - Assigns a fresh `client_instance_id` when the caller sends nil, and
+//!     echoes nil when the caller sends a non-nil id.
+//!   - Returns `accepted_compression_types = [4,3,1,2]`, that is ZSTD, LZ4,
+//!     GZIP, and SNAPPY, plus `telemetry_max_bytes = 1_048_576` and
+//!     `delta_temporality = true`.
+//!   - With no subscriptions configured, leaves `requested_metrics` empty and
+//!     sets `push_interval_ms = 300_000`.
+//!   - With a matching subscription, sets `requested_metrics` to the matched
+//!     prefix set and `push_interval_ms` to the smallest matched interval.
+//!   - Answers a `PushTelemetry` from an unknown or unregistered instance with
+//!     `error_code 42` (`INVALID_REQUEST`).
+//!   - Answers a `PushTelemetry` with a stale `subscription_id` with
+//!     `error_code 117` (`UNKNOWN_SUBSCRIPTION_ID`).
+//!   - Answers a `PushTelemetry` with an unsupported `compression_type` with
+//!     `error_code 76` (`UNSUPPORTED_COMPRESSION_TYPE`).
+//!   - Answers a valid push with `error_code 0`.
 //!
-//! Tests using `IncrementalAlterConfigs` (to set up subscriptions) require a
-//! controller-backed single-node cluster (`start_n_node(1)`) because that RPC
-//! goes through Raft. Simple handshake tests use `support::start()` (simpler
-//! single-broker helper that also boots in Bootstrap mode and is its own
-//! controller).
+//! The tests that call `IncrementalAlterConfigs` to set up subscriptions need
+//! a controller-backed single-node cluster, `start_n_node(1)`, because that
+//! RPC goes through Raft. The simple handshake tests use `support::start()`, a
+//! simpler single-broker helper that also boots in Bootstrap mode and is its
+//! own controller.
 
 use assert2::{assert, check};
 mod support;
@@ -61,7 +62,8 @@ async fn build_client(addr: std::net::SocketAddr) -> crabka_client_core::Client 
         .expect("client build")
 }
 
-/// Configure a match-all `CLIENT_METRICS` subscription via `IncrementalAlterConfigs`.
+/// Configures a match-all `CLIENT_METRICS` subscription with
+/// `IncrementalAlterConfigs`.
 async fn configure_match_all_subscription(
     client: &crabka_client_core::Client,
     name: &str,
@@ -110,7 +112,8 @@ async fn configure_match_all_subscription(
     );
 }
 
-/// Build a minimal valid OTLP `MetricsData` payload (uncompressed / `compression_type=0`).
+/// Builds a minimal valid OTLP `MetricsData` payload. It is uncompressed, so
+/// `compression_type=0`.
 fn sample_otlp_metrics() -> bytes::Bytes {
     use opentelemetry_proto::tonic::metrics::v1::{
         Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric::Data,
@@ -169,7 +172,7 @@ async fn api_versions_advertises_telemetry_apis() {
     p.broker.shutdown().await;
 }
 
-/// With no subscriptions configured the broker assigns a fresh id, returns
+/// With no subscriptions configured, the broker assigns a fresh id, returns an
 /// empty `requested_metrics`, and advertises the standard compression types
 /// and limits.
 #[tokio::test]
@@ -244,8 +247,8 @@ async fn get_telemetry_subscriptions_with_set_id_echoes_nil() {
     p.broker.shutdown().await;
 }
 
-/// An unregistered instance pushing telemetry must be rejected with
-/// `INVALID_REQUEST` (42) — the client should call `GetTelemetrySubscriptions`
+/// The broker must reject a telemetry push from an unregistered instance with
+/// `INVALID_REQUEST` (42). The client should call `GetTelemetrySubscriptions`
 /// first.
 #[tokio::test]
 async fn push_telemetry_unknown_instance_rejected() {
@@ -275,8 +278,8 @@ async fn push_telemetry_unknown_instance_rejected() {
 
 // ── Part 2: e2e coverage (controller-backed) ─────────────────────────────────
 
-/// Happy path: configure a subscription, do a `GetTelemetrySubscriptions`
-/// handshake, then push a valid OTLP payload — all must succeed.
+/// Happy path: configure a subscription, run a `GetTelemetrySubscriptions`
+/// handshake, then push a valid OTLP payload. All three must succeed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn push_telemetry_happy_path_after_subscription() {
     let cluster = start_n_node(1).await.expect("start_n_node");
@@ -350,8 +353,8 @@ async fn push_telemetry_happy_path_after_subscription() {
     );
 }
 
-/// A registered instance pushing with a stale `subscription_id` must be
-/// rejected with `UNKNOWN_SUBSCRIPTION_ID` (117).
+/// The broker must reject a push from a registered instance that carries a
+/// stale `subscription_id`, with `UNKNOWN_SUBSCRIPTION_ID` (117).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn push_telemetry_stale_subscription_id_rejected() {
     let cluster = start_n_node(1).await.expect("start_n_node");
@@ -393,9 +396,10 @@ async fn push_telemetry_stale_subscription_id_rejected() {
     );
 }
 
-/// Unsupported `compression_type` must yield `UNSUPPORTED_COMPRESSION_TYPE` (76).
-/// The manager allows the first push after a `GetTelemetrySubscriptions` (the
-/// "`first_after_get`" window), so the codec check is reached.
+/// An unsupported `compression_type` must give
+/// `UNSUPPORTED_COMPRESSION_TYPE` (76). The manager allows the first push
+/// after a `GetTelemetrySubscriptions`, the "`first_after_get`" window, so the
+/// request reaches the codec check.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn push_telemetry_unsupported_compression_rejected() {
     let cluster = start_n_node(1).await.expect("start_n_node");

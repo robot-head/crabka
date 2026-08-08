@@ -1,24 +1,25 @@
 //! Internal errors produced by the broker's handlers and lifecycle.
 //!
-//! These are NOT Kafka wire-level error codes (those live in
-//! [`crate::codes`]). Conversion from `BrokerError` to a wire code
-//! happens at the handler boundary.
+//! These are NOT Kafka wire-level error codes. Those live in
+//! [`crate::codes`]. The handler boundary converts a `BrokerError` to a wire
+//! code.
 
 use thiserror::Error;
 
 /// Errors produced by the broker's lifecycle and handlers.
 ///
-/// Returned from [`crate::Broker::start`] and propagated up from
-/// per-connection serve loops. The `#[non_exhaustive]` attribute lets
-/// future variants be added without a breaking change.
+/// [`crate::Broker::start`] returns these errors, and the per-connection serve
+/// loops pass them up. The `#[non_exhaustive]` attribute lets a later release
+/// add variants without a breaking change.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BrokerError {
-    /// Filesystem I/O failure (binding the listener, opening log dirs).
+    /// Filesystem I/O failure, for example when the broker binds the listener
+    /// or opens log dirs.
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Storage-layer error bubbling up from [`crabka_log`].
+    /// Storage-layer error that comes up from [`crabka_log`].
     #[error("log: {0}")]
     Log(#[from] crabka_log::LogError),
 
@@ -26,8 +27,8 @@ pub enum BrokerError {
     #[error("protocol: {0}")]
     Protocol(#[from] crabka_protocol::ProtocolError),
 
-    /// The peer sent a `(api_key, version)` the handler table doesn't
-    /// know how to serve.
+    /// The peer sent an `(api_key, version)` pair that the handler table
+    /// cannot serve.
     #[error("unsupported api_key={api_key} version={version}")]
     UnsupportedApi {
         /// The unsupported Kafka API key.
@@ -36,8 +37,8 @@ pub enum BrokerError {
         version: i16,
     },
 
-    /// A produce request landed on a partition whose writer actor has
-    /// exited — typically only seen at shutdown.
+    /// A produce request arrived at a partition whose writer actor has
+    /// exited. This normally happens only at shutdown.
     #[error("partition writer for {topic}-{partition} died")]
     PartitionWriterDied {
         /// Topic name of the dead writer.
@@ -50,13 +51,14 @@ pub enum BrokerError {
     #[error("shutting down")]
     Shutdown,
 
-    /// A failure that occurred during [`crate::Broker::start`] — controller
-    /// bring-up, leader election timeout, etc.
+    /// A failure during [`crate::Broker::start`], such as controller bring-up
+    /// or a leader-election timeout.
     #[error("startup failed: {0}")]
     Startup(String),
 
-    /// A group-coordinator request arrived while the group is in a state
-    /// that doesn't allow it (e.g. heartbeat during `PreparingRebalance`).
+    /// A group-coordinator request arrived while the group is in a state that
+    /// does not allow it, for example a heartbeat during
+    /// `PreparingRebalance`.
     #[error("group {group_id} is in state {state:?}, request not allowed")]
     GroupInvalidState {
         /// The affected group id.
@@ -65,8 +67,8 @@ pub enum BrokerError {
         state: String,
     },
 
-    /// The client referenced a `member_id` the coordinator doesn't track
-    /// for this group.
+    /// The client named a `member_id` that the coordinator does not track for
+    /// this group.
     #[error("unknown member {member_id} in group {group_id}")]
     UnknownMember {
         /// The affected group id.
@@ -104,19 +106,19 @@ pub enum BrokerError {
     #[error("unknown leader epoch ({0})")]
     UnknownLeaderEpoch(i32),
 
-    /// A replication-layer failure (fetch from leader failed, truncation
-    /// error, etc.). Maps to `UNKNOWN_SERVER_ERROR` on the wire.
+    /// A replication-layer failure, such as a failed fetch from the leader or
+    /// a truncation error. It maps to `UNKNOWN_SERVER_ERROR` on the wire.
     #[error("replication: {0}")]
     Replication(String),
 
-    /// A transactional operation failed. Maps to `UNKNOWN_SERVER_ERROR` on
-    /// the wire; specific wire codes are chosen by handlers.
+    /// A transactional operation failed. It maps to `UNKNOWN_SERVER_ERROR` on
+    /// the wire. Handlers choose the specific wire codes.
     #[error("transaction: {0}")]
     Txn(String),
 
-    /// A KIP-932 share-coordinator (persister) operation failed. Maps to
-    /// `UNKNOWN_SERVER_ERROR` on the wire; specific wire codes are chosen by
-    /// handlers.
+    /// A KIP-932 share-coordinator (persister) operation failed. It maps to
+    /// `UNKNOWN_SERVER_ERROR` on the wire. Handlers choose the specific wire
+    /// codes.
     #[error("share: {0}")]
     Share(String),
 
@@ -128,8 +130,8 @@ pub enum BrokerError {
     #[error("inter_broker_listener_name {name} not in listeners list")]
     InvalidInterBrokerListener { name: String },
 
-    /// `process.roles` was empty — a node must be at least one of
-    /// `controller` / `broker`.
+    /// `process.roles` was empty. A node must be a `controller`, a `broker`,
+    /// or both.
     #[error("process.roles must list at least one role")]
     EmptyRoles,
 
@@ -141,8 +143,9 @@ pub enum BrokerError {
     #[error("SASL listener {name} declared but enabled_sasl_mechanisms is empty")]
     SaslListenerNoMechanisms { name: String },
 
-    /// `Gssapi` is an enabled SASL mechanism but no `gssapi` config (keytab,
-    /// service name, principal mapping) was provided.
+    /// `Gssapi` is an enabled SASL mechanism, but the config supplied no
+    /// `gssapi` block with a keytab, a service name, and a principal
+    /// mapping.
     #[error("GSSAPI is an enabled SASL mechanism but gssapi config is missing")]
     GssapiConfigMissing,
 
@@ -150,8 +153,8 @@ pub enum BrokerError {
     #[error("tls: {0}")]
     Tls(String),
 
-    /// Failed to read or decode the bootstrap records file written by
-    /// `crabka format --add-scram`.
+    /// The broker failed to read or decode the bootstrap records file that
+    /// `crabka format --add-scram` wrote.
     #[error("bootstrap file {path:?}: {source}")]
     BootstrapFile {
         /// Path to the file that could not be read or decoded.

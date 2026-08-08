@@ -1,6 +1,8 @@
-//! Cluster authorizer. The trait + ACL evaluator now live in `crabka-authz`
-//! (shared with the gateway); this module re-exports them and keeps the
-//! broker-only OPA plugin.
+//! Cluster authorizer.
+//!
+//! The trait and the ACL evaluator live in `crabka-authz`, which the gateway
+//! shares. This module re-exports them, and it keeps the broker-only OPA
+//! plugin.
 pub mod opa;
 
 pub use crabka_authz::{

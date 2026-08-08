@@ -31,12 +31,12 @@ use crate::PromqlError;
 /// Not `Eq`: `split_interval` is a [`Time`], which stores `f64`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QueryFrontendOptions {
-    /// Width of the absolute window each sub-range is split on.
+    /// Width of the absolute window that each sub-range is split on.
     pub split_interval: Time,
     pub shard_count: usize,
 }
 
-/// One user range query entering the query-frontend.
+/// One user range query that enters the query-frontend.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrontendRangeRequest {
     pub tenant: String,
@@ -47,8 +47,9 @@ pub struct FrontendRangeRequest {
     pub opts: QueryFrontendOptions,
 }
 
-/// One Mimir-compatible query shard. Shards are one-based on the wire:
-/// `1_of_3`, `2_of_3`, ...
+/// One Mimir-compatible query shard.
+///
+/// Shards are one-based on the wire: `1_of_3`, `2_of_3`, ...
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct QueryShard {
     pub index: usize,

@@ -1,15 +1,16 @@
 //! Plotly HTML graph rendering for the benchmark report.
 //!
-//! Turns the cross-run aggregates from [`crate::aggregate`] into one
+//! This module turns the cross-run aggregates from [`crate::aggregate`] into one
 //! self-contained HTML page:
 //!
-//! - a grouped **bar chart per headline metric** — crabka vs kafka across
+//! - a grouped **bar chart per headline metric**, crabka against kafka across
 //!   every scenario cell, with run-to-run sample-stddev error bars; and
-//! - per `(scenario, metric)`, an **across-run-averaged time-series line
-//!   chart** showing how the metric moved over the run for each stack.
+//! - one **across-run-averaged time-series line chart** per
+//!   `(scenario, metric)`, which shows how the metric moved over the run for
+//!   each stack.
 //!
-//! The page loads `plotly.js` from the CDN (matching the version the `plotly`
-//! crate itself targets) and embeds each figure inline, so the whole report is
+//! The page loads `plotly.js` from the CDN and matches the version the `plotly`
+//! crate itself targets. It embeds each figure inline, so the whole report is
 //! a single `.html` file.
 
 use std::{
@@ -39,11 +40,13 @@ fn push_fmt(output: &mut String, args: Arguments<'_>) {
         .expect("writing formatted data to a String cannot fail");
 }
 
-/// plotly.js version the `plotly` crate (0.14) renders against; pin the same
-/// one in the page `<head>` so the inline figures find a compatible global.
+/// The plotly.js version that the `plotly` crate (0.14) renders against. Pin the
+/// same one in the page `<head>`, so the inline figures find a compatible
+/// global.
 const PLOTLY_CDN: &str = "https://cdn.plot.ly/plotly-3.0.1.min.js";
 
-/// Render every run into one self-contained HTML report titled `title`.
+/// Renders every run into one self-contained HTML report with the title
+/// `title`.
 #[must_use]
 pub fn render_html(runs: &[RunOutput], title: &str) -> String {
     let cells = aggregate_cells(runs);
@@ -71,11 +74,12 @@ pub fn render_html(runs: &[RunOutput], title: &str) -> String {
     wrap_page(title, &body)
 }
 
-/// Render an HTML *fragment* (no `<html>` wrapper) for embedding in the Zola
-/// website: the averaged scalar summary, then — per scenario — throughput,
-/// CPU and memory over the run window with every individual run drawn faintly
-/// plus a bold across-run mean line. `tagged` pairs each run with its
-/// `runNN` tag (parsed from the result filename) so per-run traces are named.
+/// Renders an HTML *fragment* with no `<html>` wrapper, for the Zola website to
+/// embed. The fragment holds the averaged scalar summary, and then throughput,
+/// CPU, and memory over the run window for each scenario. Every individual run
+/// is a faint line, and the across-run mean is a bold line. `tagged` pairs each
+/// run with the `runNN` tag parsed from the result filename, so every per-run
+/// trace carries a name.
 #[must_use]
 pub fn render_web_fragment(tagged: &[(String, RunOutput)]) -> String {
     let runs: Vec<RunOutput> = tagged.iter().map(|(_, r)| r.clone()).collect();
@@ -128,9 +132,9 @@ pub fn render_web_fragment(tagged: &[(String, RunOutput)]) -> String {
     out
 }
 
-/// A website time-series metric: the matching [`averaged_timeseries`] key (for
-/// the bold mean line), a label, and how to pull a run's `(t_offset_ms, value)`
-/// points (for the faint per-run lines).
+/// A website time-series metric. It holds the matching [`averaged_timeseries`]
+/// key for the bold mean line, a label, and a way to pull a run's
+/// `(t_offset_ms, value)` points for the faint per-run lines.
 struct WebMetric {
     avg_key: &'static str,
     label: &'static str,
@@ -180,8 +184,8 @@ fn stack_colors(s: Stack) -> (&'static str, &'static str) {
     }
 }
 
-/// One chart for `wm` in one cell: every run drawn as a faint line (hidden from
-/// the legend) plus a bold across-run mean line per stack.
+/// One chart for `wm` in one cell. Every run is a faint line that the legend
+/// hides, and each stack also gets a bold across-run mean line.
 fn per_run_chart(
     scenario: &str,
     brokers: u32,
@@ -242,8 +246,9 @@ fn per_run_chart(
     plot
 }
 
-/// One grouped bar chart for metric `m`: a crabka and a kafka bar per cell,
-/// each carrying the across-run sample-stddev as a symmetric error bar.
+/// One grouped bar chart for metric `m`. Each cell gets a crabka bar and a kafka
+/// bar, and each bar carries the across-run sample-stddev as a symmetric error
+/// bar.
 fn bar_chart(cells: &[CellAgg], m: &ScalarMetric) -> Plot {
     let labels: Vec<String> = cells.iter().map(|c| c.scenario.clone()).collect();
 
@@ -281,8 +286,8 @@ fn bar_chart(cells: &[CellAgg], m: &ScalarMetric) -> Plot {
     plot
 }
 
-/// One line chart per `(scenario, metric)`: a crabka and a kafka line of the
-/// across-run-averaged value over the run.
+/// One line chart per `(scenario, metric)`. Each chart holds a crabka line and a
+/// kafka line of the across-run-averaged value over the run.
 fn timeseries_charts(ts: &[TsSeries]) -> String {
     let mut groups: BTreeMap<(&str, u32, &'static str), Vec<&TsSeries>> = BTreeMap::new();
     for s in ts {
@@ -331,8 +336,8 @@ fn stack_name(s: Stack) -> &'static str {
     }
 }
 
-/// Human label for a time-series metric key. The keys are a closed set
-/// (see [`crate::aggregate`]); the fallback is unreachable in practice.
+/// The label a person reads for a time-series metric key. The keys are a closed
+/// set. See [`crate::aggregate`]. The fallback is unreachable in practice.
 fn ts_metric_label(key: &str) -> &'static str {
     match key {
         "producer_msgs_per_sec" => "Producer throughput (msgs/s)",
@@ -345,7 +350,7 @@ fn ts_metric_label(key: &str) -> &'static str {
     }
 }
 
-/// Reduce an arbitrary string to a safe HTML id (alnum + dashes).
+/// Reduces an arbitrary string to a safe HTML id of alphanumerics and dashes.
 fn sanitize_id(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -363,7 +368,7 @@ h1{{font-size:1.6rem}}h2{{margin-top:2rem;border-bottom:1px solid #ddd;padding-b
     )
 }
 
-/// Minimal HTML-text escaping for trusted scenario/metric labels.
+/// Minimal HTML-text escaping for trusted scenario and metric labels.
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

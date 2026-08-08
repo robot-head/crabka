@@ -1,30 +1,32 @@
-//! `Suppressed` + `BufferConfig` — the suppress configuration surface.
+//! `Suppressed` and `BufferConfig`: the suppress configuration surface.
 //!
-//! Slice A implements `until_window_closes(unbounded())` (final results for
-//! windowed tables). Slice B adds `with_max_records` (bounded buffer +
-//! `shutDownWhenFull`). Slice C adds `until_time_limit` + `emit_early_when_full`
-//! overflow toggle + eager `max_records(n)` constructor + `record_cap()`/`is_emit_early()`.
-//! Slice D adds the logging toggle.
+//! Slice A implements `until_window_closes(unbounded())`, which gives final
+//! results for windowed tables. Slice B adds `with_max_records`, a bounded
+//! buffer with `shutDownWhenFull`. Slice C adds `until_time_limit`, the
+//! `emit_early_when_full` overflow toggle, the eager `max_records(n)`
+//! constructor, `record_cap()`, and `is_emit_early()`. Slice D adds the logging
+//! toggle.
 
 use crabka_units::prelude::*;
 
-/// How the suppress buffer is bounded + what happens when it's full.
+/// The bound on the suppress buffer and the behaviour when it is full.
 ///
-/// A [`ByteSize`] stores `f64`, so this is `PartialEq` but not `Eq`; nothing keys
-/// a map or set on a buffer config, so the weaker bound costs nothing.
+/// A [`ByteSize`] stores `f64`, so this type is `PartialEq` but not `Eq`. Nothing
+/// keys a map or a set on a buffer config, so the weaker bound costs nothing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BufferConfig {
     max_records: Option<usize>,
-    /// Cap on the total serialized size of the buffer (`key_bytes + value_bytes`
-    /// summed). Enforced by the processor against the registered store's
-    /// `byte_size()`. The JVM `BufferConfig.maxBytes`.
+    /// Cap on the total serialized size of the buffer, the sum of `key_bytes`
+    /// and `value_bytes`. The processor enforces it against the registered
+    /// store's `byte_size()`. This is the JVM `BufferConfig.maxBytes`.
     max_bytes: Option<ByteSize>,
-    /// `false` = shutDownWhenFull (strict, panic); `true` = emitEarlyWhenFull (eager).
+    /// `false` is shutDownWhenFull, which is strict and panics. `true` is
+    /// emitEarlyWhenFull, which is eager.
     emit_early: bool,
 }
 
 impl BufferConfig {
-    /// Unbounded, strict (shutDownWhenFull).
+    /// Unbounded and strict, that is, shutDownWhenFull.
     #[must_use]
     pub fn unbounded() -> Self {
         Self {
@@ -34,8 +36,10 @@ impl BufferConfig {
         }
     }
 
-    /// Cap at `n` records, EAGER (emit-early-when-full) — the JVM static
-    /// `BufferConfig.maxRecords(n)` (the rate-limiter default overflow).
+    /// Cap at `n` records, EAGER, that is, emit-early-when-full.
+    ///
+    /// This matches the JVM static `BufferConfig.maxRecords(n)`, the
+    /// rate-limiter default overflow.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -48,9 +52,11 @@ impl BufferConfig {
         }
     }
 
-    /// Cap at `n`, EAGER (emit-early-when-full) — the JVM static
-    /// `BufferConfig.maxBytes(n)`. The cap is measured against the serialized
-    /// `key_bytes + value_bytes` summed across buffered entries.
+    /// Cap at `n`, EAGER, that is, emit-early-when-full.
+    ///
+    /// This matches the JVM static `BufferConfig.maxBytes(n)`. The processor
+    /// measures the cap against the serialized `key_bytes` and `value_bytes`
+    /// summed across the buffered entries.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -63,8 +69,10 @@ impl BufferConfig {
         }
     }
 
-    /// Cap at `n` records, keeping the current overflow mode (strict on the
-    /// `unbounded()` path) — the JVM `unbounded().withMaxRecords(n)`.
+    /// Cap at `n` records and keep the current overflow mode.
+    ///
+    /// The mode is strict on the `unbounded()` path. This matches the JVM
+    /// `unbounded().withMaxRecords(n)`.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -76,7 +84,7 @@ impl BufferConfig {
         }
     }
 
-    /// Cap at `n`, keeping the current overflow mode — the JVM
+    /// Cap at `n` and keep the current overflow mode. This matches the JVM
     /// `unbounded().withMaxBytes(n)`.
     #[must_use]
     /// # Panics
@@ -89,7 +97,8 @@ impl BufferConfig {
         }
     }
 
-    /// Evict + emit the oldest buffered record when full (eager).
+    /// Evict and emit the oldest buffered record when the buffer is full. This
+    /// is the eager mode.
     #[must_use]
     pub fn emit_early_when_full(self) -> Self {
         Self {
@@ -98,7 +107,7 @@ impl BufferConfig {
         }
     }
 
-    /// Shut the task down when full (strict).
+    /// Shut the task down when the buffer is full. This is the strict mode.
     #[must_use]
     pub fn shut_down_when_full(self) -> Self {
         Self {
@@ -118,18 +127,21 @@ impl BufferConfig {
     }
 }
 
-/// A suppression configuration, parameterized by the table key `K`. Carries a
-/// `fn(&K, i64) -> i64` (record key + timestamp → buffer time): window-close reads
-/// `window.end`, time-limit reads the record timestamp. Fn pointers are `Copy`, so
-/// `Suppressed<K>` is `Copy` without requiring `K: Copy`.
+/// A suppression configuration, parameterized by the table key `K`.
+///
+/// It carries a `fn(&K, i64) -> i64` that maps a record key and a timestamp to a
+/// buffer time. Window-close reads `window.end`, and time-limit reads the record
+/// timestamp. Fn pointers are `Copy`, so `Suppressed<K>` is `Copy` and needs no
+/// `K: Copy` bound.
 #[derive(Debug)]
 pub struct Suppressed<K> {
     pub(crate) buffer: BufferConfig,
     pub(crate) buffer_time: fn(&K, i64) -> i64,
     pub(crate) wait: WaitKind,
-    /// Whether the suppress buffer's changelog topic is emitted (default `true`).
-    /// `false` (the JVM `withLoggingDisabled()`) keeps the buffer in memory only —
-    /// no changelog topic in the wire topology, no restore.
+    /// Whether the client emits the suppress buffer's changelog topic. Default:
+    /// `true`. `false` matches the JVM `withLoggingDisabled()` and keeps the
+    /// buffer in memory only. There is then no changelog topic in the wire
+    /// topology and no restore.
     pub(crate) logging: bool,
 }
 
@@ -143,8 +155,9 @@ impl<K> Clone for Suppressed<K> {
 impl<K> Copy for Suppressed<K> {}
 
 impl<K> Suppressed<K> {
-    /// Disable the suppress buffer's changelog (the JVM `withLoggingDisabled()`):
-    /// the buffer stays in memory only — no changelog topic, no fault-tolerance.
+    /// Disable the suppress buffer's changelog, as the JVM
+    /// `withLoggingDisabled()` does. The buffer then stays in memory only, with
+    /// no changelog topic and no fault-tolerance.
     #[must_use]
     pub fn with_logging_disabled(self) -> Self {
         Self {
@@ -153,7 +166,7 @@ impl<K> Suppressed<K> {
         }
     }
 
-    /// Re-enable the suppress buffer's changelog (the default).
+    /// Re-enable the suppress buffer's changelog. This is the default.
     #[must_use]
     pub fn with_logging_enabled(self) -> Self {
         Self {
@@ -166,15 +179,17 @@ impl<K> Suppressed<K> {
 /// How long to wait before emitting a buffered record.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum WaitKind {
-    /// Window-close: wait = the upstream window's grace (from the `KTable` handle).
+    /// Window-close. The wait is the upstream window's grace, taken from the
+    /// `KTable` handle.
     UpstreamGrace,
-    /// Time-limit: wait = the configured duration.
+    /// Time-limit. The wait is the configured duration.
     Fixed(Time),
 }
 
 impl<KInner> Suppressed<crate::dsl::windows::Windowed<KInner>> {
-    /// Emit each window's final result once it closes (`stream_time >= window.end +
-    /// grace`). Requires a windowed `KTable` + a STRICT buffer (shutDownWhenFull).
+    /// Emit each window's final result once the window closes, that is, once
+    /// `stream_time >= window.end + grace`. This needs a windowed `KTable` and a
+    /// STRICT buffer, that is, shutDownWhenFull.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -193,8 +208,8 @@ impl<KInner> Suppressed<crate::dsl::windows::Windowed<KInner>> {
 }
 
 impl<K> Suppressed<K> {
-    /// Rate-limiter: emit at most one update per key per `wait` (stream-time); a
-    /// newer record for a key replaces the buffered one and resets the timer.
+    /// Rate-limiter: emit at most one update per key per `wait` in stream time.
+    /// A newer record for a key replaces the buffered one and resets the timer.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.

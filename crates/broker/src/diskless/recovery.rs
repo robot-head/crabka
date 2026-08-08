@@ -9,7 +9,8 @@ use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
 use crate::{error::BrokerError, producer_state::ProducerState};
 
-/// Return the log-open config for a partition, forcing tail validation for diskless logs.
+/// Returns the log-open config for a partition. It forces tail validation for
+/// a diskless log.
 #[must_use]
 pub(crate) fn open_config(base: &LogConfig, diskless: bool) -> LogConfig {
     let mut config = base.clone();
@@ -19,11 +20,12 @@ pub(crate) fn open_config(base: &LogConfig, diskless: bool) -> LogConfig {
     config
 }
 
-/// Apply diskless crash-restart recovery to an already-open log.
+/// Applies diskless crash-restart recovery to a log that is already open.
 ///
-/// `KRaft` is the offset authority for diskless partitions, so `committed_next_offset`
-/// re-anchors append-at offset assignment after a `[KRaft commit, fsync)` crash.
-/// The recovered WAL tail then rebuilds the idempotent producer sequence map.
+/// `KRaft` is the offset authority for a diskless partition, so
+/// `committed_next_offset` re-anchors the append-at offset assignment after a
+/// crash in the `[KRaft commit, fsync)` window. The recovered WAL tail then
+/// rebuilds the idempotent producer sequence map.
 pub(crate) async fn recover_open_log(
     topic: &str,
     partition: PartitionIndex,
@@ -37,7 +39,8 @@ pub(crate) async fn recover_open_log(
     rebuild_producer_state(topic, partition, log, producer_state).await
 }
 
-/// Rebuild idempotent-producer dedup state from a recovered log's raw batches.
+/// Rebuilds the idempotent-producer dedup state from the raw batches of a
+/// recovered log.
 pub(crate) async fn rebuild_producer_state(
     topic: &str,
     partition: PartitionIndex,

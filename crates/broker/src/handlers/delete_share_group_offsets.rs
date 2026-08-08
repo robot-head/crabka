@@ -1,14 +1,15 @@
-//! `DeleteShareGroupOffsets` (`api_key` 92) — KIP-932. Deletes the durable
-//! share-state for every initialized partition of the requested topics of an
-//! *empty* share group. A non-empty group is rejected top-level with
-//! `NON_EMPTY_GROUP`.
+//! `DeleteShareGroupOffsets` (`api_key` 92), from KIP-932.
 //!
-//! The request carries only `topic_name` per topic (no partition list), so the
-//! handler enumerates the group's initialized partitions for each topic from
-//! the cached `ShareGroupStatePartitionMetadata`.
+//! It deletes the durable share state for every initialized partition of the
+//! requested topics, in an *empty* share group. A non-empty group gets a
+//! top-level `NON_EMPTY_GROUP` rejection.
 //!
-//! Intercepted inline in `network::dispatch` for the per-group `Delete` ACL
-//! gate (principal + peer `SocketAddr`).
+//! The request carries only `topic_name` for each topic, and no partition
+//! list. The handler therefore lists the group's initialized partitions for
+//! each topic from the cached `ShareGroupStatePartitionMetadata`.
+//!
+//! `network::dispatch` intercepts this request inline for the per-group
+//! `Delete` ACL gate, which needs the principal and the peer `SocketAddr`.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};

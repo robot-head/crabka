@@ -1,13 +1,15 @@
 //! KIP-1071 classic→streams cold conversion. When a drained classic group
-//! receives a `StreamsGroupHeartbeat`, the group is converted in place: the
-//! classic `GroupMetadata` (k2) is tombstoned (defensive — a no-op when the
-//! classic path persisted none) and the type lock is forced to `Streams`. The
-//! drained classic actor is KEPT in the `groups` registry as the protocol-
-//! agnostic offset home (`OffsetFetch`/`OffsetCommit` route there via
-//! `coordinator.find()` for every protocol, streams included), so committed
-//! offsets (k0/k1) survive the flip untouched. Streams migration is COLD only
-//! (Kafka does not support online streams migration), so there is no
-//! hosted-classic-member translation here.
+//! receives a `StreamsGroupHeartbeat`, the coordinator converts the group in
+//! place. It tombstones the classic `GroupMetadata` (k2) and forces the type
+//! lock to `Streams`. That tombstone is defensive: it is a no-op when the
+//! classic path persisted none. The coordinator KEEPS the drained classic actor
+//! in the `groups` registry as the protocol-agnostic offset home, so committed
+//! offsets (k0/k1) survive the flip untouched. `OffsetFetch` and `OffsetCommit`
+//! route there through `coordinator.find()` for every protocol, streams
+//! included.
+//!
+//! Streams migration is COLD only, because Kafka does not support online
+//! streams migration, so there is no hosted-classic-member translation here.
 
 use crabka_protocol::records::RecordBatch;
 
@@ -21,11 +23,11 @@ use crate::coordinator::unified::{OffsetRecordBatchBuilder, actor::PendingRecord
 /// Result of inspecting a `group_id` for classic→streams conversion.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ConvertOutcome {
-    /// Not a classic group (fresh streams group or already streams) — serve normally.
+    /// Not a classic group (fresh streams group or already streams). Serve normally.
     NotClassic,
-    /// Was a drained classic group; converted in place to streams.
+    /// Was a drained classic group. The coordinator converted it in place to streams.
     Converted,
-    /// Classic group has live members — online streams migration is unsupported.
+    /// Classic group has live members. Online streams migration is not supported.
     RejectLiveMembers,
 }
 
@@ -33,11 +35,11 @@ pub(crate) enum ConvertOutcome {
 /// The mirror of [`ConvertOutcome`] for the opposite direction.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DowngradeOutcome {
-    /// Not a streams group — serve the classic `JoinGroup` normally.
+    /// Not a streams group. Serve the classic `JoinGroup` normally.
     NotStreams,
-    /// Was a drained streams group; converted in place to classic.
+    /// Was a drained streams group. The coordinator converted it in place to classic.
     Converted,
-    /// Streams group has live members — online streams migration is unsupported.
+    /// Streams group has live members. Online streams migration is not supported.
     RejectLiveMembers,
 }
 
@@ -52,19 +54,20 @@ pub(crate) fn classic_group_metadata_tombstone_batch(group_id: &str, now_ms: i64
     .into_batch(group_id, now_ms)
 }
 
-/// Build the batch that tombstones every streams record for `group_id`, used by
-/// the streams→classic downgrade and the type-aware streams delete. The
-/// group-level keys — k15 `GroupMetadata`, k17 `Topology`, k18
-/// `PartitionMetadata`, k19 `TargetAssignmentMetadata` — are tombstoned
-/// unconditionally (a tombstone for a never-written key is a harmless replay
-/// no-op, and k15's tombstone is load-bearing: a surviving k15 would resurrect
-/// the group as streams). Each id in `member_ids` additionally tombstones its
-/// k16/k20/k21; a drained group has none (members tombstone their own per-member
-/// records on leave), so `member_ids` is typically empty.
+/// Build the batch that tombstones every streams record for `group_id`, for the
+/// streams→classic downgrade and the type-aware streams delete. This function
+/// tombstones the group-level keys unconditionally: k15 `GroupMetadata`, k17
+/// `Topology`, k18 `PartitionMetadata`, and k19 `TargetAssignmentMetadata`. A
+/// tombstone for a never-written key is a harmless replay no-op. The k15
+/// tombstone is load-bearing, because a surviving k15 would resurrect the group
+/// as streams. Each id in `member_ids` also tombstones its k16/k20/k21. A
+/// drained group has no members, because members tombstone their own per-member
+/// records on leave, so `member_ids` is typically empty.
 ///
-/// Built directly from the key encoders rather than via `PendingStreamsRecords`,
-/// whose group-level fields are `Option<Value>` (present-or-absent) with no way
-/// to express a group-level null-value tombstone.
+/// This function builds the batch directly from the key encoders rather than
+/// through `PendingStreamsRecords`. That type's group-level fields are
+/// `Option<Value>`, present or absent, with no way to express a group-level
+/// null-value tombstone.
 pub(crate) fn streams_records_tombstone_batch(
     group_id: &str,
     member_ids: &[String],

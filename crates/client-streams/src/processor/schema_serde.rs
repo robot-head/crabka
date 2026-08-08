@@ -1,6 +1,6 @@
 //! Bridges `crabka-schema-serde` typed serdes into the Streams `Serde<T>`
 //! boundary, and implements the membership `SchemaPrewarm` hook for
-//! `SchemaCache`. Gated by the `schema-serde` feature.
+//! `SchemaCache`. The `schema-serde` feature gates this module.
 
 use bytes::Bytes;
 use crabka_schema_serde::{
@@ -14,7 +14,8 @@ use crate::{
     processor::serde::{Serde, SerdeAssociate, SerdeError, SerdeRole},
 };
 
-/// Wraps a schema-serde serializer+deserializer pair as a Streams `Serde<T>`.
+/// Wraps a schema-serde serializer and deserializer pair as a Streams
+/// `Serde<T>`.
 pub struct SchemaSerde<T, S> {
     inner: S,
     _marker: std::marker::PhantomData<fn() -> T>,
@@ -32,7 +33,7 @@ impl<T, S: Clone> Clone for SchemaSerde<T, S> {
 }
 
 impl<T, S> SchemaSerde<T, S> {
-    /// Wrap a schema-serde serde (e.g. `AvroSerde<T>`).
+    /// Wrap a schema-serde serde, such as an `AvroSerde<T>`.
     pub fn new(inner: S) -> Self {
         Self {
             inner,
@@ -41,9 +42,10 @@ impl<T, S> SchemaSerde<T, S> {
     }
 }
 
-/// Default wraps the inner serde's `Default` (e.g. `AvroSerde<T>::default()`,
-/// which reads the process default registry) — lets `T` declare a default
-/// schema serde via `DefaultSerde` for use with `add_source`/`add_sink`.
+/// `Default` wraps the inner serde's `Default`, such as
+/// `AvroSerde<T>::default()`, which reads the process default registry. `T` can
+/// therefore declare a default schema serde with `DefaultSerde`, for use with
+/// `add_source` and `add_sink`.
 impl<T, S: Default> Default for SchemaSerde<T, S> {
     fn default() -> Self {
         Self::new(S::default())

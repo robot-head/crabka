@@ -1,7 +1,7 @@
-//! Producer + consumer workload runners. Builds N producers and M
-//! consumers (members of one group), runs warmup → measurement
-//! phases, optionally triggers a failover mid-measurement, and merges
-//! per-task histograms into the public `LatencyPercentiles` shape.
+//! Producer and consumer workload runners. This module builds N producers and
+//! M consumers as members of one group, runs the warmup phase and then the
+//! measurement phase, triggers an optional failover mid-measurement, and merges
+//! the per-task histograms into the public `LatencyPercentiles` shape.
 
 use std::{
     fmt,
@@ -46,10 +46,11 @@ use crate::{
     },
 };
 
-/// Width of one time-series sample bucket. The measurement window is split
-/// into configured interval slices; each producer/consumer task tallies
-/// per-slice counts + a per-slice latency histogram locally (no shared locks
-/// on the hot path), and `run()` merges them into the `samples` series.
+/// Width of one time-series sample bucket. The driver splits the measurement
+/// window into slices of the configured interval. Each producer task and
+/// consumer task tallies its per-slice counts and its per-slice latency
+/// histogram locally, so the hot path holds no shared locks. `run()` then merges
+/// them into the `samples` series.
 type AckResult =
     Result<Result<RecordMetadata, ProducerError>, tokio::sync::oneshot::error::RecvError>;
 type AckFuture = Pin<Box<dyn Future<Output = (AckResult, Instant)> + Send>>;
@@ -209,11 +210,11 @@ pub const fn default_consumer_poll_error_backoff() -> Time {
     DEFAULT_CONSUMER_POLL_ERROR_BACKOFF
 }
 
-/// The fixed sampling grid, shared (by Copy) with every task so all tasks
-/// bucket into the same slices.
+/// The fixed sampling grid. Every task gets a copy, so all tasks bucket into
+/// the same slices.
 #[derive(Clone, Copy)]
 struct Grid {
-    /// When the measurement window begins (warmup end).
+    /// When the measurement window starts, which is the end of warmup.
     meas_start: Instant,
     interval_ms: u64,
     /// Number of slices covering the measurement window.
@@ -221,9 +222,10 @@ struct Grid {
 }
 
 impl Grid {
-    /// The grid covering `scenario`'s measurement window, which opens once its
-    /// warmup has elapsed from `started_at`. Always at least one slice wide, so
-    /// a run shorter than a slice still has somewhere to tally into.
+    /// The grid that covers `scenario`'s measurement window. That window opens
+    /// after its warmup has elapsed from `started_at`. The grid is always at
+    /// least one slice wide, so a run shorter than a slice still has somewhere
+    /// to tally into.
     fn new(started_at: Instant, scenario: &Scenario, interval: Time) -> Self {
         let interval_ms = nonnegative_i64_to_u64(interval.millis_i64());
         let duration_ms = nonnegative_i64_to_u64(scenario.duration.millis_i64());
@@ -249,9 +251,9 @@ impl Grid {
     }
 }
 
-/// Parameters wired in from `main` / CLI. Distinct from `Scenario` because
-/// the scenario YAML describes *what* to run, while this struct describes
-/// *where* it's running.
+/// Parameters wired in from `main` and the CLI. This struct is distinct from
+/// `Scenario` because the scenario YAML describes *what* to run, and this struct
+/// describes *where* it runs.
 pub struct DriverConfig {
     pub bootstrap: String,
     pub client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
@@ -272,36 +274,38 @@ pub struct DriverConfig {
     pub consumer_poll_error_backoff: Time,
     pub broker_count: u32,
     pub scenario_id: u64,
-    /// TLS data-path config. `None` → plaintext (the default benchmark path).
+    /// TLS data-path config. `None` means plaintext, the default benchmark path.
     pub tls: Option<TlsParams>,
 }
 
-/// TLS knobs for the producer/consumer data path. When present, both clients
-/// dial the broker's TLS listener and the produce/fetch byte stream is
-/// encrypted — the path crabka can serve via kTLS sendfile and Strimzi serves
-/// via JVM SSL.
+/// TLS knobs for the producer and consumer data path. When this is present, both
+/// clients dial the broker's TLS listener and the produce and fetch byte stream
+/// is encrypted. Crabka can serve that path with kTLS sendfile, and Strimzi
+/// serves it with JVM SSL.
 #[derive(Debug, Clone)]
 pub struct TlsParams {
-    /// Mounted CA bundle (`ca.crt`) the client trusts to verify the broker
-    /// serving cert. Sourced from the per-stack cluster-CA Secret.
+    /// Mounted CA bundle (`ca.crt`) that the client trusts to verify the broker
+    /// serving cert. It comes from the per-stack cluster-CA Secret.
     pub ca_path: PathBuf,
-    /// SNI / server-name presented in the TLS `ClientHello`, matched against a
-    /// SAN on the broker serving cert. LOAD-BEARING: the bootstrap is
-    /// DNS-resolved to a pod IP and dialed by IP, so the SNI is NOT derived
-    /// from the bootstrap host — it must be set to a cert-SAN name
-    /// (crabka: `demo-broker-headless.<ns>.svc.cluster.local`;
-    /// Strimzi: `demo-kafka-bootstrap`).
+    /// SNI server name that the client presents in the TLS `ClientHello`. The
+    /// broker matches it against a SAN on its serving cert. LOAD-BEARING: the
+    /// client DNS-resolves the bootstrap to a pod IP and dials by IP, so the SNI
+    /// is NOT derived from the bootstrap host. You must set it to a cert-SAN
+    /// name. For crabka that name is
+    /// `demo-broker-headless.<ns>.svc.cluster.local`, and for Strimzi it is
+    /// `demo-kafka-bootstrap`.
     pub server_name: String,
-    /// Optional mTLS client identity `(cert_pem, key_pem)`. One-way TLS
-    /// (`None`) is sufficient for the benchmark; present only if the listener
-    /// is configured to require client auth.
+    /// Optional mTLS client identity `(cert_pem, key_pem)`. One-way TLS with
+    /// `None` is enough for the benchmark. Set this only if the listener
+    /// requires client auth.
     pub client_identity: Option<(PathBuf, PathBuf)>,
 }
 
 impl TlsParams {
-    /// Build the [`ClientSecurity`] for an `Ssl` listener: one-way TLS by
-    /// default (server-authenticated, trust-roots from the mounted CA), or
-    /// mutual TLS when [`Self::client_identity`] is set.
+    /// Builds the [`ClientSecurity`] for an `Ssl` listener. The default is
+    /// one-way TLS, which authenticates the server against the trust roots from
+    /// the mounted CA. It becomes mutual TLS when [`Self::client_identity`] is
+    /// set.
     #[must_use]
     pub fn to_security(&self) -> ClientSecurity {
         ClientSecurity {
@@ -317,8 +321,8 @@ impl TlsParams {
     }
 }
 
-/// Top-level entrypoint called by `main`. Returns the populated
-/// `RunOutput`. The caller is responsible for serialising it to disk.
+/// Top-level entry point that `main` calls. Returns the populated
+/// `RunOutput`. The caller must serialise it to disk.
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 /// # Panics
@@ -763,8 +767,8 @@ struct ProducerOut {
     recovery_unix_ms: u64,
     latency_spike_max: Time,
     error: String,
-    /// Per-slice (see [`Grid`]) measurement-window tallies. Empty on a build
-    /// failure; `run()` merges by index with bounds checks.
+    /// Measurement-window tallies, one per slice of the [`Grid`]. This is empty
+    /// on a build failure. `run()` merges by index with bounds checks.
     interval_msgs: Vec<u64>,
     interval_hist: Vec<Histogram<u64>>,
 }

@@ -4,9 +4,10 @@
 //! constraint satisfiable, `MATCH SIMPLE`/`MATCH FULL` null handling, permuted
 //! composite key columns and cross-width integer keys.
 //!
-//! Every expectation here — SQLSTATE, primary message and `DETAIL` — was
-//! captured from a live `PostgreSQL` 18.4 (`postgres:18`, reporting
-//! `PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1)`), not from documentation.
+//! Every expectation here comes from a live `PostgreSQL` 18.4, and not from
+//! documentation. That covers the SQLSTATE, the primary message and the
+//! `DETAIL`. The oracle is `postgres:18`, which reports
+//! `PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1)`.
 
 use assert2::assert;
 use bytes::Bytes;
@@ -59,7 +60,7 @@ fn text_row(values: &[&str]) -> Vec<Option<String>> {
 }
 
 /// The whole reportable shape of a failed statement, so a case compares one
-/// value rather than three fields. `DETAIL` is the part that names the offending
+/// value and not three fields. `DETAIL` is the part that names the offending
 /// key, and it is the part an engine most easily drops.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Failure {
@@ -87,9 +88,9 @@ async fn failure(s: &mut SqlSession, sql: &str) -> Failure {
 }
 
 /// `23503` as every child-side write path reports it. The primary message says
-/// "insert or update" whatever the statement was — `UPDATE`, `COPY`, `MERGE` and
-/// `ON CONFLICT DO UPDATE` all reuse the `INSERT` wording — and `DETAIL` names
-/// the key in `FOREIGN KEY` clause order.
+/// "insert or update" whatever the statement was, because `UPDATE`, `COPY`,
+/// `MERGE` and `ON CONFLICT DO UPDATE` all reuse the `INSERT` wording. `DETAIL`
+/// names the key in `FOREIGN KEY` clause order.
 fn key_not_present(child: &str, constraint: &str, key: &str, parent: &str) -> Failure {
     Failure {
         code: "23503".to_string(),
@@ -100,7 +101,7 @@ fn key_not_present(child: &str, constraint: &str, key: &str, parent: &str) -> Fa
     }
 }
 
-/// `MATCH FULL` refuses a mixed key before probing anything, so its `DETAIL`
+/// `MATCH FULL` refuses a mixed key before it probes anything, so its `DETAIL`
 /// names no key at all.
 fn match_full_mixed_nulls(child: &str, constraint: &str) -> Failure {
     Failure {
@@ -127,7 +128,7 @@ const CHILD_SETUP: &[&str] = &[
 
 /// Every statement that can write a referencing key must run the same check and
 /// report the same `23503`, down to the `DETAIL` line. `COPY` has its own test
-/// because it enters through the copy-in protocol rather than a simple query.
+/// because it enters through the copy-in protocol, not through a simple query.
 #[tokio::test]
 async fn child_violation_from_every_simple_query_write_path() {
     struct Case {
@@ -201,7 +202,7 @@ async fn the_first_declared_child_side_constraint_reports_the_violation() {
 }
 
 /// `COPY FROM STDIN` reaches the write path through the copy-in protocol, which
-/// bypasses simple-query statement dispatch entirely — the drain has to be
+/// bypasses simple-query statement dispatch entirely. So the drain has to be
 /// wired into it separately, and the failed copy must leave no rows.
 #[tokio::test]
 async fn copy_from_stdin_reports_the_child_violation() {
@@ -240,9 +241,9 @@ async fn copy_from_stdin_reports_the_child_violation() {
 
 /// The load-bearing timing fact. `PostgreSQL` implements referential integrity
 /// as an `AFTER ROW` trigger, so a row may satisfy a `NOT DEFERRABLE`
-/// self-referencing foreign key with *itself* — the row exists by the time the
-/// check runs. An engine that probes inline, at the moment the row is written,
-/// fails both of these with a spurious `23503`.
+/// self-referencing foreign key with *itself*, because the row exists by the
+/// time the check runs. An engine that probes inline, at the moment it writes
+/// the row, fails both of these with a spurious `23503`.
 #[tokio::test]
 async fn not_deferrable_self_reference_is_satisfied_by_the_statement_itself() {
     let (_engine, mut s) =
@@ -271,10 +272,9 @@ async fn not_deferrable_self_reference_is_satisfied_by_the_statement_itself() {
 }
 
 /// A `WITH` item and the body it feeds are one command, so the drain fires once
-/// at the end of the whole statement rather than once per part. Both orderings
-/// prove it: the parent written by the `WITH` item satisfies the body, *and* the
-/// child written by the `WITH` item is satisfied by a parent the body has not
-/// written yet at the time the item runs.
+/// at the end of the whole statement, not once per part. Both orderings prove
+/// it. The parent the `WITH` item writes satisfies the body, *and* a parent the
+/// body has not yet written satisfies the child the `WITH` item writes.
 #[tokio::test]
 async fn with_item_and_body_drain_once_for_the_whole_statement() {
     let (_engine, mut s) = engine_with(&[
@@ -315,7 +315,7 @@ async fn with_item_and_body_drain_once_for_the_whole_statement() {
 }
 
 /// A row `ON CONFLICT DO NOTHING` skips never becomes a row, so it owes no
-/// check: the key it carried is never probed even though no parent holds it.
+/// check. Nothing probes the key it carried, even though no parent holds it.
 #[tokio::test]
 async fn on_conflict_do_nothing_queues_no_check_for_a_skipped_row() {
     let (_engine, mut s) = engine_with(CHILD_SETUP).await;
@@ -342,9 +342,9 @@ async fn on_conflict_do_nothing_queues_no_check_for_a_skipped_row() {
 // ---------------------------------------------------------------------------
 // MATCH semantics
 
-/// `MATCH SIMPLE` (the default) lets any NULL in the key through without a
-/// probe, including a partial NULL in a composite key; `MATCH FULL` accepts an
-/// all-NULL key and rejects a mixed one with a `DETAIL` that names no key.
+/// `MATCH SIMPLE`, the default, lets any NULL in the key through with no probe,
+/// including a partial NULL in a composite key. `MATCH FULL` accepts an all-NULL
+/// key and rejects a mixed one with a `DETAIL` that names no key.
 #[tokio::test]
 async fn match_simple_and_match_full_null_handling() {
     struct Case {
@@ -438,7 +438,7 @@ async fn match_simple_and_match_full_null_handling() {
     }
 }
 
-/// A single-column NULL key is satisfied on the way in and on the way out: an
+/// A single-column NULL key is satisfied on the way in and on the way out. An
 /// `INSERT` of NULL never probes, and an `UPDATE` that clears a key to NULL
 /// never probes either.
 #[tokio::test]
@@ -463,11 +463,11 @@ async fn null_child_key_is_always_satisfied() {
 // An UPDATE that leaves the key alone
 
 /// `PostgreSQL`'s child-side trigger compares the old and new keys and returns
-/// without probing when they are equal, so a row that already violates the
+/// with no probe when they are equal, so a row that already violates the
 /// constraint survives an unrelated column update. `NOT VALID` is what makes
-/// that observable from SQL alone: it admits a violating row into storage, and
-/// the constraint still governs every subsequent write. If the skip were not
-/// there, the `note` update below would re-probe the untouched key and fail.
+/// that observable from SQL alone. It admits a violating row into storage, and
+/// the constraint still governs every subsequent write. Without the skip, the
+/// `note` update below would re-probe the untouched key and fail.
 #[tokio::test]
 async fn update_that_leaves_the_key_unchanged_is_not_rechecked() {
     let (_engine, mut s) = engine_with(&[
@@ -503,8 +503,8 @@ async fn update_that_leaves_the_key_unchanged_is_not_rechecked() {
 
 /// `FOREIGN KEY (b, a) REFERENCES pperm (y, x)` over a `(x, y)` primary key
 /// pairs the two lists positionally: `b` matches `y` and `a` matches `x`. The
-/// probe therefore has to permute the child's values into the index's order, and
-/// the `DETAIL` still names the columns in `FOREIGN KEY` clause order.
+/// probe must permute the child's values into the index's order, and the
+/// `DETAIL` still names the columns in `FOREIGN KEY` clause order.
 #[tokio::test]
 async fn composite_foreign_key_with_permuted_column_order() {
     let (_engine, mut s) = engine_with(&[
@@ -528,10 +528,11 @@ async fn composite_foreign_key_with_permuted_column_order() {
 // ---------------------------------------------------------------------------
 // Keys whose two sides are different integer widths
 
-/// `int2`/`int4`/`int8` share an operator family, so a foreign key may pair them
-/// and the probe has to widen or narrow the child's value rather than compare
-/// raw encodings. A value that is representable on both sides resolves; one that
-/// is not present in the parent still reports its own literal in `DETAIL`.
+/// `int2`/`int4`/`int8` share an operator family, so a foreign key may pair them.
+/// The probe must widen or narrow the child's value, and must not compare raw
+/// encodings. A value representable on both sides resolves. A value
+/// that is not present in the parent still reports its own literal in
+/// `DETAIL`.
 #[tokio::test]
 async fn cross_width_integer_keys_resolve() {
     struct Case {

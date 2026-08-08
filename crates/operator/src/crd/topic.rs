@@ -1,5 +1,6 @@
-//! `KafkaTopic` CRD. Strimzi-shaped; unidirectional
-//! reconciliation (CRD wins).
+//! `KafkaTopic` CRD.
+//!
+//! The CRD is Strimzi-shaped. Reconciliation is unidirectional: the CRD wins.
 
 use std::collections::BTreeMap;
 
@@ -22,30 +23,32 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct KafkaTopicSpec {
     /// Optional override for the Kafka topic name. Defaults to
-    /// `metadata.name`. Validated at reconcile time against Kafka's
-    /// rules (length ≤ 249, chars `[A-Za-z0-9._-]`, not `.` or `..`).
+    /// `metadata.name`. The operator validates it at reconcile time against
+    /// Kafka's rules: length ≤ 249, characters `[A-Za-z0-9._-]`, and not `.`
+    /// or `..`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_name: Option<String>,
 
-    /// Number of partitions. Increases honored via `CreatePartitions`;
-    /// decreases rejected with `ImmutableFieldChanged`.
+    /// Number of partitions. The operator applies increases through
+    /// `CreatePartitions`. The operator rejects decreases with
+    /// `ImmutableFieldChanged`.
     #[schemars(range(min = 1, max = 1_000_000))]
     pub partitions: i32,
 
-    /// Replication factor. Changes rejected with
+    /// Replication factor. The operator rejects changes with
     /// `ImmutableFieldChanged` until partition reassignment lands.
     #[schemars(range(min = 1, max = 1_000))]
     pub replicas: i32,
 
-    /// Opaque topic-level config (`retention.ms`, `cleanup.policy`,
-    /// etc.). Reconciled via `IncrementalAlterConfigs` SET/DELETE diff
-    /// against the cluster's current dynamic-topic overrides.
+    /// Opaque topic-level config, such as `retention.ms` and
+    /// `cleanup.policy`. The operator reconciles it with an
+    /// `IncrementalAlterConfigs` SET and DELETE diff against the cluster's
+    /// current dynamic-topic overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<BTreeMap<String, String>>,
 
-    /// When `true`, CRD delete still removes the finalizer but skips
-    /// the `DeleteTopics` call so the Kafka topic survives. Default
-    /// `false`.
+    /// When `true`, a CRD delete still removes the finalizer but skips the
+    /// `DeleteTopics` call, so the Kafka topic survives. Default: `false`.
     #[serde(default)]
     pub preserve_topic: bool,
 }
@@ -53,20 +56,22 @@ pub struct KafkaTopicSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaTopicStatus {
-    /// Standard Kubernetes-style condition list. Surfaces `Ready`.
+    /// Standard Kubernetes-style condition list. It shows `Ready`.
     #[serde(default)]
     pub conditions: Vec<crate::crd::KafkaCondition>,
 
-    /// `metadata.generation` of the last successfully-reconciled spec
-    /// (i.e. last time we wrote `Ready=True reason=Ready`).
+    /// `metadata.generation` of the last successfully-reconciled spec. That
+    /// is the last time the operator wrote `Ready=True reason=Ready`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
 
-    /// Effective topic name (defaulted if `spec.topicName` unset).
+    /// Effective topic name. The operator supplies a default if
+    /// `spec.topicName` is unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_name: Option<String>,
 
-    /// Cluster-assigned topic UUID, populated once the topic exists.
+    /// Cluster-assigned topic UUID. The operator fills it in once the topic
+    /// exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_id: Option<String>,
 }

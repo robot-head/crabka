@@ -23,11 +23,12 @@ fn push_fmt(output: &mut String, args: Arguments<'_>) {
 /// How a metric's cross-run mean is written into a table cell.
 ///
 /// A mean and a standard deviation are dimension-agnostic, so the statistics
-/// below run over plain numbers in one fixed unit per metric; this says which
-/// quantity to rebuild the mean into so the cell carries its unit.
+/// below run over plain numbers in one fixed unit per metric. This enum says
+/// which quantity to rebuild the mean into, so the cell carries its unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Render {
-    /// A dimensionless number (a count, a rate of dimensionless things).
+    /// A dimensionless number, such as a count or a rate of dimensionless
+    /// things.
     Number,
     /// A time extent, from a sample of seconds.
     Extent,
@@ -52,8 +53,8 @@ impl Render {
         }
     }
 
-    /// Render per-run samples as `mean` (single run) or `mean (±cv%)` (multiple
-    /// runs), where cv is the coefficient of variation.
+    /// Renders per-run samples as `mean` for a single run, or as `mean (±cv%)`
+    /// for more than one run. `cv` is the coefficient of variation.
     fn cell(self, values: &[f64]) -> String {
         let rendered = self.mean(values);
         if values.len() > 1 {
@@ -70,9 +71,9 @@ impl Render {
     }
 }
 
-/// Walk `input_dir` for `*.json` files, deserialize each into a
-/// `RunOutput`, group by `(scenario name, broker_count)`, average each
-/// metric across all runs in a group, and emit a Markdown summary.
+/// Walks `input_dir` for `*.json` files, deserializes each one into a
+/// `RunOutput`, groups them by `(scenario name, broker_count)`, averages each
+/// metric across all runs in a group, and writes a Markdown summary.
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
@@ -343,10 +344,10 @@ fn render_notes_and_errors(out: &mut String, crabka: &[&RunOutput], kafka: &[&Ru
     }
 }
 
-/// Return human-readable failover gate violations. An empty vector means every
-/// failover cell with both stacks present has the evidence needed for the
-/// objective: Crabka recovered no slower than Kafka, and both stacks emitted
-/// producer and consumer message-rate samples over time.
+/// Returns the failover gate violations in a form a person can read. An empty
+/// vector means every failover cell that holds both stacks has the evidence the
+/// objective needs. That evidence is: Crabka recovered no slower than Kafka, and
+/// both stacks emitted producer and consumer message-rate samples over time.
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn failover_gate_violations(input_dir: &Path, strict: bool) -> Result<Vec<String>> {
@@ -369,8 +370,9 @@ fn truncate_list(items: &[String], n: usize) -> String {
 
 type LatencySelector = fn(&crate::scenario::LatencyPercentiles) -> f64;
 
-/// The percentile rows of a latency table: a label, how to read the value out in
-/// the unit the statistics run over, and how to write the mean back.
+/// The percentile rows of a latency table. Each row holds a label, a way to read
+/// the value out in the unit the statistics run over, and a way to write the
+/// mean back.
 fn latency_percentiles_pairs() -> [(&'static str, LatencySelector, Render); 7] {
     [
         ("p50", |p| p.p50.secs_f64(), Render::Extent),
@@ -413,8 +415,8 @@ fn producer_byte_rate(r: &RunOutput) -> ByteRate {
     byte_rate(r.throughput.bytes_in, window)
 }
 
-/// Arithmetic mean of a sample. Empty sample → 0.0 (an absent stack renders
-/// as a zero cell, matching the pre-averaging behaviour).
+/// Arithmetic mean of a sample. An empty sample gives 0.0, so an absent stack
+/// renders as a zero cell and matches the behaviour before averaging.
 fn mean(v: &[f64]) -> f64 {
     if v.is_empty() {
         0.0
@@ -423,8 +425,8 @@ fn mean(v: &[f64]) -> f64 {
     }
 }
 
-/// Sample standard deviation (Bessel-corrected). Zero for fewer than two
-/// samples — a single run has no measurable spread.
+/// Sample standard deviation, Bessel-corrected. This is zero for fewer than two
+/// samples, because a single run has no measurable spread.
 fn sample_stddev(v: &[f64]) -> f64 {
     if v.len() < 2 {
         return 0.0;
@@ -788,8 +790,8 @@ fn render_rate_recovery_row(
     }
 }
 
-/// Render one comparison row: the mean (± CV) of `value` over each stack's
-/// runs, plus the crabka-vs-kafka ratio of the two means.
+/// Renders one comparison row. The row holds the mean (± CV) of `value` over
+/// each stack's runs, and the crabka-vs-kafka ratio of the two means.
 ///
 /// The ratio divides two means in the same unit, so it is dimensionless
 /// whatever `render` writes the cells as.
@@ -827,8 +829,8 @@ fn row_metric(
 
 // ── CSV exports (graph-ready) ────────────────────────────────────────────────
 
-/// Read + parse every `*.json` in `input_dir` into `RunOutput`s, keeping the
-/// source path (the per-run `-runNN` tag lives in the filename).
+/// Reads and parses every `*.json` in `input_dir` into `RunOutput`s, and keeps
+/// the source path. The per-run `-runNN` tag lives in the filename.
 fn collect_runs(input_dir: &Path, strict: bool) -> Result<Vec<(PathBuf, RunOutput)>> {
     let mut runs: Vec<(PathBuf, RunOutput)> = Vec::new();
     let entries = std::fs::read_dir(input_dir)
@@ -874,8 +876,8 @@ fn run_tag_from_path(path: &Path) -> String {
     "single".to_string()
 }
 
-/// Minimal CSV quoting: wrap in double-quotes (doubling internal quotes) only
-/// when the field contains a comma, quote, or newline.
+/// Minimal CSV quoting. This wraps the field in double quotes, and doubles the
+/// internal quotes, only when the field contains a comma, quote, or newline.
 fn csv_field(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {
         format!("\"{}\"", s.replace('"', "\"\""))
@@ -884,7 +886,7 @@ fn csv_field(s: &str) -> String {
     }
 }
 
-/// One row per run (wide): every aggregate metric is a column. Group by
+/// One wide row per run, where every aggregate metric is a column. Group by
 /// `(scenario, stack, broker_count)` in any tool to draw crabka-vs-kafka bars
 /// with run-to-run error bars.
 /// # Errors
@@ -990,8 +992,8 @@ notes,errors_count\n",
     Ok(out)
 }
 
-/// Long/tidy time-series CSV: one row per (run × time-offset × metric). This is
-/// the graph-ready export for plotting values *over the test* — filter by
+/// Long, tidy time-series CSV with one row per (run × time-offset × metric).
+/// This is the graph-ready export for values plotted *over the test*. Filter by
 /// `metric` and group by `(scenario, stack, run_tag)` to draw lines.
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
@@ -1059,9 +1061,10 @@ pub fn render_timeseries_csv(input_dir: &Path, strict: bool) -> Result<String> {
     Ok(out)
 }
 
-/// Render a self-contained Plotly HTML report (bar charts + averaged
-/// time-series) from every run in `input_dir`. Delegates the aggregation +
-/// figure building to [`crate::aggregate`] / [`crate::graph`].
+/// Renders a self-contained Plotly HTML report from every run in `input_dir`.
+/// The report holds bar charts and averaged time-series. This function delegates
+/// the aggregation to [`crate::aggregate`] and the figure building to
+/// [`crate::graph`].
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn render_html(input_dir: &Path, strict: bool, title: &str) -> Result<String> {
@@ -1072,9 +1075,10 @@ pub fn render_html(input_dir: &Path, strict: bool, title: &str) -> Result<String
     Ok(crate::graph::render_html(&outputs, title))
 }
 
-/// Render the website HTML fragment (per-run + averaged throughput/CPU/memory
-/// charts) from every run in `input_dir`, pairing each run with its `runNN`
-/// tag (parsed from the result filename) so per-run traces are labelled.
+/// Renders the website HTML fragment from every run in `input_dir`. The
+/// fragment holds per-run and averaged throughput, CPU, and memory charts. This
+/// function pairs each run with the `runNN` tag it parses from the result
+/// filename, so every per-run trace carries a label.
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn render_web_fragment(input_dir: &Path, strict: bool) -> Result<String> {

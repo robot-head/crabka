@@ -60,10 +60,11 @@ where
 /// Predicate pushdown requested by the executor.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PredicatePushdown {
-    /// Remote scanner must return every visible row in the requested interval.
+    /// The remote scanner must return every visible row in the requested
+    /// interval.
     #[default]
     FullScan,
-    /// Conjunction of supported column/literal predicates.
+    /// A conjunction of supported column/literal predicates.
     Conjunctive(Vec<ColumnPredicate>),
 }
 
@@ -232,18 +233,19 @@ pub struct ScanPage {
     pub is_last: bool,
 }
 
-/// Pull-based scan result. A page is not produced until the consumer asks for
-/// it, which provides backpressure without a detached producer task.
+/// Pull-based scan result. The scanner produces a page only when the consumer
+/// asks for it, which gives backpressure with no detached producer task.
 #[async_trait::async_trait]
 pub trait RangeCursor: Send {
-    /// Return at most `max_rows` rows. Dropping the future or cursor cancels the
-    /// scan and releases its snapshot/resources through ordinary drop.
+    /// Return at most `max_rows` rows. A drop of the future or the cursor
+    /// cancels the scan and releases its snapshot and resources through
+    /// ordinary drop.
     async fn next_page(&mut self, max_rows: usize) -> Result<ScanPage, ExecError>;
 }
 
-/// Compatibility cursor for scanners which still return a complete vector.
+/// Compatibility cursor for scanners that still return a complete vector.
 ///
-/// This type deliberately says "materialized": it bounds page delivery but
+/// This type deliberately says "materialized". It bounds page delivery but
 /// does not make its backing scan incremental. New scanner implementations
 /// should override [`RangeScanner::scan_cursor`] with a native cursor.
 pub struct MaterializedRangeCursor {
@@ -353,8 +355,9 @@ pub enum JoinExecutionStrategy {
 }
 
 impl JoinExecutionStrategy {
-    /// The strategy's name as a span attribute — one of four fixed strings, so
-    /// `pg.join_strategy` stays a discriminator an operator can group by.
+    /// The strategy's name as a span attribute. It is one of four fixed
+    /// strings, so `pg.join_strategy` stays a discriminator an operator can
+    /// group by.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -382,7 +385,7 @@ pub struct JoinTableInterval {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct JoinRow {
-    /// Deterministic tuple encoding; values are ordered by the request projection.
+    /// Deterministic tuple encoding. The request projection orders the values.
     pub tuple: Vec<u8>,
 }
 
@@ -570,9 +573,9 @@ impl JoinRangeResult {
 
 /// Execute an equi-join over bounded, encoded visible rows.
 ///
-/// Both inputs contain complete table tuples. Side predicates are evaluated
-/// before joining, projection indexes address the concatenated `[left, right]`
-/// row, and SQL NULL keys never compare equal.
+/// Both inputs contain complete table tuples. This function evaluates side
+/// predicates before the join, projection indexes address the concatenated
+/// `[left, right]` row, and SQL NULL keys never compare equal.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -717,8 +720,9 @@ pub trait RangeScanner: Send + Sync + 'static {
     /// Returns an error when the requested operation cannot be completed.
     fn scan(&self, request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, ExecError>;
 
-    /// Execute a validated distributed join fragment. Implementations which do
-    /// not support owner-side joins fail explicitly and never synthesize rows.
+    /// Execute a validated distributed join fragment. An implementation that
+    /// does not support owner-side joins fails explicitly and never synthesizes
+    /// rows.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -749,7 +753,7 @@ pub trait RangeScanner: Send + Sync + 'static {
         self.join_strategy(left, right)
     }
 
-    /// Open a pull-based cursor. The default is a compatibility adapter which
+    /// Open a pull-based cursor. The default is a compatibility adapter that
     /// materializes through [`RangeScanner::scan`].
     /// # Errors
     ///
@@ -939,7 +943,8 @@ pub fn exceeds_query_memory(used: usize, limit: crabka_units::ByteSize) -> bool 
     used > limit.bytes_usize()
 }
 
-/// Collect a cursor for a blocking operator while charging one central byte budget.
+/// Collect a cursor for a blocking operator, and charge one central byte
+/// budget.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -1001,12 +1006,12 @@ pub fn collect_cursor_bounded(
 ///
 /// The cursor applies the request predicate before pages arrive, so every page
 /// row already satisfies the WHERE fragment. Peak retained memory is one page
-/// plus the accumulated aggregate states; `max_bytes` bounds each of those
-/// independently instead of the whole scanned result, which is what lets a
-/// scalar aggregate run over tables far larger than the blocking-query budget
-/// while a grouped aggregate with too many distinct keys still fails closed.
+/// plus the accumulated aggregate states. `max_bytes` bounds each of those
+/// independently, not the whole scanned result. So a scalar aggregate can run
+/// over tables far larger than the blocking-query budget, while a grouped
+/// aggregate with too many distinct keys still fails closed.
 ///
-/// Returns one pre-finalize partial row set per spec, in `specs` order; callers
+/// Returns one pre-finalize partial row set per spec, in `specs` order. Callers
 /// finish with [`finalize_partial_aggregate_rows`].
 /// # Errors
 ///
@@ -1134,7 +1139,7 @@ pub(crate) fn memory_budget_exceeded() -> ExecError {
 }
 
 /// Decorates a scanner with the read point allocated once for a SQL statement.
-/// Retries and every participating range receive the same typed timestamp.
+/// Retries and every participating range get the same typed timestamp.
 #[derive(Clone)]
 pub struct TimestampedRangeScanner {
     inner: std::sync::Arc<dyn RangeScanner>,
@@ -1247,14 +1252,14 @@ impl RangeScanner for TimestampedRangeScanner {
 
 /// Build the span covering one `scan()` call or one cursor page.
 ///
-/// Deliberately one span per call and never one per row: a table scan returns
-/// as many rows as the table holds, and a span each would bury the trace it is
-/// supposed to explain. The counts [`record_scan_rows`] folds back in are what
-/// carry the per-row detail.
+/// This is deliberately one span per call and never one per row. A table scan
+/// returns as many rows as the table holds, and a span each would bury the
+/// trace it is supposed to explain. The counts [`record_scan_rows`] folds back
+/// in carry the per-row detail.
 ///
-/// TRACE, because a statement can open a great many of these — one per cursor
-/// page — so an operator opts into scan-level detail rather than paying for it
-/// on the `DEBUG` default.
+/// The level is TRACE, because a statement can open a great many of these, one
+/// per cursor page. So an operator opts into scan-level detail and does not pay
+/// for it on the `DEBUG` default.
 fn scan_span(request: &ScanRequest<'_>, interval: RowInterval) -> tracing::Span {
     let span = tracing::trace_span!(
         target: crate::telemetry::EXEC_TARGET,
@@ -1287,10 +1292,10 @@ fn scan_span(request: &ScanRequest<'_>, interval: RowInterval) -> tracing::Span 
 
 /// Fold a scan's row counts onto its span.
 ///
-/// `scanned` is what the MVCC interval scan returned; `visible` is what the
+/// `scanned` is what the MVCC interval scan returned. `visible` is what the
 /// caller receives once predicate, projection and aggregate pushdown have run.
-/// The ratio between them is the pushdown's selectivity, which is the reason
-/// both are recorded rather than just the second.
+/// The ratio between them is the pushdown's selectivity, which is why this
+/// records both and not only the second.
 fn record_scan_rows(span: &tracing::Span, scanned: usize, visible: usize) {
     span.record("pg.rows_scanned", crate::telemetry::integer(scanned));
     span.record("pg.rows_visible", crate::telemetry::integer(visible));
@@ -1444,7 +1449,7 @@ impl RangeScanner for LocalRangeScanner {
     }
 }
 
-/// Apply row-level pushdowns to visible rows returned by a backing scanner.
+/// Apply row-level pushdowns to visible rows a backing scanner returned.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -1459,7 +1464,8 @@ pub fn apply_scan_pushdown(
         .collect()
 }
 
-/// Apply all executable scanner pushdowns to visible rows returned by a backing scanner.
+/// Apply all executable scanner pushdowns to visible rows a backing scanner
+/// returned.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -2082,8 +2088,8 @@ pub fn apply_top_k_pushdown(rows: &mut Vec<ScannedRow>, spec: &TopKSpec) -> Resu
     Ok(())
 }
 
-/// Merge already ordered range-local top-K streams without materializing or
-/// globally sorting their union. Only `limit` output rows are retained.
+/// Merge already ordered range-local top-K streams. This neither materializes
+/// nor globally sorts their union, and it retains only `limit` output rows.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.

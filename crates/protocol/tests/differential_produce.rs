@@ -39,10 +39,10 @@ fn request_oracle_value(_version: i16) -> serde_json::Value {
 /// Assemble the oracle JSON value for a default `ProduceResponse` at the given version.
 ///
 /// - `responses` is always an empty array.
-/// - `throttleTimeMs` is present from v1+ (schema default 0). All our supported versions
-///   are v3+, so it is always present.
-/// - `logAppendTimeMs`, `logStartOffset`, `recordErrors`, `errorMessage` live in nested
-///   partition structs and are absent when there are no partitions.
+/// - `throttleTimeMs` is present from v1 on, with schema default 0. All supported
+///   versions are v3 and later, so it is always present.
+/// - `logAppendTimeMs`, `logStartOffset`, `recordErrors`, and `errorMessage` live in
+///   nested partition structs. They are absent when there are no partitions.
 fn response_oracle_value(_version: i16) -> serde_json::Value {
     json!({
         "responses": [],

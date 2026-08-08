@@ -1,5 +1,5 @@
-//! Versioned metadata records. Future versions add variants; older
-//! readers can skip unknown ones because we encode each variant
+//! Versioned metadata records. Future versions add variants. An older
+//! reader can skip an unknown variant because we encode each variant
 //! length-prefixed inside the `bincode` payload.
 
 pub use crabka_ids::LeaderEpoch;
@@ -37,28 +37,30 @@ pub struct PartitionRecord {
     /// Replicas being removed in an in-flight reassignment. Empty when
     /// no reassignment in flight. KIP-455.
     pub removing_replicas: Vec<NodeId>,
-    /// KIP-858: the log-directory UUID hosting each replica, parallel to
-    /// [`Self::replicas`] (same index order). `Uuid::nil()` is
-    /// `DirectoryId.UNASSIGNED` — the owning broker has not yet reported
-    /// its `AssignReplicasToDirs` for this replica. The controller maps a
-    /// broker's failed-dir UUID to the partitions it must fail over by
-    /// matching this against the broker's replica slot.
+    /// KIP-858: the log-directory UUID that hosts each replica, parallel to
+    /// [`Self::replicas`] in the same index order. `Uuid::nil()` is
+    /// `DirectoryId.UNASSIGNED`: the owning broker has not yet reported
+    /// its `AssignReplicasToDirs` for this replica. The controller matches
+    /// this against the replica slot of a broker to map the failed-dir UUID
+    /// of that broker to the partitions it must fail over.
     pub directories: Vec<Uuid>,
-    /// KIP-631: per-partition state epoch. Increments on every state change
-    /// (leader election, ISR change, reassignment). Set to 0 on creation.
-    /// Default of -1 matches the KIP-631 schema default for compatibility
-    /// with records written before this field was added.
+    /// KIP-631: per-partition state epoch. It increments on every state
+    /// change, such as a leader election, an ISR change, or a reassignment.
+    /// It is 0 on creation. The default of -1 matches the KIP-631 schema
+    /// default, for compatibility with records written before this field
+    /// existed.
     #[serde(default = "default_partition_epoch")]
     pub partition_epoch: i32,
 }
 
 /// KIP-858 directory-assignment delta. A broker reports which log-dir UUID
-/// hosts its replica of `(topic, partition)`. Applied as a DELTA: sets ONLY
-/// the reporting replica's slot in `PartitionRecord.directories`, never
-/// touching leader/isr/replicas/adding/removing — so it cannot clobber a
-/// concurrent reassignment or ISR change. On the `KRaft` log it rides a
-/// Crabka-private carrier (via `to_kraft`) so it decodes back to this same
-/// delta and applies as a one-slot merge — never a full-record replace.
+/// hosts its replica of `(topic, partition)`. Apply treats it as a DELTA: it
+/// sets ONLY the slot of the reporting replica in
+/// `PartitionRecord.directories` and never touches leader, isr, replicas,
+/// adding, or removing. It therefore cannot clobber a concurrent reassignment
+/// or ISR change. On the `KRaft` log it rides a Crabka-private carrier through
+/// `to_kraft`, so it decodes back to this same delta and applies as a one-slot
+/// merge, never as a full-record replace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionDirAssignmentRecord {
     pub topic: String,
@@ -85,11 +87,11 @@ pub struct PartitionOffsetAdvanceRecord {
     pub count: i64,
 }
 
-/// A single named listener endpoint advertised by a broker. Stored as a
-/// list on [`BrokerRegistrationRecord::endpoints`] so KRaft-style metadata
-/// can advertise per-listener `host:port`/protocol triples to clients on
-/// `Metadata` v9+. Legacy single-listener brokers leave the list empty
-/// and rely on the top-level `host`+`port` fields.
+/// A single named listener endpoint advertised by a broker. It is stored as a
+/// list on [`BrokerRegistrationRecord::endpoints`], so KRaft-style metadata
+/// can advertise per-listener `host:port` and protocol triples to clients on
+/// `Metadata` v9+. A legacy single-listener broker leaves the list empty and
+/// relies on the top-level `host` and `port` fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokerEndpoint {
     /// Listener name (e.g. `"PLAINTEXT"`, `"SSL"`, `"SASL_SSL"`).
@@ -103,10 +105,10 @@ pub struct BrokerEndpoint {
 pub struct BrokerRegistrationRecord {
     pub node_id: NodeId,
     /// KIP-903 broker epoch: the raft log offset at which this registration
-    /// record committed. The controller leader assigns it at append time
-    /// (`on_submit_change`); a freshly-built literal carries `0` until the
-    /// leader stamps it. Used to fence stale replicas from the ISR on
-    /// `AlterPartition`.
+    /// record committed. The controller leader assigns it at append time in
+    /// `on_submit_change`. A freshly-built literal carries `0` until the
+    /// leader stamps it. `AlterPartition` uses it to fence stale replicas
+    /// from the ISR.
     pub broker_epoch: i64,
     /// KIP-631: UUID that identifies this specific process invocation of the
     /// broker. Generated once at first boot and persisted in
@@ -131,13 +133,13 @@ pub struct DeleteTopicRecord {
 }
 
 /// KIP-919 / `UnregisterBroker` (`api_key` 64). Marks a broker as
-/// permanently unregistered: the admin operator confirms the broker is
+/// permanently unregistered: the admin operator confirms that the broker is
 /// gone for good and asks the cluster to drop its registration entry
-/// from the metadata image. Subsequent `Metadata` responses no longer
-/// advertise the broker's endpoints; clients stop routing to it.
+/// from the metadata image. Later `Metadata` responses no longer
+/// advertise the endpoints of the broker, and clients stop routing to it.
 ///
-/// Idempotent — applying twice (or against an unknown `node_id`) is a
-/// no-op.
+/// The record is idempotent. A second apply, or an apply against an unknown
+/// `node_id`, does nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnregisterBrokerRecord {
     pub node_id: NodeId,
@@ -145,8 +147,8 @@ pub struct UnregisterBrokerRecord {
 
 /// Mutable topic configuration overrides. Authoritative target state:
 /// each `V1TopicConfig` record fully replaces the previous override map
-/// for `topic`. Empty map = clear all overrides. Merging happens at the
-/// `AlterConfigs` handler before the record is submitted.
+/// for `topic`. An empty map clears all overrides. The `AlterConfigs`
+/// handler merges before it submits the record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicConfigRecord {
     pub topic: String,
@@ -164,10 +166,9 @@ pub struct BrokerConfigRecord {
 
 /// KIP-714 client-metrics subscription config. Authoritative target
 /// state: each `V1ClientMetricsConfig` fully replaces the previous
-/// override map for `name` (the subscription name). Empty map = delete
-/// the subscription. Merging happens at the `IncrementalAlterConfigs`
-/// handler before the record is submitted (same pattern as
-/// [`TopicConfigRecord`]).
+/// override map for `name`, the subscription name. An empty map deletes
+/// the subscription. The `IncrementalAlterConfigs` handler merges before it
+/// submits the record, in the same pattern as [`TopicConfigRecord`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientMetricsConfigRecord {
     pub name: String,
@@ -182,7 +183,7 @@ pub struct QuotaEntity {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientQuotaRecord {
-    /// Canonicalized entity tuple — sorted by `entity_type` alphabetically.
+    /// Canonicalized entity tuple, sorted alphabetically by `entity_type`.
     pub entity: Vec<QuotaEntity>,
     pub config_key: String,
     pub config_value: Option<f64>,
@@ -205,12 +206,12 @@ pub struct DeleteScramCredentialRecord {
 }
 
 /// A single delegation token's authoritative state (KIP-48).
-/// Replacement semantics — appending a new record with the same
-/// `token_id` overwrites the prior one in the image (used by both
-/// Create and Renew). Removal goes through
+/// The record has replacement semantics: a new record with the same
+/// `token_id` overwrites the prior one in the image. Both Create and Renew
+/// use that. Removal goes through
 /// [`DeleteDelegationTokenRecord`]. `hmac` is the 32-byte HMAC-SHA-256
-/// over `token_id` keyed by the broker's master secret key; clients
-/// authenticate via SCRAM-SHA-256 using the hex-encoded HMAC as the
+/// over `token_id` keyed by the broker's master secret key. A client
+/// authenticates with SCRAM-SHA-256 and uses the hex-encoded HMAC as the
 /// password.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegationTokenRecord {
@@ -219,15 +220,15 @@ pub struct DelegationTokenRecord {
     pub hmac: Vec<u8>,
     pub issue_timestamp_ms: i64,
     pub expiry_timestamp_ms: i64,
-    /// Issue + max-lifetime; renewals cannot push `expiry_timestamp_ms`
+    /// Issue plus max-lifetime. A renewal cannot push `expiry_timestamp_ms`
     /// past this ceiling.
     pub max_timestamp_ms: i64,
     pub renewers: Vec<crabka_security::KafkaPrincipal>,
 }
 
-/// Tombstone record removing a delegation token (KIP-48)
-/// from the image. Emitted by `ExpireDelegationToken` handlers and the
-/// background expiry sweep.
+/// Tombstone record that removes a delegation token (KIP-48)
+/// from the image. The `ExpireDelegationToken` handlers and the
+/// background expiry sweep emit it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteDelegationTokenRecord {
     pub token_id: String,
@@ -247,8 +248,8 @@ pub struct VotersRecord {
 
 /// KIP-584 finalized feature level. `level` is the finalized
 /// `max_version_level` for `name`. `level == 0` is the KIP-584 sentinel
-/// for "delete this finalized feature" — `MetadataImage::apply` removes the
-/// entry rather than storing a zero. Replacement semantics: a later record
+/// for "delete this finalized feature": `MetadataImage::apply` removes the
+/// entry and does not store a zero. Replacement semantics: a later record
 /// with the same `name` overwrites the previous level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeatureLevelRecord {
@@ -258,20 +259,21 @@ pub struct FeatureLevelRecord {
 
 /// Snapshot-only carrier for the KIP-584 finalized-features epoch.
 ///
-/// The epoch is normally apply-derived (one bump per `V1FeatureLevel`
-/// applied, so it tracks the history of `UpdateFeatures` calls, not the live
-/// feature count). That derivation can't survive a snapshot: a snapshot
-/// stores resulting *state*, so it emits at most one `V1FeatureLevel` per
-/// live feature — fewer records than the original apply history. Replaying
-/// those alone would reconstruct a smaller epoch and diverge from a replica
-/// that replayed the full log.
+/// Apply normally derives the epoch, with one bump per applied
+/// `V1FeatureLevel`, so it tracks the history of `UpdateFeatures` calls and
+/// not the live feature count. That derivation cannot survive a snapshot. A
+/// snapshot stores resulting *state*, so it emits at most one
+/// `V1FeatureLevel` per live feature, which is fewer records than the
+/// original apply history. A replay of those records alone reconstructs a
+/// smaller epoch and diverges from a replica that replayed the full log.
 ///
-/// So [`MetadataImage::to_records`](crate::MetadataImage::to_records) emits
-/// this record last, and [`MetadataImage::apply`](crate::MetadataImage::apply)
-/// SETS the epoch from it verbatim (rather than bumping), pinning the
-/// reconstructed epoch to the original. It is produced only by `to_records`
-/// and consumed only on snapshot replay — it is never submitted as a
-/// controller change, so it never appears in the live Raft log.
+/// [`MetadataImage::to_records`](crate::MetadataImage::to_records) therefore
+/// emits this record last, and
+/// [`MetadataImage::apply`](crate::MetadataImage::apply) SETS the epoch from
+/// it verbatim and does not bump it. That pins the reconstructed epoch to the
+/// original. Only `to_records` produces this record, and only snapshot replay
+/// consumes it. Nothing submits it as a controller change, so it never appears
+/// in the live Raft log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeaturesEpochRecord {
     pub epoch: i64,
@@ -299,7 +301,7 @@ pub enum MetadataRecord {
     V1FeatureLevel(FeatureLevelRecord),
     V1ClientMetricsConfig(ClientMetricsConfigRecord),
     /// Snapshot-only: pins the finalized-features epoch on reconstruction.
-    /// Never submitted via the controller; see [`FeaturesEpochRecord`].
+    /// Nothing submits it through the controller. See [`FeaturesEpochRecord`].
     V1FeaturesEpoch(FeaturesEpochRecord),
     /// KIP-858 directory-assignment delta (see [`PartitionDirAssignmentRecord`]).
     /// Applied as a merge into one replica's `directories` slot; on the `KRaft`

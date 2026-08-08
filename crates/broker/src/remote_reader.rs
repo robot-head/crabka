@@ -1,13 +1,14 @@
-//! KIP-405: remote read path. Wraps the broker's shared
-//! [`RemoteStorageManager`] + [`RemoteLogMetadataManager`] pair and serves
-//! `Fetch` / `ListOffsets` requests for offsets that no longer have a local
-//! copy.
+//! KIP-405 remote read path.
 //!
-//! The RSM SPI is synchronous + blocking; this module wraps every byte-range
-//! and index read in `tokio::task::spawn_blocking` so the broker's reactor
-//! never stalls on remote-tier I/O. The pure index-decode helpers mirror
-//! `crabka_log::index::{OffsetIndex,TimeIndex}::lookup` against the
-//! Kafka-format index bytes written verbatim by the copy path.
+//! This module wraps the broker's shared [`RemoteStorageManager`] and
+//! [`RemoteLogMetadataManager`] pair. It serves `Fetch` and `ListOffsets`
+//! requests for offsets that have no local copy any more.
+//!
+//! The RSM SPI is synchronous and blocking. This module therefore wraps every
+//! byte-range read and index read in `tokio::task::spawn_blocking`, so the
+//! broker's reactor never stalls on remote-tier I/O. The pure index-decode
+//! helpers mirror `crabka_log::index::{OffsetIndex,TimeIndex}::lookup` against
+//! the Kafka-format index bytes that the copy path wrote verbatim.
 
 use std::sync::Arc;
 
@@ -27,15 +28,16 @@ use zerocopy::{
 pub(crate) type LogOffset = i64;
 /// Record timestamp in milliseconds since the Unix epoch.
 pub(crate) type TimestampMs = i64;
-/// Offset relative to a segment's base offset — the offset-index key.
+/// Offset relative to a segment's base offset. This is the offset-index key.
 pub(crate) type RelativeOffset = u32;
-/// Byte position within a segment's `.log` file — the offset-index value.
+/// Byte position within a segment's `.log` file. This is the offset-index
+/// value.
 pub(crate) type BytePosition = u32;
 
-/// 8 bytes per entry: rel u32 BE + pos u32 BE. Mirrors
-/// `crabka_log::index::OffsetEntryRaw` so the remote-tier copy of an
-/// `OffsetIndex` file decodes through the same byte layout the local index
-/// was written with.
+/// 8 bytes per entry: rel u32 BE, then pos u32 BE. It mirrors
+/// `crabka_log::index::OffsetEntryRaw`, so the remote-tier copy of an
+/// `OffsetIndex` file decodes through the same byte layout that wrote the
+/// local index.
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(crate) struct OffsetIndexEntry {
@@ -48,7 +50,7 @@ const OFFSET_INDEX_ENTRY_LEN: usize = std::mem::size_of::<OffsetIndexEntry>();
 
 const _: () = assert!(OFFSET_INDEX_ENTRY_LEN == 8);
 
-/// 12 bytes per entry: ts i64 BE + rel u32 BE. Mirrors
+/// 12 bytes per entry: ts i64 BE, then rel u32 BE. It mirrors
 /// `crabka_log::index::TimeEntryRaw`.
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
@@ -62,10 +64,10 @@ const TIME_INDEX_ENTRY_LEN: usize = std::mem::size_of::<TimeIndexEntry>();
 
 const _: () = assert!(TIME_INDEX_ENTRY_LEN == 12);
 
-/// 24 bytes per entry: `start_offset` i64 BE + `last_offset` i64 BE +
-/// `producer_id` i64 BE. Mirrors `crabka_log::txn_index::AbortedTxnRaw` so the
-/// remote-tier copy of a `.txnindex` file decodes through the same byte layout
-/// the local index was written with.
+/// 24 bytes per entry: `start_offset` i64 BE, `last_offset` i64 BE, then
+/// `producer_id` i64 BE. It mirrors `crabka_log::txn_index::AbortedTxnRaw`, so
+/// the remote-tier copy of a `.txnindex` file decodes through the same byte
+/// layout that wrote the local index.
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(crate) struct AbortedTxnIndexEntry {
@@ -87,7 +89,7 @@ pub(crate) struct AbortedTxnEntry {
     pub(crate) producer_id: i64,
 }
 
-/// Holds the broker's shared `RSM` + `RLMM` and serves remote reads.
+/// Holds the broker's shared `RSM` and `RLMM`, and serves remote reads.
 pub(crate) struct RemoteReader {
     pub(crate) rsm: Arc<dyn RemoteStorageManager>,
     pub(crate) rlmm: Arc<dyn RemoteLogMetadataManager>,
@@ -101,13 +103,15 @@ impl RemoteReader {
         Self { rsm, rlmm }
     }
 
-    /// Find the finished segment in the RLMM covering `(leader_epoch, offset)`,
-    /// fetch its offset index, position into the `.log` data, and return the
-    /// first batch whose last offset is `>= offset`. `None` when no finished
-    /// segment covers the requested offset.
+    /// Finds the finished segment in the RLMM that covers
+    /// `(leader_epoch, offset)`, fetches its offset index, positions into the
+    /// `.log` data, and returns the first batch whose last offset is
+    /// `>= offset`. It returns `None` when no finished segment covers the
+    /// requested offset.
     ///
-    /// `max_bytes` caps the byte range fetched from the remote tier; the
-    /// caller's `partition_max_bytes` from the Fetch request flows in here.
+    /// `max_bytes` caps the byte range that this method fetches from the
+    /// remote tier. The caller's `partition_max_bytes` from the Fetch request
+    /// arrives here.
     pub(crate) async fn fetch_batch(
         &self,
         tp: &TopicIdPartition,
@@ -191,11 +195,11 @@ impl RemoteReader {
         Ok(batch)
     }
 
-    /// Aborted transactions overlapping the inclusive offset range
-    /// `[from_offset, to_offset]` in the finished remote segment covering
-    /// `from_offset`. Returns an empty `Vec` when no finished segment covers
-    /// the offset, when the segment carries no transaction index
-    /// (`SegmentNotFound` from `fetch_index`), or when nothing overlaps.
+    /// Returns the aborted transactions that overlap the inclusive offset
+    /// range `[from_offset, to_offset]`, in the finished remote segment that
+    /// covers `from_offset`. It returns an empty `Vec` in three cases: no
+    /// finished segment covers the offset, the segment carries no transaction
+    /// index (`SegmentNotFound` from `fetch_index`), or nothing overlaps.
     pub(crate) async fn aborted_transactions(
         &self,
         tp: &TopicIdPartition,
@@ -236,9 +240,9 @@ impl RemoteReader {
             .collect())
     }
 
-    /// Lowest `start_offset` across finished segments for `tp`, or `None` when
-    /// no finished segment exists. Drives `ListOffsets` EARLIEST below
-    /// `local_log_start_offset()`.
+    /// Returns the lowest `start_offset` across the finished segments for
+    /// `tp`, or `None` when no finished segment exists. It drives
+    /// `ListOffsets` EARLIEST below `local_log_start_offset()`.
     pub(crate) fn earliest_offset(
         &self,
         tp: &TopicIdPartition,
@@ -251,11 +255,12 @@ impl RemoteReader {
             .min())
     }
 
-    /// Smallest absolute offset whose record timestamp is `>= target_timestamp`
-    /// across finished remote segments. Walks segments oldest-first, finds the
-    /// first whose `max_timestamp >= target_timestamp`, fetches that segment's
-    /// time index, and returns `start_offset + relative_offset_for_timestamp`.
-    /// Returns `None` when no finished remote segment qualifies.
+    /// Returns the smallest absolute offset whose record timestamp is
+    /// `>= target_timestamp`, across the finished remote segments. It walks
+    /// the segments oldest first, finds the first one whose
+    /// `max_timestamp >= target_timestamp`, fetches that segment's time index,
+    /// and returns `start_offset + relative_offset_for_timestamp`. It returns
+    /// `None` when no finished remote segment qualifies.
     pub(crate) async fn offset_for_timestamp(
         &self,
         tp: &TopicIdPartition,
@@ -324,11 +329,11 @@ impl RemoteReader {
     }
 }
 
-/// Compute the inclusive `end_position` for a remote byte-range fetch.
+/// Computes the inclusive `end_position` for a remote byte-range fetch.
 ///
-/// Returns `None` (read to end of segment) when `start_position` plus
-/// `max_bytes` would reach or exceed `segment_size`. Otherwise the inclusive
-/// last byte to read.
+/// It returns `None`, which means read to the end of the segment, when
+/// `start_position` plus `max_bytes` would reach or pass `segment_size`. In
+/// every other case it returns the inclusive last byte to read.
 pub(crate) fn end_position_for(
     start_position: BytePosition,
     segment_size: u32,
@@ -346,10 +351,12 @@ pub(crate) fn end_position_for(
     }
 }
 
-/// Helper for the `ref_from_bytes` parse error on the remote-read path. The
-/// `zerocopy` cast can only fail on a length mismatch, but the bytes come from
-/// the object store (S3 etc.), which can return corrupt/truncated data — so we
-/// surface a `RemoteStorageError` rather than panicking (a `DoS` surface).
+/// Helper for the `ref_from_bytes` parse error on the remote-read path.
+///
+/// The `zerocopy` cast can fail only on a length mismatch. The bytes come from
+/// the object store, such as S3, which can return corrupt or truncated data.
+/// This helper therefore returns a `RemoteStorageError` instead of a panic,
+/// because a panic would be a `DoS` surface.
 fn corrupt_index(kind: &str) -> RemoteStorageError {
     RemoteStorageError::Io(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -357,18 +364,20 @@ fn corrupt_index(kind: &str) -> RemoteStorageError {
     ))
 }
 
-/// Borrow Kafka's `OffsetIndex` on-disk format as a zero-copy
-/// `&[OffsetIndexEntry]` (8 bytes / entry: rel u32 BE + pos u32 BE). Trailing
-/// bytes that don't complete an 8-byte entry are ignored. Borrows from `bytes`.
+/// Borrows Kafka's `OffsetIndex` on-disk format as a zero-copy
+/// `&[OffsetIndexEntry]`, at 8 bytes per entry: rel u32 BE, then pos u32 BE.
+/// It ignores trailing bytes that do not complete an 8-byte entry. The result
+/// borrows from `bytes`.
 pub(crate) fn parse_offset_index(bytes: &[u8]) -> Result<&[OffsetIndexEntry], RemoteStorageError> {
     let truncated_len = (bytes.len() / OFFSET_INDEX_ENTRY_LEN) * OFFSET_INDEX_ENTRY_LEN;
     <[OffsetIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
         .map_err(|_| corrupt_index("offset"))
 }
 
-/// Floor lookup: byte position of the largest entry with `rel <= target_rel`,
-/// or 0 when empty / target is before the first entry. Runs directly against
-/// the borrowed zero-copy slice — no owned `Vec` is materialized.
+/// Floor lookup: the byte position of the largest entry with
+/// `rel <= target_rel`. It returns 0 when the index is empty, and when the
+/// target is before the first entry. It runs directly against the borrowed
+/// zero-copy slice and builds no owned `Vec`.
 #[must_use]
 pub(crate) fn position_for_relative_offset(
     entries: &[OffsetIndexEntry],
@@ -381,28 +390,30 @@ pub(crate) fn position_for_relative_offset(
     }
 }
 
-/// Borrow Kafka's `TimeIndex` on-disk format as a zero-copy
-/// `&[TimeIndexEntry]` (12 bytes / entry: ts i64 BE + rel u32 BE). Trailing
-/// bytes that don't complete a 12-byte entry are ignored. Borrows from `bytes`.
+/// Borrows Kafka's `TimeIndex` on-disk format as a zero-copy
+/// `&[TimeIndexEntry]`, at 12 bytes per entry: ts i64 BE, then rel u32 BE. It
+/// ignores trailing bytes that do not complete a 12-byte entry. The result
+/// borrows from `bytes`.
 pub(crate) fn parse_time_index(bytes: &[u8]) -> Result<&[TimeIndexEntry], RemoteStorageError> {
     let truncated_len = (bytes.len() / TIME_INDEX_ENTRY_LEN) * TIME_INDEX_ENTRY_LEN;
     <[TimeIndexEntry]>::ref_from_bytes(&bytes[..truncated_len]).map_err(|_| corrupt_index("time"))
 }
 
-/// Borrow Kafka's transaction-index format as a zero-copy
-/// `&[AbortedTxnIndexEntry]` (24 bytes / entry: `start_offset` i64 BE,
-/// `last_offset` i64 BE, `producer_id` i64 BE). Trailing bytes that don't
-/// complete a 24-byte entry are ignored. Borrows from `bytes`.
+/// Borrows Kafka's transaction-index format as a zero-copy
+/// `&[AbortedTxnIndexEntry]`, at 24 bytes per entry: `start_offset` i64 BE,
+/// `last_offset` i64 BE, then `producer_id` i64 BE. It ignores trailing bytes
+/// that do not complete a 24-byte entry. The result borrows from `bytes`.
 pub(crate) fn parse_txn_index(bytes: &[u8]) -> Result<&[AbortedTxnIndexEntry], RemoteStorageError> {
     let truncated_len = (bytes.len() / TXN_INDEX_ENTRY_LEN) * TXN_INDEX_ENTRY_LEN;
     <[AbortedTxnIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
         .map_err(|_| corrupt_index("transaction"))
 }
 
-/// Whether an aborted-transaction entry overlaps the inclusive offset range
-/// `[from_offset, to_offset]`. Mirrors `TxnIndex::aborted_in_range`'s overlap
-/// test against an inclusive range: the entry's `[start, last]` intersects
-/// `[from, to]` iff `start <= to && last >= from`.
+/// Reports whether an aborted-transaction entry overlaps the inclusive offset
+/// range `[from_offset, to_offset]`. It mirrors the overlap test in
+/// `TxnIndex::aborted_in_range` against an inclusive range: the entry's
+/// `[start, last]` intersects `[from, to]` if and only if
+/// `start <= to && last >= from`.
 #[must_use]
 pub(crate) fn txn_overlaps(
     entry: &AbortedTxnIndexEntry,
@@ -412,8 +423,8 @@ pub(crate) fn txn_overlaps(
     entry.start_offset.get() <= to_offset && entry.last_offset.get() >= from_offset
 }
 
-/// First entry whose `ts >= target_ts`, returning the relative offset, or
-/// `None` when none qualify.
+/// Returns the relative offset of the first entry whose `ts >= target_ts`, or
+/// `None` when no entry qualifies.
 #[must_use]
 pub(crate) fn relative_offset_for_timestamp(
     entries: &[TimeIndexEntry],
@@ -425,10 +436,10 @@ pub(crate) fn relative_offset_for_timestamp(
         .map(|e| e.relative_offset.get())
 }
 
-/// Decode batches from `data` and return the first one whose last offset is
-/// `>= floor`. Used to skip past batches at the start of the returned byte
-/// range that the offset-index pointed at but that don't actually cover the
-/// requested offset (because Kafka offset indexes are sparse).
+/// Decodes batches from `data` and returns the first one whose last offset is
+/// `>= floor`. It skips the batches at the start of the returned byte range
+/// that the offset index pointed at but that do not cover the requested
+/// offset. Kafka offset indexes are sparse, so such batches occur.
 pub(crate) fn first_batch_at_or_after(data: &[u8], floor: LogOffset) -> Option<RecordBatch> {
     let mut cur: &[u8] = data;
     while !cur.is_empty() {
@@ -854,10 +865,11 @@ mod tests {
         (RemoteReader::new(rsm, rlmm), remote_dir)
     }
 
-    /// Build a log rolled into several sealed segments under `dir`, then copy
-    /// every sealed segment into a fresh `LocalTieredStorage` +
-    /// `InmemoryRemoteLogMetadataManager`. Returns the constructed reader and
-    /// the log (kept alive so the on-disk files outlive the call).
+    /// Builds a log rolled into several sealed segments under `dir`, then
+    /// copies every sealed segment into a fresh `LocalTieredStorage` and
+    /// `InmemoryRemoteLogMetadataManager`. It returns the constructed reader
+    /// and the log. The caller keeps the log alive so that the on-disk files
+    /// outlive the call.
     fn populated_reader(
         log_dir: &std::path::Path,
         remote_dir: &std::path::Path,
@@ -941,11 +953,12 @@ mod tests {
         (RemoteReader::new(rsm, rlmm), log)
     }
 
-    /// Like `populated_reader`, but before copying, writes a single aborted-txn
-    /// entry into the first sealed segment's `.txnindex` (24 BE bytes:
-    /// `start_offset`, `last_offset`, `producer_id`) so the copy path carries
-    /// it to the remote tier. Returns the reader, the log, and the
-    /// `(start_offset, last_offset, producer_id)` written.
+    /// Works like `populated_reader`, but before the copy it writes one
+    /// aborted-txn entry into the first sealed segment's `.txnindex`. The
+    /// entry is 24 BE bytes: `start_offset`, `last_offset`, and
+    /// `producer_id`. The copy path then carries it to the remote tier. It
+    /// returns the reader, the log, and the written
+    /// `(start_offset, last_offset, producer_id)`.
     fn populated_reader_with_abort(
         log_dir: &std::path::Path,
         remote_dir: &std::path::Path,
@@ -1349,9 +1362,9 @@ mod tests {
     // ── `NotReadyRlmm` stub proves propagation through the reader; this test
     // ── proves the manager's list-path gate actually produces those states.
 
-    /// Drive `reconcile_assignment` and block (off the reactor) until the
-    /// list path stops returning `NotReady` for `tp`, i.e. the partition is
-    /// caught up to its assignment-time HWM.
+    /// Drives `reconcile_assignment` and blocks, off the reactor, until the
+    /// list path stops returning `NotReady` for `tp`. At that point the
+    /// partition is caught up to its assignment-time HWM.
     async fn assign_and_wait_ready(
         m: &Arc<crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager>,
         mp: i32,
@@ -1493,16 +1506,18 @@ mod tests {
         m.shutdown();
     }
 
-    /// Segments are tiered under the leader epoch that was active at copy time.
-    /// In normal operation `fetch_batch` receives the owning epoch (resolved
-    /// from the leader-epoch checkpoint by the caller) and the epoch-indexed
-    /// primary lookup hits.  This test exercises the *defensive fallback*: a
-    /// caller passes an epoch that is NOT in the segment's
-    /// `segment_leader_epochs` map (simulating a missing / empty checkpoint).
-    /// The lineage-unmatched fallback must still resolve the segment via
-    /// `list_remote_log_segments` and return the batch, closing the
-    /// wrong-segment hazard by preferring lineage-matching candidates first
-    /// and only resorting to `max_by_key(start_offset)` as a last resort.
+    /// The broker tiers segments under the leader epoch that was active at
+    /// copy time. In normal operation `fetch_batch` receives the owning epoch,
+    /// which the caller resolves from the leader-epoch checkpoint, and the
+    /// epoch-indexed primary lookup hits.
+    ///
+    /// This test exercises the *defensive fallback*. The caller passes an
+    /// epoch that is NOT in the segment's `segment_leader_epochs` map, which
+    /// simulates a missing or empty checkpoint. The lineage-unmatched fallback
+    /// must still resolve the segment through `list_remote_log_segments` and
+    /// return the batch. It closes the wrong-segment hazard: it prefers
+    /// lineage-matching candidates first, and uses `max_by_key(start_offset)`
+    /// only as a last resort.
     #[tokio::test]
     async fn fallback_resolves_segment_across_leader_epoch_change() {
         let log_dir = tempfile::tempdir().unwrap();

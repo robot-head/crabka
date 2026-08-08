@@ -1,6 +1,6 @@
 //! Background task that subscribes to `MetadataImage` changes and
-//! updates the throttle bucket rates. Runs unconditionally on every
-//! broker; the bucket itself handles the unthrottled fast path.
+//! updates the throttle bucket rates. The task runs unconditionally on
+//! every broker. The bucket itself handles the unthrottled fast path.
 
 use std::sync::Arc;
 

@@ -1,23 +1,23 @@
 //! Executor tracing: targets, span builders, and the SQL-text policy.
 //!
-//! Every span the executor emits is created under one of two dedicated
-//! `tracing` targets — [`STATEMENT_TARGET`] for the per-statement tier and
-//! [`EXEC_TARGET`] for the finer-grained internals. Neither appears on a
-//! process's stdout `fmt` filter, so a `gres` running without OTLP pays a
-//! disabled level check per callsite and nothing else.
+//! The executor creates every span it emits under one of two dedicated
+//! `tracing` targets. [`STATEMENT_TARGET`] carries the per-statement tier and
+//! [`EXEC_TARGET`] carries the finer-grained internals. Neither target appears
+//! on a process's stdout `fmt` filter, so a `gres` that runs without OTLP pays
+//! one disabled level check per callsite and nothing else.
 //!
 //! ## Zero cost when off
 //!
 //! A disabled callsite is a load and a branch, but a span macro's *field
-//! expressions still evaluate*. Anything costlier than reading a field —
+//! expressions still evaluate*. Anything more expensive than a field read
+//! therefore sits behind an explicit
+//! `tracing::enabled!(target: STATEMENT_TARGET, Level::DEBUG)` guard at the
+//! callsite, with a [`tracing::Span::none`] fallback. Two such expressions are
 //! [`query_summary`], which allocates, and the catalog lookup behind
-//! `pg.table_id` — therefore sits behind an explicit
-//! `tracing::enabled!(target: STATEMENT_TARGET, Level::DEBUG)` guard with a
-//! [`tracing::Span::none`] fallback, at the callsite. Spans whose fields are
-//! scalars already in hand (a read timestamp, a snapshot bound) use the bare
-//! macro.
+//! `pg.table_id`. Spans whose fields are scalars already available, such as a
+//! read timestamp or a snapshot bound, use the bare macro.
 //!
-//! Span builders here are plain functions rather than `#[instrument]`: the
+//! The span builders here are plain functions and not `#[instrument]`. The
 //! attribute cannot express that guard, and nearly every span below needs
 //! [`tracing::Span::record`] for outcome fields that are only known once the
 //! statement has run.
@@ -26,19 +26,19 @@
 //!
 //! Three tiers, of which the default is the middle one:
 //!
-//! 1. `db.query.summary` (`"SELECT orders"`) — always on, derived from the
-//!    already-parsed [`Statement`] by [`query_summary`], so it costs no second
-//!    parse and leaks no literals.
-//! 2. `db.operation.name`, `db.collection.name`, `db.namespace`, `pg.table_id`
-//!    — always on.
-//! 3. `db.query.text`, the verbatim SQL — **off by default**, behind
-//!    [`sql_text_enabled`] (`CRABKA_OTLP_SQL_TEXT`) and truncated at
+//! 1. `db.query.summary`, for example `"SELECT orders"`, is always on.
+//!    [`query_summary`] derives it from the already-parsed [`Statement`], so it
+//!    costs no second parse and leaks no literals.
+//! 2. `db.operation.name`, `db.collection.name`, `db.namespace` and
+//!    `pg.table_id` are always on.
+//! 3. `db.query.text`, the verbatim SQL, is **off by default**. It sits behind
+//!    [`sql_text_enabled`] (`CRABKA_OTLP_SQL_TEXT`) and is truncated at
 //!    [`MAX_SQL_TEXT_BYTES`]. It is the one attribute here that can carry
-//!    secrets: `INSERT INTO users VALUES ('<ssn>', …)`,
+//!    secrets, as in `INSERT INTO users VALUES ('<ssn>', …)` and
 //!    `ALTER ROLE … PASSWORD '…'`.
 //!
 //! SQL is recorded on `db.statement` only. Children inherit it through the
-//! trace, so repeating it multiplies the exported bytes for no extra signal.
+//! trace, so a repeat multiplies the exported bytes for no extra signal.
 
 use std::sync::LazyLock;
 
@@ -47,40 +47,49 @@ use crabka_pgparser::ast::{
     UtilityStatement,
 };
 
-/// `tracing` target carrying the per-statement span tier — `pg.parse.sql`,
-/// `db.statement`, `pg.select`, `pg.write`.
+/// `tracing` target that carries the per-statement span tier: `pg.parse.sql`,
+/// `db.statement`, `pg.select` and `pg.write`.
 pub const STATEMENT_TARGET: &str = "crabka_pgexec::statement";
 
-/// `tracing` target carrying the executor's internals — the timestamp grant,
-/// the read-context gate, and (from the executor proper) scans and row locks.
+/// `tracing` target that carries the executor's internals: the timestamp
+/// grant, the read-context gate, and, from the executor proper, scans and row
+/// locks.
 pub const EXEC_TARGET: &str = "crabka_pgexec::exec";
 
-/// Session GUC a client sets to hand the engine a W3C `traceparent`, for
-/// drivers that cannot append a sqlcommenter to the statement itself.
+/// Session GUC a client sets to give the engine a W3C `traceparent`.
+///
+/// This GUC is for drivers that cannot append a sqlcommenter to the statement
+/// itself.
 ///
 /// `SET crabka.traceparent = '00-…-01'` and
 /// `SELECT set_config('crabka.traceparent', '…', true)` both work without any
-/// dedicated GUC machinery: a two-part `extension.parameter` name is accepted
+/// dedicated GUC machinery. A two-part `extension.parameter` name is accepted
 /// as a customized option and stored as a string.
 pub const TRACEPARENT_GUC: &str = "crabka.traceparent";
 
-/// Companion of [`TRACEPARENT_GUC`] carrying W3C `tracestate`. Read only when
-/// a `traceparent` is present, since vendor state alone carries no trace.
+/// Companion of [`TRACEPARENT_GUC`] that carries W3C `tracestate`.
+///
+/// It is read only when a `traceparent` is present, because vendor state alone
+/// carries no trace.
 pub const TRACESTATE_GUC: &str = "crabka.tracestate";
 
-/// Byte cap on `db.query.text`. A statement longer than this is truncated on a
-/// UTF-8 boundary rather than dropped, because its head still identifies it.
+/// Byte cap on `db.query.text`.
+///
+/// A longer statement is truncated on a UTF-8 boundary and not dropped, because
+/// its head still identifies it.
 pub const MAX_SQL_TEXT_BYTES: usize = 4096;
 
-/// Byte cap on `otel.status_description`. Long error messages are diagnostics, not
-/// discriminators; the SQLSTATE on `error.type` is what queries group by.
+/// Byte cap on `otel.status_description`.
+///
+/// A long error message is a diagnostic, not a discriminator. Queries group by
+/// the SQLSTATE on `error.type`.
 pub const MAX_STATUS_MESSAGE_BYTES: usize = 512;
 
 /// Whether `db.query.text` may carry verbatim SQL.
 ///
-/// Read once from `CRABKA_OTLP_SQL_TEXT`. Keeping the switch here — rather than
-/// in `crabka-telemetry` — is what lets this crate stay publishable: it needs
-/// no dependency on the (unpublished) OTLP pipeline crate to answer the
+/// The switch is read once from `CRABKA_OTLP_SQL_TEXT`. It is kept here, and
+/// not in `crabka-telemetry`, so that this crate stays publishable. It then
+/// needs no dependency on the unpublished OTLP pipeline crate to answer the
 /// question.
 #[must_use]
 pub fn sql_text_enabled() -> bool {
@@ -89,9 +98,11 @@ pub fn sql_text_enabled() -> bool {
     *ENABLED
 }
 
-/// Interpret an environment switch. Anything other than an affirmative spelling
-/// — including an unset or empty variable — leaves the switch off, so the
-/// PII-bearing tier cannot be turned on by accident.
+/// Interpret an environment switch.
+///
+/// Every value other than an affirmative spelling leaves the switch off,
+/// including an unset or empty variable. The PII-bearing tier therefore cannot
+/// be turned on by accident.
 fn env_flag(value: Option<&str>) -> bool {
     value.is_some_and(|value| {
         matches!(
@@ -104,15 +115,15 @@ fn env_flag(value: Option<&str>) -> bool {
 /// Render an integer attribute as the `i64` OTLP can actually carry.
 ///
 /// OTLP has no unsigned integer type, so `tracing-opentelemetry` stringifies a
-/// `u64` or `usize` field rather than exporting it as a number — and a string
-/// attribute cannot be compared, sorted, or range-filtered, so a Grafana query
-/// like `pg.rows_affected > 1000` silently matches nothing. Every numeric
-/// attribute in this module therefore goes through here first.
+/// `u64` or `usize` field instead of an export as a number. A string attribute
+/// cannot be compared, sorted or range-filtered, so a Grafana query such as
+/// `pg.rows_affected > 1000` silently matches nothing. Every numeric attribute
+/// in this module therefore goes through this function first.
 ///
-/// Saturating rather than wrapping or fallible: an xid or a read timestamp is
-/// monotonic, so a value above `i64::MAX` is a value beyond anything a real
-/// cluster reaches, and clamping keeps it sorting at the top where it belongs
-/// instead of flipping negative or vanishing.
+/// The conversion saturates, and it neither wraps nor fails. An xid and a read
+/// timestamp are monotonic, so a value above `i64::MAX` is beyond anything a
+/// real cluster reaches. A clamp keeps such a value sorted at the top, where it
+/// belongs, instead of flipped negative or lost.
 pub(crate) fn integer<T: TryInto<i64>>(value: T) -> i64 {
     // Every type used with this is unsigned, so the only conversion that can
     // fail is one that overflows upward.
@@ -134,8 +145,8 @@ pub fn truncate(text: &str, max: usize) -> &str {
 
 /// The SQL command a statement runs, as `db.operation.name`.
 ///
-/// Exhaustive on purpose: a newly supported statement kind has to name itself
-/// here rather than silently exporting as something generic.
+/// This match is exhaustive on purpose. A newly supported statement kind has to
+/// name itself here, and it cannot silently export as something generic.
 #[must_use]
 pub fn statement_operation(stmt: &Statement) -> &'static str {
     match stmt {
@@ -247,11 +258,11 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
 /// The relation a statement names, when it names exactly one worth reporting as
 /// `db.collection.name`.
 ///
-/// A multi-relation statement (`DROP TABLE a, b`, a join) reports the first,
-/// which is what `PostgreSQL`'s own error messages do and what makes a
-/// summary like `"SELECT orders"` stable for grouping. Statements that name no
-/// relation — `BEGIN`, `SET`, `DO` — return `None`, and their summary is the
-/// bare operation.
+/// A multi-relation statement, such as `DROP TABLE a, b` or a join, reports the
+/// first relation. `PostgreSQL`'s own error messages do the same, and that is
+/// what makes a summary such as `"SELECT orders"` stable for grouping.
+/// Statements that name no relation, such as `BEGIN`, `SET` and `DO`, return
+/// `None`, and their summary is the bare operation.
 #[must_use]
 pub fn statement_relation(stmt: &Statement) -> Option<&RelationRef> {
     match stmt {
@@ -291,8 +302,8 @@ pub fn statement_relation(stmt: &Statement) -> Option<&RelationRef> {
     }
 }
 
-/// The first base relation a query reads, following set operations and nested
-/// bodies down their left spine.
+/// The first base relation a query reads. This function follows set operations
+/// and nested bodies down their left spine.
 fn query_relation(query: &QueryExpr) -> Option<&RelationRef> {
     fn from_set_expr(body: &SetExpr) -> Option<&RelationRef> {
         match body {
@@ -319,14 +330,15 @@ fn query_relation(query: &QueryExpr) -> Option<&RelationRef> {
     from_set_expr(&query.body)
 }
 
-/// The low-cardinality `db.query.summary` an operator groups by:
-/// `"SELECT orders"`, `"INSERT orders"`, or a bare `"CREATE TABLE"` when the
-/// statement names no relation.
+/// The low-cardinality `db.query.summary` an operator groups by.
 ///
-/// Deliberately *not* a normalized statement (`WHERE id = ?`). That would cost
-/// a second pass over the SQL for grouping power the operation-plus-relation
-/// pair already gives, and it re-opens the literal-leak question the summary
-/// exists to close.
+/// The summary is `"SELECT orders"`, `"INSERT orders"`, or a bare
+/// `"CREATE TABLE"` when the statement names no relation.
+///
+/// It is deliberately *not* a normalized statement such as `WHERE id = ?`. A
+/// normalized statement would cost a second pass over the SQL for grouping
+/// power the operation-plus-relation pair already gives, and it would re-open
+/// the literal-leak question the summary exists to close.
 #[must_use]
 pub fn query_summary(operation: &str, collection: Option<&str>) -> String {
     match collection {
@@ -337,34 +349,37 @@ pub fn query_summary(operation: &str, collection: Option<&str>) -> String {
 
 /// The attributes `db.statement` carries from the moment it opens.
 ///
-/// Grouped into a struct because they are gathered together — the summary and
-/// the resolved relation come from one pass over the parsed statement — and
-/// because a nine-argument builder is unreadable at the callsite.
+/// These fields are grouped into a struct because they are gathered together.
+/// The summary and the resolved relation come from one pass over the parsed
+/// statement. A nine-argument builder would also be unreadable at the
+/// callsite.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StatementFields<'a> {
     /// `db.query.summary`, and the span's `otel.name`.
     pub summary: &'a str,
     /// `db.operation.name`.
     pub operation: &'a str,
-    /// `db.collection.name` — the resolved relation name, when there is one.
+    /// `db.collection.name`, the resolved relation name, when there is one.
     pub collection: Option<&'a str>,
-    /// `db.namespace` — the schema the relation resolved in.
+    /// `db.namespace`, the schema the relation resolved in.
     pub namespace: Option<&'a str>,
     /// `pg.table_id`, when the relation exists in the catalog.
     pub table_id: Option<u32>,
-    /// Whether the statement opened its own transaction rather than running
+    /// Whether the statement opened its own transaction instead of running
     /// inside a client-opened block.
     pub implicit_txn: bool,
-    /// Verbatim SQL for `db.query.text`. Callers pass `None` unless
-    /// [`sql_text_enabled`]; [`statement_span`] truncates what it is given.
+    /// Verbatim SQL for `db.query.text`.
+    ///
+    /// Callers pass `None` unless [`sql_text_enabled`] is true.
+    /// [`statement_span`] truncates what it is given.
     pub sql: Option<&'a str>,
 }
 
 /// Build the per-statement span.
 ///
-/// The caller is responsible for the [`tracing::enabled!`] guard: gathering
-/// [`StatementFields`] costs an allocation and a catalog lookup, which must not
-/// happen when the target is off.
+/// The caller is responsible for the [`tracing::enabled!`] guard. A gather of
+/// [`StatementFields`] costs an allocation and a catalog lookup, and neither
+/// must happen when the target is off.
 #[must_use]
 pub fn statement_span(fields: &StatementFields<'_>) -> tracing::Span {
     let span = tracing::debug_span!(
@@ -425,10 +440,10 @@ pub fn parse_span(sql_bytes: usize) -> tracing::Span {
 
 /// Build the span covering a read statement's execution.
 ///
-/// `fast_path` distinguishes the streaming cursor — which projects and filters
-/// row by row straight onto the wire — from the materializing path. The
-/// snapshot and read timestamp are only settled once the span is open, so they
-/// are declared empty here and filled in by [`record_select_snapshot`].
+/// `fast_path` tells the streaming cursor from the materializing path. The
+/// streaming cursor projects and filters row by row directly onto the wire. The
+/// snapshot and read timestamp are settled only once the span is open, so this
+/// function declares them empty and [`record_select_snapshot`] fills them in.
 #[must_use]
 pub fn select_span(fast_path: bool) -> tracing::Span {
     tracing::debug_span!(
@@ -465,7 +480,8 @@ pub fn record_read_context(span: &tracing::Span, snapshot_xmin: u64, snapshot_xm
     span.record("pg.snapshot.xmax", integer(snapshot_xmax));
 }
 
-/// Fill in the statement count a parse produced, on a span from [`parse_span`].
+/// Fill in the statement count a parse produced, on a span from
+/// [`parse_span`].
 pub fn record_parse_statements(span: &tracing::Span, statements: usize) {
     span.record("pg.statements", integer(statements));
 }
@@ -475,15 +491,16 @@ pub fn record_parse_statements(span: &tracing::Span, statements: usize) {
 ///
 /// `local_fallback` marks the grant that came from this range's own sequence
 /// because a single-shard bypass commit had lifted the durable horizon past the
-/// global source — the one case where a read timestamp did not cross the
+/// global source. That is the one case where a read timestamp did not cross the
 /// network.
 pub fn record_timestamp_read(span: &tracing::Span, read_ts: u64, local_fallback: bool) {
     span.record("pg.read_ts", integer(read_ts));
     span.record("pg.timestamp.local_fallback", local_fallback);
 }
 
-/// Fill in the transaction identity a statement ran under. Both xids are
-/// assigned lazily, so neither is known when the span opens.
+/// Fill in the transaction identity a statement ran under.
+///
+/// Both xids are assigned lazily, so neither is known when the span opens.
 pub fn record_transaction(span: &tracing::Span, xid: Option<u64>, global_xid: Option<u64>) {
     if let Some(xid) = xid {
         span.record("pg.txn.xid", integer(xid));
@@ -493,8 +510,10 @@ pub fn record_transaction(span: &tracing::Span, xid: Option<u64>, global_xid: Op
     }
 }
 
-/// Fill in a statement's row counts: how many rows it returned to the client,
-/// and how many its command tag reports it affected.
+/// Fill in a statement's row counts.
+///
+/// The counts are how many rows the statement returned to the client, and how
+/// many rows its command tag reports it affected.
 pub fn record_rows(span: &tracing::Span, returned_rows: Option<usize>, rows_affected: Option<u64>) {
     if let Some(returned_rows) = returned_rows {
         span.record("db.response.returned_rows", integer(returned_rows));
@@ -504,12 +523,12 @@ pub fn record_rows(span: &tracing::Span, returned_rows: Option<usize>, rows_affe
     }
 }
 
-/// The row count a `PostgreSQL` command tag ends with — `5` for `INSERT 0 5`,
-/// `3` for `UPDATE 3` — or `None` for a tag whose last word is not a count, as
-/// in `CREATE TABLE`.
+/// The row count a `PostgreSQL` command tag ends with, for example `5` for
+/// `INSERT 0 5` and `3` for `UPDATE 3`.
 ///
-/// Feeds [`record_rows`]'s `rows_affected`, which is why it lives here rather
-/// than beside either of its callers.
+/// The result is `None` for a tag whose last word is not a count, as in
+/// `CREATE TABLE`. This function feeds [`record_rows`]'s `rows_affected`, which
+/// is why it is here and not beside either of its callers.
 pub(crate) fn command_tag_row_count(tag: &str) -> Option<u64> {
     tag.rsplit_once(' ')
         .and_then(|(_, count)| count.parse().ok())
@@ -530,9 +549,9 @@ pub fn write_span(implicit_txn: bool) -> tracing::Span {
 
 /// Build the span covering a statement's read-timestamp grant.
 ///
-/// `otel.kind = "client"` because this is the one point on a read path that can
-/// block on the network: the global timestamp source is remote whenever the
-/// engine is not running solo.
+/// `otel.kind = "client"`, because this is the one point on a read path that
+/// can block on the network. The global timestamp source is remote whenever the
+/// engine does not run solo.
 #[must_use]
 pub fn timestamp_read_span() -> tracing::Span {
     tracing::debug_span!(
@@ -548,11 +567,11 @@ pub fn timestamp_read_span() -> tracing::Span {
 ///
 /// `tokio::task::spawn_blocking` runs its closure on a pool thread with no
 /// ambient `tracing` span, so the session re-enters the statement's span there
-/// and opens this one beneath it. It makes the thread hop visible in a
-/// waterfall, and it is the parent that everything the executor opens on that
-/// thread — scans, row locks, commits — attaches to.
+/// and opens this span beneath it. This makes the thread hop visible in a
+/// waterfall. This span is also the parent that everything the executor opens
+/// on that thread attaches to, including scans, row locks and commits.
 ///
-/// `kind` names the worker: a static string, so the attribute stays
+/// `kind` names the worker. It is a static string, so the attribute stays
 /// low-cardinality.
 #[must_use]
 pub fn blocking_worker_span(kind: &'static str) -> tracing::Span {
@@ -579,20 +598,20 @@ pub fn read_context_span() -> tracing::Span {
 /// Mark `span` as failed, with the SQLSTATE as both the response status and the
 /// error discriminator.
 ///
-/// Only `ERROR` is ever recorded — a span that succeeded stays `Unset`, which
-/// is what the OpenTelemetry specification asks of a non-client span and what
+/// Only `ERROR` is ever recorded. A span that succeeded stays `Unset`, which is
+/// what the OpenTelemetry specification asks of a non-client span and what
 /// keeps "spans with a status" a useful query.
 ///
-/// `sqlstate` is the 5-character code, which is correctly low-cardinality;
+/// `sqlstate` is the 5-character code, which is correctly low-cardinality.
 /// `message` is truncated to [`MAX_STATUS_MESSAGE_BYTES`].
 ///
-/// The message rides on `otel.status_description`, which is the field name
-/// `tracing-opentelemetry` maps onto the OpenTelemetry status description;
+/// The message goes on `otel.status_description`, which is the field name
+/// `tracing-opentelemetry` maps onto the OpenTelemetry status description.
 /// `otel.status_message` is not recognised and would be exported as an ordinary
-/// attribute, leaving the status description empty.
+/// attribute, which would leave the status description empty.
 ///
-/// Order matters: recording the code alone yields `Error` with an empty
-/// description, and the description overwrites it — so the description must be
+/// Order matters. A record of the code alone gives `Error` with an empty
+/// description, and the description overwrites it, so the description must be
 /// recorded second.
 pub fn record_error(span: &tracing::Span, sqlstate: &str, message: &str) {
     span.record("otel.status_code", "ERROR");
@@ -656,9 +675,11 @@ mod tests {
     }
 
     /// Build a span under a capturing subscriber and return the fields that
-    /// actually reached it. `tracing` silently drops a `record` for a field the
-    /// callsite never declared, so this is what proves the declarations and the
-    /// recordings line up.
+    /// reached it.
+    ///
+    /// `tracing` silently drops a `record` for a field the callsite never
+    /// declared, so this helper proves that the declarations and the recordings
+    /// agree.
     fn captured(build: impl FnOnce()) -> Fields {
         let fields = Arc::new(Mutex::new(Fields::new()));
         let subscriber = tracing_subscriber::registry().with(

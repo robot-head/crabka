@@ -1,4 +1,5 @@
-//! Decode KIP-714 `PushTelemetry` payloads (OTLP `MetricsData` v1 protobuf).
+//! Decodes KIP-714 `PushTelemetry` payloads, which are OTLP `MetricsData` v1
+//! protobuf.
 
 use opentelemetry_proto::tonic::metrics::v1::MetricsData;
 use prost::Message;
@@ -9,7 +10,7 @@ pub(crate) enum OtlpDecodeError {
     Decode(#[from] prost::DecodeError),
 }
 
-/// Decode a (decompressed) OTLP `MetricsData` protobuf payload.
+/// Decodes a decompressed OTLP `MetricsData` protobuf payload.
 pub(crate) fn decode_metrics(bytes: &[u8]) -> Result<MetricsData, OtlpDecodeError> {
     Ok(MetricsData::decode(bytes)?)
 }

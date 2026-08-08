@@ -1,8 +1,8 @@
 //! `CreateAcls` handler (`api_key` 30).
 //!
-//! Authorizes `Alter` on `Cluster`. For each binding, validates
-//! the resource shape and submits a `V1AccessControlEntry` to the
-//! controller. Returns per-binding results.
+//! This handler authorizes `Alter` on `Cluster`. For each binding, it
+//! validates the resource shape and submits a `V1AccessControlEntry` to the
+//! controller. It returns one result per binding.
 
 use bytes::Bytes;
 use crabka_metadata::{AclEntry, MetadataRecord};
@@ -25,7 +25,8 @@ use crate::{
     codes,
 };
 
-/// Kafka principal-type prefix; the only principal type Crabka accepts.
+/// Kafka principal-type prefix. It is the only principal type that Crabka
+/// accepts.
 const USER_PRINCIPAL_PREFIX: &str = "User:";
 
 #[tracing::instrument(

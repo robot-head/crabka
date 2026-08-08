@@ -8,7 +8,8 @@ use super::{
 };
 use crate::{MetricStore, PromqlEngine, PromqlError};
 
-/// Evaluate one mixed ruler rule group: recording outputs then alert dispatch.
+/// Evaluates one mixed ruler rule group: recording outputs, then alert dispatch.
+///
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_ruler_rule_group<S, W, A>(
@@ -44,7 +45,8 @@ where
     })
 }
 
-/// Evaluate one mixed ruler rule group and persist alert state records.
+/// Evaluates one mixed ruler rule group and persists alert state records.
+///
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_ruler_rule_group<S, W, A, R>(
@@ -82,7 +84,8 @@ where
     })
 }
 
-/// Evaluate all ruler rule groups for one tenant.
+/// Evaluates all ruler rule groups for one tenant.
+///
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_ruler_rule_set<S, W, A>(
@@ -120,7 +123,8 @@ where
     Ok(total)
 }
 
-/// Evaluate all ruler rule groups for one tenant and persist compactable group state.
+/// Evaluates all ruler rule groups for one tenant and persists compactable group state.
+///
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_ruler_rule_set<S, W, A, R>(
@@ -166,7 +170,8 @@ where
     Ok(total)
 }
 
-/// Evaluate this shard's due ruler rule groups for one tenant and persist state.
+/// Evaluates this shard's due ruler rule groups for one tenant and persists state.
+///
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_ruler_rule_set_for_shard_due_for_eval<S, W, A, R>(

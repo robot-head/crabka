@@ -13,10 +13,10 @@ use crate::{PromqlError, QueryResult};
 
 /// The identity of one cached sub-range result.
 ///
-/// The step stays a raw millisecond integer here: the key is a `BTreeMap` key
-/// and an object-store path component, both of which need `Ord`/`Eq` that a
-/// `f64`-backed [`Time`](crabka_units::Time) cannot provide. The conversion is
-/// [`RangeCacheKey::new`].
+/// The step stays a raw millisecond integer here. The key is a `BTreeMap` key
+/// and an object-store path component. Both need the `Ord`/`Eq` that a
+/// `f64`-backed [`Time`](crabka_units::Time) cannot supply.
+/// [`RangeCacheKey::new`] does the conversion.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct RangeCacheKey {
     tenant: String,
@@ -42,8 +42,8 @@ impl RangeCacheKey {
 
 /// Wall-clock source for cache-entry age checks.
 ///
-/// Abstracted so tests can advance time deterministically (via
-/// [`ManualClock`]) instead of sleeping. Production uses [`SystemClock`].
+/// The trait exists so that tests can advance time deterministically with
+/// [`ManualClock`] instead of a sleep. Production uses [`SystemClock`].
 pub trait Clock: Send + Sync {
     /// Current time as Unix-epoch milliseconds.
     fn now_epoch_millis(&self) -> i64;
@@ -64,8 +64,9 @@ impl Clock for SystemClock {
     }
 }
 
-/// Returns `true` when `inserted_epoch_millis` is older than `ttl` relative to
-/// `now_epoch_millis`. `None` TTL never expires.
+/// Returns `true` if `inserted_epoch_millis` is older than `ttl`.
+///
+/// The age is measured against `now_epoch_millis`. A `None` TTL never expires.
 fn entry_is_expired(ttl: Option<Time>, inserted_epoch_millis: i64, now_epoch_millis: i64) -> bool {
     let Some(ttl) = ttl else {
         return false;
@@ -76,14 +77,14 @@ fn entry_is_expired(ttl: Option<Time>, inserted_epoch_millis: i64, now_epoch_mil
 
 /// In-memory range-result cache for query-frontend fan-out responses.
 ///
-/// The backing store is intentionally small and swappable: production wiring can
-/// replace it with an object-store/topic-backed implementation while preserving
-/// the key contract tested here.
+/// The backing store is small and swappable on purpose. Production wiring can
+/// replace it with an object-store or topic-backed implementation and keep the
+/// key contract that the tests cover here.
 ///
-/// Entries carry an insertion timestamp (from the configured internal clock). When a
-/// TTL is set via [`QueryFrontendCache::with_ttl`], a `get` for an entry older
-/// than the TTL evicts it and reports a miss. With no TTL (the default) entries
-/// never expire.
+/// Each entry carries an insertion timestamp from the configured internal clock.
+/// When [`QueryFrontendCache::with_ttl`] sets a TTL, a `get` for an entry older
+/// than the TTL evicts that entry and reports a miss. With no TTL, the default,
+/// entries never expire.
 pub struct QueryFrontendCache {
     pub(super) range_results: Mutex<BTreeMap<RangeCacheKey, (i64, QueryResult)>>,
     ttl: Option<Time>,
@@ -101,7 +102,7 @@ impl Default for QueryFrontendCache {
 }
 
 impl QueryFrontendCache {
-    /// Build a cache that expires entries older than `ttl`.
+    /// Builds a cache that expires entries older than `ttl`.
     #[must_use]
     pub fn with_ttl(ttl: Time) -> Self {
         Self {
@@ -110,7 +111,7 @@ impl QueryFrontendCache {
         }
     }
 
-    /// Override the wall clock (primarily for deterministic tests).
+    /// Overrides the wall clock, mainly for deterministic tests.
     #[must_use]
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;
@@ -182,8 +183,10 @@ impl RangeQueryCache for QueryFrontendCache {
     }
 }
 
-/// Cached object-store payload: the range result plus the wall-clock instant it
-/// was stored, so a reader can enforce a TTL without depending on object-store
+/// Cached object-store payload: the range result and its store timestamp.
+///
+/// The timestamp is the wall-clock instant of the store operation. A reader
+/// enforces a TTL from it and does not depend on the object-store
 /// `last_modified` metadata.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredRangeResult {
@@ -193,9 +196,10 @@ struct StoredRangeResult {
 
 /// Object-store backed range-result cache for query-frontend fan-out responses.
 ///
-/// Each cached object embeds the epoch-millis instant it was stored. When a TTL
-/// is set via [`ObjectStoreQueryFrontendCache::with_ttl`], a `get` for an object
-/// older than the TTL reports a miss (and best-effort deletes the stale object).
+/// Each cached object embeds the epoch-millis instant of its store operation.
+/// When [`ObjectStoreQueryFrontendCache::with_ttl`] sets a TTL, a `get` for an
+/// object older than the TTL reports a miss. That `get` also deletes the stale
+/// object on a best-effort basis.
 pub struct ObjectStoreQueryFrontendCache {
     store: Arc<dyn ObjectStore>,
     prefix: String,
@@ -215,14 +219,14 @@ impl ObjectStoreQueryFrontendCache {
         }
     }
 
-    /// Expire cached objects older than `ttl`.
+    /// Expires cached objects older than `ttl`.
     #[must_use]
     pub fn with_ttl(mut self, ttl: Time) -> Self {
         self.ttl = Some(ttl);
         self
     }
 
-    /// Override the wall clock (primarily for deterministic tests).
+    /// Overrides the wall clock, mainly for deterministic tests.
     #[must_use]
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = clock;

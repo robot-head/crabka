@@ -1,11 +1,12 @@
-//! `AlterShareGroupOffsets` (`api_key` 91) — KIP-932. Resets the
-//! share-partition start offset (SPSO) for the requested partitions of an
-//! *empty* share group, bumping the state epoch and re-initializing the
-//! persister state. A non-empty group is rejected top-level with
-//! `NON_EMPTY_GROUP`.
+//! `AlterShareGroupOffsets` (`api_key` 91), from KIP-932.
 //!
-//! Intercepted inline in `network::dispatch` for the per-group `Alter` ACL
-//! gate (principal + peer `SocketAddr`).
+//! The handler resets the share-partition start offset (SPSO) for the
+//! requested partitions of an *empty* share group. It bumps the state epoch
+//! and initializes the persister state again. It rejects a non-empty group at
+//! the top level with `NON_EMPTY_GROUP`.
+//!
+//! `network::dispatch` intercepts this RPC inline for the per-group `Alter`
+//! ACL gate, which needs the principal and the peer `SocketAddr`.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
@@ -145,9 +146,11 @@ pub(crate) async fn handle(
     crate::handlers::encode_response(&resp, version)
 }
 
-/// Read the current durable state epoch for `(group, topic_id, partition)`,
-/// then re-initialize the share state at `start_offset` with epoch+1. `Err(())`
-/// on any persister failure (mapped to `COORDINATOR_NOT_AVAILABLE`).
+/// Reads the current durable state epoch for `(group, topic_id, partition)`,
+/// then initializes the share state again at `start_offset` with epoch+1.
+///
+/// It returns `Err(())` on any persister failure, which the caller maps to
+/// `COORDINATOR_NOT_AVAILABLE`.
 async fn reset_partition(
     persister: &crate::share_coordinator::persister_client::SharePersister,
     gid: &str,
@@ -182,8 +185,9 @@ fn encode_top_level(version: i16, error_code: i16) -> Result<Bytes, BrokerError>
     crate::handlers::encode_response(&resp, version)
 }
 
-/// Returns `true` when the share group has no live members (or no actor at
-/// all). Drives the empty-group gate for offset reset/delete.
+/// Returns `true` when the share group has no live members, and also when it
+/// has no actor at all. It drives the empty-group gate for an offset reset or
+/// delete.
 pub(crate) async fn group_is_empty(
     ng: Option<&std::sync::Arc<crate::coordinator::unified::GroupCoordinator>>,
     gid: &str,

@@ -1,4 +1,4 @@
-//! Q2: window functions — `OVER`, frames, named windows, and the window-function
+//! Q2: window functions: `OVER`, frames, named windows, and the window-function
 //! set, end-to-end over the wire against `PostgreSQL` 18.4's observed behavior.
 
 use std::sync::Arc;
@@ -33,8 +33,10 @@ async fn connect(port: u16) -> Client {
     client
 }
 
-/// Every row of the result, rendered as one tab-joined text line (NULL as an
-/// empty field), so a whole expected result compares as one value.
+/// Every row of the result, rendered as one tab-joined text line.
+///
+/// A NULL becomes an empty field, so a whole expected result compares as one
+/// value.
 async fn rows(client: &Client, sql: &str) -> Vec<String> {
     client
         .simple_query(sql)
@@ -635,9 +637,10 @@ async fn window_call_inside_a_derived_table_is_owned_by_that_subquery() {
     );
 }
 
-/// The fixture the remediation tests below share: `id` is dense and unique so a
-/// window ORDER BY is total, `g` has a peer run and a NULL, and `v` carries the
-/// values `ntile`/`lag` read.
+/// The fixture the remediation tests below share.
+///
+/// `id` is dense and unique, so a window ORDER BY is total. `g` has a peer run
+/// and a NULL. `v` carries the values that `ntile` and `lag` read.
 async fn ordered_fixture() -> Client {
     let client = connect(spawn().await).await;
     client

@@ -1,25 +1,23 @@
-//! [`SwappableRlmm`] — a [`RemoteLogMetadataManager`] facade whose
-//! backing implementation can be replaced atomically after
-//! construction.
+//! [`SwappableRlmm`]: a [`RemoteLogMetadataManager`] facade whose backing
+//! implementation can be replaced atomically after construction.
 //!
-//! Lets [`crate::TopicBasedRemoteLogMetadataManager`] take over from
-//! [`crabka_remote_storage::InmemoryRemoteLogMetadataManager`] *after*
-//! the broker's listener accept loop is serving, so the manager's
-//! loopback `AdminClient` call to provision `__remote_log_metadata`
-//! has a server to talk to. Until [`SwappableRlmm::swap`] is called, every RLMM
-//! method delegates to the placeholder; after the swap, every call
-//! delegates to the new implementation.
+//! It lets [`crate::TopicBasedRemoteLogMetadataManager`] take over from
+//! [`crabka_remote_storage::InmemoryRemoteLogMetadataManager`] *after* the
+//! broker's listener accept loop is serving, so the manager's loopback
+//! `AdminClient` call to provision `__remote_log_metadata` has a server to
+//! talk to. Until a caller calls [`SwappableRlmm::swap`], every RLMM method
+//! delegates to the placeholder. After the swap, every call delegates to the
+//! new implementation.
 //!
 //! ## Invariant during the swap window
 //!
 //! Trait calls between construction and the first `swap` go to the
-//! placeholder (typically an in-memory manager). Once `swap` returns,
-//! every subsequent call uses the new implementation. The swap is
-//! atomic from the trait's perspective — a caller never sees the
-//! placeholder for one method and the replacement for the next within
-//! the same logical operation, because each trait method snapshots
-//! the inner [`Arc`] under a read lock and releases the lock before
-//! delegating.
+//! placeholder, which is usually an in-memory manager. Once `swap` returns,
+//! every later call uses the new implementation. The swap is atomic from the
+//! trait's point of view. A caller never sees the placeholder for one method
+//! and the replacement for the next within the same logical operation,
+//! because each trait method snapshots the inner [`Arc`] under a read lock
+//! and releases the lock before it delegates.
 
 use std::sync::{Arc, RwLock};
 
@@ -35,8 +33,8 @@ pub struct SwappableRlmm {
 }
 
 impl SwappableRlmm {
-    /// Construct with an initial backing implementation. The first
-    /// [`Self::swap`] (if any) replaces it.
+    /// Construct the facade with an initial backing implementation. The
+    /// first [`Self::swap`], if there is one, replaces it.
     #[must_use]
     pub fn new(initial: Arc<dyn RemoteLogMetadataManager>) -> Self {
         Self {
@@ -55,8 +53,8 @@ impl SwappableRlmm {
             .expect("SwappableRlmm write lock poisoned") = new;
     }
 
-    /// Snapshot the current inner [`Arc`] without holding the read
-    /// lock past the call site. Used by every trait method below.
+    /// Snapshot the current inner [`Arc`] and do not hold the read lock past
+    /// the call site. Every trait method below calls this.
     fn current(&self) -> Arc<dyn RemoteLogMetadataManager> {
         self.inner
             .read()

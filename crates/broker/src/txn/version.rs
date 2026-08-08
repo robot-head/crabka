@@ -1,8 +1,10 @@
-//! KIP-890 transaction.version resolution. Reads the finalized
-//! `transaction.version` from the live image and maps it to the behavior the
-//! coordinator runs. Unfinalized (UNKNOWN) resolves to `Classic` — the safest
-//! behavior for a pre-bootstrap / legacy image; a 4.0-formatted (or standalone
-//! self-bootstrapped) cluster finalizes `TV_2`, so the common path is `Verified`.
+//! KIP-890 transaction.version resolution.
+//!
+//! This module reads the finalized `transaction.version` from the live image
+//! and maps it to the behavior the coordinator runs. An unfinalized, that is
+//! UNKNOWN, version resolves to `Classic`, the safest behavior for a
+//! pre-bootstrap or legacy image. A 4.0-formatted cluster, or a standalone
+//! self-bootstrapped one, finalizes `TV_2`, so the common path is `Verified`.
 
 use crabka_metadata::MetadataImage;
 
@@ -12,8 +14,8 @@ pub(crate) enum TxnVersion {
     Classic,
     /// `TV_1`: flexible (tagged) `__transaction_state` records.
     Flexible,
-    /// `TV_2`: epoch bump on completion + server-side `AddPartitionsToTxn`
-    /// verification (also flexible records).
+    /// `TV_2`: an epoch bump on completion and server-side
+    /// `AddPartitionsToTxn` verification. It also uses flexible records.
     Verified,
 }
 
@@ -22,7 +24,8 @@ impl TxnVersion {
     pub(crate) fn flexible_records(self) -> bool {
         matches!(self, TxnVersion::Flexible | TxnVersion::Verified)
     }
-    /// Epoch-bump-on-completion + verify-only `AddPartitionsToTxn` apply at `TV_2`.
+    /// The epoch bump on completion and the verify-only `AddPartitionsToTxn`
+    /// both apply at `TV_2`.
     pub(crate) fn verified(self) -> bool {
         matches!(self, TxnVersion::Verified)
     }

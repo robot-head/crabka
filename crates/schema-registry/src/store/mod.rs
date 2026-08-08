@@ -1,8 +1,10 @@
-//! In-memory authoritative registry state, rebuilt by replaying `_schemas`.
-//! Pure data structure: no I/O. The `KafkaStore` wraps it behind a lock and the
-//! write-serialisation gate (see kafkastore/mod.rs). Cloneable so the write path
-//! can decide id/version on a throwaway copy (the reader is the sole mutator of
-//! the live instance).
+//! In-memory authoritative registry state, rebuilt by a replay of `_schemas`.
+//!
+//! This is a pure data structure and does no I/O. The `KafkaStore` wraps it
+//! behind a lock and the write-serialisation gate, as described in
+//! kafkastore/mod.rs. It is cloneable, so the write path can decide id and
+//! version on a throwaway copy. The reader is the sole mutator of the live
+//! instance.
 
 use std::collections::BTreeMap;
 
@@ -20,8 +22,9 @@ pub struct Registered {
     pub version: SchemaVersion,
 }
 
-/// A registered schema's stored form: type + text + its references (references
-/// are part of the id identity, so they live with the schema in `by_id`).
+/// A registered schema's stored form: its type, its text, and its references.
+/// References are part of the id identity, so they live with the schema in
+/// `by_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredSchema {
     pub ty: SchemaType,
@@ -30,8 +33,8 @@ pub struct RegisteredSchema {
     pub message_type: Option<String>,
 }
 
-/// A single subject-version's stored schema (the domain view returned by
-/// [`StoreState::version`]). Named to avoid colliding with the
+/// A single subject-version's stored schema. This is the domain view that
+/// [`StoreState::version`] returns. The name avoids a collision with the
 /// [`SchemaVersion`] version-number newtype.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionedSchema {
@@ -99,13 +102,15 @@ impl StoreState {
         }
     }
 
-    /// Decide id/version for a registration AND apply it locally. Validates the
-    /// schema (NONE compat still rejects unparseable schemas -> `InvalidSchema`).
-    /// `id` is global (keyed by canonical form); `version` is per-subject.
+    /// Decide id/version for a registration AND apply it locally.
     ///
-    /// The `schema` string is assumed to be already in normalised storage form
-    /// (see `format::normalized_storage_form`); the caller (e.g. `KafkaStore`)
-    /// is responsible for normalising before passing it in.
+    /// This method validates the schema. NONE compat still rejects unparseable
+    /// schemas with `InvalidSchema`. `id` is global and keyed by canonical
+    /// form. `version` is per-subject.
+    ///
+    /// The `schema` string must already be in normalised storage form, as
+    /// described in `format::normalized_storage_form`. The caller, such as
+    /// `KafkaStore`, must normalise it before it passes it in.
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub fn register(
@@ -160,8 +165,9 @@ impl StoreState {
         })
     }
 
-    /// The id-dedup key: canonical form joined with a stable fingerprint of the
-    /// references (so identical text with different refs gets a distinct id).
+    /// The id-dedup key. It is the canonical form joined with a stable
+    /// fingerprint of the references, so identical text with different refs
+    /// gets a distinct id.
     fn dedup_key(
         canonical: &str,
         references: &[SchemaReference],
@@ -183,9 +189,11 @@ impl StoreState {
     }
 
     /// Resolve a reference list into its transitive closure of
-    /// `ResolvedReference`s (depth-first, dependencies emitted before the
-    /// referring schema, dedup-by-name keeping first, cycle-guarded by
-    /// `(subject, version)`). `ReferenceNotFound` if any
+    /// `ResolvedReference`s.
+    ///
+    /// The walk is depth-first. It emits dependencies before the referring
+    /// schema, removes duplicates by name and keeps the first, and guards
+    /// cycles by `(subject, version)`. It returns `ReferenceNotFound` if any
     /// referenced `(subject, version)` is absent.
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
@@ -234,8 +242,9 @@ impl StoreState {
         Ok(())
     }
 
-    /// The id of a concrete `(subject, version)`, or `None` (considers deleted
-    /// versions — a reference can name a soft-deleted version's content).
+    /// The id of a concrete `(subject, version)`, or `None`. This method
+    /// considers deleted versions, because a reference can name a soft-deleted
+    /// version's content.
     fn id_of(&self, subject: &str, version: SchemaVersion) -> Option<SchemaId> {
         self.subjects
             .get(subject)?
@@ -273,10 +282,11 @@ impl StoreState {
         ids
     }
 
-    /// Fold a decoded SCHEMA record into state (reader replay). Idempotent.
-    /// Sets the version's `deleted` flag to the record's — so the same code path
-    /// inserts (deleted=false), soft-deletes (deleted=true on an existing
-    /// version), and resurrects (deleted=false on a soft-deleted version).
+    /// Fold a decoded SCHEMA record into state during reader replay. The method
+    /// is idempotent. It sets the version's `deleted` flag to the record's
+    /// flag, so one code path inserts with `deleted=false`, soft-deletes with
+    /// `deleted=true` on an existing version, and restores with
+    /// `deleted=false` on a soft-deleted version.
     pub fn apply_schema(&mut self, _key: &SchemaKey, value: &SchemaValue) {
         let ty = SchemaType::from_wire(value.schema_type.as_deref());
         self.max_id = self.max_id.max(value.id);
@@ -362,8 +372,9 @@ impl StoreState {
             .collect()
     }
 
-    /// Live (or, with `include_deleted`, all) version numbers. `None` when the
-    /// subject has no qualifying versions (→ 404).
+    /// Live version numbers, or all version numbers with `include_deleted`.
+    /// Returns `None` when the subject has no qualifying versions, which maps
+    /// to 404.
     #[must_use]
     pub fn versions(&self, subject: &str, include_deleted: bool) -> Option<Vec<SchemaVersion>> {
         let vs = self.subjects.get(subject)?;
@@ -403,8 +414,8 @@ impl StoreState {
     }
 
     /// Schema bytes for a global id. Returns `None` unless some qualifying
-    /// version references the id (so a permanently-deleted id is gone, and a
-    /// soft-deleted-only id is hidden without `include_deleted`).
+    /// version references the id. A permanently-deleted id is therefore gone,
+    /// and a soft-deleted-only id is hidden without `include_deleted`.
     #[must_use]
     pub fn schema_by_id(
         &self,
@@ -447,8 +458,8 @@ impl StoreState {
         out
     }
 
-    /// Every schema visible to GET /schemas, sorted by subject then version
-    /// (matches cp's `/schemas` ordering).
+    /// Every schema visible to GET /schemas, sorted by subject and then
+    /// version. This matches cp's `/schemas` ordering.
     #[must_use]
     pub fn all_schemas(&self, include_deleted: bool) -> Vec<ListedSchema> {
         let mut out = Vec::new();
@@ -473,8 +484,9 @@ impl StoreState {
         out
     }
 
-    /// A subject's LIVE versions as ordered `(type, schema, references)` tuples
-    /// (ascending). Soft-deleted versions are excluded (compat ignores them).
+    /// A subject's LIVE versions as ordered `(type, schema, references)`
+    /// tuples, in ascending order. This excludes soft-deleted versions, because
+    /// compat ignores them.
     #[must_use]
     pub fn versions_schemas(
         &self,
@@ -507,8 +519,9 @@ impl StoreState {
         Some(versions)
     }
 
-    /// Remove a single version (permanent). Drops the subject if it becomes
-    /// empty. Returns `None` if nothing was removed (idempotent replay).
+    /// Remove a single version permanently. Drops the subject if it becomes
+    /// empty. Returns `None` if it removed nothing, which makes replay
+    /// idempotent.
     pub fn permanent_delete_version(
         &mut self,
         subject: &str,

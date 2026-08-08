@@ -1,13 +1,15 @@
-//! End-to-end: drive the operator's real `ConnectRebalancerClient`
-//! over HTTP against the real `crabka-rebalancer` Connect-RPC router,
-//! served in-process against a real single-broker Crabka.
+//! End-to-end tests. They drive the real `ConnectRebalancerClient` of the
+//! operator over HTTP against the real Connect-RPC router of
+//! `crabka-rebalancer`. The router runs in-process against a real
+//! single-broker Crabka.
 //!
-//! This is the wire-compatibility contract for the slice: it proves the
-//! operator's hand-rolled Connect/JSON request shaping and response
-//! decoding (enum-name parsing, camelCase fields, nested `proposal`
-//! unwrapping, Connect error → `RebalancerError::Rpc`) actually match what
-//! the rebalancer's prost/pbjson codegen emits — something the unit tests
-//! can only assume.
+//! This is the wire-compatibility contract of the slice. It proves that
+//! the hand-written Connect and JSON request shaping of the operator, and
+//! its response decoding, match what the prost and pbjson codegen of the
+//! rebalancer produces. The decoding covers the enum-name parsing, the
+//! camelCase fields, the unwrapping of a nested `proposal`, and the map
+//! from a Connect error to `RebalancerError::Rpc`. The unit tests can only
+//! assume this match.
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -36,9 +38,11 @@ use crabka_rebalancer::{
 };
 use crabka_units::{ByteRate, bytes_per_sec, millis, percent, secs};
 
-/// Stand-in for the executor's client facade — these tests only exercise
-/// `CreateProposal` / `GetProposal` / (failed) `ExecuteProposal`, never the
-/// reassignment path, so every method is a no-op.
+/// Stand-in for the client facade of the executor.
+///
+/// These tests exercise only `CreateProposal`, `GetProposal`, and an
+/// `ExecuteProposal` that fails. They never reach the reassignment path,
+/// so every method here does nothing.
 struct NoopClient;
 
 #[async_trait]
@@ -65,8 +69,10 @@ impl ClientFacade for NoopClient {
     }
 }
 
-/// Build the `AppState` the rebalancer binary mounts behind its router.
-/// Mirrors `crates/rebalancer/tests/end_to_end.rs::build_state`.
+/// Builds the `AppState` that the rebalancer binary mounts behind its
+/// router.
+///
+/// It follows `crates/rebalancer/tests/end_to_end.rs::build_state`.
 fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
     let mut registry = new_registry();
     let metrics = RebalancerMetrics::register(&mut registry);

@@ -1,7 +1,9 @@
-//! Helpers for down-converting v2 `RecordBatch`es to v0/v1 `MessageSet`
-//! bytes when the requester is on Fetch v<4. Control batches (txn
-//! markers) are dropped entirely; zstd-compressed batches are
-//! re-compressed as snappy (v0/v1 doesn't support zstd).
+//! Helpers that down-convert v2 `RecordBatch` values to v0 or v1
+//! `MessageSet` bytes for a requester on Fetch v<4.
+//!
+//! The helpers drop control batches, that is txn markers, entirely. They
+//! re-compress zstd-compressed batches as snappy, because v0 and v1 do not
+//! support zstd.
 
 use bytes::{Bytes, BytesMut};
 use crabka_compression::CompressionType;
@@ -10,11 +12,12 @@ use crabka_records_legacy::{Magic, v2_to_legacy};
 
 use crate::codes;
 
-/// Build the records-field payload for a single batch.
+/// Builds the records-field payload for one batch.
 ///
-/// Returns `Ok(None)` when the entire batch is dropped (control batch on
-/// the legacy path). Returns `Err(error_code)` for hard down-conversion
-/// failures the caller should surface as a per-partition error.
+/// It returns `Ok(None)` when it drops the whole batch, which happens for a
+/// control batch on the legacy path. It returns `Err(error_code)` for a hard
+/// down-conversion failure that the caller should report as a per-partition
+/// error.
 pub(crate) fn down_convert_for_fetch(
     batch: &RecordBatch,
     request_version: i16,
@@ -52,12 +55,13 @@ pub(crate) fn down_convert_for_fetch(
     Ok(Some(RecordsPayload::Legacy(bytes)))
 }
 
-/// Down-convert a whole records-field payload for a Fetch v<4 requester.
+/// Down-converts a whole records-field payload for a Fetch v<4 requester.
 ///
-/// Obtains the batch list (`Raw` is decoded here — the only place `Raw` is
-/// parsed, and only for legacy clients), down-converts each non-dropped
-/// batch, and concatenates the resulting legacy `MessageSet` bytes. Returns
-/// `Ok(None)` when every batch was dropped (e.g. all control batches).
+/// The function gets the batch list, down-converts each batch it keeps, and
+/// concatenates the resulting legacy `MessageSet` bytes. It decodes `Raw`
+/// here, the only place that parses `Raw`, and only for legacy clients. It
+/// returns `Ok(None)` when it dropped every batch, for example when they are
+/// all control batches.
 pub(crate) fn down_convert_payload_for_fetch(
     payload: &RecordsPayload,
     request_version: i16,
@@ -147,7 +151,7 @@ mod tests {
         }
     }
 
-    /// version >= 4 returns the V2 batch unchanged
+    /// Version 4 and above returns the V2 batch unchanged.
     #[test]
     fn version_gte_4_returns_v2_unchanged() {
         let batch = make_batch(CompressionType::None, vec![sample_record("k", "v")]);
@@ -159,7 +163,7 @@ mod tests {
         }
     }
 
-    /// version 3 with a control batch returns Ok(None)
+    /// Version 3 with a control batch returns `Ok(None)`.
     #[test]
     fn control_batch_returns_none() {
         let mut batch = make_batch(CompressionType::None, vec![sample_record("k", "v")]);
@@ -171,7 +175,8 @@ mod tests {
         );
     }
 
-    /// version 3 with a zstd batch returns Some(Legacy) with snappy in the wrapper
+    /// Version 3 with a zstd batch returns `Some(Legacy)` with snappy in the
+    /// wrapper.
     #[test]
     fn zstd_batch_recompressed_as_snappy() {
         // Build a batch with 50 records so compression is exercised.
@@ -207,7 +212,8 @@ mod tests {
         );
     }
 
-    /// version 3 with uncompressed batch returns Legacy bytes that decode to original records
+    /// Version 3 with an uncompressed batch returns Legacy bytes that decode
+    /// to the original records.
     #[test]
     fn uncompressed_batch_decodes_correctly() {
         use crabka_records_legacy::decode_message_set;
@@ -225,7 +231,7 @@ mod tests {
         check!(recs[0].value.as_deref() == Some(b"world".as_ref()));
     }
 
-    /// version 0 uses `Magic::V0` (no timestamps)
+    /// Version 0 uses `Magic::V0`, which has no timestamps.
     #[test]
     fn version_0_uses_magic_v0() {
         use crabka_records_legacy::decode_message_set;
@@ -244,7 +250,8 @@ mod tests {
         assert!(recs[0].timestamp == None, "v0 should have no timestamps");
     }
 
-    /// payload-level conversion concatenates each batch's legacy `MessageSet`
+    /// Payload-level conversion concatenates the legacy `MessageSet` of each
+    /// batch.
     #[test]
     fn payload_multi_batch_concats_legacy() {
         let b0 = make_batch(CompressionType::None, vec![sample_record("a", "1")]);

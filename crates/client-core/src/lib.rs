@@ -1,14 +1,14 @@
 //! Connection management and request dispatch for Apache Kafka in Rust.
 //!
-//! This crate provides the first I/O-doing layer of Crabka. It wraps
+//! This crate is the first I/O-doing layer of Crabka. It wraps
 //! `crabka-protocol`'s typed request/response messages in a `tokio`-based
 //! TCP client that:
 //!
-//! - Opens one connection per broker, multiplexing requests via
+//! - Opens one connection per broker and multiplexes requests by
 //!   correlation ID.
 //! - Negotiates API versions on connect.
 //! - Manages a [`BrokerPool`] keyed on broker id with lazy connect.
-//! - Resolves bootstrap addresses on builder.
+//! - Resolves bootstrap addresses in the builder.
 //!
 //! ## Quick start
 //!
@@ -33,15 +33,16 @@
 //!
 //! ## Scope and boundaries
 //!
-//! This crate is the shared transport and request-dispatch layer. It provides
+//! This crate is the shared transport and request-dispatch layer. It supplies
 //! bootstrap resolution, API-version negotiation, broker-id connection pooling,
 //! typed request/response dispatch, low-level fetch helpers, and client-side
-//! TLS/SASL negotiation. Higher-level semantics — batching, idempotence,
-//! consumer-group heartbeats, commits, admin retries, and transactions — live in
-//! the producer, consumer, and admin crates built on top of this one.
+//! TLS/SASL negotiation. Higher-level semantics live in the producer, consumer,
+//! and admin crates built on top of this one. Those semantics are batching,
+//! idempotence, consumer-group heartbeats, commits, admin retries, and
+//! transactions.
 //!
 //! TLS / SASL: a client-side security surface lives in [`security`] and
-//! [`sasl`] — set [`ConnectionOptions::security`] (or the `Client`
+//! [`sasl`]. Set [`ConnectionOptions::security`] (or the `Client`
 //! builder's `.security(...)`) to negotiate TLS then SASL before the
 //! API-versions bootstrap. `None` (the default) is plaintext.
 //!

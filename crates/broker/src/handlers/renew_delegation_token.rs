@@ -1,18 +1,18 @@
 //! KIP-48: `RenewDelegationToken` (`api_key` 39).
 //!
-//! Per spec §1.3: caller must be SASL-authenticated; the request's
-//! `hmac` selects an existing token by HMAC bytes; only the owner, a
-//! `renewers` entry, or a configured super-user may extend it; the new
-//! expiry is clamped to the token's `max_timestamp_ms`; a fresh
-//! `V1DelegationToken` record is appended with the same `token_id`
-//! (image semantics: replace).
+//! Per spec §1.3, the caller must be SASL-authenticated. The request's
+//! `hmac` selects an existing token by HMAC bytes. Only the owner, a
+//! `renewers` entry, or a configured super-user may extend it. The handler
+//! clamps the new expiry to the token's `max_timestamp_ms`. It then appends a
+//! fresh `V1DelegationToken` record with the same `token_id`. The image
+//! semantics are replace.
 //!
 //! The super-user bypass matches Kafka's `DelegationTokenManager.
-//! isAuthorizedToOperateOnToken` (via `SecurityUtils.isAuthorized`),
-//! and is what the operator relies on: the operator is a
-//! super-user that mints tokens on behalf of `KafkaUser` principals
-//! via act-as, then must be able to renew/expire them despite being
-//! neither the owner nor a listed renewer.
+//! isAuthorizedToOperateOnToken`, which goes through
+//! `SecurityUtils.isAuthorized`. The operator relies on this bypass. The
+//! operator is a super-user that mints tokens on behalf of `KafkaUser`
+//! principals with act-as, then must be able to renew or expire them even
+//! though it is neither the owner nor a listed renewer.
 
 use std::{collections::HashSet, hash::BuildHasher};
 
@@ -122,14 +122,14 @@ mod tests {
 
     use super::*;
 
-    /// Helper: empty super-users set for the pre-existing tests, which
-    /// all exercise the owner/renewer path.
+    /// Helper: empty super-users set for the tests that all exercise the
+    /// owner/renewer path.
     fn empty_super_users() -> HashSet<String> {
         HashSet::new()
     }
 
-    /// Helper: super-users set containing the given names (for the new
-    /// super-user-bypass tests).
+    /// Helper: super-users set containing the given names, for the
+    /// super-user-bypass tests.
     fn super_users_with(names: &[&str]) -> HashSet<String> {
         names.iter().map(|s| (*s).to_string()).collect()
     }
@@ -400,9 +400,9 @@ mod tests {
     /// A super-user caller may renew a token they
     /// neither own nor are listed as a renewer on. This mirrors Kafka's
     /// `DelegationTokenManager.isAuthorizedToOperateOnToken` and is the
-    /// load-bearing gate for the operator flow — the operator
+    /// load-bearing gate for the operator flow. The operator
     /// is a super-user that act-as-mints tokens on behalf of `KafkaUser`
-    /// principals, then must be able to renew them ahead of expiry.
+    /// principals, then must be able to renew them before expiry.
     #[tokio::test]
     async fn super_user_can_renew_any_token() {
         let dir = TempDir::new().unwrap();
@@ -448,9 +448,9 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// A non-super-user caller who is also not the
-    /// owner and not a listed renewer must still be rejected with
-    /// `DELEGATION_TOKEN_OWNER_MISMATCH`. Guards against accidentally
+    /// The handler must still reject a non-super-user caller who is also not
+    /// the owner and not a listed renewer, with
+    /// `DELEGATION_TOKEN_OWNER_MISMATCH`. This test guards against accidentally
     /// widening the bypass beyond `super_users`.
     #[tokio::test]
     async fn non_super_user_non_owner_non_renewer_still_rejected() {

@@ -41,13 +41,15 @@ pub struct TimestampWritePlan {
     pub commit_ops: Vec<crabka_pgkv::WriteOp>,
 }
 
-/// SP40: the foreign-table read context threaded through the SELECT pipeline. It
-/// carries the registered scanner (the `kafka_fdw` seam) and the current user (for
-/// resolving the per-user `UserMapping`). Bundled into one borrowed struct so the
-/// already-wide read signatures gain a single argument rather than two. Paths that
-/// never reach a registered scanner (`describe`, the schema-only build) use
-/// `ForeignCtx::none()`; a foreign `SELECT` with no scanner registered returns
-/// `0A000` ("foreign tables require the `kafka` feature").
+/// SP40: the foreign-table read context threaded through the SELECT pipeline.
+///
+/// It carries the registered scanner (the `kafka_fdw` seam) and the current
+/// user, which resolves the per-user `UserMapping`. One borrowed struct holds
+/// both, so the already-wide read signatures gain a single argument and not
+/// two. Paths that never reach a registered scanner (`describe`, the
+/// schema-only build) use `ForeignCtx::none()`. A foreign `SELECT` with no
+/// scanner registered returns `0A000` ("foreign tables require the `kafka`
+/// feature").
 #[derive(Clone, Copy)]
 pub(crate) struct ForeignCtx<'a> {
     pub scanner: Option<&'a Arc<dyn ForeignScanner>>,
@@ -56,7 +58,7 @@ pub(crate) struct ForeignCtx<'a> {
     /// unqualified name against the same `search_path` a `SELECT` does.
     pub resolution: &'a crate::relname::ResolutionScope,
     /// The session's catalog handle, so a DDL-time expression can read the
-    /// catalog — a `DEFAULT 'name'::regclass` has a relation to resolve. `None`
+    /// catalog. A `DEFAULT 'name'::regclass` has a relation to resolve. `None`
     /// outside a session, where such an expression keeps its 0A000.
     pub catalog: Option<&'a Arc<dyn Kv>>,
     /// Table ids the session claimed from the shared counter, drained from the
@@ -71,17 +73,17 @@ pub(crate) struct ForeignCtx<'a> {
     ///
     /// A unique-index backfill must see the rows its OWN transaction has written
     /// but not yet committed: `BEGIN; CREATE TABLE t; INSERT …; CREATE UNIQUE
-    /// INDEX ON t;` has to back-validate against those rows, and a later insert
-    /// of a duplicate has to be rejected. Without this the backfill scanned only
-    /// committed rows, so the index was built empty and the duplicate was
-    /// accepted and then committed — leaving a table that violates its own
+    /// INDEX ON t;` must back-validate against those rows, and the engine must
+    /// reject a later insert of a duplicate. Without this the backfill scanned
+    /// only committed rows, so the index was built empty and the duplicate was
+    /// accepted and then committed. That left a table that violates its own
     /// unique index.
     pub own_xid: Option<u64>,
 }
 
 impl ForeignCtx<'_> {
-    /// A context with no scanner and the conventional `"public"` user — for paths
-    /// that never reach a registered scanner (schema-only describe).
+    /// A context with no scanner and the conventional `"public"` user, for
+    /// paths that never reach a registered scanner (schema-only describe).
     pub(crate) fn none() -> Self {
         Self {
             scanner: None,
@@ -126,10 +128,10 @@ pub(crate) struct WriteContext<'a> {
     pub repeatable_read: bool,
     pub eval_ctx: &'a crate::clock::EvalCtx,
     /// `Some(garbage horizon)` iff this statement may opportunistically prune
-    /// dead versions of the rows it writes (the session computes it once per
-    /// statement). Pruning happens only where a row's chain was re-read under
-    /// its exclusive lock — UPDATE, DELETE, and `INSERT … ON CONFLICT DO
-    /// UPDATE` — so a plain INSERT never prunes whatever this carries. `None`
+    /// dead versions of the rows it writes. The session computes it once per
+    /// statement. A prune happens only where a row's chain was re-read under
+    /// its exclusive lock, which is UPDATE, DELETE, and `INSERT … ON CONFLICT
+    /// DO UPDATE`. So a plain INSERT never prunes whatever this carries. `None`
     /// disables pruning entirely, for callers with no horizon to offer. The
     /// prune deletes ride this statement's own commit batch, so they replicate
     /// and replay like any other write.
@@ -230,7 +232,7 @@ impl WriteContext<'_> {
     /// The one caller is a referential action's re-read of the row it is about
     /// to change. `PostgreSQL` runs the action as a query of its own, once the
     /// command's rows exist, so the version it operates on is the one the
-    /// command itself last wrote — an image that is only staged here. Reading
+    /// command itself last wrote, an image that is only staged here. A read of
     /// the store instead would stamp a version the command has already
     /// superseded and leave its replacement live.
     fn staged_mutation<'b>(&'b self, staged: &'b StagedKv<'b>) -> MutationContext<'b> {
@@ -255,12 +257,12 @@ pub(crate) fn read_seq_kv(kv: &dyn Kv, table: TableId) -> Result<u64, ExecError>
 }
 
 /// DDL (CREATE/DROP TABLE) reads the catalog and builds its write batch WITHOUT
-/// persisting it — the session routes the returned ops through the durable-write
-/// seam (so DDL replicates too). The session holds the catalog lock across the
-/// read+commit (serializing DDL globally). Non-DDL is unreachable here (routed
-/// via `run_one`) but handled defensively to keep the match total. Validation
-/// (42P07 on duplicate, 42P01 on a missing drop) is unchanged — only the write
-/// destination moved.
+/// persisting it. The session routes the returned ops through the durable-write
+/// seam, so DDL replicates too. The session holds the catalog lock across the
+/// read and the commit, which serializes DDL globally. Non-DDL is unreachable
+/// here, because `run_one` routes it, but this handles it defensively to keep
+/// the match total. Validation (42P07 on duplicate, 42P01 on a missing drop) is
+/// unchanged. Only the write destination moved.
 pub(crate) fn execute_ddl(
     kv: &dyn Kv,
     stmt: &Statement,
@@ -1572,10 +1574,12 @@ fn index_name_or_default(
     format!("{}_{}_idx", table.name, parts.join("_"))
 }
 
-/// The plain column list an index can be built from. A key that is not a bare
-/// ascending column reference, or a partial-index predicate, would produce an
-/// index the scanner would read as if it covered every row — so those are
-/// refused rather than silently built wrong.
+/// The plain column list an index can be built from.
+///
+/// A key that is not a bare ascending column reference, or a partial-index
+/// predicate, would produce an index the scanner would read as if it covered
+/// every row. So the engine refuses those and does not build them wrong in
+/// silence.
 fn index_key_columns(
     keys: &[crabka_pgparser::ast::IndexKey],
     predicate: Option<&str>,
@@ -1765,9 +1769,9 @@ fn resolve_targets(t: &Table, columns: &Option<Vec<String>>) -> Result<Vec<usize
 ///
 /// `PostgreSQL` (`transformInsertRow`) checks the two directions differently. Too
 /// many expressions is always an error. Too few is an error only when the
-/// statement wrote an explicit column list; with no list the implicit target list
-/// is truncated to the source width, and the columns past it take their defaults
-/// — which is why `INSERT INTO t3 SELECT a, b FROM s` is legal against a
+/// statement wrote an explicit column list. With no list, the implicit target
+/// list is truncated to the source width, and the columns past it take their
+/// defaults. This is why `INSERT INTO t3 SELECT a, b FROM s` is legal against a
 /// three-column table.
 fn resolve_insert_targets(
     t: &Table,
@@ -1794,11 +1798,11 @@ fn resolve_insert_targets(
 /// The row a write path starts from: every column's `DEFAULT`, evaluated only
 /// for the columns the statement did not supply a value for.
 ///
-/// Skipping the supplied ones is not just saved work. A `DEFAULT` can be a side
-/// effect — `nextval('s')`, which is what a `SERIAL` column and both flavours of
-/// `GENERATED … AS IDENTITY` desugar to — and `PostgreSQL` advances the sequence
-/// only for a column it actually defaults. `INSERT INTO t (id, b) VALUES (100,
-/// 'x')` therefore leaves the sequence untouched, and the next generated id is
+/// A skip of the supplied ones is not just saved work. A `DEFAULT` can be a
+/// side effect. `nextval('s')` is one, and it is what a `SERIAL` column and both
+/// flavours of `GENERATED … AS IDENTITY` desugar to. `PostgreSQL` advances the
+/// sequence only for a column it actually defaults. So `INSERT INTO t (id, b)
+/// VALUES (100, 'x')` leaves the sequence untouched, and the next generated id is
 /// the one that insert would otherwise have burned. The choice is per row and
 /// per column: in `VALUES (100, 'a'), (DEFAULT, 'b')` only the second row
 /// advances, and a supplied identity column does not stop a *different*
@@ -1806,8 +1810,8 @@ fn resolve_insert_targets(
 /// `postgres:18.4`.
 ///
 /// A supplied slot is left `Null` here and overwritten by the caller, which is
-/// also how an explicit `DEFAULT` keyword gets its value — that one does
-/// advance the sequence, because the column really is taking its default.
+/// also how an explicit `DEFAULT` keyword gets its value. That one does advance
+/// the sequence, because the column really is taking its default.
 fn unsupplied_defaults(
     table: &Table,
     target_idx: &[usize],
@@ -1952,8 +1956,10 @@ fn decode_copy_text_field(field: &str) -> Result<String, ExecError> {
 }
 
 /// The per-row work every write path shares once the target values are in
-/// place: compute `GENERATED … STORED` columns, then enforce `NOT NULL`, then
-/// the table's `CHECK` constraints — `PostgreSQL`'s order, and the reason a
+/// place.
+///
+/// Compute `GENERATED … STORED` columns, then enforce `NOT NULL`, then the
+/// table's `CHECK` constraints. That is `PostgreSQL`'s order, and the reason a
 /// generated column can satisfy a `CHECK` that references it.
 pub(crate) fn finish_written_row(
     table: &Table,
@@ -2020,16 +2026,18 @@ fn default_value(column: &Column, ctx: &crate::clock::EvalCtx) -> Result<Datum, 
     }
 }
 
-/// The write path (INSERT/UPDATE/DELETE) with concurrent writers (SP6). Builds
-/// the version write ops tagged with the transaction's `xid` and returns them
-/// WITHOUT writing — the session assembles the final batch (clog for autocommit)
-/// and writes once. INSERT allocates rowids via the `SequenceManager` (which
-/// persists the sequence durably itself). UPDATE/DELETE lock each candidate row
-/// exclusively via the `RowLockManager` (blocking until granted, or 40P01 on a
-/// deadlock), then re-check the row's current state under EvalPlanQual: a
-/// concurrent committed change is a 40001 under REPEATABLE READ, or a re-find
-/// under READ COMMITTED. Reads resolve via `satisfies_mvcc` with the txn's own
-/// xid (read-your-writes).
+/// The write path (INSERT/UPDATE/DELETE) with concurrent writers (SP6).
+///
+/// It builds the version write ops tagged with the transaction's `xid` and
+/// returns them WITHOUT a write. The session assembles the final batch (clog
+/// for autocommit) and writes once. INSERT allocates rowids with the
+/// `SequenceManager`, which persists the sequence durably itself. UPDATE/DELETE
+/// lock each candidate row exclusively with the `RowLockManager`. That lock
+/// blocks until it is granted, or reports 40P01 on a deadlock. They then
+/// re-check the row's current state under EvalPlanQual: a concurrent committed
+/// change is a 40001 under REPEATABLE READ, or a re-find under READ COMMITTED.
+/// Reads resolve with `satisfies_mvcc` and the txn's own xid
+/// (read-your-writes).
 pub(crate) async fn execute_write(
     write_ctx: &WriteContext<'_>,
     stmt: &Statement,
@@ -2059,9 +2067,9 @@ pub(crate) async fn execute_write(
 
 /// Build the span covering one data-modifying statement's execution.
 ///
-/// Guarded rather than built unconditionally: resolving the target relation
-/// costs a name resolution and a catalog read, and a span macro's field
-/// expressions evaluate whether or not the callsite is enabled.
+/// This is guarded, not built unconditionally. A resolution of the target
+/// relation costs a name resolution and a catalog read, and a span macro's
+/// field expressions evaluate whether or not the callsite is enabled.
 fn execute_write_span(write_ctx: &WriteContext<'_>, stmt: &Statement) -> tracing::Span {
     if !tracing::enabled!(target: crate::telemetry::EXEC_TARGET, tracing::Level::DEBUG) {
         return tracing::Span::none();
@@ -2152,8 +2160,8 @@ fn index_ops(ops: &[crabka_pgkv::WriteOp]) -> usize {
 /// data-modifying items and the statement body.
 ///
 /// `PostgreSQL` runs all of those parts as ONE command. They read one snapshot,
-/// but they are not independent writers — three rules only hold if this state is
-/// per statement rather than per part:
+/// but they are not independent writers. Three rules only hold if this state is
+/// per statement and not per part:
 ///
 /// - a unique index is enforced across the whole command, so
 ///   `WITH i AS (INSERT INTO t VALUES (1)) INSERT INTO t VALUES (1)` is 23505;
@@ -2166,19 +2174,19 @@ struct StatementWrites {
     /// Unique-index keys claimed by rows this statement staged. They live only
     /// in the pending op batch, which a KV probe cannot see.
     pending_unique_keys: HashSet<PendingUniqueKey>,
-    /// `(index, rowid)` pairs whose key this statement freed — a deleted row, or
+    /// `(index, rowid)` pairs whose key this statement freed: a deleted row, or
     /// an updated row whose indexed values changed. A row holds exactly one key
     /// per index, so the rowid identifies the freed key. The superseded version
-    /// is still in the KV, so the probe still finds it and has to discount it.
+    /// is still in the KV, so the probe still finds it and must discount it.
     released_unique_keys: HashSet<(crabka_pgcatalog::IndexId, u64)>,
     /// Every `(table, rowid)` this statement has already updated or deleted,
     /// whether by its own DML or by a referential action.
     row_claims: HashSet<(TableId, u64)>,
     /// Which `(table, rowid, constraint)` triples a referential action has
-    /// already written — see [`StatementWrites::claim_row_for_action`].
+    /// already written. See [`StatementWrites::claim_row_for_action`].
     action_claims: HashSet<(TableId, u64, String)>,
     /// The referential checks this statement owes, appended by the write hooks
-    /// and drained once — after the `WITH` list AND the body, because
+    /// and drained once, after the `WITH` list AND the body, because
     /// `PostgreSQL` treats the whole command as one trigger-firing unit.
     fk_checks: crate::fk::FkCheckQueue,
     /// The relations a `TRUNCATE` is emptying, empty for every other statement.
@@ -2210,14 +2218,14 @@ impl StatementWrites {
     /// A referential action is not one of the command's `ModifyTable` nodes: it
     /// runs as a separate query the trigger queue issues, so it reaches a row
     /// the command itself already modified, and so does a *second* constraint's
-    /// action reach a row the first one has just rewritten — which is how one
+    /// action reach a row the first one has just rewritten. This is how one
     /// `DELETE` of a doubly-referenced parent key nulls both referencing
-    /// columns rather than one.
+    /// columns and not one.
     ///
-    /// What is refused is one constraint coming back around to a row its own
+    /// This refuses one constraint that comes back around to a row its own
     /// action already wrote. The drain folds each action's ops into the view it
     /// reads, so a cascade cycle already terminates on the data exactly as
-    /// `PostgreSQL`'s does — a deleted row reads as gone, a re-keyed one no
+    /// `PostgreSQL`'s does. A deleted row reads as gone, and a re-keyed one no
     /// longer matches. This bounds the work at one write per
     /// `(row, constraint)` whatever the data does.
     fn claim_row_for_action(&mut self, table: TableId, rowid: u64, constraint: &str) -> bool {
@@ -2233,7 +2241,7 @@ impl StatementWrites {
 
     /// Has anything in this command already modified this row? The predicate
     /// `ON CONFLICT DO UPDATE` raises 21000 on, where *what* touched the row
-    /// makes no difference — the upsert may not be the second thing to reach it.
+    /// makes no difference. The upsert may not be the second thing to reach it.
     fn is_claimed(&self, table: TableId, rowid: u64) -> bool {
         self.row_claims.contains(&(table, rowid))
     }
@@ -2271,10 +2279,10 @@ impl StatementWrites {
 impl<'a> WriteContext<'a> {
     /// The context the foreign-key drain probes and scans through.
     ///
-    /// The row store it reads is `staged` — this statement's write batch layered
-    /// over the real one — because the drain's whole premise is that the
-    /// statement's rows already exist, and they only reach the KV when the
-    /// session commits the batch.
+    /// The row store it reads is `staged`, this statement's write batch layered
+    /// over the real one. The drain's whole premise is that the statement's rows
+    /// already exist, and they only reach the KV when the session commits the
+    /// batch.
     fn fk_exec<'b>(&'b self, staged: &'b StagedKv<'b>) -> crate::fk::FkExecContext<'b>
     where
         'a: 'b,
@@ -2308,16 +2316,16 @@ impl<'a> WriteContext<'a> {
     }
 }
 
-/// Both sides of a foreign key name the same lock identity — the referenced
-/// index's entry prefix — which is exactly what the uniqueness check already
+/// Both sides of a foreign key name the same lock identity, the referenced
+/// index's entry prefix. That is exactly what the uniqueness check already
 /// locks, so this is a [`crate::lockmgr::LockKey::UniqueKey`] acquire in the
 /// row-lock manager and no new lock mode exists.
 ///
-/// The child side takes it SHARED, so many rows referencing one parent key never
-/// convoy; the parent side takes it EXCLUSIVE, because it is removing or moving
-/// the key. Key locks and row locks share one wait-for graph, so a cycle
-/// spanning both is still reported as 40P01, and both are released together at
-/// COMMIT/ROLLBACK.
+/// The child side takes it SHARED, so many rows that reference one parent key
+/// never convoy. The parent side takes it EXCLUSIVE, because it removes or
+/// moves the key. Key locks and row locks share one wait-for graph, so the
+/// engine still reports a cycle across both as 40P01, and it releases both
+/// together at COMMIT/ROLLBACK.
 impl crate::fk::FkKeyLocks for WriteContext<'_> {
     async fn lock_key(&self, key: Vec<u8>, mode: crate::fk::FkLockMode) -> Result<(), ExecError> {
         let mode = match mode {
@@ -2347,8 +2355,8 @@ impl crate::fk::FkKeyLocks for WriteContext<'_> {
 /// reach the row reads what this one wrote, and a cascade cycle terminates
 /// because the row it comes back to reads as deleted or off-key.
 ///
-/// [`claim_row_for_action`] then only bounds the work, refusing one constraint a
-/// second write of the same row.
+/// [`claim_row_for_action`] then only bounds the work, and refuses one
+/// constraint a second write of the same row.
 ///
 /// [`claim_row_for_action`]: StatementWrites::claim_row_for_action
 struct StatementCascade<'a, 'w> {
@@ -2357,7 +2365,7 @@ struct StatementCascade<'a, 'w> {
     /// The view both this and the drain read through: the statement's pending
     /// batch over the store, grown by every op an action produces. An action
     /// re-reads its row here rather than in the store, so it changes the image
-    /// the command — or an earlier action — last wrote.
+    /// the command, or an earlier action, last wrote.
     staged: &'a StagedKv<'a>,
     /// One index-set read per cascaded *relation*, not per cascaded row: a
     /// cascade walks a chain of relations and revisits each many times.
@@ -2589,8 +2597,8 @@ impl crate::fk::FkCascade for StatementCascade<'_, '_> {
 /// `INSERT INTO t (id, boss) VALUES (1, 1)` succeeds because the row is in place
 /// by the time the check runs. A referential action re-enters the write path
 /// through [`StatementCascade`], which shares this statement's
-/// [`StatementWrites`] — so a cascade that comes back around to a row *an
-/// action* already changed stops rather than recursing, while a row the
+/// [`StatementWrites`]. So a cascade that comes back around to a row *an
+/// action* already changed stops and does not recurse, while a row the
 /// statement's own DML modified is still the action's to change.
 async fn drain_statement_fk_checks(
     write_ctx: &WriteContext<'_>,
@@ -2626,8 +2634,8 @@ async fn drain_statement_fk_checks(
 /// `SET CONSTRAINTS … IMMEDIATE`.
 ///
 /// Every earlier statement's rows are in the KV under this transaction's xid by
-/// now, so the drain reads storage directly (an empty staged batch) and a
-/// re-supplied key is found — which is what makes `DELETE; INSERT; COMMIT`
+/// now, so the drain reads storage directly (an empty staged batch) and finds
+/// a re-supplied key. This is what makes `DELETE; INSERT; COMMIT`
 /// succeed under a deferred `NO ACTION`. A referential action re-enters the
 /// write path through the same [`StatementCascade`] the statement drain uses,
 /// over write bookkeeping of its own: the statements whose rows these checks
@@ -2868,10 +2876,13 @@ fn statement_trigger_targets(
     Ok(vec![(table, event, updated)])
 }
 
-/// Evaluate the statement's `WITH` list — including any data-modifying entries,
-/// which run exactly once each whether or not the body references them — and
-/// then the statement body against that CTE scope. The referential checks they
-/// queue are left for [`execute_write_with_ctes`] to drain once for all of them.
+/// Evaluate the statement's `WITH` list, then the statement body against that
+/// CTE scope.
+///
+/// The `WITH` list includes any data-modifying entries, which run exactly once
+/// each whether or not the body references them. The referential checks they
+/// queue are left for [`execute_write_with_ctes`] to drain once for all of
+/// them.
 ///
 /// Every entry sees the statement's own snapshot: a data-modifying CTE's rows
 /// are staged as write ops and never written to the KV here, so neither a later
@@ -2882,7 +2893,7 @@ fn statement_trigger_targets(
 /// survives, because [`StatementWrites`] then holds the row against the other).
 /// `PostgreSQL` runs a data-modifying item when something first demands its
 /// rows, and runs the items nothing demands AFTER the main query, in reverse
-/// list order — the order `ExecPostprocessPlan` walks `es_auxmodifytables`.
+/// list order, the order `ExecPostprocessPlan` walks `es_auxmodifytables`.
 async fn execute_write_parts(
     write_ctx: &WriteContext<'_>,
     ctes: &crate::cte::CteContext,
@@ -3003,7 +3014,7 @@ fn statement_with_clause(stmt: &Statement) -> Option<&crabka_pgparser::ast::With
     }
 }
 
-/// The same statement with its `WITH` list removed — the CTE relations are
+/// The same statement with its `WITH` list removed. The CTE relations are
 /// already materialized into the scope the body executes against.
 fn statement_without_with(stmt: &Statement) -> Statement {
     let mut stmt = stmt.clone();
@@ -3104,9 +3115,9 @@ fn resolve_write_subqueries(
 /// Divergence from `PostgreSQL`: an `UPDATE` that moves a row out of its own
 /// partition's bound is 23514 here (`new row for relation … violates partition
 /// constraint`), where `PostgreSQL` deletes the row from its old partition and
-/// re-inserts it into the new one. Refusing is the correctness-preserving
-/// choice — the alternative is storing a row in a partition whose bound it does
-/// not satisfy, which every later read would answer wrongly.
+/// re-inserts it into the new one. A refusal is the correctness-preserving
+/// choice. The alternative stores a row in a partition whose bound it does not
+/// satisfy, and every later read would answer that wrongly.
 async fn partitioned_dml(
     write_ctx: &WriteContext<'_>,
     ctes: &crate::cte::CteContext,
@@ -3181,7 +3192,7 @@ async fn partitioned_dml(
 }
 
 /// A row written straight into a leaf partition must still satisfy that leaf's
-/// own bound — `PostgreSQL`'s implicit per-partition `CHECK`, reported as 23514.
+/// own bound, `PostgreSQL`'s implicit per-partition `CHECK`, reported as 23514.
 fn check_partition_constraint(kv: &dyn Kv, table: &Table, row: &[Datum]) -> Result<(), ExecError> {
     let Some((parent, bound)) = crate::partition::parent_of(kv, &table.name)? else {
         return Ok(());
@@ -3207,10 +3218,10 @@ fn check_partition_constraint(kv: &dyn Kv, table: &Table, row: &[Datum]) -> Resu
 /// `INSERT` into a partitioned parent: every proposed row is routed to the leaf
 /// its partition key selects and written there.
 ///
-/// The rows are built against the *parent's* column list — defaults, coercion
-/// and `NOT NULL` all come from the parent — and permuted into the chosen
-/// leaf's own column order on the way out, so a leaf attached with its columns
-/// in a different order still stores them correctly.
+/// The rows are built against the *parent's* column list, so defaults, coercion
+/// and `NOT NULL` all come from the parent. They are then permuted into the
+/// chosen leaf's own column order on the way out, so a leaf attached with its
+/// columns in a different order still stores them correctly.
 async fn partitioned_insert(
     write_ctx: &WriteContext<'_>,
     ctes: &crate::cte::CteContext,
@@ -4080,7 +4091,7 @@ async fn execute_write_body(
 }
 
 /// The name every expression in a DML statement resolves the target's columns
-/// under: its alias when it has one, else the table name — `PostgreSQL` hides
+/// under: its alias when it has one, else the table name. `PostgreSQL` hides
 /// the real name once an alias is given.
 fn table_qualifier<'a>(table: &'a Table, alias: &'a Option<String>) -> &'a str {
     alias.as_deref().unwrap_or(&table.name.name)
@@ -4154,10 +4165,10 @@ impl DmlSource {
 enum AssignedValue<'a> {
     /// Evaluated against the joined row, per affected row.
     Expr(&'a Expr),
-    /// Already computed — a multi-column `= (SELECT …)`, which `PostgreSQL`
+    /// Already computed: a multi-column `= (SELECT …)`, which `PostgreSQL`
     /// evaluates once when the sub-select does not reference the target.
     Value(Datum),
-    /// `SET j['a'][0] = e` — the new value is written *into* the column's
+    /// `SET j['a'][0] = e`: the write puts the new value *into* the column's
     /// current jsonb value at the subscripted path.
     Subscripted {
         subscripts: &'a [ArraySubscript],
@@ -4330,9 +4341,11 @@ impl ReturnedRow {
 }
 
 /// The prefix that makes an `OLD`/`NEW` image binding unreachable by a bare
-/// column reference. It cannot occur in any identifier the lexer produces — not
-/// even a quoted one, which cannot contain a control character — so `RETURNING v`
-/// still resolves to the one target column named `v`, as it does in `PostgreSQL`.
+/// column reference.
+///
+/// It cannot occur in any identifier the lexer produces, not even a quoted one,
+/// which cannot contain a control character. So `RETURNING v` still resolves to
+/// the one target column named `v`, as it does in `PostgreSQL`.
 const IMAGE_BINDING_PREFIX: char = '\u{1}';
 
 /// An analyzed `RETURNING` clause: the scope its expressions resolve against and
@@ -4581,10 +4594,11 @@ fn image_wildcard(table: &Table, image: &str) -> Vec<SelectItem> {
         .collect()
 }
 
-/// Point every `old.col` / `new.col` reference at its image binding. Nodes that
-/// cannot contain a row reference reachable from `RETURNING` — literals,
-/// parameters, and the subquery forms, which have their own scope — are left
-/// alone.
+/// Point every `old.col` / `new.col` reference at its image binding.
+///
+/// This leaves alone the nodes that cannot contain a row reference reachable
+/// from `RETURNING`: literals, parameters, and the subquery forms, which have
+/// their own scope.
 struct ImageAliases<'a> {
     table: &'a Table,
     old: Option<&'a str>,
@@ -5156,9 +5170,11 @@ async fn apply_merge_row_action(
     }
 }
 
-/// The rows an `INSERT` supplies, plus the target column slots they fill. A
-/// feeding query is materialized before any row is written, so `INSERT … SELECT`
-/// reading the target table sees the pre-insert snapshot as `PostgreSQL` does.
+/// The rows an `INSERT` supplies, plus the target column slots they fill.
+///
+/// A feeding query is materialized before any row is written, so an
+/// `INSERT … SELECT` that reads the target table sees the pre-insert snapshot
+/// as `PostgreSQL` does.
 fn insert_source_rows(
     write_ctx: &WriteContext<'_>,
     ctes: &crate::cte::CteContext,
@@ -5452,12 +5468,13 @@ fn writable_local_indexes(
 }
 
 /// Whether a DML statement must hold the engine's `unique_index_lock` SHARED
-/// for its duration (until COMMIT/ROLLBACK in an explicit transaction). Shared
-/// mode never blocks other DML — it only lets unique-index DDL (CREATE UNIQUE
-/// INDEX backfill, CREATE TABLE with a unique constraint), which takes the
-/// same lock EXCLUSIVELY, wait out in-flight writers and block new ones while
-/// it scans. Same-key DML conflicts serialize through per-key locks in the
-/// `RowLockManager` instead (see `enforce_unique_local_index`).
+/// for its duration (until COMMIT/ROLLBACK in an explicit transaction).
+///
+/// Shared mode never blocks other DML. It only lets unique-index DDL (CREATE
+/// UNIQUE INDEX backfill, CREATE TABLE with a unique constraint), which takes
+/// the same lock EXCLUSIVELY, wait out in-flight writers and block new ones
+/// while it scans. Same-key DML conflicts serialize through per-key locks in
+/// the `RowLockManager` instead (see `enforce_unique_local_index`).
 pub(crate) enum UniqueLocalSerialization {
     None,
     Shared,
@@ -5502,8 +5519,8 @@ pub(crate) fn copy_requires_unique_local_serialization(
 
 /// The op recording a temporary namespace, when it is not recorded already.
 ///
-/// A temporary namespace is created by the engine on behalf of a session that
-/// first puts something in it, never by a statement naming it — `CREATE SCHEMA`
+/// The engine creates a temporary namespace on behalf of a session that first
+/// puts something in it, never a statement that names it. `CREATE SCHEMA`
 /// refuses every `pg_`-prefixed name, as `PostgreSQL` does.
 fn ensure_schema_ops(kv: &dyn Kv, schema: &str) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     if crabka_pgcatalog::schema_exists(kv, schema)? {
@@ -5520,7 +5537,7 @@ fn ensure_schema_ops(kv: &dyn Kv, schema: &str) -> Result<Vec<crabka_pgkv::Write
 /// elsewhere goes with its parent.
 ///
 /// `DROP SCHEMA … CASCADE` is one caller; the others are the three points a
-/// temporary namespace is emptied — `DISCARD TEMP`, the end of a session, and
+/// temporary namespace is emptied: `DISCARD TEMP`, the end of a session, and
 /// the purge a session runs over its own namespace before it first uses it, in
 /// case a crashed backend of the same id left rows behind.
 ///
@@ -5569,9 +5586,9 @@ pub(crate) fn drop_schema_contents_ops(
 }
 
 /// The batch that drops one table with everything that depends on it: the stored
-/// views over it, the foreign keys that reference it, and the partitions hanging
-/// off it — wherever those live, because a dependency in another schema is still
-/// a dependency.
+/// views over it, the foreign keys that reference it, and the partitions that
+/// hang off it, wherever those live, because a dependency in another schema is
+/// still a dependency.
 ///
 /// `dropping` names the relations the same statement already removes. A
 /// dependency inside that set neither blocks the drop nor needs an op of its own,
@@ -5581,7 +5598,7 @@ pub(crate) fn drop_schema_contents_ops(
 /// Without `cascade` a dependency outside that set is a 2BP01 refusal. With it,
 /// `PostgreSQL` splits the two kinds: a referencing *constraint* is dropped and
 /// its child table survives, while a dependent view is dropped outright. A
-/// partition is neither — it has no independent existence, so it goes with its
+/// partition is neither. It has no independent existence, so it goes with its
 /// parent whether or not `CASCADE` was written.
 ///
 /// # Errors
@@ -5801,10 +5818,12 @@ fn local_index_backfill_ops(
     local_index_backfill_ops_for_rows(&rows, table, index)
 }
 
-/// Backfill index entries for already-scanned live rows. A UNIQUE index
-/// back-validates the existing data: a duplicate non-NULL key fails the index
-/// *build* with 23505 before any op is committed (rows with a NULL key column
-/// are not indexed, matching SQL NULL-distinct semantics).
+/// Backfill index entries for already-scanned live rows.
+///
+/// A UNIQUE index back-validates the existing data: a duplicate non-NULL key
+/// fails the index *build* with 23505 before any op is committed. Rows with a
+/// NULL key column are not indexed, which matches SQL NULL-distinct
+/// semantics.
 fn local_index_backfill_ops_for_rows(
     rows: &[(u64, u64, Vec<Datum>)],
     table: &Table,
@@ -5903,21 +5922,24 @@ async fn enforce_unique_local_index(
 }
 
 /// Take `values`' unique-key lock and return the rows that currently hold that
-/// key. The lock-and-probe half of unique enforcement, shared with `ON CONFLICT`
-/// arbitration.
+/// key.
+///
+/// This is the lock-and-probe half of unique enforcement, shared with
+/// `ON CONFLICT` arbitration.
 ///
 /// Serializes check-then-write PER KEY: takes this key's exclusive lock (in the
 /// row-lock manager, so it shares the deadlock wait-for graph and is released
 /// with the row locks at COMMIT/ROLLBACK) before probing. Without it, two
-/// concurrent writers of the same key would both pass the probe — neither sees
-/// the other's uncommitted version — and both commit. A waiter that wakes here
+/// concurrent writers of the same key would both pass the probe, because
+/// neither sees the other's uncommitted version, and both would commit. A
+/// waiter that wakes here
 /// after the holder's terminal outcome probes the then-current committed state:
 /// a holder if it committed, none if it rolled back.
 ///
 /// The probe reads exactly this key instead of scanning the whole table, under
 /// the scan path's visibility (all-committed local + global snapshots plus our
 /// own xid), and `lookup_local_index_equal` resolves each candidate rowid
-/// through MVCC and re-checks its visible row's values — so dead entries left by
+/// through MVCC and re-checks its visible row's values. So dead entries left by
 /// old versions or aborted writers never count.
 ///
 /// `acquire_key` is idempotent for a holder xid, so a caller that already locked
@@ -5963,14 +5985,15 @@ async fn lock_and_probe_unique_key(
 /// - `Columns` with an index predicate (`ON CONFLICT (c) WHERE …`) is refused
 ///   (0A000): partial indexes do not exist here, so nothing could ever match it.
 /// - `OnConstraint` matches by index name, restricted to indexes that back a
-///   constraint — PostgreSQL rejects `ON CONSTRAINT` naming a plain index.
+///   constraint, because PostgreSQL rejects `ON CONSTRAINT` naming a plain
+///   index.
 ///   No match is 42704.
 /// - `None` (reachable only with `DO NOTHING`; the parser rejects a bare
 ///   `DO UPDATE`) arbitrates every unique local index. An empty result is legal:
 ///   a table with no unique index simply never conflicts.
 ///
-/// Global unique indexes never reach here — `writable_local_indexes` refuses
-/// them for every write on the table.
+/// Global unique indexes never reach here, because `writable_local_indexes`
+/// refuses them for every write on the table.
 fn resolve_arbiter_indexes(
     table: &Table,
     local_indexes: &[crabka_pgcatalog::Index],
@@ -6029,8 +6052,8 @@ fn resolve_arbiter_indexes(
 enum InsertRowPlan {
     /// No arbiter conflicts: insert the proposed row through the normal path.
     Insert,
-    /// `DO NOTHING` on a conflict: the row is skipped entirely — no ops, no
-    /// RETURNING row, and it does not count towards the command tag.
+    /// `DO NOTHING` on a conflict: the row is skipped entirely. There are no
+    /// ops, no RETURNING row, and it does not count towards the command tag.
     Skip,
     /// `DO UPDATE` on a conflict: the stored row to update, already locked and
     /// re-read under [`eval_plan_qual`].
@@ -6046,8 +6069,8 @@ enum InsertRowPlan {
 ///
 /// Probes the arbiter indexes in catalog order (`list_table_indexes` sorts by
 /// name, so the choice of conflicting index is deterministic) and stops at the
-/// first conflict. An arbiter whose key holds a NULL cannot conflict — SQL
-/// unique treats NULLs as distinct, matching the enforcement path's own
+/// first conflict. An arbiter whose key holds a NULL cannot conflict, because
+/// SQL unique treats NULLs as distinct. That matches the enforcement path's own
 /// short-circuit.
 ///
 /// A key already claimed by an earlier row of THIS statement lives only in the
@@ -6058,9 +6081,9 @@ enum InsertRowPlan {
 /// Termination: the outer loop restarts only after adding a holder rowid to
 /// `discarded` (its row vanished under the lock, or no longer carries the
 /// arbiter key). Every probed key is held under an exclusive key lock for the
-/// rest of the transaction, so the holder sets can only shrink — no new holder
-/// can appear — and `discarded` grows strictly on each restart, bounded by the
-/// rows already in the table.
+/// rest of the transaction, so the holder sets can only shrink and no new
+/// holder can appear. `discarded` grows strictly on each restart, bounded by
+/// the rows already in the table.
 async fn arbitrate_insert_row(
     write_ctx: &WriteContext<'_>,
     table: &Table,
@@ -6186,16 +6209,18 @@ struct LockedRowUpdate<'a> {
     next: &'a [Datum],
 }
 
-/// Stage the writes replacing a locked row with `next`: NOT NULL and unique
-/// enforcement, the referential checks the new image owes, the MVCC version ops,
-/// index entries, and opportunistic chain pruning. Shared by `UPDATE`, `MERGE`'s
-/// update action and `INSERT … ON CONFLICT DO UPDATE`, whose stored-row mutation
-/// is identical once the row is locked and the post-image computed — so all
-/// three reach the foreign-key hook through this one site.
+/// Stage the writes that replace a locked row with `next`.
 ///
-/// `fk` is the statement's resolved foreign-key context; a referential action
-/// re-entering here passes an empty one, because the drain derives the follow-on
-/// checks a cascaded update owes from the row it hands back.
+/// Those are NOT NULL and unique enforcement, the referential checks the new
+/// image owes, the MVCC version ops, index entries, and opportunistic chain
+/// pruning. `UPDATE`, `MERGE`'s update action and `INSERT … ON CONFLICT DO
+/// UPDATE` share this. Their stored-row mutation is identical once the row is
+/// locked and the post-image computed, so all three reach the foreign-key hook
+/// through this one site.
+///
+/// `fk` is the statement's resolved foreign-key context. A referential action
+/// that re-enters here passes an empty one, because the drain derives the
+/// follow-on checks a cascaded update owes from the row it hands back.
 async fn apply_locked_row_update(
     write_ctx: &WriteContext<'_>,
     table: &Table,
@@ -6292,10 +6317,11 @@ struct LockedRowDelete<'a> {
     cur_row: &'a [Datum],
 }
 
-/// Stage the writes that delete a locked row: the unique keys it frees, the MVCC
-/// tombstone, and opportunistic chain pruning. Shared by `DELETE` and by a
-/// cascaded `ON DELETE CASCADE`, whose stored-row mutation is identical once the
-/// row is locked and re-read.
+/// Stage the writes that delete a locked row.
+///
+/// Those are the unique keys it frees, the MVCC tombstone, and opportunistic
+/// chain pruning. `DELETE` and a cascaded `ON DELETE CASCADE` share this. Their
+/// stored-row mutation is identical once the row is locked and re-read.
 ///
 /// Queues no referential check of its own: the caller knows whether this delete
 /// is the statement's (which queues through [`crate::fk::FkCheckQueue`]) or a
@@ -6374,7 +6400,7 @@ struct ConflictUpdate<'a> {
 
 /// Run `DO UPDATE`'s filter and assignments against a locked conflicting row and
 /// stage the resulting update. Returns the post-image (for RETURNING), or `None`
-/// when the `WHERE` is not true — that row is then neither inserted nor updated
+/// when the `WHERE` is not true. That row is then neither inserted nor updated
 /// and produces no RETURNING row, though its row and key locks stay held, as
 /// PostgreSQL's do.
 ///
@@ -6382,7 +6408,7 @@ struct ConflictUpdate<'a> {
 /// [`Scope::insert_conflict`] over the stored row concatenated with the proposed
 /// row, so `excluded.c` reads the proposed value and `t.c` the stored one. Every
 /// column name appears under both qualifiers, which makes a bare reference
-/// ambiguous (42702) — that is PostgreSQL's behavior, where `DO UPDATE SET
+/// ambiguous (42702). That is PostgreSQL's behavior, where `DO UPDATE SET
 /// v = v + 1` is an error and must be written `t.v` or `excluded.v`.
 async fn apply_insert_conflict_update(
     write_ctx: &WriteContext<'_>,
@@ -6550,8 +6576,8 @@ pub(crate) struct ChainPrune {
 /// snapshot `xmin` for as long as the snapshot is in use (REPEATABLE READ
 /// transactions pin at BEGIN until COMMIT/ROLLBACK; autocommit and READ
 /// COMMITTED statements pin for the statement's duration), so a version some
-/// live snapshot still sees — one whose committed deleter is in that
-/// snapshot's `xip` or above its `xmax` — keeps `horizon` at or below the
+/// live snapshot still sees, one whose committed deleter is in that
+/// snapshot's `xip` or above its `xmax`, keeps `horizon` at or below the
 /// deleter's xid and is never selected here. Un-pinned readers do not exist:
 /// every statement path pins before taking its snapshot, and the pin value
 /// (the ProcArray xmin at pin time) is monotonically `<=` any snapshot xmin
@@ -6562,13 +6588,13 @@ pub(crate) struct ChainPrune {
 ///
 /// Lock interaction: callers must hold `rowid`'s exclusive row lock (UPDATE/
 /// DELETE already do; `vacuum` takes it per row). Dead version KEYS can never
-/// collide with a concurrent writer's puts — a writer only writes the newest
-/// committed version's key (stamping `xmax`) and its own new key, and neither
-/// is ever dead — but the survivor computation for shared index entries must
-/// not race a writer re-adding the same indexed values for this rowid.
+/// collide with a concurrent writer's puts. A writer only writes the newest
+/// committed version's key (it stamps `xmax`) and its own new key, and neither
+/// is ever dead. But the survivor computation for shared index entries must
+/// not race a writer that re-adds the same indexed values for this rowid.
 ///
 /// Engine kinds: sound everywhere, because the returned ops are folded into
-/// the caller's own commit batch — on replicated engines they replicate
+/// the caller's own commit batch. On replicated engines they replicate
 /// through the WAL and replay deterministically. Global 2PC writes are
 /// self-protecting: an undecided enlisted xid reads as `Prepared` (which
 /// [`crabka_pgmvcc::gc::version_is_dead`] never treats as dead), and global
@@ -6580,8 +6606,8 @@ pub(crate) struct ChainPruneRequest<'a> {
     pub rowid: u64,
     /// The garbage horizon (from `checkpoint_garbage_horizon`).
     pub horizon: u64,
-    /// Version-key xids this batch itself (re)writes — never deleted or
-    /// frozen, whatever their current on-disk state.
+    /// Version-key xids this batch itself (re)writes. They are never deleted
+    /// or frozen, whatever their current on-disk state.
     pub keep_xids: &'a [u64],
     /// The row this batch is writing, when any; its indexed values count as
     /// survivors so a shared index entry is never deleted out from under the
@@ -6589,9 +6615,10 @@ pub(crate) struct ChainPruneRequest<'a> {
     pub new_row: Option<&'a [Datum]>,
     /// When given (`vacuum` only), additionally rewrite every surviving
     /// version whose creator committed below this floor to `FROZEN_XID`
-    /// (visible to every snapshot without a clog lookup) — the precondition
-    /// for truncating the clog below the horizon. Freezing is invisible to
-    /// every snapshot: a registered snapshot's `xmin` is at or above the
+    /// (visible to every snapshot without a clog lookup). That is the
+    /// precondition for a truncation of the clog below the horizon. The freeze
+    /// is invisible to every snapshot: a registered snapshot's `xmin` is at or
+    /// above the
     /// horizon, so a committed sub-horizon creator was already
     /// settled-and-committed for it.
     pub freeze_below: Option<u64>,
@@ -6612,11 +6639,13 @@ struct PruneEngagementLog {
 static PRUNE_ENGAGEMENT: std::sync::LazyLock<std::sync::Mutex<PruneEngagementLog>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(PruneEngagementLog::default()));
 
-/// Emit at most one `xid_chain_prune_engaged` debug line per second, carrying
-/// the current horizon and the chain/deletion counts accumulated since the
-/// previous line. A live node logging a low `horizon` with growing `rows` and
-/// zero `pruned` shows the write path consults the horizon but finds nothing
-/// dead; non-zero `pruned` confirms end-to-end reclamation.
+/// Emit at most one `xid_chain_prune_engaged` debug line per second.
+///
+/// The line carries the current horizon and the chain/deletion counts
+/// accumulated since the previous line. A live node that logs a low `horizon`
+/// with growing `rows` and zero `pruned` shows the write path consults the
+/// horizon but finds nothing dead. A non-zero `pruned` confirms end-to-end
+/// reclamation.
 fn log_prune_engagement(horizon: u64, pruned: u64) {
     const EMIT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
     let mut log = PRUNE_ENGAGEMENT.lock().expect("prune engagement log");
@@ -6866,9 +6895,9 @@ fn visible_rows_for_rowids(
 
 /// Choose the index probe for an UPDATE/DELETE filter: a top-level
 /// `column = literal` conjunct matching a single-column local index. Returns
-/// `None` — full scan — for sharded tables, for filters outside the pushdown
-/// subset (reusing the SELECT path's extraction, so only exact-type literals on
-/// supported column types qualify), and when no index matches.
+/// `None`, which means a full scan, for sharded tables, for filters outside the
+/// pushdown subset, and when no index matches. It reuses the SELECT path's
+/// extraction, so only exact-type literals on supported column types qualify.
 fn choose_write_index_probe(
     catalog_kv: &dyn Kv,
     table: &Table,
@@ -7453,8 +7482,8 @@ fn global_index_delete_intents_for_row(
 }
 
 /// Was `xid` settled (committed or aborted) before `snapshot` was taken? True
-/// iff `xid` was neither still running at, nor started after, the snapshot —
-/// mirroring the negation of `Snapshot::is_running`.
+/// iff `xid` was neither still running at, nor started after, the snapshot.
+/// This mirrors the negation of `Snapshot::is_running`.
 fn snapshot_can_see(snapshot: &crabka_pgmvcc::visibility::Snapshot, xid: u64) -> bool {
     xid < snapshot.xmax && !snapshot.xip.contains(&xid)
 }
@@ -7466,7 +7495,7 @@ fn snapshot_can_see(snapshot: &crabka_pgmvcc::visibility::Snapshot, xid: u64) ->
 /// in-doubt as of the reader's global snapshot (`gsnap`) it reports `InProgress`
 /// (the cross-range row is invisible until the global commit decision); once `g`
 /// is settled relative to `gsnap`, range 0's global-clog status for `g` is the
-/// answer — so both ranges' Prepared rows flip visible together at the single
+/// answer. So both ranges' Prepared rows flip visible together at the single
 /// `Committed(g)` instant.
 ///
 /// For a single-range (non-GTM) engine the caller passes `global = local` and
@@ -7540,8 +7569,8 @@ fn find_visible_one(
 
 /// One decoded version of a row chain, keyed by the xid suffix of its
 /// PHYSICAL version key. The key xid normally equals the header `xmin`, but a
-/// frozen tuple keeps its original key while its header reads `FROZEN_XID` —
-/// writers must stamp `xmax` on the physical key, never one reconstructed
+/// frozen tuple keeps its original key while its header reads `FROZEN_XID`.
+/// Writers must stamp `xmax` on the physical key, never one reconstructed
 /// from the header.
 struct ChainVersion {
     key_xid: u64,
@@ -7669,8 +7698,9 @@ fn find_visible_one_keyed(
     Ok(visible)
 }
 
-/// Coerce an evaluated value into a target column type (assignment context). `ctx`
-/// supplies the session zone for any temporal numeric conversion.
+/// Coerce an evaluated value into a target column type (assignment context).
+///
+/// `ctx` supplies the session zone for any temporal numeric conversion.
 pub(crate) fn coerce(
     value: crabka_pgtypes::Datum,
     target: crabka_pgtypes::ColumnType,
@@ -8286,7 +8316,7 @@ fn mirror_op(op: crabka_pgparser::ast::BinaryOp) -> Option<crabka_pgparser::ast:
 }
 
 /// SP40 Task 14: is the FROM clause exactly one foreign base table? Only then is
-/// offset pushdown applicable — a join, a comma-FROM (cross join), or a derived
+/// offset pushdown applicable. A join, a comma-FROM (cross join), or a derived
 /// table all keep the full-scan path. A scanner must be registered (otherwise the
 /// foreign read errors anyway) and the single table's catalog entry must have
 /// `foreign` metadata. Non-foreign ordinary tables return `false` (unchanged).
@@ -8378,8 +8408,8 @@ fn append_from_item(
 ///
 /// `LATERAL` says so explicitly; `PostgreSQL` also makes a *function* item
 /// lateral implicitly, so `FROM t, unnest(t.tags)` needs no keyword. A derived
-/// table is never implicitly lateral — referencing an earlier item without
-/// `LATERAL` is an error there, and leaving the reference alone produces it.
+/// table is never implicitly lateral. A reference to an earlier item without
+/// `LATERAL` is an error there, and a reference left alone produces it.
 fn is_lateral_item(te: &crabka_pgparser::ast::TableExpr, outer: &Scope) -> bool {
     use crabka_pgparser::ast::TableExpr;
     match te {
@@ -8401,8 +8431,8 @@ fn is_lateral_item(te: &crabka_pgparser::ast::TableExpr, outer: &Scope) -> bool 
 ///
 /// Each iteration joins a one-row left relation against the specialized right
 /// side, so `ON`/`USING`/`NATURAL` matching and LEFT-join NULL padding are the
-/// ordinary join code — `LEFT JOIN LATERAL` therefore keeps an outer row whose
-/// lateral side produced nothing, exactly as `PostgreSQL` does.
+/// ordinary join code. So `LEFT JOIN LATERAL` keeps an outer row whose lateral
+/// side produced nothing, exactly as `PostgreSQL` does.
 ///
 /// `RIGHT`/`FULL JOIN LATERAL` is only an error when the lateral item *does*
 /// reference the other side: `PostgreSQL` accepts the keyword itself and runs
@@ -8510,8 +8540,8 @@ fn expr_references_scope(expr: &Expr, scope: &Scope) -> bool {
         .any(|child| expr_references_scope(child, scope))
 }
 
-/// The immediate sub-expressions of `expr` — including those reached through a
-/// subquery, which are visited by way of the subquery's own clauses.
+/// The immediate sub-expressions of `expr`, including those reached through a
+/// subquery. The walk visits those by way of the subquery's own clauses.
 fn expr_children(expr: &Expr) -> Vec<&Expr> {
     let mut owned: Vec<&Expr> = Vec::new();
     match expr {
@@ -8693,7 +8723,7 @@ impl<'a> LateralBinder<'a> {
     /// A reference is substituted only when it cannot bind to a FROM item
     /// *inside* `te`: a qualifier re-introduced there shadows the outer one, and
     /// an unqualified name is substituted only when no enclosing FROM supplies a
-    /// column of that name — `PostgreSQL` resolves the inner query level first
+    /// column of that name. `PostgreSQL` resolves the inner query level first
     /// and falls back to the lateral scope.
     fn bind(
         &mut self,
@@ -8741,7 +8771,7 @@ struct Shadow {
 
 impl Default for Shadow {
     /// At the top of a lateral item nothing is in scope yet, so no name is
-    /// shadowed — which is different from "we do not know what is in scope".
+    /// shadowed. That is different from "we do not know what is in scope".
     fn default() -> Self {
         Self {
             qualifiers: Vec::new(),
@@ -8952,7 +8982,7 @@ fn select_exprs_mut(select: &mut SelectStmt) -> Vec<&mut Expr> {
 /// Read a partitioned parent as the append of its leaf partitions.
 ///
 /// Each leaf is scanned through the ordinary base-table path and its rows are
-/// permuted into the parent's column order — a leaf attached by `ATTACH
+/// permuted into the parent's column order. A leaf attached by `ATTACH
 /// PARTITION` may declare the same columns in a different order, and
 /// `PostgreSQL` maps them by name.
 fn partitioned_scan(
@@ -8987,7 +9017,7 @@ fn partitioned_scan(
 }
 
 /// For each of `target`'s columns, the ordinal of the same-named column in
-/// `source` — the permutation that rewrites a `source`-shaped row into a
+/// `source`, the permutation that rewrites a `source`-shaped row into a
 /// `target`-shaped one. A partition and its parent always declare the same
 /// column names, but `ATTACH PARTITION` maps them by name, not by position.
 pub(crate) fn column_mapping(target: &Table, source: &Table) -> Result<Vec<usize>, ExecError> {
@@ -9005,7 +9035,7 @@ pub(crate) fn column_mapping(target: &Table, source: &Table) -> Result<Vec<usize
 /// The leaf partition a row of `parent`'s shape belongs to, together with the
 /// row permuted into that leaf's own column order.
 ///
-/// `None` means no partition accepts the row — `PostgreSQL`'s 23514.
+/// `None` means no partition accepts the row, which is `PostgreSQL`'s 23514.
 fn route_row_to_leaf(
     kv: &dyn Kv,
     parent: &Table,
@@ -9803,16 +9833,16 @@ fn try_execute_partial_aggregate_pushdown(
 }
 
 /// Stream a supported local aggregate through per-page partial-aggregate
-/// folding instead of materializing every visible row before folding.
+/// folding, instead of a fold over every visible row after it is materialized.
 ///
 /// Fires on exactly one ordinary non-sharded base table when every projection
 /// item decomposes into scalar expressions over pushdown-model aggregate calls
-/// (`CAST(count(*) AS BIGINT)`, `COALESCE(sum(x), 0)`, `sum(a) / count(*)`, …
-/// — or the narrow grouped shape), with a WHERE that parses into the strict
-/// pushdown predicate subset. Everything else — `DISTINCT`, `HAVING`, bare
-/// ungrouped columns, aggregates over non-column arguments, whole-row reads,
-/// non-pushdown filters — keeps the materializing scan and its whole-result
-/// memory budget.
+/// (`CAST(count(*) AS BIGINT)`, `COALESCE(sum(x), 0)`, `sum(a) / count(*)`, …,
+/// or the narrow grouped shape), with a WHERE that parses into the strict
+/// pushdown predicate subset. Everything else keeps the materializing scan and
+/// its whole-result memory budget: `DISTINCT`, `HAVING`, bare ungrouped
+/// columns, aggregates over non-column arguments, whole-row reads, and
+/// non-pushdown filters.
 fn try_execute_local_streaming_aggregate(
     read_ctx: &crate::subquery::SubCtx<'_>,
     s: &SelectStmt,
@@ -9913,8 +9943,9 @@ enum StreamingAggregatePlan {
         calls: Vec<crabka_pgparser::ast::FuncCall>,
         specs: Vec<crate::PartialAggregateSpec>,
     },
-    /// The narrow grouped shape: one spec whose finalized rows — group key
-    /// columns then the aggregate, ordered by key — ARE the output rows.
+    /// The narrow grouped shape: one spec whose finalized rows ARE the output
+    /// rows. Those rows are the group key columns, then the aggregate, ordered
+    /// by key.
     Grouped(crate::PartialAggregateSpec),
 }
 
@@ -9931,7 +9962,7 @@ impl StreamingAggregatePlan {
 /// grouped shape; with no GROUP BY, the deduped aggregate calls (each inside
 /// the pushdown model) with everything around them scalar expressions to
 /// evaluate over the finalized values. `None` when any part falls outside the
-/// model — the caller keeps the materializing scan.
+/// model, and the caller then keeps the materializing scan.
 fn local_streaming_aggregate_plan(table: &Table, s: &SelectStmt) -> Option<StreamingAggregatePlan> {
     if !s.group_by.is_empty() {
         return crate::plan_dist::grouped_partial_aggregate_for_select(
@@ -10041,8 +10072,8 @@ fn single_local_base_table(
 /// Match a FROM that is exactly one sharded base table.
 ///
 /// CTE, view, virtual-catalog, local, and foreign relations all resolve
-/// through their own scan paths, so they deliberately return `None` here —
-/// as does a relation that does not exist at all, whose undefined-table
+/// through their own scan paths, so they deliberately return `None` here, and
+/// so does a relation that does not exist at all, whose undefined-table
 /// error surfaces from the materializing path instead.
 fn single_sharded_base_table(
     catalog_kv: &dyn Kv,
@@ -10239,8 +10270,8 @@ pub(crate) fn table_uses_global_visibility(table: &Table) -> bool {
 /// Refuse `SHARDED BY HASH (col)` on a column whose values the shard-key hasher
 /// cannot turn into bytes, at CREATE TABLE rather than at every INSERT.
 ///
-/// A missing hash column is *not* reported here — the catalog's own validation
-/// raises the undefined-column error for that.
+/// A missing hash column is *not* reported here, because the catalog's own
+/// validation raises the undefined-column error for that.
 fn ensure_hash_shard_key_types_are_supported(
     columns: &[Column],
     sharding: Option<&crabka_pgcatalog::ShardingStrategy>,
@@ -10265,9 +10296,9 @@ fn ensure_hash_shard_key_types_are_supported(
 }
 
 /// The column types [`hash_bucket_for_row`] can hash: those stored as an
-/// `Int4`, `Int8`, `Text`, or `Bytea` datum. Everything else — `boolean`,
-/// `double precision`, `numeric`, the date/time types, `jsonb`, and arrays —
-/// would fail on the write path, so a table is never created with such a key.
+/// `Int4`, `Int8`, `Text`, or `Bytea` datum. Everything else would fail on the
+/// write path, so a table is never created with such a key: `boolean`,
+/// `double precision`, `numeric`, the date/time types, `jsonb`, and arrays.
 fn hash_shard_key_type_is_supported(ty: ColumnType) -> bool {
     matches!(
         ty,
@@ -10675,8 +10706,9 @@ struct BuiltinTypeRow {
     elem: i32,
     /// `pg_type.typarray`: the array type over a scalar, 0 for an array type
     /// and for the scalars crabka has no array type for (`varchar`, `char(n)`,
-    /// `regclass` — [`crabka_pgtypes::ElemType::from_column_type`] refuses
-    /// those, so pointing at an absent row would be worse than reporting none).
+    /// `regclass`). [`crabka_pgtypes::ElemType::from_column_type`] refuses
+    /// those, so a pointer at an absent row would be worse than a report of
+    /// none.
     array: i32,
 }
 
@@ -10728,7 +10760,7 @@ fn scan_plan_table(
 }
 
 /// The key the virtual catalog relations are held under: a bare name for
-/// anything in `pg_catalog`, and `schema.name` elsewhere — which is how
+/// anything in `pg_catalog`, and `schema.name` elsewhere. This is how
 /// `information_schema.tables` has always been spelled here.
 fn virtual_lookup_key(name: &crabka_pgcatalog::RelationName) -> String {
     if name.schema == crate::search_path::PG_CATALOG {
@@ -10741,8 +10773,9 @@ fn virtual_lookup_key(name: &crabka_pgcatalog::RelationName) -> String {
 /// True when `name` denotes a relation the engine synthesises rather than
 /// stores. The resolver consults this alongside the catalog, so an unqualified
 /// `pg_class` finds the catalog relation through the implicit `pg_catalog`
-/// entry exactly as `PostgreSQL` does — including when a user relation of the
-/// same name exists in `public`, which the oracle confirms does not shadow it.
+/// entry exactly as `PostgreSQL` does. This includes the case where a user
+/// relation of the same name exists in `public`, which the oracle confirms does
+/// not shadow it.
 pub(crate) fn is_virtual_relation(name: &crabka_pgcatalog::RelationName) -> bool {
     virtual_table(&virtual_lookup_key(name)).is_some()
 }
@@ -11107,7 +11140,7 @@ fn virtual_catalog_rows(
 /// `pg_inherits`: one row per partition, naming its direct parent.
 ///
 /// A partition is always its parent's only inheritance step, so `inhseqno` is
-/// 1 and `inhdetachpending` false — the concurrent-detach flag has no state to
+/// 1 and `inhdetachpending` false. The concurrent-detach flag has no state to
 /// report here, because detach is a single catalog batch.
 fn pg_inherits_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
@@ -11157,8 +11190,8 @@ fn pg_partitioned_table_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exe
     Ok(rows)
 }
 
-/// `pg_namespace`: one row per schema the catalog holds — nothing is added
-/// here, so a schema appears exactly once and a dropped one not at all.
+/// `pg_namespace`: one row per schema the catalog holds. This adds nothing, so
+/// a schema appears exactly once and a dropped one not at all.
 fn pg_namespace_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(crabka_pgcatalog::list_schemas(catalog_kv)?
         .into_iter()
@@ -11302,7 +11335,7 @@ struct PgClassRow<'a> {
     relam: i32,
     relispartition: bool,
     /// `p` for an ordinary relation, `t` for one in a session's temporary
-    /// namespace — which is where every temporary relation is, so the schema is
+    /// namespace. That is where every temporary relation is, so the schema is
     /// the whole fact and nothing stores it twice.
     relpersistence: char,
 }
@@ -11443,7 +11476,7 @@ fn schema_owner_name(owner: &str) -> &'static str {
 }
 
 /// True when `schema` is a temporary namespace belonging to some *other*
-/// session — `PostgreSQL`'s `pg_is_other_temp_schema`, which its
+/// session. This is `PostgreSQL`'s `pg_is_other_temp_schema`, which its
 /// `information_schema` views filter relations on.
 ///
 /// `pg_class`, `pg_namespace` and `information_schema.schemata` do not filter:
@@ -11456,7 +11489,7 @@ fn is_other_temp_schema(schema: &str, backend_id: i32) -> bool {
 }
 
 /// Every relation the SQL standard calls a table: base tables, foreign tables,
-/// and — F-2 — views, which `table_type = 'VIEW'` distinguishes.
+/// and (F-2) views, which `table_type = 'VIEW'` distinguishes.
 fn information_schema_tables_rows(
     catalog_kv: &dyn Kv,
     backend_id: i32,
@@ -11708,7 +11741,7 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
 
 /// The output text of a value whose rendering does not depend on the session
 /// time zone, for the catalog's default-expression rendering (which has no
-/// session context). `None` for a `timestamptz` array element — the one case a
+/// session context). `None` for a `timestamptz` array element, the one case a
 /// jsonb/array value can be zone-dependent.
 fn zone_independent_text(value: &Datum) -> Option<String> {
     fn zone_dependent(value: &Datum) -> bool {
@@ -11781,8 +11814,8 @@ fn attribute_rows_for_table(relid: i32, table: &Table) -> Result<Vec<Vec<Datum>>
 
 /// `pg_attribute.atttypmod`. [`ColumnType::typmod`] covers the string types;
 /// `numeric(p, s)` needs PostgreSQL's packed `((p << 16) | s) + 4` too, because
-/// `format_type(atttypid, atttypmod)` — which is how `\d` and every ORM print a
-/// column's type — reconstructs `numeric(10,2)` from exactly that word.
+/// `format_type(atttypid, atttypmod)` reconstructs `numeric(10,2)` from exactly
+/// that word. That is how `\d` and every ORM print a column's type.
 fn catalog_typmod(ty: ColumnType) -> i32 {
     match ty {
         ColumnType::Numeric(Some(typmod)) => {
@@ -11793,7 +11826,7 @@ fn catalog_typmod(ty: ColumnType) -> i32 {
 }
 
 /// `attcollation`: the database default collation for a collatable type, 0 for
-/// everything else — the exact test `\d`'s collation column makes.
+/// everything else, the exact test `\d`'s collation column makes.
 fn text_collation_oid(ty: ColumnType) -> i32 {
     if matches!(
         ty,
@@ -11873,8 +11906,8 @@ fn text_search_catalog_rows(
 ///
 /// `typrelid` of a composite is the derived `pg_class` oid its attributes hang
 /// off (`pg_attribute` uses the same derivation), and `typbasetype` of a domain
-/// is the base type's oid — the two columns `\d` and every driver's type
-/// introspection walk.
+/// is the base type's oid. Those are the two columns `\d` and every driver's
+/// type introspection walk.
 fn user_type_rows() -> Vec<Vec<Datum>> {
     use crabka_pgtypes::usertype;
     usertype::all()
@@ -12085,7 +12118,7 @@ fn virtual_relation_name(name: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(_, relation)| relation)
 }
 
-/// The schema a synthesised catalog relation lives in — `information_schema`
+/// The schema a synthesised catalog relation lives in: `information_schema`
 /// for the SQL-standard views, `pg_catalog` for everything else.
 fn virtual_relation_schema(name: &str) -> &'static str {
     if name.starts_with("information_schema.") {
@@ -12122,7 +12155,7 @@ pub(crate) fn resolve_regclass(
 
 /// The `regclass` value for a relation oid: the oid paired with the name
 /// `regclassout` prints for it. An oid no relation has is not an error in
-/// PostgreSQL — it keeps the fallback rendering, `-` for `InvalidOid` and the
+/// PostgreSQL. It keeps the fallback rendering, `-` for `InvalidOid` and the
 /// bare number otherwise, which [`RegclassValue::unresolved`] supplies.
 pub(crate) fn regclass_by_oid(
     catalog_kv: &dyn Kv,
@@ -12136,7 +12169,7 @@ pub(crate) fn regclass_by_oid(
     )
 }
 
-/// Whether a column of this type holds a `regclass` value — the type itself, or
+/// Whether a column of this type holds a `regclass` value: the type itself, or
 /// a domain over it, whose values *are* the base type's values.
 fn holds_regclass(ty: ColumnType) -> bool {
     match ty {
@@ -12148,8 +12181,9 @@ fn holds_regclass(ty: ColumnType) -> bool {
 
 /// Re-attach the relation name to every `regclass` a scan just decoded.
 ///
-/// The row encoding stores a `regclass` as its bare oid — all PostgreSQL keeps
-/// on disk too — so a decoded value arrives as a `Datum::Int4`. PostgreSQL
+/// The row encoding stores a `regclass` as its bare oid, which is all
+/// PostgreSQL keeps on disk too, so a decoded value arrives as a
+/// `Datum::Int4`. PostgreSQL
 /// consults the catalog in `regclassout`; crabka cannot, because the text
 /// encoder and the `→ text` cast both live in a crate with no catalog handle.
 /// The scan is the last point where the catalog *is* in scope, so the name is
@@ -12173,8 +12207,8 @@ fn resolve_scanned_regclass(
 }
 
 /// The positions of `table`'s `regclass`-valued columns within a scanned row
-/// whose first column sits at `offset` — non-zero for a join result, which
-/// concatenates one table's columns after another's.
+/// whose first column sits at `offset`. That offset is non-zero for a join
+/// result, which concatenates one table's columns after another's.
 fn regclass_column_indexes(table: &crabka_pgcatalog::Table, offset: usize) -> Vec<usize> {
     table
         .columns
@@ -12261,7 +12295,7 @@ pub(crate) fn regclass_cast(
 
 /// The base-table half of [`resolve_regclass`]: virtual catalog relations and
 /// ordinary/foreign tables. [`crate::catalog_fn`] layers views, sequences and
-/// indexes — the other three `pg_class` kinds — on top.
+/// indexes, the other three `pg_class` kinds, on top.
 ///
 /// # Errors
 ///
@@ -12488,8 +12522,8 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
     ]
 }
 
-/// The `pg_type.typname` of an element type's array type — PostgreSQL's leading
-/// underscore over the element's own `typname`.
+/// The `pg_type.typname` of an element type's array type, which is
+/// PostgreSQL's leading underscore over the element's own `typname`.
 fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
     use crabka_pgtypes::ElemType;
     match elem {
@@ -12516,8 +12550,8 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
 
 /// The scalar rows plus one array row per supported element type (and `_json`,
 /// the array of the `json` input alias). Array types are base types like their
-/// elements — `typtype` 'b' — in category 'A', variable length, and carry the
-/// element's oid in `typelem`.
+/// elements (`typtype` 'b'), in category 'A', variable length, and they carry
+/// the element's oid in `typelem`.
 fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
     static ROWS: std::sync::LazyLock<Vec<BuiltinTypeRow>> = std::sync::LazyLock::new(|| {
         let mut rows = scalar_type_rows().to_vec();
@@ -12670,7 +12704,7 @@ pub(crate) fn execute_read(
 /// The scans, joins and locks the read performs attach to this, so it is the
 /// level at which "the query itself was slow" separates from "getting a read
 /// timestamp was slow". `pg.join_strategy` stays empty unless the planner
-/// actually chose a distributed join — see [`try_distributed_inner_equi_join`].
+/// actually chose a distributed join. See [`try_distributed_inner_equi_join`].
 fn exec_read_span(read_ctx: &crate::subquery::SubCtx<'_>) -> tracing::Span {
     tracing::debug_span!(
         target: crate::telemetry::EXEC_TARGET,
@@ -12683,9 +12717,11 @@ fn exec_read_span(read_ctx: &crate::subquery::SubCtx<'_>) -> tracing::Span {
     )
 }
 
-/// Run a locking SELECT's body without taking any locks — the case where its
-/// FROM names no base table (a FROM-less SELECT, a set-returning function, a
-/// derived table), which `PostgreSQL` executes as an ordinary read.
+/// Run a locking SELECT's body without any locks.
+///
+/// This is the case where its FROM names no base table (a FROM-less SELECT, a
+/// set-returning function, a derived table), which `PostgreSQL` executes as an
+/// ordinary read.
 fn execute_read_body(
     read_ctx: &crate::subquery::SubCtx<'_>,
     s: &SelectStmt,
@@ -12978,7 +13014,7 @@ pub(crate) fn project_rows_ordered(
 }
 
 /// Pair each source row with the values of `keys`, under the blocking-query
-/// memory budget. With no keys the rows pass through unmeasured — nothing is
+/// memory budget. With no keys the rows pass through unmeasured. Nothing is
 /// sorted, so nothing extra is held.
 fn key_source_rows(
     keys: &[SelectOrderKey],
@@ -13030,7 +13066,7 @@ pub(crate) struct DistinctOnPlan {
 /// `PostgreSQL`'s compatibility rule (`transformDistinctOnClause`) is
 /// **one-directional**, and it is not a set-match. It walks the ORDER BY keys
 /// adopting each one that is also a `DISTINCT ON` expression; `42P10` fires
-/// only once an ORDER BY key has been *skipped*, and then in two places — for a
+/// only once an ORDER BY key has been *skipped*, and then in two places: for a
 /// later ORDER BY key that is in the `ON` list, and for any `ON` expression the
 /// ORDER BY never adopted. So `DISTINCT ON (a, b) … ORDER BY a` is valid (`b` is
 /// appended with default `ASC NULLS LAST` semantics), while
@@ -13150,7 +13186,7 @@ type KeyedRows = Vec<(Vec<Datum>, Vec<Datum>)>;
 
 /// Keep the first row of each `DISTINCT ON` key group. The rows are already in
 /// the order that decides which row wins, so this is a single pass over
-/// consecutive-equal groups — the shape `PostgreSQL`'s `Unique` node has.
+/// consecutive-equal groups, the shape `PostgreSQL`'s `Unique` node has.
 fn keep_first_per_distinct_on_group(
     keyed: KeyedRows,
     on: &[Expr],
@@ -13595,8 +13631,9 @@ pub(crate) fn resolve_projection(
 /// How a `*` expansion refers to the scope column at `index`.
 ///
 /// By name where that name resolves back to this very column, and positionally
-/// where it does not. A relation whose column names repeat — `ROWS FROM (f(),
-/// f())`, or a multi-argument `unnest` — would otherwise expand `*` into
+/// where it does not. A relation whose column names repeat, such as
+/// `ROWS FROM (f(), f())` or a multi-argument `unnest`, would otherwise expand
+/// `*` into
 /// references `PostgreSQL` itself would call ambiguous, even though `SELECT *`
 /// is valid there and only a bare reference to the repeated name is `42702`.
 fn wildcard_reference(scope: &Scope, index: usize, column: &ColumnBinding) -> Expr {
@@ -13847,7 +13884,7 @@ pub(crate) fn describe_returning(
 /// A resolved `CREATE TABLE` definition: catalog columns, `CHECK` constraints,
 /// the sequences its SERIAL/identity columns need, its constraint-backed
 /// indexes, and the `FOREIGN KEY` clauses it collected (named, but not yet
-/// resolved — see [`PendingForeignKey`]).
+/// resolved; see [`PendingForeignKey`]).
 type TableDefinition = (
     Vec<Column>,
     Vec<crabka_pgcatalog::CheckConstraint>,
@@ -14283,7 +14320,8 @@ struct PendingForeignKey {
 }
 
 /// The constraint names a `CREATE TABLE` has assigned to things that are not
-/// `CHECK`s — one namespace per relation, so a `CHECK` has to step around them.
+/// `CHECK`s. There is one namespace per relation, so a `CHECK` must step
+/// around them.
 fn non_check_constraint_names<'a>(
     indexes: &'a [crabka_pgcatalog::NewIndex],
     foreign_keys: &'a [PendingForeignKey],
@@ -14541,8 +14579,8 @@ fn backfill_generated_column(
 /// refused for this wave.
 ///
 /// [`crate::fk::resolve_foreign_key`] refuses a *sharded* relation itself, but
-/// [`Table`] carries no partition flag — the partition scheme lives in its own
-/// metadata — so only the DDL caller can raise this.
+/// [`Table`] carries no partition flag, because the partition scheme lives in
+/// its own metadata. So only the DDL caller can raise this.
 fn reject_partitioned_foreign_key(constraint: &str) -> ExecError {
     ExecError::Unsupported(format!(
         "foreign key constraint \"{constraint}\" on a partitioned table is not supported"
@@ -14554,8 +14592,9 @@ fn reject_partitioned_foreign_key(constraint: &str) -> ExecError {
 ///
 /// A `CREATE TABLE` whose `FOREIGN KEY` references the relation being created
 /// has to name the unique index proving its referenced columns are a key, and
-/// that index exists only as a staged write until the statement commits — this
-/// is where its allocated id can be observed. Values that are not index records
+/// that index exists only as a staged write until the statement commits. This
+/// is where a caller can observe its allocated id. Values that are not index
+/// records
 /// (the next-id counter) simply fail to decode, and only the names this batch
 /// asked for are kept.
 fn staged_indexes_of(
@@ -14746,9 +14785,9 @@ fn scan_all_row_versions(kv: &dyn Kv, table: &Table) -> Result<Vec<RowVersion>, 
         .collect()
 }
 
-/// The live rows among already-decoded row versions, as `(rowid, xmin, row)` —
-/// the shape [`scan_live`] returns, but derived from an in-flight `ALTER
-/// TABLE`'s working set instead of from storage.
+/// The live rows among already-decoded row versions, as `(rowid, xmin, row)`,
+/// the shape [`scan_live`] returns. This one is derived from an in-flight
+/// `ALTER TABLE`'s working set instead of from storage.
 fn live_row_versions(
     kv: &dyn Kv,
     table: &Table,
@@ -14779,7 +14818,7 @@ fn live_row_versions(
 
 /// Whether a stored row version is settled dead: its inserting transaction
 /// aborted, or its deleting one committed. No snapshot can ever see such a
-/// version again, so a column rewrite may put anything in it — `PostgreSQL`'s
+/// version again, so a column rewrite may put anything in it. `PostgreSQL`'s
 /// own table rewrite discards them outright.
 ///
 /// Deliberately stricter than "invisible under an all-committed snapshot": a
@@ -14816,15 +14855,15 @@ struct AlterTableState {
     /// type change for the same column in one `ALTER TABLE`.
     retyped_columns: Vec<String>,
     /// Foreign keys this statement added. They are not in the catalog yet, so a
-    /// later subcommand — a name collision check, a `VALIDATE`, a `DROP` — can
-    /// only find them here.
+    /// later subcommand can only find them here: a name collision check, a
+    /// `VALIDATE`, or a `DROP`.
     created_foreign_keys: Vec<crabka_pgcatalog::ForeignKey>,
     /// Names of foreign keys this statement dropped; a later subcommand must not
     /// resurrect them from the catalog.
     dropped_foreign_keys: Vec<String>,
     /// Creation-order ids for the foreign keys this statement adds. One cursor
     /// spans every subcommand, because none of their records reach the KV until
-    /// the whole batch commits — two `ADD CONSTRAINT`s reading the stored
+    /// the whole batch commits. Two `ADD CONSTRAINT`s that read the stored
     /// counter would otherwise tie, and a tie has no defined firing order.
     foreign_key_ids: crabka_pgcatalog::ForeignKeyIds,
 }
@@ -14836,16 +14875,16 @@ struct AlterTableState {
 /// store directly. Two things do:
 ///
 /// - the end-of-statement referential drain, whose whole premise is that the
-///   statement's rows already exist — `INSERT INTO t (id, boss) VALUES (1, 1)`
+///   statement's rows already exist. `INSERT INTO t (id, boss) VALUES (1, 1)`
 ///   against a self-referencing foreign key succeeds because the parent row the
 ///   check looks for is the one the statement just staged;
 /// - a foreign key back-validated by a multi-subcommand `ALTER TABLE`, which has
-///   to resolve the relation as this statement has already rewritten it — an
-///   added column, a rebuilt index — not as storage still holds it.
+///   to resolve the relation as this statement has already rewritten it, with
+///   an added column or a rebuilt index, and not as storage still holds it.
 ///
 /// Read-only through the [`Kv`] trait: the real batch is written by the session
 /// once the statement is complete. [`StagedKv::stage`] is the one way the
-/// overlay grows, and the drain's referential actions are the one caller — an
+/// overlay grows, and the drain's referential actions are the one caller. An
 /// action's ops belong in the view the next action reads, which is what makes a
 /// second constraint's action operate on the row's *current* image and a cascade
 /// cycle come back around to a row that reads as deleted.
@@ -14868,8 +14907,9 @@ impl<'a> StagedKv<'a> {
     /// Fold more ops into the overlay, so every later read through this view
     /// sees them.
     ///
-    /// The lock spans the fold and nothing else — no read here awaits — so the
-    /// interior mutability costs one uncontended acquire per KV operation.
+    /// The lock spans the fold and nothing else, and no read here awaits. So
+    /// the interior mutability costs one uncontended acquire per KV
+    /// operation.
     fn stage(&self, ops: &[crabka_pgkv::WriteOp]) {
         let mut staged = self.staged.lock().expect("staged write-batch mutex");
         for op in ops {
@@ -14989,8 +15029,8 @@ impl AlterTableState {
     }
 
     /// The relation's indexes with this statement's own creations and drops
-    /// folded in — what a foreign key added here must resolve its referenced
-    /// index against.
+    /// folded in. That is what a foreign key added here must resolve its
+    /// referenced index against.
     fn current_indexes(&self, kv: &dyn Kv) -> Result<Vec<crabka_pgcatalog::Index>, ExecError> {
         let mut indexes = crabka_pgcatalog::list_table_indexes(kv, &self.table.name)?;
         indexes.retain(|index| !self.dropped_indexes.contains(&index.name));
@@ -15018,7 +15058,7 @@ impl AlterTableState {
         Ok(keys)
     }
 
-    /// Every constraint name the relation uses, of every kind — `PostgreSQL`
+    /// Every constraint name the relation uses, of every kind. `PostgreSQL`
     /// keeps one namespace per relation, so a new constraint must step around
     /// all three kinds.
     fn taken_constraint_names(&self, kv: &dyn Kv) -> Result<Vec<String>, ExecError> {
@@ -15718,7 +15758,7 @@ fn alter_table_action_ops(
 ///
 /// The candidate must have every column the parent has (42804 otherwise), and
 /// every row it already stores must satisfy the bound being attached (23514
-/// otherwise) — `PostgreSQL` scans the table before it will attach it.
+/// otherwise). `PostgreSQL` scans the table before it will attach it.
 fn attach_partition_ops(
     kv: &dyn Kv,
     parent: &Table,
@@ -15784,8 +15824,8 @@ fn attach_partition_ops(
     Ok(ops)
 }
 
-/// `NOT VALID` applies only to constraints `PostgreSQL` can validate lazily —
-/// `CHECK` and `FOREIGN KEY`. An index-backed constraint has to be built now.
+/// `NOT VALID` applies only to constraints `PostgreSQL` can validate lazily:
+/// `CHECK` and `FOREIGN KEY`. An index-backed constraint must be built now.
 fn reject_not_valid(not_valid: bool, kind: &str) -> Result<(), ExecError> {
     if not_valid {
         return Err(ExecError::Unsupported(format!(
@@ -15795,7 +15835,7 @@ fn reject_not_valid(not_valid: bool, kind: &str) -> Result<(), ExecError> {
     Ok(())
 }
 
-/// One `FOREIGN KEY` clause as a DDL statement writes it, in either spelling —
+/// One `FOREIGN KEY` clause as a DDL statement writes it, in either spelling:
 /// `[CONSTRAINT <name>] FOREIGN KEY (…) REFERENCES …` or a column-level
 /// `REFERENCES`. Shared by `CREATE TABLE` and every `ALTER TABLE` subcommand
 /// that can carry one.
@@ -15806,9 +15846,11 @@ struct AddForeignKey<'a> {
     attributes: crabka_pgparser::ast::ConstraintAttributes,
 }
 
-/// Add one `FOREIGN KEY`, back-validating it against the relation's live rows
-/// first — unless `NOT VALID`, which stores the constraint without that scan and
-/// still governs every subsequent write.
+/// Add one `FOREIGN KEY` and back-validate it against the relation's live rows
+/// first.
+///
+/// `NOT VALID` is the exception. It stores the constraint without that scan,
+/// and the constraint still governs every subsequent write.
 ///
 /// The scan reads [`AlterTableState::live_rows`] and resolves through
 /// [`AlterTableState::staged_catalog`], never storage, so a constraint added in
@@ -15891,9 +15933,9 @@ fn add_foreign_key_constraint(
 ///
 /// DDL runs against a single KV handle standing in for the local store, the
 /// catalog and range 0's global clog alike, under an all-committed snapshot plus
-/// the open transaction's own xid — the same visibility a unique-index backfill
-/// uses, and for the same reason: `BEGIN; INSERT …; ALTER TABLE … ADD FOREIGN
-/// KEY` has to validate against the rows this transaction has written.
+/// the open transaction's own xid. That is the same visibility a unique-index
+/// backfill uses, and for the same reason: `BEGIN; INSERT …; ALTER TABLE … ADD
+/// FOREIGN KEY` must validate against the rows this transaction has written.
 fn validate_foreign_key_against_state(
     kv: &dyn Kv,
     state: &mut AlterTableState,
@@ -15959,8 +16001,9 @@ fn drop_foreign_key_constraint(kv: &dyn Kv, state: &mut AlterTableState, name: &
 ///
 /// `PostgreSQL` runs full parse analysis over the predicate when the constraint
 /// is created, so an unknown column, a subquery, an aggregate, or a non-boolean
-/// result is an error on the `CREATE TABLE` / `ALTER TABLE` — never a table that
-/// accepts the DDL and then rejects (or silently mis-filters) its own rows.
+/// result is an error on the `CREATE TABLE` / `ALTER TABLE`. It is never a
+/// table that accepts the DDL and then rejects (or silently mis-filters) its
+/// own rows.
 fn validate_check_predicate(table: &Table, predicate: &str) -> Result<(), ExecError> {
     use crabka_pgparser::ast::Expr;
 
@@ -16019,10 +16062,11 @@ fn validate_check_predicate(table: &Table, predicate: &str) -> Result<(), ExecEr
     Ok(())
 }
 
-/// Add one `CHECK`, back-validating it against the table's live rows first —
-/// `PostgreSQL` refuses the constraint rather than leaving violating rows.
+/// Add one `CHECK` and back-validate it against the table's live rows first.
+///
+/// `PostgreSQL` refuses the constraint and does not leave violating rows.
 /// `valid` is false for `NOT VALID`, which stores the constraint without that
-/// scan; it still governs every subsequent write.
+/// scan. It still governs every subsequent write.
 fn add_check_constraint(
     state: &mut AlterTableState,
     name: Option<String>,
@@ -16185,8 +16229,8 @@ fn add_constraint_index(
 ///
 /// `PostgreSQL` coerces the stored value in *assignment* context. On top of the
 /// ordinary assignment casts that admits every I/O-conversion cast whose target
-/// is a string type — `int4 → text` needs no `USING`, `text → int4` does — plus
-/// the temporal narrowings `PostgreSQL` marks assignment-level.
+/// is a string type. `int4 → text` needs no `USING`, and `text → int4` does.
+/// It also admits the temporal narrowings `PostgreSQL` marks assignment-level.
 fn alter_type_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     use ColumnType::{Date, Time, Timestamp, Timestamptz, Timetz};
 
@@ -16250,7 +16294,7 @@ fn rebuild_indexes_on_column(
 }
 
 /// Remove one column from the working schema and every stored row version, and
-/// drop the indexes, `CHECK`s and foreign keys that depended on it —
+/// drop the indexes, `CHECK`s and foreign keys that depended on it. This is
 /// `PostgreSQL`'s own `DROP COLUMN` dependency handling.
 ///
 /// A foreign key *keyed on* the dropped column goes with it, exactly as its
@@ -16403,10 +16447,10 @@ fn drop_index_by_name(
 /// * a bare `<old>` when the renamed table is the *only* relation in the view's
 ///   `FROM` that has a column of that name.
 ///
-/// When neither can be proven — the view references a relation the catalog
-/// cannot resolve, or another referenced relation also has a column named
-/// `<old>` or `<new>` — the whole `ALTER TABLE` fails with `0A000` naming the
-/// view, so a rename can never silently change what a view returns.
+/// Neither may be provable: the view references a relation the catalog cannot
+/// resolve, or another referenced relation also has a column named `<old>` or
+/// `<new>`. Then the whole `ALTER TABLE` fails with `0A000` naming the view, so
+/// a rename can never silently change what a view returns.
 fn rename_column_dependencies(
     kv: &dyn Kv,
     state: &mut AlterTableState,
@@ -16612,10 +16656,10 @@ fn view_reads_column(
 ///
 /// `PostgreSQL` stores a view as a parsed rule over relation oids, so renaming
 /// a table it reads is invisible to it; Crabka stores view *text*, so the
-/// reference has to be substituted. Only positions the token walk can prove are
-/// rewritten — a `FROM`/`JOIN` relation slot, and a `<table>.<column>`
+/// the substitution must happen. The rewrite touches only positions the token
+/// walk can prove: a `FROM`/`JOIN` relation slot, and a `<table>.<column>`
 /// qualifier when that item carries no alias. Any other occurrence of the name
-/// is `0A000` rather than a silent change of what the view returns.
+/// is `0A000`, not a silent change of what the view returns.
 fn rename_table_view_ops(
     kv: &dyn Kv,
     old_name: &crabka_pgcatalog::RelationName,
@@ -16718,8 +16762,8 @@ fn view_from_item_qualifier(
 }
 
 /// Substitute `old_name` with `new_name` at the given token indices, leaving all
-/// other source text — including other occurrences of the same identifier —
-/// exactly as written.
+/// other source text exactly as written, including other occurrences of the
+/// same identifier.
 ///
 /// `None` when a target is spelled as a quoted identifier: its source span is
 /// longer than the token text, so the substitution cannot be made without
@@ -16756,13 +16800,13 @@ fn definition_mentions_identifier(definition: &str, name: &str) -> bool {
 }
 
 /// The stored views that depend on `table`, or on one of its columns when
-/// `column` is given — `PostgreSQL` tracks a view's dependency per column, so
-/// dropping a column no view reads is allowed.
+/// `column` is given. `PostgreSQL` tracks a view's dependency per column, so a
+/// drop of a column no view reads is allowed.
 /// Every relation one `DROP TABLE` statement will remove: each name it resolves,
 /// plus the partitions that go with it. Sequence entries and (under `IF EXISTS`)
 /// missing names contribute nothing.
-/// [`crate::partition::is_partitioned`] for a relation named by the AST — the
-/// DML dispatch tests it in a match guard, where the name has to resolve first.
+/// [`crate::partition::is_partitioned`] for a relation named by the AST. The
+/// DML dispatch tests it in a match guard, where the name must resolve first.
 fn is_partitioned_ref(
     kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
@@ -16775,8 +16819,8 @@ fn is_partitioned_ref(
 /// The ops that clear the foreign keys blocking a `DROP TABLE`, or the 2BP01
 /// that refuses it.
 ///
-/// `CASCADE` drops the referencing *constraint*, not the referencing relation —
-/// the child table survives, minus the key.
+/// `CASCADE` drops the referencing *constraint*, not the referencing relation.
+/// The child table survives, minus the key.
 fn drop_blocking_foreign_keys(
     kv: &dyn Kv,
     table: &Table,
@@ -17364,7 +17408,8 @@ mod tests {
 
     /// Two output columns of the same name would define a relation whose columns
     /// cannot be told apart, so `CREATE VIEW` refuses it with `PostgreSQL`'s
-    /// 42701 before creating anything — the same rule `CREATE TABLE AS` applies.
+    /// 42701 before it creates anything. `CREATE TABLE AS` applies the same
+    /// rule.
     #[tokio::test]
     async fn create_view_refuses_duplicate_output_column_names() {
         use assert2::assert;
@@ -18990,7 +19035,8 @@ mod tests {
     }
 
     /// The row-count clauses coerce to bigint by assignment, so a type with no
-    /// such cast is 42804 naming it — not the 42846 an explicit cast would give.
+    /// such cast is 42804 naming it, not the 42846 an explicit cast would
+    /// give.
     #[tokio::test]
     async fn limit_and_offset_reject_non_numeric_arguments() {
         use assert2::assert;
@@ -19632,9 +19678,10 @@ mod tests {
     }
 
     #[tokio::test]
-    /// A short `VALUES` row is legal without a column list — PostgreSQL fills the
-    /// trailing columns from their defaults — but naming more target columns than
-    /// there are expressions is `42601`. Both were verified against the 18.4
+    /// A short `VALUES` row is legal without a column list, because PostgreSQL
+    /// fills the trailing columns from their defaults. But a statement that
+    /// names more target columns than there are expressions is `42601`. Both
+    /// were verified against the 18.4
     /// oracle; this test previously asserted `42804` for the legal form.
     async fn insert_row_shorter_than_the_table_fills_defaults() {
         use assert2::assert;
@@ -20008,7 +20055,7 @@ mod tests {
         );
     }
 
-    /// SP21: after a fresh-`g'` re-attempt, a row has TWO physical versions — the
+    /// SP21: after a fresh-`g'` re-attempt, a row has TWO physical versions: the
     /// abandoned attempt's `Prepared(Li_old -> g)` with `g` Aborted, and the re-attempt's
     /// `Prepared(Li_new -> g')` with `g'` Committed. `find_visible_one` must return the
     /// committed-`g'` version (highest xmin) and never the aborted shadow; exactly one
@@ -20223,7 +20270,7 @@ mod tests {
         }
 
         /// A scanner that RECORDS every `ScanBounds` it is handed and returns a
-        /// fixed corpus of rows IGNORING the bounds — so a result-equivalence test
+        /// fixed corpus of rows IGNORING the bounds. So a result-equivalence test
         /// proves the residual WHERE still filters, and a recording test proves the
         /// pushed bounds reached the scan.
         struct RecordingScanner {
@@ -20384,8 +20431,8 @@ mod tests {
     }
 
     /// `CREATE USER MAPPING FOR CURRENT_USER` must be findable via
-    /// `crabka_pgcatalog::get_user_mapping(kv, "public", server)` — confirming the key is
-    /// stored under "public", not "current_user".
+    /// `crabka_pgcatalog::get_user_mapping(kv, "public", server)`, which confirms
+    /// the key is stored under "public", not "current_user".
     #[test]
     fn create_user_mapping_for_current_user_stored_under_public() {
         use crabka_pgkv::{Kv, MemKv};
@@ -20914,8 +20961,8 @@ mod tests {
         assert!(super::ensure_hash_shard_key_types_are_supported(&columns, None).is_ok());
     }
 
-    /// The write-path backstop still refuses an unhashable shard key — reachable
-    /// for a table whose sharding was attached outside CREATE TABLE.
+    /// The write-path backstop still refuses an unhashable shard key. That is
+    /// reachable for a table whose sharding was attached outside CREATE TABLE.
     #[test]
     fn hashing_a_row_refuses_an_unhashable_shard_key() {
         use assert2::assert;
@@ -20955,7 +21002,7 @@ mod tests {
         );
     }
 
-    /// The DDL path builds a hash sharding only from a one-column key — the
+    /// The DDL path builds a hash sharding only from a one-column key, the
     /// arity [`super::hash_bucket_for_row`] can encode. The grammar already
     /// refuses a wider `SHARDED BY HASH` list, so this covers the seam for an
     /// AST built by something other than the parser. Bucket counts are still

@@ -1,8 +1,10 @@
-//! Unified group-coordinator subsystem for KIP-848. Shared infra and
-//! persistence for both the classic and next-gen group protocols.
+//! Unified group-coordinator subsystem for KIP-848.
+//!
+//! The subsystem gives shared infrastructure and persistence to both the
+//! classic and the next-gen group protocols.
 //!
 //! [`GroupCoordinator`] is the single owner of the next-gen consumer-group
-//! machinery: it spawns per-group actors, tracks each group's locked type,
+//! machinery. It spawns per-group actors, tracks each group's locked type,
 //! and replays persisted state during bootstrap.
 pub mod actor;
 pub mod assignor;
@@ -156,10 +158,13 @@ impl OffsetRecordBatchBuilder {
     }
 }
 
-/// Locked protocol identity for a `group_id`. Classic/next-gen actors enforce
-/// their lock via the actor's [`GroupKindTag`]; share groups (KIP-932) live in
-/// a separate `share_groups` registry and record their lock here so that the
-/// classic/next-gen and share namespaces can't collide on the same id.
+/// Locked protocol identity for a `group_id`.
+///
+/// Classic and next-gen actors enforce their lock through the actor's
+/// [`GroupKindTag`]. Share groups from KIP-932 live in a separate
+/// `share_groups` registry and record their lock here, so that the
+/// classic/next-gen namespace and the share namespace cannot collide on the
+/// same id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupType {
     Classic,
@@ -177,26 +182,28 @@ pub struct GroupCoordinator {
     pub groups: Arc<DashMap<String, Arc<GroupActorHandle>>>,
     /// Per-`group_id` share-group actor handles (KIP-932).
     pub share_groups: Arc<DashMap<String, Arc<ShareGroupActorHandle>>>,
-    /// First record persisted per `group_id` locks its type for life (the
-    /// classic↔next-gen↔share namespace guard).
+    /// The first record persisted for a `group_id` locks its type for life.
+    /// This is the classic↔next-gen↔share namespace guard.
     pub group_types: Arc<DashMap<String, GroupType>>,
-    /// Bootstrap-time accumulator for next-gen state; drained by
-    /// `finalize_bootstrap`.
+    /// Bootstrap-time accumulator for next-gen state. `finalize_bootstrap`
+    /// drains it.
     pub seeds: Arc<DashMap<String, GroupSeed>>,
-    /// Bootstrap-time share-group accumulator; drained by `finalize_bootstrap`.
+    /// Bootstrap-time share-group accumulator. `finalize_bootstrap` drains it.
     pub share_seeds: Arc<DashMap<String, ShareGroupSeed>>,
-    /// Last-known-good next-gen state per group, populated alongside every
-    /// successful actor write. Used to seed a fresh actor when the
-    /// previous instance crashed after a log-write failure.
+    /// Last-known-good next-gen state per group. Every successful actor write
+    /// also writes here. The coordinator seeds a fresh actor from this cache
+    /// when the previous instance crashed after a log-write failure.
     pub seeds_cache: Arc<DashMap<String, GroupSeed>>,
     /// Last-known-good share-group state, the share-group analogue of
     /// `seeds_cache`.
     pub share_seeds_cache: Arc<DashMap<String, ShareGroupSeed>>,
-    /// KIP-932 group-coordinator → share-state-persister bridge. Set once in
-    /// `Broker::start` after both the `ShareCoordinator` and this coordinator
-    /// exist. Per-group share actors read it (via [`Self::share_persister`]) to
-    /// drive Initialize/Delete lifecycle calls after reconcile. `None` in the
-    /// pure-coordinator unit tests, where the lifecycle hook is a no-op.
+    /// KIP-932 group-coordinator → share-state-persister bridge.
+    ///
+    /// `Broker::start` sets it once, after both the `ShareCoordinator` and
+    /// this coordinator exist. Per-group share actors read it through
+    /// [`Self::share_persister`] to drive the Initialize and Delete lifecycle
+    /// calls after reconcile. It is `None` in the pure-coordinator unit tests,
+    /// where the lifecycle hook does nothing.
     pub(crate) share_persister:
         std::sync::OnceLock<Arc<crate::share_coordinator::persister_client::SharePersister>>,
 
@@ -204,21 +211,27 @@ pub struct GroupCoordinator {
     pub streams_config: Arc<StreamsGroupConfig>,
     /// Per-`group_id` streams-group actor handles (KIP-1071).
     pub streams_groups: Arc<DashMap<String, Arc<StreamsGroupActorHandle>>>,
-    /// Bootstrap-time streams-group accumulator; drained by `finalize_bootstrap`.
+    /// Bootstrap-time streams-group accumulator. `finalize_bootstrap` drains
+    /// it.
     pub streams_seeds: Arc<DashMap<String, StreamsGroupSeed>>,
     /// Last-known-good streams-group state, the streams analogue of
     /// `seeds_cache`.
     pub streams_seeds_cache: Arc<DashMap<String, StreamsGroupSeed>>,
-    /// KIP-1071 metadata authority. Set once in `Broker::start`. Per-group
-    /// streams actors read it (via [`Self::metadata_source`]) for the full
-    /// `MetadataImage` (topology resolution + internal-topic creation). `None`
-    /// in the pure-coordinator unit tests, where reconcile no-ops to `NotReady`.
+    /// KIP-1071 metadata authority.
+    ///
+    /// `Broker::start` sets it once. Per-group streams actors read it through
+    /// [`Self::metadata_source`] for the full `MetadataImage`, which they need
+    /// for topology resolution and internal-topic creation. It is `None` in
+    /// the pure-coordinator unit tests, where reconcile does nothing and
+    /// returns `NotReady`.
     pub(crate) metadata_source: std::sync::OnceLock<MetadataSourceHandle>,
 }
 
-/// `Debug`-able wrapper around an `Arc<dyn MetadataSource>` so it can live in
-/// the `#[derive(Debug)]` [`GroupCoordinator`]. The trait object itself is not
-/// `Debug`; this prints an opaque placeholder.
+/// `Debug`-able wrapper around an `Arc<dyn MetadataSource>` so that it can
+/// live in the `#[derive(Debug)]` [`GroupCoordinator`].
+///
+/// The trait object itself is not `Debug`. This wrapper prints an opaque
+/// placeholder.
 #[derive(Clone)]
 pub(crate) struct MetadataSourceHandle(pub(crate) Arc<dyn crate::metadata_source::MetadataSource>);
 
@@ -258,9 +271,11 @@ impl GroupCoordinator {
         }
     }
 
-    /// Install the KIP-932 share-state persister bridge. Called once in
-    /// `Broker::start`. A second call is silently ignored (the `OnceLock`
-    /// keeps the first value), which keeps construction order-independent.
+    /// Install the KIP-932 share-state persister bridge.
+    ///
+    /// `Broker::start` calls this once. A second call does nothing, because
+    /// the `OnceLock` keeps the first value. Construction order therefore does
+    /// not matter.
     pub(crate) fn set_share_persister(
         &self,
         persister: Arc<crate::share_coordinator::persister_client::SharePersister>,
@@ -268,8 +283,10 @@ impl GroupCoordinator {
         let _ = self.share_persister.set(persister);
     }
 
-    /// The installed share-state persister, if any. `None` in unit tests that
-    /// construct a bare `GroupCoordinator`; the lifecycle hook then no-ops.
+    /// The installed share-state persister, if there is one.
+    ///
+    /// It is `None` in the unit tests that construct a bare
+    /// `GroupCoordinator`. The lifecycle hook then does nothing.
     #[must_use]
     pub(crate) fn share_persister(
         &self,
@@ -277,14 +294,18 @@ impl GroupCoordinator {
         self.share_persister.get()
     }
 
-    /// Install the KIP-1071 metadata source. Called once in `Broker::start`. A
-    /// second call is silently ignored (the `OnceLock` keeps the first value).
+    /// Install the KIP-1071 metadata source.
+    ///
+    /// `Broker::start` calls this once. A second call does nothing, because
+    /// the `OnceLock` keeps the first value.
     pub(crate) fn set_metadata_source(&self, src: Arc<dyn crate::metadata_source::MetadataSource>) {
         let _ = self.metadata_source.set(MetadataSourceHandle(src));
     }
 
-    /// The installed metadata source, if any. `None` in unit tests that
-    /// construct a bare `GroupCoordinator`; streams reconcile then no-ops to
+    /// The installed metadata source, if there is one.
+    ///
+    /// It is `None` in the unit tests that construct a bare
+    /// `GroupCoordinator`. The streams reconcile then does nothing and returns
     /// `NotReady`.
     #[must_use]
     pub(crate) fn metadata_source(
@@ -293,8 +314,9 @@ impl GroupCoordinator {
         self.metadata_source.get().map(|h| h.0.clone())
     }
 
-    /// Replace the cached seed for `group_id` with `seed`. Called by the
-    /// actor after every successful `OffsetsLog::append`.
+    /// Replace the cached seed for `group_id` with `seed`.
+    ///
+    /// The actor calls this after every successful `OffsetsLog::append`.
     pub fn update_cache(&self, group_id: &str, seed: GroupSeed) {
         self.seeds_cache.insert(group_id.into(), seed);
     }
@@ -305,10 +327,12 @@ impl GroupCoordinator {
         self.seeds_cache.get(group_id).map(|e| e.value().clone())
     }
 
-    /// The locked protocol type for `group_id`, if recorded. Share groups
-    /// (KIP-932) record their lock here via [`mark_share`](Self::mark_share);
-    /// classic/next-gen actors additionally enforce their lock through the
-    /// actor [`GroupKindTag`].
+    /// The locked protocol type for `group_id`, if the coordinator recorded
+    /// one.
+    ///
+    /// Share groups from KIP-932 record their lock here with
+    /// [`mark_share`](Self::mark_share). Classic and next-gen actors also
+    /// enforce their lock through the actor [`GroupKindTag`].
     #[must_use]
     pub fn group_type(&self, group_id: &str) -> Option<GroupType> {
         self.group_types.get(group_id).map(|e| *e.value())
@@ -320,35 +344,43 @@ impl GroupCoordinator {
             .or_insert(GroupType::Classic);
     }
 
-    /// After an in-place downgrade (KIP-848), drop the consumer seed so a
-    /// respawn does not re-hydrate the group as next-gen, and record it as
-    /// classic. Unlike [`Self::mark_classic`] (first-mark-wins via `or_insert`), this
-    /// FORCES the type to `Classic` — a downgrade must override any prior
-    /// `NextGen` lock the group carried while it was a consumer group.
+    /// After an in-place KIP-848 downgrade, drop the consumer seed and record
+    /// the group as classic.
+    ///
+    /// The dropped seed keeps a respawn from hydrating the group as next-gen
+    /// again. [`Self::mark_classic`] keeps the first mark through `or_insert`,
+    /// but this method FORCES the type to `Classic`. A downgrade must override
+    /// any earlier `NextGen` lock that the group carried while it was a
+    /// consumer group.
     pub fn mark_classic_after_downgrade(&self, group_id: &str) {
         self.seeds.remove(group_id);
         self.seeds_cache.remove(group_id);
         self.group_types.insert(group_id.into(), GroupType::Classic);
     }
 
-    /// After an in-place classic→streams upgrade (KIP-1071), drop the classic
-    /// seed so a respawn does not re-hydrate the group as classic, and record it
-    /// as streams. Unlike [`Self::mark_streams`] (first-mark-wins via `or_insert`),
-    /// this FORCES the type to `Streams`, overriding any prior `Classic` lock the
-    /// group carried while it was a classic group.
+    /// After an in-place classic→streams upgrade from KIP-1071, drop the
+    /// classic seed and record the group as streams.
+    ///
+    /// The dropped seed keeps a respawn from hydrating the group as classic
+    /// again. [`Self::mark_streams`] keeps the first mark through `or_insert`,
+    /// but this method FORCES the type to `Streams`. It overrides any earlier
+    /// `Classic` lock that the group carried while it was a classic group.
     pub fn mark_streams_after_upgrade(&self, group_id: &str) {
         self.seeds.remove(group_id);
         self.seeds_cache.remove(group_id);
         self.group_types.insert(group_id.into(), GroupType::Streams);
     }
 
-    /// After an in-place streams→classic downgrade (KIP-1071), drop the streams
-    /// seed so a respawn does not re-hydrate the group as streams, and record it as
-    /// classic. Unlike [`Self::mark_classic`] (first-mark-wins via `or_insert`),
-    /// this FORCES the type to `Classic`, overriding any prior `Streams` lock — the
-    /// mirror of [`Self::mark_streams_after_upgrade`]. Drops the **streams** seeds
-    /// (`streams_seeds`/`streams_seeds_cache`), not the consumer `seeds` that
-    /// [`Self::mark_classic_after_downgrade`] drops.
+    /// After an in-place streams→classic downgrade from KIP-1071, drop the
+    /// streams seed and record the group as classic.
+    ///
+    /// The dropped seed keeps a respawn from hydrating the group as streams
+    /// again. [`Self::mark_classic`] keeps the first mark through `or_insert`,
+    /// but this method FORCES the type to `Classic`. It overrides any earlier
+    /// `Streams` lock. It is the mirror of
+    /// [`Self::mark_streams_after_upgrade`]. It drops the **streams** seeds,
+    /// which are `streams_seeds` and `streams_seeds_cache`. It does not drop
+    /// the consumer `seeds` that [`Self::mark_classic_after_downgrade`] drops.
     pub fn mark_classic_after_streams_downgrade(&self, group_id: &str) {
         self.streams_seeds.remove(group_id);
         self.streams_seeds_cache.remove(group_id);
@@ -373,8 +405,10 @@ impl GroupCoordinator {
             .or_insert(GroupType::Streams);
     }
 
-    /// Replace the cached share-group seed for `group_id`. Called by the
-    /// share actor after every successful `OffsetsLog::append`.
+    /// Replace the cached share-group seed for `group_id`.
+    ///
+    /// The share actor calls this after every successful
+    /// `OffsetsLog::append`.
     pub fn update_share_cache(&self, group_id: &str, seed: ShareGroupSeed) {
         self.share_seeds_cache.insert(group_id.into(), seed);
     }
@@ -387,8 +421,10 @@ impl GroupCoordinator {
             .map(|e| e.value().clone())
     }
 
-    /// Replace the cached streams-group seed for `group_id`. Called by the
-    /// streams actor after every successful `OffsetsLog::append`.
+    /// Replace the cached streams-group seed for `group_id`.
+    ///
+    /// The streams actor calls this after every successful
+    /// `OffsetsLog::append`.
     pub fn update_streams_cache(&self, group_id: &str, seed: StreamsGroupSeed) {
         self.streams_seeds_cache.insert(group_id.into(), seed);
     }
@@ -401,14 +437,15 @@ impl GroupCoordinator {
             .map(|e| e.value().clone())
     }
 
-    /// Get the one actor for `group_id`, spawning it with `initial_kind` if
-    /// absent.
+    /// Get the one actor for `group_id`, and spawn it with `initial_kind` when
+    /// it is absent.
     ///
-    /// The kind argument only decides the spawn kind for a brand-new group.
-    /// Both families route to one actor; the actor rejects the family it does
-    /// not currently serve. (A later slice lets the actor flip kind in place,
-    /// so a group is no longer pinned to its spawn kind.) Keeps the dead-actor
-    /// (closed tx) respawn and the consumer re-hydrate-from-seed paths.
+    /// The kind argument decides the spawn kind for a brand-new group only.
+    /// Both families route to one actor, and the actor rejects the family it
+    /// does not serve at that moment. A later slice lets the actor flip kind
+    /// in place, so a group is no longer pinned to its spawn kind. This method
+    /// keeps two paths: the respawn after a dead actor with a closed tx, and
+    /// the consumer re-hydrate from the seed.
     #[must_use]
     pub fn get_or_create_group(
         self: &Arc<Self>,
@@ -448,17 +485,21 @@ impl GroupCoordinator {
         inserted
     }
 
-    /// Get-or-create a classic-protocol actor. Spawns a classic actor for a
-    /// brand-new id; for an existing id returns the one actor regardless of its
-    /// kind (the actor serves or rejects per its live kind).
+    /// Get or create a classic-protocol actor.
+    ///
+    /// This method spawns a classic actor for a brand-new id. For an id that
+    /// exists, it returns the one actor whatever its kind. The actor then
+    /// serves or rejects the request per its live kind.
     #[must_use]
     pub fn get_or_create_classic(self: &Arc<Self>, group_id: &str) -> Arc<GroupActorHandle> {
         self.get_or_create_group(group_id, GroupKindTag::Classic)
     }
 
-    /// Get-or-create a next-gen consumer-protocol actor. Spawns a consumer actor
-    /// for a brand-new id; for an existing id returns the one actor regardless
-    /// of its kind (the actor serves or rejects per its live kind).
+    /// Get or create a next-gen consumer-protocol actor.
+    ///
+    /// This method spawns a consumer actor for a brand-new id. For an id that
+    /// exists, it returns the one actor whatever its kind. The actor then
+    /// serves or rejects the request per its live kind.
     #[must_use]
     pub fn get_or_create_consumer(self: &Arc<Self>, group_id: &str) -> Arc<GroupActorHandle> {
         self.get_or_create_group(group_id, GroupKindTag::Consumer)
@@ -504,10 +545,12 @@ impl GroupCoordinator {
         self.share_groups.get(group_id).map(|e| e.value().clone())
     }
 
-    /// Snapshot the ids of every live share group (KIP-932). Sync and cheap —
-    /// just the registry keys, no actor round-trip — so `ListGroups` (`api_key`
-    /// 16) can include share groups alongside classic ones without the
-    /// per-group `Describe` mpsc hop.
+    /// Snapshot the ids of every live share group, per KIP-932.
+    ///
+    /// The call is synchronous and cheap. It reads the registry keys and makes
+    /// no actor round-trip. `ListGroups`, `api_key` 16, can therefore include
+    /// share groups together with classic ones without the per-group
+    /// `Describe` mpsc hop.
     #[must_use]
     pub fn share_group_ids(&self) -> Vec<String> {
         self.share_groups.iter().map(|e| e.key().clone()).collect()
@@ -550,14 +593,18 @@ impl GroupCoordinator {
         self.streams_groups.get(group_id).map(|e| e.value().clone())
     }
 
-    /// KIP-1071 cold upgrade: if `group_id` is a drained classic group, convert
-    /// it to a streams group in place (tombstone the classic k2 `GroupMetadata`,
-    /// force the type lock to `Streams`). Committed offsets survive untouched —
-    /// the classic actor remains in the `groups` map so that `OffsetFetch`
-    /// requests can still read back the committed offset state. Returns
-    /// `NotClassic` for non-classic groups (caller serves normally), `Converted`
-    /// after a successful flip, or `RejectLiveMembers` when live classic members
-    /// remain (online streams migration is unsupported in Kafka).
+    /// KIP-1071 cold upgrade: convert a drained classic `group_id` to a
+    /// streams group in place.
+    ///
+    /// The method tombstones the classic k2 `GroupMetadata` and forces the
+    /// type lock to `Streams`. The committed offsets survive untouched. The
+    /// classic actor stays in the `groups` map, so `OffsetFetch` requests can
+    /// still read back the committed offset state.
+    ///
+    /// The method returns `NotClassic` for a non-classic group, and the caller
+    /// then serves it as normal. It returns `Converted` after a successful
+    /// flip. It returns `RejectLiveMembers` when live classic members remain,
+    /// because Kafka does not support an online streams migration.
     pub(crate) async fn try_convert_classic_to_streams(
         self: &Arc<Self>,
         group_id: &str,
@@ -596,14 +643,19 @@ impl GroupCoordinator {
         Ok(ConvertOutcome::Converted)
     }
 
-    /// KIP-1071 cold downgrade: if `group_id` is a drained streams group, convert
-    /// it to a classic group in place — tombstone its streams records (k15–21),
-    /// force the type lock to `Classic`, and drop the streams actor. Committed
-    /// offsets (k0/k1) and the offset-home `groups` entry survive. Returns
-    /// `NotStreams` for non-streams groups (caller serves the classic `JoinGroup`
-    /// normally), `Converted` after a successful flip, or `RejectLiveMembers` when
-    /// the streams group still has live members (online streams migration is
-    /// unsupported in Kafka). The mirror of [`Self::try_convert_classic_to_streams`].
+    /// KIP-1071 cold downgrade: convert a drained streams `group_id` to a
+    /// classic group in place.
+    ///
+    /// The method tombstones the streams records k15–21, forces the type lock
+    /// to `Classic`, and drops the streams actor. The committed offsets, k0
+    /// and k1, and the offset-home `groups` entry survive.
+    ///
+    /// The method returns `NotStreams` for a non-streams group, and the caller
+    /// then serves the classic `JoinGroup` as normal. It returns `Converted`
+    /// after a successful flip. It returns `RejectLiveMembers` when the
+    /// streams group still has live members, because Kafka does not support an
+    /// online streams migration. It is the mirror of
+    /// [`Self::try_convert_classic_to_streams`].
     pub(crate) async fn try_convert_streams_to_classic(
         self: &Arc<Self>,
         group_id: &str,
@@ -646,9 +698,11 @@ impl GroupCoordinator {
         Ok(DowngradeOutcome::Converted)
     }
 
-    /// Snapshot the ids of every live streams group (KIP-1071). Mirrors
-    /// [`share_group_ids`](Self::share_group_ids); used by `ListGroups` to emit
-    /// `group_type="streams"` entries without a per-group `Describe` hop.
+    /// Snapshot the ids of every live streams group, per KIP-1071.
+    ///
+    /// The method is the counterpart of
+    /// [`share_group_ids`](Self::share_group_ids). `ListGroups` uses it to
+    /// emit `group_type="streams"` entries without a per-group `Describe` hop.
     #[must_use]
     pub fn streams_group_ids(&self) -> Vec<String> {
         self.streams_groups
@@ -657,35 +711,42 @@ impl GroupCoordinator {
             .collect()
     }
 
-    /// Ids of every live next-gen (KIP-848) consumer group actor. Mirrors
-    /// [`share_group_ids`](Self::share_group_ids); used by `ListGroups` to emit
-    /// `group_type="consumer"` entries without an actor round-trip.
+    /// Ids of every live next-gen KIP-848 consumer group actor.
     ///
-    /// Note: this returns all group ids from the shared `groups` map (classic
-    /// included). The `ListGroups` handler's `emitted` dedup set prevents a
-    /// double wire emission, so a classic group is emitted once as
-    /// `group_type="classic"` and not repeated here.
+    /// The method is the counterpart of
+    /// [`share_group_ids`](Self::share_group_ids). `ListGroups` uses it to
+    /// emit `group_type="consumer"` entries without an actor round-trip.
+    ///
+    /// Note: this method returns all group ids from the shared `groups` map,
+    /// classic groups included. The `emitted` dedup set in the `ListGroups`
+    /// handler prevents a double wire emission. A classic group therefore goes
+    /// out once as `group_type="classic"` and not again here.
     pub fn consumer_group_ids(&self) -> Vec<String> {
         self.groups.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Spawn a classic actor seeded with a fully-replayed `Group` (bootstrap).
+    /// Spawn a classic actor seeded with a fully-replayed `Group` at
+    /// bootstrap.
     pub fn seed_classic(self: &Arc<Self>, group_id: &str, group: Box<CoordinatorGroup>) {
         let handle = self.get_or_create_classic(group_id);
         let _ = handle.tx.try_send(GroupActorMessage::ClassicSeed(group));
     }
 
-    /// Snapshot every **live-classic** group for the wire `ListGroups`
-    /// (`group_type="classic"`) pass. Iterates ALL handles and discriminates on
-    /// the group's LIVE kind, not the spawn-time `handle.kind` hint (KIP-848 live
-    /// migration can make them differ): `ClassicInspect`'s arm replies only for a
-    /// classic-kind group, so a consumer/upgraded group drops its reply sender
-    /// and is skipped here. This keeps `list_groups` the sole producer of the
-    /// `classic` rows; consumer-kind groups are surfaced separately by the
-    /// `ListGroups` handler via [`consumer_group_ids`](Self::consumer_group_ids)
-    /// tagged `group_type="consumer"`, so they are NOT double-counted or
-    /// mislabeled. A *downgraded* group whose handle still reads `Consumer`
-    /// nonetheless appears here (the live kind is `Classic`).
+    /// Snapshot every **live-classic** group for the wire `ListGroups` pass
+    /// that emits `group_type="classic"`.
+    ///
+    /// The method walks ALL handles and selects on the group's LIVE kind, not
+    /// on the spawn-time `handle.kind` hint. A KIP-848 live migration can make
+    /// the two differ. The `ClassicInspect` arm replies for a classic-kind
+    /// group only, so a consumer group or an upgraded group drops its reply
+    /// sender and this method skips it.
+    ///
+    /// This keeps `list_groups` the only producer of the `classic` rows. The
+    /// `ListGroups` handler emits the consumer-kind groups separately through
+    /// [`consumer_group_ids`](Self::consumer_group_ids) with the tag
+    /// `group_type="consumer"`, so it does NOT count them twice or mislabel
+    /// them. A *downgraded* group whose handle still reads `Consumer` still
+    /// appears here, because its live kind is `Classic`.
     pub async fn list_groups(&self) -> Vec<GroupSnapshot> {
         let handles: Vec<Arc<GroupActorHandle>> =
             self.groups.iter().map(|e| e.value().clone()).collect();
@@ -706,9 +767,12 @@ impl GroupCoordinator {
         out
     }
 
-    /// Snapshot a single group (classic OR consumer/migrated), or `None` if
-    /// unknown. Inspects the LIVE group via [`InspectAny`] rather than gating on
-    /// the spawn-time `handle.kind`, so an upgraded consumer group still reports.
+    /// Snapshot a single group, classic OR consumer or migrated, and return
+    /// `None` when the group is unknown.
+    ///
+    /// The method inspects the LIVE group through [`InspectAny`] and does not
+    /// gate on the spawn-time `handle.kind`. An upgraded consumer group
+    /// therefore still reports.
     ///
     /// [`InspectAny`]: GroupActorMessage::InspectAny
     pub async fn describe_group(&self, group_id: &str) -> Option<GroupSnapshot> {
@@ -722,8 +786,10 @@ impl GroupCoordinator {
         rx.await.ok()
     }
 
-    /// Drop a **classic** group from the registry. `NonEmpty` if it still has
-    /// live members; `NotFound` if unknown / consumer.
+    /// Drop a **classic** group from the registry.
+    ///
+    /// The method returns `NonEmpty` when the group still has live members. It
+    /// returns `NotFound` when the group is unknown or is a consumer group.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub async fn delete_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
@@ -754,10 +820,13 @@ impl GroupCoordinator {
         Ok(())
     }
 
-    /// Delete a **streams** group (KIP-1071): `NonEmpty` if the streams actor still
-    /// has live members; `NotFound` if no streams actor exists for the id; else
-    /// tombstone its records (k15–21), drop the streams actor, and remove the
-    /// offset-home `groups` entry. `Internal` if the tombstone append fails.
+    /// Delete a **streams** group, per KIP-1071.
+    ///
+    /// The method returns `NonEmpty` when the streams actor still has live
+    /// members. It returns `NotFound` when no streams actor exists for the id.
+    /// In every other case it tombstones the group's records k15–21, drops the
+    /// streams actor, and removes the offset-home `groups` entry. It returns
+    /// `Internal` when the tombstone append fails.
     async fn delete_streams_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
         // A Streams-locked id with no live streams actor reports NotFound — the
         // safe failure mode (never silently drop an offset home). In practice a
@@ -901,17 +970,19 @@ impl GroupCoordinator {
         cached.current_per_member.insert(member_id.into(), v);
     }
 
-    /// Apply a tombstone for a next-gen key. Removes the corresponding
-    /// entry from both `seeds` and `seeds_cache`. Used by bootstrap replay
-    /// to honor records with `value = None`.
+    /// Apply a tombstone for a next-gen key.
     ///
-    /// A `GroupMetadata` tombstone is the migration DOWNGRADE marker: it drops
-    /// the entire next-gen group. Replay must REMOVE the seed (from both
-    /// `seeds` and `seeds_cache`) so the group disappears from the next-gen set
-    /// `finalize` derives — letting a later classic k2 `GroupMetadata` record
-    /// reconstruct it as a CLASSIC group (log order wins). Merely zeroing the
-    /// epoch would leave the group classified next-gen and replay it back as an
-    /// empty consumer group.
+    /// The method removes the matching entry from both `seeds` and
+    /// `seeds_cache`. Bootstrap replay calls it to honor records with
+    /// `value = None`.
+    ///
+    /// A `GroupMetadata` tombstone is the migration DOWNGRADE marker. It drops
+    /// the whole next-gen group. Replay must REMOVE the seed from both `seeds`
+    /// and `seeds_cache`, so that the group disappears from the next-gen set
+    /// that `finalize` derives. A later classic k2 `GroupMetadata` record can
+    /// then rebuild it as a CLASSIC group, because log order wins. A change
+    /// that only zeroed the epoch would leave the group classified as next-gen
+    /// and would replay it back as an empty consumer group.
     pub fn replay_next_gen_tombstone(&self, key: &persistence_next_gen::NextGenKey) {
         use persistence_next_gen::NextGenKey as K;
         if let K::GroupMetadata { group_id } = key {
@@ -1021,10 +1092,11 @@ impl GroupCoordinator {
         cached.current_per_member.insert(member_id.into(), v);
     }
 
-    /// Replay a KIP-932 `ShareGroupStatePartitionMetadata` (key v14) record,
-    /// recording which `(topic_id, partition)` share-states the group has
-    /// initialized so the lifecycle hook can skip re-initialization after a
-    /// restart.
+    /// Replay a KIP-932 `ShareGroupStatePartitionMetadata` record, key v14.
+    ///
+    /// The method records which `(topic_id, partition)` share-states the group
+    /// has initialized. The lifecycle hook can then skip a re-initialization
+    /// after a restart.
     pub fn replay_share_state_partition_metadata(
         &self,
         group_id: &str,
@@ -1038,11 +1110,13 @@ impl GroupCoordinator {
         cached.state_partition_metadata = v;
     }
 
-    /// Read the cached `ShareGroupStatePartitionMetadata` for `group_id`,
-    /// recording which `(topic_id, partition)` share-states the group has
-    /// initialized. Returns `None` for an unknown group. Drives the admin
-    /// offset RPCs (Describe/Alter/Delete `ShareGroupOffsets`), which enumerate
-    /// initialized partitions when the request omits an explicit list.
+    /// Read the cached `ShareGroupStatePartitionMetadata` for `group_id`.
+    ///
+    /// The value records which `(topic_id, partition)` share-states the group
+    /// has initialized. The method returns `None` for an unknown group. It
+    /// drives the admin offset RPCs Describe/Alter/Delete `ShareGroupOffsets`.
+    /// Those RPCs list the initialized partitions when the request omits an
+    /// explicit list.
     #[must_use]
     pub fn share_state_partition_metadata(
         &self,
@@ -1053,8 +1127,10 @@ impl GroupCoordinator {
             .map(|e| e.value().state_partition_metadata.clone())
     }
 
-    /// Apply a tombstone for a share-group key. Removes the corresponding
-    /// entry from both `share_seeds` and `share_seeds_cache`.
+    /// Apply a tombstone for a share-group key.
+    ///
+    /// The method removes the matching entry from both `share_seeds` and
+    /// `share_seeds_cache`.
     pub fn replay_share_tombstone(&self, key: &share::persistence::ShareGroupKey) {
         use share::persistence::ShareGroupKey as K;
         let group_id = match key {
@@ -1174,14 +1250,16 @@ impl GroupCoordinator {
         cached.current_per_member.insert(member_id.into(), v);
     }
 
-    /// Apply a tombstone for a streams-group key. Removes the corresponding
-    /// entry from both `streams_seeds` and `streams_seeds_cache`.
+    /// Apply a tombstone for a streams-group key.
     ///
-    /// A `GroupMetadata` (k15) tombstone is the "load-bearing" downgrade
-    /// tombstone (KIP-1071): it removes the entire seed so `finalize_bootstrap`
-    /// does not respawn the group as streams, and it removes the `Streams` type
-    /// lock so a subsequent classic `GroupMetadata` (k2) write can re-lock it as
-    /// `Classic`.
+    /// The method removes the matching entry from both `streams_seeds` and
+    /// `streams_seeds_cache`.
+    ///
+    /// A `GroupMetadata` k15 tombstone is the load-bearing downgrade tombstone
+    /// of KIP-1071. It removes the whole seed, so `finalize_bootstrap` does
+    /// not respawn the group as streams. It also removes the `Streams` type
+    /// lock, so a classic `GroupMetadata` k2 write that comes later can lock
+    /// the group again as `Classic`.
     pub fn replay_streams_tombstone(&self, key: &streams::persistence::StreamsGroupKey) {
         use streams::persistence::StreamsGroupKey as K;
         let group_id = match key {
@@ -1302,9 +1380,10 @@ impl MetadataProvider for ImageMetadataProvider {
     }
 }
 
-/// Hydration seed passed from the bootstrap replayer into a freshly-spawned
-/// [`actor::GroupActorHandle`]. All fields come directly from records
-/// decoded out of `__consumer_offsets`.
+/// Hydration seed that the bootstrap replayer passes into a freshly-spawned
+/// [`actor::GroupActorHandle`].
+///
+/// All fields come directly from records decoded out of `__consumer_offsets`.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct GroupSeed {
     pub group_epoch: i32,
@@ -1316,8 +1395,10 @@ pub struct GroupSeed {
         std::collections::HashMap<String, persistence_next_gen::CurrentMemberAssignmentValue>,
 }
 
-/// Hydration seed for a [`share::actor::ShareGroupActorHandle`]. All fields
-/// come from share-group records decoded out of `__consumer_offsets`.
+/// Hydration seed for a [`share::actor::ShareGroupActorHandle`].
+///
+/// All fields come from share-group records decoded out of
+/// `__consumer_offsets`.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ShareGroupSeed {
     pub group_epoch: i32,
@@ -1332,14 +1413,17 @@ pub struct ShareGroupSeed {
         String,
         share::persistence::ShareGroupCurrentMemberAssignmentValue,
     >,
-    /// KIP-932 `ShareGroupStatePartitionMetadata` (key v14): which
+    /// KIP-932 `ShareGroupStatePartitionMetadata`, key v14. It holds the
     /// `(topic_id, partition)` share-states this group has already
-    /// initialized, plus topic ids whose share-state is being deleted.
-    /// Lets the lifecycle hook skip re-initializing partitions on restart.
+    /// initialized, and the topic ids whose share-state the broker deletes.
+    /// The lifecycle hook can then skip a re-initialization of those
+    /// partitions on restart.
     pub state_partition_metadata: share::persistence::ShareGroupStatePartitionMetadataValue,
 }
 
-/// Hydration seed for a [`streams::actor::StreamsGroupActorHandle`] (KIP-1071).
+/// Hydration seed for a [`streams::actor::StreamsGroupActorHandle`], per
+/// KIP-1071.
+///
 /// All fields come from streams-group records decoded out of
 /// `__consumer_offsets`.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -1366,8 +1450,10 @@ mod tests {
 
     use super::*;
 
-    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
-    /// stall fails the test deterministically instead of spinning forever.
+    /// Yield-poll until `cond` holds.
+    ///
+    /// A bounded hang-guard makes a real stall fail the test in a
+    /// deterministic way, and the loop does not spin forever.
     async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
         for _ in 0..200_000 {
             if cond() {

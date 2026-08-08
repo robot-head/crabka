@@ -1,7 +1,10 @@
-//! `ColumnarTopology`: a linear/branching graph whose edges carry `DataFrame`s.
-//! A source binds a topic list + `BatchCodec`; operators are `BuiltinOp` (or a
-//! custom `ColumnarProcessor`); a sink binds an output topic + `BatchCodec`.
-//! v1 supports linear chains and fan-out from any node (no batch joins).
+//! `ColumnarTopology`: a linear or branching graph whose edges carry
+//! `DataFrame`s.
+//!
+//! A source binds a topic list and a `BatchCodec`. An operator is a `BuiltinOp`
+//! or a custom `ColumnarProcessor`. A sink binds an output topic and a
+//! `BatchCodec`. v1 supports linear chains and fan-out from any node. It has no
+//! batch joins.
 
 use std::sync::Arc;
 
@@ -10,7 +13,8 @@ use super::{
     operator::{BuiltinOp, ColumnarProcessor},
 };
 
-/// Opaque handle to a node, returned by `add_*` and passed as a parent.
+/// Opaque handle to a node. The `add_*` methods return it, and the caller passes
+/// it back as a parent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ColumnarNode(usize);
 
@@ -47,7 +51,7 @@ impl ColumnarTopology {
         Self::default()
     }
 
-    /// Add a source node binding `topics` to `codec`.
+    /// Add a source node that binds `topics` to `codec`.
     pub fn add_source(
         &mut self,
         name: &str,
@@ -66,8 +70,8 @@ impl ColumnarTopology {
 
     /// Add a built-in operator node fed by `parent`.
     ///
-    /// A fresh operator instance is built per `run_batch` (operators are stateless
-    /// in v1), so a built topology can be executed repeatedly.
+    /// Each `run_batch` builds a fresh operator instance, because operators are
+    /// stateless in v1. A built topology can therefore run more than once.
     pub fn add_operator(
         &mut self,
         name: &str,
@@ -84,7 +88,7 @@ impl ColumnarTopology {
         )
     }
 
-    /// Add a sink node writing to `topic` via `codec`, fed by `parent`.
+    /// Add a sink node fed by `parent`. It writes to `topic` with `codec`.
     pub fn add_sink(
         &mut self,
         name: &str,
@@ -112,8 +116,10 @@ impl ColumnarTopology {
         id
     }
 
-    /// Validate the graph: unique names, sources have no parent, non-sources have
-    /// ≥1 parent, and there is ≥1 source and ≥1 sink.
+    /// Validate the graph.
+    ///
+    /// The rules are: all names are unique, a source has no parent, a non-source
+    /// has ≥1 parent, and the graph has ≥1 source and ≥1 sink.
     ///
     /// # Errors
     /// Returns a message describing the first structural problem found.
@@ -154,7 +160,8 @@ impl ColumnarTopology {
         Ok(())
     }
 
-    /// Source topics in declaration order (used by the runtime bridge, Task 11).
+    /// Source topics in declaration order. The runtime bridge, Task 11, reads
+    /// them.
     #[must_use]
     pub fn source_topics(&self) -> Vec<String> {
         self.nodes
@@ -174,7 +181,8 @@ use super::{
     operator::ColumnarContext,
 };
 
-/// A built, runnable columnar topology (single task in v1). Cheap to construct.
+/// A built, runnable columnar topology. v1 runs it as one task. It is cheap to
+/// construct.
 pub struct BuiltColumnarTopology<'t> {
     topo: &'t ColumnarTopology,
 }
@@ -198,8 +206,10 @@ impl ColumnarTopology {
 }
 
 impl BuiltColumnarTopology<'_> {
-    /// Run one batch of records that arrived on `topic` through the graph,
-    /// returning everything the sinks want produced (`(sink_topic, record)`).
+    /// Run one batch of records that arrived on `topic` through the graph.
+    ///
+    /// Returns everything the sinks want produced, as `(sink_topic, record)`
+    /// pairs.
     ///
     /// # Errors
     /// Returns `BatchError` if any codec or operator fails.

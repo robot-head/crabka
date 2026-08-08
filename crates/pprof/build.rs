@@ -1,7 +1,8 @@
 //! Compile the vendored perftools.profiles `Profile` proto.
 //!
-//! Uses the pure-Rust `protox` compiler to produce a `FileDescriptorSet`, then
-//! hands it to `prost-build` via `compile_fds`. No `protoc` binary is required.
+//! This build script uses the pure-Rust `protox` compiler to produce a
+//! `FileDescriptorSet`. It then passes that set to `prost-build` with
+//! `compile_fds`. The build does not need a `protoc` binary.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto = "proto/profile.proto";

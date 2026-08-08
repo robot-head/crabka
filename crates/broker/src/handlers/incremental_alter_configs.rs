@@ -5,10 +5,10 @@
 //! validates the result, and submits the merged map.
 //!
 //! Supported operations:
-//! - SET (0)    — set/replace
-//! - DELETE (1) — remove
-//! - APPEND (2) and SUBTRACT (3) are list-valued operations. None of our
-//!   whitelisted keys are list-valued, so we reject these with
+//! - SET (0): set or replace
+//! - DELETE (1): remove
+//! - APPEND (2) and SUBTRACT (3) are list-valued operations. No whitelisted
+//!   key is list-valued, so the handler rejects these two with
 //!   `INVALID_CONFIG`.
 
 use bytes::Bytes;
@@ -40,11 +40,12 @@ const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
 const OP_SET: i8 = 0;
 const OP_DELETE: i8 = 1;
 
-/// Returns `true` if `name` is a broker-scoped config key accepted by this
-/// broker. We accept the two KIP-73 throttle rate keys (which we persist) plus
-/// `replica.alter.log.dirs.io.max.bytes.per.second` which Kafka's
-/// `kafka-reassign-partitions --verify` also clears. The third key is silently
-/// accepted but not stored (we have no log-dir throttle implementation).
+/// Returns `true` if `name` is a broker-scoped config key that this
+/// broker accepts. The broker accepts the two KIP-73 throttle rate keys, which
+/// it persists, and `replica.alter.log.dirs.io.max.bytes.per.second`, which
+/// Kafka's `kafka-reassign-partitions --verify` also clears. The broker accepts
+/// that third key silently and does not store it, because there is no log-dir
+/// throttle implementation.
 fn is_known_broker_config(name: &str) -> bool {
     matches!(
         name,
@@ -54,8 +55,8 @@ fn is_known_broker_config(name: &str) -> bool {
     )
 }
 
-/// Validates the value for a broker-scoped config key.
-/// Returns `Err` if the key is unknown or the value cannot be parsed as an
+/// Validate the value for a broker-scoped config key.
+/// Returns `Err` if the key is unknown or if the value does not parse as an
 /// `i64`.
 fn validate_broker_config_value(name: &str, value: &str) -> Result<(), String> {
     match name {
@@ -331,9 +332,9 @@ fn handle_broker_scoped(
 }
 
 /// Merge per-key ops into a client-metrics subscription's override map and
-/// stage a `V1ClientMetricsConfig` record. SET validates per KIP-714;
-/// DELETE drops the override (effective value reverts to its default at
-/// read time); APPEND/SUBTRACT are rejected.
+/// stage a `V1ClientMetricsConfig` record. SET validates per KIP-714.
+/// DELETE drops the override, so the effective value reverts to its default at
+/// read time. APPEND and SUBTRACT are rejected.
 fn handle_client_metrics_scoped(
     resource: &AlterConfigsResource,
     image: &MetadataImage,

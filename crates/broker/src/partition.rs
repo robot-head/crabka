@@ -1,11 +1,11 @@
 //! A single partition's runtime handle. Owned by the partition registry
 //! inside `Broker`. The handle gives any task:
 //!
-//! - read access to the partition's [`Log`] via `Arc<Mutex<Log>>`
-//! - write access via a `mpsc::Sender<WriterMessage>` (a single writer task
-//!   drains the channel; see `partition_writer.rs`)
-//! - a [`Notify`] that fires after every successful append, used by
-//!   long-poll Fetch to wake when new data arrives.
+//! - read access to the partition's [`Log`] through `Arc<Mutex<Log>>`
+//! - write access through a `mpsc::Sender<WriterMessage>`. A single writer
+//!   task drains the channel; see `partition_writer.rs`.
+//! - a [`Notify`] that fires after every successful append. Long-poll Fetch
+//!   uses it to wake when new data arrives.
 
 // Fields (`log`, `writer_tx`, `append_notify`) are consumed by the Produce
 // + Fetch handlers landing in Tasks 15-16; keep this allow until then.
@@ -35,24 +35,25 @@ use crate::error::BrokerError;
 use crate::replica_state::ReplicaState;
 
 /// Absolute record offset within a partition's log (base offset, log end
-/// offset, high watermark, truncation points, …). Alias only — clarifies
-/// which `i64`s in signatures are offsets vs. timestamps or counts.
+/// offset, high watermark, truncation points, …). This is an alias only. It
+/// shows which `i64`s in signatures are offsets and not timestamps or counts.
 pub type LogOffset = i64;
 
-/// The records to append for a single produce job — either the producer's
-/// verbatim wire bytes (zero-copy passthrough fast path) or a fully owned,
-/// decoded [`RecordBatch`] (the fallback path used when passthrough is
-/// unsafe: recompression, legacy up-conversion, control batches, etc.).
+/// The records to append for a single produce job. This is either the
+/// producer's verbatim wire bytes (zero-copy passthrough fast path) or a fully
+/// owned, decoded [`RecordBatch`]. The broker takes the fallback path when
+/// passthrough is unsafe: recompression, legacy up-conversion, control
+/// batches, and similar cases.
 ///
 /// The `Owned` arm is a complete fallback, so the whole verbatim
-/// passthrough feature is trivially revertible — "always construct
-/// `Owned`" restores the previous behavior.
+/// passthrough feature is easy to revert. An "always construct `Owned`" rule
+/// restores the previous behavior.
 #[derive(Debug)]
 pub enum ProduceData {
-    /// Append the producer's exact wire bytes, patching only `base_offset`
-    /// + `partition_leader_epoch`. No decode/re-encode/recompress/CRC.
+    /// Append the producer's exact wire bytes, and patch only `base_offset`
+    /// and `partition_leader_epoch`. No decode, re-encode, recompress, or CRC.
     Verbatim(VerbatimBatch),
-    /// Decode + re-encode the owned batch on append (the original path).
+    /// Decode and re-encode the owned batch on append (the original path).
     /// The writer mutates `base_offset` before append.
     Owned(RecordBatch),
 }
@@ -70,29 +71,29 @@ impl ProduceData {
 }
 
 /// Produce-path message sent from the Produce handler to the partition's
-/// writer task. The writer assigns `base_offset` (overwriting whatever the
-/// handler put there) and replies with the assigned value.
+/// writer task. The writer assigns `base_offset`, overwrites whatever the
+/// handler put there, and replies with the assigned value.
 #[derive(Debug)]
 pub struct ProduceJob {
     /// The records to append (verbatim passthrough or owned fallback).
     pub data: ProduceData,
-    /// Oneshot for the writer to report success (base offset assigned)
-    /// or failure back to the handler.
+    /// Oneshot that the writer uses to report success, with the assigned
+    /// base offset, or failure back to the handler.
     pub ack: oneshot::Sender<Result<Offset, BrokerError>>,
 }
 
 /// All message kinds the partition's writer task accepts.
 ///
-/// The writer task is single-consumer over a single `mpsc::Sender`; using
-/// an enum here keeps replication appends ordered with produce appends.
+/// The writer task is single-consumer over a single `mpsc::Sender`. An enum
+/// here keeps replication appends ordered with produce appends.
 #[derive(Debug)]
 pub enum WriterMessage {
-    /// Append a batch, assigning `base_offset` from the log. Used by the
-    /// `Produce` handler.
+    /// Append a batch and assign `base_offset` from the log. The `Produce`
+    /// handler sends this message.
     Produce(ProduceJob),
-    /// Append a batch at the caller-supplied offset (already assigned by
-    /// the partition's leader). Used by the per-(topic, partition)
-    /// replicator on a follower broker.
+    /// Append a batch at the caller-supplied offset, which the partition's
+    /// leader already assigned. The per-(topic, partition) replicator on a
+    /// follower broker sends this message.
     Replicate {
         batch: RecordBatch,
         ack: oneshot::Sender<Result<(), BrokerError>>,
@@ -104,10 +105,10 @@ pub enum WriterMessage {
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
     /// Drop every segment and recreate the active segment at `new_base`.
-    /// Used by the replicator's `OFFSET_OUT_OF_RANGE` recovery path when
-    /// the follower has fallen behind the leader's `log_start` — the
+    /// The replicator's `OFFSET_OUT_OF_RANGE` recovery path sends this when
+    /// the follower has fallen behind the leader's `log_start`. The
     /// follower must move its own `log_start` *forward* past records it
-    /// never saw, which `Truncate` can't do.
+    /// never saw, and `Truncate` cannot do that.
     ResetTo {
         new_base: Offset,
         ack: oneshot::Sender<Result<(), BrokerError>>,
@@ -129,15 +130,15 @@ pub enum WriterMessage {
     /// Trim from the start of the log: drop sealed segments whose last
     /// offset is `< new_start`, advance `log_start_offset` if `new_start`
     /// falls inside the active segment. Returns the resulting
-    /// `log_start_offset` (which may be less than `new_start` when
-    /// `new_start` falls between segment boundaries — Kafka semantics).
-    /// Used by the `DeleteRecords` handler.
+    /// `log_start_offset`. That value can be less than `new_start` when
+    /// `new_start` falls between segment boundaries, which is Kafka
+    /// semantics. The `DeleteRecords` handler sends this message.
     TrimToOffset {
         new_start: Offset,
         ack: tokio::sync::oneshot::Sender<Result<Offset, BrokerError>>,
     },
-    /// Test-only: shift the in-memory `log_start_offset` without
-    /// physically truncating segments. Simulates retention-driven
+    /// Test-only: shift the in-memory `log_start_offset` and do not
+    /// physically truncate segments. This simulates retention-driven
     /// truncation for the `out_of_range_truncates_and_recovers`
     /// replication integration test.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -169,8 +170,8 @@ pub enum WriterMessage {
 /// Result of a [`WriterMessage::SwapFutureLog`] handling cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapOutcome {
-    /// The swap succeeded; the partition is now serving from the
-    /// target log dir and the source dir has been removed.
+    /// The swap succeeded. The partition now serves from the
+    /// target log dir, and the broker removed the source dir.
     Swapped,
     /// The future log was behind the current log when the writer
     /// re-checked. The caller should resume replication and retry.
@@ -184,8 +185,8 @@ pub struct HwTimeout;
 
 /// Runtime handle for a single partition.
 ///
-/// Cheap to clone — `log`, `writer_tx`, `append_notify` are all `Arc`-ish
-/// and the writer handle isn't cloned (`Arc<JoinHandle<()>>` wraps it).
+/// Cheap to clone. `log`, `writer_tx`, and `append_notify` are all `Arc`-ish,
+/// and the writer handle is not cloned because `Arc<JoinHandle<()>>` wraps it.
 #[derive(Clone)]
 // `partition_id` mirrors Kafka's wire naming and is the conventional term
 // used throughout the broker; renaming to `id` would shadow `Partition`'s
@@ -193,13 +194,13 @@ pub struct HwTimeout;
 pub struct Partition {
     pub topic: String,
     pub index: PartitionIndex,
-    /// Parent `log.dir` currently owning the partition (the parent of
-    /// `log.lock().dir()` — i.e. the configured directory, not the
-    /// `<topic>-<partition>` subdirectory). Updated by
+    /// Parent `log.dir` that currently owns the partition. This is the parent
+    /// of `log.lock().dir()`, that is, the configured directory and not the
+    /// `<topic>-<partition>` subdirectory. Updated by
     /// [`WriterMessage::SwapFutureLog`] as the last step of a KIP-113
-    /// move. `ArcSwap` so readers (e.g. `DescribeLogDirs`,
-    /// `AlterReplicaLogDirs` validation) see the swap atomically
-    /// without taking the `log` mutex.
+    /// move. It is an `ArcSwap` so that readers, such as `DescribeLogDirs`
+    /// and `AlterReplicaLogDirs` validation, see the swap atomically
+    /// without the `log` mutex.
     pub log_dir: Arc<ArcSwap<PathBuf>>,
     pub log: Arc<Mutex<Log>>,
     pub writer_tx: mpsc::Sender<WriterMessage>,
@@ -209,11 +210,11 @@ pub struct Partition {
     /// Current leader's `NodeId` from the metadata image. Atomic for
     /// lock-free reads in the Produce/Fetch hot paths.
     pub current_leader: Arc<AtomicU64>,
-    /// Current `leader_epoch` from the metadata image. Stamped on every
-    /// appended batch; validated on every follower Fetch.
+    /// Current `leader_epoch` from the metadata image. The broker stamps it on
+    /// every appended batch and validates it on every follower Fetch.
     pub current_leader_epoch: Arc<AtomicI32>,
     /// True for Slice 1 diskless partitions whose client-visible HW may only
-    /// advance via the WAL durable-sync path.
+    /// advance through the WAL durable-sync path.
     pub(crate) diskless: bool,
     /// Held so the writer task is reaped when every `Partition` handle is
     /// dropped. Not accessed after construction.
@@ -225,9 +226,9 @@ impl Partition {
     /// `Arc<Mutex<Log>>` briefly. Replicators call this before each Fetch
     /// to compute `fetch_offset`.
     ///
-    /// Returns 0 if the log mutex is poisoned (i.e. the writer task
-    /// panicked). The caller treats that as "not making progress" and the
-    /// writer-died path eventually surfaces a clearer error.
+    /// Returns 0 if the log mutex is poisoned, that is, if the writer task
+    /// panicked. The caller treats that as no progress, and the
+    /// writer-died path later reports a clearer error.
     #[must_use]
     pub fn log_end_offset(&self) -> Offset {
         match self.log.lock() {
@@ -240,9 +241,9 @@ impl Partition {
     /// in all in-flight transactions have been resolved (committed or aborted).
     /// Cheap: takes the `Arc<Mutex<Log>>` briefly.
     ///
-    /// Returns 0 if the log mutex is poisoned (i.e. the writer task
-    /// panicked). The caller treats that as "not making progress" and the
-    /// writer-died path eventually surfaces a clearer error.
+    /// Returns 0 if the log mutex is poisoned, that is, if the writer task
+    /// panicked. The caller treats that as no progress, and the
+    /// writer-died path later reports a clearer error.
     #[must_use]
     pub fn lso(&self) -> Offset {
         match self.log.lock() {
@@ -251,12 +252,13 @@ impl Partition {
         }
     }
 
-    /// Push `overrides` (already-validated; see `config_keys`) through the
-    /// writer actor so the partition's `Log` picks up the new
-    /// `retention.ms` / `retention.bytes` / `segment.bytes` on the next
-    /// retention/roll tick. Idempotent: pushing the same map twice is a
-    /// cheap noop. Called by `ReplicatorSupervisor::reconcile` every time
-    /// the metadata image changes.
+    /// Push `overrides` through the writer actor so the partition's `Log`
+    /// picks up the new `retention.ms`, `retention.bytes`, and
+    /// `segment.bytes` on the next retention or roll tick. The caller has
+    /// already validated `overrides`; see `config_keys`. The call is
+    /// idempotent, so the same map pushed twice is a cheap noop.
+    /// `ReplicatorSupervisor::reconcile` calls this every time the metadata
+    /// image changes.
     ///
     /// # Errors
     ///
@@ -282,12 +284,12 @@ impl Partition {
         Ok(())
     }
 
-    /// Append a leader-assigned batch to the local log, preserving its
-    /// `base_offset`. Used by the per-partition replicator on a follower
-    /// broker. Sends the batch through the writer task so it stays
-    /// ordered with produce appends (which, on a follower, will be
-    /// rejected by the produce handler anyway, but the channel ordering
-    /// is still part of the invariant).
+    /// Append a leader-assigned batch to the local log and keep its
+    /// `base_offset`. The per-partition replicator on a follower broker
+    /// calls this. It sends the batch through the writer task so the batch
+    /// stays ordered with produce appends. On a follower the produce handler
+    /// rejects those appends anyway, but the channel ordering is still part
+    /// of the invariant.
     pub async fn replicate_batch(&self, batch: RecordBatch) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
@@ -299,10 +301,10 @@ impl Partition {
             .map_err(|_| BrokerError::Replication("ack dropped".into()))?
     }
 
-    /// Truncate the log to `offset`, dropping all records at offsets
-    /// `>= offset`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
-    /// recovery path and the KIP-320 in-band `diverging_epoch` truncation
-    /// path (which passes the leader's epoch boundary, not just 0).
+    /// Truncate the log to `offset` and drop all records at offsets
+    /// `>= offset`. The replicator's `OFFSET_OUT_OF_RANGE` recovery path
+    /// calls this, and so does the KIP-320 in-band `diverging_epoch`
+    /// truncation path, which passes the leader's epoch boundary and not 0.
     pub async fn truncate_to(&self, offset: Offset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
@@ -318,7 +320,8 @@ impl Partition {
     }
 
     /// Drop every segment and recreate the active segment at `new_base`.
-    /// Goes through the writer task so it stays ordered with appends.
+    /// The request goes through the writer task, so it stays ordered with
+    /// appends.
     pub async fn reset_to(&self, new_base: Offset) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
@@ -334,7 +337,7 @@ impl Partition {
     }
 
     /// Send a trim request through the writer actor. Returns the resulting
-    /// `log_start_offset`. Used by the `DeleteRecords` handler.
+    /// `log_start_offset`. The `DeleteRecords` handler calls this.
     ///
     /// # Errors
     ///
@@ -355,8 +358,8 @@ impl Partition {
     }
 
     /// Send a `WriterMessage::Compact` to the partition's writer
-    /// actor and await the ack. Used by the broker-wide [`Cleaner`]
-    /// ticker.
+    /// actor and await the ack. The broker-wide [`Cleaner`] ticker
+    /// calls this.
     pub async fn compact_log(&self) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         self.writer_tx
@@ -371,8 +374,9 @@ impl Partition {
     /// First absolute offset still present in the underlying [`Log`].
     /// Cheap: takes the `Arc<Mutex<Log>>` briefly.
     ///
-    /// Returns 0 if the log mutex is poisoned (i.e. the writer task panicked).
-    /// Used by `TxnCoordinator::recover` to seed the replay scan offset.
+    /// Returns 0 if the log mutex is poisoned, that is, if the writer task
+    /// panicked. `TxnCoordinator::recover` uses this to seed the replay scan
+    /// offset.
     #[must_use]
     pub(crate) fn log_start_offset(&self) -> Offset {
         match self.log.lock() {
@@ -394,12 +398,13 @@ impl Partition {
         }
     }
 
-    /// The additional internal stamp coordinate covering `offset`, or `None`
-    /// when this partition is unstamped (no [`crabka_log::StampSource`]
-    /// injected) or no stamped range covers `offset`.
+    /// The additional internal stamp coordinate that covers `offset`. Returns
+    /// `None` when this partition is unstamped, that is, when no
+    /// [`crabka_log::StampSource`] is injected, or when no stamped range
+    /// covers `offset`.
     ///
-    /// Locks the `Arc<Mutex<Log>>` briefly. This is a server-side query only:
-    /// no produce or fetch handler consults it, so the stamp cannot leak into
+    /// Locks the `Arc<Mutex<Log>>` briefly. This is a server-side query only.
+    /// No produce or fetch handler consults it, so the stamp cannot leak into
     /// any client-facing response. Returns `None` if the mutex is poisoned.
     #[must_use]
     pub fn stamp_for_offset(&self, offset: Offset) -> Option<u64> {
@@ -409,16 +414,17 @@ impl Partition {
         }
     }
 
-    /// Read batches from the underlying [`Log`] starting at `offset`,
-    /// returning up to `max_size` of data.
+    /// Read batches from the underlying [`Log`] that start at `offset`, and
+    /// return up to `max_size` of data.
     ///
-    /// Locks the `Arc<Mutex<Log>>` for the duration of the read. Used by
-    /// `TxnCoordinator::recover` to replay `__transaction_state` records.
+    /// Locks the `Arc<Mutex<Log>>` for the duration of the read.
+    /// `TxnCoordinator::recover` uses this to replay `__transaction_state`
+    /// records.
     ///
     /// # Errors
     ///
-    /// Returns [`BrokerError::Log`] if the underlying [`Log::read`] fails
-    /// (e.g. `offset < log_start_offset()`).
+    /// Returns [`BrokerError::Log`] if the underlying [`Log::read`] fails,
+    /// for example when `offset < log_start_offset()`.
     pub(crate) fn read_log(
         &self,
         offset: Offset,
@@ -431,11 +437,12 @@ impl Partition {
             .map_err(BrokerError::from)
     }
 
-    /// Append `batch` to the local log at the next assigned offset, going
-    /// through the partition's writer task so the append is ordered with
+    /// Append `batch` to the local log at the next assigned offset. The append
+    /// goes through the partition's writer task, so it stays ordered with
     /// all other produce appends. Returns the assigned `base_offset`.
     ///
-    /// Used by `TxnCoordinator::put` to persist `__transaction_state` records.
+    /// `TxnCoordinator::put` uses this to persist `__transaction_state`
+    /// records.
     ///
     /// # Errors
     ///
@@ -455,19 +462,19 @@ impl Partition {
             .map_err(|_| BrokerError::Txn("ack dropped".into()))?
     }
 
-    /// Cached High Watermark. Awaits `replica_state` cooperatively so it
-    /// doesn't block tokio worker threads.
+    /// Cached High Watermark. Awaits `replica_state` cooperatively, so it
+    /// does not block tokio worker threads.
     #[must_use]
     pub async fn high_watermark(&self) -> Offset {
         self.replica_state.lock().await.hw
     }
 
     /// KIP-392: record the high watermark the leader reported in a follower
-    /// Fetch response, so consumer reads served from this follower are bounded
-    /// correctly. Clamps to the local log end (never expose records we have not
-    /// replicated yet) and only advances `hw` (HW is monotonic). Fires
-    /// `hw_advance_notify` when it advances so a consumer parked at the old HW
-    /// wakes.
+    /// Fetch response, so that consumer reads served from this follower are
+    /// bounded correctly. It clamps to the local log end, so the broker never
+    /// exposes records it has not replicated yet, and it only advances `hw`,
+    /// because HW is monotonic. It fires `hw_advance_notify` when the HW
+    /// advances, so a consumer parked at the old HW wakes.
     pub async fn set_follower_hw(&self, reported_hw: Offset) {
         let log_end = self.log_end_offset();
         let new_hw = reported_hw.min(log_end);
@@ -500,19 +507,21 @@ impl Partition {
     }
 
     /// Install (or reinstall) the ISR membership and seed non-leader
-    /// follower entries to 0. Called by the replicator supervisor
-    /// when this broker materializes a partition where it's the leader.
-    /// Idempotent: re-installing the same `(isr, replicas, leader)`
-    /// preserves existing follower progress.
+    /// follower entries to 0. The replicator supervisor calls this
+    /// when this broker materializes a partition where it is the leader.
+    /// The call is idempotent, so a re-install of the same
+    /// `(isr, replicas, leader)` keeps existing follower progress.
     ///
-    /// `isr` is the committed in-sync set; `replicas` is the full replica
-    /// assignment. Follower-progress tracking is keyed on `replicas` so a
-    /// replica catching up toward ISR re-admission keeps its progress
-    /// across reconciles — see [`crate::replica_state::ReplicaState::install_isr`].
+    /// `isr` is the committed in-sync set. `replicas` is the full replica
+    /// assignment. Follower-progress tracking is keyed on `replicas`, so a
+    /// replica that catches up toward ISR re-admission keeps its progress
+    /// across reconciles. See
+    /// [`crate::replica_state::ReplicaState::install_isr`].
     ///
-    /// Recomputes HW under the new ISR and fires `hw_advance_notify` if HW
-    /// advanced. Diskless partitions deliberately skip this LEO-based HW
-    /// recompute: their client-visible HW advances only after WAL fsync.
+    /// The method recomputes HW under the new ISR and fires
+    /// `hw_advance_notify` if HW advanced. Diskless partitions deliberately
+    /// skip this LEO-based HW recompute, because their client-visible HW
+    /// advances only after WAL fsync.
     pub async fn install_isr(
         &self,
         isr: &[crabka_raft::NodeId],
@@ -534,15 +543,16 @@ impl Partition {
         }
     }
 
-    /// Apply a leader change observed via the metadata image. Updates
-    /// the cached `current_leader` + `current_leader_epoch`. If the
-    /// leader or epoch actually changed, clears per-follower stats
-    /// (stale under the new leader's view). On idempotent re-installs
-    /// (same leader + epoch) per-follower progress is preserved — the
-    /// supervisor calls this on every reconcile and unconditional
-    /// clearing would reset follower LEOs each time, dropping HW back
-    /// to 0 and blocking acks=-1 producers until followers re-fetch.
-    /// Fires `hw_advance_notify` so waiting Produce gates can re-check.
+    /// Apply a leader change observed in the metadata image. This updates
+    /// the cached `current_leader` and `current_leader_epoch`. If the
+    /// leader or epoch changed, it clears the per-follower stats, which are
+    /// stale under the new leader's view. On an idempotent re-install with
+    /// the same leader and epoch, it keeps the per-follower progress. The
+    /// supervisor calls this on every reconcile, and an unconditional clear
+    /// would reset follower LEOs each time. That would drop HW back
+    /// to 0 and block acks=-1 producers until followers re-fetch.
+    /// The method fires `hw_advance_notify` so waiting Produce gates can
+    /// re-check.
     pub async fn install_leader_change(&self, new_leader: u64, new_epoch: i32) {
         let prev_leader = self.current_leader.swap(new_leader, Ordering::AcqRel);
         let prev_epoch = self.current_leader_epoch.swap(new_epoch, Ordering::AcqRel);
@@ -571,7 +581,7 @@ impl Partition {
     }
 
     /// Wait until `replica_state.hw >= target_offset` or `deadline`
-    /// elapses. Used by the Produce handler for `acks == -1` to gate
+    /// elapses. The Produce handler calls this for `acks == -1` to gate
     /// the response on full replication.
     ///
     /// # Errors
@@ -625,9 +635,9 @@ impl Partition {
     }
 
     /// Test-only: directly set the partition's `current_leader_epoch`
-    /// without going through the supervisor's metadata-image-driven path.
-    /// Used by `tests/leader_epoch.rs` to simulate split-brain by forcing
-    /// an epoch bump mid-Produce.
+    /// and do not use the supervisor's metadata-image-driven path.
+    /// `tests/leader_epoch.rs` uses this to simulate split-brain with a
+    /// forced epoch bump mid-Produce.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn test_set_leader_epoch(&self, epoch: i32) {
         self.current_leader_epoch
@@ -635,7 +645,7 @@ impl Partition {
     }
 
     /// Test-only: shift the partition's in-memory `log_start_offset` to
-    /// `new_start`. Goes through the writer task to maintain the
+    /// `new_start`. The request goes through the writer task to keep the
     /// single-writer invariant on the underlying `Log`.
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn test_set_log_start(&self, new_start: Offset) -> Result<(), BrokerError> {
@@ -775,9 +785,10 @@ mod tests {
     }
 
     /// `Partition::stamp_for_offset` returns the log's actual stamp for a
-    /// covered offset and `None` beyond the stamped range — not a constant.
-    /// A distinctive stamp (`4242`) pins the delegated value so a mutant that
-    /// hard-codes `Some(0)`, `Some(1)`, or `None` is caught.
+    /// covered offset and `None` beyond the stamped range. It is not a
+    /// constant. A distinctive stamp (`4242`) pins the delegated value, so
+    /// the test catches a mutant that hard-codes `Some(0)`, `Some(1)`, or
+    /// `None`.
     #[tokio::test]
     async fn stamp_for_offset_delegates_actual_stamp() {
         #[derive(Debug)]

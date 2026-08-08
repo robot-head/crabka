@@ -1,4 +1,4 @@
-//! Config -> `object_store::ObjectStore` handle construction.
+//! Construction of an `object_store::ObjectStore` handle from a config.
 
 use std::sync::Arc;
 
@@ -11,13 +11,13 @@ use crate::{
 
 /// Build an `object_store` handle for `cfg`.
 ///
-/// The builder wiring (credential chains, endpoints, `allow_http`) is identical
-/// to the per-crate constructors it replaces.
+/// The builder wiring covers the credential chains, the endpoints, and
+/// `allow_http`. It is identical to the wiring in the per-crate constructors.
 ///
 /// # Errors
 ///
-/// Returns [`ObjectStoreError::InvalidConfig`] if the backend builder rejects the
-/// bucket / region / endpoint / credential combination.
+/// Returns [`ObjectStoreError::InvalidConfig`] if the backend builder rejects
+/// the combination of bucket, region, endpoint, and credentials.
 pub fn build_object_store(
     cfg: &ObjectStoreConfig,
 ) -> Result<Arc<dyn ObjectStore>, ObjectStoreError> {

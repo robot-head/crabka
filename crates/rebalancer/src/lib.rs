@@ -1,4 +1,4 @@
-//! Crabka rebalancer — Cruise-Control-equivalent partition placement
+//! Crabka rebalancer: a Cruise-Control-equivalent partition placement
 //! advisor and executor.
 //!
 //! The crate ingests broker/topic metrics, builds a cluster model, evaluates
@@ -60,11 +60,11 @@
 //! # }
 //! ```
 
-/// Generated protobuf + Connect server stubs. The actual content lives
-/// in `OUT_DIR/crabka.rebalancer.v1.rs` and is produced by `build.rs`.
+/// Generated protobuf + Connect server stubs. `build.rs` produces the actual
+/// content, which lives in `OUT_DIR/crabka.rebalancer.v1.rs`.
 ///
-/// Pedantic lints are silenced here because the include is verbatim
-/// codegen output; we cannot retrofit `#[must_use]` annotations or
+/// This module silences pedantic lints because the include is verbatim
+/// codegen output. The crate cannot retrofit `#[must_use]` annotations or
 /// shorter helper functions without forking the upstream codegen.
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/crabka.rebalancer.v1.rs"));

@@ -253,16 +253,16 @@ pub enum MapValidationError {
         range_id: RangeId,
         split_at: RangeKey,
     },
-    /// A range boundary falls between two rows of the same hash bucket, which
-    /// would leave the bucket owned by two ranges. Hash-sharded tables may only
-    /// be cut at a bucket start.
+    /// A range boundary falls between two rows of the same hash bucket. Two
+    /// ranges would then own the bucket. A cut of a hash-sharded table is
+    /// permitted only at a bucket start.
     #[error(
         "boundary {boundary:?} falls inside a hash bucket; hash-sharded tables split at rowid 0"
     )]
     HashBucketSplitBoundary { boundary: RangeKey },
     /// A range boundary names a bucket the table does not have. The registry
-    /// stores boundaries only below a table's bucket count, so such a boundary
-    /// is refused there, and the successor range it opens owns no rows.
+    /// stores boundaries only below a table's bucket count, so it refuses such a
+    /// boundary, and the successor range that boundary opens owns no rows.
     #[error("boundary {boundary:?} is outside the table's {bucket_count} hash buckets")]
     HashBucketOutOfRange {
         boundary: RangeKey,
@@ -385,11 +385,11 @@ impl RangeMap {
         })
     }
 
-    /// Route an equality predicate on the hash key to the range owning the
+    /// Route an equality predicate on the hash key to the range that owns the
     /// matching bucket.
     ///
-    /// The bucket is probed at rowid 0, so the answer is only the owner of
-    /// *every* row of that bucket while the map's boundaries are bucket
+    /// This method probes the bucket at rowid 0. The answer is the owner of
+    /// *every* row of that bucket only while the map's boundaries are bucket
     /// aligned. [`RangeMap::validate_hash_shard_boundaries`] decides that.
     ///
     /// # Errors
@@ -403,15 +403,16 @@ impl RangeMap {
         self.range_for_hash_bucket(spec.table_id, spec.bucket_for_value(value), 0)
     }
 
-    /// Check that every row of every hash bucket of `spec`'s table is owned by
-    /// exactly one range, i.e. that no boundary cuts a bucket in half.
+    /// Check that exactly one range owns every row of every hash bucket of
+    /// `spec`'s table, which means that no boundary cuts a bucket in half.
     ///
     /// # Errors
     ///
-    /// Returns [`MapValidationError::HashBucketSplitBoundary`] naming the first
-    /// boundary that falls inside a bucket, or
-    /// [`MapValidationError::HashBucketOutOfRange`] naming the first that sits
-    /// past the table's last bucket.
+    /// Returns [`MapValidationError::HashBucketSplitBoundary`], which names the
+    /// first boundary that falls inside a bucket.
+    ///
+    /// Returns [`MapValidationError::HashBucketOutOfRange`], which names the
+    /// first boundary that sits past the table's last bucket.
     pub fn validate_hash_shard_boundaries(
         &self,
         spec: &HashShardSpec,
@@ -484,18 +485,21 @@ impl RangeMap {
 
     /// Plan a split of a hash-sharded table's range.
     ///
-    /// `split_at` must name the start of a bucket the table actually has, so
-    /// that both successors still own whole buckets, hash-equality routing keeps
-    /// agreeing with the range that stores the rows, and the registry accepts
-    /// the resulting boundary.
+    /// `split_at` must name the start of a bucket the table has. Both successors
+    /// then still own whole buckets, hash-equality routing keeps its agreement
+    /// with the range that stores the rows, and the registry accepts the
+    /// resulting boundary.
     ///
     /// # Errors
     ///
     /// Returns [`MapValidationError::HashBucketSplitBoundary`] when `split_at`
-    /// falls inside a bucket of `spec`'s table,
-    /// [`MapValidationError::HashBucketOutOfRange`] when it names a bucket past
-    /// the table's last, and otherwise the errors of
-    /// [`RangeMap::plan_split_at_key`].
+    /// falls inside a bucket of `spec`'s table.
+    ///
+    /// Returns [`MapValidationError::HashBucketOutOfRange`] when `split_at`
+    /// names a bucket past the table's last bucket.
+    ///
+    /// Returns the errors of [`RangeMap::plan_split_at_key`] in every other
+    /// case.
     pub fn plan_hash_split_at_key(
         &self,
         spec: &HashShardSpec,

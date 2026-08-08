@@ -1,14 +1,17 @@
-//! `KTable.groupBy` / `KGroupedTable` — JVM 4.1 wire-topology + behavioral goldens.
+//! `KTable.groupBy` and `KGroupedTable`: the JVM 4.1 wire-topology and behavioral
+//! goldens.
 //!
-//! Mirrors `Capture.java::kgroupedTable` and `KGroupedTableBehavior.java`:
+//! These tests match `Capture.java::kgroupedTable` and
+//! `KGroupedTableBehavior.java`:
 //!   table("in", String/Long, Materialized "src-store")
 //!     -> filter(v > 0, Materialized "filter-store")
 //!     -> groupBy(key = even/odd by v%2, value = v) called THREE times, each terminating in
 //!          count("count-store") / reduce(+,-,"reduce-store") / aggregate(0,+,-,"agg-store"),
 //!        each .toStream().to("{count,reduce,agg}-out").
 //!
-//! Built with `build_optimized("app")` so `REUSE_KTABLE_SOURCE_TOPICS` reuses the
-//! source topic `in` as `src-store`'s changelog (matching the JVM ground truth).
+//! The tests build with `build_optimized("app")`, so `REUSE_KTABLE_SOURCE_TOPICS`
+//! reuses the source topic `in` as `src-store`'s changelog. That matches the JVM
+//! ground truth.
 use crabka_client_streams::{Consumed, Grouped, I64Serde, Materialized, Produced, StringSerde};
 
 /// Build the combined topology shared by both tests and return the optimized build.
@@ -82,10 +85,11 @@ fn kgrouped_table_topology_matches_jvm() {
     );
 }
 
-/// Build the auto-named topology: `table("in","src-store") -> groupBy -> count()`
+/// Build the auto-named topology `table("in","src-store") -> groupBy -> count()`
 /// with NO explicit result-store name, so the store name is minted from the
-/// shared node-name counter. Pins the lowering's mint order against the JVM
-/// (`Capture.java::kgroupedTableAutoNamed`), which explicit-store goldens cannot.
+/// shared node-name counter. This pins the lowering's mint order against the JVM
+/// (`Capture.java::kgroupedTableAutoNamed`), which an explicit-store golden
+/// cannot do.
 fn build_autonamed() -> crabka_client_streams::topology::BuiltTopology {
     use crabka_client_streams::dsl::StreamsBuilder;
 

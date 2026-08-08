@@ -1,10 +1,10 @@
-//! Hard goal: enforce a per-broker `cpu_cores` limit using the
-//! scraped `UsageStore::cpu_cores_rate` summed across the broker's
-//! hosted partitions (all replica roles — produce work hits the
-//! leader, fetch / replication work hits everyone serving).
+//! Hard goal: enforce a per-broker `cpu_cores` limit. It uses the scraped
+//! `UsageStore::cpu_cores_rate`, summed across the broker's hosted partitions
+//! in all replica roles. Produce work hits the leader, and fetch and
+//! replication work hits every broker that serves the partition.
 //!
-//! Both the measured rate and the `cpu_cores` capacity are core counts,
-//! so the comparison is a plain `f64` one.
+//! Both the measured rate and the `cpu_cores` capacity are core counts, so the
+//! comparison is a plain `f64` comparison.
 
 use std::collections::HashMap;
 
@@ -21,8 +21,8 @@ pub struct CpuCapacity;
 impl CpuCapacity {
     pub const NAME: &'static str = "CpuCapacity";
 
-    /// Per-broker cores-in-use total. Skips partitions with no usage
-    /// data — same fail-safe pattern as the other capacity goals.
+    /// Per-broker cores-in-use total. It skips partitions with no usage data.
+    /// This is the same fail-safe pattern as the other capacity goals.
     fn totals(
         partitions: &[PartitionView],
         broker_ids: &[i32],

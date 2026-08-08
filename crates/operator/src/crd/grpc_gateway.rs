@@ -1,9 +1,11 @@
-//! `KafkaGrpcGateway` CRD. Represents a deployment of the
-//! `crabka-grpc-gateway` binary that the operator manages — it produces
-//! a Deployment, Service, serving-cert Secret, config Secret, and a
-//! child `KafkaUser` for the gateway's broker-mTLS client identity.
-//! The parent Kafka cluster is discovered from the `crabka.io/cluster`
-//! label (same convention as `KafkaTopic` / `KafkaUser`).
+//! `KafkaGrpcGateway` CRD.
+//!
+//! One `KafkaGrpcGateway` is a deployment of the `crabka-grpc-gateway`
+//! binary that the operator manages. The operator produces a Deployment, a
+//! Service, a serving-cert Secret, a config Secret, and a child
+//! `KafkaUser` for the broker-mTLS client identity of the gateway. It
+//! finds the parent Kafka cluster from the `crabka.io/cluster` label.
+//! `KafkaTopic` and `KafkaUser` use the same convention.
 
 use std::collections::BTreeMap;
 
@@ -32,7 +34,7 @@ pub struct KafkaGrpcGatewaySpec {
     #[schemars(range(min = 1))]
     pub replicas: Option<i32>,
 
-    /// Container image override. When absent the operator uses its
+    /// Container image override. When absent, the operator uses its
     /// `--default-gateway-image` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -41,8 +43,9 @@ pub struct KafkaGrpcGatewaySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequirements>,
 
-    /// Configuration for the deduplication topic that backs idempotent
-    /// produce (exactly-once delivery). When absent, controller defaults apply.
+    /// Configuration for the deduplication topic below the idempotent
+    /// produce, which gives exactly-once delivery. When absent, the
+    /// controller defaults apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedup: Option<DedupSpec>,
 
@@ -62,13 +65,13 @@ pub struct KafkaGrpcGatewaySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_checks: Option<GatewayHealthChecks>,
 
-    /// TLS serving configuration. When absent, TLS defaults apply
-    /// (`clientAuth: required`, `validityDays: 365`).
+    /// TLS serving configuration. When absent, the TLS defaults apply:
+    /// `clientAuth: required` and `validityDays: 365`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<GatewayTlsSpec>,
 
-    /// Authorization configuration. When absent, simple ACL-based authz
-    /// is used (mode = `simple`).
+    /// Authorization configuration. When absent, the gateway uses simple
+    /// ACL-based authorization, which is mode `simple`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authz: Option<GatewayAuthzSpec>,
 
@@ -84,8 +87,8 @@ pub struct KafkaGrpcGatewaySpec {
     pub outbound_subscriptions: Vec<OutboundSubscriptionSpec>,
 
     /// Explicit SSRF allowlist for outbound HTTP targets. The controller
-    /// derives entries automatically from each subscription's
-    /// `targetUrl`; use this field to add extra allowed hosts.
+    /// derives the entries from the `targetUrl` of each subscription. Use
+    /// this field to add more allowed hosts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_targets: Vec<AllowedTargetSpec>,
 
@@ -96,8 +99,9 @@ pub struct KafkaGrpcGatewaySpec {
 }
 
 /// Configuration for the per-gateway deduplication Kafka topic.
-/// The topic is created by the operator; the gateway uses transactional
-/// produce against it to provide exactly-once delivery.
+///
+/// The operator creates the topic. The gateway does transactional produce
+/// against it to give exactly-once delivery.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DedupSpec {
@@ -111,8 +115,9 @@ pub struct DedupSpec {
     #[schemars(range(min = 1, max = 2_147_483_647))]
     pub partitions: Option<u32>,
 
-    /// Dedup window, as a unit-carrying duration (`24h`, `30m`). Records with
-    /// the same idempotency key within this window are dropped. Default `24h`.
+    /// Dedup window, as a unit-carrying duration such as `24h` or `30m`.
+    /// The gateway drops records with the same idempotency key inside this
+    /// window. Default `24h`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -242,9 +247,10 @@ pub struct GatewayHealthChecks {
     pub liveness_period_seconds: Option<i32>,
 }
 
-/// TLS serving configuration for the gateway's gRPC / webhook / metrics
-/// endpoints. The serving cert is issued by the operator from the
-/// cluster CA.
+/// TLS serving configuration for the gRPC, webhook, and metrics endpoints
+/// of the gateway.
+///
+/// The operator issues the serving cert from the cluster CA.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayTlsSpec {
@@ -272,12 +278,13 @@ pub struct GatewayTlsSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayAuthzSpec {
-    /// Authorization mode. One of `off` or `simple`. Default `simple`
-    /// (ACL-based, reading `KafkaUser` ACLs from the broker).
+    /// Authorization mode. One of `off` or `simple`. Default `simple`,
+    /// which is ACL-based and reads the `KafkaUser` ACLs from the broker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
 
-    /// Principal strings (e.g. `User:admin`) that bypass all ACL checks.
+    /// Principal strings, for example `User:admin`, that bypass all ACL
+    /// checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub super_users: Vec<String>,
 
@@ -309,8 +316,8 @@ pub struct GatewayBearerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_claim: Option<String>,
 
-    /// Allowable clock skew for bearer-token timestamps, as a unit-carrying
-    /// duration (`30s`, `500ms`).
+    /// Allowable clock skew for bearer-token timestamps, as a
+    /// unit-carrying duration such as `30s` or `500ms`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -320,15 +327,17 @@ pub struct GatewayBearerSpec {
     pub allowable_clock_skew: Option<Time>,
 }
 
-/// One inbound HTTP-webhook endpoint. Records a produce call against
-/// `targetTopic` for every verified POST to `/<name>`.
+/// One inbound HTTP-webhook endpoint.
+///
+/// The gateway does one produce call against `targetTopic` for every
+/// verified POST to `/<name>`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundWebhookSpec {
-    /// Unique name for this webhook route. Used as the URL path segment.
+    /// Unique name for this webhook route. It is the URL path segment.
     pub name: String,
 
-    /// Kafka topic that records are produced to.
+    /// Kafka topic that the gateway produces the records to.
     pub target_topic: String,
 
     /// Kafka principal for ACL checks on produce to `targetTopic`.
@@ -336,7 +345,7 @@ pub struct InboundWebhookSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
 
-    /// HTTP header carrying the HMAC signature. E.g.
+    /// HTTP header that carries the HMAC signature, for example
     /// `X-Hub-Signature-256`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature_header: Option<String>,
@@ -345,13 +354,13 @@ pub struct InboundWebhookSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature_encoding: Option<String>,
 
-    /// Prefix to strip from the signature header value before
-    /// verifying. E.g. `sha256=`.
+    /// Prefix to remove from the signature header value before the
+    /// gateway verifies it, for example `sha256=`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature_prefix: Option<String>,
 
-    /// HTTP header carrying the request timestamp. Used with
-    /// `timestampTolerance` to reject replayed requests.
+    /// HTTP header that carries the request timestamp. The gateway uses
+    /// it with `timestampTolerance` to reject replayed requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_header: Option<String>,
 
@@ -365,12 +374,12 @@ pub struct InboundWebhookSpec {
     #[schemars(with = "Option<String>")]
     pub timestamp_tolerance: Option<Time>,
 
-    /// How to derive the idempotency key for deduplication. E.g.
+    /// How to derive the idempotency key for deduplication, for example
     /// `header:X-Idempotency-Key` or `body_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_source: Option<String>,
 
-    /// How to derive the Kafka record key from the request. E.g.
+    /// How to derive the Kafka record key from the request, for example
     /// `header:X-Record-Key` or `body_path:.id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_source: Option<String>,
@@ -392,21 +401,22 @@ pub struct InboundWebhookSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_format: Option<String>,
 
-    /// Kubernetes Secret key reference for the HMAC signing secret.
-    /// The controller resolves this at render time and injects the
-    /// raw secret value into the config Secret — it is never stored
-    /// in the CRD.
+    /// Kubernetes Secret key reference for the HMAC signing secret. The
+    /// controller resolves it at render time and puts the raw secret value
+    /// into the config Secret. The CRD never stores that value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<SecretKeyRef>,
 }
 
-/// One outbound webhook subscription. Reads from `sourceTopics` and
-/// HTTP-POSTs each record to `targetUrl`.
+/// One outbound webhook subscription.
+///
+/// The gateway reads from `sourceTopics` and sends each record to
+/// `targetUrl` with an HTTP POST.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboundSubscriptionSpec {
-    /// Unique name for this subscription. Used as the consumer group id
-    /// suffix.
+    /// Unique name for this subscription. It is the suffix of the
+    /// consumer group id.
     pub name: String,
 
     /// Kafka topics to consume records from.
@@ -416,8 +426,8 @@ pub struct OutboundSubscriptionSpec {
     /// HTTP endpoint to POST records to.
     pub target_url: String,
 
-    /// Kafka topic for records that exhausted all delivery attempts.
-    /// When absent, failed records are logged and discarded.
+    /// Kafka topic for the records that used all their delivery attempts.
+    /// When absent, the gateway logs a failed record and discards it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dead_letter_topic: Option<String>,
 
@@ -472,21 +482,23 @@ pub struct OutboundSubscriptionSpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
 
-    /// Secret key reference for the outbound request HMAC signing secret.
-    /// Resolved by the controller at render time.
+    /// Secret key reference for the HMAC signing secret of the outbound
+    /// request. The controller resolves it at render time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_secret_ref: Option<SecretKeyRef>,
 }
 
-/// One entry in the gateway's SSRF allowlist. An outbound HTTP request
-/// is allowed only when `scheme` and `host` match.
+/// One entry in the SSRF allowlist of the gateway.
+///
+/// The gateway permits an outbound HTTP request only when `scheme` and
+/// `host` match.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AllowedTargetSpec {
     /// URL scheme. One of `http` or `https`.
     pub scheme: String,
 
-    /// Hostname (and optional port) of the allowed target.
+    /// Hostname of the allowed target, with an optional port.
     pub host: String,
 }
 
@@ -497,7 +509,7 @@ pub struct SecretKeyRef {
     /// Name of the Kubernetes Secret.
     pub name: String,
 
-    /// Key within the Secret's `data` map.
+    /// Key inside the `data` map of the Secret.
     pub key: String,
 }
 
@@ -505,7 +517,7 @@ pub struct SecretKeyRef {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetrySpec {
-    /// OTLP exporter endpoint URL. E.g.
+    /// OTLP exporter endpoint URL, for example
     /// `http://otel-collector.observability.svc:4317`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otlp_endpoint: Option<String>,
@@ -514,8 +526,8 @@ pub struct TelemetrySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub otlp_protocol: Option<String>,
 
-    /// Fraction of traces to sample in the range `[0.0, 1.0]`.
-    /// Default 1.0 (sample everything).
+    /// Fraction of traces to sample, in the range `[0.0, 1.0]`. Default
+    /// 1.0, which samples all traces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0.0, max = 1.0))]
     pub sample_ratio: Option<f64>,
@@ -525,8 +537,8 @@ pub struct TelemetrySpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaGrpcGatewayStatus {
-    /// Standard Kubernetes-style condition list. Surfaces
-    /// `Ready`, `KafkaVersionValid`, `CertReady`, `Degraded`.
+    /// Standard Kubernetes-style condition list. It reports `Ready`,
+    /// `KafkaVersionValid`, `CertReady`, and `Degraded`.
     #[serde(default)]
     pub conditions: Vec<crate::crd::KafkaCondition>,
 
@@ -534,7 +546,7 @@ pub struct KafkaGrpcGatewayStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
 
-    /// Number of gateway replicas currently reporting Ready.
+    /// Number of gateway replicas that report Ready now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_replicas: Option<i32>,
 }
@@ -547,9 +559,10 @@ mod tests {
 
     use super::*;
 
-    /// The dimensioned CRD fields are an external, operator-facing surface: they
-    /// take and emit the same unit-carrying strings the gateway's own config
-    /// does, so a bare number is a schema error rather than a guess.
+    /// The dimensioned CRD fields are an external surface for the
+    /// operator. They take and give the same unit-carrying strings as the
+    /// config of the gateway. A bare number is therefore a schema error
+    /// and not a guess.
     #[test]
     fn dimensioned_tuning_fields_serialize_as_unit_carrying_strings() {
         let tuning = GatewayTuning {
@@ -576,8 +589,8 @@ mod tests {
         assert!(back == tuning);
     }
 
-    /// A bare number carries no unit, so it must be rejected rather than assumed
-    /// to be milliseconds or bytes.
+    /// A bare number carries no unit. The schema must reject it and must
+    /// not assume milliseconds or bytes.
     #[test]
     fn dimensioned_fields_reject_bare_numbers() {
         for raw in [
@@ -591,8 +604,8 @@ mod tests {
         }
     }
 
-    /// The generated schema is a string for every dimensioned field — an integer
-    /// `minimum` on a string would be an invalid CRD schema.
+    /// The generated schema is a string for every dimensioned field. An
+    /// integer `minimum` on a string would be an invalid CRD schema.
     #[test]
     fn dimensioned_fields_have_a_string_schema() {
         let crd = serde_json::to_value(KafkaGrpcGateway::crd()).unwrap();

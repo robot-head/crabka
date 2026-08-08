@@ -1,10 +1,10 @@
 //! crabka-schema-registry: Confluent Schema Registry-compatible REST service.
 //!
-//! This binary is a thin `clap` → lib shim: it parses CLI flags into an
-//! [`Args`], maps them into a [`SecurityCliInput`], and hands that to
-//! [`crabka_schema_registry::cli::build_security`] for validation/assembly (kept
-//! in the lib so it is unit-testable). The remaining glue (serve wiring,
-//! election, ACL-refresh task) lives here.
+//! This binary is a thin `clap` → lib shim. It parses CLI flags into an
+//! [`Args`], maps them into a [`SecurityCliInput`], and gives that to
+//! [`crabka_schema_registry::cli::build_security`] for validation and assembly.
+//! That code stays in the lib so it is unit-testable. The remaining glue lives
+//! here: serve wiring, election, and the ACL-refresh task.
 
 #[cfg(all(unix, feature = "heap-profiling"))]
 #[global_allocator]
@@ -178,7 +178,7 @@ struct Args {
     require_auth: bool,
     /// `WWW-Authenticate: basic realm="<realm>"` realm advertised on 401. The
     /// default matches the realm `cp-schema-registry` emits under the standard
-    /// `PropertyFileLoginModule` BASIC setup (the JAAS entry name).
+    /// `PropertyFileLoginModule` BASIC setup, which is the JAAS entry name.
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_AUTH_REALM",
@@ -196,7 +196,7 @@ struct Args {
 
     // ── Bearer (OAuth) ──────────────────────────────────────────────────────
     /// Bearer-token mode: `off` | `unsecured`. `unsecured` accepts unsigned
-    /// JWTs (dev only), mirroring the gateway's `--bearer`.
+    /// JWTs for development only, and mirrors the gateway's `--bearer`.
     #[arg(long, env = "SCHEMA_REGISTRY_BEARER", default_value = "off")]
     bearer: String,
     /// JWT claim whose value becomes the principal name (Bearer mode).
@@ -211,10 +211,10 @@ struct Args {
     /// JWKS endpoint URL (required when --bearer=jwks).
     #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_ENDPOINT_URI")]
     bearer_jwks_endpoint_uri: Option<String>,
-    /// Expected token `iss` claim. Absent = no issuer check.
+    /// Expected token `iss` claim. When absent, there is no issuer check.
     #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_VALID_ISSUER")]
     bearer_jwks_valid_issuer: Option<String>,
-    /// Expected token `aud` value. Absent = no audience check.
+    /// Expected token `aud` value. When absent, there is no audience check.
     #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_EXPECTED_AUDIENCE")]
     bearer_jwks_expected_audience: Option<String>,
     /// PEM CA bundle trusted for the JWKS HTTPS endpoint.
@@ -492,9 +492,10 @@ impl Args {
         Ok(runtime)
     }
 
-    /// Map the parsed clap flags into the clap-free [`SecurityCliInput`] the lib
-    /// validates/assembles. Pure field-shuffling — the security semantics live
-    /// in [`crabka_schema_registry::cli::build_security`].
+    /// Map the parsed clap flags into the clap-free [`SecurityCliInput`] that
+    /// the lib validates and assembles. This method only moves fields. The
+    /// security semantics live in
+    /// [`crabka_schema_registry::cli::build_security`].
     fn security_input(&self) -> SecurityCliInput {
         SecurityCliInput {
             require_auth: self.require_auth,
@@ -561,8 +562,8 @@ fn split_bootstrap(bootstrap: &str) -> Vec<String> {
 
 /// Periodically fetch the JWKS endpoint and refresh the live key-set handle.
 ///
-/// Fetches immediately on startup, then once per `jwks.refresh`.
-/// Cancelled by the shared `CancellationToken`.
+/// It fetches immediately on startup, then once per `jwks.refresh`. The shared
+/// `CancellationToken` cancels it.
 async fn run_jwks_refresher(
     jwks: crabka_schema_registry::cli::JwksHandleForRefresh,
     cancel: CancellationToken,

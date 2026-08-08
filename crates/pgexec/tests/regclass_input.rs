@@ -1,11 +1,12 @@
 //! `regclassin`: the half of `regclass` that reads a *written* relation name.
 //!
-//! Two properties hold it together. The name is parsed the way
-//! `stringToQualifiedNameList` parses one — quoted parts literal and allowed to
-//! contain dots, unquoted parts downcased, whitespace anywhere around a part —
-//! and it resolves against the *session's* search path, not a fixed one. Both
-//! make the round trip work: whatever `regclassout` prints for a relation reads
-//! back as that same relation.
+//! Two properties hold it together. First, the parser reads the name the way
+//! `stringToQualifiedNameList` reads one. Quoted parts stay literal and may
+//! contain dots, the parser downcases unquoted parts, and whitespace is allowed
+//! anywhere around a part. Second, the name resolves against the *session's*
+//! search path, not against a fixed one. Both properties make the round trip
+//! work: whatever `regclassout` prints for a relation reads back as that same
+//! relation.
 //!
 //! Every expectation here was captured from `postgres:18.4` first.
 
@@ -68,9 +69,11 @@ async fn printed(client: &mut Client, spelling: &str) -> Option<String> {
 
 // -------------------------------------------------------------- reading a name
 
-/// Every shape `regclassin` accepts, and the relation each one lands on. The
-/// two that today's first-dot split gets wrong — a quoted dot and a name that
-/// needs downcasing — are the reason this is a parser and not a `split_once`.
+/// Every shape `regclassin` accepts, and the relation each one lands on.
+///
+/// Today's first-dot split gets two of them wrong: a quoted dot, and a name the
+/// parser must downcase. Those two are the reason this is a parser and not a
+/// `split_once`.
 #[tokio::test]
 async fn a_written_name_is_read_the_way_regclassin_reads_one() {
     let engine = SqlEngine::new();
@@ -157,9 +160,10 @@ async fn text_that_is_not_a_qualified_name_is_refused() {
     }
 }
 
-/// A name nothing answers to is `42P01`, spelled from the *parsed* parts —
-/// dot-joined and unquoted, which is `PostgreSQL`'s `NameListToString` and not
-/// the text as typed.
+/// A name nothing answers to is `42P01`, spelled from the *parsed* parts.
+///
+/// The parts are dot-joined and unquoted, which is `PostgreSQL`'s
+/// `NameListToString` and not the text as typed.
 #[tokio::test]
 async fn a_missing_relation_is_named_by_its_parsed_parts() {
     let engine = SqlEngine::new();
@@ -186,10 +190,11 @@ async fn a_missing_relation_is_named_by_its_parsed_parts() {
 
 // ------------------------------------------------------------- the round trip
 
-/// The property the two halves owe each other: for every name shape, the text
-/// `regclassout` prints reads back through `regclassin` as the same relation.
-/// An identifier that has to be quoted on the way out is exactly the shape the
-/// first-dot split could not read back in.
+/// The property the two halves owe each other.
+///
+/// For every name shape, the text `regclassout` prints reads back through
+/// `regclassin` as the same relation. An identifier that must be quoted on the
+/// way out is exactly the shape the first-dot split could not read back in.
 #[tokio::test]
 async fn every_name_shape_round_trips_out_and_back_in() {
     let engine = SqlEngine::new();
@@ -255,9 +260,9 @@ async fn every_name_shape_round_trips_out_and_back_in() {
 
 // ---------------------------------------------------------- the session's path
 
-/// A relation only the session's `search_path` reaches is found by every
-/// name-taking catalog function, and by a `regclass` cast — the same relation
-/// `SELECT … FROM` reads.
+/// Every name-taking catalog function finds a relation that only the session's
+/// `search_path` reaches, and so does a `regclass` cast. This is the same
+/// relation `SELECT … FROM` reads.
 #[tokio::test]
 async fn a_name_taking_function_resolves_against_the_sessions_search_path() {
     let engine = SqlEngine::new();
@@ -318,7 +323,7 @@ async fn a_name_taking_function_resolves_against_the_sessions_search_path() {
 }
 
 /// With the same name in two schemas, each name-taking function answers for the
-/// one the path reaches — not for `public`'s.
+/// one the path reaches, and not for `public`'s.
 #[tokio::test]
 async fn a_shadowed_name_answers_for_the_schema_the_path_reaches() {
     let engine = SqlEngine::new();
@@ -411,8 +416,9 @@ async fn a_sequence_name_is_read_and_resolved_like_any_other_regclass_input() {
 }
 
 /// A `serial` column's stored default is the catalog's own rendering of the
-/// sequence name, not a `regclass` literal — so it is read back as written,
-/// including for a table whose name a `regclass` literal would have to quote.
+/// sequence name, not a `regclass` literal. It therefore reads back as written.
+/// This is also true for a table whose name a `regclass` literal would have to
+/// quote.
 #[tokio::test]
 async fn a_serial_default_still_draws_from_its_sequence() {
     let engine = SqlEngine::new();

@@ -9,9 +9,10 @@ pub struct UuidBytes(pub [u8; 16]);
 impl UuidBytes {
     /// Parse a UUID input string accepted by this starter.
     ///
-    /// Supports canonical hyphenated text, uppercase hex, optional surrounding
-    /// braces, and the common 32-hex-digit hyphenless form. Output is always the
-    /// canonical lowercase hyphenated spelling.
+    /// This function accepts canonical hyphenated text, uppercase hex, optional
+    /// braces around the value, and the common 32-hex-digit form without
+    /// hyphens. The output is always the canonical lowercase hyphenated
+    /// spelling.
     ///
     /// # Errors
     ///

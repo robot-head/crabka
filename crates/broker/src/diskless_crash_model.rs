@@ -1,10 +1,11 @@
 //! Diskless WAL crash-restart model for partial durability windows.
 //!
-//! This model is intentionally tiny. It composes the Slice 5 crash windows with
-//! the Slice 6 diskless WAL quorum and stateless appenders: `KRaft` can reserve
-//! offsets before bytes fsync, object PUT can precede index commit, fsync can
-//! tear the active tail, any WAL member can initiate a reservation, and trimming
-//! must stop at the committed index frontier.
+//! This model is small on purpose. It composes the Slice 5 crash windows with
+//! the Slice 6 diskless WAL quorum and stateless appenders.
+//!
+//! `KRaft` can reserve offsets before the bytes fsync. An object PUT can come
+//! before the index commit. An fsync can tear the active tail. Any WAL member
+//! can start a reservation. A trim must stop at the committed index frontier.
 
 use std::time::Duration;
 

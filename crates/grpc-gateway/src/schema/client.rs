@@ -2,10 +2,10 @@
 //!
 //! [`SchemaRegistryClient`] talks to the REST endpoints (`/subjects`,
 //! `/schemas/ids`) and keeps two in-process caches:
-//! - `by_id` — schema string + format, keyed on schema-id (immutable once
-//!   registered; never evicted).
-//! - `by_subject_latest` — schema-id of the latest version per subject, with
-//!   a TTL so topology changes are picked up within a bounded window.
+//! - `by_id`: schema string and format, keyed on schema-id. A schema is
+//!   immutable once registered, so this cache never evicts an entry.
+//! - `by_subject_latest`: the schema-id of the latest version per subject,
+//!   with a TTL. The client picks up a topology change within that window.
 
 use std::time::Instant;
 
@@ -22,13 +22,13 @@ use crate::{
 /// A caching HTTP client for a Confluent-compatible Schema Registry.
 #[derive(Debug)]
 pub struct SchemaRegistryClient {
-    /// Underlying HTTP client (shared, connection-pooled).
+    /// Underlying HTTP client, shared and connection-pooled.
     pub http: reqwest::Client,
-    /// Base URL of the Schema Registry (e.g. `http://localhost:8081`).
+    /// Base URL of the Schema Registry, for example `http://localhost:8081`.
     pub base: Url,
-    /// Cache: schema-id → (schema string, format). Immutable once registered.
+    /// Cache of schema-id → (schema string, format). Immutable once registered.
     pub by_id: DashMap<i32, (String, SchemaFormat)>,
-    /// Cache: subject → (latest schema-id, fetched-at timestamp for TTL).
+    /// Cache of subject → (latest schema-id, fetched-at timestamp for the TTL).
     pub by_subject_latest: DashMap<String, (i32, Instant)>,
     latest_cache_ttl: Time,
 }
@@ -74,8 +74,9 @@ pub fn fmt_to_str(fmt: SchemaFormat) -> &'static str {
     }
 }
 
-/// Parse a Confluent `schemaType` string (or absent value) into [`SchemaFormat`].
-/// An absent or empty `schemaType` defaults to Avro (Confluent default).
+/// Parse a Confluent `schemaType` string, or an absent value, into
+/// [`SchemaFormat`]. An absent or empty `schemaType` defaults to Avro, which is
+/// the Confluent default.
 #[must_use]
 pub fn str_to_fmt(s: Option<&str>) -> SchemaFormat {
     match s {
@@ -87,8 +88,9 @@ pub fn str_to_fmt(s: Option<&str>) -> SchemaFormat {
 
 /// Percent-encode a subject name for safe inclusion in a URL path segment.
 ///
-/// Uses `url`'s `form_urlencoded` [`byte_serialize`](url::form_urlencoded::byte_serialize)
-/// so that `/` and other special characters in subject names are percent-encoded.
+/// This function uses `url`'s `form_urlencoded`
+/// [`byte_serialize`](url::form_urlencoded::byte_serialize), so it
+/// percent-encodes `/` and the other special characters in a subject name.
 fn encode_subject(subject: &str) -> String {
     url::form_urlencoded::byte_serialize(subject.as_bytes()).collect()
 }
@@ -126,9 +128,9 @@ impl SchemaRegistryClient {
         })
     }
 
-    /// Register `schema` (expressed as `fmt`) under `subject`.
+    /// Register `schema`, expressed as `fmt`, under `subject`.
     ///
-    /// Returns the assigned schema id.  If the schema is already registered
+    /// Returns the assigned schema id. If the schema is already registered,
     /// the registry returns the existing id.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
@@ -184,8 +186,8 @@ impl SchemaRegistryClient {
 
     /// Resolve a schema string and its format by numeric id.
     ///
-    /// Results are cached in [`Self::by_id`] indefinitely (schema ids are
-    /// immutable once assigned).
+    /// The result stays in [`Self::by_id`] indefinitely, because a schema id is
+    /// immutable once assigned.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn schema_by_id(&self, id: i32) -> Result<(String, SchemaFormat), CodecError> {
@@ -230,8 +232,8 @@ impl SchemaRegistryClient {
 
     /// Return the latest `(id, schema, format)` tuple for `subject`.
     ///
-    /// Results are cached in [`Self::by_subject_latest`] and re-fetched after
-    /// a TTL to pick up new versions.
+    /// The result stays in [`Self::by_subject_latest`]. The client re-fetches
+    /// it after a TTL, so it picks up new versions.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn latest(&self, subject: &str) -> Result<(i32, String, SchemaFormat), CodecError> {
@@ -377,7 +379,7 @@ mod tests {
 
     // ── mock server tests (axum + tokio) ────────────────────────────────────
 
-    /// Spin up a tiny axum server (axum 0.8 `{param}` syntax) handling:
+    /// Start a small axum server, in axum 0.8 `{param}` syntax, that handles:
     ///   POST /subjects/{subject}/versions  → `{"id":1}`
     ///   GET  /schemas/ids/{id}             → `{"schema":"...","schemaType":"PROTOBUF"}`
     ///   GET  /subjects/{subject}/versions/latest → `{"id":2,"schema":"...","schemaType":"JSON"}`

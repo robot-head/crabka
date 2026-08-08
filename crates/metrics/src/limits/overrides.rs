@@ -27,10 +27,11 @@ impl OverridesProvider {
         }
     }
 
-    /// Parse Mimir-style `runtime.yaml` overrides.
+    /// Parses Mimir-style `runtime.yaml` overrides.
     ///
-    /// Tenant maps are partial by design: `#[serde(default)]` below represents
-    /// sparse per-tenant overrides, not backwards-compatibility migration.
+    /// Tenant maps are partial by design. The `#[serde(default)]` below
+    /// represents sparse per-tenant overrides, and not a
+    /// backwards-compatibility migration.
     /// # Errors
     /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn from_yaml(yaml: &str) -> Result<Self, OverridesError> {
@@ -92,15 +93,16 @@ struct PartialLimits {
     out_of_order_time_window: Option<Time>,
 }
 
-/// Overlay a sparse per-tenant (or defaults) override on top of `base`.
+/// Overlays a sparse per-tenant override, or a defaults override, on top of
+/// `base`.
 ///
-/// Overrides are **fully trusted**: any field set in `partial` replaces the
-/// corresponding `base` value verbatim, with no floor or hard cap applied. In
-/// particular, a value of `0` is not rejected — for the limits that treat `0`
-/// as a sentinel (`ingestion_rate`, `max_global_series_per_user`, the per-query
-/// and query-range/lookback caps) this *disables* that cap for the tenant. This
-/// matches Mimir's runtime-overrides semantics, where operator-supplied
-/// overrides are authoritative and `0` means "unlimited".
+/// Overrides are **fully trusted**. Any field set in `partial` replaces the
+/// matching `base` value verbatim, with no floor and no hard cap. A value of `0`
+/// is not rejected. For the limits that treat `0` as a sentinel, this *turns
+/// off* that cap for the tenant. Those limits are `ingestion_rate`,
+/// `max_global_series_per_user`, and the per-query, query-range, and lookback
+/// caps. This matches Mimir's runtime-overrides semantics, where an
+/// operator-supplied override is authoritative and `0` means "unlimited".
 fn merge_limits(base: &Limits, partial: &PartialLimits) -> Limits {
     Limits {
         ingestion_rate: partial.ingestion_rate.unwrap_or(base.ingestion_rate),
@@ -202,8 +204,9 @@ overrides:
         assert!(matches!(error, OverridesError::Yaml(_)));
     }
 
-    /// A negative cap would read as "unlimited" downstream, since the enforcer
-    /// only applies a cap greater than zero. Zero is the documented sentinel.
+    /// A negative cap would read as "unlimited" downstream, because the
+    /// enforcer applies only a cap greater than zero. Zero is the documented
+    /// sentinel.
     #[test]
     fn negative_query_span_caps_are_rejected() {
         const NEGATIVE: &str = "overrides:\n  tenant-a:\n    max_query_length: \"-1s\"\n";

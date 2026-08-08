@@ -65,7 +65,8 @@ impl LiveStore {
         }
     }
 
-    /// Append a WAL span record and evict spans older than the retention window.
+    /// Append a WAL span record, then evict spans older than the retention
+    /// window.
     pub fn ingest(&mut self, rec: SpanRecord) {
         self.max_start_ns = self.max_start_ns.max(rec.span.start_ns);
         self.by_tenant
@@ -77,7 +78,7 @@ impl LiveStore {
         self.evict_old();
     }
 
-    /// Return recent spans for one trace ordered by start time and span id.
+    /// Return recent spans for one trace, ordered by start time and span id.
     #[must_use]
     pub fn trace_by_id(&self, tenant: &str, trace_id: &[u8; 16]) -> Vec<Span> {
         let mut spans = self

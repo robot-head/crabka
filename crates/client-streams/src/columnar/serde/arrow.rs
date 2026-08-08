@@ -1,4 +1,5 @@
-//! `ArrowIpcSerde`: Arrow-IPC stream encoding of an arrow-rs `RecordBatch`.
+//! `ArrowIpcSerde`, the Arrow-IPC stream encoding of an arrow-rs
+//! `RecordBatch`.
 
 use ::arrow::{
     array::RecordBatch,
@@ -8,7 +9,8 @@ use bytes::Bytes;
 
 use crate::processor::serde::{DefaultSerde, Serde, SerdeAssociate, SerdeError};
 
-/// `Serde<RecordBatch>` using the Arrow IPC stream format (schema embedded per message).
+/// `Serde<RecordBatch>` that uses the Arrow IPC stream format, which embeds the
+/// schema in each message.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ArrowIpcSerde;
 

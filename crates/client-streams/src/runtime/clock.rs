@@ -1,5 +1,7 @@
-//! Wall-clock source for wall-clock punctuation. Injected into `StreamThread` so
-//! tests can drive punctuation deterministically with a `ManualClock`.
+//! The wall-clock source for wall-clock punctuation.
+//!
+//! The caller injects it into `StreamThread`, so a test can drive the
+//! punctuation deterministically with a `ManualClock`.
 
 pub(crate) trait Clock: Send + Sync {
     fn now_ms(&self) -> i64;

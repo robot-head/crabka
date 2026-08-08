@@ -1,14 +1,16 @@
-//! A temporary namespace is `pg_temp_<backend id>` in the catalog every gateway
-//! of a cluster shares, and a session empties it by name before it first uses
-//! it — the only thing that stops relations left behind by a backend that never
-//! tore itself down from leaking forever.
+//! A temporary namespace is `pg_temp_<backend id>` in the catalog that every
+//! gateway of a cluster shares.
+//!
+//! A session empties that namespace by name before it first uses it. This is
+//! the only thing that stops the relations of a backend that never tore itself
+//! down from leaking forever.
 //!
 //! These cases pin the one outcome that must never follow from that: a second
-//! session holding the same backend id may not destroy the relations of a
-//! session still using the namespace. Backend ids carry a per-process component
-//! so the collision is not reached in practice, but every case here constructs
-//! it directly rather than trusting the ids to differ, because what is being
-//! tested is what happens when that assumption fails.
+//! session that holds the same backend id may not destroy the relations of a
+//! session that still uses the namespace. Backend ids carry a per-process
+//! component, so the collision is not reached in practice. But every case here
+//! constructs the collision directly instead of trusting the ids to differ,
+//! because these cases test what happens when that assumption fails.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -17,8 +19,10 @@ use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
 /// The backend id both sessions of a colliding pair are opened under.
 const SHARED_BACKEND_ID: i32 = 4242;
 
-/// What the second session of the pair does. Every one of these reaches a purge
-/// that names the namespace and nothing else.
+/// What the second session of the pair does.
+///
+/// Every one of these reaches a purge that names the namespace and nothing
+/// else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Collision {
     CreatesItsOwnTemporaryRelation,
@@ -62,8 +66,10 @@ fn row(value: &str) -> Vec<Option<String>> {
     vec![Some(value.to_string())]
 }
 
-/// Every temporary relation the catalog holds, whichever namespace it is in, so
-/// a case can see what a purge left behind without naming a namespace itself.
+/// Every temporary relation the catalog holds, whichever namespace it is in.
+///
+/// A case can then see what a purge left behind without naming a namespace
+/// itself.
 async fn temporary_relations(observer: &mut SqlSession) -> Vec<Vec<Option<String>>> {
     rows(
         observer,
@@ -115,8 +121,8 @@ async fn a_session_sharing_a_backend_id_leaves_a_live_sessions_temporary_rows_al
     }
 }
 
-/// The purge is what keeps a dead backend's relations from leaking, so it has
-/// to still happen once the session that held the id is gone.
+/// The purge keeps a dead backend's relations from leaking, so it must still
+/// happen after the session that held the id is gone.
 #[tokio::test]
 async fn a_backend_id_whose_session_ended_is_purged_by_the_next_one() {
     let engine = SqlEngine::new();
@@ -133,8 +139,8 @@ async fn a_backend_id_whose_session_ended_is_purged_by_the_next_one() {
     assert!(temporary_relations(&mut observer).await == vec![row("fresh")]);
 }
 
-/// A session is never held back from emptying its *own* namespace by its own
-/// claim on it.
+/// A session's own claim never stops that session from emptying its *own*
+/// namespace.
 #[tokio::test]
 async fn a_session_still_empties_its_own_temporary_namespace() {
     let engine = SqlEngine::new();

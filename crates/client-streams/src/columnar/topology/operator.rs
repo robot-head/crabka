@@ -1,7 +1,11 @@
-//! `ColumnarProcessor`: a batch operator (`DataFrame -> 0..n DataFrame`), plus
-//! built-in stateless operators expressed as polars exprs and within-batch
-//! `group_by`/`agg`. Reserved metadata columns (`__key`, …) are preserved across
-//! stateless operators and dropped/recomputed by aggregations (documented below).
+//! `ColumnarProcessor`: a batch operator that maps `DataFrame` to `0..n`
+//! `DataFrame`.
+//!
+//! This module also holds the built-in stateless operators, which are expressed
+//! as polars exprs, and the within-batch `group_by` and `agg`. The reserved
+//! metadata columns, such as `__key`, survive the stateless operators. An
+//! aggregation drops them or recomputes them. The items below document each
+//! case.
 
 use ::polars::prelude::*;
 
@@ -27,36 +31,39 @@ impl ColumnarContext {
     }
 }
 
-/// A batch operator. Stateless across calls in v1 (one batch in, 0..n out).
+/// A batch operator. In v1 it is stateless across calls: one batch in, `0..n`
+/// batches out.
 pub trait ColumnarProcessor: Send + 'static {
-    /// Process one batch, forwarding `0..n` output batches via `ctx`.
+    /// Process one batch and forward `0..n` output batches through `ctx`.
     ///
     /// # Errors
     /// Returns `BatchError` if the underlying polars computation fails.
     fn process(&mut self, ctx: &mut ColumnarContext, batch: DataFrame) -> Result<(), BatchError>;
 }
 
-/// Built-in operator kinds (the DSL/graph builds these).
+/// The built-in operator kinds. The DSL and the graph build these.
 ///
-/// `Clone` so a topology can build a fresh operator instance per `run_batch`
-/// (the exprs are cheap, refcounted polars `Expr`s).
+/// This enum is `Clone`, so a topology can build a fresh operator instance for
+/// each `run_batch`. The exprs are cheap, refcounted polars `Expr`s.
 #[derive(Clone)]
 pub enum BuiltinOp {
-    /// `filter(predicate)` — keeps reserved columns.
+    /// `filter(predicate)`. It keeps the reserved columns.
     Filter(Expr),
-    /// `select(exprs)` — projection; reserved columns are auto-appended so
-    /// downstream sinks can still reconstruct records.
+    /// `select(exprs)`, a projection. The operator appends the reserved columns
+    /// again, so downstream sinks can still rebuild the records.
     Select(Vec<Expr>),
-    /// `with_columns(exprs)` — add/replace columns; keeps reserved columns.
+    /// `with_columns(exprs)`. It adds or replaces columns and keeps the reserved
+    /// columns.
     WithColumns(Vec<Expr>),
-    /// within-batch `group_by(keys).agg(aggs)`. Drops reserved metadata columns
-    /// (the grouped frame has new cardinality); the sink writes the grouped rows
-    /// with null keys / current timestamp unless an agg recreates `__key`.
+    /// The within-batch `group_by(keys).agg(aggs)`. It drops the reserved
+    /// metadata columns, because the grouped frame has a new cardinality. The
+    /// sink writes the grouped rows with null keys and the current timestamp,
+    /// unless an agg recreates `__key`.
     GroupByAgg { keys: Vec<Expr>, aggs: Vec<Expr> },
 }
 
 impl BuiltinOp {
-    /// A cheap static label for tracing (the operator variant name).
+    /// A cheap static label for tracing. It is the operator variant name.
     fn kind_label(&self) -> &'static str {
         match self {
             BuiltinOp::Filter(_) => "filter",

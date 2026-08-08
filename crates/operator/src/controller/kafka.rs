@@ -1,14 +1,14 @@
 //! Kafka CRD reconciler.
 //!
-//! `Kafka` is a parent/coordinator. It owns the cluster-level
-//! `Service`, `ConfigMap`, and cluster-id `Secret`. Broker
-//! `StatefulSet`s live on sibling `KafkaNodePool`s (one per pool, owned
-//! by the pool). The `Kafka` reconciler aggregates per-pool status and
-//! surfaces a cluster-level `Ready` condition.
+//! `Kafka` is a parent and a coordinator. It owns the cluster-level
+//! `Service`, the `ConfigMap`, and the cluster-id `Secret`. Broker
+//! `StatefulSet`s live on the sibling `KafkaNodePool`s, one for each pool,
+//! and the pool owns them. The `Kafka` reconciler collects the per-pool
+//! status and reports a cluster-level `Ready` condition.
 //!
-//! Per-pool status is rolled up by summing `replicas` and
-//! `readyReplicas` across every `KafkaNodePool` labeled
-//! `crabka.io/cluster=<this name>`. The `Ready` condition follows the
+//! The reconciler rolls the per-pool status up. It sums `replicas` and
+//! `readyReplicas` across every `KafkaNodePool` with the label
+//! `crabka.io/cluster=<this name>`. The `Ready` condition follows this
 //! rule:
 //! - no pools           -> `Ready=False`, reason `NoNodePools`
 //! - all ready          -> `Ready=True`,  reason `Available`
@@ -63,18 +63,21 @@ use crate::{
     ids::{ReadyReplicaCount, ReplicaCount},
 };
 
-/// Rolled-up view of a cluster's pools. Computed by
-/// `aggregate_pool_status` and consumed by `rollup_condition`.
+/// Rolled-up view of the pools of one cluster.
+///
+/// `aggregate_pool_status` computes it and `rollup_condition` reads it.
 pub(crate) struct ClusterRollup {
     pub replicas: ReplicaCount,
     pub ready_replicas: ReadyReplicaCount,
     pub pool_count: usize,
 }
 
-/// Sum `replicas` and `readyReplicas` across every pool, counting how
-/// many pools we saw. A pool with no status yet contributes zero to
-/// both totals but still increments `pool_count` — so a freshly-created
-/// pool surfaces as `PartiallyReady` rather than `NoNodePools`.
+/// Sums `replicas` and `readyReplicas` across every pool and counts the
+/// pools.
+///
+/// A pool with no status yet adds zero to both totals, but it still
+/// increments `pool_count`. A new pool therefore shows as
+/// `PartiallyReady` and not as `NoNodePools`.
 pub(crate) fn aggregate_pool_status<'a>(
     pools: impl IntoIterator<Item = &'a KafkaNodePool>,
 ) -> ClusterRollup {
@@ -92,11 +95,13 @@ pub(crate) fn aggregate_pool_status<'a>(
     r
 }
 
-/// Translate a rollup into `(rolling, reason, message)` for the cluster
-/// `Rolling` condition. `Rolling=True` is surfaced whenever at least one
-/// pool exists and not all brokers have reached Ready — covers both
-/// initial bring-up and config-drift-triggered restarts (which we can't
-/// distinguish from the rollup alone).
+/// Translates a rollup into `(rolling, reason, message)` for the cluster
+/// `Rolling` condition.
+///
+/// The operator reports `Rolling=True` when at least one pool exists and
+/// not all brokers have reached Ready. This covers the initial bring-up
+/// and the restarts that config drift triggers. The rollup alone cannot
+/// separate the two.
 pub(crate) fn rolling_condition_from_rollup(
     rollup: &ClusterRollup,
 ) -> (bool, &'static str, String) {
@@ -118,9 +123,11 @@ pub(crate) fn rolling_condition_from_rollup(
     }
 }
 
-/// Translate a rollup into `(ready, reason, message)` for the cluster
-/// `Ready` condition. The three branches are the contract that admins
-/// (and the e2e tests) match on.
+/// Translates a rollup into `(ready, reason, message)` for the cluster
+/// `Ready` condition.
+///
+/// The three branches are the contract that admins and the e2e tests
+/// match on.
 pub(crate) fn rollup_condition(rollup: &ClusterRollup) -> (bool, &'static str, String) {
     if rollup.pool_count == 0 {
         (
@@ -149,18 +156,20 @@ pub(crate) fn rollup_condition(rollup: &ClusterRollup) -> (bool, &'static str, S
     }
 }
 
-/// Run the `Kafka` controller forever. Returns only on irrecoverable
-/// stream error (the kube-rs `Controller` re-establishes watches on
-/// recoverable errors internally).
+/// Runs the `Kafka` controller forever. It returns only on an
+/// irrecoverable stream error. The kube-rs `Controller` re-establishes
+/// the watches on recoverable errors by itself.
 ///
-/// Watches `KafkaNodePool` so a pool status change wakes its parent's
-/// reconcile. The mapper resolves the parent name via the
-/// `crabka.io/cluster` label and the namespace from the pool itself.
+/// The controller watches `KafkaNodePool`, so that a pool status change
+/// wakes the reconcile of its parent. The mapper reads the parent name
+/// from the `crabka.io/cluster` label and the namespace from the pool
+/// itself.
 ///
-/// Also watches `Node` (cluster-scoped) so that `ExternalIP` changes
-/// (relevant for `NodePort` listeners) eventually trigger a reconcile.
-/// The mapper returns empty — the periodic requeue (30 s) picks up the
-/// change rather than enqueuing every Kafka on every Node event.
+/// The controller also watches `Node`, which is cluster-scoped, so that a
+/// change of an `ExternalIP` triggers a reconcile. `ExternalIP` matters
+/// for `NodePort` listeners. The mapper returns an empty result. The
+/// periodic requeue every 30 s picks the change up, and the controller
+/// does not enqueue every Kafka on every Node event.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
@@ -201,9 +210,11 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
 }
 
 /// Identifier triple for one broker, derived from a `KafkaNodePool`.
-/// `pod_fqdn` is the stable in-cluster DNS name (cluster headless
-/// Service subdomain) — same string whether the pod is scheduled or
-/// not, so internal listeners can advertise it before any pod exists.
+///
+/// `pod_fqdn` is the stable in-cluster DNS name in the subdomain of the
+/// cluster headless Service. The string is the same whether the pod is
+/// scheduled or not, so internal listeners can advertise it before any pod
+/// exists.
 #[derive(Debug, Clone)]
 pub(crate) struct BrokerInfo {
     pub broker_id: i32,
@@ -211,9 +222,11 @@ pub(crate) struct BrokerInfo {
     pub pod_fqdn: String,
 }
 
-/// Walk pools (in caller-provided order) and emit one `BrokerInfo` per
-/// pool. The operator enforces `replicas == 1`, so each pool maps to
-/// exactly one broker whose id is the pool's `nodeIdStart`.
+/// Walks the pools in the order that the caller gave and returns one
+/// `BrokerInfo` for each pool.
+///
+/// The operator enforces `replicas == 1`, so each pool maps to exactly one
+/// broker. The id of that broker is the `nodeIdStart` of the pool.
 pub(crate) fn enumerate_brokers(
     cluster_name: &str,
     namespace: &str,
@@ -236,11 +249,13 @@ pub(crate) fn enumerate_brokers(
     out
 }
 
-/// Build the per-listener `ListenerStatus` entries. Internal listeners
-/// surface the headless Service FQDN; external listeners pull a
-/// bootstrap host:port from the apiserver-returned bootstrap Service.
-/// Returns only entries whose addresses successfully resolved — a
-/// listener still pending external infra is omitted.
+/// Builds the per-listener `ListenerStatus` entries.
+///
+/// Internal listeners report the FQDN of the headless Service. External
+/// listeners take a bootstrap host and port from the bootstrap Service
+/// that the apiserver returned. This function returns only the entries
+/// whose addresses resolved. It omits a listener that still waits for
+/// external infrastructure.
 pub(crate) fn build_listener_status(
     effective_listeners: &[Listener],
     addresses_per_broker: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>,
@@ -275,9 +290,11 @@ pub(crate) fn build_listener_status(
     out
 }
 
-/// Inner helper for [`build_listener_status`]. Splits the per-listener
-/// bootstrap-address derivation out so the body can `?`-chain through
-/// the Option-returning apiserver lookups.
+/// Inner helper for [`build_listener_status`].
+///
+/// This function holds the per-listener bootstrap-address derivation, so
+/// that the body can `?`-chain through the apiserver lookups that return
+/// an `Option`.
 fn resolve_bootstrap_servers(
     listener: &Listener,
     bootstrap_services: &HashMap<String, Service>,
@@ -332,13 +349,18 @@ fn resolve_bootstrap_servers(
     }
 }
 
-/// Apply the bootstrap and per-broker objects for each external listener.
-/// Internal listeners need no objects beyond the cluster-wide headless Service.
+/// Applies the bootstrap objects and the per-broker objects for each
+/// external listener.
 ///
-/// - `nodeport` / `loadbalancer`: a `NodePort` / `LoadBalancer` Service each.
-/// - `ingress` / `route`: a `ClusterIP` backend Service each, plus an `Ingress`
-///   (typed) or `OpenShift` `Route` (dynamic) routing the configured hostname to
-///   that backend over TLS passthrough.
+/// Internal listeners need no objects other than the cluster-wide headless
+/// Service.
+///
+/// - `nodeport` and `loadbalancer`: one `NodePort` or `LoadBalancer`
+///   Service each.
+/// - `ingress` and `route`: one `ClusterIP` backend Service each, and a
+///   typed `Ingress` or a dynamic `OpenShift` `Route`. The `Ingress` or
+///   `Route` routes the configured hostname to that backend over TLS
+///   passthrough.
 #[tracing::instrument(
     level = "debug",
     skip_all,
@@ -403,10 +425,12 @@ async fn apply_external_services(
     Ok(())
 }
 
-/// Return the single canonical OAuth listener config (if any).
-/// `validate_listeners` already rejects divergent per-listener OAuth
-/// configs, so the first OAuth listener's config is the canonical one
-/// for the whole cluster.
+/// Returns the single canonical OAuth listener configuration, if there is
+/// one.
+///
+/// `validate_listeners` already rejects per-listener OAuth configurations
+/// that differ from each other. The configuration of the first OAuth
+/// listener is therefore the canonical one for the whole cluster.
 fn canonical_oauth_config(listeners: &[Listener]) -> Option<ListenerAuthenticationOAuth> {
     listeners.iter().find_map(|l| match &l.authentication {
         Some(ListenerAuthentication::OAuth(cfg)) => Some((**cfg).clone()),
@@ -414,15 +438,16 @@ fn canonical_oauth_config(listeners: &[Listener]) -> Option<ListenerAuthenticati
     })
 }
 
-/// Compute the managed OAUTHBEARER trust Secret's name from
-/// the parent Kafka CR's listeners. Returns `Some(name)` when at least
-/// one OAuth listener has a non-empty `tls_trusted_certificates`, else
-/// `None`. The naming is deterministic
-/// (`{kafka}-oauth-jwks-trust`) so both `kafka.rs::reconcile_kafka`
-/// (which actually upserts the Secret via [`reconcile_oauth_jwks_trust`])
-/// and `kafka_node_pool.rs::reconcile` (which mounts the Secret into
-/// the broker pod) can derive the same name independently without
-/// re-doing the bundle assembly.
+/// Computes the name of the managed OAUTHBEARER trust Secret from the
+/// listeners of the parent Kafka CR.
+///
+/// This function returns `Some(name)` when at least one OAuth listener has
+/// a non-empty `tls_trusted_certificates`. If not, it returns `None`. The
+/// name is deterministic and is always `{kafka}-oauth-jwks-trust`. Two
+/// call sites can therefore derive the same name on their own, and neither
+/// has to assemble the bundle again. `kafka.rs::reconcile_kafka` upserts
+/// the Secret with [`reconcile_oauth_jwks_trust`], and
+/// `kafka_node_pool.rs::reconcile` mounts the Secret into the broker pod.
 pub(crate) fn oauth_jwks_trust_secret_name(kafka: &Kafka) -> Option<String> {
     let canonical = canonical_oauth_config(&kafka.spec.listeners)?;
     if canonical.tls_trusted_certificates.is_empty() {
@@ -431,27 +456,31 @@ pub(crate) fn oauth_jwks_trust_secret_name(kafka: &Kafka) -> Option<String> {
     Some(format!("{}-oauth-jwks-trust", kafka.name_any()))
 }
 
-/// Describes the source Secret the operator mounts into
-/// broker pods for OAUTHBEARER introspection client-secret. Returned
-/// by [`reconcile_oauth_introspection_secret`] (validating, async,
-/// runs in `reconcile_kafka`) and re-derived deterministically from
-/// the parent Kafka CR via [`oauth_introspection_secret_mount`] (pure,
-/// sync, used by the pool reconciler to know what to mount without
-/// re-fetching from the apiserver).
+/// Describes the source Secret that the operator mounts into broker pods
+/// for the OAUTHBEARER introspection client-secret.
+///
+/// [`reconcile_oauth_introspection_secret`] returns it. That function
+/// validates, is async, and runs in `reconcile_kafka`.
+/// [`oauth_introspection_secret_mount`] derives the same value again from
+/// the parent Kafka CR. That function is pure and synchronous, and the
+/// pool reconciler uses it to learn what to mount without another fetch
+/// from the apiserver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OauthIntrospectionMount {
     pub secret_name: String,
     pub key: String,
 }
 
-/// Derives the OAUTHBEARER introspection client-secret
-/// mount from the parent Kafka CR's listeners. `Some` when at least
-/// one OAuth listener has `accessTokenIsJwt: false` and a
-/// `clientSecret` ref; `None` when no OAuth listener uses
-/// introspection mode (or no OAuth listener at all). Pure: derives
-/// the same `OauthIntrospectionMount` the pool reconciler will mount
-/// without consulting the apiserver — the source Secret's name + key
-/// live on the CR.
+/// Derives the OAUTHBEARER introspection client-secret mount from the
+/// listeners of the parent Kafka CR.
+///
+/// The result is `Some` when at least one OAuth listener has
+/// `accessTokenIsJwt: false` and a `clientSecret` ref. The result is
+/// `None` when no OAuth listener uses introspection mode, and also when
+/// there is no OAuth listener at all. This function is pure. It derives
+/// the same `OauthIntrospectionMount` that the pool reconciler mounts, and
+/// it does not read the apiserver. The name and the key of the source
+/// Secret live on the CR.
 pub(crate) fn oauth_introspection_secret_mount(kafka: &Kafka) -> Option<OauthIntrospectionMount> {
     let canonical = canonical_oauth_config(&kafka.spec.listeners)?;
     if canonical.access_token_is_jwt {
@@ -464,17 +493,21 @@ pub(crate) fn oauth_introspection_secret_mount(kafka: &Kafka) -> Option<OauthInt
     })
 }
 
-/// In-pod mount info for the GSSAPI keytab. `key` is the user's source
-/// key; mounted via projected items to a fixed path so the broker reads
-/// `/etc/crabka/gssapi-keytab/keytab` regardless of key name.
+/// In-pod mount information for the GSSAPI keytab.
+///
+/// `key` is the source key of the user. The operator mounts it with
+/// projected items to a fixed path, so that the broker reads
+/// `/etc/crabka/gssapi-keytab/keytab` whatever the key name is.
 pub(crate) struct GssapiKeytabMount {
     pub secret_name: String,
     pub key: String,
 }
 
-/// The keytab Secret ref from the (first) GSSAPI listener, or `None` when
-/// no listener is `type: gssapi`. Validation guarantees all GSSAPI
-/// listeners agree, so the first is canonical.
+/// Returns the keytab Secret ref from the first GSSAPI listener, or
+/// `None` when no listener is `type: gssapi`.
+///
+/// Validation guarantees that all GSSAPI listeners agree, so the first one
+/// is canonical.
 pub(crate) fn gssapi_keytab_mount(kafka: &Kafka) -> Option<GssapiKeytabMount> {
     kafka
         .spec
@@ -498,11 +531,13 @@ pub(crate) fn krb5_conf_mount(kafka: &Kafka) -> Option<(String, String)> {
         .map(|r| (r.secret_name.clone(), r.key.clone()))
 }
 
-/// Build the managed oauth-jwks-trust Secret from the
-/// canonical OAuth config's `tls_trusted_certificates`. Returns the
-/// Secret's name (so the `StatefulSet` can mount it), or `None` when no
-/// managed Secret is needed (no OAuth listener, or no trust certs
-/// configured).
+/// Builds the managed oauth-jwks-trust Secret from the
+/// `tls_trusted_certificates` of the canonical OAuth configuration.
+///
+/// This function returns the name of the Secret, so that the
+/// `StatefulSet` can mount it. It returns `None` when no managed Secret is
+/// necessary, which happens when there is no OAuth listener and when no
+/// trust certs are configured.
 #[tracing::instrument(level = "debug", skip_all, fields(kafka = %kafka.name_any()), err)]
 async fn reconcile_oauth_jwks_trust(
     secret_api: &Api<Secret>,
@@ -545,9 +580,11 @@ async fn reconcile_oauth_jwks_trust(
     Ok(Some(managed_name))
 }
 
-/// Server-side apply the managed `{kafka}-oauth-jwks-trust`
-/// Secret with the concatenated PEM bundle under key `ca.crt`. Owner-
-/// ref'd to the parent `Kafka` so deleting the CR cascades the Secret.
+/// Applies the managed `{kafka}-oauth-jwks-trust` Secret from the server
+/// side, with the concatenated PEM bundle under the key `ca.crt`.
+///
+/// The Secret has an owner reference to the parent `Kafka`, so a delete of
+/// the CR also deletes the Secret.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -578,15 +615,19 @@ async fn upsert_oauth_trust_secret(
     apply_object(secret_api, managed_name, &secret).await
 }
 
-/// Validate the OAUTHBEARER introspection client-secret
-/// Secret + key exist (no managed-Secret upsert — the pod template
-/// mounts the source Secret directly via projected items). Returns
-/// the mount info for the `StatefulSet` renderer, or `None` when
-/// introspection is not configured (JWT mode or no oauth listener).
+/// Validates that the Secret and the key of the OAUTHBEARER introspection
+/// client-secret exist.
 ///
-/// The `_kafka` arg mirrors the sibling's signature for
-/// call-site symmetry but is unused here: there is no managed Secret
-/// to owner-ref — the source Secret stays user-owned.
+/// This function upserts no managed Secret. The pod template mounts the
+/// source Secret directly with projected items. The function returns the
+/// mount information for the `StatefulSet` renderer, or `None` when
+/// introspection is not configured. That happens in JWT mode and when
+/// there is no oauth listener.
+///
+/// The `_kafka` argument gives this function the same signature as its
+/// sibling, for symmetry at the call sites. This function does not use it,
+/// because there is no managed Secret to give an owner reference to. The
+/// source Secret stays the property of the user.
 async fn reconcile_oauth_introspection_secret(
     secret_api: &Api<Secret>,
     _kafka: &Kafka,
@@ -627,7 +668,7 @@ async fn reconcile_oauth_introspection_secret(
     }))
 }
 
-/// Apply one `OpenShift` `Route` via the dynamic-object path.
+/// Applies one `OpenShift` `Route` through the dynamic-object path.
 async fn apply_route(
     ctx: &Context,
     namespace: &str,
@@ -646,13 +687,15 @@ async fn apply_route(
     .await
 }
 
-/// Read back the cluster Nodes, broker Pods, and per-listener Services
-/// the operator just applied. Returned as three `HashMap`s plus the
-/// pod-by-name lookup the address resolver needs.
+/// Reads back the cluster Nodes, the broker Pods, and the per-listener
+/// Services that the operator just applied.
 ///
-/// Returning `Ok(default)` rather than failing on any individual GET's
-/// 404 is intentional: a Pod that hasn't been created yet is not an
-/// error — it surfaces as `PodNotScheduled` in `compute_advertised`.
+/// The result holds three `HashMap`s and the pod-by-name lookup that the
+/// address resolver needs.
+///
+/// A 404 from one GET gives `Ok(default)` and not an error, and this is on
+/// purpose. A Pod that does not exist yet is not an error. It shows as
+/// `PodNotScheduled` in `compute_advertised`.
 type ExternalState = (
     HashMap<String, Node>,
     HashMap<String, Pod>,
@@ -722,10 +765,12 @@ async fn read_external_state(
     Ok((nodes, pods_by_name, bootstrap_services, broker_services))
 }
 
-/// For each (broker, listener) pair, resolve the advertised host:port
-/// via [`compute_advertised`]. Short-circuits on the first
-/// `AdvertisedError` so the caller can surface a single
-/// `PendingExternalAddresses` reason rather than a flapping list.
+/// Resolves the advertised host and port for each broker and listener
+/// pair with [`compute_advertised`].
+///
+/// This function stops at the first `AdvertisedError`, so that the caller
+/// can report one `PendingExternalAddresses` reason instead of a list that
+/// changes on every pass.
 fn resolve_addresses_per_broker(
     effective_listeners: &[Listener],
     brokers: &[BrokerInfo],
@@ -750,11 +795,13 @@ fn resolve_addresses_per_broker(
     Ok(out)
 }
 
-/// Read-modify-write the `Kafka` status conditions: fetch the current
-/// status, replace any existing condition with the same `type_` as
-/// `new_cond`, push `new_cond`, and patch. Preserves all other status
-/// fields (replicas, `cluster_ca`, etc.) so a BYO-CA early-return does
-/// not wipe conditions that were written by a previous reconcile pass.
+/// Reads, modifies, and writes the `Kafka` status conditions.
+///
+/// This function fetches the current status, removes any condition with
+/// the same `type_` as `new_cond`, pushes `new_cond`, and patches. It
+/// keeps all other status fields, such as `replicas` and `cluster_ca`. A
+/// BYO-CA early return therefore does not delete the conditions that an
+/// earlier reconcile pass wrote.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -780,11 +827,15 @@ async fn patch_status_with_condition(
     patch_status::<Kafka, KafkaStatus>(kafka_api, name, status).await
 }
 
-/// Reconcile entry point. Thin wrapper that times the pass, records the
-/// `reconciliations_total{kind,result}` counter + `reconcile_duration_seconds`
-/// histogram, and delegates to the internal `reconcile_inner` operation. Kept separate so the
-/// per-outcome metric classification (ok / error) lives in one place and the
-/// long linear inner body's many early-return sites don't each need to record.
+/// Reconcile entry point.
+///
+/// This thin wrapper times the pass, records the
+/// `reconciliations_total{kind,result}` counter and the
+/// `reconcile_duration_seconds` histogram, then calls the internal
+/// `reconcile_inner` operation. It is a separate function so that the
+/// per-outcome metric classification, ok or error, lives in one place. The
+/// many early-return sites in the long inner body then do not each have to
+/// record it.
 #[tracing::instrument(
     skip_all,
     fields(
@@ -1920,19 +1971,22 @@ async fn reconcile_inner(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, R
     .await
 }
 
-/// For every pool labeled `crabka.io/cluster=<this Kafka>`, patch
-/// `metadata.ownerReferences` so the Kafka is the controlling owner AND
-/// `metadata.labels["crabka.io/config-hash"]` so the pool reconciler
-/// observes config drift. Uses a server-side apply with the operator's
-/// field manager so the patch wins over any out-of-band manual edits.
+/// Patches every pool with the label `crabka.io/cluster=<this Kafka>`.
 ///
-/// The per-pool hash is planned by [`common::plan_rollout`] so an
-/// established multi-pool cluster rolls one node at a time (ordered by
-/// `(node_id_start, name)`, gated on each pool reaching Ready) rather than
-/// rolling every pool at once. Initial bring-up still applies the hash to
-/// every pool in parallel — a `KRaft` controller quorum needs all controllers
-/// up together. The owner-ref is applied to every pool every reconcile
-/// regardless, so the request count is unchanged.
+/// The patch sets `metadata.ownerReferences`, so that the Kafka is the
+/// controlling owner, AND
+/// `metadata.labels["crabka.io/config-hash"]`, so that the pool
+/// reconciler sees config drift. This function uses a server-side apply
+/// with the field manager of the operator, so the patch wins over any
+/// manual edit from outside.
+///
+/// [`common::plan_rollout`] plans the per-pool hash. An established
+/// multi-pool cluster therefore rolls one node at a time, in the order
+/// `(node_id_start, name)`, and each pool must reach Ready before the next
+/// one rolls. The initial bring-up still applies the hash to every pool in
+/// parallel, because a `KRaft` controller quorum needs all controllers up
+/// together. Every reconcile applies the owner reference to every pool in
+/// both cases, so the request count does not change.
 #[tracing::instrument(
     level = "debug",
     skip_all,
@@ -2004,10 +2058,11 @@ pub fn error_policy(_obj: Arc<Kafka>, err: &ReconcileError, ctx: Arc<Context>) -
     common::error_requeue(ctx)
 }
 
-/// Emit a `Warning` Kubernetes Event on the `Kafka` object for a listener
-/// that carries SCRAM authentication without transport TLS. Fire-and-forget
-/// (the caller `.ok()`-s the result) — a transient API error should not
-/// block the rest of the reconcile.
+/// Emits a `Warning` Kubernetes Event on the `Kafka` object for a listener
+/// that carries SCRAM authentication without transport TLS.
+///
+/// The caller calls `.ok()` on the result and does not wait for it. A
+/// transient API error should not block the rest of the reconcile.
 async fn emit_weak_auth_event(
     client: &kube::Client,
     namespace: &str,
@@ -2030,8 +2085,11 @@ async fn emit_weak_auth_event(
     .await
 }
 
-/// Warning Event when a forced CA rotation can't be honored (BYO CA
-/// or clients-CA key replacement). Fire-and-forget at the call site.
+/// Emits a Warning Event when the operator cannot do a forced CA
+/// rotation.
+///
+/// The two causes are a BYO CA and a clients-CA key replacement. The call
+/// site does not wait for the result.
 async fn emit_ca_rotation_refused_event(
     client: &kube::Client,
     namespace: &str,
@@ -2054,11 +2112,14 @@ async fn emit_ca_rotation_refused_event(
     .await
 }
 
-/// "No roll in flight" — every pool carries the same (non-empty)
-/// `crabka.io/config-hash` label and every pool's broker is Ready. The CA
-/// rotation state machine advances a staged phase only when this holds, so
-/// trust distribution finishes before the new key is promoted (and promotion
-/// finishes before the old anchor is pruned). Empty pool list ⇒ converged.
+/// Reports whether no roll is in flight.
+///
+/// No roll is in flight when every pool carries the same non-empty
+/// `crabka.io/config-hash` label and the broker of every pool is Ready.
+/// The CA rotation state machine advances a staged phase only in this
+/// condition. Trust distribution therefore finishes before the operator
+/// promotes the new key, and the promotion finishes before the operator
+/// prunes the old anchor. An empty pool list counts as converged.
 pub(crate) fn pools_converged<'a>(pools: impl IntoIterator<Item = &'a KafkaNodePool>) -> bool {
     let mut hashes = std::collections::BTreeSet::new();
     let mut all_ready = true;
@@ -2083,8 +2144,9 @@ pub(crate) fn pools_converged<'a>(pools: impl IntoIterator<Item = &'a KafkaNodeP
     !any || (hashes.len() == 1 && !hashes.contains(&None) && all_ready)
 }
 
-/// Remove one-shot rotation-trigger annotations from the `Kafka` CR
-/// (JSON Merge Patch with `null` values deletes the keys).
+/// Removes the one-shot rotation-trigger annotations from the `Kafka` CR.
+///
+/// A JSON Merge Patch with `null` values deletes the keys.
 #[tracing::instrument(level = "debug", skip_all, fields(name = %name, keys = keys.len()), err)]
 async fn strip_annotations(
     kafka_api: &Api<Kafka>,

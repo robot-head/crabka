@@ -1,4 +1,4 @@
-//! Top-level `Broker` lifecycle. Wires together the partition registry,
+//! Top-level `Broker` lifecycle. The broker connects the partition registry,
 //! metadata image, network listener, and handler table.
 
 use std::{
@@ -55,8 +55,8 @@ fn self_registration_record(config: &BrokerConfig) -> crabka_metadata::BrokerReg
     }
 }
 
-/// Safety-net timeout shared by the test-helper `wait_*` awaiters: a
-/// condition that has not held within this window fails the test loudly.
+/// Timeout shared by the test-helper `wait_*` awaiters. If a condition
+/// does not hold within this window, the test fails.
 #[cfg(any(test, feature = "test-helpers"))]
 const TEST_AWAITER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -71,21 +71,22 @@ pub struct Broker {
     /// Metadata authority for this broker. For combined/controller nodes
     /// this is a live openraft `ControllerHandle`; for broker-only nodes it
     /// is an observer-backed source that fetches `__cluster_metadata` and
-    /// forwards writes to the controller quorum. Handlers reach it via the
-    /// `MetadataSource` trait, so the concrete backing is invisible to them.
+    /// forwards writes to the controller quorum. Handlers reach it through
+    /// the `MetadataSource` trait, so the concrete backing is invisible to
+    /// them.
     pub(crate) controller: Arc<dyn crate::metadata_source::MetadataSource>,
-    /// Wrapped in `Arc` so handlers cloning the field share the same
+    /// Wrapped in `Arc` so handlers that clone the field share the same
     /// underlying registry. Lookups take a borrowed `&str` topic, so the
     /// produce/fetch hot path resolves partitions with no per-lookup `String`
     /// allocation.
     pub(crate) partitions: Arc<PartitionRegistry>,
     /// KIP-113 (`AlterReplicaLogDirs`): in-progress intra-broker
-    /// log-dir moves. One entry per `(topic, partition)` currently
-    /// being copied to a different log.dir. `DescribeLogDirs` reads
-    /// this to surface `is_future_key=true` rows; the
-    /// `AlterReplicaLogDirs` handler reads it to make a second
-    /// request for the same partition idempotent (or reject a
-    /// conflicting target).
+    /// log-dir moves. There is one entry per `(topic, partition)` that
+    /// the broker currently copies to a different log.dir.
+    /// `DescribeLogDirs` reads this to show `is_future_key=true` rows.
+    /// The `AlterReplicaLogDirs` handler reads it to make a second
+    /// request for the same partition idempotent, or to reject a
+    /// conflicting target.
     pub(crate) future_logs:
         Arc<DashMap<(String, PartitionIndex), Arc<crate::future_log::FutureLogState>>>,
     pub(crate) group_coordinator: Arc<crate::coordinator::GroupCoordinator>,
@@ -105,15 +106,15 @@ pub struct Broker {
     pub(crate) disk_scanner_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
     /// `Some` when `BrokerConfig::tls_config` is set. Per-listener
-    /// accept loops snapshot the current `Arc<ServerConfig>` via
+    /// accept loops snapshot the current `Arc<ServerConfig>` with
     /// `current()` and wrap it in a fresh `TlsAcceptor`. The TLS
     /// hot-reload path swaps the inner config without restart.
     pub(crate) tls_dynamic: Option<Arc<crabka_security::DynamicServerConfig>>,
     /// Linux kTLS (Increment F): `true` when the startup probe confirmed the
     /// kernel supports kTLS TX (kernel ≥ 4.13 + the `tls` module loadable) and
-    /// rustls is configured to export secrets. Set ONCE at startup —
+    /// rustls is configured to export secrets. Set ONCE at startup.
     /// `ktls::config_ktls_server` consumes the `TlsStream` by value, so a
-    /// per-connection failure is unrecoverable; routing through kTLS only when
+    /// per-connection failure is unrecoverable. Routing through kTLS only when
     /// this is `true` keeps the per-connection path infallible-by-construction.
     /// When `false` (non-Linux, no `tls` module, or no TLS configured), TLS
     /// listeners serve the exact userspace rustls path (byte-identical wire).
@@ -121,18 +122,18 @@ pub struct Broker {
     /// Shared outbound dialer used by the replicator, raft transport,
     /// and controller-heartbeat loops. When `inter_broker_credentials`
     /// is `None` and the listener is `PLAINTEXT` the dialer falls back
-    /// to a plain `TcpStream::connect` — the new wiring is transparent
+    /// to a plain `TcpStream::connect`. The new wiring is transparent
     /// for the legacy PLAINTEXT-only path.
     pub(crate) inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     /// Resolved protocol of the inter-broker listener (matched from
     /// `BrokerConfig::effective_listeners()` against
     /// `inter_broker_listener_name`). Threaded into outbound inter-broker
-    /// dials — the replicator and heartbeat hold their own copies; the
-    /// `EndTxn` marker fan-out reads this one so TLS / SASL run when the
+    /// dials. The replicator and heartbeat hold their own copies. The
+    /// `EndTxn` marker fan-out reads this one, so TLS / SASL run when the
     /// listener demands them.
     pub(crate) inter_broker_listener_protocol: crabka_security::ListenerProtocol,
-    /// KIP-966 offset-aware unclean recovery. Cloneable handle for
-    /// enqueuing recovery jobs onto the Unclean Recovery Manager task.
+    /// KIP-966 offset-aware unclean recovery. Cloneable handle that
+    /// enqueues recovery jobs onto the Unclean Recovery Manager task.
     /// Used by the `ElectLeaders UNCLEAN` handler (which awaits the
     /// outcome) and the automatic failover path (fire-and-forget).
     pub(crate) unclean_recovery: crate::unclean_recovery::UncleanRecoveryHandle,
@@ -143,22 +144,23 @@ pub struct Broker {
     /// consulted by the Produce/Fetch handlers and request-rate enforcement.
     pub quota_buckets: Arc<crate::quota::QuotaBuckets>,
     /// Live connection accounting for the `max.connections` /
-    /// `max.connections.per.ip` caps. `accept_loop` consults these before
-    /// spawning a per-connection task and an RAII [`ConnectionGuard`]
+    /// `max.connections.per.ip` caps. `accept_loop` consults these before it
+    /// spawns a per-connection task. An RAII [`ConnectionGuard`]
     /// decrements them when the connection ends.
     pub(crate) connections: ConnectionLimiter,
     /// KIP-227 incremental-fetch-session cache. Consulted by the Fetch
     /// handler before each read; sized by
     /// `BrokerConfig::max_incremental_fetch_session_cache_slots`.
     pub fetch_session_cache: Arc<crate::fetch_session::FetchSessionCache>,
-    /// Prometheus metrics. Cloned into every subsystem that
-    /// emits (produce/fetch handlers, isr-maintenance loop, etc.). The
-    /// `BrokerMetrics` struct internally clones cheaply (single Arc).
+    /// Prometheus metrics. Cloned into every subsystem that emits
+    /// metrics, such as the produce/fetch handlers and the
+    /// isr-maintenance loop. The `BrokerMetrics` struct clones cheaply
+    /// because it holds a single Arc.
     pub metrics: crate::metrics::BrokerMetrics,
-    /// The actual `SocketAddr` the `/metrics` HTTP server is
-    /// bound to. Populated only when `BrokerConfig::metrics_listen_addr`
-    /// is `Some`; useful for tests that pass `127.0.0.1:0` and need to
-    /// discover the OS-assigned port.
+    /// The actual `SocketAddr` that the `/metrics` HTTP server binds
+    /// to. Populated only when `BrokerConfig::metrics_listen_addr`
+    /// is `Some`. Tests that pass `127.0.0.1:0` read this field to find
+    /// the OS-assigned port.
     pub(crate) metrics_bound_addr: Option<SocketAddr>,
     /// Controlled shutdown. Set to `true` by
     /// [`BrokerHandle::controlled_shutdown`]; the heartbeat client reads
@@ -167,7 +169,7 @@ pub struct Broker {
     pub(crate) want_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
     /// Controlled shutdown. Set to `true` by the heartbeat
     /// client when the controller responds `should_shut_down=true`;
-    /// [`BrokerHandle::controlled_shutdown`] awaits this before invoking
+    /// [`BrokerHandle::controlled_shutdown`] awaits this before it invokes
     /// the regular shutdown path.
     pub(crate) should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
     /// KIP-405: shared remote-storage + remote-log-metadata
@@ -185,9 +187,9 @@ pub struct Broker {
     pub(crate) wal_shards: Arc<crate::wal::quorum::registry::WalShardRegistry>,
     /// KIP-113 (offline-dir handling): per-log-dir online/offline status,
     /// built by a writability probe at `Broker::start` time. Handlers
-    /// (today: `DescribeLogDirs`; future: produce/fetch) read this via
-    /// [`crate::log_dir_status::LogDirRegistry::is_offline`] before
-    /// touching the dir.
+    /// (today: `DescribeLogDirs`; future: produce/fetch) read this through
+    /// [`crate::log_dir_status::LogDirRegistry::is_offline`] before they
+    /// touch the dir.
     pub(crate) log_dir_status: crate::log_dir_status::LogDirRegistry,
     /// KIP-858: stable UUID per configured log.dir, minted + persisted at
     /// startup. Shared with the heartbeat client (`offline_log_dirs` UUID list)
@@ -199,10 +201,10 @@ pub struct Broker {
     pub(crate) client_metrics: Arc<crate::client_metrics::ClientMetrics>,
     /// Test-only counter of served `OffsetForLeaderEpoch` (`api_key` 23)
     /// requests. Incremented once per decoded request by the handler.
-    /// Used by the KIP-320 proactive-validation integration test to prove
-    /// the consumer's validate pass actually issued an OFLE RPC (as opposed
-    /// to detecting truncation via the reactive in-band `diverging_epoch` /
-    /// `OFFSET_OUT_OF_RANGE` fetch paths, which issue no OFLE).
+    /// The KIP-320 proactive-validation integration test uses this to prove
+    /// that the consumer's validate pass issued an OFLE RPC. The reactive
+    /// in-band `diverging_epoch` and `OFFSET_OUT_OF_RANGE` fetch paths also
+    /// detect truncation, but they issue no OFLE.
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) offset_for_leader_epoch_requests: Arc<std::sync::atomic::AtomicU64>,
     /// `FedRAMP` MLA (Slice 1): cloneable handle to the audit pipeline.
@@ -2063,7 +2065,7 @@ impl Broker {
     }
 
     /// Test-only: clone the controller handle so the `auto_join` unit test can
-    /// build `AutoJoinParams` without reaching into private fields.
+    /// build `AutoJoinParams` without access to private fields.
     #[cfg(test)]
     pub(crate) fn controller_for_test(&self) -> Arc<dyn crate::metadata_source::MetadataSource> {
         self.controller.clone()
@@ -2097,8 +2099,8 @@ pub struct BrokerHandle {
 }
 
 impl BrokerHandle {
-    /// The actual bound `SocketAddr` (useful when `BrokerConfig.listen_addr`
-    /// used port 0 to let the OS pick).
+    /// The actual bound `SocketAddr`. This is useful when
+    /// `BrokerConfig.listen_addr` used port 0 and the OS picked the port.
     #[must_use]
     pub fn listen_addr(&self) -> SocketAddr {
         self.listen_addr
@@ -2150,10 +2152,10 @@ impl BrokerHandle {
 
     /// This broker's own registration endpoints, as stored in the
     /// quorum-replicated [`crabka_metadata::MetadataImage`]. Integration
-    /// tests verify per-listener endpoints were
-    /// projected from `BrokerConfig::effective_listeners()` onto the
-    /// self-registration record. Returns the cloned endpoint list (or
-    /// empty if the broker has not yet self-registered).
+    /// tests verify that the broker projected the per-listener endpoints
+    /// from `BrokerConfig::effective_listeners()` onto the
+    /// self-registration record. Returns the cloned endpoint list, or an
+    /// empty list if the broker has not yet self-registered.
     #[must_use]
     pub fn self_registration_endpoints(&self) -> Vec<crabka_metadata::BrokerEndpoint> {
         let node_id = self.broker.config.node_id;
@@ -2218,9 +2220,9 @@ impl BrokerHandle {
             .map_err(|e| BrokerError::Replication(format!("add_learner: {e}")))
     }
 
-    /// Is `(topic, partition)` present in this broker's `MetadataImage`?
-    /// Used by replication integration tests to wait for topic
-    /// propagation.
+    /// Reports whether `(topic, partition)` is present in this broker's
+    /// `MetadataImage`. Replication integration tests use this to wait for
+    /// topic propagation.
     #[must_use]
     pub fn has_partition(&self, topic: &str, partition: i32) -> bool {
         self.broker
@@ -2231,8 +2233,8 @@ impl BrokerHandle {
     }
 
     /// Local `log_end_offset` for `(topic, partition)`, if this broker
-    /// hosts the partition. Used by replication integration tests to
-    /// assert all followers caught up.
+    /// hosts the partition. Replication integration tests use this to
+    /// assert that all followers caught up.
     #[must_use]
     pub fn local_log_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
         let part = self
@@ -2310,8 +2312,8 @@ impl BrokerHandle {
     }
 
     /// Test-only: directly set `current_leader_epoch` on a locally-hosted
-    /// partition. Used by `tests/leader_epoch.rs` to simulate split-brain
-    /// (force an epoch bump) without going through the supervisor's
+    /// partition. `tests/leader_epoch.rs` uses this to simulate split-brain
+    /// with a forced epoch bump. It does not use the supervisor's
     /// metadata-image-driven path.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn test_set_leader_epoch(&self, topic: &str, partition: i32, epoch: i32) {
@@ -2321,9 +2323,9 @@ impl BrokerHandle {
     }
 
     /// Test-only: return `true` if `(topic, partition)` is present in this
-    /// broker's in-process partition registry. Used by admin-handler
-    /// integration tests to confirm that `CreatePartitions` materialised a
-    /// new partition dir + writer task.
+    /// broker's in-process partition registry. Admin-handler integration
+    /// tests use this to confirm that `CreatePartitions` materialised a
+    /// new partition dir and writer task.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub fn partition_exists_for_test(&self, topic: &str, partition: i32) -> bool {
@@ -2335,10 +2337,10 @@ impl BrokerHandle {
     /// Test-only: read the share-state summary
     /// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)`
     /// for `(group, topic_id, partition)` straight from this broker's
-    /// the internal `ShareCoordinator`.
+    /// internal `ShareCoordinator`.
     /// Returns `None` when the key has no initialized state. KIP-932 lifecycle
-    /// tests use this to assert the group-coordinator Initialized per-partition
-    /// share state without advertising the persister RPCs over the wire.
+    /// tests use this to assert that the group coordinator initialized the
+    /// per-partition share state. The persister RPCs stay off the wire.
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn share_state_summary_for_test(
         &self,
@@ -2445,8 +2447,8 @@ impl BrokerHandle {
     }
 
     /// Test-only: await until the live share-partition has exactly `n` Acquired
-    /// in-flight batches (e.g. after a ShareFetch acquires, or after lock-timeout
-    /// redelivery returns records to Available — count drops back).
+    /// in-flight batches. The count rises after a ShareFetch acquires, and it
+    /// drops back after lock-timeout redelivery returns records to Available.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait_until_share_acquired_count(
@@ -2643,10 +2645,10 @@ impl BrokerHandle {
 
     /// Test-only: await until the streams group is empty/drained (no members).
     ///
-    /// Replaces the fixed-duration `tokio::time::sleep` calls that follow a
-    /// `streams_leave()` heartbeat in the downgrade integration tests, where the
-    /// test must ensure the leave has propagated through the streams actor before
-    /// issuing the classic `JoinGroup` that triggers the streams→classic conversion.
+    /// The downgrade integration tests call this after a `streams_leave()`
+    /// heartbeat instead of a fixed-duration `tokio::time::sleep`. The test must
+    /// make sure the leave has propagated through the streams actor before it
+    /// sends the classic `JoinGroup` that triggers the streams→classic conversion.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait_until_streams_group_empty(&self, group_id: &str) {
@@ -2814,9 +2816,9 @@ impl BrokerHandle {
     }
 
     /// Test-only: await until the coordinator's group-type lock for `group_id`
-    /// reaches `expected`. This replaces immediate assertions after protocol
-    /// requests that enqueue actor work and then asynchronously persist the
-    /// classic/streams type marker.
+    /// reaches `expected`. Use this instead of an immediate assertion after a
+    /// protocol request. Such requests enqueue actor work and then persist the
+    /// classic/streams type marker asynchronously.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait_until_group_type(
@@ -2843,8 +2845,8 @@ impl BrokerHandle {
 
     /// This broker's raft `node_id` (1-indexed broker id used in raft quorum
     /// and metadata records). Exposed so integration tests can build
-    /// `IncrementalAlterConfigs` broker-resource requests targeting this
-    /// broker without hard-coding a node id.
+    /// `IncrementalAlterConfigs` broker-resource requests that target this
+    /// broker without a hard-coded node id.
     #[must_use]
     pub fn node_id(&self) -> u64 {
         self.broker.config.node_id.0
@@ -2863,8 +2865,8 @@ impl BrokerHandle {
 
     /// Test-only: the raft voter set this node's metadata source reports.
     /// A controller/combined node returns the openraft membership; a
-    /// broker-only (observer) node returns an empty set since it never
-    /// joins the quorum. Used by the role-separation test to assert a
+    /// broker-only (observer) node returns an empty set because it never
+    /// joins the quorum. The role-separation test uses this to assert that a
     /// broker-only node is absent from the controller's voters.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
@@ -2883,7 +2885,7 @@ impl BrokerHandle {
 
     /// Test-only: the controller voter set's size as seen by this broker's
     /// committed `MetadataImage`. KIP-853 dynamic-voters tests poll this to
-    /// observe auto-join growing / `remove_voter` shrinking the quorum.
+    /// observe auto-join grow the quorum and `remove_voter` shrink it.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub fn voter_count_for_test(&self) -> usize {
@@ -2891,8 +2893,8 @@ impl BrokerHandle {
     }
 
     /// Test-only: the controller voter ids as seen by this broker's
-    /// committed `MetadataImage`. Used to pick a follower to remove in the
-    /// dynamic-voters shrink test.
+    /// committed `MetadataImage`. The dynamic-voters shrink test uses this
+    /// to pick a follower to remove.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub fn voter_ids_for_test(&self) -> std::collections::BTreeSet<crabka_raft::NodeId> {
@@ -2929,7 +2931,7 @@ impl BrokerHandle {
     }
 
     /// Test-only: ask this broker's controller to generate a metadata
-    /// snapshot. The trigger only schedules the work; the snapshot
+    /// snapshot. The trigger only schedules the work. The snapshot
     /// completes asynchronously, so callers poll for the result.
     ///
     /// # Errors
@@ -2995,8 +2997,8 @@ impl BrokerHandle {
     }
 
     /// Test-only: await until `pred` holds for the controller metadata image.
-    /// Subscribes to the image watch channel and `.await`s changes — no polling
-    /// sleep. Bounded by a 30s safety-net so a stuck condition fails loudly.
+    /// Subscribes to the image watch channel and `.await`s changes. There is no
+    /// polling sleep. A 30s bound makes a stuck condition fail the test.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait_for_image<F>(&self, pred: F)
@@ -3023,10 +3025,10 @@ impl BrokerHandle {
     /// bundle so integration tests can read counters / gauges in-process.
     ///
     /// Pair with [`Self::wait_for_metrics`] to replace fixed-duration `sleep`s
-    /// with a bounded poll on an observable signal (a counter crossing a
-    /// threshold, a gauge reaching an expected value) — the metric moves the
-    /// instant the awaited work lands, so the wait is race-free rather than a
-    /// timing guess.
+    /// with a bounded poll on an observable signal, such as a counter that
+    /// crosses a threshold or a gauge that reaches an expected value. The
+    /// metric moves the instant the awaited work lands, so the wait is
+    /// race-free rather than a timing guess.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
@@ -3037,15 +3039,14 @@ impl BrokerHandle {
     /// Test-only: poll `predicate` against this broker's live metrics every
     /// ~25ms until it returns `true` or [`TEST_AWAITER_TIMEOUT`] elapses.
     ///
-    /// The metrics-driven replacement for a fixed `sleep` in integration
-    /// tests: instead of sleeping "long enough" for a background loop (the
-    /// gauge sampler, disk scanner, cleaner, ISR-maintenance tick, audit
-    /// flush, …) to run and hoping it did, wait until the counter / gauge it
-    /// bumps reflects the awaited state. `what` names the condition for the
-    /// timeout panic message. Unlike [`Self::wait_for_image`] there is no
-    /// change-notification channel behind a Prometheus metric, so this polls;
-    /// the 25ms cadence is an internal implementation detail, not a
-    /// test-visible timing assumption.
+    /// Use this instead of a fixed `sleep` in integration tests. A fixed sleep
+    /// only guesses that a background loop ran, such as the gauge sampler, disk
+    /// scanner, cleaner, ISR-maintenance tick, or audit flush. This method waits
+    /// until the counter or gauge that the loop bumps shows the awaited state.
+    /// `what` names the condition for the timeout panic message. A Prometheus
+    /// metric has no change-notification channel, unlike
+    /// [`Self::wait_for_image`], so this method polls. The 25ms cadence is an
+    /// internal implementation detail, not a test-visible timing assumption.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait_for_metrics<F>(&self, what: &str, mut predicate: F)
@@ -3200,14 +3201,15 @@ impl BrokerHandle {
     }
 
     /// Test-only: await until the LOCAL log end offset for `topic-partition` is
-    /// EXACTLY `target`. Unlike `wait_until_local_log_end_offset` (monotonic `>=`),
-    /// this is for non-monotonic convergence (e.g. a follower truncating a divergent
-    /// suffix then re-replicating to match the leader): the offset may pass through
-    /// `>= target` with wrong-epoch data before settling at `target`. Wakes on
-    /// `append_notify` (re-appends) with a short fallback tick to also observe a
-    /// truncation, which does not notify. Returns the instant LEO == target; this is
-    /// a condition wait on real state (not a fixed-duration sleep), so it cannot
-    /// flake on timing — only fail if the condition never holds within 30s.
+    /// EXACTLY `target`. `wait_until_local_log_end_offset` waits on a monotonic
+    /// `>=`; this method handles non-monotonic convergence. For example, a
+    /// follower truncates a divergent suffix and then re-replicates to match the
+    /// leader, so the offset can pass through `>= target` with wrong-epoch data
+    /// before it settles at `target`. The method wakes on `append_notify` for
+    /// re-appends, and a short fallback tick also observes a truncation, which
+    /// does not notify. It returns the instant LEO == target. This is a
+    /// condition wait on real state, not a fixed-duration sleep, so it cannot
+    /// flake on timing. It fails only if the condition never holds within 30s.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait_until_local_log_end_offset_eq(
@@ -3247,9 +3249,9 @@ impl BrokerHandle {
     /// Test-only: number of `OffsetForLeaderEpoch` (`api_key` 23) requests this
     /// broker has served since startup. The KIP-320 proactive-validation
     /// integration test reads this before and after a `Consumer::poll` to
-    /// prove the consumer's validate pass issued an OFLE RPC — distinguishing
-    /// the proactive path from the reactive in-band `diverging_epoch` /
-    /// `OFFSET_OUT_OF_RANGE` fetch paths, which issue no OFLE.
+    /// prove that the consumer's validate pass issued an OFLE RPC. The count
+    /// separates the proactive path from the reactive in-band `diverging_epoch`
+    /// and `OFFSET_OUT_OF_RANGE` fetch paths, which issue no OFLE.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub fn offset_for_leader_epoch_count_for_test(&self) -> u64 {
@@ -3258,9 +3260,9 @@ impl BrokerHandle {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Test-only: flip a configured log dir offline at runtime, simulating a
-    /// live fsync failure, without real EIO injection (unreliable
-    /// cross-platform). Drives the KIP-112 offline path.
+    /// Test-only: flip a configured log dir offline at runtime. This simulates
+    /// a live fsync failure without real EIO injection, which is unreliable
+    /// across platforms. It drives the KIP-112 offline path.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     pub fn test_mark_log_dir_offline(&self, dir: &std::path::Path) -> bool {
@@ -3270,21 +3272,21 @@ impl BrokerHandle {
     }
 
     /// Rebuild the TLS server config from the cert/key paths
-    /// in `BrokerConfig::tls_config` *right now*, bypassing the
+    /// in `BrokerConfig::tls_config` *right now*, without the
     /// periodic mtime watcher. New TLS handshakes after this call see
-    /// the rebuilt config; in-flight handshakes are unaffected.
+    /// the rebuilt config. In-flight handshakes are unaffected.
     ///
-    /// Operators call this from sidecars / hook scripts that just
+    /// Operators call this from sidecars or hook scripts that just
     /// wrote new cert files into place and want the change to take
-    /// effect without waiting for the next `tls_reload_interval` tick.
+    /// effect before the next `tls_reload_interval` tick.
     ///
     /// # Errors
     ///
-    /// - `BrokerError::Tls` — the new cert / key / client-CA failed
-    ///   to parse or rustls rejected the assembled config. The
-    ///   previous config remains in place; the broker keeps serving
+    /// - `BrokerError::Tls`: the new cert, key, or client-CA failed
+    ///   to parse, or rustls rejected the assembled config. The
+    ///   previous config stays in place, and the broker keeps serving
     ///   with the old cert.
-    /// - `BrokerError::Startup` — no TLS config is configured.
+    /// - `BrokerError::Startup`: no TLS config is configured.
     pub fn reload_tls(&self) -> Result<(), BrokerError> {
         let Some(dynamic) = self.broker.tls_dynamic.as_ref() else {
             return Err(BrokerError::Startup(
@@ -3302,9 +3304,9 @@ impl BrokerHandle {
     }
 
     /// Subscribe to the self-shutdown signal. Flips `true` when the broker
-    /// decides to stop on its own — today: all log dirs went offline
-    /// (KIP-112). The embedding application should call
-    /// [`Self::shutdown`] (or `controlled_shutdown`) when this fires.
+    /// decides to stop on its own. Today the only such cause is that all log
+    /// dirs went offline (KIP-112). The embedding application should call
+    /// [`Self::shutdown`] or `controlled_shutdown` when this fires.
     #[must_use]
     pub fn should_shutdown_rx(&self) -> tokio::sync::watch::Receiver<bool> {
         self.broker.should_shutdown.subscribe()
@@ -3315,20 +3317,20 @@ impl BrokerHandle {
     /// Signals the heartbeat client to set `want_shut_down=true` on
     /// outbound `BrokerHeartbeat` requests. The controller leader
     /// reassigns leadership of every partition currently led by this
-    /// broker; once leadership is fully drained, the controller
+    /// broker. Once leadership is fully drained, the controller
     /// responds with `should_shut_down=true`. This call then invokes
     /// the regular [`shutdown`](Self::shutdown).
     ///
-    /// Always stops the broker before returning: on a clean drain via the
-    /// regular [`shutdown`](Self::shutdown), and on `timeout` via a hard
-    /// shutdown fallback (returning `Err(ShutdownTimeout)` so the caller
-    /// knows the drain was incomplete). Either way the broker is stopped, so
-    /// the process can exit before a Kubernetes SIGKILL.
+    /// This method always stops the broker before it returns. A clean drain
+    /// goes through the regular [`shutdown`](Self::shutdown). A `timeout` goes
+    /// through a hard shutdown fallback that returns `Err(ShutdownTimeout)`, so
+    /// the caller knows the drain was incomplete. In both cases the broker
+    /// stops, so the process can exit before a Kubernetes SIGKILL.
     ///
     /// # Errors
     ///
-    /// - `BrokerError::ShutdownTimeout` — the controller did not
-    ///   acknowledge `should_shut_down=true` within `timeout`; the broker was
+    /// - `BrokerError::ShutdownTimeout`: the controller did not
+    ///   acknowledge `should_shut_down=true` within `timeout`. The broker was
     ///   hard-shut-down anyway.
     pub async fn controlled_shutdown(
         self,
@@ -3374,8 +3376,8 @@ impl BrokerHandle {
         }
     }
 
-    /// Cancel the listener + drain in-flight connections. Awaiting the
-    /// returned future blocks until the listener task exits.
+    /// Cancel the listener and drain in-flight connections. The returned
+    /// future completes when the listener task exits.
     pub async fn shutdown(mut self) {
         // Emit the BrokerStopping lifecycle event before tearing down
         // partitions. This record may be dropped if the audit partition is
@@ -3489,8 +3491,8 @@ impl crate::reassignment::ReassignmentController for ReassignmentControllerAdapt
 
 /// Wraps a real [`crabka_raft::ControllerHandle`] so it can satisfy the
 /// [`crate::throttle::ImageWatcher`] trait required by the throttle refresh
-/// background task. Every broker runs this (not just the controller leader)
-/// since each broker manages its own throttle buckets.
+/// background task. Every broker runs this, not only the controller leader,
+/// because each broker manages its own throttle buckets.
 struct ThrottleControllerAdapter {
     handle: Arc<dyn crate::metadata_source::MetadataSource>,
 }
@@ -3507,8 +3509,8 @@ impl crate::throttle::ImageWatcher for ThrottleControllerAdapter {
 
 /// Wraps a real [`crabka_raft::ControllerHandle`] so it can satisfy the
 /// [`crate::quota::ImageWatcher`] trait required by the quota refresh
-/// background task. Every broker runs this (not just the controller leader)
-/// since each broker enforces its own quotas via its own buckets.
+/// background task. Every broker runs this, not only the controller leader,
+/// because each broker enforces its own quotas with its own buckets.
 struct QuotaControllerAdapter {
     handle: Arc<dyn crate::metadata_source::MetadataSource>,
 }
@@ -3526,7 +3528,7 @@ impl crate::quota::ImageWatcher for QuotaControllerAdapter {
 /// KIP-48: wraps a real [`crabka_raft::ControllerHandle`] so it
 /// can satisfy the [`crate::delegation_token_cleanup::DelegationTokenController`]
 /// trait required by the delegation-token expiry sweep. Every broker runs
-/// the sweep; raft serializes duplicate tombstones so each becomes a no-op.
+/// the sweep. Raft serializes duplicate tombstones, so each becomes a no-op.
 struct DelegationTokenCleanupControllerAdapter {
     handle: Arc<dyn crate::metadata_source::MetadataSource>,
 }
@@ -3565,7 +3567,7 @@ impl Broker {
     /// controller listener instead of binding `controller_listen_addr`.
     ///
     /// Thin wrapper over [`Self::start_with_listeners`] for callers that only
-    /// hand off the controller port; the data plane still binds from `config`.
+    /// hand off the controller port. The data plane still binds from `config`.
     /// See that method for the full handoff contract.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
@@ -3579,23 +3581,24 @@ impl Broker {
     /// Like [`Self::start`], but adopts caller-supplied, already-bound
     /// listeners instead of binding their addresses itself:
     ///
-    /// * `controller_listener` — threaded through to
+    /// * `controller_listener`: threaded through to
     ///   [`crabka_raft::Controller::start_with_listener`]. Its local address
     ///   MUST equal `config.controller_listen_addr`.
-    /// * `data_plane_listener` — adopted for the data-plane [`ListenerSpec`]
+    /// * `data_plane_listener`: adopted for the data-plane [`ListenerSpec`]
     ///   whose `bind_addr` equals the listener's local address (for the legacy
     ///   single-listener path that is `config.listen_addr`). Any non-matching
     ///   specs still bind from `config`.
     ///
-    /// Handing over live sockets — rather than the bind-and-drop trick of
-    /// reading an ephemeral port then dropping the probe before re-binding —
-    /// closes the TOCTOU window in which another process can claim the
-    /// just-released port, the `AddrInUse` flake test harnesses hit under
-    /// parallel execution. The data-plane port must still be concrete in
-    /// `config` up front (the broker self-registers `listen_addr.port()`
-    /// before binding the data plane), so callers read it back from the live
-    /// listener's `local_addr()` and set `config.listen_addr` /
-    /// `advertised_listener` to it before calling.
+    /// A live socket handoff closes the TOCTOU window that the bind-and-drop
+    /// trick leaves open. That trick reads an ephemeral port and then drops the
+    /// probe before it re-binds. In the window between the two steps, another
+    /// process can claim the just-released port, which is the `AddrInUse` flake
+    /// that test harnesses hit under parallel execution. The data-plane port
+    /// must still be concrete in `config` up front, because the broker
+    /// self-registers `listen_addr.port()` before it binds the data plane.
+    /// Callers therefore read the port back from the live listener's
+    /// `local_addr()` and set `config.listen_addr` and
+    /// `advertised_listener` to it before the call.
     ///
     /// [`ListenerSpec`]: crate::config::ListenerSpec
     // sequential bring-up; splitting hurts readability more than it helps
@@ -3787,9 +3790,9 @@ struct KafkaSwapKickoff {
 }
 
 /// The sorted, deduped set of `__remote_log_metadata` partitions this broker
-/// (`node_id`) must consume: one entry per metadata partition covering any
-/// user-topic-partition this node leads or follows, given the metadata topic's
-/// `partition_count`.
+/// (`node_id`) must consume. There is one entry for each metadata partition
+/// that covers a user-topic-partition this node leads or follows, for the
+/// metadata topic's `partition_count`.
 fn needed_metadata_partitions(
     image: &crabka_metadata::MetadataImage,
     node_id: crabka_metadata::NodeId,
@@ -3852,9 +3855,9 @@ async fn rlmm_bootstrap_backoff(
 /// Construct the topic-backed
 /// [`crabka_remote_storage::RemoteLogMetadataManager`] against the
 /// broker's loopback listener and swap it into `swap`. Retries with
-/// bounded backoff until success or shutdown; the broker stays on the
-/// fail-closed [`crabka_remote_storage_topic::NotReadyRlmm`] placeholder
-/// while retrying.
+/// bounded backoff until it succeeds or shutdown fires. The broker stays on
+/// the fail-closed [`crabka_remote_storage_topic::NotReadyRlmm`] placeholder
+/// until then.
 fn metadata_log_config(
     config: &crate::config::KafkaRlmmConfig,
     topic: String,
@@ -4131,7 +4134,7 @@ fn partition_wal(
 /// configured directory, not the `<topic>-<partition>` subdirectory).
 /// Stored on the `Partition` so KIP-113 (`AlterReplicaLogDirs`) can
 /// reject moves whose target is the partition's current dir without
-/// reaching into the `Log` mutex on the hot path, and so
+/// access to the `Log` mutex on the hot path, and so
 /// `DescribeLogDirs` can attribute the partition to a dir even when
 /// the path is not stable across canonicalisation.
 pub(crate) fn spawn_partition(
@@ -4272,15 +4275,15 @@ fn parse_advertised_host_port(addr: &str) -> (String, u16) {
 /// Build the KIP-595 static controller [`VoterSet`](crabka_metadata::VoterSet)
 /// from the configured `controller_quorum_voters` (`(id, "<host>:<port>")`).
 ///
-/// Peer endpoint hosts are kept as their configured **DNS names** — NOT
-/// pre-resolved to IPs — so the inter-broker dialer re-resolves them on every
-/// (re)connect (`TcpStream::connect((host, port))` does a fresh lookup). A
-/// `StatefulSet` peer that restarts on a new pod IP keeps its stable DNS name,
-/// so re-resolution reaches it again; freezing the boot-time IP here would
-/// permanently strand a rejoining voter — its peers would dial the dead old IP
+/// Peer endpoint hosts stay as their configured **DNS names**. They are NOT
+/// pre-resolved to IPs, so the inter-broker dialer re-resolves them on every
+/// (re)connect, because `TcpStream::connect((host, port))` does a fresh lookup.
+/// A `StatefulSet` peer that restarts on a new pod IP keeps its stable DNS
+/// name, so re-resolution reaches it again. A frozen boot-time IP would
+/// permanently strand a rejoining voter. Its peers would dial the dead old IP
 /// forever, the leader's `BeginQuorumEpoch` heartbeats would never arrive, and
-/// the rejoining node would never learn the leader (so it would never open its
-/// data listener).
+/// the rejoining node would never learn the leader. It would then never open
+/// its data listener.
 ///
 /// `directory_id` is only load-bearing for self: the engine keys vote/peer
 /// logic on `NodeId` and uses `Uuid::nil()` for vote keys, so peers get a nil
@@ -4348,8 +4351,8 @@ fn static_controller_voter_set(
 }
 
 /// Live-connection accounting backing the `max.connections` (global) and
-/// `max.connections.per.ip` caps. Cloning shares the same counters
-/// (`Arc`-wrapped internally), so every listener accept loop and every
+/// `max.connections.per.ip` caps. A clone shares the same counters, which are
+/// `Arc`-wrapped internally, so every listener accept loop and every
 /// [`ConnectionGuard`] account against one set of totals.
 #[derive(Clone)]
 pub(crate) struct ConnectionLimiter {
@@ -4376,9 +4379,9 @@ impl ConnectionLimiter {
 
     /// Try to reserve a connection slot for `ip`. On success returns a
     /// [`ConnectionGuard`] that releases both the global and per-IP slot
-    /// on drop. Returns `None` (and reserves nothing) when either the
-    /// global or the per-IP cap is already reached — the caller then
-    /// closes the socket, matching Kafka's silent-drop behavior.
+    /// on drop. Returns `None`, and reserves nothing, when either the
+    /// global or the per-IP cap is already reached. The caller then
+    /// closes the socket, which matches Kafka's silent-drop behavior.
     fn try_acquire(&self, ip: IpAddr) -> Option<ConnectionGuard> {
         // Global cap. `fetch_update` keeps the increment atomic so two
         // concurrent accepts can't both slip past the ceiling.
@@ -4421,10 +4424,10 @@ impl ConnectionLimiter {
 }
 
 /// RAII release for one accepted connection. Moved into the spawned
-/// per-connection task so it fires however the connection terminates
-/// (clean close, error, panic, task abort). On drop it decrements the
-/// global counter and the per-IP counter, removing the per-IP map entry
-/// when it reaches 0.
+/// per-connection task, so it fires however the connection ends: clean
+/// close, error, panic, or task abort. On drop it decrements the
+/// global counter and the per-IP counter, and it removes the per-IP map
+/// entry when that count reaches 0.
 pub(crate) struct ConnectionGuard {
     limiter: ConnectionLimiter,
     ip: IpAddr,
@@ -4550,15 +4553,15 @@ async fn accept_loop(
 
 /// Tune an accepted broker connection before serving it.
 ///
-/// - `TCP_NODELAY`: disable Nagle so the request/response ping-pong isn't
-///   stalled up to ~40 ms by delayed ACKs. Apache Kafka sets this on its
-///   broker sockets; without it small-request latency and the header+records
-///   write coalescing (once fetch uses `sendfile`) suffer.
+/// - `TCP_NODELAY`: disable Nagle so that delayed ACKs do not stall the
+///   request/response ping-pong by up to ~40 ms. Apache Kafka sets this on its
+///   broker sockets. Without it, small-request latency and the header+records
+///   write coalescing (once fetch uses `sendfile`) both get worse.
 /// - `SO_SNDBUF`/`SO_RCVBUF`: apply the configured, independently tunable
 ///   buffers so large fetches and produces retain enough in-flight headroom.
 ///
-/// All failures are non-fatal (logged at debug): a connection that can't be
-/// tuned still serves correctly, just less optimally.
+/// All failures are non-fatal and logged at debug level. A connection that the
+/// broker cannot tune still serves correctly, but less efficiently.
 fn tune_accepted_socket(
     stream: &tokio::net::TcpStream,
     send_buffer: ByteSize,

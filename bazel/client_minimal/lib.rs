@@ -1,14 +1,14 @@
 //! Lean re-export facade over the Crabka Kafka client crates.
 //!
-//! This bundles the producer, consumer, admin, and core clients plus the
-//! Avro/Protobuf schema serdes behind a single dependency so embedders can pull
-//! `@crabka//:client_minimal` and get a slim closure.
+//! This crate bundles the producer, consumer, admin, and core clients, and the
+//! Avro and Protobuf schema serdes, behind one dependency. An embedder can thus
+//! pull `@crabka//:client_minimal` and get a slim closure.
 //!
-//! Deliberately excluded:
-//!   * the columnar streams client (`polars` / `polars-arrow` / `arrow`)
-//!   * the JSON-Schema serde path (`jsonschema` / `schemars`)
+//! The crate excludes these on purpose:
+//!   * the columnar streams client (`polars`, `polars-arrow`, `arrow`)
+//!   * the JSON-Schema serde path (`jsonschema`, `schemars`)
 //!
-//! This crate is Bazel-only — it is not a Cargo workspace member.
+//! This crate is Bazel-only. It is not a Cargo workspace member.
 
 pub use crabka_client_admin as admin;
 pub use crabka_client_consumer as consumer;

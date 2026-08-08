@@ -1,7 +1,7 @@
 //! Periodic checkpoint task: translates and emits consumer-group offset checkpoints.
 //!
 //! Reads committed consumer-group offsets from the SOURCE cluster, translates
-//! them to TARGET offsets via an [`OffsetSyncStore`], and writes MM2-compatible
+//! them to TARGET offsets with an [`OffsetSyncStore`], and writes MM2-compatible
 //! [`Checkpoint`] records to `<source>.checkpoints.internal` on the TARGET cluster.
 
 use bytes::Bytes;
@@ -25,23 +25,24 @@ use crate::{
 
 /// Parameters required to run the checkpoint task.
 pub struct CheckpointParams {
-    /// Bootstrap address of the source cluster (where consumer-group offsets live).
+    /// Bootstrap address of the source cluster, where consumer-group offsets live.
     pub source_bootstrap: String,
-    /// Bootstrap address of the target cluster (where checkpoints are written).
+    /// Bootstrap address of the target cluster, where the task writes checkpoints.
     pub target_bootstrap: String,
-    /// Alias of the source cluster (used to derive MM2 topic names).
+    /// Alias of the source cluster, used to derive MM2 topic names.
     pub source_alias: String,
-    /// Naming policy for the flow, used to rename the checkpoint's topic to the
-    /// remote name a failed-over consumer reads (MM2 `RemoteClusterUtils` parity).
+    /// Naming policy for the flow. It renames the topic of the checkpoint to the
+    /// remote name that a failed-over consumer reads, for MM2
+    /// `RemoteClusterUtils` parity.
     pub naming: NamingPolicy,
     /// Selector for which consumer groups to checkpoint.
     pub group_selector: Selector,
-    /// Optional TLS/SASL security applied to the target producer + admin.
+    /// Optional TLS/SASL security applied to the target producer and admin.
     pub security: Option<crabka_client_core::security::ClientSecurity>,
 }
 
-/// One translation pass: reads source group offsets, translates via `store`,
-/// and writes [`Checkpoint`] records to the target checkpoints topic.
+/// One translation pass: reads source group offsets, translates them with
+/// `store`, and writes [`Checkpoint`] records to the target checkpoints topic.
 ///
 /// # Errors
 /// Returns [`ReplicatorError`] on topic-ensure, admin-connect, or produce failures.
@@ -212,7 +213,8 @@ impl CheckpointTask {
     /// 2. Builds a fresh [`OffsetSyncStore`].
     /// 3. Calls [`run_once`] to write translated checkpoints.
     ///
-    /// Errors in any cycle are logged as warnings; the loop continues until shutdown.
+    /// The loop logs an error in any cycle as a warning and continues until
+    /// shutdown.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -315,7 +317,8 @@ impl CheckpointTask {
     }
 }
 
-/// Build a non-idempotent producer with `acks=All` targeting the given bootstrap.
+/// Build a non-idempotent producer with `acks=All` that targets the given
+/// bootstrap.
 async fn build_producer(
     bootstrap: &str,
     security: Option<crabka_client_core::security::ClientSecurity>,

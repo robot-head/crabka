@@ -17,14 +17,17 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Plan the float UTILITY functions onto the operator path:
-    /// `timestamp`/`scalar`/`vector`, the calendar family, `time`/`pi`, and
-    /// `absent`/`absent_over_time`. See `Self::plan_call_expr`.
+    /// Plans the float utility functions onto the operator path.
     ///
-    /// Returns `Ok(Some(..))` for a supported, parity-exact shape and `Ok(None)`
-    /// (interpreter fallback) for everything else (unknown function, wrong arity,
-    /// non-plannable / histogram-bearing inner, non-scalar `vector` arg, …). The
-    /// interpreter then raises any canonical arity/type error.
+    /// These functions are `timestamp`, `scalar`, `vector`, the calendar family,
+    /// `time`, `pi`, `absent`, and `absent_over_time`. See
+    /// `Self::plan_call_expr`.
+    ///
+    /// Returns `Ok(Some(..))` for a supported, parity-exact shape. Returns
+    /// `Ok(None)` for every other shape, such as an unknown function, a wrong
+    /// arity, a non-plannable or histogram-bearing inner, or a non-scalar
+    /// `vector` argument. The caller then falls back to the interpreter, which
+    /// raises any canonical arity or type error.
     pub(super) async fn plan_util_call(
         &self,
         tenant: &str,
@@ -72,11 +75,13 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
     }
 
-    /// Plan `timestamp(v)`: recurse `v` through the planner, assemble it, and map
-    /// each row to its own sample timestamp in seconds (dropping `__name__`,
-    /// reattaching the eval timestamp), exactly mirroring
-    /// `Self::eval_timestamp_call`. Wrong arity, a non-plannable inner, or a
-    /// histogram-bearing inner fall back to the interpreter.
+    /// Plans `timestamp(v)`.
+    ///
+    /// This method recurses `v` through the planner, assembles it, and maps each
+    /// row to its own sample timestamp in seconds. It drops `__name__` and
+    /// attaches the eval timestamp again. The result mirrors
+    /// `Self::eval_timestamp_call`. A wrong arity, a non-plannable inner, or a
+    /// histogram-bearing inner falls back to the interpreter.
     async fn plan_timestamp_call(
         &self,
         tenant: &str,
@@ -111,12 +116,15 @@ impl<S: MetricStore> PromqlEngine<S> {
         Ok(Some(PlannedInstant::Precomputed(out)))
     }
 
-    /// Plan a calendar function. With one argument it recurses the inner vector
-    /// and applies [`CalendarFn::apply`] per float row (dropping non-floats and
-    /// `__name__`, reattaching the eval timestamp), mirroring
-    /// `Self::eval_calendar_call`. With zero arguments it operates on `time()`
-    /// (the eval timestamp in seconds) and yields a `PrecomputedScalar`. Wrong
-    /// arity or a non-plannable inner fall back.
+    /// Plans a calendar function.
+    ///
+    /// With one argument, this method recurses the inner vector and applies
+    /// [`CalendarFn::apply`] to each float row. It drops non-float rows and
+    /// `__name__`, and attaches the eval timestamp again. The result mirrors
+    /// `Self::eval_calendar_call`. With zero arguments, the method works on
+    /// `time()`, the eval timestamp in seconds, and returns a
+    /// `PrecomputedScalar`. A wrong arity or a non-plannable inner falls back to
+    /// the interpreter.
     async fn plan_calendar_call(
         &self,
         tenant: &str,
@@ -153,11 +161,13 @@ impl<S: MetricStore> PromqlEngine<S> {
         Ok(Some(PlannedInstant::Precomputed(out)))
     }
 
-    /// Plan `scalar(v)`: recurse `v` through the planner, assemble it, and return
-    /// the lone series' float value, or NaN when `v` is not exactly one series (or
-    /// the single series is histogram-valued), mirroring
-    /// `Self::eval_scalar_function_call`. Wrong arity or a non-plannable inner
-    /// fall back.
+    /// Plans `scalar(v)`.
+    ///
+    /// This method recurses `v` through the planner, assembles it, and returns
+    /// the float value of the lone series. It returns NaN when `v` is not
+    /// exactly one series, and when the single series is histogram-valued. The
+    /// result mirrors `Self::eval_scalar_function_call`. A wrong arity or a
+    /// non-plannable inner falls back to the interpreter.
     async fn plan_scalar_function_call(
         &self,
         tenant: &str,
@@ -189,10 +199,12 @@ impl<S: MetricStore> PromqlEngine<S> {
         }))
     }
 
-    /// Plan `vector(s)`: fold the scalar argument `s` via the interpreter's pure
-    /// scalar path and emit a single no-label series carrying that value,
-    /// mirroring `Self::eval_vector_function_call`. Wrong arity or a non-scalar
-    /// argument fall back.
+    /// Plans `vector(s)`.
+    ///
+    /// This method folds the scalar argument `s` through the interpreter's pure
+    /// scalar path and emits a single series with no labels that carries that
+    /// value. The result mirrors `Self::eval_vector_function_call`. A wrong
+    /// arity or a non-scalar argument falls back to the interpreter.
     async fn plan_vector_function_call(
         &self,
         tenant: &str,
@@ -213,11 +225,14 @@ impl<S: MetricStore> PromqlEngine<S> {
         }])))
     }
 
-    /// Plan `absent(v)`: recurse `v` through the planner and assemble it; an
-    /// empty result yields a single 1-valued series whose labels are derived from
-    /// `v`'s matchers (`absent_labels`), and a non-empty result yields the empty
-    /// vector, mirroring `Self::eval_absent_call`. Wrong arity or a non-plannable /
-    /// histogram-bearing inner fall back.
+    /// Plans `absent(v)`.
+    ///
+    /// This method recurses `v` through the planner and assembles it. An empty
+    /// result gives a single 1-valued series, and `absent_labels` derives its
+    /// labels from the matchers of `v`. A non-empty result gives the empty
+    /// vector. The result mirrors `Self::eval_absent_call`. A wrong arity, a
+    /// non-plannable inner, or a histogram-bearing inner falls back to the
+    /// interpreter.
     async fn plan_absent_call(
         &self,
         tenant: &str,
@@ -245,12 +260,15 @@ impl<S: MetricStore> PromqlEngine<S> {
         }])))
     }
 
-    /// Plan `absent_over_time(v[range])`: evaluate the range selector via the
-    /// shared `Self::eval_range_arg` (parity-exact — the same code the interpreter
-    /// runs) and, when no series carries an in-window sample, emit a single
-    /// 1-valued series whose labels derive from `v`'s matchers, mirroring
-    /// `Self::eval_absent_over_time_call`. A histogram-bearing matrix selector or
-    /// any non-matrix-selector inner falls back to the interpreter.
+    /// Plans `absent_over_time(v[range])`.
+    ///
+    /// This method evaluates the range selector with the shared
+    /// `Self::eval_range_arg`, the same code the interpreter runs, so the result
+    /// is parity-exact. When no series carries an in-window sample, the method
+    /// emits a single 1-valued series whose labels derive from the matchers of
+    /// `v`. The result mirrors `Self::eval_absent_over_time_call`. A
+    /// histogram-bearing matrix selector, or any inner that is not a matrix
+    /// selector, falls back to the interpreter.
     async fn plan_absent_over_time_call(
         &self,
         tenant: &str,
@@ -306,13 +324,15 @@ impl<S: MetricStore> PromqlEngine<S> {
         }])))
     }
 
-    /// Evaluate `absent_over_time(v[range])` for the shapes the fast planner path
-    /// declines (a histogram-bearing matrix, a subquery range, an anchored/smoothed
-    /// selector) by reusing the shared `Self::eval_range_arg` leaf kernel — the
-    /// SAME code the tree-walking oracle's `eval_absent_over_time_call` runs — so
-    /// the result, and the per-shape / wrong-arity error, are byte-for-byte
-    /// identical. This keeps the planner self-recursive (no re-entry into the
-    /// interpreter dispatch) while still routing these shapes through `Precomputed`.
+    /// Evaluates `absent_over_time(v[range])` for the shapes the fast planner path declines.
+    ///
+    /// Those shapes are a histogram-bearing matrix, a subquery range, and an
+    /// anchored or smoothed selector. This method reuses the shared
+    /// `Self::eval_range_arg` leaf kernel, the same code that the tree-walking
+    /// oracle runs in `eval_absent_over_time_call`. The result is byte-for-byte
+    /// identical, and so is the per-shape or wrong-arity error. The planner
+    /// stays self-recursive and does not re-enter the interpreter dispatch, and
+    /// these shapes still go through `Precomputed`.
     async fn absent_over_time_via_interpreter(
         &self,
         tenant: &str,

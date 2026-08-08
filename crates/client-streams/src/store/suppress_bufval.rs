@@ -1,14 +1,15 @@
 ﻿//! JVM-exact `suppress`-buffer changelog VALUE codec.
 //!
-//! When a `KTable.suppress(...)` buffer has logging enabled, each buffered entry
-//! is logged to a changelog topic. The changelog KEY is the record's serialized
-//! key bytes; the changelog VALUE is:
+//! When a `KTable.suppress(...)` buffer has logging enabled, the store logs each
+//! buffered entry to a changelog topic. The changelog KEY is the record's
+//! serialized key bytes. The changelog VALUE is:
 //!
 //! ```text
 //! BufferValue.serialize(8) ‖ bufferTime:8B BE
 //! ```
 //!
-//! where `BufferValue.serialize` lays out (all integers big-endian):
+//! where `BufferValue.serialize` writes this layout, with all integers
+//! big-endian:
 //!
 //! ```text
 //! ProcessorRecordContext.serialize()            // see `SuppressRecordCtx`
@@ -23,14 +24,15 @@
 //! timestamp:8 ‖ offset:8 ‖ topicLen:4 ‖ topic ‖ partition:4 ‖ headerCount:4(0)
 //! ```
 //!
-//! These layouts are pinned by the Docker JVM capture in
+//! The Docker JVM capture pins these layouts. See
 //! `tests/jvm-capture/.../BufferValueCapture.java` → `tests/testdata/suppress_bufval/*.hex`.
 //!
-//! The `-2` "old same as prior" sentinel: the JVM checks reference identity
-//! (`priorValue == oldValue`). On the first buffering of a key the prior IS the
-//! record's `oldValue` (same array), so it always serializes as `-2`. Crabka uses
-//! value-equality, which reproduces every captured case and round-trips cleanly;
-//! the codec is self-consistent for restore regardless.
+//! The `-2` "old same as prior" sentinel works like this. The JVM checks
+//! reference identity with `priorValue == oldValue`. On the first buffering of a
+//! key the prior IS the record's `oldValue`, the same array, so it always
+//! serializes as `-2`. Crabka uses value-equality instead. Value-equality
+//! reproduces every captured case and round-trips cleanly, and the codec stays
+//! self-consistent for restore either way.
 use bytes::{BufMut, Bytes, BytesMut};
 
 const I64: usize = 8;
@@ -38,11 +40,14 @@ const I32: usize = 4;
 
 /// Null / aliasing sentinels for the variable-length value slots.
 const NULL: i32 = -1;
-/// `oldValue` is the same array as `priorValue` (not re-serialized).
+/// `oldValue` is the same array as `priorValue`. The codec does not re-serialize
+/// it.
 const SAME_AS_PRIOR: i32 = -2;
 
-/// The subset of JVM `ProcessorRecordContext` that suppress carries (no headers).
-/// Mirrors [`crate::processor::record::RecordContext`] but owned by the codec so the
+/// The subset of JVM `ProcessorRecordContext` that suppress carries.
+///
+/// This struct carries no headers. It mirrors
+/// [`crate::processor::record::RecordContext`], but the codec owns it, so the
 /// serialized form is pinned here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SuppressRecordCtx {
@@ -64,7 +69,9 @@ impl SuppressRecordCtx {
         b.put_i32(0); // headerCount
     }
 
-    /// Parse a context off the front of `buf`, returning it and the trailing bytes.
+    /// Parses a context off the front of `buf`.
+    ///
+    /// Returns the context and the trailing bytes.
     fn read(buf: &[u8]) -> (Self, &[u8]) {
         let timestamp = read_i64(&buf[0..I64]);
         let offset = read_i64(&buf[I64..2 * I64]);
@@ -111,7 +118,7 @@ fn add_value(b: &mut BytesMut, value: Option<&[u8]>) {
     }
 }
 
-/// Serialize one buffered entry to its JVM-exact changelog VALUE bytes.
+/// Serializes one buffered entry to its JVM-exact changelog VALUE bytes.
 pub(crate) fn serialize_buffer_change(
     ctx: &SuppressRecordCtx,
     prior: Option<&[u8]>,
@@ -136,7 +143,9 @@ pub(crate) fn serialize_buffer_change(
     b.freeze()
 }
 
-/// Read a length-prefixed value via `addValue` rules (`-1` == null), advancing `o`.
+/// Reads a length-prefixed value with the `addValue` rules, where `-1` is null.
+///
+/// This function advances `o`.
 fn read_add_value(buf: &[u8], o: &mut usize) -> Option<Vec<u8>> {
     let len = read_i32(&buf[*o..*o + I32]);
     *o += I32;
@@ -149,7 +158,7 @@ fn read_add_value(buf: &[u8], o: &mut usize) -> Option<Vec<u8>> {
     Some(v)
 }
 
-/// Parse a changelog VALUE back into a [`BufferedChange`].
+/// Parses a changelog VALUE back into a [`BufferedChange`].
 pub(crate) fn deserialize_buffer_change(bytes: &[u8]) -> BufferedChange {
     let (ctx, rest) = SuppressRecordCtx::read(bytes);
     // `rest` is offset 0 into the variable part; index into `bytes` from there.

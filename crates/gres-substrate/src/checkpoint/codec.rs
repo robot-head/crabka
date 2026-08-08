@@ -12,8 +12,8 @@ use crate::{error::SubstrateError, frame::Reader};
 /// One key/value pair carried by a checkpoint part.
 pub type PartPayload = (Vec<u8>, Vec<u8>);
 
-/// Encoded length of a part holding one empty key/value pair: the smallest part
-/// size that can make progress.
+/// Encoded length of a part that holds one empty key/value pair. This is the
+/// smallest part size that can make progress.
 const MIN_PART_BYTES: usize = 8;
 
 /// Row-key interval used to ingest a checkpoint subset during range restore.

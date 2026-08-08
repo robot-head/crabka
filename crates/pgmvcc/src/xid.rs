@@ -1,9 +1,11 @@
-//! Transaction ids. `Xid` is a plain `u64` (matching the codebase's rowid /
-//! `commit_ts` convention). `INVALID_XID` (0) is the sentinel an `xmax` carries
-//! while a version is live. `FROZEN_XID` (1) is the checkpoint/vacuum sentinel
-//! for tuples whose creating transaction is known committed before every future
-//! snapshot. Neither sentinel is assigned to a real transaction; normal xids
-//! start at [`FIRST_NORMAL_XID`].
+//! Transaction ids.
+//!
+//! `Xid` is a plain `u64`, which matches the codebase's rowid and `commit_ts`
+//! convention. `INVALID_XID` (0) is the sentinel an `xmax` carries while a
+//! version is live. `FROZEN_XID` (1) is the checkpoint/vacuum sentinel for
+//! tuples whose creating transaction is known committed before every future
+//! snapshot. No allocator assigns either sentinel to a real transaction.
+//! Normal xids start at [`FIRST_NORMAL_XID`].
 
 pub type Xid = u64;
 
@@ -16,8 +18,8 @@ pub const FROZEN_XID: Xid = 1;
 /// The first xid an allocator may hand to a real transaction.
 pub const FIRST_NORMAL_XID: Xid = 2;
 
-/// Cross-range (global) transaction ids are allocated from this reserved high
-/// half of the u64 space; every per-range local xid is `< GLOBAL_XID_BASE`. Keeps
+/// Cross-range (global) transaction ids come from this reserved high half of
+/// the u64 space. Every per-range local xid is `< GLOBAL_XID_BASE`. This keeps
 /// range 0's global-clog keys disjoint from its own local-clog keys.
 pub const GLOBAL_XID_BASE: Xid = 1 << 63;
 
@@ -27,7 +29,8 @@ pub const fn is_reserved_xid(xid: Xid) -> bool {
     xid < FIRST_NORMAL_XID
 }
 
-/// Clamp a persisted next-xid counter so allocation never returns a reserved xid.
+/// Clamps a persisted next-xid counter so allocation never returns a reserved
+/// xid.
 #[must_use]
 pub const fn first_allocatable_xid_at_or_after(xid: Xid) -> Xid {
     if xid < FIRST_NORMAL_XID {

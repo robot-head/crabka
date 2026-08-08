@@ -3,14 +3,15 @@
 //! response header in front of the handler's bytes, and writes the
 //! result back to the client.
 //!
-//! Header rules (verified against Apache Kafka 4.x):
-//! - Request header is v2 when the body is flexible (KIP-482), v1 otherwise.
-//!   Note: `client_id` is `NULLABLE_STRING` (i16 length) in BOTH header
-//!   versions — see `RequestHeader.json` schema (`flexibleVersions: none`
-//!   on the field).
-//! - Response header is v1 (i.e. a trailing tagged-fields byte) iff the
-//!   *body* is flexible — EXCEPT for `ApiVersions` (`api_key=18`), whose
-//!   response header is always v0.
+//! Header rules, verified against Apache Kafka 4.x:
+//! - The request header is v2 when the body is flexible (KIP-482), and v1
+//!   otherwise. Note that `client_id` is a `NULLABLE_STRING` with an i16
+//!   length in BOTH header versions. See the `RequestHeader.json` schema,
+//!   where the field has `flexibleVersions: none`.
+//! - The response header is v1, that is, it has a trailing tagged-fields
+//!   byte, if and only if the *body* is flexible. `ApiVersions`
+//!   (`api_key=18`) is the one EXCEPT case: its response header is always
+//!   v0.
 
 use std::net::SocketAddr;
 
@@ -36,25 +37,26 @@ use crate::{
     network::codec,
 };
 
-/// `ApiVersions` wire `api_key`. Named separately because it is the one API
-/// whose response header is always v0 regardless of body flexibility, and
-/// whose v3+ request carries the KIP-511 client software name/version.
+/// `ApiVersions` wire `api_key`. It has its own name because it is the one API
+/// whose response header is always v0, whatever the body flexibility, and
+/// whose v3+ request carries the KIP-511 client software name and version.
 const API_VERSIONS_KEY: ApiKeyCode = ApiKey::ApiVersions as i16;
 
-/// `SaslHandshake` wire `api_key` — handled inline (before the handler table)
-/// because it mutates the per-connection auth state.
+/// `SaslHandshake` wire `api_key`. The loop handles it inline, before the
+/// handler table, because it mutates the per-connection auth state.
 const SASL_HANDSHAKE_KEY: ApiKeyCode = ApiKey::SaslHandshake as i16;
 
-/// `SaslAuthenticate` wire `api_key` — handled inline (before the handler
-/// table) because it mutates the per-connection auth state.
+/// `SaslAuthenticate` wire `api_key`. The loop handles it inline, before the
+/// handler table, because it mutates the per-connection auth state.
 const SASL_AUTHENTICATE_KEY: ApiKeyCode = ApiKey::SaslAuthenticate as i16;
 
-/// Process-lifetime ANONYMOUS principal. `RequestContext` only borrows
-/// `&Principal`, so the defensive fallback (SASL pre-auth, where
-/// `auth.principal()` is `None`) can hand out a `&'static Principal` instead of
-/// allocating a fresh `String`/`Vec` per Produce/Fetch. `Principal` carries a
-/// `Vec<String>` so it can't be a `const`; `LazyLock` builds it once on first
-/// use.
+/// Process-lifetime ANONYMOUS principal.
+///
+/// `RequestContext` only borrows a `&Principal`, so the defensive fallback can
+/// return a `&'static Principal` instead of allocating a fresh `String` and
+/// `Vec` for each Produce or Fetch. That fallback covers SASL pre-auth, where
+/// `auth.principal()` is `None`. `Principal` carries a `Vec<String>`, so it
+/// cannot be a `const`; `LazyLock` builds it once on first use.
 static ANONYMOUS_PRINCIPAL: std::sync::LazyLock<crabka_security::Principal> =
     std::sync::LazyLock::new(|| crabka_security::Principal {
         name: "ANONYMOUS".to_string(),
@@ -62,18 +64,20 @@ static ANONYMOUS_PRINCIPAL: std::sync::LazyLock<crabka_security::Principal> =
         groups: vec![],
     });
 
-/// Borrow the connection's authenticated principal, falling back to the shared
-/// process-lifetime ANONYMOUS singleton when the connection has no principal
-/// yet (defensive SASL pre-auth case). Avoids a per-request `Principal` clone.
+/// Borrows the connection's authenticated principal.
+///
+/// When the connection has no principal yet, the defensive SASL pre-auth case,
+/// the function falls back to the shared process-lifetime ANONYMOUS singleton.
+/// This avoids a `Principal` clone for each request.
 fn principal_or_anonymous(
     auth: &crate::network::auth::ConnectionAuth,
 ) -> &crabka_security::Principal {
     auth.principal().unwrap_or(&ANONYMOUS_PRINCIPAL)
 }
 
-/// Returns a future that resolves at `deadline` if `Some`, or never resolves
-/// if `None`. Used in `tokio::select!` to disarm the timer arm for non-OAuth
-/// connections (which have no session expiry).
+/// Returns a future that resolves at `deadline` if it is `Some`, and never
+/// resolves if it is `None`. `tokio::select!` uses it to disarm the timer arm
+/// for non-OAuth connections, which have no session expiry.
 async fn sleep_until_some(deadline: Option<tokio::time::Instant>) {
     match deadline {
         Some(t) => tokio::time::sleep_until(t).await,
@@ -81,10 +85,12 @@ async fn sleep_until_some(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-/// Convert an "expires-at as Unix epoch ms" into a `tokio::time::Instant`
-/// suitable for `sleep_until`. Computes the delta against the current wall
-/// clock and adds to `Instant::now()`; tests using `tokio::time::pause` can
-/// then advance the tokio clock to fire the deadline deterministically.
+/// Converts an "expires-at as Unix epoch ms" value into a
+/// `tokio::time::Instant` for `sleep_until`.
+///
+/// The function computes the delta against the current wall clock and adds it
+/// to `Instant::now()`. A test that calls `tokio::time::pause` can then
+/// advance the tokio clock and fire the deadline deterministically.
 fn instant_at_epoch_ms(epoch_ms: i64) -> tokio::time::Instant {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -96,8 +102,9 @@ fn instant_at_epoch_ms(epoch_ms: i64) -> tokio::time::Instant {
 }
 
 /// Returns the principal name for an `Authenticated` connection, or for the
-/// `previous` snapshot of a `Reauthenticating` connection; `None` otherwise.
-/// Used by the per-connection re-auth timer's tracing log on expiry.
+/// `previous` snapshot of a `Reauthenticating` connection. It returns `None`
+/// otherwise. The per-connection re-auth timer reads it for the tracing log it
+/// writes on expiry.
 fn auth_principal_name(auth: &crate::network::auth::ConnectionAuth) -> Option<&str> {
     match auth {
         crate::network::auth::ConnectionAuth::Authenticated { principal, .. } => {
@@ -110,10 +117,11 @@ fn auth_principal_name(auth: &crate::network::auth::ConnectionAuth) -> Option<&s
     }
 }
 
-/// Per-listener entrypoint. Branches between TLS termination (when the
-/// listener's protocol requires TLS) and the plaintext path. Both paths
-/// converge on [`serve_connection_stream`] for the per-connection request
-/// loop.
+/// Per-listener entrypoint.
+///
+/// It branches between TLS termination, when the listener's protocol requires
+/// TLS, and the plaintext path. Both paths converge on
+/// [`serve_connection_stream`] for the per-connection request loop.
 pub async fn serve_connection_on_listener(
     broker: std::sync::Arc<Broker>,
     stream: TcpStream,
@@ -224,8 +232,8 @@ pub async fn serve_connection_on_listener(
     }
 }
 
-/// Inspect the post-handshake TLS stream for a peer certificate. If
-/// one is present, derive the principal name (Subject DN) via
+/// Inspects the post-handshake TLS stream for a peer certificate. If one is
+/// present, this derives the principal name, the Subject DN, with
 /// [`crabka_security::extract_principal_from_cert`].
 fn peer_cert_principal<S>(
     stream: &tokio_rustls::server::TlsStream<S>,
@@ -240,9 +248,9 @@ fn peer_cert_principal<S>(
     })
 }
 
-/// Plaintext entry point: keeps the legacy `TcpStream`-typed signature
-/// for call sites (and lets us record the peer's TCP address before we
-/// hand the stream to the generic loop).
+/// Plaintext entry point. It keeps the legacy `TcpStream`-typed signature for
+/// call sites, and it records the peer's TCP address before it passes the
+/// stream to the generic loop.
 async fn serve_connection_plaintext(
     broker: std::sync::Arc<Broker>,
     stream: TcpStream,
@@ -508,11 +516,12 @@ where
     true
 }
 
-/// Generic per-connection request loop. `S` is the post-handshake byte
-/// stream — `TcpStream` for plaintext listeners, `tokio_rustls::server::TlsStream<TcpStream>`
-/// for TLS listeners. `spec` carries the listener's protocol so the loop
-/// can initialise `ConnectionAuth` correctly and gate pre-auth requests on
-/// SASL listeners.
+/// Generic per-connection request loop.
+///
+/// `S` is the post-handshake byte stream: `TcpStream` for plaintext listeners,
+/// and `tokio_rustls::server::TlsStream<TcpStream>` for TLS listeners. `spec`
+/// carries the listener's protocol, so the loop initialises `ConnectionAuth`
+/// correctly and gates pre-auth requests on SASL listeners.
 // each api_key intercept arm adds ~15 lines.
 async fn serve_connection_stream<S>(
     broker: std::sync::Arc<Broker>,
@@ -659,21 +668,23 @@ async fn serve_connection_stream<S>(
     tracing::info!("connection closed");
 }
 
-/// Outcome of intercepting a SASL frame: the bytes to write back to the
-/// peer and whether the dispatcher should close the connection after the
-/// send completes (used for `SaslAuthenticate` failures + illegal state).
+/// Outcome of a SASL frame interception: the bytes to write back to the peer,
+/// and whether the dispatcher should close the connection after the send
+/// completes. `SaslAuthenticate` failures and an illegal state both use the
+/// close flag.
 struct SaslFrameOutcome {
     response_bytes: Bytes,
     close_after: bool,
 }
 
-/// If `frame` is a `SaslHandshake` (17) or `SaslAuthenticate` (36) request,
-/// handle it inline (mutating `auth`) and return a [`SaslFrameOutcome`].
-/// Returns `None` for every other `api_key` — the caller falls through to the
-/// regular registry dispatch.
+/// Handles a `SaslHandshake` (17) or `SaslAuthenticate` (36) request inline.
 ///
-/// Errors here close the connection (protocol violations, e.g. an
-/// undecodable header).
+/// For those two `api_key` values, the function mutates `auth` and returns a
+/// [`SaslFrameOutcome`]. It returns `None` for every other `api_key`, and the
+/// caller then falls through to the regular registry dispatch.
+///
+/// An error here closes the connection. Such errors are protocol violations,
+/// for example an undecodable header.
 async fn try_handle_sasl_frame(
     broker: &Broker,
     parsed: &crate::network::request::ParsedRequest<'_>,
@@ -818,24 +829,27 @@ fn handle_sasl_handshake(
     Ok(encoded.freeze())
 }
 
-/// Decode + dispatch a `Fetch` (`api_key` 1) frame. Pulls the
-/// authenticated principal off the per-connection `auth` state and the
-/// peer `SocketAddr` from the accept-time capture so the handler can
-/// batch-authorize every topic in the request for `Read`.
-/// On PLAINTEXT/SSL listeners the connection is implicitly
-/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
-/// `principal()` always returns `Some` here; the `unwrap_or_else`
-/// fallback covers the defensive SASL pre-auth case.
-/// Build the Fetch response as an ordered [`WriteOp`] plan rather than a single
-/// contiguous `Bytes`. The plan's first op carries the 4-byte frame length +
-/// correlation header; subsequent ops are the response envelope interleaved
-/// with each partition's records region (a refcounted view of the verbatim
-/// `.log` bytes — no copy). The connection writer drains the plan directly on
-/// the raw stream, bypassing `encode_response` + the `Framed` codec copies.
+/// Decodes and dispatches a `Fetch` (`api_key` 1) frame.
 ///
-/// The legacy v0–v3 path has no canonical write-plan (it down-converts), so it
-/// is encoded the old way and returned as a single `Inline` op — i.e. the
-/// existing copy path, just expressed as a one-element plan.
+/// The function reads the authenticated principal from the per-connection
+/// `auth` state, and the peer `SocketAddr` from the accept-time capture, so
+/// the handler can batch-authorize every topic in the request for `Read`. On
+/// PLAINTEXT and SSL listeners the loop init makes the connection implicitly
+/// `Authenticated { ANONYMOUS / Plain }`, so `principal()` always returns
+/// `Some` here. The `unwrap_or_else` fallback covers the defensive SASL
+/// pre-auth case.
+///
+/// The function builds the Fetch response as an ordered [`WriteOp`] plan
+/// instead of one contiguous `Bytes`. The first op of the plan carries the
+/// 4-byte frame length and the correlation header. The later ops are the
+/// response envelope, interleaved with the records region of each partition.
+/// A records region is a refcounted view of the verbatim `.log` bytes, with no
+/// copy. The connection writer drains the plan directly on the raw stream, and
+/// skips `encode_response` and the `Framed` codec copies.
+///
+/// The legacy v0 to v3 path down-converts and has no canonical write plan.
+/// The function encodes it the old way and returns it as a single `Inline` op,
+/// which is the existing copy path expressed as a one-element plan.
 async fn handle_fetch_frame_from_parsed(
     broker: &Broker,
     parsed: &crate::network::request::ParsedRequest<'_>,
@@ -1124,12 +1138,15 @@ async fn maybe_apply_request_quota(
     response_bytes
 }
 
-/// RAII guard covering one dispatched request: bumps `in_flight_requests`
-/// on construction and, on drop (any exit path — success, handler error,
-/// or panic unwind), decrements it and observes the elapsed wall-clock on
-/// the `request_duration_seconds{api}` histogram. Holds a cheap
-/// `BrokerMetrics` clone (an `Arc`-bundle) so it does not borrow `broker`
-/// across the handler `.await`.
+/// RAII guard for one dispatched request.
+///
+/// The guard increments `in_flight_requests` on construction. On drop it
+/// decrements the counter and records the elapsed wall-clock time on the
+/// `request_duration_seconds{api}` histogram. Drop covers every exit path:
+/// success, a handler error, and a panic unwind.
+///
+/// The guard holds a cheap `BrokerMetrics` clone, a bundle of `Arc`s, so it
+/// does not borrow `broker` across the handler `.await`.
 struct InFlightGuard {
     metrics: crate::metrics::BrokerMetrics,
     api_key: i16,
@@ -1155,9 +1172,9 @@ impl Drop for InFlightGuard {
     }
 }
 
-/// RAII guard for one live client connection: bumps `active_connections`
-/// on construction, decrements it when the per-connection serve loop exits
-/// (drop). Holds a cheap `BrokerMetrics` clone.
+/// RAII guard for one live client connection. It increments
+/// `active_connections` on construction and decrements it on drop, when the
+/// per-connection serve loop exits. It holds a cheap `BrokerMetrics` clone.
 struct ActiveConnectionGuard {
     metrics: crate::metrics::BrokerMetrics,
 }
@@ -1177,8 +1194,8 @@ impl Drop for ActiveConnectionGuard {
     }
 }
 
-/// Prepend the response header (`corr_id` + optional tagged-fields byte)
-/// in front of the handler's body bytes.
+/// Prepends the response header, the `corr_id` and an optional tagged-fields
+/// byte, in front of the handler's body bytes.
 // PERF: this copies the whole body to prepend a 4-5 byte header. A
 // `bytes::Buf::chain(header, body)` would avoid the copy, but the sink is a
 // `Framed<S, LengthDelimitedCodec>` and `LengthDelimitedCodec` only implements
@@ -1208,14 +1225,17 @@ fn encode_response(
     Ok(buf.freeze())
 }
 
-/// KIP-219 (throttle-then-respond): `true` when `api_key`'s response carries
-/// `ThrottleTimeMs` as its FIRST body field at `version`, so the dispatch loop
-/// can surface the request-quota throttle by patching that leading int32 in
-/// place. Boundaries are verified against the 4.x response schemas. APIs absent
-/// from this table keep the pre-KIP-219 behavior (throttle still enforced by the
-/// channel mute, just not echoed); Produce (0) / Fetch (1) self-account and
-/// never reach this path. `OffsetDelete` (47) is intentionally excluded — its
-/// leading field is `ErrorCode`, so patching would corrupt it.
+/// KIP-219 (throttle-then-respond): returns `true` when the response of
+/// `api_key` carries `ThrottleTimeMs` as its FIRST body field at `version`.
+/// The dispatch loop then reports the request-quota throttle by patching that
+/// leading int32 in place.
+///
+/// The boundaries are verified against the 4.x response schemas. APIs that are
+/// absent from this table keep the pre-KIP-219 behavior: the channel mute
+/// still enforces the throttle, but the response does not echo it. Produce (0)
+/// and Fetch (1) account for themselves and never reach this path.
+/// `OffsetDelete` (47) is deliberately excluded, because its leading field is
+/// `ErrorCode` and a patch would corrupt it.
 fn throttle_is_leading_field(api_key: ApiKeyCode, version: ApiVersion) -> bool {
     // The version bounds are the schema versions at which each API moved
     // `ThrottleTimeMs` to the front of its response (verified against the
@@ -1242,11 +1262,13 @@ fn throttle_is_leading_field(api_key: ApiKeyCode, version: ApiVersion) -> bool {
     }
 }
 
-/// Patch the leading `ThrottleTimeMs` (int32) of an already-encoded response in
-/// place, raising it to `max(existing, delay_ms)`. The body begins right after
-/// the response header, whose length mirrors `encode_response`: 5 bytes when the
-/// body is flexible and the api is not `ApiVersions`, else 4. Callers must first
-/// confirm `throttle_is_leading_field`.
+/// Patches the leading `ThrottleTimeMs` int32 of an already-encoded response
+/// in place, and raises it to `max(existing, delay_ms)`.
+///
+/// The body starts right after the response header, whose length mirrors
+/// `encode_response`: 5 bytes when the body is flexible and the api is not
+/// `ApiVersions`, and 4 bytes otherwise. Callers must first confirm
+/// `throttle_is_leading_field`.
 fn patch_leading_throttle(
     resp: Bytes,
     api_key: ApiKeyCode,
@@ -1506,12 +1528,13 @@ mod tests {
         }
     }
 
-    /// The three KIP-853 controller-plane RPCs (`AddRaftVoter` 80,
-    /// `RemoveRaftVoter` 81, `UpdateRaftVoter` 82) must reach their registry
-    /// handlers. Drive each RPC over a real socket through the whole serve loop
-    /// and assert it reaches its handler: a `DenyAll` authorizer makes every
-    /// handler short-circuit at the ACL gate with `CLUSTER_AUTHORIZATION_FAILED`
-    /// (31), which is observably different from the unsupported path's 35.
+    /// The three KIP-853 controller-plane RPCs, `AddRaftVoter` 80,
+    /// `RemoveRaftVoter` 81, and `UpdateRaftVoter` 82, must reach their
+    /// registry handlers. This test drives each RPC over a real socket through
+    /// the whole serve loop and asserts that it reaches its handler. A
+    /// `DenyAll` authorizer stops every handler at the ACL gate with
+    /// `CLUSTER_AUTHORIZATION_FAILED` (31), which differs observably from the
+    /// unsupported path's 35.
     #[tokio::test]
     async fn raft_voter_registry_routes_to_real_handlers() {
         use crabka_protocol::{

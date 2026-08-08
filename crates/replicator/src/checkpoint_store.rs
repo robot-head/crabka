@@ -2,8 +2,8 @@
 //! internal topic on the TARGET cluster, keyed by flow name.
 //!
 //! On restart, [`InternalTopicCheckpointStore::load`] reads the last value for
-//! the flow's key out of the compacted topic, recovering the exact position the
-//! worker had reached before it stopped.
+//! the flow's key out of the compacted topic. It recovers the exact position
+//! that the worker had reached before it stopped.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -17,9 +17,10 @@ const STATE_TOPIC: &str = "crabka-replicator-offsets";
 /// A [`CheckpointStore`] backed by a compacted internal Kafka topic on the
 /// target cluster.
 ///
-/// Each flow gets its own key (`flow_name`) within the shared compacted topic
-/// the internal state topic. On restart, [`load`](Self::load) fetches the last value for
-/// that key, recovering the exact partition offsets the worker had reached.
+/// Each flow gets its own key, `flow_name`, within the shared compacted
+/// internal state topic. On restart, [`load`](Self::load) fetches the last
+/// value for that key and recovers the exact partition offsets that the worker
+/// had reached.
 pub struct InternalTopicCheckpointStore {
     producer: crabka_client_producer::Producer,
     target_bootstrap: String,

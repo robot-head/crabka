@@ -2,8 +2,8 @@
 //!
 //! `PostgreSQL`'s referential triggers take `FOR KEY SHARE` on the referenced
 //! row. This engine's lock manager has only `Shared` and `Exclusive`, and adds
-//! no third mode: instead both sides of a foreign key name the *same key-lock
-//! identity* — the referenced index's entry prefix for the key value. The child
+//! no third mode. Instead, both sides of a foreign key name the *same key-lock
+//! identity*, the referenced index's entry prefix for the key value. The child
 //! side (INSERT, or an UPDATE that changes the referencing key) takes it
 //! `Shared`; the parent side (DELETE, or an UPDATE that changes the referenced
 //! key) takes it `Exclusive`.
@@ -11,20 +11,20 @@
 //! Three properties follow, and each has a test below that a naive
 //! implementation fails:
 //!
-//! 1. Many children of ONE parent key do not contend — locking the parent *row*
-//!    exclusively would convoy them, which is the whole thing this design
+//! 1. Many children of ONE parent key do not contend. An exclusive lock on the
+//!    parent *row* would convoy them, which is the whole thing this design
 //!    exists to avoid.
-//! 2. A NON-KEY update of the parent is not blocked by a concurrent child
-//!    insert, because "referenced key unchanged, so queue nothing" fires first
-//!    and the parent never reaches the key lock.
+//! 2. A concurrent child insert does not block a NON-KEY update of the parent,
+//!    because "referenced key unchanged, so queue nothing" fires first and the
+//!    parent never reaches the key lock.
 //! 3. A parent DELETE *does* block behind an uncommitted child insert, and its
-//!    outcome follows the child's — the reference is real only if the child
+//!    outcome follows the child's. The reference is real only if the child
 //!    commits.
 //!
-//! Plus the two corollaries: key locks and row locks share one wait-for graph,
-//! so a cycle spanning both is reported as `40P01` with no new machinery; and a
-//! shared parent-key hold composes with the child's own exclusive unique-key
-//! lock rather than deadlocking against it.
+//! There are also two corollaries. Key locks and row locks share one wait-for
+//! graph, so the engine reports a cycle across both as `40P01` with no new
+//! machinery. And a shared parent-key hold composes with the child's own
+//! exclusive unique-key lock instead of a deadlock against it.
 //!
 //! Every SQLSTATE is what a live `PostgreSQL` 18.4 reports, including the split
 //! between `23503` (parent side under `NO ACTION`) and `23001` (under
@@ -36,20 +36,24 @@ use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
 
-/// How long a statement gets to prove it does NOT block. Every statement here
-/// is in-process and answers in well under a millisecond, so the only way to
-/// spend this budget is to be queued on a lock — but it is wide enough that a
-/// loaded runner descheduling the task cannot fake that.
+/// How long a statement gets to prove it does NOT block.
+///
+/// Every statement here is in-process and answers in well under a millisecond,
+/// so the only way to spend this budget is to queue on a lock. But the budget
+/// is wide enough that a loaded runner cannot fake that when it deschedules the
+/// task.
 const NON_BLOCKING: Duration = Duration::from_secs(5);
 
 /// How long a statement that MUST block is given to (wrongly) finish early.
+///
 /// A false pass here means a real block was slower than the window, which is
-/// harmless; a false failure would need the statement to complete, which is the
-/// defect being hunted.
+/// harmless. A false failure would need the statement to complete, which is the
+/// defect this file hunts.
 const SETTLE: Duration = Duration::from_millis(300);
 
-/// The ceiling on a wait that should end as soon as the holder resolves. Only
-/// ever reached when the protocol hangs.
+/// The ceiling on a wait that should end as soon as the holder resolves.
+///
+/// Only ever reached when the protocol hangs.
 const HANG: Duration = Duration::from_secs(10);
 
 async fn run(s: &mut SqlSession, sql: &str) -> Vec<QueryResult> {
@@ -126,10 +130,12 @@ async fn fk_engine(tail: &str) -> Arc<SqlEngine> {
     engine
 }
 
-/// (1) Two sessions inserting children of the SAME parent key do not contend:
-/// both take the parent key `Shared`, so the second commits while the first's
-/// transaction is still open. A design that took the parent ROW exclusively —
-/// or the key exclusively — would serialize them into the convoy this protocol
+/// (1) Two sessions that insert children of the SAME parent key do not
+/// contend.
+///
+/// Both take the parent key `Shared`, so the second commits while the first's
+/// transaction is still open. A design that took the parent ROW exclusively, or
+/// the key exclusively, would serialize them into the convoy this protocol
 /// exists to avoid, and the second insert would sit here until the timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_children_of_one_parent_key_do_not_contend() {
@@ -161,12 +167,14 @@ async fn concurrent_children_of_one_parent_key_do_not_contend() {
     );
 }
 
-/// (2) `PostgreSQL`'s headline `FOR KEY SHARE` property: a NON-KEY update of the
-/// parent is not blocked by an uncommitted child insert that references it. The
-/// child holds the key `Shared`; the parent update leaves the referenced key
-/// alone, so "referenced key unchanged, so queue nothing" fires and it never
-/// asks for the key lock at all. Had the parent side locked unconditionally,
-/// its `Exclusive` request would queue behind the child and this would time out.
+/// (2) `PostgreSQL`'s headline `FOR KEY SHARE` property.
+///
+/// An uncommitted child insert that references the parent does not block a
+/// NON-KEY update of that parent. The child holds the key `Shared`. The parent
+/// update leaves the referenced key alone, so "referenced key unchanged, so
+/// queue nothing" fires and the update never asks for the key lock at all. If
+/// the parent side locked unconditionally, its `Exclusive` request would queue
+/// behind the child and this would time out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn non_key_parent_update_is_not_blocked_by_an_open_child_insert() {
     let engine = fk_engine("").await;
@@ -198,10 +206,12 @@ async fn non_key_parent_update_is_not_blocked_by_an_open_child_insert() {
     assert!(rows_of(&engine, "SELECT id, a FROM c").await == vec![row(&["10", "1"])]);
 }
 
-/// (2′) The same property from the other side: an open non-key parent update
-/// holds only that parent row's ROW lock, and the child's check never takes a
-/// row lock on the parent — it probes committed state under the key lock — so a
-/// child insert referencing that very row commits while the update is open.
+/// (2′) The same property from the other side.
+///
+/// An open non-key parent update holds only that parent row's ROW lock, and the
+/// child's check never takes a row lock on the parent. The check probes
+/// committed state under the key lock. So a child insert that references that
+/// very row commits while the update is open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn child_insert_is_not_blocked_by_an_open_non_key_parent_update() {
     let engine = fk_engine("").await;
@@ -232,11 +242,12 @@ async fn child_insert_is_not_blocked_by_an_open_non_key_parent_update() {
     );
 }
 
-/// (2″) The control that gives (2) its meaning. Change the same parent row's
-/// REFERENCED key instead of its payload and the very same statement shape now
-/// queues on the very same key the child holds: the lock is real and contended,
-/// so (2) passing is the "key unchanged, so queue nothing" rule firing, not a
-/// lock that was never taken by either side.
+/// (2″) The control that gives (2) its meaning.
+///
+/// Change the same parent row's REFERENCED key instead of its payload, and the
+/// very same statement shape now queues on the very same key the child holds.
+/// The lock is real and contended. So (2) passes because the "key unchanged, so
+/// queue nothing" rule fires, not because neither side ever took a lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn key_changing_parent_update_waits_on_an_open_child_insert() {
     for (holder_outcome, outcome, parents) in [
@@ -277,10 +288,12 @@ async fn key_changing_parent_update_waits_on_an_open_child_insert() {
     }
 }
 
-/// (3) A parent DELETE DOES block behind an uncommitted child insert — the
-/// child holds the key `Shared`, the delete wants it `Exclusive` — and its
-/// outcome follows the child's. A committed child makes the reference real and
-/// the delete fails; a rolled-back child leaves nothing behind and it succeeds.
+/// (3) A parent DELETE DOES block behind an uncommitted child insert, and its
+/// outcome follows the child's.
+///
+/// The child holds the key `Shared`, and the delete wants it `Exclusive`. A
+/// committed child makes the reference real and the delete fails. A rolled-back
+/// child leaves nothing behind and the delete succeeds.
 ///
 /// The parent-side SQLSTATE differs by action, as `PostgreSQL` 18.4 reports it:
 /// `23503` under `NO ACTION`, `23001` (`restrict_violation`) under `RESTRICT`.
@@ -332,13 +345,15 @@ async fn parent_delete_waits_on_an_open_child_insert_then_follows_its_outcome() 
     }
 }
 
-/// A deadlock cycle spanning a ROW lock and a foreign-key KEY lock resolves as
-/// exactly one `40P01` instead of hanging — key locks and row locks share one
-/// wait-for graph, so no new detection machinery is needed.
+/// A deadlock cycle across a ROW lock and a foreign-key KEY lock resolves as
+/// exactly one `40P01` and does not hang.
 ///
-/// T1 changes a child's referencing key to 1, taking p's key (1) `Shared`, then
-/// wants p's row 2 — which T2 holds from a non-key update. T2 then deletes p's
-/// row 1, which wants that key `Exclusive`. Neither edge can be resolved
+/// Key locks and row locks share one wait-for graph, so the engine needs no new
+/// detection machinery.
+///
+/// T1 changes a child's referencing key to 1 and takes p's key (1) `Shared`. It
+/// then wants p's row 2, which T2 holds from a non-key update. T2 then deletes
+/// p's row 1, which wants that key `Exclusive`. Neither edge can be resolved
 /// without the other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deadlock_across_a_key_lock_and_a_row_lock_yields_one_40p01() {
@@ -400,11 +415,13 @@ async fn deadlock_across_a_key_lock_and_a_row_lock_yields_one_40p01() {
     );
 }
 
-/// Two sessions inserting the SAME child row race on the child's own key while
-/// both hold the parent key `Shared`. The shared hold neither blocks the other
-/// session nor turns the unique-key contention into a deadlock: the loser
-/// queues on the child's `Exclusive` key lock and follows the winner's outcome —
-/// `23505` once the winner commits, its own row once the winner rolls back.
+/// Two sessions that insert the SAME child row race on the child's own key
+/// while both hold the parent key `Shared`.
+///
+/// The shared hold neither blocks the other session nor turns the unique-key
+/// contention into a deadlock. The loser queues on the child's `Exclusive` key
+/// lock and follows the winner's outcome: `23505` once the winner commits, its
+/// own row once the winner rolls back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn duplicate_child_rows_serialize_on_the_child_key_under_a_shared_parent_key() {
     for (holder_outcome, outcome, committed_a) in [

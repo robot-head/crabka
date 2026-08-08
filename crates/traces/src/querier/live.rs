@@ -23,7 +23,7 @@ use super::store::SharedTraceIndex;
 pub type Result<T> = std::result::Result<T, TraceqlError>;
 const LIVE_SPAN_BATCHES_PATH: &str = "/api/crabka/live/span-batches";
 
-/// OTLP carries nanosecond fields as `uint64`; saturate rather than wrap when
+/// OTLP carries nanosecond fields as `uint64`. Saturate rather than wrap when
 /// one exceeds what a `Time` extent can be built from.
 fn time_from_nanos_u64(nanos: u64) -> Time {
     Time::from_nanos(i64::try_from(nanos).unwrap_or(i64::MAX))

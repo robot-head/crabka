@@ -1,10 +1,13 @@
 //! In-memory per-`(group, topicId, partition)` share-delivery state.
 //!
-//! Reconstructed by folding a `ShareSnapshot` then any subsequent
-//! `ShareUpdate` deltas over it (`apply_snapshot` / `apply_update`). The
-//! merge logic mirrors KIP-932's `WriteShareGroupState` semantics: advance the
-//! share-partition start offset (SPSO), drop in-memory batches fully below
-//! it, and upsert written batches keyed by their first offset.
+//! The broker rebuilds this state by folding a `ShareSnapshot`, then any
+//! later `ShareUpdate` deltas over it, through `apply_snapshot` and
+//! `apply_update`.
+//!
+//! The merge logic mirrors the `WriteShareGroupState` semantics of KIP-932. It
+//! advances the share-partition start offset (SPSO), drops the in-memory
+//! batches that lie fully below the SPSO, and upserts the written batches
+//! keyed by their first offset.
 
 use crabka_log::Offset;
 
@@ -40,8 +43,9 @@ impl SharePartitionState {
         self.updates_since_snapshot += 1;
     }
 
-    /// Advance the SPSO, drop batches fully below it, and upsert each
-    /// written batch by its `first_offset` (sorted ascending afterwards).
+    /// Advances the SPSO, drops the batches that lie fully below it, and
+    /// upserts each written batch by its `first_offset`. It then sorts the
+    /// batches in ascending order.
     pub fn merge_batches(&mut self, new_start: Offset, written: &[StateBatch]) {
         if new_start > self.start_offset {
             self.start_offset = new_start;

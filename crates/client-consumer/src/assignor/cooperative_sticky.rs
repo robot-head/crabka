@@ -3,12 +3,13 @@
 //! Byte-identical port of Apache Kafka 3.6.x
 //! `org.apache.kafka.clients.consumer.CooperativeStickyAssignor` +
 //! `AbstractStickyAssignor.generalAssign` /
-//! `ConstrainedAssignmentBuilder`. Returns the partitions each member
-//! should be holding *after this rebalance round*. When a partition
-//! would have to move off a still-living owner, it is omitted entirely
-//! (`phase-1` of the two-phase cooperative protocol); the owner will see
-//! its loss on the next `SyncGroup`, revoke, and a follow-up rebalance
-//! places the released partition.
+//! `ConstrainedAssignmentBuilder`.
+//!
+//! It returns the partitions that each member should hold *after this rebalance
+//! round*. When a partition would have to move off a still-living owner, this
+//! assignor omits it entirely. That is `phase-1` of the two-phase cooperative
+//! protocol. The owner sees its loss on the next `SyncGroup` and revokes, and a
+//! follow-up rebalance places the released partition.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -20,9 +21,10 @@ pub type MemberInput = (String, Vec<String>, Vec<(String, i32)>, i32);
 /// Inputs: each member as `(member_id, subscribed_topics, owned_partitions, generation_id)`.
 /// `topic_partitions` gives the partition count for every topic any member subscribes to.
 ///
-/// Output: per-member assigned partitions for THIS rebalance round. Cooperative semantics
-/// mean partitions being moved from a still-active owner are omitted — the next rebalance
-/// (`phase-2`) will place them after the owner revokes.
+/// Output: the per-member assigned partitions for THIS rebalance round.
+/// Cooperative semantics mean this function omits a partition that moves off a
+/// still-active owner. The next rebalance, `phase-2`, places it after the owner
+/// revokes.
 #[must_use]
 #[tracing::instrument(
     name = "consumer.assignor.cooperative_sticky",
@@ -114,8 +116,9 @@ pub fn assign(
     adjusted
 }
 
-/// Build `current_assignment` filtered to live topics/subscriptions, with
-/// zombie conflicts resolved by `generation_id`.
+/// Build `current_assignment`, filtered to the live topics and subscriptions.
+///
+/// This function resolves zombie conflicts by `generation_id`.
 fn prepopulate_current_assignments(
     members: &[MemberInput],
     subs: &BTreeMap<String, BTreeSet<String>>,
@@ -176,9 +179,11 @@ fn prepopulate_current_assignments(
     out
 }
 
-/// `ConstrainedAssignmentBuilder` — used when all members share the same
-/// subscription. Faster path; produces the same final assignment as the
-/// general algorithm in this special case.
+/// `ConstrainedAssignmentBuilder`, for when all members share the same
+/// subscription.
+///
+/// This is the faster path. In that special case it produces the same final
+/// assignment as the general algorithm.
 fn constrained_assign(
     member_ids: &[String],
     subs: &BTreeMap<String, BTreeSet<String>>,
@@ -281,8 +286,8 @@ fn constrained_assign(
     out
 }
 
-/// `AbstractStickyAssignor.generalAssign` — the four-pass general
-/// algorithm used when subscriptions are non-uniform.
+/// `AbstractStickyAssignor.generalAssign`, the four-pass general algorithm for
+/// non-uniform subscriptions.
 // Byte-port of the JVM constrained algorithm; splitting would obscure
 // the four-pass structure.
 fn general_assign(

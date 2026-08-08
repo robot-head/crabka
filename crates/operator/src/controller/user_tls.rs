@@ -1,10 +1,10 @@
 //! TLS-auth helpers for the `KafkaUser` reconciler.
 //!
-//! Owns:
-//! - per-user X.509 cert issuance + renewal,
-//! - the per-user TLS-credential Secret render.
+//! This module owns:
+//! - the issuance and the renewal of the X.509 cert of each user,
+//! - the render of the TLS-credential Secret of each user.
 //!
-//! `controller/user.rs` dispatches into here from its reconcile pipeline
+//! `controller/user.rs` calls into this module from its reconcile pipeline
 //! when `spec.authentication` is `Authentication::Tls(_)`.
 
 use std::collections::BTreeMap;
@@ -26,25 +26,30 @@ use crate::{
     crd::{KafkaUser, user::TlsAuth},
 };
 
-/// Default cert lifetime (days) when `TlsAuth::validity_days` is absent.
+/// Default cert lifetime in days, used when `TlsAuth::validity_days` is
+/// absent.
 pub(crate) const DEFAULT_VALIDITY_DAYS: u32 = 365;
-/// Default renewal window (days) when `TlsAuth::renewal_days` is absent.
+/// Default renewal window in days, used when `TlsAuth::renewal_days` is
+/// absent.
 pub(crate) const DEFAULT_RENEWAL_DAYS: u32 = 30;
 
-/// Outcome of `ensure_user_cert_secret`. Drives the status update.
+/// Outcome of `ensure_user_cert_secret`. The status update reads it.
 #[derive(Debug, Clone)]
 pub(crate) struct UserCertStatus {
-    /// RFC3339 `notAfter` from the (newly issued or reused) cert.
+    /// RFC3339 `notAfter` from the cert, whether the operator issued it
+    /// now or reused it.
     pub not_after: String,
-    /// Whether the operator issued a new cert this reconcile.
-    /// Pure observability; not load-bearing.
+    /// Whether the operator issued a new cert in this reconcile. This
+    /// field is for observability only. No logic depends on it.
     pub issued_new: bool,
 }
 
-/// Get-or-create the per-user cert Secret. Idempotent: if the existing
-/// Secret carries a cert whose `notAfter` is more than `renewal_days`
-/// in the future, returns its status unchanged. Otherwise issues a new
-/// cert and PATCH-applies the Secret.
+/// Gets the cert Secret of one user, or creates it.
+///
+/// The function is idempotent. When the existing Secret carries a cert
+/// whose `notAfter` is more than `renewal_days` in the future, the
+/// function returns its status unchanged. If not, the function issues a
+/// new cert and applies the Secret with a PATCH.
 pub(crate) async fn ensure_user_cert_secret(
     secret_api: &Api<Secret>,
     obj: &KafkaUser,
@@ -84,15 +89,18 @@ pub(crate) async fn ensure_user_cert_secret(
     })
 }
 
-/// Compose Kafka principal for a TLS user (`User:CN=<name>`). The
-/// SCRAM path lives in `controller/user.rs::principal_for` for now;
-/// Batch B2 unifies them.
+/// Composes the Kafka principal for a TLS user, which is
+/// `User:CN=<name>`.
+///
+/// The SCRAM path lives in `controller/user.rs::principal_for` today.
+/// Batch B2 joins the two.
 #[must_use]
 pub(crate) fn tls_principal(name: &str) -> String {
     format!("User:CN={name}")
 }
 
-/// Pure: is `not_after` within `renewal_days` of `now`?
+/// Reports whether `not_after` is within `renewal_days` of `now`. This
+/// function is pure.
 #[must_use]
 pub(crate) fn is_cert_expiring_soon(
     not_after: &OffsetDateTime,
@@ -108,10 +116,12 @@ fn format_rfc3339(t: OffsetDateTime) -> Result<String, ReconcileError> {
         .map_err(|e| ReconcileError::CertParse(format!("rfc3339 format: {e}")))
 }
 
-/// Parse `user.crt` PEM out of an existing user Secret and return
-/// the cert's `notAfter` as a `time::OffsetDateTime`. Returns `None`
-/// if the key is missing, the PEM is malformed, or the cert won't
-/// parse — caller treats `None` as "reissue".
+/// Parses the `user.crt` PEM out of an existing user Secret and returns
+/// the `notAfter` of the cert as a `time::OffsetDateTime`.
+///
+/// This function returns `None` when the key is absent, when the PEM is
+/// malformed, and when the cert does not parse. The caller reads `None` as
+/// an instruction to issue a new cert.
 fn read_user_cert_not_after(secret: &Secret) -> Option<OffsetDateTime> {
     let pem = read_pem_key(secret, "user.crt")?;
     cert_not_after_from_pem(&pem)

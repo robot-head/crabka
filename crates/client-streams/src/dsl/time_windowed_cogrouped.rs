@@ -1,6 +1,8 @@
-//! `TimeWindowedCogroupedStream<K, VOut>`: time-windowed KIP-150 cogroup. Built
-//! by `CogroupedKStream::windowed_by(TimeWindows)`. Terminal `aggregate_explicit`
-//! produces `KTable<Windowed<K>, VOut>` over a shared window store.
+//! `TimeWindowedCogroupedStream<K, VOut>`: the time-windowed KIP-150 cogroup.
+//!
+//! `CogroupedKStream::windowed_by(TimeWindows)` builds it. The terminal
+//! `aggregate_explicit` produces a `KTable<Windowed<K>, VOut>` over a shared
+//! window store.
 
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
@@ -25,7 +27,7 @@ where
     K: Any + Send + Sync + Clone,
     VOut: Any + Send + Sync + Clone,
 {
-    /// `windowedBy(TimeWindows)` → time-windowed cogroup.
+    /// `windowedBy(TimeWindows)`: turn this cogroup into a time-windowed cogroup.
     #[must_use]
     pub fn windowed_by(self, windows: TimeWindows) -> TimeWindowedCogroupedStream<K, VOut> {
         TimeWindowedCogroupedStream {
@@ -37,7 +39,7 @@ where
     }
 }
 
-/// Handle produced by [`CogroupedKStream::windowed_by`]; terminal
+/// Handle that [`CogroupedKStream::windowed_by`] produces. The terminal
 /// time-windowed aggregation consumes it.
 pub struct TimeWindowedCogroupedStream<K, VOut> {
     builder: Rc<RefCell<InternalStreamsBuilder>>,
@@ -51,12 +53,12 @@ where
     K: Any + Send + Sync + Clone,
     VOut: Any + Send + Sync + Clone,
 {
-    /// Time-windowed terminal aggregation → `KTable<Windowed<K>, VOut>`.
+    /// Time-windowed terminal aggregation into a `KTable<Windowed<K>, VOut>`.
     ///
-    /// Note: the returned table carries no suppress factory, so calling
-    /// `.suppress(...)` on it fails at topology-build time. Suppress on windowed
-    /// cogroup outputs is a deferred follow-up (emit semantics are emit-on-update
-    /// across the cogroup surface, per the KIP-150 slice scope).
+    /// The returned table carries no suppress factory, so a `.suppress(...)` call
+    /// on it fails at topology-build time. Suppress on a windowed cogroup output
+    /// is a deferred follow-up. The emit semantics are emit-on-update across the
+    /// whole cogroup surface, per the KIP-150 slice scope.
     pub fn aggregate_explicit<KS, VS, I>(
         self,
         init: I,

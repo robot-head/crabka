@@ -2,19 +2,20 @@
 //!
 //! # Native-histogram range vectors
 //!
-//! The windowing core ([`from_ranges`](RangeArray::from_ranges), [`get`](RangeArray::get),
-//! [`into_dict_array`](RangeArray::into_dict_array) /
-//! [`try_from_dict_array`](RangeArray::try_from_dict_array)) is type-agnostic: it
-//! windows any backing [`ArrayRef`] by `(offset, len)` and round-trips it as a
-//! dictionary-of-lists column. A native-histogram range vector therefore already
-//! works *structurally* by backing the `RangeArray` with a `StructArray`
-//! (count/sum/schema scalars plus bucket-bound and bucket-count lists) instead of
-//! a `Float64Array`; `get(i)` returns the sliced `StructArray` for that window.
+//! The windowing core is type-agnostic. It windows any backing [`ArrayRef`] by
+//! `(offset, len)` and round-trips it as a dictionary-of-lists column. That core
+//! is [`from_ranges`](RangeArray::from_ranges), [`get`](RangeArray::get),
+//! [`into_dict_array`](RangeArray::into_dict_array), and
+//! [`try_from_dict_array`](RangeArray::try_from_dict_array). A native-histogram
+//! range vector already works structurally: back the `RangeArray` with a
+//! `StructArray` instead of a `Float64Array`. That struct holds the count, sum,
+//! and schema scalars plus the bucket-bound and bucket-count lists. `get(i)`
+//! returns the sliced `StructArray` for that window.
 //!
-//! The typed fast-path accessors below cover scalar cells
-//! ([`value_slice`](RangeArray::value_slice) for `f64`,
-//! [`timestamp_slice`](RangeArray::timestamp_slice) for `i64`) and native
-//! histogram cells ([`histogram_cell`](RangeArray::histogram_cell)).
+//! The typed fast-path accessors below cover scalar cells and native histogram
+//! cells. Use [`value_slice`](RangeArray::value_slice) for `f64` cells,
+//! [`timestamp_slice`](RangeArray::timestamp_slice) for `i64` cells, and
+//! [`histogram_cell`](RangeArray::histogram_cell) for native histogram cells.
 
 use std::sync::Arc;
 
@@ -283,9 +284,15 @@ pub struct RangeArray {
 }
 
 impl RangeArray {
-    /// Build from a backing array and windows; validates each window fits.
+    /// Builds a `RangeArray` from a backing array and its windows.
+    ///
+    /// This function checks that each window fits in the backing array.
+    ///
     /// # Errors
-    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+    ///
+    /// Returns an error if the metric input is malformed.
+    /// Returns an error if a limit is exceeded.
+    /// Returns an error if the backing WAL, block store, or remote endpoint fails.
     pub fn from_ranges(
         values: ArrayRef,
         ranges: impl IntoIterator<Item = (u32, u32)>,
@@ -323,24 +330,30 @@ impl RangeArray {
         &self.ranges
     }
 
-    /// The windowed slice for cell `index`, or `None` if out of bounds.
+    /// Returns the windowed slice for cell `index`, or `None` if `index` is out of bounds.
     #[must_use]
     pub fn get(&self, index: usize) -> Option<ArrayRef> {
         let &(offset, len) = self.ranges.get(index)?;
         Some(self.values.slice(offset as usize, len as usize))
     }
 
-    /// Build a paired value/timestamp `RangeArray` from one set of windows.
+    /// Builds a paired value and timestamp `RangeArray` from one set of windows.
     ///
     /// `RangeManipulate` emits a value column and a timestamp column whose cells
-    /// share identical window offsets/lengths. This constructs both from a single
-    /// `(offset, len)` range set so the pairing can never drift. The `values` and
-    /// `timestamps` backing arrays must have the same length (each sample has both
-    /// a value and a timestamp); every window is validated against that length.
+    /// share identical window offsets and lengths. This function builds both
+    /// columns from a single `(offset, len)` range set, so the pairing can never
+    /// drift. The `values` and `timestamps` backing arrays must have the same
+    /// length, because each sample has both a value and a timestamp. This
+    /// function checks every window against that length.
     ///
-    /// Returns `(value_ranges, timestamp_ranges)`; both share the same `ranges()`.
+    /// Returns `(value_ranges, timestamp_ranges)`. Both share the same
+    /// `ranges()`.
+    ///
     /// # Errors
-    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+    ///
+    /// Returns an error if the metric input is malformed.
+    /// Returns an error if a limit is exceeded.
+    /// Returns an error if the backing WAL, block store, or remote endpoint fails.
     pub fn from_paired_ranges(
         values: Float64Array,
         timestamps: Int64Array,
@@ -359,14 +372,16 @@ impl RangeArray {
         Ok((value_ranges, timestamp_ranges))
     }
 
-    /// Number of samples in cell `index`, or `None` if out of bounds.
+    /// Returns the number of samples in cell `index`, or `None` if `index` is out of bounds.
     #[must_use]
     pub fn cell_len(&self, index: usize) -> Option<usize> {
         self.ranges.get(index).map(|&(_, len)| len as usize)
     }
 
-    /// The cell `index` as a contiguous `&[f64]`, or `None` if `index` is out of
-    /// bounds or the backing array is not `Float64`. Empty cells yield `&[]`.
+    /// Returns cell `index` as a contiguous `&[f64]`.
+    ///
+    /// Returns `None` if `index` is out of bounds or the backing array is not
+    /// `Float64`. An empty cell returns `&[]`.
     #[must_use]
     pub fn value_slice(&self, index: usize) -> Option<&[f64]> {
         let &(offset, len) = self.ranges.get(index)?;
@@ -375,8 +390,10 @@ impl RangeArray {
         Some(&floats.values()[start..start + len as usize])
     }
 
-    /// The cell `index` as a contiguous `&[i64]`, or `None` if `index` is out of
-    /// bounds or the backing array is not `Int64`. Empty cells yield `&[]`.
+    /// Returns cell `index` as a contiguous `&[i64]`.
+    ///
+    /// Returns `None` if `index` is out of bounds or the backing array is not
+    /// `Int64`. An empty cell returns `&[]`.
     #[must_use]
     pub fn timestamp_slice(&self, index: usize) -> Option<&[i64]> {
         let &(offset, len) = self.ranges.get(index)?;
@@ -385,9 +402,10 @@ impl RangeArray {
         Some(&ints.values()[start..start + len as usize])
     }
 
-    /// The native-histogram cell `index`, or `None` if `index` is out of bounds
-    /// or the backing array does not match `crabka-metrics`' native histogram
-    /// `StructArray` layout.
+    /// Returns the native-histogram cell `index`.
+    ///
+    /// Returns `None` if `index` is out of bounds or the backing array does not
+    /// match the native histogram `StructArray` layout of `crabka-metrics`.
     #[must_use]
     pub fn histogram_cell(&self, index: usize) -> Option<HistogramView<'_>> {
         let &(offset, len) = self.ranges.get(index)?;
@@ -395,8 +413,10 @@ impl RangeArray {
         Some(columns.cell(offset, len))
     }
 
-    /// Iterate every cell as a `&[f64]`, or `None` if the backing array is not
-    /// `Float64`. The iterator yields one slice per cell in order.
+    /// Returns an iterator over every cell as a `&[f64]`.
+    ///
+    /// Returns `None` if the backing array is not `Float64`. The iterator yields
+    /// one slice per cell in order.
     #[must_use]
     pub fn iter_value_slices(&self) -> Option<impl Iterator<Item = &[f64]>> {
         let floats = self.values.as_any().downcast_ref::<Float64Array>()?;
@@ -407,8 +427,10 @@ impl RangeArray {
         }))
     }
 
-    /// Iterate every cell as a `&[i64]`, or `None` if the backing array is not
-    /// `Int64`. The iterator yields one slice per cell in order.
+    /// Returns an iterator over every cell as a `&[i64]`.
+    ///
+    /// Returns `None` if the backing array is not `Int64`. The iterator yields
+    /// one slice per cell in order.
     #[must_use]
     pub fn iter_timestamp_slices(&self) -> Option<impl Iterator<Item = &[i64]>> {
         let ints = self.values.as_any().downcast_ref::<Int64Array>()?;
@@ -419,13 +441,18 @@ impl RangeArray {
         }))
     }
 
-    /// Encode windows as a dictionary whose values are per-cell lists.
+    /// Encodes the windows as a dictionary whose values are per-cell lists.
     ///
-    /// Arrow 59 validates dictionary keys as dictionary indices, so we use keys
-    /// `0..len` and store each window as one list value. This is safe to pass as
-    /// a `RecordBatch` column and preserves the public `RangeArray` behavior.
+    /// Arrow 59 validates dictionary keys as dictionary indices, so this method
+    /// uses the keys `0..len` and stores each window as one list value. The
+    /// result is safe to pass as a `RecordBatch` column and keeps the public
+    /// `RangeArray` behavior.
+    ///
     /// # Errors
-    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+    ///
+    /// Returns an error if the metric input is malformed.
+    /// Returns an error if a limit is exceeded.
+    /// Returns an error if the backing WAL, block store, or remote endpoint fails.
     pub fn into_dict_array(self) -> Result<DictionaryArray<Int64Type>, ArrowError> {
         let mut offsets = Vec::with_capacity(self.ranges.len() + 1);
         offsets.push(0_i32);
@@ -469,9 +496,13 @@ impl RangeArray {
         DictionaryArray::try_new(keys, Arc::new(list))
     }
 
-    /// Decode a dictionary-of-lists column back into a `RangeArray`.
+    /// Decodes a dictionary-of-lists column back into a `RangeArray`.
+    ///
     /// # Errors
-    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+    ///
+    /// Returns an error if the metric input is malformed.
+    /// Returns an error if a limit is exceeded.
+    /// Returns an error if the backing WAL, block store, or remote endpoint fails.
     pub fn try_from_dict_array(dict: &DictionaryArray<Int64Type>) -> Result<Self, ArrowError> {
         let lists = dict
             .values()

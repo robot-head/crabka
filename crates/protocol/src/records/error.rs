@@ -1,4 +1,4 @@
-//! Errors specific to record-batch decoding/encoding.
+//! Errors specific to record-batch decoding and encoding.
 
 use thiserror::Error;
 

@@ -28,17 +28,18 @@ pub struct BrokerRange0EndSampler(pub Arc<dyn CommittedEndSampler>);
 
 /// One live broker attachment used for committed-end sampling.
 ///
-/// A page fetched at an offset below the retained log start must not fail:
-/// it reports the retained start through [`FetchedWalPartition::next_offset`]
-/// with no records, so a scan can jump over pruned history.
+/// A page fetched at an offset below the retained log start must not fail. It
+/// reports the retained start through [`FetchedWalPartition::next_offset`]
+/// with no records, so a scan can skip pruned history.
 #[async_trait::async_trait]
 pub(crate) trait CommittedEndConnection: Send + Sync {
     /// Fetch one committed-isolation page starting at `fetch_offset`.
     async fn fetch_page(&self, fetch_offset: i64) -> Result<FetchedWalPartition, SubstrateError>;
 }
 
-/// Dials broker attachments (connection + resolved topic identity) for
-/// [`LiveCommittedEndSampler`].
+/// Dials broker attachments for [`LiveCommittedEndSampler`].
+///
+/// An attachment is a connection and a resolved topic identity.
 #[async_trait::async_trait]
 pub(crate) trait CommittedEndDialer: Send + Sync {
     /// Establish a fresh attachment to the WAL topic.
@@ -47,16 +48,16 @@ pub(crate) trait CommittedEndDialer: Send + Sync {
 
 /// Broker-backed committed-end sampler for a live range-zero follower.
 ///
-/// The sampler keeps one broker attachment (connection plus resolved topic
-/// UUID) and a monotone scan cursor across calls, so consecutive samples cost
-/// one positioned fetch on the live connection instead of a fresh TLS
-/// handshake, admin metadata round-trip, and full-topic record scan per call.
-/// Every call still issues at least one broker fetch that starts after the
-/// call begins, so the linearizable-sample contract of
-/// [`CommittedEndSampler`] is unchanged. When the cached attachment fails,
-/// the call falls back to a fresh dial — the availability of the previous
-/// dial-per-call implementation — and only surfaces an error when the fresh
-/// attempt also fails.
+/// The sampler keeps one broker attachment and a monotone scan cursor across
+/// calls. An attachment is a connection plus a resolved topic UUID.
+/// Consecutive samples therefore cost one positioned fetch on the live
+/// connection, instead of a fresh TLS handshake, an admin metadata
+/// round-trip, and a full-topic record scan for each call. Every call still
+/// issues at least one broker fetch that starts after the call begins, so the
+/// linearizable-sample contract of [`CommittedEndSampler`] is unchanged. When
+/// the cached attachment fails, the call falls back to a fresh dial, which
+/// gives the availability of the dial-per-call implementation. The call
+/// reports an error only when the fresh attempt also fails.
 pub struct LiveCommittedEndSampler {
     dialer: Box<dyn CommittedEndDialer>,
     state: Mutex<Option<SamplerState>>,
@@ -69,10 +70,11 @@ struct SamplerState {
 
 /// Monotone facts about the committed WAL learned by earlier scans.
 ///
-/// Offsets below `next_fetch` have been scanned; `last_visible` is the
-/// highest committed visible record offset observed so far (`-1` before any).
-/// Both only grow, and both stay valid across reconnects: they describe
-/// broker-side log state, not connection state.
+/// Earlier scans have covered every offset below `next_fetch`. `last_visible`
+/// is the highest committed visible record offset seen so far, and it is `-1`
+/// before the first scan. Both values only grow, and both stay valid across
+/// reconnects, because they describe broker-side log state and not connection
+/// state.
 #[derive(Debug, Clone, Copy)]
 struct EndScanCursor {
     next_fetch: i64,
@@ -103,13 +105,15 @@ impl LiveCommittedEndSampler {
     }
 
     /// Sample the committed end with a broker fetch issued after this call
-    /// begins, reusing the cached attachment and scan cursor when possible.
+    /// begins.
+    ///
+    /// The sampler reuses the cached attachment and scan cursor when possible.
     ///
     /// # Errors
     ///
-    /// Returns an error when no attachment can serve the sample: a cached
-    /// attachment that fails is dropped and replaced by one fresh dial, and
-    /// only that fresh attempt's failure surfaces.
+    /// Returns an error when no attachment can serve the sample. The sampler
+    /// drops a cached attachment that fails and replaces it with one fresh
+    /// dial. Only the failure of that fresh attempt reaches the caller.
     pub async fn committed_end(&self) -> Result<i64, SubstrateError> {
         let mut guard = self.state.lock().await;
         if let Some(state) = guard.as_mut() {
@@ -140,14 +144,14 @@ impl CommittedEndSampler for LiveCommittedEndSampler {
 /// Advance `cursor` to the stable end observed by a fetch issued now and
 /// return the highest committed visible record offset.
 ///
-/// The first page's `last_stable_offset` is the linearization point: it is
-/// read by a fetch that started after the caller began, so every record
-/// whose commit was acknowledged before the call sits below it. The scan
-/// then walks only `[cursor.next_fetch, stable_end)` — offsets below the
-/// cursor are immutable history already folded into `cursor.last_visible`
-/// by earlier scans. Records at or above the stable end may still be
-/// undecided and are never counted, and the cursor never crosses the stable
-/// end, so a later abort cannot poison the cached value.
+/// The first page's `last_stable_offset` is the linearization point. A fetch
+/// that started after the caller began reads it, so every record whose commit
+/// was acknowledged before the call is below it. The scan then walks only
+/// `[cursor.next_fetch, stable_end)`. Offsets below the cursor are immutable
+/// history that earlier scans already folded into `cursor.last_visible`.
+/// Records at or above the stable end may still be undecided, and the scan
+/// never counts them. The cursor never crosses the stable end, so a later
+/// abort cannot corrupt the cached value.
 async fn scan_to_stable_end(
     connection: &dyn CommittedEndConnection,
     cursor: &mut EndScanCursor,
@@ -206,8 +210,9 @@ pub struct ReadOnlyRange0Follower {
 impl ReadOnlyRange0Follower {
     /// Restore a checkpoint when supplied, then replay all committed records after it.
     ///
-    /// This API deliberately accepts a reader rather than a producer: follower construction
-    /// cannot initialize transactions, fence a writer, or append a recovery barrier.
+    /// This API deliberately accepts a reader and not a producer. Follower
+    /// construction cannot initialize transactions, fence a writer, or append a
+    /// recovery barrier.
     /// # Panics
     ///
     /// Panics if an internal invariant is violated.
@@ -287,14 +292,15 @@ impl ReadOnlyRange0Follower {
 ///
 /// A follower that has applied through `applied_offset` fetches from
 /// `applied_offset + 1`. Checkpoint-driven `DeleteRecords` moves the log start
-/// forward; once it passes that offset the frame is gone for good and every
-/// later fetch fails with `OFFSET_OUT_OF_RANGE`, so retrying the same fetch
-/// can never make progress. A log start at or below it means the fetch is
-/// still servable and the failure was transient — a broker blip, a timeout —
-/// which must keep retrying rather than trigger a rebuild.
+/// forward. Once the log start passes that offset, the frame is gone
+/// permanently and every later fetch fails with `OFFSET_OUT_OF_RANGE`, so a
+/// retry of the same fetch can never make progress. A log start at or below
+/// that offset means the fetch is still servable and the failure was
+/// transient, such as a brief broker failure or a timeout. The caller must
+/// keep retrying in that case and must not start a rebuild.
 ///
-/// `log_start` is `None` when the broker did not report one; that is not
-/// evidence of a trim, so it reads as retryable.
+/// `log_start` is `None` when the broker did not report one. That is not
+/// evidence of a trim, so the function reads it as retryable.
 #[must_use]
 pub fn wal_trimmed_past_applied(applied_offset: i64, log_start: Option<i64>) -> bool {
     log_start.is_some_and(|start| start > applied_offset.saturating_add(1))
@@ -302,12 +308,12 @@ pub fn wal_trimmed_past_applied(applied_offset: i64, log_start: Option<i64>) -> 
 
 /// Rebuild `tail` from the newest checkpoint after its WAL tail was trimmed.
 ///
-/// `fresh_store` must be empty and must not be the store `tail` is currently
-/// serving: [`crabka_pgkv::RestoreKv::restore_sorted`] refuses a non-empty
-/// target, and restoring into the live store would expose half-rebuilt state
-/// to readers the barrier has already released. The restore happens entirely
-/// in `fresh_store`, and only a complete, caught-up store is handed to
-/// [`Range0Tail::reset_to_checkpoint`].
+/// `fresh_store` must be empty, and it must not be the store that `tail` is
+/// currently serving. [`crabka_pgkv::RestoreKv::restore_sorted`] refuses a
+/// non-empty target, and a restore into the live store would expose
+/// half-rebuilt state to readers that the barrier has already released. The
+/// restore happens entirely in `fresh_store`, and this function gives only a
+/// complete, caught-up store to [`Range0Tail::reset_to_checkpoint`].
 ///
 /// Returns the offset the rebuilt tail has applied through.
 ///
@@ -473,10 +479,10 @@ mod tests {
         }
     }
 
-    /// The wedge this guards against: checkpoint-driven `DeleteRecords` moves
+    /// This test covers one failure. Checkpoint-driven `DeleteRecords` moves
     /// the log start past the offset a live follower still needs, so every
     /// later fetch from that offset fails forever. The follower must rebuild
-    /// from the newest checkpoint and resume, not stall.
+    /// from the newest checkpoint and resume. It must not stall.
     #[tokio::test]
     async fn a_follower_trimmed_past_its_applied_offset_rebuilds_and_resumes() {
         let log = InMemoryWalLog::shared();
@@ -670,8 +676,8 @@ mod tests {
         records: Vec<i64>,
     }
 
-    /// Counting broker fixture: every dial and every fetch is recorded, and
-    /// failures can be injected per dial or per fetch.
+    /// Counting broker fixture. It records every dial and every fetch, and a
+    /// test can inject failures per dial or per fetch.
     #[derive(Default)]
     struct FakeBroker {
         wal: StdMutex<FakeWal>,
@@ -863,9 +869,9 @@ mod tests {
         assert!(broker.dials.load(Ordering::SeqCst) == 1);
     }
 
-    /// End-to-end over the barrier seam: the range-0 read barrier built on
-    /// the persistent sampler still blocks reads until the local tail applies
-    /// the sampled committed end, and N barrier calls share one dial.
+    /// End-to-end test over the barrier seam. The range-0 read barrier built
+    /// on the persistent sampler still blocks reads until the local tail
+    /// applies the sampled committed end, and N barrier calls share one dial.
     #[tokio::test]
     async fn barrier_blocks_until_tail_catches_up_and_reuses_the_attachment() {
         let broker = FakeBroker::shared(0, 3, vec![0, 1, 2]);

@@ -1,13 +1,17 @@
-//! The real querier fan-out backend: a reqwest client over a configurable set
-//! of querier addresses, speaking the Tempo HTTP API at the per-job grain (one
-//! HTTP call per planned shard).
+//! The real querier fan-out backend.
 //!
-//! The shard restriction uses the querier's real `scan_options` contract
-//! (`querier/http::scan_options_param`): a cold block + row-group range is
-//! `block=<object_key>&rowGroupStart=<n>&rowGroupEnd=<m>`; the live shard sends
-//! no scan params (the querier's hot/cold union scan). There is no `shard=live`
-//! param. By-id has no block scoping — it targets one querier by index and
-//! unions across the pool. `start`/`end` are epoch **seconds** on every endpoint.
+//! It is a reqwest client over a configurable set of querier addresses. It
+//! speaks the Tempo HTTP API at the per-job grain, one HTTP call per planned
+//! shard.
+//!
+//! The shard restriction uses the querier's real `scan_options` contract in
+//! `querier/http::scan_options_param`. A cold block with a row-group range is
+//! `block=<object_key>&rowGroupStart=<n>&rowGroupEnd=<m>`. The live shard sends
+//! no scan params, which gives the querier's hot/cold union scan. There is no
+//! `shard=live` param.
+//!
+//! By-id has no block scoping. It targets one querier by index and unions
+//! across the pool. `start` and `end` are epoch **seconds** on every endpoint.
 
 use std::{
     sync::{
@@ -35,9 +39,11 @@ use crate::frontend::{
 
 const TENANT_HEADER: &str = "X-Scope-OrgID";
 
-/// HTTP querier pool. Round-robins `addrs` for search/tag jobs; targets a
-/// specific querier by index for by-id fan-out. Each request carries the tenant
-/// in `X-Scope-OrgID` and a per-request timeout.
+/// HTTP querier pool.
+///
+/// It round-robins `addrs` for search and tag jobs, and targets a specific
+/// querier by index for a by-id fan-out. Each request carries the tenant in
+/// `X-Scope-OrgID` and a per-request timeout.
 pub struct HttpQuerier {
     http: reqwest::Client,
     addrs: Vec<String>,
@@ -45,7 +51,8 @@ pub struct HttpQuerier {
 }
 
 impl HttpQuerier {
-    /// Build the pool. `addrs` are `host:port` (no scheme; `http://` is assumed).
+    /// Build the pool. Each entry in `addrs` is `host:port` with no scheme,
+    /// and `http://` is assumed.
     ///
     /// # Errors
     /// Returns `BackendError::Transport` if `addrs` is empty or the client
@@ -83,8 +90,8 @@ impl HttpQuerier {
     }
 }
 
-/// Epoch nanos -> epoch seconds string (the querier parses `start`/`end` as
-/// seconds, fractional allowed).
+/// Epoch nanos -> epoch seconds string. The querier parses `start` and `end` as
+/// seconds, and allows a fractional part.
 fn ns_to_seconds(ns: i64) -> String {
     let negative = ns < 0;
     let ns = ns.unsigned_abs();
@@ -103,7 +110,7 @@ fn ns_to_seconds(ns: i64) -> String {
 }
 
 /// Push the querier's scan-job params for a cold-block shard. The live shard
-/// sends none.
+/// sends no such params.
 fn push_shard_params(params: &mut Vec<(&'static str, String)>, shard: &JobShard) {
     if let JobShard::Block {
         block_id,
@@ -117,9 +124,10 @@ fn push_shard_params(params: &mut Vec<(&'static str, String)>, shard: &JobShard)
     }
 }
 
-/// Build a `host/path?query` URL with the given params. The crate's `reqwest` is
-/// built without the `query` feature, so query strings are encoded via `url`
-/// (the same approach the legacy query-frontend uses).
+/// Build a `host/path?query` URL with the given params.
+///
+/// The crate builds `reqwest` without the `query` feature, so `url` encodes the
+/// query strings. The legacy query-frontend uses the same approach.
 fn build_url(base: &str, params: &[(&str, String)]) -> Result<reqwest::Url, BackendError> {
     let mut url = reqwest::Url::parse(base)
         .map_err(|e| BackendError::Transport(format!("invalid url {base}: {e}")))?;
@@ -350,7 +358,8 @@ impl TagsBody {
     }
 }
 
-/// The `/api/v2/search/tag/{tag}/values` body: `{ tagValues: [{ type, value }], metrics }`.
+/// The `/api/v2/search/tag/{tag}/values` body:
+/// `{ tagValues: [{ type, value }], metrics }`.
 #[derive(Clone, Debug, serde::Deserialize)]
 struct TagValuesBody {
     #[serde(rename = "tagValues", default)]
@@ -401,13 +410,17 @@ fn parse_scope(name: &str) -> crabka_traceql::TagScope {
     }
 }
 
-/// Boot the query-frontend role: build the HTTP querier pool + a block catalog,
-/// then serve the router on `cfg.listen_addr` until `shutdown` fires.
+/// Boot the query-frontend role.
 ///
-/// `catalog` is the production [`TraceIndexCatalog`] (or any compatible block catalog).
+/// This builds the HTTP querier pool and a block catalog, then serves the
+/// router on `cfg.listen_addr` until `shutdown` fires.
+///
+/// `catalog` is the production [`TraceIndexCatalog`], or any compatible block
+/// catalog.
 ///
 /// # Errors
-/// Propagates bind/serve `std::io` errors and backend-construction failures.
+/// Propagates bind and serve `std::io` errors, and backend-construction
+/// failures.
 pub async fn run_query_frontend(
     cfg: FrontendConfig,
     catalog: TraceIndexCatalog,

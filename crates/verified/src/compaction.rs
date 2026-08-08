@@ -1,6 +1,8 @@
-//! KIP-534 log-compaction decision core, extracted from `crabka-log` so
-//! Creusot can verify it. The host crate re-exports these; the stateright
-//! model in `crabka-log/src/compact_model.rs` drives these exact functions.
+//! KIP-534 log-compaction decision core.
+//!
+//! This core comes out of `crabka-log`, so that Creusot can verify it. The host
+//! crate re-exports these functions, and the stateright model in
+//! `crabka-log/src/compact_model.rs` drives these exact functions.
 
 #[cfg(creusot)]
 use std::clone::Clone;
@@ -23,10 +25,11 @@ pub struct RecordMeta {
 pub struct BatchMeta {
     /// Whether the batch is a transactional control batch.
     pub is_control: bool,
-    /// Producer id for transactional batches; negative for non-transactional.
+    /// Producer id for transactional batches. It is negative for
+    /// non-transactional batches.
     pub producer_id: i64,
-    /// The batch's existing delete horizon (`base_timestamp` when bit 6 is
-    /// set), `None` if the batch has never been stamped.
+    /// The batch's existing delete horizon, which is `base_timestamp` when bit
+    /// 6 is set. It is `None` if the batch has never been stamped.
     pub existing_horizon: Option<i64>,
 }
 
@@ -48,15 +51,17 @@ pub enum TxnDataState {
 pub enum RetainDecision {
     /// Keep the record as-is.
     Keep,
-    /// Keep the record but stamp its batch with this delete horizon
-    /// (`base_timestamp = horizon`, bit 6 set).
+    /// Keep the record, but stamp its batch with this delete horizon:
+    /// `base_timestamp = horizon`, with bit 6 set.
     SetHorizon(i64),
     /// Drop the record.
     Delete,
 }
 
-/// Compute the delete horizon timestamp: `now + delete.retention.ms`. The
-/// tombstone/marker is retained until wall-clock reaches this value.
+/// Compute the delete horizon timestamp: `now + delete.retention.ms`.
+///
+/// The tombstone or marker is retained until the wall clock reaches this
+/// value.
 #[cfg(creusot)]
 #[logic]
 pub fn compute_horizon_model(now_ms: i64, delete_retention_ms: i64) -> Int {
@@ -86,11 +91,11 @@ pub const fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
 
 /// The single per-record KIP-534 retain decision.
 ///
-/// Control batches (txn commit/abort markers) are retained as long as their
-/// transaction's data survives; once the data is fully compacted away the
-/// marker ages out via the delete horizon. Data records dedup newest-wins;
-/// tombstones (null value) age out via the delete horizon once they are the
-/// newest entry for their key.
+/// Control batches, that is transaction commit and abort markers, are retained
+/// as long as their transaction's data survives. After the data is fully
+/// compacted away, the marker ages out through the delete horizon. Data records
+/// dedup newest-wins. A tombstone, that is a record with a null value, ages out
+/// through the delete horizon after it becomes the newest entry for its key.
 #[ensures(batch.is_control && (txn == TxnDataState::DataSurvives || txn == TxnDataState::NotTransactional)
     ==> result == RetainDecision::Keep)]
 #[ensures(batch.is_control && txn == TxnDataState::DataFullyGone && batch.existing_horizon == None

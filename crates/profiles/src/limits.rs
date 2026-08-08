@@ -46,9 +46,10 @@ pub struct Limits {
 
 /// Pyroscope's default `max_query_length` (`721h`).
 ///
-/// Mirrors upstream Pyroscope's `validation.Limits.MaxQueryLength` default so
-/// an unbounded explicit range (`start=0, end=i64::MAX`) is rejected instead of
-/// scanning the whole store.
+/// This matches the upstream Pyroscope default
+/// `validation.Limits.MaxQueryLength`, so the querier rejects an unbounded
+/// explicit range of `start=0, end=i64::MAX` instead of a scan of the whole
+/// store.
 pub const DEFAULT_MAX_QUERY_LENGTH: Time = hours(721);
 
 impl Default for Limits {
@@ -110,12 +111,12 @@ impl Limits {
     }
 }
 
-/// A profile limit violation with the Connect/HTTP projection Pyroscope clients expect.
+/// A profile limit violation with the Connect and HTTP projection Pyroscope clients expect.
 ///
-/// The variant payloads are deliberately raw numbers rather than quantities:
-/// each one is interpolated straight into a Pyroscope-facing error string in a
-/// fixed unit (profiles/sec, bytes, whole seconds), so the extraction happens
-/// once at construction instead of at every rendering site.
+/// The variant payloads are raw numbers and not quantities. Each one goes
+/// straight into a Pyroscope-facing error string in a fixed unit: profiles per
+/// second, bytes, or whole seconds. The extraction therefore happens once at
+/// construction and not at every render site.
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]
 pub enum LimitError {
     #[error("ingestion rate exceeded: observed {observed} profiles/sec above limit {rate}")]

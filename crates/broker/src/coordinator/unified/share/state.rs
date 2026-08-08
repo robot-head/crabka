@@ -1,7 +1,7 @@
 //! KIP-932 share-group membership state machine.
 //!
-//! Mirrors the consumer next-gen `consumer_state::GroupState` minus all
-//! offset and revocation machinery. Share-group assignment is non-exclusive,
+//! It mirrors the consumer next-gen `consumer_state::GroupState` without any
+//! offset or revocation machinery. Share-group assignment is non-exclusive,
 //! so members carry no assignment-ack state beyond a member epoch.
 
 use std::{
@@ -61,8 +61,8 @@ pub struct ShareGroupState {
     pub group_epoch: i32,
     pub members: HashMap<String, ShareMemberState>,
     pub target: ShareTargetAssignment,
-    /// Set whenever membership/subscription changes so the actor knows a
-    /// reconcile is pending; cleared once the reconcile installs a target.
+    /// Set whenever membership or subscription changes, so the actor knows a
+    /// reconcile is pending. It clears once the reconcile installs a target.
     pub dirty: bool,
     /// KIP-932: `(topic_id, partition)` share-states this
     /// group has already Initialized in the share-state persister. Seeded from
@@ -104,8 +104,8 @@ impl ShareGroupState {
         r
     }
 
-    /// Remove members whose `last_seen` is older than `session_timeout`,
-    /// returning the evicted member ids.
+    /// Remove members whose `last_seen` is older than `session_timeout`, and
+    /// return the evicted member ids.
     pub fn evict_expired(&mut self, now: Instant, session_timeout: Duration) -> Vec<String> {
         let expired = expired_member_ids(
             self.members
@@ -133,7 +133,7 @@ impl ShareGroupState {
     }
 
     /// Advance a member to the current group epoch and hand it the partitions
-    /// the latest target assignment allotted it.
+    /// that the latest target assignment gave it.
     pub fn advance_member_epoch(&mut self, member_id: &str) {
         if let Some(m) = self.members.get_mut(member_id) {
             m.member_epoch = self.group_epoch;

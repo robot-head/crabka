@@ -16,9 +16,9 @@ use crate::{
     wal::{PROFILES_WAL_TOPIC, ProfileRecord},
 };
 
-/// Default retention horizon for the in-memory WAL tail: samples older than this
-/// (relative to the newest sample seen) are dropped so the hot store cannot grow
-/// without bound.
+/// Default retention horizon for the in-memory WAL tail. The store drops
+/// samples older than this horizon, measured from the newest sample it has
+/// seen, so the hot store cannot grow without bound.
 const DEFAULT_MAX_AGE: Time = hours(6);
 
 /// Hard cap on the number of retained source records, so a burst of same-instant
@@ -26,11 +26,14 @@ const DEFAULT_MAX_AGE: Time = hours(6);
 const DEFAULT_MAX_RECORDS: usize = 1_000_000;
 
 /// Rebuild the queryable store only once evictions reach `1 / FACTOR` of the
-/// retained window. Rebuilding is O(window), so deferring it amortizes the cost
-/// to O(1) per append in steady state, at the price of at most `window / FACTOR`
-/// already-evicted records temporarily lingering in the queryable store (a
-/// bounded memory slack, not a correctness issue — those rows are real, just
-/// older than the strict horizon, and queries still filter by timestamp).
+/// retained window.
+///
+/// A rebuild is O(window). A deferred rebuild therefore amortizes the cost to
+/// O(1) per append in steady state. The price is that at most
+/// `window / FACTOR` already-evicted records stay in the queryable store for a
+/// time. This is bounded memory slack and not a correctness fault. Those rows
+/// are real, only older than the strict horizon, and queries still filter by
+/// timestamp.
 const REBUILD_AMORTIZE_FACTOR: usize = 8;
 
 /// Retention policy for the in-memory WAL tail.
@@ -38,7 +41,7 @@ const REBUILD_AMORTIZE_FACTOR: usize = 8;
 pub struct RetentionConfig {
     /// Drop samples whose timestamp is older than `newest_ts - max_age`.
     pub max_age: Time,
-    /// Drop the oldest records once more than this many are retained.
+    /// Drop the oldest records once the store retains more than this many.
     pub max_records: usize,
 }
 
@@ -51,7 +54,8 @@ impl Default for RetentionConfig {
     }
 }
 
-/// A source record retained for retention bookkeeping / rebuilds.
+/// A source record that the store retains for retention bookkeeping and
+/// rebuilds.
 struct Retained {
     /// Newest sample timestamp (ms) carried by this record.
     max_ts_ms: i64,
@@ -59,7 +63,8 @@ struct Retained {
 }
 
 /// Retained source records plus the count of records evicted since the last
-/// rebuild, used to amortize rebuilds (see [`REBUILD_AMORTIZE_FACTOR`]).
+/// rebuild. The store uses that count to amortize rebuilds. See
+/// [`REBUILD_AMORTIZE_FACTOR`].
 #[derive(Default)]
 struct RetainedState {
     records: VecDeque<Retained>,
@@ -68,14 +73,14 @@ struct RetainedState {
 
 #[derive(Clone)]
 pub struct WalTailProfileStore {
-    /// Copy-on-write snapshot of the queryable store. Queries clone the inner
-    /// `Arc` (a cheap refcount bump) instead of deep-cloning every sample; writes
-    /// mutate via `Arc::make_mut`, which only deep-copies while a snapshot is
-    /// still outstanding.
+    /// Copy-on-write snapshot of the queryable store. A query clones the inner
+    /// `Arc`, a cheap refcount bump, instead of a deep clone of every sample. A
+    /// write mutates through `Arc::make_mut`, which deep-copies only while a
+    /// snapshot is still outstanding.
     inner: Arc<RwLock<Arc<InMemoryProfileStore>>>,
-    /// Source records retained within the retention window, used to rebuild the
-    /// queryable store after eviction (the inner store exposes no row-level
-    /// prune API).
+    /// Source records retained within the retention window. The store uses them
+    /// to rebuild the queryable store after an eviction, because the inner store
+    /// exposes no row-level prune API.
     retained: Arc<RwLock<RetainedState>>,
     retention: RetentionConfig,
 }
@@ -138,8 +143,8 @@ impl WalTailProfileStore {
         Ok(())
     }
 
-    /// Drop retained records that fall outside the retention window, counting how
-    /// many were evicted since the last rebuild.
+    /// Drop retained records that fall outside the retention window. The method
+    /// counts how many records it has evicted since the last rebuild.
     fn prune(retention: &RetentionConfig, state: &mut RetainedState) {
         // `max_ts_ms` is an epoch-millisecond instant; only the retention window
         // is an extent, so it converts here and the subtraction stays exact
@@ -160,9 +165,10 @@ impl WalTailProfileStore {
         }
     }
 
-    /// Rebuild only once evictions reach `1 / REBUILD_AMORTIZE_FACTOR` of the live
-    /// window (or the window has fully drained), so a steady-state append that
-    /// evicts one record does not trigger an O(window) rebuild every time.
+    /// Rebuild only once evictions reach `1 / REBUILD_AMORTIZE_FACTOR` of the
+    /// live window, or once the window has fully drained. A steady-state append
+    /// that evicts one record then does not cause an O(window) rebuild every
+    /// time.
     fn should_rebuild(state: &RetainedState) -> bool {
         state.evicted_since_rebuild > 0
             && state
@@ -195,7 +201,7 @@ impl WalTailProfileStore {
     }
 }
 
-/// Intern + push every sample of `record` into `store`.
+/// Intern and push every sample of `record` into `store`.
 fn apply_record(
     store: &mut InMemoryProfileStore,
     record: &ProfileRecord,

@@ -1,5 +1,8 @@
 //! Trusted-proxy authorization, end-to-end through the gateway's public
-//! surface. These exercise the identity → ACL gate the proxy chain relies on:
+//! surface.
+//!
+//! These tests exercise the identity-to-ACL gate that the proxy chain depends
+//! on:
 //!
 //! - the default `AllowAllAuthorizer` leaves produce unrestricted (regression),
 //! - a `SimpleAclAuthorizer` over an ACL cache fetched from the broker denies an
@@ -9,10 +12,11 @@
 //!   caller produces exactly once and an ungranted caller is rejected), and
 //! - the per-decision audit event fires.
 //!
-//! The ACL cache is populated the same way the running gateway does it: create
-//! ACLs via `AdminClient::create_acls`, spawn `GatewayAuthz::run_acl_refresh`
-//! with a short interval, then poll until an authorized probe passes (the cache
-//! is eventually consistent — never assert before it converges).
+//! These tests populate the ACL cache the same way the running gateway does.
+//! They create ACLs with `AdminClient::create_acls`, spawn
+//! `GatewayAuthz::run_acl_refresh` with a short interval, then poll until an
+//! authorized probe passes. The cache is eventually consistent, so never assert
+//! before it converges.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -86,8 +90,8 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
-/// A resolved caller identity (mTLS, no groups) — the shape the trusted proxy
-/// injects. ACLs are written against `User:{name}`.
+/// A resolved caller identity over mTLS with no groups, the shape the trusted
+/// proxy injects. An ACL is written against `User:{name}`.
 fn principal(name: &str) -> Principal {
     Principal {
         name: name.to_string(),
@@ -104,10 +108,10 @@ fn anonymous() -> Principal {
     }
 }
 
-/// An admin-crate `AclEntry` granting `User:{user}` Allow `op` on
-/// `Topic:{topic}` (Literal pattern, any host). The admin crate keeps its own
-/// ACL enum copies, so `create_acls` must be built from these — not
-/// `crabka_metadata`'s.
+/// An admin-crate `AclEntry` that grants `User:{user}` Allow `op` on
+/// `Topic:{topic}`, with a Literal pattern and any host. The admin crate keeps
+/// its own ACL enum copies, so `create_acls` must be built from these and not
+/// from `crabka_metadata`'s.
 fn topic_acl(
     user: &str,
     op: crabka_client_admin::AclOperation,
@@ -125,7 +129,8 @@ fn topic_acl(
 }
 
 /// Build an `AppState` whose `authz` is the supplied authorizer. `dedup_topic`
-/// etc. are wired but unused on the plain produce path these tests drive.
+/// and its neighbours are wired but unused on the plain produce path these
+/// tests drive.
 async fn app_state(bootstrap: &str, client: &str, authz: Arc<GatewayAuthz>) -> Arc<AppState> {
     let produce = ProduceCore::new(bootstrap, client, Arc::new(RawCodec), None)
         .await
@@ -176,8 +181,8 @@ async fn create_topic(bootstrap: &str, name: &str) {
         .unwrap();
 }
 
-/// Build a single `pb::SendRequest` carrying one unkeyed record (plain produce
-/// path — no dedup, no forwarding).
+/// Build a single `pb::SendRequest` that carries one unkeyed record. That takes
+/// the plain produce path, with no dedup and no forwarding.
 fn send_one(topic: &str, value: &[u8]) -> pb::SendRequest {
     pb::SendRequest {
         records: vec![pb::Record {
@@ -194,8 +199,8 @@ fn send_one(topic: &str, value: &[u8]) -> pb::SendRequest {
     }
 }
 
-/// Drive `handlers::send` for a single record as `principal`, returning the lone
-/// `RecordResult`.
+/// Drive `handlers::send` for a single record as `principal`, and return the
+/// lone `RecordResult`.
 async fn send_as(
     state: &Arc<AppState>,
     principal: &Principal,
@@ -218,10 +223,12 @@ async fn send_as(
     result
 }
 
-/// Spawn `run_acl_refresh` (short interval) and poll until an authorization
-/// probe against the cache yields `expect`. The cache is eventually consistent
-/// after `create_acls`, so this is how every ACL-dependent test arms itself —
-/// it never asserts before convergence. Returns once the probe matches (≤ 20s).
+/// Spawn `run_acl_refresh` with a short interval and poll until an
+/// authorization probe against the cache gives `expect`.
+///
+/// The cache is eventually consistent after `create_acls`, so this is how every
+/// ACL-dependent test arms itself, and it never asserts before convergence.
+/// This function returns once the probe matches, within 20s.
 async fn wait_until_probe(
     authz: &Arc<GatewayAuthz>,
     probe_principal: &Principal,
@@ -249,10 +256,10 @@ async fn wait_until_probe(
     panic!("ACL cache never converged to the expected decision for {name}");
 }
 
-/// 1. The default `AllowAllAuthorizer` leaves produce unrestricted: an
+/// 1. The default `AllowAllAuthorizer` leaves produce unrestricted. An
 ///    anonymous caller produces to a created topic with no authz error.
-///    (Regression guard — installing the authz seam must not change the
-///    out-of-the-box behavior.)
+///    This is a regression guard: the authz seam must not change the
+///    out-of-the-box behavior.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn allow_all_default_is_unrestricted() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -269,8 +276,8 @@ async fn allow_all_default_is_unrestricted() {
     broker.shutdown().await;
 }
 
-/// 2. `SimpleAclAuthorizer` with NO ACLs granted (default-deny): a produce as
-///    `alice` to topic `t` is denied with `PERMISSION_DENIED` and the record
+/// 2. `SimpleAclAuthorizer` with NO ACLs granted is default-deny. A produce as
+///    `alice` to topic `t` is denied with `PERMISSION_DENIED`, and the record
 ///    never reaches the topic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simpleacl_denies_unauthorized_produce() {
@@ -298,9 +305,9 @@ async fn simpleacl_denies_unauthorized_produce() {
     broker.shutdown().await;
 }
 
-/// 3. With an ACL granting `User:alice Allow Write Topic:t`, refreshing the
-///    cache, a produce as `alice` to `t` succeeds and the record is present; a
-///    produce to `other` (no ACL) is still denied.
+/// 3. With an ACL that grants `User:alice Allow Write Topic:t`, and after a
+///    cache refresh, a produce as `alice` to `t` succeeds and the record is
+///    present. A produce to `other`, which has no ACL, is still denied.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn simpleacl_allows_authorized_produce() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -362,10 +369,11 @@ async fn simpleacl_allows_authorized_produce() {
     broker.shutdown().await;
 }
 
-/// 4. The bearer path: `BearerSettings.build()` yields a validator that, given
-///    an unsecured (`alg:none`) JWS with `sub=alice`, resolves a principal named
-///    `alice`. Exercises the token → principal step the auth middleware drives
-///    (the middleware wiring itself is covered by `auth_layer` unit tests).
+/// 4. The bearer path. `BearerSettings.build()` gives a validator that resolves
+///    a principal named `alice` from an unsecured (`alg:none`) JWS with
+///    `sub=alice`. This covers the token-to-principal step that the auth
+///    middleware drives. The `auth_layer` unit tests cover the middleware
+///    wiring itself.
 #[tokio::test]
 async fn bearer_token_resolves_principal() {
     use crabka_grpc_gateway::config::BearerSettings;
@@ -391,17 +399,17 @@ async fn bearer_token_resolves_principal() {
 }
 
 /// 5. Forwarding re-authorizes the ORIGINAL caller against the OWNER's cache.
-///    Two gateways A and B share the same ACLs; a key owned by B is submitted
-///    through A, which forwards to B. B re-authorizes the caller:
-///    - `alice` (granted Write Topic:t) ⇒ produced exactly once;
-///    - `mallory` (not granted) ⇒ B denies; the forward surfaces an error and
+///    Two gateways A and B share the same ACLs. A key owned by B goes in
+///    through A, and A forwards it to B. B then re-authorizes the caller:
+///    - `alice`, granted Write Topic:t ⇒ produced exactly once.
+///    - `mallory`, not granted ⇒ B denies, the forward surfaces an error, and
 ///      no extra record lands.
 ///
-///    Deny surface: `forward_handler` returns HTTP 403 on a denied forward, and
-///    the forwarding client parses that body and maps it to a non-retriable
-///    `GatewayError::Unauthorized` (so the caller doesn't retry a permanent
-///    denial). The load-bearing assertions are "allowed ⇒ produced once" and
-///    "denied ⇒ Unauthorized + not produced".
+///    Deny surface: `forward_handler` returns HTTP 403 on a denied forward. The
+///    forwarding client parses that body and maps it to a non-retriable
+///    `GatewayError::Unauthorized`, so the caller does not retry a permanent
+///    denial. The load-bearing assertions are "allowed ⇒ produced once" and
+///    "denied ⇒ Unauthorized and not produced".
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn forwarding_owner_reauthorizes_caller() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -527,20 +535,21 @@ async fn forwarding_owner_reauthorizes_caller() {
     broker.shutdown().await;
 }
 
-/// 6. An audit event fires on a produce authz decision. We install a capturing
-///    `tracing` layer scoped to the `gateway::audit` target and assert an event
-///    with the principal + `allowed` field is emitted.
+/// 6. An audit event fires on a produce authz decision. This test installs a
+///    capturing `tracing` layer scoped to the `gateway::audit` target, then
+///    asserts that an event with the principal and the `allowed` field is
+///    emitted.
 ///
-///    Capture is via a PROCESS-GLOBAL capturing subscriber installed once
-///    (`set_global_default`). A thread-local `set_default` is *not* reliable
-///    here: callsite interest is process-global, and on a multi-thread runtime
-///    the synchronous audit `info!` can be emitted on a worker thread that does
-///    not own the thread-local subscriber — so the event is silently missed
-///    (the historical flake). A global subscriber fixes both: interest is
-///    rebuilt under the capturing layer, and capture works from any thread.
-///    To keep this immune to concurrent sibling tests writing into the shared
-///    global capture, we produce under a UNIQUE principal and assert only its
-///    own event.
+///    Capture runs through a PROCESS-GLOBAL capturing subscriber, installed
+///    once with `set_global_default`. A thread-local `set_default` is *not*
+///    reliable here. Callsite interest is process-global, and on a multi-thread
+///    runtime the synchronous audit `info!` can fire on a worker thread that
+///    does not own the thread-local subscriber, so the event is silently
+///    missed. That was the historical flake. A global subscriber fixes both
+///    problems: interest is rebuilt under the capturing layer, and capture
+///    works from any thread. A concurrent sibling test can write into the same
+///    global capture, so this test produces under a UNIQUE principal and
+///    asserts only on its own event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audit_log_emitted() {
     use std::sync::{Mutex, OnceLock};
@@ -617,8 +626,8 @@ async fn audit_log_emitted() {
 
 // ---- helpers ---------------------------------------------------------------
 
-/// Count records in `topic` whose value equals `value` (drains a fresh
-/// earliest-from-start read-committed consumer).
+/// Count records in `topic` whose value equals `value`. This drains a fresh
+/// earliest-from-start read-committed consumer.
 async fn count_value(bootstrap: &str, topic: &str, value: &[u8]) -> usize {
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap.to_string())
@@ -643,25 +652,28 @@ async fn count_value(bootstrap: &str, topic: &str, value: &[u8]) -> usize {
     n
 }
 
-/// A short, unique suffix so each verify consumer uses a distinct group (avoids
-/// cross-test offset bleed when tests run in the same process).
+/// A short, unique suffix so each verify consumer uses a distinct group. This
+/// avoids cross-test offset bleed when tests run in the same process.
 fn uuid_suffix() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
-/// An unsecured (`alg:none`) JWS with `sub=alice`, `exp=9999999999`
-/// (year ~2286). Pre-encoded base64url (no padding), empty signature segment —
-/// same construction the `auth_layer` unit tests use.
+/// An unsecured (`alg:none`) JWS with `sub=alice` and `exp=9999999999`, which
+/// is about the year 2286. It is pre-encoded base64url with no padding and an
+/// empty signature segment. The `auth_layer` unit tests use the same
+/// construction.
 fn unsecured_jws_alice() -> String {
     // header  = {"alg":"none"}
     // payload = {"sub": "alice", "exp": 9999999999}
     "eyJhbGciOiJub25lIn0.eyJzdWIiOiAiYWxpY2UiLCAiZXhwIjogOTk5OTk5OTk5OX0.".to_string()
 }
 
-/// A gateway replica with a `SimpleAcl` authorizer (empty super-users) whose ACL
-/// cache refreshes from the broker, full dedup + forwarding wiring, serving the
-/// Connect + forward routers. Mirrors `forwarding.rs::spawn_gateway` but swaps
-/// in the `SimpleAcl` authorizer + ACL refresh loop.
+/// A gateway replica with a `SimpleAcl` authorizer and empty super-users.
+///
+/// Its ACL cache refreshes from the broker. It has full dedup and forwarding
+/// wiring, and it serves the Connect and forward routers. It follows
+/// `forwarding.rs::spawn_gateway`, but with the `SimpleAcl` authorizer and the
+/// ACL refresh loop in place.
 struct AclGw {
     addr: String,
     state: Arc<AppState>,

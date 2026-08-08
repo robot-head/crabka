@@ -1,33 +1,37 @@
 //! JVM differential / interop test for KIP-1071 streams groups (the Streams
 //! Rebalance Protocol).
 //!
-//! Drives the REAL Apache Kafka 4.1.0 `kafka-streams-groups.sh` admin tool
-//! (a `KafkaStreamsGroupsCommand` wrapping the JVM `AdminClient`) inside an
-//! `mirror.gcr.io/apache/kafka:4.1.0` container against an in-process Crabka broker running
-//! on the host. The container has a JRE-only Kafka image (no `javac`/`jshell`),
-//! so we cannot compile a custom `KafkaStreams` app; instead we use the native
-//! `crabka-client-core` client to make a streams group EXIST on Crabka (finalize
-//! `streams.version=1`, create a source topic, drive a `StreamsGroupHeartbeat`
-//! so the group has a live member with an assignment), then point the bundled
-//! JVM admin tool at Crabka and prove it round-trips the streams-group admin
-//! wire path. The flow the real `apache-kafka-java` 4.1.0 `AdminClient` drives
-//! (read empirically from its DEBUG wire log) is:
+//! The test drives the REAL Apache Kafka 4.1.0 `kafka-streams-groups.sh` admin
+//! tool, a `KafkaStreamsGroupsCommand` that wraps the JVM `AdminClient`. The
+//! tool runs inside an `mirror.gcr.io/apache/kafka:4.1.0` container against an
+//! in-process Crabka broker on the host. The container has a JRE-only Kafka
+//! image with no `javac` or `jshell`, so we cannot compile a custom
+//! `KafkaStreams` app. Instead we use the native `crabka-client-core` client to
+//! make a streams group EXIST on Crabka. The client finalizes
+//! `streams.version=1`, creates a source topic, and drives a
+//! `StreamsGroupHeartbeat` so the group has a live member with an assignment.
+//! We then point the bundled JVM admin tool at Crabka and prove it round-trips
+//! the streams-group admin wire path.
 //!
-//! - `ApiVersions` negotiation (key 18) — Crabka advertises api keys 88/89 and
+//! The real `apache-kafka-java` 4.1.0 `AdminClient` drives this flow, read
+//! empirically from its DEBUG wire log:
+//!
+//! - `ApiVersions` negotiation (key 18): Crabka advertises api keys 88/89 and
 //!   the finalized `streams.version` feature,
 //! - `Metadata` (key 13) to discover the broker set,
-//! - `ListGroups` (key 16, v5) with `typesFilter=[Streams]` — the KIP-1071
-//!   `ListGroupsOptions.forStreamsGroups()` filter; Crabka returns the live
-//!   streams group,
+//! - `ListGroups` (key 16, v5) with `typesFilter=[Streams]`, which is the
+//!   KIP-1071 `ListGroupsOptions.forStreamsGroups()` filter, and Crabka returns
+//!   the live streams group,
 //! - `FindCoordinator` (key 10) for the group,
-//! - `StreamsGroupDescribe` (key 89) — Crabka returns the full `DescribedGroup`
-//!   (group state/epochs, the resolved topology, and the member with its active
-//!   task assignment), which the JVM `DescribeStreamsGroupsHandler` accepts.
+//! - `StreamsGroupDescribe` (key 89): Crabka returns the full `DescribedGroup`,
+//!   which the JVM `DescribeStreamsGroupsHandler` accepts. That group holds the
+//!   group state and epochs, the resolved topology, and the member with its
+//!   active task assignment.
 //!
-//! Gated `#[ignore = "requires Docker"]`; run with `--ignored`.
+//! The test is gated `#[ignore = "requires Docker"]`. Run it with `--ignored`.
 //!
 //! Networking mirrors `jvm_share_groups.rs`: the broker binds `0.0.0.0:9092`
-//! and advertises `host.docker.internal:9092`; the container reaches it via
+//! and advertises `host.docker.internal:9092`. The container reaches it with
 //! `--add-host=host.docker.internal:host-gateway`.
 
 use std::{
@@ -47,20 +51,20 @@ use crabka_protocol::owned::{
     update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
 };
 
-/// Port the broker binds on the host and that the container reaches via
+/// Port the broker binds on the host and that the container reaches through
 /// `host.docker.internal`.
 const HOST_PORT: u16 = 9092;
 const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
-/// Official Apache Kafka image. Ships KIP-1071 streams groups plus the
+/// Official Apache Kafka image. It ships KIP-1071 streams groups plus the
 /// `kafka-streams-groups.sh` admin tool (`StreamsGroupDescribe` / `ListGroups`).
 const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.1.0";
 const STREAMS_GROUPS: &str = "/opt/kafka/bin/kafka-streams-groups.sh";
-/// Kafka `COORDINATOR_LOAD_IN_PROGRESS` — the first-join heartbeat is retried
-/// while the coordinator is still loading.
+/// Kafka `COORDINATOR_LOAD_IN_PROGRESS`. The test retries the first-join
+/// heartbeat while the coordinator is still loading.
 const ERR_COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 
-/// Boot one broker bound to `0.0.0.0:9092`, advertising `host.docker.internal:
+/// Boot one broker bound to `0.0.0.0:9092`. It advertises `host.docker.internal:
 /// 9092` so the Docker container's post-Metadata connect targets a hostname it
 /// can resolve. Mirrors `jvm_share_groups.rs::start_host_broker`.
 async fn start_host_broker() -> (BrokerHandle, tempfile::TempDir) {
@@ -98,8 +102,8 @@ async fn start_host_broker() -> (BrokerHandle, tempfile::TempDir) {
     (handle, dir)
 }
 
-/// Native client connecting to the broker's local loopback listener (the
-/// container reaches the same broker via `host.docker.internal`).
+/// Native client that connects to the broker's local loopback listener. The
+/// container reaches the same broker through `host.docker.internal`.
 async fn connect() -> Client {
     Client::builder()
         .bootstrap(format!("127.0.0.1:{HOST_PORT}"))
@@ -154,7 +158,7 @@ async fn finalize_streams_version(client: &Client) {
     );
 }
 
-/// A single-subtopology topology subscribing to one source topic (stateless).
+/// A single-subtopology topology that subscribes to one source topic (stateless).
 fn topology(source_topic: &str) -> Topology {
     Topology {
         epoch: 0,
@@ -169,7 +173,7 @@ fn topology(source_topic: &str) -> Topology {
 }
 
 /// First-join heartbeat: empty member id (server mints one), epoch 0,
-/// process id + rebalance timeout + the supplied topology.
+/// process id, rebalance timeout, and the supplied topology.
 fn first_join(group: &str, topo: Topology) -> StreamsGroupHeartbeatRequest {
     StreamsGroupHeartbeatRequest {
         group_id: group.into(),
@@ -182,8 +186,8 @@ fn first_join(group: &str, topo: Topology) -> StreamsGroupHeartbeatRequest {
     }
 }
 
-/// Follow-up heartbeat: known member id + its current epoch, echoing back the
-/// owned active tasks (as a steady-state member would).
+/// Follow-up heartbeat: known member id and its current epoch. It echoes back
+/// the owned active tasks, as a steady-state member would.
 fn follow_up(
     group: &str,
     member_id: &str,
@@ -258,7 +262,8 @@ async fn join_and_converge(
 }
 
 /// Heartbeat once more to keep the live member's session fresh while the JVM
-/// admin tool runs (so the group stays non-Empty with a member + assignment).
+/// admin tool runs. The group then stays non-Empty with a member and an
+/// assignment.
 async fn keepalive(client: &Client, group: &str, member_id: &str, epoch: i32) {
     let active = Some(vec![ReqTaskIds {
         subtopology_id: "0".into(),
@@ -271,8 +276,8 @@ async fn keepalive(client: &Client, group: &str, member_id: &str, epoch: i32) {
 }
 
 /// Run a docker container against the host broker and return its output. The
-/// admin tool may exit non-zero even on a successful round-trip (mirrors the
-/// `jvm_share_groups.rs` note), so callers check stdout, not exit status.
+/// admin tool may exit non-zero even on a successful round-trip, as the
+/// `jvm_share_groups.rs` note records. So callers check stdout, not exit status.
 fn docker_run(args: &[&str]) -> std::process::Output {
     let out = Command::new("docker")
         .arg("run")
@@ -292,11 +297,11 @@ fn docker_run(args: &[&str]) -> std::process::Output {
     out
 }
 
-/// A DEBUG-level log4j2 config (written into the container at `/tmp/d.yaml`) so
-/// the JVM tool's `NetworkClient`/`KafkaAdminClient` logs every request +
-/// response. The tool's own stdout is empty when no streams group surfaces (see
-/// the test below), so the wire-level interop checkpoints we assert on are read
-/// from these DEBUG lines, captured via `2>&1`.
+/// A DEBUG-level log4j2 config, written into the container at `/tmp/d.yaml`, so
+/// the JVM tool's `NetworkClient`/`KafkaAdminClient` logs every request and
+/// response. The tool's own stdout is empty when no streams group surfaces. See
+/// the test below. So the test reads the wire-level interop checkpoints it
+/// asserts on from these DEBUG lines, captured with `2>&1`.
 // NOTE: YAML is indentation-sensitive, so this is written WITHOUT Rust
 // line-continuation (`\` at EOL eats the next line's leading spaces). Each
 // `\n` is a real newline and the two/four/six-space indents are literal.
@@ -319,26 +324,27 @@ const TOOL_DEBUG_PREAMBLE: &str = concat!(
 );
 
 /// The headline differential test: make a KIP-1071 streams group live on Crabka
-/// via the native `crabka-client-core` client (`StreamsGroupHeartbeat`, api 88),
-/// then drive the REAL Apache Kafka 4.1.0 `kafka-streams-groups.sh` admin tool
-/// (the JVM `StreamsGroupCommand` wrapping `AdminClient`) against Crabka and
-/// prove it round-trips the streams-group admin wire path.
+/// with the native `crabka-client-core` client (`StreamsGroupHeartbeat`, api
+/// 88). Then drive the REAL Apache Kafka 4.1.0 `kafka-streams-groups.sh` admin
+/// tool against Crabka and prove it round-trips the streams-group admin wire
+/// path. That tool is the JVM `StreamsGroupCommand` that wraps `AdminClient`.
 ///
 /// We assert these checkpoints, read from the JVM tool's own DEBUG wire logs:
 ///
-///  1. The JVM `AdminClient` negotiated `ApiVersions` with Crabka and the
-///     response advertised `StreamsGroupDescribe (apiKey=89)` plus the finalized
-///     `streams.version` feature (so the KIP-1071 admin surface is visible to
-///     the real client).
-///  2. The tool issued `LIST_GROUPS apiVersion=5` with `typesFilter=[Streams]`
-///     (the KIP-1071 `ListGroupsOptions.forStreamsGroups()` filter) and Crabka
+///  1. The JVM `AdminClient` negotiated `ApiVersions` with Crabka. The response
+///     advertised `StreamsGroupDescribe (apiKey=89)` plus the finalized
+///     `streams.version` feature, so the KIP-1071 admin surface is visible to
+///     the real client.
+///  2. The tool issued `LIST_GROUPS apiVersion=5` with `typesFilter=[Streams]`,
+///     the KIP-1071 `ListGroupsOptions.forStreamsGroups()` filter. Crabka
 ///     answered with the live streams group (`errorCode=0`).
 ///  3. `StreamsGroupCommand.describeGroups()` then resolved the coordinator and
-///     issued `StreamsGroupDescribe` (api 89); Crabka returned the full group —
-///     state/epochs, the resolved topology, and the member with its active task
-///     assignment — which the JVM `DescribeStreamsGroupsHandler` accepts (it
-///     rejects a describe whose topology is absent, so the topology must be
-///     populated; checkpoint 3 guards against regressing that).
+///     issued `StreamsGroupDescribe` (api 89). Crabka returned the full group,
+///     which the JVM `DescribeStreamsGroupsHandler` accepts. That group holds
+///     the state and epochs, the resolved topology, and the member with its
+///     active task assignment. The handler rejects a describe whose topology is
+///     absent, so the topology must be populated. Checkpoint 3 guards against a
+///     regression there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_streams_groups_admin_round_trips_crabka() {

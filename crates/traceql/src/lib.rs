@@ -1,8 +1,9 @@
 //! `TraceQL` engine for Crabka's Grafana-Tempo-equivalent traces backend.
 //!
-//! Hand-written lexer and recursive-descent parser, an AST-to-`DataFusion`
-//! planner, and nested-set structural self-join lowering for `TraceQL` structural
-//! operators. Storage is injected through the `SpanStore` trait.
+//! The crate holds a hand-written lexer, a recursive-descent parser, and an
+//! AST-to-`DataFusion` planner. It lowers the `TraceQL` structural operators to
+//! nested-set structural self-joins. The caller injects storage through the
+//! `SpanStore` trait.
 
 #![forbid(unsafe_code)]
 

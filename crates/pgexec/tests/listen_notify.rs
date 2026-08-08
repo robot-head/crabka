@@ -2,10 +2,10 @@
 //! one engine, driven through the public `Engine`/`Session` API.
 //!
 //! The unit tests inside `session.rs` pin the same semantics against the
-//! internal wiring (`SqlSession::register_notify`); this file goes through
-//! `Engine::connect_with_pid`, which is what the wire loop calls, and covers the
-//! multi-session shapes: who receives what, whose pid is stamped, and what a
-//! closed connection does to the bus.
+//! internal wiring, through `SqlSession::register_notify`. This file goes
+//! through `Engine::connect_with_pid`, which is what the wire loop calls. It
+//! covers the multi-session shapes: who receives what, whose pid is stamped,
+//! and what a closed connection does to the bus.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -16,7 +16,8 @@ use crabka_pgwire::{
 use tokio::sync::mpsc::{Receiver, error::TryRecvError};
 
 /// A connection registered on the engine's bus under `pid`, plus the receiving
-/// end of its notification queue (the wire loop's `take_notifications`).
+/// end of its notification queue, which is the wire loop's
+/// `take_notifications`.
 fn connect(engine: &SqlEngine, pid: i32) -> (SqlSession, Receiver<Notification>) {
     let mut session = engine.connect_with_pid(pid);
     let rx = session
@@ -25,7 +26,7 @@ fn connect(engine: &SqlEngine, pid: i32) -> (SqlSession, Receiver<Notification>)
     (session, rx)
 }
 
-/// Run one statement, returning its command tag.
+/// Run one statement and return its command tag.
 async fn tag(session: &mut SqlSession, sql: &str) -> String {
     let results = session.simple_query(sql).await.expect(sql);
     let [QueryResult::Command { tag }] = results.as_slice() else {
@@ -34,7 +35,7 @@ async fn tag(session: &mut SqlSession, sql: &str) -> String {
     tag.clone()
 }
 
-/// Run one statement expected to fail, returning the error.
+/// Run one statement that is expected to fail, and return the error.
 async fn error(session: &mut SqlSession, sql: &str) -> PgError {
     session
         .simple_query(sql)

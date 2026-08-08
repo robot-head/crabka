@@ -7,7 +7,7 @@ use refined_type::rule::{GreaterEqualUsize, GreaterUsize};
 
 /// Default checkpoint trigger threshold in committed WAL frames.
 ///
-/// A frame count, not a magnitude, so it stays a plain integer.
+/// This is a frame count and not a magnitude, so it stays a plain integer.
 pub const DEFAULT_CHECKPOINT_FRAMES: u64 = 10_000;
 /// Default checkpoint trigger threshold in committed WAL bytes.
 pub const DEFAULT_CHECKPOINT_BYTES: ByteSize = mebibytes(64);
@@ -20,9 +20,9 @@ pub const DEFAULT_IDLE_SUSPEND_POLL_INTERVAL: Time = secs(1);
 
 /// Checkpoint part size large enough to contain the fixed part header.
 ///
-/// The validated magnitude is stored as a `usize` so the type stays `Eq` for the
-/// operator's CRD spec, which diffs by equality; [`Self::into_value`] is the seam
-/// that hands out a dimensioned [`ByteSize`].
+/// This type stores the validated magnitude as a `usize`, so it stays `Eq` for
+/// the operator's CRD spec, which diffs by equality. [`Self::into_value`] is the
+/// seam that hands out a dimensioned [`ByteSize`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CheckpointPartBytes(usize);
 

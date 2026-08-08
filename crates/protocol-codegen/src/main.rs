@@ -50,9 +50,11 @@ enum RunError {
     MissingSha,
 }
 
-/// Format generated Rust source through rustfmt, then write it. The quote-based
-/// emitters return unformatted token text; rustfmt is the secondary processing
-/// step that turns it into the canonical committed form.
+/// Format generated Rust source through rustfmt, then write it.
+///
+/// The quote-based emitters return unformatted token text. rustfmt is the
+/// secondary processing step that turns it into the canonical committed
+/// form.
 fn write_rs(path: impl AsRef<Path>, body: &str) -> Result<(), RunError> {
     std::fs::write(path, fmt::rustfmt(body)?)?;
     Ok(())
@@ -74,7 +76,8 @@ fn should_emit(spec: &ir::MessageSpec) -> bool {
 }
 
 /// Derive the `crates/protocol/src` directory from the generated-output dir.
-/// Convention: generated output is `crates/protocol/generated`; src is the sibling `src`.
+/// By convention the generated output is `crates/protocol/generated`, and src
+/// is the sibling `src`.
 fn protocol_src_from_out(out: &Path) -> PathBuf {
     out.parent().unwrap_or(out).join("src")
 }
@@ -106,8 +109,10 @@ fn split_common_stem(stem: &str) -> (&str, &str) {
 }
 
 /// Write the `include!` wrapper for one message-scoped common struct at
-/// `src/{flavor}/common/<message_snake>/<struct_snake>.rs`, pulling in the
-/// generated body from `generated/common/{flavor}/<message_snake>/<struct_snake>.<suffix>.rs`.
+/// `src/{flavor}/common/<message_snake>/<struct_snake>.rs`.
+///
+/// The wrapper pulls in the generated body from
+/// `generated/common/{flavor}/<message_snake>/<struct_snake>.<suffix>.rs`.
 fn write_common_wrapper(
     message_snake: &str,
     struct_snake: &str,
@@ -136,7 +141,8 @@ fn write_common_wrapper(
 /// - `src/{flavor}/common/<msg>/mod.rs`    — `pub mod <struct_snake>;` per struct
 /// - `src/{flavor}/common/<msg>/<struct>.rs` — the `include!` wrapper
 ///
-/// Returns the number of files written. A no-op (returns 0) when `tree` is empty.
+/// Returns the number of files written. It does nothing and returns 0 when
+/// `tree` is empty.
 fn write_common_wrapper_tree(
     tree: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     flavor: emit::wrappers::Flavor,

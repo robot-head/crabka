@@ -2,17 +2,17 @@
 //!
 //! Pure logic, no I/O: this module parses a JWKS *string* and verifies a
 //! token's signature against an in-memory [`Jwks`]. The broker fetches the key
-//! set over the network and feeds it in via a [`JwksHandle`]. Supported key
+//! set over the network and feeds it in through a [`JwksHandle`]. Supported key
 //! types / algorithms:
 //!
-//! - `RS256` — RSASSA-PKCS1-v1_5 + SHA-256 over an `RSA` key (`n`, `e`).
-//! - `ES256` — ECDSA P-256 + SHA-256 over an `EC` key (`crv:P-256`, `x`, `y`).
+//! - `RS256`: RSASSA-PKCS1-v1_5 + SHA-256 over an `RSA` key (`n`, `e`).
+//! - `ES256`: ECDSA P-256 + SHA-256 over an `EC` key (`crv:P-256`, `x`, `y`).
 //!
-//! These cover the overwhelming majority of OAuth 2.0 identity providers.
-//! Verification is delegated to `ring` — the same crypto backend the rest of
-//! `crates/security` uses — rather than pulling in a JWT crate, which keeps the
-//! dependency surface small and the temporal checks (`exp` / `iat` / `nbf`)
-//! injectable for deterministic tests.
+//! These cover most OAuth 2.0 identity providers. This module delegates
+//! verification to `ring`, the same crypto backend that the rest of
+//! `crates/security` uses, and does not pull in a JWT crate. That keeps the
+//! dependency surface small and keeps the temporal checks (`exp` / `iat` /
+//! `nbf`) injectable for deterministic tests.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -27,15 +27,18 @@ use crate::AuthError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum JwkKey {
     /// RSA public key: big-endian modulus + exponent, as decoded from the JWK
-    /// `n` / `e` members. Fed verbatim to `ring`'s `RsaPublicKeyComponents`.
+    /// `n` / `e` members. This module passes them verbatim to `ring`'s
+    /// `RsaPublicKeyComponents`.
     Rsa { n: Vec<u8>, e: Vec<u8> },
     /// EC P-256 public key: the SEC1 uncompressed point `0x04 ‖ x ‖ y`, ready
     /// for `ring`'s `UnparsedPublicKey`.
     EcP256 { point: Vec<u8> },
 }
 
-/// A parsed JWK key set. Lookups are by `kid`; keys without a `kid` are stored
-/// under the empty string and used when a token header omits `kid` and the set
+/// A parsed JWK key set.
+///
+/// Lookups are by `kid`. This module stores a key without a `kid` under the
+/// empty string, and uses that key when a token header omits `kid` and the set
 /// holds exactly one key.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Jwks {
@@ -43,8 +46,8 @@ pub struct Jwks {
 }
 
 impl Jwks {
-    /// An empty key set — nothing validates until the broker's refresher
-    /// populates it.
+    /// An empty key set. Nothing validates until the broker's refresher fills
+    /// it.
     #[must_use]
     // cargo-mutants: trivial constructor.
     #[cfg_attr(test, mutants::skip)]
@@ -60,24 +63,25 @@ impl Jwks {
         self.keys.is_empty()
     }
 
-    /// Number of usable keys (skips unsupported `kty` / `crv`).
+    /// Number of usable keys. The count skips unsupported `kty` / `crv`.
     #[must_use]
     pub fn len(&self) -> usize {
         self.keys.len()
     }
 
-    /// Parse an RFC 7517 JWKS document. Keys with an unsupported `kty` /
-    /// `crv` / `alg` are skipped (not an error — identity providers publish
-    /// encryption keys and other algs alongside the signing keys we care
-    /// about). A document that is not valid JSON or lacks a `keys` array is an
-    /// error.
+    /// Parse an RFC 7517 JWKS document.
     ///
-    /// When `ignore_key_use` is `false` (the default), keys with
-    /// `use=enc` are filtered out (encryption-only keys are unsuitable for
-    /// signature verification). When `true`, all keys are kept regardless of
-    /// `use`. Strimzi exposes the same toggle; some identity providers serve
-    /// signing keys with `use:"enc"` by mistake, and operators occasionally
-    /// need to override.
+    /// This function skips keys with an unsupported `kty` / `crv` / `alg`. A
+    /// skipped key is not an error, because identity providers publish
+    /// encryption keys and other algs next to the signing keys. A document that
+    /// is not valid JSON, or that has no `keys` array, is an error.
+    ///
+    /// When `ignore_key_use` is `false`, which is the default, this function
+    /// removes keys with `use=enc`. Encryption-only keys are unsuitable for
+    /// signature verification. When `ignore_key_use` is `true`, this function
+    /// keeps all keys regardless of `use`. Strimzi exposes the same toggle.
+    /// Some identity providers serve signing keys with `use:"enc"` by mistake,
+    /// and operators sometimes need to override.
     ///
     /// # Errors
     ///
@@ -111,12 +115,14 @@ impl Jwks {
         self.keys.contains_key(kid)
     }
 
-    /// Verify a JWS `signature` over `signing_input` (the ASCII
-    /// `header_b64 "." payload_b64`) using the key selected by `kid` / `alg`.
+    /// Verify a JWS `signature` over `signing_input` with the key that `kid` /
+    /// `alg` select.
     ///
-    /// `kid` is the token header `kid` (when present). When `None`, the set
-    /// must hold exactly one key. `alg` must be `RS256` or `ES256` and must
-    /// match the selected key's type.
+    /// `signing_input` is the ASCII `header_b64 "." payload_b64`.
+    ///
+    /// `kid` is the token header `kid` when the header has one. When `kid` is
+    /// `None`, the set must hold exactly one key. `alg` must be `RS256` or
+    /// `ES256` and must match the selected key's type.
     ///
     /// # Errors
     ///
@@ -162,7 +168,7 @@ impl Jwks {
     }
 
     /// Pick the key for `kid`. With no `kid`, succeed only when the set holds a
-    /// single key (otherwise selection is ambiguous).
+    /// single key. Any other count makes the selection ambiguous.
     fn select_key(&self, kid: Option<&str>) -> Result<&JwkKey, AuthError> {
         match kid {
             Some(kid) => self.keys.get(kid).ok_or(AuthError::InvalidToken),
@@ -177,10 +183,12 @@ impl Jwks {
     }
 }
 
-/// Parse a single JWK object into a `(kid, key)` pair, or `None` for an
-/// unsupported / malformed key (skipped, not fatal). `use` is honored when
-/// present: a key explicitly marked for encryption (`use: "enc"`) is skipped
-/// unless `ignore_key_use` is true.
+/// Parse a single JWK object into a `(kid, key)` pair.
+///
+/// This function returns `None` for an unsupported or malformed key. Such a key
+/// is skipped and is not fatal. The function honors `use` when the key has it: it
+/// skips a key marked for encryption with `use: "enc"` unless `ignore_key_use`
+/// is true.
 fn parse_one_jwk(jwk: &Value, ignore_key_use: bool) -> Option<(String, JwkKey)> {
     if !ignore_key_use && jwk.get("use").and_then(Value::as_str) == Some("enc") {
         return None;
@@ -220,8 +228,10 @@ fn b64url_field(jwk: &Value, key: &str) -> Option<Vec<u8>> {
     B64URL.decode(s).ok()
 }
 
-/// Left-pad a big-endian coordinate to exactly 32 bytes. Returns `None` if the
-/// input is already longer than 32 bytes (malformed P-256 coordinate).
+/// Left-pad a big-endian coordinate to exactly 32 bytes.
+///
+/// This function returns `None` if the input is already longer than 32 bytes,
+/// which is a malformed P-256 coordinate.
 fn left_pad_32(bytes: &[u8]) -> Option<[u8; 32]> {
     if bytes.len() > 32 {
         return None;
@@ -235,35 +245,37 @@ fn left_pad_32(bytes: &[u8]) -> Option<[u8; 32]> {
 ///
 /// Mirrors `DynamicServerConfig`: the broker's background JWKS
 /// refresher [`store`](JwksHandle::store)s a freshly-fetched key set while
-/// validators [`load`](JwksHandle::load) the current one with no lock. Cloning
-/// a handle shares the same underlying cell.
+/// validators [`load`](JwksHandle::load) the current one with no lock. A clone
+/// of a handle shares the same underlying cell.
 ///
-/// Handles paired with a refresher additionally carry a shared
-/// `last_successful_fetch_ms` counter (for hard cache-expiry checks in the
-/// signed validator) and a `signal_tx` mpsc sender (for fire-and-forget
-/// on-demand refresh requests when validators encounter unknown-kid /
-/// bad-signature tokens). Default-constructed handles carry no signal sender
-/// — `signal_refresh()` is a silent no-op on those.
+/// A handle paired with a refresher also carries a shared
+/// `last_successful_fetch_ms` counter for the hard cache-expiry checks in the
+/// signed validator. It carries a `signal_tx` mpsc sender as well, for
+/// fire-and-forget on-demand refresh requests when a validator meets an
+/// unknown-kid or bad-signature token. A default-constructed handle carries no
+/// signal sender, and `signal_refresh()` is a silent no-op on those.
 #[derive(Debug, Clone)]
 pub struct JwksHandle {
     keys: Arc<ArcSwap<Jwks>>,
-    /// Epoch ms of last successful refresh. Validators
-    /// check this against `expiry_ms` to fail closed on stale cache.
-    /// `0` sentinel = never successfully fetched (initial state).
+    /// Epoch ms of the last successful refresh. Validators
+    /// check this against `expiry_ms` to fail closed on a stale cache.
+    /// The `0` sentinel means never successfully fetched, the initial state.
     last_successful_fetch_ms: Arc<std::sync::atomic::AtomicI64>,
     /// Fire-and-forget signal sender to the refresher.
-    /// Validator calls `signal_refresh()` on verify failure (unknown
-    /// kid or bad signature). `None` when the validator isn't paired
-    /// with a refresher (e.g., default-constructed `JwksHandle` in
-    /// non-signed validators or pre-`apply_to` state).
+    /// The validator calls `signal_refresh()` on a verify failure, which is an
+    /// unknown kid or a bad signature. `None` when the validator is not paired
+    /// with a refresher, such as a default-constructed `JwksHandle` in a
+    /// non-signed validator or in the pre-`apply_to` state.
     signal_tx: Option<tokio::sync::mpsc::Sender<()>>,
 }
 
 impl JwksHandle {
-    /// Wrap an initial key set (often [`Jwks::empty`] at startup) with NO
-    /// refresher coordination. Used by default-constructed handles and tests
-    /// that don't need the signal channel. `signal_refresh()` on these is a
-    /// silent no-op.
+    /// Wrap an initial key set with NO refresher coordination.
+    ///
+    /// The initial key set is often [`Jwks::empty`] at startup.
+    /// Default-constructed handles use this constructor, as do tests that do
+    /// not need the signal channel. `signal_refresh()` on these is a silent
+    /// no-op.
     #[must_use]
     pub fn new(jwks: Jwks) -> Self {
         Self {
@@ -274,10 +286,11 @@ impl JwksHandle {
     }
 
     /// Wrap an initial key set WITH the shared timestamp counter
-    /// and signal sender pre-wired. The refresher constructs its own
-    /// `(signal_tx, signal_rx)` pair and passes `signal_tx` here; the
-    /// refresher holds `signal_rx` and a clone of the shared
-    /// `Arc<AtomicI64>` for timestamp updates.
+    /// and signal sender pre-wired.
+    ///
+    /// The refresher constructs its own `(signal_tx, signal_rx)` pair and
+    /// passes `signal_tx` here. The refresher keeps `signal_rx` and a clone of
+    /// the shared `Arc<AtomicI64>` for the timestamp updates.
     #[must_use]
     pub fn new_with_refresher_handles(
         jwks: Jwks,
@@ -291,32 +304,39 @@ impl JwksHandle {
         }
     }
 
-    /// Atomically replace the key set — called by the refresher after a
-    /// successful fetch. Lock-free; concurrent `load`s see either the old or
-    /// the new set, never a torn one.
+    /// Atomically replace the key set.
+    ///
+    /// The refresher calls this after a successful fetch. The swap is
+    /// lock-free. A concurrent `load` sees either the old set or the new set,
+    /// never a torn one.
     pub fn store(&self, jwks: Jwks) {
         self.keys.store(Arc::new(jwks));
     }
 
-    /// Load the current key set. Cheap (an `Arc` clone).
+    /// Load the current key set. This costs one `Arc` clone.
     #[must_use]
     pub fn load(&self) -> Arc<Jwks> {
         self.keys.load_full()
     }
 
-    /// Epoch-ms timestamp of last successful JWKS fetch. `0` if no
-    /// fetch has succeeded yet (initial state). Validators compare against
-    /// `now_ms - expiry_ms` to enforce hard cache expiry.
+    /// Epoch-ms timestamp of the last successful JWKS fetch.
+    ///
+    /// The value is `0` if no fetch has succeeded yet, the initial state.
+    /// Validators compare it against `now_ms - expiry_ms` to enforce hard cache
+    /// expiry.
     #[must_use]
     pub fn last_successful_fetch_ms(&self) -> i64 {
         self.last_successful_fetch_ms
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Fire-and-forget signal to the refresher that an on-demand
-    /// refresh is requested (e.g., unknown-kid token). Non-blocking — drops
-    /// silently if the channel is full (signals coalesce; one is enough).
-    /// No-op when `signal_tx` is `None` (default-constructed handles).
+    /// Fire-and-forget signal to the refresher that asks for an on-demand
+    /// refresh, for example after an unknown-kid token.
+    ///
+    /// This call does not block. It drops the signal silently if the channel is
+    /// full, because signals coalesce and one is enough. It is a no-op when
+    /// `signal_tx` is `None`, which is the case for default-constructed
+    /// handles.
     pub fn signal_refresh(&self) {
         if let Some(tx) = &self.signal_tx {
             let _ = tx.try_send(());
@@ -345,9 +365,11 @@ mod tests {
 
     use super::*;
 
-    /// A static RSA-2048 PKCS#8 key (generated with `openssl genpkey`). `ring`
-    /// cannot generate RSA keys, so tests mint RS256 tokens from this fixed
-    /// key. Production never sees a private key — it reads `n`/`e` from JWKS.
+    /// A static RSA-2048 PKCS#8 key, generated with `openssl genpkey`.
+    ///
+    /// `ring` cannot generate RSA keys, so tests mint RS256 tokens from this
+    /// fixed key. Production never sees a private key. It reads `n`/`e` from
+    /// JWKS.
     const RSA_PKCS8_B64: &str = "MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC1Ekoc++7sSsH55QXBCq/aj71helk6ZCTkzYxfLRZXbox0FcV7vOkLNodetJLY7nAUekZLltQ7Q6FJ42geqGV+vgttF63Ue9OP24mPmn/OiFqVYhBaJDRI5BMBLCqZbUfpNBDh7ZOCczwlX8Z5FQS0QJBA4F26H9AKzFRvofwHFk1wxqiGdgwDyClgi+eDnhEGGhBEHuTl1edvTRif88rLDfPHKG1TRqKC6LMXCZQdNy7lrDEGPKHqfW4mb2mq7Vj6h2Jjv+1SpsSxdqX8Tsua4/LrAKvFIXfoZAnjzhACbhXqf1DdSdInZ0i1adY8JpgJQ+WtJ0i9aIOnnmDYwgMvAgMBAAECggEAHqBqUr62Kdd3Odpn/7/cAL7hTHSSVRMNPnoZ7RtGNSGothXcolJQpKnjebxXPkQORxhrfWuUmDWXOVUyjkTzbd2dNyWTLGaJYULD4LtENN3RXIUKuQR4p3+US1V6Gxtl12cMF/rEQYNWQAgUHPTWJ9rny2Fn2Qx6dukauwsOAvCU47fL873sm06SYgPJsLm7MKVeifl8dDudgpURxeC9z37cm9kjjE6n6aiBTNAuBEkMaAbcfgJ0RZfzaMo7IpsOeyOwp932JDlKROpQWKA+lz08YzhkU81qHJYOS/js2F0jxzFz31D9IN+OLu7vRCANFLJl/qnin1JEgVPh7gxSKQKBgQDfrQEsutvH1746ytfE+4jUXyv7Fuaz9MML8uaJbC4hMFdCJuMuLBY07bDE23+4byuWY7JHrgsLRaZ+qpNGWs3LH2x6xsHiK8Ivpuy8TVUJ6hgkPK1cr8yUJxaDcyV8tJAZ+mFmyyWx7wUdlgJFCa2MQF1HnrlBKZvSLWV4CjctZQKBgQDPPR2wLwyk6JlyapsVnCpNBGcXqbJxPh1TM7uPqlODxTzegUK+TMJDZ840u2aBNXf2D5WIJMl+/ohYefOOqK9z2OJUGObnJMgGusH04rdbBoDCdBwfwjiluU7vxbuQKBu8JNXzeb7HJhmgxtXWdJuFYcYbmGu8leFvmUxZTPRfAwKBgQCm6Gpf/m/SiGMjbAnmq+xGzV38V/J/hr2lRPRSx68EhRYX/vy3j55ikJu/yitcbViROIPoiS8kkizTiGWtskSuthw04ev74btd46n0OaCjbVPmdoDHEUgPpbtfC6WFkReWyweztRPD2yBuG2pGKhqe9cilkQOcZHgqNkXpdXYHIQKBgQCO0BQkdNfm0O/l3DdRdhPkjVMqCGSTC3YT/0OS5pK07PhccYF4ONdqsh91UWt7QUiRBf5LGubMoEV/i1LfjbmTQPP/dkWxJjS+Bndg9dfbX6jd2DwFWsfE1OXj8ESoPCuYxV23cr+Y59WjaUK1jhgam9106N3d0P/Q8zidFZ4V1wKBgQDFvIqMLnpaInWhb7kP+X6o0tPQSg+6odMWPnjhwnpSIiUjPUTZV4ijc/d1tPsUemFQxDe+ZreQXDMVGcAVldFnoEMyL8iAtMAHtsSmq2E80RNZfc6nUgy5esQ9rJeX2pH9aZCVvKv6iVTeUtAxS+ltjmEG9BSEI2WQI1WDzPbKiA==";
 
     fn rsa_pkcs8() -> Vec<u8> {
@@ -355,9 +377,11 @@ mod tests {
         STANDARD.decode(RSA_PKCS8_B64).unwrap()
     }
 
-    /// Split the two big-endian INTEGERs (modulus, publicExponent) out of a
-    /// PKCS#1 `RSAPublicKey` DER. Test-only — production reads `n`/`e` straight
-    /// from JWKS JSON.
+    /// Split the two big-endian INTEGERs, modulus and publicExponent, out of a
+    /// PKCS#1 `RSAPublicKey` DER.
+    ///
+    /// This helper is test-only. Production reads `n`/`e` straight from JWKS
+    /// JSON.
     fn split_pkcs1_public(der: &[u8]) -> (Vec<u8>, Vec<u8>) {
         // SEQUENCE { INTEGER n, INTEGER e }
         let mut p = 0usize;
@@ -402,9 +426,10 @@ mod tests {
         B64URL.encode(b)
     }
 
-    /// Mint an RS256 token signed by the static RSA key, returning
-    /// `(token, jwks_json)` where the JWKS advertises the matching public key
-    /// under `kid`.
+    /// Mint an RS256 token signed by the static RSA key and return
+    /// `(token, jwks_json)`.
+    ///
+    /// The JWKS advertises the matching public key under `kid`.
     fn rs256(kid: &str, claims: &str) -> (String, String) {
         let der = rsa_pkcs8();
         let kp = RsaKeyPair::from_pkcs8(&der).unwrap();
@@ -709,9 +734,10 @@ mod tests {
         rs256(kid, claims)
     }
 
-    /// Mint an RS256 token with a fully-controlled header JSON (so the
-    /// caller can drive `typ` / `kid` / extra header fields). Returns
-    /// `(token, jwks_json)` like the other minters.
+    /// Mint an RS256 token with a fully-controlled header JSON, so the caller
+    /// can drive `typ` / `kid` / extra header fields.
+    ///
+    /// This helper returns `(token, jwks_json)` like the other minters.
     pub(crate) fn mint_rs256_with_header(header_json: &str, claims: &str) -> (String, String) {
         let der = rsa_pkcs8();
         let kp = RsaKeyPair::from_pkcs8(&der).unwrap();
@@ -738,9 +764,10 @@ mod tests {
         (token, jwks)
     }
 
-    /// Mint an ES256 token under a *fresh* key, returning `(token, jwks_json)`.
-    /// Each call generates a new key pair, so two calls yield independent keys
-    /// — useful for key-rotation tests where RS256's fixed key can't differ.
+    /// Mint an ES256 token under a *fresh* key and return `(token, jwks_json)`.
+    ///
+    /// Each call generates a new key pair, so two calls give independent keys.
+    /// That helps key-rotation tests, where RS256's fixed key cannot differ.
     pub(crate) fn mint_es256(kid: &str, claims: &str) -> (String, String) {
         let (kp, jwks) = es256_key(kid);
         let token = es256_token(&kp, kid, claims);

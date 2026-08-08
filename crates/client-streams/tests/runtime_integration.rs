@@ -80,10 +80,10 @@ impl Processor<String, String, String, String> for Upper {
 
 // ─── fetch helpers ────────────────────────────────────────────────────────────
 
-/// Resolve the `topic_id` for `topic_name` via a metadata refresh, then open a
-/// dedicated `Connection` and poll `fetch_partition` in a loop until `want`
-/// values have been collected from partition 0.  Returns the decoded UTF-8
-/// values in arrival order.
+/// Resolve the `topic_id` for `topic_name` with a metadata refresh. Then open a
+/// dedicated `Connection` and poll `fetch_partition` in a loop until it has
+/// collected `want` values from partition 0. Returns the decoded UTF-8 values in
+/// arrival order.
 async fn collect_output(
     admin: &Client,
     bootstrap: &str,

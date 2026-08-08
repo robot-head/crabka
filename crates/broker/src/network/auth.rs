@@ -3,9 +3,9 @@
 //! Drives `SaslHandshake` (17) and `SaslAuthenticate` (36).
 //!
 //! The state machine is deliberately separate from the byte-level I/O loop
-//! in `dispatch.rs`: handlers mutate `ConnectionAuth`
-//! based on decoded request bodies; the dispatcher only consults the state
-//! to gate non-allowlisted requests before authentication completes.
+//! in `dispatch.rs`. Handlers mutate `ConnectionAuth` from decoded request
+//! bodies. The dispatcher only reads the state, to gate non-allowlisted
+//! requests before authentication completes.
 
 // Several variants and the `principal` accessor are exercised by the PLAIN,
 // SCRAM, and admin paths — keep the surface in one place.
@@ -34,64 +34,67 @@ use crate::{
 /// `Anonymous` -> (`SaslHandshake`) -> `Negotiating` -> (`SaslAuthenticate` ok)
 ///   -> `Authenticated`.
 ///
-/// For PLAINTEXT/SSL listeners the dispatcher initialises the connection
-/// directly to `Authenticated { principal: ANONYMOUS }` so the pre-auth
-/// gate is a no-op.
+/// For PLAINTEXT/SSL listeners, the dispatcher initialises the connection
+/// directly to `Authenticated { principal: ANONYMOUS }`, so the pre-auth
+/// gate does nothing.
 #[derive(Debug)]
 pub enum ConnectionAuth {
     /// PLAINTEXT / SSL listener, or pre-handshake on a SASL listener.
     Anonymous,
-    /// `SaslHandshake` received; awaiting (possibly multiple) `SaslAuthenticate`.
+    /// The broker received `SaslHandshake` and waits for one or more
+    /// `SaslAuthenticate` requests.
     Negotiating {
         mechanism: SaslMechanism,
         exchange: SaslExchange,
-        /// KIP-48 side-channel: when the SCRAM round-1
-        /// lookup falls back to a delegation token, the token's
-        /// `expiry_timestamp_ms` is captured here so the round-2
-        /// success arm can:
+        /// KIP-48 side-channel: when the SCRAM round-1 lookup falls back to
+        /// a delegation token, this field holds the token's
+        /// `expiry_timestamp_ms`, so the round-2 success arm can:
         /// 1. Set `ConnectionAuth::Authenticated.expires_at_ms` (the
         ///    KIP-368 re-auth ceiling), and
         /// 2. Set `authenticated_via_token: true` (the KIP-48
         ///    token-to-token chain guard read by `CreateDelegationToken`).
         ///
-        /// `None` for every non-token-SCRAM negotiation (PLAIN,
-        /// regular SCRAM, OAUTHBEARER, plus token-SCRAM round 1
-        /// before the lookup fires). The presence of `Some(_)` is
-        /// the unambiguous "token-authed session" marker.
+        /// This field is `None` for every non-token-SCRAM negotiation:
+        /// PLAIN, regular SCRAM, OAUTHBEARER, and token-SCRAM round 1 before
+        /// the lookup fires. `Some(_)` is the unambiguous "token-authed
+        /// session" marker.
         pending_token_expiry_ms: Option<i64>,
     },
     Authenticated {
         principal: Principal,
-        /// SASL mechanism this connection authenticated with. Used by KIP-368
-        /// in-band re-auth to reject a fresh `SaslHandshake` that
-        /// switches mechanisms mid-connection. For mTLS / anonymous
-        /// connections (no SASL), this is `SaslMechanism::Plain` as a
-        /// don't-care default (the in-band reauth path is unreachable since
-        /// the listener doesn't accept `SaslHandshake` at all).
+        /// SASL mechanism this connection authenticated with. KIP-368
+        /// in-band re-auth reads it to reject a fresh `SaslHandshake` that
+        /// switches mechanisms in the middle of a connection. For mTLS and
+        /// anonymous connections, which use no SASL, this is
+        /// `SaslMechanism::Plain` as an unused default. The in-band re-auth
+        /// path cannot run there, because the listener does not accept
+        /// `SaslHandshake` at all.
         mechanism: SaslMechanism,
-        /// Session expiry as Unix epoch ms. `None` = no expiry / no re-auth
-        /// timer (PLAIN/SCRAM/mTLS/anonymous). `Some` = OAUTHBEARER token's
-        /// `exp`; the dispatch loop closes the connection when this elapses.
+        /// Session expiry as Unix epoch ms. `None` means no expiry and no
+        /// re-auth timer, as for PLAIN, SCRAM, mTLS, and anonymous. `Some`
+        /// holds the OAUTHBEARER token's `exp`. The dispatch loop closes the
+        /// connection when this time passes.
         expires_at_ms: Option<i64>,
-        /// KIP-48: whether this connection authenticated via a
-        /// delegation token (SCRAM-SHA-256 with the token's HMAC as the
-        /// password equivalent) rather than a "real" principal credential.
-        /// The delegation-token RPCs check this flag — `CreateDelegationToken`
-        /// rejects token-authed callers with
-        /// `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED` (KIP-48 forbids
-        /// token-creating-token chains), and `DescribeDelegationToken`
-        /// restricts a token-authed caller to their own owned tokens
-        /// regardless of any owner filter. Set to `true` only by the
-        /// token-auth path; every other construction site defaults
-        /// to `false`.
+        /// KIP-48: whether this connection authenticated with a delegation
+        /// token instead of a "real" principal credential. Token auth uses
+        /// SCRAM-SHA-256 with the token's HMAC as the password equivalent.
+        ///
+        /// The delegation-token RPCs read this flag.
+        /// `CreateDelegationToken` rejects token-authed callers with
+        /// `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED`, because KIP-48 forbids
+        /// token-creating-token chains. `DescribeDelegationToken` restricts a
+        /// token-authed caller to their own owned tokens, whatever the owner
+        /// filter says. Only the token-auth path sets this to `true`; every
+        /// other construction site defaults it to `false`.
         authenticated_via_token: bool,
     },
     /// In-band re-authentication in progress: a `SaslHandshake` from a
-    /// previously `Authenticated` OAuth connection. Holds the previous
-    /// session snapshot so the post-validate equality check (same principal
-    /// name, same mechanism) has something to compare against, and so a
-    /// failed re-auth's error message can reference the still-current
-    /// principal. (KIP-368.)
+    /// previously `Authenticated` OAuth connection (KIP-368).
+    ///
+    /// This variant holds the previous session snapshot. The post-validate
+    /// equality check compares against it for the same principal name and the
+    /// same mechanism. A failed re-auth also uses it to name the still-current
+    /// principal in the error message.
     Reauthenticating {
         previous: AuthenticatedSnapshot,
         exchange: SaslExchange,
@@ -99,9 +102,10 @@ pub enum ConnectionAuth {
 }
 
 /// Snapshot of an `Authenticated` connection at the moment a re-auth
-/// `SaslHandshake` arrives. Used by the `SaslAuthenticate` handler during
-/// re-auth to enforce same-mechanism + same-principal-name semantics
-/// (KIP-368).
+/// `SaslHandshake` arrives.
+///
+/// During re-auth, the `SaslAuthenticate` handler reads it to enforce
+/// same-mechanism and same-principal-name semantics (KIP-368).
 #[derive(Debug, Clone)]
 pub struct AuthenticatedSnapshot {
     pub principal: Principal,
@@ -109,38 +113,42 @@ pub struct AuthenticatedSnapshot {
     pub expires_at_ms: Option<i64>,
 }
 
-/// In-flight SASL exchange. `Plain` carries no state because PLAIN is a
-/// single round-trip; `ScramPending` is the post-handshake / pre-client-first
-/// state for SCRAM (we need the client's `username` to materialise a
-/// `ScramServerExchange`, so the real exchange is built lazily);
-/// `Scram` wraps the live RFC 5802 server state machine once the first
-/// client message arrives.
+/// In-flight SASL exchange.
+///
+/// `Plain` carries no state, because PLAIN is a single round trip.
+/// `ScramPending` is the post-handshake and pre-client-first state for SCRAM;
+/// the broker needs the client's `username` to build a
+/// `ScramServerExchange`, so it builds the real exchange lazily. `Scram`
+/// wraps the live RFC 5802 server state machine once the first client message
+/// arrives.
 #[derive(Debug)]
 pub enum SaslExchange {
     Plain,
     ScramPending,
-    /// Boxed because `ScramServerExchange` grew past clippy's 200-byte
-    /// `large_enum_variant` threshold once the
-    /// `principal_override: Option<Principal>` field was added for delegation-token
-    /// SCRAM fallback. Keeps the cold path off the hot enum size.
+    /// This variant is boxed because `ScramServerExchange` is larger than
+    /// clippy's 200-byte `large_enum_variant` threshold. Its
+    /// `principal_override: Option<Principal>` field serves the
+    /// delegation-token SCRAM fallback. Boxing keeps this rare variant out of
+    /// the size of the whole enum.
     Scram(Box<ScramServerExchange>),
-    /// OAUTHBEARER, post-handshake / pre-token. The bearer token arrives in
-    /// the first (and on success only) `SaslAuthenticate`.
+    /// OAUTHBEARER, post-handshake and pre-token. The bearer token arrives
+    /// in the first `SaslAuthenticate`, which on success is the only one.
     OAuthBearer,
-    /// OAUTHBEARER token validation failed: the broker has returned the RFC
-    /// 7628 error JSON (with `error_code = 0`, connection still open) and is
-    /// awaiting the client's single-`\x01` final message before failing the
+    /// OAUTHBEARER token validation failed. The broker returned the RFC 7628
+    /// error JSON with `error_code = 0` and kept the connection open. It now
+    /// waits for the client's single-`\x01` final message before it fails the
     /// connection with `SASL_AUTHENTICATION_FAILED`.
     OAuthBearerFailed,
-    /// GSSAPI post-handshake / pre-first-token. The acceptor (and thus the
-    /// live `GssapiServerExchange`) is built lazily on the first
-    /// `SaslAuthenticate` round, once the client's AP-REQ arrives — mirroring
-    /// the SCRAM `ScramPending` pattern (we don't want to read the keytab
-    /// until a client actually starts a GSSAPI exchange).
+    /// GSSAPI post-handshake and pre-first-token. The broker builds the
+    /// acceptor, and with it the live `GssapiServerExchange`, lazily on the
+    /// first `SaslAuthenticate` round, once the client's AP-REQ arrives. This
+    /// mirrors the SCRAM `ScramPending` pattern: the broker does not read the
+    /// keytab until a client starts a GSSAPI exchange.
     GssapiPending,
-    /// GSSAPI multi-round in flight: the live RFC 4752 server state machine
-    /// (GSS context establishment → security-layer negotiation). Boxed to
-    /// keep the `sspi`-backed acceptor off the hot enum size.
+    /// GSSAPI multi-round in flight: the live RFC 4752 server state machine,
+    /// from GSS context establishment to security-layer negotiation. This
+    /// variant is boxed to keep the `sspi`-backed acceptor out of the size of
+    /// the whole enum.
     Gssapi(Box<crabka_security::gssapi::server::GssapiServerExchange>),
 }
 
@@ -159,10 +167,10 @@ impl ConnectionAuth {
         }
     }
 
-    /// KIP-48: whether the current session authenticated via a
-    /// delegation token. Used by the four delegation-token RPC handlers
-    /// to gate token-creating-token (`Create`) and visibility restriction
-    /// (`Describe`). `false` for any non-`Authenticated` state.
+    /// KIP-48: whether the current session authenticated with a delegation
+    /// token. The four delegation-token RPC handlers read it to gate
+    /// token-creating-token (`Create`) and visibility restriction
+    /// (`Describe`). It is `false` for any non-`Authenticated` state.
     #[must_use]
     pub fn authenticated_via_token(&self) -> bool {
         matches!(
@@ -174,7 +182,7 @@ impl ConnectionAuth {
         )
     }
 
-    /// Whether `api_key` may be served given the current auth state.
+    /// Whether the broker may serve `api_key` in the current auth state.
     /// - `Anonymous` / `Negotiating`: allow the pre-auth allowlist
     ///   (ApiVersions=18, SaslHandshake=17, SaslAuthenticate=36).
     /// - `Reauthenticating`: allow only `SaslAuthenticate=36`. Any other
@@ -193,11 +201,11 @@ impl ConnectionAuth {
 
 /// Pre-auth allowlist: `api_key`s clients may send before completing SASL.
 ///
-/// Mirrors Apache Kafka's pre-auth allowlist: a client must be able to
-/// negotiate the mechanism (`SaslHandshake` = 17), run the SASL exchange
-/// (`SaslAuthenticate` = 36), and discover supported APIs
-/// (`ApiVersions` = 18) before authenticating. Everything else is rejected
-/// with `ILLEGAL_SASL_STATE` (34) and the connection is closed.
+/// Mirrors Apache Kafka's pre-auth allowlist. Before it authenticates, a
+/// client must be able to negotiate the mechanism (`SaslHandshake` = 17), run
+/// the SASL exchange (`SaslAuthenticate` = 36), and discover the supported
+/// APIs (`ApiVersions` = 18). The broker rejects everything else with
+/// `ILLEGAL_SASL_STATE` (34) and closes the connection.
 #[must_use]
 pub fn is_pre_auth_allowed(api_key: ApiKeyCode) -> bool {
     matches!(
@@ -206,24 +214,25 @@ pub fn is_pre_auth_allowed(api_key: ApiKeyCode) -> bool {
     )
 }
 
-/// `SASL_AUTHENTICATION_FAILED` (58) — credential check rejected by the
-/// broker. The caller closes the connection after writing the response.
-/// (Not yet in `crate::codes` — this is its only use site.)
+/// `SASL_AUTHENTICATION_FAILED` (58): the broker rejected the credential
+/// check. The caller closes the connection after it writes the response.
+/// This code is not yet in `crate::codes`, because this is its only use site.
 const SASL_AUTHENTICATION_FAILED: i16 = 58;
 
-/// RFC 4752 server "maximum message size" advertised in the auth-only
-/// security-layer offer. 64 KiB matches the JVM broker's default SASL receive
-/// buffer; with confidentiality/integrity disabled it only bounds the size of
-/// the (empty) wrapped payloads, so the exact value is not load-bearing.
+/// RFC 4752 server "maximum message size" that the broker advertises in the
+/// auth-only security-layer offer. 64 KiB matches the JVM broker's default
+/// SASL receive buffer. With confidentiality and integrity disabled, the value
+/// only bounds the size of the empty wrapped payloads, so the exact value does
+/// not matter.
 const GSSAPI_MAX_RECV: ByteSize = kibibytes(64);
 
 /// Handles `SaslHandshake` (`api_key` 17).
 ///
-/// On a mechanism the broker advertises, transitions `auth` to
-/// `Negotiating` and returns a success response carrying the enabled list.
-/// On any unknown / disabled mechanism returns
-/// [`UNSUPPORTED_SASL_MECHANISM`] (33) with the enabled list; the connection
-/// stays open so the client can retry with a supported mechanism.
+/// For a mechanism the broker advertises, this moves `auth` to `Negotiating`
+/// and returns a success response that carries the enabled list. For any
+/// unknown or disabled mechanism, it returns [`UNSUPPORTED_SASL_MECHANISM`]
+/// (33) with the enabled list. The connection stays open, so the client can
+/// retry with a supported mechanism.
 pub fn handle_handshake(
     req: &SaslHandshakeRequest,
     auth: &mut ConnectionAuth,
@@ -315,9 +324,10 @@ pub fn handle_handshake(
     }
 }
 
-/// Build the per-mechanism `SaslExchange` initial state. Extracted from
-/// `handle_handshake` so both the initial-auth path and the re-auth path
-/// can construct it identically.
+/// Builds the per-mechanism `SaslExchange` initial state.
+///
+/// It is separate from `handle_handshake` so that the initial-auth path and
+/// the re-auth path construct the state in the same way.
 fn exchange_for_mechanism(m: SaslMechanism) -> SaslExchange {
     match m {
         SaslMechanism::Plain => SaslExchange::Plain,
@@ -339,13 +349,13 @@ fn exchange_for_mechanism(m: SaslMechanism) -> SaslExchange {
 
 /// Handles `SaslAuthenticate` (`api_key` 36) for the PLAIN mechanism.
 ///
-/// On wire format: `auth_bytes` carries `\0<authzid>\0<authcid>\0<password>`.
-/// `authzid` is ignored (RFC 4616 leaves it free-form and Kafka clients
-/// typically send it empty); the username is `authcid`.
+/// On the wire, `auth_bytes` carries `\0<authzid>\0<authcid>\0<password>`.
+/// The handler ignores `authzid`, because RFC 4616 leaves it free-form and
+/// Kafka clients usually send it empty. The username is `authcid`.
 ///
-/// On a credential match this transitions `auth` to
-/// [`ConnectionAuth::Authenticated`]. The caller closes the connection if
-/// the returned `error_code` is non-zero.
+/// On a credential match, this moves `auth` to
+/// [`ConnectionAuth::Authenticated`]. The caller closes the connection if the
+/// returned `error_code` is non-zero.
 pub fn handle_authenticate_plain<S: BuildHasher>(
     req: &SaslAuthenticateRequest,
     auth: &mut ConnectionAuth,
@@ -380,24 +390,24 @@ pub fn handle_authenticate_plain<S: BuildHasher>(
     }
 }
 
-/// SCRAM-SHA-512 `SaslAuthenticate` handler. Implements the two-round RFC 5802
-/// dance over Kafka's `SaslAuthenticate` (`api_key` 36) wire envelope.
+/// SCRAM-SHA-512 `SaslAuthenticate` handler. It runs the two RFC 5802 rounds
+/// over Kafka's `SaslAuthenticate` (`api_key` 36) wire envelope.
 ///
 /// Round 1 (client-first):
-///   - `auth_bytes` = `n,,n=<user>,r=<client-nonce>` (raw SCRAM client-first
-///     message). We parse the username, look up the credential in the
-///     metadata image, and instantiate a [`ScramServerExchange`]. The
-///     exchange consumes the same client-first bytes and emits the
-///     server-first message (`r=…,s=…,i=…`), which becomes the response
-///     `auth_bytes`. `auth` transitions from
+///   - `auth_bytes` is the raw SCRAM client-first message,
+///     `n,,n=<user>,r=<client-nonce>`. The handler parses the username, looks
+///     up the credential in the metadata image, and builds a
+///     [`ScramServerExchange`]. The exchange consumes the same client-first
+///     bytes and emits the server-first message (`r=…,s=…,i=…`), which
+///     becomes the response `auth_bytes`. `auth` moves from
 ///     `Negotiating { exchange: ScramPending }` to
-///     `Negotiating { exchange: Scram(server) }` — still unauthenticated.
+///     `Negotiating { exchange: Scram(server) }`, still unauthenticated.
 ///
 /// Round 2 (client-final):
-///   - `auth_bytes` = `c=biws,r=<combined-nonce>,p=<proof>`. The exchange
+///   - `auth_bytes` is `c=biws,r=<combined-nonce>,p=<proof>`. The exchange
 ///     verifies the client proof and emits the server-final message
-///     (`v=<server-signature>`). On success `auth` transitions to
-///     `Authenticated { principal }`; on any error the response carries
+///     (`v=<server-signature>`). On success, `auth` moves to
+///     `Authenticated { principal }`. On any error, the response carries
 ///     `error_code = 58` and the dispatcher closes the connection.
 pub fn handle_authenticate_scram(
     req: &SaslAuthenticateRequest,
@@ -539,19 +549,19 @@ pub fn handle_authenticate_scram(
 /// credentials. Specified by KIP-48 §"Token Format".
 const TOKEN_SCRAM_ITERS: u32 = 4096;
 
-/// KIP-48: build a synthetic SCRAM-SHA-256 credential for
-/// authenticating callers against a delegation token. KIP-48 fixes:
-///   - mechanism = SCRAM-SHA-256 (the only token-SCRAM mechanism)
-///   - "password" = base64-encoded token HMAC bytes (the same value
-///     `CreateDelegationToken` returns to the client and that clients
-///     present as the SCRAM password)
-///   - salt = UTF-8 bytes of `token_id` (the token UUID is already
-///     uniformly random — no extra randomness needed)
+/// KIP-48: builds a synthetic SCRAM-SHA-256 credential that authenticates
+/// callers against a delegation token. KIP-48 fixes these values:
+///   - mechanism = SCRAM-SHA-256, the only token-SCRAM mechanism
+///   - "password" = base64-encoded token HMAC bytes. This is the same value
+///     that `CreateDelegationToken` returns to the client and that clients
+///     present as the SCRAM password.
+///   - salt = UTF-8 bytes of `token_id`. The token UUID is already uniformly
+///     random, so it needs no extra randomness.
 ///   - iters = [`TOKEN_SCRAM_ITERS`]
 ///
-/// The result is identical to what `hash_scram_password_with_salt`
-/// would produce for those inputs — computed on every auth attempt
-/// rather than stored per-token in the metadata image.
+/// The result is identical to what `hash_scram_password_with_salt` produces
+/// for those inputs. The broker computes it on every auth attempt instead of
+/// storing it for each token in the metadata image.
 fn synthesize_token_scram_credential(
     token: &crabka_metadata::DelegationToken,
 ) -> crabka_security::ScramCredential {
@@ -568,29 +578,32 @@ fn synthesize_token_scram_credential(
 
 /// SASL/GSSAPI (Kerberos, RFC 4752) `SaslAuthenticate` handler.
 ///
-/// Multi-round, driven over Kafka's `SaslAuthenticate` (`api_key` 36) wire
-/// envelope. The opaque GSS/SASL tokens ride in `auth_bytes` both ways:
+/// This handler runs several rounds over Kafka's `SaslAuthenticate`
+/// (`api_key` 36) wire envelope. The opaque GSS/SASL tokens travel in
+/// `auth_bytes` in both directions.
 ///
 /// Round 1 (client AP-REQ):
-///   - `auth_bytes` = the GSS initial context token (AP-REQ). We build the
-///     `sspi`-backed acceptor from the broker's keytab now that an exchange
-///     has actually started, feed the token to a fresh
-///     [`GssapiServerExchange`], and emit the server's context token (AP-REP)
-///     as the response `auth_bytes`. `auth` transitions
-///     `Negotiating { exchange: GssapiPending }` →
+///   - `auth_bytes` is the GSS initial context token (AP-REQ). An exchange
+///     has now started, so the handler builds the `sspi`-backed acceptor from
+///     the broker's keytab, feeds the token to a fresh
+///     [`GssapiServerExchange`], and emits the server's context token
+///     (AP-REP) as the response `auth_bytes`. `auth` moves from
+///     `Negotiating { exchange: GssapiPending }` to
 ///     `Negotiating { exchange: Gssapi(..) }`, still unauthenticated.
 ///
-/// Middle round(s) (security-layer negotiation, RFC 4752):
-///   - the server emits its GSS-wrapped auth-only offer, the client replies
-///     with its GSS-wrapped choice. Each `ServerStep::Challenge` becomes a
-///     success response carrying the next token; `auth` stays `Negotiating`.
+/// Middle round or rounds (security-layer negotiation, RFC 4752):
+///   - the server emits its GSS-wrapped auth-only offer, and the client
+///     replies with its GSS-wrapped choice. Each `ServerStep::Challenge`
+///     becomes a success response that carries the next token. `auth` stays
+///     `Negotiating`.
 ///
 /// Final round (client layer choice):
-///   - the exchange yields `ServerStep::Done { principal }`. We map the raw
-///     Kerberos principal through `auth_to_local`, transition to
-///     `Authenticated`, and reply with empty `auth_bytes` + `error_code = 0`.
+///   - the exchange yields `ServerStep::Done { principal }`. The handler maps
+///     the raw Kerberos principal through `auth_to_local`, moves to
+///     `Authenticated`, and replies with empty `auth_bytes` and
+///     `error_code = 0`.
 ///
-/// Any GSS/codec error returns `SASL_AUTHENTICATION_FAILED` (58) and the
+/// Any GSS or codec error returns `SASL_AUTHENTICATION_FAILED` (58), and the
 /// dispatcher closes the connection.
 pub fn handle_authenticate_gssapi(
     req: &SaslAuthenticateRequest,
@@ -673,8 +686,9 @@ pub fn handle_authenticate_gssapi(
     fail_authenticate("not in GSSAPI negotiation")
 }
 
-/// A non-terminal GSSAPI round: hand the next token back to the client with
-/// `error_code = 0`; the connection stays open and `auth` stays `Negotiating`.
+/// Handles a non-terminal GSSAPI round. It returns the next token to the
+/// client with `error_code = 0`. The connection stays open and `auth` stays
+/// `Negotiating`.
 fn gssapi_challenge_response(token: Vec<u8>) -> SaslAuthenticateResponse {
     SaslAuthenticateResponse {
         error_code: 0,
@@ -685,8 +699,8 @@ fn gssapi_challenge_response(token: Vec<u8>) -> SaslAuthenticateResponse {
     }
 }
 
-/// Map the authenticated Kerberos principal through `auth_to_local` and, on
-/// success, transition `auth` to `Authenticated`.
+/// Maps the authenticated Kerberos principal through `auth_to_local` and, on
+/// success, moves `auth` to `Authenticated`.
 fn finish_gssapi(
     raw_principal: &str,
     mech: SaslMechanism,
@@ -720,15 +734,16 @@ fn finish_gssapi(
     }
 }
 
-/// Apply the configured `auth_to_local` rules to a raw Kerberos principal.
+/// Applies the configured `auth_to_local` rules to a raw Kerberos principal.
 ///
-/// `sspi` recovers the principal lower-cased (e.g. `alice@crabka.test`); we
-/// re-canonicalise the realm to upper-case before matching because Kerberos
-/// realms are conventionally upper-case and both the configured default realm
-/// and the `auth_to_local` rules are written against the upper-case form. When
-/// no default realm is configured we fall back to the principal's own realm,
-/// so a single-component principal in its own realm maps to its primary via
-/// the implicit `DEFAULT` rule.
+/// `sspi` recovers the principal in lower case, for example
+/// `alice@crabka.test`. This function canonicalises the realm back to upper
+/// case before it matches, because Kerberos realms are conventionally upper
+/// case, and because both the configured default realm and the
+/// `auth_to_local` rules are written in the upper-case form. When no default
+/// realm is configured, the function falls back to the principal's own realm.
+/// A single-component principal in its own realm then maps to its primary
+/// through the implicit `DEFAULT` rule.
 fn map_gssapi_principal(
     raw: &str,
     config: &crabka_security::gssapi::GssapiConfig,
@@ -748,17 +763,19 @@ fn map_gssapi_principal(
 /// SASL/OAUTHBEARER `SaslAuthenticate` handler (KIP-255 / RFC 7628).
 ///
 /// Round 1 (client initial response):
-///   - `auth_bytes` = `n,,\x01auth=Bearer <token>\x01\x01`. We parse the
-///     bearer token and validate it with `validator` against `now_ms`. On
-///     success `auth` transitions to `Authenticated` and the response carries
-///     empty `auth_bytes` with `error_code = 0` (single-round success).
-///   - On any parse / validation failure we return the RFC 7628
-///     `{"status":"invalid_token"}` JSON in `auth_bytes` with `error_code = 0`
-///     (the connection stays open) and move to `OAuthBearerFailed`.
+///   - `auth_bytes` is `n,,\x01auth=Bearer <token>\x01\x01`. The handler
+///     parses the bearer token and validates it with `validator` against
+///     `now_ms`. On success, `auth` moves to `Authenticated` and the response
+///     carries empty `auth_bytes` with `error_code = 0`. That is a
+///     single-round success.
+///   - On any parse or validation failure, the handler returns the RFC 7628
+///     `{"status":"invalid_token"}` JSON in `auth_bytes` with
+///     `error_code = 0`, keeps the connection open, and moves to
+///     `OAuthBearerFailed`.
 ///
-/// Round 2 (failure only): the JVM client replies to the error JSON with a
-/// single `\x01`. We return `SASL_AUTHENTICATION_FAILED` (58); the dispatcher
-/// closes the connection.
+/// Round 2 runs only after a failure. The JVM client replies to the error JSON
+/// with a single `\x01`. The handler returns `SASL_AUTHENTICATION_FAILED`
+/// (58), and the dispatcher closes the connection.
 // Single state-machine dispatch: Negotiating-success / Negotiating-failure /
 // Reauth-success / Reauth-failure / fall-through. Extracting per-arm helpers
 // would obscure the shape and force ferrying `mech` / `prev_mech` / now_ms /
@@ -908,8 +925,9 @@ fn successful_authentication(session_lifetime_ms: i64) -> SaslAuthenticateRespon
     }
 }
 
-/// Parse + validate an OAUTHBEARER client initial response. The authzid, when
-/// present, must equal the token principal (RFC 7628 / Kafka behaviour).
+/// Parses and validates an OAUTHBEARER client initial response. The authzid,
+/// when present, must equal the token principal, as RFC 7628 and Kafka
+/// require.
 async fn validate_bearer(
     auth_bytes: &[u8],
     validator: &crabka_security::OAuthBearerValidator,
@@ -929,12 +947,12 @@ async fn validate_bearer(
     Ok(outcome)
 }
 
-/// Parse the username from a SCRAM client-first message.
+/// Parses the username from a SCRAM client-first message.
 ///
-/// Format (RFC 5802): `n,,n=<user>,r=<nonce>[,extensions...]`. The leading
-/// `n,,` is the GS2 header (no channel binding, no authzid); the bare body
-/// is a comma-separated attribute list. Returns the first `n=` value, or
-/// `None` on any parse failure.
+/// The RFC 5802 format is `n,,n=<user>,r=<nonce>[,extensions...]`. The
+/// leading `n,,` is the GS2 header, with no channel binding and no authzid.
+/// The bare body is a comma-separated attribute list. Returns the first `n=`
+/// value, or `None` on any parse failure.
 fn parse_scram_username(bytes: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(bytes).ok()?;
     let bare = s.strip_prefix("n,,")?;
@@ -946,9 +964,11 @@ fn parse_scram_username(bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Build a [`SASL_AUTHENTICATION_FAILED`] response. `reason` is logged at
-/// `debug` (never returned over the wire — auth failures are intentionally
-/// opaque so attackers can't distinguish "no such user" from "bad password").
+/// Builds a [`SASL_AUTHENTICATION_FAILED`] response.
+///
+/// The function logs `reason` at `debug` and never returns it over the wire.
+/// Auth failures are deliberately opaque, so that an attacker cannot tell
+/// "no such user" from "bad password".
 fn fail_authenticate(reason: &str) -> SaslAuthenticateResponse {
     tracing::debug!(reason, "SASL authenticate failed");
     SaslAuthenticateResponse {
@@ -1320,7 +1340,7 @@ mod tests {
     }
 
     /// Establishes the GSS context on the first token with no trailing
-    /// AP-REP, so a single `step()` reaches `AwaitingChoice` directly —
+    /// AP-REP, so one `step()` call reaches `AwaitingChoice` directly. This
     /// mirrors `crabka-security`'s own `gssapi::server` unit tests.
     struct FakeAcceptor;
 
@@ -1750,7 +1770,7 @@ mod tests {
             handle
         }
 
-        /// Helper: append a delegation token to the controller's image.
+        /// Appends a delegation token to the controller's image.
         async fn append_token(
             controller: &crabka_raft::ControllerHandle,
             token_id: &str,
@@ -1773,10 +1793,10 @@ mod tests {
             controller.submit_change(vec![rec]).await.unwrap();
         }
 
-        /// Drive the SCRAM client through both rounds against the broker's
-        /// `handle_authenticate_scram`. Returns the final `auth` state plus
-        /// the round-2 server response so callers can assert on
-        /// `error_code`, `session_lifetime_ms`, etc.
+        /// Drives the SCRAM client through both rounds against the broker's
+        /// `handle_authenticate_scram`. Returns the final `auth` state and
+        /// the round-2 server response, so callers can assert on
+        /// `error_code`, `session_lifetime_ms`, and other fields.
         fn drive_scram_to_done(
             controller: &crabka_raft::ControllerHandle,
             scram_username: &str,
@@ -1965,9 +1985,9 @@ mod tests {
             controller.cancel().await;
         }
 
-        /// SCRAM-SHA-512 must NOT consult the delegation-token table
-        /// even when the SCRAM username happens to match a token's id:
-        /// KIP-48 scopes token-SCRAM to SHA-256 only.
+        /// SCRAM-SHA-512 must NOT read the delegation-token table, even when
+        /// the SCRAM username matches a token's id. KIP-48 scopes token-SCRAM
+        /// to SHA-256 only.
         #[tokio::test]
         async fn scram_sha512_does_not_fall_back_to_token() {
             let dir = TempDir::new().unwrap();
@@ -2005,7 +2025,7 @@ mod tests {
             controller.cancel().await;
         }
 
-        /// Regular SCRAM (non-token) preserves the existing semantics:
+        /// Regular SCRAM, without a token, keeps
         /// `Authenticated.authenticated_via_token = false` and
         /// `expires_at_ms = None`.
         #[tokio::test]

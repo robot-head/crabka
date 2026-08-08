@@ -1,9 +1,11 @@
-//! KIP-923 stream–table join grace processor. Buffers each stream record into a
-//! `JoinGraceBufferStore`, advances `observed_stream_time`, then drains every
-//! buffered record with `bufTs <= streamTime - grace` in ascending `(ts, seq)`
-//! order — performing the versioned as-of join (`get_as_of(key, bufTs)`) at drain
-//! time and forwarding at `bufTs`. A record already late on arrival drains in the
-//! same pass. Inner skips on miss; left passes `None`.
+//! KIP-923 stream-table join grace processor.
+//!
+//! The processor buffers each stream record into a `JoinGraceBufferStore` and
+//! advances `observed_stream_time`. It then drains every buffered record with
+//! `bufTs <= streamTime - grace` in ascending `(ts, seq)` order. At drain time it
+//! does the versioned as-of join `get_as_of(key, bufTs)` and forwards at `bufTs`.
+//! A record that is already late on arrival drains in the same pass. An inner
+//! join skips on a miss, and a left join passes `None`.
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
@@ -17,18 +19,20 @@ use crate::processor::{
 /// Variance-neutral marker for multi-param processor structs.
 type Marker<T> = PhantomData<fn() -> T>;
 
-/// Stream–table join grace-flush processor (KIP-923).
+/// Stream-table join grace-flush processor (KIP-923).
 ///
-/// Each incoming stream record is appended to the named [`JoinGraceBufferStore`]
-/// rather than joined immediately, and `observed_stream_time` is advanced to the
-/// max record timestamp seen. The processor then drains every buffered record
-/// whose timestamp is `<= observed_stream_time - grace` — in ascending
-/// `(ts, seq)` order — and joins each one against the versioned table *as of its
-/// own buffer timestamp*, forwarding at that timestamp. A record that is already
+/// The processor appends each incoming stream record to the named
+/// [`JoinGraceBufferStore`] and does not join it immediately. It advances
+/// `observed_stream_time` to the maximum record timestamp it has seen. It then
+/// drains every buffered record whose timestamp is
+/// `<= observed_stream_time - grace`, in ascending `(ts, seq)` order. It joins
+/// each drained record against the versioned table *as of that record's own
+/// buffer timestamp* and forwards at that timestamp. A record that is already
 /// past the grace horizon on arrival drains in the same `process` call.
 ///
-/// `emit_on_miss = false` is an inner join (skip on a null as-of result);
-/// `emit_on_miss = true` is a left join (the joiner receives `None`).
+/// `emit_on_miss = false` is an inner join, and the processor skips on a null
+/// as-of result. `emit_on_miss = true` is a left join, and the joiner receives
+/// `None`.
 ///
 /// [`JoinGraceBufferStore`]: crate::store::join_grace_buffer::JoinGraceBufferStore
 pub(crate) struct KStreamKTableJoinGraceProcessor<K, V, VT, VO, F> {
@@ -103,7 +107,7 @@ mod tests {
         },
     };
 
-    /// Registry holding BOTH stores the grace processor reads:
+    /// Registry that holds BOTH stores the grace processor reads:
     /// - versioned table "vt": `(a, 10)@100`, `(a, 20)@200`.
     /// - empty grace buffer "buf".
     async fn make_stores() -> StoreRegistry {
@@ -132,7 +136,7 @@ mod tests {
     }
 
     /// Drive one `(key, value)@ts` record through `proc` against the shared
-    /// `stores`, returning every forwarded `(value, ts)` from THIS call.
+    /// `stores`. Returns every forwarded `(value, ts)` from THIS call.
     async fn run_one(
         proc: &mut KStreamKTableJoinGraceProcessor<
             String,

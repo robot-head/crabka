@@ -19,8 +19,9 @@ fn encode(err: &PgError) -> BytesMut {
     out
 }
 
-/// Split an encoded `ErrorResponse` into its `(field type, value)` pairs,
-/// verifying the frame's self-inclusive length prefix on the way through.
+/// Split an encoded `ErrorResponse` into its `(field type, value)` pairs.
+///
+/// This helper also verifies the frame's self-inclusive length prefix.
 fn decode_error_response(frame: &[u8]) -> Vec<(u8, String)> {
     assert!(frame[0] == b'E');
     let len = i32::from_be_bytes(frame[1..5].try_into().expect("four length bytes"));

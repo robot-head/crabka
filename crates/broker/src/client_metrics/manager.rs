@@ -1,7 +1,9 @@
-//! Per-broker KIP-714 client-metrics state: instance registry, subscription
-//! matching, stable subscription-id computation, and push throttling. All
-//! state is in-memory (KIP-714 is per-broker — a client pins telemetry to
-//! one broker, so no raft replication is needed).
+//! Per-broker KIP-714 client-metrics state: the instance registry,
+//! subscription matching, stable subscription-id computation, and push
+//! throttling.
+//!
+//! All state is in memory. KIP-714 is per-broker, because a client pins its
+//! telemetry to one broker, so this state needs no raft replication.
 
 use std::{
     collections::HashMap,
@@ -29,8 +31,8 @@ pub(crate) struct ClientAttributes {
     pub source_port: u16,
 }
 
-/// The metric prefixes + push interval a client should use, after unioning
-/// every matched subscription.
+/// The metric prefixes and the push interval that a client must use, after
+/// the union of every matched subscription.
 #[derive(Debug, Clone)]
 pub(crate) struct ComputedSubscription {
     pub metrics: Vec<String>,
@@ -71,8 +73,9 @@ pub(crate) struct ClientMetricsManager {
     telemetry_max: ByteSize,
 }
 
-/// Compression codecs the broker advertises, in Kafka's fixed order:
-/// ZSTD(4), LZ4(3), GZIP(1), SNAPPY(2). NONE is intentionally not advertised.
+/// Compression codecs that the broker advertises, in Kafka's fixed order:
+/// ZSTD(4), LZ4(3), GZIP(1), and SNAPPY(2). The broker deliberately does not
+/// advertise NONE.
 pub(crate) const ACCEPTED_COMPRESSION_TYPES: [i8; 4] = [4, 3, 1, 2];
 
 impl ClientMetricsManager {
@@ -213,7 +216,8 @@ impl ClientMetricsManager {
         PushDecision::Accept { metrics }
     }
 
-    /// Drop instances idle beyond `max(interval * factor, floor)`.
+    /// Drops an instance that has been idle for longer than
+    /// `max(interval * factor, floor)`.
     pub(crate) fn evict_stale(&self, factor: u32, floor: Duration) {
         let now = Instant::now();
         let mut guard = self
@@ -297,10 +301,12 @@ fn selector_matches(rule: &config::MatchRule, attrs: &ClientAttributes) -> bool 
         .is_some_and(|m| m.start() == 0 && m.end() == target.len())
 }
 
-/// Stable, change-sensitive subscription id. CRC32C over a canonical
-/// (sorted) rendering of the metric set + push interval, XOR-ed with the
-/// instance-id hash. Self-consistent across re-fetch; not byte-identical to
-/// the JVM broker (which is not required).
+/// Stable, change-sensitive subscription id.
+///
+/// It is the CRC32C over a canonical, sorted rendering of the metric set and
+/// the push interval, XOR-ed with the instance-id hash. It stays consistent
+/// across a re-fetch. It is not byte-identical to the JVM broker's id, and it
+/// does not need to be.
 pub(crate) fn subscription_id(sub: &ComputedSubscription, client_instance_id: Uuid) -> i32 {
     let mut sorted = sub.metrics.clone();
     sorted.sort();
@@ -311,7 +317,7 @@ pub(crate) fn subscription_id(sub: &ComputedSubscription, client_instance_id: Uu
     crc ^ uuid_hashcode(client_instance_id)
 }
 
-/// Reproduces `java.util.UUID.hashCode()` for parity of shape.
+/// Reproduces `java.util.UUID.hashCode()`, so the shape matches.
 fn uuid_hashcode(id: Uuid) -> i32 {
     let bytes = id.as_bytes();
     let msb = i64::from_be_bytes(bytes[0..8].try_into().unwrap());

@@ -64,8 +64,10 @@ impl Default for RecordBatch {
 }
 
 impl Record {
-    /// Encode a single record (varlong length prefix + fields) into `buf`.
+    /// Encode a single record into `buf` as a varlong length prefix and fields.
+    ///
     /// # Errors
+    ///
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
         let body_len = self.body_len();
@@ -77,8 +79,10 @@ impl Record {
         self.encode_body(buf)
     }
 
-    /// Predicted total length of this record on the wire (length-prefix + body).
+    /// Predicted total length of this record on the wire, length-prefix plus body.
+    ///
     /// # Panics
+    ///
     /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
     pub fn encoded_len(&self) -> usize {
         let body = self.body_len();
@@ -167,9 +171,12 @@ impl Record {
         Ok(())
     }
 
-    /// Decode a single record. `buf` must be positioned at the record's
-    /// varlong length prefix.
+    /// Decode a single record.
+    ///
+    /// `buf` must be positioned at the record's varlong length prefix.
+    ///
     /// # Errors
+    ///
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, RecordsError> {
         let body_len = get_varlong(buf)
@@ -408,7 +415,8 @@ mod record_tests {
 
 impl RecordBatch {
     /// KIP-534 delete horizon, if the delete-horizon attribute bit is set.
-    /// `base_timestamp` is repurposed to carry it (no separate wire field).
+    ///
+    /// `base_timestamp` carries the horizon. There is no separate wire field.
     #[must_use]
     pub fn delete_horizon_ms(&self) -> Option<i64> {
         self.attributes
@@ -416,10 +424,11 @@ impl RecordBatch {
             .then_some(self.base_timestamp)
     }
 
-    /// Stamp the delete horizon: set bit 6, move the horizon into
-    /// `base_timestamp`, and rewrite every record's `timestamp_delta` so
-    /// reconstructed absolute timestamps (`base_timestamp + delta`) are
-    /// unchanged.
+    /// Stamp the delete horizon onto this batch.
+    ///
+    /// This method sets bit 6 and moves the horizon into `base_timestamp`. It
+    /// then rewrites every record's `timestamp_delta`, so the reconstructed
+    /// absolute timestamps `base_timestamp + delta` do not change.
     #[must_use]
     pub fn with_delete_horizon(mut self, horizon_ms: i64) -> Self {
         let old_base = self.base_timestamp;
@@ -436,11 +445,16 @@ impl RecordBatch {
         self
     }
 
-    /// Decode a complete v2 record batch from `buf`. Reads from the start of
-    /// the header.
+    /// Decode a complete v2 record batch from `buf`.
+    ///
+    /// This method reads from the start of the header.
+    ///
     /// # Errors
+    ///
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+    ///
     /// # Panics
+    ///
     /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, RecordsError> {
         Self::decode_with_policy(buf, RecordDecompressionPolicy::default())
@@ -590,7 +604,9 @@ impl RecordBatch {
     }
 
     /// Encode this batch into `buf`.
+    ///
     /// # Errors
+    ///
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
         const HEADER_TAIL_LEN: i32 = 49;
@@ -646,8 +662,9 @@ impl RecordBatch {
         Ok(())
     }
 
-    /// Predicted total bytes that `encode` will write (uncompressed; for
-    /// compressed batches the actual size will differ).
+    /// Predicted total bytes that `encode` will write, for an uncompressed batch.
+    ///
+    /// For a compressed batch, the actual size will differ.
     pub fn encoded_len(&self) -> usize {
         let body: usize = self.records.iter().map(Record::encoded_len).sum();
         HEADER_LEN + body

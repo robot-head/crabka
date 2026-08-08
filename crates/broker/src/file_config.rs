@@ -1,9 +1,9 @@
 //! TOML file-config surface for the `crabka-broker` binary.
 //!
-//! Deserialized by `--config-file PATH` in `bin/broker.rs` and merged
-//! into [`crate::BrokerConfig`]. Only `[[listeners]]`,
-//! `inter_broker_listener_name`, and (passively) `[server_properties]`
-//! are consumed; other top-level keys are accepted but ignored.
+//! `--config-file PATH` in `bin/broker.rs` deserializes this file and merges
+//! it into [`crate::BrokerConfig`]. The broker reads only `[[listeners]]`,
+//! `inter_broker_listener_name`, and, passively, `[server_properties]`. It
+//! accepts other top-level keys but ignores them.
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -18,43 +18,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ListenerSpec;
 
-/// Failures surfaced by [`FileConfig::apply_to`]. Each variant
-/// corresponds to a specific misconfiguration the broker can diagnose
-/// at startup; the variants exist (rather than a single `String`
-/// fallthrough) so the binary entry point can log structured context.
+/// Failures that [`FileConfig::apply_to`] returns.
+///
+/// Each variant is one misconfiguration that the broker can diagnose at
+/// startup. The variants exist instead of a single `String` fallthrough so
+/// that the binary entry point can log structured context.
 #[derive(Debug, thiserror::Error)]
 pub enum FileConfigError {
-    /// A `[section]` referenced by another field is missing — e.g.
+    /// Another field refers to a `[section]` that is missing. For example,
     /// `[authorization] type = "opa"` without an `[authorization.opa]`
     /// table. The payload names the missing section.
     #[error("missing required TOML section: {0}")]
     MissingSection(String),
-    /// `OpaAuthorizer::new` failed (see [`crate::authorizer::opa::OpaConfigError`]).
-    /// The payload is the underlying error's `Debug` form — formatted
-    /// here rather than at the call site so the binary entry point can
-    /// log a single string.
+    /// `OpaAuthorizer::new` failed. See
+    /// [`crate::authorizer::opa::OpaConfigError`]. The payload is the
+    /// underlying error's `Debug` form. This variant formats it here rather
+    /// than at the call site so that the binary entry point can log a single
+    /// string.
     #[error("OPA authorizer configuration error: {0}")]
     OpaConfig(String),
-    /// A TOML section's contents conflict in a way only the apply step
-    /// can diagnose — e.g. `[remote_storage]` carrying both `storage_dir`
+    /// A TOML section's contents conflict in a way that only the apply step
+    /// can diagnose. For example, `[remote_storage]` holds both `storage_dir`
     /// (local backend) and `[remote_storage.s3]` (object-store backend).
     #[error("invalid config: {0}")]
     InvalidConfig(String),
     /// A `controller_quorum_voters` entry is malformed (no `@`, non-numeric
-    /// node id) or its `<host>:<port>` could not be DNS-resolved within the
-    /// startup retry budget. The payload is the offending entry plus the
-    /// underlying reason.
+    /// node id), or DNS did not resolve its `<host>:<port>` within the startup
+    /// retry budget. The payload is the bad entry and the underlying reason.
     #[error("invalid controller_quorum_voters entry: {0}")]
     InvalidQuorumVoter(String),
 }
 
-/// Top-level shape of `broker.toml`. `serde(deny_unknown_fields)` is
-/// off — new fields may be added and old binaries should warn rather
-/// than refuse to start.
+/// Top-level shape of `broker.toml`.
+///
+/// `serde(deny_unknown_fields)` is off. New fields can be added, and old
+/// binaries should warn rather than refuse to start.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 pub struct FileConfig {
-    /// Operational runtime policy. Present values replace the current broker
-    /// value; absent values retain it.
+    /// Operational runtime policy. A present value replaces the current
+    /// broker value. An absent value keeps it.
     #[serde(default)]
     pub runtime: Option<RuntimeFileConfig>,
     pub broker_id: Option<i32>,
@@ -97,9 +99,10 @@ pub struct FileConfig {
     pub inter_broker_listener_name: Option<String>,
 
     /// Maximum number of live broker connections across all listeners
-    /// (Kafka `max.connections`). Connections accepted past this ceiling
-    /// are closed immediately. Absent leaves the `BrokerConfig` default
-    /// `usize::MAX` (unlimited), matching Kafka's `Integer.MAX_VALUE`.
+    /// (Kafka `max.connections`). The broker closes a connection immediately
+    /// when it arrives past this ceiling. Absent leaves the `BrokerConfig`
+    /// default `usize::MAX` (unlimited), which matches Kafka's
+    /// `Integer.MAX_VALUE`.
     #[serde(default)]
     pub max_connections: Option<usize>,
 
@@ -109,25 +112,29 @@ pub struct FileConfig {
     #[serde(default)]
     pub max_connections_per_ip: Option<usize>,
 
-    /// KIP-595 static controller quorum voter set. Each entry is
-    /// `<node_id>@<host>:<port>` pointing at a broker's controller listener
-    /// (port 9093). At apply time each entry is parsed (NOT DNS-resolved) and
-    /// its `<host>:<port>` is carried verbatim into
-    /// `BrokerConfig::controller_quorum_voters`. The inter-broker dialer
-    /// re-resolves the host on every (re)connect (`TcpStream::connect`), so a
-    /// peer that restarts on a new pod IP (a `StatefulSet` pod keeps its stable
-    /// DNS name but gets a fresh A record) is reached again without restarting
-    /// this broker — pre-resolving here would freeze the peer's boot-time IP
-    /// and strand a rejoining voter. Empty leaves the single self-voter the
-    /// binary seeds (standalone).
+    /// KIP-595 static controller quorum voter set.
+    ///
+    /// Each entry is `<node_id>@<host>:<port>` and points at a broker's
+    /// controller listener (port 9093). At apply time the broker parses each
+    /// entry but does NOT DNS-resolve it, and carries its `<host>:<port>`
+    /// verbatim into `BrokerConfig::controller_quorum_voters`. Empty leaves
+    /// the single self-voter that the binary seeds (standalone).
+    ///
+    /// The inter-broker dialer re-resolves the host on every (re)connect
+    /// (`TcpStream::connect`). A peer that restarts on a new pod IP is reached
+    /// again without a restart of this broker, because a `StatefulSet` pod
+    /// keeps its stable DNS name but gets a fresh A record. Pre-resolution
+    /// here would freeze the peer's boot-time IP and strand a rejoining
+    /// voter.
     #[serde(default)]
     pub controller_quorum_voters: Vec<String>,
 
-    /// TLS server name (SNI) presented when dialing a PEER's controller
-    /// listener for the KIP-595 quorum. The operator renders the shared
-    /// headless-Service FQDN here — a SAN on every broker's serving cert —
-    /// so mTLS validation succeeds no matter which peer (resolved to a pod
-    /// IP) is dialed. Absent falls back to `"localhost"`. Maps to
+    /// TLS server name (SNI) that the broker presents when it dials a PEER's
+    /// controller listener for the KIP-595 quorum. The operator writes the
+    /// shared headless-Service FQDN here. That name is a SAN on every
+    /// broker's serving cert, so mTLS validation succeeds whichever peer the
+    /// broker dials, and whichever pod IP that peer resolves to. Absent falls
+    /// back to `"localhost"`. Maps to
     /// [`crate::BrokerConfig::controller_server_name`].
     #[serde(default)]
     pub controller_server_name: Option<String>,
@@ -160,48 +167,49 @@ pub struct FileConfig {
     #[serde(default)]
     pub delegation_token: Option<FileDelegationTokenConfig>,
 
-    /// Principals that are unconditionally authorized for
-    /// all operations, including KIP-48 delegation-token `act-as`. The
-    /// operator emits `super_users = ["ANONYMOUS"]` when
-    /// `Kafka.spec.delegationToken` is set so its PLAINTEXT
-    /// inter-broker reconcile loop can mint per-`KafkaUser` tokens.
-    /// `None` and `Some(empty)` are equivalent — both leave
-    /// `BrokerConfig.super_users` empty.
+    /// Principals that are authorized for all operations without conditions,
+    /// including KIP-48 delegation-token `act-as`. The operator emits
+    /// `super_users = ["ANONYMOUS"]` when `Kafka.spec.delegationToken` is set,
+    /// so that its PLAINTEXT inter-broker reconcile loop can create
+    /// per-`KafkaUser` tokens. `None` and `Some(empty)` are equivalent. Both
+    /// leave `BrokerConfig.super_users` empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub super_users: Option<Vec<String>>,
 
-    /// KIP-405: tiered-storage enablement. Setting
-    /// `storage_dir` turns tiered storage on broker-wide and roots the
-    /// local reference `RemoteStorageManager` there.
+    /// KIP-405: tiered-storage enablement. A `storage_dir` value turns
+    /// tiered storage on broker-wide and roots the local reference
+    /// `RemoteStorageManager` at that directory.
     #[serde(default)]
     pub remote_storage: Option<FileRemoteStorageConfig>,
 
-    /// Pluggable cluster authorizer + super-user list.
-    /// `None` ⇒ [`crate::authorizer::AllowAllAuthorizer`] with empty
-    /// super-users (default-on-no-config behavior). When `Some`, the
-    /// `type` field selects the authorizer implementation; for
-    /// `type = "opa"`, the `[authorization.opa]` subtable is required.
+    /// Pluggable cluster authorizer and super-user list.
+    ///
+    /// `None` selects [`crate::authorizer::AllowAllAuthorizer`] with empty
+    /// super-users (default-on-no-config behavior). When `Some`, the `type`
+    /// field selects the authorizer implementation. `type = "opa"` needs the
+    /// `[authorization.opa]` subtable.
     #[serde(default)]
     pub authorization: Option<FileAuthorizationConfig>,
 
-    /// `[process]` section — `KRaft` `process.roles`. Absent / empty leaves
-    /// the `BrokerConfig` default `[Controller, Broker]`.
+    /// `[process]` section, which carries `KRaft` `process.roles`. Absent or
+    /// empty leaves the `BrokerConfig` default `[Controller, Broker]`.
     #[serde(default)]
     pub process: Option<FileProcessConfig>,
 
-    /// SASL/GSSAPI (Kerberos) accept-path config. Broker-global —
-    /// there is one `[gssapi]` block per broker. Relevant when a listener
-    /// enables the `GSSAPI` mechanism.
+    /// SASL/GSSAPI (Kerberos) accept-path config. This config is
+    /// broker-global: there is one `[gssapi]` block per broker. It applies
+    /// when a listener enables the `GSSAPI` mechanism.
     #[serde(default)]
     pub gssapi: Option<FileGssapiConfig>,
 
     /// Credentials this broker uses to authenticate *to* peer brokers
-    /// (inter-broker initiate path). Only the `gssapi` variant is supported.
+    /// (inter-broker initiate path). The broker supports only the `gssapi`
+    /// variant.
     #[serde(default)]
     pub inter_broker_credentials: Option<FileInterBrokerCredentials>,
 
-    /// `FedRAMP` 20x MLA audit subsystem configuration.
-    /// Absent → secure default (enabled, standard internal topic name).
+    /// `FedRAMP` 20x MLA audit subsystem configuration. Absent selects the
+    /// secure default: enabled, with the standard internal topic name.
     #[serde(default)]
     pub audit: Option<FileAuditConfig>,
 }
@@ -544,9 +552,9 @@ pub struct RuntimeFileConfig {
 /// TOML shape of `[remote_storage]`. Maps to
 /// [`crate::BrokerConfig::remote_storage_backend`].
 ///
-/// Exactly one of `storage_dir` (local filesystem), `[remote_storage.s3]`
+/// Set exactly one of `storage_dir` (local filesystem), `[remote_storage.s3]`
 /// (S3-compatible object store), or `[remote_storage.gcs]` (native Google
-/// Cloud Storage) should be set. Setting more than one errors at load time.
+/// Cloud Storage). More than one is an error at load time.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileRemoteStorageConfig {
@@ -567,8 +575,8 @@ pub struct FileRemoteStorageConfig {
 #[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileKafkaRlmmConfig {
-    /// `host:port` the manager dials to reach its own broker.
-    /// May be empty; the broker derives the address from the inter-broker
+    /// `host:port` the manager dials to reach its own broker. This value can
+    /// be empty. The broker then derives the address from the inter-broker
     /// listener at startup.
     #[serde(default)]
     pub bootstrap: String,
@@ -607,7 +615,8 @@ pub struct FileKafkaRlmmConfig {
     #[schemars(with = "Option<String>")]
     pub snapshot_interval: Option<Time>,
     /// Explicit opt-out: run the non-durable in-memory RLMM instead of the
-    /// topic-backed default. Tests / single-node dev only.
+    /// topic-backed default. Use this for tests and single-node development
+    /// only.
     #[serde(default)]
     pub in_memory: bool,
 }
@@ -625,7 +634,7 @@ pub struct FileRemoteStorageS3Config {
     /// share a bucket).
     #[serde(default)]
     pub prefix: Option<String>,
-    /// Optional custom endpoint URL (e.g. `MinIO` or Cloudflare R2).
+    /// Optional custom endpoint URL, for example `MinIO` or Cloudflare R2.
     #[serde(default)]
     pub endpoint: Option<String>,
     /// Explicit access key id. Falls back to the AWS credential chain
@@ -636,20 +645,20 @@ pub struct FileRemoteStorageS3Config {
     /// when omitted.
     #[serde(default)]
     pub secret_access_key: Option<String>,
-    /// Allow plaintext HTTP (off-by-default; required by `MinIO` running
-    /// without TLS).
+    /// Allow plaintext HTTP. Off by default. `MinIO` needs this when it runs
+    /// without TLS.
     #[serde(default)]
     pub allow_http: bool,
     /// Optional override of the multipart-upload threshold (bytes). When
     /// `None`, [`crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`]
-    /// applies. Operators typically leave this alone; lower it to force
-    /// multipart on smaller segments for testing.
+    /// applies. Operators usually do not change this. Lower it to force
+    /// multipart on smaller segments in tests.
     #[serde(default)]
     pub multipart_threshold: Option<u64>,
     /// Optional override of the per-part multipart chunk size (bytes).
     /// When `None`, [`crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE`]
-    /// applies. AWS requires parts ≥ 5 MiB except the last; `MinIO`
-    /// tolerates smaller values.
+    /// applies. AWS needs parts of 5 MiB or more, except the last one.
+    /// `MinIO` accepts smaller values.
     #[serde(default)]
     pub multipart_chunk_size: Option<usize>,
 }
@@ -677,10 +686,10 @@ impl std::fmt::Debug for FileRemoteStorageS3Config {
 /// TOML shape of `[remote_storage.gcs]`. Maps to
 /// [`crabka_remote_storage::GcsConfig`].
 ///
-/// Omitting all credential fields (`service_account_path`,
-/// `service_account_key`, `application_credentials_path`) selects GKE
-/// Workload Identity / Application Default Credentials (keyless) — the
-/// primary production path.
+/// When all three credential fields (`service_account_path`,
+/// `service_account_key`, `application_credentials_path`) are absent, this
+/// config selects GKE Workload Identity / Application Default Credentials
+/// (keyless). That is the primary production path.
 #[derive(Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileRemoteStorageGcsConfig {
@@ -705,14 +714,14 @@ pub struct FileRemoteStorageGcsConfig {
     /// Optional custom GCS API base URL (for emulators / fakes).
     #[serde(default)]
     pub endpoint: Option<String>,
-    /// Allow plaintext HTTP (off-by-default; required by emulators
-    /// running without TLS).
+    /// Allow plaintext HTTP. Off by default. Emulators need this when they
+    /// run without TLS.
     #[serde(default)]
     pub allow_http: bool,
     /// Optional override of the multipart-upload threshold (bytes). When
     /// `None`, [`crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`]
-    /// applies. Operators typically leave this alone; lower it to force
-    /// multipart on smaller segments for testing.
+    /// applies. Operators usually do not change this. Lower it to force
+    /// multipart on smaller segments in tests.
     #[serde(default)]
     pub multipart_threshold: Option<u64>,
     /// Optional override of the per-part multipart chunk size (bytes).
@@ -745,14 +754,15 @@ impl std::fmt::Debug for FileRemoteStorageGcsConfig {
     }
 }
 
-/// TOML shape of `[authorization]`. `type` (renamed to `authz_type` on
-/// the Rust side to avoid shadowing the keyword) defaults to
-/// `AllowAll`; `super_users` is the principal bypass list consulted by
-/// every concrete authorizer impl.
+/// TOML shape of `[authorization]`.
 ///
-/// `deny_unknown_fields` so a misspelled `super_user` typo at the top
-/// of the `[authorization]` block is rejected at parse time rather
-/// than silently producing the wrong authorizer.
+/// `type` defaults to `AllowAll`. It is named `authz_type` on the Rust side
+/// to avoid the keyword. Every concrete authorizer impl reads `super_users`,
+/// the principal bypass list.
+///
+/// This struct sets `deny_unknown_fields` so that serde rejects a misspelled
+/// `super_user` at the top of the `[authorization]` block at parse time,
+/// rather than build the wrong authorizer without a message.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileAuthorizationConfig {
@@ -760,16 +770,16 @@ pub struct FileAuthorizationConfig {
     pub authz_type: AuthzType,
     #[serde(default)]
     pub super_users: Vec<String>,
-    /// `Some` iff `authz_type == Opa`. Required in that case;
-    /// `apply_to` returns [`FileConfigError::MissingSection`] when
-    /// omitted.
+    /// `Some` if and only if `authz_type == Opa`. This field is required in
+    /// that case. `apply_to` returns [`FileConfigError::MissingSection`] when
+    /// it is absent.
     #[serde(default)]
     pub opa: Option<FileOpaConfig>,
 }
 
-/// Which [`crate::authorizer::Authorizer`] impl to instantiate.
-/// `snake_case` to match the spec's `type = "allow_all" | "simple" |
-/// "opa"` wire shape.
+/// Which [`crate::authorizer::Authorizer`] impl to build. This enum uses
+/// `snake_case` to match the spec's `type = "allow_all" | "simple" | "opa"`
+/// wire shape.
 #[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthzType {
@@ -779,21 +789,22 @@ pub enum AuthzType {
     Opa,
 }
 
-/// TOML shape of `[authorization.opa]`. Mirrors the constructor
-/// arguments of [`crate::authorizer::opa::OpaAuthorizer::new`]. Defaults
-/// are picked to match Strimzi's `KafkaAuthorizationOpa` (`50_000` LRU
-/// entries, 1 h TTL, fail-closed on OPA error).
+/// TOML shape of `[authorization.opa]`. This struct mirrors the constructor
+/// arguments of [`crate::authorizer::opa::OpaAuthorizer::new`]. The defaults
+/// match Strimzi's `KafkaAuthorizationOpa`: `50_000` LRU entries, 1 h TTL, and
+/// fail-closed on OPA error.
 #[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileOpaConfig {
-    /// OPA decision endpoint URL — must include the data-API path,
-    /// e.g. `http://opa:8181/v1/data/kafka/authz/allow`.
+    /// OPA decision endpoint URL. The URL must include the data-API path,
+    /// for example `http://opa:8181/v1/data/kafka/authz/allow`.
     pub url: String,
     /// **Security-sensitive.** Permit the operation when the OPA call
     /// fails (timeout, 5xx, parse error). When `true`, an OPA outage
     /// authorizes *every* request (fail-open). Default `false`
-    /// (fail-closed) — omitting this field denies on error, matching the
-    /// upstream Open Policy Agent Kafka plugin's `allow.on.error = false`.
+    /// (fail-closed). An absent field therefore denies on error, which
+    /// matches the upstream Open Policy Agent Kafka plugin's
+    /// `allow.on.error = false`.
     #[serde(default)]
     pub allow_on_error: bool,
     /// LRU cache capacity, in entries. Default `50_000`.
@@ -825,22 +836,22 @@ fn default_opa_expire_after_ms() -> i64 {
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileDelegationTokenConfig {
-    /// HMAC master key. Overridden by `CRABKA_DELEGATION_TOKEN_SECRET_KEY`
-    /// when set. Bytes are wrapped in
-    /// [`crabka_security::SecretBytes`] before reaching `BrokerConfig`.
+    /// HMAC master key. `CRABKA_DELEGATION_TOKEN_SECRET_KEY` overrides this
+    /// value when that variable is set. The broker wraps the bytes in
+    /// [`crabka_security::SecretBytes`] before they reach `BrokerConfig`.
     pub secret_key: Option<String>,
     /// Hard upper bound on token lifetime, ms. Default 7 days.
     pub max_lifetime_ms: Option<i64>,
     /// Background sweep cadence, ms. Default 1 hour.
     pub expiry_check_interval_ms: Option<i64>,
-    /// Default renew period — the initial `expiry_timestamp_ms` offset
-    /// at create time and the implicit renew period when
-    /// `RenewDelegationToken.renew_period_ms == -1`. Distinct from
-    /// `max_lifetime_ms` (the absolute ceiling). Default 24 hours.
+    /// Default renew period. It is the initial `expiry_timestamp_ms` offset
+    /// at create time, and the implicit renew period when
+    /// `RenewDelegationToken.renew_period_ms == -1`. It is not the same as
+    /// `max_lifetime_ms`, the absolute ceiling. Default 24 hours.
     pub default_renew_period_ms: Option<i64>,
 }
 
-/// `[process]` TOML section — `KRaft` `process.roles`.
+/// `[process]` TOML section, which carries `KRaft` `process.roles`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileProcessConfig {
@@ -851,28 +862,29 @@ pub struct FileProcessConfig {
 }
 
 /// TOML shape of `[oauthbearer]`. Maps to
-/// [`crabka_security::OAuthBearerValidator`]. Setting `jwks_endpoint_uri`
-/// selects the signed-JWT validator; setting
-/// `introspection_endpoint_uri` selects the RFC 7662 introspection
-/// validator; the two endpoint URIs are mutually
-/// exclusive. With neither set, the unsecured-JWS validator
-/// (development only) is used.
+/// [`crabka_security::OAuthBearerValidator`].
+///
+/// A `jwks_endpoint_uri` value selects the signed-JWT validator. An
+/// `introspection_endpoint_uri` value selects the RFC 7662 introspection
+/// validator. The two endpoint URIs are mutually exclusive. With neither set,
+/// the broker uses the unsecured-JWS validator, which is for development
+/// only.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 pub struct FileOAuthBearerConfig {
     /// Claim whose value becomes the principal name. Default `sub`.
     #[serde(default)]
     pub principal_claim_name: Option<String>,
-    /// Optional `JsonPath` expression (RFC 9535, via
-    /// jsonpath-rust) evaluated against the token claim set. Token is
-    /// rejected when the expression yields empty/null/false. Compiled
-    /// once at broker startup; malformed expressions panic with a
-    /// descriptive error.
+    /// Optional `JsonPath` expression (RFC 9535, through jsonpath-rust) that
+    /// the validator evaluates against the token claim set. The validator
+    /// rejects the token when the expression gives empty, null, or false. The
+    /// broker compiles the expression once at startup. A malformed expression
+    /// panics with a descriptive error.
     #[serde(default)]
     pub custom_claim_check: Option<String>,
-    /// Optional JWT `typ` header check. When set, JWT-mode
-    /// validators (unsecured + signed JWS) require the JWT header's
-    /// `typ` field to equal this string. Introspection-mode skips
-    /// (no JWT header). Ignored when unset.
+    /// Optional JWT `typ` header check. When set, the JWT-mode validators
+    /// (unsecured and signed JWS) require the JWT header's `typ` field to
+    /// equal this string. Introspection mode skips the check, because there
+    /// is no JWT header. The validators ignore this field when it is unset.
     #[serde(default)]
     pub valid_token_type: Option<String>,
     /// Clock-skew tolerance, in milliseconds, for `exp` / `iat` / `nbf`.
@@ -880,10 +892,10 @@ pub struct FileOAuthBearerConfig {
     #[serde(default)]
     pub allowable_clock_skew_ms: Option<i64>,
 
-    /// JWKS endpoint URL. When set, tokens are validated as signed
-    /// JWTs (RS256 / ES256) against the keys fetched from this URL, and the
-    /// broker spawns a background refresher. When unset, the unsecured-JWS
-    /// (`alg:none`) development validator is used.
+    /// JWKS endpoint URL. When set, the broker validates tokens as signed
+    /// JWTs (RS256 / ES256) against the keys it fetches from this URL, and it
+    /// spawns a background refresher. When unset, the broker uses the
+    /// unsecured-JWS (`alg:none`) development validator.
     #[serde(default)]
     pub jwks_endpoint_uri: Option<String>,
     /// When set, the token `iss` claim must equal this. Signed
@@ -899,19 +911,18 @@ pub struct FileOAuthBearerConfig {
     #[serde(default)]
     pub jwks_refresh_interval_ms: Option<u64>,
 
-    /// PEM file containing the CA
-    /// certificate(s) used to verify the `IdP`'s TLS certificate on ALL
-    /// outbound HTTPS to the `IdP` — JWKS endpoint, introspection
-    /// endpoint, and userinfo endpoint. When set, these are
-    /// the *only* trust roots used for the outbound HTTPS (replaces the
-    /// default webpki-roots — Strimzi-shaped). When unset, the broker
-    /// uses reqwest's default rustls webpki-roots.
+    /// PEM file that holds the CA certificate(s) the broker uses to verify
+    /// the `IdP`'s TLS certificate on ALL outbound HTTPS to the `IdP`: the
+    /// JWKS endpoint, the introspection endpoint, and the userinfo endpoint.
+    /// When set, these are the *only* trust roots for that outbound HTTPS,
+    /// and they replace the default webpki-roots. This shape follows Strimzi.
+    /// When unset, the broker uses reqwest's default rustls webpki-roots.
     #[serde(default)]
     pub idp_tls_trust: Option<std::path::PathBuf>,
 
-    /// RFC 7662 introspection endpoint URL. When set,
-    /// selects the introspection validator (mutually exclusive with
-    /// `jwks_endpoint_uri`).
+    /// RFC 7662 introspection endpoint URL. When set, it selects the
+    /// introspection validator. It is mutually exclusive with
+    /// `jwks_endpoint_uri`.
     #[serde(default)]
     pub introspection_endpoint_uri: Option<String>,
 
@@ -923,18 +934,18 @@ pub struct FileOAuthBearerConfig {
     #[serde(default)]
     pub userinfo_endpoint_uri: Option<String>,
 
-    /// `client_id` the broker uses to authenticate (HTTP Basic
-    /// Auth) against the introspection endpoint. Required when
+    /// `client_id` the broker uses to authenticate (HTTP Basic Auth) against
+    /// the introspection endpoint. Required when
     /// `introspection_endpoint_uri` is set.
     #[serde(default)]
     pub introspection_client_id: Option<String>,
 
-    /// Filesystem path to a file containing the client
-    /// secret the broker uses to authenticate against the introspection
-    /// endpoint. Required when `introspection_endpoint_uri` is set.
-    /// File-based (not literal) so secret material doesn't sit in the
-    /// TOML; operator mounts a `Secret` and writes the mount path here.
-    /// The file's trailing newline (if any) is stripped at config-load.
+    /// Filesystem path to a file that holds the client secret the broker
+    /// uses to authenticate against the introspection endpoint. Required when
+    /// `introspection_endpoint_uri` is set. This field takes a path, not a
+    /// literal, so that secret material does not sit in the TOML. The
+    /// operator mounts a `Secret` and writes the mount path here. Config-load
+    /// strips the file's trailing newline if there is one.
     #[serde(default)]
     pub introspection_client_secret_path: Option<std::path::PathBuf>,
 
@@ -956,9 +967,9 @@ pub struct FileOAuthBearerConfig {
     /// Prepended on fallback only.
     #[serde(default)]
     pub fallback_user_name_prefix: Option<String>,
-    /// `JsonPath` expression (RFC 9535) extracting groups.
-    /// Compiled once at broker startup; malformed expression panics
-    /// with descriptive error.
+    /// `JsonPath` expression (RFC 9535) that extracts groups. The broker
+    /// compiles it once at startup. A malformed expression panics with a
+    /// descriptive error.
     #[serde(default)]
     pub groups_claim: Option<String>,
     /// When `groups_claim` resolves to a string, split on
@@ -966,23 +977,23 @@ pub struct FileOAuthBearerConfig {
     #[serde(default)]
     pub groups_claim_delimiter: Option<String>,
 
-    /// Minimum pause (seconds) between on-demand JWKS refreshes
-    /// triggered by validator signals (unknown-kid / bad-signature tokens).
+    /// Minimum pause (seconds) between on-demand JWKS refreshes. Validator
+    /// signals start those refreshes: unknown-kid and bad-signature tokens.
     /// Defaults to 1 (Strimzi parity). Signed validator only.
     #[serde(default)]
     pub jwks_min_refresh_pause_seconds: Option<u32>,
 
-    /// Maximum age (seconds) of the cached JWKS before validators
-    /// reject tokens until the next successful refresh. Strimzi default 360
-    /// (6 minutes). Unset = no expiry check. Fails
-    /// closed on prolonged `IdP` outage. Signed validator only.
+    /// Maximum age (seconds) of the cached JWKS. Past that age the
+    /// validators reject tokens until the next successful refresh. Strimzi
+    /// default 360 (6 minutes). Unset means no expiry check. This fails
+    /// closed on a long `IdP` outage. Signed validator only.
     #[serde(default)]
     pub jwks_expiry_seconds: Option<u32>,
 
-    /// When true, the JWKS parser keeps keys regardless of `use`
-    /// field. Default false (filter out `use=enc`). Some identity providers
-    /// publish signing keys with `use="enc"` by mistake; operators set this
-    /// to true to accept them. Signed validator only.
+    /// When true, the JWKS parser keeps keys whatever their `use` field
+    /// holds. Default false, which filters out `use=enc`. Some identity
+    /// providers publish signing keys with `use="enc"` by mistake. Operators
+    /// set this to true to accept them. Signed validator only.
     #[serde(default)]
     pub jwks_ignore_key_use: Option<bool>,
 }
@@ -998,8 +1009,8 @@ const DEFAULT_INTROSPECTION_HTTP_TIMEOUT: Time = secs(10);
 const DEFAULT_ALLOWABLE_CLOCK_SKEW: Time = secs(30);
 
 /// TOML shape of `[gssapi]`. Maps to
-/// [`crabka_security::gssapi::GssapiConfig`]. `principal_to_local_rules`
-/// are parsed into `name::Rule` at `apply_to` time.
+/// [`crabka_security::gssapi::GssapiConfig`]. `apply_to` parses
+/// `principal_to_local_rules` into `name::Rule`.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileGssapiConfig {
@@ -1013,8 +1024,8 @@ pub struct FileGssapiConfig {
     /// Default Kerberos realm, used for principals that omit their realm.
     #[serde(default)]
     pub realm: Option<String>,
-    /// KDC endpoint (e.g. `tcp://kdc:88`) that bypasses krb5.conf discovery;
-    /// falls back to krb5.conf when omitted.
+    /// KDC endpoint, for example `tcp://kdc:88`. It skips krb5.conf
+    /// discovery. When absent, the broker falls back to krb5.conf.
     #[serde(default)]
     pub kdc: Option<String>,
     /// Maximum tolerated difference between client and broker clocks.
@@ -1023,9 +1034,9 @@ pub struct FileGssapiConfig {
     pub max_time_skew: Option<Time>,
 }
 
-/// TOML shape of `[inter_broker_credentials]`. A `type` discriminator
-/// selects the variant; only `gssapi` is implemented (PLAIN/SCRAM
-/// inter-broker over TOML is intentionally not exposed).
+/// TOML shape of `[inter_broker_credentials]`. A `type` discriminator selects
+/// the variant. Only `gssapi` exists. PLAIN and SCRAM inter-broker over TOML
+/// are deliberately not exposed.
 #[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum FileInterBrokerCredentials {
@@ -1048,13 +1059,14 @@ pub struct FileAuditConfig {
     /// Internal topic name for audit records.
     #[serde(default = "default_audit_topic")]
     pub topic: String,
-    /// Ed25519 checkpoint signing key. `None` → chaining only, no checkpoints.
+    /// Ed25519 checkpoint signing key. `None` gives chaining only, with no
+    /// checkpoints.
     #[serde(default)]
     pub signing: Option<FileAuditSigningConfig>,
-    /// Checkpoint emission cadence. `None` → use defaults.
+    /// Checkpoint emission cadence. `None` uses the defaults.
     #[serde(default)]
     pub checkpoint: Option<FileAuditCheckpointConfig>,
-    /// Durable spool for the AU-5 degraded path. `None` → use defaults.
+    /// Durable spool for the AU-5 degraded path. `None` uses the defaults.
     #[serde(default)]
     pub spool: Option<FileAuditSpoolConfig>,
 }
@@ -1071,7 +1083,7 @@ impl Default for FileAuditConfig {
     }
 }
 
-/// `[audit.spool]` — durable spool for the AU-5 degraded path.
+/// `[audit.spool]`, the durable spool for the AU-5 degraded path.
 #[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileAuditSpoolConfig {
@@ -1098,7 +1110,7 @@ fn default_spool_max_bytes() -> u64 {
     crate::config::DEFAULT_AUDIT_SPOOL_MAX.bytes_u64()
 }
 
-/// `[audit.signing]` — Ed25519 checkpoint signing key.
+/// `[audit.signing]`, the Ed25519 checkpoint signing key.
 #[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileAuditSigningConfig {
@@ -1106,7 +1118,7 @@ pub struct FileAuditSigningConfig {
     pub key_id: String,
 }
 
-/// `[audit.checkpoint]` — checkpoint cadence.
+/// `[audit.checkpoint]`, the checkpoint cadence.
 #[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileAuditCheckpointConfig {
@@ -1147,10 +1159,10 @@ fn default_audit_topic() -> String {
 pub struct FileTlsConfig {
     pub cert_path: std::path::PathBuf,
     pub key_path: std::path::PathBuf,
-    /// PEM file of CA(s) this broker trusts when validating a PEER's server
-    /// cert as an outbound inter-broker / controller-quorum dialer. The
-    /// operator renders the cluster CA here so KIP-595 controller peers can
-    /// mutually authenticate over the controller listener. Maps to
+    /// PEM file of CA(s) this broker trusts when it validates a PEER's server
+    /// cert as an outbound inter-broker or controller-quorum dialer. The
+    /// operator writes the cluster CA here so that KIP-595 controller peers
+    /// can mutually authenticate over the controller listener. Maps to
     /// [`crabka_security::TlsConfig::trust_roots_path`].
     #[serde(default)]
     pub trust_roots_path: Option<std::path::PathBuf>,
@@ -1922,10 +1934,10 @@ macro_rules! set_runtime_time_millis {
 
 /// Assigns a `_ms` key into a [`std::time::Duration`] field.
 ///
-/// For the group-coordinator configs, which are still `Duration`-typed: two of
-/// the four (`StreamsGroupConfig`, `ShareCoordinatorConfig`) derive `Eq` and so
-/// cannot hold an `f64`-backed quantity, and keeping all four in one
-/// representation is what lets `BrokerConfig::validate` compare them uniformly.
+/// The group-coordinator configs are still `Duration`-typed. Two of the four
+/// (`StreamsGroupConfig`, `ShareCoordinatorConfig`) derive `Eq` and so cannot
+/// hold an `f64`-backed quantity. One shared representation for all four is
+/// what lets `BrokerConfig::validate` compare them uniformly.
 macro_rules! set_runtime_duration {
     ($runtime:ident, $field:ident, $target:expr) => {
         if let Some(value) = $runtime.$field {
@@ -1999,7 +2011,7 @@ macro_rules! set_runtime_plain {
 }
 
 impl RuntimeFileConfig {
-    /// Apply every present runtime value, validating scalar boundaries.
+    /// Applies every present runtime value and validates scalar boundaries.
     ///
     /// # Errors
     ///
@@ -2734,17 +2746,18 @@ impl RuntimeFileConfig {
 }
 
 impl FileConfig {
-    /// Apply this file-config to a `BrokerConfig`. Present `[runtime]` values
-    /// replace current runtime values; other file sections retain their
-    /// established fill-or-replace semantics.
+    /// Applies this file-config to a `BrokerConfig`.
     ///
-    /// The broker binary uses [`Self::apply_before_runtime_overlay`] and then
-    /// applies explicit CLI/environment values so those inputs win.
+    /// A present `[runtime]` value replaces the current runtime value. Other
+    /// file sections keep their established fill-or-replace semantics.
     ///
-    /// **Caller contract:** when `--config-file` is used, the caller
-    /// must NOT pass `--listen-addr` or `--advertised-listener`. The
-    /// binary entrypoint enforces this (see `bin/broker.rs`); this
-    /// method just merges what it's given.
+    /// The broker binary calls [`Self::apply_before_runtime_overlay`] and then
+    /// applies explicit CLI and environment values, so that those inputs win.
+    ///
+    /// **Caller contract:** with `--config-file`, the caller must NOT pass
+    /// `--listen-addr` or `--advertised-listener`. The binary entrypoint
+    /// enforces this (see `bin/broker.rs`). This method only merges what it
+    /// receives.
     // Linear config-load pipeline; each arm is its own validator construction —
     // extraction obscures the dispatch shape.
     //
@@ -2760,10 +2773,11 @@ impl FileConfig {
         self.apply_to_inner(cfg, true)
     }
 
-    /// Apply file values before a higher-precedence runtime overlay.
+    /// Applies file values before a higher-precedence runtime overlay.
     ///
-    /// Runtime relational validation is deferred until the caller applies the
-    /// final overlay and validates the resolved [`crate::config::BrokerConfig`].
+    /// This method defers runtime relational validation. The caller applies
+    /// the final overlay and then validates the resolved
+    /// [`crate::config::BrokerConfig`].
     ///
     /// # Errors
     ///
@@ -2900,14 +2914,16 @@ impl FileConfig {
         Ok(())
     }
 
-    /// Parse a single `controller_quorum_voters` entry of the form
-    /// `<node_id>@<host>:<port>` into `(NodeId, "<host>:<port>")`. The host is
-    /// **not** DNS-resolved — it is carried verbatim so the dialer can
-    /// re-resolve it on every (re)connect. Freezing a peer's boot-time IP here
-    /// would strand a `StatefulSet` peer that restarts on a new pod IP (its
-    /// stable DNS name still resolves, but to a different address). Only the
-    /// shape is validated: a numeric node id and a `<host>:<port>` with a
-    /// non-empty host and a numeric port.
+    /// Parses one `controller_quorum_voters` entry of the form
+    /// `<node_id>@<host>:<port>` into `(NodeId, "<host>:<port>")`.
+    ///
+    /// This function does **not** DNS-resolve the host. It carries the host
+    /// verbatim so that the dialer can re-resolve it on every (re)connect. A
+    /// frozen boot-time IP here would strand a `StatefulSet` peer that
+    /// restarts on a new pod IP, because its stable DNS name still resolves,
+    /// but to a different address. This function validates the shape only: a
+    /// numeric node id, and a `<host>:<port>` with a non-empty host and a
+    /// numeric port.
     ///
     /// # Errors
     ///
@@ -3071,9 +3087,9 @@ mod tests {
 
     use super::*;
 
-    /// Serializes any test that mutates process-wide env vars. Tests in
-    /// the same `cargo test` process run on multiple threads by default,
-    /// and `set_var`/`remove_var` are global side-effects.
+    /// Serializes any test that changes process-wide env vars. Tests in the
+    /// same `cargo test` process run on multiple threads by default, and
+    /// `set_var` and `remove_var` are global side effects.
     static ENV_LOCK_CELL: OnceLock<Mutex<()>> = OnceLock::new();
     fn env_lock() -> &'static Mutex<()> {
         ENV_LOCK_CELL.get_or_init(|| Mutex::new(()))
@@ -4880,11 +4896,11 @@ metadata_raft_fetch_max = "4MiB"
         assert!(cfg.metadata_raft_fetch_max.bytes() == 4 * 1024 * 1024);
     }
 
-    /// Every time and byte-size runtime key must survive the round trip
-    /// TOML quantity → wire integer unchanged. This is the
-    /// regression the `crabka-units` adoption exists to prevent: a mapping
-    /// that reads `30000` as 30 000 *seconds*, or writes a 30 s timeout back
-    /// as `30`, changes a Kafka wire field by three orders of magnitude.
+    /// Every time and byte-size runtime key must survive the round trip from
+    /// TOML quantity to wire integer unchanged. This is the regression that
+    /// the `crabka-units` adoption prevents. A mapping that reads `30000` as
+    /// 30 000 *seconds*, or writes a 30 s timeout back as `30`, changes a
+    /// Kafka wire field by three orders of magnitude.
     #[test]
     fn runtime_millisecond_and_byte_keys_round_trip_through_quantities() {
         let file: FileConfig = toml::from_str(

@@ -29,9 +29,9 @@ pub(crate) struct PlannerContext {
 pub(crate) struct PlannedSpanset {
     pub ctx: SessionContext,
     pub plan: LogicalPlan,
-    /// Span data inspected by the primary span scan (threaded to
-    /// `SearchResponse::inspected`). Nested structural-join tables re-scan the
-    /// same blocks, so only the primary scan is counted.
+    /// Span data that the primary span scan inspected. The engine passes this
+    /// value to `SearchResponse::inspected`. Nested structural-join tables scan
+    /// the same blocks again, so this field counts only the primary scan.
     pub inspected: ByteSize,
 }
 

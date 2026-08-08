@@ -1,28 +1,33 @@
 ﻿//! DSL optimizer passes (JVM `topology.optimization=all`).
 //!
-//! Each pass rewrites the [`LogicalGraph`] in place *before* lowering:
-//! [`merge_repartition_topics`] collapses repartition topics shared by two
-//! aggregations off one key-changing op, and [`reuse_ktable_source_topics`]
-//! makes a `builder.table_explicit()` store reuse its source topic as its changelog.
+//! Each pass rewrites the [`LogicalGraph`] in place *before* lowering.
+//! [`merge_repartition_topics`] collapses the repartition topics that two
+//! aggregations share off one key-changing op. [`reuse_ktable_source_topics`]
+//! makes a `builder.table_explicit()` store reuse its source topic as its
+//! changelog.
 
 use std::collections::BTreeMap;
 
 use crate::dsl::graph::{GraphNodeKind, LogicalGraph, NodeId};
 
-/// `MERGE_REPARTITION_TOPICS`: when two aggregations hang off the *same*
-/// key-changing operation, the JVM optimizer collapses their two repartition
-/// topics into a single shared one (keeping the first aggregation's), so both
-/// aggregations read one repartition and live in one subtopology.
+/// `MERGE_REPARTITION_TOPICS`: collapse repartition topics that two aggregations
+/// share.
 ///
-/// We detect this by grouping the [`Repartition`] nodes by their predecessor
-/// (the shared key-changing source). For each group of more than one, the
-/// lowest-id node is the *keeper*; every other repartition node is recorded as
-/// an alias of the keeper in [`LogicalGraph::aliases`]. The lowering driver then
-/// skips the aliased nodes' sink/topic/source emission and points their handle
-/// at the keeper's repartition source — so the redundant topic is never created
-/// and the downstream aggregate reads the shared repartition. Each aggregate's
-/// own state store (hence its changelog) is untouched, so both changelogs still
-/// appear in the merged subtopology.
+/// When two aggregations hang off the *same* key-changing operation, the JVM
+/// optimizer collapses their two repartition topics into one shared topic. It
+/// keeps the first aggregation's topic. Both aggregations then read one
+/// repartition and live in one subtopology.
+///
+/// This pass detects the case by grouping the [`Repartition`] nodes by their
+/// predecessor, which is the shared key-changing source. In each group of more
+/// than one node, the lowest-id node is the *keeper*. The pass records every
+/// other repartition node as an alias of the keeper in
+/// [`LogicalGraph::aliases`]. The lowering driver then skips the sink, topic,
+/// and source emission for the aliased nodes and points their handle at the
+/// keeper's repartition source. The redundant topic is therefore never created,
+/// and the downstream aggregate reads the shared repartition. This pass does not
+/// touch each aggregate's own state store, and so it does not touch its
+/// changelog. Both changelogs still appear in the merged subtopology.
 ///
 /// [`Repartition`]: GraphNodeKind::Repartition
 #[tracing::instrument(
@@ -55,19 +60,22 @@ pub(crate) fn merge_repartition_topics(graph: &mut LogicalGraph) {
     }
 }
 
-/// `REUSE_KTABLE_SOURCE_TOPICS`: when a `KTable` is materialized directly from a
-/// source topic (`builder.table_explicit(topic, Materialized::as(store))`), the JVM
-/// optimizer makes the store's changelog the **source topic itself** rather than
-/// minting a separate `<app>-<store>-changelog` topic. The source topic is
-/// already a compacted, fully-keyed copy of the table, so reusing it as the
-/// changelog avoids duplicating the data.
+/// `REUSE_KTABLE_SOURCE_TOPICS`: reuse a table's source topic as its changelog.
 ///
-/// We flag every [`TableSource`] node with `reuse_source_for_changelog = true`.
-/// The lowering driver then registers each such node's store with its source
-/// `topic` as the changelog (via `add_state_store_with_changelog`), so the wire
-/// `state_changelog_topics` entry is named after the source topic, not the
-/// derived changelog name. The store's name, processors and subtopology
-/// placement are untouched — only the changelog topic name changes.
+/// When a `KTable` is materialized directly from a source topic through
+/// `builder.table_explicit(topic, Materialized::as(store))`, the JVM optimizer
+/// makes the store's changelog the **source topic itself**. It does not mint a
+/// separate `<app>-<store>-changelog` topic. The source topic is already a
+/// compacted, fully-keyed copy of the table, so this reuse avoids a duplicate
+/// copy of the data.
+///
+/// This pass flags every [`TableSource`] node with
+/// `reuse_source_for_changelog = true`. The lowering driver then registers each
+/// such node's store with its source `topic` as the changelog, through
+/// `add_state_store_with_changelog`. The wire `state_changelog_topics` entry
+/// therefore carries the source topic name and not the derived changelog name.
+/// This pass does not touch the store's name, its processors, or its subtopology
+/// placement. Only the changelog topic name changes.
 ///
 /// [`TableSource`]: GraphNodeKind::TableSource
 #[tracing::instrument(

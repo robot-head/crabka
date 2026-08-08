@@ -557,10 +557,13 @@ where
 }
 
 /// A single process-wide shutdown signal shared by the HTTP server and every
-/// background task. Flipping the watch to `true` asks the axum server to begin
-/// its graceful drain and tells the consumer/eval loops to stop; a critical
-/// background task that exits (cleanly or with an error) also flips it so the
-/// whole process winds down loudly instead of limping on with a dead loop.
+/// background task.
+///
+/// A `true` value in the watch asks the axum server to start its graceful
+/// drain, and tells the consumer and eval loops to stop. A critical background
+/// task that exits also sets the watch, whether it exits cleanly or with an
+/// error. The whole process then stops, instead of a continued run with a dead
+/// loop.
 #[derive(Clone)]
 struct Shutdown {
     tx: tokio::sync::watch::Sender<bool>,
@@ -573,13 +576,17 @@ impl Shutdown {
         Self { tx, rx }
     }
 
-    /// Request shutdown. Idempotent — repeated triggers are no-ops.
+    /// Request shutdown.
+    ///
+    /// This method is idempotent. Repeated triggers do nothing.
     fn trigger(&self) {
         let _ = self.tx.send(true);
     }
 
-    /// A future that resolves once shutdown has been requested. Cloned per
-    /// consumer (the server's graceful-shutdown hook, each background task).
+    /// Return a future that resolves after a caller requests shutdown.
+    ///
+    /// Each consumer gets its own clone: the server's graceful-shutdown hook
+    /// and each background task.
     fn signalled(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
         let mut rx = self.rx.clone();
         async move {
@@ -595,8 +602,10 @@ impl Shutdown {
     }
 }
 
-/// Spawn a task that flips the shared shutdown on the first SIGINT (Ctrl-C), so
-/// a single signal tears down the server and all background tasks together.
+/// Spawn a task that sets the shared shutdown on the first SIGINT, that is
+/// Ctrl-C.
+///
+/// One signal stops the server and all background tasks together.
 fn spawn_ctrl_c_listener(shutdown: Shutdown) {
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_err() {

@@ -1,33 +1,36 @@
-//! `LogicalPlan` lowering for the simple `PromQL` aggregations
-//! (`sum | avg | min | max | count | group`) with `by(...)`/`without(...)`.
+//! `LogicalPlan` lowering for the simple `PromQL` aggregations.
 //!
-//! The recursive instant planner ([`crate::engine`]) hands this module an inner
-//! [`LogicalPlan`] whose output carries one row per input series: a set of
-//! `Utf8` label columns, a `Float64` `value` column, and (for the
-//! instant-selector shape) `timestamp`/`sample_timestamp` index columns. This
-//! module wraps that input in a `DataFusion` [`Aggregate`](LogicalPlan::Aggregate)
-//! that collapses the rows into per-group results, mapping Prometheus grouping
-//! semantics onto GROUP BY:
+//! The aggregations are `sum | avg | min | max | count | group` with
+//! `by(...)`/`without(...)`.
 //!
-//! - `by (l...)` groups by exactly the listed label columns (those present in
-//!   the input; a `by` label absent from every input series simply does not
-//!   appear, matching Prometheus, which drops empty grouping labels).
-//! - `without (l...)` groups by every input label column **except** the listed
-//!   ones and except `__name__` (Prometheus `without` always drops the metric
-//!   name).
+//! The recursive instant planner [`crate::engine`] hands this module an inner
+//! [`LogicalPlan`] whose output carries one row for each input series. That row
+//! holds a set of `Utf8` label columns, a `Float64` `value` column, and, for the
+//! instant-selector shape, `timestamp`/`sample_timestamp` index columns. This
+//! module wraps that input in a `DataFusion`
+//! [`Aggregate`](LogicalPlan::Aggregate) that collapses the rows into per-group
+//! results. The aggregate maps Prometheus grouping semantics onto GROUP BY:
+//!
+//! - `by (l...)` groups by exactly the listed label columns that are present in
+//!   the input. A `by` label absent from every input series does not appear.
+//!   Prometheus does the same and drops empty grouping labels.
+//! - `without (l...)` groups by every input label column except the listed
+//!   ones and except `__name__`. Prometheus `without` always drops the metric
+//!   name.
 //! - `by ()` collapses all series into a single group.
 //!
 //! Most per-op value aggregates use `DataFusion`'s built-in aggregate
-//! expressions, which match Prometheus float semantics exactly (including NaN
-//! propagation for `sum`/`avg`): `sum`, `avg`, `count` (cast to `Float64`), and
-//! `group` (constant `1.0`). `min`/`max` are the exception: Arrow's built-in
-//! `min`/`max` order floats with `total_cmp` and therefore **propagate** NaN,
-//! whereas Prometheus (and the tree-walking interpreter) **ignore** NaN — a
-//! group's extremum is over its non-NaN samples, and the result is NaN only when
-//! every sample is NaN. So `min`/`max` lower onto the NaN-ignoring
+//! expressions, which match Prometheus float semantics exactly. This includes
+//! NaN propagation for `sum`/`avg`. Those aggregates are `sum`, `avg`, `count`
+//! cast to `Float64`, and `group` as the constant `1.0`. `min`/`max` are the
+//! exception: Arrow's built-in `min`/`max` order floats with `total_cmp` and so
+//! propagate NaN, but Prometheus and the tree-walking interpreter ignore NaN.
+//!
+//! A group's extremum is over its non-NaN samples, and the result is NaN only
+//! when every sample is NaN. So `min`/`max` lower onto the NaN-ignoring
 //! [`prom_min_udaf`]/[`prom_max_udaf`] UDAFs instead. The result columns are the
-//! grouping label columns plus the aggregated `value` column; the eval
-//! timestamp is reattached by the caller during result assembly.
+//! grouping label columns plus the aggregated `value` column. The caller
+//! reattaches the eval timestamp during result assembly.
 
 use std::collections::BTreeSet;
 
@@ -43,25 +46,30 @@ use crate::{
     planner::leaf::{SAMPLE_TIME_COLUMN, TIME_COLUMN, VALUE_COLUMN},
 };
 
-/// Result-value column emitted by the aggregation projection. Reuses the
-/// leaf/rate `value` name so the engine's batch-label reader treats every other
-/// `Utf8` column as a grouping label.
+/// Result-value column that the aggregation projection emits.
+///
+/// The column reuses the leaf/rate `value` name, so the engine's batch-label
+/// reader treats every other `Utf8` column as a grouping label.
 pub const AGGREGATE_VALUE_COLUMN: &str = VALUE_COLUMN;
 
-/// Synthetic per-row grouping column injected when the `PromQL` grouping is
-/// empty (`by ()` / no modifier). `GROUP BY` over an empty key set is SQL's
-/// "single global group", which emits one row even over an empty input — but
-/// Prometheus `sum by ()` over zero series yields the *empty* vector. Grouping
-/// by a constant-valued real column instead makes the group key per-row, so an
-/// empty input produces zero groups (Prometheus semantics) while a non-empty
-/// input collapses to exactly one group. The column is dropped at assembly (it
-/// never appears in the projected output).
+/// Synthetic per-row grouping column for an empty `PromQL` grouping.
+///
+/// An empty grouping is `by ()` or no modifier. `GROUP BY` over an empty key set
+/// is SQL's "single global group", which emits one row even over an empty input.
+/// Prometheus `sum by ()` over zero series yields the empty vector instead. A
+/// group by a constant-valued real column makes the group key per-row. An empty
+/// input then produces zero groups, which is the Prometheus behaviour, and a
+/// non-empty input collapses to exactly one group.
+///
+/// This module drops the column at assembly, so it never appears in the
+/// projected output.
 const ALL_GROUP_COLUMN: &str = "__crabka_agg_all__";
 
-/// The simple aggregation operators this module lowers. Param ops
-/// (`topk`/`bottomk`/`quantile`/`count_values`/`stddev`/`stdvar`) are out of
-/// scope and never reach here — the recursive planner returns `Unsupported` for
-/// them so the interpreter owns them.
+/// The simple aggregation operators this module lowers.
+///
+/// The param ops `topk`/`bottomk`/`quantile`/`count_values`/`stddev`/`stdvar`
+/// are out of scope and never reach here. The recursive planner returns
+/// `Unsupported` for them, so the interpreter owns them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimpleAggregateOp {
     Sum,
@@ -73,9 +81,11 @@ pub enum SimpleAggregateOp {
 }
 
 impl SimpleAggregateOp {
-    /// Build the per-group value aggregate expression over the `value` column,
-    /// aliased to the output value column. `count` is cast to `Float64` (Prom
-    /// reports counts as floats); `group` is a constant `1.0` per group.
+    /// Builds the per-group value aggregate expression over the `value` column.
+    ///
+    /// The expression is aliased to the output value column. `count` is cast to
+    /// `Float64`, because Prometheus reports counts as floats. `group` is the
+    /// constant `1.0` for each group.
     fn value_aggregate(self) -> Expr {
         let value = col(VALUE_COLUMN);
         match self {
@@ -103,22 +113,23 @@ impl SimpleAggregateOp {
 pub enum Grouping {
     /// `by (labels...)`: group by exactly these label columns.
     By(Vec<String>),
-    /// `without (labels...)`: group by all input label columns except these
-    /// (and except `__name__`, which `without` always drops).
+    /// `without (labels...)`: group by all input label columns except these and
+    /// except `__name__`, which `without` always drops.
     Without(Vec<String>),
 }
 
-/// Wrap `input` in a `DataFusion` aggregate implementing the `PromQL`
-/// aggregation `op grouping (<input>)`.
+/// Wraps `input` in a `DataFusion` aggregate for `op grouping (<input>)`.
 ///
-/// `input` is the inner planner plan; its output schema's `Utf8` columns are the
-/// candidate grouping labels (everything except the `value`/`timestamp`/
-/// `sample_timestamp` index columns). The returned plan's output is the surviving
-/// grouping label columns plus the aggregated `value` column.
+/// The aggregate implements that `PromQL` aggregation. `input` is the inner
+/// planner plan. The `Utf8` columns of its output schema are the candidate
+/// grouping labels: every column except the `value`/`timestamp`/
+/// `sample_timestamp` index columns. The output of the returned plan is the
+/// surviving grouping label columns plus the aggregated `value` column.
 ///
 /// # Errors
 ///
-/// Returns [`PromqlError::Exec`] if the aggregate plan cannot be constructed.
+/// Returns [`PromqlError::Exec`] if this function cannot build the aggregate
+/// plan.
 pub fn plan_simple_aggregate(
     input: LogicalPlan,
     op: SimpleAggregateOp,
@@ -179,8 +190,9 @@ pub fn plan_simple_aggregate(
 }
 
 /// The `Utf8` label columns of an inner plan's output schema, in schema order.
-/// The `value`/`timestamp`/`sample_timestamp` columns are the operator chain's
-/// index/value columns, never labels.
+///
+/// The `value`/`timestamp`/`sample_timestamp` columns are the index and value
+/// columns of the operator chain. They are never labels.
 fn input_label_columns(input: &LogicalPlan) -> Vec<String> {
     input
         .schema()
@@ -191,11 +203,12 @@ fn input_label_columns(input: &LogicalPlan) -> Vec<String> {
         .collect()
 }
 
-/// Map a `PromQL` [`Grouping`] onto the concrete set of grouping label columns,
-/// intersected with the labels actually present in the input.
+/// Maps a `PromQL` [`Grouping`] onto the concrete grouping label columns.
 ///
-/// `by` keeps the listed labels in their given order (dropping any not present);
-/// `without` keeps every present label except the listed ones and `__name__`.
+/// The result is intersected with the labels present in the input. `by` keeps
+/// the listed labels in their given order and drops each label that is not
+/// present. `without` keeps every present label except the listed ones and
+/// `__name__`.
 fn resolve_group_labels(input_labels: &[String], grouping: &Grouping) -> Vec<String> {
     match grouping {
         Grouping::By(labels) => {
@@ -232,8 +245,10 @@ mod tests {
 
     use super::*;
 
-    /// Build a leaf plan over an in-memory table mirroring an instant-selector
-    /// output: `job`, `group` labels plus `timestamp`/`value`/`sample_timestamp`.
+    /// Builds a leaf plan over an in-memory table like an instant-selector output.
+    ///
+    /// The table has the `job` and `group` labels plus
+    /// `timestamp`/`value`/`sample_timestamp`.
     async fn selector_like_leaf(ctx: &SessionContext, rows: &[(&str, &str, f64)]) -> LogicalPlan {
         let schema = Arc::new(Schema::new(vec![
             Field::new("group", DataType::Utf8, false),
@@ -267,10 +282,12 @@ mod tests {
             .unwrap()
     }
 
-    /// Like [`selector_like_leaf`] but with a **nullable** `value` column, so a
-    /// `None` row models a rate/`*_over_time` UDF "no value" (NULL) cell. This
-    /// drives the pre-aggregate NULL filter: such rows must be dropped before
-    /// grouping, exactly as the interpreter omits no-value series.
+    /// Like [`selector_like_leaf`], but with a nullable `value` column.
+    ///
+    /// A `None` row models the "no value" NULL cell of a rate or `*_over_time`
+    /// UDF. This drives the pre-aggregate NULL filter: the planner must drop
+    /// such rows before grouping, exactly as the interpreter omits no-value
+    /// series.
     async fn nullable_leaf(
         ctx: &SessionContext,
         rows: &[(&str, &str, Option<f64>)],

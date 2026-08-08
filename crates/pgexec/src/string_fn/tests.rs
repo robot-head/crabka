@@ -15,9 +15,11 @@ fn text_of(sql: &str) -> String {
     }
 }
 
-/// The SQLSTATE and message a failing expression reports, taken from whichever
-/// of the plan-time (`infer_type`) and run-time (`eval`) paths rejects it —
-/// exactly the order a real statement goes through.
+/// The SQLSTATE and message a failing expression reports.
+///
+/// The result comes from whichever path rejects the expression: the plan-time
+/// path `infer_type` or the run-time path `eval`. This is the same order a real
+/// statement goes through.
 fn error_of(sql: &str) -> (String, String) {
     let ctx = EvalCtx::test_default();
     let expr = pexpr(sql).expect("parse");
@@ -162,9 +164,9 @@ fn to_hex_prints_the_two_complement_pattern() {
     }
 }
 
-/// `quote_ident` leaves a value bare only when re-parsing it unquoted would
-/// yield the same identifier — so keywords and anything outside `[a-z0-9_]`
-/// come back quoted.
+/// `quote_ident` leaves a value bare only when a second parse of the unquoted
+/// value gives the same identifier. Keywords and anything outside `[a-z0-9_]`
+/// therefore come back quoted.
 #[test]
 fn quoting_matches_postgres() {
     let cases = [
@@ -293,7 +295,7 @@ fn result_types_match_postgres() {
 }
 
 /// Every function here except `format`, `concat_ws` and `quote_nullable` is
-/// strict; those three have their own documented NULL behavior.
+/// strict. Those three have their own documented NULL behavior.
 #[test]
 fn strictness_matches_postgres() {
     let null_returning = [

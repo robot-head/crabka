@@ -79,7 +79,8 @@ impl<S: SpanStore> Clone for AppState<S> {
 
 impl<S: SpanStore> AppState<S> {
     /// Record one querier request on `route` with the given outcome and
-    /// elapsed time. No-op when metrics are not wired (test routers).
+    /// elapsed time. This does nothing when metrics are not wired, as in test
+    /// routers.
     fn record_query(&self, route: &str, ok: bool, start: std::time::Instant) {
         if let Some(metrics) = &self.metrics {
             metrics.record_query(route, ok, start.elapsed().as_secs_f64());
@@ -132,8 +133,9 @@ where
     })
 }
 
-/// Like [`router_with_config`] but threads a [`ServiceMetrics`] bundle so each
-/// query handler records `query_requests` / `query_duration_seconds`.
+/// Like [`router_with_config`], but it also threads a [`ServiceMetrics`]
+/// bundle. Each query handler then records `query_requests` and
+/// `query_duration_seconds`.
 pub fn router_with_config_and_metrics<S>(
     engine: Arc<TraceqlEngine<S>>,
     cfg: HttpConfig,
@@ -181,11 +183,13 @@ async fn ready() -> &'static str {
     "ready"
 }
 
-/// Tempo-compatible build info. Grafana's Tempo datasource probes this on every
-/// query to detect the backend version; without it Grafana treats the backend as
-/// a legacy Tempo and falls back to endpoints we do not serve (breaking the
-/// trace-by-id view). The Prometheus-style `{status, data:{version,...}}` shape
-/// matches Tempo's `/api/status/buildinfo`.
+/// Tempo-compatible build info.
+///
+/// Grafana's Tempo datasource probes this on every query to detect the backend
+/// version. Without it, Grafana treats the backend as a legacy Tempo and falls
+/// back to endpoints this crate does not serve, which breaks the trace-by-id
+/// view. The Prometheus-style `{status, data:{version,...}}` shape matches
+/// Tempo's `/api/status/buildinfo`.
 async fn buildinfo() -> Response {
     Json(json!({
         "status": "success",
@@ -825,10 +829,12 @@ where
     }
 }
 
-/// Tempo v1 trace-by-id (`/api/traces/{id}`). Grafana's Tempo *backend*
-/// datasource fetches the trace-view here with `Accept: application/protobuf`
-/// and proto-decodes the body as OTLP, so we default to OTLP `TracesData`
-/// protobuf (Tempo's v1 default), falling back to the wrapped JSON for humans.
+/// Tempo v1 trace-by-id, at `/api/traces/{id}`.
+///
+/// Grafana's Tempo *backend* datasource fetches the trace-view here with
+/// `Accept: application/protobuf` and proto-decodes the body as OTLP. This
+/// handler therefore defaults to OTLP `TracesData` protobuf, which is Tempo's
+/// v1 default. It falls back to the wrapped JSON for humans.
 async fn trace_by_id_v1<S>(
     State(state): State<AppState<S>>,
     headers: HeaderMap,
@@ -928,10 +934,12 @@ fn query_param(uri: &Uri, key: &str) -> Option<String> {
         .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
 }
 
-/// The `TraceQL` metrics query string. Tempo accepts both `q` and `query` on
-/// the metrics endpoints: the Explore `TraceQL` editor and the HTTP API send
-/// `q`, while the Grafana Tempo datasource powering the Traces Drilldown app
-/// sends `query`. Accept either, preferring `q`.
+/// The `TraceQL` metrics query string.
+///
+/// Tempo accepts both `q` and `query` on the metrics endpoints. The Explore
+/// `TraceQL` editor and the HTTP API send `q`. The Grafana Tempo datasource
+/// that powers the Traces Drilldown app sends `query`. This accepts either, and
+/// prefers `q`.
 fn metrics_query_param(uri: &Uri) -> Option<String> {
     query_param(uri, "q").or_else(|| query_param(uri, "query"))
 }
@@ -966,9 +974,11 @@ fn tags_to_traceql(tags: &str) -> Option<String> {
 }
 
 /// A legacy `tags=` key is a safe `TraceQL` attribute reference only if it is
-/// made of identifier characters (alphanumerics plus `._:-`). Anything else
-/// (`{`, `}`, `"`, `\`, `|`, `&`, `=`, whitespace, …) could inject query
-/// structure once interpolated unquoted into the generated `TraceQL`.
+/// made of identifier characters: alphanumerics plus `._:-`.
+///
+/// Any other character, such as `{`, `}`, `"`, `\`, `|`, `&`, `=` or
+/// whitespace, could inject query structure once it is interpolated unquoted
+/// into the generated `TraceQL`.
 fn key_is_safe_attribute(key: &str) -> bool {
     !key.is_empty()
         && key
@@ -1264,9 +1274,11 @@ fn step_param(uri: &Uri, start_ns: UnixNano, end_ns: UnixNano) -> Result<i64, &'
     Ok(step_ns)
 }
 
-/// Default query-range step when none is supplied: aim for ~100 buckets over the
-/// range, rounded up to a whole second, with a 1s floor (mirrors Tempo's
-/// `DefaultQueryRangeStep` closely enough for a usable series).
+/// Default query-range step when the request supplies none.
+///
+/// This aims for about 100 buckets over the range, rounded up to a whole
+/// second, with a 1s floor. It mirrors Tempo's `DefaultQueryRangeStep` closely
+/// enough for a usable series.
 fn default_query_range_step_ns(start_ns: UnixNano, end_ns: UnixNano) -> i64 {
     const SECOND_NS: i64 = 1_000_000_000;
     let delta = end_ns.0.saturating_sub(start_ns.0).max(0);
@@ -1909,16 +1921,19 @@ fn typed_value_parts(value: &AttrValue) -> (String, String) {
     }
 }
 
-/// One TraceQL-metrics label as Tempo's protojson `commonv1.KeyValue`
-/// (`{"key": k, "value": {"stringValue": v}}`). Grafana's Tempo backend parses
-/// the `labels` field as a JSON array, so a map object fails to unmarshal
-/// (`cannot unmarshal object into Go value of type []json.RawMessage`).
+/// One TraceQL-metrics label as Tempo's protojson `commonv1.KeyValue`, which is
+/// `{"key": k, "value": {"stringValue": v}}`.
+///
+/// Grafana's Tempo backend parses the `labels` field as a JSON array, so a map
+/// object fails to unmarshal with
+/// `cannot unmarshal object into Go value of type []json.RawMessage`.
 fn metric_label_json(key: &str, value: &str) -> Value {
     json!({ "key": key, "value": { "stringValue": value } })
 }
 
-/// Prometheus-style label string for `TimeSeries.promLabels` (Grafana's legend),
-/// e.g. `{resource_service_name="api"}`. Empty label set renders as `{}`.
+/// Prometheus-style label string for `TimeSeries.promLabels`, which is
+/// Grafana's legend. An example is `{resource_service_name="api"}`. An empty
+/// label set renders as `{}`.
 fn metric_prom_labels(labels: &[(String, String)]) -> String {
     let inner = labels
         .iter()
@@ -2119,9 +2134,11 @@ fn trace_traces_data(trace: &TraceSpans, max_trace_spans: usize) -> OtlpTracesDa
     }
 }
 
-/// OTLP `TracesData` protobuf — the Tempo v1 `/api/traces/{id}` body, which
-/// Grafana's Tempo datasource decodes as `tempopb.Trace` (wire-identical to
-/// `TracesData`: both are field 1 = repeated `ResourceSpans`).
+/// OTLP `TracesData` protobuf, the Tempo v1 `/api/traces/{id}` body.
+///
+/// Grafana's Tempo datasource decodes it as `tempopb.Trace`, which is
+/// wire-identical to `TracesData`. Both are field 1 = repeated
+/// `ResourceSpans`.
 fn trace_protobuf(
     trace: &TraceSpans,
     max_trace_spans: usize,
@@ -2132,10 +2149,13 @@ fn trace_protobuf(
     Ok(bytes)
 }
 
-/// Tempo `TraceByIDResponse` (`message TraceByIDResponse { Trace trace = 1; }`),
-/// the `/api/v2/traces/{id}` protobuf body. Grafana's Tempo datasource decodes
-/// the v2 trace-by-id response into this message; the inner `Trace` is
-/// wire-identical to OTLP `TracesData`, so we model the field as `TracesData`.
+/// Tempo `TraceByIDResponse`, which is
+/// `message TraceByIDResponse { Trace trace = 1; }`. It is the
+/// `/api/v2/traces/{id}` protobuf body.
+///
+/// Grafana's Tempo datasource decodes the v2 trace-by-id response into this
+/// message. The inner `Trace` is wire-identical to OTLP `TracesData`, so this
+/// type models the field as `TracesData`.
 #[derive(Clone, PartialEq, ::prost::Message)]
 struct TraceByIdResponse {
     #[prost(message, optional, tag = "1")]

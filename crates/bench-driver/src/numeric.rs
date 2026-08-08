@@ -1,12 +1,12 @@
 //! The driver's numeric seams.
 //!
 //! Two kinds of conversion live here. The `*_to_*` helpers bound a primitive
-//! cast (a `u128` of nanoseconds into the `u64` the histogram records, an epoch
-//! millisecond into the `i64` `chrono` speaks). The quantity helpers express a
-//! [`crabka_units`] quantity as a count of one named unit, which is what a
-//! Plotly axis or a CSV column needs: dividing a quantity by one unit of the
-//! same dimension yields the count as a dimensionless [`Ratio`], so the scale
-//! factor is never written out by hand.
+//! cast, such as a `u128` of nanoseconds into the `u64` the histogram records,
+//! or an epoch millisecond into the `i64` that `chrono` uses. The quantity
+//! helpers express a [`crabka_units`] quantity as a count of one named unit,
+//! which is what a Plotly axis or a CSV column needs. A quantity divided by one
+//! unit of the same dimension gives the count as a dimensionless [`Ratio`], so
+//! nobody writes the scale factor out by hand.
 
 use crabka_units::prelude::*;
 use num_traits::ToPrimitive;
@@ -41,7 +41,7 @@ pub(crate) fn saturating_u64_to_i64(value: u64) -> i64 {
 
 /// The rate at which `count` events arrived over `window`.
 ///
-/// A zero or negative window yields no rate rather than an infinity, matching
+/// A zero or negative window gives no rate and not an infinity. This matches
 /// how [`crabka_units::convert::FrequencyExt::period`] treats a zero rate.
 pub(crate) fn event_rate(count: u64, window: Time) -> Frequency {
     if window <= Time::ZERO {
@@ -50,13 +50,13 @@ pub(crate) fn event_rate(count: u64, window: Time) -> Frequency {
     fraction(to_f64(count)) / window
 }
 
-/// `size` counted in mebibytes — the unit the report's memory axes are drawn in.
+/// `size` counted in mebibytes, which is the unit of the report's memory axes.
 pub(crate) fn mebibytes_f64(size: ByteSize) -> f64 {
     (size / mebibytes(1)).as_f64()
 }
 
-/// `extent` counted in milliseconds — the unit the report's latency columns and
-/// time-series metric keys are written in.
+/// `extent` counted in milliseconds, which is the unit of the report's latency
+/// columns and time-series metric keys.
 pub(crate) fn millis_f64(extent: Time) -> f64 {
     (extent / millis(1)).as_f64()
 }

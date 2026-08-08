@@ -1,6 +1,8 @@
-//! Profiling helper: boot a single-node in-process Crabka broker on a fixed
-//! port and run until killed. Pair with the `loadgen` example and attach
-//! `perf record -p <pid>` to capture a clean broker-only CPU profile.
+//! Profiling helper that runs a single-node in-process Crabka broker.
+//!
+//! The broker binds a fixed port and runs until you kill it. Use this example
+//! together with the `loadgen` example. Attach `perf record -p <pid>` to
+//! capture a clean broker-only CPU profile.
 //!
 //!   cargo run --release --example profile_server -p crabka-integration-tests
 //!

@@ -34,7 +34,7 @@ pub enum Readiness {
 
 /// Bounds for cold-start readiness waits.
 ///
-/// Not `Eq`: both bounds are `f64`-backed quantities.
+/// This type is not `Eq`, because both bounds are `f64`-backed quantities.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaitForReadyConfig {
     /// Maximum time to wait.

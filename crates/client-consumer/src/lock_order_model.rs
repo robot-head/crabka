@@ -1,30 +1,32 @@
 //! Exhaustive stateright model of the classic consumer's async-Mutex lock
-//! protocol, to settle whether the `poll()` ↔ coordinator-task lock dance can
-//! deadlock (a lock-order cycle) or is provably deadlock-free.
+//! protocol.
+//!
+//! The model settles whether the `poll()` ↔ coordinator-task lock sequence can
+//! deadlock through a lock-order cycle, or is provably deadlock-free.
 //!
 //! ## Why this model exists
 //!
-//! A WAL consumer (logs-compactor) hangs at cold start with an
-//! idle-runtime / lost-wakeup signature. Two hypotheses: (a) a lock-order
-//! deadlock between the poll loop and the background coordinator task, or
-//! (b) a lost-wakeup that is *not* a lock cycle. This model formally rules one
-//! of them in. If the protocol is deadlock-free under exhaustive search, the
-//! investigation should redirect to the lost-wakeup path.
+//! A WAL consumer, the logs-compactor, hangs at cold start with an
+//! idle-runtime / lost-wakeup signature. There are two hypotheses: (a) a
+//! lock-order deadlock between the poll loop and the background coordinator
+//! task, or (b) a lost wakeup that is *not* a lock cycle. This model formally
+//! rules one of them in. If the protocol is deadlock-free under exhaustive
+//! search, the investigation should redirect to the lost-wakeup path.
 //!
 //! ## Fidelity (the crabka stateright program's cardinal rule)
 //!
-//! Every modeled lock edge is extracted from the real source and cited below by
-//! **function + lock variable** (bare line numbers drift whenever code is added
-//! above a lock site, so we anchor to stable names an auditor can `grep`).
-//! Nothing here is invented. The model abstracts away *values* (offsets,
-//! partitions, RPC payloads) and the network — it keeps only what a deadlock can
-//! possibly depend on: **which task holds which `tokio::sync::Mutex` and where
-//! each task is suspended.**
+//! Every modeled lock edge comes from the real source. The citations below use
+//! **function + lock variable**. Bare line numbers drift whenever someone adds
+//! code above a lock site, so this file anchors to stable names that an auditor
+//! can `grep`. Nothing here is invented. The model abstracts away *values* such
+//! as offsets, partitions, and RPC payloads, and it abstracts away the network.
+//! It keeps only what a deadlock can depend on: **which task holds which
+//! `tokio::sync::Mutex` and where each task is suspended.**
 //!
 //! ## The five shared `tokio::sync::Mutex`es
 //!
-//! Declared on `Consumer` (`consumer.rs`, the `Consumer` mutex fields) and
-//! shared (`Arc::clone`) into `CoordinatorState`:
+//! `Consumer` declares them in `consumer.rs`, in the `Consumer` mutex fields,
+//! and shares them into `CoordinatorState` with `Arc::clone`:
 //!
 //! | id | field          | abbrev |
 //! |----|----------------|--------|
@@ -38,9 +40,9 @@
 //! plus single-lock regions for completeness). Citations are to the real code.
 //!
 //! Critically: **no guard is ever held across an `.await` that is not itself a
-//! `.lock().await`** — the code is explicit about dropping guards before every
-//! RPC. So a region is a contiguous run of nested `.lock().await` acquisitions;
-//! the only suspension point *inside* a region is the next lock acquisition.
+//! `.lock().await`**. The code drops guards explicitly before every RPC. A
+//! region is therefore a contiguous run of nested `.lock().await` acquisitions.
+//! The only suspension point *inside* a region is the next lock acquisition.
 //! That acquisition is exactly where a deadlock cycle would form, so it is the
 //! thing this model interleaves.
 //!
@@ -49,8 +51,8 @@
 //!   `assigned.clone()` (released) → **PS → N → P** held together, all released
 //!   at scope end. Region edges: PS→N, N→P.
 //! - `resolve_latest_sentinels` (poll.rs): **N alone**, held across a
-//!   `ListOffsets` `.await` — but no second lock is taken in the region, so it
-//!   cannot be half of a cycle. Modeled as N-alone.
+//!   `ListOffsets` `.await`. The region takes no second lock, so it cannot be
+//!   half of a cycle. Modeled as N-alone.
 //! - `refresh_leader_epochs` (validate.rs): **P alone** (after the metadata
 //!   `.await`).
 //! - `validate_positions` (validate.rs): **N→P** snapshot held together,
@@ -59,9 +61,9 @@
 //!   together, released before the Fetch `.await`.
 //! - `poll` post-fetch loop (poll.rs): A `assigned.clone()` (released) → **N
 //!   held across the whole processing loop**, and inside it P is acquired
-//!   *second* at each per-partition site — i.e. **N→P every time** ("offsets is
-//!   already locked, positions acquired second"). VERIFIED: there is **no P→N
-//!   inversion** on the post-fetch path. N released before the metadata
+//!   *second* at each per-partition site, that is **N→P every time** ("offsets
+//!   is already locked, positions acquired second"). VERIFIED: there is **no
+//!   P→N inversion** on the post-fetch path. N released before the metadata
 //!   refresh `.await`.
 //!
 //! ### coordinator task (`coordinator.rs`)
@@ -79,25 +81,26 @@
 //! ### commit task (`commit.rs`)
 //! - `commit_sync` (N `next_offsets.clone()`, then P, then T `topic_ids.clone()`)
 //!   and the `commit_async` spawned task (same N→P→T sequence): **at most one
-//!   lock held at a time** — N, then P, then T, each released before the next.
-//!   No multi-lock region, so the commit task can never be half of a cycle.
-//!   Modeled as three independent single-lock regions to confirm this.
+//!   lock held at a time**, that is N, then P, then T, each released before the
+//!   next. There is no multi-lock region, so the commit task can never be half
+//!   of a cycle. Modeled as three independent single-lock regions to confirm
+//!   this.
 //!
 //! ## The lock hierarchy these regions imply
 //!
 //! Collecting every "hold L1 while acquiring L2" edge actually observed:
 //!   PS → N,  PS → P (transitively),  N → P.
-//! A and T are only ever held *alone* (never with another lock live). So the
-//! partial order is `PS < N < P` with `A` and `T` incomparable singletons. This
-//! is acyclic ⇒ the prediction is **deadlock-free**, and the model proves it
-//! exhaustively across all task interleavings.
+//! A and T are only ever held *alone*, never with another lock live. So the
+//! partial order is `PS < N < P`, with `A` and `T` as incomparable singletons.
+//! This is acyclic ⇒ the prediction is **deadlock-free**, and the model proves
+//! it exhaustively across all task interleavings.
 
 use std::time::Duration;
 
 use stateright::{Checker, Model, Property};
 
-/// Lock identifiers. Order here is incidental — the model does not assume any
-/// hierarchy; it discovers cycles purely from the acquire/release sequences.
+/// Lock identifiers. The order here is incidental. The model assumes no
+/// hierarchy and discovers cycles purely from the acquire/release sequences.
 const PS: u8 = 0; // pending_seeks
 const A: u8 = 1; // assigned
 const N: u8 = 2; // next_offsets
@@ -105,8 +108,9 @@ const P: u8 = 3; // positions
 const T: u8 = 4; // topic_ids
 const NUM_LOCKS: usize = 5;
 
-/// A single lock operation in a task's program. `Acquire` is a suspension point
-/// (`.lock().await`); `Release` drops a guard (end of scope / explicit `drop`).
+/// A single lock operation in a task's program. `Acquire` is a suspension
+/// point, a `.lock().await`. `Release` drops a guard at the end of a scope or
+/// through an explicit `drop`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Op {
     Acquire(u8),
@@ -116,9 +120,9 @@ enum Op {
 use Op::{Acquire, Release};
 
 /// One concurrently-running future. Its `program` is the exact ordered sequence
-/// of lock acquisitions/releases from the real code (see module docs for the
-/// function + lock-variable anchor of every step). `pc` is the program counter
-/// into it.
+/// of lock acquisitions and releases from the real code. See the module docs
+/// for the function + lock-variable anchor of every step. `pc` is the program
+/// counter into it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Task {
     /// Human-readable label of the code region this program models.
@@ -153,20 +157,25 @@ struct State {
 }
 
 /// The action the scheduler takes: advance task `idx` by executing its next op.
-/// Only emitted when that op is *enabled* (a Release, or an Acquire of a lock
-/// that is free or already self-held) — a blocked Acquire is never enabled, so a
-/// task suspended on a contended `.lock().await` simply cannot step.
+///
+/// The model emits this only when that op is *enabled*, which means a Release,
+/// or an Acquire of a lock that is free or already self-held. A blocked Acquire
+/// is never enabled, so a task suspended on a contended `.lock().await` cannot
+/// step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Step {
     idx: usize,
 }
 
-/// Build the poll task's program — the full sequence of multi-lock regions a
-/// single `poll()` call walks, in source order. Each region's locks are
-/// acquired in the real nesting order and released at the modeled scope end.
+/// Build the poll task's program, the full sequence of multi-lock regions that
+/// a single `poll()` call walks, in source order.
 ///
-/// Region boundaries (and the RPC `.await`s between them, where all guards are
-/// already dropped) are faithful to the real source, anchored by function:
+/// This function acquires each region's locks in the real nesting order and
+/// releases them at the modeled scope end.
+///
+/// The region boundaries are faithful to the real source and are anchored by
+/// function. So are the RPC `.await`s between them, where all guards are
+/// already dropped:
 ///   1. `apply_pending_seeks` (seek.rs)   : PS, N, P  (PS→N→P held)
 ///   2. `resolve_latest_sentinels` (poll.rs): N       [across await, alone]
 ///   3. `refresh_leader_epochs` (validate.rs): P      (P alone)
@@ -224,9 +233,10 @@ fn poll_program() -> Vec<Op> {
     ]
 }
 
-/// The coordinator task's `rejoin` program. A is only ever held alone; N→P
-/// regions for the offset/position prune. Models the cooperative phase-1 path
-/// (the most lock-dense), which also subsumes the eager path's edges.
+/// The coordinator task's `rejoin` program. A is only ever held alone. The N→P
+/// regions do the offset and position prune. This models the cooperative
+/// phase-1 path, the most lock-dense one, which also subsumes the eager path's
+/// edges.
 ///
 /// Sequence (coordinator.rs `rejoin`, cooperative-revoke path):
 ///   A alone (`rejoin`: `assigned.clone()` owned snapshot)
@@ -279,8 +289,8 @@ fn coordinator_program() -> Vec<Op> {
 }
 
 /// The commit task (`commit.rs` `commit_sync` / `commit_async`): N, then P,
-/// then T — each released before the next is taken. At most one lock held at a
-/// time, so it can never be half of a cycle. Modeled faithfully to confirm.
+/// then T, each released before the next is taken. At most one lock is held at
+/// a time, so it can never be half of a cycle. Modeled faithfully to confirm.
 fn commit_program() -> Vec<Op> {
     vec![
         // next_offsets snapshot (commit_sync / commit_async: `next_offsets.clone()`)
@@ -378,8 +388,9 @@ impl Model for LockOrderModel {
     }
 }
 
-/// A task is *blocked* iff its next op is an `Acquire` of a lock currently held
-/// by a different task (it is suspended at a contended `.lock().await`).
+/// A task is *blocked* iff its next op is an `Acquire` of a lock that a
+/// different task currently holds. The task is then suspended at a contended
+/// `.lock().await`.
 fn task_blocked(s: &State, idx: usize) -> bool {
     match s.tasks[idx].next_op() {
         Some(Op::Acquire(l)) => matches!(s.holder[l as usize], Some(h) if h != idx),
@@ -392,7 +403,7 @@ fn any_task_blocked(s: &State) -> bool {
 }
 
 /// Deadlock = at least one unfinished task, and every unfinished task is
-/// blocked. (If any unfinished task can still step, the system makes progress.)
+/// blocked. If any unfinished task can still step, the system makes progress.
 fn is_deadlocked(s: &State) -> bool {
     let unfinished: Vec<usize> = (0..s.tasks.len()).filter(|&i| !s.tasks[i].done()).collect();
     !unfinished.is_empty() && unfinished.iter().all(|&i| task_blocked(s, i))
@@ -415,9 +426,10 @@ mod tests {
 
     use super::*;
 
-    /// MAIN RESULT: the real classic-consumer lock protocol (poll task +
-    /// coordinator task + commit task, each running its extracted acquire/
-    /// release sequence) is DEADLOCK-FREE under exhaustive interleaving.
+    /// MAIN RESULT: the real classic-consumer lock protocol is DEADLOCK-FREE
+    /// under exhaustive interleaving. The protocol here is the poll task, the
+    /// coordinator task, and the commit task, each running its extracted
+    /// acquire/release sequence.
     #[test]
     fn classic_consumer_lock_protocol_is_deadlock_free() {
         let checker = run_model(vec![
@@ -440,8 +452,9 @@ mod tests {
         checker.assert_properties();
     }
 
-    /// Two poll tasks racing the coordinator (e.g. a buggy double-poll) — still
-    /// deadlock-free, because every region respects the same PS<N<P order.
+    /// Two poll tasks race the coordinator, for example in a buggy double-poll.
+    /// The protocol is still deadlock-free, because every region respects the
+    /// same PS<N<P order.
     #[test]
     fn two_pollers_and_coordinator_are_deadlock_free() {
         let checker = run_model(vec![
@@ -463,10 +476,11 @@ mod tests {
     }
 
     /// NEGATIVE CONTROL / falsification check: inject the hypothesized P→N
-    /// inversion (the "smoking gun" the investigation feared on the post-fetch
-    /// path) into a second task and confirm the model DOES find the deadlock.
-    /// This proves `no_deadlock` is a real, falsifiable property — not a model
-    /// that can never fail — and shows exactly the cycle the real code avoids.
+    /// inversion into a second task and confirm that the model DOES find the
+    /// deadlock. The investigation feared that inversion on the post-fetch path.
+    /// This proves that `no_deadlock` is a real, falsifiable property and not a
+    /// model that can never fail. It also shows exactly the cycle that the real
+    /// code avoids.
     #[test]
     fn injected_inversion_is_detected_as_deadlock() {
         // Task X: hold N, then acquire P  (the real order, N→P).

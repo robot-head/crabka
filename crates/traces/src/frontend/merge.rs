@@ -1,12 +1,15 @@
-//! Merge per-job search/by-id/tag partials back into one Tempo response,
-//! honoring `limit` (max traces) and `spss` (max spans per spanSet), and
-//! accumulating the job-accounting `metrics{}` block.
+//! Merge per-job search, by-id and tag partials back into one Tempo response.
 //!
-//! The search merge currency is the **typed serde edge model**
-//! ([`crate::frontend::wire`]), not raw `serde_json::Value`. Reunion is keyed by
-//! `traceID` so a trace split across blocks / hot+cold reassembles, with
-//! span-level dedup (by `spanID`) for the late-span overlap case, including
-//! cross-block `matched`-count accumulation, all over typed structs.
+//! The merge honors `limit`, the max number of traces, and `spss`, the max
+//! number of spans per spanSet. It accumulates the job-accounting `metrics{}`
+//! block.
+//!
+//! The search merge currency is the **typed serde edge model** in
+//! [`crate::frontend::wire`], not raw `serde_json::Value`. Reunion keys on
+//! `traceID`, so a trace split across blocks or across hot and cold reassembles.
+//! Span-level dedup on `spanID` covers the late-span overlap case, and the
+//! merge accumulates the `matched` count across blocks. All of this runs over
+//! typed structs.
 
 use std::collections::BTreeSet;
 
@@ -18,9 +21,11 @@ use crate::frontend::{
     wire::{Metrics, SearchResponseJson, SpanSetJson, TraceByIdResponseJson, TraceJson},
 };
 
-/// The v2 by-id status: a fully-returned trace is `COMPLETE`; one exceeding the
-/// max trace size is `PARTIAL` (returned with an explanatory message, not an
-/// error).
+/// The v2 by-id status.
+///
+/// A fully-returned trace is `COMPLETE`. A trace that exceeds the max trace
+/// size is `PARTIAL`, and the response carries an explanatory message rather
+/// than an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TraceStatus {
     Complete,
@@ -37,9 +42,12 @@ impl TraceStatus {
     }
 }
 
-/// Merge search partials: reunion by `traceID`, accumulate metrics, then apply
-/// `limit` (newest-first) and `spss` (per-spanSet span cap, `matched`
-/// preserved). Returns the merged `SearchResponseJson` ready to serialize.
+/// Merge search partials.
+///
+/// This reunions by `traceID`, accumulates metrics, then applies `limit`
+/// newest-first and `spss` as a per-spanSet span cap. It preserves each
+/// spanSet's `matched` count. It returns the merged `SearchResponseJson`, ready
+/// to serialize.
 #[must_use]
 pub fn merge_search(partials: Vec<SearchPartial>, limit: usize, spss: usize) -> SearchResponseJson {
     let mut merged: Vec<TraceJson> = Vec::new();
@@ -59,8 +67,9 @@ pub fn merge_search(partials: Vec<SearchPartial>, limit: usize, spss: usize) -> 
     }
 }
 
-/// Fold one trace into the merged set: append when new, else reunion its
-/// spanSets into the existing same-`traceID` trace.
+/// Fold one trace into the merged set. This appends the trace when it is new.
+/// Otherwise it reunions the trace's spanSets into the existing trace with the
+/// same `traceID`.
 fn merge_trace(merged: &mut Vec<TraceJson>, trace: TraceJson) {
     let Some(existing) = merged.iter_mut().find(|t| t.trace_id == trace.trace_id) else {
         merged.push(trace);
@@ -86,9 +95,11 @@ fn merge_trace(merged: &mut Vec<TraceJson>, trace: TraceJson) {
     merge_span_sets(&mut existing.span_sets, trace.span_sets);
 }
 
-/// Reunion spanSets across blocks: dedupe spans by `spanID` into the first
-/// spanSet, accumulating each spanSet's true `matched` count (cross-shard the
-/// match count is additive — ported from the legacy `merge_span_sets`).
+/// Reunion spanSets across blocks.
+///
+/// This dedupes spans by `spanID` into the first spanSet, and accumulates each
+/// spanSet's true `matched` count. The match count is additive across shards.
+/// This is ported from the legacy `merge_span_sets`.
 fn merge_span_sets(existing: &mut Vec<SpanSetJson>, incoming: Vec<SpanSetJson>) {
     for span_set in incoming {
         let Some(first) = existing.first_mut() else {
@@ -123,9 +134,11 @@ fn merge_span_sets(existing: &mut Vec<SpanSetJson>, incoming: Vec<SpanSetJson>) 
     }
 }
 
-/// Apply Tempo's post-merge `limit`/`spss` truncation: order traces newest-first
-/// by `startTimeUnixNano`, keep at most `limit`, then cap each kept trace's
-/// spanSets' `spans` to `spss` (preserving each spanSet's `matched` count).
+/// Apply Tempo's post-merge `limit` and `spss` truncation.
+///
+/// This orders traces newest-first by `startTimeUnixNano` and keeps at most
+/// `limit` of them. It then caps the `spans` of each kept trace's spanSets to
+/// `spss`, and preserves each spanSet's `matched` count.
 fn apply_search_limits(traces: &mut Vec<TraceJson>, limit: usize, spss: usize) {
     traces.sort_by(|a, b| {
         parse_nanos(&b.start_time_unix_nano).cmp(&parse_nanos(&a.start_time_unix_nano))
@@ -148,11 +161,13 @@ fn parse_nanos(s: &str) -> i128 {
     s.parse().unwrap_or(i128::MIN)
 }
 
-/// Assemble one trace from per-querier by-id partials: union `resourceSpans`,
-/// dedupe spans by `spanId`, accumulate metrics, and flag `Partial` when the
-/// assembled trace exceeds `max_trace` (or any partial reported `PARTIAL`).
+/// Assemble one trace from per-querier by-id partials.
 ///
-/// Returns `None` when no querier returned the trace.
+/// This unions `resourceSpans`, dedupes spans by `spanId`, and accumulates
+/// metrics. It flags `Partial` when the assembled trace exceeds `max_trace`, or
+/// when any partial reported `PARTIAL`.
+///
+/// It returns `None` when no querier returned the trace.
 #[must_use]
 pub fn assemble_trace(
     partials: Vec<TracePartial>,
@@ -197,8 +212,8 @@ fn seed_seen(trace: &TraceByIdResponseJson, seen: &mut BTreeSet<String>) {
     }
 }
 
-/// Union another querier's by-id body into the accumulator, deduping spans by
-/// `spanId` (appending new resourceSpans/scopeSpans only as needed).
+/// Union another querier's by-id body into the accumulator, and dedupe spans by
+/// `spanId`. This appends new resourceSpans and scopeSpans only as needed.
 fn union_trace_bodies(
     acc: &mut TraceByIdResponseJson,
     other: TraceByIdResponseJson,
@@ -265,14 +280,15 @@ fn merge_scope_spans(
     }
 }
 
-/// Total span count of a typed by-id body (helper for callers/tests).
+/// Total span count of a typed by-id body. This is a helper for callers and
+/// tests.
 #[must_use]
 pub fn assembled_span_count(trace: &TraceByIdResponseJson) -> usize {
     trace.span_count()
 }
 
-/// Union scoped tag names across jobs, dedup + sort per scope; accumulate
-/// metrics.
+/// Union scoped tag names across jobs, then dedup and sort per scope. This also
+/// accumulates metrics.
 #[must_use]
 pub fn merge_tag_names(partials: Vec<TagNamesPartial>) -> (Vec<ScopedTag>, Metrics) {
     let mut metrics = Metrics::default();
@@ -302,8 +318,8 @@ pub fn merge_tag_names(partials: Vec<TagNamesPartial>) -> (Vec<ScopedTag>, Metri
     (merged, metrics)
 }
 
-/// Union typed tag values across jobs, dedup `(type, value)` pairs; accumulate
-/// metrics.
+/// Union typed tag values across jobs, then dedup the `(type, value)` pairs.
+/// This also accumulates metrics.
 #[must_use]
 pub fn merge_tag_values(partials: Vec<TagValuesPartial>) -> (Vec<TypedValue>, Metrics) {
     let mut metrics = Metrics::default();
@@ -322,7 +338,8 @@ pub fn merge_tag_values(partials: Vec<TagValuesPartial>) -> (Vec<TypedValue>, Me
     (out, metrics)
 }
 
-/// Stable string discriminant for a `TagScope` (ordering + dedup key).
+/// Stable string discriminant for a `TagScope`. It is the ordering key and the
+/// dedup key.
 fn scope_key(scope: TagScope) -> &'static str {
     match scope {
         TagScope::Resource => "resource",

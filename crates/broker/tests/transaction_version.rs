@@ -6,26 +6,28 @@
 //! verify-only `AddPartitionsToTxn` path, and that persisted txn state
 //! survives a broker restart (the startup DECODE/recover-from-disk path):
 //!
-//! 1. **`TV_1`** — downgrade `transaction.version` to 1 (flexible, v1
+//! 1. **`TV_1`**: downgrade `transaction.version` to 1 (flexible, v1
 //!    `TransactionLogValue` records, no epoch bump), then run a full
 //!    transactional produce → commit → `read_committed` consume. Success
-//!    proves the coordinator persists `__transaction_state` via the v1
-//!    *encode* path at the resolved level and the transaction commits/reads
-//!    end-to-end.
-//! 2. **`TV_0`** — downgrade to 0 (tombstone → Classic, non-flexible v0
-//!    records), then the same full cycle. Proves the v0 encode path + cycle.
-//! 3. **verify-only `AddPartitionsToTxn`** at `TV_2` — confirm per-partition
+//!    proves that the coordinator persists `__transaction_state` through the
+//!    v1 *encode* path at the resolved level, and that the transaction
+//!    commits and reads end-to-end.
+//! 2. **`TV_0`**: downgrade to 0 (tombstone → Classic, non-flexible v0
+//!    records), then run the same full cycle. This proves the v0 encode path
+//!    and the cycle.
+//! 3. **verify-only `AddPartitionsToTxn`** at `TV_2`: confirm per-partition
 //!    `NONE (0)` for an already-added partition and
 //!    `TRANSACTION_ABORTABLE (120)` for one that was never added.
-//! 4. **restart recovery** (v0 + v1) — persist an `Ongoing` entry, restart the
-//!    broker on the same data dir, and prove `TxnCoordinator::recover` decodes
-//!    the `__transaction_state` record from disk by committing the recovered
-//!    txn via `EndTxn`. This is the only path that exercises the startup
-//!    decode/recover code that the live-broker tests above cannot reach.
+//! 4. **restart recovery** (v0 and v1): persist an `Ongoing` entry, restart the
+//!    broker on the same data dir, and prove that `TxnCoordinator::recover`
+//!    decodes the `__transaction_state` record from disk. The proof is a
+//!    commit of the recovered txn through `EndTxn`. This is the only path that
+//!    exercises the startup decode/recover code, which the live-broker tests
+//!    above cannot reach.
 //!
-//! Windows-gated like `transactions.rs`: openraft + tokio scheduling on the
-//! hosted Windows runner causes intermittent `INVALID_TXN_STATE` during
-//! `InitProducerId`.
+//! This suite is Windows-gated like `transactions.rs`. On the hosted Windows
+//! runner, openraft and tokio scheduling cause intermittent
+//! `INVALID_TXN_STATE` during `InitProducerId`.
 
 use std::time::Duration;
 
@@ -146,11 +148,11 @@ async fn create_topic(client: &Client, name: &str, partitions: i32) {
     );
 }
 
-/// Downgrade the finalized `transaction.version` to `level` via a
+/// Downgrade the finalized `transaction.version` to `level` with a
 /// `SAFE_DOWNGRADE` (`upgrade_type = 2`) `UpdateFeatures` request. Level 1
-/// finalizes the Flexible level; level 0 tombstones the feature (→ absent →
+/// finalizes the Flexible level. Level 0 tombstones the feature (→ absent →
 /// Classic). `resolve_txn_version` reads the live image per request, so a new
-/// transaction started after this returns picks up the downgraded level.
+/// transaction started after this call returns picks up the downgraded level.
 async fn downgrade_transaction_version(client: &Client, level: i16) {
     let resp = client
         .send(UpdateFeaturesRequest {
@@ -192,10 +194,11 @@ fn rec(topic: &str, v: &str) -> ProducerRecord {
 ///
 /// The commit forces the coordinator to write `TransactionLogValue` records to
 /// `__transaction_state` at the resolved level (v0 for `TV_0`, v1 for `TV_1/TV_2`)
-/// across its state transitions, so a successful produce→commit→read cycle
-/// proves the level's *encode* path runs and the transaction commits/reads
-/// end-to-end. (In-memory state drives the transitions within one broker
-/// lifetime; decode/recover from disk is unit-tested in `txn::log_record`.)
+/// across its state transitions. A successful produce→commit→read cycle
+/// therefore proves that the level's *encode* path runs and that the
+/// transaction commits and reads end-to-end. In-memory state drives the
+/// transitions within one broker lifetime. Unit tests in `txn::log_record`
+/// cover decode and recovery from disk.
 async fn full_cycle_commit_and_read(bootstrap: &str, topic: &str, tid: &str, group: &str) {
     let producer = Producer::builder()
         .bootstrap(bootstrap.to_string())
@@ -240,8 +243,8 @@ async fn full_cycle_commit_and_read(bootstrap: &str, topic: &str, tid: &str, gro
 
 /// Exercise the complete transactional cycle at both downgraded feature
 /// levels. `TV_1` writes flexible v1 log values and `TV_0` writes classic v0
-/// log values; in both cases a committed read proves the selected encode path
-/// works end-to-end.
+/// log values. In both cases a committed read proves that the selected encode
+/// path works end-to-end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn versioned_full_cycles_commit_and_read() {
     struct Case {
@@ -288,11 +291,12 @@ async fn versioned_full_cycles_commit_and_read() {
 /// `(t,0)` → `AddPartitionsToTxn` (`verify_only=true`) querying both `(t,0)`
 /// (added → NONE) and `(t,1)` (never added → `TRANSACTION_ABORTABLE`).
 ///
-/// Sent over a single connection to the in-process broker, which is its own
-/// transaction coordinator. `Client::send` negotiates the highest mutually
-/// supported version; the broker advertises v5, which carries the same
-/// batched `transactions` array + `verify_only` field as v4 and routes through
-/// the identical `handle_v4` verify path, so the assertions hold regardless.
+/// The test sends this over a single connection to the in-process broker,
+/// which is its own transaction coordinator. `Client::send` negotiates the
+/// highest mutually supported version. The broker advertises v5, which carries
+/// the same batched `transactions` array and `verify_only` field as v4 and
+/// routes through the identical `handle_v4` verify path, so the assertions
+/// hold at either version.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
     let (broker, bootstrap, _dir) = boot_single().await;
@@ -412,18 +416,19 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
 // ── restart recovery: __transaction_state DECODE / recover-from-disk ────────────
 
 /// Re-open the broker on the SAME data dir. A populated dir replays the raft
-/// log/checkpoint rather than re-bootstrapping, so the restart uses
-/// `BootstrapMode::Rejoin` (same pattern as
-/// `consumer_group_next_gen_persistence.rs`).
+/// log and checkpoint instead of a re-bootstrap, so the restart uses
+/// `BootstrapMode::Rejoin`. This is the same pattern as
+/// `consumer_group_next_gen_persistence.rs`.
 fn rejoin_config(log_dir: std::path::PathBuf) -> BrokerConfig {
     let mut cfg = BrokerConfig::for_tests(log_dir);
     cfg.bootstrap_mode = BootstrapMode::Rejoin;
     cfg
 }
 
-/// `InitProducerId` for `tid`, retrying while the coordinator is still loading
-/// (`COORDINATOR_NOT_AVAILABLE(15)` / `NOT_COORDINATOR(16)`). Returns the
-/// assigned `(producer_id, producer_epoch)`.
+/// `InitProducerId` for `tid`. It retries while the coordinator is still
+/// loading, that is, on `COORDINATOR_NOT_AVAILABLE(15)` or
+/// `NOT_COORDINATOR(16)`. Returns the assigned
+/// `(producer_id, producer_epoch)`.
 async fn init_producer_id(client: &Client, tid: &str) -> (i64, i16) {
     // FindCoordinator locates and triggers loading of the coordinator for tid;
     // on a single-broker cluster the coordinator load can lag broker boot.
@@ -472,8 +477,8 @@ async fn init_producer_id(client: &Client, tid: &str) -> (i64, i16) {
 
 /// `AddPartitionsToTxn` to add `(topic, partition)` to the ongoing txn for
 /// `tid`/`pid`/`epoch`. This transitions the coordinator entry to `Ongoing`
-/// and PERSISTS a `TransactionLogValue` record to `__transaction_state` —
-/// without committing it. Asserts success.
+/// and PERSISTS a `TransactionLogValue` record to `__transaction_state`. It
+/// does not commit the record. Asserts success.
 async fn add_partition_ongoing(
     client: &Client,
     tid: &str,
@@ -528,11 +533,11 @@ async fn add_partition_ongoing(
 }
 
 /// Wait for the transaction coordinator for `tid` to finish loading after a
-/// (re)boot, then commit the in-flight transaction via `EndTxn`. The commit
-/// only succeeds if the coordinator already holds an `Ongoing` entry whose
-/// `(producer_id, producer_epoch)` match — which, on a freshly-rebooted broker,
-/// can only have come from decoding the persisted `__transaction_state` record.
-/// Returns the complete `EndTxn` response.
+/// (re)boot, then commit the in-flight transaction through `EndTxn`. The
+/// commit succeeds only if the coordinator already holds an `Ongoing` entry
+/// whose `(producer_id, producer_epoch)` match. On a freshly-rebooted broker
+/// that entry can come only from a decode of the persisted
+/// `__transaction_state` record. Returns the complete `EndTxn` response.
 async fn commit_via_end_txn(client: &Client, tid: &str, pid: i64, epoch: i16) -> EndTxnResponse {
     // FindCoordinator both locates and triggers loading of the coordinator.
     let fc = client
@@ -584,9 +589,9 @@ struct RecoveryCase {
 }
 
 /// Persist an `Ongoing` transaction, restart on the same data directory, and
-/// compare the complete `EndTxn` response after recovery. Success proves the
-/// selected transaction-log codec was decoded with the original producer
-/// identity; the expected completion epoch additionally checks the feature
+/// compare the complete `EndTxn` response after recovery. Success proves that
+/// the broker decoded the selected transaction-log codec with the original
+/// producer identity. The expected completion epoch also checks the feature
 /// level's KIP-890 behavior.
 async fn assert_ongoing_txn_survives_restart(case: &RecoveryCase) {
     let dir = TempDir::new().unwrap();

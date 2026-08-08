@@ -74,28 +74,29 @@ pub struct MultiRangeTenantConfig {
     /// This node's identity for cross-gateway `NOTIFY`, and the switch that
     /// turns it on.
     ///
-    /// `Some` opts the node in: the coordinator engine stamps every committed
-    /// notification with this string and appends it to the range-0 log, and a
-    /// node without range 0 re-injects the records its follower tail reads,
-    /// skipping the ones carrying its own identity. It must therefore differ
-    /// between the nodes of one tenant — the live runtime passes its
-    /// authenticated range-listen endpoint.
+    /// `Some` opts the node in. The coordinator engine stamps every committed
+    /// notification with this string and appends it to the range-0 log. A node
+    /// without range 0 re-injects the records its follower tail reads, but it
+    /// skips the records that carry its own identity. The identity must
+    /// therefore differ between the nodes of one tenant. The live runtime
+    /// passes its authenticated range-listen endpoint.
     ///
-    /// `None` keeps notifications in-process. That is the required setting for
-    /// a tenant whose engines commit straight to their KV rather than through
-    /// the substrate WAL: only the WAL apply paths drop notify records, so
-    /// replicating without one would write a notification into the catalog
+    /// `None` keeps notifications in-process. A tenant whose engines commit
+    /// straight to their KV, and not through the substrate WAL, must use
+    /// `None`. Only the WAL apply paths drop notify records. Replication
+    /// without a WAL would therefore write a notification into the catalog
     /// store, where checkpoints would keep it forever.
     pub node_identity: Option<String>,
     /// Signed wall-clock skew in milliseconds applied to this node's HLC reads.
     ///
-    /// Fault-injection knob for load and chaos testing, not a production
-    /// setting: when [`TimestampSourceMode::Hlc`] is installed, the system
-    /// clock is wrapped in a [`crabka_pgexec::SkewedWallClock`] so this node
-    /// mints stamps as if its wall clock ran ahead of (positive) or behind
-    /// (negative) its peers. Node-local by design — unlike the mode, it need
-    /// not match across nodes — and ignored under
-    /// [`TimestampSourceMode::LogicalTso`].
+    /// This is a fault-injection control for load and chaos tests, not a
+    /// production setting. When [`TimestampSourceMode::Hlc`] is installed, the
+    /// tenant wraps the system clock in a [`crabka_pgexec::SkewedWallClock`].
+    /// A positive offset makes this node mint stamps as if its wall clock ran
+    /// ahead of its peers. A negative offset makes it mint stamps as if the
+    /// clock ran behind them. The offset is node-local by design and, unlike
+    /// the mode, does not need to match across nodes. Under
+    /// [`TimestampSourceMode::LogicalTso`] the tenant ignores it.
     pub hlc_wall_offset_ms: i64,
     /// Distributed range limits and pacing.
     pub runtime_policy: crate::RangeRuntimePolicy,
@@ -107,23 +108,26 @@ pub struct MultiRangeTenantConfig {
 
 /// The timestamp-ordering source a tenant installs, chosen at provision time.
 ///
-/// Mode is explicit tenant configuration, not inferred from topology: a
-/// distributed topology running [`LogicalTso`](TimestampSourceMode::LogicalTso)
-/// is a legitimate single-zone-HA configuration, and promotion to
-/// [`Hlc`](TimestampSourceMode::Hlc) is an administrative act. The existing
-/// topology-based selection (in-process oracle vs. registry-forwarded vs.
-/// unavailable) still decides *how* the chosen mode is wired for this node.
+/// The mode is explicit tenant configuration. The tenant does not infer it from
+/// the topology: a distributed topology that runs
+/// [`LogicalTso`](TimestampSourceMode::LogicalTso) is a legitimate
+/// single-zone-HA configuration, and promotion to
+/// [`Hlc`](TimestampSourceMode::Hlc) is an administrative act. The
+/// topology-based selection between the in-process oracle, the
+/// registry-forwarded oracle, and no oracle still decides *how* this node wires
+/// the chosen mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimestampSourceMode {
-    /// Centralized range-0 logical oracle — the solo default. Timestamps flow
+    /// Centralized range-0 logical oracle, the solo default. Timestamps flow
     /// through one authority with its successor grace period, stride batching,
     /// and epoch fencing.
     #[default]
     LogicalTso,
     /// Node-local Hybrid Logical Clock. Each node mints stamps from its own
-    /// clock with no RPC. A single `HlcTimestampSource` fanned to every engine
-    /// is correct on its own (one authority, so no cross-node skew); multi-node
-    /// stamping and uncertainty-window read-restart are documented follow-up.
+    /// clock with no RPC. One `HlcTimestampSource` fanned out to every engine
+    /// is correct on its own, because it is one authority and there is no
+    /// cross-node skew. Multi-node stamping and uncertainty-window read-restart
+    /// are documented follow-up work.
     Hlc {
         /// Maximum tolerated clock offset in milliseconds; sizes the read
         /// uncertainty window.
@@ -256,7 +260,7 @@ impl MultiRangeTenantConfig {
         self
     }
 
-    /// Defer timestamp recovery while durable split activation is being resumed.
+    /// Defer timestamp recovery while durable split activation resumes.
     #[must_use]
     pub fn defer_timestamp_recovery(mut self) -> Self {
         self.recover_timestamps_on_start = false;
@@ -266,9 +270,10 @@ impl MultiRangeTenantConfig {
     /// Replicate this node's notifications through the range-0 log, stamped
     /// with `identity`.
     ///
-    /// Must differ between the nodes of one tenant: it is how a node recognises
-    /// the records it published itself. Only for a tenant whose ranges commit
-    /// through the substrate WAL — see [`Self::node_identity`].
+    /// The identity must differ between the nodes of one tenant. It is how a
+    /// node recognizes the records it published itself. Use it only for a tenant
+    /// whose ranges commit through the substrate WAL. See
+    /// [`Self::node_identity`].
     #[must_use]
     pub fn with_node_identity(mut self, identity: impl Into<String>) -> Self {
         self.node_identity = Some(identity.into());
@@ -284,8 +289,9 @@ impl MultiRangeTenantConfig {
 
     /// Skew this node's HLC wall-clock reads by a signed millisecond offset.
     ///
-    /// Fault-injection knob for load and chaos testing, not production
-    /// configuration; ignored unless [`TimestampSourceMode::Hlc`] is selected.
+    /// This is a fault-injection control for load and chaos tests, not
+    /// production configuration. The tenant ignores it unless
+    /// [`TimestampSourceMode::Hlc`] is selected.
     #[must_use]
     pub fn with_hlc_wall_offset_ms(mut self, hlc_wall_offset_ms: i64) -> Self {
         self.hlc_wall_offset_ms = hlc_wall_offset_ms;
@@ -403,7 +409,8 @@ impl ReadOnlyRange0Replica {
     }
 
     /// The follower tail this replica reads, for consumers of records the merge
-    /// rules deliberately never store — cross-gateway `NOTIFY` being the one.
+    /// rules deliberately never store. Cross-gateway `NOTIFY` is the one such
+    /// record.
     #[must_use]
     pub fn tail(&self) -> &crate::Range0Tail {
         &self.tail
@@ -428,11 +435,11 @@ impl ReadOnlyRange0Replica {
     /// Wake the follower's poll loop without waiting for it.
     ///
     /// A `NOTIFY` this node forwarded to the coordinator is already durable in
-    /// the range-0 log by the time the forwarded statement returns, but this
-    /// node only sees it on the follower's next poll — up to its full poll
-    /// period away. Poking costs nothing, never blocks the notifying client,
-    /// and turns that wait into one broker round trip for the listeners on
-    /// *this* node. Listeners elsewhere still learn on their own node's poll.
+    /// the range-0 log when the forwarded statement returns. But this node only
+    /// sees it on the follower's next poll, which can be a full poll period
+    /// away. The poke costs nothing, never blocks the notifying client, and
+    /// shortens that wait to one broker round trip for the listeners on *this*
+    /// node. Listeners elsewhere still learn on their own node's poll.
     fn poke_catalog_refresh(&self) {
         if let Some(poke) = &self.refresh_poke {
             // `notify_one` leaves a permit when the loop is mid-iteration, so
@@ -454,10 +461,10 @@ impl ReadOnlyRange0Replica {
 
 /// Re-injects the notifications carried by the range-0 log into this node's bus.
 ///
-/// Installed on the follower tail of a node that does not host range 0. Notify
-/// records never reach a KV — every apply site drops them — so this hook is the
-/// only place they are visible, and it runs inline on the apply path: it does
-/// exactly one non-blocking best-effort fan-out and returns.
+/// The node installs this hook on the follower tail when it does not host range
+/// 0. Notify records never reach a KV, because every apply site drops them, so
+/// this hook is the only place they are visible. It runs inline on the apply
+/// path: it does exactly one non-blocking best-effort fan-out and returns.
 struct NotifyTailObserver {
     bus: Arc<crabka_pgexec::notify::NotifyBus>,
     origin: String,
@@ -476,8 +483,8 @@ impl crate::range0_tail::Range0FrameObserver for NotifyTailObserver {
 /// The notifications a frame carries for delivery on a node identified by
 /// `origin`.
 ///
-/// Non-notify ops and this node's own records are skipped, and so is any record
-/// that fails to decode: these bytes came off a log another node wrote, so a
+/// This function skips non-notify ops, this node's own records, and any record
+/// that fails to decode. These bytes came off a log another node wrote, so a
 /// corrupt or future-versioned record must cost one warning, not the catalog
 /// apply path it runs on.
 fn remote_notifications(ops: &[crabka_pgkv::WriteOp], origin: &str) -> Vec<Notification> {
@@ -587,7 +594,7 @@ impl MultiRangeTenant {
     /// Build a transfer plan from the currently served coordinator catalog.
     ///
     /// The returned physical-to-logical table mapping is authoritative for
-    /// control-plane restores; callers must not synthesize it from routing IDs.
+    /// control-plane restores. Callers must not synthesize it from routing IDs.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -732,9 +739,9 @@ impl MultiRangeTenant {
 
     /// Start a tenant from explicitly injected per-range engines.
     ///
-    /// The factory is called once for every hosted range. Production substrate callers should use
-    /// this seam to pass engines recovered from each range's WAL instead of falling back to local
-    /// in-process stores.
+    /// This function calls the factory once for every hosted range. Production substrate callers
+    /// should use this seam to pass engines recovered from each range's WAL, rather than fall back
+    /// to local in-process stores.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -922,10 +929,11 @@ impl MultiRangeTenant {
         Ok(hosts_range0)
     }
 
-    /// This node's identity on the cross-gateway notification log: the origin
-    /// stamped on every record it publishes, and the one it ignores when
-    /// reading records back off the log. `None` when its notifications stay
-    /// in-process.
+    /// This node's identity on the cross-gateway notification log.
+    ///
+    /// The node stamps this origin on every record it publishes, and it ignores
+    /// this origin when it reads records back off the log. The value is `None`
+    /// when the node keeps its notifications in-process.
     #[must_use]
     pub fn node_notify_origin(&self) -> Option<&str> {
         self.inner.notify_origin.as_deref()
@@ -972,8 +980,9 @@ impl MultiRangeTenant {
 
     /// Install one foreign scanner on every currently served range engine.
     ///
-    /// The serving snapshot is replaced atomically so new gateway sessions
-    /// cannot observe a mixture of scanner-enabled and scanner-less engines.
+    /// This method replaces the serving snapshot atomically, so new gateway
+    /// sessions cannot observe a mixture of scanner-enabled and scanner-less
+    /// engines.
     pub fn set_foreign_scanner(&self, scanner: &Arc<dyn ForeignScanner>) {
         let serving = self.inner.serving.load_full();
         let mut engines = serving
@@ -995,7 +1004,7 @@ impl MultiRangeTenant {
 
     /// Split off one physically empty ordinary table into a locally hosted successor.
     ///
-    /// This first bridge intentionally performs no physical data migration. It accepts only a
+    /// This first bridge deliberately does no physical data migration. It accepts only a
     /// table boundary whose moved table has no rows and whose row-id allocator has not advanced.
     /// # Errors
     ///
@@ -1055,9 +1064,9 @@ impl MultiRangeTenant {
 
     /// Physically transfer and publish one populated ordinary table into a local successor.
     ///
-    /// This is intentionally limited to a target interval containing exactly one
-    /// catalog-visible table.  The table gate and source WAL pause are held until
-    /// the complete successor engine is atomically published with the new map.
+    /// This method is deliberately limited to a target interval that contains exactly
+    /// one catalog-visible table. It holds the table gate and the source WAL pause until
+    /// it publishes the complete successor engine atomically with the new map.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1537,8 +1546,10 @@ impl MultiRangeTenant {
 }
 
 /// Settle every primary descriptor recovered from hosted ranges before serving.
-/// A pending descriptor is abort-won under its primary-range descriptor lock; a durable
-/// commit is physically replayed with the operations stored in that descriptor.
+///
+/// Recovery makes a pending descriptor abort-won under its primary-range descriptor
+/// lock. It replays a durable commit physically with the operations stored in that
+/// descriptor.
 fn hosted_participant_requires_recovery(
     descriptor: &crabka_pgexec::TimestampTxnDescriptor,
     identity: crabka_pgexec::TimestampTxnIdentity,
@@ -2030,11 +2041,12 @@ where
 
 struct PgexecTsoOracle<R> {
     client: BatchedTsoClient<R>,
-    /// Highest range-local timestamp observed via the Lamport receive seam.
-    /// Single-shard bypass commits advance per-range local sequences without
-    /// consulting the global oracle, so a grant may lag behind stamps a range
-    /// has already spent; every allocation skips to strictly above this floor
-    /// so cross-range leases never collide with locally minted rowids.
+    /// Highest range-local timestamp observed through the Lamport receive seam.
+    ///
+    /// Single-shard bypass commits advance per-range local sequences without a
+    /// call to the global oracle, so a grant can lag behind stamps a range has
+    /// already spent. Every allocation therefore skips to strictly above this
+    /// floor, so cross-range leases never collide with locally minted rowids.
     observed_floor: std::sync::atomic::AtomicU64,
 }
 
@@ -2124,16 +2136,17 @@ where
     }
 
     /// Grant `count` contiguous timestamps whose first stamp strictly exceeds
-    /// the observed range-local floor, burning below-floor stamps as needed.
-    /// Grants are contiguous and strictly monotone across calls, so each
-    /// deficit re-grant closes the gap and the loop only repeats when a
-    /// concurrent observation raises the floor mid-flight.
+    /// the observed range-local floor, and burn below-floor stamps as needed.
     ///
-    /// The floor is a best-effort high-water mark, not a reservation: a
-    /// bypass allocation racing this grant can still mint overlapping stamps,
-    /// and that collision is caught by the prewrite reservation checks as a
-    /// retryable serialization conflict. Serializing against every range's
-    /// local allocator would reintroduce exactly the global coordination the
+    /// Grants are contiguous and strictly monotone across calls, so each
+    /// deficit re-grant closes the gap. The loop repeats only when a concurrent
+    /// observation raises the floor mid-flight.
+    ///
+    /// The floor is a best-effort high-water mark, not a reservation. A bypass
+    /// allocation that races this grant can still mint overlapping stamps. The
+    /// prewrite reservation checks catch that collision as a retryable
+    /// serialization conflict. Serialization against every range's local
+    /// allocator would reintroduce exactly the global coordination that the
     /// single-shard bypass exists to avoid.
     async fn grant_above_floor(
         &self,
@@ -2195,22 +2208,24 @@ fn install_replica_catalog(
     }
 }
 
-/// Give this node the one `LISTEN`/`NOTIFY` bus every connection to it shares,
-/// and — when the node has an identity to publish under — connect that bus to
-/// the range-0 log in whichever direction this node can reach it.
+/// Give this node the one `LISTEN`/`NOTIFY` bus every connection to it shares.
 ///
-/// A node hosting range 0 must use that engine's own bus, not a bus beside it:
-/// the coordinator engine publishes there, so a second bus would leave every
-/// statement executed on this node invisible to its own listeners. It is also
-/// the node that owns the notification log, so it is the one that stamps and
-/// appends records — hence [`SqlEngine::set_notify_origin`] on that engine and
-/// no observer, since the leader applies its own frames without the tail.
+/// When the node has an identity to publish under, this function also connects
+/// that bus to the range-0 log, in whichever direction this node can reach it.
 ///
-/// A node without range 0 is fed from the other direction: its follower tail
+/// A node that hosts range 0 must use that engine's own bus, not a bus beside
+/// it. The coordinator engine publishes there, so a second bus would leave every
+/// statement executed on this node invisible to its own listeners. That node
+/// also owns the notification log, so it is the node that stamps and appends
+/// records. This function therefore calls [`SqlEngine::set_notify_origin`] on
+/// that engine and installs no observer, because the leader applies its own
+/// frames without the tail.
+///
+/// A node without range 0 is fed from the other direction. Its follower tail
 /// observes the records the coordinator appended and re-injects them.
 ///
-/// Without an identity the bus stays in-process, which is what a tenant whose
-/// engines commit straight to their KV needs: nothing stamps, nothing appends,
+/// Without an identity the bus stays in-process. A tenant whose engines commit
+/// straight to their KV needs exactly that: nothing stamps, nothing appends,
 /// and no notification can reach a store.
 fn install_node_notify_bus(
     engines: &BTreeMap<RangeId, SqlEngine>,
@@ -2359,13 +2374,13 @@ where
 /// Build the in-process RPC endpoint for a wall-anchored HLC grant oracle
 /// recovered from a durable horizon.
 ///
-/// This is the `Hlc`-mode counterpart of [`tso_rpc_from_horizon`]: range 0
-/// stays the single timestamp authority, but grants are packed HLC stamps
-/// anchored to `wall` instead of dense logical integers. The oracle seeds its
-/// clock from `persisted_max_ts`, so every grant strictly dominates everything
-/// any predecessor granted even when `wall` reads behind the predecessor's
-/// wall clock, and it persists the configured horizon headroom through the
-/// same epoch-gated committer the logical oracle uses.
+/// This is the `Hlc`-mode counterpart of [`tso_rpc_from_horizon`]. Range 0 stays
+/// the single timestamp authority, but grants are packed HLC stamps anchored to
+/// `wall` instead of dense logical integers. The oracle seeds its clock from
+/// `persisted_max_ts`, so every grant strictly dominates everything any
+/// predecessor granted, even when `wall` reads behind the predecessor's wall
+/// clock. The oracle persists the configured horizon headroom through the same
+/// epoch-gated committer that the logical oracle uses.
 /// # Panics
 ///
 /// Panics if an internal invariant is violated.
@@ -2428,9 +2443,9 @@ where
 
 /// The wall clock an HLC component on this node should read.
 ///
-/// A zero `wall_offset_ms` is the plain system clock; a nonzero offset wraps
-/// it in the fault-injection [`crabka_pgexec::SkewedWallClock`] used by load
-/// and chaos tests to emulate cross-node wall-clock skew.
+/// A zero `wall_offset_ms` gives the plain system clock. A nonzero offset wraps
+/// the system clock in the fault-injection [`crabka_pgexec::SkewedWallClock`]
+/// that load and chaos tests use to emulate cross-node wall-clock skew.
 #[must_use]
 pub fn hlc_wall_clock(wall_offset_ms: i64) -> Arc<dyn crabka_pgexec::WallClock> {
     if wall_offset_ms == 0 {
@@ -2465,13 +2480,13 @@ fn install_memory_timestamp_oracle(
 /// Install a node-local Hybrid Logical Clock source, seeded from the durable
 /// `LogicalTso` horizon so its first stamp dominates every solo-mode stamp.
 ///
-/// This mirrors [`install_memory_timestamp_oracle`]: it fans one source to every
-/// hosted engine. A single `HlcTimestampSource` is the sole timestamp authority
-/// here, so it is correct on its own — multi-node stamping and the
-/// uncertainty-window read-restart are the documented follow-up.
+/// This mirrors [`install_memory_timestamp_oracle`]: it fans one source out to
+/// every hosted engine. One `HlcTimestampSource` is the sole timestamp authority
+/// here, so it is correct on its own. Multi-node stamping and the
+/// uncertainty-window read-restart are the documented follow-up work.
 ///
 /// A nonzero `wall_offset_ms` wraps the system clock in a fault-injection
-/// [`crabka_pgexec::SkewedWallClock`], for load and chaos tests emulating
+/// [`crabka_pgexec::SkewedWallClock`], for load and chaos tests that emulate
 /// cross-node wall-clock skew.
 fn install_hlc_timestamp_source(
     engines: &mut BTreeMap<RangeId, SqlEngine>,
@@ -2738,19 +2753,19 @@ fn range_client_for_registry(
 impl MultiRangeTenant {
     /// Build a gateway session over the engines this node currently serves.
     ///
-    /// When `notify_pid` is set the session also joins **this node's**
-    /// notification bus under that backend pid — the coordinator engine's own
-    /// bus where range 0 is hosted, a standalone bus fed by the range-0 tail
-    /// where it is not. The gateway keeps the receiver — the wire loop takes it
-    /// through [`Session::take_notifications`] and pushes `NotificationResponse`
-    /// from there — and hands the registration handle to one hosted range's
-    /// [`crabka_pgexec::SqlSession`], the seat this connection's `LISTEN` and
-    /// `UNLISTEN` run on.
+    /// When `notify_pid` is set, the session also joins **this node's**
+    /// notification bus under that backend pid. That bus is the coordinator
+    /// engine's own bus where range 0 is hosted, and a standalone bus fed by the
+    /// range-0 tail where it is not. The gateway keeps the receiver: the wire
+    /// loop takes it through [`Session::take_notifications`] and pushes
+    /// `NotificationResponse` from there. The gateway hands the registration
+    /// handle to one hosted range's [`crabka_pgexec::SqlSession`], the seat this
+    /// connection's `LISTEN` and `UNLISTEN` run on.
     ///
-    /// A session that cannot register — no backend pid, or no hosted engine to
-    /// seat the registration on — records why in [`GatewayNotify`] and refuses
-    /// the statements rather than accepting them into a queue nothing on this
-    /// connection drains.
+    /// A session can fail to register for two reasons: it has no backend pid, or
+    /// there is no hosted engine to seat the registration on. Such a session
+    /// records the reason in [`GatewayNotify`] and refuses the statements. It
+    /// does not accept them into a queue that nothing on this connection drains.
     fn open_session(&self, notify_pid: Option<i32>) -> GatewaySession {
         let serving = self.inner.serving.load_full();
         let mut sessions: BTreeMap<RangeId, crabka_pgexec::SqlSession> = serving
@@ -2795,11 +2810,11 @@ impl MultiRangeTenant {
 
 /// The hosted range whose session carries a connection's bus registration.
 ///
-/// Range 0 when this node hosts it — the seat every notification statement
-/// already ran on — and otherwise the lowest hosted range, because `LISTEN` and
-/// `UNLISTEN` only ever touch the registration handle the seat holds, never the
-/// seat's own data. A node hosting nothing has no seat, and no statement at all
-/// (its router has no catalog engine either).
+/// The seat is range 0 when this node hosts it, because every notification
+/// statement already ran there. Otherwise the seat is the lowest hosted range,
+/// because `LISTEN` and `UNLISTEN` only ever touch the registration handle the
+/// seat holds, never the seat's own data. A node that hosts nothing has no seat
+/// and no statement at all, because its router has no catalog engine either.
 fn notify_seat(sessions: &BTreeMap<RangeId, crabka_pgexec::SqlSession>) -> Option<RangeId> {
     sessions
         .contains_key(&RangeId::COORDINATOR)
@@ -2808,17 +2823,17 @@ fn notify_seat(sessions: &BTreeMap<RangeId, crabka_pgexec::SqlSession>) -> Optio
 }
 
 /// Whether this gateway session holds a seat on this node's notification bus,
-/// and if not, why — the two shapes carry different refusals.
+/// and if not, why. The two failure shapes carry different refusals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GatewayNotify {
     /// Registered on the node-local bus, with the hosted range whose session
-    /// holds the registration: `LISTEN` and `UNLISTEN` run there rather than
-    /// routing to range 0, since a subscription is only meaningful to the wire
+    /// holds the registration. `LISTEN` and `UNLISTEN` run there rather than
+    /// route to range 0, because a subscription is only meaningful to the wire
     /// loop attached to this connection.
     Registered { seat: RangeId },
     /// Opened through [`Engine::connect`] without a backend pid, so there is no
     /// wire loop to hand a notification queue to. Only in-process callers reach
-    /// this: the wire layer always opens sessions with a pid.
+    /// this state, because the wire layer always opens sessions with a pid.
     NoBackendPid,
     /// This node hosts no range engine, so there is no session to seat the
     /// registration on.
@@ -2864,8 +2879,9 @@ impl Engine for MultiRangeTenant {
 
 struct TenantInner {
     tenant: TenantName,
-    /// The one notification bus of this node: shared with the coordinator
-    /// engine where range 0 is hosted, fed by the range-0 tail where it is not.
+    /// The one notification bus of this node. It is shared with the coordinator
+    /// engine where range 0 is hosted, and fed by the range-0 tail where it is
+    /// not.
     notify_bus: Arc<crabka_pgexec::notify::NotifyBus>,
     /// This node's identity on the notification log, or `None` when its
     /// notifications stay in-process.
@@ -2997,11 +3013,13 @@ impl ServingSnapshot {
             .flatten()
     }
 
-    /// The engine that stands in for range 0 on this node: r0's own engine when
-    /// hosted, otherwise any hosted data-range engine. Every hosted engine shares
-    /// the certified range-0 (follower) catalog KV and the installed timestamp
-    /// oracle, so catalog classification, timestamp-write planning, and TSO
-    /// allocation behave identically on any seat.
+    /// The engine that stands in for range 0 on this node.
+    ///
+    /// This is r0's own engine when the node hosts r0, and otherwise any hosted
+    /// data-range engine. Every hosted engine shares the certified range-0
+    /// follower catalog KV and the installed timestamp oracle. Catalog
+    /// classification, timestamp-write planning, and TSO allocation therefore
+    /// behave identically on any seat.
     fn planner_engine(&self) -> Option<&SqlEngine> {
         self.engine(RangeId::COORDINATOR)
             .or_else(|| self.engines.values().next())
@@ -3219,9 +3237,10 @@ pub enum StatementKind {
 }
 
 impl StatementKind {
-    /// Value written to the `pg.statement_kind` span attribute. Lower-case and
-    /// fixed, so a rename of the variant cannot silently change what an
-    /// operator's saved trace query matches on.
+    /// Value written to the `pg.statement_kind` span attribute.
+    ///
+    /// The value is lower-case and fixed, so a rename of the variant cannot
+    /// silently change what an operator's saved trace query matches on.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -3253,9 +3272,10 @@ pub struct GatewaySession {
     /// This connection's backend pid, forwarded on `SessionOpen` so a `NOTIFY`
     /// executed on the range owner is stamped with the originating pid.
     notify_pid: Option<i32>,
-    /// The receiving end of this connection's registration on that bus, handed to
-    /// the wire loop once by [`Session::take_notifications`]. `None` unless
-    /// [`GatewayNotify::Registered`], and `None` again once taken.
+    /// The receiving end of this connection's registration on that bus.
+    /// [`Session::take_notifications`] hands it to the wire loop once. The value
+    /// is `None` unless [`GatewayNotify::Registered`], and `None` again after
+    /// the wire loop takes it.
     notifications: Option<tokio::sync::mpsc::Receiver<Notification>>,
 }
 
@@ -3276,29 +3296,29 @@ struct GatewayPortal {
 
 /// Which commit protocol a gateway session is currently running under.
 ///
-/// **There are two, and a transaction uses one or the other — never both.**
-/// Confusing them reads like a missing-2PC bug, so:
+/// **There are two protocols, and a transaction uses one or the other, never
+/// both.** A reader who confuses them sees what looks like a missing-2PC bug.
 ///
-/// - [`Self::Open`] — plain per-range tables. Each write enlists its range via
-///   `touch_write_range`, which flips `escalated` the moment a *second*
+/// - [`Self::Open`] covers plain per-range tables. Each write enlists its range
+///   with `touch_write_range`, which flips `escalated` the moment a *second*
 ///   distinct range joins. `commit_transaction` then settles through the
 ///   **global-xid** protocol: `commit_global_transaction`, one `prepare_on_range`
-///   per participant, then the decision. Traced as `pg.commit_global` +
+///   per participant, then the decision. The trace shows `pg.commit_global` and
 ///   `pg.prepare`.
-/// - [`Self::Timestamp`] — hash-sharded tables, where one statement's rows
+/// - [`Self::Timestamp`] covers hash-sharded tables, where one statement's rows
 ///   already straddle ranges. `execute_timestamp_scatter` runs the
-///   Percolator-style protocol instead. Traced as `pg.timestamp_scatter` /
-///   `pg.prewrite` / `pg.resolve`.
+///   Percolator-style protocol instead. The trace shows `pg.timestamp_scatter`,
+///   `pg.prewrite`, and `pg.resolve`.
 ///
-/// So a `BEGIN; INSERT t_a; INSERT t_b; COMMIT` across two ranges emits
-/// `pg.commit_global`, **not** `pg.timestamp_scatter`. That is correct, and is
-/// pinned by `cross_range_transaction_commits_through_global_two_phase_commit`
-/// in `tests/gateway_tracing.rs`.
+/// A `BEGIN; INSERT t_a; INSERT t_b; COMMIT` across two ranges therefore emits
+/// `pg.commit_global`, **not** `pg.timestamp_scatter`. That is correct, and
+/// `cross_range_transaction_commits_through_global_two_phase_commit` in
+/// `tests/gateway_tracing.rs` pins it.
 ///
-/// The atomicity invariant is enforced rather than assumed: a multi-participant
-/// [`Self::Open`] that somehow reached commit *without* `escalated` set is
-/// rejected with `XX000` in `commit_transaction` instead of committing
-/// participant-by-participant. There is no path that silently half-applies.
+/// The code enforces the atomicity invariant rather than assumes it.
+/// `commit_transaction` rejects a multi-participant [`Self::Open`] that reached
+/// commit *without* `escalated` set, with `XX000`, instead of a commit
+/// participant by participant. There is no path that silently half-applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GatewayTransaction {
     Idle,
@@ -3542,8 +3562,8 @@ struct OffsetResultSink<'a, S> {
     inner: &'a mut S,
     offset: usize,
     completed: usize,
-    /// Rows forwarded, accumulated so the enclosing statement span can record
-    /// `db.response.returned_rows` once instead of emitting a span per page.
+    /// Rows forwarded. The sink accumulates them so the enclosing statement span
+    /// can record `db.response.returned_rows` once instead of one span per page.
     rows: usize,
     /// Pages forwarded, for `pg.result_pages`.
     pages: usize,
@@ -3585,8 +3605,10 @@ const fn timestamp_decision_label(decision: crabka_pgexec::TimestampTxnDecision)
     }
 }
 
-/// Fold a failed result onto `span`. Success is deliberately not recorded:
-/// `otel.status_code` stays unset, which is what `Unset` means in `OTel`.
+/// Fold a failed result onto `span`.
+///
+/// This function deliberately records nothing for a success. `otel.status_code`
+/// stays unset, which is what `Unset` means in `OTel`.
 fn record_pg_result<T>(span: &tracing::Span, result: &Result<T, PgError>) {
     if let Err(error) = result {
         telemetry::record_error(span, &error.code, &error.message);
@@ -3594,8 +3616,9 @@ fn record_pg_result<T>(span: &tracing::Span, result: &Result<T, PgError>) {
 }
 
 /// Rows a statement sent back to the client, for `db.response.returned_rows`.
-/// `None` when the statement returned no result set at all, which is different
-/// from a result set that happened to be empty.
+///
+/// The result is `None` when the statement returned no result set at all. That
+/// is different from a result set that was empty.
 fn returned_rows(results: &[QueryResult]) -> Option<u64> {
     let mut total: Option<u64> = None;
     for result in results {
@@ -3607,13 +3630,14 @@ fn returned_rows(results: &[QueryResult]) -> Option<u64> {
     total
 }
 
-/// Rows a statement reported *changing*, for `pg.rows_affected`: the count
-/// `PostgreSQL` puts at the end of a command tag (`INSERT 0 1`, `UPDATE 3`).
+/// Rows a statement reported as *changed*, for `pg.rows_affected`.
 ///
-/// Tags without a count (`BEGIN`, `SET`) contribute nothing, and a statement
-/// that produced only those leaves the attribute unset rather than claiming
-/// zero. Row-returning results are deliberately excluded — the rows a `SELECT`
-/// returned are `db.response.returned_rows`, a different question.
+/// This is the count `PostgreSQL` puts at the end of a command tag, as in
+/// `INSERT 0 1` or `UPDATE 3`. Tags without a count, such as `BEGIN` and `SET`,
+/// contribute nothing. A statement that produced only such tags leaves the
+/// attribute unset rather than claim zero. This function deliberately excludes
+/// row-returning results: the rows a `SELECT` returned are
+/// `db.response.returned_rows`, a different question.
 fn rows_affected(results: &[QueryResult]) -> Option<u64> {
     let mut total: Option<u64> = None;
     for result in results {
@@ -4190,13 +4214,14 @@ impl GatewaySession {
         Ok(serving)
     }
 
-    /// Fold the highest hosted local timestamp floor into every hosted
-    /// engine's source before a statement read timestamp is allocated:
-    /// single-shard bypass commits advance per-range sequences without the
-    /// global oracle, and a read timestamp minted below an already
-    /// acknowledged commit would serve a stale (non-linearizable) snapshot.
-    /// The fold targets every engine because the read stamp is drawn from
-    /// whichever engine seats the session — routed, forwarded, or portal.
+    /// Fold the highest hosted local timestamp floor into every hosted engine's
+    /// source before the gateway allocates a statement read timestamp.
+    ///
+    /// Single-shard bypass commits advance per-range sequences without the
+    /// global oracle. A read timestamp minted below an already acknowledged
+    /// commit would serve a stale, non-linearizable snapshot. The fold targets
+    /// every engine because the read stamp comes from whichever engine seats the
+    /// session: routed, forwarded, or portal.
     fn fold_hosted_read_floors(&self) -> Result<(), PgError> {
         let serving = self.current_serving()?;
         let mut floor = 0;
@@ -4240,9 +4265,10 @@ impl GatewaySession {
         Ok(())
     }
 
-    /// Run one statement under the gateway's `db.statement` span — the
-    /// gateway-side analogue of the range-local statement span, and the span an
-    /// operator reads first when a query is slow.
+    /// Run one statement under the gateway's `db.statement` span.
+    ///
+    /// This span is the gateway-side analogue of the range-local statement span,
+    /// and the span an operator reads first when a query is slow.
     async fn execute_one_inner(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
         let span = self.statement_span(statement, false);
         let result = self
@@ -4265,10 +4291,10 @@ impl GatewaySession {
 
     /// Build the `db.statement` span for `statement`.
     ///
-    /// Behind an `enabled!` guard because the field expressions are not free:
-    /// naming the collection lower-cases the statement and re-scans it for a
-    /// table reference. That work must not be paid by a gateway that exports
-    /// nothing.
+    /// This method sits behind an `enabled!` guard because the field expressions
+    /// are not free. To name the collection, the code lower-cases the statement
+    /// and scans it again for a table reference. A gateway that exports nothing
+    /// must not pay for that work.
     fn statement_span(&self, statement: &str, fast_path: bool) -> tracing::Span {
         if !tracing::enabled!(target: telemetry::ROUTE_TARGET, tracing::Level::DEBUG) {
             return tracing::Span::none();
@@ -4289,8 +4315,9 @@ impl GatewaySession {
         )
     }
 
-    /// The global transaction id this session is currently running under, for
-    /// `pg.txn.global_xid`. `None` outside a distributed transaction.
+    /// The global transaction id this session currently runs under, for
+    /// `pg.txn.global_xid`. The result is `None` outside a distributed
+    /// transaction.
     fn transaction_global_xid(&self) -> Option<u64> {
         match &self.transaction {
             GatewayTransaction::Timestamp { identity, .. } => Some(identity.global_xid),
@@ -4499,12 +4526,13 @@ impl GatewaySession {
         Ok(rollback_command_response())
     }
 
-    /// Drive the global-xid 2PC commit — the gateway's other distributed-commit
-    /// protocol, distinct from the timestamp scatter above.
+    /// Drive the global-xid 2PC commit.
     ///
-    /// The outcome falls straight out of the error the body already builds:
-    /// [`GlobalCommitError::recovery`] is `Some` exactly when the decision may
-    /// be durable but unreleased, which is what `indeterminate` means.
+    /// This is the gateway's other distributed-commit protocol, distinct from
+    /// the timestamp scatter above. The outcome comes straight from the error
+    /// the body already builds: [`GlobalCommitError::recovery`] is `Some`
+    /// exactly when the decision can be durable but unreleased, which is what
+    /// `indeterminate` means.
     async fn commit_global_transaction(
         &mut self,
         touched: Vec<RangeId>,
@@ -4914,11 +4942,12 @@ impl GatewaySession {
 
     /// Confirm the committed catalog change is visible cluster-wide.
     ///
-    /// Barrier contract: once DDL returns, a statement on any node observes the
-    /// change — the local replica (if any) and every follower node's replica
-    /// have applied it. A single-process topology has neither, so this is a
-    /// no-op there. Failures here are reported as `58000` because the DDL is
-    /// already committed on range 0; only its visibility is unconfirmed.
+    /// The barrier contract is this: after DDL returns, a statement on any node
+    /// observes the change, because the local replica, if there is one, and every
+    /// follower node's replica have applied it. A single-process topology has
+    /// neither replica, so this method does nothing there. This method reports a
+    /// failure as `58000`, because range 0 has already committed the DDL and only
+    /// its visibility is unconfirmed.
     async fn barrier_ddl_visibility(&self) -> Result<(), PgError> {
         if let Some(replica) = &self.inner.range0_replica {
             // The barrier's own timeout only bounds tail catch-up; the broker
@@ -5117,13 +5146,13 @@ impl GatewaySession {
     /// Run one timestamp-scatter (Percolator-style) 2PC round under the
     /// `pg.timestamp_scatter` span.
     ///
-    /// The fields worth having — participants, primary, start and commit
-    /// timestamps — are only known part-way through the round, so the body
-    /// records them as it learns them. `pg.outcome` is threaded back out
-    /// through `outcome` instead of being recorded inline: the body has a dozen
-    /// `?` exits, and a round that ends indeterminate without saying so on its
-    /// span is the one failure this feature must not ship with. Threading it
-    /// makes every exit path, including the propagating ones, record something.
+    /// The fields worth having are the participants, the primary, and the start
+    /// and commit timestamps. The round only knows them part-way through, so the
+    /// body records them as it learns them. The body threads `pg.outcome` back
+    /// out through `outcome` instead of a record inline. The body has a dozen `?`
+    /// exits, and a round that ends indeterminate without a record of that on its
+    /// span is the one failure this feature must not ship with. The thread makes
+    /// every exit path record something, including the paths that propagate.
     async fn execute_timestamp_scatter(
         &mut self,
         statement: &str,
@@ -5624,9 +5653,10 @@ impl GatewaySession {
         result
     }
 
-    /// Build a `pg.prewrite` span, resolving `pg.local` only when the span is
-    /// live: deciding it costs a serving-snapshot load and an engine lookup,
-    /// which a gateway that exports nothing should not pay per participant.
+    /// Build a `pg.prewrite` span, and resolve `pg.local` only when the span is
+    /// live. That decision costs one serving-snapshot load and one engine
+    /// lookup, and a gateway that exports nothing should not pay it per
+    /// participant.
     fn prewrite_span(
         &self,
         range_id: RangeId,
@@ -5831,11 +5861,11 @@ impl GatewaySession {
 
     /// Resolve every participant of a timestamp transaction as aborted.
     ///
-    /// Carries its own `pg.abort_scatter` span rather than recording onto the
-    /// scatter span, because an abort also runs from `ROLLBACK` and from the
-    /// failed-statement cleanup, by which time the scatter span is long closed.
-    /// An abort that stops half-way is exactly the state that needs a span of
-    /// its own saying `pg.outcome = "indeterminate"`.
+    /// This method carries its own `pg.abort_scatter` span and does not record
+    /// onto the scatter span. An abort also runs from `ROLLBACK` and from the
+    /// failed-statement cleanup, and the scatter span is long closed by then. An
+    /// abort that stops half-way is exactly the state that needs its own span
+    /// with `pg.outcome = "indeterminate"`.
     async fn abort_timestamp_scatter(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -6029,12 +6059,12 @@ impl GatewaySession {
         })
     }
 
-    /// Route a statement, recording the decision on a `pg.route` span.
+    /// Route a statement and record the decision on a `pg.route` span.
     ///
-    /// `TRACE`, not `DEBUG`: routing runs on every statement — including the
-    /// `SET`s and `BEGIN`s that never leave the coordinator — and it is a
-    /// string scan, so it is the one span here cheap enough to be noise at the
-    /// default level.
+    /// The span level is `TRACE`, not `DEBUG`. Routing runs on every statement,
+    /// including the `SET` and `BEGIN` statements that never leave the
+    /// coordinator, and it is a string scan. It is therefore the one span here
+    /// cheap enough to be noise at the default level.
     fn route_statement(&self, sql: &str) -> Result<StatementRoute, PgError> {
         let span = telemetry::route_span(self.inner.tenant.as_str());
         let _guard = span.enter();
@@ -6077,11 +6107,12 @@ impl GatewaySession {
         Ok(route)
     }
 
-    /// The lock-wait cap this session's next remote statement should carry:
-    /// bounded only while the transaction spans more than one range — the only
-    /// state in which a wait can be an edge of a cross-engine deadlock cycle.
-    /// Single-range and autocommit forwarding keep `None`, preserving exact
-    /// engine-local blocking on the remote host.
+    /// The lock-wait cap this session's next remote statement should carry.
+    ///
+    /// The cap is bounded only while the transaction spans more than one range.
+    /// That is the only state in which a wait can be an edge of a cross-engine
+    /// deadlock cycle. Single-range forwarding and autocommit forwarding keep
+    /// `None`, which preserves exact engine-local blocking on the remote host.
     fn cross_range_statement_cap(&self) -> Option<crabka_units::Time> {
         matches!(
             self.transaction,
@@ -6268,8 +6299,10 @@ async fn cleanup_dropped_timestamp_session(
     Ok(())
 }
 
-/// Map each INSERT tuple to its physical owner. Hash-sharded tables use their
-/// declared literal shard keys; row-sharded tables use their leased hidden IDs.
+/// Map each INSERT tuple to its physical owner.
+///
+/// Hash-sharded tables use their declared literal shard keys. Row-sharded tables
+/// use their leased hidden IDs.
 fn timestamp_insert_write_routes(
     range_map: &RangeMap,
     table: &crabka_pgcatalog::Table,
@@ -6341,21 +6374,21 @@ fn ensure_timestamp_scatter_is_supported(statement: &str) -> Result<(), PgError>
     ))
 }
 
-/// Whether `sql` acts on this connection's notification registration:
-/// `LISTEN`, `NOTIFY`, `UNLISTEN`, or a `pg_notify()` call anywhere in a query.
+/// Whether `sql` acts on this connection's notification registration.
 ///
-/// `pg_notify` publishes exactly as `NOTIFY` does, so a statement calling it is
-/// as much a notification statement as one that leads with the keyword —
-/// matching only the leading word would let `SELECT pg_notify('c', 'p')` slip
-/// past the registration check and be accepted by a connection that can never
-/// be delivered to.
+/// Such a statement is `LISTEN`, `NOTIFY`, `UNLISTEN`, or a `pg_notify()` call
+/// anywhere in a query. `pg_notify` publishes exactly as `NOTIFY` does, so a
+/// statement that calls it is as much a notification statement as one that leads
+/// with the keyword. A match on the leading word alone would let
+/// `SELECT pg_notify('c', 'p')` pass the registration check, and a connection
+/// that can never be delivered to would accept it.
 fn statement_is_notify_family(sql: &str) -> bool {
     leading_keyword_is(sql, &["listen", "notify", "unlisten"]) || calls_pg_notify(sql)
 }
 
-/// Whether `sql` changes this connection's subscriptions, as opposed to
-/// publishing. There is no function form of either, so the leading keyword
-/// decides.
+/// Whether `sql` changes this connection's subscriptions instead of publishing.
+///
+/// Neither operation has a function form, so the leading keyword decides.
 fn statement_is_subscription_change(sql: &str) -> bool {
     leading_keyword_is(sql, &["listen", "unlisten"])
 }
@@ -6371,13 +6404,13 @@ fn leading_keyword_is(sql: &str, keywords: &[&str]) -> bool {
         .any(|keyword| command.eq_ignore_ascii_case(keyword))
 }
 
-/// Whether `sql` contains a call to `pg_notify`: the identifier on a token
-/// boundary, followed by its argument list.
+/// Whether `sql` contains a call to `pg_notify`.
 ///
-/// Deliberately lexical rather than parsed, and allocation-free — every
-/// forwarded statement passes through here ahead of planning, and the cost of a
-/// false positive is a refusal on a connection that could not have been
-/// delivered to anyway.
+/// The check looks for the identifier on a token boundary, followed by its
+/// argument list. It is deliberately lexical rather than parsed, and it
+/// allocates nothing. Every forwarded statement passes through here before
+/// planning, and a false positive costs only a refusal on a connection that
+/// could not have been delivered to anyway.
 fn calls_pg_notify(sql: &str) -> bool {
     const NAME: &[u8] = b"pg_notify";
     let bytes = sql.as_bytes();
@@ -6682,10 +6715,10 @@ fn route_statement(
 
 /// Classify a statement from its leading keywords alone.
 ///
-/// This is the catalog-free half of [`route_statement`]'s decision: the part
-/// that needs no range map, no planner and no allocation beyond the caller's
-/// already-lower-cased `normalized`. Statement spans use it to label a
-/// statement without paying for a full route.
+/// This is the catalog-free half of the decision [`route_statement`] makes. It
+/// needs no range map, no planner, and no allocation beyond the caller's
+/// already-lower-cased `normalized`. Statement spans use it to label a statement
+/// without payment for a full route.
 fn route_statement_kind(normalized: &str) -> StatementKind {
     if normalized.is_empty() {
         return StatementKind::Local;
@@ -8345,9 +8378,11 @@ mod tests {
         );
     }
 
-    /// Counting delegate around [`LocalTimestampSource`]: read grants pass
-    /// through untouched so visibility checks stay exact, while write leases and
-    /// commit grants are tallied to prove when the global oracle is bypassed.
+    /// Counting delegate around [`LocalTimestampSource`].
+    ///
+    /// Read grants pass through untouched, so visibility checks stay exact. The
+    /// delegate counts write leases and commit grants, which proves when the
+    /// code bypasses the global oracle.
     ///
     /// [`LocalTimestampSource`]: crabka_pgexec::timestamp_txn::LocalTimestampSource
     #[derive(Default)]
@@ -8434,8 +8469,8 @@ mod tests {
         }
     }
 
-    /// An rN-only gateway hosting `[r1]` whose follower catalog carries the
-    /// hash-sharded table `t7`, with a counting global timestamp source
+    /// An rN-only gateway that hosts `[r1]`, whose follower catalog carries the
+    /// hash-sharded table `t7`, and that has a counting global timestamp source
     /// installed. Boundaries `0,7` put every `t7` hash bucket in r1, so
     /// statically routable inserts land entirely on the hosted data range.
     async fn rn_only_timestamp_gateway(
@@ -9172,9 +9207,9 @@ mod tests {
         RangeRegistry::from_tenant_record(&record).expect("registry")
     }
 
-    /// A gateway hosting `{r0, r1}` whose registry maps r1 to
-    /// `follower_endpoint`. The r0 entry's address is never dialed: local DDL
-    /// needs no forward, and the follower fan-out only compares it.
+    /// A gateway that hosts `{r0, r1}` and whose registry maps r1 to
+    /// `follower_endpoint`. Nothing ever dials the r0 entry's address, because
+    /// local DDL needs no forward and the follower fan-out only compares it.
     fn range0_host_gateway_with_follower(
         tenant_name: &str,
         record_tenant: &str,

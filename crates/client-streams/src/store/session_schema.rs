@@ -1,8 +1,11 @@
-//! JVM-exact session-store byte codec (`SessionKeySchema`).
-//! Store/changelog KEY: `key_bytes ‖ end:8B BE ‖ start:8B BE` (END first, so the
-//! store sorts by `(key, end, start)` — the merge fetch scans by session end).
-//! VALUE: the raw serialized aggregate (session stores are not
-//! `ValueAndTimestamp`-wrapped; the session end carries the time).
+//! The JVM-exact session-store byte codec, `SessionKeySchema`.
+//!
+//! The store and changelog KEY is `key_bytes ‖ end:8B BE ‖ start:8B BE`. END
+//! comes first, so the store sorts by `(key, end, start)` and the merge fetch
+//! scans by session end.
+//!
+//! The VALUE is the raw serialized aggregate. A session store is not
+//! `ValueAndTimestamp`-wrapped, because the session end carries the time.
 use bytes::{BufMut, Bytes, BytesMut};
 
 const TS_SIZE: usize = 8;
@@ -17,13 +20,13 @@ pub(crate) fn session_key(key_bytes: &[u8], start: i64, end: i64) -> Bytes {
     b.freeze()
 }
 
-/// The session END encoded in a composite key (`k[len-16 .. len-8]`).
+/// The session END encoded in a composite key, at `k[len-16 .. len-8]`.
 pub(crate) fn session_end_of(k: &[u8]) -> i64 {
     let n = k.len();
     i64::from_be_bytes(k[n - SUFFIX_SIZE..n - TS_SIZE].try_into().expect("8 bytes"))
 }
 
-/// The session START encoded in a composite key (`k[len-8 .. len]`).
+/// The session START encoded in a composite key, at `k[len-8 .. len]`.
 pub(crate) fn session_start_of(k: &[u8]) -> i64 {
     let n = k.len();
     i64::from_be_bytes(k[n - TS_SIZE..].try_into().expect("8 bytes"))

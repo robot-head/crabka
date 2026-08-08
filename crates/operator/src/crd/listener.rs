@@ -1,4 +1,4 @@
-//! `Kafka.spec.listeners` schema — Strimzi-shaped.
+//! `Kafka.spec.listeners` schema. The schema is Strimzi-shaped.
 
 use std::collections::BTreeMap;
 
@@ -9,40 +9,43 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Listener {
-    /// Unique within the cluster. Alphanumeric + `-`, ≤25 chars. Used
-    /// as the Kafka listener name; surfaces in `bootstrap.servers`-style
-    /// URLs.
+    /// Unique within the cluster. Alphanumeric characters and `-`, ≤25
+    /// chars. It is the Kafka listener name, and it appears in
+    /// `bootstrap.servers`-style URLs.
     pub name: String,
     /// Container port the broker binds. Unique within the cluster.
     pub port: i32,
-    /// Listener type. `internal` is in-cluster; `nodeport` /
-    /// `loadbalancer` create external Services; `ingress` / `route` are
-    /// accepted by the schema but rejected at reconcile.
+    /// Listener type. `internal` is in-cluster. `nodeport` and
+    /// `loadbalancer` create external Services. The schema accepts `ingress`
+    /// and `route`, but the reconcile rejects them.
     #[serde(rename = "type")]
     pub type_: ListenerType,
     /// Transport-level TLS. When `true`, the listener uses the per-broker
-    /// keystore signed by the cluster CA and clients must speak
-    /// TLS to connect. Independent of `authentication` — a `tls: true`
+    /// keystore that the cluster CA signed, and clients must use TLS to
+    /// connect. This field is independent of `authentication`. A `tls: true`
     /// listener with no `authentication` is anonymous over TLS.
     #[serde(default)]
     pub tls: bool,
-    /// Per-listener authentication mechanism. Absent means anonymous (no
-    /// client identity required). When set to `type: tls`, the listener
-    /// must also have `tls: true` — enforced at reconcile time.
+    /// Per-listener authentication mechanism. Absent means anonymous, and no
+    /// client identity is required. When the field is `type: tls`, the
+    /// listener must also have `tls: true`. The reconcile enforces this
+    /// rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication: Option<ListenerAuthentication>,
     /// Optional listener-type-specific configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration: Option<ListenerConfiguration>,
-    /// Per-listener peer allow-list. Tri-state:
-    /// - `None` → no per-listener restriction (allow-all on this port).
-    /// - `Some(vec![])` → deny-all on this listener port (no per-listener
-    ///   rule emitted; default-deny applies).
-    /// - `Some(non_empty)` → only listed peers may reach this port.
+    /// Per-listener peer allow-list. It is tri-state:
+    /// - `None` gives no per-listener restriction, that is, allow-all on this
+    ///   port.
+    /// - `Some(vec![])` gives deny-all on this listener port. The operator
+    ///   emits no per-listener rule, and the default-deny applies.
+    /// - `Some(non_empty)` lets only the listed peers reach this port.
     ///
-    /// Only consulted when `Kafka.spec.networkPolicy` is set; otherwise
-    /// inert. The operator auto-allow rule still fires on this port even
-    /// for deny-all listeners so the operator can manage the cluster.
+    /// The operator reads this field only when `Kafka.spec.networkPolicy` is
+    /// set. In any other case the field is inert. The operator auto-allow rule
+    /// still fires on this port for deny-all listeners, so that the operator
+    /// can manage the cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_policy_peers: Option<Vec<crate::crd::NetworkPolicyPeer>>,
 }
@@ -65,9 +68,9 @@ pub struct ListenerConfiguration {
     pub bootstrap: Option<BootstrapConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub brokers: Vec<BrokerOverride>,
-    /// `ingress` only: the `spec.ingressClassName` set on every
-    /// generated `Ingress`. Strimzi-shaped `configuration.class`. Inert for
-    /// other listener types.
+    /// `ingress` only: the `spec.ingressClassName` that the operator sets on
+    /// every generated `Ingress`. This is the Strimzi-shaped
+    /// `configuration.class`. It is inert for other listener types.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "class")]
     pub ingress_class: Option<String>,
 }
@@ -125,8 +128,8 @@ pub struct BrokerOverride {
 /// Per-listener authentication mechanism.
 ///
 /// The `schema_with` workaround avoids a kube-rs 3.x `StructuralSchemaRewriter`
-/// panic when `oneOf` branches share a `type` discriminator with differing `enum`
-/// values — same pattern as `Authentication` in `user.rs`.
+/// panic when `oneOf` branches share a `type` discriminator with different
+/// `enum` values. This is the same pattern as `Authentication` in `user.rs`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type")]
 #[schemars(schema_with = "listener_authentication_schema")]
@@ -143,41 +146,41 @@ pub enum ListenerAuthentication {
     Gssapi(ListenerAuthenticationGssapi),
 }
 
-/// Config for `authentication: { type: oauth }` on a listener. The
-/// reconciler renders these into the broker-global
-/// `[oauthbearer]` TOML block and appends `OAUTHBEARER` to the
-/// listener's `sasl_mechanisms`. This narrows Strimzi's surface to
-/// the fields the JWT validator honors.
+/// Config for `authentication: { type: oauth }` on a listener. The reconciler
+/// renders these fields into the broker-global `[oauthbearer]` TOML block and
+/// appends `OAUTHBEARER` to the listener's `sasl_mechanisms`. This narrows the
+/// Strimzi surface to the fields that the JWT validator honors.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListenerAuthenticationOAuth {
-    /// Expected `iss` claim. Broker rejects tokens whose `iss` differs.
+    /// Expected `iss` claim. The broker rejects tokens with a different
+    /// `iss`.
     pub valid_issuer_uri: String,
-    /// JWKS endpoint URL (RFC 7517). Required when
-    /// `accessTokenIsJwt: true` (the default); rejected when
-    /// `accessTokenIsJwt: false`.
+    /// JWKS endpoint URL (RFC 7517). Required when `accessTokenIsJwt: true`,
+    /// which is the default. Rejected when `accessTokenIsJwt: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_endpoint_uri: Option<String>,
     /// Optional expected `aud` claim. Absent means no audience check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_audience: Option<String>,
-    /// Claim name to use as the Kafka principal. Defaults broker-side
-    /// to `sub`; set e.g. to `preferred_username` for Keycloak.
+    /// Claim name to use as the Kafka principal. The broker-side default is
+    /// `sub`. Set it to `preferred_username` for Keycloak, for example.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_name_claim: Option<String>,
-    /// `JsonPath` expression
-    /// (RFC 9535 via jsonpath-rust) evaluated against the token's claim
-    /// set. Token is rejected when the expression yields empty/null/false.
-    /// Examples (RFC 9535 syntax — note no parens around filter predicate):
-    ///   `"$.scope[?@ == 'kafka.write']"` — `scope` claim is an array
-    ///     containing 'kafka.write'.
-    ///   `"$[?@.aud == 'kafka-broker']"` — token's `aud` claim equals
+    /// `JsonPath` expression that the broker evaluates against the token's
+    /// claim set. The expression is RFC 9535, and jsonpath-rust evaluates it.
+    /// The broker rejects the token when the expression yields empty, null, or
+    /// false. Two examples in RFC 9535 syntax, which has no parens around the
+    /// filter predicate:
+    ///   `"$.scope[?@ == 'kafka.write']"`, where the `scope` claim is an array
+    ///     that contains 'kafka.write'.
+    ///   `"$[?@.aud == 'kafka-broker']"`, where the token's `aud` claim equals
     ///     'kafka-broker'.
     /// CRD-validated `minLength: 1` when set.
     ///
-    /// Note: Strimzi uses Jayway `JsonPath` syntax (`$[?(@.x == 'y')]`); Crabka
-    /// uses RFC 9535 (`$[?@.x == 'y']` — no parens). Operators migrating
-    /// from Strimzi rewrite expressions accordingly.
+    /// Note: Strimzi uses Jayway `JsonPath` syntax, `$[?(@.x == 'y')]`. Crabka
+    /// uses RFC 9535, `$[?@.x == 'y']`, which has no parens. Operators that
+    /// migrate from Strimzi must rewrite their expressions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_claim_check: Option<String>,
     /// JWKS refresh cadence in seconds. The reconciler enforces `>= 30`.
@@ -187,134 +190,135 @@ pub struct ListenerAuthenticationOAuth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_clock_skew_seconds: Option<u32>,
     /// Whether to advertise `OAUTHBEARER` in the listener's
-    /// `sasl_mechanisms`. Defaults `true`; setting `false` keeps the
-    /// listener anonymous-over-SASL but still validates tokens if any
-    /// arrive via other mechanisms (rare; mirrors Strimzi).
+    /// `sasl_mechanisms`. Default: `true`. A value of `false` keeps the
+    /// listener anonymous-over-SASL, but the broker still validates tokens
+    /// that arrive through other mechanisms. This case is rare, and it is the
+    /// same as Strimzi.
     #[serde(
         default = "default_true",
         skip_serializing_if = "std::clone::Clone::clone"
     )]
     pub enable_oauth_bearer: bool,
-    /// Strimzi-shaped list of `{secretName, certificate}`
-    /// entries naming source Secrets (same namespace as the `Kafka`
-    /// CR) whose listed PEM keys are concatenated into a managed
-    /// Secret `{kafka.name}-oauth-jwks-trust` and mounted into broker
-    /// pods. The broker reads the concatenated bundle at the path
-    /// written into `[oauthbearer].idp_tls_trust`. Empty
-    /// list (default) → no managed Secret, no mount, no TOML line.
+    /// Strimzi-shaped list of `{secretName, certificate}` entries. Each entry
+    /// names a source Secret in the same namespace as the `Kafka` CR. The
+    /// operator concatenates the listed PEM keys into a managed Secret
+    /// `{kafka.name}-oauth-jwks-trust` and mounts it into the broker pods. The
+    /// broker reads the concatenated bundle at the path that the operator
+    /// writes into `[oauthbearer].idp_tls_trust`. An empty list, which is the
+    /// default, gives no managed Secret, no mount, and no TOML line.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tls_trusted_certificates: Vec<TlsTrustedCertificate>,
-    /// Strimzi-shape: when `true` (default), the broker validates
-    /// tokens as signed JWTs against `jwksEndpointUri`.
-    /// When `false`, the broker calls `introspectionEndpointUri` for
-    /// each token. Drives operator-side validation: see
-    /// also the cross-mode rules in the listeners reconciler.
+    /// Strimzi-shape. When `true`, which is the default, the broker validates
+    /// tokens as signed JWTs against `jwksEndpointUri`. When `false`, the
+    /// broker calls `introspectionEndpointUri` for each token. This field
+    /// drives the operator-side validation. See also the cross-mode rules in
+    /// the listeners reconciler.
     #[serde(
         default = "default_true",
         skip_serializing_if = "std::clone::Clone::clone"
     )]
     pub access_token_is_jwt: bool,
     /// RFC 7662 introspection endpoint. Required when
-    /// `accessTokenIsJwt: false`; rejected when `accessTokenIsJwt: true`.
+    /// `accessTokenIsJwt: false`. Rejected when `accessTokenIsJwt: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection_endpoint_uri: Option<String>,
-    /// Optional OIDC userinfo endpoint. Permitted only with
-    /// `accessTokenIsJwt: false`. When set, the broker calls userinfo
-    /// after each successful introspection and merges the profile
-    /// claims (userinfo enrichment).
+    /// Optional OIDC userinfo endpoint. It is permitted only with
+    /// `accessTokenIsJwt: false`. When set, the broker calls userinfo after
+    /// each successful introspection and merges the profile claims. This is
+    /// userinfo enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_info_endpoint_uri: Option<String>,
     /// HTTP Basic Auth `client_id` the broker uses against the
     /// introspection endpoint. Required when `accessTokenIsJwt: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    /// Reference to a Kubernetes `Secret` in the same namespace
-    /// holding the client-secret material for the introspection
-    /// endpoint's Basic Auth. The operator mounts the source Secret
-    /// directly into the broker pod with a projected `items` mapping
-    /// so the broker reads from a fixed path regardless of the
-    /// user's source key name. Required when `accessTokenIsJwt: false`.
+    /// Reference to a Kubernetes `Secret` in the same namespace that holds
+    /// the client-secret material for the introspection endpoint's Basic Auth.
+    /// The operator mounts the source Secret into the broker pod with a
+    /// projected `items` mapping, so the broker reads from a fixed path for
+    /// any user source key name. Required when `accessTokenIsJwt: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<OauthClientSecretRef>,
-    /// Timeout for the introspection (and userinfo) HTTP
-    /// requests, in seconds. Operator converts to ms for the broker
-    /// TOML. Optional; broker default is 10 seconds. Permitted only
+    /// Timeout in seconds for the introspection and userinfo HTTP requests.
+    /// The operator converts it to ms for the broker TOML. The field is
+    /// optional, and the broker default is 10 seconds. It is permitted only
     /// with `accessTokenIsJwt: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection_http_timeout_seconds: Option<u32>,
-    /// Maximum SASL session lifetime (seconds) before the
-    /// broker forces re-authentication via KIP-368. Acts as a ceiling on
-    /// top of the token's `exp` — the effective session is
-    /// `min(token_exp - now, maxSecondsWithoutReauthentication)`. When
-    /// unset (the default), sessions last until the token's natural
-    /// `exp`. Strimzi-shape field;
-    /// CRD-validated `minimum: 1`.
+    /// Maximum SASL session lifetime in seconds before the broker forces a
+    /// re-authentication through KIP-368. It is a ceiling on top of the
+    /// token's `exp`. The effective session is
+    /// `min(token_exp - now, maxSecondsWithoutReauthentication)`. When the
+    /// field is unset, which is the default, sessions last until the token's
+    /// natural `exp`. This is a Strimzi-shape field, CRD-validated
+    /// `minimum: 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_seconds_without_reauthentication: Option<u32>,
-    /// When set, the JWT `typ` header must equal this
-    /// string. JWT-mode only — rejected with
+    /// When set, the JWT `typ` header must equal this string. The field is
+    /// JWT-mode only. The operator rejects it with
     /// `ListenersValid=False reason=ListenerOauthValidTokenTypeRejectedInIntrospectionMode`
-    /// when set on an `accessTokenIsJwt: false` listener (no JWT
-    /// header in introspection responses). CRD-validated `minLength: 1`.
+    /// when it is set on an `accessTokenIsJwt: false` listener, because
+    /// introspection responses have no JWT header. CRD-validated
+    /// `minLength: 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_token_type: Option<String>,
-    /// Alternate claim name for principal-name fallback when
-    /// `userNameClaim` (default `sub`) is absent/empty on the token.
-    /// Strimzi convention: `client_id` for Keycloak service-account
-    /// tokens whose `sub` is a UUID. Flat claim name, NOT `JsonPath`.
-    /// CRD-validated `minLength: 1`.
+    /// Alternate claim name for the principal-name fallback when
+    /// `userNameClaim`, which defaults to `sub`, is absent or empty on the
+    /// token. The Strimzi convention is `client_id` for Keycloak
+    /// service-account tokens whose `sub` is a UUID. This is a flat claim name
+    /// and NOT a `JsonPath`. CRD-validated `minLength: 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_user_name_claim: Option<String>,
-    /// Prepended to the resolved principal name ONLY when
-    /// the fallback claim fires (primary present → no prefix). Strimzi
-    /// convention: `"service-account-"` to namespace
-    /// fallback-derived principals so ACLs can distinguish service
-    /// accounts from human users. CRD-validated `minLength: 1`.
+    /// The operator prepends this string to the resolved principal name ONLY
+    /// when the fallback claim fires. If the primary claim is present, there
+    /// is no prefix. The Strimzi convention is `"service-account-"`, which
+    /// namespaces the fallback-derived principals, so that ACLs can separate
+    /// service accounts from human users. CRD-validated `minLength: 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_user_name_prefix: Option<String>,
-    /// `JsonPath` expression (RFC 9535 via jsonpath-rust)
-    /// extracting group memberships from token claims. Examples:
-    /// `"$.groups"` (top-level array), `"$.realm_access.roles[*]"`
-    /// (Keycloak realm-roles shape). When the path resolves to an
-    /// array, each string element is a group; when it resolves to a
-    /// string and `groupsClaimDelimiter` is set, the string is split.
-    /// Result attached to the Kafka principal for broker-side authorization.
-    /// CRD-validated `minLength: 1`.
+    /// `JsonPath` expression that extracts group memberships from the token
+    /// claims. The expression is RFC 9535, and jsonpath-rust evaluates it. Two
+    /// examples are `"$.groups"`, a top-level array, and
+    /// `"$.realm_access.roles[*]"`, the Keycloak realm-roles shape. When the
+    /// path resolves to an array, each string element is a group. When the
+    /// path resolves to a string and `groupsClaimDelimiter` is set, the broker
+    /// splits the string. The operator attaches the result to the Kafka
+    /// principal for broker-side authorization. CRD-validated `minLength: 1`.
     ///
-    /// Note: Strimzi uses Jayway `JsonPath` (`$[?(@.x == 'y')]`); Crabka
-    /// uses RFC 9535 (`$[?@.x == 'y']` — no parens) per the
-    /// choice of `jsonpath-rust`.
+    /// Note: Strimzi uses Jayway `JsonPath`, `$[?(@.x == 'y')]`. Crabka uses
+    /// RFC 9535, `$[?@.x == 'y']`, which has no parens, because Crabka uses
+    /// `jsonpath-rust`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups_claim: Option<String>,
-    /// Delimiter to split `groupsClaim` results when the
-    /// claim resolves to a string (e.g., `","` or `" "`). Ignored
+    /// Delimiter that splits the `groupsClaim` results when the claim
+    /// resolves to a string, for example `","` or `" "`. The broker ignores it
     /// when the claim is an array. CRD-validated `minLength: 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups_claim_delimiter: Option<String>,
-    /// Minimum pause (seconds) between on-demand JWKS
-    /// refreshes triggered by tokens with unknown `kid`. When the
-    /// broker receives a token whose `kid` isn't in the cached
-    /// JWKS, it triggers an immediate refresh; this field
-    /// rate-limits to protect the `IdP` from being hammered by a
-    /// stream of bad tokens. Strimzi default: 1. CRD-validated
-    /// `minimum: 0` (0 = no rate-limit). JWT-mode only — rejected
-    /// when `accessTokenIsJwt: false`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jwks_min_refresh_pause_seconds: Option<u32>,
-    /// Maximum age (seconds) of the cached JWKS before
-    /// validators reject tokens until next successful refresh.
-    /// Distinct from `jwksRefreshSeconds` (the periodic cadence) —
-    /// this is the HARD expiry that fails closed if the `IdP` is
-    /// unreachable for too long. Strimzi default: 360 (6 minutes).
-    /// CRD-validated `minimum: 1`. JWT-mode only — rejected when
+    /// Minimum pause in seconds between the on-demand JWKS refreshes that
+    /// tokens with an unknown `kid` trigger. When the broker receives a token
+    /// whose `kid` is not in the cached JWKS, the broker triggers an immediate
+    /// refresh. This field rate-limits those refreshes, so that a stream of
+    /// bad tokens cannot overload the `IdP`. The Strimzi default is 1.
+    /// CRD-validated `minimum: 0`, where 0 means no rate-limit. The field is
+    /// JWT-mode only, and the operator rejects it when
     /// `accessTokenIsJwt: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_min_refresh_pause_seconds: Option<u32>,
+    /// Maximum age in seconds of the cached JWKS. After that age the
+    /// validators reject tokens until the next successful refresh. This field
+    /// is different from `jwksRefreshSeconds`, which is the periodic cadence.
+    /// This field is the HARD expiry that fails closed if the `IdP` is
+    /// unreachable for too long. The Strimzi default is 360, that is, 6
+    /// minutes. CRD-validated `minimum: 1`. The field is JWT-mode only, and
+    /// the operator rejects it when `accessTokenIsJwt: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_expiry_seconds: Option<u32>,
-    /// When true, accept JWKS keys with any `use` field
-    /// value (not just `sig`). Default false matches Strimzi/JWS
-    /// behavior of filtering out encryption-only keys. Set true for
-    /// `IdPs` that mis-tag their signing keys. JWT-mode only —
-    /// rejected when `accessTokenIsJwt: false`.
+    /// When true, the broker accepts JWKS keys with any `use` field value and
+    /// not only `sig`. The default of false matches the Strimzi and JWS
+    /// behavior, which filters out the encryption-only keys. Set it to true
+    /// for `IdPs` that mis-tag their signing keys. The field is JWT-mode only,
+    /// and the operator rejects it when `accessTokenIsJwt: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_ignore_key_use: Option<bool>,
 }
@@ -323,12 +327,11 @@ fn default_true() -> bool {
     true
 }
 
-/// One entry in
-/// `ListenerAuthenticationOAuth.tls_trusted_certificates`. Names a
-/// source `Secret` (in the same namespace as the `Kafka` CR) and the
-/// key within that Secret whose value is a PEM-encoded CA certificate.
-/// The operator concatenates all listed entries into a managed Secret
-/// the broker mounts and reads as its OAUTHBEARER JWKS trust store.
+/// One entry in `ListenerAuthenticationOAuth.tls_trusted_certificates`. It
+/// names a source `Secret` in the same namespace as the `Kafka` CR, and the
+/// key within that Secret whose value is a PEM-encoded CA certificate. The
+/// operator concatenates all listed entries into a managed Secret. The broker
+/// mounts that Secret and reads it as its OAUTHBEARER JWKS trust store.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TlsTrustedCertificate {
@@ -344,35 +347,37 @@ pub struct TlsTrustedCertificate {
 pub struct OauthClientSecretRef {
     /// Name of the Kubernetes Secret holding the client secret.
     pub secret_name: String,
-    /// Key within the Secret whose value is the client-secret
-    /// material. The operator mounts this key as a file at a fixed
-    /// path inside the broker pod (the user's key name is hidden
-    /// from the broker via projected `items`).
+    /// Key within the Secret whose value is the client-secret material. The
+    /// operator mounts this key as a file at a fixed path inside the broker
+    /// pod. The projected `items` hide the user's key name from the broker.
     pub key: String,
 }
 
-/// Config for `authentication: { type: gssapi }`. Full parity with the
-/// broker's `GssapiConfig`. The reconciler renders these into the
-/// broker-global `[gssapi]` TOML block and appends `GSSAPI` to the
-/// listener's `sasl_mechanisms`. `[gssapi]` is broker-global, so all
-/// GSSAPI listeners on a cluster must agree.
+/// Config for `authentication: { type: gssapi }`. It has full parity with the
+/// broker's `GssapiConfig`. The reconciler renders these fields into the
+/// broker-global `[gssapi]` TOML block and appends `GSSAPI` to the listener's
+/// `sasl_mechanisms`. `[gssapi]` is broker-global, so all GSSAPI listeners on
+/// a cluster must agree.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListenerAuthenticationGssapi {
-    /// Secret (same namespace as the `Kafka` CR) holding the service
-    /// keytab. Mounted into broker pods at a fixed path via projected items.
+    /// Secret in the same namespace as the `Kafka` CR that holds the service
+    /// keytab. The operator mounts it into the broker pods at a fixed path
+    /// with projected items.
     pub keytab_secret_ref: KeytabSecretRef,
-    /// `sasl.kerberos.service.name` (the SPN primary). Defaults to `kafka`.
+    /// `sasl.kerberos.service.name`, the SPN primary. Defaults to `kafka`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_name: Option<String>,
-    /// `auth_to_local` rule specs, applied in order; first match wins.
+    /// `auth_to_local` rule specs. The broker applies them in order, and the
+    /// first match wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub principal_to_local_rules: Vec<String>,
-    /// Default Kerberos realm (used when a principal omits its realm).
+    /// Default Kerberos realm. The broker uses it when a principal omits its
+    /// realm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realm: Option<String>,
-    /// KDC endpoint (e.g. `tcp://kdc:88`) for the initiate path; falls
-    /// back to krb5.conf discovery when omitted.
+    /// KDC endpoint for the initiate path, for example `tcp://kdc:88`. When
+    /// omitted, the broker falls back to krb5.conf discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kdc: Option<String>,
     /// Maximum tolerated difference between client and broker clocks.
@@ -385,15 +390,16 @@ pub struct ListenerAuthenticationGssapi {
     pub max_time_skew: Option<Time>,
 }
 
-/// Reference to a Secret (same namespace as the `Kafka` CR) holding a
-/// Kerberos keytab. The operator mounts `key` at a fixed in-pod path so
-/// the broker reads it regardless of the user's key name.
+/// Reference to a Secret in the same namespace as the `Kafka` CR that holds a
+/// Kerberos keytab. The operator mounts `key` at a fixed in-pod path, so the
+/// broker reads it for any user key name.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KeytabSecretRef {
     /// Name of the Secret holding the keytab.
     pub secret_name: String,
-    /// Key within the Secret whose value is the keytab bytes. Mounted at a fixed in-pod path regardless of this key name.
+    /// Key within the Secret whose value is the keytab bytes. The operator
+    /// mounts it at a fixed in-pod path for any value of this key name.
     pub key: String,
 }
 
@@ -473,7 +479,7 @@ pub struct ListenerStatus {
     pub name: String,
     #[serde(rename = "type")]
     pub type_: ListenerType,
-    /// `host:port` clients should put in `bootstrap.servers`.
+    /// `host:port` that clients put in `bootstrap.servers`.
     pub bootstrap_servers: String,
     #[serde(default)]
     pub addresses: Vec<ListenerAddress>,

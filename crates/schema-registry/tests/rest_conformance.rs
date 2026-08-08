@@ -1,8 +1,9 @@
 //! REST conformance: verifies our router's responses structurally match the
 //! byte-exact golden fixtures captured from a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`.
 //!
-//! No Docker required — the suite spins up an in-process broker + `KafkaStore`
-//! and drives the `axum` router via `tower::ServiceExt::oneshot` (no live socket).
+//! No Docker is required. The suite starts an in-process broker and
+//! `KafkaStore` and drives the `axum` router through
+//! `tower::ServiceExt::oneshot`, so it needs no live socket.
 //!
 //! Schema strings and the registration order are taken verbatim from the fixture
 //! README (`tests/fixtures/README.md`) so that assigned IDs 1/2/3 match.
@@ -30,8 +31,8 @@ fn fixture_value(name: &str) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("fixture {path} is not valid JSON: {e}"))
 }
 
-/// For error fixtures: unwrap the `{"_http_status": N, "_body": "<raw>"}` wrapper
-/// and return the `_body` JSON as a `serde_json::Value`.
+/// For error fixtures, unwrap the `{"_http_status": N, "_body": "<raw>"}`
+/// wrapper and return the `_body` JSON as a `serde_json::Value`.
 fn fixture_error_body(name: &str) -> (u16, serde_json::Value) {
     let wrapper = fixture_value(name);
     let raw_status = wrapper["_http_status"]

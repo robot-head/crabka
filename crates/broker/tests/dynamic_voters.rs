@@ -1,13 +1,13 @@
 //! KIP-853 dynamic-voters end-to-end integration tests.
 //!
-//! These exercise the *real* auto-join path: broker 0 self-bootstraps as the
-//! sole voter, then brokers 1..n boot in `Join` mode with `auto_join = true`
-//! and grow the quorum by sending `AddRaftVoter(self)` to the leader over the
-//! wire. The shrink test then drives `remove_voter` on the leader and asserts
-//! the committed voter set contracts.
+//! These tests exercise the *real* auto-join path. Broker 0 self-bootstraps as
+//! the sole voter. Brokers 1 to n then boot in `Join` mode with
+//! `auto_join = true` and grow the quorum by sending `AddRaftVoter(self)` to
+//! the leader over the wire. The shrink test then calls `remove_voter` on the
+//! leader and asserts that the committed voter set contracts.
 //!
 //! openraft's debug assertions race on the hosted Windows scheduler, so these
-//! are gated off Windows like the other multi-node suites.
+//! tests are gated off Windows, like the other multi-node suites.
 
 use assert2::assert;
 use crabka_raft::reconfig::{ReconfigOutcome, RemoveVoter};
@@ -15,11 +15,12 @@ use crabka_raft::reconfig::{ReconfigOutcome, RemoveVoter};
 mod support;
 use support::start_n_node;
 
-/// Auto-join must grow a fresh cluster from one voter to three: broker 0
-/// bootstraps alone, brokers 1 and 2 join over the wire. `start_n_node`
-/// already waits for convergence, but we re-assert here against the leader's
-/// committed image so the test fails loudly (rather than the harness's
-/// `Startup` error) if convergence regresses.
+/// Auto-join must grow a fresh cluster from one voter to three. Broker 0
+/// bootstraps alone, and brokers 1 and 2 join over the wire.
+///
+/// `start_n_node` already waits for convergence. This test asserts again
+/// against the leader's committed image, so that a convergence regression
+/// fails here rather than through the harness's `Startup` error.
 #[tokio::test]
 #[ignore = "KIP-853 dynamic reconfig: Slice 5"]
 async fn auto_join_grows_quorum_to_three() {
@@ -37,8 +38,8 @@ async fn auto_join_grows_quorum_to_three() {
     }
 }
 
-/// After growing to three, removing one follower via the leader's
-/// `remove_voter` must shrink the committed voter set to two.
+/// After the cluster grows to three, a call to the leader's `remove_voter` for
+/// one follower must shrink the committed voter set to two.
 #[tokio::test]
 #[ignore = "KIP-853 dynamic reconfig: Slice 5"]
 async fn remove_voter_shrinks_quorum() {

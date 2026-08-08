@@ -1,13 +1,16 @@
-//! Stream-side buffer for the KIP-923 stream–table join grace period. Holds
-//! incoming stream records `(key, value)` keyed by `(timestamp, seqnum)` so
-//! out-of-order records buffer and `drain_due` returns them in ascending
-//! `(ts, seq)` order once stream-time passes `ts + grace`. Keeps EVERY record —
-//! a stream is not a changelog (two records with the same key at different
-//! timestamps must BOTH buffer; there is no replace-by-key).
+//! Stream-side buffer for the KIP-923 stream–table join grace period.
 //!
-//! Changelog format (Crabka-internal — there is no JVM byte-exact golden for this
-//! buffer, so it only needs to be self-consistent for Crabka's own clean-slate
-//! restore):
+//! The buffer holds incoming stream records `(key, value)` keyed by
+//! `(timestamp, seqnum)`, so out-of-order records buffer. `drain_due` returns
+//! them in ascending `(ts, seq)` order once stream-time passes `ts + grace`. The
+//! buffer keeps EVERY record, because a stream is not a changelog. Two records
+//! with the same key at different timestamps must BOTH buffer. There is no
+//! replace-by-key.
+//!
+//! The changelog format is Crabka-internal. There is no JVM byte-exact golden for
+//! this buffer, so the format only needs to be self-consistent for Crabka's own
+//! clean-slate restore.
+//!
 //! - Changelog KEY  = `(ts, seq)` encoded big-endian (8 bytes ts ‖ 4 bytes seq).
 //! - Changelog VALUE = `(key bytes, value bytes)` length-prefixed, or `None`
 //!   (a tombstone logged when an entry is drained).
@@ -18,8 +21,10 @@ use bytes::Bytes;
 
 use crate::{processor::serde::Serde, store::api::StateStore};
 
-/// Encode a `(ts, seq)` buffer id as the changelog KEY: 8-byte big-endian `ts`
-/// followed by 4-byte big-endian `seq` (so byte order matches `(ts, seq)` order).
+/// Encodes a `(ts, seq)` buffer id as the changelog KEY.
+///
+/// The layout is an 8-byte big-endian `ts` followed by a 4-byte big-endian `seq`,
+/// so byte order matches `(ts, seq)` order.
 fn encode_id(id: (i64, u32)) -> Bytes {
     let mut buf = Vec::with_capacity(12);
     buf.extend_from_slice(&id.0.to_be_bytes());
@@ -27,15 +32,17 @@ fn encode_id(id: (i64, u32)) -> Bytes {
     Bytes::from(buf)
 }
 
-/// Decode a changelog KEY back into `(ts, seq)`.
+/// Decodes a changelog KEY back into `(ts, seq)`.
 fn decode_id(bytes: &[u8]) -> (i64, u32) {
     let ts = i64::from_be_bytes(bytes[0..8].try_into().expect("8-byte ts prefix"));
     let seq = u32::from_be_bytes(bytes[8..12].try_into().expect("4-byte seq suffix"));
     (ts, seq)
 }
 
-/// Encode `(key bytes, value bytes)` as the changelog VALUE: a 4-byte big-endian
-/// key length, the key bytes, then the value bytes.
+/// Encodes `(key bytes, value bytes)` as the changelog VALUE.
+///
+/// The layout is a 4-byte big-endian key length, the key bytes, then the value
+/// bytes.
 fn encode_payload(kb: &[u8], vb: &[u8]) -> Bytes {
     let mut buf = Vec::with_capacity(4 + kb.len() + vb.len());
     buf.extend_from_slice(
@@ -48,7 +55,7 @@ fn encode_payload(kb: &[u8], vb: &[u8]) -> Bytes {
     Bytes::from(buf)
 }
 
-/// Decode a changelog VALUE back into `(key bytes, value bytes)`.
+/// Decodes a changelog VALUE back into `(key bytes, value bytes)`.
 fn decode_payload(bytes: &[u8]) -> (Bytes, Bytes) {
     let klen = u32::from_be_bytes(bytes[0..4].try_into().expect("4-byte key len")) as usize;
     let kb = Bytes::copy_from_slice(&bytes[4..4 + klen]);
@@ -56,17 +63,18 @@ fn decode_payload(bytes: &[u8]) -> (Bytes, Bytes) {
     (kb, vb)
 }
 
-/// Typed stream-side grace buffer. `put` appends `(key, value)` at `ts` under a
-/// fresh `(ts, seq)` id; `drain_due(threshold)` pops every entry with
-/// `ts <= threshold` in ascending `(ts, seq)` order (logging a tombstone per
-/// popped entry).
+/// Typed stream-side grace buffer.
+///
+/// `put` appends `(key, value)` at `ts` under a fresh `(ts, seq)` id.
+/// `drain_due(threshold)` pops every entry with `ts <= threshold` in ascending
+/// `(ts, seq)` order, and logs a tombstone for each popped entry.
 pub struct JoinGraceBufferStore<K, V> {
     name: String,
     changelog_topic: String,
     key_serde: Box<dyn Serde<K>>,
     value_serde: Box<dyn Serde<V>>,
-    /// `(ts, seq)` -> `(key bytes, value bytes)`; `seq` disambiguates equal ts and
-    /// preserves insertion order among records with the same timestamp.
+    /// `(ts, seq)` -> `(key bytes, value bytes)`. `seq` separates equal ts values
+    /// and keeps insertion order among records with the same timestamp.
     buffer: BTreeMap<(i64, u32), (Bytes, Bytes)>,
     seq: u32,
     /// Append-only changelog: `Some` = buffered, `None` = drained tombstone.
@@ -94,8 +102,10 @@ impl<K: 'static, V: 'static> JoinGraceBufferStore<K, V> {
         }
     }
 
-    /// The public ctor used by tests + the DSL. The grace buffer has no pluggable
-    /// backend, so `in_memory` and `new` are the same body.
+    /// The public ctor that the tests and the DSL use.
+    ///
+    /// The grace buffer has no pluggable backend, so `in_memory` and `new` have
+    /// the same body.
     #[must_use]
     #[allow(dead_code)] // test-only ctor
     pub fn in_memory(
@@ -107,8 +117,10 @@ impl<K: 'static, V: 'static> JoinGraceBufferStore<K, V> {
         Self::new(name, key_serde, value_serde, changelog_topic)
     }
 
-    /// Buffer a stream record `(key, value)` at `ts`. Always appends a NEW entry
-    /// (no replace-by-key): a stream is not a changelog.
+    /// Buffers a stream record `(key, value)` at `ts`.
+    ///
+    /// This method always appends a NEW entry and never replaces by key, because
+    /// a stream is not a changelog.
     pub fn put(&mut self, key: K, value: V, ts: i64) -> std::future::Ready<()> {
         let kb = self.key_serde.serialize(&self.changelog_topic, &key);
         let vb = self.value_serde.serialize(&self.changelog_topic, &value);
@@ -124,8 +136,11 @@ impl<K: 'static, V: 'static> JoinGraceBufferStore<K, V> {
         std::future::ready(())
     }
 
-    /// Pop every entry with `ts <= threshold`, in ascending `(ts, seq)` order, as
-    /// `(key, value, ts)`. Logs a tombstone per popped entry (if logging).
+    /// Pops every entry with `ts <= threshold`.
+    ///
+    /// The entries come back in ascending `(ts, seq)` order as
+    /// `(key, value, ts)`. This method logs a tombstone for each popped entry if
+    /// logging is on.
     pub fn drain_due(&mut self, threshold: i64) -> std::future::Ready<Vec<(K, V, i64)>> {
         let ids: Vec<(i64, u32)> = self
             .buffer

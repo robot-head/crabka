@@ -3,8 +3,8 @@
 //! In-process bring-up for the Kafka FDW round-trip test.
 //!
 //! [`KafkaStack`] starts a single-node crabka broker (`KRaft`, ephemeral port)
-//! and a Confluent-compatible schema registry served over a real ephemeral
-//! HTTP socket, then exposes:
+//! and a Confluent-compatible schema registry on a real ephemeral HTTP
+//! socket. It then exposes:
 //!
 //! * the broker bootstrap address (`bootstrap`),
 //! * the registry base URL (`registry_url`),
@@ -12,8 +12,9 @@
 //! * Avro registration (`register_avro`) → schema id,
 //! * record production (`produce`) → assigned offset.
 //!
-//! Readiness is **condition-driven** (broker metadata fetch succeeds; registry
-//! `GET /subjects` returns 200), each bounded by a timeout — never a fixed
+//! Readiness is **condition-driven**. The broker is ready when a metadata
+//! fetch succeeds, and the registry is ready when `GET /subjects` returns
+//! 200. A timeout bounds each condition. The harness never uses a fixed
 //! sleep.
 
 use std::{
@@ -47,11 +48,12 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Poll cadence while waiting on a readiness condition.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// A live in-process broker + schema registry.
+/// A live in-process broker and schema registry.
 ///
-/// Holds every resource (broker handle, registry store, cancellation token,
-/// temp log dir) so the stack stays up for the lifetime of the value and is
-/// torn down on drop / [`KafkaStack::shutdown`].
+/// The struct holds every resource: the broker handle, the registry store,
+/// the cancellation token, and the temp log dir. The stack stays up for the
+/// lifetime of the value, and it goes down on drop or on
+/// [`KafkaStack::shutdown`].
 pub struct KafkaStack {
     broker: Option<BrokerHandle>,
     bootstrap: String,
@@ -63,12 +65,13 @@ pub struct KafkaStack {
 }
 
 impl KafkaStack {
-    /// Bring up a single-node broker + registry on ephemeral ports and wait
-    /// until both are serving requests.
+    /// Brings up a single-node broker and registry on ephemeral ports, and
+    /// waits until both serve requests.
     ///
     /// # Panics
-    /// Panics (via `expect`) if any component fails to start or does not become
-    /// ready within [`READY_TIMEOUT`] — a test harness wants a loud failure.
+    /// Panics through `expect` if any component fails to start, or if it does
+    /// not become ready within [`READY_TIMEOUT`]. A test harness needs a loud
+    /// failure.
     pub async fn start() -> Self {
         crabka_fdw_install_provider();
 
@@ -147,7 +150,7 @@ impl KafkaStack {
         &self.registry_url
     }
 
-    /// Create `name` with `partitions` partitions (replication factor 1).
+    /// Creates `name` with `partitions` partitions and replication factor 1.
     ///
     /// # Panics
     /// Panics if the `CreateTopics` RPC fails or the broker rejects the topic.
@@ -178,8 +181,8 @@ impl KafkaStack {
         client.close();
     }
 
-    /// Register an Avro schema for `subject` (typically `"<topic>-value"`) and
-    /// return the assigned Confluent schema id.
+    /// Registers an Avro schema for `subject`, usually `"<topic>-value"`, and
+    /// returns the assigned Confluent schema id.
     ///
     /// # Panics
     /// Panics if registration fails.
@@ -201,7 +204,7 @@ impl KafkaStack {
         u32::try_from(reg.id.0).expect("schema id fits in u32")
     }
 
-    /// Register a JSON Schema for `subject` and return its Confluent schema id.
+    /// Registers a JSON Schema for `subject` and returns its Confluent schema id.
     ///
     /// # Panics
     /// Panics if registration fails.
@@ -223,7 +226,7 @@ impl KafkaStack {
         u32::try_from(reg.id.0).expect("schema id fits in u32")
     }
 
-    /// Register a Protobuf schema for `subject` and return the assigned
+    /// Registers a Protobuf schema for `subject` and returns the assigned
     /// Confluent schema id.
     ///
     /// # Panics
@@ -238,7 +241,7 @@ impl KafkaStack {
             .await
     }
 
-    /// Register a Protobuf schema with Schema Registry references.
+    /// Registers a Protobuf schema with Schema Registry references.
     ///
     /// # Panics
     /// Panics if registration fails.
@@ -265,11 +268,11 @@ impl KafkaStack {
         u32::try_from(reg.id.0).expect("schema id fits in u32")
     }
 
-    /// Produce one record to `topic` partition `partition` with the given
-    /// (already framed) `value` bytes, returning the assigned offset.
+    /// Produces one record to `topic` partition `partition` with the given,
+    /// already framed, `value` bytes, and returns the assigned offset.
     ///
-    /// `value` is the raw on-wire payload: for Avro it must be the Confluent
-    /// frame (`magic | id | avro-body`); for the raw-fallback path it is the
+    /// `value` is the raw on-wire payload. For Avro it must be the Confluent
+    /// frame (`magic | id | avro-body`). For the raw-fallback path it is the
     /// verbatim bytes.
     ///
     /// # Panics
@@ -279,7 +282,7 @@ impl KafkaStack {
             .await
     }
 
-    /// Produce one record with headers to `topic` partition `partition`.
+    /// Produces one record with headers to `topic` partition `partition`.
     ///
     /// # Panics
     /// Panics if the broker does not ack the record.
@@ -308,7 +311,8 @@ impl KafkaStack {
         meta.offset
     }
 
-    /// Tear down the registry and broker. Idempotent-ish: safe to call once.
+    /// Tears down the registry and broker. The method consumes the stack, so
+    /// you can call it only once.
     pub async fn shutdown(mut self) {
         self.cancel.cancel();
         if let Some(broker) = self.broker.take() {
@@ -326,12 +330,12 @@ impl Drop for KafkaStack {
     }
 }
 
-/// Install the rustcrypto rustls provider used by the FDW + crabka clients.
+/// Installs the rustcrypto rustls provider that the FDW and crabka clients use.
 fn crabka_fdw_install_provider() {
     crabka_gres_fdw::provider::install_default_provider();
 }
 
-/// Wait until a `Metadata` RPC against `bootstrap` succeeds.
+/// Waits until a `Metadata` RPC against `bootstrap` succeeds.
 async fn wait_for_broker(bootstrap: &str) {
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_err = String::from("(no attempt)");
@@ -357,7 +361,7 @@ async fn wait_for_broker(bootstrap: &str) {
     panic!("broker {bootstrap} not ready within {READY_TIMEOUT:?}: {last_err}");
 }
 
-/// Wait until `GET {registry_url}/subjects` returns HTTP 200.
+/// Waits until `GET {registry_url}/subjects` returns HTTP 200.
 async fn wait_for_registry(registry_url: &str) {
     let deadline = Instant::now() + READY_TIMEOUT;
     let url = format!("{registry_url}/subjects");
@@ -373,9 +377,9 @@ async fn wait_for_registry(registry_url: &str) {
     panic!("registry {url} not ready within {READY_TIMEOUT:?}: {last}");
 }
 
-/// Minimal HTTP/1.1 GET returning `(status, body)`, using only `tokio` (no
-/// extra HTTP-client dev-dependency). Sufficient for a readiness probe /
-/// diagnostic against the local registry.
+/// Minimal HTTP/1.1 GET that returns `(status, body)` and uses only `tokio`.
+/// It needs no extra HTTP-client dev-dependency, and it is enough for a
+/// readiness probe or a diagnostic against the local registry.
 async fn http_get(url: &str) -> Result<(u16, String), String> {
     let rest = url.strip_prefix("http://").ok_or("url must be http://")?;
     let (authority, path) = match rest.split_once('/') {

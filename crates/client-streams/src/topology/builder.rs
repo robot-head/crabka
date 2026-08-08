@@ -7,8 +7,10 @@ use std::{
     marker::PhantomData,
 };
 
-/// Factory that builds a fresh erased [`StateStore`] given the store name, pre-derived
-/// changelog topic, and an already-opened byte backend. The factory only owns the serdes.
+/// Factory that builds a fresh erased [`StateStore`].
+///
+/// The caller supplies the store name, the pre-derived changelog topic, and an
+/// already-opened byte backend. The factory owns only the serdes.
 pub(crate) type StoreFactory = Box<
     dyn Fn(
             &str,
@@ -19,9 +21,11 @@ pub(crate) type StoreFactory = Box<
         + Sync,
 >;
 
-/// The JVM's `windowstore.changelog.additional.retention.ms` default: the slack
-/// added on top of a window store's own retention so a restoring instance can
-/// still read the records backing its open windows.
+/// The JVM default for `windowstore.changelog.additional.retention.ms`.
+///
+/// This is the extra time added to a window store's own retention. An instance
+/// that restores its state can then still read the records that back its open
+/// windows.
 const CHANGELOG_ADDITIONAL_RETENTION: Time = days(1);
 
 use crabka_protocol::owned::streams_group_heartbeat_request::Topology as WireTopology;
@@ -45,11 +49,12 @@ use crate::processor::{
 // TopologyError
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Error building a topology (bad node graph, invalid configuration, etc.).
+/// An error that stops a topology build, such as a bad node graph or an
+/// invalid configuration.
 ///
-/// Parent→child *type* mismatches are not represented here: typed
-/// [`NodeHandle`] wiring makes them a compile error, so they never reach
-/// `build()`.
+/// This enum does not cover parent→child *type* mismatches. Typed
+/// [`NodeHandle`] wiring makes such a mismatch a compile error, so it never
+/// reaches `build()`.
 #[derive(Debug, thiserror::Error)]
 pub enum TopologyError {
     #[error("duplicate node name: {0}")]
@@ -96,32 +101,37 @@ impl From<TopologyError> for StoredError {
 // Topology
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// A Processor-API topology under construction. Node insertion order is
-/// significant — it determines subtopology indices (JVM-matching).
+/// A Processor-API topology under construction.
+///
+/// Node insertion order is significant. It sets the subtopology indices, which
+/// match the JVM.
 #[derive(Default)]
 pub struct Topology {
     reg: NodeRegistry,
     error: Option<StoredError>,
     factories: HashMap<String, NodeFactory>,
-    /// `(changelog_override, factory)` — override is `None` for the default
+    /// `(changelog_override, factory)`. The override is `None` for the default
     /// `<app_id>-<store_name>-changelog` derivation.
     store_factories: HashMap<String, (Option<String>, StoreFactory)>,
-    /// `GlobalKTable` store factories, keyed by store name. Kept SEPARATE from
-    /// `store_factories` so per-task `instantiate` does NOT build them (a global
-    /// store is fully replicated, not task-partitioned) and NO changelog topic is
-    /// emitted. The override is always `None` here (global stores have no
-    /// changelog) but the tuple mirrors the regular-store shape consumed by the
-    /// global-store manager. Populated by [`Topology::add_global_store`].
+    /// `GlobalKTable` store factories, keyed by store name. These stay SEPARATE
+    /// from `store_factories` for two reasons: per-task `instantiate` must NOT
+    /// build them, because a global store is fully replicated and not
+    /// task-partitioned, and NO changelog topic is emitted. The override is
+    /// always `None` here, because a global store has no changelog, but the
+    /// tuple still mirrors the regular-store shape that the global-store manager
+    /// reads. [`Topology::add_global_store`] fills this map.
     global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
     /// `global store name -> source topic` for each `GlobalKTable`. The shared
-    /// global consumer reads each source topic (all partitions) to fully
-    /// replicate the matching store. Populated by [`Topology::add_global_store`]
-    /// alongside `global_store_factories`. Invisible in the wire output.
+    /// global consumer reads all partitions of each source topic to fully
+    /// replicate the matching store. [`Topology::add_global_store`] fills this
+    /// map together with `global_store_factories`. It is invisible in the wire
+    /// output.
     global_store_topics: HashMap<String, String>,
-    /// Materialized KV stores whose record cache is eligible (JVM `Materialized`
-    /// caching, default on). Populated by [`Topology::mark_store_caching`] at the
-    /// materialized KTable/aggregate lowering sites; consumed by `instantiate` to
-    /// wrap the store in a [`NamedCache`] when the cache budget is positive.
+    /// Materialized KV stores that can use a record cache. This is JVM
+    /// `Materialized` caching, which is on by default.
+    /// [`Topology::mark_store_caching`] fills this set at the materialized
+    /// KTable and aggregate lowering sites. `instantiate` reads it and wraps the
+    /// store in a [`NamedCache`] when the cache budget is positive.
     caching_stores: std::collections::HashSet<String>,
 }
 
@@ -151,19 +161,20 @@ impl std::fmt::Debug for Topology {
     }
 }
 
-/// A typed handle to a node in a [`Topology`], returned by
-/// [`Topology::add_source`] and [`Topology::add_processor`]. Pass it (by
-/// reference) as a parent when adding a child node.
+/// A typed handle to a node in a [`Topology`].
 ///
-/// Wiring by value rather than by string name means the compiler does two jobs
-/// that `build()` used to: a parent that doesn't exist yet simply has no handle
-/// to pass (so forward references and cycles can't be written), and the
-/// parent's output type `(K, V)` is checked against the child's input type —
-/// a mismatch is a **compile error**, not a runtime `build()` failure.
+/// [`Topology::add_source`] and [`Topology::add_processor`] return a handle.
+/// Pass it by reference as a parent when you add a child node.
 ///
-/// `K` / `V` are the key/value types the node *produces*. The handle is cheap
-/// to [`Clone`] (it carries only the node name) so one parent can feed many
-/// children.
+/// Wiring uses values and not string names, so the compiler does two checks.
+/// First, a parent that does not exist yet has no handle to pass, so you cannot
+/// write a forward reference or a cycle. Second, the compiler checks the
+/// parent's output type `(K, V)` against the child's input type. A mismatch is
+/// a **compile error**, not a runtime `build()` failure.
+///
+/// `K` and `V` are the key and value types the node *produces*. The handle is
+/// cheap to [`Clone`], because it carries only the node name, so one parent can
+/// feed many children.
 pub struct NodeHandle<K, V> {
     name: String,
     _pd: PhantomData<fn() -> (K, V)>,
@@ -179,17 +190,18 @@ impl<K, V> NodeHandle<K, V> {
 
     /// Reconstruct a typed handle from a node name recorded during DSL lowering.
     ///
-    /// The DSL lowers a type-erased logical graph: each lowering thunk knows its
-    /// own concrete `K`/`V` statically and looks up its parent's
-    /// Processor-API node name from `LowerState`, rebuilding a typed handle to
-    /// pass to [`Topology::add_processor`] / [`Topology::add_sink`].
+    /// The DSL lowers a type-erased logical graph. Each lowering thunk knows its
+    /// own concrete `K` and `V` statically and looks up its parent's
+    /// Processor-API node name in `LowerState`. The thunk then rebuilds a typed
+    /// handle to pass to [`Topology::add_processor`] or [`Topology::add_sink`].
     pub(crate) fn from_name(name: String) -> Self {
         Self::new(name)
     }
 
-    /// The node's name, as it appears in the wire topology. Useful for
-    /// [`Topology::add_state_store`], which connects stores to processors by
-    /// name.
+    /// The node's name, as it appears in the wire topology.
+    ///
+    /// [`Topology::add_state_store`] needs this name, because it connects
+    /// stores to processors by name.
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -241,15 +253,16 @@ impl Topology {
     /// Add a source node reading the given external topics with explicit serdes,
     /// returning a typed [`NodeHandle`] used to wire children to it.
     ///
-    /// `consumed` carries the key + value serdes used to deserialize incoming
-    /// bytes into typed `Record<K, V>` values at runtime — written
+    /// `consumed` carries the key serde and the value serde. At runtime they
+    /// deserialize incoming bytes into typed `Record<K, V>` values. Write it as
     /// `Consumed::with(key_serde, value_serde)` so the two roles are visible.
     ///
-    /// Prefer [`Topology::add_source`] (the default-serde form) for types that
-    /// implement [`DefaultSerde`]. Reach for this escape hatch when a type has no
-    /// default serde, or to override the default for a topic — e.g. a hand-rolled
-    /// `Serde<T>`, a **key**-role schema serde (`AvroSerde::<T>::key(&cache)`), or
-    /// a validation-on JSON serde (`JsonSerde::value(&cache, true)`).
+    /// Prefer [`Topology::add_source`], the default-serde form, for types that
+    /// implement [`DefaultSerde`]. Use this escape hatch when a type has no
+    /// default serde, or to override the default for a topic. Examples are a
+    /// hand-rolled `Serde<T>`, a **key**-role schema serde
+    /// (`AvroSerde::<T>::key(&cache)`), and a validation-on JSON serde
+    /// (`JsonSerde::value(&cache, true)`).
     pub fn add_source_explicit<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
@@ -302,12 +315,12 @@ impl Topology {
     /// Add a processor node fed by the given parent [`NodeHandle`]s, returning a
     /// handle for its output.
     ///
-    /// Wiring is by value: every parent's output type must equal this
-    /// processor's input type `(KIn, VIn)`, enforced by the compiler. `supplier`
-    /// produces a fresh `Processor` per task; the closure form `|| MyProc`
-    /// satisfies [`ProcessorSupplier`] via a blanket impl and infers all four KV
-    /// type parameters from the processor's `Processor` impl, so callers never
-    /// annotate them.
+    /// Wiring is by value. Every parent's output type must equal this
+    /// processor's input type `(KIn, VIn)`, and the compiler enforces this.
+    /// `supplier` produces a fresh `Processor` per task. The closure form
+    /// `|| MyProc` satisfies [`ProcessorSupplier`] through a blanket impl, and
+    /// it infers all four KV type parameters from the processor's `Processor`
+    /// impl, so callers never annotate them.
     pub fn add_processor<KIn, VIn, KOut, VOut, S, P, I>(
         &mut self,
         name: impl Into<String>,
@@ -352,7 +365,7 @@ impl Topology {
 
     /// Add a sink node writing to `topic` with the default serdes for `K` and
     /// `V`, fed by the given parent [`NodeHandle`]s. Every parent's output type
-    /// must equal the sink's input type `(K, V)` — enforced by the compiler.
+    /// must equal the sink's input type `(K, V)`, and the compiler enforces this.
     ///
     /// Use [`Topology::add_sink_explicit`] when either type has no default serde
     /// or when a topology needs custom serdes.
@@ -375,17 +388,18 @@ impl Topology {
 
     /// Add a sink node writing to `topic` with explicit serdes, fed by the given
     /// parent [`NodeHandle`]s. Every parent's output type must equal the sink's
-    /// input type `(K, V)` — enforced by the compiler.
+    /// input type `(K, V)`, and the compiler enforces this.
     ///
-    /// `produced` carries the key + value serdes used to serialize outgoing
-    /// records — written `Produced::with(key_serde, value_serde)`. A sink is
-    /// terminal, so nothing is returned.
+    /// `produced` carries the key serde and the value serde that serialize
+    /// outgoing records. Write it as `Produced::with(key_serde, value_serde)`.
+    /// A sink is terminal, so this method returns nothing.
     ///
-    /// Prefer [`Topology::add_sink`] (the default-serde form) for types that
-    /// implement [`DefaultSerde`]. Reach for this escape hatch when a type has no
-    /// default serde, or to override the default for a topic — e.g. a hand-rolled
-    /// `Serde<T>`, a **key**-role schema serde (`AvroSerde::<T>::key(&cache)`), or
-    /// a validation-on JSON serde (`JsonSerde::value(&cache, true)`).
+    /// Prefer [`Topology::add_sink`], the default-serde form, for types that
+    /// implement [`DefaultSerde`]. Use this escape hatch when a type has no
+    /// default serde, or to override the default for a topic. Examples are a
+    /// hand-rolled `Serde<T>`, a **key**-role schema serde
+    /// (`AvroSerde::<T>::key(&cache)`), and a validation-on JSON serde
+    /// (`JsonSerde::value(&cache, true)`).
     pub fn add_sink_explicit<K, V, KS, VS, P, I>(
         &mut self,
         name: impl Into<String>,
@@ -440,12 +454,14 @@ impl Topology {
         );
     }
 
-    /// Register a state store connected to the given processors (→ changelog).
+    /// Register a state store connected to the given processors, with a
+    /// changelog.
     ///
-    /// `key_serde` / `value_serde` define how records are serialized into the
-    /// changelog topic (`<app_id>-<name>-changelog`) and the store's byte map.
-    /// Stores connect processors of possibly-differing types, so the processor
-    /// list is by name — pass [`NodeHandle::name`] for a handle you hold.
+    /// `key_serde` and `value_serde` define how the store serializes records
+    /// into the changelog topic (`<app_id>-<name>-changelog`) and into the
+    /// store's byte map. Stores connect processors that can have different
+    /// types, so the processor list uses names. Pass [`NodeHandle::name`] for a
+    /// handle you hold.
     pub fn add_state_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
@@ -465,12 +481,12 @@ impl Topology {
     /// Register a state store whose changelog is an existing **source topic**
     /// rather than the derived `<app_id>-<name>-changelog`.
     ///
-    /// This backs the `REUSE_KTABLE_SOURCE_TOPICS` DSL optimizer: a
-    /// `builder.table_explicit(topic, ...)` store can reuse `topic` as its changelog, so
-    /// no separate `app-<store>-changelog` topic is created and the wire
-    /// topology lists `topic` as the store's changelog. `changelog_topic` is the
-    /// topic name used both in the wire `state_changelog_topics` entry and as the
-    /// runtime store's changelog target.
+    /// This backs the `REUSE_KTABLE_SOURCE_TOPICS` DSL optimizer. A
+    /// `builder.table_explicit(topic, ...)` store can reuse `topic` as its
+    /// changelog. No separate `app-<store>-changelog` topic is created, and the
+    /// wire topology lists `topic` as the store's changelog. `changelog_topic`
+    /// is the topic name used both in the wire `state_changelog_topics` entry
+    /// and as the runtime store's changelog target.
     pub fn add_state_store_with_changelog<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
@@ -542,15 +558,15 @@ impl Topology {
     /// [`add_state_store`]: Topology::add_state_store
     ///
     /// The tuple is `(retention_basis, window_size, grace)`. The **retention
-    /// basis** drives the changelog `retention.ms`; for tumbling/hopping windows
-    /// it equals the window size, and for sliding windows it is the retention
-    /// span (`2 * time_difference`), which is wider than the window.
+    /// basis** sets the changelog `retention.ms`. For tumbling and hopping
+    /// windows it equals the window size. For sliding windows it is the
+    /// retention span (`2 * time_difference`), which is wider than the window.
     ///
-    /// The **window size** is the true window length, used only by the store's
-    /// cache flush to reconstruct the downstream `Windowed<K>` key's
-    /// `end = start + window_size` (the store-key bytes hold only the start).
-    /// For sliding windows this is `time_difference` (1x), NOT the retention
-    /// span.
+    /// The **window size** is the true window length. Only the store's cache
+    /// flush uses it, to rebuild the downstream `Windowed<K>` key's
+    /// `end = start + window_size`, because the store-key bytes hold only the
+    /// start. For sliding windows this is `time_difference` (1x), NOT the
+    /// retention span.
     // retention basis + window size (key-end) are distinct
     pub fn add_window_store<K, V, KS, VS>(
         &mut self,
@@ -652,8 +668,8 @@ impl Topology {
 
     /// Register a session state store connected to the given processors.
     ///
-    /// Like [`add_window_store`] but for session stores. Reuses the windowed
-    /// (`compact,delete`) changelog config; the `retention.ms` is derived from
+    /// Like [`add_window_store`] but for session stores. It reuses the windowed
+    /// (`compact,delete`) changelog config. The `retention.ms` comes from
     /// `gap + grace + `[`CHANGELOG_ADDITIONAL_RETENTION`]. The store holds the
     /// raw aggregate (`SessionBytesStore`).
     ///
@@ -702,10 +718,12 @@ impl Topology {
     }
 
     /// Register a versioned state store (KIP-889) connected to the given
-    /// processors. The changelog topic carries `compact` + `min.compaction.lag.ms
+    /// processors.
+    ///
+    /// The changelog topic carries `compact` + `min.compaction.lag.ms
     /// = history_retention + `[`CHANGELOG_ADDITIONAL_RETENTION`]. The
-    /// version-chain store is self-contained in memory; the supplied byte backend
-    /// is unused.
+    /// version-chain store is self-contained in memory, so it does not use the
+    /// supplied byte backend.
     pub fn add_versioned_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
@@ -730,10 +748,10 @@ impl Topology {
         )
     }
 
-    /// Like [`add_versioned_store`] but whose changelog is an existing **source
-    /// topic** (the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a versioned
+    /// Like [`add_versioned_store`] but the changelog is an existing **source
+    /// topic**. The `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a versioned
     /// `builder.table_explicit(topic, …)` store's changelog at its own source
-    /// `topic`). Mirrors [`add_state_store_with_changelog`].
+    /// `topic`. This mirrors [`add_state_store_with_changelog`].
     ///
     /// [`add_versioned_store`]: Topology::add_versioned_store
     /// [`add_state_store_with_changelog`]: Topology::add_state_store_with_changelog
@@ -812,9 +830,9 @@ impl Topology {
     /// The subscription store is keyed by `combined_key(fk, pk)` bytes →
     /// `ValueAndTimestamp<SubscriptionWrapper>` bytes. Its changelog is a plain
     /// compacted KV changelog (`<app_id>-<name>-changelog`, like
-    /// [`add_state_store`]) — NOT windowed retention. The store types are fixed
-    /// (raw bytes in, `SubscriptionWrapper` out), so no key/value serdes are
-    /// taken.
+    /// [`add_state_store`]), NOT windowed retention. The store types are fixed
+    /// to raw bytes in and `SubscriptionWrapper` out, so this method takes no
+    /// key serde and no value serde.
     ///
     /// [`add_state_store`]: Topology::add_state_store
     pub(crate) fn add_fk_subscription_store(
@@ -848,13 +866,15 @@ impl Topology {
     /// Register a suppress buffer store connected to the given processor.
     ///
     /// The suppress buffer ([`SuppressBytesStore`]) is a time-ordered in-memory
-    /// buffer with its own storage (it does NOT use the pluggable byte backend),
-    /// so the factory ignores the opened backend. `logging` toggles ONLY the
-    /// changelog: when `true` the changelog topic is emitted in the wire topology
-    /// (a plain `cleanup.policy=compact` changelog — the JVM suppress buffer is a
-    /// compacted KV store) and the store logs/restores; when `false` the store
-    /// stays in memory and NO changelog topic appears (so a logging-off suppress
-    /// has the same wire shape as an unsuppressed topology.
+    /// buffer with its own storage. It does NOT use the pluggable byte backend,
+    /// so the factory ignores the opened backend.
+    ///
+    /// `logging` toggles ONLY the changelog. When `true`, the wire topology
+    /// gets the changelog topic, a plain `cleanup.policy=compact` changelog,
+    /// because the JVM suppress buffer is a compacted KV store, and the store
+    /// logs and restores. When `false`, the store stays in memory and NO
+    /// changelog topic appears, so a logging-off suppress has the same wire
+    /// shape as an unsuppressed topology.
     ///
     /// [`SuppressBytesStore`]: crate::store::suppress_store::SuppressBytesStore
     pub fn add_suppress_store<K, V, KS, VS>(
@@ -910,14 +930,16 @@ impl Topology {
     /// Register a join-grace buffer store (KIP-923) connected to the given
     /// processor.
     ///
-    /// The grace buffer ([`JoinGraceBufferStore`]) is a stream-side, time-ordered
-    /// in-memory buffer with its own storage (it does NOT use the pluggable byte
-    /// backend), so the factory ignores the opened backend. Its changelog is a
-    /// COMPACTED KV changelog (`ChangelogKind::Kv` → `cleanup.policy=compact`,
-    /// `message.timestamp.type=CreateTime`, NO explicit `retention.ms`), pinned
-    /// from the JVM 4.1.0 capture. `logging` toggles ONLY the changelog: when
-    /// `true` the changelog topic is emitted and the store logs/restores; when
-    /// `false` the store stays in memory and NO changelog topic appears.
+    /// The grace buffer ([`JoinGraceBufferStore`]) is a stream-side,
+    /// time-ordered in-memory buffer with its own storage. It does NOT use the
+    /// pluggable byte backend, so the factory ignores the opened backend. Its
+    /// changelog is a COMPACTED KV changelog (`ChangelogKind::Kv` →
+    /// `cleanup.policy=compact`, `message.timestamp.type=CreateTime`, NO
+    /// explicit `retention.ms`), pinned from the JVM 4.1.0 capture.
+    ///
+    /// `logging` toggles ONLY the changelog. When `true`, the changelog topic
+    /// is emitted and the store logs and restores. When `false`, the store
+    /// stays in memory and NO changelog topic appears.
     ///
     /// [`JoinGraceBufferStore`]: crate::store::join_grace_buffer::JoinGraceBufferStore
     pub(crate) fn add_join_grace_store<K, V, KS, VS>(
@@ -972,7 +994,7 @@ impl Topology {
 
     /// Register a state store **without** a changelog topic.
     ///
-    /// The store is available at runtime (for in-memory state), but NO entry is
+    /// The store is available at runtime for in-memory state, but NO entry is
     /// emitted in the wire topology's `state_changelog_topics` array. This backs
     /// `Materialized::with_logging(false)` in the DSL.
     pub(crate) fn add_state_store_no_changelog<K, V, KS, VS>(
@@ -1015,22 +1037,22 @@ impl Topology {
 
     /// Register a `GlobalKTable` source, update-processor, and KV store.
     ///
-    /// A `GlobalKTable` is **invisible in the wire**: no subtopology of its own,
-    /// no changelog topic. But its source node still occupies a node-group index
-    /// during grouping (so other subtopology ids shift). This method:
+    /// A `GlobalKTable` is **invisible in the wire**. It has no subtopology of
+    /// its own and no changelog topic. Its source node still takes a node-group
+    /// index during grouping, so other subtopology ids shift. This method does
+    /// three things:
     ///
-    /// 1. registers a source node reading `topic` and a processor node fed by it
-    ///    (the source→processor edge unites them into one node group);
-    /// 2. marks `topic` global so the grouping pass skips it in the
-    ///    source-bucketing pass — the resulting
-    ///    source-less group is dropped by the final filter but already consumed
-    ///    its index;
-    /// 3. stores the global KV factory in a SEPARATE map (`global_store_factories`,
-    ///    NOT `store_factories`) so per-task `instantiate` does not build it and NO
-    ///    changelog topic is emitted. The factory builds a
-    ///    [`KeyValueBytesStore`] with an empty changelog.
+    /// 1. it registers a source node reading `topic` and a processor node fed
+    ///    by it, and the source→processor edge unites them into one node group;
+    /// 2. it marks `topic` global so the grouping pass skips it in the
+    ///    source-bucketing pass. The final filter drops the resulting
+    ///    source-less group, but that group already took its index;
+    /// 3. it stores the global KV factory in a SEPARATE map
+    ///    (`global_store_factories`, NOT `store_factories`) so per-task
+    ///    `instantiate` does not build it and NO changelog topic is emitted. The
+    ///    factory builds a [`KeyValueBytesStore`] with an empty changelog.
     ///
-    /// The global store is not built by per-task `instantiate`; the
+    /// Per-task `instantiate` does not build the global store. The
     /// fully-replicated global-store manager reads the factory.
     ///
     /// [`KeyValueBytesStore`]: crate::store::kv::KeyValueBytesStore
@@ -1093,20 +1115,22 @@ impl Topology {
 
     /// Connect an additional processor to an already-registered state store.
     ///
-    /// Mirrors `InternalTopologyBuilder.connectProcessorAndStateStores`: a join
-    /// processor needs to read the joined table's store even though it wasn't the
-    /// store's original owner. The grouping pass unions all connected processors
-    /// into one subtopology, so adding a second processor here is sufficient to
+    /// This mirrors `InternalTopologyBuilder.connectProcessorAndStateStores`. A
+    /// join processor must read the joined table's store even though it was not
+    /// the store's original owner. The grouping pass unions all connected
+    /// processors into one subtopology, so a second processor here is enough to
     /// pull the join processor into the same subtopology as the store.
     pub fn connect_processor_store(&mut self, processor: &str, store: &str) -> &mut Self {
         self.reg.connect_processor_store(processor, store);
         self
     }
 
-    /// Mark a materialized store as record-cache eligible (JVM `Materialized`
-    /// caching, default on). Called by the materialized KTable/aggregate lowering
-    /// sites with the `Materialized`'s `caching_enabled()`; `on == false`
-    /// (`with_caching(false)`) leaves the store uncached.
+    /// Mark a materialized store as record-cache eligible.
+    ///
+    /// This is JVM `Materialized` caching, which is on by default. The
+    /// materialized KTable and aggregate lowering sites call this method with
+    /// the `Materialized`'s `caching_enabled()`. `on == false`, which
+    /// `with_caching(false)` gives, leaves the store uncached.
     pub(crate) fn mark_store_caching(&mut self, name: &str, on: bool) {
         if on {
             self.caching_stores.insert(name.to_string());
@@ -1135,11 +1159,13 @@ impl Topology {
         self
     }
 
-    /// Declare a copartition group: the given member topics must share a
-    /// partitioning. The grouping pass assigns the group to the subtopology that
-    /// reads its members, and the wire layer encodes member names as `int16`
-    /// indices into that subtopology's sorted source/repartition arrays. Required
-    /// for joins (KIP-1071).
+    /// Declare a copartition group. The given member topics must share a
+    /// partitioning.
+    ///
+    /// The grouping pass assigns the group to the subtopology that reads its
+    /// members. The wire layer encodes member names as `int16` indices into that
+    /// subtopology's sorted source and repartition arrays. Joins need this
+    /// (KIP-1071).
     pub fn add_copartition_group(
         &mut self,
         topics: impl IntoIterator<Item = impl Into<String>>,
@@ -1149,12 +1175,14 @@ impl Topology {
         self
     }
 
-    /// Derive subtopologies and the wire topology. `application_id` drives
-    /// internal-topic names (`<app>-<store>-changelog`).
+    /// Derive subtopologies and the wire topology.
     ///
-    /// Parent→child KV types are already guaranteed to match by the typed
-    /// [`NodeHandle`] wiring, so `build()` only checks structural invariants
-    /// (no duplicate names, every predecessor exists, at least one source). The
+    /// `application_id` sets the internal-topic names
+    /// (`<app>-<store>-changelog`).
+    ///
+    /// The typed [`NodeHandle`] wiring already guarantees that parent→child KV
+    /// types match, so `build()` checks only the structural invariants: no
+    /// duplicate names, every predecessor exists, and at least one source. The
     /// wire `Topology` is byte-identical to the untyped implementation.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
@@ -1275,8 +1303,9 @@ impl Topology {
 // NodeSpec
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Lightweight description of one node's wiring (no type parameters).
-/// Used during `BuiltTopology::instantiate()`.
+/// Lightweight description of one node's wiring, with no type parameters.
+///
+/// `BuiltTopology::instantiate()` uses this description.
 pub(crate) struct NodeSpec {
     pub name: String,
     /// `"source"` | `"processor"` | `"sink"`
@@ -1294,39 +1323,41 @@ pub(crate) struct NodeSpec {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// A built topology: the wire `Topology` plus the per-subtopology source-topic
-/// map used to resolve task assignments to concrete topic-partitions.
+/// map that resolves task assignments to concrete topic-partitions.
 ///
-/// NOTE: `BuiltTopology` is **not** `Clone` because the node factories hold
+/// NOTE: `BuiltTopology` is **not** `Clone`, because the node factories hold
 /// `Box<dyn Fn…>` closures that are not cloneable. The membership client wraps
-/// it in an `Arc<BuiltTopology>` — use that for sharing across tasks.
+/// it in an `Arc<BuiltTopology>`. Use that to share it across tasks.
 pub struct BuiltTopology {
     wire: WireTopology,
     source_topics: BTreeMap<String, Vec<String>>,
     application_id: String,
     factories: HashMap<String, NodeFactory>,
     node_specs: Vec<NodeSpec>,
-    /// `(changelog_override, factory)` — override is `None` for the default
+    /// `(changelog_override, factory)`. The override is `None` for the default
     /// `<app_id>-<store_name>-changelog` derivation.
     store_factories: HashMap<String, (Option<String>, StoreFactory)>,
-    /// `GlobalKTable` store factories (separate from `store_factories`): NOT built
-    /// by per-task `instantiate`. The fully-replicated global-store runtime
-    /// (`StreamThread`) reads these to build + restore each global store once;
-    /// the [`TopologyTestDriver`] reads them via
+    /// `GlobalKTable` store factories, separate from `store_factories`. Per-task
+    /// `instantiate` does NOT build them. The fully-replicated global-store
+    /// runtime (`StreamThread`) reads these to build and restore each global
+    /// store once. The [`TopologyTestDriver`] reads them through
     /// [`global_store_factories`](Self::global_store_factories)
     /// to materialize global stores directly for join tests.
     global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
-    /// `global store name -> source topic` for each `GlobalKTable`. Read by the
-    /// shared global manager so the consumer knows which topic feeds each store.
+    /// `global store name -> source topic` for each `GlobalKTable`. The shared
+    /// global manager reads this so the consumer knows which topic feeds each
+    /// store.
     // Consumed by global-store wiring via the accessor.
     #[allow(dead_code)]
     global_store_topics: HashMap<String, String>,
-    /// Materialized KV stores whose record cache is eligible (default-on JVM
-    /// `Materialized` caching, opt-out via `with_caching(false)`). `instantiate`
-    /// wraps each in a [`NamedCache`] when the cache budget is positive.
+    /// Materialized KV stores that can use a record cache. This is JVM
+    /// `Materialized` caching, which is on by default; `with_caching(false)`
+    /// opts out. `instantiate` wraps each store in a [`NamedCache`] when the
+    /// cache budget is positive.
     caching_stores: std::collections::HashSet<String>,
-    /// Store name → its connected processor names. `instantiate` maps a cached
-    /// store's (single, materializing) processor name to that node's graph index
-    /// to root the store's `cache_owner` entry.
+    /// Store name → its connected processor names. A cached store has one
+    /// materializing processor. `instantiate` maps that processor name to the
+    /// node's graph index to root the store's `cache_owner` entry.
     store_processors: HashMap<String, Vec<String>>,
 }
 
@@ -1353,10 +1384,12 @@ impl BuiltTopology {
         self.wire.clone()
     }
 
-    /// The `GlobalKTable` store factories, keyed by store name. The
-    /// [`TopologyTestDriver`] materializes these directly into its per-task store
-    /// registry so a stream-globaltable join can find them; the real runtime
-    /// (`StreamThread`) builds them once in a shared global manager, NOT per task.
+    /// The `GlobalKTable` store factories, keyed by store name.
+    ///
+    /// The [`TopologyTestDriver`] materializes these directly into its per-task
+    /// store registry so a stream-globaltable join can find them. The real
+    /// runtime (`StreamThread`) builds them once in a shared global manager,
+    /// NOT per task.
     ///
     /// [`TopologyTestDriver`]: crate::TopologyTestDriver
     pub(crate) fn global_store_factories(
@@ -1366,13 +1399,15 @@ impl BuiltTopology {
     }
 
     /// The `global store name -> source topic` map for each `GlobalKTable`.
+    ///
     /// The shared global-store manager reads this so the global consumer knows
-    /// which topic feeds each store. Invisible in the wire output.
+    /// which topic feeds each store. The map is invisible in the wire output.
     pub(crate) fn global_store_topics(&self) -> HashMap<String, String> {
         self.global_store_topics.clone()
     }
 
-    /// The external + repartition source topics a subtopology's tasks read.
+    /// The external and repartition source topics that a subtopology's tasks
+    /// read.
     #[must_use]
     pub fn source_topics_for(&self, subtopology_id: &str) -> &[String] {
         self.source_topics
@@ -1380,14 +1415,14 @@ impl BuiltTopology {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// The application id (drives internal-topic names).
+    /// The application id, which sets the internal-topic names.
     #[must_use]
     pub fn application_id(&self) -> &str {
         &self.application_id
     }
 
-    /// Topics that are sources in this topology (for test driver / repartition
-    /// loopback).
+    /// Topics that are sources in this topology, for the test driver and the
+    /// repartition loopback.
     #[must_use]
     pub fn list_source_topics(&self) -> Vec<String> {
         self.node_specs
@@ -1408,8 +1443,8 @@ impl BuiltTopology {
 
     /// Instantiate a runnable [`Graph`] for this topology.
     ///
-    /// Each call produces an independent graph (its own processor instances and
-    /// a fresh byte-store backend opened via `backend`).
+    /// Each call produces an independent graph with its own processor instances
+    /// and a fresh byte-store backend opened through `backend`.
     #[tracing::instrument(
         name = "streams.topology.instantiate",
         level = "info",
@@ -1540,18 +1575,22 @@ impl BuiltTopology {
         })
     }
 
-    /// Build-time record-cache wiring: for each materialized KV store marked
-    /// cache-eligible (default-on `Materialized` caching), register a
-    /// [`NamedCache`](crate::store::cache::named::NamedCache) in the per-task
-    /// [`ThreadCache`](crate::store::cache::thread::ThreadCache), wrap the typed
-    /// store's backend (via the erased
-    /// [`enable_cache_erased`](crate::store::api::StateStore::enable_cache_erased)
-    /// hook), and root its forwarded changes at the materializing node.
+    /// Wire the record caches at build time.
     ///
-    /// Returns the populated `ThreadCache` and the `store name → owning node
-    /// index` map for `Graph::flush_caches`. With a zero budget
-    /// (`TopologyTestDriver`) or no marked stores, the cache stays empty and the
-    /// owner map is empty, so every store stays uncached (goldens unchanged).
+    /// For each materialized KV store marked cache-eligible by the default-on
+    /// `Materialized` caching, this method does three things. It registers a
+    /// [`NamedCache`](crate::store::cache::named::NamedCache) in the per-task
+    /// [`ThreadCache`](crate::store::cache::thread::ThreadCache). It wraps the
+    /// typed store's backend through the erased
+    /// [`enable_cache_erased`](crate::store::api::StateStore::enable_cache_erased)
+    /// hook. It then roots the store's forwarded changes at the materializing
+    /// node.
+    ///
+    /// The method returns the populated `ThreadCache` and the `store name →
+    /// owning node index` map for `Graph::flush_caches`. With a zero budget, as
+    /// in the `TopologyTestDriver`, or with no marked stores, the cache and the
+    /// owner map both stay empty. Every store then stays uncached and the
+    /// goldens do not change.
     fn wire_record_caches(
         &self,
         store_registry: &mut crate::store::registry::StoreRegistry,

@@ -1,35 +1,35 @@
 //! `*_over_time` `PromQL` functions as `DataFusion` [`ScalarUDF`]s.
 //!
-//! Each UDF consumes the windowed columns that `RangeManipulate` emits per eval
-//! step and produces a `Float64Array` with one value per step. The per-window
+//! Each UDF reads the windowed columns that `RangeManipulate` emits per eval
+//! step, and returns a `Float64Array` with one value per step. The per-window
 //! reductions are a byte-for-byte port of the tree-walking engine's
-//! `over_time_sample_from_series` (float path) and `quantile_value`, so these
-//! UDFs and the interpreter agree on every number.
+//! `over_time_sample_from_series` (float path) and `quantile_value`. These UDFs
+//! and the interpreter agree on every number.
 //!
 //! # Call convention
 //!
-//! Every non-quantile `*_over_time` UDF is called with **three** positional
-//! arguments, in order:
+//! Every non-quantile `*_over_time` UDF takes three positional arguments in
+//! this order:
 //!
-//! 1. `eval_timestamp` (`Int64`): the eval instant `t` each window closes on —
-//!    `RangeManipulate`'s scalar `timestamp` column.
+//! 1. `eval_timestamp` (`Int64`): the eval instant `t` each window closes on.
+//!    This is `RangeManipulate`'s scalar `timestamp` column.
 //! 2. `timestamp_range` (`Dictionary<Int64, List<Int64>>`): the windowed sample
-//!    timestamps — `RangeManipulate`'s `<time>_range` column.
+//!    timestamps. This is `RangeManipulate`'s `<time>_range` column.
 //! 3. `value_range` (`Dictionary<Int64, List<Float64>>`): the windowed sample
-//!    values — `RangeManipulate`'s `<value>_range` column, 1:1 with (2).
+//!    values. This is `RangeManipulate`'s `<value>_range` column, 1:1 with (2).
 //!
-//! `quantile_over_time` takes a fourth leading argument, the quantile `phi`
-//! (`Float64` scalar), threaded ahead of the three windowed columns:
+//! `quantile_over_time` takes a fourth argument, the quantile `phi`
+//! (`Float64` scalar). `phi` comes before the three windowed columns:
 //! `prom_quantile_over_time(phi, eval_timestamp, timestamp_range, value_range)`.
 
 //!
-//! The `eval_timestamp`/`timestamp_range` columns are accepted uniformly even
-//! though only `last_over_time` consults timestamps (to pick the latest sample);
-//! a uniform shape keeps the planner lowering trivial. Empty windows render as
-//! **NULL** (not a NaN sentinel; Prometheus emits no sample there), which the
-//! assembler drops and downstream aggregates skip — matching the interpreter,
-//! which omits no-value series before aggregating. A genuinely-computed
-//! reduction, even a legitimately-NaN one, stays a non-null float and propagates.
+//! Every UDF accepts the `eval_timestamp` and `timestamp_range` columns, but
+//! only `last_over_time` reads the timestamps, to pick the latest sample. One
+//! uniform shape keeps the planner lowering simple. An empty window gives NULL,
+//! not a NaN sentinel, because Prometheus emits no sample there. The assembler
+//! drops that cell and downstream aggregates skip it, the same as the
+//! interpreter, which omits no-value series before it aggregates. A computed
+//! reduction stays a non-null float and propagates, even when its value is NaN.
 
 use std::sync::Arc;
 
@@ -48,10 +48,11 @@ use num_traits::ToPrimitive;
 
 use crate::range_array::RangeArray;
 
-/// Which `*_over_time` function an [`OverTimeUdf`] evaluates. Only the
-/// non-experimental, float-typed members the operator path supports appear here;
-/// `mad_over_time`, `first_over_time`, and the `ts_of_*_over_time` family stay on
-/// the interpreter.
+/// Which `*_over_time` function an [`OverTimeUdf`] evaluates.
+///
+/// Only the non-experimental, float-typed members that the operator path
+/// supports appear here. `mad_over_time`, `first_over_time`, and the
+/// `ts_of_*_over_time` family stay on the interpreter.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum OverTimeFamily {
     /// Sum of the window's sample values.
@@ -60,11 +61,11 @@ pub enum OverTimeFamily {
     Avg,
     /// Count of samples in the window.
     Count,
-    /// Smallest sample value, NaN-ignoring (Prometheus folds NaN out, matching
-    /// the engine and the `prom_min` aggregate).
+    /// Smallest sample value. Prometheus folds NaN out, the same as the engine
+    /// and the `prom_min` aggregate.
     Min,
-    /// Largest sample value, NaN-ignoring (Prometheus folds NaN out, matching
-    /// the engine and the `prom_max` aggregate).
+    /// Largest sample value. Prometheus folds NaN out, the same as the engine
+    /// and the `prom_max` aggregate.
     Max,
     /// Population standard deviation of the window's sample values.
     Stddev,
@@ -74,13 +75,13 @@ pub enum OverTimeFamily {
     Last,
     /// `1.0` if the window holds any sample.
     Present,
-    /// `phi`-quantile of the window's sample values (linear interpolation),
-    /// matching the engine's `quantile_value`.
+    /// `phi`-quantile of the window's sample values, with linear interpolation.
+    /// This matches the engine's `quantile_value`.
     Quantile,
 }
 
 impl OverTimeFamily {
-    /// The registered UDF name this family projects.
+    /// Returns the registered UDF name for this family.
     #[must_use]
     pub fn udf_name(self) -> &'static str {
         match self {
@@ -97,15 +98,17 @@ impl OverTimeFamily {
         }
     }
 
-    /// Whether this family threads a leading `phi` (quantile) scalar argument.
+    /// Returns true if this family takes a leading `phi` quantile scalar argument.
     fn takes_quantile_param(self) -> bool {
         matches!(self, Self::Quantile)
     }
 
-    /// Evaluate one window's reduction. `timestamps` and `values` are paired 1:1
-    /// in sample order; `phi` is the quantile for [`OverTimeFamily::Quantile`]
-    /// and ignored otherwise. Returns `None` where Prometheus yields no value
-    /// (an empty window).
+    /// Evaluates one window's reduction.
+    ///
+    /// `timestamps` and `values` are paired 1:1 in sample order. `phi` is the
+    /// quantile for [`OverTimeFamily::Quantile`], and other families ignore it.
+    /// This function returns `None` for an empty window, where Prometheus gives
+    /// no value.
     fn eval_window(self, timestamps: &[i64], values: &[f64], phi: f64) -> Option<f64> {
         if values.is_empty() {
             return None;
@@ -134,12 +137,13 @@ enum Extremum {
 }
 
 impl Extremum {
-    /// Whether the running value `running` should be replaced by `candidate`
-    /// under Prometheus' NaN-ignoring float ordering — the exact rule the
-    /// `prom_min`/`prom_max` aggregate UDAF's `Extremum::should_replace` and the
-    /// engine's `AggregateState::push_float` use. A NaN running value is always
-    /// replaced; a NaN candidate (with a non-NaN running value) never is, since
-    /// `NaN > _` / `NaN < _` are both false.
+    /// Returns true if `candidate` should replace the running value `running`.
+    ///
+    /// The rule is Prometheus' NaN-ignoring float order. The `prom_min` and
+    /// `prom_max` aggregate UDAF's `Extremum::should_replace` and the engine's
+    /// `AggregateState::push_float` use the same rule. This method always
+    /// replaces a NaN running value. A NaN candidate never replaces a non-NaN
+    /// running value, because `NaN > _` and `NaN < _` are both false.
     fn should_replace(self, running: f64, candidate: f64) -> bool {
         if running.is_nan() {
             return true;
@@ -151,11 +155,12 @@ impl Extremum {
     }
 }
 
-/// NaN-ignoring `min`/`max` fold over a non-empty window: seed with the first
-/// sample (NaN included), then replace the running value under
-/// [`Extremum::should_replace`]. The result is NaN only when *every* sample is
-/// NaN — matching Prometheus, the engine's `over_time_sample_from_series`, and
-/// the `prom_min`/`prom_max` aggregate UDAF.
+/// Folds a non-empty window to its `min` or `max` and ignores NaN.
+///
+/// The fold seeds with the first sample, NaN included, then replaces the
+/// running value under [`Extremum::should_replace`]. The result is NaN only
+/// when every sample is NaN. This matches Prometheus, the engine's
+/// `over_time_sample_from_series`, and the `prom_min`/`prom_max` aggregate UDAF.
 fn fold_extremum(values: &[f64], extremum: Extremum) -> f64 {
     let mut running = values[0];
     for &candidate in &values[1..] {
@@ -166,12 +171,14 @@ fn fold_extremum(values: &[f64], extremum: Extremum) -> f64 {
     running
 }
 
-/// Population variance of `values` via Welford's online algorithm with
-/// Kahan-compensated accumulation, a port of the engine's `over_time_variance`
-/// (which now matches Prometheus' `stdvar_over_time`/`stddev_over_time`). The
-/// naive `E[x^2] - E[x]^2` form suffers catastrophic cancellation for
-/// large-magnitude close-valued windows (a negative variance whose `sqrt` is
-/// NaN); Welford stays stable.
+/// Returns the population variance of `values`.
+///
+/// The fold uses Welford's online algorithm with Kahan-compensated
+/// accumulation, a port of the engine's `over_time_variance`, which matches
+/// Prometheus' `stdvar_over_time` and `stddev_over_time`. The naive
+/// `E[x^2] - E[x]^2` form suffers catastrophic cancellation for large-magnitude
+/// close-valued windows and gives a negative variance whose `sqrt` is NaN.
+/// Welford stays stable.
 fn over_time_variance(values: &[f64]) -> f64 {
     let mut count = 0.0_f64;
     let (mut mean, mut mean_comp) = (0.0_f64, 0.0_f64);
@@ -190,11 +197,13 @@ fn over_time_variance(values: &[f64]) -> f64 {
     (aux + aux_comp) / count
 }
 
-/// Arithmetic mean of a non-empty `values` window via Prometheus' incremental
-/// Kahan-compensated mean (`avg_over_time`), a port of the engine's
-/// `over_time_mean`. The naive `sum / count` overflows to ±Inf for
-/// very-large-magnitude windows; the incremental form stays finite and
-/// preserves the same-sign-infinity handling once it does saturate.
+/// Returns the arithmetic mean of a non-empty `values` window.
+///
+/// The fold uses Prometheus' incremental Kahan-compensated mean
+/// (`avg_over_time`), a port of the engine's `over_time_mean`. The naive
+/// `sum / count` overflows to ±Inf for very-large-magnitude windows. The
+/// incremental form stays finite and keeps the same-sign-infinity handling once
+/// it does saturate.
 fn over_time_mean(values: &[f64]) -> f64 {
     let mut count = 0.0_f64;
     let (mut mean, mut comp) = (0.0_f64, 0.0_f64);
@@ -216,9 +225,11 @@ fn keep_infinite_mean(mean: f64, value: f64) -> bool {
             || (!value.is_infinite() && !value.is_nan()))
 }
 
-/// One Kahan-compensated incremental sum step, a port of Prometheus' `kahanSumInc`
-/// (`promql/engine.go`). Returns the updated `(sum, comp)` after adding
-/// `increment`, so the mean/variance folds agree bit-for-bit with the engine.
+/// Does one Kahan-compensated incremental sum step.
+///
+/// This function is a port of Prometheus' `kahanSumInc` (`promql/engine.go`).
+/// It returns the updated `(sum, comp)` after it adds `increment`. The mean and
+/// variance folds then agree bit-for-bit with the engine.
 fn kahan_sum_inc(increment: f64, sum: f64, comp: f64) -> (f64, f64) {
     let new_sum = sum + increment;
     let new_comp = if sum.abs() >= increment.abs() {
@@ -229,9 +240,10 @@ fn kahan_sum_inc(increment: f64, sum: f64, comp: f64) -> (f64, f64) {
     (new_sum, new_comp)
 }
 
-/// Value of the sample with the greatest timestamp, ties broken by the later
-/// element (mirroring `max_by_key(timestamp)` over a time-sorted window). Returns
-/// `None` only for an empty window.
+/// Returns the value of the sample with the greatest timestamp.
+///
+/// A tie selects the later element, the same as `max_by_key(timestamp)` over a
+/// time-sorted window. This function returns `None` only for an empty window.
 fn last_value_by_timestamp(timestamps: &[i64], values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -252,9 +264,11 @@ fn last_value_by_timestamp(timestamps: &[i64], values: &[f64]) -> Option<f64> {
     values.last().copied()
 }
 
-/// `phi`-quantile of `values` with linear interpolation between ranks. A direct
-/// port of the engine's `quantile_value` (operating on a local sorted copy so
-/// the UDF can take `&[f64]`). Returns `None` for an empty slice.
+/// Returns the `phi`-quantile of `values`, with linear interpolation between ranks.
+///
+/// This function is a direct port of the engine's `quantile_value`. It sorts a
+/// local copy, so the UDF can take `&[f64]`. It returns `None` for an empty
+/// slice.
 fn quantile_value(phi: f64, values: &[f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -287,8 +301,10 @@ fn quantile_value(phi: f64, values: &[f64]) -> Option<f64> {
     Some(sorted[lower] * (1.0 - weight) + sorted[upper] * weight)
 }
 
-/// A `ScalarUDFImpl` over `RangeManipulate`'s windowed columns. One instance per
-/// [`OverTimeFamily`] member; the family discriminates the reduction.
+/// A `ScalarUDFImpl` over `RangeManipulate`'s windowed columns.
+///
+/// There is one instance per [`OverTimeFamily`] member. The family selects the
+/// reduction.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct OverTimeUdf {
     family: OverTimeFamily,
@@ -305,7 +321,7 @@ impl OverTimeUdf {
         }
     }
 
-    /// Expected positional-argument count for this family.
+    /// Returns the positional-argument count this family expects.
     fn arity(&self) -> usize {
         if self.family.takes_quantile_param() {
             4
@@ -315,7 +331,7 @@ impl OverTimeUdf {
     }
 }
 
-/// Decode a `Dictionary<Int64, List<_>>` range column into a [`RangeArray`].
+/// Decodes a `Dictionary<Int64, List<_>>` range column into a [`RangeArray`].
 fn decode_range_column(array: &ArrayRef, arg: &str, udf: &str) -> DfResult<RangeArray> {
     let dict = array
         .as_any()
@@ -343,10 +359,11 @@ impl ScalarUDFImpl for OverTimeUdf {
         Ok(DataType::Float64)
     }
 
-    /// `Signature::user_defined` requires bespoke coercion. These UDFs accept
-    /// their args verbatim — the `RangeArray` dictionary columns and the
-    /// scalars are already the exact types the planner supplies. Validate arity
-    /// and pass the types through unchanged.
+    /// `Signature::user_defined` needs its own coercion.
+    ///
+    /// These UDFs accept their arguments unchanged. The `RangeArray` dictionary
+    /// columns and the scalars are already the exact types the planner supplies.
+    /// This method checks the arity and returns the types unchanged.
     fn coerce_types(&self, arg_types: &[DataType]) -> DfResult<Vec<DataType>> {
         if arg_types.len() != self.arity() {
             return Err(DataFusionError::Plan(format!(
@@ -436,7 +453,7 @@ impl ScalarUDFImpl for OverTimeUdf {
     }
 }
 
-/// Read a scalar `Float64` argument, accepting a single-row array fallback.
+/// Reads a scalar `Float64` argument, or a single-row array as a fallback.
 fn scalar_f64(value: &ColumnarValue, arg: &str, udf: &str) -> DfResult<f64> {
     match value {
         ColumnarValue::Scalar(scalar) => match scalar {
@@ -465,13 +482,13 @@ fn scalar_f64(value: &ColumnarValue, arg: &str, udf: &str) -> DfResult<f64> {
     }
 }
 
-/// The `over_time` UDF for `family`.
+/// Returns the `over_time` UDF for `family`.
 #[must_use]
 pub fn over_time_udf(family: OverTimeFamily) -> ScalarUDF {
     ScalarUDF::from(OverTimeUdf::new(family))
 }
 
-/// Every non-experimental `*_over_time` UDF, ready to register on a
+/// Returns every non-experimental `*_over_time` UDF, ready to register on a
 /// [`SessionContext`].
 #[must_use]
 pub fn over_time_family_udfs() -> Vec<ScalarUDF> {
@@ -492,7 +509,7 @@ pub fn over_time_family_udfs() -> Vec<ScalarUDF> {
     .collect()
 }
 
-/// Register every `*_over_time` UDF on `ctx` so a planner can lower onto them.
+/// Registers every `*_over_time` UDF on `ctx`, so a planner can lower onto them.
 pub fn register_over_time_udfs(ctx: &SessionContext) {
     for udf in over_time_family_udfs() {
         ctx.register_udf(udf);
@@ -510,9 +527,11 @@ mod tests {
         (left - right).abs() < 1e-9
     }
 
-    /// Build the invoke args for a multi-step window set and run an
-    /// `OverTimeUdf` directly, returning each step's value or `None` for a
-    /// no-value (NULL) cell. `phi` is threaded only for the quantile family.
+    /// Runs an `OverTimeUdf` directly over a multi-step window set.
+    ///
+    /// This function builds the invoke arguments and returns each step's value,
+    /// or `None` for a no-value NULL cell. `phi` is supplied only for the
+    /// quantile family.
     fn run_udf_nullable(
         family: OverTimeFamily,
         steps: &[(i64, &[i64], &[f64])],
@@ -591,8 +610,9 @@ mod tests {
             .collect()
     }
 
-    /// Convenience wrapper asserting every step produced a (non-null) value,
-    /// returning the unwrapped floats. Tests that exercise the no-value (NULL)
+    /// Wrapper that asserts every step produced a non-null value.
+    ///
+    /// This function returns the unwrapped floats. Tests for the no-value NULL
     /// case call [`run_udf_nullable`] directly.
     fn run_udf(family: OverTimeFamily, steps: &[(i64, &[i64], &[f64])], phi: f64) -> Vec<f64> {
         run_udf_nullable(family, steps, phi)
@@ -601,8 +621,10 @@ mod tests {
             .collect()
     }
 
-    /// One window with 3,5 reproduces the engine's basic reductions
-    /// (`instant_basic_over_time_functions_reduce_range_samples`).
+    /// One window with 3,5 reproduces the engine's basic reductions.
+    ///
+    /// The engine test is
+    /// `instant_basic_over_time_functions_reduce_range_samples`.
     #[test]
     fn basic_reductions_match_engine() {
         let window: &[(i64, &[i64], &[f64])] = &[(120_000, &[60_000, 120_000], &[3.0, 5.0])];
@@ -620,9 +642,11 @@ mod tests {
         }
     }
 
-    /// Population stddev/stdvar over 2,4,4,4,5,5,7,9 reproduce the engine's
-    /// `instant_statistical_over_time_functions_reduce_range_samples` numbers
-    /// (stdvar == 4, stddev == 2), and the median quantile (0.5) == 4.5.
+    /// Population stddev and stdvar over 2,4,4,4,5,5,7,9 match the engine.
+    ///
+    /// The engine test
+    /// `instant_statistical_over_time_functions_reduce_range_samples` gives
+    /// stdvar == 4 and stddev == 2. The median quantile (0.5) == 4.5.
     #[test]
     fn statistical_reductions_match_engine() {
         let vals: &[f64] = &[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
@@ -796,8 +820,7 @@ mod tests {
         assert2::assert!(scalar_f64(&null, "phi", "prom_quantile_over_time").is_err());
     }
 
-    /// `last_over_time` returns the latest sample's value even when the window
-    /// is presented out of timestamp order.
+    /// `last_over_time` returns the latest sample's value from an unordered window.
     #[test]
     fn last_uses_max_timestamp() {
         let window: &[(i64, &[i64], &[f64])] =
@@ -808,8 +831,10 @@ mod tests {
         ));
     }
 
-    /// An empty window yields NULL (no Prometheus value), not a NaN sentinel —
-    /// so the assembler drops the series and aggregates skip it.
+    /// An empty window gives NULL, not a NaN sentinel.
+    ///
+    /// Prometheus has no value there, so the assembler drops the series and
+    /// aggregates skip it.
     #[test]
     fn empty_window_yields_null() {
         let window: &[(i64, &[i64], &[f64])] = &[(60_000, &[], &[])];
@@ -823,9 +848,10 @@ mod tests {
         }
     }
 
-    /// A genuinely-computed reduction is kept as a non-null float even when it is
-    /// itself NaN (a window holding a NaN sample): the cell is non-null, so
-    /// downstream aggregates propagate it rather than skip it.
+    /// A computed reduction stays a non-null float even when its value is NaN.
+    ///
+    /// A window that holds a NaN sample still gives a non-null cell, so
+    /// downstream aggregates propagate it and do not skip it.
     #[test]
     fn genuine_nan_reduction_is_kept_non_null() {
         // sum over [NaN, 1.0] is a genuine NaN value (the window is non-empty, so
@@ -836,9 +862,11 @@ mod tests {
         assert2::assert!(out[0].unwrap().is_nan());
     }
 
-    /// H9: `min`/`max_over_time` IGNORE NaN. A NaN sample never displaces a
-    /// non-NaN extremum, regardless of position; a window's extremum is over its
-    /// non-NaN samples, and is NaN only when *every* sample is NaN.
+    /// H9: `min_over_time` and `max_over_time` ignore NaN.
+    ///
+    /// A NaN sample never displaces a non-NaN extremum, at any position. A
+    /// window's extremum is over its non-NaN samples. The extremum is NaN only
+    /// when every sample is NaN.
     #[test]
     fn min_max_over_time_ignore_nan() {
         let cases: &[(&[f64], f64, f64)] = &[
@@ -869,9 +897,11 @@ mod tests {
         }
     }
 
-    /// M16: `stdvar`/`stddev_over_time` over a large-offset close-valued window
-    /// must not catastrophically cancel into a negative variance (whose `sqrt`
-    /// is NaN). Welford yields the small positive population variance/stddev.
+    /// M16: a close-valued window at a large offset must not cancel to a negative variance.
+    ///
+    /// A negative variance has a NaN `sqrt`. For `stdvar_over_time` and
+    /// `stddev_over_time`, Welford gives the small positive population variance
+    /// and stddev.
     #[test]
     fn over_time_variance_is_stable_for_large_offset_window() {
         let vals: &[f64] = &[1e8, 1e8 + 1.0, 1e8 + 2.0];
@@ -886,8 +916,10 @@ mod tests {
         assert2::assert!(approx_eq(stddev, (2.0_f64 / 3.0).sqrt()));
     }
 
-    /// M17: `avg_over_time` of very-large-magnitude samples must not overflow the
-    /// running sum to +/-Inf; the incremental Kahan mean stays finite.
+    /// M17: `avg_over_time` must not overflow the running sum to +/-Inf.
+    ///
+    /// The samples have a very large magnitude. The incremental Kahan mean
+    /// stays finite.
     #[test]
     fn avg_over_time_does_not_overflow() {
         let vals: &[f64] = &[f64::MAX, f64::MAX];
@@ -899,7 +931,7 @@ mod tests {
         assert2::assert!(approx_eq(avg, f64::MAX));
     }
 
-    /// A multi-step window set yields one reduction per step.
+    /// A multi-step window set gives one reduction per step.
     #[test]
     fn produces_per_step_vector() {
         let out = run_udf(
@@ -915,7 +947,7 @@ mod tests {
         check!(approx_eq(out[1], 7.0));
     }
 
-    /// The UDFs install onto a `SessionContext` under their Prometheus-prefixed
+    /// The UDFs register on a `SessionContext` under their Prometheus-prefixed
     /// names, so a planner can resolve them.
     #[test]
     fn register_installs_named_udfs() {
@@ -939,7 +971,7 @@ mod tests {
         }
     }
 
-    /// Confirm the helper round-trips a `DictionaryArray` back into a `RangeArray`.
+    /// Confirms the helper round-trips a `DictionaryArray` back into a `RangeArray`.
     #[test]
     fn decode_range_column_round_trips() {
         let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef;

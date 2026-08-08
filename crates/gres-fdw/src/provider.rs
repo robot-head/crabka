@@ -4,13 +4,15 @@ use std::sync::Once;
 
 static INSTALL: Once = Once::new();
 
-/// Install the ring provider as the process-global rustls default.
+/// Installs the ring provider as the process-global rustls default.
 ///
-/// Idempotent: safe to call multiple times; the actual install runs exactly once.
-/// This mirrors what the pgwire frontend does (`rustls::ServerConfig::builder_with_provider`
-/// with `Arc::new(rustls::crypto::ring::default_provider())`), but installs it as the
-/// process default so that `crabka-client-core`'s `TlsConnectorConfig::build()` — which calls
-/// `rustls::ClientConfig::builder()` (no explicit provider) — picks up the same provider.
+/// The function is idempotent. It is safe to call many times, and the install
+/// itself runs exactly once. It mirrors what the pgwire frontend does with
+/// `rustls::ServerConfig::builder_with_provider` and
+/// `Arc::new(rustls::crypto::ring::default_provider())`. It installs the
+/// provider as the process default, so `crabka-client-core`'s
+/// `TlsConnectorConfig::build()` gets the same provider. That method calls
+/// `rustls::ClientConfig::builder()` with no explicit provider.
 pub fn install_default_provider() {
     INSTALL.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -21,9 +23,10 @@ pub fn install_default_provider() {
 mod tests {
     use super::*;
 
-    /// Coexistence spike: proves that after installing the ring process default,
-    /// `crabka_client_core::security::TlsConnectorConfig::build()` succeeds — meaning
-    /// the Kafka client TLS uses the same process default as pgwire.
+    /// Coexistence spike. It proves that
+    /// `crabka_client_core::security::TlsConnectorConfig::build()` succeeds
+    /// after the ring process default is installed, so the Kafka client TLS
+    /// uses the same process default as pgwire.
     #[test]
     fn pgwire_and_kafka_tls_configs_build_together() {
         install_default_provider();

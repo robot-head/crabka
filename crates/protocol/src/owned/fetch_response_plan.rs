@@ -1,32 +1,36 @@
-//! Write-plan serialization for `FetchResponse` (the broker's zero-copy fetch
-//! path, "Increment C").
+//! Write-plan serialization for `FetchResponse`.
 //!
-//! The generated [`FetchResponse::encode`] materializes the whole response —
-//! including every partition's records region — into one contiguous
-//! `BytesMut`, which forces the broker to copy the (potentially 100 KB+)
-//! records bytes through a throwaway buffer (`__rb_buf`), then again into the
-//! `Framed` codec's write buffer, then a third time to prepend the response
-//! header. This module produces the **same bytes** as an ordered list of
-//! [`FetchWriteOp`] segments so the broker can write the envelope inline and
-//! hand each partition's records region to the socket directly (vectored
-//! write, or — on Linux plaintext — `sendfile`), without copying the records
-//! payload.
+//! This is the broker's zero-copy fetch path, named "Increment C".
+//!
+//! The generated [`FetchResponse::encode`] materializes the whole response into
+//! one contiguous `BytesMut`, including every partition's records region. The
+//! broker must then copy the records bytes, which can exceed 100 KB, through a
+//! throwaway buffer (`__rb_buf`). It copies them again into the `Framed` codec's
+//! write buffer, and a third time to prepend the response header.
+//!
+//! This module produces the **same bytes** as an ordered list of
+//! [`FetchWriteOp`] segments. The broker can then write the envelope inline and
+//! hand each partition's records region to the socket directly, with no copy of
+//! the records payload. The broker uses a vectored write, or `sendfile` on Linux
+//! plaintext.
 //!
 //! ## Byte-exactness invariant
 //!
-//! Concatenating the bytes of every [`FetchWriteOp`] produced by
-//! [`FetchResponse::write_plan`] yields **exactly** the bytes that
-//! [`FetchResponse::encode`] writes, for every Fetch version v4..=v18 (the
-//! generated `MIN_VERSION..=MAX_VERSION`), covering both the non-flexible
-//! (`INT32` length prefix, v4–v11) and flexible (`COMPACT_BYTES`
-//! unsigned-varint prefix + trailing tagged-field buffer, v12+) records-field
-//! encodings, multi-topic / multi-partition / multi-batch responses, and the
-//! truncated-trailing-batch case (the records `Bytes` is emitted verbatim, so
-//! a clipped final batch rides through untouched).
+//! Concatenate the bytes of every [`FetchWriteOp`] that
+//! [`FetchResponse::write_plan`] produces. The result is **exactly** the bytes
+//! that [`FetchResponse::encode`] writes, for every Fetch version v4..=v18, the
+//! generated `MIN_VERSION..=MAX_VERSION`.
 //!
-//! This is enforced by `fetch_response_plan_matches_encode` in the test module
-//! below, which asserts `concat(write_plan) == encode` for `populated(version)`
-//! and hand-built multi-partition fixtures across all versions.
+//! The invariant holds for both records-field encodings: the non-flexible one
+//! with an `INT32` length prefix at v4 to v11, and the flexible one with a
+//! `COMPACT_BYTES` unsigned-varint prefix plus a trailing tagged-field buffer at
+//! v12 and later. It also holds for multi-topic, multi-partition, multi-batch
+//! responses, and for the truncated-trailing-batch case. The records `Bytes` is
+//! emitted verbatim, so a clipped final batch passes through unchanged.
+//!
+//! `fetch_response_plan_matches_encode` in the test module below enforces this.
+//! It asserts `concat(write_plan) == encode` for `populated(version)` and for
+//! hand-built multi-partition fixtures at all versions.
 
 use bytes::{Bytes, BytesMut};
 
@@ -45,24 +49,25 @@ use crate::{
 
 /// One ordered segment of a `FetchResponse` write-plan.
 ///
-/// The broker drains these in order: `Inline` bytes are written from
-/// userspace; a `Records` segment carries the partition's records payload,
-/// which the broker resolves to a vectored `write_all` (any payload kind) or
-/// — on Linux plaintext for `RecordsPayload::FileRegions` — a `sendfile`.
+/// The broker drains these segments in order. It writes `Inline` bytes from
+/// userspace. A `Records` segment carries the partition's records payload, which
+/// the broker resolves to a vectored `write_all` for any payload kind. For
+/// `RecordsPayload::FileRegions` on Linux plaintext, it resolves to a `sendfile`
+/// instead.
 ///
-/// The `Records` op holds the [`RecordsPayload`] itself (a cheap refcounted
-/// clone for `Raw`/`FileRegions`) rather than pre-encoded bytes so the broker
-/// can choose its drain strategy. The records **length prefix** (`INT32` for
-/// non-flex, unsigned-varint for flex) is part of the **preceding** `Inline`
-/// segment, exactly as the wire format requires; `Records` is the raw payload
-/// region only.
+/// The `Records` op holds the [`RecordsPayload`] itself, a cheap refcounted
+/// clone for `Raw` and `FileRegions`, rather than pre-encoded bytes. The broker
+/// can then choose its drain strategy. The records **length prefix** is part of
+/// the **preceding** `Inline` segment, exactly as the wire format requires. The
+/// prefix is `INT32` for non-flex and unsigned-varint for flex. `Records` is the
+/// raw payload region only.
 #[derive(Debug, Clone)]
 pub enum FetchWriteOp {
-    /// Userspace bytes — response header fragment, partition metadata,
-    /// records length prefixes, tagged-field trailers, array prefixes, etc.
+    /// Userspace bytes: response header fragment, partition metadata, records
+    /// length prefixes, tagged-field trailers, array prefixes, and so on.
     Inline(Bytes),
-    /// A partition's records payload region (no length prefix). Drained by
-    /// the broker via vectored write or sendfile.
+    /// A partition's records payload region, with no length prefix. The broker
+    /// drains it with a vectored write or with sendfile.
     Records(RecordsPayload),
 }
 
@@ -84,17 +89,19 @@ impl FetchWriteOp {
 }
 
 impl FetchResponse {
-    /// Serialize this response as an ordered [`FetchWriteOp`] plan whose
-    /// concatenated bytes are **byte-identical** to [`crate::Encode::encode`]
-    /// at the same `version`.
+    /// Serialize this response as an ordered [`FetchWriteOp`] plan.
     ///
-    /// Only valid for the canonical (v4+) Fetch codec — the legacy
-    /// `kafka_3_6_2` path (v0–v3) does not get a plan (it down-converts and
-    /// stays on the copy path). The caller must gate on `version >= 4`.
+    /// The plan's concatenated bytes are **byte-identical** to
+    /// [`crate::Encode::encode`] at the same `version`.
     ///
-    /// The records length prefix is written into the inline segment that
-    /// precedes each `Records` op, so resolving `Records` to its bytes and
-    /// concatenating reproduces the exact wire frame.
+    /// This is valid only for the canonical Fetch codec at v4 and later. The
+    /// legacy `kafka_3_6_2` path at v0 to v3 does not get a plan, because it
+    /// down-converts and stays on the copy path. The caller must gate on
+    /// `version >= 4`.
+    ///
+    /// This method writes the records length prefix into the inline segment that
+    /// precedes each `Records` op. Resolve each `Records` op to its bytes and
+    /// concatenate the plan to reproduce the exact wire frame.
     ///
     /// # Errors
     /// Returns an error if the response cannot be encoded for `version`.
@@ -161,9 +168,10 @@ impl FetchResponse {
     }
 }
 
-/// Encode one `FetchableTopicResponse` worth of bytes, splitting out each
-/// partition's records region as a `Records` op. Mirrors the generated
-/// `FetchableTopicResponse::encode` field-for-field.
+/// Encode one `FetchableTopicResponse` worth of bytes.
+///
+/// This function splits out each partition's records region as a `Records` op.
+/// It mirrors the generated `FetchableTopicResponse::encode` field-for-field.
 fn encode_topic(
     buf: &mut BytesMut,
     ops: &mut Vec<FetchWriteOp>,
@@ -194,9 +202,11 @@ fn encode_topic(
     Ok(())
 }
 
-/// Encode one `PartitionData`, emitting the records payload as a separate
-/// `Records` op (the records *length prefix* stays in the inline `buf`).
-/// Mirrors the generated `PartitionData::encode` field-for-field.
+/// Encode one `PartitionData`.
+///
+/// This function emits the records payload as a separate `Records` op. The
+/// records *length prefix* stays in the inline `buf`. The function mirrors the
+/// generated `PartitionData::encode` field-for-field.
 fn encode_partition(
     buf: &mut BytesMut,
     ops: &mut Vec<FetchWriteOp>,
@@ -293,10 +303,12 @@ fn encode_partition(
     Ok(())
 }
 
-/// Flush the running inline accumulator as an `Inline` op (no-op if empty),
-/// leaving `buf` empty and ready to accumulate the next segment. Uses
-/// `split()` so the emitted `Bytes` shares the existing allocation and the
-/// continued accumulation reuses the buffer's spare capacity.
+/// Flush the running inline accumulator as an `Inline` op.
+///
+/// This function does nothing if the accumulator is empty. It leaves `buf` empty
+/// and ready to accumulate the next segment. It uses `split()`, so the emitted
+/// `Bytes` shares the existing allocation and the next accumulation reuses the
+/// buffer's spare capacity.
 #[inline]
 fn flush_inline(buf: &mut BytesMut, ops: &mut Vec<FetchWriteOp>) {
     if !buf.is_empty() {
@@ -315,9 +327,10 @@ mod tests {
     };
     use crate::{Encode, records::RecordsPayload};
 
-    /// Concatenate a write-plan's ops into one byte buffer (resolving
-    /// `Records` ops via the payload's own `encode_to`, exactly as the broker
-    /// fallback path would).
+    /// Concatenate a write-plan's ops into one byte buffer.
+    ///
+    /// This function resolves `Records` ops with the payload's own `encode_to`,
+    /// exactly as the broker fallback path does.
     fn concat_plan(ops: &[FetchWriteOp]) -> Vec<u8> {
         let mut out = BytesMut::new();
         for op in ops {
@@ -347,9 +360,11 @@ mod tests {
         buf.freeze()
     }
 
-    /// The load-bearing golden test: for a hand-built multi-topic,
-    /// multi-partition, multi-batch response, the write-plan's concatenated
-    /// bytes must equal the generated `encode` output, at every version.
+    /// The golden test for the byte-exactness invariant.
+    ///
+    /// For a hand-built multi-topic, multi-partition, multi-batch response, the
+    /// write-plan's concatenated bytes must equal the generated `encode` output
+    /// at every version.
     fn assert_plan_matches_encode(_case_name: &str, resp: &FetchResponse, version: i16) {
         let mut canonical = BytesMut::new();
         resp.encode(&mut canonical, version).unwrap();

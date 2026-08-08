@@ -1,23 +1,25 @@
-//! Regression: when an operator-rendered broker config sets
-//! `[oauthbearer] introspection_endpoint_uri`, `FileConfig::apply_to`
-//! builds the introspection client BEFORE `Broker::start` has had a
-//! chance to install the rustls process-level `CryptoProvider`. The
-//! `reqwest::Client::builder().build()` path inside
-//! `ReqwestIntrospectionClient::new` reaches into
-//! `rustls::ClientConfig::builder` → `CryptoProvider::get_default`,
-//! which panics with "Could not automatically determine the
-//! process-level `CryptoProvider` from Rustls crate features" when no
-//! provider is installed. Each integration-test file is its own
-//! process, so this file deliberately does not install the provider
-//! anywhere else — if the eager install inside the client constructor
-//! is ever removed, this test panics on startup just like the broker
-//! binary did in the kind-oauth-introspection e2e job.
+//! Regression test for the rustls `CryptoProvider` install order.
+//!
+//! When an operator-rendered broker config sets
+//! `[oauthbearer] introspection_endpoint_uri`, `FileConfig::apply_to` builds
+//! the introspection client before `Broker::start` can install the rustls
+//! process-level `CryptoProvider`. The `reqwest::Client::builder().build()`
+//! path inside `ReqwestIntrospectionClient::new` reaches into
+//! `rustls::ClientConfig::builder` → `CryptoProvider::get_default`. That call
+//! panics with "Could not automatically determine the process-level
+//! `CryptoProvider` from Rustls crate features" when no provider is
+//! installed.
+//!
+//! Each integration-test file is its own process, so this file does not
+//! install the provider anywhere else. If anyone removes the eager install
+//! inside the client constructor, this test panics on startup, exactly as the
+//! broker binary did in the kind-oauth-introspection e2e job.
 
 use assert2::assert;
 use crabka_broker::{config::BrokerConfig, file_config::FileConfig};
 
-/// A self-contained CA cert. Avoids depending on the security crate's
-/// fixtures (which live behind `#[cfg(test)]`-only paths).
+/// A self-contained CA cert. It does not depend on the security crate's
+/// fixtures, which live behind `#[cfg(test)]`-only paths.
 const DEV_CERT_PEM: &str = "\
 -----BEGIN CERTIFICATE-----\n\
 MIIB4zCCAYmgAwIBAgIUcSDwFlx+8XhU+aAAtS17F6TnHQgwCgYIKoZIzj0EAwIw\n\

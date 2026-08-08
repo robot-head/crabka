@@ -1,4 +1,4 @@
-//! The [`RemoteLogMetadataManager`] SPI: persistence and querying of
+//! The [`RemoteLogMetadataManager`] SPI, which stores and queries
 //! remote-segment metadata.
 
 use crabka_ids::LeaderEpoch;
@@ -15,13 +15,13 @@ use crate::{
 ///
 /// The reference implementation is
 /// [`InmemoryRemoteLogMetadataManager`](crate::InmemoryRemoteLogMetadataManager);
-/// a production implementation backs the metadata with an internal topic
-/// (Kafka's `TopicBasedRemoteLogMetadataManager`). Implementations must be
+/// a production implementation stores the metadata in an internal topic, as
+/// Kafka's `TopicBasedRemoteLogMetadataManager` does. Implementations must be
 /// `Send + Sync`.
 ///
 /// The lifecycle invariants every implementation enforces:
 ///
-/// - A segment is introduced with
+/// - The caller introduces a segment with
 ///   [`add_remote_log_segment_metadata`](RemoteLogMetadataManager::add_remote_log_segment_metadata)
 ///   in state
 ///   [`CopySegmentStarted`](crate::RemoteLogSegmentState::CopySegmentStarted).
@@ -32,7 +32,7 @@ use crate::{
 ///   [`CopySegmentFinished`](crate::RemoteLogSegmentState::CopySegmentFinished)
 ///   segments are visible to the offset/epoch queries.
 pub trait RemoteLogMetadataManager: Send + Sync {
-    /// Record a newly-started segment copy. The metadata's state must be
+    /// Records a newly-started segment copy. The metadata's state must be
     /// [`CopySegmentStarted`](crate::RemoteLogSegmentState::CopySegmentStarted)
     /// and its id must not already be known.
     ///
@@ -45,7 +45,7 @@ pub trait RemoteLogMetadataManager: Send + Sync {
         metadata: RemoteLogSegmentMetadata,
     ) -> Result<(), RemoteStorageError>;
 
-    /// Advance a known segment's lifecycle state.
+    /// Advances a known segment's lifecycle state.
     ///
     /// # Errors
     ///
@@ -57,7 +57,7 @@ pub trait RemoteLogMetadataManager: Send + Sync {
         update: RemoteLogSegmentMetadataUpdate,
     ) -> Result<(), RemoteStorageError>;
 
-    /// Find the finished segment that contains `offset` for the given
+    /// Finds the finished segment that contains `offset` for the given
     /// `leader_epoch`, if any.
     ///
     /// # Errors
@@ -71,8 +71,10 @@ pub trait RemoteLogMetadataManager: Send + Sync {
         offset: i64,
     ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError>;
 
-    /// The highest offset that the remote tier holds for `leader_epoch`
-    /// (the max `end_offset` across finished segments carrying that epoch).
+    /// The highest offset that the remote tier holds for `leader_epoch`.
+    ///
+    /// This is the maximum `end_offset` across the finished segments that
+    /// carry that epoch.
     ///
     /// # Errors
     ///
@@ -83,8 +85,8 @@ pub trait RemoteLogMetadataManager: Send + Sync {
         leader_epoch: LeaderEpoch,
     ) -> Result<Option<i64>, RemoteStorageError>;
 
-    /// All segments known for a partition, ordered by `start_offset`
-    /// (regardless of state).
+    /// All segments known for a partition, in `start_offset` order. The
+    /// state does not matter.
     ///
     /// # Errors
     ///
@@ -94,8 +96,8 @@ pub trait RemoteLogMetadataManager: Send + Sync {
         topic_id_partition: &TopicIdPartition,
     ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError>;
 
-    /// All segments carrying `leader_epoch`, ordered by `start_offset`
-    /// (regardless of state).
+    /// All segments that carry `leader_epoch`, in `start_offset` order. The
+    /// state does not matter.
     ///
     /// # Errors
     ///
@@ -106,7 +108,7 @@ pub trait RemoteLogMetadataManager: Send + Sync {
         leader_epoch: LeaderEpoch,
     ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError>;
 
-    /// Record a partition-delete lifecycle event.
+    /// Records a partition-delete lifecycle event.
     ///
     /// # Errors
     ///

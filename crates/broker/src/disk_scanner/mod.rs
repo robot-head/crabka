@@ -1,8 +1,9 @@
-//! Periodic per-partition disk-usage scanner. Spawned by
-//! `Broker::start` when `--partition-disk-scan-interval-secs > 0`.
-//! Each tick walks the log directory for every known
-//! (topic, partition), sums regular file sizes, and updates the
-//! `partition_disk_bytes` gauge.
+//! Periodic per-partition disk-usage scanner.
+//!
+//! `Broker::start` spawns the scanner when
+//! `--partition-disk-scan-interval-secs > 0`. On each tick the scanner walks
+//! the log directory for every known (topic, partition), sums the regular
+//! file sizes, and updates the `partition_disk_bytes` gauge.
 
 pub mod scan;
 

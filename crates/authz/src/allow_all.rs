@@ -1,13 +1,16 @@
-//! Default authorizer when authorization is unset. Returns `Allow` for
-//! any request. Provides an explicit type so the "allow everything"
-//! behavior is spelled out at config time rather than emerging from the
-//! ACL impl's empty-input path.
+//! Default authorizer when authorization is unset.
+//!
+//! This authorizer returns `Allow` for any request. It is an explicit type, so
+//! the "allow everything" behavior is clear at config time. The behavior does
+//! not come from the empty-input path of the ACL implementation.
 
 use crate::{AclSource, AuthorizationRequest, AuthorizationResult, Authorizer};
 
 /// Authorizer that always returns [`AuthorizationResult::Allow`].
-/// Default authorizer value; chosen by `type = "allow_all"` (or omitted
-/// entirely) in the broker / gateway config.
+///
+/// This is the default authorizer value. An operator selects it with
+/// `type = "allow_all"` in the broker or gateway config, or by omission of the
+/// field.
 #[derive(Debug, Default)]
 pub struct AllowAllAuthorizer;
 

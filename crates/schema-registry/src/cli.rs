@@ -1,11 +1,11 @@
 //! Clap-free CLI → [`SecurityConfig`] assembly.
 //!
-//! The binary (`src/bin/schema-registry.rs`) owns the `clap` `Args` derive and
-//! maps it into the plain [`SecurityCliInput`] below; this module does the
-//! validation and assembly so the security-config logic is unit-testable (a
-//! binary's `main`/helpers are never executed by tests, which left the
-//! assembly's many `bail!` branches uncovered). The mapping is intentionally
-//! mechanical — behaviour is identical to the previous in-binary helpers.
+//! The binary `src/bin/schema-registry.rs` owns the `clap` `Args` derive and
+//! maps it into the plain [`SecurityCliInput`] below. This module does the
+//! validation and assembly, so the security-config logic is unit-testable.
+//! Tests never execute a binary's `main` or its helpers, which left the many
+//! `bail!` branches of the assembly uncovered. The mapping is intentionally
+//! mechanical, and the behaviour is identical to the in-binary helpers.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -30,11 +30,12 @@ use crate::config::{
 /// Default JWKS refresh interval.
 pub const DEFAULT_JWKS_REFRESH: Time = minutes(1);
 
-/// Plain (clap-free) inputs for assembling [`SecurityConfig`]. The binary maps
-/// its clap `Args` into this; the lib does the validation/assembly so it is
-/// unit-testable. The all-[`Default`] value (no TLS, no auth, no authz,
-/// plaintext broker client) yields the fully-open [`SecurityConfig::default`]
-/// behaviour.
+/// Plain, clap-free inputs for the assembly of [`SecurityConfig`].
+///
+/// The binary maps its clap `Args` into this type. The library does the
+/// validation and assembly, so it is unit-testable. The all-[`Default`] value
+/// has no TLS, no auth, no authz, and a plaintext broker client, and it yields
+/// the fully-open [`SecurityConfig::default`] behaviour.
 #[derive(Debug, Default, Clone)]
 pub struct SecurityCliInput {
     /// Reject unauthenticated (anonymous) requests with `401`.
@@ -87,8 +88,10 @@ pub struct SecurityCliInput {
 }
 
 /// JWKS key-set handle plus the metadata the binary needs to drive the
-/// periodic refresh task. Returned by [`build_security`] when
-/// `--bearer=jwks` is configured; the binary spawns `run_jwks_refresher`.
+/// periodic refresh task.
+///
+/// [`build_security`] returns this value when `--bearer=jwks` is configured.
+/// The binary then spawns `run_jwks_refresher`.
 #[derive(Debug)]
 pub struct JwksHandleForRefresh {
     /// The live key-set cell shared with the `SignedJwsValidator`.
@@ -101,9 +104,10 @@ pub struct JwksHandleForRefresh {
     pub refresh: Time,
 }
 
-/// Return value of [`build_security`]: the assembled [`SecurityConfig`] plus,
-/// when `--bearer=jwks` is set, a [`JwksHandleForRefresh`] the binary must
-/// hand to `run_jwks_refresher`.
+/// Return value of [`build_security`]. It holds the assembled
+/// [`SecurityConfig`]. When `--bearer=jwks` is set, it also holds a
+/// [`JwksHandleForRefresh`] that the binary must give to
+/// `run_jwks_refresher`.
 #[derive(Debug)]
 pub struct SecurityOutput {
     pub config: SecurityConfig,
@@ -117,9 +121,10 @@ impl std::ops::Deref for SecurityOutput {
     }
 }
 
-/// Assemble [`SecurityConfig`] from [`SecurityCliInput`]. The all-defaults case
-/// (no TLS, no auth, no authz, plaintext broker client) yields the fully-open
-/// [`SecurityConfig::default`] behaviour.
+/// Assemble [`SecurityConfig`] from [`SecurityCliInput`].
+///
+/// The all-defaults case has no TLS, no auth, no authz, and a plaintext broker
+/// client. It yields the fully-open [`SecurityConfig::default`] behaviour.
 ///
 /// # Errors
 ///
@@ -144,8 +149,8 @@ pub fn build_security(input: &SecurityCliInput) -> anyhow::Result<SecurityOutput
 }
 
 /// Build [`BasicAuthConfig`] from `basic_auth_file` / `basic_users`. Returns
-/// `None` when neither is supplied (Basic disabled). A malformed `basic_users`
-/// entry (no `:`) is warned about and skipped.
+/// `None` when neither is supplied, which disables Basic. This function warns
+/// about a malformed `basic_users` entry that has no `:`, and skips it.
 fn build_basic(input: &SecurityCliInput) -> Option<BasicAuthConfig> {
     if input.basic_auth_file.is_none() && input.basic_users.is_empty() {
         return None;
@@ -164,9 +169,9 @@ fn build_basic(input: &SecurityCliInput) -> Option<BasicAuthConfig> {
     })
 }
 
-/// Build [`BearerAuthConfig`] from `bearer`. `off` ⇒ `None`; `unsecured` ⇒ a
-/// dev `UnsecuredJwsValidator` (mirrors the gateway); `jwks` ⇒ a
-/// `SignedJwsValidator` backed by a refreshable [`JwksHandle`].
+/// Build [`BearerAuthConfig`] from `bearer`. `off` gives `None`. `unsecured`
+/// gives a dev `UnsecuredJwsValidator`, which mirrors the gateway. `jwks` gives
+/// a `SignedJwsValidator` backed by a refreshable [`JwksHandle`].
 fn build_bearer(
     input: &SecurityCliInput,
 ) -> anyhow::Result<(Option<BearerAuthConfig>, Option<JwksHandleForRefresh>)> {
@@ -227,8 +232,8 @@ fn build_bearer_jwks(
     Ok((cfg, refresh))
 }
 
-/// Build server [`TlsConfig`] from the `tls_*` inputs. Requires both cert+key
-/// or neither; `None` ⇒ plain HTTP.
+/// Build server [`TlsConfig`] from the `tls_*` inputs. It requires both cert
+/// and key, or neither. `None` gives plain HTTP.
 fn build_tls(input: &SecurityCliInput) -> anyhow::Result<Option<TlsConfig>> {
     match (input.tls_cert.clone(), input.tls_key.clone()) {
         (Some(cert_chain_path), Some(private_key_path)) => {
@@ -264,10 +269,10 @@ fn build_authz(input: &SecurityCliInput) -> Option<AuthzConfig> {
     })
 }
 
-/// Build SR → broker [`ClientSecurity`] from `kafka_*`. `PLAINTEXT` ⇒ `None`
-/// (plaintext, the pre-security default). PLAIN/SCRAM + TLS-CA are covered;
-/// GSSAPI and client-cert (mTLS to the broker) are config-struct-supported but
-/// not yet CLI-exposed.
+/// Build SR → broker [`ClientSecurity`] from `kafka_*`. `PLAINTEXT` gives
+/// `None`, which is plaintext and the pre-security default. PLAIN, SCRAM, and
+/// TLS-CA are covered. The config struct supports GSSAPI and client-cert mTLS
+/// to the broker, but the CLI does not expose them yet.
 fn build_client_security(input: &SecurityCliInput) -> anyhow::Result<Option<ClientSecurity>> {
     let protocol = match input.kafka_security_protocol.to_ascii_uppercase().as_str() {
         "PLAINTEXT" => return Ok(None),
@@ -342,10 +347,10 @@ mod tests {
 
     use super::*;
 
-    /// Convenience: the binary's clap defaults for the string-typed knobs, so a
-    /// test sets only the fields it exercises. Mirrors the `Args` `default_value`
-    /// attributes (bearer `off`, client-auth `disabled`, broker protocol
-    /// `PLAINTEXT`, SASL mechanism `PLAIN`, ACL refresh `30s`).
+    /// The binary's clap defaults for the string-typed settings, so a test sets
+    /// only the fields it exercises. This mirrors the `Args` `default_value`
+    /// attributes: bearer `off`, client-auth `disabled`, broker protocol
+    /// `PLAINTEXT`, SASL mechanism `PLAIN`, and ACL refresh `30s`.
     fn input() -> SecurityCliInput {
         SecurityCliInput {
             bearer: "off".to_string(),

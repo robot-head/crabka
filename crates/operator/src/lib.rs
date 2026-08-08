@@ -1,8 +1,8 @@
 //! Crabka Kubernetes operator library.
 //!
-//! The binary entry point is `src/main.rs`; this library exposes the
-//! reusable pieces (controllers, CRD types, telemetry, leader election)
-//! so they can be unit-tested without spinning up the binary.
+//! The binary entry point is `src/main.rs`. This library exposes the reusable
+//! parts: controllers, CRD types, telemetry, and leader election. You can
+//! unit-test these parts without the binary.
 //!
 //! ## Runtime config scope
 //!

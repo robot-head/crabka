@@ -1,4 +1,5 @@
-//! Topology builder: Processor-API node graph → byte-exact wire `Topology`.
+//! The topology builder. It turns a Processor-API node graph into a byte-exact
+//! wire `Topology`.
 
 pub(crate) mod builder;
 mod grouping;

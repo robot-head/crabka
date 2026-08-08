@@ -1,9 +1,10 @@
 //! KIP-848 / KIP-584: the next-gen consumer-group protocol
 //! (`ConsumerGroupHeartbeat`, `api_key` 68) is gated on a finalized
 //! `group.version >= 1`. A freshly-bootstrapped broker finalizes
-//! `group.version=1` (so next-gen is enabled); downgrading it to 0 (a KIP-584
-//! tombstone) disables next-gen, and the broker then rejects heartbeats with
-//! `UNSUPPORTED_VERSION` so the client falls back to the classic protocol.
+//! `group.version=1`, which enables next-gen. A downgrade to 0, which is a
+//! KIP-584 tombstone, disables next-gen. The broker then rejects heartbeats
+//! with `UNSUPPORTED_VERSION`, so the client falls back to the classic
+//! protocol.
 
 use assert2::assert;
 mod support;

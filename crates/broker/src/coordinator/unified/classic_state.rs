@@ -1,7 +1,8 @@
-//! Classic-protocol per-`group_id` state machine (`Group`). Pure data +
-//! transitions, owned by the unified per-group actor. Committed offsets are
-//! protocol-agnostic and live on the unified [`super::group::CoordinatorGroup`]
-//! container, not here.
+//! Classic-protocol per-`group_id` state machine (`Group`).
+//!
+//! This module holds pure data and transitions. The unified per-group actor
+//! owns them. Committed offsets are protocol-agnostic and live on the unified
+//! [`super::group::CoordinatorGroup`] container, not here.
 
 use std::{
     collections::HashMap,
@@ -11,22 +12,23 @@ use std::{
 use bytes::Bytes;
 use crabka_log::Offset;
 
-/// Five-state machine for a consumer group, matching the Apache Kafka
-/// classic protocol (KIP-62 / KIP-394).
+/// Five-state machine for a consumer group. It matches the Apache Kafka
+/// classic protocol (KIP-62 and KIP-394).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GroupState {
     /// No members and no committed offsets.
     Empty,
-    /// At least one member has called `JoinGroup`; waiting for the rebalance
-    /// deadline or every expected member.
+    /// At least one member has called `JoinGroup`. The group waits for the
+    /// rebalance deadline or for every expected member.
     PreparingRebalance,
-    /// `JoinGroup` returned to all members; waiting for the leader's `SyncGroup`.
+    /// `JoinGroup` returned to all members. The group waits for the leader's
+    /// `SyncGroup`.
     CompletingRebalance,
-    /// `SyncGroup` completed; members are heart-beating.
+    /// `SyncGroup` completed. Members send heartbeats.
     Stable,
-    /// Group has been deleted (e.g. after the last member leaves and an
-    /// optional retention period). Reserved; the MVP doesn't actively
-    /// transition into this state.
+    /// The broker deleted the group, for example after the last member left
+    /// and an optional retention period passed. This state is reserved. The
+    /// MVP does not transition into it.
     Dead,
 }
 
@@ -34,9 +36,9 @@ pub enum GroupState {
 #[derive(Debug, Clone)]
 pub struct Member {
     pub id: String,
-    /// KIP-345 static-membership pin. When `Some`, the broker preserves
-    /// this member's slot across session timeouts and matches reconnecting
-    /// clients by `group_instance_id` rather than minting a fresh
+    /// KIP-345 static-membership pin. When `Some`, the broker keeps this
+    /// member's slot across session timeouts, and matches a reconnecting
+    /// client by `group_instance_id` instead of creating a fresh
     /// `member_id`.
     pub group_instance_id: Option<String>,
     pub client_id: String,
@@ -44,16 +46,18 @@ pub struct Member {
     pub session_timeout: Duration,
     pub rebalance_timeout: Duration,
     pub last_heartbeat: Instant,
-    /// Encoded `ConsumerProtocolSubscription` bytes (a `subscription` field
-    /// from `JoinGroupRequest`). Opaque to the broker. This is the metadata
-    /// for the selected protocol — populated after `select_protocol` picks a
-    /// winner via [`Group::resolve_selected_protocol_metadata`].
+    /// Encoded `ConsumerProtocolSubscription` bytes, from a `subscription`
+    /// field in `JoinGroupRequest`. The broker does not read them. These are
+    /// the metadata for the selected protocol.
+    /// [`Group::resolve_selected_protocol_metadata`] fills the field after
+    /// `select_protocol` picks a winner.
     pub protocol_metadata: Bytes,
     /// Full list of `(protocol_name, metadata)` pairs the member proposed in
-    /// its `JoinGroupRequest`. Used to negotiate the group protocol.
+    /// its `JoinGroupRequest`. The broker uses them to negotiate the group
+    /// protocol.
     pub protocols: Vec<(String, Bytes)>,
-    /// Encoded `ConsumerProtocolAssignment` bytes — populated by the leader
-    /// in `SyncGroup`. `None` until then.
+    /// Encoded `ConsumerProtocolAssignment` bytes. The leader fills them in
+    /// `SyncGroup`. The value is `None` until then.
     pub assignment: Option<Bytes>,
 }
 
@@ -98,28 +102,28 @@ impl Member {
     }
 }
 
-/// Outcome of [`Group::add_member`] — drives the `JoinGroup` handler's
-/// fast-path decisions for KIP-345 static-rejoin.
+/// Outcome of [`Group::add_member`]. It drives the `JoinGroup` handler's
+/// fast-path decisions for a KIP-345 static rejoin.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AddMemberOutcome {
-    /// Brand-new member added; group transitioned to `PreparingRebalance`
-    /// if it was previously `Empty` or `Stable`.
+    /// The group added a new member. The group moved to `PreparingRebalance`
+    /// if it was `Empty` or `Stable` before.
     NewMember,
-    /// A static member with this `group.instance.id` already existed and
-    /// has been replaced in-place. The prior `member_id` (which the new
-    /// session may or may not match) is returned. If the group was
-    /// `Stable` the state is preserved — the new session reuses the
-    /// cached assignment without forcing a rebalance.
+    /// A static member with this `group.instance.id` already existed, and the
+    /// group replaced it in place. This variant returns the prior
+    /// `member_id`, which the new session can match or not match. If the group
+    /// was `Stable`, the state does not change, and the new session reuses the
+    /// cached assignment without a forced rebalance.
     StaticRejoin { prior_member_id: String },
     /// A *different* live `member_id` is currently pinned to this
-    /// `group.instance.id`. The caller must reject with
-    /// `FENCED_INSTANCE_ID`. No state change happened.
+    /// `group.instance.id`. The caller must reject the request with
+    /// `FENCED_INSTANCE_ID`. Nothing changed.
     Fenced { live_member_id: String },
 }
 
-/// Pick the protocol name with the most first-place votes among names
-/// proposed by every member. Ties broken lexicographically. Returns
-/// `None` if the intersection is empty (or there are no members).
+/// Picks the protocol name with the most first-place votes, among the names
+/// that every member proposed. It breaks a tie lexicographically. It returns
+/// `None` when the intersection is empty, and when there are no members.
 #[must_use]
 pub fn select_protocol(members: &HashMap<String, Member>) -> Option<String> {
     if members.is_empty() {
@@ -155,7 +159,7 @@ pub fn select_protocol(members: &HashMap<String, Member>) -> Option<String> {
         .cloned()
 }
 
-/// A committed offset entry. Keyed by `(topic, partition)` in
+/// A committed offset entry, keyed by `(topic, partition)` in
 /// [`Group::committed_offsets`].
 #[derive(Debug, Clone)]
 pub struct OffsetEntry {
@@ -169,41 +173,46 @@ pub struct OffsetEntry {
 pub struct ClassicGroup {
     pub group_id: String,
     pub state: GroupState,
-    /// `"consumer"` for `KafkaConsumer`. The broker doesn't interpret the
-    /// value beyond rejecting inconsistent proposals.
+    /// `"consumer"` for `KafkaConsumer`. The broker reads the value only to
+    /// reject inconsistent proposals.
     pub protocol_type: Option<String>,
     pub generation_id: i32,
     pub leader_id: Option<String>,
     pub protocol_name: Option<String>,
     pub members: HashMap<String, Member>,
-    /// KIP-345 secondary index: `group.instance.id` → current `member_id`.
-    /// Mirrors the `group_instance_id` field on entries in `members`. Used
-    /// to look up a static member's slot when a reconnecting client either
-    /// omits its `member_id` (KIP-394 bootstrap) or supplies a stale one
-    /// from a prior session.
+    /// KIP-345 secondary index that maps `group.instance.id` to the current
+    /// `member_id`. It mirrors the `group_instance_id` field on entries in
+    /// `members`. The broker uses it to find a static member's slot when a
+    /// reconnecting client omits its `member_id` (KIP-394 bootstrap), or
+    /// supplies a stale one from a prior session.
     pub static_members: HashMap<String, String>,
     pub rebalance_deadline: Option<Instant>,
-    /// Members whose `JoinGroup` has arrived since the last transition into
-    /// `PreparingRebalance`. The `JoinGroup` handler runs the rebalance early
-    /// — without waiting out the configured initial delay — once every member
-    /// still in `members` shows up here, which avoids the leader running
-    /// the assignor on a stale-metadata snapshot when a slow member misses
-    /// the wait window under load (the assignor's cooperative-sticky
-    /// Pass-3 omissions then strand partitions on no member). Cleared on
-    /// every transition into `PreparingRebalance`.
+    /// Members whose `JoinGroup` arrived since the last transition into
+    /// `PreparingRebalance`.
+    ///
+    /// The `JoinGroup` handler runs the rebalance early, without the full
+    /// configured initial delay, once every member still in `members` appears
+    /// here. This keeps the leader from running the assignor on a
+    /// stale-metadata snapshot when a slow member misses the wait window under
+    /// load. In that case the assignor's cooperative-sticky Pass-3 omissions
+    /// strand partitions on no member. Every transition into
+    /// `PreparingRebalance` clears this set.
     pub joined_this_round: std::collections::HashSet<String>,
     /// `true` while the current `PreparingRebalance` round opened from an
-    /// `Empty` group — a brand-new group or one whose members had all left
-    /// (e.g. after a warm-up consumer joins and leaves). Such a round honors
-    /// the full configured batching window — mirroring Apache
-    /// Kafka's `InitialDelayedJoin` — instead of eager-completing the moment
-    /// the first member shows up, so a herd of consumers starting together
-    /// lands in a single generation. Eager-completing a from-`Empty` round
-    /// instead strands the first joiner in a solo generation and forces an
-    /// immediate re-rebalance when the next member arrives, thrashing
-    /// produce+fetch under load. `false` for rebalances triggered by a
-    /// membership change in a group that still had members (`Stable` →
-    /// `PreparingRebalance`), which complete as soon as every still-live
+    /// `Empty` group. That is a new group, or one whose members had all left,
+    /// for example after a warm-up consumer joins and leaves.
+    ///
+    /// Such a round keeps the full configured batching window, which mirrors
+    /// Apache Kafka's `InitialDelayedJoin`. It does not complete as soon as
+    /// the first member appears, so a set of consumers that start together
+    /// lands in a single generation. An early completion of a from-`Empty`
+    /// round would strand the first joiner in a solo generation. It would then
+    /// force an immediate second rebalance when the next member arrives, which
+    /// disrupts produce and fetch under load.
+    ///
+    /// The value is `false` for a rebalance that a membership change triggers
+    /// in a group that still had members, that is `Stable` to
+    /// `PreparingRebalance`. Such a round completes as soon as every still-live
     /// member rejoins.
     pub rebalance_from_empty: bool,
 }
@@ -226,8 +235,9 @@ impl ClassicGroup {
         }
     }
 
-    /// Look up the current `member_id` pinned to a `group.instance.id`,
-    /// if any. KIP-345 entry point used by every group RPC handler.
+    /// Looks up the current `member_id` pinned to a `group.instance.id`, if
+    /// there is one. This is the KIP-345 entry point that every group RPC
+    /// handler uses.
     #[must_use]
     pub fn current_member_id_for_instance(&self, instance_id: &str) -> Option<&str> {
         self.static_members.get(instance_id).map(String::as_str)
@@ -235,27 +245,28 @@ impl ClassicGroup {
 
     /// Add or refresh a member.
     ///
-    /// **Dynamic** (no `group_instance_id`): inserted; transitions to
-    /// `PreparingRebalance` if previously `Empty` or `Stable`. Returns
-    /// [`AddMemberOutcome::NewMember`].
+    /// **Dynamic** (no `group_instance_id`): the group inserts the member and
+    /// moves to `PreparingRebalance` if it was `Empty` or `Stable` before. It
+    /// returns [`AddMemberOutcome::NewMember`].
     ///
     /// **Static** (KIP-345, `group_instance_id` set): three cases.
-    /// 1. The instance id is new → behaves like a dynamic add. Returns
+    /// 1. The instance id is new. This behaves like a dynamic add and returns
     ///    [`AddMemberOutcome::NewMember`].
-    /// 2. The instance id maps to an existing live `member_id` that
-    ///    matches the incoming `member.member_id` (or the incoming id is
-    ///    different but the leader-side bootstrap-rejoin path supplied a
-    ///    fresh id for the same instance) → the slot is replaced
-    ///    in-place; the prior `assignment` and the group's `state` are
-    ///    preserved (no rebalance triggered on `Stable` rejoin). Returns
+    /// 2. The instance id maps to an existing live `member_id` that matches
+    ///    the incoming `member.member_id`. It also matches when the incoming
+    ///    id differs but the leader-side bootstrap-rejoin path supplied a
+    ///    fresh id for the same instance. The group replaces the slot in
+    ///    place and keeps the prior `assignment` and the group's `state`, so a
+    ///    `Stable` rejoin triggers no rebalance. It returns
     ///    [`AddMemberOutcome::StaticRejoin`] with the prior member id.
-    /// 3. The instance id maps to a different live `member_id` and the
-    ///    caller did not request a takeover → the caller must reject
-    ///    with `FENCED_INSTANCE_ID`. Returns [`AddMemberOutcome::Fenced`].
-    ///    The handler decides whether a non-empty mismatching
-    ///    `req.member_id` is a real fence or a legitimate replacement;
-    ///    `add_member` itself always performs the takeover unless the
-    ///    caller pre-checks with [`Self::current_member_id_for_instance`].
+    /// 3. The instance id maps to a different live `member_id` and the caller
+    ///    did not ask for a takeover. The caller must then reject the request
+    ///    with `FENCED_INSTANCE_ID`, and this method returns
+    ///    [`AddMemberOutcome::Fenced`]. The handler decides whether a
+    ///    non-empty mismatched `req.member_id` is a real fence or a valid
+    ///    replacement. `add_member` itself always does the takeover unless the
+    ///    caller checks first with
+    ///    [`Self::current_member_id_for_instance`].
     pub fn add_member(&mut self, member: Member) -> AddMemberOutcome {
         if let Some(instance_id) = member.group_instance_id.clone() {
             if let Some(prior_member_id) = self.static_members.get(&instance_id).cloned() {
@@ -315,11 +326,11 @@ impl ClassicGroup {
         AddMemberOutcome::NewMember
     }
 
-    /// True once every member currently in `members` has issued a
-    /// `JoinGroup` since the last transition into `PreparingRebalance`.
-    /// The `JoinGroup` handler uses this to short-circuit the rebalance
-    /// wait the moment all members are accounted for, so the leader runs
-    /// the assignor on a fresh snapshot of every member's owned set.
+    /// True once every member currently in `members` has sent a `JoinGroup`
+    /// since the last transition into `PreparingRebalance`. The `JoinGroup`
+    /// handler uses this to end the rebalance wait as soon as all members are
+    /// accounted for, so the leader runs the assignor on a fresh snapshot of
+    /// every member's owned set.
     #[must_use]
     pub fn all_members_joined_this_round(&self) -> bool {
         if self.members.is_empty() {
@@ -330,8 +341,8 @@ impl ClassicGroup {
             .all(|id| self.joined_this_round.contains(id))
     }
 
-    /// Remove a member; transitions to `Empty` if no members remain.
-    /// KIP-345: clears the static-membership index entry too.
+    /// Removes a member. The group moves to `Empty` if no member remains.
+    /// KIP-345: this also clears the static-membership index entry.
     pub fn remove_member(&mut self, member_id: &str) {
         if let Some(m) = self.members.remove(member_id)
             && let Some(ref iid) = m.group_instance_id
@@ -351,8 +362,9 @@ impl ClassicGroup {
         }
     }
 
-    /// Complete the rebalance: pick the leader (oldest `member_id` wins —
-    /// stable for tests), bump the generation, advance state.
+    /// Completes the rebalance. It picks the leader, where the oldest
+    /// `member_id` wins, which keeps the choice stable for tests. It then
+    /// raises the generation and advances the state.
     pub fn complete_rebalance(&mut self, protocol_name: impl Into<String>) {
         let leader = self
             .members
@@ -369,9 +381,9 @@ impl ClassicGroup {
         self.rebalance_from_empty = false;
     }
 
-    /// Set each member's `protocol_metadata` to its proposal for `name`.
-    /// Members that didn't propose `name` retain their existing metadata
-    /// (should not happen if called after a successful `select_protocol`).
+    /// Sets each member's `protocol_metadata` to its proposal for `name`. A
+    /// member that did not propose `name` keeps its existing metadata. That
+    /// case should not arise after a successful `select_protocol`.
     pub fn resolve_selected_protocol_metadata(&mut self, name: &str) {
         for m in self.members.values_mut() {
             if let Some((_, bytes)) = m.protocols.iter().find(|(n, _)| n == name) {
@@ -380,8 +392,8 @@ impl ClassicGroup {
         }
     }
 
-    /// Called when the leader's `SyncGroup` arrives with assignments.
-    /// Stores each member's `assignment` and transitions to `Stable`.
+    /// Runs when the leader's `SyncGroup` arrives with assignments. It stores
+    /// each member's `assignment` and moves the group to `Stable`.
     pub fn install_assignments(&mut self, assignments: HashMap<String, Bytes>) {
         for (member_id, bytes) in assignments {
             if let Some(m) = self.members.get_mut(&member_id) {
@@ -391,15 +403,15 @@ impl ClassicGroup {
         self.state = GroupState::Stable;
     }
 
-    /// Drop any **dynamic** member whose `last_heartbeat` is older than
-    /// its `session_timeout`. Returns the dropped member IDs.
-    /// Transitions to `PreparingRebalance` if any were dropped and the
-    /// group still has members; to `Empty` if it became empty.
+    /// Drops any **dynamic** member whose `last_heartbeat` is older than its
+    /// `session_timeout`. It returns the dropped member IDs. The group moves
+    /// to `PreparingRebalance` when it dropped at least one member and still
+    /// has members. It moves to `Empty` when it became empty.
     ///
-    /// KIP-345: static members (`group_instance_id.is_some()`) are
-    /// **skipped** — their slot is preserved across the session timeout
-    /// so a restarting client reclaims its assignment on rejoin without
-    /// kicking the rest of the group into a rebalance.
+    /// KIP-345: this method **skips** static members, those with
+    /// `group_instance_id.is_some()`. Their slot survives the session timeout,
+    /// so a restarting client reclaims its assignment on rejoin without a
+    /// rebalance for the rest of the group.
     pub fn expire_dead_members(
         &mut self,
         now: Instant,

@@ -4,13 +4,12 @@
 //! `committed + 1` instead of replaying `__remote_log_metadata` from
 //! offset 0.
 //!
-//! The per-segment / per-partition-delete encoding reuses the
-//! [`MetadataEvent`] codec; the envelope
-//! adds a format version, the committed-offsets vector, and
-//! length-prefixed entries. Writes are atomic (temp file + rename) so
-//! a crash mid-write never yields a torn snapshot; a corrupt or
-//! truncated file decodes to an error (never a panic), and the caller
-//! falls back to a full replay.
+//! The per-segment and per-partition-delete encoding reuses the
+//! [`MetadataEvent`] codec. The envelope adds a format version, the
+//! committed-offsets vector, and length-prefixed entries. Writes are atomic,
+//! through a temp file and a rename, so a crash mid-write never yields a torn
+//! snapshot. A corrupt or truncated file decodes to an error and never to a
+//! panic, and the caller then falls back to a full replay.
 
 use std::path::Path;
 
@@ -27,15 +26,15 @@ use crate::{
     serde::{MetadataEvent, Reader, read_uvarint, write_uvarint},
 };
 
-/// Format version at the head of every snapshot file. Greenfield: bump
-/// freely, no backward-compat decoder arms.
+/// Format version at the head of every snapshot file. This is greenfield
+/// code: bump it freely, and add no backward-compat decoder arms.
 pub const SNAPSHOT_FORMAT_VERSION: u16 = 0;
 
 /// Default snapshot file name under the snapshot directory.
 pub const SNAPSHOT_FILE_NAME: &str = "snapshot";
 
-/// Initial encode-buffer reservation. Covers the envelope and a handful of
-/// entries; the buffer grows for anything larger.
+/// Initial encode-buffer reservation. It covers the envelope and a few
+/// entries, and the buffer grows for anything larger.
 const ENCODE_BUFFER_HINT: ByteSize = byte_size(256);
 
 /// A decoded snapshot: the per-metadata-partition committed offsets and
@@ -44,9 +43,9 @@ const ENCODE_BUFFER_HINT: ByteSize = byte_size(256);
 /// [`InmemoryRemoteLogMetadataManager`]: crabka_remote_storage::InmemoryRemoteLogMetadataManager
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    /// Highest offset applied into the cache per metadata partition,
-    /// indexed by metadata-partition. `committed[p] == -1` means the
-    /// snapshot covers no events for `p`.
+    /// Highest offset applied into the cache per metadata partition, indexed
+    /// by metadata-partition. `committed[p] == -1` means the snapshot covers
+    /// no events for `p`.
     pub committed_offsets: Vec<i64>,
     /// The cache contents at the moment the snapshot was taken.
     pub dump: RlmmCacheDump,
@@ -99,9 +98,9 @@ impl Snapshot {
     ///
     /// # Errors
     ///
-    /// Returns [`SnapshotError`] for any malformed input — bad version,
-    /// short/truncated buffer, a contained event that fails to decode,
-    /// or trailing bytes after the declared entries.
+    /// Returns [`SnapshotError`] for any malformed input: a bad version, a
+    /// short or truncated buffer, a contained event that fails to decode, or
+    /// trailing bytes after the declared entries.
     /// # Panics
     /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
     pub fn decode(bytes: &[u8]) -> Result<Self, SnapshotError> {
@@ -192,16 +191,18 @@ impl Snapshot {
         })
     }
 
-    /// Atomically write this snapshot to `path`: write to a sibling temp
-    /// file, fsync the file, rename over `path`, then fsync the parent
-    /// directory so the rename itself is durable. A crash at any point
-    /// leaves either the old snapshot or none — never a torn file. The
-    /// temp file is removed if any step before the rename fails, so a
-    /// persistent error does not litter a stale `.tmp`.
+    /// Atomically write this snapshot to `path`.
     ///
-    /// The directory fsync is best-effort: filesystems that do not support
-    /// it (or platforms where opening a directory fails) are ignored
-    /// rather than failing the write.
+    /// This method writes to a sibling temp file, fsyncs the file, renames it
+    /// over `path`, then fsyncs the parent directory so the rename itself is
+    /// durable. A crash at any point leaves either the old snapshot or none,
+    /// and never a torn file. This method removes the temp file if any step
+    /// before the rename fails, so a persistent error does not leave a stale
+    /// `.tmp` behind.
+    ///
+    /// The directory fsync is best-effort. This method ignores filesystems
+    /// that do not support it, and platforms where an open of a directory
+    /// fails, rather than fails the write.
     ///
     /// # Errors
     ///
@@ -238,9 +239,9 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Load a snapshot from `path`. `Ok(None)` when the file does not
-    /// exist (first boot); `Err` when the file exists but is corrupt;
-    /// `Ok(Some)` on success.
+    /// Load a snapshot from `path`. Returns `Ok(None)` when the file does
+    /// not exist, which is the first boot. Returns `Err` when the file exists
+    /// but is corrupt. Returns `Ok(Some)` on success.
     ///
     /// # Errors
     ///

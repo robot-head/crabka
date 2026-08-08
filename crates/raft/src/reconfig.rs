@@ -1,4 +1,5 @@
-//! KIP-853 reconfiguration coordinator: single-voter add/remove/update with safety guards.
+//! KIP-853 reconfiguration coordinator: single-voter add, remove, and update
+//! with safety guards.
 
 use crabka_metadata::{MetadataRecord, Voter, VoterSet, VotersRecord};
 
@@ -17,7 +18,7 @@ pub struct RemoveVoter {
     pub directory_id: uuid::Uuid,
 }
 
-/// A request to update one voter's endpoints / supported version range.
+/// A request to update one voter's endpoints and supported version range.
 #[derive(Debug, Clone)]
 pub struct UpdateVoter {
     pub voter: Voter,
@@ -30,15 +31,16 @@ pub enum ReconfigOutcome {
     NotLeader { leader: Option<NodeId> },
 }
 
-/// The raft operations the coordinator needs. Implemented by `ControllerHandle`.
+/// The raft operations the coordinator needs. `ControllerHandle` implements
+/// this trait.
 #[async_trait::async_trait]
 pub trait ReconfigOps: Send + Sync {
     fn current_voters(&self) -> VoterSet;
     fn leader(&self) -> Option<NodeId>;
     fn is_leader(&self) -> bool;
-    /// Highest log index the leader has; used for observer-lag checks.
+    /// Highest log index the leader has. The observer-lag checks use it.
     fn leader_last_index(&self) -> u64;
-    /// Last replicated index for an observer/learner, if known.
+    /// Last replicated index for an observer or learner, if known.
     fn observer_index(&self, id: NodeId) -> Option<u64>;
     async fn add_learner(&self, id: NodeId, node: crate::Node) -> Result<(), RaftError>;
     async fn change_membership(
@@ -84,16 +86,18 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
             .await
     }
 
-    /// Add a single voter. The candidate is first registered as a learner and
+    /// Adds a single voter.
+    ///
+    /// This method first registers the candidate as a learner. The candidate
     /// must be caught up within `observer_lag_bound` before promotion. On
-    /// success the new membership is committed and an authoritative
-    /// `V1Voters` record is written.
+    /// success the coordinator commits the new membership and writes an
+    /// authoritative `V1Voters` record.
     ///
     /// # Errors
     ///
     /// - [`RaftError::ReconfigInProgress`] if another reconfiguration holds the lock.
     /// - [`RaftError::VoterNotCaughtUp`] if the candidate observer lags too far.
-    /// - Any error surfaced by the underlying raft operations.
+    /// - Any error that the underlying raft operations return.
     #[tracing::instrument(level = "info", skip_all, fields(voter = req.voter.id.0), err)]
     pub async fn add_voter(&self, req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
         if let Some(outcome) = self.not_leader_outcome() {
@@ -126,13 +130,13 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
         Ok(ReconfigOutcome::Committed)
     }
 
-    /// Remove a single voter, refusing to drop the last one.
+    /// Removes a single voter. This method refuses to drop the last voter.
     ///
     /// # Errors
     ///
     /// - [`RaftError::ReconfigInProgress`] if another reconfiguration holds the lock.
     /// - [`RaftError::ReconfigRejected`] if the removal would leave no voters.
-    /// - Any error surfaced by the underlying raft operations.
+    /// - Any error that the underlying raft operations return.
     #[tracing::instrument(level = "info", skip_all, fields(voter = req.id.0), err)]
     pub async fn remove_voter(&self, req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
         if let Some(outcome) = self.not_leader_outcome() {
@@ -162,13 +166,13 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
         Ok(ReconfigOutcome::Committed)
     }
 
-    /// Update an existing voter's endpoints / supported version range.
+    /// Updates an existing voter's endpoints and supported version range.
     ///
     /// # Errors
     ///
     /// - [`RaftError::ReconfigInProgress`] if another reconfiguration holds the lock.
     /// - [`RaftError::ReconfigRejected`] if the voter id is unknown.
-    /// - Any error surfaced by the underlying raft operations.
+    /// - Any error that the underlying raft operations return.
     #[tracing::instrument(level = "info", skip_all, fields(voter = req.voter.id.0), err)]
     pub async fn update_voter(&self, req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
         if let Some(outcome) = self.not_leader_outcome() {

@@ -1,7 +1,8 @@
 //! Interactive Queries v2 (KIP-796 / 960 / 968): the `StateQueryRequest` →
 //! `KafkaStreams::query` → `StateQueryResult` envelope and its query objects.
-//! Coexists with the v1 `ReadOnly*Store` views (see `runtime::iq_view`) on a
-//! separate channel; v1 is untouched.
+//!
+//! This module uses a channel of its own, separate from the v1
+//! `ReadOnly*Store` views in `runtime::iq_view`. It does not change v1.
 
 pub(crate) mod dispatch;
 pub mod query;

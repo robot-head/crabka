@@ -3,18 +3,20 @@
 //!
 //! Under `build_optimized()`, the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a
 //! materialized `builder.table(topic, …)` store's changelog at its own source
-//! `topic` (instead of a derived `<app>-<store>-changelog`). The runtime must NOT
-//! re-produce that store's changelog entries — the source topic already IS the
-//! log, so re-producing onto it feeds the source node an unbounded re-emit loop
-//! (each stored row is written back, re-consumed, re-stored, re-written…).
+//! `topic`, and not at a derived `<app>-<store>-changelog`.
 //!
-//! This test boots a single in-process broker (rf=1, no Docker), runs the
-//! canonical reuse topology (`table → mapValues → toStream → to`) built with
-//! `build_optimized()`, produces ONE record to the reused source topic, and
-//! asserts that — after several commit/poll cycles — the source topic still holds
-//! exactly that one record (no write-back loop) and the output topic has not
-//! exploded. Before the fix, the source topic grew without bound from the single
-//! input record.
+//! The runtime must NOT re-produce that store's changelog entries. The source
+//! topic already IS the log, so a write back onto it feeds the source node an
+//! unbounded re-emit loop: each stored row is written back, re-consumed,
+//! re-stored, and written back again.
+//!
+//! This test boots a single in-process broker with rf=1 and no Docker. It runs
+//! the canonical reuse topology `table → mapValues → toStream → to`, built with
+//! `build_optimized()`, and produces ONE record to the reused source topic. After
+//! several commit and poll cycles it asserts that the source topic still holds
+//! exactly that one record, so there is no write-back loop, and that the output
+//! topic has not exploded. Before the fix, the source topic grew without bound
+//! from that single input record.
 
 use std::time::Duration;
 
@@ -110,9 +112,10 @@ async fn topic_id(admin: &Client, topic: &str) -> crabka_protocol::primitives::u
         .map_or_else(|| panic!("{topic} not found"), |t| t.topic_id)
 }
 
-/// Count records on `topic` partition 0, capped at `CAP` so a write-back-loop
-/// regression (which grows the topic without bound) fails the caller's assertion
-/// cleanly instead of fetching forever.
+/// Count the records on `topic` partition 0, with a cap of `CAP`.
+///
+/// A write-back-loop regression grows the topic without bound. The cap makes the
+/// caller's assertion fail cleanly instead of fetching forever.
 async fn count_records(admin: &Client, bootstrap: &str, topic: &str) -> usize {
     const CAP: usize = 64; // legitimate counts here are tiny (1); >CAP ⇒ looping
     let tid = topic_id(admin, topic).await;
@@ -181,7 +184,7 @@ async fn poll_until_latest(admin: &Client, bootstrap: &str, topic: &str, key: &s
 
 /// `builder.table("rt-in", "rt-store").mapValues(id).toStream().to("rt-out")`,
 /// built with `build_optimized` so the `rt-store` changelog reuses the `rt-in`
-/// source topic (matches the `table_reuse` wire golden).
+/// source topic. This matches the `table_reuse` wire golden.
 fn reuse_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
     b.table::<String, String>("rt-in", "rt-store")

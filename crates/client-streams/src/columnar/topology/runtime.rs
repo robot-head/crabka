@@ -1,6 +1,8 @@
 //! Runs a `ColumnarTopology` against the existing KIP-1071 runtime I/O traits.
-//! One `FetchBatch` per (topic, partition) becomes one `DataFrame` batch (= the
-//! commit/transaction boundary); produced records go through `RecordProducer`.
+//!
+//! One `FetchBatch` per (topic, partition) becomes one `DataFrame` batch, which
+//! is the commit and transaction boundary. The produced records go through
+//! `RecordProducer`.
 
 use super::{codec::ConsumedRecord, graph::ColumnarTopology};
 use crate::{
@@ -23,15 +25,16 @@ fn to_consumed(partition: i32, batch: &FetchBatch) -> Vec<ConsumedRecord> {
         .collect()
 }
 
-/// Drive one fetch→process→produce→flush cycle for `(topic, partition)` starting
-/// at `offset`. Returns the next offset to fetch (unchanged if nothing new).
+/// Drive one fetch, process, produce, and flush cycle for `(topic, partition)`
+/// that starts at `offset`.
 ///
-/// The whole fetched batch is assembled into one `DataFrame` and processed as a
-/// unit, so the batch is the commit boundary.
+/// This function returns the next offset to fetch. That offset is unchanged when
+/// there is nothing new. It assembles the whole fetched batch into one
+/// `DataFrame` and processes it as a unit, so the batch is the commit boundary.
 ///
 /// # Errors
-/// Returns a `StreamsClientError` if fetching, processing, producing, or flushing
-/// fails.
+/// Returns a `StreamsClientError` when the fetch, the processing, the produce, or
+/// the flush fails.
 #[tracing::instrument(
     name = "streams.columnar.run_partition_once",
     level = "debug",

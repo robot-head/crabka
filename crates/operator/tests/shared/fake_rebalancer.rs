@@ -1,9 +1,10 @@
 //! In-memory `RebalancerClientLike` for `KafkaRebalance` reconcile tests.
 //!
-//! Records every Connect-RPC the reconcile issues and serves a scripted
-//! response per method, so the controller's state machine can be exercised
-//! without a live `crabka-rebalancer` process. Mirrors the `FakeAdminClient`
-//! pattern: `std::sync::Mutex` interior mutability behind the `&self`
+//! This fake records every Connect-RPC that the reconcile issues. It
+//! serves one scripted response for each method, so that a test can
+//! exercise the state machine of the controller without a live
+//! `crabka-rebalancer` process. It follows the `FakeAdminClient` pattern
+//! and uses `std::sync::Mutex` for interior mutability behind the `&self`
 //! trait methods.
 
 #![allow(dead_code)]
@@ -30,9 +31,11 @@ pub enum RebalCall {
     CancelExecution(String),
 }
 
-/// A scripted reply for one method. `Clone` so the fake can serve it on
-/// repeated calls (`RebalancerError` isn't `Clone`, so we model the two
-/// error flavors structurally and rebuild a fresh error each call).
+/// A scripted reply for one method.
+///
+/// The type is `Clone`, so that the fake can serve the same reply on
+/// repeated calls. `RebalancerError` is not `Clone`, so this type models
+/// the two error forms structurally and builds a new error on each call.
 #[derive(Debug, Clone)]
 pub enum FakeResp {
     Ok(RebalancerProposal),

@@ -1,9 +1,10 @@
-//! `remote_write` v2 string interning. `symbols[0]` is always the empty string;
-//! all label names/values and metadata strings are `u32` indices into `symbols`.
+//! `remote_write` v2 string interning. `symbols[0]` is always the empty string.
+//! All label names, label values, and metadata strings are `u32` indices into
+//! `symbols`.
 
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
-/// Errors from symbol-table operations.
+/// Errors raised by symbol-table operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SymbolError {
     #[error("symbols[0] must be the empty string")]
@@ -44,13 +45,13 @@ impl Default for SymbolTable {
 }
 
 impl SymbolTable {
-    /// Create a symbol table containing the required empty zero symbol.
+    /// Creates a symbol table that holds the required empty zero symbol.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Build from an existing symbol list, such as a received v2 request.
+    /// Builds from an existing symbol list, such as a received v2 request.
     ///
     /// The first symbol must be the empty string.
     /// # Errors
@@ -74,7 +75,7 @@ impl SymbolTable {
         Ok(Self { symbols, index })
     }
 
-    /// Intern `s`, returning its stable ref.
+    /// Interns `s` and returns its stable ref.
     /// # Panics
     /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn intern(&mut self, s: &str) -> u32 {
@@ -89,19 +90,19 @@ impl SymbolTable {
         ref_
     }
 
-    /// Resolve a symbol ref to a string.
+    /// Resolves a symbol ref to a string.
     #[must_use]
     pub fn resolve(&self, ref_: u32) -> Option<&str> {
         self.symbols.get(ref_ as usize).map(String::as_str)
     }
 
-    /// Return all symbols in ref order.
+    /// Returns all symbols in ref order.
     #[must_use]
     pub fn symbols(&self) -> &[String] {
         &self.symbols
     }
 
-    /// Resolve even-length `(name_ref, value_ref)` pairs into label pairs.
+    /// Resolves even-length `(name_ref, value_ref)` pairs into label pairs.
     /// # Errors
     /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn resolve_label_refs(&self, refs: &[u32]) -> Result<Vec<(String, String)>, SymbolError> {

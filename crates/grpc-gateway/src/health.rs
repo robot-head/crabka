@@ -1,6 +1,8 @@
-//! Liveness/readiness endpoints. `/healthz` is always 200 once serving;
-//! `/readyz` returns 503 until the dedup store has warmed up, so load
-//! balancers don't route dedup'd traffic to a cold replica.
+//! Liveness and readiness endpoints.
+//!
+//! `/healthz` is always 200 once the gateway serves. `/readyz` returns 503
+//! until the dedup store has warmed up, so a load balancer does not route
+//! dedup'd traffic to a cold replica.
 
 use std::sync::{
     Arc,
@@ -9,8 +11,8 @@ use std::sync::{
 
 use axum::{Router, extract::State, http::StatusCode, routing::get};
 
-/// Shared readiness flag, flipped to `true` once the gateway can serve
-/// dedup'd traffic correctly (dedup store warmed). Cheaply cloneable.
+/// Shared readiness flag. It turns `true` once the dedup store is warm and the
+/// gateway can serve dedup'd traffic correctly. It is cheap to clone.
 #[derive(Clone, Default)]
 pub struct Readiness(pub Arc<AtomicBool>);
 
@@ -30,7 +32,7 @@ impl Readiness {
     }
 }
 
-/// Build the health/readiness router, with the readiness flag as state.
+/// Build the health and readiness router, with the readiness flag as state.
 pub fn router(readiness: Readiness) -> Router {
     Router::new()
         .route("/healthz", get(|| async { StatusCode::OK }))

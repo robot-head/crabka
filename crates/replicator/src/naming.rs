@@ -2,8 +2,8 @@
 
 use crate::config::NamingPolicy;
 
-/// Header key stamped on every produced record carrying the origin cluster alias.
-/// Used by the identity-naming loop-guard (and useful for provenance generally).
+/// Header key that every produced record carries with the origin cluster alias.
+/// The identity-naming loop-guard uses it, and it is also useful for provenance.
 pub const PROVENANCE_HEADER: &str = "__crabka_origin";
 
 /// Maps source topic names to target topic names and enforces loop-prevention
@@ -36,18 +36,18 @@ impl Renamer {
         }
     }
 
-    /// Return `true` if this topic looks like it was already produced by
-    /// replication and should therefore be excluded from this flow's
-    /// subscription (loop prevention).
+    /// Return `true` if this topic looks like a topic that replication already
+    /// produced. This flow should exclude it from its subscription, for loop
+    /// prevention.
     ///
-    /// Under [`NamingPolicy::Default`] a topic that contains `.` (but does not
-    /// *start* with `.`) is treated as remote — this mirrors `MirrorMaker` 2's
-    /// "topic contains the replication separator" heuristic.  Intentionally
-    /// simple for Slice 1; the two-cluster integration test pins exact
-    /// behaviour.
+    /// Under [`NamingPolicy::Default`] a topic that contains `.`, but does not
+    /// *start* with `.`, counts as remote. This mirrors the "topic contains the
+    /// replication separator" heuristic of `MirrorMaker` 2. The rule is
+    /// deliberately simple for Slice 1, and the two-cluster integration test
+    /// pins the exact behaviour.
     ///
-    /// Under [`NamingPolicy::Identity`] the loop guard is header-based (see
-    /// [`PROVENANCE_HEADER`]), so this method always returns `false`.
+    /// Under [`NamingPolicy::Identity`] the loop guard uses the header. See
+    /// [`PROVENANCE_HEADER`]. This method then always returns `false`.
     #[must_use]
     pub fn is_remote(&self, topic: &str) -> bool {
         match self.policy {
@@ -57,7 +57,7 @@ impl Renamer {
     }
 
     /// The source cluster alias stamped in [`PROVENANCE_HEADER`] on produced
-    /// records (used for identity-policy loop prevention).
+    /// records, used for identity-policy loop prevention.
     #[must_use]
     pub fn provenance_alias(&self) -> &str {
         &self.source_alias

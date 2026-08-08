@@ -1,7 +1,7 @@
 //! Shared admin/IO helpers used by replicator engine tasks.
 //!
-//! All functions return `Result<_, String>` and map client errors via
-//! `.map_err(|e| e.to_string())` so callers stay wire-error-agnostic.
+//! All functions return `Result<_, String>` and map client errors with
+//! `.map_err(|e| e.to_string())`, so callers stay wire-error-agnostic.
 
 use std::collections::BTreeMap;
 
@@ -15,8 +15,8 @@ use crate::config::{ClientResourcePolicy, ReplicationFactor, ReplicatorRuntimePo
 /// Kafka error code: the topic already exists.
 const TOPIC_ALREADY_EXISTS: i16 = 36;
 
-/// Ensure `topic` exists with the given parameters, treating an
-/// already-exists response as success.
+/// Ensure `topic` exists with the given parameters. An already-exists response
+/// counts as success.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -265,9 +265,9 @@ fn admin_options(
     })
 }
 
-/// Build a drain consumer for the given topic.  Security is threaded through
-/// conditionally — `bon` wraps bare `T` setters in `Some`, so passing `None`
-/// means simply omitting the `.security()` call.
+/// Build a drain consumer for the given topic. This function threads security
+/// through conditionally. `bon` wraps bare `T` setters in `Some`, so a `None`
+/// value means that the function omits the `.security()` call.
 async fn build_drain_consumer(
     bootstrap: &str,
     group_id: String,
@@ -301,11 +301,12 @@ async fn build_drain_consumer(
     }
 }
 
-/// Drain all records from `topic` from the earliest offset, returning
+/// Drain all records from `topic` from the earliest offset. Returns
 /// `(key, value)` pairs in order.
 ///
-/// Uses the runtime policy's consecutive-empty threshold as the drain sentinel.
-/// Poll errors for a not-yet-existing topic are silently treated as empty.
+/// The function uses the consecutive-empty threshold of the runtime policy as
+/// the drain sentinel. It silently treats a poll error for a topic that does
+/// not exist yet as empty.
 pub type RawRecord = (Option<Bytes>, Option<Bytes>);
 
 #[tracing::instrument(
@@ -410,6 +411,7 @@ pub(crate) async fn read_all_with_runtime_policy(
 /// Return the value bytes of the last record whose key equals `key`.
 ///
 /// If `key` is empty, returns the last record overall regardless of key.
+///
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn read_last_value_for_key(
@@ -481,7 +483,7 @@ pub(crate) async fn read_last_value_for_key_with_runtime_policy(
     Ok(matched.and_then(|(_, v)| v.map(|b| b.to_vec())))
 }
 
-/// Returns `true` if the error message indicates the topic doesn't exist.
+/// Returns `true` if the error message shows that the topic does not exist.
 fn is_unknown_topic_error(msg: &str) -> bool {
     msg.contains("UNKNOWN_TOPIC_OR_PARTITION")
         || msg.contains("unknown topic")

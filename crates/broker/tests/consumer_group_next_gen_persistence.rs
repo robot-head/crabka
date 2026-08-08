@@ -1,4 +1,5 @@
-//! Broker restart preserves next-gen group state via `__consumer_offsets` replay.
+//! A broker restart preserves the next-gen group state, through
+//! `__consumer_offsets` replay.
 
 use std::sync::Arc;
 

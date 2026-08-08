@@ -66,8 +66,9 @@ async fn broker_started_event_is_written_to_audit_topic() {
 }
 
 /// Verifies that a successful `CreateTopics` call emits an `AdminOperation`
-/// audit record with `class_uid == 6003`, `api.operation == "CreateTopics"`,
-/// `status_id == 1`, and the topic name in `resources[0].name`.
+/// audit record. That record must carry `class_uid == 6003`,
+/// `api.operation == "CreateTopics"`, `status_id == 1`, and the topic name in
+/// `resources[0].name`.
 #[tokio::test]
 async fn successful_create_topics_is_audited() {
     let p = support::start().await;
@@ -109,9 +110,10 @@ async fn successful_create_topics_is_audited() {
     p.broker.shutdown().await;
 }
 
-/// Verifies that when a broker is configured with an audit signing key and a
-/// checkpoint cadence of `every_n = 1`, sending a `CreateTopics` request causes
-/// a `checkpoint` record to appear on the audit topic with the expected `key_id`.
+/// Verifies the checkpoint path. The broker is configured with an audit
+/// signing key and a checkpoint cadence of `every_n = 1`. A `CreateTopics`
+/// request must then put a `checkpoint` record on the audit topic with the
+/// expected `key_id`.
 #[tokio::test]
 async fn signed_checkpoints_appear_on_audit_topic() {
     use ring::signature::Ed25519KeyPair;
@@ -164,27 +166,30 @@ async fn signed_checkpoints_appear_on_audit_topic() {
     p.broker.shutdown().await;
 }
 
-/// Verifies the authorizer-decorator path denies an unauthorized operation.
+/// Verifies that the authorizer-decorator path denies an unauthorized
+/// operation.
 ///
 /// This test asserts that:
-///   1. A `CreateTopics` request is denied with `CLUSTER_AUTHORIZATION_FAILED`.
-///   2. The broker remains healthy and does not crash.
+///   1. The broker denies a `CreateTopics` request with
+///      `CLUSTER_AUTHORIZATION_FAILED`.
+///   2. The broker stays healthy and does not crash.
 ///
-/// What this test does NOT assert:
-///   - That an `AuthorizationDenied` audit record was emitted to the audit topic.
+/// This test does NOT assert that the broker emitted an `AuthorizationDenied`
+/// audit record to the audit topic.
 ///
-/// Why not: The full end-to-end path (send-denied-request → observe
-/// `AuthorizationDenied` record in the audit topic via the same client) is
-/// impractical because:
-///   - The test client connects anonymously (principal `"ANONYMOUS"`).
-///   - `SimpleAclAuthorizer` with no ACLs and no super-users denies
-///     every request, including the `Fetch` needed to read back the
-///     audit topic.
-///   - There is no plaintext SASL path that would give the anonymous
-///     reader an elevated principal without setting up SCRAM credentials.
+/// The full end-to-end path, which sends a denied request and then observes
+/// the `AuthorizationDenied` record in the audit topic through the same
+/// client, is impractical for these reasons:
+///   - The test client connects anonymously, with the principal
+///     `"ANONYMOUS"`.
+///   - `SimpleAclAuthorizer` with no ACLs and no super-users denies every
+///     request, including the `Fetch` that reads the audit topic back.
+///   - There is no plaintext SASL path that would give the anonymous reader a
+///     higher principal without SCRAM credentials.
 ///
-/// The audit emit on deny is already proven by the unit test
-/// `deny_decision_emits_audit_record` in `crates/broker/src/audit_authorizer.rs`.
+/// The unit test `deny_decision_emits_audit_record` in
+/// `crates/broker/src/audit_authorizer.rs` already proves the audit emit on a
+/// deny.
 #[tokio::test]
 async fn denied_operation_returns_cluster_authorization_failed() {
     // Start a broker with a deny-all authorizer.
@@ -243,9 +248,9 @@ async fn denied_operation_returns_cluster_authorization_failed() {
     p.broker.shutdown().await;
 }
 
-/// Verifies that the audit hash-chain sequence numbers are contiguous and
-/// duplicate-free across a broker restart — i.e. chain recovery worked and
-/// the second boot did NOT reset the chain to seq 0.
+/// Verifies that the audit hash-chain sequence numbers are contiguous, and
+/// that none repeats, across a broker restart. That shows that chain recovery
+/// worked, and that the second boot did NOT reset the chain to seq 0.
 #[tokio::test]
 async fn audit_chain_continues_across_restart() {
     let dir = tempfile::tempdir().unwrap();

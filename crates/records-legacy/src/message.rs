@@ -1,24 +1,24 @@
 //! v0/v1 `Message` wire format.
 //!
-//! Wire layout (sit inside a [`MessageSet`](crate::set) entry, after the
-//! per-entry `(offset:i64, message_size:i32)` framing):
+//! Each message sits inside a [`MessageSet`](crate::set) entry, after the
+//! per-entry `(offset:i64, message_size:i32)` framing. The wire layout is:
 //!
 //! ```text
 //! v0: crc:u32 | magic:i8=0 | attrs:i8 |                 | key | value
 //! v1: crc:u32 | magic:i8=1 | attrs:i8 | timestamp:i64   | key | value
 //! ```
 //!
-//! `key` and `value` are nullable bytes (i32 length; -1 means null). CRC-32
-//! (IEEE polynomial) is computed over the bytes from `magic` through the
-//! end of `value` — i.e. everything inside the message except the CRC
-//! field itself.
+//! `key` and `value` are nullable bytes: an i32 length, where -1 means
+//! null. The codec computes the CRC-32 (IEEE polynomial) over the bytes
+//! from `magic` through the end of `value`. That is, over everything
+//! inside the message except the CRC field itself.
 
 use bytes::{Buf, BufMut, Bytes};
 use crabka_compression::CompressionType;
 
 use crate::error::LegacyRecordsError;
 
-/// Magic byte (i.e. legacy message format version) — 0 or 1.
+/// Magic byte, that is, the legacy message-format version: 0 or 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Magic {
     V0,
@@ -35,7 +35,7 @@ impl Magic {
     }
 
     /// # Errors
-    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+    /// Returns `LegacyRecordsError::UnsupportedMagic` if `b` is not 0 or 1.
     pub fn from_i8(b: i8) -> Result<Self, LegacyRecordsError> {
         match b {
             0 => Ok(Self::V0),
@@ -52,13 +52,13 @@ pub mod attrs {
     pub const TIMESTAMP_TYPE_BIT: i8 = 1 << 3;
 }
 
-/// Map a v0/v1 compression-code (low 3 bits of `attributes`) to a
-/// [`CompressionType`].
+/// Map a v0/v1 compression code to a [`CompressionType`].
 ///
+/// The compression code is the low 3 bits of `attributes`.
 /// `0` => `None`, `1` => `Gzip`, `2` => `Snappy`, `3` => `Lz4`. v0/v1
-/// never carried Zstd on the wire (KIP-110 was v2-only).
+/// never carried Zstd on the wire. KIP-110 was v2-only.
 /// # Errors
-/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// Returns `LegacyRecordsError::Malformed` if the compression code is not 0, 1, 2, or 3.
 pub fn compression_from_attrs(byte: i8) -> Result<CompressionType, LegacyRecordsError> {
     match byte & attrs::COMPRESSION_MASK {
         0 => Ok(CompressionType::None),
@@ -73,7 +73,7 @@ pub fn compression_from_attrs(byte: i8) -> Result<CompressionType, LegacyRecords
 
 #[must_use]
 /// # Panics
-/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
+/// Panics if `codec` is `CompressionType::Zstd`, or any other codec that v0/v1 cannot carry.
 pub fn attrs_with_compression(byte: i8, codec: CompressionType) -> i8 {
     let code: i8 = match codec {
         CompressionType::None => 0,
@@ -86,20 +86,22 @@ pub fn attrs_with_compression(byte: i8, codec: CompressionType) -> i8 {
     (byte & !attrs::COMPRESSION_MASK) | code
 }
 
-/// Owned, decoded legacy message (post-frame parse).
+/// Owned legacy message, decoded after the frame parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub magic: Magic,
     pub attributes: i8,
-    /// `Some` iff `magic == V1`.
+    /// `Some` when `magic` is `V1`. `None` when `magic` is `V0`.
     pub timestamp: Option<i64>,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
 }
 
 impl Message {
-    /// Bytes the message occupies inside the per-entry frame (i.e. starting
-    /// at the CRC field, up to and including the value).
+    /// Number of bytes that the message occupies inside the per-entry frame.
+    ///
+    /// The count starts at the CRC field. It goes up to and includes the
+    /// value.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
         // crc(4) + magic(1) + attrs(1) [+ ts(8) if v1] + key + value
@@ -112,8 +114,9 @@ impl Message {
         n
     }
 
-    /// Encode the message into `buf`, including the CRC field. `buf` is
-    /// extended; nothing is written before the CRC.
+    /// Encode the message into `buf`, including the CRC field.
+    ///
+    /// This method extends `buf`. It writes nothing before the CRC.
     pub fn encode_into<B: BufMut>(&self, buf: &mut B) {
         // Build the CRC-covered payload first, then prefix it with the CRC.
         let body_len = self.encoded_len() - 4;
@@ -132,13 +135,22 @@ impl Message {
         buf.put_slice(&body);
     }
 
-    /// Decode a message from `buf`. `buf` must be positioned at the CRC and
-    /// must contain at least `frame_size` bytes; `frame_size` is the
-    /// `message_size` from the outer `MessageSet` frame.
+    /// Decode a message from `buf`.
+    ///
+    /// `buf` must be positioned at the CRC and must contain at least
+    /// `frame_size` bytes. `frame_size` is the `message_size` from the
+    /// outer `MessageSet` frame.
     /// # Errors
-    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+    /// Returns `Truncated` if `buf` holds fewer than `frame_size` bytes.
+    /// Returns `Malformed` if `frame_size` is less than the 6-byte minimum.
+    /// Returns `CrcMismatch` if the computed CRC differs from the CRC field.
+    /// Returns `UnsupportedMagic` if the magic byte is not 0 or 1.
+    /// Returns `Truncated` if a v1 frame holds fewer than 8 timestamp bytes.
+    /// Returns `NegativeLength` if the `key` or `value` length is negative and is not -1.
+    /// Returns `Truncated` if the `key` or `value` bytes stop early.
+    /// Returns `Malformed` if bytes remain after the value.
     /// # Panics
-    /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
+    /// Panics if a nonnegative `i32` length does not fit in a `usize`. This cannot occur on any target Crabka builds for.
     pub fn decode_from<B: Buf>(buf: &mut B, frame_size: usize) -> Result<Self, LegacyRecordsError> {
         if buf.remaining() < frame_size {
             return Err(LegacyRecordsError::Truncated {

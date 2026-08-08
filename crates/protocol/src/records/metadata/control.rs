@@ -1,14 +1,14 @@
 //! `KRaft` control-record framing. Control records (`LeaderChange`,
-//! `SnapshotHeader`, `SnapshotFooter`) live in a batch with the control bit set;
-//! the record key is `version (i16) + type (i16)` and the value is the message
-//! body.
+//! `SnapshotHeader`, `SnapshotFooter`) live in a batch with the control bit
+//! set. The record key is `version (i16) + type (i16)`, and the value is the
+//! message body.
 
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::records::{Attributes, Record, RecordBatch};
 
-/// `KRaft` control record types (the i16 written after the i16 version in the
-/// key).
+/// `KRaft` control record types. This is the i16 written after the i16 version
+/// in the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i16)]
 pub enum ControlRecordType {
@@ -20,7 +20,7 @@ pub enum ControlRecordType {
 /// Control record key version (Kafka writes 0).
 const CONTROL_KEY_VERSION: i16 = 0;
 
-/// Build a control record key: `version(i16) + type(i16)`.
+/// Builds a control record key: `version(i16) + type(i16)`.
 #[must_use]
 pub fn control_record_key(ty: ControlRecordType) -> Bytes {
     let mut key = BytesMut::with_capacity(4);
@@ -29,8 +29,10 @@ pub fn control_record_key(ty: ControlRecordType) -> Bytes {
     key.freeze()
 }
 
-/// Encode a single-record control batch at `base_offset` with the control bit
-/// set, returning the full v2 `RecordBatch` bytes (CRC computed by the encoder).
+/// Encodes a single-record control batch at `base_offset` with the control bit
+/// set.
+///
+/// Returns the full v2 `RecordBatch` bytes. The encoder computes the CRC.
 ///
 /// # Panics
 /// Panics only if the underlying record-batch encoder fails, which cannot happen

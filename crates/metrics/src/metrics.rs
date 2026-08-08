@@ -1,10 +1,11 @@
 //! Prometheus metrics for the metrics-subsystem ingest (distributor) role.
 //!
-//! Mirrors the broker's `metrics` pattern: a shared `Registry` wrapped in
-//! `Arc<Mutex<…>>` plus a cheaply-`Clone` bundle of metric handles that the
-//! ingest handlers clone and increment directly. Registry prefix is
-//! `crabka_metrics`; `prometheus-client` auto-appends `_total` to counters at
-//! encode time, so counter names are registered without the suffix.
+//! This module mirrors the broker's `metrics` pattern. It holds a shared
+//! `Registry` wrapped in `Arc<Mutex<…>>`, and a cheaply-`Clone` bundle of
+//! metric handles that the ingest handlers clone and increment directly. The
+//! registry prefix is `crabka_metrics`. `prometheus-client` appends `_total` to
+//! counters at encode time, so this module registers counter names without the
+//! suffix.
 
 use std::sync::Arc;
 
@@ -16,8 +17,8 @@ use prometheus_client::{
 };
 use tokio::sync::Mutex;
 
-/// Shared registry owning every metric this process emits. Wrapped in
-/// `Arc<Mutex<…>>` because `prometheus-client` requires `&mut Registry` to
+/// Shared registry that owns every metric this process emits. It is wrapped in
+/// `Arc<Mutex<…>>`, because `prometheus-client` needs `&mut Registry` to
 /// register and the exporter needs shared read access at scrape time.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
@@ -34,7 +35,7 @@ pub struct RouteStatusLabel {
     pub status: String,
 }
 
-/// Per-query-route label (latency histogram family).
+/// Per-query-route label for the latency histogram family.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct RouteLabel {
     pub route: String,
@@ -46,9 +47,9 @@ pub struct TenantLabel {
     pub tenant: String,
 }
 
-/// Cheaply-clonable bundle of metric handles. Construct once with
-/// [`ServiceMetrics::new`]; hand out clones (each a single `Arc::clone`) to the
-/// handlers that emit.
+/// Cheaply-clonable bundle of metric handles. Construct it once with
+/// [`ServiceMetrics::new`], then hand out clones to the handlers that emit.
+/// Each clone is a single `Arc::clone`.
 #[derive(Clone)]
 pub struct ServiceMetrics {
     pub registry: SharedRegistry,
@@ -69,7 +70,8 @@ pub struct ServiceMetrics {
 }
 
 impl ServiceMetrics {
-    /// Build a fresh registry, register every metric, and return the bundle.
+    /// Builds a fresh registry, registers every metric, and returns the
+    /// bundle.
     #[must_use]
     pub fn new() -> Self {
         let mut registry = Registry::with_prefix("crabka_metrics");
@@ -150,13 +152,14 @@ impl ServiceMetrics {
         }
     }
 
-    /// Record one ingest request outcome. `wal_append_failures` is NOT touched
-    /// here — increment it separately at the actual WAL/produce error site so a
-    /// 4xx client/validation error does not inflate the WAL-failure counter.
+    /// Records one ingest request outcome. This method does NOT touch
+    /// `wal_append_failures`. Increment that counter separately at the real WAL
+    /// or produce error site, so a 4xx client or validation error does not
+    /// inflate the WAL-failure counter.
     ///
-    /// `body` is the request-body size and `elapsed` the handler latency; both
-    /// are converted to the raw units the Prometheus instruments hold here, so
-    /// callers never spell out `_bytes`/`_secs` themselves.
+    /// `body` is the request-body size and `elapsed` is the handler latency.
+    /// This method converts both to the raw units the Prometheus instruments
+    /// hold, so a caller never spells out `_bytes` or `_secs`.
     pub fn record_ingest(&self, ok: bool, body: ByteSize, items: u64, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
@@ -169,8 +172,9 @@ impl ServiceMetrics {
         self.ingest_duration.observe(elapsed.secs_f64());
     }
 
-    /// Record `series` accepted series for `tenant` on the ingest path. Called
-    /// once per accepted push request, after the body decodes to a series count.
+    /// Records `series` accepted series for `tenant` on the ingest path. The
+    /// handler calls this once per accepted push request, after the body
+    /// decodes to a series count.
     pub fn record_ingest_series(&self, tenant: &str, series: u64) {
         if series == 0 {
             return;
@@ -182,7 +186,8 @@ impl ServiceMetrics {
             .inc_by(series);
     }
 
-    /// Record `blocks` metric blocks written by the compactor in one flush.
+    /// Records the `blocks` metric blocks that the compactor wrote in one
+    /// flush.
     pub fn record_blocks_compacted(&self, blocks: u64) {
         if blocks == 0 {
             return;
@@ -190,7 +195,7 @@ impl ServiceMetrics {
         self.blocks_compacted.inc_by(blocks);
     }
 
-    /// Record one query request outcome on `route` with its latency.
+    /// Records one query request outcome on `route` with its latency.
     pub fn record_query(&self, route: &str, ok: bool, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.query_requests
@@ -213,9 +218,9 @@ impl Default for ServiceMetrics {
     }
 }
 
-/// Build the `/metrics` exporter router. The admin server merges this with the
-/// pprof routes via `serve_admin_from_env_with`; do not merge `pprof_router`
-/// here.
+/// Builds the `/metrics` exporter router. The admin server merges this with the
+/// pprof routes through `serve_admin_from_env_with`. Do not merge
+/// `pprof_router` here.
 pub fn metrics_router(registry: SharedRegistry) -> axum::Router {
     axum::Router::new()
         .route("/metrics", axum::routing::get(export))

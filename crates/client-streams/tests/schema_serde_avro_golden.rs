@@ -1,7 +1,9 @@
-//! Asserts our Avro framing/body matches bytes captured from Confluent's
-//! `AvroSerializer`. The golden in `testdata/schema_serde/avro/order.hex` was
-//! captured against `mirror.gcr.io/confluentinc/cp-schema-registry` (schema id 1) via
-//! `tests/schema-serde-capture/run.sh`.
+//! Asserts that our Avro framing and body match the bytes captured from
+//! Confluent's `AvroSerializer`.
+//!
+//! `tests/schema-serde-capture/run.sh` captured the golden in
+//! `testdata/schema_serde/avro/order.hex` against
+//! `mirror.gcr.io/confluentinc/cp-schema-registry`, with schema id 1.
 
 use apache_avro::AvroSchema;
 use assert2::check;

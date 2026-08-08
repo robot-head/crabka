@@ -14,23 +14,25 @@ use super::scalar::{DurationHelper, ScalarExtremaFn, scalar_call_to_planned};
 use crate::{PromqlError, error::Result, result::QueryResult, store::MetricStore};
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Plan the EXPERIMENTAL non-leaf functions onto the operator path by
-    /// delegating to the SAME interpreter method (so the result — value,
-    /// labelset, and any annotation side effect — is parity-exact by
-    /// construction) and wrapping it in the matching `Precomputed*` variant:
+    /// Plans the EXPERIMENTAL non-leaf functions onto the operator path.
+    ///
+    /// This method delegates to the SAME interpreter method, so the result is
+    /// parity-exact by construction in value, in label set, and in any
+    /// annotation side effect. It then wraps the result in the matching
+    /// `Precomputed*` variant:
     ///
     /// - `max_of`/`min_of` → scalar extrema, a `PrecomputedScalar`.
     /// - `double_exponential_smoothing(m[range], sf, tf)` over a bare matrix
-    ///   selector → an instant vector via the shared `apply_outer_range_fn` fold,
-    ///   a `Precomputed`. (The subquery-range form is handled earlier by
-    ///   `match_subquery_range_call`.)
-    /// - the duration helpers `range`/`step`/`start`/`end` → a scalar; these are
-    ///   plain `Expr::Call`s (NOT parser-folded), reading the scoped range
+    ///   selector → an instant vector through the shared `apply_outer_range_fn`
+    ///   fold, a `Precomputed`. `match_subquery_range_call` handles the
+    ///   subquery-range form earlier.
+    /// - the duration helpers `range`/`step`/`start`/`end` → a scalar. These are
+    ///   plain `Expr::Call`s (NOT parser-folded) that read the scoped range
     ///   context.
     ///
-    /// Returns `Ok(None)` for any other function name (the caller then tries
-    /// `plan_util_call`). A wrong-arity / invalid-argument call surfaces the same
-    /// `Err` the interpreter would, since this delegates to it.
+    /// Returns `Ok(None)` for any other function name, and the caller then tries
+    /// `plan_util_call`. A wrong-arity or invalid-argument call returns the same
+    /// `Err` as the interpreter, because this method delegates to it.
     #[cfg(feature = "experimental-functions")]
     pub(super) async fn plan_experimental_call(
         &self,

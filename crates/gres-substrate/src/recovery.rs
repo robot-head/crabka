@@ -57,8 +57,8 @@ pub const DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX: ByteSize = mebibytes(1);
 /// Default whole-response byte limit for committed-WAL recovery fetches.
 ///
 /// Mirrors [`crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX`], which is the
-/// raw `int32` the client crate hands the wire;
-/// `recovery_read_policy_mirrors_the_client_response_limit` pins the two together.
+/// raw `int32` that the client crate sends on the wire.
+/// `recovery_read_policy_mirrors_the_client_response_limit` keeps the two equal.
 pub const DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX: ByteSize = mebibytes(50);
 /// Default consecutive empty-fetch retries after the initial empty fetch.
 pub const DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES: usize = 100;
@@ -69,8 +69,8 @@ pub const DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT: Time = secs(10);
 /// Default timeout for requests on a raw committed-WAL connection.
 pub const DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT: Time = secs(30);
 /// Committed-end sample fetches must return immediately when the cursor is
-/// already at the stable end; a positive wait would park every barrier call
-/// on the broker's long-poll timer.
+/// already at the stable end. A positive wait makes the broker hold every
+/// barrier call on its long-poll timer.
 const END_SAMPLE_MAX_WAIT_MS: i32 = 0;
 const OFFSET_OUT_OF_RANGE: i16 = 1;
 
@@ -706,11 +706,11 @@ pub async fn bootstrap_live_range0_follower(
 /// Report whether the live WAL has been trimmed past the frames a follower at
 /// `applied_offset` still needs.
 ///
-/// This is the discriminator between the one failure a follower cannot retry
-/// its way out of and every transient fetch failure. It asks the broker for
-/// the retained log start rather than inspecting a failed fetch's error text;
-/// an error here means the broker could not be asked, which is itself
-/// transient and leaves the caller retrying.
+/// This function separates the one failure a follower cannot retry from every
+/// transient fetch failure. It asks the broker for the retained log start
+/// instead of reading the error text of a failed fetch. An error here means
+/// the broker could not be asked. That failure is also transient, so the
+/// caller continues to retry.
 ///
 /// # Errors
 ///
@@ -1220,12 +1220,12 @@ pub(crate) struct FetchedWalPartition {
 }
 
 impl KafkaCommittedWalReader {
-    /// Fetch one page and decode it, offering each applied record's headers to
+    /// Fetch one page, decode it, and offer each applied record's headers to
     /// `links`.
     ///
-    /// The headers are only in hand here: [`ReplayItem`] carries the frame
-    /// bytes and its offset and nothing else, so a trace context that is not
-    /// collected at this point is gone by the time anything applies the frame.
+    /// The headers are available only here. [`ReplayItem`] carries the frame
+    /// bytes and its offset and nothing else, so a trace context that this
+    /// function does not collect is lost before anything applies the frame.
     async fn fetch_partition(
         &self,
         conn: &Connection,
@@ -1478,8 +1478,8 @@ pub trait RecoveryFencer: Send + Sync {
 /// to.
 ///
 /// A replay batch can mix records from thousands of commits, and every link is
-/// exported with the span. Eight is enough to see *which* writers a slow apply
-/// is replaying without letting one span's payload grow with the batch.
+/// exported with the span. Eight links show *which* writers a slow apply
+/// replays, and they keep one span's payload from growing with the batch.
 pub const MAX_WAL_APPLY_LINKS: usize = 8;
 
 /// `pg.wal.source` for the replay a recovering writer runs after fencing.
@@ -1495,37 +1495,37 @@ pub const WAL_APPLY_RESTORE_TAIL: &str = "restore_tail";
 /// Byte range of the trace-id inside a W3C `traceparent`
 /// (`00-<32 hex trace id>-<16 hex span id>-<2 hex flags>`).
 ///
-/// Only ever applied to a string [`TraceCarrier`] itself re-rendered from a
-/// parsed span context, so the slice is always present and always canonical
-/// lower-case hex — which is what makes it usable as a set key.
+/// This range is only applied to a string [`TraceCarrier`] that was re-rendered
+/// from a parsed span context. The slice is therefore always present and always
+/// canonical lower-case hex, which is what makes it usable as a set key.
 const TRACEPARENT_TRACE_ID: std::ops::Range<usize> = 3..35;
 
 /// The distinct producer traces carried by one batch of committed WAL records.
 ///
 /// # Why links and not parents
 ///
-/// A `gres.wal_apply` span is **linked** to the commits it applies, never
-/// parented under them, and that is a deliberate constraint rather than an
-/// approximation to be tightened later. Three independent reasons:
+/// A `gres.wal_apply` span is **linked** to the commits it applies. It is never
+/// parented under them. This is a deliberate constraint, not an approximation
+/// to tighten later. There are three separate reasons:
 ///
-/// - A recovery replay may run hours after the commit it is replaying. Making
-///   it a child would stretch the commit's trace across the whole WAL retention
-///   period, so the trace's duration would measure retention, not latency.
-/// - One commit fans out to every follower, every checkpoint service, and every
-///   future replay. The child set of a single commit span is unbounded in a way
-///   no trace backend renders usefully.
-/// - The sampler is `ParentBased(TraceIdRatioBased)`, which returns
-///   `RecordAndSample` unconditionally for a *sampled* remote parent. Parenting
-///   would therefore force export of every apply of every sampled write,
-///   forever, on the hottest loop in the system.
+/// - A recovery replay can run hours after the commit that it replays. A child
+///   span would stretch the commit's trace across the whole WAL retention
+///   period, so the trace duration would measure retention, not latency.
+/// - One commit goes to every follower, every checkpoint service, and every
+///   future replay. The child set of a single commit span is unbounded, and no
+///   trace backend shows such a set usefully.
+/// - The sampler is `ParentBased(TraceIdRatioBased)`, which always returns
+///   `RecordAndSample` for a *sampled* remote parent. A parent span would then
+///   force export of every apply of every sampled write, forever, on the
+///   busiest loop in the system.
 ///
 /// A link says "this apply was caused by that commit" without any of those
 /// consequences.
 #[derive(Debug, Clone, Default)]
 pub struct WalTraceLinks {
     /// Whether the WAL target is enabled. When it is not, [`WalTraceLinks::record`]
-    /// returns before parsing anything: a recovery that exports no spans must
-    /// not pay a `traceparent` parse per record.
+    /// returns before it parses anything. A recovery that exports no spans must
+    /// not parse a `traceparent` for each record.
     armed: bool,
     carriers: Vec<TraceCarrier>,
     trace_ids: BTreeSet<String>,
@@ -1544,10 +1544,10 @@ impl WalTraceLinks {
 
     /// Offer one record's headers to the collector.
     ///
-    /// Keeps at most one carrier per trace-id and at most
-    /// [`MAX_WAL_APPLY_LINKS`] of them: a batch is overwhelmingly one commit
-    /// per trace, so deduplicating by trace rather than by record is what keeps
-    /// a thousand-record replay to a handful of links.
+    /// The collector keeps at most one carrier per trace-id, and at most
+    /// [`MAX_WAL_APPLY_LINKS`] carriers. A batch is almost always one commit
+    /// per trace. The collector therefore removes duplicates by trace and not
+    /// by record, which keeps a thousand-record replay to a few links.
     pub fn record<'a, I, V>(&mut self, headers: I)
     where
         I: IntoIterator<Item = (&'a str, V)>,
@@ -1576,8 +1576,10 @@ impl WalTraceLinks {
         self.carriers.len()
     }
 
-    /// Whether no producer trace was collected — the normal case for an
-    /// untraced write, and for a reader that does not decode record headers.
+    /// Whether no producer trace was collected.
+    ///
+    /// This is the normal case for an untraced write, and for a reader that
+    /// does not decode record headers.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.carriers.is_empty()
@@ -1595,7 +1597,7 @@ impl WalTraceLinks {
 /// headers named.
 #[derive(Debug, Default)]
 pub struct TracedWalRecords {
-    /// The records, in offset order — exactly what
+    /// The records, in offset order. These are exactly what
     /// [`CommittedWalReader::committed_from`] returns.
     pub items: Vec<ReplayItem>,
     /// Producer trace contexts for the `gres.wal_apply` span to link to.
@@ -1605,11 +1607,12 @@ pub struct TracedWalRecords {
 /// Build the `gres.wal_apply` span covering one batch of committed WAL records
 /// applied to a local read model.
 ///
-/// One span per *batch*, never per record: a replay applies thousands of frames
-/// and a span each would be dropped by the exporter long before it reached a
-/// backend. `pg.wal.source` says which consumer is applying, which is the field
-/// that separates a slow recovery from a slow follower from a slow checkpoint
-/// restore when all three are running against one tenant.
+/// This function makes one span per *batch*, never one span per record. A
+/// replay applies thousands of frames, and the exporter would drop one span per
+/// frame long before it reached a backend. `pg.wal.source` names the consumer
+/// that applies the records. That field separates a slow recovery, a slow
+/// follower, and a slow checkpoint restore when all three run against one
+/// tenant.
 #[must_use]
 pub fn wal_apply_span(source: &'static str, records: usize, links: &WalTraceLinks) -> Span {
     let span = tracing::debug_span!(
@@ -1625,8 +1628,10 @@ pub fn wal_apply_span(source: &'static str, records: usize, links: &WalTraceLink
     span
 }
 
-/// `READ_COMMITTED` replay seam. Implementations must not model `ListOffsets` as a
-/// stable end; recovery terminates on the barrier offset returned by fencing.
+/// `READ_COMMITTED` replay seam.
+///
+/// Implementations must not model `ListOffsets` as a stable end. Recovery ends
+/// on the barrier offset returned by fencing.
 #[async_trait::async_trait]
 pub trait CommittedWalReader: Send + Sync {
     /// Return committed WAL records starting at `start_offset`.
@@ -1640,12 +1645,13 @@ pub trait CommittedWalReader: Send + Sync {
     /// Return committed WAL records together with the producer traces their
     /// headers named, for a caller that will open a `gres.wal_apply` span.
     ///
-    /// Separate from [`CommittedWalReader::committed_from`] because trace
-    /// context lives in Kafka record headers and [`ReplayItem`] deliberately
-    /// carries none: it is a decode-and-apply value, and threading telemetry
-    /// through it would put a trace field on every one of its construction
-    /// sites. A reader that reads no headers — an in-memory log, a test double
-    /// — inherits the default and reports no links, which is exactly true of it.
+    /// This method is separate from [`CommittedWalReader::committed_from`]
+    /// because trace context lives in Kafka record headers and [`ReplayItem`]
+    /// deliberately carries none. [`ReplayItem`] is a decode-and-apply value,
+    /// and telemetry passed through it would put a trace field on every one of
+    /// its construction sites. A reader that reads no headers, such as an
+    /// in-memory log or a test double, inherits the default and reports no
+    /// links, which is exactly true of it.
     async fn committed_from_traced(
         &self,
         start_offset: i64,
@@ -1670,9 +1676,9 @@ pub trait CommittedWalReader: Send + Sync {
 
 /// Read a finite committed WAL interval `(after_offset, barrier_offset]`.
 ///
-/// This shared boundary parser keeps test and live readers honest: records
-/// beyond the supplied barrier are never returned, and a missing barrier is a
-/// hard error rather than a partial transfer tail.
+/// This shared boundary parser applies the same rule to test readers and live
+/// readers. It never returns records beyond the supplied barrier, and a missing
+/// barrier is a hard error and not a partial transfer tail.
 ///
 /// # Errors
 ///
@@ -1925,9 +1931,9 @@ mod tests {
 
     /// `is_empty` has to track `record`, not merely mirror `len`.
     ///
-    /// It has no production caller — it exists because `len` does, and clippy
-    /// requires the pair — so nothing else pins it. A collector that always
-    /// reported itself empty would still attach links, but any caller trusting
+    /// It has no production caller. It exists because `len` does, and clippy
+    /// requires the pair, so nothing else pins it. A collector that always
+    /// reported itself empty would still attach links, but a caller that trusts
     /// the predicate to skip that work would silently stop linking.
     #[test]
     fn the_link_collector_reports_emptiness_from_what_it_recorded() {

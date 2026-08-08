@@ -1,13 +1,13 @@
 //! Transport seam for the background sender.
 //!
-//! The sender needs only a narrow slice of [`crabka_client_core::Client`]:
-//! ship a single-partition `ProduceRequest` to a partition leader (or the
-//! bootstrap connection when the leader is unknown), evict a dead broker
-//! connection, ask whether a broker id is dialable, and refresh cluster
-//! metadata. [`ProduceTransport`] captures exactly that surface so tests can
-//! drive the sender against an in-process broker model
-//! ([`MockTransport`](#tests)) with no socket — letting us reproduce
-//! idempotent-sequencing hangs deterministically.
+//! The sender needs only a narrow slice of [`crabka_client_core::Client`]. It
+//! ships a single-partition `ProduceRequest` to a partition leader, or to the
+//! bootstrap connection when the leader is unknown. It evicts a dead broker
+//! connection, asks whether a broker id is dialable, and refreshes cluster
+//! metadata. [`ProduceTransport`] captures exactly that surface, so tests can
+//! drive the sender against an in-process broker model,
+//! [`MockTransport`](#tests), with no socket. That makes idempotent-sequencing
+//! hangs reproducible.
 //!
 //! [`ClientTransport`] is the thin production adapter over a real `Client`.
 
@@ -20,32 +20,34 @@ use crabka_protocol::owned::{
 
 /// The broker-facing operations the sender performs.
 ///
-/// `send_produce` folds the `Client::broker(id).send` / bootstrap `Client::send`
-/// distinction into one call: `leader = Some(id)` routes to that broker, `None`
-/// uses the bootstrap connection. This mirrors the sender's existing
-/// `BOOTSTRAP_LEADER` fallback while keeping the trait a clean, testable seam.
+/// `send_produce` folds the difference between `Client::broker(id).send` and
+/// the bootstrap `Client::send` into one call. `leader = Some(id)` routes to
+/// that broker, and `None` uses the bootstrap connection. This mirrors the
+/// sender's existing `BOOTSTRAP_LEADER` fallback, and it keeps the trait a
+/// clean, testable seam.
 ///
-/// `async_trait` is used for dyn-compatibility so `SenderConfig` can hold a
-/// `Box<dyn ProduceTransport>` without leaking generics across the whole crate.
+/// The trait uses `async_trait` for dyn-compatibility, so `SenderConfig` can
+/// hold a `Box<dyn ProduceTransport>` without leaking generics across the whole
+/// crate.
 #[async_trait]
 pub(crate) trait ProduceTransport: Send + Sync {
-    /// Send a single-partition `ProduceRequest` to `leader` (a broker id), or to
-    /// the bootstrap connection when `leader` is `None`.
+    /// Send a single-partition `ProduceRequest` to `leader`, which is a broker
+    /// id, or to the bootstrap connection when `leader` is `None`.
     async fn send_produce(
         &self,
         leader: Option<i32>,
         req: ProduceRequest,
     ) -> Result<ProduceResponse, ClientError>;
 
-    /// Drop any pooled connection to `broker_id` so the next send reconnects.
-    /// No-op for the bootstrap connection.
+    /// Drop any pooled connection to `broker_id`, so the next send reconnects.
+    /// This is a no-op for the bootstrap connection.
     fn evict_broker(&self, broker_id: i32);
 
     /// Whether the transport has a dialable address for `broker_id`.
     fn knows_broker(&self, broker_id: i32) -> bool;
 
-    /// Refresh cluster metadata, re-populating the broker-address registry, and
-    /// return the typed response so the sender can update its leader map.
+    /// Refresh cluster metadata, refill the broker-address registry, and
+    /// return the typed response, so the sender can update its leader map.
     async fn refresh_metadata(&self) -> Result<MetadataResponse, ClientError>;
 }
 
@@ -168,8 +170,8 @@ mod tests {
         buf.to_vec()
     }
 
-    /// A non-default `ProduceResponse` (one topic/partition), encoded at
-    /// `version` with the correct `ResponseHeader` prefix.
+    /// A non-default `ProduceResponse` with one topic and partition, encoded
+    /// at `version` with the correct `ResponseHeader` prefix.
     fn produce_v(version: i16) -> Vec<u8> {
         let resp = ProduceResponse {
             responses: vec![TopicProduceResponse {
@@ -193,10 +195,10 @@ mod tests {
     }
 
     /// `ClientTransport` forwards each operation to the underlying `Client`. A
-    /// real in-process broker confirms the delegations are live: `refresh_metadata`
-    /// and `send_produce` return the broker's data (not a default), `knows_broker`
-    /// reflects the pool, and `evict_broker` drops the cached connection so the
-    /// next send re-handshakes.
+    /// real in-process broker confirms that the delegations are live.
+    /// `refresh_metadata` and `send_produce` return the broker's data rather
+    /// than a default, `knows_broker` reflects the pool, and `evict_broker`
+    /// drops the cached connection so that the next send re-handshakes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_transport_delegates_to_client() {
         // One ApiVersions handshake happens per new TCP connection, so this

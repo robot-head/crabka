@@ -174,8 +174,10 @@ pub struct CheckpointMetadata {
 }
 
 /// Conservative read-only planner adapter over verified durable checkpoint
-/// metadata. Checkpoints are range/tenant scoped rather than per-table, so the
-/// verified total is an upper-bound estimate for any table in that range.
+/// metadata.
+///
+/// Checkpoints are range/tenant scoped and not per-table, so the verified
+/// total is an upper-bound estimate for any table in that range.
 impl crabka_pgexec::plan_dist::Stats for CheckpointMetadata {
     fn estimated_bytes(&self, _table_id: u64) -> Option<u64> {
         Some(self.total_bytes)
@@ -235,10 +237,10 @@ pub struct RestoreTail {
 /// Build the `gres.wal_apply` span covering one checkpoint tail replay.
 ///
 /// These spans carry no links. [`RestoreTail`] arrives already decoded into
-/// [`ReplayItem`]s — offset and frame bytes only — so whatever `traceparent`
-/// the producing commits stamped on their records was dropped before the tail
-/// reached here. What the span still answers is how long restoring a checkpoint
-/// tail took and how many frames it covered, which is the question a slow
+/// [`ReplayItem`]s, which hold offset and frame bytes only. Any `traceparent`
+/// that the producing commits stamped on their records was dropped before the
+/// tail reached here. The span still reports how long the checkpoint tail
+/// restore took and how many frames it covered, which is the question a slow
 /// follower rebuild or split raises.
 fn restore_tail_apply_span(tail: &RestoreTail) -> tracing::Span {
     wal_apply_span(
@@ -396,7 +398,7 @@ fn checkpoint_failure(
     None
 }
 
-/// Restore the newest valid checkpoint for `tenant`, skipping incomplete attempts.
+/// Restore the newest valid checkpoint for `tenant` and skip incomplete attempts.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -439,7 +441,7 @@ pub(crate) async fn restore_latest_at_or_before(
     .await
 }
 
-/// Restore the newest valid checkpoint subset for `tenant`, skipping incomplete attempts.
+/// Restore the newest valid checkpoint subset for `tenant` and skip incomplete attempts.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -789,8 +791,8 @@ pub async fn restore_latest_filtered_and_replay_tail(
 
 /// Restore a table-transfer checkpoint closure and replay its matching WAL tail.
 ///
-/// The selector state established from the checkpoint is carried into replay,
-/// preserving the closure when tail tuples introduce new XID dependencies.
+/// The replay carries the selector state established from the checkpoint. This
+/// keeps the closure when tail tuples introduce new XID dependencies.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -841,7 +843,7 @@ pub async fn restore_latest_table_transfer_and_replay_tail(
 ///
 /// Unlike [`restore_latest_table_transfer_and_replay_tail`], this function
 /// never lists checkpoint objects. The manifest key and covered offset form a
-/// transfer boundary selected by the caller; a later checkpoint must not
+/// transfer boundary that the caller selects. A later checkpoint must not
 /// change that boundary.
 /// # Errors
 ///

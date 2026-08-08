@@ -1,11 +1,13 @@
-//! End-to-end: a Rust producer (via `crabka-client-core`) writes records;
-//! a Rust [`crabka_client_consumer::Consumer`] subscribes through a group
-//! and reads them back; commits survive a broker restart.
+//! End-to-end consumer tests against a live broker.
+//!
+//! A Rust producer writes records through `crabka-client-core`. A Rust
+//! [`crabka_client_consumer::Consumer`] subscribes through a group and reads
+//! the records back. The commits survive a broker restart.
 //!
 //! `flavor = "multi_thread", worker_threads = 2` is mandatory here for the
-//! same reason as the JVM acceptance tests: a single-threaded
-//! runtime can't drive both the broker's accept loop and the test body
-//! when the test makes synchronous-style blocking calls into the broker.
+//! same reason as the JVM acceptance tests. A single-threaded runtime cannot
+//! drive both the broker's accept loop and the test body when the test makes
+//! synchronous-style blocking calls into the broker.
 
 use std::{
     collections::HashSet,
@@ -27,8 +29,9 @@ use crabka_protocol::{
 };
 use tempfile::TempDir;
 
-/// Build a `RecordBatch` with one entry per value. Mirrors the helper in
-/// `crates/broker/tests/integration.rs`.
+/// Builds a `RecordBatch` with one entry per value.
+///
+/// This helper is a copy of the helper in `crates/broker/tests/integration.rs`.
 fn record_batch_with_values(values: &[&str]) -> RecordBatch {
     let len_i32 = i32::try_from(values.len()).expect("test fixture small enough for i32");
     let len_i64 = i64::try_from(values.len()).expect("test fixture small enough for i64");
@@ -47,8 +50,9 @@ fn record_batch_with_values(values: &[&str]) -> RecordBatch {
     batch
 }
 
-/// Resolve the topic UUID via Metadata. Produce / Fetch at v ≥ 13 carry
-/// only `topic_id` on the wire.
+/// Resolves the topic UUID through a Metadata request.
+///
+/// Produce and Fetch at v ≥ 13 carry only `topic_id` on the wire.
 async fn topic_id_for(client: &Client, name: &str) -> crabka_protocol::primitives::uuid::Uuid {
     let resp = client
         .send(MetadataRequest {
@@ -128,8 +132,9 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
     assert2::assert!(cr.topics[0].error_code == 0);
 }
 
-/// Produce records to a specific partition index (the plain `produce` helper
-/// hardcodes partition 0).
+/// Produces records to a specific partition index.
+///
+/// The plain `produce` helper always writes to partition 0.
 async fn produce_to_partition(
     broker: &BrokerHandle,
     client: &Client,
@@ -309,15 +314,18 @@ async fn offsets_survive_broker_restart() {
     }
 }
 
-/// Two Range (eager) consumers share a 2-partition topic. When the second
-/// joins, the survivor sheds a partition through the coordinator's *eager*
-/// rejoin path; when it leaves, the survivor re-acquires the freed partition
-/// through that same path, which primes the re-acquired partition's fetch
-/// offset *before* republishing the assignment. Regression coverage for the
-/// prime-before-publish ordering in `coordinator.rs`'s eager branch (the
-/// cooperative branches are covered by `cooperative_rebalance.rs`). A poll
-/// racing the rejoin must not observe a re-acquired partition with no primed
-/// offset and fetch it from 0.
+/// Two Range (eager) consumers share a 2-partition topic.
+///
+/// When the second consumer joins, the survivor gives up a partition through
+/// the coordinator's *eager* rejoin path. When the second consumer leaves, the
+/// survivor takes the freed partition back through that same path. That path
+/// primes the fetch offset of the re-acquired partition *before* it publishes
+/// the assignment again.
+///
+/// This test covers the prime-before-publish order in the eager branch of
+/// `coordinator.rs`. `cooperative_rebalance.rs` covers the cooperative
+/// branches. A poll that races the rejoin must not see a re-acquired partition
+/// with no primed offset and fetch it from 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn eager_rebalance_reacquires_and_primes() {
     let dir = TempDir::new().unwrap();
@@ -412,14 +420,18 @@ async fn eager_rebalance_reacquires_and_primes() {
     broker.shutdown().await;
 }
 
-/// Regression: a commit issued AFTER a rebalance bumped the group generation
-/// must stamp the CURRENT generation, not the start-up snapshot. The commit
-/// path used to read a `generation_id` captured at build time and never kept in
-/// sync as the coordinator rejoined, so the first commit after any rebalance hit
-/// `ILLEGAL_GENERATION (22)` and a long-running block-builder/compactor commit
-/// loop crashed (observed as the demo metrics-compactor crash-loop). Now the
-/// generation is shared (`Arc<AtomicI32>`) and published by the coordinator on
-/// every rejoin, and a rebalance code on commit defers rather than failing.
+/// Regression: a commit after a rebalance stamps the CURRENT generation.
+///
+/// A rebalance bumps the group generation. A commit issued after that rebalance
+/// must use the current generation, not the start-up snapshot. The commit path
+/// read a `generation_id` captured at build time and never kept it in sync as
+/// the coordinator rejoined. So the first commit after any rebalance hit
+/// `ILLEGAL_GENERATION (22)`, and a long-running block-builder/compactor commit
+/// loop crashed. The demo metrics-compactor crash-loop showed this failure.
+///
+/// The coordinator now shares the generation in an `Arc<AtomicI32>` and
+/// publishes it on every rejoin. A rebalance code on commit now defers the
+/// commit instead of failing it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_succeeds_after_rebalance_bumps_generation() {
     let dir = TempDir::new().unwrap();
@@ -525,11 +537,13 @@ use crabka_protocol::owned::{
     offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics},
 };
 
-/// Move a partition's `log_start_offset` forward via `DeleteRecords`
-/// (`api_key=21`), dropping every record below `offset`. Returns the
-/// resulting `low_watermark`. A consumer positioned below the new log start
-/// then sees `OFFSET_OUT_OF_RANGE` on its next `Fetch` — the deterministic
-/// way to induce the truncation/divergence KIP-320 handles.
+/// Moves a partition's `log_start_offset` forward with `DeleteRecords`.
+///
+/// `DeleteRecords` is `api_key=21`. It drops every record below `offset`. This
+/// helper returns the resulting `low_watermark`. A consumer positioned below
+/// the new log start then sees `OFFSET_OUT_OF_RANGE` on its next `Fetch`. This
+/// is the deterministic way to cause the truncation and divergence that
+/// KIP-320 handles.
 async fn delete_records_before(client: &Client, topic: &str, partition: i32, offset: i64) -> i64 {
     let resp = client
         .send(DeleteRecordsRequest {
@@ -554,14 +568,13 @@ async fn delete_records_before(client: &Client, topic: &str, partition: i32, off
 
 /// `OFFSET_OUT_OF_RANGE` recovery under `auto.offset.reset=latest`.
 ///
-/// A consumer parked at offset 0 has its log trimmed out from under it
-/// (`DeleteRecords` moves `log_start` to 5). The next `Fetch` from 0 is below
-/// the log start, so the broker returns `OFFSET_OUT_OF_RANGE` (code 1). The
-/// error-first poll loop resets per policy: `Latest` plants the `i64::MAX`
-/// sentinel, which the following poll resolves to the live log-end via
-/// `ListOffsets(-1)`. Records produced after that point are then consumed
-/// cleanly — proving genuine recovery (no error, fetch resumes), not a silent
-/// stall.
+/// A consumer sits at offset 0 while `DeleteRecords` moves `log_start` to 5.
+/// The next `Fetch` from 0 is below the log start, so the broker returns
+/// `OFFSET_OUT_OF_RANGE` (code 1). The error-first poll loop then resets by
+/// policy: `Latest` writes the `i64::MAX` sentinel. The next poll resolves that
+/// sentinel to the live log-end with `ListOffsets(-1)`. The consumer then reads
+/// the records produced after that point. This shows real recovery, with no
+/// error and a resumed fetch, and not a silent stall.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumer_resets_on_offset_out_of_range_latest() {
     let dir = TempDir::new().unwrap();
@@ -635,15 +648,17 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
 
 /// `OFFSET_OUT_OF_RANGE` recovery under `auto.offset.reset=earliest`.
 ///
-/// A consumer parked at offset 0 has its log trimmed out from under it
-/// (`DeleteRecords` moves `log_start` to 5). The next `Fetch` from 0 is below
-/// the log start, so the broker returns `OFFSET_OUT_OF_RANGE` (code 1). The
-/// error-first poll loop resets per policy: `Earliest` must reset to the
-/// response's `log_start_offset` (5 in this test), NOT to the literal 0,
-/// because resetting to 0 would re-trigger `OFFSET_OUT_OF_RANGE` endlessly
-/// (the real root cause this test catches). After recovery the consumer
-/// resumes from the new log start and delivers the records that survived the
-/// trim, plus any produced afterwards — proving genuine recovery.
+/// A consumer sits at offset 0 while `DeleteRecords` moves `log_start` to 5.
+/// The next `Fetch` from 0 is below the log start, so the broker returns
+/// `OFFSET_OUT_OF_RANGE` (code 1). The error-first poll loop then resets by
+/// policy: `Earliest` must reset to the `log_start_offset` in the response,
+/// which is 5 in this test, and NOT to the literal 0. A reset to 0 would cause
+/// `OFFSET_OUT_OF_RANGE` again without end, and that is the root cause this
+/// test catches.
+///
+/// After recovery the consumer starts again from the new log start. It delivers
+/// the records that survived the trim, and also the records produced after the
+/// trim. This shows real recovery.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumer_resets_on_offset_out_of_range_earliest() {
     let dir = TempDir::new().unwrap();
@@ -711,22 +726,24 @@ async fn consumer_resets_on_offset_out_of_range_earliest() {
     broker.shutdown().await;
 }
 
-/// `auto.offset.reset=none` surfaces `OFFSET_OUT_OF_RANGE` as a
-/// `ConsumerError::LogTruncation` instead of silently resetting.
+/// `auto.offset.reset=none` reports `OFFSET_OUT_OF_RANGE` as an error.
 ///
-/// Same induced divergence as the `Latest` test (`DeleteRecords` trims
-/// `log_start` past the consumer's offset), but the `None` policy means
-/// the OOR arm returns an error rather than a safe offset. `poll()` must
-/// propagate `Err(ConsumerError::LogTruncation { .. })` carrying the
-/// out-of-range fetch offset and the response's `log_start_offset` as
-/// the `safe_offset`.
+/// The consumer returns `ConsumerError::LogTruncation` and does not reset
+/// silently.
 ///
-/// A fresh `None` consumer starts at the `i64::MAX` sentinel (resolved to the
-/// live log-end), so it would never be out of range. To seat a below-trim
-/// position deterministically, an `Earliest` seed consumer first commits
-/// offset 0 for the group (BEFORE the trim), and then `DeleteRecords` moves
-/// `log_start` forward past that committed 0. The `None` consumer then inherits
-/// the below-trim committed offset and hits `OFFSET_OUT_OF_RANGE`.
+/// This test causes the same divergence as the `Latest` test: `DeleteRecords`
+/// trims `log_start` past the consumer's offset. But the `None` policy makes
+/// the OOR arm return an error instead of a safe offset. `poll()` must return
+/// `Err(ConsumerError::LogTruncation { .. })`. That error carries the
+/// out-of-range fetch offset and, as the `safe_offset`, the `log_start_offset`
+/// from the response.
+///
+/// A new `None` consumer starts at the `i64::MAX` sentinel, which resolves to
+/// the live log-end, so it is never out of range. To seat a below-trim position
+/// deterministically, an `Earliest` seed consumer first commits offset 0 for
+/// the group BEFORE the trim. `DeleteRecords` then moves `log_start` forward
+/// past that committed 0. The `None` consumer inherits the below-trim committed
+/// offset and gets `OFFSET_OUT_OF_RANGE`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumer_none_policy_surfaces_log_truncation() {
     let dir = TempDir::new().unwrap();
@@ -838,20 +855,25 @@ async fn consumer_none_policy_surfaces_log_truncation() {
     broker.shutdown().await;
 }
 
-/// The `committed_leader_epoch` consumed at offset-commit survives a broker
-/// restart and is readable back through `OffsetFetch` — the round-trip the
-/// consumer relies on to seed `positions[..].offset_epoch` so a later
-/// leader-epoch bump can trigger KIP-320 validation.
+/// The `committed_leader_epoch` survives a broker restart.
 ///
-/// The records are produced at the partition's natural leader epoch (0), so the
-/// consumer's `Fetch` (`current_leader_epoch = 0`, matching the broker) is not
-/// epoch-fenced and the consumer observes `ConsumerRecord.leader_epoch == 0`.
-/// After consume + commit, the committed epoch must read back as exactly `0`
-/// across a broker restart — crucially NOT the `-1` "no epoch committed"
-/// sentinel an uncommitted partition yields. That `0 != -1` distinction is what
-/// proves the consumer transmitted the consumed epoch through
-/// `OffsetCommit` and it round-tripped through `OffsetFetch`; an unrelated
-/// never-committed group is checked as the `-1` control.
+/// The consumer commits the epoch it consumed, and `OffsetFetch` reads that
+/// epoch back. The consumer needs this round-trip to seed
+/// `positions[..].offset_epoch`, so that a later leader-epoch bump can start
+/// KIP-320 validation.
+///
+/// The test produces the records at the partition's natural leader epoch, which
+/// is 0. The consumer's `Fetch` carries `current_leader_epoch = 0` and matches
+/// the broker, so the broker does not epoch-fence the fetch and the consumer
+/// sees `ConsumerRecord.leader_epoch == 0`. After the consume and the commit,
+/// the committed epoch must read back as exactly `0` across a broker restart.
+/// It must NOT read back as the `-1` "no epoch committed" sentinel that an
+/// uncommitted partition gives.
+///
+/// The difference between `0` and `-1` proves that the consumer sent the
+/// consumed epoch through `OffsetCommit` and that the epoch came back through
+/// `OffsetFetch`. The test checks an unrelated never-committed group as the
+/// `-1` control.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_leader_epoch_survives_restart() {
     let dir = TempDir::new().unwrap();
@@ -957,17 +979,21 @@ async fn committed_leader_epoch_survives_restart() {
     }
 }
 
-/// Regression for the WAL-consumer cold-start hang: a single-member group that
-/// JOINS before its subscribed topic exists gets a 0-partition assignment, and
-/// a Stable one-member group is never sent a broker-driven rebalance — so
-/// recovery depends *solely* on the coordinator noticing, via its metadata
-/// refresh, that the topic appeared, and rejoining. Without that loop the empty
-/// assignment strands forever (the `logs-compactor` / `profiles-block-builder`
-/// hang). No second member ever joins, so this isolates the metadata-driven
-/// rejoin from the heartbeat-driven `REBALANCE_IN_PROGRESS` path. It also guards
-/// the TOCTOU fix: the coordinator seeds its rejoin baseline from the snapshot
-/// the *initial* (empty) assignment was computed against, so a topic created any
-/// time after the join — including during start-up — is still seen as growth.
+/// Regression for the WAL-consumer cold-start hang.
+///
+/// A single-member group that JOINS before its subscribed topic exists gets a
+/// 0-partition assignment. The broker never sends a rebalance to a Stable
+/// one-member group. Recovery depends *solely* on the coordinator: its metadata
+/// refresh must see that the topic appeared, and the coordinator must rejoin.
+/// Without that loop the empty assignment stays empty for ever, which is the
+/// `logs-compactor` and `profiles-block-builder` hang.
+///
+/// No second member ever joins, so this test separates the metadata-driven
+/// rejoin from the heartbeat-driven `REBALANCE_IN_PROGRESS` path. It also
+/// guards the TOCTOU fix: the coordinator seeds its rejoin baseline from the
+/// snapshot that it used for the *initial* empty assignment. So a topic created
+/// at any time after the join, and also during start-up, is still seen as
+/// growth.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cold_start_rejoins_when_subscribed_topic_appears() {
     let dir = TempDir::new().unwrap();

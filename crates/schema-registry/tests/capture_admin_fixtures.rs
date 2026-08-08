@@ -1,18 +1,18 @@
 //! Golden admin-lifecycle capture harness for Crabka Schema Registry slice 3.
 //!
 //! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container against an
-//! in-process Crabka broker (same networking as `capture_compat_fixtures.rs`:
-//! the broker binds `0.0.0.0:9092` and advertises `host.docker.internal:9092`,
-//! while the host connects directly on `127.0.0.1:9092`), then drives the
-//! delete / mode / lookup admin lifecycle against cp's REST API. Two fixtures
-//! are produced:
+//! in-process Crabka broker, with the same networking as
+//! `capture_compat_fixtures.rs`. The broker binds `0.0.0.0:9092` and advertises
+//! `host.docker.internal:9092`, while the host connects directly on
+//! `127.0.0.1:9092`. The harness then drives the delete / mode / lookup admin
+//! lifecycle against cp's REST API. Two fixtures are produced:
 //!
-//!   * `tests/fixtures/admin/rest.json`    — the REST status + parsed body that
-//!     cp returns for every op in the lifecycle (the oracle for the error-code
-//!     and status calibration of slice 3).
-//!   * `tests/fixtures/admin/records.json` — the exact `(offset, key, value)`
-//!     bytes cp wrote to the `_schemas` topic over the lifecycle, dumped by
-//!     fetching partition 0 directly from the host broker.
+//!   * `tests/fixtures/admin/rest.json`: the REST status and parsed body that
+//!     cp returns for every op in the lifecycle. It is the oracle for the
+//!     error-code and status calibration of slice 3.
+//!   * `tests/fixtures/admin/records.json`: the exact `(offset, key, value)`
+//!     bytes cp wrote to the `_schemas` topic over the lifecycle. The harness
+//!     dumps them by fetching partition 0 directly from the host broker.
 //!
 //! ```text
 //! cargo test -p crabka-schema-registry --test capture_admin_fixtures -- --ignored --nocapture
@@ -243,8 +243,8 @@ fn av(n: &str) -> String {
     format!("{{\"type\":\"record\",\"name\":\"{n}\",\"fields\":[]}}")
 }
 
-/// Drive the full delete / mode / lookup lifecycle, recording every op's REST
-/// result into the returned vector (→ `rest.json`).
+/// Drive the full delete / mode / lookup lifecycle and record every op's REST
+/// result into the returned vector, which becomes `rest.json`.
 async fn run_admin_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_json::Value> {
     let mut results: Vec<serde_json::Value> = Vec::new();
 
@@ -397,9 +397,9 @@ async fn run_mode_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_jso
 // ── `_schemas` byte dump ────────────────────────────────────────────────────────
 
 /// Connect host-side directly to `127.0.0.1:9092` and dump every `_schemas`
-/// partition-0 record's `(offset, key, value)` bytes (UTF-8 lossy) to
+/// partition-0 record's `(offset, key, value)` bytes as UTF-8 lossy text to
 /// `records.json`. `fetch_partition` fetches over the given connection with no
-/// leader re-routing, so the direct (non-advertised) connection works.
+/// leader re-routing, so the direct, non-advertised connection works.
 async fn dump_schemas_records() {
     // Resolve the `_schemas` topic_id.
     let mut admin = crabka_client_admin::AdminClient::connect(&["127.0.0.1:9092".to_string()])

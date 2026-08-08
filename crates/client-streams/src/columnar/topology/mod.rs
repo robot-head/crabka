@@ -1,6 +1,8 @@
-//! Native columnar (polars `DataFrame`) topology. Edges carry `DataFrame`s;
-//! a `BatchCodec` bridges Kafka records ↔ `DataFrame`. Operators, graph, driver,
-//! and the broker runtime bridge are added by later tasks.
+//! Native columnar topology over polars `DataFrame`s.
+//!
+//! Edges carry `DataFrame`s. A `BatchCodec` bridges Kafka records ↔
+//! `DataFrame`. Later tasks add the operators, the graph, the driver, and the
+//! broker runtime bridge.
 
 pub mod codec;
 pub mod driver;

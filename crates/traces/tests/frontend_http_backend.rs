@@ -1,7 +1,9 @@
-//! `HttpQuerier` request-shape + Tempo-JSON parse, pinned by a loopback axum
-//! stub. Verifies the querier's real scan-job contract
-//! (`block`/`rowGroupStart`/`rowGroupEnd`), `X-Scope-OrgID`, and that a 404 by-id
-//! response degrades to an empty partial.
+//! `HttpQuerier` request shape and Tempo-JSON parse, pinned by a loopback axum
+//! stub.
+//!
+//! The tests verify the querier's real scan-job contract, which is `block`,
+//! `rowGroupStart` and `rowGroupEnd`. They verify `X-Scope-OrgID`. They also
+//! verify that a 404 by-id response degrades to an empty partial.
 
 use std::{
     net::SocketAddr,

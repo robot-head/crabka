@@ -1,11 +1,13 @@
 //! `OffsetFetch` (`api_key=9`). Reads from `Group.committed_offsets`.
 //!
-//! For v0-v7 the request carries the legacy single-group fields:
-//! `group_id` + `topics: Option<Vec<OffsetFetchRequestTopic>>`. v8+ (KIP-516)
-//! moves to a per-group `groups[]` array and, at v10, keys topics by
-//! `topic_id`; that path is handled in `handle_groups`. Internal offset
-//! storage stays name-keyed, so topic ids are resolved to names at the wire
-//! boundary and echoed back on the response.
+//! For v0 to v7, the request carries the legacy single-group fields:
+//! `group_id` and `topics: Option<Vec<OffsetFetchRequestTopic>>`. From v8,
+//! KIP-516 moves to a per-group `groups[]` array, and at v10 it keys topics by
+//! `topic_id`. `handle_groups` serves that path.
+//!
+//! The internal offset storage stays keyed by name, so the handler resolves
+//! topic ids to names at the wire boundary and echoes the ids back on the
+//! response.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
@@ -260,10 +262,14 @@ async fn fetch_committed(
     response.await.unwrap_or_default()
 }
 
-/// v8+ per-group fetch. Processes `req.groups` into `resp.groups`, leaving
-/// `resp.topics` empty (it is only encoded for v < 8). Offset storage is
-/// name-keyed, so at v10 we resolve each requested `topic_id` → name and
-/// echo the id back; unknown ids return `UNKNOWN_TOPIC_ID` per partition.
+/// Per-group fetch for v8 and above.
+///
+/// It processes `req.groups` into `resp.groups` and leaves `resp.topics`
+/// empty, because the encoder writes `resp.topics` only for v < 8.
+///
+/// The offset storage keys by name, so at v10 this function resolves each
+/// requested `topic_id` to a name and echoes the id back. An unknown id gives
+/// `UNKNOWN_TOPIC_ID` for each partition.
 // per-group loop: ACL + id→name resolve + named/fetch-all branches
 async fn handle_groups(
     broker: &Broker,

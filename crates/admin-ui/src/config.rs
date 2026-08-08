@@ -55,7 +55,7 @@ fn parse_topic_mutation_timeout(input: &str) -> Result<Time, String> {
 #[derive(Debug, Clone, Parser)]
 #[command(name = "crabka-admin-ui")]
 pub struct AdminUiRuntimeArgs {
-    /// Maximum authenticated mutation JSON body size.
+    /// Maximum size of an authenticated mutation JSON body.
     #[arg(
         long,
         env = "CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT",

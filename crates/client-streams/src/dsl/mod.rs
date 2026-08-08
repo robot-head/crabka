@@ -1,7 +1,8 @@
-//! High-level KStream/KTable DSL.
+//! The high-level KStream and KTable DSL.
 //!
-//! The DSL records a typed logical graph, optionally applies JVM-compatible
-//! topology optimizations, and lowers to the Processor-API [`Topology`].
+//! The DSL records a typed logical graph. It can then apply the JVM-compatible
+//! topology optimizations, and it lowers the graph to the Processor-API
+//! [`Topology`].
 //!
 //! [`Topology`]: crate::topology::Topology
 pub(crate) mod builder;

@@ -1,6 +1,8 @@
-//! End-to-end multi-format Streams pipeline, self-contained and self-asserting:
-//! JSON -> Protobuf -> Arrow -> columnar Polars -> summary Protobuf, against an
-//! in-process broker + in-process Schema Registry (no external services).
+//! End-to-end multi-format Streams pipeline, self-contained and self-asserting.
+//!
+//! The stages are JSON, then Protobuf, then Arrow, then columnar Polars, then a
+//! summary Protobuf. It runs against an in-process broker and an in-process
+//! Schema Registry, and it needs no external service.
 //!
 //! Run: `cargo run -p crabka-client-streams --example format_pipeline --features polars,arrow`
 
@@ -60,9 +62,10 @@ mod orders {
 use orders::{OrderProto, OrderSummary};
 
 // docs:begin arrow-codec
-/// Source codec: each Kafka record value is an Arrow-IPC `RecordBatch`; decode
-/// them into one Polars `DataFrame` the columnar engine can process. Bridges
-/// arrow-rs -> polars explicitly (different Arrow memory libraries).
+/// Source codec. Each Kafka record value is an Arrow-IPC `RecordBatch`, and this
+/// codec decodes them into one Polars `DataFrame` that the columnar engine can
+/// process. It bridges arrow-rs to polars explicitly, because the two use
+/// different Arrow memory libraries.
 struct ArrowBlobCodec;
 
 impl BatchCodec for ArrowBlobCodec {
@@ -160,7 +163,8 @@ async fn send_record(producer: &Producer, topic: &str, value: Bytes) {
         .expect("send ack");
 }
 
-/// Poll a fresh consumer group until `want` records arrive (bounded retries).
+/// Poll a fresh consumer group until `want` records arrive. The retries are
+/// bounded.
 async fn drain(bootstrap: &str, topic: &str, group: &str, want: usize) -> Vec<Bytes> {
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap)

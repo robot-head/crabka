@@ -1,4 +1,4 @@
-//! P2: the SQL-routine grammar — `CREATE`/`ALTER`/`DROP` of `FUNCTION`,
+//! P2: the SQL-routine grammar for `CREATE`/`ALTER`/`DROP` of `FUNCTION`,
 //! `PROCEDURE` and `ROUTINE`, plus `CALL` and `DO`.
 
 use assert2::assert;

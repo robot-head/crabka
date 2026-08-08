@@ -1,17 +1,20 @@
-//! Demo-app business metrics (Prometheus, prefix `crabka_demo`).
+//! Demo-app business metrics for Prometheus, with the prefix `crabka_demo`.
 //!
-//! Mirrors the observability services' metric shape: a `prometheus-client`
-//! [`Registry`] wrapped in `Arc<Mutex<…>>`, a cheaply-cloneable [`DemoMetrics`]
-//! bundle handing out counter/histogram handles, and a `/metrics` router merged
-//! onto the admin port (`:9404`) by `serve_admin_from_env_with`. The producer
-//! role increments the `orders_produced` / value / latency handles; the traced
-//! consumer role increments the `orders_processed` / per-stage handles. These
-//! give the demo dashboards a business-level view (orders by category × region ×
-//! payment method, order value distribution, per-stage processing latency)
-//! alongside the RED metrics the backend services already expose.
+//! This module mirrors the metric shape of the observability services. It holds
+//! a `prometheus-client` [`Registry`] in an `Arc<Mutex<…>>`, a
+//! cheaply-cloneable [`DemoMetrics`] bundle that hands out counter and
+//! histogram handles, and a `/metrics` router. `serve_admin_from_env_with`
+//! merges that router onto the admin port `:9404`.
 //!
-//! `prometheus-client` auto-appends `_total` to counters at encode time, so
-//! counter names are registered WITHOUT the suffix.
+//! The producer role increments the `orders_produced`, value, and latency
+//! handles. The traced consumer role increments the `orders_processed` and
+//! per-stage handles. These metrics give the demo dashboards a business-level
+//! view next to the RED metrics that the backend services already expose. That
+//! view holds orders by category, region, and payment method, the order value
+//! distribution, and the per-stage processing latency.
+//!
+//! `prometheus-client` appends `_total` to counters at encode time, so the
+//! code registers counter names WITHOUT the suffix.
 
 use std::sync::Arc;
 
@@ -33,8 +36,8 @@ pub struct ProducedLabel {
     pub payment_method: String,
 }
 
-/// Processed-order label: category × region × terminal outcome
-/// (`fulfilled|fraud_rejected|anomalous`).
+/// Processed-order label: the cross-product of category, region, and terminal
+/// outcome (`fulfilled|fraud_rejected|anomalous`).
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ProcessedLabel {
     pub category: String,
@@ -123,8 +126,9 @@ impl DemoMetrics {
         }
     }
 
-    /// Record one produced order: bumps the per-(category, region, payment)
-    /// counter and observes the value + send latency.
+    /// Record one produced order. The method increments the counter for the
+    /// (category, region, payment) triple, and it observes the value and the
+    /// send latency.
     pub fn record_produced(
         &self,
         category: &str,
@@ -172,8 +176,9 @@ impl Default for DemoMetrics {
     }
 }
 
-/// `/metrics` router serving the `OpenMetrics` text encoding of `registry`.
-/// Merged onto the admin port by `serve_admin_from_env_with`.
+/// `/metrics` router that serves the `OpenMetrics` text encoding of `registry`.
+///
+/// `serve_admin_from_env_with` merges it onto the admin port.
 pub fn metrics_router(registry: SharedRegistry) -> axum::Router {
     axum::Router::new()
         .route("/metrics", axum::routing::get(export))

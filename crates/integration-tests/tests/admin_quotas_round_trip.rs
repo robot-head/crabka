@@ -1,10 +1,12 @@
-//! Integration test: drive `DescribeClientQuotas` (`api_key` 48)
-//! and `AlterClientQuotas` (`api_key` 49) against a live in-process
-//! broker and assert end-to-end wire behavior.
+//! Integration test for the client-quota admin RPCs.
 //!
-//! The pipeline exercised matches the operator's `KafkaUser` reconcile
-//! quota path: read the current per-user state, diff, write the
-//! resulting `(set, remove)` ops, read back.
+//! The test drives `DescribeClientQuotas` (`api_key` 48) and
+//! `AlterClientQuotas` (`api_key` 49) against a live in-process broker. It then
+//! asserts the end-to-end wire behavior.
+//!
+//! The pipeline matches the quota path of the operator's `KafkaUser` reconcile:
+//! read the current per-user state, diff it, write the resulting
+//! `(set, remove)` ops, then read the state back.
 
 use assert2::check;
 use crabka_client_admin::{AdminClient, QuotaOp, diff_user_quotas};

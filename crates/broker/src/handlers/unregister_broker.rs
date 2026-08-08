@@ -1,19 +1,21 @@
-//! `UnregisterBroker` (`api_key=64`). Admin RPC the operator uses to
-//! drop a permanently-dead broker from the cluster's metadata image.
-//! After this lands through Raft, `Metadata` responses no longer
-//! advertise the broker's endpoints; clients stop routing to it.
+//! `UnregisterBroker` (`api_key=64`).
+//!
+//! This is the admin RPC an operator uses to drop a permanently dead broker
+//! from the cluster's metadata image. Once the change lands through Raft,
+//! `Metadata` responses no longer advertise the broker's endpoints, and
+//! clients stop routing to it.
 //!
 //! ## ACL
 //!
-//! `Alter` on `Cluster("kafka-cluster")`. Deny → whole-response
-//! `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
+//! The handler needs `Alter` on `Cluster("kafka-cluster")`. On Deny, the whole
+//! response carries `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
 //!
 //! ## Idempotency
 //!
-//! Unknown `broker_id` returns `INVALID_REQUEST (42)` with an
-//! explanatory message — matches JVM `KafkaApis.handleUnregisterBroker`
-//! shape (it surfaces `BrokerIdNotRegisteredException` as
-//! `INVALID_REQUEST`).
+//! An unknown `broker_id` returns `INVALID_REQUEST (42)` with an explanatory
+//! message. This matches the shape of the JVM
+//! `KafkaApis.handleUnregisterBroker`, which reports
+//! `BrokerIdNotRegisteredException` as `INVALID_REQUEST`.
 
 use bytes::Bytes;
 use crabka_metadata::{MetadataRecord, UnregisterBrokerRecord};

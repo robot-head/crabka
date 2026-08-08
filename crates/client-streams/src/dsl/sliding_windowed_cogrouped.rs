@@ -1,7 +1,9 @@
 //! `SlidingWindowedCogroupedStream<K, VOut>`: sliding-windowed KIP-150 cogroup.
-//! Built by `CogroupedKStream::windowed_by_sliding(SlidingWindows)`. Terminal
-//! `aggregate_explicit` produces `KTable<Windowed<K>, VOut>` over a shared window
-//! store with the KIP-450 `2 * timeDifferenceMs` retention formula.
+//!
+//! `CogroupedKStream::windowed_by_sliding(SlidingWindows)` builds it. The
+//! terminal `aggregate_explicit` produces a `KTable<Windowed<K>, VOut>` over a
+//! shared window store. That store uses the KIP-450 `2 * timeDifferenceMs`
+//! retention formula.
 
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
@@ -26,7 +28,8 @@ where
     K: Any + Send + Sync + Clone,
     VOut: Any + Send + Sync + Clone,
 {
-    /// `windowedBy(SlidingWindows)` → sliding-windowed cogroup (KIP-450).
+    /// `windowedBy(SlidingWindows)`: switch to a sliding-windowed cogroup
+    /// (KIP-450).
     #[must_use]
     pub fn windowed_by_sliding(
         self,
@@ -41,7 +44,7 @@ where
     }
 }
 
-/// Handle produced by [`CogroupedKStream::windowed_by_sliding`]; terminal
+/// Handle produced by [`CogroupedKStream::windowed_by_sliding`]. The terminal
 /// sliding-windowed aggregation consumes it.
 pub struct SlidingWindowedCogroupedStream<K, VOut> {
     builder: Rc<RefCell<InternalStreamsBuilder>>,
@@ -55,15 +58,18 @@ where
     K: Any + Send + Sync + Clone,
     VOut: Any + Send + Sync + Clone,
 {
-    /// Sliding-windowed terminal aggregation → `KTable<Windowed<K>, VOut>`.
+    /// Sliding-windowed terminal aggregation. It produces a
+    /// `KTable<Windowed<K>, VOut>`.
     ///
-    /// Store retention uses the KIP-450 formula: `size = 2 * timeDifferenceMs`
-    /// (matching `sliding_windowed_kgrouped.rs::lower_aggregate`).
+    /// The store retention uses the KIP-450 formula
+    /// `size = 2 * timeDifferenceMs`. This matches
+    /// `sliding_windowed_kgrouped.rs::lower_aggregate`.
     ///
-    /// Note: the returned table carries no suppress factory, so calling
-    /// `.suppress(...)` on it fails at topology-build time. Suppress on windowed
-    /// cogroup outputs is a deferred follow-up (emit semantics are emit-on-update
-    /// across the cogroup surface, per the KIP-150 slice scope).
+    /// Note: the returned table carries no suppress factory, so a
+    /// `.suppress(...)` call on it fails at topology-build time. Suppress on
+    /// windowed cogroup outputs is a deferred follow-up. The emit semantics are
+    /// emit-on-update across the cogroup surface, which is the KIP-150 slice
+    /// scope.
     pub fn aggregate_explicit<KS, VS, I>(
         self,
         init: I,

@@ -1,6 +1,7 @@
-//! Structural diff between two `FileDescriptorProto`, mirroring Confluent's
-//! `SchemaDiff`. Each `Difference` is classified by `compat.rs`. No direction logic
-//! here — the engine calls `check` with (reader, writer) swapped per level.
+//! Structural diff between two `FileDescriptorProto`, which mirrors Confluent's
+//! `SchemaDiff`. `compat.rs` classifies each `Difference`. This module has no
+//! direction logic. The engine calls `check` with (reader, writer) swapped per
+//! level.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,24 +44,29 @@ pub struct Difference {
     pub path: String,
 }
 
-/// The wire-level kind a field encodes. `protox_parse` does NOT resolve named
-/// type references — for a `message`/`enum`-typed field it leaves `type` unset
-/// (so `r#type()` reports the zero value `Double`) and only sets `type_name` to
-/// the short leaf name. So we cannot trust `r#type()` for named types; instead we
-/// resolve `type_name` against the set of enum names declared in the file.
+/// The wire-level kind a field encodes.
+///
+/// `protox_parse` does NOT resolve named type references. For a
+/// `message`-typed or `enum`-typed field it leaves `type` unset, so `r#type()`
+/// reports the zero value `Double`, and it only sets `type_name` to the short
+/// leaf name. We therefore cannot trust `r#type()` for named types. We resolve
+/// `type_name` against the set of enum names declared in the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FieldKind {
     /// A primitive scalar with its concrete wire type.
     Scalar(FieldType),
-    /// A named enum (varint on the wire — same group as int32/int64/bool).
+    /// A named enum. It is a varint on the wire, in the same group as
+    /// int32/int64/bool.
     Enum,
-    /// A named message / group (length-delimited; never group-compatible with a scalar).
+    /// A named message or group. It is length-delimited and never
+    /// group-compatible with a scalar.
     Message,
 }
 
-/// Resolution context: the set of enum leaf-names declared anywhere in each file,
-/// used to tell an `enum`-typed field from a `message`-typed one (both arrive from
-/// `protox_parse` with an unresolved `type` and only a `type_name`).
+/// Resolution context. It is the set of enum leaf-names declared anywhere in
+/// each file, and it tells an `enum`-typed field from a `message`-typed one.
+/// Both arrive from `protox_parse` with an unresolved `type` and only a
+/// `type_name`.
 struct Resolver<'a> {
     orig_enums: BTreeSet<&'a str>,
     upd_enums: BTreeSet<&'a str>,
@@ -97,8 +103,9 @@ impl Resolver<'_> {
     }
 }
 
-/// Collect the leaf-names of every enum declared in the file (top-level and
-/// nested at any depth) so named-type fields can be classified enum-vs-message.
+/// Collect the leaf-names of every enum declared in the file, both top-level
+/// and nested at any depth, so that the code can classify a named-type field as
+/// an enum or a message.
 fn collect_enum_names(file: &FileDescriptorProto) -> BTreeSet<&str> {
     let mut set = BTreeSet::new();
     for e in &file.enum_type {
@@ -292,11 +299,13 @@ fn compare_field(
     );
 }
 
-/// Classify a type change between two resolved field kinds. Group-comparable
-/// kinds (scalars + enums, all of which encode as a single wire value) that
-/// differ are a `FieldScalarKindChanged` (compatible iff same wire group); any
-/// change touching a message is a `FieldKindChanged`; an unchanged named type
-/// with a different referent is a `FieldNamedTypeChanged`.
+/// Classify a type change between two resolved field kinds.
+///
+/// Group-comparable kinds are scalars and enums, which all encode as a single
+/// wire value. Two such kinds that differ give a `FieldScalarKindChanged`,
+/// which is compatible only when the wire group is the same. Any change that
+/// touches a message gives a `FieldKindChanged`. An unchanged named type with a
+/// different referent gives a `FieldNamedTypeChanged`.
 fn compare_field_types(
     path: &str,
     ok: FieldKind,
@@ -342,9 +351,11 @@ fn oneof_member_count(msg: &DescriptorProto, field: &FieldDescriptorProto) -> us
         .count()
 }
 
-/// True iff this field is a real (user-declared) oneof member.
-/// proto3 `optional` generates a SYNTHETIC oneof (`proto3_optional == Some(true)`),
-/// which must NOT be treated as a real oneof membership change.
+/// True only when this field is a real, user-declared oneof member.
+///
+/// proto3 `optional` generates a SYNTHETIC oneof, where
+/// `proto3_optional == Some(true)`. The code must NOT treat that as a real
+/// oneof membership change.
 fn real_oneof(f: &FieldDescriptorProto) -> bool {
     f.oneof_index.is_some() && f.proto3_optional != Some(true)
 }
@@ -376,7 +387,7 @@ fn compare_oneofs(
 }
 
 /// Returns the synthetic map-entry `DescriptorProto` for `field` if it is a
-/// map field inside `containing`.  A map field has `type == Message` and its
+/// map field inside `containing`. A map field has `type == Message`, and its
 /// `type_name` leaf matches a nested type whose `options.map_entry == Some(true)`.
 fn find_map_entry<'a>(
     containing: &'a DescriptorProto,
@@ -525,12 +536,15 @@ fn compare_enum_values(
 }
 
 /// The wire-compatibility group of a single-value field kind, or `None` for a
-/// message (length-delimited, never group-compatible with a single value).
-/// Two fields whose kinds share a non-`None` group are interchangeable on the
-/// wire; differing groups are an across-group (incompatible) scalar change.
+/// message.
 ///
-/// Enums map to the varint group (1), so `int32 ↔ enum` is in-group/compatible —
-/// matching cp-schema-registry's golden verdicts.
+/// A message is length-delimited and never group-compatible with a single
+/// value. Two fields whose kinds share a non-`None` group are interchangeable
+/// on the wire. Differing groups are an across-group scalar change, which is
+/// incompatible.
+///
+/// Enums map to the varint group (1), so `int32 ↔ enum` is in-group and
+/// compatible. This matches cp-schema-registry's golden verdicts.
 fn kind_group(k: FieldKind) -> Option<u8> {
     use FieldType::{
         Bool, Bytes, Fixed32, Fixed64, Int32, Int64, Sfixed32, Sfixed64, Sint32, Sint64,

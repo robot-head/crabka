@@ -1,6 +1,7 @@
-//! Operator-supplied outbound webhook subscriptions (TOML), compiled at load:
-//! the target URL's scheme/host is checked against an allow-list (SSRF guard)
-//! and any filter `JSONPath` is parsed once.
+//! Operator-supplied outbound webhook subscriptions (TOML), compiled at load.
+//!
+//! The loader checks the target URL's scheme and host against an allow-list,
+//! which guards against SSRF. It also parses any filter `JSONPath` once.
 
 use crabka_units::prelude::*;
 use jsonpath_rust::parser::model::JpQuery;
@@ -14,12 +15,13 @@ pub struct OutboundFile {
     #[serde(default)]
     pub subscriptions: Vec<OutboundSubscription>,
     /// Allowed `scheme://host` targets (SSRF allow-list). A target is permitted
-    /// iff its `scheme` + `host` matches an entry. Empty ⇒ deny all (fail-closed).
+    /// iff its `scheme` and `host` match an entry. Empty ⇒ deny all, which is
+    /// fail-closed.
     #[serde(default)]
     pub allowed_targets: Vec<AllowedTarget>,
 }
 
-/// One entry in `[[allowed_targets]]`: an exact `scheme` + `host` pair.
+/// One entry in `[[allowed_targets]]`, an exact `scheme` and `host` pair.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AllowedTarget {
     /// URL scheme, e.g. `"https"` (recommended) or `"http"`.
@@ -34,8 +36,8 @@ pub struct AllowedTarget {
 /// `max_backoff = "30s"`, `request_timeout = "10s"`. A bare number is rejected.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct OutboundSubscription {
-    /// Unique name; used as the consumer-group suffix
-    /// (`__crabka_grpc_wh_{name}`).
+    /// Unique name. It is the consumer-group suffix in
+    /// `__crabka_grpc_wh_{name}`.
     pub name: String,
     /// Consumer group override. Defaults to `__crabka_grpc_wh_{name}`.
     pub group_id: Option<String>,
@@ -46,8 +48,8 @@ pub struct OutboundSubscription {
     /// HMAC-SHA256 signing secret. When set, every POST carries an
     /// `X-Crabka-Signature` header computed over the JSON envelope body.
     pub signing_secret: Option<String>,
-    /// Topic to produce exhausted records to (dead-letter queue). If absent,
-    /// exhausted records are logged and dropped after `max_attempts`.
+    /// Dead-letter queue: the topic that exhausted records go to. If absent,
+    /// the gateway logs and drops exhausted records after `max_attempts`.
     pub dead_letter_topic: Option<String>,
     /// Maximum delivery attempts per record. Must be greater than zero. Default 5.
     #[serde(default = "default_max_attempts")]
@@ -74,18 +76,19 @@ pub struct OutboundSubscription {
     )]
     pub request_timeout: Time,
     /// Optional delivery filter:
-    /// - `json:<JSONPath>` — record delivered iff the path yields a non-null/
-    ///   non-false value.
-    /// - `header:<Name>` — **rejected**: records carry no headers.
+    /// - `json:<JSONPath>`: the gateway delivers the record iff the path gives
+    ///   a value that is neither null nor false.
+    /// - `header:<Name>`: rejected, because records carry no headers.
     pub filter: Option<String>,
-    /// Extra static HTTP headers added to every POST (e.g. `Authorization`).
+    /// Extra static HTTP headers the gateway adds to every POST, for example
+    /// `Authorization`.
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
-    /// When `true`, each record value is run through the injected codec's
-    /// `decode` before delivery: a Confluent-framed value is de-framed to its
-    /// JSON view and delivered as `application/json`. With `RawCodec` (no
-    /// registry) this is inert (decode yields no JSON ⇒ raw delivery). Default
-    /// `false`.
+    /// When `true`, the injected codec's `decode` runs on each record value
+    /// before delivery. It de-frames a Confluent-framed value to its JSON view
+    /// and delivers it as `application/json`. With `RawCodec`, which has no
+    /// registry, this setting is inert, because decode yields no JSON ⇒ raw
+    /// delivery. Default `false`.
     #[serde(default)]
     pub decode_to_json: bool,
 }
@@ -103,16 +106,17 @@ fn default_request_timeout() -> Time {
     secs(10)
 }
 
-/// Validated and compiled form of [`OutboundSubscription`] — the runtime form.
+/// Validated and compiled form of [`OutboundSubscription`], the runtime form.
 ///
-/// `JpQuery` is parsed once at load so each delivery doesn't re-parse.
-/// Secret is stored as raw bytes so callers don't have to re-encode.
+/// The loader parses `JpQuery` once, so no delivery has to re-parse it. It
+/// stores the secret as raw bytes, so no caller has to re-encode it.
 #[derive(Debug, Clone)]
 pub struct CompiledSubscription {
     pub name: String,
     pub group_id: String,
     pub source_topics: Vec<String>,
-    /// Validated (parseable, scheme+host allowed) target URL string.
+    /// Target URL string, already validated as parseable with an allowed
+    /// scheme and host.
     pub target_url: String,
     /// HMAC-SHA256 signing key bytes, or `None` when signing is disabled.
     pub signing_secret: Option<Vec<u8>>,
@@ -121,26 +125,27 @@ pub struct CompiledSubscription {
     pub base_backoff: Time,
     pub max_backoff: Time,
     pub request_timeout: Time,
-    /// Compiled `JSONPath` filter, or `None` (deliver all records).
+    /// Compiled `JSONPath` filter, or `None` to deliver all records.
     pub filter: Option<JpQuery>,
     /// Static extra headers as `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
-    /// Decode each record value to JSON via the injected codec before delivery
-    /// (inert under `RawCodec`). See [`OutboundSubscription::decode_to_json`].
+    /// Decode each record value to JSON with the injected codec before
+    /// delivery. This is inert under `RawCodec`. See
+    /// [`OutboundSubscription::decode_to_json`].
     pub decode_to_json: bool,
 }
 
 impl OutboundFile {
-    /// Validate + compile every subscription.
+    /// Validate and compile every subscription.
     ///
-    /// SSRF check: every `target_url` must parse successfully via
-    /// [`reqwest::Url::parse`] and its `(scheme, host)` must match at least one
-    /// entry in `allowed_targets`. An **empty** `allowed_targets` list denies
-    /// everything (fail-closed).
+    /// SSRF check: every `target_url` must parse with
+    /// [`reqwest::Url::parse`], and its `(scheme, host)` must match at least one
+    /// entry in `allowed_targets`. An empty `allowed_targets` list denies
+    /// everything, which is fail-closed.
     ///
-    /// Filter check: `header:<X>` filters are rejected because
-    /// `ConsumerRecord` exposes no record headers. Only `json:<path>` is
-    /// supported.
+    /// Filter check: this method rejects `header:<X>` filters, because
+    /// `ConsumerRecord` exposes no record headers. It supports only
+    /// `json:<path>`.
     ///
     /// # Errors
     ///

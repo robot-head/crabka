@@ -1,12 +1,12 @@
 //! `PostgreSQL`'s hash-partition row hash, ported byte-exactly.
 //!
-//! Hash partitioning routes a row by `rowHash % modulus == remainder`, so the
-//! hash is not an implementation detail we are free to choose: a leaf partition
-//! stores `(modulus, remainder)` and nothing else, and `satisfies_hash_partition`
-//! is user-visible SQL. Any deviation from `PostgreSQL`'s arithmetic puts rows in
-//! the wrong leaf, and the mistake is only discoverable by reading every row back.
+//! Hash partitioning routes a row by `rowHash % modulus == remainder`, so we
+//! are not free to choose the hash. A leaf partition stores
+//! `(modulus, remainder)` and nothing else, and `satisfies_hash_partition` is
+//! user-visible SQL. Any deviation from `PostgreSQL`'s arithmetic puts rows in
+//! the wrong leaf. You find that mistake only if you read every row back.
 //!
-//! The chain being reproduced, from `src/backend/partitioning/partbounds.c`:
+//! This module reproduces this chain from `src/backend/partitioning/partbounds.c`:
 //!
 //! ```text
 //! rowHash = 0;
@@ -18,21 +18,21 @@
 //! NULL columns contribute nothing, so an all-NULL key hashes to 0 and lands in
 //! the `remainder = 0` partition.
 //!
-//! Every per-type hash below bottoms out in Bob Jenkins' lookup3, in the shape
+//! Every per-type hash below ends in Bob Jenkins' lookup3, in the shape
 //! `PostgreSQL` vendors in `src/common/hashfn.c`. The port targets
-//! **little-endian** byte order, which is where `PostgreSQL`'s word-at-a-time and
-//! byte-at-a-time paths agree; a big-endian server produces different hashes for
-//! the same value, and `PostgreSQL` makes no promise otherwise.
+//! **little-endian** byte order, which is where `PostgreSQL`'s word-at-a-time
+//! and byte-at-a-time paths agree. A big-endian server produces different
+//! hashes for the same value, and `PostgreSQL` makes no promise otherwise.
 //!
 //! A type whose `PostgreSQL` hash function is not ported here is *refused*, not
-//! approximated. Refusing an `INSERT` is recoverable; silently routing a row to
+//! approximated. A refused `INSERT` is recoverable. A row routed silently to
 //! the wrong partition is not.
 
 use crabka_pgtypes::{Datum, datetime};
 
 use crate::error::ExecError;
 
-/// `HASH_PARTITION_SEED` — the fixed seed every partition-key hash is taken with.
+/// `HASH_PARTITION_SEED`: the fixed seed every partition-key hash uses.
 const HASH_PARTITION_SEED: u64 = 0x7a5b_2236_7996_dcfd;
 
 /// lookup3 consumes the key twelve bytes at a time.
@@ -43,8 +43,9 @@ const U32_KEY_LEN: u32 = 4;
 
 /// `PostgreSQL`'s `compute_partition_hash_value` for one row's partition key.
 ///
-/// `values` are the row's partition-key columns in key order. Returns the 64-bit
-/// row hash; the caller takes `% modulus` to pick the leaf partition.
+/// `values` are the row's partition-key columns in key order. This function
+/// returns the 64-bit row hash. The caller takes `% modulus` to pick the leaf
+/// partition.
 pub(crate) fn partition_hash(values: &[Datum]) -> Result<u64, ExecError> {
     let mut row_hash = 0_u64;
     for value in values {
@@ -55,9 +56,10 @@ pub(crate) fn partition_hash(values: &[Datum]) -> Result<u64, ExecError> {
     Ok(row_hash)
 }
 
-/// One partition-key column's extended hash, or `None` for NULL — `PostgreSQL`'s
-/// `if (isnull[i]) continue;`, which is why a NULL column is not the same as a
-/// column hashing to zero.
+/// One partition-key column's extended hash, or `None` for NULL.
+///
+/// This is `PostgreSQL`'s `if (isnull[i]) continue;`. A NULL column is
+/// therefore not the same as a column that hashes to zero.
 ///
 /// The dispatch mirrors the `hashextended` support procedures (`amprocnum = 2`)
 /// that `pg_amproc` records for each type's default hash operator family.
@@ -124,8 +126,8 @@ fn unsupported(type_name: &str) -> ExecError {
 
 /// `hash_combine64` from `src/include/common/hashfn.h`.
 ///
-/// The shifts are 54 and 7 — the 64-bit constants, not the 6 and 2 that the
-/// 32-bit `hash_combine` uses.
+/// The shifts are 54 and 7. These are the 64-bit constants, not the 6 and 2
+/// that the 32-bit `hash_combine` uses.
 fn hash_combine64(a: u64, b: u64) -> u64 {
     a ^ b
         .wrapping_add(0x49a0_f4dd_15e5_a8e3)
@@ -148,11 +150,11 @@ fn hash_uint32_extended(key: u32, seed: u64) -> u64 {
     join(b, c)
 }
 
-/// `hash_bytes_extended` from `src/common/hashfn.c` — lookup3 over `key`.
+/// `hash_bytes_extended` from `src/common/hashfn.c`: lookup3 over `key`.
 ///
 /// `PostgreSQL` has an aligned word-at-a-time path and an unaligned
-/// byte-at-a-time path; on little-endian hardware the two agree by construction,
-/// and this is that shared result.
+/// byte-at-a-time path. On little-endian hardware the two agree by
+/// construction, and this is that shared result.
 fn hash_bytes_extended(key: &[u8], seed: u64) -> Result<u64, ExecError> {
     let (mut a, mut b, mut c) = seeded_state(hash_key_len(key.len() as u64)?, seed);
 
@@ -183,8 +185,8 @@ fn hash_bytes_extended(key: &[u8], seed: u64) -> Result<u64, ExecError> {
 
 /// `PostgreSQL` passes the key length to lookup3 as a C `int`, and its varlena
 /// format caps a value at 1 GB, so a longer key cannot have come from a
-/// `PostgreSQL`-compatible value. Truncating the length would change the hash
-/// and route the row elsewhere, so refuse instead.
+/// `PostgreSQL`-compatible value. A truncated length would change the hash and
+/// route the row elsewhere, so refuse the key instead.
 fn hash_key_len(len: u64) -> Result<u32, ExecError> {
     u32::try_from(len).map_err(|_| {
         ExecError::Unsupported(format!(
@@ -209,7 +211,7 @@ fn seeded_state(key_len: u32, seed: u64) -> (u32, u32, u32) {
     mix(init.wrapping_add(seed_hi), init.wrapping_add(seed_lo), init)
 }
 
-/// The low and high 32-bit halves of a 64-bit value — C's `(uint32) v` and
+/// The low and high 32-bit halves of a 64-bit value: C's `(uint32) v` and
 /// `(uint32) (v >> 32)`.
 fn halves(value: u64) -> (u32, u32) {
     let [b0, b1, b2, b3, b4, b5, b6, b7] = value.to_le_bytes();

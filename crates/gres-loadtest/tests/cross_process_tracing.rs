@@ -1,25 +1,26 @@
 //! Layer 5 of the gres distributed-tracing verification: a client's W3C trace
 //! context survives across real operating-system processes.
 //!
-//! Every other tracing test in the workspace runs in one process, where a span
-//! handle can be cloned from producer to consumer and a propagation bug is
-//! invisible: `TraceCarrier::apply_to` silently no-ops without an installed
-//! propagator, and an in-process test would still see the right context because
-//! the span never actually left. Here the context has to survive being written
-//! into a sqlcommenter tag by the client, parsed by one `crabka-gres` process,
-//! serialised into a `RangeEnvelope` on the mTLS range RPC, reconstituted by a
-//! *different* `crabka-gres` process, and finally exported over OTLP from both
-//! of them to the collector this test runs.
+//! Every other tracing test in the workspace runs in one process. There a span
+//! handle can move from producer to consumer as a clone, and a propagation bug
+//! stays invisible. `TraceCarrier::apply_to` quietly does nothing without an
+//! installed propagator, and an in-process test would still see the right
+//! context, because the span never really left. Here the context must survive
+//! a longer path. The client writes it into a sqlcommenter tag. One
+//! `crabka-gres` process parses it and serialises it into a `RangeEnvelope` on
+//! the mTLS range RPC. A *different* `crabka-gres` process reconstitutes it.
+//! Both processes then export it over OTLP to the collector that this test
+//! runs.
 //!
-//! The topology is two nodes over two ranges. Range 1 (table id `1000000`)
-//! lives on node 1, so a statement issued at node 0's gateway against
-//! `t1000000` must cross the process boundary to be answered — which is the
-//! whole point. The write path is exercised during setup; the traced statement
-//! is a read, because a read produces the smallest span tree that still spans
-//! two processes and so gives the sharpest assertion.
+//! The topology is two nodes over two ranges. Range 1, table id `1000000`,
+//! lives on node 1. A statement issued at node 0's gateway against `t1000000`
+//! must therefore cross the process boundary to get an answer, and that is the
+//! whole point. The setup exercises the write path. The traced statement is a
+//! read, because a read gives the smallest span tree that still spans two
+//! processes, and therefore the sharpest assertion.
 //!
-//! The test skips — it does not fail — when the binaries it launches have not
-//! been built, matching the rest of the harness.
+//! The test skips when the binaries it launches are not built. It does not
+//! fail there. This matches the rest of the harness.
 
 mod support;
 
@@ -35,10 +36,11 @@ use crabka_gres_loadtest::{
 use opentelemetry_proto::tonic::trace::v1::span::SpanKind;
 use support::collector::{FlatSpan, OtlpCollector, RANGE_RPC_SYSTEM};
 
-/// The trace the client claims its statement belongs to. A fixed value, so the
-/// assertions pin *which* trace came back rather than merely that some trace
-/// did — a test that only checked "the ids all match each other" would pass
-/// against a gres that ignored the client and rooted its own trace.
+/// The trace that the client claims its statement belongs to. The value is
+/// fixed, so the assertions pin *which* trace came back, and not only that
+/// some trace did. A test that checked only "the ids all match each other"
+/// would pass against a gres that ignored the client and rooted its own
+/// trace.
 const CLIENT_TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
 /// The client's own span id, which the statement span must name as its parent.
 const CLIENT_SPAN_ID: &str = "00f067aa0ba902b7";
@@ -61,8 +63,9 @@ const REMOTE_TABLE: &str = "t1000000";
 /// both ranges and the traced read has a local counterpart that is not used.
 const LOCAL_TABLE: &str = "t0";
 
-/// How long to wait for the traced statement's spans to be exported. Generous:
-/// two batch exporters have to fire and the host may be loaded.
+/// How long to wait for the export of the traced statement's spans. The value
+/// is generous, because two batch exporters must fire and the host may be
+/// loaded.
 const COLLECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 /// Polling interval while waiting for spans.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -117,10 +120,10 @@ async fn client_trace_context_survives_across_gres_processes() {
 /// Environment every spawned node gets.
 ///
 /// `CRABKA_OTLP_SAMPLE_RATIO=1.0` covers both samplers that could otherwise
-/// drop the trace: the SDK's `ParentBased(TraceIdRatioBased)` head sampler, and
-/// the ingress `Resample` policy that recomputes the client's sampled flag
-/// locally. At 1.0 both keep everything, so a missing span means a missing
-/// span, not an unlucky trace id.
+/// drop the trace. Those are the SDK's `ParentBased(TraceIdRatioBased)` head
+/// sampler, and the ingress `Resample` policy that recomputes the client's
+/// sampled flag locally. At 1.0 both keep everything, so a missing span means
+/// a missing span and not an unlucky trace id.
 fn tracing_env(endpoint: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("CRABKA_OTLP_ENDPOINT".to_owned(), endpoint.to_owned()),
@@ -135,9 +138,10 @@ fn tracing_env(endpoint: &str) -> BTreeMap<String, String> {
 /// Creates the schema, quiesces the collector, then runs exactly one
 /// sqlcommenter-tagged statement and returns every span exported afterwards.
 ///
-/// The connection carrying the traced statement is deliberately still open when
-/// the spans are collected: `gres.session` closes — and exports, as the root of
-/// a trace of its own — only when the client disconnects.
+/// The connection that carries the traced statement is deliberately still open
+/// when the collector gathers the spans. `gres.session` closes only when the
+/// client disconnects, and it exports at that point, as the root of a trace of
+/// its own.
 async fn run_traced_statement(cluster: &Cluster, collector: &OtlpCollector) -> Vec<FlatSpan> {
     let gateway = cluster.sql_endpoint(0);
     let (setup, setup_driver) = connect(&gateway).await;
@@ -198,8 +202,8 @@ async fn wait_for_quiet(collector: &OtlpCollector) {
 /// Accumulates exported spans until the traced statement's tree has arrived
 /// from both processes, or [`COLLECT_TIMEOUT`] elapses.
 ///
-/// Returning on a timeout rather than panicking is deliberate: the assertions
-/// that follow describe precisely what was missing, which is far more useful
+/// A return on a timeout, rather than a panic, is deliberate. The assertions
+/// that follow describe exactly what was missing, which is much more useful
 /// than "timed out".
 async fn collect_until_complete(collector: &OtlpCollector) -> Vec<FlatSpan> {
     let deadline = tokio::time::Instant::now() + COLLECT_TIMEOUT;
@@ -229,9 +233,9 @@ fn traced_spans(received: &[FlatSpan]) -> Vec<&FlatSpan> {
         .collect()
 }
 
-/// The ingress claim: the statement gres executed is a child of the span the
-/// client named in its sqlcommenter tag, in the client's trace — not a root of
-/// a trace gres invented for itself.
+/// The ingress claim. The statement that gres ran is a child of the span the
+/// client named in its sqlcommenter tag, inside the client's trace. It is not
+/// the root of a trace that gres invented for itself.
 fn assert_ingress_context_reached_the_statement(received: &[FlatSpan]) {
     // Every session-tier span exported in this window belongs to the client's
     // trace. The setup traffic was drained and the traced connection is still
@@ -267,8 +271,8 @@ fn assert_ingress_context_reached_the_statement(received: &[FlatSpan]) {
     assert!(statement.kind == SpanKind::Server);
 }
 
-/// The cross-process claim: a served range RPC on one node is the child of the
-/// client-side range RPC span emitted by a *different* node.
+/// The cross-process claim. A served range RPC on one node is the child of the
+/// client-side range RPC span that a *different* node emitted.
 fn assert_trace_crossed_processes(received: &[FlatSpan]) {
     let traced = traced_spans(received);
     assert!(!traced.is_empty(), "the client's trace was never exported");
@@ -307,8 +311,9 @@ fn assert_trace_crossed_processes(received: &[FlatSpan]) {
     assert!(serve.name == "Sql");
 }
 
-/// Connects to a node's SQL front door, returning the client and the driver
-/// task the caller must keep alive for the connection's lifetime.
+/// Connects to a node's SQL front door. It returns the client and the driver
+/// task, which the caller must keep alive for the lifetime of the
+/// connection.
 async fn connect(endpoint: &SqlEndpoint) -> (tokio_postgres::Client, tokio::task::JoinHandle<()>) {
     let (client, connection) = tokio_postgres::Config::new()
         .host(endpoint.addr.ip().to_string())

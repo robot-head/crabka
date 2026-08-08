@@ -1,6 +1,6 @@
 //! `TraceQL` error categories.
 
-/// Errors raised by the `TraceQL` engine.
+/// Errors that the `TraceQL` engine raises.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum TraceqlError {
     #[error("parse error: {0}")]

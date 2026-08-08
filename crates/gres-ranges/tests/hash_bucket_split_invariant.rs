@@ -1,8 +1,8 @@
 //! Every row of a hash bucket must live on exactly one range.
 //!
 //! Hash-equality routing probes a bucket at rowid 0 and answers for the whole
-//! bucket, so a boundary that falls between two rows of one bucket sends a
-//! value to a range that does not store all of its rows.
+//! bucket. A boundary that falls between two rows of one bucket therefore sends
+//! a value to a range that does not store all of that bucket's rows.
 
 use assert2::assert;
 use crabka_gres_ranges::{

@@ -1,7 +1,9 @@
-//! Commit-status log — Postgres' `pg_xact`. Maps each transaction id to its
-//! final outcome; the authority on whether a writer committed. An ABSENT entry
-//! means the xid recorded no outcome: it is in-progress while the transaction
-//! runs, and aborted-equivalent after a crash (it is then in no live snapshot).
+//! Commit-status log, Postgres' `pg_xact`.
+//!
+//! It maps each transaction id to its final outcome, and it is the authority
+//! on whether a writer committed. An ABSENT entry means the xid recorded no
+//! outcome. It is in-progress while the transaction runs, and
+//! aborted-equivalent after a crash, because it is then in no live snapshot.
 
 use crabka_pgkv::{Kv, KvError, WriteOp};
 
@@ -19,8 +21,8 @@ const S_COMMITTED: u8 = 1;
 const S_ABORTED: u8 = 2;
 const S_PREPARED: u8 = 3;
 
-/// Read an xid's status. An absent entry is treated as `InProgress`
-/// (aborted-equivalent once the xid is in no live snapshot — see recovery).
+/// Reads an xid's status. An absent entry counts as `InProgress`. It is
+/// aborted-equivalent once the xid is in no live snapshot. See recovery.
 ///
 /// # Errors
 ///
@@ -33,9 +35,10 @@ pub fn get(kv: &dyn Kv, xid: u64) -> Result<XidStatus, KvError> {
     )
 }
 
-/// Decode a clog entry's bytes. An EMPTY slice (an absent key, via
-/// `kv.get(...)?.unwrap_or_default()`) is `InProgress` — preserving `get`'s
-/// absent-key semantics. A non-empty value decodes its status byte.
+/// Decodes a clog entry's bytes. An EMPTY slice is `InProgress`, which keeps
+/// `get`'s absent-key semantics. Such a slice comes from an absent key through
+/// `kv.get(...)?.unwrap_or_default()`. A non-empty value decodes its status
+/// byte.
 ///
 /// # Errors
 ///
@@ -83,9 +86,9 @@ pub fn put_op(xid: u64, status: XidStatus) -> WriteOp {
     }
 }
 
-/// True iff `value` (a clog entry's bytes) encodes a TERMINAL decision
-/// (Committed/Aborted) — the statuses the write-once global decision must keep.
-/// `Prepared`/`InProgress`/empty are non-terminal.
+/// True iff `value`, a clog entry's bytes, encodes a TERMINAL decision, that
+/// is `Committed` or `Aborted`. These are the statuses the write-once global
+/// decision must keep. `Prepared`, `InProgress`, and empty are non-terminal.
 #[must_use]
 pub fn is_terminal(value: &[u8]) -> bool {
     matches!(value.first(), Some(&S_COMMITTED | &S_ABORTED))

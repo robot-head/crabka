@@ -1,7 +1,7 @@
-//! The durable-timestamp read floor must be O(1) per statement — no store
-//! rescan — while still staying strictly above every durable commit timestamp,
-//! including commits made through another engine sharing the same store and
-//! timestamp state that predates the engine's open.
+//! The durable-timestamp read floor must be O(1) per statement, with no store
+//! rescan. It must still stay strictly above every durable commit timestamp.
+//! That includes commits made through another engine that shares the same store,
+//! and timestamp state that predates the engine's open.
 
 use std::sync::{
     Arc,

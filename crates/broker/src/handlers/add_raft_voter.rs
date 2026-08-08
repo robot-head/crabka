@@ -3,18 +3,21 @@
 //!
 //! ## ACL
 //!
-//! `Alter` on `Cluster("kafka-cluster")`. Deny → whole-response
+//! `Alter` on `Cluster("kafka-cluster")`. A deny gives the whole response
 //! `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
 //!
-//! ## Outcome → error code (mirrors KIP-853 / JVM `KafkaApis`)
+//! ## Error code for each outcome
 //!
-//! - `Committed` → `NONE (0)`
-//! - `NotLeader` → `NOT_LEADER_OR_FOLLOWER (6)` (client retries on the leader)
-//! - `VoterNotCaughtUp` → `INVALID_REQUEST (42)`
-//! - `ReconfigInProgress` → `REQUEST_TIMED_OUT (7)` (another reconfig holds
-//!   the serialization lock; the client should retry)
-//! - `ReconfigRejected` → `INVALID_REQUEST (42)`
-//! - any other raft error → `UNKNOWN_SERVER_ERROR (-1)`
+//! This mapping mirrors KIP-853 and the JVM `KafkaApis`:
+//!
+//! - `Committed` gives `NONE (0)`.
+//! - `NotLeader` gives `NOT_LEADER_OR_FOLLOWER (6)`. The client retries on the
+//!   leader.
+//! - `VoterNotCaughtUp` gives `INVALID_REQUEST (42)`.
+//! - `ReconfigInProgress` gives `REQUEST_TIMED_OUT (7)`. Another reconfig
+//!   holds the serialization lock, and the client should retry.
+//! - `ReconfigRejected` gives `INVALID_REQUEST (42)`.
+//! - Any other raft error gives `UNKNOWN_SERVER_ERROR (-1)`.
 
 use bytes::Bytes;
 use crabka_metadata::{Voter, VoterEndpoint};
@@ -106,9 +109,9 @@ pub(crate) async fn handle(
     )
 }
 
-/// Map a coordinator outcome / raft error onto a Kafka error code +
-/// optional message. Shared by the Add/Remove/Update handlers (Update can
-/// never surface `VoterNotCaughtUp`, but the arm is harmless there).
+/// Maps a coordinator outcome or a raft error onto a Kafka error code and an
+/// optional message. The Add, Remove, and Update handlers share it. Update can
+/// never produce `VoterNotCaughtUp`, but the arm is harmless there.
 pub(crate) fn outcome_to_code(
     outcome: Result<ReconfigOutcome, RaftError>,
 ) -> (i16, Option<String>) {
@@ -214,9 +217,9 @@ mod tests {
         assert!(msg.as_deref() == Some("nope"));
     }
 
-    /// Decode→encode round-trip at min and max versions. Guards against
-    /// the response failing to encode at either end of the version range
-    /// the schema declares.
+    /// Round-trips a decode and then an encode at the minimum and the maximum
+    /// version. This guards against a response that fails to encode at either
+    /// end of the version range that the schema declares.
     #[test]
     fn response_round_trips_at_min_and_max_versions() {
         use crabka_protocol::owned::add_raft_voter_response::{self, AddRaftVoterResponse};

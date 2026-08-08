@@ -1,12 +1,14 @@
 //! Broker-side integration tests for KIP-599 `controller_mutation_rate`.
 //!
 //! Tests:
-//! 1. `controller_mutation_rate_throttles_create_topics` — Set rate=2.0 for alice;
-//!    create topic with 10 partitions; assert `throttle_time_ms` > 0 AND wall ≥800ms.
-//! 2. `unthrottled_create_topics_unaffected` — No quota; create topic; assert
-//!    `throttle_time_ms` == 0.
-//! 3. `controller_mutation_rate_throttles_delete_topics` — Pre-create topic with 10
-//!    partitions; set rate=2.0 for alice; alice deletes; assert `throttle_time_ms` > 0.
+//! 1. `controller_mutation_rate_throttles_create_topics`. Set rate=2.0 for
+//!    alice. Create a topic with 10 partitions. Assert `throttle_time_ms` > 0
+//!    AND wall ≥800ms.
+//! 2. `unthrottled_create_topics_unaffected`. No quota. Create a topic.
+//!    Assert `throttle_time_ms` == 0.
+//! 3. `controller_mutation_rate_throttles_delete_topics`. Pre-create a topic
+//!    with 10 partitions. Set rate=2.0 for alice. Alice deletes. Assert
+//!    `throttle_time_ms` > 0.
 
 use std::{io, net::SocketAddr};
 
@@ -352,8 +354,8 @@ async fn drive_delete_topics_sasl(
 // Integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 1: Set `controller_mutation_rate=2.0` for alice; create topic with 10
-/// partitions (mutations=10, burst=2, overage=8 → delay=4s capped at 1s).
+/// Test 1: Set `controller_mutation_rate=2.0` for alice. Create a topic with
+/// 10 partitions (mutations=10, burst=2, overage=8 → delay=4s capped at 1s).
 /// Assert `throttle_time_ms` > 0 AND wall ≥ 800ms.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn controller_mutation_rate_throttles_create_topics() {
@@ -425,7 +427,8 @@ async fn controller_mutation_rate_throttles_create_topics() {
     );
 }
 
-/// Test 2: No quota configured; create topic; assert `throttle_time_ms` == 0.
+/// Test 2: No quota configured. Create a topic. Assert
+/// `throttle_time_ms` == 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unthrottled_create_topics_unaffected() {
     let (handle, _dir, addr) =
@@ -440,8 +443,8 @@ async fn unthrottled_create_topics_unaffected() {
     assert!(throttle_ms == 0);
 }
 
-/// Test 3: Pre-create topic as admin (no quota); set rate=2.0 for alice;
-/// alice deletes; assert `throttle_time_ms` > 0.
+/// Test 3: Pre-create a topic as admin with no quota. Set rate=2.0 for
+/// alice. Alice deletes. Assert `throttle_time_ms` > 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn controller_mutation_rate_throttles_delete_topics() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(

@@ -69,34 +69,35 @@ impl Range0Frame {
 /// A sink for the content of every committed range-0 frame.
 ///
 /// The tail exists to keep a local catalog store in step with the range-0 log,
-/// so it publishes only an applied offset. Records that are deliberately never
-/// written to the KV — cross-node `NOTIFY` being the first — are visible
-/// nowhere else, hence this seam.
+/// so it publishes only an applied offset. The records the code deliberately
+/// never writes to the KV, of which cross-node `NOTIFY` is the first, are
+/// visible nowhere else. That is why this seam exists.
 ///
-/// `observe` runs inline on the apply path, after the frame's surviving ops have
-/// reached the store and before the applied offset advances. Both halves of that
-/// ordering are load-bearing:
+/// `observe` runs inline on the apply path. It runs after the frame's surviving
+/// ops reach the store, and before the applied offset advances. Both halves of
+/// that ordering are load-bearing:
 ///
-/// * *After* the store write, because the write is fallible. A follower that
-///   fails to apply a frame leaves its applied offset alone, re-fetches the same
-///   frame and applies it again; an observer called first would re-deliver the
-///   frame's records on every retry, even though the WAL carries them once.
-/// * *Before* the offset is published, because a reader gated on the barrier
-///   wakes on the offset. Delivering afterwards would let such a reader observe
-///   the frame's catalog effects before the records it shipped alongside them.
+/// * *After* the store write, because the write can fail. A follower that fails
+///   to apply a frame leaves its applied offset alone, re-fetches the same frame
+///   and applies it again. An observer called first would deliver the frame's
+///   records again on every retry, even though the WAL carries them once.
+/// * *Before* the code publishes the offset, because a reader gated on the
+///   barrier wakes on the offset. A delivery after the publication would let
+///   such a reader observe the frame's catalog effects before the records the
+///   frame shipped beside them.
 ///
-/// The frame is handed over whole, as it was logged — including the records the
-/// merge rules drop instead of storing, which are visible nowhere else. Those
-/// ops are filtered out of the batch the merge builds, not out of the frame, so
-/// they are still here.
+/// The tail hands over the whole frame, as the log holds it. The frame includes
+/// the records the merge rules drop instead of store, and those records are
+/// visible nowhere else. The merge filters those ops out of the batch it builds,
+/// not out of the frame, so they are still here.
 ///
-/// An implementation must never block: a slow observer stalls catalog
-/// application and every read barrier waiting on it. Deciding what to do with a
-/// full downstream queue belongs to the observer, which is why this is an
-/// installed hook rather than a broadcast channel with a buffering policy of its
-/// own.
+/// An implementation must never block. A slow observer stalls catalog
+/// application and every read barrier that waits on it. The observer decides what
+/// to do with a full downstream queue. That is why this is an installed hook and
+/// not a broadcast channel with a buffering policy of its own.
 pub trait Range0FrameObserver: Send + Sync {
-    /// Called with every successfully applied frame's ops, offset not yet published.
+    /// The tail calls this with the ops of every frame it applied successfully,
+    /// before it publishes the offset.
     fn observe(&self, ops: &[WriteOp]);
 }
 
@@ -118,8 +119,9 @@ impl Range0Tail {
 
     /// Create a tail after a checkpoint has restored state through `applied_offset`.
     ///
-    /// Callers must only use this after the checkpoint is durably restored; publishing a
-    /// covered offset before its data is present would make a read barrier unsafe.
+    /// Callers must use this only after the checkpoint is durably restored. A
+    /// covered offset published before its data is present would make a read
+    /// barrier unsafe.
     #[must_use]
     pub fn from_checkpoint(store: Arc<dyn Kv>, applied_offset: i64) -> Self {
         Self::from_applied_offset(store, applied_offset)
@@ -137,17 +139,19 @@ impl Range0Tail {
 
     /// Install the observer that sees every committed frame's ops.
     ///
-    /// Takes `&self` rather than `&mut self` on purpose: a `Range0Tail` is
-    /// cloned to hand out (the substrate follower's `tail()` returns a clone),
-    /// and the handle a caller holds is rarely the one that applies frames. The
-    /// hook is stored behind a shared cell exactly like the offset sender, so
-    /// installing on any clone is visible to all of them.
+    /// This method takes `&self` rather than `&mut self` on purpose. The code
+    /// clones a `Range0Tail` to hand it out, and the substrate follower's
+    /// `tail()` returns such a clone. The handle a caller holds is rarely the
+    /// handle that applies frames. The hook lives behind a shared cell exactly
+    /// like the offset sender, so an install on any clone is visible to all of
+    /// them.
     ///
-    /// A second call replaces the first; there is one observer, not a list.
+    /// A second call replaces the first. There is one observer, not a list.
     ///
     /// # Panics
     ///
-    /// Panics if the observer cell was poisoned by a panicking observer.
+    /// This method panics if an observer panicked earlier and poisoned the
+    /// observer cell.
     pub fn set_frame_observer(&self, observer: Arc<dyn Range0FrameObserver>) {
         *self.observer.lock().expect("range-0 frame observer cell") = Some(observer);
     }
@@ -161,11 +165,11 @@ impl Range0Tail {
 
     /// Apply a committed frame with G-2 merge rules and publish its offset.
     ///
-    /// The installed [`Range0FrameObserver`] is called between the store write
-    /// and the offset publication, and only when the write succeeded — see the
-    /// trait docs for why that window is the only correct one. The frame it sees
-    /// is the logged one, so it remains the only view of the records the merge
-    /// rules drop instead of storing.
+    /// This method calls the installed [`Range0FrameObserver`] between the store
+    /// write and the offset publication, and only when the write succeeded. See
+    /// the trait docs for why that window is the only correct one. The observer
+    /// sees the logged frame, so it stays the only view of the records the merge
+    /// rules drop instead of store.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -205,13 +209,14 @@ impl Range0Tail {
 
     /// Return the store that receives committed range-0 frames.
     ///
-    /// Consumers that use this tail for catalog reads must use this exact handle;
-    /// a separate catalog store could let a barrier certify unrelated state.
+    /// A consumer that uses this tail for catalog reads must use this exact
+    /// handle. A separate catalog store could let a barrier certify unrelated
+    /// state.
     ///
-    /// The handle is stable for the tail's whole life. It is a
-    /// [`SwappableKv`], so a caller that captures it once — the read-only
-    /// range-0 replica does exactly that, at construction — keeps reading the
-    /// live store across a [`Range0Tail::reset_to_checkpoint`].
+    /// The handle is stable for the tail's whole life. It is a [`SwappableKv`],
+    /// so a caller that captures it once keeps reading the live store across a
+    /// [`Range0Tail::reset_to_checkpoint`]. The read-only range-0 replica
+    /// captures it once, at construction.
     #[must_use]
     pub fn store_handle(&self) -> Arc<dyn Kv> {
         Arc::clone(&self.store) as Arc<dyn Kv>
@@ -220,33 +225,35 @@ impl Range0Tail {
     /// Adopt a store rebuilt from a checkpoint that covers `covered_offset`.
     ///
     /// This is the recovery path for a follower whose WAL was trimmed past the
-    /// offset it still needed: the committed frames it was waiting for no
-    /// longer exist, so the only way forward is a fresh restore. `store` must
-    /// be a *different* store that already holds the restored state through
-    /// `covered_offset` — restoring in place would expose partially rebuilt
-    /// state to readers the barrier has already released.
+    /// offset it still needed. The committed frames it waited for no longer
+    /// exist, so the only way forward is a fresh restore. `store` must be a
+    /// *different* store that already holds the restored state through
+    /// `covered_offset`. A restore in place would expose partially rebuilt state
+    /// to readers the barrier has already released.
     ///
-    /// Ordering is load-bearing. The store is installed *before* the offset is
-    /// published, because a reader gated on the barrier waits for
+    /// The ordering is load-bearing. This method installs the store *before* it
+    /// publishes the offset, because a reader gated on the barrier waits for
     /// `applied_offset >= target` and only then reads through
-    /// [`Range0Tail::store_handle`]. Publishing first would let such a reader
+    /// [`Range0Tail::store_handle`]. A publication first would let such a reader
     /// wake on an offset whose data lives in a store it cannot see yet.
     ///
-    /// Frames between the old applied offset and `covered_offset` are never
-    /// replayed. The catalog stays correct — the checkpoint is a superset of
-    /// what they wrote — but anything derived from *observing* frames is lost
-    /// for that window. The one such consumer today is the
-    /// [`Range0FrameObserver`] hook that delivers cross-node `NOTIFY` records,
-    /// so notifications committed in the skipped window are dropped. That is
-    /// at-most-once delivery, and it matches `PostgreSQL`, where a listener that
-    /// loses its connection loses the notifications sent while it was away.
+    /// This method never replays the frames between the old applied offset and
+    /// `covered_offset`. The catalog stays correct, because the checkpoint is a
+    /// superset of what those frames wrote. But anything derived from an
+    /// *observation* of frames is lost for that window. The one such consumer
+    /// today is the [`Range0FrameObserver`] hook that delivers cross-node
+    /// `NOTIFY` records, so the tail drops the notifications committed in the
+    /// skipped window. That is at-most-once delivery, and it matches
+    /// `PostgreSQL`, where a listener that loses its connection loses the
+    /// notifications sent while it was away.
     ///
     /// # Errors
     ///
-    /// Returns [`Range0TailError::NonMonotoneOffset`] when `covered_offset`
-    /// does not advance the applied offset — the offset this tail publishes
-    /// only ever moves forward — or [`Range0TailError::Closed`] when the
-    /// observable is closed.
+    /// Returns [`Range0TailError::NonMonotoneOffset`] when `covered_offset` does
+    /// not advance the applied offset. The offset this tail publishes only ever
+    /// moves forward.
+    ///
+    /// Returns [`Range0TailError::Closed`] when the observable is closed.
     pub fn reset_to_checkpoint(
         &self,
         store: Arc<dyn Kv>,
@@ -286,7 +293,7 @@ impl Range0Tail {
     }
 }
 
-/// Start a range-0 tail seam. Live broker consumption is supplied by substrate.
+/// Start a range-0 tail seam. Substrate supplies the live broker consumption.
 #[must_use]
 pub fn spawn(_bootstrap: impl Into<String>, _tenant: TenantName, store: Arc<dyn Kv>) -> Range0Tail {
     Range0Tail::new(store)
@@ -294,7 +301,7 @@ pub fn spawn(_bootstrap: impl Into<String>, _tenant: TenantName, store: Arc<dyn 
 
 use crate::TenantName;
 
-/// Errors applying or observing the range-0 tail.
+/// Errors from an apply or an observation of the range-0 tail.
 #[derive(Debug, thiserror::Error)]
 pub enum Range0TailError {
     /// A frame payload could not be parsed.
@@ -485,8 +492,8 @@ mod tests {
         }
     }
 
-    /// A store whose batch writes fail until `heal` is called, standing in for a
-    /// backend hitting a transient I/O error.
+    /// A store whose batch writes fail until the test calls `heal`. It stands in
+    /// for a backend that hits a transient I/O error.
     #[derive(Default)]
     struct FlakyKv {
         inner: MemKv,
@@ -607,9 +614,9 @@ mod tests {
     }
 
     /// A failed apply leaves the offset alone, so the follower loop re-fetches
-    /// and re-applies the very same frame. Delivering to the observer before the
-    /// store write would therefore duplicate every record the frame carried, once
-    /// per retry, for a WAL that holds each record exactly once.
+    /// and re-applies the same frame. A delivery to the observer before the
+    /// store write would therefore duplicate every record the frame carried,
+    /// once per retry, for a WAL that holds each record exactly once.
     #[test]
     fn a_frame_whose_apply_fails_delivers_nothing_until_a_retry_succeeds() {
         let store = Arc::new(FlakyKv::default());

@@ -18,8 +18,8 @@ use crate::{
 
 const COL_VALUE: &str = "value";
 
-/// Encode `(fingerprint, timestamp, value)` rows into a `RecordBatch` matching
-/// [`float_sample_schema`].
+/// Encodes `(fingerprint, timestamp, value)` rows into a `RecordBatch` that
+/// matches [`float_sample_schema`].
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn encode_float_samples(rows: &[(u64, i64, f64)]) -> Result<RecordBatch, HistogramCodecError> {
@@ -42,7 +42,7 @@ pub fn encode_float_samples(rows: &[(u64, i64, f64)]) -> Result<RecordBatch, His
     Ok(RecordBatch::try_new(float_sample_schema(), columns)?)
 }
 
-/// Decode a float-sample `RecordBatch` into `(fingerprint, timestamp, value)`
+/// Decodes a float-sample `RecordBatch` into `(fingerprint, timestamp, value)`
 /// rows.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.

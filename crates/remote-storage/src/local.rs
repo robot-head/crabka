@@ -1,9 +1,9 @@
-//! [`LocalTieredStorage`] — a filesystem-backed reference
-//! [`RemoteStorageManager`], mirroring Kafka's test fixture of the same
-//! name. Stores each segment's data + indexes under a per-segment directory
-//! rooted at a configurable path. Useful for tests and single-node setups;
-//! production deployments swap in an object-store-backed implementation
-//! behind the same trait.
+//! [`LocalTieredStorage`] is a filesystem-backed reference
+//! [`RemoteStorageManager`]. It mirrors Kafka's test fixture of the same
+//! name. It stores each segment's data and indexes under a per-segment
+//! directory below a configurable root path. It is useful for tests and
+//! single-node setups. Production deployments use an object-store-backed
+//! implementation behind the same trait.
 
 use std::{
     fs,
@@ -38,14 +38,14 @@ pub struct LocalTieredStorage {
 }
 
 impl LocalTieredStorage {
-    /// Construct a store rooted at `root`. The directory is created lazily
+    /// Constructs a store rooted at `root`. The store creates the directory
     /// on the first copy.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    /// The directory holding all of one segment's files.
+    /// The directory that holds all of one segment's files.
     fn segment_dir(&self, metadata: &RemoteLogSegmentMetadata) -> PathBuf {
         let id = metadata.remote_log_segment_id();
         let tp = &id.topic_id_partition;
@@ -246,7 +246,7 @@ mod tests {
         .unwrap()
     }
 
-    /// Write `contents` to a fresh temp file under `dir` and return its path.
+    /// Writes `contents` to a fresh temp file under `dir` and returns its path.
     fn write_file(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
         let p = dir.join(name);
         let mut f = fs::File::create(&p).unwrap();

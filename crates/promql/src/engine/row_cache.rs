@@ -23,43 +23,49 @@ pub(super) struct FloatRow {
 ///
 /// A range query evaluates the same selector at every step, and each step's
 /// instant scan covers `[step - lookback, step]`. Those windows overlap almost
-/// entirely, so a naive driver re-scans the store once per step (240x for a
-/// 1h/15s query). This cache scans the union window `[start - lookback, end]`
-/// **once per matcher set** and serves each step from the in-memory result -
-/// the store is a pure time-range filter, so a filtered superset is byte-for-byte
-/// what a direct sub-window scan returns (both stores keep `[start, end]`
-/// inclusive). Only requests inside the pre-scanned union use the cache; an
-/// `offset`/`@`-modified or long-`[range]` scan that falls outside it transparently
-/// falls back to a direct scan, so results never change - only the redundant
-/// re-scans are removed.
+/// completely, so a driver without a cache re-scans the store once per step
+/// (240x for a 1h/15s query).
+///
+/// This cache scans the union window `[start - lookback, end]` one time per
+/// matcher set and serves each step from the in-memory result. The store is a
+/// pure time-range filter, so a filtered superset is byte-for-byte what a direct
+/// sub-window scan returns. Both stores keep `[start, end]` inclusive.
+///
+/// Only requests inside the pre-scanned union use the cache. An
+/// `offset`-modified, `@`-modified, or long-`[range]` scan outside the union
+/// falls back to a direct scan. Results therefore never change, and only the
+/// redundant re-scans are removed.
 pub(super) struct RangeScanCacheInner {
     pub(super) full_start_ms: i64,
     pub(super) full_end_ms: i64,
     pub(super) floats: HashMap<String, Arc<Vec<FloatRow>>>,
     /// Per-matcher-set histogram rows over the union window. The instant-selector
-    /// path probes for histogram series at every step (`selector_has_histogram_series`),
-    /// a second per-step store scan alongside the float scan; cache it the same way.
+    /// path probes for histogram series at every step
+    /// (`selector_has_histogram_series`). This probe is a second per-step store
+    /// scan next to the float scan, so the cache holds it the same way.
     pub(super) histograms: HashMap<String, Arc<Vec<HistogramRow>>>,
-    /// Per-matcher-set fingerprint->labels resolution. A series' label set is
-    /// immutable, so the union-window result is a superset of any sub-window's
-    /// active series, and callers only ever use it as a `get(&fp)` lookup keyed
-    /// by rows already filtered to the sub-window - extra entries are never read.
+    /// Per-matcher-set fingerprint->labels resolution. A series label set is
+    /// immutable, so the union-window result is a superset of the active series
+    /// of any sub-window. Callers use it only as a `get(&fp)` lookup keyed by
+    /// rows already filtered to the sub-window, so they never read the extra
+    /// entries.
     pub(super) labels: HashMap<String, Arc<BTreeMap<SeriesFingerprint, Labels>>>,
 }
 
 pub(super) type RangeScanCache = Arc<Mutex<RangeScanCacheInner>>;
 
 tokio::task_local! {
-    /// Active only for the dynamic extent of `PromqlEngine::eval_range_via_planner`'s
-    /// step loop. Nested range evals (subqueries) shadow it with their own cache
-    /// and restore the outer one on exit, so each range scans its own union.
+    /// Active only for the dynamic extent of the step loop in
+    /// `PromqlEngine::eval_range_via_planner`. Nested range evaluations
+    /// (subqueries) shadow it with their own cache and restore the outer cache
+    /// on exit, so each range scans its own union.
     pub(super) static RANGE_SCAN_CACHE: RangeScanCache;
 }
 
 /// Deterministic cache key for a matcher set. `LabelMatcher` is not `Hash`, but
-/// its `Debug` is stable and uniquely identifies the (name, op, value) triples
-/// in order - sufficient because the same selector yields the same matcher list
-/// at every step of a range query.
+/// its `Debug` output is stable and uniquely identifies the (name, op, value)
+/// triples in order. This is enough, because the same selector returns the same
+/// matcher list at every step of a range query.
 pub(super) fn matchers_cache_key(matchers: &[LabelMatcher]) -> String {
     format!("{matchers:?}")
 }

@@ -26,18 +26,18 @@ use crate::{
     replicator_supervisor::materialize_partition,
 };
 
-/// Leader epoch a freshly created partition starts at; the committed
+/// Leader epoch that a freshly created partition starts at. The committed
 /// `PartitionRecord` and the handler-side leader-cache install must agree.
 const INITIAL_LEADER_EPOCH: i32 = 0;
 
 /// Round-robin replica placement.
 ///
 /// Given a sorted broker set `bs = [b0, b1, …, bk-1]` and a partition
-/// count `P`, returns a `Vec<Vec<NodeId>>` of length `P`, where each
+/// count `P`, this returns a `Vec<Vec<NodeId>>` of length `P`, where each
 /// inner vec is `R = replication_factor` long. Partition `p`'s leader
-/// is `bs[(p) % k]`; the remaining replicas are `bs[(p + i) % k]` for
-/// `i in 1..R`. Caller must guarantee `R <= k` (else returns an empty
-/// outer vec and the caller surfaces `INVALID_REPLICATION_FACTOR`).
+/// is `bs[(p) % k]`, and the remaining replicas are `bs[(p + i) % k]` for
+/// `i in 1..R`. The caller must guarantee `R <= k`. Otherwise this returns an
+/// empty outer vec, and the caller reports `INVALID_REPLICATION_FACTOR`.
 pub(crate) fn round_robin_replicas(
     sorted_brokers: &[crabka_raft::NodeId],
     num_partitions: i32,

@@ -47,8 +47,8 @@ pub enum KeyClass {
     Sequence { table_id: u32 },
     /// A transaction commit-status-log key.
     Clog { xid: u64 },
-    /// A cross-node `NOTIFY` record key. WAL-only: it is dropped by every apply
-    /// site and must never reach the store.
+    /// A cross-node `NOTIFY` record key. It is WAL-only. Every apply site
+    /// drops it, and it must never reach the store.
     Notify,
     /// A known system key that is not transferable table state.
     System,
@@ -56,10 +56,10 @@ pub enum KeyClass {
     Unknown,
 }
 
-/// Classify a storage key without accepting trailing bytes as a valid key.
+/// Classifies a storage key and does not accept trailing bytes as a valid key.
 ///
 /// This is the common boundary for transfer and recovery code. In particular,
-/// hash rows and secondary indexes are not silently mistaken for ordinary
+/// the classifier never mistakes hash rows or secondary indexes for ordinary
 /// primary versions.
 #[must_use]
 pub fn classify_key(bytes: &[u8]) -> KeyClass {
@@ -113,7 +113,7 @@ pub fn classify_key(bytes: &[u8]) -> KeyClass {
     }
 }
 
-/// Extract an ordinary table MVCC version identity from `key`.
+/// Extracts an ordinary table MVCC version identity from `key`.
 #[must_use]
 pub fn primary_version_of(key: &[u8]) -> Option<(u32, u64, u64)> {
     match classify_key(key) {
@@ -126,7 +126,7 @@ pub fn primary_version_of(key: &[u8]) -> Option<(u32, u64, u64)> {
     }
 }
 
-/// Extract a table id from an exact per-table sequence key.
+/// Extracts a table id from an exact per-table sequence key.
 #[must_use]
 pub fn sequence_table_id_of(key: &[u8]) -> Option<u32> {
     let prefix = seq_prefix();
@@ -203,13 +203,13 @@ pub fn secondary_index_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
 
 /// Prefix for a local secondary-index equality probe over an encoded key tuple.
 ///
-/// Index lookups (and unique-constraint enforcement) are equality **by these
-/// bytes**, so the values are first put through
-/// [`crabka_pgtypes::canonicalize_row_for_key`]: two values that compare equal
-/// — `numeric` `1.0` and `1.00`, `-0.0` and `0.0`, `interval` `1 mon` and
-/// `30 days`, the same inside `jsonb` or an array — must produce the same key.
-/// Canonicalization is confined to this key path; `encode_row` on a stored row
-/// keeps whatever the value was written as.
+/// Index lookups, and unique-constraint enforcement, are equality **by these
+/// bytes**, so the values go first through
+/// [`crabka_pgtypes::canonicalize_row_for_key`]. Two values that compare equal
+/// must produce the same key. Examples are `numeric` `1.0` and `1.00`, `-0.0`
+/// and `0.0`, `interval` `1 mon` and `30 days`, and the same values inside
+/// `jsonb` or an array. Canonicalization stays on this key path. `encode_row`
+/// on a stored row keeps the value exactly as it was written.
 ///
 /// # Panics
 ///
@@ -243,7 +243,7 @@ pub fn secondary_index_entry_key(
     k
 }
 
-/// Recover the base rowid from a local secondary-index entry key.
+/// Recovers the base rowid from a local secondary-index entry key.
 ///
 /// # Errors
 ///
@@ -276,7 +276,7 @@ pub fn secondary_index_rowid_of(table_id: u32, index_id: u32, key: &[u8]) -> Res
     take_u64(&mut rowid_bytes)
 }
 
-/// Deterministically map value bytes to a power-of-two bucket count.
+/// Maps value bytes deterministically to a power-of-two bucket count.
 ///
 /// # Panics
 ///
@@ -332,20 +332,20 @@ pub fn topology_activation_receipt_prefix(tenant: &str) -> Vec<u8> {
     key
 }
 
-/// Append one length-prefixed part to a catalog key.
+/// Appends one length-prefixed part to a catalog key.
 ///
 /// Every catalog key that names a relation is built from `(schema, name)` this
-/// way rather than from a dotted string, because the two are not
-/// interchangeable: `PostgreSQL` lets a relation called `a.b` in `public` and a
-/// relation called `b` in schema `a` coexist with distinct contents, which no
-/// flattened `schema.relation` string can represent.
+/// way and not from a dotted string, because the two are not interchangeable.
+/// `PostgreSQL` lets a relation called `a.b` in `public` and a relation called
+/// `b` in schema `a` coexist with distinct contents. No flattened
+/// `schema.relation` string can represent that.
 ///
-/// The prefix is a big-endian `u32` byte length rather than a separator byte.
-/// A separator would work — an identifier holds no NUL — but `\0` already
-/// separates sub-families inside the catalog prefix, and a length prefix means
-/// a scan recovers a part exactly instead of guessing at it. That guessing is
-/// what let `CREATE TABLE "a/b"` store a relation the catalog projections
-/// could never see.
+/// The prefix is a big-endian `u32` byte length and not a separator byte. A
+/// separator would work, because an identifier holds no NUL. But `\0` already
+/// separates sub-families inside the catalog prefix, and a length prefix lets
+/// a scan recover a part exactly instead of a guess at it. That guess is what
+/// let `CREATE TABLE "a/b"` store a relation the catalog projections could
+/// never see.
 ///
 /// # Panics
 ///
@@ -358,12 +358,12 @@ pub fn push_key_part(key: &mut Vec<u8>, part: &str) {
     key.extend_from_slice(part.as_bytes());
 }
 
-/// Split a key suffix written by [`push_key_part`] into exactly `count` parts.
+/// Splits a key suffix written by [`push_key_part`] into exactly `count` parts.
 ///
 /// Returns `None` for a suffix that is truncated, carries trailing bytes, or
-/// holds a part that is not UTF-8 — so a scan over a family prefix rejects a
-/// neighbouring sub-family's keys structurally rather than by filtering for a
-/// byte the names were assumed not to contain.
+/// holds a part that is not UTF-8, so a scan over a family prefix rejects a
+/// neighbouring sub-family's keys structurally. It does not filter
+/// for a byte that the names were assumed not to contain.
 #[must_use]
 pub fn key_parts(suffix: &[u8], count: usize) -> Option<Vec<&str>> {
     let mut rest = suffix;
@@ -407,10 +407,10 @@ pub fn catalog_sharding_key(schema: &str, name: &str) -> Vec<u8> {
 
 /// Key for the id-keyed index over stored tables: `/0/catalog_by_id/<id>`.
 ///
-/// A table's identity is its id — row keys, lock identities and foreign-key
+/// A table's identity is its id. Row keys, lock identities, and foreign-key
 /// referents all key on it, and it survives a rename or a move between schemas
-/// where the name does not. Range RPCs therefore ship an id, and the receiving
-/// node needs the relation the id names without a full catalog scan.
+/// where the name does not, so Range RPCs ship an id, and the receiving
+/// node needs the relation that the id names without a full catalog scan.
 #[must_use]
 pub fn catalog_by_id_key(table_id: u32) -> Vec<u8> {
     let mut k = system_prefix("catalog_by_id");
@@ -488,7 +488,7 @@ pub fn user_mapping_key(user: &str, server: &str) -> Vec<u8> {
     k
 }
 
-/// Shared prefix for all foreign-server entries (for listing / IMPORT scans).
+/// Shared prefix for all foreign-server entries, for list and IMPORT scans.
 #[must_use]
 pub fn server_prefix() -> Vec<u8> {
     system_prefix("fsrv")
@@ -511,7 +511,7 @@ pub fn next_xid_key() -> Vec<u8> {
 }
 
 /// Key for the GTM's monotonic global-xid counter: `/0/meta/next_global_xid`.
-/// Lives in range 0's store, disjoint from the per-range `next_xid` key.
+/// It lives in range 0's store, disjoint from the per-range `next_xid` key.
 #[must_use]
 pub fn meta_next_global_xid_key() -> Vec<u8> {
     let mut k = system_prefix("meta");
@@ -520,9 +520,11 @@ pub fn meta_next_global_xid_key() -> Vec<u8> {
 }
 
 /// Key for a DATA range's recovery-scan watermark: the smallest local xid `Li`
-/// at/after which the leadership-rise recovery scan must still look. Lives in the
-/// `meta` namespace (disjoint from the `/0/clog/` prefix, so a clog scan never
-/// returns it). Stored per-range in that range's own store. Value = `Li` big-endian.
+/// at or after which the leadership-rise recovery scan must still look.
+///
+/// The key lives in the `meta` namespace, disjoint from the `/0/clog/` prefix,
+/// so a clog scan never returns it. It is stored per-range in that range's own
+/// store. Value = `Li` big-endian.
 #[must_use]
 pub fn clog_scan_lo_key() -> Vec<u8> {
     let mut k = system_prefix("meta");
@@ -559,7 +561,8 @@ pub fn clog_prefix() -> Vec<u8> {
     system_prefix("clog")
 }
 
-/// Decode the xid from a `/0/clog/<xid>` key, or `None` if `key` is not a clog key.
+/// Decodes the xid from a `/0/clog/<xid>` key. Returns `None` if `key` is not
+/// a clog key.
 #[must_use]
 pub fn clog_xid_of(key: &[u8]) -> Option<u64> {
     let prefix = clog_prefix();
@@ -574,8 +577,8 @@ pub fn clog_xid_of(key: &[u8]) -> Option<u64> {
 ///
 /// Records under this prefix live in the WAL only. Range-0 checkpoints snapshot
 /// the entire KV and the WAL topic never expires by time, so a notify record
-/// that reached the store would become permanent catalog state; every apply
-/// site drops them instead (see [`crate::is_notify_op`]).
+/// that reached the store would become permanent catalog state. Every apply
+/// site drops them instead. See [`crate::is_notify_op`].
 #[must_use]
 pub fn notify_prefix() -> Vec<u8> {
     system_prefix("notify")
@@ -583,9 +586,9 @@ pub fn notify_prefix() -> Vec<u8> {
 
 /// Key for one cross-node `NOTIFY` record: `/0/notify/<seq>`.
 ///
-/// `seq` is written big-endian so records sort — and are therefore observed —
-/// in arrival order. One WAL frame may carry several records, each with its own
-/// `seq`.
+/// `seq` is written big-endian, so records sort in arrival order and are
+/// observed in arrival order. One WAL frame may carry several
+/// records, each with its own `seq`.
 #[must_use]
 pub fn notify_key(seq: u64) -> Vec<u8> {
     let mut k = notify_prefix();
@@ -595,15 +598,14 @@ pub fn notify_key(seq: u64) -> Vec<u8> {
 
 /// True for any key in the `/0/notify/` namespace.
 ///
-/// Deliberately a prefix test rather than an exact-shape test: this predicate
-/// guards the store, so even a malformed key under the notify namespace must be
-/// rejected.
+/// This is a prefix test and not an exact-shape test. The predicate guards the
+/// store, so it must reject even a malformed key under the notify namespace.
 #[must_use]
 pub fn is_notify_key(key: &[u8]) -> bool {
     key.starts_with(&notify_prefix())
 }
 
-/// Recover `(table_id, rowid)` from a primary-index row/version key.
+/// Recovers `(table_id, rowid)` from a primary-index row/version key.
 #[must_use]
 pub fn table_rowid_of(key: &[u8]) -> Option<(u32, u64)> {
     let mut cur = key;
@@ -616,7 +618,8 @@ pub fn table_rowid_of(key: &[u8]) -> Option<(u32, u64)> {
     Some((t, rowid))
 }
 
-/// Recover `(table_id, bucket, rowid)` from a hash-sharded primary row/version key.
+/// Recovers `(table_id, bucket, rowid)` from a hash-sharded primary row or
+/// version key.
 #[must_use]
 pub fn table_bucket_rowid_of(key: &[u8]) -> Option<(u32, u32, u64)> {
     let mut cur = key;
@@ -630,7 +633,7 @@ pub fn table_bucket_rowid_of(key: &[u8]) -> Option<(u32, u32, u64)> {
     Some((t, bucket, rowid))
 }
 
-/// Recover the rowid from a key known to belong to `table_id`.
+/// Recovers the rowid from a key that is known to belong to `table_id`.
 ///
 /// # Errors
 ///
@@ -648,7 +651,8 @@ pub fn rowid_of(table_id: u32, key: &[u8]) -> Result<u64, KvError> {
     take_u64(&mut cur)
 }
 
-/// Recover `(bucket, rowid)` from a hash-sharded key known to belong to `table_id`.
+/// Recovers `(bucket, rowid)` from a hash-sharded key that is known to belong
+/// to `table_id`.
 ///
 /// # Errors
 ///
@@ -689,9 +693,9 @@ mod tests {
         k
     }
 
-    /// Index probes are equality by raw key bytes, so values that compare equal
-    /// MUST build the same key — otherwise a unique index would admit two rows
-    /// `PostgreSQL` considers duplicates.
+    /// Index probes are equality by raw key bytes, so values that compare
+    /// equal MUST build the same key. If they did not, a unique index would
+    /// admit two rows that `PostgreSQL` considers duplicates.
     #[test]
     fn equal_index_values_build_identical_keys() {
         use assert2::assert;
@@ -751,9 +755,9 @@ mod tests {
         );
     }
 
-    /// Key canonicalization must not leak into row storage: a stored `interval`
-    /// keeps the months/days/micros it was given, so `1 mon` renders `1 mon`
-    /// (not the `30 days` its index key folds to).
+    /// Key canonicalization must not leak into row storage. A stored
+    /// `interval` keeps the months, days, and micros it was given, so `1 mon`
+    /// renders `1 mon` and not the `30 days` that its index key folds to.
     #[test]
     fn canonicalization_is_key_only_and_never_rewrites_stored_rows() {
         use assert2::assert;
@@ -911,8 +915,8 @@ mod tests {
         }
     }
 
-    /// A suffix that is truncated, over-long, or not UTF-8 is rejected rather
-    /// than guessed at — a scan over one family prefix must reject a
+    /// The function rejects a suffix that is truncated, over-long, or not
+    /// UTF-8. It does not guess. A scan over one family prefix must reject a
     /// neighbouring family's keys structurally.
     #[test]
     fn key_parts_rejects_a_suffix_it_did_not_write() {

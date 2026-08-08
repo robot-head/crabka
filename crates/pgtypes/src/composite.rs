@@ -1,16 +1,16 @@
-//! `PostgreSQL`'s composite (record) text format — `record_out` and the field
+//! `PostgreSQL`'s composite (record) text format: `record_out` and the field
 //! splitter behind `record_in`.
 //!
-//! The output side renders `(f1,f2,…)`, writing a NULL field as nothing and
-//! double-quoting any field that is empty or contains a quote, a backslash, a
-//! parenthesis, a comma or whitespace. The input side is the exact inverse: it
-//! splits a literal into per-field strings (`None` for a NULL field) without
-//! knowing the field types, leaving each field's own input function to the
-//! caller.
+//! The output side renders `(f1,f2,…)`. It writes a NULL field as nothing, and
+//! it puts double quotes around any field that is empty or contains a quote, a
+//! backslash, a parenthesis, a comma or whitespace. The input side is the exact
+//! inverse. It splits a literal into per-field strings, with `None` for a NULL
+//! field, and it does not know the field types. The caller supplies each
+//! field's own input function.
 
 use crate::error::TypeError;
 
-/// `PostgreSQL`'s `record_out`, given each field already rendered to text
+/// `PostgreSQL`'s `record_out`, with each field already rendered to text
 /// (`None` for a NULL field).
 #[must_use]
 pub fn record_out(fields: &[Option<String>]) -> String {
@@ -37,9 +37,10 @@ pub fn record_out(fields: &[Option<String>]) -> String {
     out
 }
 
-/// Whether `record_out` wraps this field in double quotes: `PostgreSQL` quotes
-/// an empty field (so it is not read back as NULL) and any field holding a
-/// character that would otherwise be structural.
+/// Whether `record_out` wraps this field in double quotes.
+///
+/// `PostgreSQL` quotes an empty field, so that it is not read back as NULL. It
+/// also quotes any field that holds a character that is otherwise structural.
 #[must_use]
 pub fn needs_quoting(text: &str) -> bool {
     text.is_empty()
@@ -50,24 +51,25 @@ pub fn needs_quoting(text: &str) -> bool {
 
 /// Split a composite literal into its fields, `None` for a NULL field.
 ///
-/// This is the structural half of `record_in`: `PostgreSQL` requires the outer
-/// parentheses (whitespace either side of them is allowed), reads a zero-length
-/// field as NULL, and un-doubles `""` / un-escapes `\x` inside a quoted field.
-/// It does **not** trim whitespace around a field — `'( 1 , a )'::t_rec` is
-/// `(1," a ")`, because `int4in` trims its own input and `textin` does not — so
-/// each field's text arrives here exactly as written and the caller's per-field
-/// input function decides what to do with it.
+/// This is the structural half of `record_in`. `PostgreSQL` requires the outer
+/// parentheses, and it allows whitespace on either side of them. It reads a
+/// zero-length field as NULL, and it un-doubles `""` and un-escapes `\x` inside
+/// a quoted field. It does **not** trim whitespace around a field:
+/// `'( 1 , a )'::t_rec` is `(1," a ")`, because `int4in` trims its own input and
+/// `textin` does not. Each field's text therefore arrives here exactly as
+/// written, and the caller's per-field input function decides what to do with
+/// it.
 ///
-/// A zero-field composite cannot be told apart from a one-NULL-field one by the
-/// literal alone (`PostgreSQL` drives the split from the target type's column
-/// count), so `()` yields one NULL field and the caller reconciles it against a
-/// zero-column composite.
+/// The literal alone cannot tell a zero-field composite apart from a composite
+/// with one NULL field, because `PostgreSQL` drives the split from the target
+/// type's column count. `()` therefore yields one NULL field, and the caller
+/// reconciles it against a zero-column composite.
 ///
 /// # Errors
 ///
-/// [`TypeError::Coded`] carrying `PostgreSQL`'s 22P02 `malformed record
-/// literal` when the literal has no leading `(`, no closing `)`, or junk after
-/// the closing parenthesis.
+/// This function returns [`TypeError::Coded`] with `PostgreSQL`'s 22P02
+/// `malformed record literal` when the literal has no leading `(`, no closing
+/// `)`, or junk after the closing parenthesis.
 pub fn record_fields(literal: &str) -> Result<Vec<Option<String>>, TypeError> {
     let body = literal
         .trim_start()
@@ -140,8 +142,9 @@ fn finish_field(field: String, saw_quotes: bool) -> Option<String> {
 }
 
 /// `PostgreSQL`'s `malformed record literal` (22P02). The `DETAIL` line it also
-/// emits is not part of the wire message crabka reports, so the detail argument
-/// documents which of `record_in`'s failures this is rather than being printed.
+/// emits is not part of the wire message crabka reports. The detail argument
+/// therefore documents which of `record_in`'s failures this is, and the
+/// function does not print it.
 #[must_use]
 pub fn malformed(literal: &str, _detail: &str) -> TypeError {
     TypeError::Coded {
@@ -177,8 +180,8 @@ mod tests {
         }
     }
 
-    /// The inverse: each literal is one `PostgreSQL` renders, read back into the
-    /// fields it came from.
+    /// The inverse: each literal is one that `PostgreSQL` renders, read back
+    /// into the fields it came from.
     #[test]
     fn record_fields_is_the_inverse_of_record_out() {
         let cases: &[(&str, &[Option<&str>])] = &[

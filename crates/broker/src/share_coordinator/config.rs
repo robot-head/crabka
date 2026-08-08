@@ -2,8 +2,8 @@
 
 use crabka_units::{ByteSize, mebibytes};
 
-/// Not `Eq`: the recovery read budget is a quantity, whose `f64` storage is
-/// only `PartialEq`.
+/// This struct is not `Eq`. The recovery read budget is a quantity, and its
+/// `f64` storage is only `PartialEq`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShareCoordinatorConfig {
     pub state_topic_num_partitions: i32,

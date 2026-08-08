@@ -1,5 +1,5 @@
-//! Produce via `ProduceCore` against an in-process broker; read the record
-//! back with a native consumer to prove it landed.
+//! Produce through `ProduceCore` against an in-process broker, then read the
+//! record back with a native consumer to prove that it landed.
 
 use std::{collections::BTreeMap, sync::Arc};
 

@@ -7,35 +7,37 @@
 //! KIP-966 end-to-end: offset-aware **unclean recovery** elects the survivor
 //! with the most complete log, not merely the first alive replica.
 //!
-//! Uses a 3-broker PLAINTEXT cluster (same rationale as `tests/elect_leaders.rs`:
-//! a 3-node raft quorum survives one dead node, and the authorizer compat
-//! shim lets the wire path through without SASL).
+//! The test uses a 3-broker PLAINTEXT cluster, for the same reason as
+//! `tests/elect_leaders.rs`. A 3-node raft quorum survives one dead node, and
+//! the authorizer compat shim lets the wire path through without SASL.
 //!
 //! Scenario (`unclean_recovery_elects_longest_log_replica`):
 //!
-//! 1. 3-broker cluster; topic "t", 1 partition, RF=3 → replicas `[1, 2, 3]`.
-//! 2. Set `unclean.recovery.strategy=Aggressive` on the topic so the UNCLEAN
+//! 1. A 3-broker cluster with topic "t", 1 partition, and RF=3, so the
+//!    replicas are `[1, 2, 3]`.
+//! 2. Set `unclean.recovery.strategy=Aggressive` on the topic, so the UNCLEAN
 //!    election routes through the offset-aware Unclean Recovery Manager (URM).
-//! 3. Take the partition offline by injecting a `PartitionRecord` whose
-//!    leader + ISR is a dead phantom node (99). Liveness reports 99 dead, so
-//!    the partition has no live leader and an empty (of-alive-members) ISR.
-//!    Demoting the leader to a non-existent broker also stops the real
-//!    replication fetchers, which keeps the next step deterministic.
-//! 4. Force the replicas' local logs to **diverge** deterministically using
-//!    the `produce_records_for_test` accessor — directly appending to each
-//!    broker's hosted partition log so the per-broker LEOs differ, with
-//!    broker 2 given the strictly-highest LEO. All three keep
-//!    `current_leader_epoch == 0`, so the selection tiebreak is decided
-//!    purely by `log_end_offset`. Broker 2 must win even though broker 1 is
-//!    the first alive replica — that distinction is the whole point.
+//! 3. Take the partition offline. The test injects a `PartitionRecord` whose
+//!    leader and ISR is a dead phantom node, 99. Liveness reports 99 dead, so
+//!    the partition has no live leader, and its ISR holds no live member. A
+//!    demotion of the leader to a broker that does not exist also stops the
+//!    real replication fetchers, which keeps the next step deterministic.
+//! 4. Force the replicas' local logs to **diverge** deterministically with the
+//!    `produce_records_for_test` accessor. It appends directly to each
+//!    broker's hosted partition log, so the per-broker LEOs differ, and broker
+//!    2 gets the strictly highest LEO. All three keep
+//!    `current_leader_epoch == 0`, so only `log_end_offset` decides the
+//!    selection tiebreak. Broker 2 must win even though broker 1 is the first
+//!    alive replica. That distinction is the point of the test.
 //! 5. Trigger recovery with `ElectLeaders(UNCLEAN)` sent to the raft leader.
-//!    The URM polls brokers 1/2/3 over the real `GetReplicaLogInfo` wire path
-//!    and elects the highest-LEO survivor.
-//! 6. Assert the new partition leader == broker 2 (highest LEO), NOT broker 1
-//!    (first alive). ISR becomes `[2]`.
+//!    The URM polls brokers 1, 2, and 3 over the real `GetReplicaLogInfo` wire
+//!    path, and elects the survivor with the highest LEO.
+//! 6. Assert that the new partition leader is broker 2, the highest LEO, and
+//!    NOT broker 1, the first alive replica. The ISR becomes `[2]`.
 //!
-//! Gated to non-Windows to match the multi-broker test convention (openraft
-//! `debug_assert!` races on the hosted Windows scheduler are unrelated).
+//! This test is gated to non-Windows, to match the multi-broker test
+//! convention. The openraft `debug_assert!` races on the hosted Windows
+//! scheduler are unrelated.
 
 use std::{io, net::SocketAddr, time::Duration};
 
@@ -65,8 +67,8 @@ const ELECT_LEADERS_VERSION: i16 = 2;
 // independently so a small duplicate keeps the helper local + simple.)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Single length-prefixed request/response exchange over a **PLAINTEXT**
-/// connection. Encodes a Kafka request header (flexible or not), writes the
+/// One length-prefixed request and response exchange over a **PLAINTEXT**
+/// connection. It encodes a Kafka request header, flexible or not, writes the
 /// frame, reads one response frame, strips the response header, and returns
 /// the body bytes.
 async fn round_trip(
@@ -113,8 +115,8 @@ async fn round_trip(
     Ok(cur.to_vec())
 }
 
-/// Create a topic on a PLAINTEXT broker. The authorizer compat shim
-/// (no `super_users`, no ACLs) lets the request through.
+/// Creates a topic on a PLAINTEXT broker. The authorizer compat shim, with no
+/// `super_users` and no ACLs, lets the request through.
 async fn create_topic_plaintext(
     addr: SocketAddr,
     name: &str,
@@ -152,8 +154,8 @@ async fn create_topic_plaintext(
     );
 }
 
-/// Drive `ElectLeaders` over a fresh PLAINTEXT connection. Asserts the
-/// top-level `error_code == 0` and returns per-partition
+/// Drives `ElectLeaders` over a fresh PLAINTEXT connection. It asserts that
+/// the top-level `error_code == 0`, and returns the per-partition
 /// `(partition_id, error_code)` rows for `topic`.
 async fn drive_elect_leaders(
     addr: SocketAddr,
@@ -204,14 +206,14 @@ async fn drive_elect_leaders(
 // Polling helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Wait until `handle` sees `(topic, partition)` present in its metadata image.
+/// Waits until `handle` sees `(topic, partition)` in its metadata image.
 async fn wait_partition_hosted(handle: &BrokerHandle, topic: &str, partition: i32) {
     // Event-driven: `has_partition` reads the committed metadata image, which is
     // exactly the source `wait_until_partition_present` subscribes to.
     handle.wait_until_partition_present(topic, partition).await;
 }
 
-/// Wait until `handle`'s metadata image reports `leader` as the leader for
+/// Waits until `handle`'s metadata image reports `leader` as the leader for
 /// `(topic, partition)`.
 async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i32, leader: u64) {
     // Event-driven: await the metadata image whose leader == expected (the image
@@ -224,7 +226,7 @@ async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i3
         .await;
 }
 
-/// Wait until the ISR for `(topic, partition)` is exactly `expected`.
+/// Waits until the ISR for `(topic, partition)` is exactly `expected`.
 async fn wait_partition_isr_only(
     handle: &BrokerHandle,
     topic: &str,
@@ -251,10 +253,12 @@ async fn wait_partition_isr_only(
 // Test
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 3-broker PLAINTEXT cluster, RF=3 topic (replicas = `[1, 2, 3]`).
+/// A 3-broker PLAINTEXT cluster with an RF=3 topic, whose replicas are
+/// `[1, 2, 3]`.
 ///
-/// Proves the offset-aware unclean-recovery path elects the survivor with the
-/// **highest LEO**, distinguishing it from a naive "first-alive replica" pick.
+/// This test proves that the offset-aware unclean-recovery path elects the
+/// survivor with the **highest LEO**. That result is different from a simple
+/// "first alive replica" pick.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unclean_recovery_elects_longest_log_replica() {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();

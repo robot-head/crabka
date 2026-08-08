@@ -1,10 +1,11 @@
 //! Logs-service Prometheus metrics.
 //!
-//! Shared metric spec uniform across the LGTM observability services: a
-//! `prometheus-client` [`Registry`] (prefix `crabka_logs`) wrapped in
-//! `Arc<Mutex<…>>` so the `/metrics` exporter can lock it while the cheaply
-//! cloneable [`ServiceMetrics`] hands out counter / histogram handles that the
-//! ingest (distributor) and query (querier) handlers increment directly.
+//! This metric spec is the same across the LGTM observability services. It is
+//! a `prometheus-client` [`Registry`] with prefix `crabka_logs`, wrapped in
+//! `Arc<Mutex<…>>` so the `/metrics` exporter can lock it. The cheaply
+//! cloneable [`ServiceMetrics`] hands out counter and histogram handles, and
+//! the ingest (distributor) and query (querier) handlers increment those
+//! handles directly.
 //!
 //! `prometheus-client` auto-appends `_total` to counters at encode time, so
 //! counter names are registered WITHOUT the suffix.
@@ -22,9 +23,9 @@ use prometheus_client::{
 };
 use tokio::sync::Mutex;
 
-/// Shared registry owning every metric this service emits. Wrapped in
-/// `Arc<Mutex<…>>` because `prometheus-client` requires `&mut Registry` to
-/// register and the exporter takes a read lock at scrape time.
+/// Shared registry that owns every metric this service emits. It is wrapped in
+/// `Arc<Mutex<…>>` because `prometheus-client` needs `&mut Registry` to
+/// register, and the exporter takes a read lock at scrape time.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
 /// Ingest request outcome label (`status="ok"|"error"`).
@@ -40,14 +41,14 @@ pub struct RouteStatusLabel {
     pub status: String,
 }
 
-/// Per-tenant ingest label (`tenant="…"`), paired with the accepted-lines
-/// counter so ingest volume can be attributed per tenant.
+/// Per-tenant ingest label (`tenant="…"`). It pairs with the accepted-lines
+/// counter, so the service can attribute ingest volume per tenant.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct TenantLabel {
     pub tenant: String,
 }
 
-/// Query route label (`route="query"`), paired with the per-route latency
+/// Query route label (`route="query"`). It pairs with the per-route latency
 /// histogram family.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct RouteLabel {
@@ -55,9 +56,10 @@ pub struct RouteLabel {
 }
 
 /// Cheaply-clonable bundle of metric handles plus the shared registry.
-/// Construct once in the binary's `run()` before role dispatch; clone into the
-/// distributor and querier state structs (each clone is a handful of
-/// `Arc::clone`s).
+///
+/// Construct it once in the binary's `run()` before role dispatch, then clone
+/// it into the distributor and querier state structs. Each clone is a handful
+/// of `Arc::clone`s.
 #[derive(Clone)]
 pub struct ServiceMetrics {
     pub registry: SharedRegistry,
@@ -71,8 +73,9 @@ pub struct ServiceMetrics {
     /// tenant-agnostic `ingest_items` counter with per-tenant attribution.
     pub ingest_lines: Family<TenantLabel, Counter>,
     // COMPACT (compactor role).
-    /// Log blocks durably written to object storage by the compactor (one
-    /// increment per persisted [`crabka_blockstore::BlockDescriptor`]).
+    /// Log blocks that the compactor durably wrote to object storage. There
+    /// is one increment per persisted
+    /// [`crabka_blockstore::BlockDescriptor`].
     pub blocks_written: Counter,
     // QUERY (querier role).
     pub query_requests: Family<RouteStatusLabel, Counter>,
@@ -80,7 +83,8 @@ pub struct ServiceMetrics {
 }
 
 impl ServiceMetrics {
-    /// Build a fresh registry, register every metric, and return the bundle.
+    /// Builds a fresh registry, registers every metric, and returns the
+    /// bundle.
     #[must_use]
     pub fn new() -> Self {
         let mut registry = Registry::with_prefix("crabka_logs");
@@ -159,12 +163,15 @@ impl ServiceMetrics {
         }
     }
 
-    /// Record one log-ingest request outcome: bumps the per-status request
-    /// counter, accumulates bytes / lines, and observes the handler latency.
-    /// `ok=false` covers any 4xx/5xx (validation, rate-limit, decode, or
-    /// produce failure); the WAL/produce-specific failure counter is bumped
-    /// separately via [`Self::record_wal_append_failure`] only at the actual
-    /// produce error site so a 4xx client error does not inflate it.
+    /// Records one log-ingest request outcome. It bumps the per-status
+    /// request counter, accumulates bytes and lines, and observes the handler
+    /// latency.
+    ///
+    /// `ok=false` covers any 4xx or 5xx, that is a validation, rate-limit,
+    /// decode, or produce failure. [`Self::record_wal_append_failure`] bumps
+    /// the WAL/produce-specific failure counter separately, and only at the
+    /// actual produce error site, so a 4xx client error does not inflate
+    /// it.
     pub fn record_ingest(&self, ok: bool, body: ByteSize, items: u64, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
@@ -177,16 +184,18 @@ impl ServiceMetrics {
         self.ingest_duration.observe(elapsed.secs_f64());
     }
 
-    /// Bump the WAL/produce append-failure counter. Called only when the
-    /// failure was an actual WAL (Kafka produce) error, not a client/validation
-    /// 4xx.
+    /// Bumps the WAL/produce append-failure counter. Callers call it only
+    /// when the failure was an actual WAL (Kafka produce) error, and not a
+    /// client or validation 4xx.
     pub fn record_wal_append_failure(&self) {
         self.wal_append_failures.inc();
     }
 
-    /// Add `lines` accepted log lines to the per-tenant ingest-lines counter.
-    /// Called once per accepted ingest request from the push handlers, where
-    /// the tenant (`X-Scope-OrgID`) and normalized record count are both known.
+    /// Adds `lines` accepted log lines to the per-tenant ingest-lines counter.
+    ///
+    /// The push handlers call it once per accepted ingest request, where both
+    /// the tenant (`X-Scope-OrgID`) and the normalized record count are
+    /// known.
     pub fn record_ingest_lines(&self, tenant: &str, lines: u64) {
         if lines == 0 {
             return;
@@ -198,13 +207,13 @@ impl ServiceMetrics {
             .inc_by(lines);
     }
 
-    /// Bump the compactor blocks-written counter once per log block durably
-    /// persisted to object storage.
+    /// Bumps the compactor blocks-written counter once per log block that is
+    /// durably persisted to object storage.
     pub fn record_block_written(&self) {
         self.blocks_written.inc();
     }
 
-    /// Record one querier request: bumps the per-(route, status) request
+    /// Records one querier request. It bumps the per-(route, status) request
     /// counter and observes the per-route handler latency.
     pub fn record_query(&self, route: &str, ok: bool, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
@@ -228,9 +237,11 @@ impl Default for ServiceMetrics {
     }
 }
 
-/// `/metrics` router serving the `OpenMetrics` text encoding of `registry`.
-/// Merged onto the admin port by `serve_admin_from_env_with`; does NOT include
-/// the pprof routes (those are added by `serve_admin`).
+/// `/metrics` router that serves the `OpenMetrics` text encoding of
+/// `registry`.
+///
+/// `serve_admin_from_env_with` merges it onto the admin port. It does NOT
+/// include the pprof routes, which `serve_admin` adds.
 pub fn metrics_router(registry: SharedRegistry) -> axum::Router {
     axum::Router::new()
         .route("/metrics", axum::routing::get(export))

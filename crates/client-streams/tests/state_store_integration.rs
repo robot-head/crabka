@@ -1,8 +1,8 @@
-//! Broker integration test: stateful counting topology + restart-restore.
+//! Broker integration test: stateful counting topology and restart-restore.
 //!
-//! Proves that a fresh `KafkaStreams` instance restores its `counts` store from
-//! the changelog so that counts continue from where the previous instance left
-//! off rather than resetting to zero.
+//! This test proves that a fresh `KafkaStreams` instance restores its `counts`
+//! store from the changelog. Counts continue from where the previous instance
+//! left off, and they do not reset to zero.
 
 use std::time::Duration;
 
@@ -68,7 +68,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 
 // ─── Counter processor ────────────────────────────────────────────────────────
 
-/// Counts per-value occurrences and forwards `(value_as_key, count)`.
+/// Counts occurrences per value and forwards `(value_as_key, count)`.
 struct Counter;
 
 #[async_trait::async_trait]
@@ -99,7 +99,8 @@ fn counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
 
 // ─── output collector ────────────────────────────────────────────────────────
 
-/// Poll `stream-out` partition 0 until `want` records arrive.
+/// Polls `stream-out` partition 0 until `want` records arrive.
+///
 /// Returns `(key, i64_value)` pairs in arrival order.
 async fn collect_output_keyed(
     admin: &Client,

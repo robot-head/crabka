@@ -2,11 +2,12 @@
 //!
 //! Covers:
 //!  - `POST /v1/webhooks/{name}`: HMAC verification, `JSONPath` idempotency,
-//!    header idempotency, body-size guard, unknown endpoint 404.
-//!  - `POST /v1/produce/{topic}`: plain produce + `Idempotency-Key` dedup.
+//!    header idempotency, the body-size guard, and the unknown-endpoint 404.
+//!  - `POST /v1/produce/{topic}`: plain produce and `Idempotency-Key` dedup.
 //!
-//! Dedup tests spin up a real single-owner store and wait for `has_warmed_once`
-//! before the first produce — exactly the pattern in `tests/integration_dedup.rs`.
+//! A dedup test starts a real single-owner store and waits for
+//! `has_warmed_once` before the first produce. That is the same pattern as
+//! `tests/integration_dedup.rs`.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -78,14 +79,14 @@ fn hmac_hex(secret: &[u8], body: &[u8]) -> String {
 // State / harness builders
 // ---------------------------------------------------------------------------
 
-/// Build an `AppState` (and optionally a `DedupStore`) for webhook tests.
+/// Build an `AppState`, and optionally a `DedupStore`, for webhook tests.
 ///
-/// * `webhooks_toml` is parsed + compiled via `WebhooksFile::compile()` and
-///   stored in `GatewayConfig.webhooks`.
-/// * When `with_dedup = true` the function creates the dedup topic, builds a
+/// * `WebhooksFile::compile()` parses and compiles `webhooks_toml`, and the
+///   result goes into `GatewayConfig.webhooks`.
+/// * When `with_dedup = true`, this function creates the dedup topic, builds a
 ///   `DedupStore`, spawns `run_ownership`, wraps the produce core with the
 ///   `DedupEngine`, and returns the store so the caller can wait for
-///   `has_warmed_once()`. When `false` no dedup wiring is done.
+///   `has_warmed_once()`. When it is `false`, the function adds no dedup wiring.
 ///
 /// Returns `(Arc<AppState>, token, Option<Arc<DedupStore>>)`.
 async fn webhook_state(
@@ -196,7 +197,7 @@ async fn webhook_state(
     (state, token, store)
 }
 
-/// Poll `has_warmed_once` up to 80 × 250 ms (20 s).
+/// Poll `has_warmed_once` for up to 80 rounds of 250 ms, which is 20 s.
 async fn wait_warm(store: &Arc<DedupStore>) {
     for _ in 0..80 {
         if store.has_warmed_once() {
@@ -207,8 +208,9 @@ async fn wait_warm(store: &Arc<DedupStore>) {
     panic!("DedupStore never warmed");
 }
 
-/// Consume all committed records from `topic` and count them (`ReadCommitted`,
-/// `AutoOffsetReset::Earliest`, up to 10 poll rounds × 500 ms).
+/// Consume all committed records from `topic` and count them. The consumer uses
+/// `ReadCommitted` and `AutoOffsetReset::Earliest`, over up to 10 poll rounds of
+/// 500 ms.
 async fn count_topic(bootstrap: &str, topic: &str, group: &str) -> usize {
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap.to_string())
@@ -238,7 +240,8 @@ struct WR {
     deduplicated: bool,
 }
 
-/// Parse the response body as a `WR` (from `{"partition":…,"offset":…,"deduplicated":…}`).
+/// Parse the response body as a `WR`, from
+/// `{"partition":…,"offset":…,"deduplicated":…}`.
 async fn parse_response(resp: axum::response::Response) -> WR {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -319,7 +322,7 @@ signature_encoding = "hex"
     broker.shutdown().await;
 }
 
-/// Wrong HMAC signature → 401; nothing produced.
+/// A wrong HMAC signature returns 401, and nothing is produced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_hmac_rejected() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -380,9 +383,9 @@ signature_encoding = "hex"
     broker.shutdown().await;
 }
 
-/// `JSONPath` idempotency source: two POSTs with the same `$.id` value (provider
-/// redelivery) dedup — the second returns `deduplicated=true` with the same
-/// offset, and exactly one record lands in the topic.
+/// `JSONPath` idempotency source. Two POSTs with the same `$.id` value, which
+/// is a provider redelivery, dedup. The second returns `deduplicated=true` with
+/// the same offset, and exactly one record lands in the topic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jsonpath_idempotency_redelivery_dedups() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -473,7 +476,7 @@ idempotency_source = "json:$.id"
     broker.shutdown().await;
 }
 
-/// Header idempotency source (`header:X-Delivery`): two POSTs with the same
+/// Header idempotency source, `header:X-Delivery`. Two POSTs with the same
 /// header value dedup on the second request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn header_idempotency_works() {
@@ -562,8 +565,8 @@ idempotency_source = "header:X-Delivery"
     broker.shutdown().await;
 }
 
-/// `POST /v1/produce/{topic}`: plain produce returns 200; a repeat with the
-/// same `Idempotency-Key` header is deduplicated.
+/// `POST /v1/produce/{topic}`: a plain produce returns 200, and a repeat with
+/// the same `Idempotency-Key` header is deduplicated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn generic_produce_route() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -653,7 +656,7 @@ async fn generic_produce_route() {
     broker.shutdown().await;
 }
 
-/// Body larger than `max_body` → 413 Payload Too Large.
+/// A body larger than `max_body` returns 413 Payload Too Large.
 #[tokio::test]
 async fn body_too_large_413() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -687,7 +690,7 @@ max_body = "16B"
     broker.shutdown().await;
 }
 
-/// Unknown webhook name → 404.
+/// An unknown webhook name returns 404.
 #[tokio::test]
 async fn unknown_endpoint_404() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -716,8 +719,8 @@ async fn unknown_endpoint_404() {
 // Authz tests (SimpleAclAuthorizer)
 // ---------------------------------------------------------------------------
 
-/// Helper: build an `AppState` with a `SimpleAclAuthorizer` (empty super-users)
-/// backed by the provided `GatewayAuthz`. No dedup wiring.
+/// Helper that builds an `AppState` with a `SimpleAclAuthorizer` and empty
+/// super-users, backed by the given `GatewayAuthz`. It adds no dedup wiring.
 async fn webhook_state_with_authz(
     bootstrap: &str,
     client_prefix: &str,
@@ -765,8 +768,9 @@ async fn webhook_state_with_authz(
     })
 }
 
-/// Helper: poll the ACL cache until the authorization result for the given
-/// probe matches `expect`. Times out after 20 s (80 × 250 ms).
+/// Helper that polls the ACL cache until the authorization result for the given
+/// probe matches `expect`. It times out after 20 s, which is 80 rounds of
+/// 250 ms.
 async fn wait_authz(
     authz: &Arc<GatewayAuthz>,
     probe_principal: &Principal,
@@ -811,11 +815,11 @@ fn topic_acl(
     }
 }
 
-/// `SimpleAclAuthorizer` with an EMPTY cache (default-deny) rejects a webhook
-/// produce even when the HMAC is valid, because the endpoint's principal
-/// (`webhook:acl-denied`) has no Write ACL on the target topic.
+/// `SimpleAclAuthorizer` with an EMPTY cache is default-deny. It rejects a
+/// webhook produce even when the HMAC is valid, because the endpoint's
+/// principal, `webhook:acl-denied`, has no Write ACL on the target topic.
 ///
-/// After granting the ACL and refreshing the cache the same request succeeds.
+/// After the ACL is granted and the cache refreshes, the same request succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simpleacl_denies_webhook_principal() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -947,9 +951,9 @@ signature_encoding = "hex"
     broker.shutdown().await;
 }
 
-/// Sending `X-Timestamp: i64::MIN` (the most negative timestamp) must return
-/// 401 (stale) and NOT panic — this exercises the i128 overflow fix. Under the
-/// test profile's overflow-checks the old i64 subtraction would panic.
+/// `X-Timestamp: i64::MIN`, the most negative timestamp, must return 401 for a
+/// stale timestamp and must NOT panic. This exercises the i128 overflow fix.
+/// Under the test profile's overflow checks, an i64 subtraction panics here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_timestamp_overflow_rejected() {
     let (broker, bootstrap, _dir) = boot().await;

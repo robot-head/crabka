@@ -1,7 +1,9 @@
-//! Port of `InternalTopologyBuilder.makeNodeGroups`: union-find over the node
-//! graph in insertion order assigns each subtopology its integer index; the
-//! index is rendered as a decimal string. Groups with no source topics are
-//! dropped but still consume an index (so ids may be non-contiguous).
+//! A port of `InternalTopologyBuilder.makeNodeGroups`.
+//!
+//! A union-find pass over the node graph, in insertion order, gives each
+//! subtopology its integer index, and the code renders that index as a decimal
+//! string. A group with no source topics is dropped but still takes an index, so
+//! the ids can be non-contiguous.
 
 use std::collections::HashMap;
 
@@ -11,26 +13,31 @@ use super::node::{ChangelogKind, NodeKind, NodeRegistry};
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GroupTopics {
     pub id: String,
-    /// External source topics (sorted later by the wire layer).
+    /// The external source topics. The wire layer sorts them later.
     pub source_topics: Vec<String>,
     /// Internal repartition topics this subtopology reads.
     pub repartition_source_topics: Vec<String>,
     /// Internal repartition topics this subtopology writes.
     pub repartition_sink_topics: Vec<String>,
-    /// Stores whose changelog topics back this subtopology, as
-    /// `(store_name, changelog_override, changelog_kind)`. When the
-    /// override is `None` the wire layer derives `<app>-<store>-changelog`;
-    /// when `Some(topic)` (set by the `REUSE_KTABLE_SOURCE_TOPICS` pass) that
-    /// topic name is used verbatim. `changelog_kind` controls the topic config
-    /// (compact / compact,delete / delete).
+    /// The stores whose changelog topics back this subtopology, as
+    /// `(store_name, changelog_override, changelog_kind)`.
+    ///
+    /// When the override is `None`, the wire layer derives
+    /// `<app>-<store>-changelog`. When it is `Some(topic)`, which the
+    /// `REUSE_KTABLE_SOURCE_TOPICS` pass sets, the wire layer uses that topic
+    /// name verbatim. `changelog_kind` selects the topic config: `compact`,
+    /// `compact,delete`, or `delete`.
     pub changelog_stores: Vec<(String, Option<String>, ChangelogKind)>,
-    /// Declared copartition groups whose member topics all read into this
-    /// subtopology. Each is a list of member topic names; the wire layer maps
-    /// them to `int16` indices into the sorted source/repartition arrays.
+    /// The declared copartition groups whose member topics all read into this
+    /// subtopology.
+    ///
+    /// Each group is a list of member topic names. The wire layer maps them to
+    /// `int16` indices into the sorted source and repartition arrays.
     pub copartition_groups: Vec<Vec<String>>,
 }
 
-/// Minimal quick-union over `usize` node indices (path-compressing find).
+/// A minimal quick-union over `usize` node indices, with a path-compressing
+/// find.
 struct QuickUnion {
     parent: Vec<usize>,
 }

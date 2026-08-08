@@ -1,4 +1,4 @@
-//! Errors raised by the v0/v1 `MessageSet` codec.
+//! Errors that the v0/v1 `MessageSet` codec returns.
 
 use thiserror::Error;
 

@@ -1,5 +1,5 @@
-//! Dedup: ownership consumer reconstructs the claim map from the compacted
-//! topic, so a post-restart duplicate is recognized.
+//! Dedup: the ownership consumer rebuilds the claim map from the compacted
+//! topic, so it recognizes a duplicate after a restart.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -16,8 +16,8 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
-/// The resolved caller relayed on a forward. With `AllowAll` the value is
-/// immaterial — it only satisfies `produce`'s signature for these local tests.
+/// The resolved caller relayed on a forward. With `AllowAll` the value does not
+/// matter. It only satisfies `produce`'s signature for these local tests.
 fn anon() -> crabka_security::Principal {
     crabka_security::Principal {
         name: "ANONYMOUS".into(),

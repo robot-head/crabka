@@ -1,4 +1,5 @@
-//! Metrics distributor role: validate, HA-dedup, and append to the WAL.
+//! Metrics distributor role. It validates a request, applies HA deduplication,
+//! and appends to the WAL.
 
 pub mod ha;
 
@@ -64,11 +65,11 @@ pub struct TenantLimits {
     pub max_label_value_len: ByteSize,
     pub max_samples_per_series: usize,
     pub max_series_per_request: usize,
-    /// Accepted sample rate; a zero rate disables ingestion rate limiting.
+    /// Accepted sample rate. A zero rate turns the ingestion rate limit off.
     pub ingestion_rate: Frequency,
     /// Samples the token bucket may hand out in one burst.
     pub ingestion_burst_size: usize,
-    /// Accepted out-of-order ingest window; a negative extent disables the cap.
+    /// Accepted out-of-order ingest window. A negative extent removes the cap.
     pub out_of_order_time_window: Time,
 }
 
@@ -86,7 +87,7 @@ impl Default for TenantLimits {
     }
 }
 
-/// Errors from appending to the metrics WAL.
+/// Errors raised while appending to the metrics WAL.
 #[derive(Debug, thiserror::Error)]
 pub enum ProduceError {
     #[error("wal append failed: {0}")]
@@ -233,7 +234,8 @@ pub struct HaElectionConsumerRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HaElectionPartitionOffset {
     pub partition: PartitionIndex,
-    /// Kafka commit offset: the next offset after the last replayed record.
+    /// Kafka commit offset. This is the next offset after the last replayed
+    /// record.
     pub offset: Offset,
 }
 
@@ -463,7 +465,7 @@ impl DistributorState {
     }
 }
 
-/// Build the distributor HTTP router.
+/// Builds the distributor HTTP router.
 pub fn router(state: Arc<DistributorState>) -> Router {
     let grpc_service = otlp_metrics_service_server(Arc::clone(&state));
     // Cap the (compressed) push body explicitly rather than relying on axum's
@@ -491,13 +493,13 @@ pub fn router(state: Arc<DistributorState>) -> Router {
         .with_state(state)
 }
 
-/// Build the OTLP gRPC metrics service implementation.
+/// Builds the OTLP gRPC metrics service implementation.
 #[must_use]
 pub fn otlp_metrics_service(state: Arc<DistributorState>) -> OtlpMetricsService {
     OtlpMetricsService { state }
 }
 
-/// Build a tonic server for OTLP metrics export.
+/// Builds a tonic server for OTLP metrics export.
 #[must_use]
 pub fn otlp_metrics_service_server(
     state: Arc<DistributorState>,
@@ -535,7 +537,7 @@ impl MetricsService for OtlpMetricsService {
     }
 }
 
-/// Bind and serve the metrics distributor until `shutdown` resolves.
+/// Binds and serves the metrics distributor until `shutdown` resolves.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn serve(
@@ -576,8 +578,9 @@ async fn push(
     }
 }
 
-/// Build the per-request ingest span. `crabka.ingest.series` is declared empty
-/// here and recorded once the request body is decoded (see `push_inner`).
+/// Builds the per-request ingest span. This function declares
+/// `crabka.ingest.series` empty, and `push_inner` records it after it decodes
+/// the request body.
 fn ingest_span(headers: &HeaderMap, body_size: ByteSize) -> tracing::Span {
     let tenant = tenant_for_span(headers);
     tracing::info_span!(
@@ -591,9 +594,10 @@ fn ingest_span(headers: &HeaderMap, body_size: ByteSize) -> tracing::Span {
     )
 }
 
-/// Tenant label for the ingest span, falling back to `"unknown"` when the
-/// `X-Scope-OrgID` header is absent or non-ASCII. This is span-only labelling and
-/// never rejects the request — validation stays in `tenant_from_headers`.
+/// Tenant label for the ingest span. It falls back to `"unknown"` when the
+/// `X-Scope-OrgID` header is absent or non-ASCII. This label is for the span
+/// only and never rejects the request. Validation stays in
+/// `tenant_from_headers`.
 fn tenant_for_span(headers: &HeaderMap) -> String {
     headers
         .get("X-Scope-OrgID")
@@ -703,9 +707,9 @@ async fn otlp_push_inner(
     Ok((PushSuccess::Ok, items))
 }
 
-/// Record an ingest request outcome on the distributor metrics bundle, if one
-/// is configured. `body_size` is the (compressed) request-body length; `items`
-/// is the decoded series count on success and `0` on error.
+/// Records an ingest request outcome on the distributor metrics bundle, if one
+/// is configured. `body_size` is the compressed request-body length. `items` is
+/// the decoded series count on success and `0` on error.
 fn record_ingest_outcome(
     state: &DistributorState,
     result: &Result<(PushSuccess, u64), PushError>,
@@ -721,8 +725,8 @@ fn record_ingest_outcome(
     }
 }
 
-/// Decode and append an OTLP gRPC export. Returns the decoded series count
-/// (the ingest `items` measure) on success.
+/// Decodes and appends an OTLP gRPC export. Returns the decoded series count on
+/// success, which is the ingest `items` measure.
 async fn otlp_grpc_export_inner(
     state: &DistributorState,
     request: TonicRequest<ExportMetricsServiceRequest>,
@@ -831,10 +835,10 @@ fn enforce_label_limits(limits: &Limits, series: &[DecodedSeries]) -> Result<(),
     Ok(())
 }
 
-/// Enforce the per-user active-series limit and record the new series under a
-/// single lock acquisition. Holding the lock across the check AND the insert
-/// closes the active-series TOCTOU: two concurrent pushes can no longer both
-/// observe the same pre-insert count and overshoot `max_global_series_per_user`.
+/// Enforces the per-user active-series limit and records the new series under a
+/// single lock acquisition. The lock covers the check AND the insert, which
+/// closes the active-series TOCTOU. Two concurrent pushes can no longer both see
+/// the same pre-insert count and overshoot `max_global_series_per_user`.
 fn enforce_and_record_active_series(
     state: &DistributorState,
     limits: &Limits,
@@ -1000,7 +1004,7 @@ fn validate_request_tenant(tenant: &str) -> Result<&str, PushError> {
     }
 }
 
-/// Validate decoded series against structural limits.
+/// Validates the decoded series against the structural limits.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn validate(series: &[DecodedSeries], limits: &TenantLimits) -> Result<(), WireError> {
@@ -1199,7 +1203,8 @@ fn status_from_push_error(error: &PushError) -> Status {
     }
 }
 
-/// Fan decoded series into one WAL record per float or native-histogram sample.
+/// Fans the decoded series into one WAL record per float sample or native-
+/// histogram sample.
 #[must_use]
 pub fn wal_records_from_series(tenant: &str, series: &[DecodedSeries]) -> Vec<WalRecord> {
     let mut out = Vec::new();
@@ -1301,11 +1306,12 @@ mod tests {
     use super::*;
     use crate::wire::DecodedSample;
 
-    /// Pins `tenant_for_span`'s span-label logic: a present non-empty header is
-    /// echoed verbatim, while a missing OR empty `X-Scope-OrgID` falls back to
-    /// `"unknown"`. Kills the whole-fn replacement mutants (`"xyzzy"` /
-    /// `String::new()`) and the `delete !` mutant on `!value.is_empty()` — the
-    /// empty-string case only maps to `"unknown"` while the negation stands.
+    /// Pins the span-label logic of `tenant_for_span`. A present, non-empty
+    /// header goes through verbatim. A missing OR empty `X-Scope-OrgID` falls
+    /// back to `"unknown"`. This kills the whole-function replacement mutants,
+    /// `"xyzzy"` and `String::new()`, and the `delete !` mutant on
+    /// `!value.is_empty()`. The empty-string case maps to `"unknown"` only
+    /// while the negation stands.
     #[test]
     fn tenant_for_span_labels_present_and_falls_back_on_missing_or_empty() {
         let mut present = HeaderMap::new();

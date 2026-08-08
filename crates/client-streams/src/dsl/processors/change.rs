@@ -1,6 +1,8 @@
-//! `Change<V>` — the (old, new) value a `KTable` propagates internally.
-//! `new == None` is a tombstone (the key was deleted / stopped matching).
-//! State stores hold `V`; only the inter-node forwarded value is `Change<V>`.
+//! `Change<V>`, the (old, new) value that a `KTable` propagates internally.
+//!
+//! A `new == None` is a tombstone: the key was deleted or stopped matching. The
+//! state stores hold `V`. Only the value forwarded between nodes is a
+//! `Change<V>`.
 
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,7 +25,7 @@ impl<V> Change<V> {
     pub fn is_tombstone(&self) -> bool {
         self.new.is_none()
     }
-    /// Map both sides through `f` (used by `KTable` `map_values`).
+    /// Map both sides through `f`. `KTable` `map_values` uses this method.
     pub fn map<V2>(self, f: impl Fn(&V) -> V2) -> Change<V2> {
         Change {
             old: self.old.as_ref().map(&f),

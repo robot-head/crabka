@@ -1,5 +1,6 @@
-//! Segment filename parsing. Kafka names segments by 20-digit
-//! zero-padded base offset, with `.log`, `.index`, `.timeindex` extensions.
+//! Segment filename parsing. Kafka names a segment by its 20-digit
+//! zero-padded base offset, with the `.log`, `.index`, and `.timeindex`
+//! extensions.
 
 use std::path::Path;
 
@@ -42,8 +43,8 @@ pub fn txnindex_path(dir: &Path, base_offset: i64) -> std::path::PathBuf {
     dir.join(format!("{}.txnindex", format_base_offset(base_offset)))
 }
 
-/// Path to the per-segment `.stampindex` sidecar (the additional internal
-/// stamp coordinate; never a client-facing file).
+/// Path to the per-segment `.stampindex` sidecar. It holds the additional
+/// internal stamp coordinate and is never a client-facing file.
 pub fn stampindex_path(dir: &Path, base_offset: i64) -> std::path::PathBuf {
     dir.join(format!("{}.stampindex", format_base_offset(base_offset)))
 }

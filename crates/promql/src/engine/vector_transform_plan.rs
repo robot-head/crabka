@@ -22,17 +22,22 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Plan a per-row scalar-math `Call` (`abs`/`ceil`/.../`sgn`, the
-    /// trig/hyperbolic family, `round`, the `clamp` family) onto a
-    /// `Projection(f(value))` over its evaluated inner instant vector.
+    /// Plans a per-row scalar-math `Call` onto a `Projection(f(value))`.
     ///
-    /// Returns `None` (interpreter fallback) when the arity is wrong, a bound
-    /// argument (`round`'s `to_nearest`, `clamp`'s bounds) is not a scalar, the
-    /// inner argument is a histogram-bearing selector, or the inner expression
-    /// is not planner-supported. The inner vector is sourced either from a
-    /// NaN-preserving bare-selector selection (so a genuine, non-stale NaN
-    /// sample survives, matching the interpreter) or by assembling a nested
-    /// plannable inner expression.
+    /// The projection runs over the evaluated inner instant vector of the call.
+    /// The supported calls are `abs`/`ceil`/.../`sgn`, the trig/hyperbolic
+    /// family, `round`, and the `clamp` family.
+    ///
+    /// This method returns `None`, and the interpreter takes over, in these
+    /// cases: the arity is wrong, a bound argument is not a scalar, the inner
+    /// argument is a histogram-bearing selector, or the inner expression is not
+    /// planner-supported. The bound arguments are `round`'s `to_nearest` and
+    /// `clamp`'s bounds.
+    ///
+    /// The inner vector comes from one of two sources. A bare selector gives a
+    /// NaN-preserving selection, so a genuine, non-stale NaN sample survives and
+    /// matches the interpreter. A nested plannable inner expression is assembled
+    /// instead.
     pub(super) async fn plan_scalar_math_call(
         &self,
         tenant: &str,
@@ -129,19 +134,23 @@ impl<S: MetricStore> PromqlEngine<S> {
         )))
     }
 
-    /// Plan a `label_replace`/`label_join`/`sort`/`sort_desc`/`sort_by_label`/
-    /// `sort_by_label_desc` call onto the operator path: recurse into the inner
-    /// instant-vector argument, assemble it (preserving genuine NaN), apply the
-    /// pure label-rewrite / ordering transform (shared with the interpreter), and
-    /// return the finished vector as a [`PlannedInstant::Precomputed`].
+    /// Plans a label-rewrite or ordering call onto the operator path.
     ///
-    /// Returns `None` (interpreter fallback, which then raises the canonical
-    /// error) for wrong arity, a non-string label/separator/regex argument, or an
-    /// inner expression the recursive planner cannot evaluate. An invalid
-    /// `label_replace` regex surfaces here as `Err`, matching the interpreter.
-    /// Output-labelset collisions are not checked here: the top-level
-    /// `validate_unique_instant_labelsets` enforces them identically for both the
-    /// operator and interpreter paths.
+    /// The supported calls are `label_replace`, `label_join`, `sort`,
+    /// `sort_desc`, `sort_by_label`, and `sort_by_label_desc`. This method
+    /// recurses into the inner instant-vector argument and assembles it with
+    /// genuine NaN preserved. It then applies the pure label-rewrite or ordering
+    /// transform that it shares with the interpreter. It returns the finished
+    /// vector as a [`PlannedInstant::Precomputed`].
+    ///
+    /// This method returns `None` for a wrong arity, for a non-string label,
+    /// separator, or regex argument, and for an inner expression the recursive
+    /// planner cannot evaluate. The interpreter then takes over and raises the
+    /// canonical error. An invalid `label_replace` regex comes back here as
+    /// `Err`, as it does in the interpreter. This method does not check
+    /// output-labelset collisions. The top-level
+    /// `validate_unique_instant_labelsets` enforces them identically for the
+    /// operator path and the interpreter path.
     pub(super) async fn plan_label_ops_call(
         &self,
         tenant: &str,
@@ -242,17 +251,19 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
     }
 
-    /// Evaluate the inner instant-vector argument of a label-rewrite / ordering
-    /// call into a `Vec<InstantSample>`, preserving genuine (non-stale) NaN —
-    /// exactly the samples the interpreter would transform.
+    /// Evaluates the inner instant-vector argument of a label-ops call.
     ///
-    /// A bare instant-vector selector is selected directly here (preserving a
-    /// genuine NaN latest-in-window sample, and dropping only stale-NaN markers,
-    /// exactly as the shared `InstantManipulate` operator does) with its full
-    /// labelset (including `__name__`). Every other planner-supported inner
-    /// expression is recursed into and assembled. Returns `None` (caller falls
-    /// back) for a histogram-bearing selector or an inner expression the planner
-    /// cannot evaluate.
+    /// The call is a label-rewrite or ordering call. This method returns a
+    /// `Vec<InstantSample>` with genuine, non-stale NaN preserved: exactly the
+    /// samples the interpreter would transform.
+    ///
+    /// This method selects a bare instant-vector selector directly, with its
+    /// full labelset that includes `__name__`. That selection keeps a genuine
+    /// NaN latest-in-window sample and drops only stale-NaN markers, exactly as
+    /// the shared `InstantManipulate` operator does. This method recurses into
+    /// every other planner-supported inner expression and assembles it. It
+    /// returns `None` for a histogram-bearing selector or an inner expression the
+    /// planner cannot evaluate, and the caller falls back.
     pub(super) fn label_ops_inner_vector<'a>(
         &'a self,
         tenant: &'a str,
@@ -300,16 +311,19 @@ impl<S: MetricStore> PromqlEngine<S> {
         .boxed()
     }
 
-    /// Evaluate the inner instant-vector argument of a scalar-math call into the
-    /// one-float-per-series rows the projection consumes, preserving genuine
-    /// (non-stale) NaN — exactly the samples the interpreter would feed to `f()`.
+    /// Evaluates the inner instant-vector argument of a scalar-math call.
     ///
-    /// A bare instant-vector selector is selected directly here (preserving a
-    /// genuine NaN latest-in-window sample, and dropping only stale-NaN markers,
-    /// exactly as the shared `InstantManipulate` operator does). Every other
-    /// planner-supported inner expression is recursed into and assembled. Returns
-    /// `None` (caller falls back) for a histogram-bearing selector or an inner
-    /// expression the planner cannot evaluate.
+    /// This method returns the one-float-per-series rows that the projection
+    /// consumes, with genuine, non-stale NaN preserved: exactly the samples the
+    /// interpreter would feed to `f()`.
+    ///
+    /// This method selects a bare instant-vector selector directly. That
+    /// selection keeps a genuine NaN latest-in-window sample and drops only
+    /// stale-NaN markers, exactly as the shared `InstantManipulate` operator
+    /// does. This method recurses into every other planner-supported inner
+    /// expression and assembles it. It returns `None` for a histogram-bearing
+    /// selector or an inner expression the planner cannot evaluate, and the
+    /// caller falls back.
     fn scalar_math_inner_samples<'a>(
         &'a self,
         tenant: &'a str,
@@ -369,10 +383,11 @@ impl<S: MetricStore> PromqlEngine<S> {
         .boxed()
     }
 
-    /// Select the latest in-window float sample per series for a bare
-    /// instant-vector selector, keeping genuine NaN and dropping stale-NaN
-    /// markers — a float-only mirror of `Self::eval_instant_selector` used as
-    /// the scalar-math inner source.
+    /// Selects the latest in-window float sample for each series.
+    ///
+    /// The input is a bare instant-vector selector. This method keeps a genuine
+    /// NaN and drops stale-NaN markers. It is a float-only mirror of
+    /// `Self::eval_instant_selector`, and it is the scalar-math inner source.
     async fn scalar_math_selector_samples(
         &self,
         tenant: &str,

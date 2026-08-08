@@ -1,28 +1,30 @@
 //! Structured-JSON `tracing` log formatter shared across Crabka services.
 //!
-//! Every Crabka service (broker, gateway, operator, schema-registry) installs
-//! this formatter on its stdout `fmt` layer so container log collectors ingest
-//! each line as fields rather than ANSI-coloured human text. The output is
-//! shaped for Google Cloud Logging (GKE), whose agent parses stdout JSON and
-//! recognises a handful of special fields:
+//! Every Crabka service installs this formatter on its stdout `fmt` layer, so
+//! container log collectors ingest each line as fields and not as
+//! ANSI-coloured human text. Those services are the broker, the gateway, the
+//! operator, and the schema-registry. The output is shaped for Google Cloud
+//! Logging on GKE. That agent parses stdout JSON and recognises a few special
+//! fields:
 //!
-//! - `severity` — mapped from the `tracing` level (`WARN` → `WARNING`,
-//!   `TRACE` → `DEBUG`); sets the log entry's `LogSeverity`.
-//! - `message` — the event message, flattened to the top level so it becomes
+//! - `severity`: mapped from the `tracing` level, where `WARN` becomes
+//!   `WARNING` and `TRACE` becomes `DEBUG`. It sets the log entry's
+//!   `LogSeverity`.
+//! - `message`: the event message, flattened to the top level, so it becomes
 //!   the entry's summary line.
-//! - `timestamp` — RFC3339 UTC, recognised as the entry timestamp.
+//! - `timestamp`: RFC3339 UTC, recognised as the entry timestamp.
 //!
-//! Everything else (the event `target` and all event fields) is emitted at the
-//! top level too, so a line looks like:
+//! The formatter emits everything else at the top level too, that is the event
+//! `target` and all the event fields. A line looks like this:
 //!
 //! ```json
 //! {"timestamp":"2026-06-13T05:55:09.951788Z","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened","listener":"PLAIN","sasl":false}
 //! ```
 //!
 //! The JSON formatter never writes ANSI escape codes, so logs stay clean in
-//! non-TTY environments (the default `tracing_subscriber` `fmt` layer emits
-//! ANSI colours regardless of whether stdout is a terminal — the bug this
-//! crate exists to avoid).
+//! non-TTY environments. The default `tracing_subscriber` `fmt` layer emits
+//! ANSI colours even when stdout is not a terminal. This crate avoids that
+//! bug.
 
 #![forbid(unsafe_code)]
 
@@ -45,8 +47,8 @@ use tracing_subscriber::{
 
 /// Map a `tracing` [`Level`] to a Google Cloud Logging `LogSeverity` string.
 ///
-/// `WARN` becomes `WARNING` (Cloud Logging's spelling) and `TRACE` floors to
-/// `DEBUG` (Cloud Logging has no finer level). See
+/// `WARN` becomes `WARNING`, which is Cloud Logging's spelling. `TRACE` floors
+/// to `DEBUG`, because Cloud Logging has no finer level. See
 /// <https://cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry#LogSeverity>.
 fn severity(level: Level) -> &'static str {
     match level {
@@ -57,8 +59,8 @@ fn severity(level: Level) -> &'static str {
     }
 }
 
-/// Collects `tracing` event fields into a JSON object, preserving primitive
-/// types and stringifying everything else via `Debug`.
+/// Collects `tracing` event fields into a JSON object. It keeps the primitive
+/// types and turns everything else into a string with `Debug`.
 #[derive(Default)]
 struct JsonVisitor {
     fields: Map<String, Value>,
@@ -99,7 +101,7 @@ impl Visit for JsonVisitor {
     }
 }
 
-/// `tracing_subscriber` event formatter emitting one Cloud Logging-friendly
+/// `tracing_subscriber` event formatter that emits one Cloud Logging-friendly
 /// JSON object per line. See the crate-level docs for the output shape.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CloudLogging;
@@ -145,11 +147,13 @@ where
 }
 
 /// Build a stdout `fmt` layer that emits [`CloudLogging`] JSON, filtered by
-/// `filter`. `make_writer` is the sink — production passes `std::io::stdout`;
+/// `filter`.
+///
+/// `make_writer` is the sink. Production code passes `std::io::stdout`, and
 /// tests pass a capturing buffer.
 ///
-/// Returns a boxed layer over a [`Registry`] so call sites compose it with
-/// `tracing_subscriber::registry().with(...)`.
+/// The function returns a boxed layer over a [`Registry`], so call sites
+/// compose it with `tracing_subscriber::registry().with(...)`.
 #[must_use]
 pub fn layer<W>(filter: EnvFilter, make_writer: W) -> Box<dyn Layer<Registry> + Send + Sync>
 where

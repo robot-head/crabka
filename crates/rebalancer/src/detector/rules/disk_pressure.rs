@@ -1,6 +1,6 @@
-//! `DiskPressure` rule — fires when a broker's summed `disk_bytes_avg`
-//! exceeds `disk_pressure_threshold` of its configured `disk_bytes`
-//! capacity. Skips brokers with no capacity info.
+//! `DiskPressure` rule. It fires when a broker's summed `disk_bytes_avg`
+//! exceeds `disk_pressure_threshold` of its configured `disk_bytes` capacity.
+//! It skips brokers with no capacity info.
 
 use std::collections::HashMap;
 

@@ -1,12 +1,12 @@
-//! Leaf source and `LogicalPlan` assembly for the `*_over_time` range-selector
-//! operator path.
+//! Leaf source and `LogicalPlan` assembly for the `*_over_time` operator path.
 //!
-//! This is the `*_over_time` sibling of [`super::rate_range`]. It shares the
-//! exact `<leaf over MetricStore> -> SeriesDivide -> SeriesNormalize ->
-//! RangeManipulate` plumbing and differs only in the final projection: instead of
-//! a rate-family UDF taking `(timestamp, timestamp_range, value_range, range_ms)`,
-//! it projects an `*_over_time` UDF taking `(timestamp, timestamp_range,
-//! value_range)` — and, for `quantile_over_time`, a leading `phi` literal.
+//! This module is the `*_over_time` sibling of [`super::rate_range`]. It uses
+//! the same `<leaf over MetricStore> -> SeriesDivide -> SeriesNormalize ->
+//! RangeManipulate` plumbing. Only the final projection is different. A
+//! rate-family UDF takes `(timestamp, timestamp_range, value_range, range_ms)`.
+//! This module instead projects an `*_over_time` UDF that takes `(timestamp,
+//! timestamp_range, value_range)`, with a leading `phi` literal for
+//! `quantile_over_time`.
 //!
 //! The assembled chain is
 //! `<leaf over MetricStore> -> SeriesDivide -> SeriesNormalize -> RangeManipulate
@@ -15,11 +15,11 @@
 //!
 //! # Window semantics
 //!
-//! Identical to the rate path: the window is exactly `(eval_time - range,
-//! eval_time]`, left-open and right-closed, with **no** 5m lookback, matching
+//! The window is the same as the rate path: exactly `(eval_time - range,
+//! eval_time]`, left-open and right-closed, with no 5m lookback. This matches
 //! Prometheus matrix-selector semantics and the interpreter's
-//! `over_time_sample_from_series` (which filters on `range_start < ts <=
-//! range_end`).
+//! `over_time_sample_from_series`, which filters on `range_start < ts <=
+//! range_end`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -52,19 +52,21 @@ use crate::{
     functions::OverTimeFamily,
 };
 
-/// Leaf-batch column carrying the per-sample timestamp in epoch milliseconds.
+/// Leaf-batch column with the per-sample timestamp in epoch milliseconds.
 pub const TIME_COLUMN: &str = "timestamp";
-/// Leaf-batch column carrying the per-sample float value.
+/// Leaf-batch column with the per-sample float value.
 pub const VALUE_COLUMN: &str = "value";
-/// Projection output column name carrying the `*_over_time` UDF result.
+/// Projection output column name with the `*_over_time` UDF result.
 pub const OVER_TIME_VALUE_COLUMN: &str = "value";
 
-/// Resolve a matrix-selector `*_over_time` function name to its operator-path
-/// [`OverTimeFamily`] (the float UDF-chain path). Returns `None` for the
-/// experimental members (`mad_over_time`, `first_over_time`, the
-/// `ts_of_*_over_time` family) — which have no operator-leaf UDF and instead route
-/// through the engine's shared `apply_outer_range_fn` kernel — and for any
-/// function outside the `*_over_time` set.
+/// Resolves a matrix-selector `*_over_time` function name to its [`OverTimeFamily`].
+///
+/// [`OverTimeFamily`] is the operator path, the float UDF chain. This function
+/// returns `None` for the experimental members `mad_over_time`,
+/// `first_over_time`, and the `ts_of_*_over_time` family. Those members have no
+/// operator-leaf UDF and route through the engine's shared
+/// `apply_outer_range_fn` kernel instead. This function also returns `None` for
+/// any function outside the `*_over_time` set.
 #[must_use]
 pub fn over_time_family_from_function_name(name: &str) -> Option<OverTimeFamily> {
     match name {
@@ -90,33 +92,35 @@ pub struct LabeledSample {
     pub value: f64,
 }
 
-/// The assembled operator plan plus the per-series labels needed to reattach
-/// label sets to the projected `*_over_time` values.
+/// The assembled operator plan with the per-series labels.
+///
+/// The labels reattach label sets to the projected `*_over_time` values.
 pub struct OverTimeRangePlan {
-    /// Session context whose physical planner understands the custom operators
-    /// and whose registry holds the `*_over_time` UDFs, with the leaf table registered.
+    /// Session context with the leaf table registered. Its physical planner
+    /// knows the custom operators and its registry holds the `*_over_time` UDFs.
     pub ctx: SessionContext,
     /// The `SeriesDivide -> SeriesNormalize -> RangeManipulate -> Projection`
     /// logical plan.
     pub plan: LogicalPlan,
-    /// Series labels keyed by fingerprint, for assembling the result.
+    /// Series labels keyed by fingerprint. The assembler builds the result from them.
     pub labels_by_fp: BTreeMap<SeriesFingerprint, Labels>,
 }
 
-/// Build the leaf table and operator chain that evaluates
-/// `f_over_time(selector[range])` at a single eval instant `eval_time_ms` with
-/// the given `range` width. `phi` is the quantile literal for
-/// [`OverTimeFamily::Quantile`] and ignored for every other family.
+/// Builds the leaf table and operator chain for `f_over_time(selector[range])`.
+///
+/// The chain evaluates at one eval instant `eval_time_ms` with the given
+/// `range` width. `phi` is the quantile literal for
+/// [`OverTimeFamily::Quantile`], and every other family ignores it.
 ///
 /// `samples` are the float samples of the matched series over the exact range
-/// window `(eval_time_ms - range, eval_time_ms]`. Stale-NaN markers must be
-/// filtered by the caller before the values reach the operator chain; genuine
-/// NaN values are carried through unchanged, as the interpreter does.
+/// window `(eval_time_ms - range, eval_time_ms]`. The caller must filter out
+/// stale-NaN markers before the values reach the operator chain. Genuine NaN
+/// values pass through unchanged, as the interpreter does.
 ///
 /// # Errors
 ///
-/// Returns an error if the Arrow batch, table, or projection plan cannot be
-/// constructed.
+/// Returns an error if this function cannot build the Arrow batch, the table,
+/// or the projection plan.
 pub async fn plan_over_time_range_selector(
     samples: Vec<LabeledSample>,
     eval_time_ms: i64,
@@ -312,8 +316,7 @@ mod tests {
         got
     }
 
-    /// `avg_over_time` over the engine's basic window (3,5 -> 4.0) flows through
-    /// the full operator chain.
+    /// `avg_over_time` over the engine's basic window (3,5 -> 4.0) runs the full chain.
     #[tokio::test]
     async fn avg_over_time_plan_reduces_window() {
         let samples = vec![labeled("a", 60_000, 3.0), labeled("a", 120_000, 5.0)];
@@ -346,7 +349,7 @@ mod tests {
         }
     }
 
-    /// `quantile_over_time(0.5, ...)` over 2,4,4,4,5,5,7,9 yields the median 4.5.
+    /// `quantile_over_time(0.5, ...)` over 2,4,4,4,5,5,7,9 gives the median 4.5.
     #[tokio::test]
     async fn quantile_over_time_plan_threads_phi() {
         let values = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
@@ -367,7 +370,7 @@ mod tests {
         assert2::assert!(approx_eq(got[0].1, 4.5));
     }
 
-    /// `present_over_time` yields 1.0 when the window has samples.
+    /// `present_over_time` gives 1.0 when the window has samples.
     #[tokio::test]
     async fn present_over_time_plan_signals_presence() {
         let samples = vec![labeled("a", 60_000, 42.0)];
@@ -382,8 +385,9 @@ mod tests {
         assert2::assert!(approx_eq(got[0].1, 1.0));
     }
 
-    /// An empty window emits NULL (not a NaN sentinel), so the assembler drops
-    /// the series and aggregates skip it.
+    /// An empty window emits NULL, not a NaN sentinel.
+    ///
+    /// The assembler drops the series and aggregates skip it.
     #[tokio::test]
     async fn empty_window_emits_null() {
         use arrow::array::Array;

@@ -11,12 +11,12 @@ pub enum ValidateError {
     },
 }
 
-/// Field types the generator currently understands. Anything else is a hard error.
-/// Verified against the full Kafka 4.2.0 schema corpus (197 files).
-/// All field-level primitive types found: bool, bytes, float64, int16, int32, int64,
-/// int8, records, string, uint16, uuid.
-/// `uint32` and `float32` are listed here for completeness (appear in older/future
-/// schemas) but are not present in the 4.2.0 corpus.
+/// Field types the generator currently understands. Anything else is a hard
+/// error. This list is verified against the full Kafka 4.2.0 schema corpus of
+/// 197 files. The field-level primitive types found there are bool, bytes,
+/// float64, int16, int32, int64, int8, records, string, uint16, and uuid.
+/// `uint32` and `float32` are listed here for completeness, because they
+/// appear in older or future schemas, but they are not in the 4.2.0 corpus.
 const KNOWN_PRIMITIVE_TYPES: &[&str] = &[
     "bool", "int8", "int16", "int32", "int64", "uint16", "uint32", "float64", "string", "bytes",
     "uuid", "records",

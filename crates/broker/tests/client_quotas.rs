@@ -10,30 +10,33 @@
 //! Broker-side integration tests for KIP-13/124/257 client quotas.
 //!
 //! Tests:
-//! 1. `alter_then_describe_round_trip` — `AlterClientQuotas` sets
-//!    `(user=alice) producer_byte_rate=1024`; `DescribeClientQuotas` returns it.
-//! 2. `producer_byte_rate_throttles_produce` — Set low `producer_byte_rate` for
-//!    alice; produce a large payload; assert `throttle_time_ms` > 0.
-//! 3. `consumer_byte_rate_throttles_fetch` — Set low `consumer_byte_rate` for
-//!    alice; produce then fetch a large payload; assert `throttle_time_ms` > 0.
-//! 4. `user_specific_overrides_user_default` — Set (user=alice)
-//!    `producer_byte_rate=128` AND (user=<default>) `producer_byte_rate=8192`;
-//!    produce as alice; the tight alice-specific limit fires, not the default.
-//! 5. `non_super_user_denied` — alice (no ACLs) calls `AlterClientQuotas`;
-//!    must receive `CLUSTER_AUTHORIZATION_FAILED` (31) on every entry.
-//! 6. `request_percentage_throttles_produce` — Set a tiny `request_percentage`
-//!    (KIP-124) for alice with NO byte-rate quota; produce a small payload;
-//!    assert `throttle_time_ms` > 0. Proves the request-quota throttle is
-//!    communicated in the response (KIP-219 throttle-then-respond) and not
-//!    just silently muted.
+//! 1. `alter_then_describe_round_trip`. `AlterClientQuotas` sets
+//!    `(user=alice) producer_byte_rate=1024`. `DescribeClientQuotas` returns it.
+//! 2. `producer_byte_rate_throttles_produce`. Set a low `producer_byte_rate`
+//!    for alice. Produce a large payload. Assert `throttle_time_ms` > 0.
+//! 3. `consumer_byte_rate_throttles_fetch`. Set a low `consumer_byte_rate` for
+//!    alice. Produce and then fetch a large payload. Assert
+//!    `throttle_time_ms` > 0.
+//! 4. `user_specific_overrides_user_default`. Set (user=alice)
+//!    `producer_byte_rate=128` AND (user=<default>) `producer_byte_rate=8192`.
+//!    Produce as alice. The tight alice-specific limit fires, not the default.
+//! 5. `non_super_user_denied`. alice has no ACLs and calls
+//!    `AlterClientQuotas`. Every entry must carry
+//!    `CLUSTER_AUTHORIZATION_FAILED` (31).
+//! 6. `request_percentage_throttles_produce`. Set a tiny `request_percentage`
+//!    from KIP-124 for alice with NO byte-rate quota. Produce a small payload.
+//!    Assert `throttle_time_ms` > 0. This test proves that the broker sends the
+//!    request-quota throttle in the response, as KIP-219 throttle-then-respond
+//!    needs, and does not only mute the channel.
 //!
-//! Test 4 uses the Option B approach: user-specific overrides user-default.
-//! The (user, client-id) tuple precedence is covered by unit tests in
-//! `quota/lookup.rs`. The `client_id` plumbing gap in Produce/Fetch handlers
-//! is tracked as a known limitation (deferred to a future cleanup slice).
+//! Test 4 uses the Option B approach: a user-specific value overrides a
+//! user-default value. Unit tests in `quota/lookup.rs` cover the
+//! (user, client-id) tuple precedence. The `client_id` plumbing gap in the
+//! Produce and Fetch handlers is a known limitation. A future cleanup slice
+//! removes it.
 //!
-//! Gated to non-Windows to match the multi-broker test convention from
-//! slices 10b/12b/14/15/15b.
+//! These tests are gated to non-Windows to match the multi-broker test
+//! convention from slices 10b/12b/14/15/15b.
 
 use std::{
     io,
@@ -195,7 +198,8 @@ async fn sasl_plain_authenticate(
 // Cluster setup helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Start a single-broker SASL/PLAINTEXT cluster.
+/// Starts a single-broker SASL/PLAINTEXT cluster.
+///
 /// Returns `(handle, _dir, addr)`.
 fn start_single_broker_sasl_plaintext_with_users(
     super_user: &str,
@@ -230,7 +234,7 @@ fn start_single_broker_sasl_plaintext_with_users(
     })
 }
 
-/// Create a topic via SASL/PLAIN as admin. Asserts success.
+/// Creates a topic with SASL/PLAIN as admin. Asserts success.
 async fn create_topic_as_admin(
     addr: SocketAddr,
     topic: &str,
@@ -270,7 +274,7 @@ async fn create_topic_as_admin(
     );
 }
 
-/// Await until `handle` sees `(topic, partition)` present in its image.
+/// Waits until `handle` sees `(topic, partition)` in its image.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
     handle.wait_until_partition_present(topic, partition).await;
 }
@@ -279,7 +283,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
 // Wire drivers for AlterClientQuotas and DescribeClientQuotas
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `AlterClientQuotas` (`api_key=49`) over a SASL/PLAIN connection.
+/// Drives `AlterClientQuotas` with `api_key=49` over a SASL/PLAIN connection.
 ///
 /// `entries` is a list of `(entity_components, ops)` where:
 /// - `entity_components` is `Vec<(entity_type, entity_name)>`, e.g.
@@ -356,7 +360,7 @@ async fn drive_alter_client_quotas_sasl(
         .collect()
 }
 
-/// Drive `DescribeClientQuotas` (`api_key=48`) over a SASL/PLAIN connection.
+/// Drives `DescribeClientQuotas` with `api_key=48` over a SASL/PLAIN connection.
 ///
 /// `components` is a list of `(entity_type, match_type, match_value)`:
 /// - `match_type`: 0=EXACT, 1=DEFAULT, 2=ANY
@@ -420,7 +424,8 @@ async fn drive_describe_client_quotas_sasl(
         .collect()
 }
 
-/// Drive a `Produce` request over an already-authenticated SASL stream.
+/// Drives a `Produce` request over an already-authenticated SASL stream.
+///
 /// Returns the full `ProduceResponse`.
 async fn drive_produce_sasl(
     addr: SocketAddr,
@@ -475,7 +480,8 @@ async fn drive_produce_sasl(
     ProduceResponse::decode(&mut cur, version).expect("decode ProduceResponse")
 }
 
-/// Drive a `Fetch` request (consumer fetch, replica_id=-1) over SASL.
+/// Drives a consumer `Fetch` request with `replica_id=-1` over SASL.
+///
 /// Returns the full `FetchResponse`.
 async fn drive_fetch_sasl(addr: SocketAddr, user: &str, pass: &[u8], topic: &str) -> FetchResponse {
     let version: i16 = 12; // flexible, supports throttle_time_ms
@@ -533,7 +539,7 @@ async fn seed_compat_shim_disable_acl(handle: &BrokerHandle) {
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
-/// Seed an ACL that allows alice to Write topic `topic`.
+/// Seeds an ACL that allows alice to Write topic `topic`.
 async fn seed_alice_write_acl(handle: &BrokerHandle, topic: &str) {
     handle
         .submit_metadata_record_for_test(MetadataRecord::V1AccessControlEntry(AclEntry {
@@ -553,7 +559,7 @@ async fn seed_alice_write_acl(handle: &BrokerHandle, topic: &str) {
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
-/// Seed an ACL that allows alice to Read topic `topic`.
+/// Seeds an ACL that allows alice to Read topic `topic`.
 async fn seed_alice_read_acl(handle: &BrokerHandle, topic: &str) {
     handle
         .submit_metadata_record_for_test(MetadataRecord::V1AccessControlEntry(AclEntry {
@@ -577,8 +583,10 @@ async fn seed_alice_read_acl(handle: &BrokerHandle, topic: &str) {
 // Integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 1: `AlterClientQuotas` sets `(user=alice) producer_byte_rate=1024`;
-/// the value appears in the metadata image and in `DescribeClientQuotas`.
+/// Test 1: `AlterClientQuotas` sets `(user=alice) producer_byte_rate=1024`.
+///
+/// The value then appears in the metadata image and in
+/// `DescribeClientQuotas`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_then_describe_round_trip() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -648,14 +656,16 @@ async fn alter_then_describe_round_trip() {
     handle.shutdown().await;
 }
 
-/// Test 2: Set `(user=alice) producer_byte_rate=128`; alice produces ~8 KB;
-/// assert `throttle_time_ms > 0`.
+/// Test 2: a low `(user=alice) producer_byte_rate` throttles a produce.
 ///
-/// Rate = 128 bytes/sec, burst = 1 second at rate = 128 bytes free. Producing
-/// 8 KB = 8192 bytes means ~7168 bytes over budget. At 128 bytes/sec that is
-/// ~56 seconds of debt, but the response `throttle_time_ms` is capped at 1000ms.
-/// We only assert `throttle_time_ms` > 0 here — the exact value is not load-
-/// bearing.
+/// Set `(user=alice) producer_byte_rate=128`. alice produces about 8 KB. Assert
+/// `throttle_time_ms > 0`.
+///
+/// Rate = 128 bytes/sec, burst = 1 second at rate = 128 bytes free. A produce
+/// of 8 KB = 8192 bytes is about 7168 bytes over budget. At 128 bytes/sec that
+/// is about 56 seconds of debt, but the response `throttle_time_ms` has a cap
+/// of 1000ms. This test asserts only `throttle_time_ms` > 0. The exact value is
+/// not load-bearing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn producer_byte_rate_throttles_produce() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -735,16 +745,19 @@ async fn producer_byte_rate_throttles_produce() {
     handle.shutdown().await;
 }
 
-/// Test 6: Set a tiny `(user=alice) request_percentage` and NO byte-rate quota;
-/// alice produces a small payload; assert `throttle_time_ms > 0`.
+/// Test 6: a tiny `(user=alice) request_percentage` throttles a produce.
 ///
-/// This is the KIP-124 request quota (server-side CPU-time throttle), which
-/// KIP-219 requires the broker to communicate via `throttle_time_ms` while
-/// muting the channel — *not* silently delay. `request_percentage=0.001`
-/// gives the bucket a ~10µs/sec budget, far below any real produce handler's
-/// processing time, so even a single small produce trips the quota and the
-/// response must carry a non-zero throttle time. No `producer_byte_rate` is
-/// set, so the throttle can only come from the request quota.
+/// Set a tiny `(user=alice) request_percentage` and NO byte-rate quota. alice
+/// produces a small payload. Assert `throttle_time_ms > 0`.
+///
+/// This quota is the KIP-124 request quota, a server-side CPU-time throttle.
+/// KIP-219 requires the broker to report it in `throttle_time_ms` and to mute
+/// the channel. The broker must *not* silently delay the request.
+/// `request_percentage=0.001` gives the bucket a budget of about 10µs/sec, far
+/// below the processing time of any real produce handler. Even one small
+/// produce thus trips the quota, and the response must carry a non-zero
+/// throttle time. No `producer_byte_rate` is set, so only the request quota can
+/// cause the throttle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_percentage_throttles_produce() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -819,10 +832,12 @@ async fn request_percentage_throttles_produce() {
     handle.shutdown().await;
 }
 
-/// Test 3: Set `(user=alice) consumer_byte_rate=128`; produce 8 KB as admin;
-/// alice fetches; assert `throttle_time_ms > 0`.
+/// Test 3: a low `(user=alice) consumer_byte_rate` throttles a fetch.
 ///
-/// Same rate/burst reasoning as Test 2.
+/// Set `(user=alice) consumer_byte_rate=128`. Produce 8 KB as admin. alice
+/// fetches. Assert `throttle_time_ms > 0`.
+///
+/// The rate and burst reasoning is the same as Test 2.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumer_byte_rate_throttles_fetch() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -902,16 +917,17 @@ async fn consumer_byte_rate_throttles_fetch() {
     handle.shutdown().await;
 }
 
-/// Test 4 (Option B — user-specific overrides user-default):
+/// Test 4, Option B: a user-specific value overrides a user-default value.
+///
 /// Set `(user=alice) producer_byte_rate=128` AND
 /// `(user=<default>) producer_byte_rate=8192`. Produce as alice. The tight
-/// alice-specific rate (128) fires, not the lenient default (8192).
+/// alice-specific rate of 128 fires, not the lenient default of 8192.
 ///
-/// This avoids the (user, client-id) tuple limitation described above: the
-/// lookup module unit tests already cover the tuple-wins-over-user-only path
-/// (`pair_specific_wins_over_user_only` in `quota/lookup.rs`). The
-/// client-id plumbing gap in Produce/Fetch handlers is deferred to a future
-/// cleanup slice.
+/// This test avoids the (user, client-id) tuple limitation above. The unit
+/// tests of the lookup module already cover the path where the tuple wins over
+/// a user-only value. That test is `pair_specific_wins_over_user_only` in
+/// `quota/lookup.rs`. A future cleanup slice removes the client-id plumbing gap
+/// in the Produce and Fetch handlers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_specific_overrides_user_default() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -1013,12 +1029,14 @@ async fn user_specific_overrides_user_default() {
     handle.shutdown().await;
 }
 
-/// Test 5: alice (authenticated, no super-user, no ACLs) sends
-/// `AlterClientQuotas`; every entry must carry
+/// Test 5: a non-super-user cannot alter client quotas.
+///
+/// alice is authenticated, is not a super-user, and has no ACLs. alice sends
+/// `AlterClientQuotas`. Every entry must carry
 /// `CLUSTER_AUTHORIZATION_FAILED (31)`.
 ///
-/// A dummy ACL is seeded first to disable the compat shim (allow-all when no
-/// ACLs are present in the image).
+/// The test seeds a dummy ACL first. The dummy ACL disables the compat shim,
+/// which allows every operation while the image holds no ACLs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_super_user_denied() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(

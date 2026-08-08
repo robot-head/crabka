@@ -2,29 +2,30 @@
 //! (`super::apply_incremental`).
 //!
 //! The session-cache partition map is **stateful** across incremental fetches,
-//! so a real state machine fits (unlike the stateless quota lookup, which is
-//! exhaustive-enum + proptest only). The model drives the REAL forget+merge over
-//! sequences of incremental fetches whose topic references carry varying
-//! identity halves — name-only (Fetch v ≤ 12), id-only (v ≥ 13), or both — over a
-//! tiny topic/id/partition universe, starting from a fully-resolved session, and
-//! asserts:
+//! so a real state machine fits. The stateless quota lookup, by contrast, uses
+//! exhaustive enumeration and proptest only. The model drives the REAL
+//! forget+merge over sequences of incremental fetches. The topic references in
+//! those fetches carry varying identity halves: name-only (Fetch v ≤ 12),
+//! id-only (v ≥ 13), or both. The topic/id/partition universe is tiny, and the
+//! model starts from a fully-resolved session. It asserts:
 //!
 //! - `no_shadow` (headline): no two cached keys ever refer to one logical
-//!   partition (same partition AND a shared non-trivial identity half). A shadow
-//!   would silently corrupt subsequent reads — the merge-only shadow is already
-//!   fixed+tested; this targets the *composed* forget-then-merge path.
-//! - **subscription fidelity** (per-transition): a subscribed partition is
-//!   reflected with the requested `max_bytes`.
-//! - `no_orphan_default`: no key carries default state (`max_bytes == 0`); a
+//!   partition, that is the same partition AND a shared non-trivial identity
+//!   half. A shadow would silently corrupt subsequent reads. The merge-only
+//!   shadow is already fixed and tested. This model targets the *composed*
+//!   forget-then-merge path.
+//! - **subscription fidelity** (per-transition): the cache reflects a
+//!   subscribed partition with the requested `max_bytes`.
+//! - `no_orphan_default`: no key carries default state (`max_bytes == 0`). A
 //!   merge-created entry always takes the request's value.
 //!
-//! Note on determinism: the real merge resolves a double-match (a request whose
-//! name matches one cached key and whose id matches another) via `HashMap`
-//! iteration order, so `next_state` is not a pure function of `(state, action)`.
-//! That is faithful to production and sound here: every possible resolution
-//! satisfies the asserted invariants (which are choice-independent), and the
-//! sorted projection gives identical fingerprints for identical resulting
-//! content, so the explored graph is well-defined.
+//! Note on determinism: the real merge resolves a double-match through
+//! `HashMap` iteration order. A double-match is a request whose name matches
+//! one cached key and whose id matches another. So `next_state` is not a pure
+//! function of `(state, action)`. That is faithful to production and sound
+//! here. Every possible resolution satisfies the asserted invariants, which are
+//! choice-independent. The sorted projection also gives identical fingerprints
+//! for identical resulting content, so the explored graph is well-defined.
 
 use std::{
     collections::HashMap,
@@ -57,10 +58,10 @@ fn id_of(tag: u8) -> WireUuid {
     WireUuid([tag; 16])
 }
 
-/// A client topic reference and which identity halves it carries. `tag` 1 = id U,
-/// 2 = id V; the name is one of {A, B}. `Both(B, 1)` models a rename of topic A
-/// (id U) to name B; `IdOnly(1)` / `NameOnly(A)` model the half-identity wire
-/// forms.
+/// A client topic reference and which identity halves it carries. `tag` 1 = id
+/// U and `tag` 2 = id V. The name is one of {A, B}. `Both(B, 1)` models a
+/// rename of topic A (id U) to name B. `IdOnly(1)` and `NameOnly(A)` model the
+/// half-identity wire forms.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Ref {
     Both(&'static str, u8),
@@ -80,7 +81,8 @@ fn ref_id(r: Ref) -> WireUuid {
     }
 }
 /// Mirror of the merge find-predicate: does cached key `k` match reference `r`
-/// for partition `p` (either non-empty name equal, or non-zero id equal)?
+/// for partition `p`? A match needs an equal non-empty name or an equal
+/// non-zero id.
 fn ref_matches(k: &FetchSessionKey, r: Ref, p: i32) -> bool {
     let name = ref_name(r);
     let id = ref_id(r);
@@ -96,7 +98,7 @@ struct CacheState {
 impl CacheState {
     /// Canonical, hashable projection: (name, id-bytes, partition, `max_bytes`),
     /// sorted. `max_bytes` distinguishes a real entry from a default-state
-    /// shadow; the other `CachedPartitionState` fields are irrelevant here.
+    /// shadow. The other `CachedPartitionState` fields are irrelevant here.
     fn proj(&self) -> Vec<(String, [u8; 16], i32, i32)> {
         let mut v: Vec<_> = self
             .partitions

@@ -1,20 +1,21 @@
-//! `AlterReplicaLogDirs` (`api_key=34`, KIP-113). Intra-broker
-//! log-directory reassignment: move a hosted replica from one of this
-//! broker's configured `log.dirs` to another, without re-replicating
-//! from the leader. Backs `kafka-log-dirs --alter` and the
+//! `AlterReplicaLogDirs` (`api_key=34`, KIP-113) moves a replica between the
+//! log directories of one broker.
+//!
+//! This intra-broker log-directory reassignment moves a hosted replica from
+//! one of the configured `log.dirs` of this broker to another, without a new
+//! replication from the leader. It backs `kafka-log-dirs --alter` and the
 //! `--reassignment-json-file` log-dir overrides of
 //! `kafka-reassign-partitions`.
 //!
-//! The handler immediately validates inputs, kicks off a per-move
-//! background replicator task via [`crate::future_log::start_move`],
-//! and returns success. The actual data copy + atomic dir-rename
-//! happens in the background; clients poll `DescribeLogDirs` and
-//! watch `is_future_key` flip from `true` to `false` to detect
-//! completion.
+//! The handler validates the inputs immediately, starts a background
+//! replicator task for each move with [`crate::future_log::start_move`], and
+//! returns success. The data copy and the atomic dir-rename occur in the
+//! background. Clients poll `DescribeLogDirs` and watch `is_future_key`
+//! change from `true` to `false` to find the end of the move.
 //!
-//! Authorisation (Cluster.Alter) is enforced at
-//! [`crate::network::dispatch::handle_alter_replica_log_dirs_frame`] —
-//! this handler runs only after the principal has been authorized.
+//! [`crate::network::dispatch::handle_alter_replica_log_dirs_frame`] enforces
+//! authorisation (Cluster.Alter). This handler runs only after the principal
+//! has been authorized.
 
 use std::{collections::BTreeMap, path::PathBuf};
 

@@ -1,21 +1,24 @@
 //! Exhaustive stateright model of the KIP-848 reconciliation core.
 //!
-//! The model drives the real `step_heartbeat` (membership + heartbeat actions)
-//! and a faithful-client environment (revoke-before-add, trust-the-coordinator)
-//! to check the headline KIP-848 safety property: no two members ever
-//! simultaneously own the same partition. Design:
+//! The model drives the real `step_heartbeat`, with its membership and
+//! heartbeat actions, and a faithful-client environment that revokes before it
+//! adds and trusts the coordinator. It checks the main KIP-848 safety
+//! property: no two members ever own the same partition at the same time. The
+//! design is in
 //! `docs/superpowers/specs/2026-06-14-crabka-kip848-reconciliation-model-design.md`.
 //!
-//! The faithful client adds/revokes partitions strictly according to the
-//! **advertised** assignment the coordinator returned in that member's last
-//! heartbeat response (`ReconState::advertised`) — never the raw target — with
-//! no cross-member check. That is exactly how a real consumer behaves: it
-//! trusts the coordinator's assignment. The safety guarantee must therefore come
-//! entirely from the coordinator's withholding (`GroupState::reconcile_member`).
+//! The faithful client adds and revokes partitions strictly by the
+//! **advertised** assignment that the coordinator returned in that member's
+//! last heartbeat response (`ReconState::advertised`). It never reads the raw
+//! target, and it makes no cross-member check. That is how a real consumer
+//! behaves: it trusts the coordinator's assignment. The safety guarantee must
+//! therefore come entirely from the coordinator's withholding, in
+//! `GroupState::reconcile_member`.
 //!
-//! Memory safety: stateright BFS keeps every visited unique state resident, so
-//! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
-//! and MUST be executed under the host memory watchdog while bounds are tuned.
+//! Memory safety: stateright BFS keeps every visited unique state in memory.
+//! Each run is therefore fenced with `within_boundary`, `target_state_count`,
+//! and `timeout`. Run it under the host memory watchdog while you tune the
+//! bounds.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -45,15 +48,16 @@ const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 60;
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Bounded config (held here, not in the state).
+/// Bounded config. It lives here, not in the state.
 struct ReconModel {
-    /// Member-id pool. A member may join, leave, and rejoin.
+    /// Member-id pool. A member can join, leave, and rejoin.
     pool: Vec<&'static str>,
     partitions: i32,
     max_epoch: i32,
 }
 
-/// Per-member coordinator-side projection (single topic → `Vec<i32>`).
+/// Per-member coordinator-side projection, which maps a single topic to a
+/// `Vec<i32>`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct MemberProj {
     id: String,
@@ -70,13 +74,14 @@ struct ReconState {
     dirty: bool,
     target_epoch: i32,
     members: Vec<MemberProj>, // sorted by id
-    /// Ground-truth ledger: what each member actually consumes. Sorted by id;
-    /// partitions sorted. This is the observable the headline invariant checks.
+    /// Ground-truth ledger: what each member consumes. It is sorted by id, and
+    /// the partitions are sorted. The main invariant checks this observable.
     client_owned: Vec<(String, Vec<i32>)>,
-    /// The assignment the coordinator last advertised to each member (its last
-    /// heartbeat response). The faithful client adds/revokes against THIS, not
-    /// the raw target — a member only learns its new assignment when it
-    /// heartbeats. Sorted by id; partitions sorted.
+    /// The assignment that the coordinator last advertised to each member, in
+    /// that member's last heartbeat response. The faithful client adds and
+    /// revokes against THIS, not against the raw target, because a member
+    /// learns its new assignment only when it heartbeats. It is sorted by id,
+    /// and the partitions are sorted.
     advertised: Vec<(String, Vec<i32>)>,
 }
 
@@ -89,7 +94,7 @@ enum ReconAction {
     ClientRevoke(String, i32),
 }
 
-/// Static metadata image: one topic with `partitions` partitions.
+/// Static metadata image with one topic that has `partitions` partitions.
 #[derive(Debug)]
 struct ModelMetadata {
     input: ReconcileInput,
@@ -148,10 +153,12 @@ fn to_map(parts: &[i32]) -> HashMap<Uuid, Vec<i32>> {
     }
 }
 
-/// Reconstruct a real `GroupState` from the projection so the next real call
-/// behaves identically to a live run. Fields not in the projection (subscription
-/// fixed to the one topic, `last_seen` constant, `previous_member_epoch`
-/// irrelevant to any decision) are set to faithful constants.
+/// Rebuilds a real `GroupState` from the projection, so that the next real
+/// call behaves exactly as it does in a live run.
+///
+/// The fields that the projection does not hold get faithful constants. The
+/// subscription is fixed to the one topic, `last_seen` is constant, and
+/// `previous_member_epoch` affects no decision.
 fn rebuild_group(s: &ReconState) -> GroupState {
     let mut g = GroupState::new("g");
     g.group_epoch = s.group_epoch;
@@ -188,8 +195,8 @@ fn rebuild_group(s: &ReconState) -> GroupState {
     g
 }
 
-/// Project a real `GroupState` + the client ledger + advertised map back into
-/// the hashable state.
+/// Projects a real `GroupState`, the client ledger, and the advertised map
+/// back into the hashable state.
 fn project(
     g: &GroupState,
     owned: &BTreeMap<String, BTreeSet<i32>>,
@@ -279,7 +286,8 @@ fn hb_request(
     }
 }
 
-/// The partitions the coordinator advertised to a member in `step`'s response.
+/// The partitions that the coordinator advertised to a member in the response
+/// from `step`.
 fn advertised_of(step: &HeartbeatStep) -> Vec<i32> {
     let mut v: Vec<i32> = step
         .response

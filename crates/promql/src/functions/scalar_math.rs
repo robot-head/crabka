@@ -1,28 +1,30 @@
 //! Per-row scalar math / trig / clamp / round / sgn `PromQL` functions as
 //! `DataFusion` [`ScalarUDF`]s.
 //!
-//! Each UDF consumes a single `Float64` `value` column (the per-series value of
-//! the inner instant vector) and produces a `Float64` result, one value per row.
-//! `clamp`/`clamp_min`/`clamp_max` thread their bound(s) and `round` threads its
-//! optional `to_nearest` as additional leading `Float64` scalar columns.
+//! Each UDF reads a single `Float64` `value` column and returns a `Float64`
+//! result, one value per row. That column holds the per-series value of the
+//! inner instant vector. `clamp`, `clamp_min`, and `clamp_max` thread their
+//! bounds, and `round` threads its optional `to_nearest`, as more leading
+//! `Float64` scalar columns.
 //!
 //! The math is a byte-for-byte port of the tree-walking interpreter's
-//! `UnaryFloatFn::apply`, `clamp_float`, and `round_to_nearest`, so the operator
-//! path and the interpreter agree on every number — including the edge values a
-//! `DataFusion` built-in math expression might round differently (`ln(0)`,
-//! `sqrt(-1)`, `sgn(NaN)`/`sgn(-0.0)`, the `.5` rounding direction). Using a UDF
-//! sidesteps having to audit each built-in against Prometheus.
+//! `UnaryFloatFn::apply`, `clamp_float`, and `round_to_nearest`. The operator
+//! path and the interpreter therefore agree on every number, including the edge
+//! values that a `DataFusion` built-in math expression can round differently.
+//! Those edge values are `ln(0)`, `sqrt(-1)`, `sgn(NaN)`, `sgn(-0.0)`, and the
+//! `.5` rounding direction. A UDF also removes the need to audit each built-in
+//! against Prometheus.
 //!
 //! # Call convention
 //!
 //! - Unary families (`abs`, `ceil`, …, `deg`, `rad`): `prom_<fn>(value)`.
 //! - `clamp_min`/`clamp_max`: `prom_clamp_min(bound, value)` /
-//!   `prom_clamp_max(bound, value)` — the bound leads.
-//! - `clamp`: `prom_clamp(min, max, value)` — both bounds lead.
-//! - `round`: `prom_round(to_nearest, value)` — `to_nearest` leads.
+//!   `prom_clamp_max(bound, value)`, where the bound leads.
+//! - `clamp`: `prom_clamp(min, max, value)`, where both bounds lead.
+//! - `round`: `prom_round(to_nearest, value)`, where `to_nearest` leads.
 //!
-//! Genuine NaN is preserved (never dropped): `f(NaN)` and `sqrt(-1)` render as
-//! `NaN`, matching the interpreter, which keeps every float sample.
+//! A UDF keeps every NaN and never drops one. `f(NaN)` and `sqrt(-1)` render as
+//! `NaN`, as in the interpreter, which keeps every float sample.
 
 use std::sync::Arc;
 
@@ -64,18 +66,18 @@ pub enum ScalarMathOp {
     Atanh,
     Deg,
     Rad,
-    /// `round(v, to_nearest?)` — `to_nearest` is the leading scalar column.
+    /// `round(v, to_nearest?)`: `to_nearest` is the leading scalar column.
     Round,
-    /// `clamp_min(v, min)` — `min` is the leading scalar column.
+    /// `clamp_min(v, min)`: `min` is the leading scalar column.
     ClampMin,
-    /// `clamp_max(v, max)` — `max` is the leading scalar column.
+    /// `clamp_max(v, max)`: `max` is the leading scalar column.
     ClampMax,
-    /// `clamp(v, min, max)` — `min`, `max` are the two leading scalar columns.
+    /// `clamp(v, min, max)`: `min` and `max` are the two leading scalar columns.
     Clamp,
 }
 
 impl ScalarMathOp {
-    /// The registered UDF name this op projects.
+    /// Returns the registered UDF name for this op.
     #[must_use]
     pub fn udf_name(self) -> &'static str {
         match self {
@@ -109,8 +111,10 @@ impl ScalarMathOp {
         }
     }
 
-    /// Number of leading `Float64` scalar columns this op threads ahead of the
-    /// `value` column (`round`/`clamp_*` take bound args; unary fns take none).
+    /// Returns the count of leading `Float64` scalar columns this op threads
+    /// ahead of the `value` column.
+    ///
+    /// `round` and `clamp_*` take bound args. Unary functions take none.
     fn scalar_param_count(self) -> usize {
         match self {
             Self::Round | Self::ClampMin | Self::ClampMax => 1,
@@ -119,18 +123,20 @@ impl ScalarMathOp {
         }
     }
 
-    /// Total positional-argument count (`value` plus the leading scalars).
+    /// Returns the total positional-argument count: `value` plus the leading
+    /// scalars.
     fn arity(self) -> usize {
         self.scalar_param_count() + 1
     }
 
-    /// Apply the op to one row. `params` are the leading scalar args in call
-    /// order (`[to_nearest]` for `round`, `[min]`/`[max]` for
-    /// `clamp_min`/`clamp_max`, `[min, max]` for `clamp`); `value` is the per-row
-    /// instant-vector value.
+    /// Applies the op to one row.
     ///
-    /// A direct port of the interpreter's `UnaryFloatFn::apply` / `clamp_float`
-    /// / `round_to_nearest`, evaluated bit-for-bit.
+    /// `params` holds the leading scalar args in call order: `[to_nearest]` for
+    /// `round`, `[min]` or `[max]` for `clamp_min` and `clamp_max`, and
+    /// `[min, max]` for `clamp`. `value` is the per-row instant-vector value.
+    ///
+    /// This is a direct port of the interpreter's `UnaryFloatFn::apply`,
+    /// `clamp_float`, and `round_to_nearest`, and it evaluates bit-for-bit.
     fn apply(self, value: f64, params: &[f64]) -> f64 {
         match self {
             Self::Abs => value.abs(),
@@ -199,8 +205,10 @@ fn clamp_float(value: f64, min: Option<f64>, max: Option<f64>) -> f64 {
     value
 }
 
-/// A `ScalarUDFImpl` over the inner instant vector's `value` column (plus any
-/// leading scalar bound columns). One instance per [`ScalarMathOp`].
+/// A `ScalarUDFImpl` over the inner instant vector's `value` column.
+///
+/// The call can add leading scalar bound columns. There is one instance per
+/// [`ScalarMathOp`].
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct ScalarMathUdf {
     op: ScalarMathOp,
@@ -229,9 +237,10 @@ impl ScalarUDFImpl for ScalarMathUdf {
         Ok(DataType::Float64)
     }
 
-    /// `Signature::user_defined` requires bespoke coercion. Every argument is a
-    /// `Float64` column (the value plus any leading scalars), so validate arity
-    /// and pass the types through unchanged.
+    /// `Signature::user_defined` needs its own type coercion.
+    ///
+    /// Every argument is a `Float64` column: the value plus any leading scalars.
+    /// This method checks the arity and returns the types unchanged.
     fn coerce_types(&self, arg_types: &[DataType]) -> DfResult<Vec<DataType>> {
         if arg_types.len() != self.op.arity() {
             return Err(DataFusionError::Plan(format!(
@@ -297,7 +306,7 @@ impl ScalarUDFImpl for ScalarMathUdf {
     }
 }
 
-/// Read a scalar `Float64` argument, accepting a single-row array fallback.
+/// Reads a scalar `Float64` argument, with a single-row array as a fallback.
 fn scalar_f64(value: &ColumnarValue, arg: &str, udf: &str) -> DfResult<f64> {
     match value {
         ColumnarValue::Scalar(scalar) => match scalar {
@@ -369,7 +378,7 @@ pub fn scalar_math_udfs() -> Vec<ScalarUDF> {
     .collect()
 }
 
-/// Register every scalar-math UDF on `ctx` so a planner can lower onto them.
+/// Registers every scalar-math UDF on `ctx` so a planner can lower onto them.
 pub fn register_scalar_math_udfs(ctx: &SessionContext) {
     for udf in scalar_math_udfs() {
         ctx.register_udf(udf);
@@ -384,8 +393,10 @@ mod tests {
 
     use super::*;
 
-    /// Invoke a `ScalarMathUdf` over a one-batch `value` column plus the given
-    /// leading scalar bounds, returning the result column.
+    /// Invokes a `ScalarMathUdf` over a one-batch `value` column and the given
+    /// leading scalar bounds.
+    ///
+    /// This function returns the result column.
     fn run(op: ScalarMathOp, bounds: &[f64], values: &[f64]) -> Vec<f64> {
         let udf = ScalarMathUdf::new(op);
         let rows = values.len();

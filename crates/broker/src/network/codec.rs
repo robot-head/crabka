@@ -18,7 +18,7 @@ pub(crate) fn validate_frame_length(
     Ok(())
 }
 
-/// Build a [`LengthDelimitedCodec`] configured for Kafka's wire framing.
+/// Builds a [`LengthDelimitedCodec`] configured for Kafka's wire framing.
 #[must_use]
 pub fn codec(max_frame_bytes: usize) -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
@@ -30,7 +30,7 @@ pub fn codec(max_frame_bytes: usize) -> LengthDelimitedCodec {
         .new_codec()
 }
 
-/// Wrap a [`TcpStream`] with the Kafka length-delimited codec.
+/// Wraps a [`TcpStream`] with the Kafka length-delimited codec.
 #[must_use]
 pub fn frame(stream: TcpStream, max_frame_bytes: usize) -> Framed<TcpStream, LengthDelimitedCodec> {
     Framed::new(stream, codec(max_frame_bytes))

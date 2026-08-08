@@ -1,4 +1,5 @@
-//! `BatchCodec`: bridges a per-partition batch of Kafka records ↔ a polars `DataFrame`.
+//! `BatchCodec`: the bridge between a per-partition batch of Kafka records and a
+//! polars `DataFrame`.
 
 use ::polars::prelude::*;
 use bytes::Bytes;
@@ -35,22 +36,23 @@ pub struct ProduceRecord {
     pub timestamp: i64,
 }
 
-/// Failure assembling/decomposing a batch.
+/// Failure to assemble or decompose a batch.
 #[derive(Debug, thiserror::Error)]
 #[error("batch codec error: {0}")]
 pub struct BatchError(pub String);
 
-/// Bridges a per-partition batch of records ↔ a polars `DataFrame`.
+/// The bridge between a per-partition batch of records and a polars `DataFrame`.
 pub trait BatchCodec: Send + Sync + 'static {
-    /// Assemble consumed records (in offset order) into one `DataFrame`, including
-    /// the reserved metadata columns.
+    /// Assemble the consumed records, in offset order, into one `DataFrame` that
+    /// includes the reserved metadata columns.
     fn decode(&self, records: &[ConsumedRecord]) -> Result<DataFrame, BatchError>;
     /// Decompose an output `DataFrame` into produce records.
     fn encode(&self, df: &DataFrame) -> Result<Vec<ProduceRecord>, BatchError>;
 }
 
-/// Returns `Err` if `df_columns` contains a name that collides with a reserved
-/// metadata column. Shared by codecs (Tasks 6–7) and the topology builder (Task 9).
+/// Returns `Err` when `df_columns` holds a name that collides with a reserved
+/// metadata column. The codecs (Tasks 6–7) and the topology builder (Task 9)
+/// share this function.
 pub fn reject_reserved_payload_columns(df_columns: &[&str]) -> Result<(), BatchError> {
     for name in df_columns {
         if RESERVED_COLUMNS.contains(name) {
@@ -64,14 +66,15 @@ pub fn reject_reserved_payload_columns(df_columns: &[&str]) -> Result<(), BatchE
 
 /// `BatchCodec` where each record value is itself an Arrow-IPC `DataFrame`.
 ///
-/// `decode` vstacks the per-record frames (attaching the reserved metadata
-/// columns); `encode` writes the result as IPC record(s), splitting if the
-/// encoded size would exceed `max_record_bytes`.
+/// `decode` vstacks the per-record frames and attaches the reserved metadata
+/// columns. `encode` writes the result as one or more IPC records, and it splits
+/// them when the encoded size would exceed `max_record_bytes`.
 #[derive(Debug, Clone)]
 pub struct BlobCodec {
-    /// Soft cap on one produced record's encoded size; the frame is row-chunked
-    /// to stay under it. Defaults to ~900 KiB (under Kafka's default 1 MiB
-    /// `max.request.size`, leaving headroom for record headers/framing).
+    /// Soft cap on one produced record's encoded size. The codec row-chunks the
+    /// frame to stay under the cap. Default: about 900 KiB. That is under
+    /// Kafka's default 1 MiB `max.request.size`, and it leaves headroom for the
+    /// record headers and framing.
     pub max_record_bytes: ByteSize,
 }
 
@@ -125,7 +128,7 @@ impl BatchCodec for BlobCodec {
     }
 }
 
-/// Add the four reserved metadata columns (broadcast to every row of `frame`).
+/// Add the four reserved metadata columns, broadcast to every row of `frame`.
 fn with_meta_columns(frame: DataFrame, rec: &ConsumedRecord) -> Result<DataFrame, BatchError> {
     let n = frame.height();
     let mut df = frame;
@@ -142,8 +145,9 @@ fn with_meta_columns(frame: DataFrame, rec: &ConsumedRecord) -> Result<DataFrame
     Ok(df)
 }
 
-/// Drop the reserved metadata columns, leaving only payload columns. Tolerates a
-/// frame that never carried them (`drop_many` ignores absent names).
+/// Drop the reserved metadata columns and leave only the payload columns. A
+/// frame that never carried them is fine, because `drop_many` ignores absent
+/// names.
 fn drop_reserved_columns(df: &DataFrame) -> DataFrame {
     df.drop_many(RESERVED_COLUMNS.iter().map(|s| PlSmallStr::from_str(s)))
 }
@@ -170,9 +174,10 @@ use std::marker::PhantomData;
 
 use crate::{columnar::topology::row_bridge::RowBridge, processor::serde::SerdeAssociate};
 
-/// `BatchCodec` over ordinary row records: deserialize each `(key, value)` with
-/// the inner serdes, assemble payload columns via a [`RowBridge`], and attach the
-/// reserved metadata columns. `encode` reverses it (one record per row).
+/// `BatchCodec` over ordinary row records. It deserializes each `(key, value)`
+/// with the inner serdes, assembles the payload columns with a [`RowBridge`], and
+/// attaches the reserved metadata columns. `encode` reverses that, one record per
+/// row.
 pub struct RowCodec<K, V, KS, VS, B> {
     #[allow(dead_code, reason = "retained for future typed-key reconstruction")]
     key_serde: KS,
@@ -182,7 +187,8 @@ pub struct RowCodec<K, V, KS, VS, B> {
 }
 
 impl<K, V, KS, VS, B> RowCodec<K, V, KS, VS, B> {
-    /// Construct a `RowCodec` from its key/value serdes and a row bridge.
+    /// Construct a `RowCodec` from its key serde, its value serde, and a row
+    /// bridge.
     pub fn new(key_serde: KS, value_serde: VS, bridge: B) -> Self {
         Self {
             key_serde,

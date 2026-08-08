@@ -1,6 +1,9 @@
-//! SP37: the evaluation context (session timezone + the transaction/statement
-//! clock) threaded through expression evaluation, and an injectable clock so
-//! `now()`/`current_timestamp` are deterministic in tests.
+//! SP37: the evaluation context threaded through expression evaluation, and an
+//! injectable clock.
+//!
+//! The context carries the session timezone and the transaction/statement
+//! clock. The injectable clock makes `now()` and `current_timestamp`
+//! deterministic in tests.
 
 use std::{
     collections::HashMap,
@@ -9,7 +12,8 @@ use std::{
 
 use jiff::{Timestamp, tz::TimeZone};
 
-/// Source of "current time". `SystemClock` in production; `FixedClock` in tests.
+/// Source of "current time". Production uses `SystemClock` and tests use
+/// `FixedClock`.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Timestamp;
 }
@@ -18,9 +22,11 @@ pub trait Clock: Send + Sync {
 pub struct SystemClock;
 impl Clock for SystemClock {
     /// Quantized to microseconds, the resolution every `timestamp` encoding
-    /// stores. A sub-microsecond value would compare unequal to its own stored
-    /// form while encoding to identical bytes, which a unique index reads as a
-    /// duplicate — the same hazard the text parsers guard against.
+    /// stores.
+    ///
+    /// A sub-microsecond value would compare unequal to its own stored form
+    /// while it encodes to identical bytes, and a unique index reads that as a
+    /// duplicate. The text parsers guard against the same hazard.
     fn now(&self) -> Timestamp {
         Timestamp::from_microsecond(Timestamp::now().as_microsecond())
             .unwrap_or_else(|_| Timestamp::now())
@@ -36,16 +42,18 @@ impl Clock for FixedClock {
     }
 }
 
-/// Per-statement evaluation context. `now`/`stmt_now` are the transaction- and
-/// statement-start instants (PG transaction-stable semantics); `time_zone` is the
-/// effective session zone; `clock` backs `clock_timestamp()`.
+/// Per-statement evaluation context.
+///
+/// `now` and `stmt_now` are the transaction-start and statement-start instants,
+/// with PG transaction-stable semantics. `time_zone` is the effective session
+/// zone. `clock` backs `clock_timestamp()`.
 #[derive(Clone)]
 pub struct EvalCtx {
     pub now: Timestamp,
     pub stmt_now: Timestamp,
     pub time_zone: TimeZone,
     /// The `DateStyle` field order, which decides how an otherwise-ambiguous
-    /// all-numeric date literal (`01/02/03`) is read.
+    /// all-numeric date literal such as `01/02/03` is read.
     pub date_order: crabka_pgtypes::datetime::DateOrder,
     /// The `DateStyle` output format, which decides how a `date`, `timestamp`
     /// or `timestamptz` is spelled on the wire.
@@ -54,34 +62,43 @@ pub struct EvalCtx {
     pub interval_style: crabka_pgtypes::datetime::IntervalStyle,
     pub current_user: String,
     pub session_user: String,
-    /// The session's backend process id — the value the wire layer announced in
-    /// `BackendKeyData`, which `pg_backend_pid()` must agree with because that
-    /// pairing is how a client correlates a cancel request with its session.
-    /// 0 outside a SQL session (a planning context or a unit test), where no
-    /// backend id was ever assigned.
+    /// The session's backend process id.
+    ///
+    /// This is the value the wire layer announced in `BackendKeyData`.
+    /// `pg_backend_pid()` must agree with it, because a client uses that
+    /// pairing to match a cancel request with its session. The value is 0
+    /// outside a SQL session, for example in a planning context or a unit test,
+    /// where no backend id was ever assigned.
     pub(crate) backend_pid: i32,
-    /// Nesting level of the ordinary trigger currently executing in this session.
+    /// Nesting level of the ordinary trigger that executes in this session
+    /// now.
     pub(crate) trigger_depth: u32,
     pub clock: Arc<dyn Clock>,
     pub(crate) sequence: Option<Arc<SequenceRuntime>>,
     /// The catalog KV on its own, for a context that can read the catalog but
-    /// has no sequence machinery — a DDL statement, which must resolve the
-    /// relation a `'name'::regclass` default names while `nextval()` stays the
-    /// 0A000 it is outside a session. A session leaves this `None` and reads
+    /// has no sequence machinery.
+    ///
+    /// A DDL statement is such a context. It must resolve the relation a
+    /// `'name'::regclass` default names, while `nextval()` stays the 0A000 it
+    /// is outside a session. A session leaves this field `None` and reads
     /// through `sequence`, which carries the same handle.
     pub(crate) catalog: Option<Arc<dyn crabka_pgkv::Kv>>,
-    /// The session's name-resolution scope — its `search_path`, the user
-    /// `"$user"` expands to, and its backend id. `None` outside a SQL session
-    /// (a planning context or a unit test), where
-    /// [`crate::relname::ResolutionScope::default_scope`] stands in: a
-    /// relation named there still has to resolve, and `PostgreSQL`'s own
-    /// default path is the honest answer.
+    /// The session's name-resolution scope: its `search_path`, the user
+    /// `"$user"` expands to, and its backend id.
+    ///
+    /// The field is `None` outside a SQL session, for example in a planning
+    /// context or a unit test. There
+    /// [`crate::relname::ResolutionScope::default_scope`] stands in, because a
+    /// relation named there still has to resolve and `PostgreSQL`'s own default
+    /// path is the correct answer.
     pub(crate) resolution: Option<Arc<crate::relname::ResolutionScope>>,
-    /// The session's queued `LISTEN`/`NOTIFY` work, so the side-effecting
-    /// `pg_notify(channel, payload)` can enqueue from inside expression
-    /// evaluation — the same seam `sequence` gives `nextval`. `None` outside a
-    /// SQL session (planning contexts, unit tests), where `pg_notify` is an
-    /// error rather than a silent no-op.
+    /// The session's queued `LISTEN`/`NOTIFY` work.
+    ///
+    /// The queue lets the side-effecting `pg_notify(channel, payload)` add work
+    /// from inside expression evaluation. It is the same seam `sequence` gives
+    /// `nextval`. The field is `None` outside a SQL session, for example in
+    /// planning contexts and unit tests, where `pg_notify` is an error and not
+    /// a silent no-op.
     pub(crate) notify: Option<Arc<Mutex<crate::session::NotifyPending>>>,
     pub(crate) transition_relations: Option<Arc<Mutex<HashMap<String, TransitionRelation>>>>,
     pub(crate) event_trigger: Option<Arc<EventTriggerContext>>,
@@ -114,24 +131,27 @@ pub(crate) struct EventTriggerContext {
 }
 
 pub(crate) struct SequenceRuntime {
-    /// The session's catalog KV. `nextval` reads sequence records through it,
-    /// and it is the same handle the catalog-introspection functions read
-    /// relations, views and comments through — a session has exactly one.
+    /// The session's catalog KV.
+    ///
+    /// `nextval` reads sequence records through it. It is the same handle the
+    /// catalog-introspection functions read relations, views and comments
+    /// through. A session has exactly one.
     pub(crate) kv: Arc<dyn crabka_pgkv::Kv>,
     pub(crate) manager: Arc<crate::seq::SequenceManager>,
     pub(crate) currvals: Arc<Mutex<HashMap<String, i64>>>,
-    /// The session's sequence advances that are not durable yet, which a
-    /// `Replicated` engine stages here rather than writing through the store.
-    /// The session folds them into the next batch it commits — the same seam
-    /// [`EvalCtx::notify`] gives `pg_notify()`, and for the same reason:
-    /// expression evaluation is synchronous and cannot await a commit.
-    /// `Durable` mode persists as it goes and leaves this empty.
+    /// The session's sequence advances that are not durable yet.
+    ///
+    /// A `Replicated` engine stages them here instead of a write through the
+    /// store. The session folds them into the next batch it commits. This is
+    /// the same seam [`EvalCtx::notify`] gives `pg_notify()`, and for the same
+    /// reason: expression evaluation is synchronous and cannot await a commit.
+    /// `Durable` mode persists as it goes and leaves this field empty.
     pub(crate) pending: Arc<Mutex<crate::seq::PendingSequences>>,
 }
 
 impl EvalCtx {
     /// The session's text-output settings, in the shape the value layer's text
-    /// encoder takes them.
+    /// encoder takes.
     pub fn output_style(&self) -> crabka_pgtypes::encoding::OutputStyle<'_> {
         crabka_pgtypes::encoding::OutputStyle {
             time_zone: &self.time_zone,
@@ -143,9 +163,11 @@ impl EvalCtx {
 }
 
 impl EvalCtx {
-    /// The catalog KV backing the `pg_catalog` functions, or `None` outside a
-    /// SQL session (a planning context or a unit test), where those functions
-    /// report 0A000 rather than inventing an answer.
+    /// The catalog KV that backs the `pg_catalog` functions.
+    ///
+    /// The value is `None` outside a SQL session, for example in a planning
+    /// context or a unit test. Those functions then report 0A000 and do not
+    /// invent an answer.
     pub(crate) fn catalog(&self) -> Option<&dyn crabka_pgkv::Kv> {
         self.catalog
             .as_deref()
@@ -161,15 +183,16 @@ impl EvalCtx {
 }
 
 impl EvalCtx {
-    /// A non-temporal context that still resolves names the session's way —
-    /// what a DDL statement evaluates its `DEFAULT`s and partition bounds in.
-    /// It has no clock of its own because a DDL statement has no row to stamp;
-    /// it does need the search path, because the relation it names has to land
-    /// in the right schema, and it needs the catalog, because a `DEFAULT
-    /// 'name'::regclass` has a relation name to resolve.
+    /// A non-temporal context that still resolves names the session's way.
     ///
-    /// `catalog` is `None` where no session supplied one (a planning context),
-    /// leaving the catalog-reading functions their 0A000.
+    /// A DDL statement evaluates its `DEFAULT`s and partition bounds in this
+    /// context. The context has no clock of its own, because a DDL statement
+    /// has no row to stamp. It does need the search path, because the relation
+    /// it names has to reach the right schema. It also needs the catalog,
+    /// because a `DEFAULT 'name'::regclass` has a relation name to resolve.
+    ///
+    /// `catalog` is `None` where no session supplied one, for example in a
+    /// planning context. The catalog-reading functions then keep their 0A000.
     pub(crate) fn for_ddl(
         scope: &crate::relname::ResolutionScope,
         catalog: Option<&Arc<dyn crabka_pgkv::Kv>>,
@@ -181,7 +204,8 @@ impl EvalCtx {
         }
     }
 
-    /// A UTC context anchored at the Unix epoch — for tests / non-temporal eval.
+    /// A UTC context anchored at the Unix epoch, for tests and non-temporal
+    /// evaluation.
     pub fn test_default() -> Self {
         let epoch = Timestamp::UNIX_EPOCH;
         Self {
@@ -213,8 +237,8 @@ mod tests {
     use super::{Clock, SystemClock};
 
     /// Every `timestamp` encoding stores microseconds. A clock reading with a
-    /// finer tail would compare unequal to its own stored form while encoding to
-    /// identical bytes — a unique index would read that as a duplicate.
+    /// finer tail would compare unequal to its own stored form while it encodes
+    /// to identical bytes, and a unique index would read that as a duplicate.
     #[test]
     fn the_system_clock_reads_whole_microseconds() {
         for _ in 0..64 {

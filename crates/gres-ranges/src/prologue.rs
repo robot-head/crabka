@@ -23,7 +23,7 @@ pub struct RecoverRange<'a> {
     pub range: RangeId,
     /// Local store receiving replayed records and reseeds.
     pub store: &'a dyn Kv,
-    /// Fence/barrier/replay provider.
+    /// Provider of the fence, the barrier, and the replay.
     pub substrate: &'a dyn RangeRecoverySubstrate,
     /// Range-0-only counter and GTM reseed hooks.
     pub range0_hooks: &'a dyn Range0RecoveryHooks,
@@ -36,7 +36,7 @@ pub struct RecoverRange<'a> {
 /// Range substrate operations that must execute in fence-first order.
 #[async_trait::async_trait]
 pub trait RangeRecoverySubstrate: Send + Sync {
-    /// Bump/fence the writer epoch before any end-offset read or replay.
+    /// Advance and fence the writer epoch before any end-offset read or replay.
     async fn fence_epoch(&self, range: RangeId) -> Result<i16, PrologueError>;
     /// Produce a committed recovery barrier under the fenced epoch.
     async fn produce_barrier(
@@ -64,7 +64,8 @@ pub trait Range0RecoveryHooks: Send + Sync {
 /// In-doubt recovery and settle seam.
 #[async_trait::async_trait]
 pub trait InDoubtSettlement: Send + Sync {
-    /// Reacquire locks for prepared in-doubt records before settling decisions.
+    /// Reacquire the locks for prepared in-doubt records before the settle of
+    /// their decisions.
     async fn reacquire_in_doubt_locks(&self, range: RangeId) -> Result<(), PrologueError>;
     /// Try to settle known in-doubt records.
     async fn settle_once(&self, range: RangeId) -> Result<SettleOutcome, PrologueError>;
@@ -106,11 +107,11 @@ pub struct ReplaySummary {
 pub enum SettleOutcome {
     /// No in-doubt markers remain.
     Complete,
-    /// In-doubt markers remain; the gate must stay closed.
+    /// In-doubt markers remain. The gate must stay closed.
     InDoubtRemaining,
 }
 
-/// Run the fence → barrier → replay → reseed → settle → serve prologue.
+/// Run the prologue: fence, barrier, replay, reseed, settle, then serve.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -160,13 +161,13 @@ pub enum PrologueError {
     /// A substrate seam failed.
     #[error("substrate recovery failed: {0}")]
     Substrate(String),
-    /// Range-0 reseeding failed and serving must remain closed.
+    /// The range-0 reseed failed, and serving must stay closed.
     #[error("range-0 reseed failed: {0}")]
     Reseed(String),
     /// In-doubt markers remain after the bounded settle loop.
     #[error("range recovery still has in-doubt markers")]
     InDoubtRemaining,
-    /// Serving gate failed to open.
+    /// The serving gate failed to open.
     #[error("serving gate failed: {0}")]
     Gate(String),
 }

@@ -1,16 +1,18 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
 
-//! KIP-939 two-phase-commit (2PC) participation — `InitProducerId` v6
-//! coordinator semantics:
-//!  - `enable2Pc` is rejected with `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` when
-//!    the cluster has `transaction.two.phase.commit.enable=false`;
-//!  - `keepPreparedTxn` returns `UNSUPPORTED_VERSION` (matches Kafka, where the
-//!    prepared-txn recovery flow is still unstable);
-//!  - with 2PC enabled, an `enable2Pc` transaction is persisted with the
-//!    no-timeout sentinel (`i32::MAX`), so it is exempt from the idle reaper.
+//! KIP-939 two-phase-commit (2PC) participation, that is the `InitProducerId`
+//! v6 coordinator semantics:
+//!  - The broker rejects `enable2Pc` with
+//!    `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` when the cluster has
+//!    `transaction.two.phase.commit.enable=false`.
+//!  - `keepPreparedTxn` returns `UNSUPPORTED_VERSION`. This matches Kafka,
+//!    where the prepared-txn recovery flow is still unstable.
+//!  - With 2PC enabled, the broker persists an `enable2Pc` transaction with
+//!    the no-timeout sentinel `i32::MAX`, so the idle reaper skips it.
 //!
-//! The reaper's *decision* (never abort a 2PC txn) is proven exhaustively in
-//! `txn::two_pc_model`; these tests pin the wire/handler behaviour end-to-end.
+//! `txn::two_pc_model` proves the reaper's *decision*, that it never aborts a
+//! 2PC transaction, exhaustively. These tests pin the wire and handler
+//! behaviour end to end.
 
 use std::time::Duration;
 
@@ -45,10 +47,11 @@ async fn client(bootstrap: &str) -> crabka_client_core::Client {
         .unwrap()
 }
 
-/// `enable2Pc=true` against a cluster with 2PC disabled is rejected with
-/// `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` — before any coordinator lookup, so
-/// it does not depend on `__transaction_state` being bootstrapped, and a client
-/// cannot probe the cluster flag with an `UNSUPPORTED_*`.
+/// The broker rejects `enable2Pc=true` against a cluster with 2PC disabled,
+/// with `TRANSACTIONAL_ID_AUTHORIZATION_FAILED`. It does so before any
+/// coordinator lookup, so the result does not depend on a bootstrapped
+/// `__transaction_state`, and a client cannot probe the cluster flag with an
+/// `UNSUPPORTED_*` code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enable_2pc_rejected_when_cluster_disabled() {
     let (broker, bootstrap, _dir) = boot(false).await;
@@ -75,8 +78,8 @@ async fn enable_2pc_rejected_when_cluster_disabled() {
     broker.shutdown().await;
 }
 
-/// `keepPreparedTxn=true` returns `UNSUPPORTED_VERSION` regardless of the 2PC
-/// flag — the prepared-txn recovery flow is not yet a stable Kafka feature.
+/// `keepPreparedTxn=true` returns `UNSUPPORTED_VERSION` whatever the 2PC flag
+/// holds. The prepared-txn recovery flow is not yet a stable Kafka feature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn keep_prepared_txn_is_unsupported() {
     let (broker, bootstrap, _dir) = boot(true).await;
@@ -103,13 +106,14 @@ async fn keep_prepared_txn_is_unsupported() {
     broker.shutdown().await;
 }
 
-/// With 2PC enabled, an `enable2Pc` `InitProducerId` succeeds and the
-/// transaction is persisted with the no-timeout sentinel (`i32::MAX`), which is
-/// exactly how the coordinator marks a transaction exempt from the timeout
-/// reaper. We bootstrap the coordinator with a normal transactional producer
-/// (which creates `__transaction_state` + the tid's entry), then re-init the
-/// same tid with `enable2Pc=true`, and read the persisted timeout back via
-/// `DescribeTransactions`.
+/// With 2PC enabled, an `enable2Pc` `InitProducerId` succeeds, and the broker
+/// persists the transaction with the no-timeout sentinel `i32::MAX`. That is
+/// how the coordinator marks a transaction that the timeout reaper must skip.
+///
+/// The test bootstraps the coordinator with a normal transactional producer,
+/// which creates `__transaction_state` and the tid's entry. It then
+/// re-initializes the same tid with `enable2Pc=true`, and reads the persisted
+/// timeout back through `DescribeTransactions`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enable_2pc_persists_no_timeout_sentinel() {
     let (broker, bootstrap, _dir) = boot(true).await;

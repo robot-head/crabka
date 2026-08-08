@@ -1,15 +1,16 @@
 //! KIP-932 share-state record codecs for the `__share_group_state` internal
 //! topic.
 //!
-//! Two record types share one key namespace, discriminated by a leading
-//! `i16` record-type version: `ShareSnapshot` (a full per-partition state
-//! image) and `ShareUpdate` (a delta). Keys then carry `group_id` (string),
+//! Two record types share one key namespace. A leading `i16` record-type
+//! version tells them apart: `ShareSnapshot`, a full per-partition state
+//! image, and `ShareUpdate`, a delta. Keys then carry `group_id` (string),
 //! `topic_id` (16 raw bytes), and `partition` (`i32`). Values use an
 //! `i16(0)` version preamble, fixed fields, then a length-prefixed array of
 //! [`StateBatch`].
 //!
-//! Distinct from the `__consumer_offsets` share-group keys (versions 9–14) —
-//! this is a different topic with its own discriminator space.
+//! These keys are distinct from the `__consumer_offsets` share-group keys
+//! (versions 9–14). This is a different topic with its own discriminator
+//! space.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_log::Offset;

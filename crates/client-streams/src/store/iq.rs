@@ -1,7 +1,9 @@
-//! Byte-level read surface for Interactive Queries. The supervisor calls these
-//! through `&dyn StateStore::as_iq()` to serve `KafkaStreams::*_store` queries
-//! without knowing `K`/`V` — the typed view owns (de)serialization. All reads
-//! are `&self`; only key/value **bytes** cross this trait.
+//! Byte-level read surface for Interactive Queries.
+//!
+//! The supervisor calls these methods through `&dyn StateStore::as_iq()` to serve
+//! `KafkaStreams::*_store` queries, and it never learns `K` or `V`. The typed
+//! view owns the serialization and deserialization. All reads take `&self`, and
+//! only key and value **bytes** cross this trait.
 
 use std::any::Any;
 
@@ -17,31 +19,35 @@ pub enum StoreKind {
     Versioned,
 }
 
-/// A typed `IQv2` query lowered to the store boundary. Keys travel as
-/// `Box<dyn Any + Send + Sync>` (the raw `K`); the concrete store downcasts to
-/// its own `K`, serializes with its own key serde, runs the op, and returns the
-/// typed result (`Option<V>`, `Vec<(K,V)>`, …) boxed as `Box<dyn Any + Send>`.
+/// A typed `IQv2` query lowered to the store boundary.
 ///
-/// Time bounds are plain `i64`; ordering/bound choices are flags. No serde and
-/// no `K`/`V` appear here — that is the whole point of the byte-level boundary.
+/// Keys travel as `Box<dyn Any + Send + Sync>`, which holds the raw `K`. The
+/// concrete store downcasts to its own `K`, serializes with its own key serde,
+/// runs the op, and returns the typed result boxed as `Box<dyn Any + Send>`.
+/// That result is an `Option<V>`, a `Vec<(K,V)>`, or a similar type.
+///
+/// Time bounds are plain `i64`, and the ordering and bound choices are flags. No
+/// serde and no `K` or `V` appear here. That is the whole point of the
+/// byte-level boundary.
 pub enum Iq2Query {
-    /// `KeyQuery` — single key. Result: `Option<V>`.
+    /// `KeyQuery`: single key. Result: `Option<V>`.
     Key { key: Box<dyn Any + Send + Sync> },
-    /// `RangeQuery` — `None` bound = unbounded that side. Result: `Vec<(K,V)>`.
+    /// `RangeQuery`: a `None` bound is unbounded on that side. Result:
+    /// `Vec<(K,V)>`.
     Range {
         lo: Option<Box<dyn Any + Send + Sync>>,
         hi: Option<Box<dyn Any + Send + Sync>>,
         descending: bool,
     },
-    /// `WindowKeyQuery` — one key, window starts in `[from_ts, to_ts]`.
+    /// `WindowKeyQuery`: one key, window starts in `[from_ts, to_ts]`.
     /// Result: `Vec<(i64 /*windowStart*/, V)>`, ascending by start.
     WindowKey {
         key: Box<dyn Any + Send + Sync>,
         from_ts: i64,
         to_ts: i64,
     },
-    /// `WindowRangeQuery` — key range × window-start range. `None` bound =
-    /// unbounded that side. Result: `Vec<((K, i64 /*windowStart*/), V)>`,
+    /// `WindowRangeQuery`: key range by window-start range. A `None` bound is
+    /// unbounded on that side. Result: `Vec<((K, i64 /*windowStart*/), V)>`,
     /// ascending by (key bytes, windowStart).
     WindowRange {
         lo: Option<Box<dyn Any + Send + Sync>>,
@@ -49,17 +55,17 @@ pub enum Iq2Query {
         from_ts: i64,
         to_ts: i64,
     },
-    /// `VersionedKeyQuery` (KIP-960) — one key; `as_of = None` ⇒ latest live
-    /// version, `Some(t)` ⇒ the version valid at `t`. Result:
+    /// `VersionedKeyQuery` (KIP-960): one key. `as_of = None` gives the latest
+    /// live version, and `Some(t)` gives the version valid at `t`. Result:
     /// `Option<VersionedRecord<V>>`.
     VersionedKey {
         key: Box<dyn Any + Send + Sync>,
         as_of: Option<i64>,
     },
-    /// `MultiVersionedKeyQuery` (KIP-968) — one key; every version whose
-    /// validity `[valid_from, valid_to)` overlaps `[from_ts, to_ts]` (`None`
-    /// bound = unbounded that side), ascending by `valid_from` unless
-    /// `descending`. Result: `Vec<VersionedRecord<V>>`.
+    /// `MultiVersionedKeyQuery` (KIP-968): one key, and every version whose
+    /// validity `[valid_from, valid_to)` overlaps `[from_ts, to_ts]`. A `None`
+    /// bound is unbounded on that side. The order is ascending by `valid_from`,
+    /// unless `descending` is set. Result: `Vec<VersionedRecord<V>>`.
     MultiVersionedKey {
         key: Box<dyn Any + Send + Sync>,
         from_ts: Option<i64>,
@@ -68,9 +74,9 @@ pub enum Iq2Query {
     },
 }
 
-/// Why a store could not execute an `IQv2` query. The runtime maps these (plus its
-/// own conditions: rebalancing, not-up-to-bound, not-active) into the public
-/// `FailureReason`.
+/// Why a store could not run an `IQv2` query. The runtime maps these variants
+/// into the public `FailureReason`, together with its own conditions:
+/// rebalancing, not-up-to-bound, and not-active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Iq2Failure {
     /// This store kind has no handler for the requested query variant.
@@ -79,9 +85,10 @@ pub enum Iq2Failure {
     KeyTypeMismatch,
 }
 
-/// Byte-level IQ reads. Implemented by the three materialized `*Bytes` stores.
-/// Default methods return empties so a non-matching store kind (caught earlier
-/// by the supervisor's `kind()` check) never produces wrong data.
+/// Byte-level IQ reads. The three materialized `*Bytes` stores implement this
+/// trait. The default methods return empty results, so a non-matching store kind
+/// never produces wrong data. The supervisor's `kind()` check catches that case
+/// earlier.
 #[doc(hidden)]
 #[async_trait]
 pub trait IqQueryable: Send + Sync {
@@ -132,9 +139,10 @@ pub trait IqQueryable: Send + Sync {
         None
     }
 
-    /// `IQv2` entry point. The store downcasts keys, (de)serializes with its own
-    /// serdes, runs the op, and returns the typed result boxed. Default: this
-    /// store kind handles no `IQv2` query variant.
+    /// `IQv2` entry point. The store downcasts the keys, serializes and
+    /// deserializes with its own serdes, runs the op, and returns the typed
+    /// result boxed. The default is that this store kind handles no `IQv2` query
+    /// variant.
     async fn iq2_execute(&self, _query: &Iq2Query) -> Result<Box<dyn Any + Send>, Iq2Failure> {
         Err(Iq2Failure::UnknownQueryType)
     }

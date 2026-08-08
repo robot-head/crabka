@@ -1,24 +1,26 @@
 //! Avro format: serialize / deserialize / validate.
 //!
-//! Wire payload is **Avro binary datum** (no Confluent framing — that is added
-//! separately by `wire.rs`). The gateway's structured input/output is JSON.
+//! The wire payload is an Avro binary datum, with no Confluent framing.
+//! `wire.rs` adds that framing separately. The gateway's structured input and
+//! output are JSON.
 //!
-//! Implementation uses [`apache_avro`] 0.21 for schema parsing, binary
-//! encoding, and value round-tripping.
+//! This module uses [`apache_avro`] 0.21 to parse a schema, to encode binary,
+//! and to round-trip a value.
 
 use apache_avro::Schema;
 use bytes::Bytes;
 
 use crate::codec::CodecError;
 
-/// Serialize `json` (a JSON-encoded value) into Avro binary using `schema`.
+/// Serialize `json`, a JSON-encoded value, into Avro binary with `schema`.
 ///
 /// Steps:
 /// 1. Parse the Avro schema string.
 /// 2. Parse the JSON bytes into a [`serde_json::Value`].
-/// 3. Convert to [`apache_avro::types::Value`] via `apache_avro::to_value`,
-///    then `Value::resolve` to coerce types (ints, enums, unions) to the schema.
-/// 4. Encode as Avro binary datum via `apache_avro::to_avro_datum`.
+/// 3. Convert to [`apache_avro::types::Value`] with `apache_avro::to_value`,
+///    then call `Value::resolve` to coerce ints, enums, and unions to the
+///    schema.
+/// 4. Encode as an Avro binary datum with `apache_avro::to_avro_datum`.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
@@ -42,14 +44,14 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
     Ok(Bytes::from(datum))
 }
 
-/// Deserialize Avro binary `payload` back to JSON bytes using `schema`.
+/// Deserialize Avro binary `payload` back to JSON bytes with `schema`.
 ///
 /// Steps:
 /// 1. Parse the Avro schema string.
-/// 2. Decode the binary datum into an [`apache_avro::types::Value`] via
+/// 2. Decode the binary datum into an [`apache_avro::types::Value`] with
 ///    `apache_avro::from_avro_datum`.
-/// 3. Convert to [`serde_json::Value`] via `TryFrom` (provided by
-///    `apache_avro` 0.21).
+/// 3. Convert to [`serde_json::Value`] with the `TryFrom` that
+///    `apache_avro` 0.21 supplies.
 /// 4. Serialize to JSON bytes.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
@@ -73,8 +75,8 @@ pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
 
 /// Validate that `json` is a valid Avro value for `schema`.
 ///
-/// Implemented as a round-trip through [`serialize`]: if the JSON can be
-/// encoded as an Avro datum, it is valid for the schema.
+/// This function is a round-trip through [`serialize`]. If the JSON encodes as
+/// an Avro datum, it is valid for the schema.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn validate(schema: &str, json: &[u8]) -> Result<(), CodecError> {

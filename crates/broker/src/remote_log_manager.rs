@@ -1,16 +1,16 @@
-//! `RemoteLogManager` — KIP-405 tiered-storage copy path.
+//! `RemoteLogManager`: the KIP-405 tiered-storage copy path.
 //!
-//! Every `interval`, walks the partition registry and, for each partition
-//! where this broker is the leader and the topic has
-//! `remote.storage.enable=true`, copies the partition's sealed log
+//! Every `interval`, the manager walks the partition registry. For each
+//! partition where this broker is the leader and the topic has
+//! `remote.storage.enable=true`, it copies the partition's sealed log
 //! segments that are not yet in the remote tier to a
-//! [`RemoteStorageManager`], recording each copy in a
+//! [`RemoteStorageManager`]. It records each copy in a
 //! [`RemoteLogMetadataManager`] (`CopySegmentStarted` →
 //! `CopySegmentFinished`).
 //!
-//! This is the copy path. Local-retention deletion of copied segments and the
-//! remote read path on `Fetch` are implemented in their own modules. The
-//! remote-storage SPIs are blocking, so each copy / delete
+//! This is the copy path. Their own modules implement local-retention deletion
+//! of copied segments and the remote read path on `Fetch`. The
+//! remote-storage SPIs are blocking, so each copy and each delete
 //! runs on the `tokio` blocking pool.
 
 use std::{
@@ -38,7 +38,7 @@ use uuid::Uuid;
 
 use crate::{partition::Partition, partition_registry::PartitionRegistry};
 
-/// Default cadence of the tiered-storage sweep (copy + retention passes).
+/// Default cadence of the tiered-storage sweep (copy and retention passes).
 const DEFAULT_TIERING_INTERVAL: Time = secs(30);
 
 /// The floor of every size-budget walk in this module.
@@ -138,8 +138,9 @@ async fn tick_all(
 
 /// Copy every sealed segment in `exports` that the metadata store does not
 /// already know about. Returns the number of segments newly copied to
-/// `CopySegmentFinished`. Factored out of [`tick_all`] so it can be driven
-/// directly in tests against a real `Log` + reference RSM/RLMM.
+/// `CopySegmentFinished`. This is a separate function from [`tick_all`] so
+/// that tests can drive it directly against a real `Log` and a reference
+/// RSM/RLMM.
 pub(crate) async fn copy_eligible(
     tp: &TopicIdPartition,
     broker_id: i32,
@@ -177,16 +178,16 @@ pub(crate) async fn copy_eligible(
 /// partition's local sealed-segment exports and the per-topic
 /// local-retention settings. Returns `None` when nothing is deletable.
 ///
-/// A segment is eligible iff its `base_offset` is in `finished_bases`
-/// (i.e. `CopySegmentFinished` in the RLMM) AND it satisfies either
-/// time-based eviction (`now_ms - seg.max_timestamp > effective_local`)
-/// or size-based eviction (oldest-first until sealed-total fits
+/// A segment is eligible if and only if its `base_offset` is in
+/// `finished_bases`, that is, `CopySegmentFinished` in the RLMM, AND it meets
+/// either time-based eviction (`now_ms - seg.max_timestamp > effective_local`)
+/// or size-based eviction (oldest-first until the sealed total fits
 /// `effective_local_size`). The walk stops at the first non-finished
-/// segment so the local prefix stays contiguous (matches Kafka).
+/// segment, so the local prefix stays contiguous. This matches Kafka.
 ///
-/// Size-based eviction ignores the active segment — operators set
-/// local.retention.bytes in MB/GB ranges where the active segment
-/// (bounded by `segment.bytes`) is negligible.
+/// Size-based eviction ignores the active segment. Operators set
+/// local.retention.bytes in MB or GB ranges, where the active segment,
+/// bounded by `segment.bytes`, is negligible.
 pub(crate) fn local_retention_target(
     exports: &[SegmentExport],
     finished_bases: &HashSet<i64>,
@@ -224,7 +225,7 @@ pub(crate) fn local_retention_target(
 /// After the copy pass, drop local sealed segments whose
 /// remote copy is `CopySegmentFinished` and that fall outside the
 /// per-topic local-retention window. Returns the count of segments
-/// physically removed from disk.
+/// that this pass physically removed from disk.
 pub(crate) fn local_retention_pass(
     tp: &TopicIdPartition,
     partition: &Partition,
@@ -280,18 +281,18 @@ pub(crate) fn local_retention_pass(
 }
 
 /// KIP-405: compute the set of finished remote segments whose
-/// total-retention window has expired (by time or by size budget), in
-/// oldest-first order. Mirrors [`local_retention_target`]'s walk; **stops at
-/// the first non-deletable segment** so the remaining remote prefix stays
-/// contiguous (matches Kafka).
+/// total-retention window has expired, by time or by size budget, in
+/// oldest-first order. Mirrors [`local_retention_target`]'s walk. It **stops at
+/// the first non-deletable segment**, so the remaining remote prefix stays
+/// contiguous. This matches Kafka.
 ///
 /// A segment is deletable when either:
 /// - `now_ms - md.max_timestamp_ms > retention`, or
 /// - the running sum of sizes from the oldest forward must exceed
 ///   `total - retention_size` (greedy size eviction).
 ///
-/// `None` settings disable that axis. Caller must already have filtered to
-/// `CopySegmentFinished` and sorted by `start_offset`.
+/// A `None` setting disables that axis. The caller must already have filtered
+/// to `CopySegmentFinished` and sorted by `start_offset`.
 pub(crate) fn remote_retention_eviction_set(
     finished: &[RemoteLogSegmentMetadata],
     retention: Option<Time>,
@@ -327,14 +328,14 @@ fn segment_size(md: &RemoteLogSegmentMetadata) -> ByteSize {
 }
 
 /// KIP-405: evict remote segments past the topic's total
-/// retention window (`retention.ms` / `retention.bytes`). For each
-/// deletable segment, runs the lifecycle:
+/// retention window (`retention.ms` and `retention.bytes`). For each
+/// deletable segment, it runs the lifecycle
 /// `CopySegmentFinished` → `DeleteSegmentStarted` → RSM delete →
-/// `DeleteSegmentFinished`. Failures log at WARN and short-circuit the
-/// partition's pass — leftover `DeleteSegmentStarted` metadata is invisible
-/// to the read path's finished-only filter and gets retried on the next
-/// tick. Returns the count of segments transitioned to
-/// `DeleteSegmentFinished` (i.e. successfully evicted).
+/// `DeleteSegmentFinished`. A failure logs at WARN and ends the
+/// partition's pass early. Leftover `DeleteSegmentStarted` metadata is
+/// invisible to the read path's finished-only filter, and the next tick
+/// retries it. Returns the count of segments that reached
+/// `DeleteSegmentFinished`, that is, the successfully evicted ones.
 pub(crate) async fn remote_retention_pass(
     tp: &TopicIdPartition,
     broker_id: i32,
@@ -378,12 +379,12 @@ pub(crate) async fn remote_retention_pass(
 
 /// KIP-405: cascade the
 /// [`DeletePartitionMarked` → `DeletePartitionStarted` →
-/// `DeletePartitionFinished`] lifecycle for `tp`, deleting every remote
-/// segment along the way. Run as a detached task from the `DeleteTopics`
-/// handler so the response doesn't wait on remote-tier I/O. Failures log
-/// at WARN; leftover `DeleteSegmentStarted` segments are harmless in the
-/// in-memory RLMM (a `DeleteTopics`-recreate combination regenerates the
-/// topic id and the new partition is a fresh `TopicIdPartition`).
+/// `DeletePartitionFinished`] lifecycle for `tp`, and delete every remote
+/// segment along the way. The `DeleteTopics` handler runs this as a detached
+/// task, so the response does not wait on remote-tier I/O. A failure logs
+/// at WARN. Leftover `DeleteSegmentStarted` segments are harmless in the
+/// in-memory RLMM, because a `DeleteTopics`-recreate combination regenerates
+/// the topic id and the new partition is a fresh `TopicIdPartition`.
 pub(crate) async fn cascade_remote_partition_delete(
     tp: TopicIdPartition,
     broker_id: i32,
@@ -446,11 +447,11 @@ pub(crate) async fn cascade_remote_partition_delete(
 
 /// Run one blocking [`RemoteLogMetadataManager`] mutation on the blocking
 /// pool. The topic-backed manager's synchronous SPI methods bridge to a
-/// Tokio runtime via `block_on`, which panics if invoked on a runtime
-/// worker thread; `spawn_blocking` hands them a thread that is allowed to
-/// block (for the in-memory manager the closure is a cheap no-op there).
-/// Mirrors the `spawn_blocking` wrapping already used for the blocking
-/// [`RemoteStorageManager`] SPI in this module.
+/// Tokio runtime with `block_on`, which panics on a runtime worker thread.
+/// `spawn_blocking` gives them a thread that is allowed to block. For the
+/// in-memory manager the closure is a cheap no-op there.
+/// This mirrors the `spawn_blocking` wrapping that this module already uses
+/// for the blocking [`RemoteStorageManager`] SPI.
 async fn rlmm_mutate<F>(
     rlmm: &Arc<dyn RemoteLogMetadataManager>,
     op: F,
@@ -554,9 +555,9 @@ async fn delete_one_segment(
 }
 
 /// Copy one sealed segment through the full `Started` → `Finished`
-/// lifecycle. On any failure, the partial remote data is deleted and the
-/// metadata is dropped (`DeleteSegmentStarted` → `DeleteSegmentFinished`)
-/// so the segment is retried on the next tick. Returns `true` on success.
+/// lifecycle. On any failure, this function deletes the partial remote data
+/// and drops the metadata (`DeleteSegmentStarted` → `DeleteSegmentFinished`),
+/// so the next tick retries the segment. Returns `true` on success.
 async fn copy_one(
     tp: &TopicIdPartition,
     broker_id: i32,
@@ -731,8 +732,8 @@ mod tests {
 
     use super::*;
 
-    /// An RSM whose copy always fails (delete succeeds). Used to exercise
-    /// the failure rollback path.
+    /// An RSM whose copy always fails, but whose delete succeeds. The tests
+    /// use it to exercise the failure rollback path.
     struct AlwaysFailRsm;
 
     impl RemoteStorageManager for AlwaysFailRsm {
@@ -1323,9 +1324,9 @@ mod tests {
         assert!(target == Some(20));
     }
 
-    /// Test-only drive helper: mirrors the body of `local_retention_pass`
-    /// without the `Partition` wrapper, so we can exercise the integration
-    /// against a real `Log` without standing up the broker fixtures.
+    /// Test-only drive helper. It mirrors the body of `local_retention_pass`
+    /// without the `Partition` wrapper, so the test can exercise the
+    /// integration against a real `Log` and no broker fixtures.
     fn local_retention_drive(
         log: &mut Log,
         finished_bases: &HashSet<i64>,

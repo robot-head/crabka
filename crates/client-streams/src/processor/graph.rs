@@ -1,7 +1,8 @@
-//! The instantiated, runnable processor graph for one subtopology + partition.
-//! Non-recursive driver loop: a node's `forward` appends `(child_idx,
-//! ErasedRecord)` to a buffer the driver drains, so there is no `&mut` aliasing
-//! across nodes.
+//! The instantiated, runnable processor graph for one subtopology and partition.
+//!
+//! The driver loop is not recursive. A node's `forward` appends
+//! `(child_idx, ErasedRecord)` to a buffer, and the driver drains that buffer, so
+//! there is no `&mut` aliasing across nodes.
 
 use std::collections::VecDeque;
 
@@ -14,12 +15,12 @@ use super::{
 };
 use crate::store::registry::StoreRegistry;
 
-/// Closure type used by [`GraphSource`] to deserialize raw bytes into an
-/// [`ErasedRecord`]. Aliased here to keep the `GraphSource` field legible.
+/// Closure type that [`GraphSource`] uses to deserialize raw bytes into an
+/// [`ErasedRecord`]. The alias keeps the `GraphSource` field legible.
 type DeserializeFn =
     Box<dyn Fn(Option<&[u8]>, &[u8], i64) -> Result<ErasedRecord, ProcessorError> + Send>;
 
-/// A source: which topic it reads, a closure that deserializes `(key,value,ts)`
+/// A source: the topic it reads, a closure that deserializes `(key,value,ts)`
 /// into an erased record, and the node indices it feeds.
 pub(crate) struct GraphSource {
     pub topic: String,
@@ -34,42 +35,45 @@ pub(crate) struct Graph {
     pub sources: Vec<GraphSource>,
     pub output: Vec<OutputRecord>,
     pub stores: StoreRegistry,
-    /// The app-wide, fully-replicated global stores (shared across tasks),
-    /// lent into each dispatch. Default-empty until the app runtime or
-    /// `TopologyTestDriver` populates it; stream-globaltable joins read it.
+    /// The app-wide, fully-replicated global stores, shared across tasks and
+    /// lent into each dispatch. This field is empty by default, until the app
+    /// runtime or `TopologyTestDriver` fills it. Stream-globaltable joins read
+    /// it.
     pub globals: crate::runtime::global::GlobalStateManager,
-    /// Live punctuation schedules registered via `ProcessorContext::schedule`,
-    /// tagged by node index. Written here (lent into each dispatch); fired by
-    /// `punctuate_stream_time`.
+    /// Live punctuation schedules that `ProcessorContext::schedule` registers,
+    /// tagged by node index. Each dispatch borrows this field and writes to it.
+    /// `punctuate_stream_time` fires the schedules.
     pub schedules: Vec<crate::processor::punctuation::ScheduleEntry>,
-    /// Observed max record timestamp (stream-time); the base a stream-time
-    /// schedule stamps its first fire from. Init `i64::MIN`.
+    /// Observed max record timestamp, the stream-time. A stream-time schedule
+    /// stamps its first fire from this base. It starts at `i64::MIN`.
     pub stream_time: i64,
-    /// Last wall-clock value seen; the base a wall-clock schedule stamps its
-    /// first fire from. Init `0`. Read by [`Graph::punctuate_wall_clock`].
+    /// The last wall-clock value seen. A wall-clock schedule stamps its first
+    /// fire from this base. It starts at `0`, and
+    /// [`Graph::punctuate_wall_clock`] reads it.
     pub wall_clock: i64,
-    /// Total record-cache budget for this graph's stores (JVM
-    /// `statestore.cache.max.bytes`). A zero budget disables caching
-    /// (emit-on-update), matching the JVM `TopologyTestDriver` default. Threaded
-    /// from [`StreamsApp`](crate::StreamsApp) →
-    /// [`KafkaStreams`](crate::KafkaStreams) → `instantiate`. Read via
-    /// [`Graph::cache_max_bytes`].
+    /// Total record-cache budget for this graph's stores, the JVM
+    /// `statestore.cache.max.bytes`. A zero budget disables caching and gives
+    /// emit-on-update, which matches the JVM `TopologyTestDriver` default. The
+    /// value threads from [`StreamsApp`](crate::StreamsApp) to
+    /// [`KafkaStreams`](crate::KafkaStreams) to `instantiate`.
+    /// [`Graph::cache_max_bytes`] reads it.
     // Config-only for now; the record cache that consumes this budget lands in a
     // later task, so the field/accessor are read only by tests until then.
     #[allow(dead_code)]
     pub cache_max_bytes: ByteSize,
-    /// Store name → owning node index, for `flush_caches` to root each cached
-    /// store's forwarded changes at the node that materializes it. Empty in
-    /// production until build-time population lands (sub-task 3b-ii); filled
-    /// manually by tests for now.
+    /// Store name to owning node index. `flush_caches` uses it to root each
+    /// cached store's forwarded changes at the node that materializes the store.
+    /// This map is empty in production until build-time population lands
+    /// (sub-task 3b-ii). Tests fill it manually for now.
     // Build-time population + the production flush_caches call site land in later
     // record-caching sub-tasks; read only by tests until then.
     #[allow(dead_code)]
     pub(crate) cache_owner: std::collections::HashMap<String, usize>,
-    /// The per-task record cache owning every cached store's [`NamedCache`].
+    /// The per-task record cache that owns every cached store's [`NamedCache`].
     /// `instantiate` builds it with the graph's `cache_max_bytes` budget and
-    /// registers a named cache per materialized KV store; eviction/flush route
-    /// through it. Empty/zero-budget when caching is disabled.
+    /// registers one named cache per materialized KV store. Eviction and flush
+    /// both route through it. It is empty and has a zero budget when caching is
+    /// disabled.
     // Eviction wiring (over-budget forwarding) lands in a later record-caching
     // sub-task; held here so the per-store NamedCaches share one budget.
     #[allow(dead_code)]
@@ -77,15 +81,17 @@ pub(crate) struct Graph {
 }
 
 impl Graph {
-    /// The record-cache budget threaded into this graph (JVM
-    /// `statestore.cache.max.bytes`); a zero budget means caching disabled.
+    /// The record-cache budget threaded into this graph, the JVM
+    /// `statestore.cache.max.bytes`. A zero budget disables caching.
     #[allow(dead_code)] // consumed by the record cache in a later task; tests assert it now
     pub(crate) fn cache_max_bytes(&self) -> ByteSize {
         self.cache_max_bytes
     }
 
-    /// Feed one record arriving on `topic`; runs the graph to completion,
-    /// appending sink outputs to `self.output`. Unknown topics are ignored.
+    /// Feed one record that arrives on `topic`.
+    ///
+    /// This method runs the graph to completion and appends the sink outputs to
+    /// `self.output`. It ignores an unknown topic.
     pub async fn pipe(
         &mut self,
         topic: &str,
@@ -116,9 +122,11 @@ impl Graph {
         self.drain(buffer, &rc).await
     }
 
-    /// Drive the buffer of `(node_idx, ErasedRecord)` to completion, appending
-    /// sink outputs to `self.output`. Shared by `pipe` (record processing) and
-    /// `fire_schedule` (punctuator-forwarded records).
+    /// Drive the buffer of `(node_idx, ErasedRecord)` to completion and append
+    /// the sink outputs to `self.output`.
+    ///
+    /// `pipe` shares this method for record processing, and `fire_schedule`
+    /// shares it for punctuator-forwarded records.
     async fn drain(
         &mut self,
         mut buffer: VecDeque<(usize, ErasedRecord)>,
@@ -162,8 +170,8 @@ impl Graph {
         Ok(())
     }
 
-    /// Fire one schedule's punctuator positioned at its node, then drain any
-    /// records it forwarded. `ts` is the timestamp passed to `punctuate`.
+    /// Fire one schedule's punctuator at its node, then drain any records that
+    /// the punctuator forwarded. `ts` is the timestamp passed to `punctuate`.
     async fn fire_schedule(&mut self, sched_idx: usize, ts: i64) -> Result<(), ProcessorError> {
         let node_idx = self.schedules[sched_idx].node_idx;
         let rc = RecordContext {
@@ -204,11 +212,14 @@ impl Graph {
         self.drain(buffer, &rc).await
     }
 
-    /// Flush every cached store and forward its deduped changes downstream, rooted
-    /// at the store's owning node (mirrors `fire_schedule`). Called from the task
-    /// commit/close path before the producer commit. Flushes in ascending owning-
-    /// node order and drains after each store, so a downstream cached store sees an
-    /// upstream store's forwarded changes before it flushes (chained-KTable order).
+    /// Flush every cached store and forward its deduped changes downstream.
+    ///
+    /// Each set of changes is rooted at the store's owning node, which matches
+    /// `fire_schedule`. The task commit and close path calls this method before
+    /// the producer commit. It flushes in ascending owning-node order and drains
+    /// after each store, so a downstream cached store sees an upstream store's
+    /// forwarded changes before the downstream store flushes. This is the
+    /// chained-KTable order.
     pub(crate) async fn flush_caches(&mut self) -> Result<(), ProcessorError> {
         let rc = RecordContext {
             topic: String::new(),
@@ -241,8 +252,9 @@ impl Graph {
         Ok(())
     }
 
-    /// Fire all due `STREAM_TIME` schedules at the current stream-time (each at
-    /// most once). Bumps stream-time to `max(.., stream_time)` first.
+    /// Fire all due `STREAM_TIME` schedules at the current stream-time, each one
+    /// at most once. This method first raises stream-time to
+    /// `max(.., stream_time)`.
     pub async fn punctuate_stream_time(&mut self, stream_time: i64) -> Result<(), ProcessorError> {
         self.stream_time = self.stream_time.max(stream_time);
         let now = self.stream_time;
@@ -253,9 +265,10 @@ impl Graph {
         .await
     }
 
-    /// Fire all due `WALL_CLOCK_TIME` schedules at `now_ms` (each at most once).
-    /// Setting `self.wall_clock = now_ms` first means a `schedule()` called from
-    /// a punctuator (or a later `process`) stamps its base from the current clock.
+    /// Fire all due `WALL_CLOCK_TIME` schedules at `now_ms`, each one at most
+    /// once. This method sets `self.wall_clock = now_ms` first, so a `schedule()`
+    /// call from a punctuator, or from a later `process`, stamps its base from
+    /// the current clock.
     pub async fn punctuate_wall_clock(&mut self, now_ms: i64) -> Result<(), ProcessorError> {
         self.wall_clock = now_ms;
         self.punctuate(
@@ -265,10 +278,12 @@ impl Graph {
         .await
     }
 
-    /// Shared firing pass: fire every due schedule of type `ty` at `now`,
-    /// AT MOST ONCE each (no catch-up loop), then resync each fired entry's
-    /// `next_time`. The fired value is `now` (the current clock), matching the
-    /// JVM capture for both stream-time and wall-clock punctuation.
+    /// Shared firing pass over every due schedule of type `ty`.
+    ///
+    /// The pass fires each due schedule at `now`, AT MOST ONCE each, with no
+    /// catch-up loop. It then resyncs each fired entry's `next_time`. The fired
+    /// value is `now`, the current clock, which matches the JVM capture for both
+    /// stream-time and wall-clock punctuation.
     async fn punctuate(
         &mut self,
         ty: crate::processor::punctuation::PunctuationType,
@@ -306,8 +321,8 @@ impl Graph {
         std::mem::take(&mut self.output)
     }
 
-    /// Call `init` on every node in index order. Nodes that don't override
-    /// `ErasedNode::init` (sink, source) get the default no-op.
+    /// Call `init` on every node in index order. A node that does not override
+    /// `ErasedNode::init`, such as a sink or a source, gets the default no-op.
     #[tracing::instrument(
         name = "streams.graph.init_processors",
         level = "info",
@@ -363,16 +378,17 @@ impl Graph {
         }
     }
 
-    /// Drain every store's changelog buffer → `(changelog_topic, key, value)`.
+    /// Drain every store's changelog buffer into `(changelog_topic, key, value)`.
     ///
     /// A store whose changelog topic is one of `reuse_source_topics` is a
-    /// **reuse-source** store: the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a
-    /// `builder.table_explicit(topic, …)` store's changelog at its own source `topic`
-    /// instead of a derived `<app>-<store>-changelog`. Its buffer is still drained
-    /// (so it can't grow unbounded), but the entries are **not** re-produced — the
-    /// source topic already IS the changelog, and re-producing onto it would feed
-    /// the source node an endless re-emit loop. This mirrors the JVM, which marks
-    /// such source-table stores `loggingDisabled`.
+    /// **reuse-source** store. The `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a
+    /// `builder.table_explicit(topic, …)` store's changelog at its own source
+    /// `topic` instead of at a derived `<app>-<store>-changelog`. This method
+    /// still drains that buffer, so the buffer cannot grow unbounded, but it does
+    /// **not** re-produce the entries. The source topic already IS the changelog,
+    /// and a re-produce onto it would feed the source node an endless re-emit
+    /// loop. This matches the JVM, which marks such source-table stores
+    /// `loggingDisabled`.
     pub fn drain_changelogs(
         &mut self,
         reuse_source_topics: &std::collections::HashSet<String>,
@@ -397,8 +413,8 @@ impl Graph {
         out
     }
 
-    /// Restore one changelog record into a named store (logging-off path is
-    /// the caller's responsibility).
+    /// Restore one changelog record into a named store. The caller is
+    /// responsible for the logging-off path.
     pub async fn restore_apply(
         &mut self,
         store_name: &str,
@@ -411,8 +427,8 @@ impl Graph {
         }
     }
 
-    /// Toggle changelog logging on every store (off during restore, on during
-    /// processing).
+    /// Toggle changelog logging on every store. It is off during restore and on
+    /// during processing.
     pub fn set_logging(&mut self, on: bool) {
         for name in self.stores.names() {
             if let Some(s) = self.stores.get_mut(&name) {
@@ -432,9 +448,9 @@ impl Graph {
     }
 }
 
-/// Placeholder swapped into a `ScheduleEntry` while its real punctuator is taken
-/// out to fire (so the firing `Dispatch` can borrow `self.schedules` without
-/// aliasing the entry). `fire` is never actually called on it.
+/// Placeholder swapped into a `ScheduleEntry` while the real punctuator is out
+/// to fire. The swap lets the firing `Dispatch` borrow `self.schedules` and not
+/// alias the entry. `fire` is never called on this placeholder.
 struct NoopPunctuator;
 #[async_trait::async_trait]
 impl crate::processor::punctuation::ErasedPunctuator for NoopPunctuator {

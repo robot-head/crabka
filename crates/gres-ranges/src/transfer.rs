@@ -220,9 +220,9 @@ impl TableTransferRequest {
 
 /// A restored successor that has not been published into a serving range map.
 ///
-/// This value deliberately contains no map-publish operation.  The caller that
-/// owns the source pause must atomically publish the successor before allowing
-/// it to serve.
+/// This value deliberately contains no map-publish operation. The caller that
+/// owns the source pause must publish the successor atomically before the
+/// successor may serve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedRangeSuccessor {
     /// The still-unhosted successor range.
@@ -244,8 +244,9 @@ pub struct StagedRangeSuccessors {
 
 /// Runtime resources claimed from a staged successor at the publication boundary.
 ///
-/// The opaque keepalive retains runtime-owned tasks and stores without coupling the
-/// range orchestration crate to a particular substrate implementation.
+/// The opaque keepalive retains runtime-owned tasks and stores. It does not
+/// couple the range orchestration crate to a particular substrate
+/// implementation.
 pub struct ClaimedStagedSuccessor {
     /// Claimed range identity.
     pub range_id: RangeId,
@@ -293,7 +294,7 @@ pub enum RangeTransferError {
     Unavailable {
         /// Range requested by the caller.
         range_id: RangeId,
-        /// Why this runtime cannot provide the operation.
+        /// Why this runtime cannot supply the operation.
         reason: String,
     },
     /// The caller requested an invalid transfer boundary.
@@ -320,12 +321,12 @@ pub enum RangeTransferError {
     },
 }
 
-/// Runtime operations needed by split orchestration without depending on a substrate crate.
+/// Runtime operations that split orchestration needs, with no dependency on a substrate crate.
 ///
-/// Implementations must fence writes before returning a barrier and must return only committed
-/// records in the inclusive interval requested from [`Self::read_committed_tail`].  Restoring a
-/// target is intentionally an empty-target operation; publishing a range map remains outside this
-/// foundation seam.
+/// An implementation must fence writes before it returns a barrier. It must return only committed
+/// records in the inclusive interval that [`Self::read_committed_tail`] requests. A restore of a
+/// target is deliberately an empty-target operation. The publication of a range map stays outside
+/// this foundation seam.
 #[async_trait]
 pub trait RangeTransferCapability: Send + Sync {
     /// Durably record the complete activation intent before checkpointing or pausing.
@@ -373,7 +374,7 @@ pub trait RangeTransferCapability: Send + Sync {
     /// Durably commit the roll-forward decision through the predecessor range zero.
     ///
     /// After this returns successfully, every failure path must leave the predecessor
-    /// paused and startup must finish activation before advertising readiness.
+    /// paused, and startup must finish activation before it advertises readiness.
     async fn mark_topology_must_activate(&self) -> Result<(), RangeTransferError> {
         Ok(())
     }
@@ -425,7 +426,7 @@ pub trait RangeTransferCapability: Send + Sync {
         barrier: RangeTransferBarrier,
     ) -> Result<(), RangeTransferError>;
 
-    /// Release the durable checkpoint/WAL pin after resume or retirement succeeds.
+    /// Release the durable checkpoint and WAL pin after a resume or a retirement succeeds.
     async fn release_checkpoint_pin(
         &self,
         _operation_id: &str,
@@ -436,16 +437,17 @@ pub trait RangeTransferCapability: Send + Sync {
 
     /// Synchronously release a held source pause when its transfer future is dropped.
     ///
-    /// This is the cancellation-safe counterpart to [`Self::resume`]. Implementations
-    /// must make the source writable before returning; errors cannot be reported from
-    /// [`Drop`](std::ops::Drop) and should be recorded by the implementation.
+    /// This is the cancellation-safe counterpart to [`Self::resume`]. An implementation
+    /// must make the source writable before it returns. [`Drop`](std::ops::Drop) cannot
+    /// report an error, so the implementation should record any error itself.
     fn resume_after_drop(&self, operation_id: &str, barrier: RangeTransferBarrier);
 
     /// Stage a checkpoint and bounded tail into an empty, unhosted target range.
     ///
-    /// The returned successor is intentionally not serving and no range map is
-    /// mutated. The caller retains ownership of the source pause represented by
-    /// `barrier` and must resume it on every failure path.
+    /// The returned successor deliberately does not serve, and this method
+    /// mutates no range map. The caller keeps ownership of the source pause that
+    /// `barrier` represents, and it must resume that pause on every failure
+    /// path.
     /// Stage both successor intervals from the same immutable checkpoint and bounded tail.
     async fn stage_successors(
         &self,
@@ -457,9 +459,9 @@ pub trait RangeTransferCapability: Send + Sync {
 
     /// Transfer ownership of a staged successor to the serving-map publisher.
     ///
-    /// This must only succeed while the source barrier remains held. Callers must
-    /// discard the claimed resources and resume the source if publication cannot
-    /// proceed.
+    /// This must succeed only while the caller still holds the source barrier. If
+    /// the publication cannot continue, the caller must discard the claimed
+    /// resources and resume the source.
     /// Claim both staged successors before an atomic map publication.
     async fn claim_successors(
         &self,

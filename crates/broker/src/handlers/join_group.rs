@@ -1,8 +1,10 @@
-//! `JoinGroup` (`api_key=11`). Routes the request into the group's unified
-//! actor as a `ClassicJoin` message and awaits the reply. The actor parks the
-//! reply until the rebalance boundary (its rebalance-deadline timer, an
-//! all-members-joined early-complete, or a membership change), so the
-//! connection blocks here exactly as long as the old `Notify`-based wait.
+//! `JoinGroup` (`api_key=11`). This handler routes the request into the
+//! group's unified actor as a `ClassicJoin` message, and waits for the reply.
+//!
+//! The actor parks the reply until the rebalance boundary, which is its
+//! rebalance-deadline timer, an all-members-joined early completion, or a
+//! membership change. The connection therefore blocks here for exactly as long
+//! as the earlier `Notify`-based wait.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};

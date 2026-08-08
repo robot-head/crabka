@@ -5,9 +5,9 @@ use bytes::Bytes;
 /// One record delivered by [`ShareConsumer::poll`](super::ShareConsumer).
 ///
 /// Unlike a classic `ConsumerRecord`, a share record carries a
-/// `delivery_count`: the broker increments it each time the record is
-/// re-acquired after a prior delivery was released or its acquisition lock
-/// expired (KIP-932). A first delivery has `delivery_count == 1`.
+/// `delivery_count`. The broker increments it each time it re-acquires the
+/// record after a prior delivery was released or after its acquisition lock
+/// expired, per KIP-932. A first delivery has `delivery_count == 1`.
 #[derive(Debug, Clone)]
 pub struct ShareConsumerRecord {
     pub topic: String,
@@ -16,18 +16,18 @@ pub struct ShareConsumerRecord {
     pub timestamp: i64,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
-    /// Kafka record headers, preserved losslessly and in wire order.
+    /// Kafka record headers, kept lossless and in wire order.
     pub headers: Vec<(String, Option<Bytes>)>,
     pub delivery_count: i16,
 }
 
 /// How acquired records are acknowledged.
 ///
-/// In [`Implicit`](ShareAckMode::Implicit) mode the next `poll()` (and
-/// `close()`) implicitly `Accept`s every record returned by the previous
-/// `poll()`. In [`Explicit`](ShareAckMode::Explicit) mode the application must
-/// call `acknowledge()` for each record; un-acknowledged records are released
-/// back to the queue.
+/// In [`Implicit`](ShareAckMode::Implicit) mode the next `poll()`, and
+/// `close()`, implicitly `Accept` every record that the previous `poll()`
+/// returned. In [`Explicit`](ShareAckMode::Explicit) mode the application must
+/// call `acknowledge()` for each record. The broker releases un-acknowledged
+/// records back to the queue.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ShareAckMode {
     /// Auto-accept the previous batch on the next poll. The default, matching
@@ -41,8 +41,8 @@ pub enum ShareAckMode {
 /// How a `ShareFetch` applies its maximum-record limit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ShareAcquireMode {
-    /// Acquire complete record batches, which may exceed the requested record
-    /// limit. This preserves the existing Kafka-compatible behavior.
+    /// Acquire complete record batches, which can exceed the requested record
+    /// limit. This keeps the existing Kafka-compatible behavior.
     #[default]
     BatchOptimized,
     /// Stop acquiring when the requested record limit is reached.
@@ -59,14 +59,14 @@ impl ShareAcquireMode {
     }
 }
 
-/// The disposition of an acknowledged record (KIP-932 wire codes).
+/// The disposition of an acknowledged record, with the KIP-932 wire codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareAckType {
-    /// Successfully processed; advance the share-partition start offset past it.
+    /// Successfully processed. Advance the share-partition start offset past it.
     Accept,
-    /// Return to the queue for re-delivery (increments `delivery_count`).
+    /// Return to the queue for re-delivery. This increments `delivery_count`.
     Release,
-    /// Permanently skip; do not re-deliver.
+    /// Permanently skip. Do not re-deliver.
     Reject,
 }
 

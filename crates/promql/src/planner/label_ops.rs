@@ -1,22 +1,24 @@
 //! Pure label-rewrite and ordering transforms for the `label_replace`,
 //! `label_join`, `sort`, and `sort_desc` operator paths.
 //!
-//! Unlike the selector / rate / `*_over_time` / scalar-math paths, these four
-//! functions do not lower to a `DataFusion` projection over a leaf table. They
-//! operate on the *already-assembled* inner instant vector — one
-//! [`InstantSample`] per matched series — and rewrite its label columns
-//! (`label_replace`/`label_join`) or reorder its rows (`sort`/`sort_desc`).
-//! Because the transform is a pure function over the assembled vector, the
-//! engine recurses into the inner expression, assembles it (applying that
-//! shape's own NaN/staleness semantics), and applies one of these transforms at
-//! assembly time rather than re-emitting through the operator chain.
+//! These four functions do not lower to a `DataFusion` projection over a leaf
+//! table, unlike the selector, rate, `*_over_time`, and scalar-math paths. They
+//! work on the already-assembled inner instant vector, which holds one
+//! [`InstantSample`] per matched series. `label_replace` and `label_join`
+//! rewrite its label columns, and `sort` and `sort_desc` reorder its rows.
 //!
-//! The exact same functions back the interpreter's `eval_label_replace_call` /
-//! `eval_label_join_call` / `eval_sort_call`, so the operator path matches the
-//! interpreter by construction — including `$1`/`${name}` capture-group
-//! expansion, empty-replacement label writes, no-match passthrough, the
-//! `separator`-join semantics, and the `total_cmp`-with-`labels_key`-tiebreak
-//! ordering (which places `NaN` last for `sort` and first for `sort_desc`).
+//! Each transform is a pure function over the assembled vector. The engine
+//! therefore recurses into the inner expression and assembles it with that
+//! shape's own NaN and staleness semantics. The engine then applies one of these
+//! transforms at assembly time, and does not re-emit through the operator chain.
+//!
+//! The same functions back the interpreter's `eval_label_replace_call`,
+//! `eval_label_join_call`, and `eval_sort_call`, so the operator path matches
+//! the interpreter by construction. The match covers `$1` and `${name}`
+//! capture-group expansion, empty-replacement label writes, no-match
+//! passthrough, the `separator`-join semantics, and the `total_cmp` ordering
+//! with the `labels_key` tiebreak. That ordering places `NaN` last for `sort`
+//! and first for `sort_desc`.
 
 use std::cmp::Ordering;
 
@@ -37,10 +39,12 @@ pub enum SortOrder {
 }
 
 impl SortOrder {
-    /// Compare two sample values in this order using `total_cmp`, matching the
-    /// interpreter's `SortDirection::compare`. `total_cmp` places a (positive)
-    /// `NaN` above every finite value, so ascending sends `NaN` to the end and
-    /// descending (the reverse) sends it to the front.
+    /// Compares two sample values in this order with `total_cmp`.
+    ///
+    /// This matches the interpreter's `SortDirection::compare`. `total_cmp`
+    /// places a positive `NaN` above every finite value, so ascending order
+    /// sends `NaN` to the end. Descending order is the reverse and sends `NaN`
+    /// to the front.
     fn compare(self, left: f64, right: f64) -> Ordering {
         match self {
             Self::Ascending => left.total_cmp(&right),
@@ -49,8 +53,10 @@ impl SortOrder {
     }
 }
 
-/// Canonical `name=value\n…` rendering of a label set, used as the sort
-/// tiebreak and the collision key. Matches the interpreter's `labels_key`.
+/// Returns the canonical `name=value\n…` rendering of a label set.
+///
+/// This rendering is the sort tiebreak and the collision key. It matches the
+/// interpreter's `labels_key`.
 fn labels_key(labels: &Labels) -> String {
     let mut key = String::new();
     for (name, value) in labels.iter() {
@@ -62,9 +68,10 @@ fn labels_key(labels: &Labels) -> String {
     key
 }
 
-/// The float value of a sample, or `NaN` for a histogram sample (matching the
-/// interpreter's `float_sample_value(...).unwrap_or(f64::NAN)` in the sort
-/// comparator).
+/// Returns the float value of a sample, or `NaN` for a histogram sample.
+///
+/// This matches the interpreter's `float_sample_value(...).unwrap_or(f64::NAN)`
+/// in the sort comparator.
 fn sort_value(sample: &InstantSample) -> f64 {
     match sample.value {
         SampleValue::Float(value) => value,
@@ -72,23 +79,23 @@ fn sort_value(sample: &InstantSample) -> f64 {
     }
 }
 
-/// Apply `label_replace(v, dst_label, replacement, src_label, regex)` to an
+/// Applies `label_replace(v, dst_label, replacement, src_label, regex)` to an
 /// already-assembled instant vector.
 ///
-/// For each series, if `regex` — fully anchored as `^(?:<regex>)$`, matching
-/// Prometheus — matches the *entire* value of `src_label`, the destination label
-/// is set to `replacement` with `$1` /
-/// `${name}` capture-group expansion. A non-matching series is passed through
-/// unchanged. `__name__` is preserved unless `dst_label == "__name__"` (these
-/// functions never drop the metric name themselves). Writing an empty expansion
-/// stores `dst_label=""` (the interpreter's `Labels::insert` keeps empty-valued
-/// labels), so the empty entry participates in later collision checks exactly as
-/// the interpreter sees it.
+/// `regex` is fully anchored as `^(?:<regex>)$`, as in Prometheus. For each
+/// series whose `src_label` value matches `regex` in full, this function sets
+/// the destination label to `replacement` with `$1` and `${name}` capture-group
+/// expansion. A series that does not match passes through unchanged. This
+/// function keeps `__name__` unless `dst_label == "__name__"`; these functions
+/// never drop the metric name themselves. An empty expansion writes
+/// `dst_label=""`, because the interpreter's `Labels::insert` keeps
+/// empty-valued labels. The empty entry then takes part in later collision
+/// checks exactly as the interpreter sees it.
 ///
 /// # Errors
 ///
-/// Returns [`PromqlError::Plan`] when `regex` is not a valid regular expression,
-/// matching the interpreter's error text.
+/// Returns [`PromqlError::Plan`] when `regex` is not a valid regular expression.
+/// The error text matches the interpreter's error text.
 pub fn apply_label_replace(
     samples: Vec<InstantSample>,
     dst_label: &str,
@@ -116,10 +123,12 @@ pub fn apply_label_replace(
         .collect())
 }
 
-/// Apply `label_join(v, dst_label, separator, src_label_1, …)` to an
-/// already-assembled instant vector: set `dst_label` to the `separator`-joined
-/// values of the listed source labels (missing labels contribute the empty
-/// string), for every series. Mirrors the interpreter's `eval_label_join_call`.
+/// Applies `label_join(v, dst_label, separator, src_label_1, …)` to an
+/// already-assembled instant vector.
+///
+/// For every series, this function sets `dst_label` to the `separator`-joined
+/// values of the listed source labels. A missing label contributes the empty
+/// string. This mirrors the interpreter's `eval_label_join_call`.
 #[must_use]
 pub fn apply_label_join(
     samples: Vec<InstantSample>,
@@ -141,8 +150,10 @@ pub fn apply_label_join(
         .collect()
 }
 
-/// Sort an already-assembled instant vector by sample value in `order`, breaking
-/// ties by canonical label key. Mirrors the interpreter's `eval_sort_call`.
+/// Sorts an already-assembled instant vector by sample value in `order`.
+///
+/// Ties break by canonical label key. This mirrors the interpreter's
+/// `eval_sort_call`.
 #[must_use]
 pub fn apply_sort(mut samples: Vec<InstantSample>, order: SortOrder) -> Vec<InstantSample> {
     samples.sort_by(|left, right| {
@@ -153,10 +164,12 @@ pub fn apply_sort(mut samples: Vec<InstantSample>, order: SortOrder) -> Vec<Inst
     samples
 }
 
-/// Compare two label sets by the listed `label_names` in `order`, returning the
-/// first non-equal label-value comparison (missing labels compare as the empty
-/// string), or [`Ordering::Equal`] when every listed label is equal. Mirrors the
-/// interpreter's `SortDirection::compare_label_values`.
+/// Compares two label sets by the listed `label_names` in `order`.
+///
+/// This function returns the first non-equal label-value comparison, or
+/// [`Ordering::Equal`] when every listed label is equal. A missing label
+/// compares as the empty string. This mirrors the interpreter's
+/// `SortDirection::compare_label_values`.
 fn compare_label_values(
     left: &Labels,
     right: &Labels,
@@ -179,11 +192,14 @@ fn compare_label_values(
     Ordering::Equal
 }
 
-/// Sort an already-assembled instant vector by the values of the named labels in
-/// `order`, breaking ties by canonical label key. Mirrors the interpreter's
-/// `eval_sort_by_label_call`: the sort is over the listed labels first (in order),
-/// then the full canonical label key (so a `_desc` sort still tiebreaks by the
-/// *ascending* label key, exactly as the interpreter's `labels_key` tiebreak does).
+/// Sorts an already-assembled instant vector by the values of the named labels
+/// in `order`.
+///
+/// Ties break by canonical label key. This mirrors the interpreter's
+/// `eval_sort_by_label_call`. The sort is over the listed labels first, in the
+/// given order, and then over the full canonical label key. A `_desc` sort
+/// therefore still tiebreaks by the ascending label key, exactly as the
+/// interpreter's `labels_key` tiebreak does.
 #[must_use]
 pub fn apply_sort_by_label(
     mut samples: Vec<InstantSample>,

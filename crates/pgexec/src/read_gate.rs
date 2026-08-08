@@ -1,30 +1,32 @@
-//! The linearizable-read seam. Mirrors the durable-write `Committer` seam: a read
-//! confirms it may observe local state before taking its MVCC snapshot. The local
-//! impl is a no-op (single-node applied state is authoritative); the replicated
-//! impl (`cluster::RaftLinearizer`) performs an openraft ReadIndex check.
+//! The linearizable-read seam. It follows the durable-write `Committer` seam: a
+//! read confirms it may observe local state before it takes its MVCC snapshot.
+//! The local impl is a no-op, because single-node applied state is
+//! authoritative. The replicated impl, `cluster::RaftLinearizer`, does an
+//! openraft ReadIndex check.
 
 use crate::{error::ExecError, telemetry::EXEC_TARGET};
 
 #[async_trait::async_trait]
 pub trait Linearizer: Send + Sync {
-    /// Confirm this node may serve a linearizable read now. Replicated: confirm
-    /// leadership via a quorum heartbeat and block until the local state machine
-    /// has applied through the read log id. `Err(NotLeader)` (or `Unavailable`)
-    /// if leadership can't be confirmed (deposed/partitioned), so the caller
+    /// Confirm this node may serve a linearizable read now. A replicated
+    /// implementation confirms leadership with a quorum heartbeat, and blocks
+    /// until the local state machine has applied through the read log id. It
+    /// returns `Err(NotLeader)`, or `Unavailable`, when it cannot confirm
+    /// leadership, because the node is deposed or partitioned. The caller then
     /// rejects the read rather than serving stale state.
     ///
     /// # Tracing
     ///
-    /// An implementation that can block opens its own span describing *why* it
-    /// blocked — the range-0 barrier's `range.barrier` names the sampled offset
-    /// it waited for, which a generic wrapper here could not. This module only
-    /// traces the gate that cannot block, so that a waterfall distinguishes "the
-    /// gate was a no-op" from "the gate was never consulted".
+    /// An implementation that can block opens its own span that describes *why*
+    /// it blocked. The range-0 barrier's `range.barrier` names the sampled
+    /// offset it waited for, which a generic wrapper here could not. This module
+    /// only traces the gate that cannot block, so a waterfall tells "the gate
+    /// was a no-op" apart from "the gate was never consulted".
     async fn ensure_readable(&self) -> Result<(), ExecError>;
 }
 
-/// Single-node / non-replicated: local applied state is authoritative, so a read
-/// is always immediately serveable.
+/// The single-node, non-replicated gate. Local applied state is authoritative,
+/// so this gate can always serve a read immediately.
 pub struct LocalLinearizer;
 
 #[async_trait::async_trait]
@@ -38,10 +40,10 @@ impl Linearizer for LocalLinearizer {
 /// Build the `pg.read_gate` span covering a linearizability gate that resolves
 /// locally.
 ///
-/// `TRACE`, and deliberately field-free beyond `pg.gate.local`: this gate does
-/// no work, so the only thing it can tell an operator is that a read reached the
-/// gate and passed it without leaving the node. The spans worth reading are the
-/// blocking implementations' own.
+/// The span is `TRACE`, and deliberately field-free beyond `pg.gate.local`. This
+/// gate does no work, so the only thing it can tell an operator is that a read
+/// reached the gate and passed it without leaving the node. The spans worth
+/// reading are the blocking implementations' own.
 #[must_use]
 fn read_gate_span() -> tracing::Span {
     tracing::trace_span!(
@@ -79,8 +81,8 @@ mod tests {
         }
     }
 
-    /// The no-op gate must still be visible: a read that reached the gate and a
-    /// read that skipped it are indistinguishable otherwise.
+    /// The no-op gate must still be visible. Otherwise nothing tells a read that
+    /// reached the gate apart from a read that skipped it.
     #[tokio::test]
     async fn the_local_gate_opens_a_read_gate_span() {
         let opened = Opened::default();

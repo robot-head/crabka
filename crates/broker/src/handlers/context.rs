@@ -11,32 +11,34 @@ use crabka_security::Principal;
 pub(crate) struct RequestContext<'a> {
     pub principal: &'a Principal,
     pub peer: &'a SocketAddr,
-    /// Frame's `client_id` header. Empty string when the wire field is
-    /// null (`-1` length) or zero-length. Matches the existing
-    /// `peek_client_id(frame).unwrap_or("")` convention used for the
-    /// `request_percentage` quota in the dispatch loop.
+    /// Frame's `client_id` header. It is an empty string when the wire field
+    /// is null (`-1` length) or zero-length. This matches the existing
+    /// `peek_client_id(frame).unwrap_or("")` convention that the dispatch loop
+    /// uses for the `request_percentage` quota.
     pub client_id: &'a str,
-    /// `true` when the connection can serve the fetch records region via
-    /// kernel `sendfile(2)` — i.e. a plaintext `TcpStream` on a SENDFILE-alias
-    /// platform (Linux + Apple + FreeBSD/DragonFly). The fetch handler uses this
-    /// to emit `RecordsPayload::FileRegions` (zero-copy) instead of `Raw` for
-    /// large records runs (Increments D + E). `false` on TLS, on Windows, and
-    /// for every non-fetch handler (which ignore it).
+    /// `true` when the connection can serve the fetch records region with
+    /// kernel `sendfile(2)`. That means a plaintext `TcpStream` on a
+    /// SENDFILE-alias platform: Linux, Apple, FreeBSD, or DragonFly. The fetch
+    /// handler uses this to emit the zero-copy `RecordsPayload::FileRegions`
+    /// instead of `Raw` for large records runs (Increments D and E). It is
+    /// `false` on TLS, on Windows, and for every non-fetch handler, which all
+    /// ignore it.
     pub sendfile_capable: bool,
     /// Name of the [`crate::config::ListenerSpec`] serving this connection
-    /// (e.g. `"PLAINTEXT"` / `"SSL"` / a configured listener name). This is
+    /// such as `"PLAINTEXT"`, `"SSL"`, or a configured listener name. This is
     /// the same string that self-registration writes as each
-    /// [`crabka_metadata::BrokerEndpoint::name`], so address-projecting
-    /// handlers (`Metadata`, `FindCoordinator`, `DescribeCluster`) advertise
-    /// the endpoint matching the listener the request arrived on — exactly as
-    /// Apache Kafka does. Handlers that don't project broker addresses ignore
-    /// this field.
+    /// [`crabka_metadata::BrokerEndpoint::name`]. Address-projecting
+    /// handlers (`Metadata`, `FindCoordinator`, `DescribeCluster`) therefore
+    /// advertise the endpoint that matches the listener the request arrived
+    /// on, exactly as Apache Kafka does. Handlers that do not project broker
+    /// addresses ignore this field.
     pub connection_listener_name: &'a str,
 }
 
 /// Connection attributes a KIP-714 telemetry handler needs to match a
 /// client to a subscription. Telemetry RPCs are unauthenticated, so this
-/// carries no principal — just the wire/connection-derived fields.
+/// carries no principal. It carries only the wire-derived and
+/// connection-derived fields.
 pub(crate) struct TelemetryContext<'a> {
     pub client_id: &'a str,
     pub peer: &'a std::net::SocketAddr,

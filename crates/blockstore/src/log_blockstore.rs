@@ -324,15 +324,16 @@ impl BlockKey {
 
 /// One block's manifest entry: its key, the series it holds, and its on-disk size.
 ///
-/// No `Eq`: [`ByteSize`] stores `f64`, so it is only `PartialEq`. Descriptors are
-/// held in a `Vec` and matched by `key.object_key()`, never used as a map or set
-/// key, so the derive was unused.
+/// There is no `Eq`. [`ByteSize`] stores `f64`, so it is only `PartialEq`. A
+/// `Vec` holds the descriptors, and `key.object_key()` matches them. Nothing
+/// uses a descriptor as a map or set key, so the derive is unused.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockDescriptor {
     pub key: BlockKey,
     pub fingerprints: BTreeSet<SeriesFingerprint>,
-    /// Pinned to the manifest's `size_bytes` integer: the JSON encoding is the
-    /// on-disk log index format and must not move with the in-memory type.
+    /// Pinned to the manifest's `size_bytes` integer. The JSON encoding is
+    /// the on-disk log index format, and it must not move with the in-memory
+    /// type.
     #[serde(
         rename = "size_bytes",
         with = "crabka_units::serde_units::numeric::bytes_u64"

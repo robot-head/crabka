@@ -6,9 +6,9 @@ use crabka_audit::{AuditEndpoint, AuditEvent, AuditLog, AuditPrincipal};
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
 
-/// Wraps an [`Authorizer`], forwarding decisions and emitting an audit record on
-/// every Deny. Allow decisions for admin operations are audited separately by
-/// the handlers (Task 8), so they are not duplicated here.
+/// Wraps an [`Authorizer`]. It forwards decisions and emits an audit record on
+/// every Deny. The handlers audit Allow decisions for admin operations
+/// separately (Task 8), so this decorator does not duplicate them.
 #[derive(Debug)]
 pub struct AuditingAuthorizer {
     inner: Arc<dyn Authorizer>,

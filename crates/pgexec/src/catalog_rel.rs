@@ -1,20 +1,21 @@
 //! F-2: the `pg_catalog` and `information_schema` relations `psql`'s `\d`
 //! family and ORM preambles read, beyond the starter set `exec` already owns.
 //!
-//! Two rules shape everything here:
+//! Two rules control everything here:
 //!
 //! 1. **A named relation always exists.** Where crabka has no such object kind
-//!    yet (triggers, policies, enums, publications), the relation still resolves
-//!    and returns zero rows. A client that `LEFT JOIN`s it gets PostgreSQL's
-//!    answer; one that expects rows gets an empty set rather than a 42P01.
+//!    yet, for example triggers, policies, enums and publications, the relation
+//!    still resolves and returns zero rows. A client that `LEFT JOIN`s it gets
+//!    PostgreSQL's answer. A client that expects rows gets an empty set instead
+//!    of a 42P01.
 //! 2. **Columns follow PostgreSQL 18.4's catalog order and names exactly**, so a
 //!    positional `SELECT *` and a named projection agree with the oracle. Types
 //!    are the nearest crabka [`ColumnType`]: `oid`/`xid` are integers, `name`,
 //!    `"char"`, `pg_node_tree`, `int2vector`, `oidvector` and `pg_lsn` are
-//!    `text`, and `aclitem[]` is a `text[]` that is always NULL (crabka grants
-//!    are tracked outside the ACL representation).
+//!    `text`, and `aclitem[]` is a `text[]` that is always NULL. Crabka tracks
+//!    grants outside the ACL representation.
 //!
-//! [`exec`](crate::exec) owns the relation seam; this module owns the extra
+//! [`exec`](crate::exec) owns the relation seam. This module owns the extra
 //! names, their column lists and their rows.
 
 use std::collections::BTreeMap;
@@ -47,7 +48,8 @@ const ATTRDEF_OID_BASE: i32 = 110_000;
 const OID_BAND_WIDTH: i32 = 9_000;
 /// Oid of the constraint band derived from an index oid.
 const CONSTRAINT_OID_BASE: i32 = 80_000;
-/// `pg_class` oid the index band starts at, mirroring `exec::catalog_index_oid`.
+/// `pg_class` oid the index band starts at, which mirrors
+/// `exec::catalog_index_oid`.
 const INDEX_OID_BASE: i32 = 50_000;
 
 /// Oid of the single database crabka exposes.
@@ -60,8 +62,10 @@ pub(crate) const GIN_AM_OID: i32 = 2742;
 /// Oid of the `default` collation, as in PostgreSQL.
 pub(crate) const DEFAULT_COLLATION_OID: i32 = 100;
 
-/// Canonicalize a written relation name to this module's key, or `None` when
-/// [`exec`](crate::exec) owns it (or nothing does).
+/// Canonicalize a written relation name to this module's key.
+///
+/// The result is `None` when [`exec`](crate::exec) owns the name, and also when
+/// nothing owns it.
 pub(crate) fn catalog_relation(name: &str) -> Option<&'static str> {
     let bare = name.strip_prefix("pg_catalog.").unwrap_or(name);
     if let Some(found) = PG_CATALOG_RELATIONS.iter().find(|entry| **entry == bare) {
@@ -174,9 +178,11 @@ static RELATION_NAMES: &[&str] = &[
     "information_schema.views",
 ];
 
-/// The fixed `pg_class` oid of one of this module's relations. PostgreSQL's own
-/// oid where the relation is a real catalog table; a reserved 12xxxx value where
-/// it is a system view whose oid nothing depends on.
+/// The fixed `pg_class` oid of one of this module's relations.
+///
+/// The oid is PostgreSQL's own oid where the relation is a real catalog table.
+/// It is a reserved 12xxxx value where the relation is a system view whose oid
+/// nothing depends on.
 pub(crate) fn relation_oid(name: &str) -> i32 {
     match name {
         "pg_am" => 2601,
@@ -208,8 +214,11 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
     }
 }
 
-/// Reserved oids for the relations above that are views rather than catalog
-/// tables. Kept out of [`relation_oid`]'s match so neither arm grows unwieldy.
+/// Reserved oids for the relations above that are views instead of catalog
+/// tables.
+///
+/// These oids are kept out of [`relation_oid`]'s match so that neither arm
+/// grows too large.
 fn system_view_oid(name: &str) -> i32 {
     match name {
         "pg_indexes" => 120_001,
@@ -237,9 +246,9 @@ fn system_view_oid(name: &str) -> i32 {
 /// What a banded oid is hashed from.
 ///
 /// A relation is keyed by its own [`RelationName`], so two same-named relations
-/// in different schemas take different oids — the hash has to see the schema,
-/// which the `public`-bare [`std::fmt::Display`] spelling would hide. Everything
-/// else arrives as an already-built dotted key.
+/// in different schemas take different oids. The hash has to see the schema,
+/// and the `public`-bare [`std::fmt::Display`] spelling would hide it.
+/// Everything else arrives as an already-built dotted key.
 trait BandKey: Ord + Clone {
     fn band_text(&self) -> String;
 }
@@ -256,17 +265,19 @@ impl BandKey for RelationName {
     }
 }
 
-/// What a `pg_constraint` oid is keyed by: the relation the constraint belongs
-/// to, and the constraint's own name — the column's name, for the `NOT NULL`
-/// constraints `PostgreSQL` 18 records per column.
+/// What a `pg_constraint` oid is keyed by.
 ///
-/// Structural rather than a flattened `<table>.<name>` string, for the same
+/// The key is the relation the constraint belongs to, and the constraint's own
+/// name. For the `NOT NULL` constraints `PostgreSQL` 18 records per column, the
+/// constraint's name is the column's name.
+///
+/// The key is structural, not a flattened `<table>.<name>` string, for the same
 /// reason [`BandKey for RelationName`](BandKey) spells the schema out. A
-/// constraint name is unique per relation rather than per catalog, so the key
-/// has to carry the relation; and a dot inside a quoted identifier — `"s.t"` in
-/// `public` against `t` in schema `s` — would let two distinct constraints
+/// constraint name is unique per relation, not per catalog, so the key has to
+/// carry the relation. A dot inside a quoted identifier, such as `"s.t"` in
+/// `public` against `t` in schema `s`, would also let two distinct constraints
 /// flatten to one key. [`banded_oids`] deduplicates, so that is not a near miss
-/// in the band: the pair becomes one entry and reports one oid twice.
+/// in the band. The pair becomes one entry and reports one oid twice.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ConstraintKey {
     table: RelationName,
@@ -288,10 +299,12 @@ impl BandKey for ConstraintKey {
     }
 }
 
-/// Assign every name in `names` a distinct oid inside the band starting at
-/// `base`. The slot is a hash of the name, so an object keeps its oid when
-/// unrelated objects are created or dropped; a collision probes forward, which
-/// makes the whole assignment a pure function of the (sorted) name set.
+/// Assign every name in `names` a distinct oid inside the band that starts at
+/// `base`.
+///
+/// The slot is a hash of the name, so an object keeps its oid when unrelated
+/// objects are created or dropped. A collision probes forward, which makes the
+/// whole assignment a pure function of the sorted name set.
 fn banded_oids<K: BandKey>(base: i32, names: &[K]) -> BTreeMap<K, i32> {
     let mut taken = BTreeMap::new();
     let mut used = std::collections::BTreeSet::new();
@@ -309,7 +322,7 @@ fn banded_oids<K: BandKey>(base: i32, names: &[K]) -> BTreeMap<K, i32> {
     taken
 }
 
-/// FNV-1a over the name's bytes — a stable, dependency-free 32-bit fold.
+/// FNV-1a over the name's bytes, a stable, dependency-free 32-bit fold.
 fn fnv1a(value: &str) -> u32 {
     let mut hash = 0x811c_9dc5_u32;
     for byte in value.as_bytes() {
@@ -322,7 +335,7 @@ fn fnv1a(value: &str) -> u32 {
 /// `pg_namespace.oid` of a schema by name.
 ///
 /// The three schemas `PostgreSQL` itself bootstraps keep their real oids, so a
-/// client that hard-codes 2200 for `public` still matches; a user-created
+/// client that hard-codes 2200 for `public` still matches. A user-created
 /// schema gets a stable hashed slot in its own reserved band, exactly as views
 /// and sequences do.
 pub(crate) fn namespace_oid(schema: &str) -> i32 {
@@ -356,8 +369,10 @@ pub(crate) fn sequence_oids(kv: &dyn Kv) -> Result<BTreeMap<RelationName, i32>, 
     Ok(banded_oids(SEQUENCE_OID_BASE, &names))
 }
 
-/// Role oids, keyed by role name. The bootstrap superuser keeps PostgreSQL's
-/// own oid 10; every other role gets a hashed slot.
+/// Role oids, keyed by role name.
+///
+/// The bootstrap superuser keeps PostgreSQL's own oid 10. Every other role gets
+/// a hashed slot.
 pub(crate) fn role_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
     let names = crabka_pgcatalog::list_roles(kv)?
         .into_iter()
@@ -412,8 +427,8 @@ pub(crate) fn not_null_constraint_oids(
 /// Every `FOREIGN KEY` constraint's oid, indexed by the `<child table>.<name>`
 /// text `pg_get_constraintdef` reverses an oid through.
 ///
-/// The oid itself comes from [`foreign_key_oid`]; this map is a lookup index
-/// over it, not the definition of it.
+/// The oid itself comes from [`foreign_key_oid`]. This map is a lookup index
+/// over that oid, not the definition of it.
 pub(crate) fn foreign_key_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
     crabka_pgcatalog::list_foreign_keys(kv)?
         .into_iter()
@@ -426,14 +441,15 @@ pub(crate) fn foreign_key_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String
         .collect()
 }
 
-/// The `pg_constraint` oid of a foreign key: its stored [`ForeignKeyId`] placed
-/// in the foreign-key band, exactly as [`index_constraint_oid`] places an index
-/// id in its own.
+/// The `pg_constraint` oid of a foreign key.
 ///
-/// The id is monotonic, drawn from the catalog's foreign-key counter, and
-/// survives a rename, so the oid it yields is stable for the constraint's
-/// lifetime and orders by creation — both properties a real `pg_constraint.oid`
-/// has and a slot hashed from the constraint's *name* does not.
+/// The oid is the key's stored [`ForeignKeyId`] placed in the foreign-key band,
+/// exactly as [`index_constraint_oid`] places an index id in its own band.
+///
+/// The id is monotonic, comes from the catalog's foreign-key counter, and
+/// survives a rename. The oid it gives is therefore stable for the
+/// constraint's lifetime and orders by creation. A real `pg_constraint.oid` has
+/// both properties, and a slot hashed from the constraint's *name* does not.
 pub(crate) fn foreign_key_oid(id: ForeignKeyId) -> Result<i32, ExecError> {
     i32::try_from(id)
         .ok()
@@ -442,13 +458,13 @@ pub(crate) fn foreign_key_oid(id: ForeignKeyId) -> Result<i32, ExecError> {
         .ok_or_else(|| ExecError::Unsupported("foreign key oid leaves its band".into()))
 }
 
-/// The `pg_constraint` oid of the constraint an index backs.
+/// The `pg_constraint` oid of the constraint that an index backs.
 ///
-/// Bounded to the band like [`foreign_key_oid`]: the bases sit
-/// [`OID_BAND_WIDTH`] apart, so an unbounded add would walk an index id past
-/// `CONSTRAINT_OID_BASE + OID_BAND_WIDTH` into the `CHECK` band and hand two
-/// distinct constraints one oid. Refusing is the lesser failure — a wrong oid
-/// is silent, and `pg_constraint` is what a client joins on.
+/// This oid is bounded to the band like [`foreign_key_oid`]. The bases sit
+/// [`OID_BAND_WIDTH`] apart, so an unbounded add would move an index id past
+/// `CONSTRAINT_OID_BASE + OID_BAND_WIDTH` into the `CHECK` band and give two
+/// distinct constraints one oid. A refusal is the lesser failure, because a
+/// wrong oid is silent and `pg_constraint` is what a client joins on.
 pub(crate) fn index_constraint_oid(index_id: u32) -> Result<i32, ExecError> {
     i32::try_from(index_id)
         .ok()
@@ -457,11 +473,11 @@ pub(crate) fn index_constraint_oid(index_id: u32) -> Result<i32, ExecError> {
         .ok_or_else(|| ExecError::Unsupported("constraint oid leaves its band".into()))
 }
 
-/// The `pg_class` oid of an index, mirroring `exec::catalog_index_oid` so both
-/// sides of a `pg_index`/`pg_class` join agree.
+/// The `pg_class` oid of an index, which mirrors `exec::catalog_index_oid` so
+/// that both sides of a `pg_index`/`pg_class` join agree.
 ///
-/// Bounded for the same reason as [`index_constraint_oid`]; the neighbour it
-/// would spill into is the view band.
+/// This oid is bounded for the same reason as [`index_constraint_oid`]. The
+/// neighbour it would spill into is the view band.
 pub(crate) fn index_relation_oid(index_id: u32) -> Result<i32, ExecError> {
     i32::try_from(index_id)
         .ok()
@@ -495,7 +511,7 @@ fn small(value: i16) -> Datum {
 }
 
 /// The relation's column list, or an empty list for a name this module does not
-/// own (the seam never asks for one).
+/// own. The seam never asks for such a name.
 pub(crate) fn columns(name: &str) -> Vec<Column> {
     let found = pg_catalog_columns(name);
     if found.is_empty() {
@@ -505,8 +521,10 @@ pub(crate) fn columns(name: &str) -> Vec<Column> {
     }
 }
 
-/// The relation's rows. `backend_pid` is the querying session's backend id,
-/// which `pg_stat_activity` reports as its one row's `pid`.
+/// The relation's rows.
+///
+/// `backend_pid` is the querying session's backend id, which
+/// `pg_stat_activity` reports as its one row's `pid`.
 ///
 /// # Errors
 ///
@@ -815,8 +833,8 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
     }
 }
 
-/// The remainder of the `pg_catalog` column lists — split out so neither arm of
-/// the dispatch exceeds the file's function-length budget.
+/// The remainder of the `pg_catalog` column lists, split out so that neither
+/// arm of the dispatch exceeds the file's function-length budget.
 fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
     use ColumnType::{Bool, Int2, Int4, Int8, Text, Timestamptz};
     match name {
@@ -1100,8 +1118,10 @@ fn pg_stat_activity_columns() -> Vec<Column> {
     ])
 }
 
-/// PostgreSQL's built-in index access methods, with their real oids: `relam`
-/// joins against this and `\d`'s "Access method" line reads `amname`.
+/// PostgreSQL's built-in index access methods, with their real oids.
+///
+/// `relam` joins against this table, and `\d`'s "Access method" line reads
+/// `amname`.
 fn pg_am_rows() -> Vec<Vec<Datum>> {
     [
         (BTREE_AM_OID, "btree", "i"),
@@ -1118,7 +1138,9 @@ fn pg_am_rows() -> Vec<Vec<Datum>> {
 }
 
 /// The procedural languages every PostgreSQL cluster bootstraps, with their
-/// real oids. `\df+` joins `pg_proc.prolang` against this; crabka has no
+/// real oids.
+///
+/// `\df+` joins `pg_proc.prolang` against this table. Crabka has no
 /// user-defined routines, so nothing points at these rows yet.
 fn pg_language_rows() -> Vec<Vec<Datum>> {
     [
@@ -1146,8 +1168,10 @@ fn pg_language_rows() -> Vec<Vec<Datum>> {
     .collect()
 }
 
-/// One row per column default. `adbin` holds the default's source text — crabka
-/// stores defaults as text, so `pg_get_expr(adbin, adrelid)` is the identity.
+/// One row per column default.
+///
+/// `adbin` holds the default's source text. Crabka stores defaults as text, so
+/// `pg_get_expr(adbin, adrelid)` is the identity.
 fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(kv)? {
@@ -1205,9 +1229,10 @@ fn pg_authid_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect())
 }
 
-/// The three collations every UTF-8 PostgreSQL cluster has. crabka compares
-/// text with memcmp semantics, which is what `C` describes; `default` is the
-/// database default and is what every column reports.
+/// The three collations every UTF-8 PostgreSQL cluster has.
+///
+/// Crabka compares text with memcmp semantics, which is what `C` describes.
+/// `default` is the database default and is what every column reports.
 fn pg_collation_rows() -> Vec<Vec<Datum>> {
     [
         (DEFAULT_COLLATION_OID, "default", "d", 0),
@@ -1234,7 +1259,8 @@ fn pg_collation_rows() -> Vec<Vec<Datum>> {
     .collect()
 }
 
-/// The single database crabka exposes, matching what `current_database()` says.
+/// The single database crabka exposes, which matches what `current_database()`
+/// says.
 fn pg_database_rows() -> Vec<Vec<Datum>> {
     vec![vec![
         int(DATABASE_OID),
@@ -1265,13 +1291,15 @@ fn pg_tablespace_rows() -> Vec<Vec<Datum>> {
         .collect()
 }
 
-/// The current backend, as `pg_stat_activity` describes it. crabka has no
-/// cross-session backend registry, so exactly one row is reported: the backend
-/// running the query, which is what a health check or a "who am I" probe reads.
+/// The current backend, as `pg_stat_activity` describes it.
+///
+/// Crabka has no cross-session backend registry, so it reports exactly one row.
+/// That row is the backend that runs the query, which is what a health check or
+/// a "who am I" probe reads.
 ///
 /// The `pid` is the querying session's backend id, so
-/// `WHERE pid = pg_backend_pid()` selects the row — the pairing every
-/// "am I still connected" probe rests on.
+/// `WHERE pid = pg_backend_pid()` selects the row. Every "am I still connected"
+/// probe depends on that pairing.
 fn pg_stat_activity_rows(backend_pid: i32) -> Vec<Vec<Datum>> {
     vec![vec![
         int(DATABASE_OID),
@@ -1299,9 +1327,11 @@ fn pg_stat_activity_rows(backend_pid: i32) -> Vec<Vec<Datum>> {
     ]]
 }
 
-/// One row per view, describing its `_RETURN` rewrite rule the way PostgreSQL
-/// does. `ev_action` holds the view's stored definition text rather than a
-/// serialized plan tree — nothing in crabka reads it as a node tree.
+/// One row per view, which describes its `_RETURN` rewrite rule the way
+/// PostgreSQL does.
+///
+/// `ev_action` holds the view's stored definition text instead of a serialized
+/// plan tree. Nothing in crabka reads it as a node tree.
 fn pg_rewrite_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let oids = view_oids(kv)?;
     Ok(crabka_pgcatalog::list_views(kv)?
@@ -1341,10 +1371,11 @@ fn pg_sequence_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect())
 }
 
-/// `COMMENT ON` text, as `pg_description` reports it. `classoid` names the
-/// catalog the commented object lives in and `objsubid` is the column number
-/// for a column comment (0 otherwise) — `obj_description`/`col_description`
-/// both read exactly these two.
+/// `COMMENT ON` text, as `pg_description` reports it.
+///
+/// `classoid` names the catalog that holds the commented object. `objsubid` is
+/// the column number for a column comment, and 0 for every other comment. Both
+/// `obj_description` and `col_description` read exactly these two columns.
 fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(kv)? {
@@ -1388,8 +1419,8 @@ fn description_row(objoid: i32, objsubid: i32, comment: &str) -> Vec<Datum> {
     ]
 }
 
-/// Primary-key/unique constraints (each backed by an index), `CHECK` and
-/// `NOT NULL` constraints, and `FOREIGN KEY` constraints.
+/// Primary-key and unique constraints, each backed by an index, plus `CHECK`,
+/// `NOT NULL` and `FOREIGN KEY` constraints.
 fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for index in crabka_pgcatalog::list_indexes(kv)? {
@@ -1430,15 +1461,15 @@ fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 
 /// `FOREIGN KEY` constraints (`contype = 'f'`).
 ///
-/// `conindid` is the *referenced* index — the unique index that proves the
-/// referenced columns are a key — and `confrelid` the referenced relation.
-/// `confrelid` is load-bearing rather than cosmetic: `psql`'s `\d <parent>`
-/// renders its `Referenced by:` section by filtering `pg_constraint` on it, so
-/// leaving it 0 makes the parent's `\d` silently empty.
+/// `conindid` is the *referenced* index, the unique index that proves the
+/// referenced columns are a key. `confrelid` is the referenced relation.
+/// `confrelid` is load-bearing, not cosmetic. `psql`'s `\d <parent>` renders
+/// its `Referenced by:` section from a filter of `pg_constraint` on that
+/// column, so a value of 0 makes the parent's `\d` silently empty.
 ///
 /// `conkey` and `confkey` are both stored in the order the FK clause wrote
-/// them, paired positionally — not sorted, and not permuted into the referenced
-/// index's column order.
+/// them, paired positionally. They are not sorted, and they are not permuted
+/// into the referenced index's column order.
 fn foreign_key_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
@@ -1477,8 +1508,8 @@ fn foreign_key_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError
     Ok(rows)
 }
 
-/// The 1-based attnums of `columns` in `table`, in the order written — the
-/// contents of a `pg_constraint` attnum array.
+/// The 1-based attnums of `columns` in `table`, in the order written. These are
+/// the contents of a `pg_constraint` attnum array.
 fn attnums(table: &Table, columns: &[String]) -> Result<Vec<Datum>, ExecError> {
     columns
         .iter()
@@ -1509,8 +1540,9 @@ fn referential_action_code(action: ReferentialAction) -> &'static str {
     }
 }
 
-/// The `"char"` PostgreSQL stores in `confmatchtype`. `MATCH PARTIAL`'s `p` has
-/// no crabka spelling because the parser refuses it.
+/// The `"char"` PostgreSQL stores in `confmatchtype`.
+///
+/// `MATCH PARTIAL`'s `p` has no crabka spelling because the parser refuses it.
 fn match_type_code(match_type: MatchType) -> &'static str {
     match match_type {
         MatchType::Simple => "s",
@@ -1571,20 +1603,23 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 }
 
 /// The name PostgreSQL 18 gives the `pg_constraint` row it records for a
-/// `NOT NULL` column: the *unqualified* table name, an underscore, the column
-/// and `_not_null`. A constraint name is never schema-qualified — the schema
-/// lives in `connamespace` instead.
+/// `NOT NULL` column.
+///
+/// The name is the *unqualified* table name, an underscore, the column and
+/// `_not_null`. A constraint name is never schema-qualified. `connamespace`
+/// holds the schema instead.
 fn not_null_constraint_name(table: &RelationName, column: &str) -> String {
     format!("{}_{column}_not_null", table.name)
 }
 
-/// The `pg_constraint` fields that vary by constraint kind; the rest of the
-/// wide tuple is the same for every row crabka produces.
+/// The `pg_constraint` fields that vary by constraint kind.
+///
+/// The rest of the wide tuple is the same for every row crabka produces.
 struct ConstraintRow<'a> {
     oid: i32,
     name: &'a str,
     /// The schema of the relation the constraint is on, which is the one
-    /// `connamespace` names — a constraint has no schema of its own.
+    /// `connamespace` names. A constraint has no schema of its own.
     schema: &'a str,
     contype: &'a str,
     conrelid: i32,
@@ -1597,9 +1632,10 @@ struct ConstraintRow<'a> {
     referent: Referent,
 }
 
-/// The `conf*` columns, which only a `FOREIGN KEY` fills in. [`Default`] is
-/// PostgreSQL's "references nothing" spelling: `confrelid` 0, a single space in
-/// each of the three `"char"` codes, and NULL attnum arrays.
+/// The `conf*` columns, which only a `FOREIGN KEY` fills in.
+///
+/// [`Default`] is PostgreSQL's "references nothing" spelling: `confrelid` 0, a
+/// single space in each of the three `"char"` codes, and NULL attnum arrays.
 struct Referent {
     confrelid: i32,
     confupdtype: &'static str,
@@ -1724,9 +1760,10 @@ fn pg_views_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 
 // -------------------------------------------------------- information_schema
 
-/// Column lists for the SQL-standard views, in PostgreSQL 18.4 order. Every
-/// column is `text` in the standard's `sql_identifier`/`character_data`
-/// domains except the explicitly numeric ones.
+/// Column lists for the SQL-standard views, in PostgreSQL 18.4 order.
+///
+/// Every column except the explicitly numeric ones is `text` in the standard's
+/// `sql_identifier`/`character_data` domains.
 fn information_schema_columns(name: &str) -> Vec<Column> {
     use ColumnType::{Int4, Text};
     match name {
@@ -1897,16 +1934,17 @@ fn catalog_name() -> Datum {
 
 /// A constraint's `information_schema` identity: catalog, schema, name.
 ///
-/// A constraint has no schema of its own — it belongs to the schema of the
+/// A constraint has no schema of its own. It belongs to the schema of the
 /// relation it constrains, which is what `pg_constraint.connamespace` records
 /// and what the standard views report as `constraint_schema`.
 fn constraint_identity(schema: &str, name: &str) -> [Datum; 3] {
     [catalog_name(), text(schema), text(name)]
 }
 
-/// A relation's `information_schema` identity: catalog, schema, name — the
-/// `table_catalog`/`table_schema`/`table_name` triple every standard view
-/// carries, reporting the relation's real schema.
+/// A relation's `information_schema` identity: catalog, schema, name.
+///
+/// This is the `table_catalog`/`table_schema`/`table_name` triple every
+/// standard view carries. It reports the relation's real schema.
 fn relation_identity(relation: &RelationName) -> [Datum; 3] {
     [catalog_name(), text(&relation.schema), text(&relation.name)]
 }
@@ -1991,9 +2029,9 @@ fn table_constraint_row(
 /// `information_schema.referential_constraints`: one row per foreign key.
 ///
 /// `unique_constraint_catalog`/`_schema`/`_name` are NULL as a triple when the
-/// referent is a bare `CREATE UNIQUE INDEX` rather than a `PRIMARY KEY` or
-/// `UNIQUE` constraint — PostgreSQL's view LEFT JOINs `pg_constraint` to name
-/// it, so an index with no constraint marker yields no name.
+/// referent is a bare `CREATE UNIQUE INDEX` instead of a `PRIMARY KEY` or
+/// `UNIQUE` constraint. PostgreSQL's view LEFT JOINs `pg_constraint` to name
+/// the referent, so an index with no constraint marker gives no name.
 fn referential_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
@@ -2014,9 +2052,10 @@ fn referential_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError
     Ok(rows)
 }
 
-/// The catalog name of the unique index a foreign key references. A foreign key
-/// stores that index's bare name, and an index lives in the schema of the table
-/// it indexes — here, the referenced table's.
+/// The catalog name of the unique index a foreign key references.
+///
+/// A foreign key stores that index's bare name. An index belongs to the schema
+/// of the table it indexes, which here is the referenced table's schema.
 fn referenced_index_name(foreign_key: &crabka_pgcatalog::ForeignKey) -> RelationName {
     foreign_key
         .referenced_table
@@ -2024,7 +2063,7 @@ fn referenced_index_name(foreign_key: &crabka_pgcatalog::ForeignKey) -> Relation
 }
 
 /// The SQL standard's `match_option`, whose spelling for `MATCH SIMPLE` is
-/// `NONE` rather than `SIMPLE`.
+/// `NONE` and not `SIMPLE`.
 fn match_option(match_type: MatchType) -> &'static str {
     match match_type {
         MatchType::Simple => "NONE",
@@ -2032,8 +2071,8 @@ fn match_option(match_type: MatchType) -> &'static str {
     }
 }
 
-/// The SQL standard's `update_rule`/`delete_rule` — the referential action
-/// spelled out rather than the `pg_constraint` `"char"`.
+/// The SQL standard's `update_rule`/`delete_rule`, which is the referential
+/// action spelled out instead of the `pg_constraint` `"char"`.
 fn referential_action_rule(action: ReferentialAction) -> &'static str {
     match action {
         ReferentialAction::NoAction => "NO ACTION",
@@ -2065,9 +2104,9 @@ fn key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// because its `key_column_usage` covers `contype IN ('p', 'u', 'f')`.
 ///
 /// `position_in_unique_constraint` is the paired referenced column's position
-/// within the referenced *index*, which is why it can disagree with
-/// `ordinal_position`: a permuted composite key pairs by written order while
-/// the index keeps its own.
+/// within the referenced *index*. That is why it can disagree with
+/// `ordinal_position`. A permuted composite key pairs by written order, while
+/// the index keeps its own order.
 fn foreign_key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
@@ -2134,9 +2173,11 @@ fn constraint_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
     Ok(rows)
 }
 
-/// One `constraint_column_usage` row. The relation and the constraint carry
-/// their own schemas because a foreign key separates them: the columns are the
-/// *parent's*, while the constraint belongs to the child's schema.
+/// One `constraint_column_usage` row.
+///
+/// The relation and the constraint carry their own schemas because a foreign
+/// key separates them. The columns are the *parent's*, while the constraint
+/// belongs to the child's schema.
 fn column_usage_row(
     table: &RelationName,
     column: &str,
@@ -2216,8 +2257,10 @@ fn sequence_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 }
 
 /// The owner's implicit grants on every table it owns, then any explicit
-/// `GRANT`. PostgreSQL lists the owner's seven table privileges in ACL bit
-/// order, grantable, and `with_hierarchy` only for `SELECT`.
+/// `GRANT`.
+///
+/// PostgreSQL lists the owner's seven table privileges in ACL bit order, all
+/// grantable, and sets `with_hierarchy` only for `SELECT`.
 fn table_privilege_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     const OWNER_PRIVILEGES: [&str; 7] = [
         "INSERT",
@@ -2306,8 +2349,8 @@ mod tests {
     }
 
     /// Two relations of the same name in different schemas are two objects, so
-    /// the band has to see the schema — the `public`-bare display spelling
-    /// would give both the same slot.
+    /// the band has to see the schema. The `public`-bare display spelling would
+    /// give both the same slot.
     #[test]
     fn banded_oids_separate_same_named_relations_in_different_schemas() {
         let names = [
@@ -2330,10 +2373,10 @@ mod tests {
         assert!(distinct.len() == names.len());
     }
 
-    /// Every projection that carries a schema reports the relation's own,
-    /// rather than the `public` the catalog assumed before a relation had one.
-    /// An index is reported in its table's schema, which is where PostgreSQL
-    /// puts it.
+    /// Every projection that carries a schema reports the relation's own
+    /// schema, and not the `public` the catalog assumed before a relation had
+    /// one. An index is reported in its table's schema, which is where
+    /// PostgreSQL puts it.
     #[test]
     fn projections_report_a_relations_real_schema() {
         const VIEW: &str = "information_schema.table_constraints";
@@ -2370,10 +2413,10 @@ mod tests {
 
     // ------------------------------------------------------------ foreign keys
 
-    /// The oracle's shapes: a `pp(id, k, m)` parent carrying a primary key on
+    /// The oracle's shapes. The `pp(id, k, m)` parent carries a primary key on
     /// `id`, a `UNIQUE` constraint on `k`, a composite `UNIQUE` constraint on
-    /// `(id, k)` and a bare `CREATE UNIQUE INDEX` on `m`; plus a `cc(a, b, c)`
-    /// child to hang foreign keys off.
+    /// `(id, k)` and a bare `CREATE UNIQUE INDEX` on `m`. The `cc(a, b, c)`
+    /// child holds the foreign keys.
     struct Schema {
         parent: TableId,
         child: TableId,
@@ -2450,10 +2493,11 @@ mod tests {
         }
     }
 
-    /// `cc(a) REFERENCES pp(id)` with every option at its default — the shape
-    /// each case below varies one or two fields of. `id` is the creation-order
-    /// id DDL would have allocated, and is what the constraint's oid derives
-    /// from, so every constraint in one fixture needs its own.
+    /// `cc(a) REFERENCES pp(id)` with every option at its default.
+    ///
+    /// Each case below varies one or two fields of this shape. `id` is the
+    /// creation-order id DDL would have allocated, and the constraint's oid
+    /// comes from it, so every constraint in one fixture needs its own `id`.
     fn base_foreign_key(schema: &Schema, id: ForeignKeyId, name: &str) -> ForeignKey {
         ForeignKey {
             id,
@@ -2516,7 +2560,8 @@ mod tests {
     }
 
     /// `cperm(a, b)` with `FOREIGN KEY (b, a) REFERENCES pperm(y, x)`, where
-    /// `pperm`'s primary key is `(x, y)` — the oracle's permuted composite.
+    /// `pperm`'s primary key is `(x, y)`. This is the oracle's permuted
+    /// composite.
     fn permuted_catalog() -> MemKv {
         let kv = MemKv::default();
         let pperm = RelationName::public("pperm");
@@ -2560,8 +2605,8 @@ mod tests {
         kv
     }
 
-    /// One column of a row, located by *name* in the relation's declared column
-    /// list, so a positional mistake surfaces as a value mismatch.
+    /// One column of a row, found by *name* in the relation's declared column
+    /// list, so a positional mistake appears as a value mismatch.
     fn field(relation: &str, row: &[Datum], column: &str) -> Datum {
         let position = columns(relation)
             .iter()
@@ -2595,8 +2640,8 @@ mod tests {
     }
 
     /// Every `pg_constraint` column of a foreign-key row, in PostgreSQL 18.4's
-    /// 28-column order — the case that pins each position rather than trusting
-    /// a remembered index.
+    /// 28-column order. This case pins each position and does not depend on a
+    /// remembered index.
     #[test]
     fn pg_constraint_foreign_key_row_matches_postgresql_column_for_column() {
         let (kv, schema) = oracle_catalog();
@@ -2671,7 +2716,7 @@ mod tests {
         }
     }
 
-    /// The oracle's four rows verbatim: `NOT VALID` clears `convalidated`,
+    /// The oracle's four rows verbatim. `NOT VALID` clears `convalidated`,
     /// `DEFERRABLE INITIALLY DEFERRED` sets both deferral flags, and every row
     /// points `confrelid` at the parent so `\d pp`'s `Referenced by:` finds it.
     #[test]
@@ -2797,8 +2842,8 @@ mod tests {
     }
 
     /// PostgreSQL stores `conkey` and `confkey` in the order the FK clause
-    /// wrote them, paired positionally — neither sorted nor permuted into the
-    /// referenced index's own column order.
+    /// wrote them, paired positionally. They are neither sorted nor permuted
+    /// into the referenced index's own column order.
     #[test]
     fn pg_constraint_keeps_composite_key_columns_in_written_order() {
         let kv = permuted_catalog();
@@ -2811,8 +2856,8 @@ mod tests {
     }
 
     /// `confdelsetcols` holds the written `ON DELETE SET … (cols)` list, in
-    /// written order, and is NULL when no list was written — PostgreSQL does
-    /// not fill it in with a copy of `conkey`.
+    /// written order, and is NULL when no list was written. PostgreSQL does not
+    /// fill it in with a copy of `conkey`.
     #[test]
     fn pg_constraint_records_the_on_delete_set_column_list_only_when_written() {
         let kv = MemKv::default();
@@ -2868,9 +2913,9 @@ mod tests {
     }
 
     /// A foreign key's oid is its stored id placed in the foreign-key band, so
-    /// the band has to be disjoint from the ones the other constraint kinds
-    /// report in — and an id that would leave it is refused rather than
-    /// answered inside a neighbour's.
+    /// the band has to be disjoint from the bands the other constraint kinds
+    /// report in. An id that would leave the band is refused, and it is never
+    /// answered inside a neighbour's band.
     #[test]
     fn a_foreign_key_oid_stays_inside_the_foreign_key_band() {
         let band = FOREIGN_KEY_OID_BASE..FOREIGN_KEY_OID_BASE + OID_BAND_WIDTH;
@@ -2888,11 +2933,11 @@ mod tests {
     }
 
     /// An index id is placed in its band the same way, and the bands are
-    /// adjacent — `INDEX_OID_BASE` borders the view band and
-    /// `CONSTRAINT_OID_BASE` borders the `CHECK` band. Past roughly ten
-    /// thousand indexes an unbounded add would answer inside a neighbour's
-    /// band, so two distinct objects would report one `pg_class` or
-    /// `pg_constraint` oid with nothing raised.
+    /// adjacent. `INDEX_OID_BASE` borders the view band and
+    /// `CONSTRAINT_OID_BASE` borders the `CHECK` band. Past about ten thousand
+    /// indexes an unbounded add would answer inside a neighbour's band, so two
+    /// distinct objects would report one `pg_class` or `pg_constraint` oid and
+    /// nothing would be raised.
     #[test]
     fn an_index_oid_stays_inside_its_band() {
         let last = OID_BAND_WIDTH.unsigned_abs() - 1;
@@ -2946,7 +2991,8 @@ mod tests {
         }
     }
 
-    /// A one-column `c` table, `NOT NULL` and carrying a `CHECK` named `ck`.
+    /// A one-column `c` table that is `NOT NULL` and carries a `CHECK` named
+    /// `ck`.
     fn add_checked_table(kv: &MemKv, name: &RelationName) -> TableId {
         let column = Column {
             not_null: true,
@@ -2969,10 +3015,11 @@ mod tests {
         id
     }
 
-    /// Two relations whose schema and name flatten to the same dotted text:
-    /// `"s.t"` created in `public`, and `t` created in schema `s`. Each carries
-    /// a `CHECK` named `ck`, a `NOT NULL` on `c` and a foreign key named `fk`
-    /// into `public.p`.
+    /// Two relations whose schema and name flatten to the same dotted text.
+    ///
+    /// They are `"s.t"` created in `public`, and `t` created in schema `s`.
+    /// Each one carries a `CHECK` named `ck`, a `NOT NULL` on `c` and a foreign
+    /// key named `fk` into `public.p`.
     fn dotted_name_catalog() -> MemKv {
         let kv = MemKv::default();
         let ops = crabka_pgcatalog::create_schema_ops(&kv, "s", "postgres").expect("schema ops");
@@ -3018,12 +3065,12 @@ mod tests {
     }
 
     /// A dot only reaches an identifier through quoting, and that is where a
-    /// flattened `<table>.<constraint>` key stops being injective: `"s.t"` in
+    /// flattened `<table>.<constraint>` key stops being injective. `"s.t"` in
     /// `public` and `t` in schema `s` are two relations, so a same-named
     /// constraint on each is two constraints. [`banded_oids`] deduplicates its
     /// input, so one flattened key would collapse the pair into a single entry
-    /// and report one oid for both `pg_constraint` rows — which is what any
-    /// join on that oid then mis-associates.
+    /// and report one oid for both `pg_constraint` rows. Any join on that oid
+    /// then mis-associates the rows.
     #[test]
     fn constraint_oids_separate_a_dotted_relation_from_a_qualified_one() {
         let kv = dotted_name_catalog();
@@ -3050,7 +3097,7 @@ mod tests {
     }
 
     /// `match_option` uses the SQL standard's `NONE` for MATCH SIMPLE, and the
-    /// rules are spelled out rather than coded.
+    /// rules are spelled out instead of coded.
     #[test]
     fn referential_constraints_spell_out_the_oracle_rules() {
         const VIEW: &str = "information_schema.referential_constraints";
@@ -3082,7 +3129,7 @@ mod tests {
     }
 
     /// A foreign key may target a bare `CREATE UNIQUE INDEX`, which carries no
-    /// `pg_constraint` row — PostgreSQL's view LEFT JOINs to find one, so the
+    /// `pg_constraint` row. PostgreSQL's view LEFT JOINs to find one, so the
     /// whole `unique_constraint_*` triple comes back NULL.
     #[test]
     fn referential_constraints_null_the_unique_constraint_for_a_bare_unique_index() {
@@ -3192,7 +3239,8 @@ mod tests {
     }
 
     /// `constraint_column_usage` attributes a foreign key to the columns it
-    /// *references*, on the parent relation — the mirror of `key_column_usage`.
+    /// *references*, on the parent relation. It is the mirror of
+    /// `key_column_usage`.
     #[test]
     fn constraint_column_usage_names_the_referenced_table_for_a_foreign_key() {
         const VIEW: &str = "information_schema.constraint_column_usage";

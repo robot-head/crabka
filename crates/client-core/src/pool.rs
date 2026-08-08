@@ -25,33 +25,38 @@ pub struct BrokerInfo {
 }
 
 /// The single live-IO dependency [`BrokerPool`] needs: dial an address and
-/// return an opened connection. Abstracting it behind a trait (mirroring
-/// `connect-postgres`'s `PgCatalog` seam) makes the pool's caching, fallback
-/// iteration, and eviction *logic* killable without a socket: a `mockall` mock
-/// connector hands back a stand-in connection type, so [`BrokerPool::get`],
+/// return an opened connection.
+///
+/// A trait hides this dependency, which mirrors `connect-postgres`'s
+/// `PgCatalog` seam. The trait makes the pool's caching, fallback iteration,
+/// and eviction *logic* killable without a socket. A `mockall` mock connector
+/// hands back a stand-in connection type, so [`BrokerPool::get`],
 /// [`BrokerPool::bootstrap_connection`], [`BrokerPool::evict`],
 /// [`BrokerPool::evict_bootstrap`], and [`BrokerPool::close_all`] are all
-/// exercised under the crate's default feature set. The only un-mockable part —
-/// the actual TCP dial + API-versions handshake — stays in [`TcpConnector`].
+/// exercised under the crate's default feature set. Only one part is
+/// un-mockable and it stays in [`TcpConnector`]: the actual TCP dial +
+/// API-versions handshake.
 ///
-/// The trait has an associated `Conn` type rather than returning a fixed handle
-/// so tests can substitute a cheap stand-in; `mockall` does not cleanly mock a
-/// generic-associated-type trait, so the test connector is hand-written
-/// (`CountingConnector`) instead of `automock`-generated.
+/// The trait has an associated `Conn` type rather than a fixed handle so tests
+/// can substitute a cheap stand-in. `mockall` does not cleanly mock a
+/// generic-associated-type trait, so the test connector `CountingConnector` is
+/// hand-written instead of `automock`-generated.
 #[async_trait::async_trait]
 pub trait BrokerConnector: Send + Sync {
-    /// Connection handle this connector produces. `Connection` in production; a
-    /// cheap stand-in in tests so caching/fallback decisions are observable
-    /// without opening a real socket.
+    /// Connection handle this connector produces. It is `Connection` in
+    /// production and a cheap stand-in in tests, so caching and fallback
+    /// decisions are observable without a real socket.
     type Conn: Send + Sync;
 
     /// Dial `addr` and return a ready connection, or a transport error.
     async fn dial(&self, addr: SocketAddr) -> Result<Self::Conn, ClientError>;
 }
 
-/// Production [`BrokerConnector`]: opens a real [`Connection`] honouring the
-/// pool's TLS/SASL policy. This thin adapter is the only un-mockable part of the
-/// pool (the live TCP dial + API-versions handshake).
+/// Production [`BrokerConnector`]: opens a real [`Connection`] that honours
+/// the pool's TLS/SASL policy.
+///
+/// This thin adapter is the only un-mockable part of the pool, because it does
+/// the live TCP dial + API-versions handshake.
 #[derive(Debug)]
 pub struct TcpConnector {
     options: ConnectionOptions,
@@ -67,13 +72,14 @@ impl BrokerConnector for TcpConnector {
     }
 }
 
-/// Pool of `Arc<Connection>` keyed by broker id. Connections are opened lazily
-/// on first use and cached thereafter.
+/// Pool of `Arc<Connection>` keyed by broker id.
 ///
-/// Generic over the internal `BrokerConnector` seam so the caching/fallback/eviction
-/// logic is unit-testable against a mock connector; the default `C` is the live
-/// `TcpConnector`, so the public type and every downstream use stay
-/// `BrokerPool` (no type argument needed).
+/// The pool opens a connection lazily on first use and caches it afterwards.
+///
+/// The pool is generic over the internal `BrokerConnector` seam, so the
+/// caching, fallback, and eviction logic is unit-testable against a mock
+/// connector. The default `C` is the live `TcpConnector`, so the public type
+/// and every downstream use stay `BrokerPool` and need no type argument.
 pub struct BrokerPool<C: BrokerConnector = TcpConnector> {
     by_id: DashMap<i32, Arc<C::Conn>>,
     by_addr: DashMap<i32, SocketAddr>,
@@ -104,8 +110,8 @@ impl BrokerPool<TcpConnector> {
 }
 
 impl<C: BrokerConnector> BrokerPool<C> {
-    /// Build a pool over an explicit [`BrokerConnector`]. Used by [`new`] for the
-    /// live connector and by tests for a mock connector.
+    /// Build a pool over an explicit [`BrokerConnector`]. [`new`] calls this
+    /// for the live connector, and tests call it for a mock connector.
     ///
     /// [`new`]: BrokerPool::new
     fn with_connector(
@@ -123,7 +129,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
     }
 
     /// Get-or-connect to a specific broker id. The pool must have already
-    /// learned the (id, address) mapping via [`refresh_brokers`].
+    /// learned the (id, address) mapping with [`refresh_brokers`].
     ///
     /// [`refresh_brokers`]: BrokerPool::refresh_brokers
     #[tracing::instrument(level = "debug", skip_all, fields(broker_id), err)]
@@ -143,23 +149,28 @@ impl<C: BrokerConnector> BrokerPool<C> {
         Ok(conn)
     }
 
-    /// Drop the cached connection to `broker_id` (if any) so the next
-    /// [`get`](BrokerPool::get) reconnects. Used after a send fails: a bounced
-    /// or failed-over broker must not be retried over its dead, cached socket.
-    /// The `(id → addr)` mapping is left intact so the reconnect targets the
-    /// broker's current advertised address.
+    /// Drop the cached connection to `broker_id`, if there is one, so the next
+    /// [`get`](BrokerPool::get) reconnects.
+    ///
+    /// Call this after a send fails. A bounced or failed-over broker must not
+    /// be retried over its dead, cached socket. The pool keeps the
+    /// `(id → addr)` mapping, so the reconnect targets the broker's current
+    /// advertised address.
     pub fn evict(&self, broker_id: i32) {
         self.by_id.remove(&broker_id);
     }
 
     /// Drop the cached bootstrap connection so the next
     /// [`bootstrap_connection`](BrokerPool::bootstrap_connection) re-iterates the
-    /// bootstrap addresses and reconnects to a live broker. Required because the
-    /// bootstrap connection is keyed by the synthetic id `-1`, which no real
-    /// broker id matches — so [`evict`](BrokerPool::evict) can never reach it.
-    /// Call this after a bootstrap send fails: the broker backing the bootstrap
-    /// connection may have been killed (e.g. it was the failed-over partition
-    /// leader), and the dead socket must not be reused for metadata refreshes.
+    /// bootstrap addresses and reconnects to a live broker.
+    ///
+    /// This method is necessary because the pool keys the bootstrap connection
+    /// by the synthetic id `-1`, which no real broker id matches, so
+    /// [`evict`](BrokerPool::evict) can never reach it. Call this after a
+    /// bootstrap send fails. The broker behind the bootstrap connection may
+    /// have been killed, for example when it was the failed-over partition
+    /// leader, and the pool must not reuse the dead socket for metadata
+    /// refreshes.
     pub fn evict_bootstrap(&self) {
         self.by_id.remove(&BOOTSTRAP_ID);
     }
@@ -201,15 +212,16 @@ impl<C: BrokerConnector> BrokerPool<C> {
         Err(last_err.unwrap_or(ClientError::Disconnected))
     }
 
-    /// Update the (id, addr) address registry from a list of brokers, typically
-    /// sourced from a `MetadataResponse`. Does not open any new connections.
+    /// Update the (id, addr) address registry from a list of brokers, which
+    /// usually comes from a `MetadataResponse`. This method opens no new
+    /// connections.
     ///
-    /// Brokers advertising port `0` are skipped: that is not a dialable address
-    /// (it shows up for in-process test brokers whose advertised port never got
-    /// rewritten to the real bound port). Leaving such an entry out means
-    /// [`get`](BrokerPool::get) reports `Disconnected` for that id, letting a
-    /// caller fall back to the bootstrap connection rather than attempting a
-    /// doomed `host:0` connect.
+    /// This method skips brokers that advertise port `0`, because that is not
+    /// a dialable address. It shows up for in-process test brokers whose
+    /// advertised port never got rewritten to the real bound port. When the
+    /// registry leaves such an entry out, [`get`](BrokerPool::get) reports
+    /// `Disconnected` for that id. The caller can then fall back to the
+    /// bootstrap connection instead of trying a doomed `host:0` connect.
     #[tracing::instrument(level = "debug", skip_all, fields(brokers = brokers.len()))]
     pub async fn refresh_brokers(&self, brokers: &[BrokerInfo]) {
         for b in brokers {
@@ -240,10 +252,11 @@ impl<C: BrokerConnector> BrokerPool<C> {
     }
 
     /// Whether the (id → addr) registry knows a dialable address for this
-    /// broker id (i.e. [`refresh_brokers`](BrokerPool::refresh_brokers) learned
-    /// it and the port was not `0`). A caller can use this to decide between
-    /// routing to a specific broker and falling back to the bootstrap
-    /// connection, without a speculative connect.
+    /// broker id. It knows one when
+    /// [`refresh_brokers`](BrokerPool::refresh_brokers) learned it and the
+    /// port was not `0`. A caller can use this to choose between a route to a
+    /// specific broker and a fallback to the bootstrap connection, without a
+    /// speculative connect.
     #[must_use]
     pub fn knows_broker(&self, broker_id: i32) -> bool {
         self.by_addr.contains_key(&broker_id)
@@ -370,8 +383,9 @@ mod tests {
     // bootstrap fallback iteration, and the two eviction paths are all killable
     // under the crate's default feature set.
 
-    /// Stand-in connection: an opaque marker carrying the address it was dialed
-    /// against so tests can prove which bootstrap address won.
+    /// Stand-in connection: an opaque marker that carries the address it was
+    /// dialed against, so tests can prove which bootstrap address the pool
+    /// used.
     #[derive(Debug)]
     struct StubConn {
         addr: SocketAddr,
@@ -379,7 +393,7 @@ mod tests {
 
     struct CountingConnector {
         dials: Arc<AtomicUsize>,
-        /// Addresses that should fail to dial (simulating a dead broker).
+        /// Addresses that must fail to dial. They simulate a dead broker.
         fail: Vec<SocketAddr>,
     }
 

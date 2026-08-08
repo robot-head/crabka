@@ -1,13 +1,13 @@
-//! Integration test for `AdminClient::connect`'s bootstrap-walking
-//! behavior: when the first address in the list refuses connections,
-//! it must fall through to the second and succeed.
+//! Integration test for the bootstrap walk in `AdminClient::connect`.
 //!
-//! This complements the predicate-level unit tests in
-//! `src/topics.rs` (`controller_endpoint_picks_broker_with_matching_node_id`,
-//! `any_not_controller_predicate_matches_code_41`) which lock the
-//! pure pieces of the `NOT_CONTROLLER` retry path. The full retry
-//! pipeline (response → reconnect → resend) is covered by
-//! `round_trip.rs` against a real broker.
+//! When the first address in the list refuses connections, `connect` must go on
+//! to the second address and succeed.
+//!
+//! This test adds to the predicate-level unit tests in `src/topics.rs`. Those
+//! tests are `controller_endpoint_picks_broker_with_matching_node_id` and
+//! `any_not_controller_predicate_matches_code_41`, and they lock the pure parts
+//! of the `NOT_CONTROLLER` retry path. `round_trip.rs` covers the full retry
+//! pipeline against a real broker: response, then reconnect, then resend.
 
 #[path = "../../broker/tests/support/mod.rs"]
 mod support;
@@ -16,11 +16,11 @@ use crabka_client_admin::AdminClient;
 
 /// Spec test: `connect_walks_bootstrap_list`.
 ///
-/// Bind-and-drop an ephemeral port to obtain an address whose TCP
-/// connects will be refused with `ECONNREFUSED`, then start the
-/// in-process broker and use its address as the second bootstrap
-/// entry. `AdminClient::connect` must skip the refused address and
-/// succeed against the broker.
+/// The test binds an ephemeral port and drops it. The address of that port
+/// refuses TCP connects with `ECONNREFUSED`. The test then starts the
+/// in-process broker and uses its address as the second bootstrap entry.
+/// `AdminClient::connect` must skip the refused address and succeed against
+/// the broker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_walks_bootstrap_list() {
     support::init_tracing();

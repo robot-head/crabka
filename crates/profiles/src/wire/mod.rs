@@ -1,6 +1,6 @@
-//! Generated message + Connect-server types from vendored protos.
+//! Generated message and Connect-server types from vendored protos.
 
-/// Generated protobuf + Connect server stubs.
+/// Generated protobuf and Connect server stubs.
 pub mod pb {
     /// Pyroscope `push.v1.PusherService`.
     pub mod push {
@@ -30,8 +30,8 @@ pub mod pb {
         }
     }
 
-    /// Pyroscope `settings.v1.SettingsService` (UI settings the Grafana
-    /// Profiles Drilldown app loads on init).
+    /// Pyroscope `settings.v1.SettingsService`. It carries the UI settings that
+    /// the Grafana Profiles Drilldown app loads on init.
     pub mod settings {
         pub mod v1 {
             include!(concat!(env!("OUT_DIR"), "/settings.v1.rs"));
@@ -81,7 +81,7 @@ pub mod pb {
         }
     }
 
-    /// Ergonomic alias for OTLP collector profile service + message types.
+    /// Alias for the OTLP collector profile service and message types.
     pub mod otlp_profiles {
         pub use super::opentelemetry::proto::{
             collector::profiles::v1development::*, profiles::v1development::*,
