@@ -13,42 +13,44 @@
 
 Crabka is a Rust implementation of [Apache Kafka](https://kafka.apache.org)
 infrastructure. It speaks the Kafka wire protocol, stores records in
-Kafka-compatible log segments, runs metadata on KRaft, and is tested against the
-official JVM clients and command-line tools.
+Kafka-compatible log segments, and runs metadata on KRaft. The test suite runs
+Crabka against the official JVM clients and command-line tools.
 
 Use Crabka when you want Kafka-compatible streaming infrastructure without a JVM
-runtime: memory-safe Rust, async I/O, no ZooKeeper mode, no GC pauses, and a
-workspace that includes the broker, Rust clients, Schema Registry, gateways,
-operators, rebalancing, replication, and observability services.
+runtime. Crabka gives you memory-safe Rust, async I/O, no ZooKeeper mode, and no
+GC pauses. The workspace contains the broker, the Rust clients, the Schema
+Registry, gateways, operators, and the rebalancing, replication, and
+observability services.
 
 ## Project Status
 
-Crabka is **beta**, pre-1.0 software. The workspace version is defined in
+Crabka is **beta**, pre-1.0 software. The workspace version is in
 [Cargo.toml](Cargo.toml).
 
-The project is still greenfield infrastructure: there are no production users,
-and on-disk compatibility across Crabka versions is not promised yet. Use it for
-evaluation, development, interoperability testing, and non-critical workloads
-while the project hardens.
+The project is still greenfield infrastructure. There are no production users,
+and Crabka does not promise on-disk compatibility across versions yet. Use
+Crabka for evaluation, development, interoperability tests, and non-critical
+workloads while the project hardens.
 
 Kafka compatibility is the primary constraint. The repository validates protocol
 encoding, record formats, storage behavior, KRaft metadata, and JVM tool
-interoperability against Apache Kafka behavior where those surfaces are in
-scope.
+interoperability against Apache Kafka behavior. This applies where those
+surfaces are in scope.
 
 ## Why Crabka
 
-- **Kafka wire compatibility:** protocol codecs are generated from Apache Kafka
-  message schemas and checked byte-for-byte against `kafka-clients`.
+- **Kafka wire compatibility:** the build generates the protocol codecs from
+  Apache Kafka message schemas and checks them byte-for-byte against
+  `kafka-clients`.
 - **JVM tooling works:** acceptance tests drive tools such as
   `kafka-topics.sh`, `kafka-configs.sh`, `kafka-acls.sh`,
   `kafka-consumer-groups.sh`, `kafka-leader-election.sh`, and
   `kafka-reassign-partitions.sh` against Crabka.
 - **Rust runtime:** Crabka uses `tokio`, forbids unsafe code across the
   workspace, and avoids JVM heap tuning and garbage-collection behavior.
-- **KRaft-native:** metadata is stored in a native KRaft quorum; ZooKeeper mode
-  and ZooKeeper-to-KRaft migration are out of scope.
-- **Operations included:** the workspace includes a Kubernetes operator,
+- **KRaft-native:** Crabka stores metadata in a native KRaft quorum. ZooKeeper
+  mode and ZooKeeper-to-KRaft migration are out of scope.
+- **Operations included:** the workspace contains a Kubernetes operator,
   Prometheus metrics, OTLP tracing, Helm charts, OCI images, and a
   Cruise-Control-style partition rebalancer.
 - **Rust clients included:** producer, consumer, admin, streams, schema-serde,
@@ -68,10 +70,10 @@ implementation internals are not compatibility goals.
 | Idempotent and transactional produce / consume | Implemented |
 | Classic and next-generation consumer groups | Implemented |
 | Share groups / queues | Implemented |
-| Tiered storage | Implemented; segment-data JVM interop is still being validated |
+| Tiered storage | Implemented; segment-data JVM interop is still in validation |
 | TLS, SASL, delegation tokens, ACLs, and quotas | Implemented |
 | Schema Registry-compatible REST service | Implemented |
-| Kubernetes operator | Implemented; external listener surfaces are still maturing |
+| Kubernetes operator | Implemented; external listener surfaces continue to mature |
 | Rust Streams client | Partial versus the full JVM Kafka Streams library |
 | Kafka Connect-equivalent runtime | Partial; managed Postgres CDC workers, durable offsets, connector SPI, and `KafkaConnector` CRD are implemented |
 | ZooKeeper mode and ZooKeeper-to-KRaft migration | Out of scope |
@@ -99,7 +101,7 @@ cargo install --path crates/cli
 cargo install --path crates/broker
 ```
 
-Rust client crates are published independently. For example:
+The project publishes the Rust client crates independently. For example:
 
 ```bash
 cargo add crabka-client-producer
@@ -107,16 +109,16 @@ cargo add crabka-client-consumer
 cargo add crabka-client-admin
 ```
 
-Container images are published to GHCR and Docker Hub:
+The project publishes container images to GHCR and Docker Hub:
 
 ```bash
 docker pull ghcr.io/robot-head/crabka-broker:latest
 docker pull mirror.gcr.io/robothead/crabka-broker:latest
 ```
 
-Image build, signing, SBOM, and attestation details are in
-[packaging/README.md](packaging/README.md). Helm chart usage is documented in
-[charts/README.md](charts/README.md).
+[packaging/README.md](packaging/README.md) gives the image build, signature,
+SBOM, and attestation details. [charts/README.md](charts/README.md) documents
+the Helm chart usage.
 
 ## Quick Start
 
@@ -160,8 +162,8 @@ kafka-console-consumer.sh \
   --from-beginning
 ```
 
-`crabka format` initializes an empty log directory. To start over locally, stop
-the broker and remove `target/crabka-data`.
+`crabka format` initializes an empty log directory. To start again locally, stop
+the broker and delete `target/crabka-data`.
 
 ## Documentation
 
@@ -176,7 +178,7 @@ the broker and remove `target/crabka-data`.
 
 ## Workspace
 
-Crabka is organized as a Cargo workspace. The main runtime path is:
+Crabka is a Cargo workspace. The main runtime path is:
 
 ```mermaid
 flowchart LR
@@ -228,14 +230,14 @@ Run JVM-backed differential and acceptance tests:
 cargo test --workspace -- --include-ignored
 ```
 
-Regenerate protocol code after editing Kafka schemas:
+Regenerate the protocol code after you edit the Kafka schemas:
 
 ```bash
 ./tools/regenerate.sh
 git diff crates/protocol/generated
 ```
 
-More contributor workflow details are in [CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](CONTRIBUTING.md) gives more contributor workflow details.
 
 ## Roadmap
 
@@ -245,20 +247,21 @@ Near-term work focuses on production hardening and compatibility depth:
 - Continued Kubernetes operator maturity.
 - More complete Connect runtime and connector surfaces.
 - Better deployment, security, and operations documentation.
-- Compatibility and upgrade testing as the project approaches 1.0.
+- Compatibility and upgrade tests as the project approaches 1.0.
 
-Detailed implementation status lives in [docs/KIP_MATRIX.md](docs/KIP_MATRIX.md)
-and the design notes under [docs/superpowers/specs](docs/superpowers/specs).
+[docs/KIP_MATRIX.md](docs/KIP_MATRIX.md) and the design notes under
+[docs/superpowers/specs](docs/superpowers/specs) give the detailed
+implementation status.
 
 ## Contributing
 
-Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), open an
-issue for substantial design or compatibility changes, and keep Kafka wire and
-behavior compatibility as the primary constraint.
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md). Open an
+issue for a large design or compatibility change. Keep Kafka wire and behavior
+compatibility as the primary constraint.
 
 Run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-and the relevant tests before opening a pull request. Conventional commits are
-used by `release-plz` for automated versioning and changelog generation.
+and the relevant tests before you open a pull request. `release-plz` uses
+conventional commits for automated versioning and changelog generation.
 
 ## Security
 
@@ -266,10 +269,9 @@ Crabka includes authentication, authorization, TLS, mTLS, delegation-token, and
 OPA integration work, but it is still beta infrastructure. Do not use it as the
 sole security boundary for critical production systems yet.
 
-If you believe you have found a security vulnerability, avoid posting exploit
-details in a public issue. Use GitHub private vulnerability reporting if it is
-enabled for the repository, or contact the maintainers privately through the
-repository owner.
+If you find a security vulnerability, do not post exploit details in a public
+issue. Use GitHub private vulnerability reporting if the repository has it
+enabled. If not, contact the maintainers privately through the repository owner.
 
 ## License
 

@@ -1,18 +1,19 @@
 # Vendored JavaScript
 
-Third-party JS served directly from the docs site so pages have **no runtime
-dependency on an external CDN**. Files here are committed deliberately.
+The docs site serves this third-party JavaScript directly, so pages have **no
+runtime dependency on an external CDN**. These files are committed deliberately.
 
 ## `mermaid.min.js`
 
 - **Library:** [Mermaid](https://github.com/mermaid-js/mermaid) (diagram rendering)
 - **Pinned version:** `11.4.1`
-- **Build:** the standalone UMD bundle (`dist/mermaid.min.js`), which exposes a
-  global `mermaid` and has no dynamic chunk imports — load with a plain
-  `<script src>` then `mermaid.initialize(...)` + `mermaid.run()`.
-- **Used by:** `templates/docs/page.html` and `templates/docs/section.html`,
-  gated on a page's `extra.mermaid = true` front matter; authored via the
-  `mermaid` shortcode (`templates/shortcodes/mermaid.html`).
+- **Build:** the standalone UMD bundle `dist/mermaid.min.js`. It exposes a
+  global `mermaid` and has no dynamic chunk imports. Load it with a plain
+  `<script src>`, then call `mermaid.initialize(...)` and `mermaid.run()`.
+- **Used by:** `templates/docs/page.html` and `templates/docs/section.html`.
+  They render a diagram only when the page sets `extra.mermaid = true` in its
+  front matter. Authors write the diagrams with the `mermaid` shortcode in
+  `templates/shortcodes/mermaid.html`.
 
 ### Refreshing to a new version
 
@@ -23,5 +24,5 @@ tar -xzf /tmp/mermaid.tgz -C /tmp
 cp /tmp/package/dist/mermaid.min.js website/static/js/mermaid.min.js
 ```
 
-Then bump the pinned version above and confirm `zola build` renders the
+Then update the pinned version above. Confirm that `zola build` renders the
 diagrams on a page such as `/docs/reference/concepts/failure-scenarios/`.

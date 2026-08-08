@@ -16,22 +16,22 @@ The connector tracks Postgres LSNs with `SourceOffset`. The offset partition
 contains the database and replication slot, and the offset position contains the
 LSN.
 
-The live source reads with `pg_logical_slot_peek_binary_changes`, so polling does
-not advance the replication slot. After the runtime writes the sink record,
-commits the sink, and durably saves the checkpoint, it calls
-`Source::acknowledge`. The connector then advances the Postgres slot to the
-acknowledged LSN.
+The live source reads with `pg_logical_slot_peek_binary_changes`, so a poll does
+not advance the replication slot. The runtime calls `Source::acknowledge` after
+three steps. It writes the sink record, commits the sink, and durably saves the
+checkpoint. The connector then advances the Postgres slot to the acknowledged
+LSN.
 
 ## Setup expectations
 
-This slice expects:
+This slice needs:
 
 - A `pgoutput` logical replication slot.
-- A publication covering the configured tables.
+- A publication that covers the configured tables.
 - Configured table names for the source.
-- No initial snapshot support. Only changes available through logical decoding
-  are emitted.
+- No initial snapshot. The connector emits only the changes that logical
+  decoding makes available.
 
-When table names are configured, the connector creates the publication if it is
-missing and validates that the publication covers the configured tables. It also
-creates the logical slot if it is missing.
+If you configure table names, the connector creates the publication when it is
+missing. The connector also checks that the publication covers the configured
+tables. It creates the logical slot when that slot is missing.

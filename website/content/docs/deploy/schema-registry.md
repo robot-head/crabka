@@ -9,32 +9,30 @@ mermaid = true
 +++
 
 Crabka includes a Confluent Schema Registry-compatible REST service. It runs as
-a separate Kafka client, stores state in the compacted `_schemas` topic, and can
-be deployed by the operator or as a standalone Helm release.
+a separate Kafka client and stores state in the compacted `_schemas` topic. You
+can deploy it with the operator or as a standalone Helm release.
 
-Use it when producers and consumers exchange structured records and need schema
-IDs, compatibility checks, and existing Confluent serializer/tooling
-compatibility.
+Use it when producers and consumers exchange structured records. It gives schema
+IDs, compatibility checks, and compatibility with existing Confluent serializers
+and tools.
 
-When producers and consumers exchange structured records, they need to agree on
-the shape of the data. A schema registry is the shared source of truth for those
-shapes. Producers register a schema and stamp each record with its id; consumers
-fetch the schema by id to deserialize. Crucially, the registry **checks
-compatibility** before accepting a new schema version — so a producer can't roll
-out a change that would break the consumers reading from a topic. That is how you
-evolve a data format (add a field, widen a type) without a flag-day coordination
-across every team.
+Producers and consumers must agree on the shape of the data. A schema registry
+is the shared source of truth for those shapes. Producers register a schema and
+stamp each record with its id. Consumers get the schema by id and deserialize
+the record. The registry **checks compatibility** before it accepts a new schema
+version, so a producer cannot release a change that breaks the consumers of a
+topic. This lets you change a data format, for example to add a field or to
+widen a type, without one coordinated switchover across every team.
 
-The registry:
+The registry has these properties:
 
-- supports **Avro, Protobuf, and JSON Schema**, each with configurable
-  compatibility checking (backward, forward, full, and their transitive
-  variants);
-- stores every schema in a compacted **`_schemas` topic** on the broker — the
-  topic *is* the database, so the registry is stateless and any replica can be
-  rebuilt by replaying it;
-- exposes a **Confluent-compatible REST API**, so existing Confluent
-  serializers, `kafka-avro-console-*` tools, and tooling work unmodified.
+- It supports **Avro, Protobuf, and JSON Schema**. Each format has configurable
+  compatibility checks: backward, forward, full, and the transitive variants.
+- It stores every schema in a compacted **`_schemas` topic** on the broker. The
+  topic *is* the database, so the registry is stateless. You can rebuild any
+  replica when you replay the topic.
+- It exposes a **Confluent-compatible REST API**. Existing Confluent
+  serializers, `kafka-avro-console-*` tools, and other tools work unmodified.
 
 {% mermaid() %}
 flowchart LR
@@ -44,12 +42,13 @@ flowchart LR
   Topic --> Broker[(Broker)]
 {% end %}
 
-The rest of this page covers deploying the registry.
+The next sections show how to deploy the registry.
 
 ## Operator-managed (recommended)
 
 Apply a `SchemaRegistry` next to a managed `Kafka`. The `crabka.io/cluster`
-label binds it to the cluster; bootstrap is derived from the internal listener.
+label binds it to the cluster. The registry gets its bootstrap address from the
+internal listener.
 
 ```yaml
 apiVersion: crabka.io/v1alpha1
@@ -63,9 +62,9 @@ spec:
   schemasTopicReplicationFactor: 3
 ```
 
-The operator creates a Deployment, a ClusterIP Service
-(`sr-sr.<ns>.svc.cluster.local:8081`), and a headless Service for write
-forwarding. The generated [SchemaRegistry CRD reference](/docs/reference/operator/schemaregistry/)
+The operator creates a Deployment, a ClusterIP Service at
+`sr-sr.<ns>.svc.cluster.local:8081`, and a headless Service that forwards
+writes. The generated [SchemaRegistry CRD reference](/docs/reference/operator/schemaregistry/)
 lists every field.
 
 ## Standalone (Helm, external broker)
@@ -77,9 +76,10 @@ helm install sr charts/crabka-schema-registry \
 
 ## Security
 
-`spec.tls`, `spec.authentication` (Basic / unsecured Bearer), and
-`spec.authorization` (Kafka-ACL super-users) map to mounted Secrets + SR flags.
-Credentials are always referenced Secrets, never inline.
+Three fields map to mounted Secrets and SR flags: `spec.tls`,
+`spec.authentication` for Basic or unsecured Bearer, and `spec.authorization`
+for Kafka-ACL super-users. Credentials are always referenced Secrets. Never
+write them inline.
 
 ## Next steps
 

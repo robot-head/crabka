@@ -12,32 +12,32 @@ of Apache Kafka-compatible infrastructure and clients.
 ## Overview
 
 `crabka-client-consumer` owns the high-level consumer behavior above
-`crabka-client-core`: subscription, group membership, polling, offset commits,
-position validation, cooperative shutdown, and share-group consumption. It is
-the crate to use for application-style consumers that join Kafka groups and
-process records by topic subscription.
+`crabka-client-core`. It handles subscription, group membership, record polls,
+offset commits, position validation, cooperative shutdown, and share-group
+consumption. Use this crate for application-style consumers that join Kafka
+groups and process records by topic subscription.
 
 Manual single-partition fetches and raw request dispatch stay in
-`crabka-client-core`; admin group inspection stays in `crabka-client-admin`.
+`crabka-client-core`. Admin group inspection stays in `crabka-client-admin`.
 
 ## Capabilities
 
-- Classic consumer-group lifecycle using `JoinGroup`, `SyncGroup`, `Heartbeat`,
+- Classic consumer-group lifecycle with `JoinGroup`, `SyncGroup`, `Heartbeat`,
   `Fetch`, `OffsetCommit`, and `LeaveGroup`.
 - Range and cooperative-sticky partition assignors.
 - `poll`, `commit_sync`, `commit_async`, `seek`, and graceful `close` APIs.
-- Leader-epoch position validation for truncation handling.
+- Leader-epoch position validation to handle truncation.
 - KIP-447 `ConsumerGroupMetadata` for transactional producers.
 - Share-group consumer support with explicit acknowledgement and commit.
 
 ## Kafka Scope
 
-The crate implements subscribe-style consumer flows, including KIP-429
+The crate implements subscribe-style consumer flows. These flows cover KIP-429
 cooperative sticky assignment, KIP-320 leader-epoch validation, KIP-516 offset
 wire shapes, KIP-447 consumer group metadata, and KIP-932 share groups.
 
-The public API does not currently expose a JVM-style manual `assign()` consumer.
-Use `crabka-client-core` for lower-level partition fetches.
+The public API does not expose a JVM-style manual `assign()` consumer. Use
+`crabka-client-core` for lower-level partition fetches.
 
 ## Install
 

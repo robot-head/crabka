@@ -11,36 +11,36 @@ of Apache Kafka-compatible infrastructure and clients.
 
 ## Overview
 
-`crabka-client-admin` is the control-plane client used by operators and
-automation. It builds on `crabka-client-core` for typed Kafka protocol dispatch,
-tracks the active controller for controller-routed RPCs, and retries selected
+Operators and automation use `crabka-client-admin` as their control-plane
+client. It builds on `crabka-client-core` for typed Kafka protocol dispatch and
+tracks the active controller for controller-routed RPCs. It retries selected
 requests when a broker returns `NOT_CONTROLLER`.
 
-Use this crate when a program needs to create topics, change topic config,
-manage users or ACLs, inspect log directories, or issue other Kafka admin RPCs
-without depending on broker internals.
+Use this crate when a program must create topics, change topic config, manage
+users or ACLs, or inspect log directories. It sends these Kafka admin RPCs
+without a dependency on broker internals.
 
 ## Capabilities
 
-- Topic metadata, topic creation/deletion, and partition expansion.
-- Dynamic topic config describe and incremental alter operations.
-- SCRAM user credential upsert/delete for SHA-256 and SHA-512.
-- ACL create, delete, and describe operations.
-- Per-user client quota describe/alter helpers.
-- Delegation-token create, renew, expire, and describe operations.
-- Per-broker log-directory alter/describe calls.
-- Consumer-group listing and offset inspection.
+- Read topic metadata, create and delete topics, and expand partitions.
+- Describe dynamic topic config and change it with incremental alter operations.
+- Upsert and delete SCRAM user credentials for SHA-256 and SHA-512.
+- Create, delete, and describe ACLs.
+- Describe and alter client quotas for each user.
+- Create, renew, expire, and describe delegation tokens.
+- Alter and describe the log directories of each broker.
+- List consumer groups and inspect their offsets.
 
 ## Kafka Scope
 
-The public API wraps Kafka admin RPCs that Crabka operators currently need,
-including SCRAM credentials (KIP-554), delegation tokens (KIP-48), dynamic topic
-configuration, ACLs, client quotas, and log-directory inspection. It is not a
-complete clone of the JVM `AdminClient` surface.
+The public API wraps the Kafka admin RPCs that Crabka operators need now. These
+RPCs cover SCRAM credentials (KIP-554), delegation tokens (KIP-48), dynamic
+topic configuration, ACLs, client quotas, and log-directory inspection. The API
+is not a complete clone of the JVM `AdminClient` surface.
 
-Log-directory calls target the connected broker and do not perform controller
-retry. Quota helpers currently expose the per-user entity shape used by Crabka's
-operator controllers.
+Log-directory calls target the connected broker. They do not retry against the
+controller. Quota helpers expose the per-user entity shape that Crabka's
+operator controllers use.
 
 ## Install
 

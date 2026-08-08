@@ -12,11 +12,12 @@ of Apache Kafka-compatible infrastructure and clients.
 ## Overview
 
 `crabka-compression` implements the compression formats Apache Kafka uses in
-record batches. It is a small, I/O-free crate used by `crabka-protocol`, the
-producer, and storage code whenever bytes must match Kafka's wire framing.
+record batches. It is a small, I/O-free crate. `crabka-protocol`, the producer,
+and storage code use it whenever bytes must match Kafka's wire framing.
 
 The crate exposes a stable `CompressionType` enum that maps to Kafka's record
-batch attribute bits and `compress`/`decompress` helpers for payload bytes.
+batch attribute bits. It also exposes `compress` and `decompress` helpers for
+payload bytes.
 
 ## Codecs
 
@@ -48,19 +49,19 @@ assert_eq!(plain.as_ref(), b"hello kafka");
 # Ok::<(), crabka_compression::CompressionError>(())
 ```
 
-`decompress` requires a caller-provided `max_output` limit to guard against
-decompression bombs.
+`decompress` needs a `max_output` limit from the caller. The limit guards
+against decompression bombs.
 
 ## Cargo Features
 
-All codecs are enabled by default. Disable defaults and opt into only the
+All codecs are enabled by default. Disable the defaults and select only the
 codecs you need:
 
 ```toml
 crabka-compression = { version = "0.3.8", default-features = false, features = ["gzip", "zstd"] }
 ```
 
-Calling a disabled codec returns `CompressionError::FeatureDisabled`.
+A call to a disabled codec returns `CompressionError::FeatureDisabled`.
 
 ## Documentation
 

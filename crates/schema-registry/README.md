@@ -32,7 +32,7 @@ curl -X POST http://127.0.0.1:8081/subjects/orders-value/versions \
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-schema-registry](https://docs.rs/crabka-schema-registry). The repository README contains project-wide setup, development, and release notes.
+Read the API documentation at [docs.rs/crabka-schema-registry](https://docs.rs/crabka-schema-registry). The repository README contains the project-wide setup, development, and release notes.
 
 ## License
 

@@ -6,21 +6,20 @@ template = "docs/page.html"
 +++
 
 `crabka-client-streams` is Crabka's Rust Streams client. It joins a KIP-1071
-Streams rebalance group, runs a processing topology, and reads/writes Kafka
+Streams rebalance group, runs a processing topology, and reads and writes Kafka
 topics through pluggable serdes.
 
-Use this page when you are building stream-processing applications in Rust. Use
+Use this page when you build stream-processing applications in Rust. Use
 [Schema Registry Deployment](/docs/deploy/schema-registry/) when you need the
-registry service those schema-aware serdes talk to.
+registry service that those schema-aware serdes use.
 
-The client offers two processing models:
+The client gives two processing models:
 
-- **Row model** — the Processor API and the high-level DSL (`StreamsApp` /
-  `streams_builder`), one record at a time, with `TopologyTestDriver` for
+- **Row model.** The Processor API and the high-level DSL, `StreamsApp` and
+  `streams_builder`, process one record at a time. Use `TopologyTestDriver` for
   broker-free tests.
-- **Columnar model** — a `ColumnarTopology` whose edges are Polars
-  `DataFrame`s, for vectorized aggregation, with `ColumnarTestDriver` for
-  broker-free tests.
+- **Columnar model.** A `ColumnarTopology` has Polars `DataFrame` edges and does
+  vectorized aggregation. Use `ColumnarTestDriver` for broker-free tests.
 
 ## Data formats
 
@@ -34,8 +33,8 @@ The client offers two processing models:
 | `ArrowIpcSerde` | `arrow::RecordBatch` | `arrow` | arrow-rs interchange |
 | `ColumnarSerde<T>` | `columnar::Columnar` | `columnar` | zero-copy native columnar |
 
-Schema serdes resolve schema IDs against a Confluent-compatible registry
-(`crabka-schema-registry`); the columnar serdes are self-describing Arrow IPC.
+Schema serdes resolve schema IDs against a Confluent-compatible registry,
+`crabka-schema-registry`. The columnar serdes are self-describing Arrow IPC.
 
 ## Getting started
 
@@ -80,7 +79,7 @@ let back: OrderEvent = serde.deserialize("orders.json", &bytes).unwrap();
 ```
 <!-- /snippet -->
 
-The idiomatic high-level DSL wires types in via `DefaultSerde`:
+The high-level DSL wires types in with `DefaultSerde`:
 
 <!-- snippet: client-streams/examples/format_dsl.rs#dsl-defaultserde -->
 ```rust
@@ -118,8 +117,8 @@ topology
 ### Columnar formats
 
 For vectorized workloads, values are self-describing Arrow IPC. `ArrowIpcSerde`
-round-trips an arrow-rs `RecordBatch` (and `PolarsIpcSerde` does the same for a
-Polars `DataFrame`):
+round-trips an arrow-rs `RecordBatch`. `PolarsIpcSerde` does the same for a
+Polars `DataFrame`:
 
 <!-- snippet: client-streams/examples/format_arrow.rs#arrow-roundtrip -->
 ```rust
@@ -142,9 +141,10 @@ let back = ArrowIpcSerde.deserialize("orders.arrow", &bytes).unwrap();
 
 ## Worked pipeline: JSON → Protobuf → Arrow → Polars → summary Protobuf
 
-This pipeline ingests order events as JSON, normalizes them to a Protobuf
-canonical form, batches them into Arrow, aggregates per user with the Polars
-columnar engine, and emits a Protobuf summary — one format at each topic hop:
+The pipeline ingests order events as JSON and normalizes them to a canonical
+Protobuf form. It then batches them into Arrow and aggregates them per user with
+the Polars columnar engine. Last, it emits a Protobuf summary. Each topic hop
+uses one format:
 
 ```text
 orders.json   --JSON Schema-->  Stage A  --Protobuf-->  orders.proto
@@ -153,11 +153,11 @@ orders.arrow  --Arrow IPC----->  Stage C (Polars group-by)
 (agg rows)    --------------->  Stage D  --Protobuf-->  orders.summary
 ```
 
-The full source is `crates/client-streams/examples/format_pipeline.rs`; it boots
-an in-process broker and Schema Registry and asserts the result, so it runs in
-CI as a test.
+The full source is `crates/client-streams/examples/format_pipeline.rs`. It boots
+an in-process broker and a Schema Registry, then asserts the result. CI runs it
+as a test.
 
-The harness — an in-process broker plus a Schema Registry on a real HTTP port:
+The harness is an in-process broker plus a Schema Registry on a real HTTP port:
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#setup -->
 ```rust
@@ -259,7 +259,7 @@ impl BatchCodec for ArrowBlobCodec {
 ```
 <!-- /snippet -->
 
-**Stage A — JSON → Protobuf**
+**Stage A: JSON → Protobuf**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#stage-a-json-proto -->
 ```rust
@@ -282,7 +282,7 @@ producer.flush().await.expect("flush proto");
 ```
 <!-- /snippet -->
 
-**Stage B — Protobuf → Arrow**
+**Stage B: Protobuf → Arrow**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#stage-b-proto-arrow -->
 ```rust
@@ -318,7 +318,7 @@ producer.flush().await.expect("flush arrow");
 ```
 <!-- /snippet -->
 
-**Stage C — Arrow → Polars (columnar group-by)**
+**Stage C: Arrow → Polars, the columnar group-by**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#stage-c-arrow-polars -->
 ```rust
@@ -357,7 +357,7 @@ let produced = built
 ```
 <!-- /snippet -->
 
-**Stage D — Polars → summary Protobuf**
+**Stage D: Polars → summary Protobuf**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#stage-d-polars-proto -->
 ```rust
@@ -387,7 +387,7 @@ producer.flush().await.expect("flush summary");
 ```
 <!-- /snippet -->
 
-**Verifying the rollup**
+**Verify the rollup**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#assert -->
 ```rust

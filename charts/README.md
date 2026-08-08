@@ -14,15 +14,16 @@ helm search repo crabka
 | `crabka/crabka-schema-registry` | Confluent Schema Registry-compatible service |
 | `crabka/crabka-rebalancer` | Cruise-Control-equivalent partition rebalancer |
 
-Chart `version`/`appVersion` and the default image tags track the crate release
-automatically (derived from the workspace `Cargo.toml` at package time), so there
-is no hardcoded version to hand-edit.
+The chart `version` and `appVersion` fields and the default image tags track the
+crate release automatically. The package step derives them from the workspace
+`Cargo.toml`, so there is no hardcoded version to edit by hand.
 
 ## Verifying charts
 
-Every published chart tarball is signed and carries supply-chain provenance. The
-chart-signing **public key is committed here** ([`crabka-charts.pub.asc`](crabka-charts.pub.asc))
-and mirrored at `https://robot-head.github.io/crabka/charts/crabka-charts.pub.asc`.
+The project signs every published chart tarball, and each tarball carries
+supply-chain provenance. The chart-signing **public key is in this directory**
+as [`crabka-charts.pub.asc`](crabka-charts.pub.asc). A mirror is at
+`https://robot-head.github.io/crabka/charts/crabka-charts.pub.asc`.
 
 ### PGP provenance (`helm install --verify`)
 
@@ -34,8 +35,8 @@ helm install my-op crabka/crabka-operator --verify --keyring ./crabka-keyring.gp
 
 ### Keyless cosign signature
 
-Each tarball has a detached Sigstore bundle (`<chart>.tgz.cosign.bundle`) next to
-it in the repo:
+Each tarball has a detached Sigstore bundle `<chart>.tgz.cosign.bundle` next to
+it in the repository:
 
 ```sh
 cosign verify-blob \
@@ -53,12 +54,12 @@ gh attestation verify crabka-operator-<version>.tgz --repo robot-head/crabka
 
 ## Maintainers: signing keys
 
-Chart signing is wired into `.github/workflows/docs.yml`:
+`.github/workflows/docs.yml` does the chart signing:
 
-- **cosign** and **SLSA attestation** are keyless (Sigstore OIDC) — no secrets
-  required, active on every non-PR build.
-- **PGP `.prov`** activates when the `HELM_GPG_KEY` (base64 ASCII-armored private
-  key), `HELM_GPG_KEY_ID`, and `HELM_GPG_PASSPHRASE` repository secrets are set.
-  The matching public key is [`crabka-charts.pub.asc`](crabka-charts.pub.asc);
-  rotate both together and keep the private key + its revocation certificate in a
-  secrets manager.
+- **cosign** and **SLSA attestation** are keyless through Sigstore OIDC. They
+  need no secrets, and they are active on every non-PR build.
+- **PGP `.prov`** activates when you set the `HELM_GPG_KEY`, `HELM_GPG_KEY_ID`,
+  and `HELM_GPG_PASSPHRASE` repository secrets. `HELM_GPG_KEY` is the base64
+  ASCII-armored private key. The matching public key is
+  [`crabka-charts.pub.asc`](crabka-charts.pub.asc). Rotate both keys together.
+  Keep the private key and its revocation certificate in a secrets manager.

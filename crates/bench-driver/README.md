@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/crabka-bench-driver/badge.svg)](https://docs.rs/crabka-bench-driver)
 [![CI](https://github.com/robot-head/crabka/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-head/crabka/actions/workflows/ci.yml)
 
-Load driver + report aggregator for the Crabka vs Strimzi benchmark harness.
+Load driver and report aggregator for the Crabka vs Strimzi benchmark harness.
 
 This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation of Kafka-compatible infrastructure and clients.
 
@@ -20,7 +20,7 @@ For workspace development, use the path dependency from this repository instead.
 
 Run one benchmark scenario against a reachable Kafka-compatible cluster and write the JSON report.
 
-Every size, duration, and rate in the scenario carries its unit — `512B`, `5ms`, `20000/s`. A bare number is rejected rather than guessed at, so a scenario cannot silently mean milliseconds where it meant seconds:
+Every size, duration, and rate in the scenario carries its unit: `512B`, `5ms`, `20000/s`. The driver rejects a bare number instead of a guess. So a scenario cannot mean milliseconds where it meant seconds:
 
 ```bash
 cat > /tmp/smoke.yaml <<'YAML'
@@ -56,11 +56,11 @@ mode:
   rate: 20000/s
 ```
 
-The `RunOutput` JSON the driver writes encodes its *measurements* as exact integers instead — latencies in nanoseconds, sizes in bytes — so the report aggregator compares and plots them without rounding.
+The `RunOutput` JSON that the driver writes encodes its measurements as exact integers instead. Latencies are in nanoseconds and sizes are in bytes. The report aggregator can then compare and plot them without rounding.
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-bench-driver](https://docs.rs/crabka-bench-driver). The repository README contains project-wide setup, development, and release notes.
+Read the API documentation on [docs.rs/crabka-bench-driver](https://docs.rs/crabka-bench-driver). The repository README contains the project-wide setup, development, and release notes.
 
 ## License
 

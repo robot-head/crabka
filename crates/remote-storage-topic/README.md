@@ -41,7 +41,7 @@ manager.shutdown_and_flush().await;
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-remote-storage-topic](https://docs.rs/crabka-remote-storage-topic). The repository README contains project-wide setup, development, and release notes.
+Read the API documentation at [docs.rs/crabka-remote-storage-topic](https://docs.rs/crabka-remote-storage-topic). The repository README contains the project-wide setup, development, and release notes.
 
 ## License
 

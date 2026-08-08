@@ -18,7 +18,7 @@ For workspace development, use the path dependency from this repository instead.
 
 ## Usage example
 
-Format a broker log directory before first start, optionally seeding credentials:
+Format a broker log directory before the first start. This command can also seed credentials:
 
 ```bash
 crabka format \
@@ -40,13 +40,13 @@ crabka gres list --bootstrap 127.0.0.1:9092
 crabka gres describe --bootstrap 127.0.0.1:9092 --name tenant-a
 ```
 
-`create-tenant` writes a validated tenant record with a PostgreSQL SCRAM verifier
-to the compacted `__gres_tenants` registry; command output redacts the verifier.
-`suspend`, `resume`, and `delete` update the same tenant registry record. The
-operator path mirrors tenant records into `__gres_cfg.<tenant>` for compute
-startup.
+`create-tenant` writes a validated tenant record to the compacted
+`__gres_tenants` registry. The record holds a PostgreSQL SCRAM verifier, and the
+command output redacts that verifier. `suspend`, `resume`, and `delete` update
+the same tenant registry record. The operator path mirrors tenant records into
+`__gres_cfg.<tenant>` for compute startup.
 
-Render PgDog files from the live registry for local or operator-adjacent testing:
+Render PgDog files from the live registry for local and operator-adjacent tests:
 
 ```bash
 crabka gres render-pgdog \
@@ -55,11 +55,12 @@ crabka gres render-pgdog \
 ```
 
 The render command writes `pgdog.toml` and `users.toml`. Pass `--activator host:port`
-to route suspended tenants to an activator instead of omitting their backend route.
+to route suspended tenants to an activator. Without that flag, the command omits
+the backend route of each suspended tenant.
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-cli](https://docs.rs/crabka-cli). The repository README contains project-wide setup, development, and release notes.
+Read the API documentation on [docs.rs/crabka-cli](https://docs.rs/crabka-cli). The repository README contains the project-wide setup, development, and release notes.
 
 ## License
 

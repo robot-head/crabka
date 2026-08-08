@@ -9,6 +9,6 @@ contract: resolve catalog FDW options into Kafka client profiles, import topic
 schemas from Schema Registry, scan bounded Kafka offsets, and project raw,
 Avro, JSON, and Protobuf values into Crabka PostgreSQL datums.
 
-The in-process broker/pgwire round-trip test is retained behind the
-`roundtrip` feature so normal package checks exercise deterministic unit
-behavior without starting the full Kafka stack.
+The `roundtrip` feature holds the in-process broker/pgwire round-trip test.
+Normal package checks then test deterministic unit behavior and do not start
+the full Kafka stack.

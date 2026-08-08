@@ -49,7 +49,7 @@ println!("authorization decision: {decision:?}");
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-authz](https://docs.rs/crabka-authz). The repository README contains project-wide setup, development, and release notes.
+Read the API documentation on [docs.rs/crabka-authz](https://docs.rs/crabka-authz). The repository README contains the project-wide setup, development, and release notes.
 
 ## License
 

@@ -9,23 +9,24 @@ mermaid = true
 +++
 
 The Crabka Operator turns declarative Kubernetes resources into a running
-Kafka-compatible cluster. It owns the operational lifecycle: data-directory
-formatting, broker configuration, Services, StatefulSets, Secrets, certificates,
-topic/user reconciliation, broker rolls, and rebalances.
+Kafka-compatible cluster. It controls the operational lifecycle. It formats the
+data directories and manages broker configuration, Services, StatefulSets,
+Secrets, certificates, topic and user reconciliation, broker rolls, and
+rebalances.
 
 Use the operator for real clusters. Use the local
 [Quickstart](/docs/start-here/quickstart/) only for development and evaluation.
 
 ## How the operator works
 
-The operator is purpose-built for Crabka. It is not a Strimzi plugin or fork. A
-single operator process can watch the namespaces it is granted and reconcile
-every Crabka resource it finds.
+Crabka has its own operator. It is not a Strimzi plugin or fork. One operator
+process can watch the namespaces that you grant it and reconcile every Crabka
+resource it finds.
 
 A `Kafka` resource owns the cluster. One or more `KafkaNodePool` resources supply
 brokers. Each node pool becomes a StatefulSet, and the total broker count is the
-sum of the pool replica counts. Scale by editing `replicas` or adding another
-pool.
+sum of the pool replica counts. To scale the cluster, edit `replicas` or add
+another pool.
 
 ## Custom Resources
 
@@ -39,7 +40,8 @@ pool.
 | `SchemaRegistry` | A Confluent-compatible schema registry bound to a cluster |
 | `KafkaGrpcGateway` | A gRPC / Connect-RPC gateway in front of the cluster |
 
-Exact fields are generated into the [Operator CRD reference](/docs/reference/operator/).
+The docs build generates the exact fields into the
+[Operator CRD reference](/docs/reference/operator/).
 
 ## Architecture
 
@@ -64,7 +66,7 @@ flowchart TD
 ## 1. Install Prometheus CRDs
 
 The operator uses the Prometheus Operator's `PodMonitor` and `ServiceMonitor`
-CRDs for metrics scraping. If they are not already installed, apply them:
+CRDs to scrape metrics. If your cluster does not have them, apply them:
 
 ```bash
 PROM_OP_TAG=v0.79.2
@@ -95,8 +97,7 @@ For the published chart repository and provenance verification, see the
 
 ### Private registries
 
-If your operator or broker images live in a private registry, create a pull
-secret:
+To use operator or broker images from a private registry, create a pull secret:
 
 ```bash
 kubectl create secret docker-registry my-registry-secret \
@@ -170,9 +171,9 @@ kubectl rollout status statefulset/demo-brokers --timeout=300s
 
 ## 5. Use the cluster
 
-Use the bootstrap Service created by the operator with standard Kafka clients
-and tools. The exact Service names depend on the listener configuration in the
-`Kafka` resource.
+Connect standard Kafka clients and tools to the bootstrap Service that the
+operator creates. The exact Service names depend on the listener configuration
+in the `Kafka` resource.
 
 Next:
 

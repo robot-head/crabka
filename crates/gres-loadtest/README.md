@@ -6,7 +6,9 @@ Part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation of
 
 ## Overview
 
-The harness boots a real multi-process cluster — one `crabka-broker` plus N `crabka-gres` compute nodes — with every inter-node and client-facing TCP endpoint fronted by a chaos proxy. A YAML scenario describes the topology, the timestamp-source mode (Percolator-style `logical-tso` or hybrid logical clock `hlc`), the SQL workload mix, and a timeline of network faults. A run produces a JSON report plus a Markdown summary; `compare` runs the same scenario under both timestamp modes and renders them side by side, so the cost of the global-timestamp path is measurable per workload shape and per fault. An external mode (`run --external`) drives the identical workload against any pgwire-speaking SQL system without launching crabka — see [External systems](#external-systems).
+The harness boots a real multi-process cluster: one `crabka-broker` plus N `crabka-gres` compute nodes. A chaos proxy fronts every inter-node and client-facing TCP endpoint. A YAML scenario describes the topology, the timestamp-source mode, the SQL workload mix, and a timeline of network faults. The timestamp-source mode is Percolator-style `logical-tso` or hybrid logical clock `hlc`.
+
+A run produces a JSON report and a Markdown summary. `compare` runs the same scenario under both timestamp modes and renders them side by side, so you can measure the cost of the global-timestamp path per workload shape and per fault. An external mode (`run --external`) drives the identical workload against any pgwire-speaking SQL system and launches no crabka processes. See [External systems](#external-systems).
 
 ## Prerequisites
 
@@ -16,7 +18,7 @@ Build the binaries the harness launches:
 cargo build -p crabka-gres -p crabka-broker -p crabka-cli
 ```
 
-Binaries are resolved from `target/debug/` under the workspace root; point `CRABKA_GRES_LOADTEST_GRES_BIN`, `CRABKA_GRES_LOADTEST_BROKER_BIN`, or `CRABKA_GRES_LOADTEST_CLI_BIN` at other builds to override.
+The harness resolves the binaries from `target/debug/` under the workspace root. To use other builds, point `CRABKA_GRES_LOADTEST_GRES_BIN`, `CRABKA_GRES_LOADTEST_BROKER_BIN`, or `CRABKA_GRES_LOADTEST_CLI_BIN` at them.
 
 ## Quick Start
 
@@ -39,24 +41,24 @@ cargo run -p crabka-gres-loadtest -- compare \
   --scenario crates/gres-loadtest/scenarios/baseline-single-shard.yaml
 ```
 
-`--out <dir>` changes the report directory; `--keep-work-dir` retains the cluster's data and log directory after a successful run (it is always retained on failure).
+`--out <dir>` changes the report directory. `--keep-work-dir` keeps the cluster's data and log directory after a successful run. The harness always keeps that directory after a failure.
 
 ## Bundled Scenarios
 
 | Scenario | Purpose |
 |----------|---------|
-| `baseline-single-shard` | Pure single-shard insert saturation, no faults — the headline scalability number and the cost of the global timestamp path on the hot write loop. |
-| `mixed-oltp` | Representative OLTP mix at a fixed rate — steady-state efficiency (txn per CPU-second) and tail latency between modes at identical offered load. |
-| `cross-shard-heavy` | Cross-shard-transaction-dominated load — worst case for the centralized oracle, best probe of 2PC + global-timestamp coordination overhead. |
-| `tso-partition` | Partitions range 0 (catalog, coordinator, timestamp authority) mid-run — how much availability the timestamp mode buys when the oracle's link dies. |
-| `node-crash` | SIGKILLs node 2 and restarts it 10 s later — blast radius, WAL fence-and-replay recovery time, post-restart throughput recovery. |
-| `flappy-network` | Flaps the link to range 1 and throttles range 2 — reconnect storms and retry behavior under an unreliable rather than cleanly-partitioned network. |
-| `wan-latency` | 50 ms ± 10 ms one-way delay on every inter-node link for the whole window — which coordination steps a node-local clock removes from the critical path. |
-| `clock-skew` | HLC-only: skews the authority node's wall clock +400 ms, beyond the 250 ms uncertainty bound — throughput and correctness-adjacent symptoms under skew. |
+| `baseline-single-shard` | Pure single-shard insert saturation with no faults. Gives the headline scalability number and the cost of the global timestamp path on the hot write loop. |
+| `mixed-oltp` | Representative OLTP mix at a fixed rate. Gives the steady-state efficiency in txn per CPU-second and the tail latency between modes at identical offered load. |
+| `cross-shard-heavy` | Load dominated by cross-shard transactions. This is the worst case for the centralized oracle and the best probe of 2PC and global-timestamp coordination overhead. |
+| `tso-partition` | Partitions range 0, the catalog, coordinator, and timestamp authority, in the middle of the run. Shows how much availability the timestamp mode gives when the oracle's link fails. |
+| `node-crash` | SIGKILLs node 2 and restarts it 10 s later. Shows the extent of the failure, the WAL fence-and-replay recovery time, and the throughput recovery after the restart. |
+| `flappy-network` | Flaps the link to range 1 and throttles range 2. Shows reconnect storms and retry behavior on an unreliable network instead of a cleanly-partitioned network. |
+| `wan-latency` | 50 ms ± 10 ms one-way delay on every inter-node link for the whole window. Shows which coordination steps a node-local clock removes from the critical path. |
+| `clock-skew` | HLC only. Skews the authority node's wall clock +400 ms, which is more than the 250 ms uncertainty bound. Shows throughput and correctness-adjacent symptoms under skew. |
 
 ## Scenario Schema
 
-A scenario is one YAML document. **Every dimensioned value carries its unit** — `60s`, `250ms`, `2000/s`, `128KiB/s`. A bare number is rejected rather than guessed at, because whether `30` means seconds or milliseconds is exactly what the units exist to settle. Durations accept `ns`/`µs`/`ms`/`s`/`m`/`h`/`d`, sizes and byte rates the binary (`KiB`, `MiB`, `GiB`) and decimal (`kB`, `MB`, `GB`) prefixes, and event rates `/s`, `/min`, or `Hz`.
+A scenario is one YAML document. **Every dimensioned value carries its unit**, for example `60s`, `250ms`, `2000/s`, and `128KiB/s`. The harness rejects a bare number and does not guess it, because `30` can mean seconds or milliseconds and the unit settles that. Durations accept `ns`/`µs`/`ms`/`s`/`m`/`h`/`d`. Sizes and byte rates accept the binary prefixes `KiB`, `MiB`, and `GiB`, and the decimal prefixes `kB`, `MB`, and `GB`. Event rates accept `/s`, `/min`, or `Hz`.
 
 ```yaml
 name: my-scenario          # used in report file names
@@ -89,45 +91,45 @@ faults:
 
 ### Workload mix classes
 
-Weights are relative; classes with weight 0 are never issued.
+Weights are relative. The harness never issues a class with weight 0.
 
 | Class | What it exercises |
 |-------|-------------------|
-| `single_shard_insert` | Autocommit single-row insert into one range — the hot write loop and per-range write throughput. |
-| `cross_shard_txn` | Explicit transaction writing two different ranges — 2PC and the global-timestamp path. |
-| `read_only` | Bounded snapshot read on one range — read-path latency and snapshot timestamp acquisition. |
-| `contended_update` | Zipf-distributed update of a small hot table — serialization conflicts and retry behavior. |
+| `single_shard_insert` | Autocommit single-row insert into one range. This is the hot write loop and the per-range write throughput. |
+| `cross_shard_txn` | Explicit transaction that writes two different ranges. This exercises 2PC and the global-timestamp path. |
+| `read_only` | Bounded snapshot read on one range. This exercises read-path latency and snapshot timestamp acquisition. |
+| `contended_update` | Zipf-distributed update of a small hot table. This exercises serialization conflicts and retry behavior. |
 
 ### Fault actions
 
-Every action takes a `target`; timed actions un-apply themselves after `duration`.
+Every action takes a `target`. Timed actions un-apply themselves after `duration`.
 
 | Action | Fields | Effect |
 |--------|--------|--------|
 | `partition` | `target`, `duration`, `style` | Cuts the target's link, heals it after the duration. |
-| `latency` | `target`, `delay`, `jitter`, `duration` | One-way delay per direction (a round trip pays roughly twice `delay`), with a uniform draw from `0..jitter` on top. |
-| `throttle` | `target`, `rate`, `duration` | Per-direction bandwidth cap (e.g. `rate: 128KiB/s`). |
-| `kill_node` | `node`, `restart_after` | SIGKILLs the node's process; restarts it after the delay, or leaves it down when omitted. |
-| `flap` | `target`, `period`, `duration` | Alternates blackhole-partition and heal every `period`; always ends healed by `at + duration`. |
+| `latency` | `target`, `delay`, `jitter`, `duration` | One-way delay per direction. A round trip costs about twice `delay`. The harness adds a uniform draw from `0..jitter`. |
+| `throttle` | `target`, `rate`, `duration` | Per-direction bandwidth cap, for example `rate: 128KiB/s`. |
+| `kill_node` | `node`, `restart_after` | SIGKILLs the node's process and restarts it after the delay. If you omit `restart_after`, the node stays down. |
+| `flap` | `target`, `period`, `duration` | Alternates blackhole-partition and heal every `period`. The link is always healed by `at + duration`. |
 
 Targets: `range:<id>` (one range's RPC endpoint), `all-ranges`, `sql:<node>` (one node's SQL front door), `all-sql`.
 
-Partition styles: `blackhole` (default) makes packets vanish — live connections stall without FIN/RST, peers see timeouts, and connections survive if the link heals before the application gives up, like a real network partition. `reset` closes live connections and refuses new ones — peers see immediate errors, like an administratively-down endpoint.
+Partition styles: `blackhole` is the default and discards packets. Live connections stall without FIN/RST, peers see timeouts, and connections survive if the link heals before the application gives up. This is the behavior of a real network partition. `reset` closes live connections and refuses new ones. Peers see immediate errors, as they do with an administratively-down endpoint.
 
 ## Reports
 
-Each run writes two files into the output directory, named `<scenario>-<mode-slug>` (`logical-tso` or `hlc`):
+Each run writes two files into the output directory. Their names use `<scenario>-<mode-slug>`, where the mode slug is `logical-tso` or `hlc`:
 
-- `<scenario>-<mode>.json` — the full `RunReport`: committed/failed transactions and the mean transaction rate, latency percentiles (p50/p95/p99/p99.9/max) per operation class, an error taxonomy (serialization retries, unavailable, connection errors, other), a per-second timeline (throughput dips make faults visible), per-process CPU time and peak RSS, cluster-wide efficiency (committed txn per CPU core-second), and the applied-fault log.
-- `<scenario>-<mode>.md` — the same run rendered as Markdown, with the timeline reduced to the interesting seconds (near a fault or deviating from median throughput).
+- `<scenario>-<mode>.json` holds the full `RunReport`. It has the committed and failed transaction counts and the mean transaction rate, the p50/p95/p99/p99.9/max latency percentiles per operation class, and an error taxonomy of serialization retries, unavailable, connection errors, and other. It also has a per-second timeline, the per-process CPU time and peak RSS, the cluster-wide efficiency in committed txn per CPU core-second, and the applied-fault log. Throughput dips in the timeline make the faults visible.
+- `<scenario>-<mode>.md` holds the same run in Markdown. The timeline keeps only the interesting seconds: the seconds near a fault, and the seconds that deviate from the median throughput.
 
-Dimensioned JSON fields come in two encodings. Values a person reads — `throughput.mean_rate` (`"1000/s"`), `resources[].max_rss` (`"512MiB"`), `faults[].at` (`"20s"`) — carry their unit as a string. Values a script compares or plots are exact integers in a fixed unit: latency percentiles and `timeline[].mean_latency` in **nanoseconds**, `timeline[].t` in **seconds**, and `duration`, `resources[].cpu_time`, and `efficiency.total_cpu` in **milliseconds**. `started_unix_ms` stays a raw epoch-milliseconds stamp — it is an instant, not an extent.
+Dimensioned JSON fields come in two encodings. Values that a person reads carry their unit as a string: `throughput.mean_rate` (`"1000/s"`), `resources[].max_rss` (`"512MiB"`), and `faults[].at` (`"20s"`). Values that a script compares or plots are exact integers in a fixed unit. The latency percentiles and `timeline[].mean_latency` are in **nanoseconds**, `timeline[].t` is in **seconds**, and `duration`, `resources[].cpu_time`, and `efficiency.total_cpu` are in **milliseconds**. `started_unix_ms` stays a raw epoch-milliseconds stamp, because it is an instant, not an extent.
 
-`compare` additionally writes `<scenario>-comparison.md`: both modes side by side with relative deltas and both fault logs.
+`compare` also writes `<scenario>-comparison.md`. That file shows both modes side by side with relative deltas and both fault logs.
 
 ## External systems
 
-`run --external` points the identical workload, measurement, and reporting pipeline at any pgwire-speaking SQL system — CockroachDB, YugabyteDB, PostgreSQL, or a remote crabka cluster — without launching any crabka processes:
+`run --external` points the identical workload, measurement, and reporting pipeline at any pgwire-speaking SQL system, such as CockroachDB, YugabyteDB, PostgreSQL, or a remote crabka cluster. It launches no crabka processes:
 
 ```bash
 cargo run -p crabka-gres-loadtest -- run \
@@ -136,28 +138,28 @@ cargo run -p crabka-gres-loadtest -- run \
   --external-user roach --external-database bench
 ```
 
-- `--external` takes a comma-separated `host:port` list; the workload's connections spread round-robin across the endpoints exactly as they do across crabka node front doors.
-- `--external-user` and `--external-database` are required (external mode never guesses credentials); `--external-password` is optional, and omitting it means no password.
-- Schema prep is the same standard SQL as against crabka (`DROP TABLE IF EXISTS` + `CREATE TABLE t<id> (id int4)` per table, a `(id int4, v int4)` hot table, multi-row `INSERT` seeding), so re-runs against a persistent system start clean.
-- The scenario's `topology.ranges` sets the number of `t{i * 1000000}` workload tables; an external system spreads those tables by its own sharding, so "ranges" simply means "N tables" there. `topology.nodes` is only recorded in the report.
-- The scenario's `mode` is ignored (with a logged notice) — the external system uses its own timestamp source — and the report's `mode` field is the string `external`; reports are named `<scenario>-external.{json,md}`.
-- The scenario's `faults` must be empty: no chaos proxies front an external system, so `run --external` fails fast on a fault timeline. `compare` does not support `--external` for the same reason it exists — it contrasts crabka's timestamp modes on a harness-launched cluster; run `run --external` once per target and diff the reports.
+- `--external` takes a comma-separated `host:port` list. The workload's connections spread round-robin across the endpoints exactly as they do across crabka node front doors.
+- `--external-user` and `--external-database` are required, because external mode never guesses credentials. `--external-password` is optional. If you omit it, the run uses no password.
+- Schema prep uses the same standard SQL as a crabka run: `DROP TABLE IF EXISTS` and `CREATE TABLE t<id> (id int4)` for each table, a `(id int4, v int4)` hot table, and multi-row `INSERT` seed statements. So re-runs against a persistent system start clean.
+- The scenario's `topology.ranges` sets the number of `t{i * 1000000}` workload tables. An external system spreads those tables with its own sharding, so "ranges" means "N tables" there. The report records `topology.nodes` only.
+- The harness ignores the scenario's `mode` and logs a notice, because the external system uses its own timestamp source. The report's `mode` field is the string `external`, and the report file names are `<scenario>-external.{json,md}`.
+- The scenario's `faults` must be empty. No chaos proxy fronts an external system, so `run --external` fails fast on a fault timeline. `compare` does not support `--external`, because `compare` contrasts crabka's timestamp modes on a harness-launched cluster. Run `run --external` once per target and diff the reports.
 
-**Resource sampling.** The harness discovers which local processes serve the given ports (`/proc/net/tcp{,6}` listening-socket inodes matched against `/proc/<pid>/fd`) and samples them under `ext:<port>` labels. Discovery only covers loopback endpoints — a remote system's processes cannot be read from the local `/proc`. For multi-process systems (e.g. a YugabyteDB master + tserver) or when `/proc` is permission-restricted, pass the roster manually:
+**Resource sampling.** The harness finds which local processes serve the given ports and samples them under `ext:<port>` labels. It matches the `/proc/net/tcp{,6}` listening-socket inodes against `/proc/<pid>/fd`. Discovery covers loopback endpoints only, because the local `/proc` cannot show a remote system's processes. Pass the roster manually for a multi-process system, for example a YugabyteDB master and tserver, or when the permissions on `/proc` are restricted:
 
 ```bash
 --external-pids "master=41230,tserver=41288"
 ```
 
-If discovery finds nothing and no override is given, the run warns and proceeds: throughput and latency are still measured, the report's resource and efficiency sections are just empty.
+If discovery finds nothing and you give no override, the run writes a warning and continues. It still measures throughput and latency, but the report's resource and efficiency sections are empty.
 
-**Fairness caveats for any cross-system comparison.** Numbers from `run --external` are only comparable to a crabka run (or another external run) after accounting for:
+**Fairness caveats for any cross-system comparison.** You can compare numbers from `run --external` to a crabka run, or to another external run, only after you account for these points:
 
-- *Replication factor.* The harness launches crabka unreplicated (one broker, replication factor 1); CockroachDB and YugabyteDB default to 3× replication and pay for it on every write. Compare against a 1× external cluster, or a replicated crabka deployment, not across durability models.
-- *Commit durability.* fsync/commit settings differ per system (`synchronous_commit`, YCQL/YSQL durability knobs, crabka's broker flush policy). Align them explicitly before quoting a delta.
-- *No fault injection.* External runs measure fault-free steady state only; crabka scenario results that include fault windows are not comparable.
-- *Resource attribution scope.* `ext:<port>` rows cover only the discovered (or manually listed) local processes — a remote node, a separate storage service, or an undiscovered helper process contributes load but no CPU/RSS rows, so txn-per-CPU-second is comparable only when the rosters cover equivalent scopes.
-- *Everything in [Limitations](#limitations)* — debug vs release builds, shared-machine noise — applies doubly across systems.
+- *Replication factor.* The harness launches crabka unreplicated, with one broker and replication factor 1. CockroachDB and YugabyteDB default to 3× replication and pay that cost on every write. Compare against a 1× external cluster or a replicated crabka deployment. Do not compare across durability models.
+- *Commit durability.* fsync and commit settings differ per system: `synchronous_commit`, the YCQL/YSQL durability knobs, and crabka's broker flush policy. Align them explicitly before you quote a delta.
+- *No fault injection.* External runs measure fault-free steady state only. You cannot compare crabka scenario results that include fault windows.
+- *Resource attribution scope.* `ext:<port>` rows cover only the local processes that discovery found, or that you listed manually. A remote node, a separate storage service, or an undiscovered helper process adds load but no CPU/RSS rows. So txn-per-CPU-second is comparable only when the rosters cover equivalent scopes.
+- *Everything in [Limitations](#limitations)* applies across systems, and with more force. This includes debug builds against release builds, and shared-machine noise.
 
 ### Worked example: local PostgreSQL
 
@@ -179,14 +181,14 @@ cargo run --release -p crabka-gres-loadtest -- run \
 docker stop loadtest-pg
 ```
 
-Reports land in `loadtest-out/mixed-oltp-external.{json,md}`. Note that a containerized server may defeat pid discovery from the host's `/proc` view depending on the runtime; `--external-pids "postgres=$(docker inspect -f '{{.State.Pid}}' loadtest-pg)"` pins the roster explicitly (that pid samples the postmaster only — PostgreSQL backends are separate forked processes, so per-connection CPU is not attributed; treat resource rows as a lower bound).
+Reports land in `loadtest-out/mixed-oltp-external.{json,md}`. A containerized server can defeat pid discovery from the host's `/proc` view, and the result depends on the runtime. `--external-pids "postgres=$(docker inspect -f '{{.State.Pid}}' loadtest-pg)"` pins the roster explicitly. That pid samples the postmaster only. PostgreSQL backends are separate forked processes, so the report does not attribute per-connection CPU. Treat the resource rows as a lower bound.
 
 ## Limitations
 
-- **Single-authority HLC today.** Non-r0 nodes still fetch timestamps from range 0 via RPC, so per-node `clock_skew` is only observable on the node hosting range 0 until multi-node HLC stamping lands.
-- **Restarted nodes report as separate rows.** The `/proc` sampler follows a live process roster: a node restarted by `kill_node` is attached at the next sample tick under a `label#N` entry (e.g. `node2#2`), so its post-restart CPU/RSS is counted alongside — not merged into — the original incarnation's row.
-- **Localhost only.** The chaos proxies model the network in user space; OS-level `netem`/`tc` shaping is out of scope.
-- **Relative numbers, not benchmarks.** Results depend on the machine, debug/release build, and concurrent load; they are for comparing modes and scenarios on the same host, not for absolute claims.
+- **Single-authority HLC today.** Non-r0 nodes fetch timestamps from range 0 through RPC. So per-node `clock_skew` is visible only on the node that hosts range 0, until multi-node HLC stamping arrives.
+- **Restarted nodes report as separate rows.** The `/proc` sampler follows a live process roster. When `kill_node` restarts a node, the sampler attaches that node at the next sample tick under a `label#N` entry, for example `node2#2`. The report counts the CPU/RSS after the restart in a row beside the original row. It does not merge the two rows.
+- **Localhost only.** The chaos proxies model the network in user space. OS-level `netem`/`tc` shaping is out of scope.
+- **Relative numbers, not benchmarks.** Results depend on the machine, the debug or release build, and the concurrent load. Use them to compare modes and scenarios on the same host. Do not use them for absolute claims.
 
 ## Documentation
 

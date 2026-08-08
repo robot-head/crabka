@@ -12,12 +12,12 @@ of Apache Kafka-compatible infrastructure and clients.
 ## Overview
 
 `crabka-protocol` is the generated Kafka request/response and record-batch
-codec used by Crabka clients, broker code, and protocol tests. It contains no
-networking and no async runtime assumptions: callers provide bytes, choose the
-Kafka API version, and use typed encode/decode traits.
+codec. Crabka clients, broker code, and protocol tests all use it. It contains
+no networking and no async runtime assumptions. The caller supplies the bytes,
+chooses the Kafka API version, and uses the typed encode/decode traits.
 
-The generated schemas are pinned to Apache Kafka 4.3.0. Both owned message
-types and borrowed zero-copy decode types are generated for Kafka APIs.
+The generated schemas are pinned to Apache Kafka 4.3.0. The codegen emits both
+owned message types and borrowed zero-copy decode types for Kafka APIs.
 
 ## Capabilities
 
@@ -29,18 +29,18 @@ types and borrowed zero-copy decode types are generated for Kafka APIs.
 - `ApiKey` registry for Kafka APIs through Kafka 4.3.0.
 - Typed v2 `RecordBatch`, `Record`, and record-header support.
 - Produce/read framing helpers for record-batch byte streams.
-- Optional compression forwarding through `crabka-compression`.
+- Optional compression, forwarded through `crabka-compression`.
 
 ## Kafka Scope
 
 This crate is wire-protocol and record-codec infrastructure only. It does not
-open sockets, maintain connections, implement broker state, or provide producer
-or consumer behavior. Use `crabka-client-core` for typed RPC transport and the
-higher-level client crates for application APIs.
+open sockets, maintain connections, implement broker state, or supply producer
+or consumer behavior. Use `crabka-client-core` for typed RPC transport, and use
+the higher-level client crates for application APIs.
 
-Legacy v0/v1 MessageSet conversion lives in the private `crabka-records-legacy`
-workspace crate; this published crate focuses on generated Kafka APIs and modern
-v2 record batches.
+The private `crabka-records-legacy` workspace crate holds the legacy v0/v1
+MessageSet conversion. This published crate holds the generated Kafka APIs and
+the modern v2 record batches.
 
 ## Install
 
@@ -75,8 +75,9 @@ assert_eq!(decoded, request);
 
 ## Cargo Features
 
-Default features enable arbitrary generation support and all four compression
-codecs. Disable defaults to opt into a smaller codec set:
+The default features enable arbitrary generation support and all four
+compression codecs. Turn off the default features to select a smaller codec
+set:
 
 ```toml
 crabka-protocol = { version = "0.3.8", default-features = false, features = ["snappy", "zstd"] }

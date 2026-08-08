@@ -52,7 +52,7 @@ flowchart TD
 
 ## Core Components
 
-**Broker.** `crabka-broker` owns Kafka protocol handling, log storage,
+**Broker.** `crabka-broker` controls the Kafka protocol, log storage,
 replication, group coordination, transactions, quotas, authorization, metrics,
 and the KRaft metadata quorum.
 
@@ -64,9 +64,9 @@ topic/user operations, rebalances, gateways, and Schema Registry deployments.
 Connect-RPC gateway, rebalancer, and replicator all use the Kafka-compatible
 surface rather than private broker internals.
 
-**Reference generation.** Exact CRD fields, broker settings, topic settings,
-protocol tables, and consensus failure diagrams are generated from source during
-the docs build. That keeps reference pages close to implementation reality.
+**Reference generation.** The docs build generates the exact CRD fields, broker
+settings, topic settings, protocol tables, and consensus failure diagrams from
+source, so the reference pages stay close to the implementation.
 
 ## Documentation Map
 
@@ -92,5 +92,5 @@ The generated reference is organized by component:
 - [Concepts](/docs/reference/concepts/) document KRaft failure behavior with
   simulator-generated diagrams.
 
-Reach for those pages when you need an exact field name, config key, API
-version, or rustdoc signature.
+Use those pages when you need an exact field name, config key, API version, or
+rustdoc signature.

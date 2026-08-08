@@ -38,7 +38,7 @@ assert_eq!(image.topic("orders").unwrap().topic_id, topic_id);
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-metadata](https://docs.rs/crabka-metadata). The repository README contains project-wide setup, development, and release notes.
+The API documentation is on [docs.rs/crabka-metadata](https://docs.rs/crabka-metadata). The repository README contains project-wide setup, development, and release notes.
 
 ## License
 

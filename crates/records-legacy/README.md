@@ -6,7 +6,7 @@
 
 Apache Kafka legacy (v0/v1) `MessageSet` codec, with bridges to and from the v2 `RecordBatch` types.
 
-See the [Kafka message format docs](https://kafka.apache.org/43/implementation/message-format/) for the wire layout this crate implements. v0 carries no per-message timestamp; v1 adds an `i64` timestamp per message (KIP-32). Compression in both is signalled in the low 3 bits of the per-message `attributes` byte, with the compressed payload appearing as a single outer message whose `value` is a nested (uncompressed) MessageSet.
+See the [Kafka message format docs](https://kafka.apache.org/43/implementation/message-format/) for the wire layout that this crate implements. v0 carries no per-message timestamp. v1 adds an `i64` timestamp to each message (KIP-32). Both formats signal compression in the low 3 bits of the per-message `attributes` byte. The compressed payload is a single outer message. The `value` of that outer message is a nested, uncompressed MessageSet.
 
 This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation of Kafka-compatible infrastructure and clients.
 
@@ -43,13 +43,13 @@ assert_eq!(decoded[0].offset, 42);
 
 ## Features
 
-This crate supports the following compression features via `crabka-compression`:
+This crate supports these compression features through `crabka-compression`:
 - `gzip`
 - `snappy`
 - `lz4`
 - `zstd`
 
-All compression features are enabled by default.
+All compression features are on by default.
 
 ## MSRV
 
@@ -57,7 +57,7 @@ Rust 1.95.0.
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-records-legacy](https://docs.rs/crabka-records-legacy). The repository README contains project-wide setup, development, and release notes.
+Read the API documentation at [docs.rs/crabka-records-legacy](https://docs.rs/crabka-records-legacy). The repository README contains the project-wide setup, development, and release notes.
 
 ## License
 

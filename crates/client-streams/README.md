@@ -11,7 +11,7 @@ of Apache Kafka-compatible infrastructure and clients.
 
 ## Overview
 
-`crabka-client-streams` provides a Kafka Streams-inspired API on top of Crabka's
+`crabka-client-streams` is a Kafka Streams-inspired API on top of Crabka's
 producer, consumer, and protocol crates. It includes a typed topology DSL,
 processor API, state stores, broker-free topology tests, KIP-1071 streams-group
 membership, and a managed `KafkaStreams` runtime.
@@ -31,21 +31,22 @@ consumer loops.
 - KIP-1071 streams-group membership through `StreamsMembership`.
 - Managed `KafkaStreams` runtime with configurable processing guarantee and
   state backend.
-- Schema-aware serdes via `crabka-schema-serde`.
+- Schema-aware serdes through `crabka-schema-serde`.
 - Optional dataframe and columnar serde/topology support.
 
 ## Kafka Scope
 
-The crate tracks Kafka Streams semantics including KIP-1071 streams-group
+The crate tracks Kafka Streams semantics. It covers KIP-1071 streams-group
 membership, KIP-447 EOS v2 integration, KIP-213 foreign-key joins, KIP-150
-cogroup, KIP-450 sliding windows, KIP-633 stream-stream left/outer emission,
-KIP-820 fixed-key processors, KIP-825 suppression, KIP-889 versioned stores,
-KIP-914 versioned join behavior, and KIP-923 stream-table join grace.
+cogroup, and KIP-450 sliding windows. It also covers KIP-633 stream-stream
+left/outer emission, KIP-820 fixed-key processors, KIP-825 suppression, KIP-889
+versioned stores, KIP-914 versioned join behavior, and KIP-923 stream-table join
+grace.
 
-The default processing guarantee is at-least-once. Exactly-once v2 must be
-selected explicitly. The default state backend is in-memory; persistent stores
-require selecting a durable backend and state directory. Interactive queries are
-local active-store queries and can fail during rebalance or when a store is not
+The default processing guarantee is at-least-once. You must select exactly-once
+v2 explicitly. The default state backend is in-memory. Persistent stores need a
+durable backend and a state directory. Interactive queries are local
+active-store queries. They can fail during rebalance, or when a store is not
 local to the process.
 
 ## Install
@@ -87,8 +88,8 @@ if let StreamsEvent::Assigned(assignment) = membership.next_event().await? {
 
 ## Testing Topologies
 
-Use `TopologyTestDriver` for broker-free tests. It can pipe typed input records
-through a topology and read typed output from sink topics without opening Kafka
+Use `TopologyTestDriver` for broker-free tests. It pipes typed input records
+through a topology and reads typed output from sink topics. It opens no Kafka
 connections.
 
 ```rust,no_run
@@ -107,9 +108,9 @@ let mut driver = TopologyTestDriver::new(&built)?;
 
 The `SchemaSerde<T, S>` bridge lets streams read and write Confluent-framed
 Avro, Protobuf, or JSON Schema payloads through `crabka-schema-serde`. Serdes
-are topic-aware, matching Kafka's `serialize(topic, value)` shape: key/value
-roles derive `<topic>-key` or `<topic>-value` subjects from the topic passed at
-runtime.
+are topic-aware and match Kafka's `serialize(topic, value)` shape. The key and
+value roles derive `<topic>-key` or `<topic>-value` subjects from the topic that
+the caller passes at runtime.
 
 Runnable examples live under `examples/`:
 
@@ -132,7 +133,7 @@ cargo add crabka-client-streams --features polars
 ```
 
 Columnar topologies operate on batches within a consumed batch. Cross-batch
-stateful operations such as accumulated joins and windows require the normal
+stateful operations such as accumulated joins and windows need the normal
 streams state-store APIs.
 
 ## Cargo Features

@@ -30,7 +30,7 @@ curl -f http://127.0.0.1:9500/healthz
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-grpc-gateway](https://docs.rs/crabka-grpc-gateway). The repository README contains project-wide setup, development, and release notes.
+The API documentation is on [docs.rs/crabka-grpc-gateway](https://docs.rs/crabka-grpc-gateway). The repository README contains project-wide setup, development, and release notes.
 
 ## License
 

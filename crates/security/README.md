@@ -11,15 +11,15 @@ of Apache Kafka-compatible infrastructure and clients.
 
 ## Overview
 
-`crabka-security` collects the reusable security primitives shared by Crabka
-brokers, clients, operators, and tests. It builds rustls configs, implements
-SASL mechanism helpers, performs SCRAM exchanges, validates OAuth bearer tokens,
-extracts Kafka principals from certificates, and issues local test/cluster
-certificates.
+`crabka-security` collects the reusable security primitives that Crabka brokers,
+clients, operators, and tests share. It builds rustls configs, implements SASL
+mechanism helpers, and runs SCRAM exchanges. It also validates OAuth bearer
+tokens, extracts Kafka principals from certificates, and issues local
+test/cluster certificates.
 
-The crate provides security building blocks. It does not open network sockets or
-own OAuth/JWKS refresh loops; callers integrate these primitives with their own
-transport and runtime.
+The crate supplies security building blocks. It does not open network sockets
+and it does not own OAuth/JWKS refresh loops. Callers integrate these
+primitives with their own transport and runtime.
 
 ## Capabilities
 
@@ -42,8 +42,8 @@ and includes KIP-554-style broker credential derivation. OAuth bearer parsing
 matches the RFC 7628/KIP-255 client initial response shape. mTLS principal
 extraction follows Kafka's default subject-DN principal style.
 
-GSSAPI support is a de-risking surface and should be reviewed before production
-use.
+GSSAPI support is a de-risking surface. Review it before you use it in
+production.
 
 ## Install
 

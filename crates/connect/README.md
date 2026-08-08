@@ -14,26 +14,26 @@ of Apache Kafka-compatible infrastructure and clients.
 
 `crabka-connect` defines the traits and data model for connector authors. It is
 the shared SPI for CDC sources, telemetry sinks, byte converters, typed schema
-converters, connector configuration, and the single-process runtime that pipes a
-source into a sink.
+converters, and connector configuration. It also holds the single-process
+runtime that pipes a source into a sink.
 
-The crate is intentionally embeddable: there is no Kafka Connect worker
-protocol and no REST management server. Build connectors programmatically and
-run them inside the process that owns their lifecycle.
+The crate is embeddable by design. It has no Kafka Connect worker protocol and
+no REST management server. Build connectors programmatically and run them inside
+the process that owns their lifecycle.
 
 ## Capabilities
 
-- `Source<K, V>` for polling records from an external system, checkpointing
-  read position, seeking on restart, and acknowledging committed checkpoints.
-- `Sink<K, V>` for writing batches, flushing, and optionally bracketing writes
-  in transactions.
+- `Source<K, V>` polls records from an external system, checkpoints the read
+  position, seeks on restart, and acknowledges committed checkpoints.
+- `Sink<K, V>` writes batches, flushes them, and can put writes inside
+  transactions.
 - `ConnectRecord<K, V>` with optional key/value, timestamp, headers, and source
   offset metadata.
-- `Converter<T>` for crossing between typed connector payloads and Kafka wire
+- `Converter<T>` converts between typed connector payloads and Kafka wire
   bytes.
 - `ByteIdentity` for byte-for-byte passthrough.
-- `SchemaConverter<T>` for Confluent-framed Avro, Protobuf, or JSON payloads via
-  `crabka-schema-serde`.
+- `SchemaConverter<T>` for Confluent-framed Avro, Protobuf, or JSON payloads
+  through `crabka-schema-serde`.
 - `ConnectorRuntime` for the sequential `poll -> put -> commit -> checkpoint ->
   acknowledge` loop.
 - `ConfigDef`, `ConnectorConfig`, secret resolution, typed config extraction,
@@ -41,13 +41,15 @@ run them inside the process that owns their lifecycle.
 
 ## Runtime Model
 
-`ConnectorRuntime` owns one source and one sink. Each interval polls a bounded
-batch, writes it to the sink, commits or flushes the sink, persists the source
-checkpoint, then acknowledges the source only after the checkpoint is durable.
+`ConnectorRuntime` owns one source and one sink. In each interval, the runtime
+polls a bounded batch and writes it to the sink. It then commits or flushes the
+sink and persists the source checkpoint. It acknowledges the source only after
+the checkpoint is durable.
 
-This keeps the source from running ahead of records the sink has committed. The
-included `InMemoryCheckpointStore` is useful for tests and short-lived tools;
-production connectors should provide a durable `CheckpointStore`.
+This order stops the source from moving ahead of the records that the sink has
+committed. The included `InMemoryCheckpointStore` is useful for tests and
+short-lived tools. A production connector should supply a durable
+`CheckpointStore`.
 
 ## Install
 
@@ -94,9 +96,9 @@ let config = PostgresSourceConfig::from_resolved(&resolved)?;
 # }
 ```
 
-Secret fields resolve through `SecretResolver` implementations and are redacted
-by `Debug` and `Display`. Literal secrets are rejected unless explicitly allowed
-with `ResolveOptions`.
+Secret fields resolve through `SecretResolver` implementations. `Debug` and
+`Display` redact them. The crate rejects literal secrets unless `ResolveOptions`
+explicitly allows them.
 
 ## Cargo Features
 

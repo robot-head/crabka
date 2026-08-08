@@ -12,13 +12,13 @@ of Apache Kafka-compatible infrastructure and clients.
 ## Overview
 
 `crabka-schema-serde` frames typed payloads with the Confluent Schema Registry
-wire format, registers or resolves schemas through a Confluent-compatible REST
-API, and gives clients synchronous hot-path serialize/deserialize calls backed
-by an async `SchemaCache`.
+wire format. It registers or resolves schemas through a Confluent-compatible
+REST API. It also gives clients synchronous hot-path serialize/deserialize
+calls, backed by an async `SchemaCache`.
 
 The crate is client-agnostic. It plugs into `crabka-client-streams` and
-`crabka-connect`, and can be used by applications that produce or consume
-Confluent-framed Kafka records directly.
+`crabka-connect`. Applications that produce or consume Confluent-framed Kafka
+records directly can also use it.
 
 ## Capabilities
 
@@ -26,7 +26,7 @@ Confluent-framed Kafka records directly.
 - Protobuf message-index encoding compatible with Confluent framing.
 - Async `RegistryClient` for register, lookup, latest, and schema-by-id calls.
 - Shared `SchemaCache` with prewarm for synchronous serialize/deserialize.
-- Topic-aware subject naming through `TopicNameStrategy`:
+- Topic-aware subject names through `TopicNameStrategy`:
   `<topic>-key` and `<topic>-value`.
 - Register modes for auto-register, lookup-only, and use-latest workflows.
 - Optional typed serdes for Avro, Protobuf, and JSON Schema.
@@ -39,7 +39,7 @@ Confluent-framed Kafka records directly.
 | `protobuf` | `ProtobufSerde<T>` | `prost` plus `prost-reflect::ReflectMessage` |
 | `json` | `JsonSerde<T>` | `schemars::JsonSchema` plus serde JSON |
 
-No schema format is enabled by default.
+No schema format is on by default.
 
 ## Install
 
@@ -92,8 +92,8 @@ let decoded: Order = serde.deserialize("orders", &bytes)?;
 # }
 ```
 
-If deserialization sees an unknown writer schema id, it starts a background
-fetch and returns a retriable `WriterSchemaPending` error until the cache fills.
+If deserialization finds an unknown writer schema id, it starts a background
+fetch. It returns a retriable `WriterSchemaPending` error until the cache fills.
 
 ## Cargo Features
 
