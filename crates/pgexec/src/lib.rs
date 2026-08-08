@@ -78,6 +78,7 @@ pub mod hlc_source;
 mod inheritance;
 mod join;
 mod json_fn;
+mod json_record;
 mod jsonpath;
 mod jsontable;
 mod local_sequence;

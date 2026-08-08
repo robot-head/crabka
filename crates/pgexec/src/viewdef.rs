@@ -774,21 +774,109 @@ fn from_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
                 format!("({inner})")
             }
         }
-        TableExpr::Function { functions, .. } => functions
-            .iter()
-            .map(|call| {
-                let args = call
-                    .args
-                    .iter()
-                    .map(|arg| expr_text(arg, ctx))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{}({args})", call.name)
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
+        TableExpr::Function {
+            functions,
+            with_ordinality,
+            alias,
+            column_aliases,
+            lateral,
+            rows_from,
+        } => {
+            // A single call carries its column-definition list *inside the
+            // alias parens* (`f(…) t(a integer)`); only `ROWS FROM` writes it as
+            // `AS (…)` per call. The distinction is not cosmetic — neither
+            // spelling parses in the other's position — and getting it wrong is
+            // a stored rule that cannot be replayed.
+            let single = (!*rows_from).then(|| functions.first()).flatten();
+            let inline_defs = single.and_then(|call| call.column_defs.as_deref());
+            let calls: Vec<String> = functions
+                .iter()
+                .map(|call| func_item_text(call, inline_defs.is_none(), ctx))
+                .collect();
+            let mut text = String::new();
+            if *lateral {
+                text.push_str("LATERAL ");
+            }
+            if inline_defs.is_none() && !*rows_from && calls.len() == 1 {
+                text.push_str(&calls[0]);
+            } else if *rows_from || calls.len() > 1 {
+                text.push_str("ROWS FROM(");
+                text.push_str(&calls.join(", "));
+                text.push(')');
+            } else {
+                text.push_str(&calls[0]);
+            }
+            if *with_ordinality {
+                text.push_str(" WITH ORDINALITY");
+            }
+            // PostgreSQL always names the item when it has to print a column
+            // list, falling back to the function's own name — `f(…) (a integer)`
+            // is not grammatical.
+            let alias = alias.as_deref().or_else(|| {
+                (inline_defs.is_some() || column_aliases.is_some())
+                    .then(|| single.map(|call| call.name.as_str()))
+                    .flatten()
+            });
+            if let Some(alias) = alias {
+                text.push(' ');
+                text.push_str(&quote_identifier(alias));
+            }
+            let listed = inline_defs.map_or_else(
+                || {
+                    column_aliases.as_ref().map(|columns| {
+                        columns
+                            .iter()
+                            .map(|name| quote_identifier(name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                },
+                |defs| Some(column_def_text(defs)),
+            );
+            if let Some(listed) = listed {
+                text.push('(');
+                text.push_str(&listed);
+                text.push(')');
+            }
+            text
+        }
         TableExpr::JsonTable(table) => json_table_text(table, ctx),
     }
+}
+
+/// One call of a FROM function item, with the column-definition list that gives
+/// a record-returning call its row type.
+///
+/// Dropping that list would not merely lose detail: the rendered text would no
+/// longer re-parse, because `json_to_record(…)` without one is a 42601. A stored
+/// rule has to round-trip, so the list is part of the call, not part of the
+/// alias.
+fn func_item_text(
+    call: &crabka_pgparser::ast::TableFuncCall,
+    with_defs: bool,
+    ctx: Ctx<'_>,
+) -> String {
+    let args = call
+        .args
+        .iter()
+        .map(|arg| expr_text(arg, ctx))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut text = format!("{}({args})", call.name);
+    if with_defs && let Some(defs) = &call.column_defs {
+        text.push_str(" AS (");
+        text.push_str(&column_def_text(defs));
+        text.push(')');
+    }
+    text
+}
+
+/// `a integer, b text` — a column-definition list's body.
+fn column_def_text(defs: &[crabka_pgparser::ast::TableFuncColumnDef]) -> String {
+    defs.iter()
+        .map(|def| format!("{} {}", quote_identifier(&def.name), def.ty.name()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A `JSON_TABLE(…)` FROM item.

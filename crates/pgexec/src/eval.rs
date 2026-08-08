@@ -231,6 +231,14 @@ fn eval_depth_inner(
         Expr::Func(fc) if crate::format_fn::is_format_func(&fc.name) => {
             crate::format_fn::eval_format(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
+        // `json_populate_record` and its `jsonb_` twin, ahead of the general
+        // JSON arm because they are the one family whose result *shape* comes
+        // from an argument's declared type rather than from its value —
+        // `NULL::jpop` is a bare `Datum::Null` by the time the general arm sees
+        // it, and the composite it was cast to is only in the scope.
+        Expr::Func(fc) if json_fn::is_record_func(&fc.name) => {
+            json_fn::eval_record_func(fc, scope, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
         // The jsonb + array function families, tried after the older families and
         // before the aggregate-context error, exactly like the arms above.
         Expr::Func(fc) if json_fn::is_json_func(&fc.name) => {

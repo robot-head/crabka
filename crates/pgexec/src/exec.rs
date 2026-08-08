@@ -13653,6 +13653,7 @@ fn build_table_expr(
                     *with_ordinality,
                     alias.as_deref(),
                     column_aliases,
+                    functions[0].column_defs.as_deref(),
                 );
             }
             if *with_ordinality {
@@ -15368,6 +15369,7 @@ fn build_table_expr_schema_with_ctes(
                     *with_ordinality,
                     alias.as_deref(),
                     column_aliases,
+                    functions[0].column_defs.as_deref(),
                 );
             }
             crate::srf::from_item_schema(

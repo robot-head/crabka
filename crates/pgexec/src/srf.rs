@@ -40,8 +40,13 @@
 
 use std::borrow::Cow;
 
-use crabka_pgparser::ast::{ArraySubscript, Expr, FuncArgs, SelectItem, SelectStmt, TableFuncCall};
-use crabka_pgtypes::{ColumnType, Datum, ElemType, TypeError, numeric::NumericValue};
+use crabka_pgparser::ast::{
+    ArraySubscript, Expr, FuncArgs, SelectItem, SelectStmt, TableFuncCall, TableFuncColumnDef,
+};
+use crabka_pgtypes::{
+    ColumnType, Datum, ElemType, RecordValue, TypeError, numeric::NumericValue,
+    usertype::UserTypeRef,
+};
 use crabka_pgwire::engine::FieldDescription;
 
 use crate::{
@@ -50,6 +55,7 @@ use crate::{
     eval::ArgType,
     join::Relation,
     json_fn::JsonbSrf,
+    json_record::RecordShape,
     scope::{ColumnBinding, Scope},
 };
 
@@ -85,6 +91,8 @@ enum Srf {
     /// the jsonpath produces. There is no `json_path_query`: `PostgreSQL`
     /// declares the jsonpath functions over `jsonb` alone.
     JsonbPathQuery,
+    /// `json_populate_record` and its seven relatives — see [`RecordCall`].
+    Record(RecordCall),
     PgInputErrorInfo,
     /// `pg_partition_ancestors(regclass)` → `relid regclass` — the relation
     /// itself, then every parent up to the root of its partition tree.
@@ -119,7 +127,98 @@ impl JsonFamily {
             JsonFamily::Jsonb => ColumnType::Jsonb,
         }
     }
+
+    /// The same distinction as seen by the shared population walk.
+    fn flavour(self) -> crate::json_record::Flavour {
+        match self {
+            JsonFamily::Json => crate::json_record::Flavour::Json,
+            JsonFamily::Jsonb => crate::json_record::Flavour::Jsonb,
+        }
+    }
 }
+
+/// One of the eight record-mapping functions, as three independent choices.
+///
+/// `PostgreSQL` declares them as two families of four, and the four differ only
+/// in where the target row type comes from and how many rows the document
+/// yields — so they are one implementation with three flags rather than eight
+/// entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecordCall {
+    family: JsonFamily,
+    /// `*_populate_record`/`*_populate_recordset`, whose first argument is both
+    /// the row type and the source of every field the document omits. The
+    /// `*_to_record`/`*_to_recordset` half takes neither: its row type comes
+    /// from the FROM item's column-definition list and its omitted fields are
+    /// NULL.
+    populate: bool,
+    /// `*_recordset`/`*_to_recordset`: the document is an array of objects and
+    /// each element is a row.
+    set: bool,
+}
+
+impl RecordCall {
+    /// The SQL name, which several of this family's run-time errors quote.
+    fn name(self) -> &'static str {
+        match (self.family, self.populate, self.set) {
+            (JsonFamily::Json, true, false) => "json_populate_record",
+            (JsonFamily::Json, true, true) => "json_populate_recordset",
+            (JsonFamily::Json, false, false) => "json_to_record",
+            (JsonFamily::Json, false, true) => "json_to_recordset",
+            (JsonFamily::Jsonb, true, false) => "jsonb_populate_record",
+            (JsonFamily::Jsonb, true, true) => "jsonb_populate_recordset",
+            (JsonFamily::Jsonb, false, false) => "jsonb_to_record",
+            (JsonFamily::Jsonb, false, true) => "jsonb_to_recordset",
+        }
+    }
+
+    /// Which argument holds the document.
+    fn document_at(self) -> usize {
+        usize::from(self.populate)
+    }
+
+    /// The arities `PostgreSQL` declares, inclusive.
+    ///
+    /// The `json_populate_*` half carries a third parameter the `jsonb_` half
+    /// does not: `use_json_as_text boolean DEFAULT false`, kept since 9.4 for
+    /// callers written against the old signature. It has had no effect for a
+    /// decade — a sub-document reaches a `text` column as its own text either
+    /// way — but it is part of the signature, so a three-argument call resolves
+    /// and a boolean is coerced.
+    fn arity(self) -> (usize, usize) {
+        match (self.populate, self.family) {
+            (true, JsonFamily::Json) => (2, 3),
+            (true, JsonFamily::Jsonb) => (2, 2),
+            (false, _) => (1, 1),
+        }
+    }
+
+    /// The `*_recordset` sibling of this call.
+    const fn into_set(self) -> Self {
+        RecordCall { set: true, ..self }
+    }
+}
+
+const RECORD_JSON_POPULATE: RecordCall = RecordCall {
+    family: JsonFamily::Json,
+    populate: true,
+    set: false,
+};
+const RECORD_JSONB_POPULATE: RecordCall = RecordCall {
+    family: JsonFamily::Jsonb,
+    populate: true,
+    set: false,
+};
+const RECORD_JSON_TO: RecordCall = RecordCall {
+    family: JsonFamily::Json,
+    populate: false,
+    set: false,
+};
+const RECORD_JSONB_TO: RecordCall = RecordCall {
+    family: JsonFamily::Jsonb,
+    populate: false,
+    set: false,
+};
 
 /// What a call *is*, as opposed to how it was written: the name with its
 /// `pg_catalog` qualifier and its letter case folded away.
@@ -166,6 +265,15 @@ fn classify(name: &str) -> Option<Srf> {
         "json_array_elements_text" => Srf::ArrayElementsText(JsonFamily::Json),
         "jsonb_array_elements_text" => Srf::ArrayElementsText(JsonFamily::Jsonb),
         "jsonb_path_query" | "jsonb_path_query_tz" => Srf::JsonbPathQuery,
+        // Eight names, one implementation: see `RecordCall`.
+        "json_populate_record" => Srf::Record(RECORD_JSON_POPULATE),
+        "jsonb_populate_record" => Srf::Record(RECORD_JSONB_POPULATE),
+        "json_populate_recordset" => Srf::Record(RECORD_JSON_POPULATE.into_set()),
+        "jsonb_populate_recordset" => Srf::Record(RECORD_JSONB_POPULATE.into_set()),
+        "json_to_record" => Srf::Record(RECORD_JSON_TO),
+        "jsonb_to_record" => Srf::Record(RECORD_JSONB_TO),
+        "json_to_recordset" => Srf::Record(RECORD_JSON_TO.into_set()),
+        "jsonb_to_recordset" => Srf::Record(RECORD_JSONB_TO.into_set()),
         "pg_input_error_info" => Srf::PgInputErrorInfo,
         "pg_partition_ancestors" => Srf::PgPartitionAncestors,
         "pg_event_trigger_ddl_commands" => Srf::EventDdlCommands,
@@ -174,10 +282,48 @@ fn classify(name: &str) -> Option<Srf> {
     })
 }
 
-/// Is `name` a set-returning function? This is the dispatch point for the
-/// FROM-item and select-list guards.
+/// Is `name` one of the functions this registry expands in a FROM item?
+///
+/// Not every one of them is *set*-returning: `json_populate_record` returns one
+/// composite, and `json_to_record` one `record`. They live here because a FROM
+/// item expands a composite result into columns exactly as it expands a set into
+/// rows, and because the two halves of each pair share everything but their row
+/// count. [`is_set_returning`] is the narrower predicate the select-list rewrite
+/// needs.
 pub(crate) fn is_srf(name: &str) -> bool {
     classify(name).is_some()
+}
+
+/// Does `name` return a *set*? Only these multiply a select list's rows, so only
+/// these take the ProjectSet path — and only these are refused inside an
+/// aggregate.
+pub(crate) fn is_set_returning(name: &str) -> bool {
+    classify(name).is_some_and(Srf::returns_set)
+}
+
+impl Srf {
+    /// Does a call produce zero or more rows, rather than exactly one?
+    fn returns_set(self) -> bool {
+        match self {
+            Srf::Record(call) => call.set,
+            _ => true,
+        }
+    }
+
+    /// Does `PostgreSQL` declare this function's output columns as OUT
+    /// parameters? That changes which 42601 a column-definition list earns:
+    /// `json_each` is "redundant for a function with OUT parameters" where
+    /// `generate_series` is "only allowed for functions returning \"record\"".
+    fn has_out_parameters(self) -> bool {
+        matches!(
+            self,
+            Srf::Each(_)
+                | Srf::EachText(_)
+                | Srf::PgInputErrorInfo
+                | Srf::EventDdlCommands
+                | Srf::EventDroppedObjects
+        )
+    }
 }
 
 /// One resolved SRF call: which function, and the columns it produces.
@@ -190,12 +336,73 @@ pub(crate) struct SrfPlan {
     /// written instead, because there is no function to have a real name.
     name: String,
     columns: Vec<ColumnBinding>,
+    /// For the record family, the composite the call populates and the type a
+    /// *select-list* occurrence of the call yields.
+    ///
+    /// `columns` always holds the FROM-position shape — a composite result
+    /// expands into one column per attribute there — but the same call in a
+    /// select list is a single value of the composite type, so the two shapes
+    /// are kept side by side rather than one being derived from the other.
+    record: Option<RecordResult>,
 }
 
-/// Resolve `name(args)` to the columns it produces. This function checks every
-/// arity and type rule a call can fail, at plan time, so `Describe` reports the
-/// same error `Execute` would.
-pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, ExecError> {
+/// The composite a record-family call produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordResult {
+    shape: RecordShapeSource,
+    /// The composite type itself, for the select-list column. `None` for the
+    /// anonymous `record` a column-definition list gave a shape but not a name.
+    named: Option<UserTypeRef>,
+    /// Was the shape supplied by a column-definition list? A run-time record
+    /// argument must then agree with it, which is `PostgreSQL`'s
+    /// "function return row and query-specified return row do not match".
+    from_column_defs: bool,
+}
+
+/// What tells a record-family call the shape of the rows it produces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordShapeSource {
+    /// Known at plan time: the named composite the first argument is declared
+    /// as, or the FROM item's column-definition list.
+    Fixed(RecordShape),
+    /// Known only at run time, from the first argument's *value*.
+    ///
+    /// `SELECT json_populate_recordset(ROW(1, 2), '…')` has no FROM item to hang
+    /// a column-definition list on and no named composite to read, yet
+    /// PostgreSQL answers it — because a `ROW(…)` carries a row type the type
+    /// layer here cannot see but the value can. `NULL::record` reaches the same
+    /// plan and is the 0A000, so the two are only told apart by the value.
+    Argument,
+}
+
+/// Where a call was written. Which of the two it is decides what may supply a
+/// `record` result's row type, and so which refusal an unresolvable one earns.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CallSite<'a> {
+    /// A FROM item, which may carry a column-definition list.
+    FromItem(Option<&'a [TableFuncColumnDef]>),
+    /// A select-list call, where only a run-time record argument can supply one.
+    Projection,
+}
+
+impl<'a> CallSite<'a> {
+    fn column_defs(self) -> Option<&'a [TableFuncColumnDef]> {
+        match self {
+            CallSite::FromItem(defs) => defs,
+            CallSite::Projection => None,
+        }
+    }
+}
+
+/// Resolve `name(args)` to the columns it produces. Every arity/type rule a call
+/// can fail is checked here, at plan time, so `Describe` reports the same error
+/// `Execute` would.
+pub(crate) fn plan(
+    name: &str,
+    args: &[Expr],
+    site: CallSite<'_>,
+    scope: &Scope,
+) -> Result<SrfPlan, ExecError> {
     // Resolve the arguments' types first, so a name no entry claims still reports
     // the argument types PostgreSQL's 42883 names.
     let given = crate::eval::static_arg_types(args, scope)?;
@@ -204,6 +411,19 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
     // `undefined_function` above; everything the *result* is named after uses
     // the folded spelling.
     let bare = bare_name(name);
+    if let Srf::Record(call) = kind {
+        return plan_record(call, &bare, &given, site);
+    }
+    if site.column_defs().is_some() {
+        return Err(ExecError::Syntax(
+            if kind.has_out_parameters() {
+                "a column definition list is redundant for a function with OUT parameters"
+            } else {
+                "a column definition list is only allowed for functions returning \"record\""
+            }
+            .into(),
+        ));
+    }
     let columns = match kind {
         Srf::Unnest => unnest_columns(name, &given)?,
         Srf::GenerateSeries => vec![column("generate_series", series_types(name, &given)?)],
@@ -252,6 +472,9 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
             require_arity(name, &given, (2, 4))?;
             vec![column(&bare, ColumnType::Jsonb)]
         }
+        // Handled above: the record family resolves its own shape, and the
+        // column-definition-list rules differ for it.
+        Srf::Record(_) => unreachable!("plan_record answered the record family"),
         Srf::PgInputErrorInfo => {
             require_arity(name, &given, (2, 2))?;
             vec![
@@ -301,6 +524,123 @@ pub(crate) fn plan(name: &str, args: &[Expr], scope: &Scope) -> Result<SrfPlan, 
         kind,
         name: bare.into_owned(),
         columns,
+        record: None,
+    })
+}
+
+/// Resolve one record-family call: where its row type comes from, and what a
+/// column-definition list is allowed to say about it.
+///
+/// `PostgreSQL` splits this three ways and words each refusal differently, so
+/// the three cases are spelled out rather than folded into one check:
+///
+/// * `json_populate_record(null::jpop, …)` returns the *named* composite `jpop`,
+///   and a column-definition list on it is "redundant for a function returning a
+///   named composite type";
+/// * `json_to_record(…)`, and `json_populate_record(null::record, …)`, return
+///   `record`, whose shape only a column-definition list can supply — without
+///   one a FROM item is "a column definition list is required", and a select-list
+///   call is the 0A000 "could not determine row type";
+/// * an argument carrying no type at all (`json_populate_record('x', …)`) leaves
+///   the `anyelement` parameter unresolved, which is 42804.
+fn plan_record(
+    call: RecordCall,
+    bare: &str,
+    given: &[ArgType],
+    site: CallSite<'_>,
+) -> Result<SrfPlan, ExecError> {
+    let name = call.name();
+    require_arity(name, given, call.arity())?;
+    let document = given[call.document_at()];
+    if let Some(ty) = document.known()
+        && ty != call.family.column_type()
+    {
+        return Err(undefined_function(name, given));
+    }
+
+    let declared = if call.populate {
+        match given[0] {
+            ArgType::Known(ty @ ColumnType::Record(_)) => ty,
+            // `anyelement` resolved to a non-composite: no such function.
+            ArgType::Known(_) => return Err(undefined_function(name, given)),
+            // A bare literal or NULL resolves the polymorphic parameter to
+            // nothing at all, which PostgreSQL reports before it looks at the
+            // document.
+            ArgType::Unknown | ArgType::Opaque => {
+                return Err(ExecError::TypeMismatch(
+                    "could not determine polymorphic type because input has type unknown".into(),
+                ));
+            }
+        }
+    } else {
+        ColumnType::Record(None)
+    };
+
+    let record = match (RecordShape::of(declared), site.column_defs()) {
+        (Some(_), Some(_)) => {
+            return Err(ExecError::Syntax(
+                "a column definition list is redundant for a function returning a named \
+                 composite type"
+                    .into(),
+            ));
+        }
+        (Some(shape), None) => {
+            let ColumnType::Record(named) = declared else {
+                unreachable!("RecordShape::of accepted a non-record type");
+            };
+            RecordResult {
+                shape: RecordShapeSource::Fixed(shape),
+                named,
+                from_column_defs: false,
+            }
+        }
+        (None, Some(defs)) => {
+            // The list becomes a tuple descriptor, and PostgreSQL builds that
+            // through the same attribute-name check a `CREATE TABLE` goes
+            // through — so a repeated name is 42701, not two columns.
+            if let Some(name) = first_duplicate(defs) {
+                return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                    "42701",
+                    format!("column name \"{name}\" specified more than once"),
+                )));
+            }
+            RecordResult {
+                shape: RecordShapeSource::Fixed(RecordShape {
+                    fields: defs.iter().map(|d| (d.name.clone(), d.ty)).collect(),
+                }),
+                named: None,
+                from_column_defs: true,
+            }
+        }
+        (None, None) => match site {
+            CallSite::FromItem(_) => {
+                return Err(ExecError::Syntax(
+                    "a column definition list is required for functions returning \"record\""
+                        .into(),
+                ));
+            }
+            CallSite::Projection => RecordResult {
+                shape: RecordShapeSource::Argument,
+                named: None,
+                from_column_defs: false,
+            },
+        },
+    };
+
+    let columns = match &record.shape {
+        RecordShapeSource::Fixed(shape) => shape
+            .fields
+            .iter()
+            .map(|(name, ty)| column(name, *ty))
+            .collect(),
+        // Never a FROM item's shape — only the one column a select list sees.
+        RecordShapeSource::Argument => vec![column(bare, ColumnType::Record(None))],
+    };
+    Ok(SrfPlan {
+        kind: Srf::Record(call),
+        name: bare.to_string(),
+        columns,
+        record: Some(record),
     })
 }
 
@@ -321,6 +661,11 @@ pub(crate) fn rows(
     let strict_upto = match plan.kind {
         Srf::Unnest => 0,
         Srf::StringToTable => 1,
+        // Not strict in *either* argument, and deliberately so: the row type
+        // usually arrives as `NULL::jpop`, and a NULL document yields one
+        // all-NULL row from `populate_record` rather than no rows. `record_rows`
+        // decides what a NULL document means for each half.
+        Srf::Record(_) => 0,
         _ => vals.len(),
     };
     if vals[..strict_upto.min(vals.len())]
@@ -341,6 +686,7 @@ pub(crate) fn rows(
         Srf::ArrayElements(family) => expand_json(family, JsonbSrf::ArrayElements, vals)?,
         Srf::ArrayElementsText(family) => expand_json(family, JsonbSrf::ArrayElementsText, vals)?,
         Srf::JsonbPathQuery => crate::json_fn::jsonb_path_query_rows(&plan.name, vals)?,
+        Srf::Record(call) => record_rows(call, plan, vals, ctx)?,
         Srf::PgInputErrorInfo => input_error_info_rows(vals, ctx)?,
         Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
@@ -382,6 +728,15 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
             Some(ColumnType::Jsonb),
             Some(ColumnType::Bool),
         ],
+        // The row-type argument is `anyelement` — an `unknown` literal there is
+        // already a 42804 — so only the document and the vestigial
+        // `use_json_as_text` flag resolve a literal.
+        Srf::Record(call) => {
+            let mut params = vec![None; call.document_at()];
+            params.push(Some(call.family.column_type()));
+            params.push(Some(ColumnType::Bool));
+            params
+        }
         Srf::PgInputErrorInfo => vec![text, text],
         // `regclass`, but resolving a *name* to a relation needs the catalog and
         // the search path, which the pure cast this drives has neither of. The
@@ -390,6 +745,122 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
         Srf::PgPartitionAncestors => vec![None],
         Srf::EventDdlCommands | Srf::EventDroppedObjects => Vec::new(),
     }
+}
+
+/// Run one record-family call over its evaluated arguments.
+fn record_rows(
+    call: RecordCall,
+    plan: &SrfPlan,
+    vals: &[Datum],
+    ctx: &EvalCtx,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let result = plan
+        .record
+        .as_ref()
+        .expect("plan_record attached a shape to every record-family plan");
+    let base = match vals.first() {
+        Some(Datum::Record(record)) if call.populate => Some(record),
+        _ => None,
+    };
+    let shape = match &result.shape {
+        RecordShapeSource::Fixed(shape) => Cow::Borrowed(shape),
+        // The row type is the argument's, so there is no answer without one.
+        RecordShapeSource::Argument => match base {
+            Some(base) => Cow::Owned(RecordShape::of_value(base)),
+            None => return Err(crate::json_record::indeterminate_row_type(&plan.name)),
+        },
+    };
+    // A column-definition list does not *replace* a run-time record argument's
+    // row type, it has to agree with it — PostgreSQL compares the two tuple
+    // descriptors and refuses a mismatch rather than coercing.
+    if let Some(base) = base
+        && result.from_column_defs
+    {
+        check_row_type_matches(base, &shape)?;
+    }
+    let document = &vals[call.document_at()];
+    if document.is_null() {
+        // A NULL document leaves `populate_record` with the base row (all NULL
+        // when there is none) and `populate_recordset` with no rows at all.
+        return Ok(reshape(
+            result,
+            &shape,
+            if call.set {
+                Vec::new()
+            } else {
+                vec![crate::json_record::populate_missing(&shape, base, ctx)?]
+            },
+        ));
+    }
+    let node = crate::json_record::Node::of(document, call.family.flavour())?;
+    let produced = if call.set {
+        crate::json_record::populate_set(
+            &shape,
+            base,
+            node,
+            call.name(),
+            call.family.flavour(),
+            ctx,
+        )?
+    } else {
+        vec![crate::json_record::populate(&shape, base, node, ctx)?]
+    };
+    Ok(reshape(result, &shape, produced))
+}
+
+/// Fold each row into a single composite value when the plan's one column *is*
+/// the composite — the deferred select-list shape, whose columns nothing outside
+/// the value knows.
+fn reshape(
+    result: &RecordResult,
+    shape: &RecordShape,
+    produced: Vec<Vec<Datum>>,
+) -> Vec<Vec<Datum>> {
+    if matches!(result.shape, RecordShapeSource::Fixed(_)) {
+        return produced;
+    }
+    let names: std::sync::Arc<[String]> =
+        shape.fields.iter().map(|(name, _)| name.clone()).collect();
+    produced
+        .into_iter()
+        .map(|row| vec![Datum::Record(RecordValue::named(None, names.clone(), row))])
+        .collect()
+}
+
+/// PostgreSQL's `tupledesc_match`: a record argument's own row type and the
+/// column-definition list must agree on width and on every column's type.
+fn check_row_type_matches(base: &RecordValue, shape: &RecordShape) -> Result<(), ExecError> {
+    let mismatch = |detail: String| {
+        ExecError::Remote(
+            crabka_pgwire::error::PgError::error(
+                "42804",
+                "function return row and query-specified return row do not match",
+            )
+            .with_detail(detail),
+        )
+    };
+    if base.values.len() != shape.fields.len() {
+        return Err(mismatch(format!(
+            "Returned row contains {} attribute{}, but query expects {}.",
+            base.values.len(),
+            if base.values.len() == 1 { "" } else { "s" },
+            shape.fields.len()
+        )));
+    }
+    for (index, (value, (_, wanted))) in base.values.iter().zip(&shape.fields).enumerate() {
+        let Some(actual) = value.column_type() else {
+            continue;
+        };
+        if actual != *wanted {
+            return Err(mismatch(format!(
+                "Returned type {} at ordinal position {}, but query expects {}.",
+                actual.name(),
+                index + 1,
+                wanted.name()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -617,6 +1088,9 @@ pub(crate) fn from_item(
     column_aliases: &Option<Vec<String>>,
     ctx: &EvalCtx,
 ) -> Result<Relation, ExecError> {
+    if with_ordinality {
+        reject_ordinality_with_column_defs(functions)?;
+    }
     let plans = plan_all(functions)?;
     let mut produced = Vec::new();
     for (call, plan) in functions.iter().zip(&plans) {
@@ -639,24 +1113,54 @@ pub(crate) fn from_item_schema(
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
 ) -> Result<Relation, ExecError> {
+    if with_ordinality {
+        reject_ordinality_with_column_defs(functions)?;
+    }
     let plans = plan_all(functions)?;
     qualify(&plans, Vec::new(), with_ordinality, alias, column_aliases)
 }
 
-/// Plan every call in the item, and reject a column-definition list the way
-/// `PostgreSQL` does. crabka has no composite types, so no function it knows
-/// returns `record`, and the list is never allowed.
+/// The first column name a definition list repeats.
+fn first_duplicate(defs: &[TableFuncColumnDef]) -> Option<&str> {
+    let mut seen = std::collections::HashSet::new();
+    defs.iter()
+        .find(|def| !seen.insert(def.name.as_str()))
+        .map(|def| def.name.as_str())
+}
+
+/// `WITH ORDINALITY` and a column-definition list cannot be written on the same
+/// FROM item.
+///
+/// `PostgreSQL`'s grammar allows both, and then refuses the combination with a
+/// hint pointing at the one spelling that does accept both — `ROWS FROM(f(…) AS
+/// (…)) WITH ORDINALITY`, where the list belongs to the call rather than to the
+/// item.
+fn reject_ordinality_with_column_defs(functions: &[TableFuncCall]) -> Result<(), ExecError> {
+    if matches!(functions, [call] if call.column_defs.is_some()) {
+        return Err(ExecError::Remote(
+            crabka_pgwire::error::PgError::error(
+                "42601",
+                "WITH ORDINALITY cannot be used with a column definition list",
+            )
+            .with_hint("Put the column definition list inside ROWS FROM()."),
+        ));
+    }
+    Ok(())
+}
+
+/// Plan every call in the item. Whether a column-definition list is allowed,
+/// required or refused is the individual function's business — [`plan`] decides
+/// it, because for the record family the answer depends on the arguments.
 fn plan_all(functions: &[TableFuncCall]) -> Result<Vec<SrfPlan>, ExecError> {
     functions
         .iter()
         .map(|call| {
-            if call.column_defs.is_some() {
-                return Err(ExecError::Syntax(
-                    "a column definition list is only allowed for functions returning \"record\""
-                        .into(),
-                ));
-            }
-            plan(&call.name, &call.args, &Scope::empty())
+            plan(
+                &call.name,
+                &call.args,
+                CallSite::FromItem(call.column_defs.as_deref()),
+                &Scope::empty(),
+            )
         })
         .collect()
 }
@@ -712,6 +1216,11 @@ fn ordinality_column() -> ColumnBinding {
 /// keeps its own name either way. A column-alias list renames a prefix
 /// positionally. A list that names more columns than the item has is
 /// `PostgreSQL`'s 42P10.
+///
+/// That renaming is a property of a *scalar* result, not of column count. A
+/// one-attribute composite is one column too, but its column is the attribute
+/// and `AS q` names only the item — so `json_to_record(…) AS x(a int)` yields
+/// `a`, not `x`.
 fn qualify(
     plans: &[SrfPlan],
     rows: Vec<Vec<Datum>>,
@@ -730,6 +1239,7 @@ fn qualify(
         with_ordinality,
         alias,
         column_aliases,
+        plans.iter().all(|plan| plan.record.is_none()),
     )
 }
 
@@ -740,6 +1250,7 @@ pub(crate) fn user_function_relation(
     with_ordinality: bool,
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
+    column_defs: Option<&[TableFuncColumnDef]>,
 ) -> Result<Relation, ExecError> {
     let columns = columns
         .into_iter()
@@ -752,6 +1263,7 @@ pub(crate) fn user_function_relation(
         with_ordinality,
         alias,
         column_aliases,
+        column_defs.is_none(),
     )
 }
 
@@ -762,6 +1274,9 @@ fn qualify_columns(
     with_ordinality: bool,
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
+    // `alias_names_column`: may a bare alias rename the item's single column?
+    // Only when that column is the function's scalar result.
+    alias_names_column: bool,
 ) -> Result<Relation, ExecError> {
     let function_columns = columns.len();
     if with_ordinality {
@@ -783,6 +1298,7 @@ fn qualify_columns(
             column.name.clone_from(name);
         }
     } else if let Some(alias) = alias
+        && alias_names_column
         && function_columns == 1
     {
         columns[0].name = alias.to_string();
@@ -825,7 +1341,7 @@ pub(crate) fn order_by_contains_srf(order_by: &[crabka_pgparser::ast::OrderItem]
 
 fn expr_contains_srf(expr: &Expr) -> bool {
     if let Expr::Func(fc) = expr
-        && is_srf(&fc.name)
+        && is_set_returning(&fc.name)
     {
         return true;
     }
@@ -937,7 +1453,7 @@ fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
         extended.columns.push(ColumnBinding {
             qualifier: Some(SRF_QUALIFIER.to_string()),
             name: index.to_string(),
-            ty: call.plan.columns[0].ty,
+            ty: projected_type(&call.plan),
         });
     }
     Ok(ProjectSet {
@@ -949,7 +1465,7 @@ fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
 
 fn rewrite_expr(expr: &mut Expr, scope: &Scope, calls: &mut Vec<SrfCall>) -> Result<(), ExecError> {
     if let Expr::Func(fc) = expr
-        && is_srf(&fc.name)
+        && is_set_returning(&fc.name)
     {
         let FuncArgs::Exprs(args) = &fc.args else {
             return Err(undefined_function(&fc.name, &[]));
@@ -961,8 +1477,10 @@ fn rewrite_expr(expr: &mut Expr, scope: &Scope, calls: &mut Vec<SrfCall>) -> Res
                     .into(),
             ));
         }
-        let plan = plan(&fc.name, args, scope)?;
-        if plan.columns.len() != 1 {
+        // A select-list call has no FROM item to hang a column-definition list
+        // on, so a record-returning one has no row type at all.
+        let plan = plan(&fc.name, args, CallSite::Projection, scope)?;
+        if plan.record.is_none() && plan.columns.len() != 1 {
             return Err(ExecError::Unsupported(format!(
                 "set-returning function {} with multiple output columns is only supported in FROM",
                 plan.name
@@ -1168,6 +1686,44 @@ pub(crate) fn project_rows_ordered(
     ))
 }
 
+/// The type a select-list occurrence of a planned call yields.
+///
+/// [`SrfPlan::columns`] is the FROM-position shape, which for the record family
+/// is one column per attribute; a select list gets the composite whole.
+fn projected_type(plan: &SrfPlan) -> ColumnType {
+    match &plan.record {
+        Some(record) => ColumnType::Record(record.named),
+        None => plan.columns[0].ty,
+    }
+}
+
+/// Reduce a call's FROM-position rows to the one column a select list sees.
+///
+/// A record-family call is *reassembled* here rather than truncated: its FROM
+/// shape is the composite's attributes spread across columns, and the select
+/// list wants them back inside one value.
+fn collapse_projection(plan: &SrfPlan, produced: Vec<Vec<Datum>>) -> Vec<Datum> {
+    let take_first = |produced: Vec<Vec<Datum>>| {
+        produced
+            .into_iter()
+            .filter_map(|row| row.into_iter().next())
+            .collect()
+    };
+    let Some(record) = &plan.record else {
+        return take_first(produced);
+    };
+    let RecordShapeSource::Fixed(shape) = &record.shape else {
+        // `rows` already folded these; the one column is the composite.
+        return take_first(produced);
+    };
+    let names: std::sync::Arc<[String]> =
+        shape.fields.iter().map(|(name, _)| name.clone()).collect();
+    produced
+        .into_iter()
+        .map(|row| Datum::Record(RecordValue::named(record.named, names.clone(), row)))
+        .collect()
+}
+
 /// Expand one source row into the output rows its select-list SRFs produce.
 /// PostgreSQL 10+ runs the calls in lockstep. The row count is the longest
 /// call's, and the shorter ones read as NULL past their end.
@@ -1185,12 +1741,7 @@ fn expand_row(
             .map(|arg| crate::eval::eval(arg, scope, row, ctx))
             .collect::<Result<Vec<_>, _>>()?;
         let produced = rows(&call.plan, &call.args, &mut vals, ctx)?;
-        values.push(
-            produced
-                .into_iter()
-                .filter_map(|r| r.into_iter().next())
-                .collect(),
-        );
+        values.push(collapse_projection(&call.plan, produced));
     }
     let count = values.iter().map(Vec::len).max().unwrap_or(0);
     let mut out = Vec::with_capacity(count);
@@ -1737,7 +2288,7 @@ mod tests {
 
     /// Plan then expand a call, the way both callers do.
     fn call(name: &str, args: &[Expr]) -> Result<Vec<Vec<Datum>>, ExecError> {
-        let plan = plan(name, args, &Scope::empty())?;
+        let plan = plan(name, args, CallSite::FromItem(None), &Scope::empty())?;
         let mut vals = args
             .iter()
             .map(|a| crate::eval::eval(a, &Scope::empty(), &[], &ctx()))
@@ -1920,7 +2471,8 @@ mod tests {
                 .into_iter()
                 .map(|(name, ty)| column(name, ty))
                 .collect();
-            let planned = plan(name, &args, &Scope::empty()).expect("plan");
+            let planned =
+                plan(name, &args, CallSite::FromItem(None), &Scope::empty()).expect("plan");
             assert!(planned.columns == expected, "planning {name}");
             // The `Describe` path must agree with the executing one, column for
             // column, or a prepared statement's RowDescription would lie.
@@ -1988,7 +2540,12 @@ mod tests {
         ];
 
         for (args, expected) in cases {
-            let planned = plan("generate_series", &args, &Scope::empty());
+            let planned = plan(
+                "generate_series",
+                &args,
+                CallSite::FromItem(None),
+                &Scope::empty(),
+            );
             match expected {
                 Ok(ty) => assert!(planned.expect("plan").columns[0].ty == ty),
                 Err(sqlstate) => {

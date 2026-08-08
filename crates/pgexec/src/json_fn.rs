@@ -79,6 +79,16 @@ impl Flavour {
             Flavour::Jsonb => ColumnType::Jsonb,
         }
     }
+
+    /// The same distinction as seen by the record-population walk, which draws
+    /// it for a different reason: not which parameter type a call takes, but
+    /// whether a populated field keeps the document's original text.
+    fn populate(self) -> crate::json_record::Flavour {
+        match self {
+            Flavour::Json => crate::json_record::Flavour::Json,
+            Flavour::Jsonb => crate::json_record::Flavour::Jsonb,
+        }
+    }
 }
 
 /// The `json` and `jsonb` functions, named for whichever family has both.
@@ -121,6 +131,18 @@ enum JsonFunc {
     /// `jsonb_set_lax(target, path, new_value [, create_if_missing [, null_value_treatment]])`.
     /// `jsonb` only.
     SetLax,
+    /// `json_populate_record(base anyelement, doc)` / `json_to_record(doc)` and
+    /// the two `jsonb_` twins, in a *select list*.
+    ///
+    /// The FROM-position spelling of these — and the whole `*_recordset` half —
+    /// is `srf`'s, because a FROM item expands a composite result into columns
+    /// and a column-definition list can only be written there. What is left here
+    /// is the one place the same call is a scalar: `SELECT
+    /// json_populate_record(row(1,2), '…')` yields one composite value.
+    PopulateRecord,
+    /// `json_to_record(doc)` / `jsonb_to_record(doc)` in a select list, which is
+    /// always the 0A000 below: nothing there can give a `record` a row type.
+    ToRecord,
     /// `json_object(text[])` / `json_object(text[], text[])` (and the `jsonb_`
     /// spellings) — an object built from a flat or two-column key/value array.
     /// Every value is a JSON string.
@@ -172,6 +194,10 @@ fn json_func(name: &str) -> Option<(JsonFunc, Flavour)> {
         "jsonb_extract_path_text" => (JsonFunc::ExtractPathText, Jsonb),
         "json_strip_nulls" => (JsonFunc::StripNulls, Json),
         "jsonb_strip_nulls" => (JsonFunc::StripNulls, Jsonb),
+        "json_populate_record" => (JsonFunc::PopulateRecord, Json),
+        "jsonb_populate_record" => (JsonFunc::PopulateRecord, Jsonb),
+        "json_to_record" => (JsonFunc::ToRecord, Json),
+        "jsonb_to_record" => (JsonFunc::ToRecord, Jsonb),
         "json_object" => (JsonFunc::Object, Json),
         "jsonb_object" => (JsonFunc::Object, Jsonb),
         "to_json" => (JsonFunc::ToJson, Json),
@@ -202,6 +228,92 @@ fn json_func(name: &str) -> Option<(JsonFunc, Flavour)> {
 /// chains.)
 pub(crate) fn is_json_func(name: &str) -> bool {
     json_func(name).is_some()
+}
+
+/// Is `name` one of the two record-mapping functions a *select list* evaluates
+/// as a scalar? (`*_populate_recordset`/`*_to_recordset` are set-returning and
+/// belong to `srf`.)
+pub(crate) fn is_record_func(name: &str) -> bool {
+    matches!(
+        json_func(name),
+        Some((JsonFunc::PopulateRecord | JsonFunc::ToRecord, _))
+    )
+}
+
+/// Evaluate a select-list `json_populate_record`/`jsonb_populate_record`, with
+/// the scope the declared row type is resolved against.
+///
+/// A `populate_record` call's result shape has two possible sources and needs
+/// both: `NULL::jpop` carries the composite only in its *declared* type, and
+/// `ROW(1, 2)` carries it only in its *value*. Neither alone answers both, so
+/// the declared type is tried first and the value is the fallback.
+pub(crate) fn eval_record_func(
+    fc: &FuncCall,
+    scope: &Scope,
+    ctx: &EvalCtx,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> Result<Datum, ExecError> {
+    let (f, flavour) = json_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
+    if f == JsonFunc::ToRecord {
+        // `json_to_record` returns `record` and a select list can say nothing
+        // about it; the arity/type checks still have to run first.
+        json_func_result_type(fc, scope)?;
+        return Err(crate::json_record::indeterminate_row_type(&fc.name));
+    }
+    let declared = json_func_result_type(fc, scope)?;
+    let args = exprs_of(fc)?;
+    let mut vals: Vec<Datum> = args.iter().map(&mut eval_child).collect::<Result<_, _>>()?;
+    let given = crate::eval::value_arg_types(args, &vals);
+    crate::eval::coerce_unknown_args(args, &mut vals, &param_types(f, flavour, &given)?, ctx)?;
+    populate_record_value(fc, flavour, Some(declared), &vals, ctx)
+}
+
+/// The shared body of both entry points: resolve the shape, populate it, and
+/// rebuild the composite.
+fn populate_record_value(
+    fc: &FuncCall,
+    flavour: Flavour,
+    declared: Option<ColumnType>,
+    vals: &[Datum],
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    require_arity(
+        fc,
+        vals.len() == 2 || (vals.len() == 3 && flavour == Flavour::Json),
+    )?;
+    let base = match &vals[0] {
+        Datum::Record(record) => Some(record),
+        _ => None,
+    };
+    let (shape, named) = match declared.and_then(crate::json_record::RecordShape::of) {
+        Some(shape) => (
+            shape,
+            declared.and_then(|ty| match ty {
+                ColumnType::Record(named) => named,
+                _ => None,
+            }),
+        ),
+        None => match base {
+            Some(base) => (crate::json_record::RecordShape::of_value(base), base.ty),
+            None => return Err(crate::json_record::indeterminate_row_type(&fc.name)),
+        },
+    };
+    let values = if vals[1].is_null() {
+        crate::json_record::populate_missing(&shape, base, ctx)?
+    } else {
+        let node = crate::json_record::Node::of(&vals[1], flavour.populate())?;
+        crate::json_record::populate(&shape, base, node, ctx)?
+    };
+    let fields: Vec<String> = shape
+        .fields
+        .iter()
+        .map(|(field, _)| field.clone())
+        .collect();
+    Ok(Datum::Record(crabka_pgtypes::RecordValue::named(
+        named,
+        fields.into(),
+        values,
+    )))
 }
 
 // ---- argument-type resolution ----
@@ -260,6 +372,18 @@ fn param_types(
         JsonFunc::Pretty => vec![jsonb],
         JsonFunc::DeletePath => vec![jsonb, ColumnType::array_of(ColumnType::Text)],
         JsonFunc::Object => vec![ColumnType::array_of(ColumnType::Text); n.max(1)],
+        // `(anyelement, doc)`: only the document position resolves a literal —
+        // the row-type argument is polymorphic, so an `unknown` there is 42804.
+        JsonFunc::PopulateRecord => {
+            if given.first().is_some_and(|a| a.is_unknown()) {
+                return Err(crate::eval::undetermined_polymorphic_type());
+            }
+            // The third parameter is `json_populate_record`'s vestigial
+            // `use_json_as_text boolean DEFAULT false`; `jsonb_populate_record`
+            // has no such parameter, so a third argument there is 42883.
+            vec![None, doc, Some(ColumnType::Bool)]
+        }
+        JsonFunc::ToRecord => vec![doc],
         // `(jsonb, jsonpath [, jsonb vars [, boolean silent]])`.
         JsonFunc::PathExists
         | JsonFunc::PathMatch
@@ -330,6 +454,24 @@ pub(crate) fn json_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colu
                 return Err(undefined_function(&fc.name));
             }
             doc
+        }
+        // A select-list call's row type can only come from its own argument, and
+        // for the anonymous `record` only the *value* has one: `ROW(1, 2)` and
+        // `NULL::record` are one type here and two different answers — a row of
+        // two fields, and the 0A000 below. So the refusal is deferred to
+        // [`eval_json`], which has the value.
+        JsonFunc::PopulateRecord => {
+            require_arity(fc, n == 2 || (n == 3 && flavour == Flavour::Json))?;
+            require_document_arg(fc, doc, types[1])?;
+            match types[0] {
+                ty @ ColumnType::Record(_) => ty,
+                _ => return Err(undefined_function(&fc.name)),
+            }
+        }
+        JsonFunc::ToRecord => {
+            require_arity(fc, n == 1)?;
+            require_document_arg(fc, doc, types[0])?;
+            return Err(crate::json_record::indeterminate_row_type(&fc.name));
         }
         JsonFunc::ArrayLength => {
             require_arity(fc, n == 1)?;
@@ -609,6 +751,13 @@ pub(crate) fn eval_json(
             write_json(&vals[0], punct, ctx, &mut out)?;
             Ok(Datum::Json(out))
         }
+        // Reached only from the aggregate evaluator, which has no scope to read
+        // a declared row type from; [`eval_record_func`] is the scoped entry
+        // point every other caller takes.
+        JsonFunc::PopulateRecord => populate_record_value(fc, flavour, None, &vals, ctx),
+        // Unreachable in practice: `json_func_result_type` has already refused
+        // the call, and every path that evaluates one types it first.
+        JsonFunc::ToRecord => Err(crate::json_record::indeterminate_row_type(&fc.name)),
         JsonFunc::StripNulls => {
             require_arity(fc, n == 1 || n == 2)?;
             if vals.iter().any(Datum::is_null) {
