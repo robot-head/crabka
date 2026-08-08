@@ -13,6 +13,11 @@
 //! hold a catalog handle. The durable definition still lives in the catalog;
 //! accepted DDL publishes an atomic catalog-snapshot delta here, and catalog
 //! rollback publishes the inverse delta.
+//!
+//! Process-wide is *not* the same as per-catalog, and conflating the two is a
+//! known defect — see [`CatalogTypes`], which owns all of the mutable state in
+//! this module so that giving each catalog its own instance is a local change
+//! rather than a rewrite.
 
 use std::{
     collections::HashMap,
@@ -333,8 +338,13 @@ pub const USER_TYPE_DEFAULT_SCHEMA: &str = "public";
 /// type oid and its backing `pg_class` relation oid never collide.
 const OID_STRIDE: u32 = 4;
 
+/// The name and oid indexes of one [`CatalogTypes`], plus its oid counter.
+///
+/// Every map here is keyed by a SQL name or an oid, both of which are only
+/// meaningful within a single catalog — which is why this lives inside
+/// [`CatalogTypes`] rather than in a `static` of its own.
 #[derive(Default)]
-struct Registry {
+struct TypeIndex {
     by_identity: HashMap<(String, String), u32>,
     by_lower_name: HashMap<String, u32>,
     multirange_by_identity: HashMap<(String, String), u32>,
@@ -343,14 +353,389 @@ struct Registry {
     next_oid: u32,
 }
 
-fn registry() -> &'static RwLock<Registry> {
-    static REGISTRY: OnceLock<RwLock<Registry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        RwLock::new(Registry {
-            next_oid: FIRST_USER_TYPE_OID,
-            ..Registry::default()
-        })
-    })
+impl TypeIndex {
+    /// Forget every SQL name that resolves to `oid`, keeping the oid itself
+    /// resolvable so stored rows still decode.
+    fn remove_name_mappings(&mut self, oid: u32) {
+        self.by_identity.retain(|_, found| *found != oid);
+        self.by_lower_name.retain(|_, found| *found != oid);
+        self.multirange_by_identity.retain(|_, found| *found != oid);
+        self.multirange_by_lower_name
+            .retain(|_, found| *found != oid);
+    }
+
+    /// Index `ty` under every name it answers to, and keep the oid counter
+    /// ahead of it.
+    fn insert(&mut self, ty: &UserType) {
+        let qualified_name = ty.qualified_name();
+        self.by_identity
+            .insert((ty.schema.clone(), ty.name.clone()), ty.oid);
+        self.by_lower_name
+            .insert(qualified_name.to_ascii_lowercase(), ty.oid);
+        if let Some(companion) = ty.multirange_name() {
+            self.multirange_by_lower_name
+                .insert(companion.to_ascii_lowercase(), ty.oid);
+        }
+        if let Some(identity) = ty.multirange_identity() {
+            self.multirange_by_identity.insert(identity, ty.oid);
+        }
+        self.by_oid.insert(ty.oid, ty.clone());
+        self.next_oid = self.next_oid.max(ty.oid + OID_STRIDE);
+    }
+}
+
+/// The user-defined types of **one catalog**: the name and oid indexes, the oid
+/// counter, and the cache of leaked `&'static ColumnType`s that a [`DomainRef`]
+/// base or a [`RangeRef`] subtype points at.
+///
+/// # Why this is a struct and must stay one
+///
+/// Nothing here is process-global data. Oids are handed out from a per-catalog
+/// KV counter, and names resolve against one catalog's `pg_type`. Yet every
+/// operation below is reached today through a single process-wide singleton
+/// (`catalog_types()`), so two `SqlEngine`s in one process assign the same oid
+/// to different types and then resolve each other's type names — the last
+/// engine to hydrate its catalog on session open wins, repeatedly.
+///
+/// The leaked-`ColumnType` cache aliases the same way and more quietly:
+/// [`UserTypeRef`], [`DomainRef`], [`RangeRef`] and [`MultirangeRef`] all
+/// compare on the oid alone, on the assumption that two references to the same
+/// type agree on everything else. Two catalogs break that assumption, so one
+/// catalog's leaked value is handed to another under the wrong name and over
+/// the wrong base type, permanently, behind a `&'static`. Adding the name to
+/// the cache key does not fix it — two catalogs whose `public.zdom` is oid
+/// 300000 over different bases still collide.
+///
+/// Gathering the state behind one owner is the first stage of the fix; the
+/// remaining stage keys these instances by catalog and resolves through the
+/// caller's catalog instead of the singleton. **Do not flatten this back into
+/// free functions over `static`s.** The free functions further down are
+/// deliberately thin delegates to the singleton, and exist only so that stage
+/// one changed no call sites.
+pub struct CatalogTypes {
+    /// Guarded separately from [`Self::leaked_column_types`] because
+    /// [`Self::column_type_for_name`] materialises a `ColumnType` — and so
+    /// reaches the leak cache — while still holding this read guard.
+    index: RwLock<TypeIndex>,
+    /// Deduplicated `&'static ColumnType`s, so a `Copy` [`DomainRef`] can point
+    /// at its base type. Bounded by the number of distinct base and subtype
+    /// shapes the catalog ever sees, i.e. by DDL, not by traffic.
+    leaked_column_types: RwLock<Vec<&'static ColumnType>>,
+}
+
+/// The process-wide [`CatalogTypes`]. Every free function in this module goes
+/// through here; see [`CatalogTypes`] for why that is a defect and not a design.
+fn catalog_types() -> &'static CatalogTypes {
+    static CATALOG_TYPES: OnceLock<CatalogTypes> = OnceLock::new();
+    CATALOG_TYPES.get_or_init(CatalogTypes::new)
+}
+
+impl CatalogTypes {
+    /// A catalog with no user-defined types, ready to hand out oids from
+    /// [`FIRST_USER_TYPE_OID`].
+    fn new() -> Self {
+        Self {
+            index: RwLock::new(TypeIndex {
+                next_oid: FIRST_USER_TYPE_OID,
+                ..TypeIndex::default()
+            }),
+            leaked_column_types: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Register `body` under `name`, allocating a fresh oid, and return the
+    /// registered type. See [`register`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    #[must_use]
+    pub fn register(&self, name: &str, body: UserTypeBody) -> UserType {
+        let mut guard = self.index.write().expect("user type registry is healthy");
+        let oid = guard.next_oid;
+        guard.next_oid += OID_STRIDE;
+        let ty = UserType {
+            oid,
+            schema: USER_TYPE_DEFAULT_SCHEMA.to_string(),
+            name: name.to_string(),
+            body,
+        };
+        let qualified_name = ty.qualified_name();
+        guard
+            .by_identity
+            .insert((ty.schema.clone(), ty.name.clone()), oid);
+        guard
+            .by_lower_name
+            .insert(qualified_name.to_ascii_lowercase(), oid);
+        if let Some(companion) = ty.multirange_name() {
+            guard
+                .multirange_by_lower_name
+                .insert(companion.to_ascii_lowercase(), oid);
+        }
+        if let Some(identity) = ty.multirange_identity() {
+            guard.multirange_by_identity.insert(identity, oid);
+        }
+        guard.by_oid.insert(oid, ty.clone());
+        // Intern eagerly so `column_type()` never has to take the interner lock
+        // while the registry lock is held.
+        drop(guard);
+        let _ = intern(&qualified_name);
+        ty
+    }
+
+    /// Re-register a type that already has an oid. See [`replace`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    pub fn replace(&self, ty: &UserType) {
+        let qualified_name = ty.qualified_name();
+        let _ = intern(&qualified_name);
+        if let Some(companion) = ty.multirange_name() {
+            let _ = intern(&companion);
+        }
+        let mut guard = self.index.write().expect("user type registry is healthy");
+        guard.remove_name_mappings(ty.oid);
+        guard.insert(ty);
+    }
+
+    /// Atomically publish the user-type changes between two durable catalog
+    /// snapshots. See [`publish_catalog_delta`].
+    ///
+    /// The whole delta is applied under a single write guard, so no reader can
+    /// observe it half-applied.
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    pub fn publish_catalog_delta(&self, before: &[UserType], after: &[UserType]) {
+        let before_by_oid = before
+            .iter()
+            .map(|ty| (ty.oid, ty))
+            .collect::<HashMap<_, _>>();
+        let after_by_oid = after
+            .iter()
+            .map(|ty| (ty.oid, ty))
+            .collect::<HashMap<_, _>>();
+        let changed_after = after
+            .iter()
+            .filter(|ty| before_by_oid.get(&ty.oid).copied() != Some(*ty))
+            .collect::<Vec<_>>();
+
+        // Intern before taking the registry lock: constructing a ColumnType from
+        // the newly published definition may take the interner lock in the other
+        // order.
+        for ty in &changed_after {
+            let _ = intern(&ty.qualified_name());
+            if let Some(companion) = ty.multirange_name() {
+                let _ = intern(&companion);
+            }
+        }
+
+        let mut guard = self.index.write().expect("user type registry is healthy");
+        for ty in before {
+            if after_by_oid.get(&ty.oid).copied() != Some(ty) {
+                guard.remove_name_mappings(ty.oid);
+            }
+        }
+        for ty in changed_after {
+            guard.insert(ty);
+        }
+    }
+
+    /// Forget the type named `name`. See [`unregister`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    pub fn unregister(&self, name: &str) {
+        // Only the NAME is forgotten. The oid keeps resolving, because a stored row
+        // encodes its column's type oid: rows written before the drop still have to
+        // decode afterwards, and the background vacuum reads exactly those rows when
+        // it prunes a dropped table. Removing the oid too made every later read of
+        // that data a `corrupt row encoding: column type oid N is not a registered
+        // type`, and the vacuum then failed on every pass, forever.
+        //
+        // Dropping the name is what makes the type unreachable from SQL — a new
+        // reference is 42704 and `CREATE TYPE` may reuse the name with a fresh oid.
+        let mut guard = self.index.write().expect("user type registry is healthy");
+        if let Some(oid) = guard.by_lower_name.remove(&name.to_ascii_lowercase()) {
+            guard.by_identity.retain(|_, found| *found != oid);
+            guard
+                .multirange_by_identity
+                .retain(|_, found| *found != oid);
+            guard
+                .multirange_by_lower_name
+                .retain(|_, found| *found != oid);
+        }
+    }
+
+    /// Forget one exact `(schema, name)` identity. See [`unregister_in`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    pub fn unregister_in(&self, schema: &str, name: &str) {
+        let mut guard = self.index.write().expect("user type registry is healthy");
+        let identity = (schema.to_string(), name.to_string());
+        if let Some(oid) = guard.by_identity.remove(&identity) {
+            guard.by_lower_name.retain(|_, found| *found != oid);
+            guard
+                .multirange_by_identity
+                .retain(|_, found| *found != oid);
+            guard
+                .multirange_by_lower_name
+                .retain(|_, found| *found != oid);
+        }
+    }
+
+    /// The type registered under `name`, case-insensitively. See [`lookup`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    #[must_use]
+    pub fn lookup(&self, name: &str) -> Option<UserType> {
+        let guard = self.index.read().expect("user type registry is healthy");
+        let lower_name = name.to_ascii_lowercase();
+        let oid = *guard
+            .by_identity
+            .get(&(USER_TYPE_DEFAULT_SCHEMA.to_string(), name.to_string()))
+            .or_else(|| guard.by_lower_name.get(&lower_name))?;
+        guard.by_oid.get(&oid).cloned()
+    }
+
+    /// The type with this exact structured identity. See [`lookup_in`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    #[must_use]
+    pub fn lookup_in(&self, schema: &str, name: &str) -> Option<UserType> {
+        let guard = self.index.read().expect("user type registry is healthy");
+        let oid = *guard
+            .by_identity
+            .get(&(schema.to_string(), name.to_string()))?;
+        guard.by_oid.get(&oid).cloned()
+    }
+
+    /// The type with this oid. See [`lookup_oid`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    #[must_use]
+    pub fn lookup_oid(&self, oid: u32) -> Option<UserType> {
+        self.index
+            .read()
+            .expect("user type registry is healthy")
+            .by_oid
+            .get(&oid)
+            .cloned()
+    }
+
+    /// Every registered type, ordered by oid. See [`all`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    #[must_use]
+    pub fn all(&self) -> Vec<UserType> {
+        let guard = self.index.read().expect("user type registry is healthy");
+        let mut types: Vec<UserType> = guard.by_oid.values().cloned().collect();
+        types.sort_by_key(|ty| ty.oid);
+        types
+    }
+
+    /// The `ColumnType` a SQL type name resolves to. See
+    /// [`column_type_for_name`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    #[must_use]
+    pub fn column_type_for_name(&self, name: &str) -> Option<ColumnType> {
+        if let Some(ty) = self.lookup(name) {
+            return Some(ty.column_type());
+        }
+        let guard = self.index.read().expect("user type registry is healthy");
+        let oid = *guard
+            .multirange_by_lower_name
+            .get(&name.to_ascii_lowercase())?;
+        guard.by_oid.get(&oid)?.multirange_type()
+    }
+
+    /// Resolve an exact schema and unqualified user-type name. See
+    /// [`column_type_for_name_in`].
+    ///
+    /// # Panics
+    ///
+    /// If the type-index lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    #[must_use]
+    pub fn column_type_for_name_in(&self, schema: &str, name: &str) -> Option<ColumnType> {
+        if let Some(ty) = self.lookup_in(schema, name) {
+            return Some(ty.column_type());
+        }
+        let guard = self.index.read().expect("user type registry is healthy");
+        let oid = *guard
+            .multirange_by_identity
+            .get(&(schema.to_string(), name.to_string()))?;
+        guard.by_oid.get(&oid)?.multirange_type()
+    }
+
+    /// Resolve either a user type oid or its derived multirange oid. See
+    /// [`column_type_for_oid`].
+    #[must_use]
+    pub fn column_type_for_oid(&self, oid: u32) -> Option<ColumnType> {
+        if let Some(ty) = self.lookup_oid(oid) {
+            return Some(ty.column_type());
+        }
+        self.lookup_oid(oid.checked_sub(3)?)?.multirange_type()
+    }
+
+    /// Leak `ty` — or return the equal value already leaked — so a `Copy`
+    /// [`DomainRef`] or [`RangeRef`] can point at it.
+    ///
+    /// "Equal" is [`ColumnType`]'s `PartialEq`, which for a user-type base or
+    /// subtype is the oid alone. That is why this cache belongs to a catalog:
+    /// shared between two of them it returns the wrong type entirely.
+    ///
+    /// # Panics
+    ///
+    /// If the leak-cache lock is poisoned, which can only happen if another
+    /// thread panicked while holding it.
+    fn leak_column_type(&self, ty: ColumnType) -> &'static ColumnType {
+        if let Some(found) = self
+            .leaked_column_types
+            .read()
+            .expect("leaked column types are not poisoned")
+            .iter()
+            .find(|candidate| ***candidate == ty)
+        {
+            return found;
+        }
+        let mut guard = self
+            .leaked_column_types
+            .write()
+            .expect("leaked column types are not poisoned");
+        if let Some(found) = guard.iter().find(|candidate| ***candidate == ty) {
+            return found;
+        }
+        let leaked: &'static ColumnType = Box::leak(Box::new(ty));
+        guard.push(leaked);
+        leaked
+    }
 }
 
 fn interner() -> &'static RwLock<HashMap<String, &'static str>> {
@@ -363,6 +748,12 @@ fn interner() -> &'static RwLock<HashMap<String, &'static str>> {
 /// [`intern`] is what makes `ColumnType::name() -> &'static str` work for a type
 /// whose name is only known at run time. The leak is bounded by the number of
 /// distinct type names a process ever sees, i.e. by DDL, not by traffic.
+///
+/// Unlike [`CatalogTypes`], this map is legitimately process-wide: it is keyed
+/// by the name and its value *is* the same name, so two catalogs that both have
+/// a `public.zdom` share one `&'static str` spelling `"public.zdom"` and neither
+/// can learn anything about the other from it. Nothing about a type's identity
+/// travels through here.
 ///
 /// # Panics
 ///
@@ -389,30 +780,20 @@ pub fn intern(name: &str) -> &'static str {
     leaked
 }
 
-/// Intern a [`ColumnType`] so a [`DomainRef`] can point at it.
+/// Intern a [`ColumnType`] so a [`DomainRef`] can point at it, through the
+/// process-wide [`CatalogTypes`].
 fn leak_column_type(ty: ColumnType) -> &'static ColumnType {
-    static LEAKED: OnceLock<RwLock<Vec<&'static ColumnType>>> = OnceLock::new();
-    let cache = LEAKED.get_or_init(|| RwLock::new(Vec::new()));
-    if let Some(found) = cache
-        .read()
-        .expect("leaked column types are not poisoned")
-        .iter()
-        .find(|candidate| ***candidate == ty)
-    {
-        return found;
-    }
-    let mut guard = cache.write().expect("leaked column types are not poisoned");
-    if let Some(found) = guard.iter().find(|candidate| ***candidate == ty) {
-        return found;
-    }
-    let leaked: &'static ColumnType = Box::leak(Box::new(ty));
-    guard.push(leaked);
-    leaked
+    catalog_types().leak_column_type(ty)
 }
 
-/// Register `body` under `name` with a fresh oid, and return the registered
-/// type. This function replaces an existing registration under the same name.
-/// Callers enforce `PostgreSQL`'s duplicate-name rule (42710) before they get
+// Everything below delegates to the process-wide `CatalogTypes`. The delegates
+// are the compatibility layer for callers that have no catalog handle; when a
+// caller acquires one it should call the `CatalogTypes` method directly rather
+// than growing another free function here.
+
+/// Register `body` under `name`, allocating a fresh oid, and return the
+/// registered type. An existing registration under the same name is replaced —
+/// callers enforce `PostgreSQL`'s duplicate-name rule (42710) before getting
 /// here, and DDL that legitimately replaces a definition (`ALTER TYPE`) goes
 /// through [`replace`].
 ///
@@ -422,36 +803,7 @@ fn leak_column_type(ty: ColumnType) -> &'static ColumnType {
 /// happen if another thread panicked while holding it.
 #[must_use]
 pub fn register(name: &str, body: UserTypeBody) -> UserType {
-    let mut guard = registry().write().expect("user type registry is healthy");
-    let oid = guard.next_oid;
-    guard.next_oid += OID_STRIDE;
-    let ty = UserType {
-        oid,
-        schema: USER_TYPE_DEFAULT_SCHEMA.to_string(),
-        name: name.to_string(),
-        body,
-    };
-    let qualified_name = ty.qualified_name();
-    guard
-        .by_identity
-        .insert((ty.schema.clone(), ty.name.clone()), oid);
-    guard
-        .by_lower_name
-        .insert(qualified_name.to_ascii_lowercase(), oid);
-    if let Some(companion) = ty.multirange_name() {
-        guard
-            .multirange_by_lower_name
-            .insert(companion.to_ascii_lowercase(), oid);
-    }
-    if let Some(identity) = ty.multirange_identity() {
-        guard.multirange_by_identity.insert(identity, oid);
-    }
-    guard.by_oid.insert(oid, ty.clone());
-    // Intern eagerly so `column_type()` never has to take the interner lock
-    // while the registry lock is held.
-    drop(guard);
-    let _ = intern(&qualified_name);
-    ty
+    catalog_types().register(name, body)
 }
 
 /// Re-register a type that already has an oid: the catalog-hydration path and
@@ -462,14 +814,7 @@ pub fn register(name: &str, body: UserTypeBody) -> UserType {
 /// If the process-wide user-type registry lock is poisoned, which can only
 /// happen if another thread panicked while holding it.
 pub fn replace(ty: &UserType) {
-    let qualified_name = ty.qualified_name();
-    let _ = intern(&qualified_name);
-    if let Some(companion) = ty.multirange_name() {
-        let _ = intern(&companion);
-    }
-    let mut guard = registry().write().expect("user type registry is healthy");
-    remove_name_mappings(&mut guard, ty.oid);
-    insert_type(&mut guard, ty);
+    catalog_types().replace(ty);
 }
 
 /// Atomically publish the user-type changes between two durable catalog
@@ -483,69 +828,7 @@ pub fn replace(ty: &UserType) {
 /// If the process-wide user-type registry lock is poisoned, which can only
 /// happen if another thread panicked while holding it.
 pub fn publish_catalog_delta(before: &[UserType], after: &[UserType]) {
-    let before_by_oid = before
-        .iter()
-        .map(|ty| (ty.oid, ty))
-        .collect::<HashMap<_, _>>();
-    let after_by_oid = after
-        .iter()
-        .map(|ty| (ty.oid, ty))
-        .collect::<HashMap<_, _>>();
-    let changed_after = after
-        .iter()
-        .filter(|ty| before_by_oid.get(&ty.oid).copied() != Some(*ty))
-        .collect::<Vec<_>>();
-
-    // Intern before taking the registry lock: constructing a ColumnType from
-    // the newly published definition may take the interner lock in the other
-    // order.
-    for ty in &changed_after {
-        let _ = intern(&ty.qualified_name());
-        if let Some(companion) = ty.multirange_name() {
-            let _ = intern(&companion);
-        }
-    }
-
-    let mut guard = registry().write().expect("user type registry is healthy");
-    for ty in before {
-        if after_by_oid.get(&ty.oid).copied() != Some(ty) {
-            remove_name_mappings(&mut guard, ty.oid);
-        }
-    }
-    for ty in changed_after {
-        insert_type(&mut guard, ty);
-    }
-}
-
-fn remove_name_mappings(registry: &mut Registry, oid: u32) {
-    registry.by_identity.retain(|_, found| *found != oid);
-    registry.by_lower_name.retain(|_, found| *found != oid);
-    registry
-        .multirange_by_identity
-        .retain(|_, found| *found != oid);
-    registry
-        .multirange_by_lower_name
-        .retain(|_, found| *found != oid);
-}
-
-fn insert_type(registry: &mut Registry, ty: &UserType) {
-    let qualified_name = ty.qualified_name();
-    registry
-        .by_identity
-        .insert((ty.schema.clone(), ty.name.clone()), ty.oid);
-    registry
-        .by_lower_name
-        .insert(qualified_name.to_ascii_lowercase(), ty.oid);
-    if let Some(companion) = ty.multirange_name() {
-        registry
-            .multirange_by_lower_name
-            .insert(companion.to_ascii_lowercase(), ty.oid);
-    }
-    if let Some(identity) = ty.multirange_identity() {
-        registry.multirange_by_identity.insert(identity, ty.oid);
-    }
-    registry.by_oid.insert(ty.oid, ty.clone());
-    registry.next_oid = registry.next_oid.max(ty.oid + OID_STRIDE);
+    catalog_types().publish_catalog_delta(before, after);
 }
 
 /// Forget the type named `name` (`DROP TYPE` / `DROP DOMAIN`).
@@ -555,25 +838,7 @@ fn insert_type(registry: &mut Registry, ty: &UserType) {
 /// If the process-wide user-type registry lock is poisoned, which can only
 /// happen if another thread panicked while holding it.
 pub fn unregister(name: &str) {
-    // Only the NAME is forgotten. The oid keeps resolving, because a stored row
-    // encodes its column's type oid: rows written before the drop still have to
-    // decode afterwards, and the background vacuum reads exactly those rows when
-    // it prunes a dropped table. Removing the oid too made every later read of
-    // that data a `corrupt row encoding: column type oid N is not a registered
-    // type`, and the vacuum then failed on every pass, forever.
-    //
-    // Dropping the name is what makes the type unreachable from SQL — a new
-    // reference is 42704 and `CREATE TYPE` may reuse the name with a fresh oid.
-    let mut guard = registry().write().expect("user type registry is healthy");
-    if let Some(oid) = guard.by_lower_name.remove(&name.to_ascii_lowercase()) {
-        guard.by_identity.retain(|_, found| *found != oid);
-        guard
-            .multirange_by_identity
-            .retain(|_, found| *found != oid);
-        guard
-            .multirange_by_lower_name
-            .retain(|_, found| *found != oid);
-    }
+    catalog_types().unregister(name);
 }
 
 /// Forget one exact `(schema, name)` identity while retaining the legacy raw-
@@ -584,17 +849,7 @@ pub fn unregister(name: &str) {
 /// If the process-wide user-type registry lock is poisoned, which can only
 /// happen if another thread panicked while holding it.
 pub fn unregister_in(schema: &str, name: &str) {
-    let mut guard = registry().write().expect("user type registry is healthy");
-    let identity = (schema.to_string(), name.to_string());
-    if let Some(oid) = guard.by_identity.remove(&identity) {
-        guard.by_lower_name.retain(|_, found| *found != oid);
-        guard
-            .multirange_by_identity
-            .retain(|_, found| *found != oid);
-        guard
-            .multirange_by_lower_name
-            .retain(|_, found| *found != oid);
-    }
+    catalog_types().unregister_in(schema, name);
 }
 
 /// The type registered under `name`, matched case-insensitively on the already
@@ -606,13 +861,7 @@ pub fn unregister_in(schema: &str, name: &str) {
 /// happen if another thread panicked while holding it.
 #[must_use]
 pub fn lookup(name: &str) -> Option<UserType> {
-    let guard = registry().read().expect("user type registry is healthy");
-    let lower_name = name.to_ascii_lowercase();
-    let oid = *guard
-        .by_identity
-        .get(&(USER_TYPE_DEFAULT_SCHEMA.to_string(), name.to_string()))
-        .or_else(|| guard.by_lower_name.get(&lower_name))?;
-    guard.by_oid.get(&oid).cloned()
+    catalog_types().lookup(name)
 }
 
 /// The type with this exact structured identity.
@@ -623,11 +872,7 @@ pub fn lookup(name: &str) -> Option<UserType> {
 /// happen if another thread panicked while holding it.
 #[must_use]
 pub fn lookup_in(schema: &str, name: &str) -> Option<UserType> {
-    let guard = registry().read().expect("user type registry is healthy");
-    let oid = *guard
-        .by_identity
-        .get(&(schema.to_string(), name.to_string()))?;
-    guard.by_oid.get(&oid).cloned()
+    catalog_types().lookup_in(schema, name)
 }
 
 /// The type with this oid.
@@ -638,12 +883,7 @@ pub fn lookup_in(schema: &str, name: &str) -> Option<UserType> {
 /// happen if another thread panicked while holding it.
 #[must_use]
 pub fn lookup_oid(oid: u32) -> Option<UserType> {
-    registry()
-        .read()
-        .expect("user type registry is healthy")
-        .by_oid
-        .get(&oid)
-        .cloned()
+    catalog_types().lookup_oid(oid)
 }
 
 /// Every registered type, ordered by oid so catalog scans are deterministic.
@@ -654,10 +894,7 @@ pub fn lookup_oid(oid: u32) -> Option<UserType> {
 /// happen if another thread panicked while holding it.
 #[must_use]
 pub fn all() -> Vec<UserType> {
-    let guard = registry().read().expect("user type registry is healthy");
-    let mut types: Vec<UserType> = guard.by_oid.values().cloned().collect();
-    types.sort_by_key(|ty| ty.oid);
-    types
+    catalog_types().all()
 }
 
 /// The `ColumnType` a SQL type name resolves to when it is not built in.
@@ -669,14 +906,7 @@ pub fn all() -> Vec<UserType> {
 /// happen if another thread panicked while holding it.
 #[must_use]
 pub fn column_type_for_name(name: &str) -> Option<ColumnType> {
-    if let Some(ty) = lookup(name) {
-        return Some(ty.column_type());
-    }
-    let guard = registry().read().expect("user type registry is healthy");
-    let oid = *guard
-        .multirange_by_lower_name
-        .get(&name.to_ascii_lowercase())?;
-    guard.by_oid.get(&oid)?.multirange_type()
+    catalog_types().column_type_for_name(name)
 }
 
 /// Resolve an exact schema and unqualified user-type name.
@@ -687,23 +917,13 @@ pub fn column_type_for_name(name: &str) -> Option<ColumnType> {
 /// happen if another thread panicked while holding it.
 #[must_use]
 pub fn column_type_for_name_in(schema: &str, name: &str) -> Option<ColumnType> {
-    if let Some(ty) = lookup_in(schema, name) {
-        return Some(ty.column_type());
-    }
-    let guard = registry().read().expect("user type registry is healthy");
-    let oid = *guard
-        .multirange_by_identity
-        .get(&(schema.to_string(), name.to_string()))?;
-    guard.by_oid.get(&oid)?.multirange_type()
+    catalog_types().column_type_for_name_in(schema, name)
 }
 
 /// Resolve either a user type oid or its derived multirange oid.
 #[must_use]
 pub fn column_type_for_oid(oid: u32) -> Option<ColumnType> {
-    if let Some(ty) = lookup_oid(oid) {
-        return Some(ty.column_type());
-    }
-    lookup_oid(oid.checked_sub(3)?)?.multirange_type()
+    catalog_types().column_type_for_oid(oid)
 }
 
 /// Derives the default multirange companion name for a range type.
@@ -901,5 +1121,135 @@ mod tests {
         assert!(all().iter().any(|ty| ty.oid == a.oid));
         unregister("ut_oid_a");
         unregister("ut_oid_b");
+    }
+
+    /// The premise behind [`CatalogTypes`] owning its leak cache: every
+    /// user-type reference compares on the oid alone, so a cache keyed on
+    /// `ColumnType` equality treats two catalogs' distinct types at the same
+    /// oid as one value — with the wrong name *and* the wrong base or subtype.
+    /// Adding the name to the key would not help, as the range/multirange rows
+    /// here show.
+    #[test]
+    fn user_type_refs_compare_on_the_oid_alone() {
+        let subrange = |oid, name, subtype| RangeRef { oid, name, subtype };
+        let cases: [(&str, ColumnType, ColumnType); 5] = [
+            (
+                "record",
+                ColumnType::Record(Some(UserTypeRef {
+                    oid: 300_000,
+                    name: "public.zcomp",
+                })),
+                ColumnType::Record(Some(UserTypeRef {
+                    oid: 300_000,
+                    name: "public.zother",
+                })),
+            ),
+            (
+                "enum",
+                ColumnType::Enum(UserTypeRef {
+                    oid: 300_000,
+                    name: "public.zenum",
+                }),
+                ColumnType::Enum(UserTypeRef {
+                    oid: 300_000,
+                    name: "public.zother",
+                }),
+            ),
+            (
+                "domain over a different base",
+                ColumnType::Domain(DomainRef {
+                    oid: 300_000,
+                    name: "public.zdom",
+                    base: &ColumnType::Int4,
+                }),
+                ColumnType::Domain(DomainRef {
+                    oid: 300_000,
+                    name: "public.zdom",
+                    base: &ColumnType::Text,
+                }),
+            ),
+            (
+                "range over a different subtype",
+                ColumnType::Range(subrange(300_000, "public.zrange", &ColumnType::Int4)),
+                ColumnType::Range(subrange(300_000, "public.zrange", &ColumnType::Text)),
+            ),
+            (
+                "multirange over a different range",
+                ColumnType::Multirange(MultirangeRef {
+                    oid: 300_003,
+                    name: "public.zmultirange",
+                    range: subrange(300_000, "public.zrange", &ColumnType::Int4),
+                }),
+                ColumnType::Multirange(MultirangeRef {
+                    oid: 300_003,
+                    name: "public.zmultirange",
+                    range: subrange(300_004, "public.zother", &ColumnType::Text),
+                }),
+            ),
+        ];
+        for (label, left, right) in cases {
+            assert!(
+                left == right,
+                "{label}: equality must ignore everything but the oid"
+            );
+        }
+    }
+
+    /// Two catalogs allocate from independent counters, so both hand out
+    /// oid [`FIRST_USER_TYPE_OID`] to *different* types. Because those types
+    /// then compare equal (see above), a shared leak cache would return one
+    /// catalog's `&'static ColumnType` to the other, permanently. Owning the
+    /// cache per [`CatalogTypes`] is what keeps them apart.
+    #[test]
+    fn each_catalog_leaks_its_own_column_types() {
+        let first = CatalogTypes::new();
+        let second = CatalogTypes::new();
+
+        let first_enum = first.register("zleak_first", UserTypeBody::Enum(vec!["a".into()]));
+        let second_enum = second.register("zleak_second", UserTypeBody::Enum(vec!["b".into()]));
+        assert!(first_enum.oid == second_enum.oid);
+
+        let first_leaked = first.leak_column_type(first_enum.column_type());
+        let second_leaked = second.leak_column_type(second_enum.column_type());
+
+        // Equal by the oid-only comparison, which is exactly the trap.
+        assert!(first_leaked == second_leaked);
+        assert!(!std::ptr::eq(first_leaked, second_leaked));
+
+        let (ColumnType::Enum(first_ref), ColumnType::Enum(second_ref)) =
+            (*first_leaked, *second_leaked)
+        else {
+            panic!("an enum type leaks as ColumnType::Enum");
+        };
+        assert!(first_ref.name == "zleak_first");
+        assert!(second_ref.name == "zleak_second");
+
+        // Within one catalog the cache still dedups to a single pointer.
+        assert!(std::ptr::eq(
+            first_leaked,
+            first.leak_column_type(first_enum.column_type())
+        ));
+    }
+
+    /// A catalog's own state is reachable only through its own methods: names
+    /// registered in one instance do not resolve in another, and neither
+    /// reaches the process-wide singleton the free functions use.
+    #[test]
+    fn catalog_instances_do_not_share_their_indexes() {
+        let first = CatalogTypes::new();
+        let second = CatalogTypes::new();
+
+        let registered = first.register("zindex_isolated", UserTypeBody::Composite(Vec::new()));
+
+        assert!(first.lookup("zindex_isolated").as_ref() == Some(&registered));
+        assert!(
+            first
+                .lookup_in(USER_TYPE_DEFAULT_SCHEMA, "zindex_isolated")
+                .is_some()
+        );
+        assert!(second.lookup("zindex_isolated").is_none());
+        assert!(second.lookup_oid(registered.oid).is_none());
+        assert!(lookup("zindex_isolated").is_none());
+        assert!(second.all().is_empty());
     }
 }
