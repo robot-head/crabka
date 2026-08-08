@@ -40,8 +40,23 @@ fn len_i32(len: usize) -> i32 {
     i32::try_from(len).expect("Postgres byte length fits in i32")
 }
 
+/// Write one protocol string: its bytes, then the terminating NUL.
+///
+/// An embedded NUL is dropped rather than written through. A client reads the
+/// field as ending at that byte and takes everything after it as the *next*
+/// field of the same message, so one stray NUL desynchronizes the whole frame
+/// — an `ErrorResponse` loses its message and grows a field nobody wrote. A
+/// real `PostgreSQL` server cannot emit one, every string it sends being a C
+/// string already; dropping the byte keeps crabka byte-exact for every input a
+/// real server could produce, and keeps an internal encoding that leaks into a
+/// message from corrupting the connection.
 fn put_cstr(out: &mut BytesMut, s: &str) {
-    out.put_slice(s.as_bytes());
+    let bytes = s.as_bytes();
+    if bytes.contains(&0) {
+        out.extend(bytes.iter().copied().filter(|byte| *byte != 0));
+    } else {
+        out.put_slice(bytes);
+    }
     out.put_u8(0);
 }
 
@@ -335,6 +350,51 @@ mod tests {
             error_response(&mut out, &err);
             assert2::assert!(&out[..] == expected);
         }
+    }
+
+    /// A NUL inside a protocol string would end its field early and leave the
+    /// remainder to be read as the *next* field — the message would lose its
+    /// text and grow a field nobody wrote. Every string a message carries is
+    /// checked, because the framing damage is the same wherever the byte gets
+    /// in.
+    #[test]
+    fn embedded_nuls_never_split_a_protocol_string() {
+        let mut out = BytesMut::new();
+        error_response(
+            &mut out,
+            &PgError::error(
+                sqlstate::SYNTAX_ERROR,
+                "column \"\0expr:(a * 2)\" does not exist",
+            ),
+        );
+        assert2::assert!(
+            &out[..]
+                == b"E\x00\x00\x00\x40SERROR\0VERROR\0C42601\0Mcolumn \"expr:(a * 2)\" does not \
+                     exist\0\0"
+                    .as_slice()
+        );
+
+        // The same guarantee for a column name, which is the other string a
+        // client parses positionally.
+        let mut out = BytesMut::new();
+        row_description(
+            &mut out,
+            &[FieldDescription {
+                name: "a\0b".into(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: 25,
+                type_size: -1,
+                type_modifier: -1,
+                format: 0,
+            }],
+        );
+        assert2::assert!(
+            &out[..]
+                == b"T\x00\x00\x00\x1b\x00\x01ab\0\x00\x00\x00\x00\x00\x00\
+                     \x00\x00\x00\x19\xff\xff\xff\xff\xff\xff\x00\x00"
+                    .as_slice()
+        );
     }
 
     #[test]

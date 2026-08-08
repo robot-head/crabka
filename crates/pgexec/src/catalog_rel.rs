@@ -1612,26 +1612,52 @@ fn pg_language_rows() -> Vec<Vec<Datum>> {
     .collect()
 }
 
-/// One row per column default.
+/// One row per column default *or* generation expression. `adbin` holds the
+/// source text — crabka stores both as text, so `pg_get_expr(adbin, adrelid)`
+/// is the identity.
 ///
-/// `adbin` holds the default's source text. Crabka stores defaults as text, so
-/// `pg_get_expr(adbin, adrelid)` is the identity.
+/// A generated column belongs here as much as a defaulted one: PostgreSQL keeps
+/// its expression in `pg_attrdef` too, and that is where psql's `\d` reads the
+/// body of `generated always as (…) stored` from. A column can carry only one
+/// of the two — `CREATE TABLE` refuses both together — so the pair is an
+/// either/or rather than two rows.
 fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    /// The source text `adbin` reports for one column, or `None` when the
+    /// column has neither a default nor a generation expression.
+    fn source_text(kv: &dyn Kv, column: &crabka_pgcatalog::Column) -> Option<String> {
+        if let Some(generated) = &column.generated {
+            // Stored bare, as the catalog holds it. PostgreSQL's non-pretty
+            // `pg_get_expr` wraps an operator expression in parens and its
+            // pretty form does not; crabka's `pg_get_expr` is the identity and
+            // has only one text to give, so this is the spelling psql's `\d`
+            // asks for — the one place the difference is visible.
+            return Some(generated.expr.clone());
+        }
+        let default = column.default.as_ref()?;
+        Some(crate::catalog_fn::default_source_text(
+            kv, default, column.ty,
+        ))
+    }
+
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(kv)? {
         let relid = table_relation_oid(table.id)?;
+        let sources = table
+            .columns
+            .iter()
+            .map(|column| source_text(kv, column))
+            .collect::<Vec<_>>();
         let keys = table
             .columns
             .iter()
             .enumerate()
-            .filter(|(_, column)| column.default.is_some())
-            .map(|(idx, column)| format!("{}.{}.{idx}", table.name, column.name))
+            .zip(&sources)
+            .filter(|(_, source)| source.is_some())
+            .map(|((idx, column), _)| format!("{}.{}.{idx}", table.name, column.name))
             .collect::<Vec<_>>();
         let oids = banded_oids(ATTRDEF_OID_BASE, &keys);
-        for (idx, column) in table.columns.iter().enumerate() {
-            let Some(default) = &column.default else {
-                continue;
-            };
+        for ((idx, column), source) in table.columns.iter().enumerate().zip(sources) {
+            let Some(source) = source else { continue };
             let key = format!("{}.{}.{idx}", table.name, column.name);
             let attnum = i16::try_from(idx + 1)
                 .map_err(|_| ExecError::Unsupported("attnum exceeds int2 range".into()))?;
@@ -1639,9 +1665,7 @@ fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(oids.get(&key).copied().unwrap_or(0)),
                 int(relid),
                 small(attnum),
-                text(&crate::catalog_fn::default_source_text(
-                    kv, default, column.ty,
-                )),
+                text(&source),
             ]);
         }
     }

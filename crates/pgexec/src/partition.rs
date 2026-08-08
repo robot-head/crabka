@@ -375,6 +375,72 @@ fn deserialize_child(bytes: &[u8]) -> Result<(RelationName, Bound), ExecError> {
     Ok((parent, bound))
 }
 
+// ── Deparsing ────────────────────────────────────────────────────────────────
+
+/// One bound value as `pg_get_expr(pg_class.relpartbound, …)` prints it.
+///
+/// A partition bound is *not* rendered like a stored default: PostgreSQL prints
+/// the bare literal, without the `::type` annotation
+/// [`crate::viewdef::const_text`] adds, and a NULL list bound as the word `NULL`
+/// rather than `NULL::text`. The two renderings must therefore stay separate,
+/// however similar they look.
+fn bound_datum_text(value: &Datum) -> String {
+    match value {
+        Datum::Null => "NULL".to_string(),
+        Datum::Bool(flag) => (if *flag { "true" } else { "false" }).to_string(),
+        Datum::Int2(n) => n.to_string(),
+        Datum::Int4(n) => n.to_string(),
+        Datum::Int8(n) => n.to_string(),
+        Datum::Float4(n) => n.to_string(),
+        Datum::Float8(n) => n.to_string(),
+        Datum::Numeric(n) => n.to_string(),
+        other => format!(
+            "'{}'",
+            crate::func::text_render(other, &jiff::tz::TimeZone::UTC).replace('\'', "''")
+        ),
+    }
+}
+
+fn range_side_text(side: &[RangeDatum]) -> String {
+    side.iter()
+        .map(|value| match value {
+            RangeDatum::MinValue => "MINVALUE".to_string(),
+            RangeDatum::MaxValue => "MAXVALUE".to_string(),
+            RangeDatum::Value(datum) => bound_datum_text(datum),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A stored bound as `pg_class.relpartbound` reports it — the very clause the
+/// partition was declared with, which is what psql echoes after `Partition of:`
+/// and in the `\d+` partition list.
+///
+/// The hash form spells its two keywords in lower case: that is PostgreSQL's
+/// own output, and it does not match the upper-case spelling the grammar
+/// accepts.
+pub(crate) fn bound_text(bound: &Bound) -> String {
+    match bound {
+        Bound::Default => "DEFAULT".to_string(),
+        Bound::List(values) => format!(
+            "FOR VALUES IN ({})",
+            values
+                .iter()
+                .map(bound_datum_text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Bound::Range { from, to } => format!(
+            "FOR VALUES FROM ({}) TO ({})",
+            range_side_text(from),
+            range_side_text(to)
+        ),
+        Bound::Hash { modulus, remainder } => {
+            format!("FOR VALUES WITH (modulus {modulus}, remainder {remainder})")
+        }
+    }
+}
+
 // ── Catalog reads ────────────────────────────────────────────────────────────
 
 /// The partition key of `name`, or `None` when `name` is not a partitioned

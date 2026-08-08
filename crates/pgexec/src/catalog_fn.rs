@@ -76,6 +76,9 @@ enum CatalogFunc {
     /// A definition-reconstruction function for an object kind crabka has none
     /// of. It is always NULL, like PostgreSQL's answer for a missing oid.
     NullDef,
+    /// `pg_get_partkeydef(oid)` — the `PARTITION BY` clause that rebuilds a
+    /// partitioned relation's key, and NULL for a relation without one.
+    PartKeyDef,
     /// P2: the `pg_get_function*` family over the routine catalog.
     RoutineDef(RoutineDefKind),
     IsVisible,
@@ -132,10 +135,8 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_get_function_identity_arguments" => RoutineDef(RoutineDefKind::IdentityArguments),
         "pg_get_function_result" => RoutineDef(RoutineDefKind::Result),
         "pg_get_triggerdef" => TriggerDef,
-        "pg_get_ruledef"
-        | "pg_get_partkeydef"
-        | "pg_get_statisticsobjdef"
-        | "pg_get_statisticsobjdef_columns" => NullDef,
+        "pg_get_partkeydef" => CatalogFunc::PartKeyDef,
+        "pg_get_ruledef" | "pg_get_statisticsobjdef" | "pg_get_statisticsobjdef_columns" => NullDef,
         // `pg_table_is_visible` belongs to the same family but is dispatched
         // through [`crate::func`]; every other member lands here. Both routes
         // evaluate through [`crate::visibility`].
@@ -295,9 +296,19 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
         CatalogFunc::RoutineDef(_) => n == 1,
         IndexDef => n == 1 || n == 3,
         ExprDef => n == 2 || n == 3,
-        UserById | IsVisible | SizePretty | SizeBytes | CurrentSchemas | EncodingToChar
-        | CharToEncoding | IsPublishable | TablespaceLocation | TableSize | IndexesSize
-        | TotalRelationSize => n == 1,
+        UserById
+        | IsVisible
+        | SizePretty
+        | SizeBytes
+        | CurrentSchemas
+        | EncodingToChar
+        | CharToEncoding
+        | IsPublishable
+        | TablespaceLocation
+        | TableSize
+        | IndexesSize
+        | TotalRelationSize
+        | CatalogFunc::PartKeyDef => n == 1,
         SerialSequence | ColDescription | ShobjDescription | HasRole => n == 2 || n == 3,
         CatalogFunc::RelationIsUpdatable => n == 2,
         CatalogFunc::ColumnIsUpdatable => n == 3,
@@ -450,6 +461,7 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
             matches!(vals.get(2), Some(Datum::Bool(true))),
         ),
         ConstraintDef => constraint_def(kv, scope, &vals[0]),
+        CatalogFunc::PartKeyDef => part_key_def(kv, scope, &vals[0]),
         CatalogFunc::TriggerDef => trigger_def(kv, &vals[0]),
         // Every catalog column this reaches already holds the text that column
         // is supposed to report — `polqual` deparsed by its projection, a
@@ -1972,7 +1984,41 @@ fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
     )
 }
 
-/// `pg_get_constraintdef(oid)`, the constraint clause that rebuilds a
+/// `pg_get_partkeydef(oid)` — the `PARTITION BY` body a partitioned relation
+/// was declared with, which is what psql's `\d` prints as `Partition key:`.
+///
+/// The answer is NULL for anything that is not a partitioned parent: an
+/// ordinary table, an index, an oid no relation carries. PostgreSQL answers the
+/// same way rather than raising, because the function is called unconditionally
+/// on every relation `\d` describes.
+///
+/// Only column keys can appear. An expression partition key is refused at
+/// `CREATE TABLE` time (see [`crate::partition`]), so the `partexprs` half of
+/// PostgreSQL's rendering has nothing to print here.
+fn part_key_def(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Datum, ExecError> {
+    if matches!(object, Datum::Null) {
+        return Ok(Datum::Null);
+    }
+    let oid = resolve_relation_oid(kv, scope, object)?;
+    let Some(name) = crate::catalog_rel::relation_for_oid(kv, oid)? else {
+        return Ok(Datum::Null);
+    };
+    let Some(scheme) = crate::partition::scheme_of(kv, &name)? else {
+        return Ok(Datum::Null);
+    };
+    let keys = scheme
+        .keys
+        .iter()
+        .map(|key| quote_identifier(&key.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(Datum::Text(format!(
+        "{} ({keys})",
+        scheme.strategy.name().to_uppercase()
+    )))
+}
+
+/// `pg_get_constraintdef(oid)` — the constraint clause that rebuilds a
 /// constraint, in the spelling `ALTER TABLE … ADD CONSTRAINT` takes.
 fn constraint_def(
     kv: &dyn Kv,

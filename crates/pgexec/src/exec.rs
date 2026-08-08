@@ -17160,23 +17160,38 @@ fn virtual_catalog_rows(
     }
 }
 
-/// `pg_inherits`: one row per partition, naming its direct parent.
+/// `pg_inherits`: one row per inheritance child or partition, naming its direct
+/// parent.
+///
+/// Both `inhrelid` and `inhparent` are `pg_class` oids, so a parent's table id
+/// goes through the same [`crate::catalog_rel::table_relation_oid`] derivation
+/// the child's does. Reading the parent's id out of the relation list already
+/// in hand also spares a catalog `get` per parent.
 ///
 /// A partition is always its parent's only inheritance step, so `inhseqno` is
 /// 1 and `inhdetachpending` false. The concurrent-detach flag has no state to
 /// report here, because detach is a single catalog batch.
 fn pg_inherits_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let tables = crabka_pgcatalog::list_tables(catalog_kv)?;
+    let table_ids = tables
+        .iter()
+        .map(|table| (&table.name, table.id))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut rows = Vec::new();
-    for table in crabka_pgcatalog::list_tables(catalog_kv)? {
+    for table in &tables {
         let mut parents = crate::inheritance::parents_of(catalog_kv, &table.name)?;
         if let Some((parent, _)) = crate::partition::parent_of(catalog_kv, &table.name)? {
             parents.push(parent);
         }
         for (index, parent) in parents.into_iter().enumerate() {
-            let parent = crabka_pgcatalog::get_table(catalog_kv, &parent)?;
+            let parent_id = table_ids.get(&parent).copied().ok_or_else(|| {
+                ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(
+                    parent.to_string(),
+                ))
+            })?;
             rows.push(vec![
                 int(crate::catalog_rel::table_relation_oid(table.id)?),
-                int(oid_i32(parent.id)?),
+                int(crate::catalog_rel::table_relation_oid(parent_id)?),
                 int(i32::try_from(index + 1).unwrap_or(i32::MAX)),
                 Datum::Bool(false),
             ]);
@@ -17296,7 +17311,12 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         row.relchecks = table.checks.len();
         row.relhasindex = indexed_table_ids.contains(&table.id);
         row.relhastriggers = triggered_relation_ids.contains(&table.id);
-        row.relispartition = crate::partition::parent_of(catalog_kv, &table.name)?.is_some();
+        // The same read answers both: a relation is a partition exactly when it
+        // has a stored bound, and that bound is what `relpartbound` reports.
+        if let Some((_, bound)) = crate::partition::parent_of(catalog_kv, &table.name)? {
+            row.relispartition = true;
+            row.relpartbound = Some(crate::partition::bound_text(&bound));
+        }
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&table.name.schema);
         row.reltablespace = crabka_pgcatalog::relation_tablespace_oid(catalog_kv, &table.name)?;
         row.relowner = role_oid_of(&role_oids, &table.owner);
@@ -17495,6 +17515,10 @@ struct PgClassRow<'a> {
     /// namespace. That is where every temporary relation is, so the schema is
     /// the whole fact and nothing stores it twice.
     relpersistence: char,
+    /// `pg_class.relpartbound`, already deparsed. PostgreSQL stores a node tree
+    /// and hands it to `pg_get_expr`; crabka's `pg_get_expr` is the identity,
+    /// so the column carries the printed clause. Only a partition has one.
+    relpartbound: Option<String>,
 }
 
 impl<'a> PgClassRow<'a> {
@@ -17525,6 +17549,7 @@ impl<'a> PgClassRow<'a> {
             reltablespace: 0,
             relowner: crate::catalog_fn::BOOTSTRAP_ROLE_OID,
             relpersistence: 'p',
+            relpartbound: None,
         }
     }
 
@@ -17568,9 +17593,12 @@ impl<'a> PgClassRow<'a> {
             int(0),
             Datum::Int8(0),
             Datum::Int8(0),
+            // relacl, reloptions.
             Datum::Null,
             Datum::Null,
-            Datum::Null,
+            self.relpartbound
+                .as_deref()
+                .map_or(Datum::Null, text),
         ])
     }
 }
@@ -18112,7 +18140,11 @@ fn attribute_rows_for_table(relid: i32, table: &Table) -> Result<Vec<Vec<Datum>>
                 text(attribute_storage(column.ty)),
                 text(""),
                 Datum::Bool(column.not_null),
-                Datum::Bool(column.default.is_some()),
+                // `atthasdef` means "this column has a `pg_attrdef` row", and a
+                // generated column has one: its expression is stored there, and
+                // psql's `\d` reads the body of `generated always as (…)`
+                // through this flag.
+                Datum::Bool(column.default.is_some() || column.generated.is_some()),
                 Datum::Bool(false),
                 text(identity),
                 text(column.attgenerated()),
@@ -18626,17 +18658,34 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .into_iter()
         .map(|index| {
             let table = crabka_pgcatalog::get_table(catalog_kv, &index.table)?;
-            let indkey = index
-                .columns
-                .iter()
-                .map(|column| {
-                    table
-                        .column_index(column)
-                        .and_then(|idx| i32::try_from(idx + 1).ok())
-                        .map(Datum::Int4)
-                        .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            // An expression key has no table column to point at: PostgreSQL
+            // writes 0 in `indkey` for it and carries the expression itself in
+            // `indexprs`, in key order. Looking one up as a column name instead
+            // fails every read of the whole catalog, because one unreadable
+            // index poisons the projection for every other.
+            let mut expressions = Vec::new();
+            let mut indkey = Vec::with_capacity(index.columns.len());
+            for column in &index.columns {
+                if let Some(source) = crabka_pgcatalog::index_key_expression(column) {
+                    expressions.push(source);
+                    indkey.push(Datum::Int4(0));
+                    continue;
+                }
+                let attnum = table
+                    .column_index(column)
+                    .and_then(|idx| i32::try_from(idx + 1).ok())
+                    .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+                indkey.push(Datum::Int4(attnum));
+            }
+            // `indexprs` is a node tree in PostgreSQL and text here, which is
+            // what `pg_get_expr` reports either way; the list separator is the
+            // one `pg_get_expr(indexprs, indrelid)` prints for a multi-key
+            // index.
+            let indexprs = if expressions.is_empty() {
+                Datum::Null
+            } else {
+                text(&expressions.join(", "))
+            };
             let natts = i16::try_from(index.columns.len())
                 .map_err(|_| ExecError::Unsupported("indnatts exceeds int2 range".into()))?;
             Ok(vec![
@@ -18672,10 +18721,13 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                     indkey,
                     vec![crabka_pgtypes::ArrayDim::new(0, i32::from(natts))],
                 )),
+                // indcollation, indclass, indoption.
                 Datum::Null,
                 Datum::Null,
                 Datum::Null,
-                Datum::Null,
+                indexprs,
+                // `indpred`: crabka has no partial indexes — `CREATE INDEX …
+                // WHERE` is refused — so a stored index is never predicated.
                 Datum::Null,
             ])
         })
@@ -32281,6 +32333,280 @@ mod tests {
                     text_row(&["20"]),
                     text_row(&["30"]),
                     text_row(&["40"]),
+                ]
+        );
+    }
+
+    /// An expression key has no table column to name, so `pg_index` reports 0
+    /// in `indkey` and carries the expression in `indexprs` — PostgreSQL's own
+    /// encoding.
+    ///
+    /// Resolving the stored key as a column name instead fails the *whole*
+    /// projection: `pg_index` is built as one list, so a single expression
+    /// index makes every index on every relation unreadable. Each case below
+    /// therefore also names a plain index, which is the part that regressed.
+    #[tokio::test]
+    async fn pg_index_reports_expression_keys_as_zero_attnums() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE b (kind text, totamt numeric)").await;
+        run_s(&mut session, "CREATE INDEX b_kind ON b (kind)").await;
+        run_s(&mut session, "CREATE INDEX b_expr ON b ((totamt * 2))").await;
+        run_s(
+            &mut session,
+            "CREATE INDEX b_mixed ON b (kind, (totamt + 1))",
+        )
+        .await;
+        run_s(
+            &mut session,
+            "CREATE INDEX b_two ON b ((totamt * 3), (totamt * 4))",
+        )
+        .await;
+
+        // (index, indnatts, indnkeyatts, indkey, indexprs, indpred)
+        let want = vec![
+            vec![
+                Some("b_expr".into()),
+                Some("1".into()),
+                Some("1".into()),
+                Some("0".into()),
+                Some("(totamt * 2)".into()),
+                None,
+            ],
+            vec![
+                Some("b_kind".into()),
+                Some("1".into()),
+                Some("1".into()),
+                Some("1".into()),
+                None,
+                None,
+            ],
+            vec![
+                Some("b_mixed".into()),
+                Some("2".into()),
+                Some("2".into()),
+                Some("1 0".into()),
+                Some("(totamt + 1)".into()),
+                None,
+            ],
+            vec![
+                Some("b_two".into()),
+                Some("2".into()),
+                Some("2".into()),
+                Some("0 0".into()),
+                Some("(totamt * 3), (totamt * 4)".into()),
+                None,
+            ],
+        ];
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT indexrelid::regclass::text, indnatts, indnkeyatts, indkey::text, \
+                 pg_get_expr(indexprs, indrelid), pg_get_expr(indpred, indrelid) \
+                 FROM pg_index WHERE indrelid = 'b'::regclass ORDER BY 1",
+            )
+            .await
+                == want
+        );
+
+        // The table's own `pg_attribute` rows are the shared machinery behind
+        // every `\d`, and an index that cannot be described must not disturb
+        // them.
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT attname, attnum FROM pg_attribute \
+                 WHERE attrelid = 'b'::regclass AND attnum > 0 ORDER BY attnum",
+            )
+            .await
+                == vec![text_row(&["kind", "1"]), text_row(&["totamt", "2"])]
+        );
+    }
+
+    /// `\d` on a partitioned table needs three catalog answers, and each was
+    /// missing or wrong: the key from `pg_get_partkeydef`, the *direct*
+    /// children from `pg_inherits`, and each child's bound from
+    /// `pg_class.relpartbound`.
+    ///
+    /// The fixture is deliberately three levels deep: counting descendants or
+    /// leaves rather than direct children answers 5 or 4 where PostgreSQL
+    /// answers 3.
+    #[tokio::test]
+    async fn partitioned_table_reports_its_key_bounds_and_direct_children() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE clstrpart (a int) PARTITION BY RANGE (a)",
+            "CREATE TABLE clstrpart1 PARTITION OF clstrpart FOR VALUES FROM (1) TO (10) \
+             PARTITION BY RANGE (a)",
+            "CREATE TABLE clstrpart11 PARTITION OF clstrpart1 FOR VALUES FROM (1) TO (5)",
+            "CREATE TABLE clstrpart2 PARTITION OF clstrpart FOR VALUES FROM (10) TO (20)",
+            "CREATE TABLE clstrpart3 PARTITION OF clstrpart DEFAULT PARTITION BY RANGE (a)",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+
+        // psql's "Partition key:" line, for every partitioned relation in the
+        // tree and for a relation that is not partitioned at all.
+        run_s(&mut session, "CREATE TABLE plain (a int)").await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT relname, pg_get_partkeydef(oid) FROM pg_class \
+                 WHERE relname LIKE 'clstrpart%' OR relname = 'plain' ORDER BY 1",
+            )
+            .await
+                == vec![
+                    text_row(&["clstrpart", "RANGE (a)"]),
+                    text_row(&["clstrpart1", "RANGE (a)"]),
+                    vec![Some("clstrpart11".into()), None],
+                    vec![Some("clstrpart2".into()), None],
+                    text_row(&["clstrpart3", "RANGE (a)"]),
+                    vec![Some("plain".into()), None],
+                ]
+        );
+
+        // psql's "Number of partitions:" line counts `pg_inherits` rows whose
+        // `inhparent` is the relation's own `pg_class` oid — which is the join
+        // that found nothing.
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT c.relname, count(*)::text FROM pg_class c JOIN pg_inherits i \
+                 ON i.inhparent = c.oid WHERE c.relname LIKE 'clstrpart%' \
+                 GROUP BY c.relname ORDER BY 1",
+            )
+            .await
+                == vec![
+                    text_row(&["clstrpart", "3"]),
+                    text_row(&["clstrpart1", "1"]),
+                ]
+        );
+
+        // psql's "Partition of: <parent> <bound>" line.
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT relname, relispartition, pg_get_expr(relpartbound, oid) FROM pg_class \
+                 WHERE relname LIKE 'clstrpart%' ORDER BY 1",
+            )
+            .await
+                == vec![
+                    vec![Some("clstrpart".into()), Some("f".into()), None],
+                    text_row(&["clstrpart1", "t", "FOR VALUES FROM (1) TO (10)"]),
+                    text_row(&["clstrpart11", "t", "FOR VALUES FROM (1) TO (5)"]),
+                    text_row(&["clstrpart2", "t", "FOR VALUES FROM (10) TO (20)"]),
+                    text_row(&["clstrpart3", "t", "DEFAULT"]),
+                ]
+        );
+    }
+
+    /// The other bound spellings `pg_class.relpartbound` has to print, and the
+    /// `LIST`/`HASH` keys `pg_get_partkeydef` renders for them.
+    #[tokio::test]
+    async fn partition_bounds_print_in_postgresql_spelling() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE pr (a int, b date) PARTITION BY RANGE (a, b)",
+            "CREATE TABLE pr1 PARTITION OF pr FOR VALUES FROM (MINVALUE, MINVALUE) \
+             TO (10, '2020-01-01')",
+            "CREATE TABLE pr2 PARTITION OF pr FOR VALUES FROM (10, '2020-01-01') \
+             TO (MAXVALUE, MAXVALUE)",
+            "CREATE TABLE pl (a int, b text) PARTITION BY LIST (b)",
+            "CREATE TABLE pl1 PARTITION OF pl FOR VALUES IN ('x', 'y''z')",
+            "CREATE TABLE ph (a int) PARTITION BY HASH (a)",
+            "CREATE TABLE ph1 PARTITION OF ph FOR VALUES WITH (MODULUS 4, REMAINDER 0)",
+        ] {
+            run_s(&mut session, sql).await;
+        }
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT c.relname, pg_get_partkeydef(p.oid), pg_get_expr(c.relpartbound, c.oid) \
+                 FROM pg_class c JOIN pg_inherits i ON i.inhrelid = c.oid \
+                 JOIN pg_class p ON p.oid = i.inhparent ORDER BY 1",
+            )
+            .await
+                == vec![
+                    text_row(&[
+                        "ph1",
+                        "HASH (a)",
+                        "FOR VALUES WITH (modulus 4, remainder 0)"
+                    ]),
+                    text_row(&["pl1", "LIST (b)", "FOR VALUES IN ('x', 'y''z')"]),
+                    text_row(&[
+                        "pr1",
+                        "RANGE (a, b)",
+                        "FOR VALUES FROM (MINVALUE, MINVALUE) TO (10, '2020-01-01')",
+                    ]),
+                    text_row(&[
+                        "pr2",
+                        "RANGE (a, b)",
+                        "FOR VALUES FROM (10, '2020-01-01') TO (MAXVALUE, MAXVALUE)",
+                    ]),
+                ]
+        );
+    }
+
+    /// `pg_inherits` describes plain `INHERITS` children by the same two oids,
+    /// so the parent side had to be a `pg_class` oid for them too — `\d` prints
+    /// "Inherits:" and "Number of child tables:" from exactly this join.
+    #[tokio::test]
+    async fn pg_inherits_names_an_inheritance_parent_by_its_relation_oid() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(&mut session, "CREATE TABLE ip (x int)").await;
+        run_s(&mut session, "CREATE TABLE ic (z int) INHERITS (ip)").await;
+        run_s(&mut session, "CREATE TABLE ic2 () INHERITS (ip)").await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT ch.relname, pa.relname, i.inhseqno FROM pg_inherits i \
+                 JOIN pg_class ch ON ch.oid = i.inhrelid \
+                 JOIN pg_class pa ON pa.oid = i.inhparent ORDER BY 1",
+            )
+            .await
+                == vec![text_row(&["ic", "ip", "1"]), text_row(&["ic2", "ip", "1"])]
+        );
+    }
+
+    /// A generated column's expression lives in `pg_attrdef` in PostgreSQL, and
+    /// `atthasdef` is what says so — psql's `\d` reads the body of `generated
+    /// always as (…) stored` through that flag and finds nothing without it.
+    #[tokio::test]
+    async fn a_generated_column_carries_its_expression_in_pg_attrdef() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        run_s(
+            &mut session,
+            "CREATE TABLE gen (a int, b int GENERATED ALWAYS AS (a * 2) STORED, c int DEFAULT 7)",
+        )
+        .await;
+        assert!(
+            text_rows_of(
+                &mut session,
+                "SELECT a.attname, a.atthasdef, a.attgenerated, \
+                 pg_get_expr(d.adbin, d.adrelid, true) \
+                 FROM pg_attribute a LEFT JOIN pg_attrdef d \
+                 ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+                 WHERE a.attrelid = 'gen'::regclass AND a.attnum > 0 ORDER BY a.attnum",
+            )
+            .await
+                == vec![
+                    vec![
+                        Some("a".into()),
+                        Some("f".into()),
+                        Some(String::new()),
+                        None,
+                    ],
+                    text_row(&["b", "t", "s", "a * 2"]),
+                    text_row(&["c", "t", "", "7"]),
                 ]
         );
     }
