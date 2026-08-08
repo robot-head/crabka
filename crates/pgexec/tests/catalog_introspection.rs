@@ -1504,3 +1504,49 @@ async fn attstorage_reports_each_types_storage_class() {
     .collect();
     assert!(got == expected);
 }
+
+/// A catalog that `PostgreSQL` implements as a SQL view must report `relkind`
+/// `v`, not `r`.
+///
+/// `misc_sanity` asks for `pg_catalog` relations with `relkind = 'r'` that have
+/// no primary key, and a view answering `r` joins that list wrongly. That is how
+/// `pg_matviews` was caught: it was added to the catalog relation list without
+/// being added to the view list beside it, so the two lists drifted. Naming
+/// every view here means the next one to drift fails a test rather than a
+/// certification run.
+#[tokio::test]
+async fn a_catalog_implemented_as_a_view_does_not_claim_to_be_a_table() {
+    let engine = SqlEngine::new();
+    for name in [
+        "pg_indexes",
+        "pg_locks",
+        "pg_matviews",
+        "pg_policies",
+        "pg_replication_slots",
+        "pg_settings",
+        "pg_shmem_allocations_numa",
+        "pg_stat_activity",
+        "pg_tables",
+        "pg_views",
+    ] {
+        let sql = format!(
+            "SELECT relkind FROM pg_class WHERE relname = '{name}' AND relnamespace = 'pg_catalog'::regnamespace"
+        );
+        assert!(
+            column(&engine, &sql).await == vec![Some("v".to_owned())],
+            "{name}"
+        );
+    }
+
+    // The base catalogs beside them must still answer `r`, or the fix would be
+    // "call everything a view".
+    for name in ["pg_class", "pg_attribute", "pg_proc", "pg_type"] {
+        let sql = format!(
+            "SELECT relkind FROM pg_class WHERE relname = '{name}' AND relnamespace = 'pg_catalog'::regnamespace"
+        );
+        assert!(
+            column(&engine, &sql).await == vec![Some("r".to_owned())],
+            "{name}"
+        );
+    }
+}

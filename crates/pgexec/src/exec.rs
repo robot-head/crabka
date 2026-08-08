@@ -17412,6 +17412,7 @@ fn virtual_pg_class_properties(name: &str, oid: i32) -> (&'static str, i32) {
             name,
             "pg_indexes"
                 | "pg_locks"
+                | "pg_matviews"
                 | "pg_policies"
                 | "pg_prepared_statements"
                 | "pg_replication_slots"
