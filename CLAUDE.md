@@ -44,3 +44,13 @@ A "conflict" between parallel implementers occurs only when both edit the same f
 Tests must exercise behavior, not source text. Do not read source files in tests and assert against their contents. `include_str!` and `fs::read_to_string` are examples of such reads. If a behavior is hard to test, add a narrow helper or seam. Then test that behavior directly.
 
 When you check generated protocol records or other structured values in tests, compare the whole expected struct. This is better than long chains of field-by-field assertions. Use table-driven or parameterized tests for repeated scenarios that differ only by inputs, protocol version, or expected request shape.
+
+## Release Process
+
+Crabka uses **release-plz** for automated semantic versioning. Conventional commits drive the version bumps:
+
+- `feat:` gives a minor version bump
+- `fix:` gives a patch version bump
+- `feat!:` gives a major version bump
+
+release-plz also generates the changelogs and publishes the crates to crates.io.

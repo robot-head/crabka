@@ -31,8 +31,11 @@ pub(crate) struct ClientAttributes {
     pub source_port: u16,
 }
 
-/// The metric prefixes and the push interval that a client must use, after
-/// the union of every matched subscription.
+/// The metric prefixes a client should send, and the push interval it must
+/// use, after the union of every matched subscription.
+///
+/// The broker enforces the interval in `authorize_push`. It does not inspect
+/// the payload, so the prefixes are advisory.
 #[derive(Debug, Clone)]
 pub(crate) struct ComputedSubscription {
     pub metrics: Vec<String>,
