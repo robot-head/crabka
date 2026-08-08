@@ -5,9 +5,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use crabka_client_core::ConnectionOptions;
 use crabka_ids::PartitionIndex;
 use crabka_metadata::NodeId;
-use crabka_protocol::{
-    owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic},
-    primitives::uuid::Uuid as WireUuid,
+use crabka_protocol::owned::list_offsets_request::{
+    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
 };
 use crabka_security::ListenerProtocol;
 use tokio_util::sync::CancellationToken;
@@ -25,7 +24,11 @@ use crate::{
 };
 
 pub(crate) fn effective_backlog(hwm: i64, spso: i64, log_start: i64) -> i64 {
-    let base = if spso >= 0 { spso } else { log_start };
+    let base = if spso >= 0 {
+        spso.max(log_start)
+    } else {
+        log_start
+    };
     (hwm - base).max(0)
 }
 
@@ -47,6 +50,7 @@ impl BacklogPoller {
     pub(crate) fn spawn(self) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last = HashMap::new();
             loop {
                 tokio::select! {
@@ -98,10 +102,10 @@ impl BacklogPoller {
                 "sampling initialized share-group partitions",
             );
             for (topic_id, partitions) in state.initialized {
-                let topic = image
-                    .topic_name_by_id(&topic_id)
-                    .ok_or_else(|| format!("unknown topic id {topic_id}"))?
-                    .to_owned();
+                let Some(topic) = image.topic_name_by_id(&topic_id).map(str::to_owned) else {
+                    tracing::debug!(%group_id, %topic_id, "skipping deleted share-group topic");
+                    continue;
+                };
                 for partition in partitions {
                     let spso = self
                         .persister
@@ -109,8 +113,7 @@ impl BacklogPoller {
                         .await
                         .map_err(|error| error.to_string())?
                         .map_or(-1, |state| state.start_offset.0);
-                    let (hwm, log_start) =
-                        self.offsets(&image, &topic, topic_id, partition).await?;
+                    let (hwm, log_start) = self.offsets(&image, &topic, partition).await?;
                     snapshot.insert(
                         ShareGroupLabel {
                             group_id: group_id.clone(),
@@ -129,7 +132,6 @@ impl BacklogPoller {
         &self,
         image: &crabka_metadata::MetadataImage,
         topic: &str,
-        topic_id: uuid::Uuid,
         partition: i32,
     ) -> Result<(i64, i64), String> {
         let leader = image
@@ -143,8 +145,7 @@ impl BacklogPoller {
                 .ok_or_else(|| format!("leader partition {topic}-{partition} is not local"))?;
             return Ok((local.high_watermark().await.0, local.log_start_offset().0));
         }
-        self.remote_offsets(image, leader, topic, topic_id, partition)
-            .await
+        self.remote_offsets(image, leader, topic, partition).await
     }
 
     async fn remote_offsets(
@@ -152,7 +153,6 @@ impl BacklogPoller {
         image: &crabka_metadata::MetadataImage,
         leader: NodeId,
         topic: &str,
-        topic_id: uuid::Uuid,
         partition: i32,
     ) -> Result<(i64, i64), String> {
         let broker = image
@@ -175,40 +175,50 @@ impl BacklogPoller {
             .connect_as_connection(host, port, self.listener_protocol, "localhost", options)
             .await
             .map_err(|error| error.to_string())?;
-        let response = connection
-            .send(FetchRequest {
-                replica_id: -1,
-                max_wait_ms: 0,
-                min_bytes: 0,
-                max_bytes: 1,
-                topics: vec![FetchTopic {
-                    topic: topic.to_owned(),
-                    topic_id: WireUuid(*topic_id.as_bytes()),
-                    partitions: vec![FetchPartition {
-                        partition,
-                        fetch_offset: 0,
-                        partition_max_bytes: 1,
-                        ..FetchPartition::default()
-                    }],
-                    ..FetchTopic::default()
+        let request = |timestamp| ListOffsetsRequest {
+            replica_id: -1,
+            isolation_level: 0,
+            topics: vec![ListOffsetsTopic {
+                name: topic.to_owned(),
+                partitions: vec![ListOffsetsPartition {
+                    partition_index: partition,
+                    current_leader_epoch: -1,
+                    timestamp,
+                    ..Default::default()
                 }],
-                ..FetchRequest::default()
-            })
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let earliest = connection
+            .send(request(-2))
+            .await
+            .map_err(|error| error.to_string())?;
+        let latest = connection
+            .send(request(-1))
             .await
             .map_err(|error| error.to_string())?;
         connection.close();
-        let result = response
-            .responses
-            .first()
-            .and_then(|topic| topic.partitions.first())
-            .ok_or_else(|| format!("empty Fetch response for {topic}-{partition}"))?;
-        if result.error_code != 0 && result.error_code != crate::codes::OFFSET_OUT_OF_RANGE {
-            return Err(format!(
-                "Fetch {topic}-{partition} returned code {}",
-                result.error_code
-            ));
-        }
-        Ok((result.high_watermark, result.log_start_offset))
+        let offset =
+            |response: &crabka_protocol::owned::list_offsets_response::ListOffsetsResponse,
+             kind: &str|
+             -> Result<i64, String> {
+                let result = response
+                    .topics
+                    .first()
+                    .and_then(|topic| topic.partitions.first())
+                    .ok_or_else(|| {
+                        format!("empty ListOffsets({kind}) response for {topic}-{partition}")
+                    })?;
+                if result.error_code != 0 {
+                    return Err(format!(
+                        "ListOffsets({kind}) {topic}-{partition} returned code {}",
+                        result.error_code
+                    ));
+                }
+                Ok(result.offset)
+            };
+        Ok((offset(&latest, "latest")?, offset(&earliest, "earliest")?))
     }
 }
 
@@ -243,5 +253,6 @@ mod tests {
         assert_eq!(effective_backlog(100, -1, 10), 90);
         assert_eq!(effective_backlog(100, 100, 0), 0);
         assert_eq!(effective_backlog(100, 120, 0), 0);
+        assert_eq!(effective_backlog(110, 0, 100), 10);
     }
 }
