@@ -78,7 +78,7 @@ pub struct KafkaConnectorSpec {
     /// Default `PostgreSQL` schema for unqualified table names. Default `public`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
-    /// Tables included in CDC. Names may be schema-qualified.
+    /// Unqualified tables included in CDC. All belong to `schema`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(min = 1))]
     pub tables: Vec<String>,

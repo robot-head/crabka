@@ -292,6 +292,7 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
                         continue;
                     }
 
+                    let transaction_lsn = row.commit_lsn;
                     let diff = self.relation_cache.translate(row)?;
                     let span = tracing::Span::current();
                     span.record("table", diff.table.as_str());
@@ -302,8 +303,6 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
                     } else {
                         Some(self.encoder.encode_value(&diff)?)
                     };
-                    self.checkpoint = Some(diff.lsn);
-
                     let mut record = ConnectRecord::new(Some(key), value)
                         .with_topic(diff.table.clone())
                         .with_header("crabka.pg.table", Some(Bytes::from(diff.table.clone())))
@@ -317,6 +316,14 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
                     }
 
                     self.pending.pop_front();
+                    let transaction_has_more_rows = transaction_lsn.is_some_and(|lsn| {
+                        self.pending.iter().any(|event| {
+                            matches!(event, LogicalEvent::Row(row) if row.commit_lsn == Some(lsn))
+                        })
+                    });
+                    if !transaction_has_more_rows {
+                        self.checkpoint = Some(diff.lsn);
+                    }
                     return Ok(Some(record));
                 }
             }
@@ -1090,6 +1097,7 @@ mod tests {
             .await
             .expect("first poll succeeds")
             .expect("first row emits");
+        check!(source.checkpoint().is_none());
         let second = source
             .poll()
             .await

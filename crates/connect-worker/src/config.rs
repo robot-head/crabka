@@ -1,6 +1,6 @@
 //! Command-line and environment configuration for one connector worker.
 
-use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
+use std::{fmt::Write as _, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
 use clap::Parser;
 use crabka_client_core::{
@@ -9,8 +9,10 @@ use crabka_client_core::{
 };
 use crabka_connect::SecretString;
 use crabka_connect_postgres::PostgresSourceConfig;
+use crabka_replicator::config::ReplicationFactor;
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use crabka_units::{ByteSize, convert::ByteSizeExt as _};
+use sha2::{Digest as _, Sha256};
 
 /// Kafka listener protocol used by the worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +90,9 @@ pub struct WorkerConfig {
     /// Kafka bootstrap address.
     #[arg(long, env = "CRABKA_KAFKA_BOOTSTRAP", value_parser = parse_non_empty)]
     pub kafka_bootstrap: String,
+    /// Replicas used when the worker creates data and checkpoint topics.
+    #[arg(long, env = "CRABKA_CONNECT_REPLICATION_FACTOR", default_value = "1")]
+    pub replication_factor: ReplicationFactor,
     /// `PostgreSQL` connection URL. Formatting is always redacted.
     #[arg(long, env = "CRABKA_POSTGRES_URL", value_parser = parse_secret)]
     pub postgres_url: SecretString,
@@ -175,6 +180,16 @@ impl WorkerConfig {
             .map_err(|_| "batch size must fit PostgreSQL's u32 poll limit".to_owned())?;
         ConnectionDispatchQueueCapacity::new(self.client_dispatch_queue_capacity)?;
         ClientFrameMax::try_from(ByteSize::from_bytes(self.client_frame_max_bytes))?;
+        if self
+            .postgres_tables
+            .iter()
+            .any(|table| table.trim().is_empty() || table.contains('.'))
+        {
+            return Err(
+                "PostgreSQL tables must be non-empty unqualified names; use --postgres-schema separately"
+                    .to_owned(),
+            );
+        }
 
         let protocol: ListenerProtocol = self.broker_protocol.into();
         let has_tls = self.broker_ca_path.is_some()
@@ -239,6 +254,24 @@ impl WorkerConfig {
     #[must_use]
     pub const fn poll_backoff(&self) -> Duration {
         Duration::from_millis(self.poll_backoff_ms)
+    }
+
+    /// Stable checkpoint key scoped to the connector and `PostgreSQL` source.
+    #[must_use]
+    pub fn checkpoint_key(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(self.postgres_url.expose_secret().as_bytes());
+        digest.update([0]);
+        digest.update(self.postgres_slot.as_bytes());
+
+        let digest = digest.finalize();
+        let mut key = String::with_capacity(self.connector_id.len() + 1 + digest.len() * 2);
+        key.push_str(&self.connector_id);
+        key.push(':');
+        for byte in digest {
+            write!(&mut key, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        key
     }
 
     /// Validated Kafka client security, or `None` for plaintext.
@@ -354,6 +387,7 @@ mod tests {
         assert!(config.postgres_tables == ["orders", "customers"]);
         assert!(config.topic_prefix == "db");
         assert!(config.batch_size == 500);
+        assert!(config.replication_factor.get() == 1);
         assert!(config.postgres_url.to_string() == "[REDACTED]");
     }
 
@@ -391,5 +425,25 @@ mod tests {
         ]);
         let config = WorkerConfig::try_parse_from(partial).expect("CLI shape parses");
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_qualified_tables_and_scopes_checkpoints_to_source_identity() {
+        let base = WorkerConfig::try_parse_from(base_args()).expect("valid CLI");
+        let base_key = base.checkpoint_key();
+        assert!(base_key.starts_with("orders:"));
+        assert!(!base_key.contains("secret"));
+
+        let mut different_slot = base.clone();
+        different_slot.postgres_slot = "other".into();
+        assert!(different_slot.checkpoint_key() != base_key);
+
+        let mut different_database = base.clone();
+        different_database.postgres_url = SecretString::new("postgres://localhost/other");
+        assert!(different_database.checkpoint_key() != base_key);
+
+        let mut qualified = base;
+        qualified.postgres_tables = vec!["audit.orders".into()];
+        assert!(qualified.validate().is_err());
     }
 }

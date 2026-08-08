@@ -36,6 +36,8 @@ const DEFAULT_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-connect-worker:",
     env!("CARGO_PKG_VERSION")
 );
+const CHECKPOINT_TOPIC: &str = "__crabka_connect_offsets";
+const CHECKPOINT_READER_GROUP: &str = "crabka-replicator-reader-__crabka_connect_offsets";
 const BROKER_CLIENT_DIR: &str = "/etc/crabka/broker-client";
 const BROKER_CA_DIR: &str = "/etc/crabka/broker-ca";
 
@@ -162,6 +164,7 @@ async fn reconcile_inner(
         cluster_name,
         bootstrap,
         broker_server_name,
+        replication_factor,
         config_hash,
     } = resolve_inputs(&obj, &ctx, &connector_api, &namespace).await?
     else {
@@ -180,6 +183,7 @@ async fn reconcile_inner(
         image,
         &bootstrap,
         &broker_server_name,
+        replication_factor,
         &config_hash,
     )?;
     apply_object(&deployment_api, &name, &deployment).await?;
@@ -228,6 +232,7 @@ enum ResolvedInputs {
         cluster_name: String,
         bootstrap: String,
         broker_server_name: String,
+        replication_factor: i32,
         config_hash: String,
     },
     Requeue,
@@ -353,6 +358,9 @@ async fn resolve_inputs(
         cluster_name,
         bootstrap,
         broker_server_name,
+        replication_factor: connector_replication_factor(
+            parent.status.as_ref().and_then(|status| status.replicas),
+        ),
         config_hash: secret_hash(&[
             database_url.0.as_slice(),
             secret_value(&client_secret, "user.crt"),
@@ -389,6 +397,11 @@ fn validate_spec(spec: &KafkaConnectorSpec) -> Result<(), String> {
     if spec.tables.iter().any(|table| table.trim().is_empty()) {
         return Err("spec.tables entries must not be empty".into());
     }
+    if spec.tables.iter().any(|table| table.contains('.')) {
+        return Err(
+            "spec.tables entries must be unqualified; select their schema with spec.schema".into(),
+        );
+    }
     if spec
         .schema
         .as_ref()
@@ -399,7 +412,7 @@ fn validate_spec(spec: &KafkaConnectorSpec) -> Result<(), String> {
     if spec
         .topic_prefix
         .as_ref()
-        .is_some_and(|value| value.trim().is_empty())
+        .is_some_and(|value| value.trim().trim_matches('.').is_empty())
     {
         return Err("spec.topicPrefix must not be empty when set".into());
     }
@@ -452,37 +465,68 @@ fn broker_user_name(connector_name: &str) -> String {
     format!("{connector_name}-broker")
 }
 
+fn connector_replication_factor(broker_replicas: Option<i32>) -> i32 {
+    broker_replicas.unwrap_or(1).clamp(1, 3)
+}
+
 fn child_kafka_user(
     connector: &KafkaConnector,
     cluster_name: &str,
 ) -> Result<KafkaUser, ReconcileError> {
     let connector_name = connector.name_any();
+    let topic_prefix = connector
+        .spec
+        .topic_prefix
+        .as_deref()
+        .unwrap_or("db")
+        .trim_end_matches('.');
     let mut user = KafkaUser::new(
         &broker_user_name(&connector_name),
         KafkaUserSpec {
             authentication: Authentication::Tls(TlsAuth::default()),
             authorization: Some(Authorization::Simple(SimpleAuthorization {
-                acls: [
-                    AclResourceKind::Topic,
-                    AclResourceKind::Group,
-                    AclResourceKind::Cluster,
-                ]
-                .into_iter()
-                .map(|kind| AclRule {
-                    resource: AclResource {
-                        kind,
-                        name: if kind == AclResourceKind::Cluster {
-                            "kafka-cluster".into()
-                        } else {
-                            "*".into()
+                acls: vec![
+                    AclRule {
+                        resource: AclResource {
+                            kind: AclResourceKind::Topic,
+                            name: format!("{topic_prefix}."),
+                            pattern_type: AclPatternType::Prefixed,
                         },
-                        pattern_type: AclPatternType::Literal,
+                        operations: vec![AclOp::Write, AclOp::Describe],
+                        host: "*".into(),
+                        permission: AclPermission::Allow,
                     },
-                    operations: vec![AclOp::All],
-                    host: "*".into(),
-                    permission: AclPermission::Allow,
-                })
-                .collect(),
+                    AclRule {
+                        resource: AclResource {
+                            kind: AclResourceKind::Topic,
+                            name: CHECKPOINT_TOPIC.into(),
+                            pattern_type: AclPatternType::Literal,
+                        },
+                        operations: vec![AclOp::Read, AclOp::Write, AclOp::Describe],
+                        host: "*".into(),
+                        permission: AclPermission::Allow,
+                    },
+                    AclRule {
+                        resource: AclResource {
+                            kind: AclResourceKind::Group,
+                            name: CHECKPOINT_READER_GROUP.into(),
+                            pattern_type: AclPatternType::Literal,
+                        },
+                        operations: vec![AclOp::Read],
+                        host: "*".into(),
+                        permission: AclPermission::Allow,
+                    },
+                    AclRule {
+                        resource: AclResource {
+                            kind: AclResourceKind::Cluster,
+                            name: "kafka-cluster".into(),
+                            pattern_type: AclPatternType::Literal,
+                        },
+                        operations: vec![AclOp::Create, AclOp::IdempotentWrite],
+                        host: "*".into(),
+                        permission: AclPermission::Allow,
+                    },
+                ],
             })),
             quotas: None,
         },
@@ -504,6 +548,7 @@ fn render_deployment(
     image: &str,
     bootstrap: &str,
     broker_server_name: &str,
+    replication_factor: i32,
     config_hash: &str,
 ) -> Result<Deployment, ReconcileError> {
     let name = connector.name_any();
@@ -519,6 +564,10 @@ fn render_deployment(
     let mut env = vec![
         value_env("CRABKA_CONNECTOR_ID", &name),
         value_env("CRABKA_KAFKA_BOOTSTRAP", bootstrap),
+        value_env(
+            "CRABKA_CONNECT_REPLICATION_FACTOR",
+            replication_factor.to_string(),
+        ),
         json!({
             "name": "CRABKA_POSTGRES_URL",
             "valueFrom": { "secretKeyRef": {
@@ -577,6 +626,7 @@ fn render_deployment(
         },
         "spec": {
             "replicas": i32::from(!connector.spec.paused),
+            "strategy": { "type": "Recreate" },
             "selector": { "matchLabels": labels },
             "template": {
                 "metadata": {
@@ -727,11 +777,13 @@ mod tests {
                 "worker:latest",
                 "demo:9093",
                 "demo-broker-headless.default.svc.cluster.local",
+                3,
                 "hash",
             )
             .unwrap();
             let spec = deployment.spec.unwrap();
             check!(spec.replicas == Some(replicas), "paused={paused}");
+            check!(spec.strategy.unwrap().type_.as_deref() == Some("Recreate"));
             let container = &spec.template.spec.unwrap().containers[0];
             check!(
                 container
@@ -759,6 +811,7 @@ mod tests {
             for (name, value) in [
                 ("CRABKA_CONNECTOR_ID", "orders"),
                 ("CRABKA_KAFKA_BOOTSTRAP", "demo:9093"),
+                ("CRABKA_CONNECT_REPLICATION_FACTOR", "3"),
                 ("CRABKA_POSTGRES_TABLES", "orders,customers"),
                 ("CRABKA_CONNECT_BATCH_SIZE", "100"),
                 ("CRABKA_CONNECT_COMMIT_INTERVAL_MS", "1000"),
@@ -795,6 +848,9 @@ mod tests {
         spec.tables.push("orders".into());
         spec.database_url.key.clear();
         assert!(validate_spec(&spec).is_err());
+        spec.database_url.key = "url".into();
+        spec.tables = vec!["audit.orders".into()];
+        assert!(validate_spec(&spec).is_err());
     }
 
     #[test]
@@ -803,6 +859,43 @@ mod tests {
         let user = child_kafka_user(&connector, "demo").unwrap();
         check!(user.name_any() == "orders-broker");
         assert!(matches!(user.spec.authentication, Authentication::Tls(_)));
+        let Some(Authorization::Simple(authorization)) = user.spec.authorization else {
+            panic!("connector user should have simple authorization");
+        };
+        check!(authorization.acls.len() == 4);
+        assert!(
+            authorization.acls.iter().all(|rule| {
+                rule.resource.name != "*" && !rule.operations.contains(&AclOp::All)
+            })
+        );
+        assert!(authorization.acls.iter().any(|rule| {
+            rule.resource.kind == AclResourceKind::Topic
+                && rule.resource.name == "db."
+                && rule.resource.pattern_type == AclPatternType::Prefixed
+                && rule.operations == [AclOp::Write, AclOp::Describe]
+        }));
+        assert!(authorization.acls.iter().any(|rule| {
+            rule.resource.kind == AclResourceKind::Topic
+                && rule.resource.name == CHECKPOINT_TOPIC
+                && rule.resource.pattern_type == AclPatternType::Literal
+                && rule.operations == [AclOp::Read, AclOp::Write, AclOp::Describe]
+        }));
+        assert!(authorization.acls.iter().any(|rule| {
+            rule.resource.kind == AclResourceKind::Group
+                && rule.resource.name == CHECKPOINT_READER_GROUP
+                && rule.operations == [AclOp::Read]
+        }));
+        assert!(authorization.acls.iter().any(|rule| {
+            rule.resource.kind == AclResourceKind::Cluster
+                && rule.operations == [AclOp::Create, AclOp::IdempotentWrite]
+        }));
         check!(user.metadata.owner_references.unwrap()[0].kind == "KafkaConnector");
+    }
+
+    #[test]
+    fn topic_replication_tracks_cluster_size_up_to_three() {
+        for (replicas, expected) in [(None, 1), (Some(1), 1), (Some(2), 2), (Some(5), 3)] {
+            check!(connector_replication_factor(replicas) == expected);
+        }
     }
 }

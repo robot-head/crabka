@@ -80,6 +80,11 @@ replay records after restart. Consumers must tolerate duplicates; keys and the
 advancing the source beyond durably acknowledged Kafka data, but it is not
 exactly-once source delivery.
 
+Checkpoint keys include a hash of the PostgreSQL URL and slot, so repointing a
+connector does not load an incompatible offset from its former source. Topics
+created by the worker use up to three replicas, bounded by the managed
+cluster's broker count.
+
 ## Health and metrics
 
 The worker listens on port `8080` inside its pod:

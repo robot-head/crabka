@@ -7,6 +7,7 @@ use bytes::Bytes;
 use crabka_client_core::security::ClientSecurity;
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_connect::{CheckpointStore, ConnectError, ConnectRecord, Sink, SourceOffset};
+use crabka_replicator::config::ReplicationFactor;
 use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use tokio::sync::oneshot::Receiver;
 
@@ -19,6 +20,7 @@ pub const CHECKPOINT_TOPIC: &str = "__crabka_connect_offsets";
 pub(crate) struct KafkaClientConfig {
     pub(crate) bootstrap: String,
     pub(crate) security: Option<ClientSecurity>,
+    pub(crate) replication_factor: ReplicationFactor,
     pub(crate) dispatch_queue_capacity: usize,
     pub(crate) frame_max_bytes: u64,
 }
@@ -68,6 +70,7 @@ impl KafkaSink {
         let client = KafkaClientConfig {
             bootstrap: bootstrap.into(),
             security: None,
+            replication_factor: ReplicationFactor::default(),
             dispatch_queue_capacity: 64,
             frame_max_bytes: 100 * 1024 * 1024,
         };
@@ -97,11 +100,12 @@ impl Sink<Bytes, Bytes> for KafkaSink {
         for record in records {
             let output = to_producer_record(record, &self.topic_prefix)?;
             if self.ensured_topics.insert(output.topic.clone()) {
-                crabka_replicator::admin_util::ensure_topic(
+                crabka_replicator::admin_util::ensure_topic_with_replication_factor(
                     &self.client.bootstrap,
                     &output.topic,
                     1,
                     self.client.security.clone(),
+                    self.client.replication_factor,
                 )
                 .await
                 .map_err(ConnectError::Backend)?;
@@ -180,11 +184,11 @@ fn prefixed_topic(prefix: &str, topic: &str) -> String {
     }
 }
 
-/// Durable connector checkpoint store keyed by connector ID.
+/// Durable connector checkpoint store keyed by connector and source identity.
 pub struct KafkaCheckpointStore {
     producer: Producer,
     client: KafkaClientConfig,
-    connector_id: String,
+    checkpoint_key: String,
     metrics: WorkerMetrics,
 }
 
@@ -196,26 +200,28 @@ impl KafkaCheckpointStore {
     /// Returns [`ConnectError::Offset`] when topic creation or producer startup fails.
     pub async fn start(
         bootstrap: impl Into<String>,
-        connector_id: impl Into<String>,
+        checkpoint_key: impl Into<String>,
     ) -> Result<Self, ConnectError> {
         let client = KafkaClientConfig {
             bootstrap: bootstrap.into(),
             security: None,
+            replication_factor: ReplicationFactor::default(),
             dispatch_queue_capacity: 64,
             frame_max_bytes: 100 * 1024 * 1024,
         };
-        Self::start_with_config(client, connector_id.into(), WorkerMetrics::new()).await
+        Self::start_with_config(client, checkpoint_key.into(), WorkerMetrics::new()).await
     }
 
     pub(crate) async fn start_with_config(
         client: KafkaClientConfig,
-        connector_id: String,
+        checkpoint_key: String,
         metrics: WorkerMetrics,
     ) -> Result<Self, ConnectError> {
-        crabka_replicator::admin_util::ensure_compacted_topic(
+        crabka_replicator::admin_util::ensure_compacted_topic_with_replication_factor(
             &client.bootstrap,
             CHECKPOINT_TOPIC,
             client.security.clone(),
+            client.replication_factor,
         )
         .await
         .map_err(ConnectError::Offset)?;
@@ -225,7 +231,7 @@ impl KafkaCheckpointStore {
         Ok(Self {
             producer,
             client,
-            connector_id,
+            checkpoint_key,
             metrics,
         })
     }
@@ -241,7 +247,7 @@ impl CheckpointStore for KafkaCheckpointStore {
             .send(ProducerRecord {
                 topic: CHECKPOINT_TOPIC.to_owned(),
                 partition: Some(0),
-                key: Some(Bytes::copy_from_slice(self.connector_id.as_bytes())),
+                key: Some(Bytes::copy_from_slice(self.checkpoint_key.as_bytes())),
                 value: Some(Bytes::from(value)),
                 headers: Vec::new(),
                 timestamp_ms: None,
@@ -267,7 +273,7 @@ impl CheckpointStore for KafkaCheckpointStore {
         let value = crabka_replicator::admin_util::read_last_value_for_key(
             &self.client.bootstrap,
             CHECKPOINT_TOPIC,
-            self.connector_id.as_bytes(),
+            self.checkpoint_key.as_bytes(),
             self.client.security.clone(),
         )
         .await

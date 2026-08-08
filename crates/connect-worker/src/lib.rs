@@ -27,9 +27,11 @@ use crate::{kafka::KafkaClientConfig, metrics::WorkerMetrics};
 pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
     config.validate().map_err(anyhow::Error::msg)?;
     let security = config.client_security().map_err(anyhow::Error::msg)?;
+    let checkpoint_key = config.checkpoint_key();
     let client = KafkaClientConfig {
         bootstrap: config.kafka_bootstrap.clone(),
         security,
+        replication_factor: config.replication_factor,
         dispatch_queue_capacity: config.client_dispatch_queue_capacity,
         frame_max_bytes: config.client_frame_max_bytes,
     };
@@ -44,13 +46,9 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
             .await
             .context("connect Kafka sink")?;
     let checkpoints = Arc::new(
-        KafkaCheckpointStore::start_with_config(
-            client,
-            config.connector_id.clone(),
-            metrics.clone(),
-        )
-        .await
-        .context("connect Kafka checkpoint store")?,
+        KafkaCheckpointStore::start_with_config(client, checkpoint_key, metrics.clone())
+            .await
+            .context("connect Kafka checkpoint store")?,
     );
     metrics.set_live(true);
     let mut health_task = health::start(
