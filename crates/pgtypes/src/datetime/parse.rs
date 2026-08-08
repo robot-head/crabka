@@ -1540,6 +1540,22 @@ fn lookup_abbrev(word: &str) -> Option<Zone> {
         .map(Zone::Offset)
 }
 
+/// Resolve a lowercased timezone abbreviation to a UTC offset, for the template
+/// parser's `TZ` pattern.
+///
+/// The east-positive offset comes back directly for a fixed abbreviation; a
+/// dynamic one (`MSK`) yields its zone instead, because what it means depends on
+/// the reading it is attached to and the template parser has not finished
+/// assembling that yet. Going through the same table as literal decoding is the
+/// point: `to_timestamp(…, 'TZ')` and a zone-bearing literal accept exactly the
+/// same set of spellings, and adding an abbreviation moves both at once.
+pub(super) fn abbrev_offset(word: &str) -> Option<(i32, Option<TimeZone>)> {
+    match lookup_abbrev(word)? {
+        Zone::Offset(offset) => Some((offset.seconds(), None)),
+        Zone::Named(zone) => Some((0, Some(zone))),
+    }
+}
+
 /// Convert a Julian Day Number to a calendar date.
 fn julian_to_date(jd: i32) -> Result<Date, DecodeError> {
     /// The Julian Day Number of 2000-01-01, the anchor for the offset.

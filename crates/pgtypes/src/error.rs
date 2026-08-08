@@ -49,6 +49,16 @@ pub enum TypeError {
         type_name: &'static str,
         value: String,
     },
+    /// SP38: a `to_timestamp`/`to_date` template that does not fit its input
+    /// (22007).
+    ///
+    /// Free-form rather than shaped, because `PostgreSQL` raises a different
+    /// sentence for each way a template can fail — a value that is not an
+    /// integer, a field set twice, Gregorian and ISO week fields mixed — and the
+    /// message is the whole diagnosis. The DETAIL and HINT lines it attaches
+    /// alongside are not carried: the error channel has room for one message.
+    #[error("{message}")]
+    InvalidDatetimeTemplate { message: String },
     /// SP37: a date/time field out of range (e.g. month 13) (22008).
     #[error("date/time field value out of range: \"{value}\"")]
     DatetimeFieldOverflow { value: String },
@@ -146,7 +156,9 @@ impl TypeError {
             TypeError::InvalidEscape | TypeError::InvalidEscapeString => "22025",
             TypeError::CannotCast { .. } => "42846",
             TypeError::Domain { sqlstate, .. } => sqlstate,
-            TypeError::InvalidDatetimeFormat { .. } => "22007",
+            TypeError::InvalidDatetimeFormat { .. } | TypeError::InvalidDatetimeTemplate { .. } => {
+                "22007"
+            }
             TypeError::DatetimeFieldOverflow { .. } => "22008",
             TypeError::IntervalFieldOverflow { .. } => "22015",
             TypeError::DatetimeOutOfRange { .. } => "22008",

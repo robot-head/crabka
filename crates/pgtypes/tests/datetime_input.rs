@@ -7,9 +7,9 @@ use assert2::assert;
 use crabka_pgtypes::{
     TypeError,
     datetime::{
-        DateOrder, date_to_text, interval_to_text, parse_date, parse_date_in, parse_interval,
-        parse_time, parse_timestamp, parse_timestamptz, parse_timetz, time_to_text,
-        timestamp_to_text, timestamptz_to_text, timetz_to_text,
+        DateOrder, ParsedDateTime, date_to_text, interval_to_text, parse_by_template, parse_date,
+        parse_date_in, parse_interval, parse_time, parse_timestamp, parse_timestamptz,
+        parse_timetz, time_to_text, timestamp_to_text, timestamptz_to_text, timetz_to_text,
     },
 };
 use jiff::tz::TimeZone;
@@ -699,4 +699,437 @@ fn a_boundary_reading_resolves_to_the_later_instant() {
             "input {input}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// SP38: `to_timestamp`/`to_date` template parsing.
+//
+// Every expectation below was read off the same PostgreSQL 18.4 oracle, through
+// `to_char(to_timestamp(input, template) AT TIME ZONE 'UTC',
+// 'YYYY-MM-DD HH24:MI:SS.US BC')` for the field cases and `EXTRACT(epoch …)` for
+// the zone cases, so the years are astronomical (1 BC is year 0) exactly as
+// `ParsedDateTime` reports them.
+// ---------------------------------------------------------------------------
+
+/// The reading a template parse should produce, spelled out in full so a case
+/// compares as one value rather than as a chain of field assertions.
+fn reading(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    micros: u32,
+) -> ParsedDateTime {
+    ParsedDateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        micros,
+        tz_offset_secs: None,
+        fractional_precision: None,
+    }
+}
+
+#[test]
+fn template_parse_fields_match_postgres() {
+    let cases: &[(&str, &str, ParsedDateTime)] = &[
+        (
+            "YYYY/Mon/DD --> HH:MI:SS",
+            "0097/Feb/16 --> 08:14:30",
+            reading(97, 2, 16, 8, 14, 30, 0),
+        ),
+        (
+            "FMYYYY/FMMM/FMDD FMHH:FMMI:FMSS",
+            "97/2/16 8:14:30",
+            reading(97, 2, 16, 8, 14, 30, 0),
+        ),
+        (
+            "YYYY-MM-DD HH24:MI:SS",
+            "2011$03!18 23_38_15",
+            reading(2011, 3, 18, 23, 38, 15, 0),
+        ),
+        (
+            "YYYY FMMonth DD",
+            "1985 January 12",
+            reading(1985, 1, 12, 0, 0, 0, 0),
+        ),
+        (
+            "Y,YYYth FMRM DD",
+            "1,582nd VIII 21",
+            reading(1582, 8, 21, 0, 0, 0, 0),
+        ),
+        (
+            "MMDDHH24MISSYYYY",
+            "05121445482000",
+            reading(2000, 5, 12, 14, 45, 48, 0),
+        ),
+        (
+            "YYYYFMMonthDDFMDay",
+            "2000January09Sunday",
+            reading(2000, 1, 9, 0, 0, 0, 0),
+        ),
+        ("FXYY:Mon:DD", "97/Feb/16", reading(1997, 2, 16, 0, 0, 0, 0)),
+        ("YYYYMMDD", "19971116", reading(1997, 11, 16, 0, 0, 0, 0)),
+        (
+            "YYYY BC MM DD",
+            "1997 AD 11 16",
+            reading(1997, 11, 16, 0, 0, 0, 0),
+        ),
+        (
+            "YYYY BC MM DD",
+            "1997 BC 11 16",
+            reading(-1996, 11, 16, 0, 0, 0, 0),
+        ),
+        (
+            "YYYY B.C. MM DD",
+            "1997 B.C. 11 16",
+            reading(-1996, 11, 16, 0, 0, 0, 0),
+        ),
+        ("Y-MMDD", "9-1116", reading(2009, 11, 16, 0, 0, 0, 0)),
+        ("YY-MMDD", "95-1116", reading(1995, 11, 16, 0, 0, 0, 0)),
+        ("YYY-MMDD", "995-1116", reading(1995, 11, 16, 0, 0, 0, 0)),
+        ("YYYYWWD", "2005426", reading(2005, 10, 15, 0, 0, 0, 0)),
+        ("YYYYDDD", "2005300", reading(2005, 10, 27, 0, 0, 0, 0)),
+        ("IYYYIWID", "2005527", reading(2006, 1, 1, 0, 0, 0, 0)),
+        ("IYYIWID", "005527", reading(2006, 1, 1, 0, 0, 0, 0)),
+        ("IYIWID", "05527", reading(2006, 1, 1, 0, 0, 0, 0)),
+        ("IYYYIDDD", "2005364", reading(2006, 1, 1, 0, 0, 0, 0)),
+        ("YYYYMMDD", "  20050302", reading(2005, 3, 2, 0, 0, 0, 0)),
+        (
+            "YYYY-MM-DD HH12:MI PM",
+            "2011-12-18 11:38 AM",
+            reading(2011, 12, 18, 11, 38, 0, 0),
+        ),
+        (
+            "YYYY-MM-DD HH12:MI P.M.",
+            "2011-12-18 11:38 P.M.",
+            reading(2011, 12, 18, 23, 38, 0, 0),
+        ),
+        (
+            "YYYY-MM-DD HH24:MI:SS.MS",
+            "2018-11-02 12:34:56.025",
+            reading(2018, 11, 2, 12, 34, 56, 25000),
+        ),
+        ("Q MM YYYY", "1 4 1902", reading(1902, 4, 1, 0, 0, 0, 0)),
+        ("W MM CC YY", "3 4 21 01", reading(2001, 4, 15, 0, 0, 0, 0)),
+        ("J", "2458872", reading(2020, 1, 23, 0, 0, 0, 0)),
+        (
+            "YYYY-MM-DD BC",
+            "44-02-01 BC",
+            reading(-43, 2, 1, 0, 0, 0, 0),
+        ),
+        ("YYYY-MM-DD", "-44-02-01", reading(-43, 2, 1, 0, 0, 0, 0)),
+        (
+            "YYYY-MM-DD BC",
+            "-44-02-01 BC",
+            reading(44, 2, 1, 0, 0, 0, 0),
+        ),
+        (
+            "YYYY   MON",
+            "2000 + + JUN",
+            reading(2000, 6, 1, 0, 0, 0, 0),
+        ),
+        (
+            "YYYY-MM-DD SSSS",
+            "2015-02-11 86000",
+            reading(2015, 2, 11, 23, 53, 20, 0),
+        ),
+        ("YYYY DDD", "2016 366", reading(2016, 12, 31, 0, 0, 0, 0)),
+        ("YYYY-MM-DD", "0000-02-01", reading(0, 2, 1, 0, 0, 0, 0)),
+        ("CC YY", "21 99", reading(2099, 1, 1, 0, 0, 0, 0)),
+        ("CC YY", "21 00", reading(2100, 1, 1, 0, 0, 0, 0)),
+        ("CC YY", "-6 01", reading(-500, 1, 1, 0, 0, 0, 0)),
+        ("CC", "20", reading(1901, 1, 1, 0, 0, 0, 0)),
+        ("YYYY rm", "1902 viii", reading(1902, 8, 1, 0, 0, 0, 0)),
+        ("MM-DD", "02-30", reading(0, 3, 1, 0, 0, 0, 0)),
+        ("DD", "00", reading(0, 1, 1, 0, 0, 0, 0)),
+        ("YYYY", "2011", reading(2011, 1, 1, 0, 0, 0, 0)),
+    ];
+    for &(template, input, expected) in cases {
+        let parsed = parse_by_template(template, input)
+            .unwrap_or_else(|e| panic!("{template:?} on {input:?}: {e}"));
+        assert!(parsed == expected, "{template:?} on {input:?}");
+    }
+}
+
+#[test]
+fn template_parse_zone_offsets_match_postgres() {
+    // The offset PostgreSQL applied, recovered as (civil reading) - (instant).
+    // The two `'2000 -10'` rows are the pair that pins the sign-reclaim rule: a
+    // single space node eats the minus and `TZH` takes it back, while a second
+    // space node leaves nothing to reclaim and the offset comes out positive.
+    let cases: &[(&str, &str, i32)] = &[
+        ("YYYY-MM-DD HH12:MI TZH", "2011-12-18 11:38 +05", 18_000),
+        ("YYYY-MM-DD HH12:MI TZH", "2011-12-18 11:38 -05", -18_000),
+        (
+            "YYYY-MM-DD HH12:MI TZH:TZM",
+            "2011-12-18 11:38 +05:20",
+            19_200,
+        ),
+        (
+            "YYYY-MM-DD HH12:MI TZH:TZM",
+            "2011-12-18 11:38 -05:20",
+            -19_200,
+        ),
+        ("YYYY-MM-DD HH12:MI TZM", "2011-12-18 11:38 20", 1_200),
+        ("YYYY-MM-DD HH12:MI TZ", "2011-12-18 11:38 EST", -18_000),
+        ("YYYY-MM-DD HH12:MI OF", "2011-12-18 11:38 +01:30", 5_400),
+        ("YYYY-MM-DD HH12:MI OF", "2011-12-18 11:38 -05", -18_000),
+        // `MSK` is a dynamic abbreviation: +4 in December 2011, not the +3 it
+        // means today, so it can only be resolved once the date is known.
+        ("YYYY-MM-DD HH12:MI TZ", "2011-12-18 11:38 MSK", 14_400),
+        ("YYYY TZH", "2000 -10", -36_000),
+        ("YYYY  TZH", "2000 -10", 36_000),
+    ];
+    for &(template, input, offset) in cases {
+        let parsed = parse_by_template(template, input)
+            .unwrap_or_else(|e| panic!("{template:?} on {input:?}: {e}"));
+        assert!(
+            parsed.tz_offset_secs == Some(offset),
+            "{template:?} on {input:?}"
+        );
+    }
+}
+
+#[test]
+fn template_parse_rejections_match_postgres() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "YYYYIWID",
+            "2005527",
+            "22007",
+            "invalid combination of date conventions",
+        ),
+        (
+            "YYYYMMDD",
+            "19971",
+            "22007",
+            "source string too short for \"MM\" formatting field",
+        ),
+        (
+            "YYYYMMDD",
+            "19971)24",
+            "22007",
+            "invalid value \"1)\" for \"MM\"",
+        ),
+        (
+            "DY DD MON YYYY",
+            "Friday 1-January-1999",
+            "22007",
+            "invalid value \"da\" for \"DD\"",
+        ),
+        (
+            "DY DD MON YYYY",
+            "Fri 1-January-1999",
+            "22007",
+            "invalid value \"uary\" for \"YYYY\"",
+        ),
+        (
+            "YYYY-MM-Mon-DD",
+            "1997-11-Jan-16",
+            "22007",
+            "conflicting values for \"Mon\" field in formatting string",
+        ),
+        (
+            "YYYYMMDD",
+            "199711xy",
+            "22007",
+            "invalid value \"xy\" for \"DD\"",
+        ),
+        (
+            "FMYYYY",
+            "10000000000",
+            "22008",
+            "value for \"YYYY\" in source string is out of range",
+        ),
+        (
+            "YYYY-MM-DD HH24:MI:SS",
+            "2016-06-13 25:00:00",
+            "22008",
+            "date/time field value out of range: \"2016-06-13 25:00:00\"",
+        ),
+        (
+            "YYYY-MM-DD HH24:MI:SS",
+            "2016-06-13 15:60:00",
+            "22008",
+            "date/time field value out of range: \"2016-06-13 15:60:00\"",
+        ),
+        (
+            "YYYY-MM-DD HH:MI:SS",
+            "2016-06-13 15:50:55",
+            "22007",
+            "hour \"15\" is invalid for the 12-hour clock",
+        ),
+        (
+            "YYYY-MM-DD HH24:MI:SS",
+            "2016-13-01 15:50:55",
+            "22008",
+            "date/time field value out of range: \"2016-13-01 15:50:55\"",
+        ),
+        (
+            "YYYY-MM-DD HH24:MI:SS",
+            "2016-02-30 15:50:55",
+            "22008",
+            "date/time field value out of range: \"2016-02-30 15:50:55\"",
+        ),
+        (
+            "YYYY-MM-DD HH24:MI:SS",
+            "2015-02-29 15:50:55",
+            "22008",
+            "date/time field value out of range: \"2015-02-29 15:50:55\"",
+        ),
+        (
+            "YYYY-MM-DD SSSS",
+            "2015-02-11 86400",
+            "22008",
+            "date/time field value out of range: \"2015-02-11 86400\"",
+        ),
+        (
+            "Y,YYY",
+            "1000000000,999",
+            "22008",
+            "value for \"Y,YYY\" in source string is out of range",
+        ),
+        (
+            "SS.MS",
+            "0.-2147483648",
+            "22008",
+            "date/time field value out of range: \"0.-2147483648\"",
+        ),
+        (
+            "W",
+            "613566758",
+            "22008",
+            "date/time field value out of range: \"613566758\"",
+        ),
+        (
+            "YYYY WW D",
+            "2024 613566758 1",
+            "22008",
+            "date/time field value out of range: \"2024 613566758 1\"",
+        ),
+        (
+            "YYYY DDD",
+            "2016 367",
+            "22008",
+            "date/time field value out of range: \"2016 367\"",
+        ),
+        (
+            "CC",
+            "100000000",
+            "22008",
+            "date/time field value out of range: \"100000000\"",
+        ),
+        (
+            "CC YY",
+            "-2147483648 01",
+            "22008",
+            "date/time field value out of range: \"-2147483648 01\"",
+        ),
+        (
+            "YYYY-MM-DD HH12:MI TZ",
+            "2011-12-18 11:38 JUNK",
+            "22007",
+            "invalid value \"JUNK\" for \"TZ\"",
+        ),
+        (
+            "YYYY-MM-DD HH12:MI OF",
+            "2011-12-18 11:38 +xyz",
+            "22007",
+            "invalid value \"xy\" for \"OF\"",
+        ),
+        (
+            "YYYY-MM-DD HH12:MI OF",
+            "2011-12-18 11:38 +16:00",
+            "22009",
+            "time zone displacement out of range: \"2011-12-18 11:38 +16:00\"",
+        ),
+        (
+            "YYYY YYYY",
+            "2011 2012",
+            "22007",
+            "conflicting values for \"YYYY\" field in formatting string",
+        ),
+        (
+            "MM MM",
+            "05 06",
+            "22007",
+            "conflicting values for \"MM\" field in formatting string",
+        ),
+        (
+            "YYYY MM RM",
+            "1902 09 VIII",
+            "22007",
+            "conflicting values for \"RM\" field in formatting string",
+        ),
+        (
+            "HH12 AM",
+            "00 AM",
+            "22007",
+            "hour \"0\" is invalid for the 12-hour clock",
+        ),
+        (
+            "IYYY MM",
+            "2005 527",
+            "22007",
+            "invalid combination of date conventions",
+        ),
+        (
+            "YYMonDD",
+            "97/Feb/16",
+            "22007",
+            "invalid value \"/Feb/16\" for \"Mon\"",
+        ),
+        (
+            "YYYYxMMxDD",
+            "2011 x12 x18",
+            "22007",
+            "invalid value \"x1\" for \"MM\"",
+        ),
+    ];
+    for &(template, input, sqlstate, message) in cases {
+        let err = parse_by_template(template, input)
+            .expect_err(&format!("{template:?} on {input:?} should be rejected"));
+        assert!(err.sqlstate() == sqlstate, "{template:?} on {input:?}");
+        assert!(err.to_string() == message, "{template:?} on {input:?}");
+    }
+}
+
+#[test]
+fn template_parse_accepts_a_second_value_only_when_the_first_was_zero() {
+    // `from_char_set_int` treats a destination still holding zero as unset, so a
+    // meridiem that stored 0 (`AM`) can be overwritten by one that stores 1
+    // (`PM`) without complaint, while two non-zero years collide. Both halves
+    // are PostgreSQL's, verified against the oracle.
+    let both = parse_by_template("HH12 AM AM", "11 AM AM").expect("AM twice is accepted");
+    assert!(both.hour == 11);
+    let flipped = parse_by_template("HH12 AM PM", "11 AM PM").expect("AM then PM is accepted");
+    assert!(flipped.hour == 23);
+    let clash = parse_by_template("YYYY YYYY", "2011 2012").expect_err("two years collide");
+    assert!(clash.to_string() == "conflicting values for \"YYYY\" field in formatting string");
+}
+
+#[test]
+fn template_parse_rounds_to_the_fractional_precision_requested() {
+    // `FF`n does not cap what is read — every digit is parsed — it records a
+    // precision the caller rounds the finished instant to.
+    for (n, expected) in [(1u8, 1u8), (3, 3), (6, 6)] {
+        let parsed = parse_by_template(
+            &format!("YYYY-MM-DD HH24:MI:SS.FF{n}"),
+            "2018-11-02 12:34:56.123456",
+        )
+        .expect("FF parses");
+        assert!(parsed.micros == 123_456, "FF{n}");
+        assert!(parsed.fractional_precision == Some(expected), "FF{n}");
+    }
+    // `US` and `MS` set no precision, so nothing is rounded afterwards.
+    let us = parse_by_template("HH24:MI:SS.US", "01:02:03.123456").expect("US");
+    assert!(us.fractional_precision == None);
+    let ms = parse_by_template("HH24:MI:SS.MS", "01:02:03.25").expect("MS");
+    assert!(ms.micros == 250_000 && ms.fractional_precision == None);
 }

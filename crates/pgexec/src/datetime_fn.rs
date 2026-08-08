@@ -928,17 +928,43 @@ fn date_trunc(
                 return Ok(Datum::Timestamptz(*ts));
             }
             let tz = zone.unwrap_or(session_tz);
-            // Render in the zone, truncate the wall-clock, re-interpret in the zone.
+            // Render in the zone, truncate the wall-clock, then put it back on
+            // the timeline.
+            let offset = tz.to_offset(*ts);
             let dt = tz.to_datetime(*ts);
             let truncated = trunc_datetime(unit, dt)?;
-            truncated
-                .to_zoned(tz.clone())
-                .map(|z| Datum::Timestamptz(z.timestamp()))
+            let instant = if unit_redoes_zone(unit) {
+                // Truncating to a day or coarser moves the reading far enough
+                // that its offset has to be worked out afresh, and the midnight
+                // it lands on may itself be a DST gap or fold.
+                crabka_pgtypes::datetime::zoned_instant(truncated, tz)
+            } else {
+                // Truncating within the day keeps the offset the source instant
+                // already had. That is what makes `date_trunc('hour', …)` inside
+                // a fall-back fold stay on the pre-transition side, where
+                // re-deriving the offset would move it an hour.
+                offset.to_timestamp(truncated)
+            };
+            instant
+                .map(Datum::Timestamptz)
                 .map_err(|_| invalid_param("timestamp out of range for date_trunc"))
         }
         Datum::Interval(iv) => Ok(Datum::Interval(trunc_interval(unit, *iv)?)),
         other => Err(type_error("date_trunc", other)),
     }
+}
+
+/// Whether truncating to `unit` makes `date_trunc` re-derive the zone offset.
+///
+/// `PostgreSQL`'s `redotz`: set for `day` and every coarser unit, left clear for
+/// `hour` and finer. A sub-day truncation therefore carries the source instant's
+/// own offset forward, which only shows up on a DST boundary — and is exactly
+/// where it shows up that the two rules disagree.
+fn unit_redoes_zone(unit: &str) -> bool {
+    matches!(
+        unit,
+        "day" | "week" | "month" | "quarter" | "year" | "decade" | "century" | "millennium"
+    )
 }
 
 /// Zero out every field below `unit` in a civil datetime.
@@ -1127,9 +1153,12 @@ fn days_in_month(year: i16, month: i8) -> Option<i8> {
 ///   * `timestamptz` → `timestamp`: render the instant in `zone` (wall-clock).
 fn timezone_convert(tz: &TimeZone, value: &Datum) -> Result<Datum, ExecError> {
     match value {
-        Datum::Timestamp(dt) => dt
-            .to_zoned(tz.clone())
-            .map(|z| Datum::Timestamptz(z.timestamp()))
+        // A wall-clock on a DST boundary has two readings or none; PostgreSQL's
+        // `DetermineTimeZoneOffset` picks the later instant either way, which is
+        // what `zoned_instant` applies. jiff's own `Compatible` strategy takes
+        // the *earlier* instant in a fold, so it cannot stand in here.
+        Datum::Timestamp(dt) => crabka_pgtypes::datetime::zoned_instant(*dt, tz)
+            .map(Datum::Timestamptz)
             .map_err(|_| invalid_param("timestamp out of range for time zone conversion")),
         Datum::Timestamptz(ts) => Ok(Datum::Timestamp(tz.to_datetime(*ts))),
         // `timetz AT TIME ZONE zone` re-expresses the same instant-of-day at the
@@ -1577,6 +1606,65 @@ mod tests {
                     )
                     .expect("tstz")
                 )
+        );
+    }
+
+    /// The rules `PostgreSQL` applies when a wall-clock reading falls on a DST
+    /// boundary, all read off a PostgreSQL 18.4 oracle.
+    ///
+    /// `AT TIME ZONE` resolves a gap or a fold with `DetermineTimeZoneOffset`,
+    /// which takes the smaller of the two candidate offsets — the later instant
+    /// — where jiff's own `Compatible` strategy takes the earlier one in a fold.
+    /// `date_trunc` uses that same rule only for `day` and coarser units; a
+    /// sub-day truncation keeps whatever offset the source instant already had,
+    /// which is `PostgreSQL`'s `redotz` flag.
+    #[test]
+    fn dst_boundaries_resolve_the_way_postgres_resolves_them() {
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        let epoch = |d: &Datum| match d {
+            Datum::Timestamptz(ts) => ts.as_second(),
+            other => panic!("expected timestamptz, got {other:?}"),
+        };
+        let at = |secs: i64| secs;
+        // 2011-11-06 01:30 in Los Angeles is a fold: 08:30 UTC at PDT (-7) or
+        // 09:30 UTC at PST (-8). PostgreSQL names the later instant.
+        assert2::assert!(
+            epoch(&ev(
+                "TIMESTAMP '2011-11-06 01:30:00' AT TIME ZONE 'America/Los_Angeles'",
+                &ctx
+            )) == at(1_320_571_800)
+        );
+        // 2011-03-13 02:30 does not exist there; the same rule gives 10:30 UTC.
+        assert2::assert!(
+            epoch(&ev(
+                "TIMESTAMP '2011-03-13 02:30:00' AT TIME ZONE 'America/Los_Angeles'",
+                &ctx
+            )) == at(1_300_012_200)
+        );
+        // Truncating to the hour inside that fold keeps the source offset, so
+        // 08:30 UTC (PDT) becomes 08:00 UTC and stays on the pre-transition
+        // side; re-deriving the offset would move it an hour to 09:00 UTC.
+        assert2::assert!(
+            epoch(&ev(
+                "date_trunc('hour', TIMESTAMPTZ '2011-11-06 08:30:00+00', 'America/Los_Angeles')",
+                &ctx
+            )) == at(1_320_566_400)
+        );
+        // A day truncation does re-derive it. Havana began DST at midnight on
+        // 2011-03-13, so the midnight it lands on is a gap.
+        assert2::assert!(
+            epoch(&ev(
+                "date_trunc('day', TIMESTAMPTZ '2011-03-13 10:00:00+00', 'America/Havana')",
+                &ctx
+            )) == at(1_299_992_400)
+        );
+        // And the same day truncation inside the fold lands on a midnight that
+        // is unambiguous, one PDT day earlier.
+        assert2::assert!(
+            epoch(&ev(
+                "date_trunc('day', TIMESTAMPTZ '2011-11-06 08:30:00+00', 'America/Los_Angeles')",
+                &ctx
+            )) == at(1_320_562_800)
         );
     }
 

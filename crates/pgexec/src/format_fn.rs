@@ -516,48 +516,107 @@ fn to_timestamp_epoch(value: &Datum, name: &str) -> Result<Datum, ExecError> {
         })
 }
 
-/// `to_timestamp(input, template)`: parse `input` by `template`, then read the
-/// resulting wall-clock in the session zone → `timestamptz`.
+/// `to_timestamp(input, template)`: parse `input` by `template`, then reduce the
+/// resulting wall-clock to an instant → `timestamptz`.
+///
+/// A template that named a zone (`TZ`, `OF`, `TZH`/`TZM`) fixes the offset
+/// itself; otherwise the reading is local to the session zone, resolved by the
+/// same rule a bare `timestamp` cast uses.
 fn to_timestamp_template(template: &str, input: &str, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let p = datetime::parse_by_template(template, input).map_err(map_type)?;
-    let dt = civil_from_parsed(&p)?;
-    datetime::zoned_instant(dt, &ctx.time_zone)
-        .map(Datum::Timestamptz)
-        .map_err(|_| {
-            ExecError::Type(TypeError::DatetimeFieldOverflow {
-                value: input.to_string(),
-            })
-        })
-}
-
-/// `to_date(input, template)`: parse `input` by `template` into a calendar date.
-fn to_date(template: &str, input: &str) -> Result<Datum, ExecError> {
-    let p = datetime::parse_by_template(template, input).map_err(map_type)?;
-    let date = jiff::civil::Date::new(p.year as i16, p.month as i8, p.day as i8).map_err(|_| {
+    let dt = civil_from_parsed(&p, input)?;
+    let out_of_range = || {
         ExecError::Type(TypeError::DatetimeFieldOverflow {
             value: input.to_string(),
         })
-    })?;
+    };
+    let instant = match p.tz_offset_secs {
+        Some(secs) => jiff::tz::Offset::from_seconds(secs)
+            .and_then(|offset| offset.to_timestamp(dt))
+            .map_err(|_| out_of_range())?,
+        None => datetime::zoned_instant(dt, &ctx.time_zone).map_err(|_| out_of_range())?,
+    };
+    let instant = match p.fractional_precision {
+        Some(precision) => round_to_precision(instant, precision).ok_or_else(out_of_range)?,
+        None => instant,
+    };
+    Ok(Datum::Timestamptz(instant))
+}
+
+/// Round an instant to `precision` fractional-second digits.
+///
+/// `PostgreSQL`'s `AdjustTimestampForTypmod`, which is what an `FF`n pattern
+/// ends up applying: the microsecond count is rounded half away from zero, taken
+/// about PostgreSQL's own 2000-01-01 epoch. The epoch matters only for the
+/// tie-breaking direction on instants before it, which is precisely where
+/// rounding about the Unix epoch would disagree.
+fn round_to_precision(instant: jiff::Timestamp, precision: u8) -> Option<jiff::Timestamp> {
+    /// Microseconds between the Unix epoch and PostgreSQL's 2000-01-01 epoch.
+    const PG_EPOCH_MICROS: i64 = 946_684_800 * 1_000_000;
+    if precision >= 6 {
+        return Some(instant);
+    }
+    let scale = 10_i64.checked_pow(6 - u32::from(precision))?;
+    let half = scale / 2;
+    let micros = instant.as_microsecond().checked_sub(PG_EPOCH_MICROS)?;
+    let rounded = if micros >= 0 {
+        micros.checked_add(half)? / scale * scale
+    } else {
+        -((micros.checked_neg()?.checked_add(half)?) / scale * scale)
+    };
+    jiff::Timestamp::from_microsecond(rounded.checked_add(PG_EPOCH_MICROS)?).ok()
+}
+
+/// `to_date(input, template)`: parse `input` by `template` into a calendar date.
+/// Any zone the template named is parsed and discarded, as `PostgreSQL` does —
+/// a `date` has no zone to carry it.
+fn to_date(template: &str, input: &str) -> Result<Datum, ExecError> {
+    let p = datetime::parse_by_template(template, input).map_err(map_type)?;
+    let date = date_from_parsed(&p, input)?;
     Ok(Datum::Date(date))
 }
 
-/// Build a civil `DateTime` from a `ParsedDateTime`. This function maps a jiff
-/// range or validity error, such as Feb 30, to 22008.
-fn civil_from_parsed(p: &datetime::ParsedDateTime) -> Result<jiff::civil::DateTime, ExecError> {
-    jiff::civil::DateTime::new(
-        p.year as i16,
-        p.month as i8,
-        p.day as i8,
-        p.hour as i8,
-        p.minute as i8,
-        p.second as i8,
-        (p.micros * 1_000) as i32,
-    )
-    .map_err(|_| {
+/// Build a civil `Date` from a `ParsedDateTime`.
+///
+/// The parse has already range-checked every field, so the only failure left is
+/// a year outside the ±9999 jiff stores a date in — the storage limit that keeps
+/// gres short of PostgreSQL's 294276 AD.
+fn date_from_parsed(
+    p: &datetime::ParsedDateTime,
+    input: &str,
+) -> Result<jiff::civil::Date, ExecError> {
+    let out_of_range = || {
         ExecError::Type(TypeError::DatetimeFieldOverflow {
-            value: format!("{}-{}-{}", p.year, p.month, p.day),
+            value: input.to_string(),
         })
-    })
+    };
+    let year = i16::try_from(p.year).map_err(|_| out_of_range())?;
+    let month = i8::try_from(p.month).map_err(|_| out_of_range())?;
+    let day = i8::try_from(p.day).map_err(|_| out_of_range())?;
+    jiff::civil::Date::new(year, month, day).map_err(|_| out_of_range())
+}
+
+/// Build a civil `DateTime` from a `ParsedDateTime`, on top of
+/// [`date_from_parsed`].
+fn civil_from_parsed(
+    p: &datetime::ParsedDateTime,
+    input: &str,
+) -> Result<jiff::civil::DateTime, ExecError> {
+    let out_of_range = || {
+        ExecError::Type(TypeError::DatetimeFieldOverflow {
+            value: input.to_string(),
+        })
+    };
+    let date = date_from_parsed(p, input)?;
+    let nanos = i32::try_from(p.micros).map_err(|_| out_of_range())? * 1_000;
+    let time = jiff::civil::Time::new(
+        i8::try_from(p.hour).map_err(|_| out_of_range())?,
+        i8::try_from(p.minute).map_err(|_| out_of_range())?,
+        i8::try_from(p.second).map_err(|_| out_of_range())?,
+        nanos,
+    )
+    .map_err(|_| out_of_range())?;
+    Ok(date.to_datetime(time))
 }
 
 // ---- argument helpers ----
@@ -720,7 +779,37 @@ mod tests {
         .code
     }
 
-    /// `to_number` reads the digits out of a decorated string, and drops the
+    /// An `FF`n pattern does not truncate what it reads — every digit is parsed
+    /// — it asks for the finished instant to be rounded to n fractional digits,
+    /// half away from zero. Expectations are PostgreSQL 18.4's.
+    #[test]
+    fn to_timestamp_rounds_to_the_fractional_precision_the_template_asked_for() {
+        let micros = |sql: &str| match ev(sql) {
+            Datum::Timestamptz(ts) => ts.as_microsecond(),
+            other => panic!("expected timestamptz, got {other:?}"),
+        };
+        for (precision, expected) in [
+            (1, 1_541_162_096_100_000_i64),
+            (2, 1_541_162_096_120_000),
+            (3, 1_541_162_096_123_000),
+            (4, 1_541_162_096_123_500),
+            (5, 1_541_162_096_123_460),
+            (6, 1_541_162_096_123_456),
+        ] {
+            let sql = format!(
+                "to_timestamp('2018-11-02 12:34:56.123456', 'YYYY-MM-DD HH24:MI:SS.FF{precision}')"
+            );
+            assert!(micros(&sql) == expected, "FF{precision}");
+        }
+        // A template that names a zone fixes the offset itself instead of
+        // reading the wall clock as local to the session.
+        assert!(
+            micros("to_timestamp('2011-12-18 11:38 -05', 'YYYY-MM-DD HH12:MI TZH')")
+                == 1_324_226_280_000_000
+        );
+    }
+
+    /// `to_number` reads the digits out of a decorated string, dropping the
     /// decoration a `to_char` template would have emitted. Every expectation is
     /// PostgreSQL 18.4's.
     #[test]
