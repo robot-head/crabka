@@ -11,6 +11,8 @@ pub const METADATA_VERSION_FEATURE: &str = "metadata.version";
 
 /// The `share.version` feature name (KIP-932). Gates share-group membership.
 pub const SHARE_VERSION_FEATURE: &str = "share.version";
+/// KIP-853 Raft protocol and dynamic-membership feature.
+pub const KRAFT_VERSION_FEATURE: &str = "kraft.version";
 /// Minimum supported `share.version` level: `0` (feature disabled).
 pub const SHARE_VERSION_MIN: i16 = 0;
 /// Maximum supported `share.version` level: `1` (KIP-932 GA).

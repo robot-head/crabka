@@ -1,45 +1,54 @@
-//! The async `KraftController` consensus engine.
+//! The async `KraftController` consensus engine: a single owning tokio task
+//! holds all consensus state (the [`QuorumStateMachine`] core, the
+//! [`KraftLog`], and the published [`MetadataImage`]) and turns inbound
+//! commands/RPCs into core [`Event`]s whose [`Action`]s it executes.
 //!
-//! A single owning tokio task holds all consensus state: the
-//! [`QuorumStateMachine`] core, the [`KraftLog`], and the published
-//! [`MetadataImage`]. That task turns inbound commands and RPCs into core
-//! [`Event`]s, then executes the [`Action`]s those events produce.
-//!
-//! The ownership model is a single-owner actor. One task owns the `Engine`, and
-//! everything else talks to it over an mpsc of [`Command`]. The public
-//! [`KraftController`] handle is a cheap clone that holds the command sender and
-//! the `watch` receivers.
+//! Ownership model: one task owns the `Engine`; everything else talks to it
+//! over an mpsc of [`Command`]. The public [`KraftController`] handle is a
+//! cheap clone holding the command sender plus the `watch` receivers. This is
+//! a single-owner actor pattern; the engine is entirely ours.
 //!
 //! ## Concurrency / no-inline-await invariant
 //!
 //! The loop is single-threaded over all consensus state, so it never blocks on
-//! a peer RPC. The loop dispatches each `Send*` [`Action`] fire-and-forget. A
-//! [`tokio::spawn`]ed task calls [`PeerSender::send`], decodes the response body
-//! into the matching `Receive*Response` [`Event`], and posts it back to the loop
-//! through a clone of the command sender. The in-process multi-node sim needs
-//! this, because there the engines RPC each other reciprocally. A loop that
-//! awaited a send inline would deadlock.
+//! a peer RPC. Each `Send*` [`Action`] is dispatched **fire-and-forget**: a
+//! [`tokio::spawn`]ed task calls [`PeerSender::send`], decodes the response
+//! body into the matching `Receive*Response` [`Event`], and posts it back to
+//! the loop via a clone of the command sender. This is critical for the
+//! in-process multi-node sim, where engines RPC each other reciprocally — a
+//! loop that awaited a send inline would deadlock.
 //!
 //! ## Timers & liveness
 //!
-//! The loop drives a real monotonic clock and `select!`s over the mpsc, an
+//! The loop drives a real monotonic clock and `select!`s over the mpsc plus an
 //! election timer, a fetch timer, and a leader heartbeat interval:
-//! - On a role transition the loop cancels the now-irrelevant timer. A follower
-//!   has no election timer. A leader has no fetch timer and runs the heartbeat.
-//! - A fetch-timer expiry while the leader is still reachable RE-POLLS with
-//!   `SendFetch`, and it does not elect. Only the configured number of
-//!   consecutive misses feeds `Event::FetchTimeout` to start an election.
-//! - The leader re-broadcasts `BeginQuorumEpoch` to the voters on each
-//!   heartbeat tick.
+//! - on a role transition the now-irrelevant timer is cancelled (a follower has
+//!   no election timer; a leader has no fetch timer and runs the heartbeat);
+//! - a fetch-timer expiry while the leader is still reachable RE-POLLS
+//!   (`SendFetch`), it does not elect; only the configured consecutive
+//!   misses feed `Event::FetchTimeout` to start an election;
+//! - the leader re-broadcasts `BeginQuorumEpoch` to voters each heartbeat tick.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-use bytes::BufMut;
 use crabka_ids::Offset;
 use crabka_metadata::{
-    MetadataImage, MetadataRecord, VotersRecord, from_kraft_value, to_kraft_values,
+    MetadataImage, MetadataRecord, VoterSet, VotersRecord, from_kraft_value, to_kraft_values,
 };
-use crabka_protocol::records::{Record, RecordBatch};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        k_raft_version_record::KRaftVersionRecord as WireKRaftVersionRecord,
+        voters_record::{
+            Endpoint as WireVoterEndpoint, KRaftVersionFeature as WireKRaftVersionFeature,
+            Voter as WireVoter, VotersRecord as WireVotersRecord,
+        },
+    },
+    records::{
+        Record, RecordBatch,
+        metadata::control::{ControlRecord, ControlRecordType, control_record_key},
+    },
+};
 use crabka_units::{
     fmt::Human as _,
     prelude::{ByteSize, Time, TimeExt as _},
@@ -73,26 +82,25 @@ use crate::{
 };
 
 /// Leader heartbeat interval as a fraction of the election timeout. The leader
-/// re-broadcasts `BeginQuorumEpoch` this often, so a follower that lost the
-/// initial announcement, or an old leader that rejoins, re-attaches without a
-/// wait for an election.
+/// re-broadcasts `BeginQuorumEpoch` this often so followers that lost the
+/// initial announcement (or a rejoining old leader) re-attach without waiting
+/// for an election.
 const HEARTBEAT_DIVISOR: u64 = 3;
 
-/// Floor on an observer's metadata-fetch budget. The engine always emits at
-/// least the first committed batch, so a zero-budget fetch still makes
-/// progress.
+/// Floor on an observer's metadata-fetch budget: at least the first committed
+/// batch is always emitted so a zero-budget fetch still makes progress.
 const MIN_FETCH_BUDGET: ByteSize = crabka_units::bytes(1);
 
 /// Filename of the node-local durable quorum-state file.
 const QUORUM_STATE_FILE: &str = "quorum-state";
 
 /// Crabka-internal "snapshot not available" signal in a `FetchSnapshot`
-/// response, sent between voters.
+/// response (voter↔voter).
 const SNAPSHOT_NOT_FOUND: i16 = 98;
 
-/// Subdirectory under the data dir that holds the KIP-630 `.checkpoint`
-/// artifacts for the single metadata partition. It matches the on-disk layout
-/// that the broker's `FetchSnapshot` handler and broker-only observers expect.
+/// Subdirectory under the data dir holding KIP-630 `.checkpoint` artifacts for
+/// the single metadata partition. Matches the on-disk layout the broker's
+/// `FetchSnapshot` handler and broker-only observers expect.
 const METADATA_SUBDIR: &str = "@metadata-0";
 
 /// The checkpoint directory for a controller rooted at `data_dir`.
@@ -110,65 +118,148 @@ struct Engine {
     peers: Arc<dyn PeerSender>,
     /// Publishes the latest applied [`MetadataImage`] to readers.
     image_tx: watch::Sender<Arc<MetadataImage>>,
-    /// Publishes the current leader id. It is `None` while the leader is
-    /// unknown and while an election runs.
+    /// Publishes the current leader id (None while unknown / election running).
     leader_tx: watch::Sender<Option<NodeId>>,
     /// Publishes a structured consensus snapshot for the handle's synchronous
-    /// `quorum_state()`. The broker's `DescribeQuorum` reads it without an mpsc
-    /// round trip.
+    /// `quorum_state()` (the broker's `DescribeQuorum` reads it without an mpsc
+    /// round-trip).
     quorum_tx: watch::Sender<QuorumStateSnapshot>,
     /// Clone of the command sender, handed to fire-and-forget send tasks so
     /// they can post the decoded `Receive*Response` event back to the loop.
     cmd_tx: mpsc::Sender<Command>,
-    /// Directory that holds the metadata log, the checkpoints, and the
-    /// quorum-state file.
+    /// Directory holding the metadata log + checkpoints + quorum-state file.
     data_dir: PathBuf,
     /// Monotonic clock base: `SimInstant(ms)` is `(now - base).as_millis()`.
     clock_base: Instant,
-    /// Base election timeout. The caller varies it per node for liveness.
+    /// Base election timeout (varied per node by the caller for liveness).
     election_timeout: Time,
     heartbeat_interval: Option<Time>,
     controller_fetch_miss_limit: ControllerFetchMissLimit,
     metadata_raft_fetch_max: MetadataRaftFetchMax,
-    /// Pending timer deadlines as `tokio::time::Instant`s. `None` means
-    /// disarmed.
+    /// Pending timer deadlines as `tokio::time::Instant`s. `None` = disarmed.
     election_at: Option<Instant>,
     fetch_at: Option<Instant>,
     /// Consecutive fetch misses while still believing in a leader.
     fetch_misses: u32,
-    /// Outstanding `submit_change` waiters, keyed by the end offset they need
-    /// committed and applied. Each one resolves on apply, either with `Ok` or
-    /// with a per-record rejection.
+    /// Outstanding `submit_change` waiters keyed by the end offset they need
+    /// committed+applied. Resolved (Ok or per-record rejection) on apply.
     commit_waiters: Vec<CommitWaiter>,
-    /// Whether this node held leadership as of the last reconcile, and at what
-    /// epoch. The engine uses it to detect a leadership-loss edge, which is
-    /// either a move from Leader to a non-Leader role or a leader-epoch bump
-    /// while the node still nominally leads. On that edge the engine fails the
-    /// parked `submit_change` waiters instead of leaving them hung (FIX 1).
+    /// Whether we held leadership as of the last reconcile, and at what epoch.
+    /// Used to detect a leadership-loss edge (Leader → non-Leader, or a
+    /// leader-epoch bump while still nominally leading) so we can fail parked
+    /// `submit_change` waiters instead of leaving them hung (FIX 1).
     was_leader: bool,
     held_epoch: Epoch,
-    /// Take a snapshot every this many committed records past the last
-    /// snapshot, then prune the log below that point. `0` disables snapshots
-    /// (KIP-630).
+    /// Snapshot every this many committed records past the last snapshot, then
+    /// prune the log below that point. `0` disables snapshotting (KIP-630).
     snapshot_interval_records: u64,
     metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
-    /// HWM at which the engine wrote the last checkpoint and pruned the log to.
-    /// `open` seeds it from the recovered checkpoint.
+    /// HWM at which the last checkpoint was written (and the log pruned to).
+    /// Seeded from the recovered checkpoint on `open`.
     last_snapshot_end_offset: Offset,
     /// In-flight follower snapshot reassembly, if any.
     snapshot_fetch: Option<SnapshotFetchState>,
-    /// Set when the engine has just installed a snapshot. The next follower
-    /// Fetch carries this epoch, because the log is empty at the snapshot
-    /// boundary and so has no epoch of its own. The engine clears the field
-    /// once a normal fetch advances the log.
+    /// Set when a snapshot was just installed; the next follower Fetch carries
+    /// this epoch (the log is empty at the snapshot boundary so it has no epoch
+    /// of its own). Cleared once a normal fetch advances the log.
     installed_snapshot_epoch: Option<Epoch>,
+    /// KIP-853 control records between the latest snapshot and the LEO. The
+    /// newest set drives consensus immediately; the committed projection is
+    /// mirrored into `MetadataImage` for broker/admin readers.
+    controls: KraftControlState,
+    /// Fetch progress for every replica, including observers not yet present
+    /// in the voter set.
+    replica_fetch_offsets: BTreeMap<NodeId, i64>,
+    /// At most one voter/version control operation may be uncommitted.
+    pending_reconfig: Option<PendingReconfig>,
 }
 
-/// A parked `submit_change`. It completes once the HWM reaches `need_offset`
-/// AND the records have gone through `validate` and `apply`.
+#[derive(Debug, Clone)]
+struct KraftControlState {
+    voter_history: BTreeMap<i64, VoterSet>,
+    version_history: BTreeMap<i64, u16>,
+    committed_voters: VoterSet,
+    committed_version: u16,
+}
+
+impl KraftControlState {
+    fn new(voters: VoterSet, version: u16) -> Self {
+        Self {
+            voter_history: BTreeMap::from([(-1, voters.clone())]),
+            version_history: BTreeMap::from([(-1, version)]),
+            committed_voters: voters,
+            committed_version: version,
+        }
+    }
+
+    fn latest_voters(&self) -> &VoterSet {
+        self.voter_history
+            .last_key_value()
+            .map_or(&self.committed_voters, |(_, voters)| voters)
+    }
+
+    fn latest_version(&self) -> u16 {
+        self.version_history
+            .last_key_value()
+            .map_or(self.committed_version, |(_, version)| *version)
+    }
+
+    fn apply(&mut self, offset: i64, record: &ControlRecord) -> Result<(), RaftError> {
+        match record {
+            ControlRecord::KRaftVersion(record) => {
+                let version = u16::try_from(record.k_raft_version).map_err(|_| {
+                    RaftError::ChangeRejected("negative kraft.version control record".into())
+                })?;
+                self.version_history.insert(offset, version);
+            }
+            ControlRecord::Voters(record) => {
+                self.voter_history
+                    .insert(offset, voter_set_from_wire(record)?);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn truncate_to(&mut self, offset: i64) {
+        self.voter_history
+            .retain(|record_offset, _| *record_offset < offset);
+        self.version_history
+            .retain(|record_offset, _| *record_offset < offset);
+    }
+
+    fn commit_to(&mut self, high_watermark: i64) -> bool {
+        let voters = self
+            .voter_history
+            .range(..high_watermark)
+            .next_back()
+            .map_or_else(
+                || self.committed_voters.clone(),
+                |(_, voters)| voters.clone(),
+            );
+        let version = self
+            .version_history
+            .range(..high_watermark)
+            .next_back()
+            .map_or(self.committed_version, |(_, version)| *version);
+        let changed = voters != self.committed_voters || version != self.committed_version;
+        self.committed_voters = voters;
+        self.committed_version = version;
+        changed
+    }
+}
+
+struct PendingReconfig {
+    need_offset: Offset,
+    reply: Option<oneshot::Sender<Result<crate::reconfig::ReconfigOutcome, RaftError>>>,
+    removed_local_leader: bool,
+}
+
+/// A parked `submit_change`: it completes once the HWM reaches `need_offset`
+/// AND the records have been run through `validate`/`apply`.
 struct CommitWaiter {
-    /// Base append offset of this waiter's batch. The appended range is
-    /// `[base_offset, need_offset)`. A committed-record rejection attaches only
+    /// Base (append) offset of this waiter's batch. Its appended range is
+    /// `[base_offset, need_offset)`; a committed-record rejection only attaches
     /// to a waiter whose range actually contains the failing offset (FIX 2).
     base_offset: Offset,
     need_offset: Offset,
@@ -178,14 +269,15 @@ struct CommitWaiter {
     reply: oneshot::Sender<Result<SubmitChangeResult, RaftError>>,
 }
 
-/// Cheap, cloneable handle to the running engine. It holds the command sender
-/// and the `watch` receivers that the broker and the handle read.
+/// Cheap, cloneable handle to the running engine: holds the command sender and
+/// the `watch` receivers the broker/handle read.
 #[derive(Clone)]
 pub struct KraftController {
     cmd_tx: mpsc::Sender<Command>,
     image_rx: watch::Receiver<Arc<MetadataImage>>,
     leader_rx: watch::Receiver<Option<NodeId>>,
     quorum_rx: watch::Receiver<QuorumStateSnapshot>,
+    peers: Arc<dyn PeerSender>,
     me: NodeId,
 }
 
@@ -200,20 +292,19 @@ pub struct KraftConfig {
     pub metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity,
     pub metadata_raft_fetch_max: MetadataRaftFetchMax,
     pub peers: Arc<dyn PeerSender>,
-    /// Take a snapshot once the committed offset advances this many records
-    /// past the last snapshot, then prune the log below it. `0` disables
-    /// snapshots.
+    /// Snapshot once committed offset advances this many records past the
+    /// last snapshot, then prune the log below it. `0` disables snapshotting.
     pub snapshot_interval_records: u64,
-    /// Validated maximum metadata snapshot size this follower fetches.
+    /// Validated maximum metadata snapshot size this follower will fetch.
     pub metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
 }
 
 /// The configured election timeout as whole milliseconds.
 ///
 /// Every deadline derived from the timeout crosses into integers here. The
-/// core defines its per-node, per-epoch jitter over integer milliseconds, in
-/// `election_jitter_ms`. Keeping the base in the same domain therefore leaves
-/// every election deadline bit-identical to raw-integer arithmetic.
+/// core's per-(node, epoch) jitter is defined over integer milliseconds
+/// (`election_jitter_ms`), so keeping the base in the same domain leaves every
+/// election deadline bit-identical to the raw-integer arithmetic it replaces.
 fn election_timeout_ms(election_timeout: Time) -> u64 {
     u64::try_from(election_timeout.millis_i64()).unwrap_or(0)
 }
@@ -320,6 +411,129 @@ fn metadata_record_batch(leader_epoch: Epoch, blobs: &[bytes::Bytes]) -> RecordB
         records,
         ..Default::default()
     }
+}
+
+fn typed_control_batch(
+    leader_epoch: Epoch,
+    controls: &[ControlRecord],
+) -> Result<RecordBatch, RaftError> {
+    let records = controls
+        .iter()
+        .enumerate()
+        .map(|(index, control)| {
+            let (key, value) = control.encode_key_value()?;
+            Ok(Record {
+                offset_delta: i32::try_from(index).unwrap_or(i32::MAX),
+                key: Some(key),
+                value: Some(value),
+                ..Default::default()
+            })
+        })
+        .collect::<Result<Vec<_>, crabka_protocol::ProtocolError>>()?;
+    Ok(RecordBatch {
+        partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
+        attributes: crabka_protocol::records::Attributes::default().with_control(true),
+        last_offset_delta: i32::try_from(controls.len().saturating_sub(1)).unwrap_or(i32::MAX),
+        records,
+        ..Default::default()
+    })
+}
+
+fn decode_control_record(record: &Record) -> Result<Option<ControlRecord>, RaftError> {
+    let (Some(key), Some(value)) = (&record.key, &record.value) else {
+        return Ok(None);
+    };
+    Ok(Some(ControlRecord::decode(key, value)?))
+}
+
+fn voter_supports_version(voter: &crabka_metadata::voters::Voter, version: u16) -> bool {
+    voter.kraft_version.min <= version && version <= voter.kraft_version.max
+}
+
+fn voter_set_to_wire(voters: &VoterSet) -> WireVotersRecord {
+    let voters = voters
+        .iter()
+        .map(|voter| WireVoter {
+            voter_id: i32::try_from(voter.id.0).unwrap_or(i32::MAX),
+            voter_directory_id: crabka_protocol::primitives::uuid::Uuid(
+                *voter.directory_id.as_bytes(),
+            ),
+            endpoints: voter
+                .endpoints
+                .iter()
+                .map(|endpoint| WireVoterEndpoint {
+                    name: endpoint.name.clone(),
+                    host: endpoint.host.clone(),
+                    port: endpoint.port,
+                    ..Default::default()
+                })
+                .collect(),
+            k_raft_version_feature: WireKRaftVersionFeature {
+                min_supported_version: i16::try_from(voter.kraft_version.min).unwrap_or(i16::MAX),
+                max_supported_version: i16::try_from(voter.kraft_version.max).unwrap_or(i16::MAX),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .collect();
+    WireVotersRecord {
+        version: 0,
+        voters,
+        ..Default::default()
+    }
+}
+
+fn voter_set_from_wire(record: &WireVotersRecord) -> Result<VoterSet, RaftError> {
+    let voters = record
+        .voters
+        .iter()
+        .map(|voter| {
+            let id = u64::try_from(voter.voter_id).map_err(|_| {
+                RaftError::InvalidVoterUpdate("negative voter id in VotersRecord".into())
+            })?;
+            let min = u16::try_from(voter.k_raft_version_feature.min_supported_version).map_err(
+                |_| RaftError::InvalidVoterUpdate("negative minimum kraft.version".into()),
+            )?;
+            let max = u16::try_from(voter.k_raft_version_feature.max_supported_version).map_err(
+                |_| RaftError::InvalidVoterUpdate("negative maximum kraft.version".into()),
+            )?;
+            if min > max {
+                return Err(RaftError::InvalidVoterUpdate(
+                    "inverted kraft.version range".into(),
+                ));
+            }
+            let endpoints = voter
+                .endpoints
+                .iter()
+                .map(|endpoint| {
+                    let port = endpoint.port;
+                    if endpoint.name.is_empty() || endpoint.host.is_empty() || port == 0 {
+                        return Err(RaftError::InvalidVoterUpdate(
+                            "voter endpoint must have a name, host, and nonzero port".into(),
+                        ));
+                    }
+                    Ok(crabka_metadata::voters::VoterEndpoint {
+                        name: endpoint.name.clone(),
+                        host: endpoint.host.clone(),
+                        port,
+                    })
+                })
+                .collect::<Result<Vec<_>, RaftError>>()?;
+            Ok(crabka_metadata::voters::Voter {
+                id: NodeId(id),
+                directory_id: Uuid::from_bytes(voter.voter_directory_id.0),
+                endpoints,
+                kraft_version: crabka_metadata::voters::KRaftVersionRange { min, max },
+            })
+        })
+        .collect::<Result<Vec<_>, RaftError>>()?;
+    let set = VoterSet::from_voters(voters);
+    if set.len() != record.voters.len() {
+        return Err(RaftError::InvalidVoterUpdate(
+            "duplicate voter id in VotersRecord".into(),
+        ));
+    }
+    Ok(set)
 }
 
 fn append_result_is_consistent(
@@ -444,17 +658,14 @@ fn snapshot_fetch_response_invalid(error_code: i16, from: NodeId, leader_id: Nod
 }
 
 impl KraftController {
-    /// Builds the engine over an already-opened [`KraftLog`] and spawns its
-    /// loop task.
+    /// Build the engine over an already-opened [`KraftLog`] and spawn its loop
+    /// task. Recovery (snapshot + replay + quorum-state file) is wired by
+    /// [`Self::open`]; this lower-level entrypoint takes the seed state directly
+    /// and is used by tests/drivers that supply their own [`KraftLog`].
     ///
-    /// [`Self::open`] wires the recovery, which is the snapshot, the replay, and
-    /// the quorum-state file. This lower-level entry point takes the seed state
-    /// directly, and the tests and drivers that supply their own [`KraftLog`]
-    /// use it.
-    ///
-    /// The loop of the returned handle runs until [`Self::shutdown`], or until
-    /// every handle drops. `data_dir` is where the engine writes the
-    /// quorum-state file and the checkpoints.
+    /// The returned handle's loop runs until [`Self::shutdown`] (or all handles
+    /// drop). `data_dir` is where the engine writes the quorum-state file and
+    /// checkpoints.
     #[must_use]
     pub fn spawn(config: KraftConfig, log: KraftLog, data_dir: PathBuf) -> Self {
         let cluster_id = config.cluster_id;
@@ -462,9 +673,9 @@ impl KraftController {
         Self::spawn_with_image(config, log, data_dir, image, Offset(0))
     }
 
-    /// Spawns the engine from an already-recovered [`MetadataImage`]. The
-    /// restart-recovery path through [`Self::open`] threads the rebuilt image
-    /// in here, so the published `current_image` shows it immediately.
+    /// Spawn the engine starting from an already-recovered [`MetadataImage`]
+    /// (the restart-recovery path through [`Self::open`] threads the rebuilt
+    /// image in here so the published `current_image` reflects it immediately).
     fn spawn_with_image(
         config: KraftConfig,
         log: KraftLog,
@@ -475,7 +686,7 @@ impl KraftController {
         let KraftConfig {
             me,
             cluster_id: _,
-            initial_state,
+            mut initial_state,
             election_timeout,
             heartbeat_interval,
             controller_fetch_miss_limit,
@@ -486,6 +697,12 @@ impl KraftController {
             metadata_snapshot_fetch_max,
         } = config;
 
+        // Every record in a cleanly reopened log is committed. Recover the
+        // latest control state before constructing the core so elections never
+        // briefly use stale configured voters.
+        replay_control_records(&log, &mut initial_state, metadata_raft_fetch_max);
+        let controls =
+            KraftControlState::new(initial_state.voters.clone(), initial_state.kraft_version);
         let core = QuorumStateMachine::new(me, initial_state, election_timeout);
         let initial_leader = core.quorum_state().leader_id;
         let initial_was_leader = core.role().is_leader();
@@ -498,6 +715,11 @@ impl KraftController {
         // the published `MetadataImage` so image readers (e.g. the broker's
         // voter-set views, auto-join) observe the live quorum membership.
         let mut image = image;
+        image.apply(&MetadataRecord::V1KRaftVersion(
+            crabka_metadata::KRaftVersionRecord {
+                kraft_version: core.quorum_state().kraft_version,
+            },
+        ));
         image.apply(&MetadataRecord::V1Voters(VotersRecord {
             voters: core.quorum_state().voters.clone(),
         }));
@@ -510,8 +732,14 @@ impl KraftController {
             high_watermark: log.hwm().0,
             log_end_offset: log.log_end_offset().0,
             log_start_offset: log.log_start_offset().0,
-            voters: initial_state_voters(&core),
-            per_voter_fetch_offset: std::collections::BTreeMap::new(),
+            voters: core.quorum_state().voters.clone(),
+            voted_directory_id: core
+                .quorum_state()
+                .voted_key
+                .as_ref()
+                .map(|key| key.directory_id),
+            observers: Vec::new(),
+            per_replica_fetch_offset: BTreeMap::new(),
         };
         let (quorum_tx, quorum_rx) = watch::channel(initial_snapshot);
         let (cmd_tx, cmd_rx) = mpsc::channel(metadata_raft_command_queue_capacity.get());
@@ -528,6 +756,7 @@ impl KraftController {
             election_timeout,
         );
 
+        let engine_peers = Arc::clone(&peers);
         let engine = Engine {
             me,
             core,
@@ -555,6 +784,9 @@ impl KraftController {
             last_snapshot_end_offset,
             snapshot_fetch: None,
             installed_snapshot_epoch: None,
+            controls,
+            replica_fetch_offsets: BTreeMap::new(),
+            pending_reconfig: None,
         };
 
         tokio::spawn(engine.run(cmd_rx));
@@ -564,16 +796,15 @@ impl KraftController {
             image_rx,
             leader_rx,
             quorum_rx,
+            peers: engine_peers,
             me,
         }
     }
 
-    /// Opens the engine over `data_dir`.
-    ///
-    /// The engine recovers the [`MetadataImage`] from the latest checkpoint,
-    /// replays the committed log batches, and seeds the durable
-    /// [`QuorumState`] from the node-local quorum-state file. It uses the
-    /// `bootstrap` voter set and cluster id only when no quorum-state file
+    /// Open the engine over `data_dir`: recover the [`MetadataImage`] from the
+    /// latest checkpoint + replay committed log batches, and seed the durable
+    /// [`QuorumState`] from the node-local quorum-state file. The
+    /// `bootstrap` voter set/cluster id is used only when no quorum-state file
     /// exists yet.
     ///
     /// # Errors
@@ -603,17 +834,37 @@ impl KraftController {
         metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
     ) -> Result<Self, RaftError> {
         std::fs::create_dir_all(&data_dir).map_err(crabka_log::LogError::Io)?;
+        let legacy_quorum_state = std::fs::metadata(data_dir.join(QUORUM_STATE_FILE))
+            .is_ok_and(|metadata| metadata.len() == 54);
         let mut log = KraftLog::open(&data_dir)?;
+        if legacy_quorum_state {
+            // The predecessor format treated a cleanly reopened log as fully
+            // committed. Capture that boundary once while migrating its
+            // binary quorum state; all subsequent restarts use the persisted
+            // high-watermark checkpoint.
+            log.advance_hwm(log.log_end_offset());
+        }
 
-        // Recover the image: latest checkpoint, then replay committed batches
-        // past it. The committed prefix is the whole log on a clean restart
-        // (the HWM is not persisted separately; the log only holds committed
-        // metadata here, so we apply the full log end).
+        // Recover the image from the checkpoint plus only the durable committed
+        // prefix. An uncommitted voter record can remain at the log end after a
+        // crash and must not become authoritative during restart.
         let mut image = MetadataImage::new(cluster_id);
+        let mut snapshot_control = None;
         let mut last_snapshot_end_offset = Offset(0);
         if let Some(bytes) = load_latest_checkpoint(&checkpoint_dir(&data_dir))? {
-            let records = crate::snapshot::SnapshotReader::read_records(&bytes)?;
-            image = MetadataImage::from_records(cluster_id, &records);
+            let contents = crate::snapshot::SnapshotReader::read(&bytes)?;
+            image = MetadataImage::from_records(cluster_id, &contents.metadata_records);
+            if let Some(control) = contents.control_state {
+                image.apply(&MetadataRecord::V1KRaftVersion(
+                    crabka_metadata::KRaftVersionRecord {
+                        kraft_version: control.kraft_version,
+                    },
+                ));
+                image.apply(&MetadataRecord::V1Voters(VotersRecord {
+                    voters: control.voters.clone(),
+                }));
+                snapshot_control = Some(control);
+            }
             if let Some((off, _ep)) = latest_checkpoint_id(&checkpoint_dir(&data_dir)) {
                 // Checkpoint filenames encode the raw offset (on-disk boundary).
                 last_snapshot_end_offset = Offset(off);
@@ -624,12 +875,15 @@ impl KraftController {
             // checkpoint-offset cursor.
         }
         replay_committed(&log, &mut image, Offset(0), metadata_raft_fetch_max);
-        log.advance_hwm(log.log_end_offset());
 
         // Seed the durable quorum state from the file, falling back to a fresh
         // bootstrap when absent.
-        let initial_state = load_quorum_state(&data_dir, cluster_id, &bootstrap_voters)?
+        let mut initial_state = load_quorum_state(&data_dir, cluster_id, &bootstrap_voters)?
             .unwrap_or_else(|| QuorumState::bootstrap(cluster_id, bootstrap_voters));
+        if let Some(control) = snapshot_control {
+            initial_state.kraft_version = control.kraft_version;
+            initial_state.voters = control.voters;
+        }
 
         Ok(Self::spawn_with_image(
             KraftConfig {
@@ -658,41 +912,49 @@ impl KraftController {
         self.me
     }
 
+    /// Probe a proposed voter through the controller's configured TLS/SASL
+    /// dialer rather than opening an unauthenticated plaintext connection.
+    pub(crate) async fn probe_kraft_version(
+        &self,
+        address: &str,
+        finalized_version: u16,
+    ) -> Result<bool, RaftError> {
+        self.peers
+            .probe_kraft_version(address, finalized_version)
+            .await
+    }
+
     /// A snapshot of the latest applied [`MetadataImage`].
     #[must_use]
     pub fn current_image(&self) -> Arc<MetadataImage> {
         self.image_rx.borrow().clone()
     }
 
-    /// Watches the published [`MetadataImage`].
+    /// Watch the published [`MetadataImage`].
     #[must_use]
     pub fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
         self.image_rx.clone()
     }
 
-    /// Watches the current leader id.
+    /// Watch the current leader id.
     #[must_use]
     pub fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
         self.leader_rx.clone()
     }
 
-    /// A synchronous snapshot of consensus state. The handle's
-    /// `quorum_state()` reads it without an mpsc round trip, because the engine
-    /// republishes it on every event. The call is a cheap `watch` borrow plus a
-    /// clone.
+    /// A synchronous snapshot of consensus state (the handle's `quorum_state()`
+    /// reads this without an mpsc round-trip — the engine republishes it on
+    /// every event). Cheap `watch` borrow + clone.
     #[must_use]
     pub fn quorum_snapshot(&self) -> QuorumStateSnapshot {
         self.quorum_rx.borrow().clone()
     }
 
-    /// Submits a metadata change.
-    ///
-    /// On the leader this method appends the batch at the current leader epoch.
-    /// It returns once the batch is committed, that is once the HWM is ≥ the
-    /// appended end offset, AND applied, and it surfaces the first per-record
-    /// rejection. On a follower it returns [`RaftError::NotLeader`] with the
-    /// leader hint, and the handle layer then forwards the batch through
-    /// `forward_submit_to`.
+    /// Submit a metadata change. On the leader, appends the batch at the current
+    /// leader epoch and returns once it is committed (HWM ≥ the appended end
+    /// offset) AND applied, surfacing the first per-record rejection. On a
+    /// follower, returns [`RaftError::NotLeader`] with the leader hint; the
+    /// handle layer forwards via `forward_submit_to`.
     ///
     /// # Errors
     /// - [`RaftError::Metadata`] if a record fails `validate`.
@@ -710,6 +972,31 @@ impl KraftController {
         rx.await.map_err(|_| RaftError::Shutdown)?
     }
 
+    /// Submit one KIP-853 voter or kraft-version control operation.
+    pub(crate) async fn reconfigure(
+        &self,
+        change: crate::reconfig::VoterChange,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Reconfigure { change, reply })
+            .await
+            .map_err(|_| RaftError::Shutdown)?;
+        rx.await.map_err(|_| RaftError::Shutdown)?
+    }
+
+    /// Atomically finalize `kraft.version` in the Raft control log.
+    ///
+    /// # Errors
+    /// Returns an unsupported-version, leadership, timeout, or storage error.
+    pub async fn finalize_kraft_version(
+        &self,
+        version: u16,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        self.reconfigure(crate::reconfig::VoterChange::FinalizeKraftVersion(version))
+            .await
+    }
+
     /// A structured snapshot of consensus state for the broker's
     /// `DescribeQuorum` admin view.
     ///
@@ -724,7 +1011,7 @@ impl KraftController {
         rx.await.map_err(|_| RaftError::Shutdown)
     }
 
-    /// Reads a committed `__cluster_metadata` slice for an observer's
+    /// Read a committed `__cluster_metadata` slice for an observer's
     /// `API_KEY_METADATA_FETCH` (1004).
     ///
     /// # Errors
@@ -746,8 +1033,7 @@ impl KraftController {
         rx.await.map_err(|_| RaftError::Shutdown)
     }
 
-    /// Serializes the current image to a KIP-630 checkpoint under the data
-    /// dir.
+    /// Serialize the current image to a KIP-630 checkpoint under the data dir.
     ///
     /// # Errors
     /// Returns [`RaftError`] if serialization or the file write fails.
@@ -760,9 +1046,8 @@ impl KraftController {
         rx.await.map_err(|_| RaftError::Shutdown)?
     }
 
-    /// Injects a raw core [`Event`] into the loop. This is the test and driver
-    /// entry point, and it is also the internal feedback path for peer-RPC
-    /// responses.
+    /// Inject a raw core [`Event`] into the loop (test/driver entrypoint and the
+    /// internal feedback path for peer-RPC responses).
     ///
     /// # Errors
     /// Returns [`RaftError::Shutdown`] if the engine task is gone.
@@ -773,7 +1058,7 @@ impl KraftController {
             .map_err(|_| RaftError::Shutdown)
     }
 
-    /// Delivers an inbound peer RPC to the engine.
+    /// Deliver an inbound peer RPC to the engine.
     ///
     /// # Errors
     /// Returns [`RaftError::Shutdown`] if the engine task is gone.
@@ -784,13 +1069,13 @@ impl KraftController {
             .map_err(|_| RaftError::Shutdown)
     }
 
-    /// Stops the engine task.
+    /// Stop the engine task.
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(Command::Shutdown).await;
     }
 
-    /// Test-only: appends `records` as a committed batch and applies them
-    /// through the real pipeline. Returns the appended base offset.
+    /// Test-only: append `records` as a committed batch and apply them through
+    /// the real pipeline; returns the appended base offset.
     #[cfg(test)]
     async fn test_append_and_commit(
         &self,
@@ -806,14 +1091,23 @@ impl KraftController {
 }
 
 impl Engine {
-    /// The event loop.
-    ///
-    /// It `select!`s the command mpsc against the election timer, the fetch
-    /// timer, and the leader heartbeat interval. It turns each one into core
-    /// input and executes the resulting [`Action`]s. The loop is
-    /// single-threaded over all consensus state, so it needs no locking inside.
-    /// Peer sends are fire-and-forget. See the module docs.
+    /// The event loop. `select!`s the command mpsc against the election/fetch
+    /// timers and the leader heartbeat interval, turning each into core input
+    /// and executing the resulting [`Action`]s. Single-threaded over all
+    /// consensus state, so no locking is needed inside; peer sends are
+    /// fire-and-forget (see the module docs).
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<Command>) {
+        // A dynamically formatted controller starts as an observer with no
+        // known leader.  It still has one or more discovery voters from the
+        // bootstrap configuration, so poll one immediately.  The Fetch reply
+        // redirects us to the current leader and begins normal replication.
+        // Without this kick, observers never arm either election or fetch
+        // timers and therefore cannot reach the auto-join workflow.
+        if let Some(peer) = self.discovery_peer() {
+            self.send_fetch(peer);
+            self.arm_fetch_timer();
+        }
+
         // Heartbeat ticks the whole time; the loop only acts on it while leader.
         let hb_period = heartbeat_period(self.election_timeout, self.heartbeat_interval);
         let mut heartbeat = tokio::time::interval(hb_period.to_std());
@@ -871,6 +1165,7 @@ impl Engine {
             Command::Inbound(inbound) => self.on_inbound(inbound),
             Command::Timer(tick) => self.on_timer(tick),
             Command::SubmitChange { records, reply } => self.on_submit_change(&records, reply),
+            Command::Reconfigure { change, reply } => self.on_reconfigure(change, reply),
             Command::TriggerSnapshot { reply } => {
                 let _ = reply.send(self.do_trigger_snapshot());
             }
@@ -906,7 +1201,7 @@ impl Engine {
         self.publish_leader();
     }
 
-    /// Maps a timer tick to liveness behavior.
+    /// Map a timer tick to liveness behavior.
     fn on_timer(&mut self, tick: TimerTick) {
         match tick {
             TimerTick::Election => {
@@ -937,6 +1232,11 @@ impl Engine {
                 } else if self.core.is_voter() {
                     // No leader to poll but the fetch watchdog fired: elect.
                     self.on_event(Event::FetchTimeout);
+                } else if let Some(peer) = self.discovery_peer() {
+                    // An observer has no election timeout. Retry discovery
+                    // until a bootstrap voter redirects it to the leader.
+                    self.send_fetch(peer);
+                    self.arm_fetch_timer();
                 }
             }
             TimerTick::Heartbeat => {
@@ -948,10 +1248,24 @@ impl Engine {
         }
     }
 
-    /// The leader id this node actively follows as a Follower or as an
-    /// attached Observer, if there is one.
+    /// The leader id we are actively following (Follower / attached Observer),
+    /// if any.
     fn following_leader(&self) -> Option<NodeId> {
         following_leader_for_role(self.core.role())
+    }
+
+    /// Pick a configured voter for observer leader discovery.
+    fn discovery_peer(&self) -> Option<NodeId> {
+        if self.core.is_voter() || self.following_leader().is_some() {
+            return None;
+        }
+        self.core
+            .quorum_state()
+            .voters
+            .ids()
+            .into_iter()
+            .find(|id| *id != self.me)
+            .or_else(|| self.peers.discovery_peers().into_iter().next())
     }
 
     #[tracing::instrument(
@@ -1027,6 +1341,7 @@ impl Engine {
                     fetch_offset,
                 }) = wire::decode_fetch(&req)
                 {
+                    self.replica_fetch_offsets.insert(from, fetch_offset);
                     let now = self.now();
                     let prev_role = self.core.role().name();
                     let actions = self.core.on_event(
@@ -1142,9 +1457,9 @@ impl Engine {
         }
     }
 
-    /// Runs an inbound event whose actions include a `ReplyVote`, and returns
-    /// the encoded response body. The loop also applies the side effects of the
-    /// non-reply actions.
+    /// Run an inbound event whose actions include a `ReplyVote`, returning the
+    /// encoded response body (the loop side-effects from non-reply actions are
+    /// applied too).
     fn run_inbound_reply(&mut self, event: Event) -> bytes::Bytes {
         let now = self.now();
         let prev_role = self.core.role().name();
@@ -1167,8 +1482,7 @@ impl Engine {
         resp.encode()
     }
 
-    /// Executes a batch of [`Action`]s and dispatches the peer sends
-    /// fire-and-forget.
+    /// Execute a batch of [`Action`]s, dispatching peer sends fire-and-forget.
     fn execute(&mut self, actions: Vec<Action>) {
         for action in actions {
             match action {
@@ -1190,8 +1504,7 @@ impl Engine {
         }
     }
 
-    /// Executes only the local actions in `actions`, that is the ones that
-    /// are neither network nor reply actions.
+    /// Execute only the local (non-network, non-reply) actions in `actions`.
     fn execute_local_only(&mut self, actions: Vec<Action>) {
         for action in actions {
             match action {
@@ -1210,12 +1523,17 @@ impl Engine {
         }
     }
 
-    /// Executes a single non-network [`Action`] synchronously.
+    /// Execute a single non-network [`Action`] synchronously.
     fn execute_one_local(&mut self, action: Action) {
         match action {
             Action::AppendLeaderChange { epoch } => {
                 if let Err(e) = self.append_leader_change(epoch) {
                     tracing::error!(?e, "kraft: append leader-change failed");
+                } else if is_single_voter_majority(self.core.quorum_state().majority()) {
+                    // There is no follower Fetch acknowledgement to drive HWM
+                    // recomputation in a one-voter quorum. The local append is
+                    // already a majority, so commit the current-epoch barrier.
+                    self.advance_and_apply(self.log.log_end_offset());
                 }
             }
             Action::AdvanceHighWatermark(n) => {
@@ -1226,6 +1544,8 @@ impl Engine {
                 // `point.offset` is the core's raw i64 divergence point.
                 if let Err(e) = self.log.truncate_to(Offset(point.offset)) {
                     tracing::error!(?e, "kraft: truncate failed");
+                } else {
+                    self.restore_control_state_after_truncation(point.offset);
                 }
             }
             Action::PersistQuorumState => {
@@ -1248,9 +1568,8 @@ impl Engine {
         }
     }
 
-    /// Cancels the timers that are irrelevant to the new role after an event,
-    /// and arms the timers that role needs and the core did not explicitly
-    /// reset.
+    /// After processing an event, cancel timers irrelevant to the new role and
+    /// arm the ones it needs that the core did not explicitly reset.
     fn reconcile_timers(&mut self, _prev_role: &'static str) {
         match self.core.role() {
             Role::Leader { .. } => {
@@ -1277,15 +1596,12 @@ impl Engine {
         self.fail_waiters_on_leadership_loss();
     }
 
-    /// Detects a transition away from leadership and fails every parked
-    /// `submit_change` waiter with `NotLeader`.
-    ///
-    /// The transition is either a move from Leader to a non-Leader role, or a
-    /// leader-epoch bump while this node still nominally leads. The waiter must
-    /// fail so that the caller's future resolves promptly instead of hanging
-    /// until shutdown (FIX 1). Records appended at the old epoch can no longer
-    /// commit once this node steps down, because a new leader can truncate
-    /// them. The parked waiters are therefore unresolvable and must error.
+    /// Detect a transition away from leadership — Leader → non-Leader, or a
+    /// leader-epoch bump while we still nominally lead — and fail every parked
+    /// `submit_change` waiter with `NotLeader` so the caller's future resolves
+    /// promptly instead of hanging until shutdown (FIX 1). Records appended at
+    /// our old epoch can no longer commit once we step down (a new leader may
+    /// truncate them), so the parked waiters are unresolvable and must error.
     fn fail_waiters_on_leadership_loss(&mut self) {
         let is_leader = self.core.role().is_leader();
         let epoch = self.core.quorum_state().leader_epoch;
@@ -1301,28 +1617,39 @@ impl Engine {
                 let _ = w.reply.send(Err(RaftError::NotLeader { current_leader }));
             }
         }
+        if lost_leadership
+            && let Some(mut pending) = self.pending_reconfig.take()
+            && let Some(reply) = pending.reply.take()
+        {
+            let _ = reply.send(Err(RaftError::NotLeader {
+                current_leader: self.core.quorum_state().leader_id,
+            }));
+        }
         self.was_leader = is_leader;
         self.held_epoch = epoch;
     }
 
-    /// Arms the fetch timer one election timeout out from now. This is the
-    /// re-poll cadence.
+    /// Arm the fetch timer one election-timeout out from now (re-poll cadence).
     fn arm_fetch_timer(&mut self) {
         self.fetch_at = Some(
             Instant::now() + Duration::from_millis(election_timeout_ms(self.election_timeout)),
         );
     }
 
-    /// Converts a core [`SimInstant`] deadline into a `tokio::time::Instant`.
+    /// Convert a core [`SimInstant`] deadline into a `tokio::time::Instant`.
     fn deadline_instant(&self, deadline: SimInstant) -> Instant {
         instant_from_clock_base(self.clock_base, deadline)
     }
 
-    /// Appends the leader's `LeaderChange` control marker for `epoch`.
+    /// Append the leader's `LeaderChange` control marker for `epoch`.
     #[tracing::instrument(level = "info", skip_all, fields(node = self.me.0, epoch), err)]
     fn append_leader_change(&mut self, epoch: Epoch) -> Result<Offset, RaftError> {
-        let voter_ids: Vec<NodeId> = self.core.quorum_state().voters.ids().into_iter().collect();
-        let mut batch = leader_change_batch(epoch, self.me, &voter_ids);
+        let mut batch = leader_change_batch(
+            epoch,
+            self.me,
+            &self.core.quorum_state().voters,
+            self.controls.latest_version(),
+        );
         let expected_base = self.log.log_end_offset();
         let base = self.log.append(&mut batch)?;
         validate_append_result(
@@ -1334,9 +1661,218 @@ impl Engine {
         Ok(base)
     }
 
-    /// Handles a `submit_change`. A leader appends the batch and parks a
-    /// waiter. A non-leader rejects the change immediately and returns the
-    /// leader hint.
+    /// Validate and append one KIP-853 control operation. The voter set is
+    /// applied to the core immediately after append; completion waits for the
+    /// resulting batch to cross the HWM unless `AddRaftVoter` v1 requested an
+    /// append-only acknowledgement.
+    fn on_reconfigure(
+        &mut self,
+        change: crate::reconfig::VoterChange,
+        reply: oneshot::Sender<Result<crate::reconfig::ReconfigOutcome, RaftError>>,
+    ) {
+        use crate::reconfig::{ReconfigOutcome, VoterChange};
+
+        if !self.core.role().is_leader() {
+            let _ = reply.send(Ok(ReconfigOutcome::NotLeader {
+                leader: self.core.quorum_state().leader_id,
+            }));
+            return;
+        }
+        if self.pending_reconfig.is_some()
+            || self.controls.latest_voters() != &self.controls.committed_voters
+            || self.controls.latest_version() != self.controls.committed_version
+        {
+            let _ = reply.send(Err(RaftError::ReconfigInProgress));
+            return;
+        }
+        if let Role::Leader {
+            epoch_start_offset, ..
+        } = self.core.role()
+            && self.log.hwm().0 <= *epoch_start_offset
+        {
+            let _ = reply.send(Err(RaftError::ReconfigInProgress));
+            return;
+        }
+
+        let current = self.controls.committed_voters.clone();
+        let current_version = self.controls.committed_version;
+        let (records, ack_when_committed, removed_local_leader) = match change {
+            VoterChange::Add(request) => {
+                if current_version < 1 {
+                    let _ = reply.send(Err(RaftError::UnsupportedKraftVersion(current_version)));
+                    return;
+                }
+                if current.contains(request.voter.id) {
+                    let _ = reply.send(Err(RaftError::DuplicateVoter(request.voter.id)));
+                    return;
+                }
+                if !voter_supports_version(&request.voter, current_version) {
+                    let _ = reply.send(Err(RaftError::InvalidVoterUpdate(format!(
+                        "voter {} does not support kraft.version {current_version}",
+                        request.voter.id
+                    ))));
+                    return;
+                }
+                let leader_end = self.log.log_end_offset().0;
+                let observer_end = self
+                    .replica_fetch_offsets
+                    .get(&request.voter.id)
+                    .copied()
+                    .unwrap_or(0);
+                if observer_end < leader_end {
+                    let lag =
+                        u64::try_from(leader_end.saturating_sub(observer_end)).unwrap_or(u64::MAX);
+                    let _ = reply.send(Err(RaftError::VoterNotCaughtUp {
+                        id: request.voter.id,
+                        lag,
+                    }));
+                    return;
+                }
+                let next = current.with_voter(request.voter);
+                (
+                    vec![ControlRecord::Voters(voter_set_to_wire(&next))],
+                    request.ack_when_committed,
+                    false,
+                )
+            }
+            VoterChange::Remove(request) => {
+                if current_version < 1 {
+                    let _ = reply.send(Err(RaftError::UnsupportedKraftVersion(current_version)));
+                    return;
+                }
+                let Some(existing) = current.get(request.id) else {
+                    let _ = reply.send(Err(RaftError::VoterNotFound(request.id)));
+                    return;
+                };
+                if existing.directory_id != request.directory_id {
+                    let _ = reply.send(Err(RaftError::VoterNotFound(request.id)));
+                    return;
+                }
+                if current.len() == 1 {
+                    let _ = reply.send(Err(RaftError::ReconfigRejected(
+                        "cannot remove the last voter".into(),
+                    )));
+                    return;
+                }
+                let next = current.without_voter(request.id);
+                (
+                    vec![ControlRecord::Voters(voter_set_to_wire(&next))],
+                    true,
+                    request.id == self.me,
+                )
+            }
+            VoterChange::Update(request) => {
+                let Some(existing) = current.get(request.voter.id) else {
+                    let _ = reply.send(Err(RaftError::VoterNotFound(request.voter.id)));
+                    return;
+                };
+                if existing.directory_id != uuid::Uuid::nil()
+                    && existing.directory_id != request.voter.directory_id
+                {
+                    let _ = reply.send(Err(RaftError::VoterNotFound(request.voter.id)));
+                    return;
+                }
+                if !voter_supports_version(&request.voter, current_version) {
+                    let _ = reply.send(Err(RaftError::InvalidVoterUpdate(format!(
+                        "voter {} does not support kraft.version {current_version}",
+                        request.voter.id
+                    ))));
+                    return;
+                }
+                if current_version == 0 {
+                    // At level 0 UpdateVoter supplies upgrade preflight data;
+                    // no VotersRecord may be written yet.
+                    let next = current.with_voter(request.voter);
+                    self.controls.committed_voters = next.clone();
+                    self.controls.voter_history.insert(-1, next.clone());
+                    let actions = self.core.apply_voter_set(next.clone(), self.now());
+                    self.peers.update_voters(&next);
+                    self.execute(actions);
+                    self.publish_leader();
+                    let _ = reply.send(Ok(ReconfigOutcome::Committed));
+                    return;
+                }
+                let next = current.with_voter(request.voter);
+                (
+                    vec![ControlRecord::Voters(voter_set_to_wire(&next))],
+                    true,
+                    false,
+                )
+            }
+            VoterChange::FinalizeKraftVersion(version) => {
+                if version != 1 || current_version != 0 {
+                    let _ = reply.send(Err(RaftError::InvalidVoterUpdate(format!(
+                        "kraft.version transition {current_version} -> {version} is not supported"
+                    ))));
+                    return;
+                }
+                if current
+                    .iter()
+                    .any(|voter| !voter_supports_version(voter, version))
+                {
+                    let _ = reply.send(Err(RaftError::InvalidVoterUpdate(
+                        "not every voter supports kraft.version 1".into(),
+                    )));
+                    return;
+                }
+                (
+                    vec![
+                        ControlRecord::KRaftVersion(WireKRaftVersionRecord {
+                            version: 0,
+                            k_raft_version: 1,
+                            ..Default::default()
+                        }),
+                        ControlRecord::Voters(voter_set_to_wire(&current)),
+                    ],
+                    true,
+                    false,
+                )
+            }
+        };
+
+        let leader_epoch = self.core.quorum_state().leader_epoch;
+        let mut batch = match typed_control_batch(leader_epoch, &records) {
+            Ok(batch) => batch,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        let base = match self.log.append(&mut batch) {
+            Ok(base) => base,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        if let Err(error) = self.apply_control_batch(&batch) {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        let need_offset = Offset(
+            base.0
+                .saturating_add(i64::try_from(records.len()).unwrap_or(i64::MAX)),
+        );
+        let waiter_reply = if ack_when_committed {
+            Some(reply)
+        } else {
+            let _ = reply.send(Ok(ReconfigOutcome::Committed));
+            None
+        };
+        self.pending_reconfig = Some(PendingReconfig {
+            need_offset,
+            reply: waiter_reply,
+            removed_local_leader,
+        });
+
+        if is_single_voter_majority(self.core.quorum_state().majority()) {
+            self.advance_and_apply(self.log.log_end_offset());
+        }
+        self.publish_leader();
+    }
+
+    /// Handle a `submit_change`: leader appends + parks a waiter; non-leader
+    /// rejects immediately with the leader hint.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -1459,8 +1995,8 @@ impl Engine {
         self.try_resolve_waiters();
     }
 
-    /// Test-only: appends a metadata batch and commits it through the real
-    /// apply pipeline. Returns the appended base offset, or -1 on failure.
+    /// Test-only: append a metadata batch and commit it through the real apply
+    /// pipeline. Returns the appended base offset (or -1 on failure).
     #[cfg(test)]
     fn test_append_and_commit(&mut self, records: &[crabka_metadata::MetadataRecord]) -> i64 {
         let leader_epoch = self.core.quorum_state().leader_epoch;
@@ -1495,9 +2031,92 @@ impl Engine {
         base.0
     }
 
-    /// Advances the HWM and applies the records that the advance newly commits
-    /// to the [`MetadataImage`]. It then publishes the image and resolves every
-    /// satisfied waiter.
+    /// Apply KIP-853 controls as soon as their batch is appended or fetched.
+    /// Consensus always uses the latest local view, even before commitment.
+    fn apply_control_batch(&mut self, batch: &RecordBatch) -> Result<(), RaftError> {
+        if !batch.attributes.is_control_batch() {
+            return Ok(());
+        }
+        let previous = self.controls.latest_voters().clone();
+        for record in &batch.records {
+            let Some(control) = decode_control_record(record)? else {
+                continue;
+            };
+            let offset = batch
+                .base_offset
+                .saturating_add(i64::from(record.offset_delta));
+            self.controls.apply(offset, &control)?;
+        }
+        let latest = self.controls.latest_voters().clone();
+        if latest != previous {
+            let actions = self.core.apply_voter_set(latest.clone(), self.now());
+            self.peers.update_voters(&latest);
+            self.execute(actions);
+        }
+        Ok(())
+    }
+
+    fn restore_control_state_after_truncation(&mut self, offset: i64) {
+        let previous = self.controls.latest_voters().clone();
+        self.controls.truncate_to(offset);
+        let latest = self.controls.latest_voters().clone();
+        if latest != previous {
+            let actions = self.core.apply_voter_set(latest.clone(), self.now());
+            self.peers.update_voters(&latest);
+            self.execute(actions);
+        }
+        if self
+            .pending_reconfig
+            .as_ref()
+            .is_some_and(|pending| pending.need_offset.0 > offset)
+            && let Some(mut pending) = self.pending_reconfig.take()
+            && let Some(reply) = pending.reply.take()
+        {
+            let _ = reply.send(Err(RaftError::NotLeader {
+                current_leader: self.core.quorum_state().leader_id,
+            }));
+        }
+    }
+
+    fn commit_control_state(&mut self, high_watermark: Offset) {
+        if !self.controls.commit_to(high_watermark.0) {
+            return;
+        }
+        self.core.commit_voter_set();
+        self.core.set_kraft_version(self.controls.committed_version);
+        self.image.apply(&MetadataRecord::V1KRaftVersion(
+            crabka_metadata::KRaftVersionRecord {
+                kraft_version: self.controls.committed_version,
+            },
+        ));
+        self.image.apply(&MetadataRecord::V1Voters(VotersRecord {
+            voters: self.controls.committed_voters.clone(),
+        }));
+        let _ = self.image_tx.send(Arc::new(self.image.clone()));
+    }
+
+    fn try_resolve_reconfiguration(&mut self) {
+        let Some(pending) = self.pending_reconfig.as_ref() else {
+            return;
+        };
+        if !hwm_reaches_waiter(self.log.hwm(), pending.need_offset) {
+            return;
+        }
+        let Some(mut pending) = self.pending_reconfig.take() else {
+            return;
+        };
+        if let Some(reply) = pending.reply.take() {
+            let _ = reply.send(Ok(crate::reconfig::ReconfigOutcome::Committed));
+        }
+        if pending.removed_local_leader {
+            let actions = self.core.finish_local_leader_removal(self.now());
+            self.execute(actions);
+            self.reconcile_timers("leader");
+        }
+    }
+
+    /// Advance the HWM and apply the records newly committed by it to the
+    /// [`MetadataImage`], then publish and resolve any satisfied waiters.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -1509,6 +2128,8 @@ impl Engine {
         let expected_hwm = expected_hwm_after_advance(prev_hwm, new_hwm, self.log.log_end_offset());
         self.log.advance_hwm(new_hwm);
         let applied_hwm = self.log.hwm();
+        self.commit_control_state(applied_hwm);
+        self.try_resolve_reconfiguration();
         if !hwm_advanced_as_expected(applied_hwm, expected_hwm) {
             tracing::error!(
                 prev_hwm = prev_hwm.0,
@@ -1596,10 +2217,9 @@ impl Engine {
         self.maybe_snapshot_and_prune();
     }
 
-    /// Leader path, KIP-630. Once the committed offset has advanced
-    /// `snapshot_interval_records` past the last snapshot, this method
-    /// serializes the current image to a checkpoint and prunes the log below
-    /// the snapshot boundary.
+    /// (Leader, KIP-630) once the committed offset has advanced
+    /// `snapshot_interval_records` past the last snapshot, serialize the current
+    /// image to a checkpoint and prune the log below the snapshot boundary.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -1635,18 +2255,17 @@ impl Engine {
         retain_latest_checkpoint(&checkpoint_dir(&self.data_dir));
     }
 
-    /// The latest local snapshot id `(end_offset, epoch)`, if there is one.
-    /// This is the leader's `FetchSnapshot` hint.
+    /// The latest local snapshot id `(end_offset, epoch)`, if any (leader's
+    /// `FetchSnapshot` hint).
     fn latest_snapshot_id(&self) -> Option<(i64, i32)> {
         latest_checkpoint_id(&checkpoint_dir(&self.data_dir))
     }
 
-    /// Attaches a rejection to the waiter whose appended range
-    /// `[base_offset, need_offset)` actually contains `record_offset`.
-    ///
-    /// The gate uses both bounds, not `need_offset > record_offset` alone. That
-    /// stops a failing record from bleeding its rejection onto later, unrelated
-    /// waiters whose own records committed correctly (FIX 2).
+    /// Attach a rejection to the waiter whose appended range
+    /// `[base_offset, need_offset)` actually contains `record_offset`. Gating on
+    /// both bounds (not just `need_offset > record_offset`) prevents a failing
+    /// record from bleeding its rejection onto later, unrelated waiters whose
+    /// own records committed fine (FIX 2).
     fn note_rejection(&mut self, record_offset: Offset, err: &crabka_metadata::MetadataError) {
         for w in &mut self.commit_waiters {
             if w.base_offset <= record_offset
@@ -1658,7 +2277,7 @@ impl Engine {
         }
     }
 
-    /// Resolves every waiter whose target offset is now committed.
+    /// Resolve every waiter whose target offset is now committed.
     fn try_resolve_waiters(&mut self) {
         let hwm = self.log.hwm();
         let mut still = Vec::new();
@@ -1687,8 +2306,7 @@ impl Engine {
         self.commit_waiters = still;
     }
 
-    /// Serializes the current image into a KIP-630 checkpoint under the data
-    /// dir.
+    /// Serialize the current image into a KIP-630 checkpoint under the data dir.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -1703,15 +2321,15 @@ impl Engine {
         write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset.0, epoch, &bytes)
     }
 
-    /// Persists the durable quorum state atomically.
+    /// Persist the durable quorum state atomically.
     fn persist_quorum_state(&self) -> Result<(), RaftError> {
         save_quorum_state(&self.data_dir, self.core.quorum_state())
     }
 
-    /// Snapshots the consensus state for `DescribeQuorum`.
+    /// Snapshot the consensus state for `DescribeQuorum`.
     fn quorum_state_snapshot(&self) -> QuorumStateSnapshot {
         let qs = self.core.quorum_state();
-        let mut per_voter_fetch_offset = std::collections::BTreeMap::new();
+        let mut per_replica_fetch_offset = self.replica_fetch_offsets.clone();
         if let Role::Leader { replicas, .. } = self.core.role() {
             // The leader's own matched index is its log end offset — its local
             // log is, by definition, fully matched against itself. The
@@ -1721,29 +2339,34 @@ impl Engine {
             // the JVM "unknown" sentinel -1 for the leader).
             // `per_voter_fetch_offset` is a wire-facing DescribeQuorum DTO of raw
             // `i64`s; the peer entries already come from the core as `i64`.
-            per_voter_fetch_offset.insert(self.core.me(), self.log.log_end_offset().0);
+            per_replica_fetch_offset.insert(self.core.me(), self.log.log_end_offset().0);
             for (id, progress) in replicas {
-                per_voter_fetch_offset.insert(*id, progress.fetch_offset);
+                per_replica_fetch_offset.insert(*id, progress.fetch_offset);
             }
         }
+        let observers = per_replica_fetch_offset
+            .keys()
+            .filter(|id| !qs.voters.contains(**id))
+            .copied()
+            .collect();
         QuorumStateSnapshot {
             leader_id: qs.leader_id,
             leader_epoch: qs.leader_epoch,
             high_watermark: self.log.hwm().0,
             log_end_offset: self.log.log_end_offset().0,
             log_start_offset: self.log.log_start_offset().0,
-            voters: qs.voters.ids().into_iter().collect(),
-            per_voter_fetch_offset,
+            voters: qs.voters.clone(),
+            voted_directory_id: qs.voted_key.as_ref().map(|key| key.directory_id),
+            observers,
+            per_replica_fetch_offset,
         }
     }
 
-    /// Serves a committed `__cluster_metadata` slice for an observer's metadata
-    /// fetch (1004).
-    ///
-    /// This method reads the committed batches at or after `fetch_offset`, up
-    /// to the HWM, and concatenates their verbatim `RecordBatch` bytes. The
-    /// engine's records are already Kafka record batches. It always emits at
-    /// least the first batch, so the observer makes progress.
+    /// Serve a committed `__cluster_metadata` slice for an observer's metadata
+    /// fetch (1004): read committed batches at/after `fetch_offset` up to the
+    /// HWM and concatenate their verbatim `RecordBatch` bytes (the engine's
+    /// records are already Kafka record batches). At least the first batch is
+    /// always emitted so the observer makes progress.
     fn metadata_fetch_slice(&self, fetch_offset: i64, max_size: ByteSize) -> MetadataFetchSlice {
         // `fetch_offset` arrives raw on the observer metadata-fetch wire; wrap it
         // into the `KraftLog` offset domain for the log-bound comparisons/read.
@@ -1778,7 +2401,7 @@ impl Engine {
         }
     }
 
-    /// Voter ids other than this node's own id.
+    /// Voter ids other than self.
     fn other_voters(&self) -> Vec<NodeId> {
         self.core
             .quorum_state()
@@ -1863,8 +2486,7 @@ impl Engine {
         self.spawn_send(leader_id, api_key::FETCH, body);
     }
 
-    /// Follower path: requests a byte range of `snapshot_id` from
-    /// `leader_id`.
+    /// (Follower side) request a byte range of `snapshot_id` from `leader_id`.
     fn send_fetch_snapshot(&self, leader_id: NodeId, snapshot_id: (i64, i32), position: i64) {
         if leader_id == self.me {
             return;
@@ -1881,15 +2503,12 @@ impl Engine {
         self.spawn_send(leader_id, api_key::FETCH_SNAPSHOT, body);
     }
 
-    /// Leader path: serializes every log batch at or after `fetch_offset`, up
-    /// to this node's log end, into a length-prefixed run of
-    /// `RecordBatch::encode` blobs for the fetching follower.
-    ///
-    /// `KRaft` replicates up to the leader's log end, not only up to the HWM.
-    /// The response carries the HWM separately, and that HWM gates the apply on
-    /// the follower. This method is what moves the real record bytes, so
-    /// multi-voter `submit_change` waiters can commit once a majority has
-    /// fetched.
+    /// (Leader side) serialize every log batch at/after `fetch_offset` up to our
+    /// log end into a length-prefixed run of `RecordBatch::encode` blobs for the
+    /// fetching follower. `KRaft` replicates up to the leader's log end (not just
+    /// the HWM — the HWM is carried separately in the response and gates apply on
+    /// the follower); this is what moves real record bytes so multi-voter
+    /// `submit_change` waiters can commit once a majority has fetched.
     fn serve_fetch_records(&self, fetch_offset: Offset) -> bytes::Bytes {
         let log_end = self.log.log_end_offset();
         if !fetch_offset_has_records(fetch_offset, log_end) {
@@ -1908,13 +2527,11 @@ impl Engine {
         encode_batches(&batches)
     }
 
-    /// Follower path: applies the leader's Fetch response.
-    ///
-    /// This method truncates on a divergence hint, appends the carried batches
-    /// at their leader-assigned offsets, advances the local HWM to
-    /// `min(leader_hwm, own log_end)`, applies the newly-committed records to
-    /// the image, then feeds the core `ReceiveFetchResponse`. That event re-arms
-    /// the fetch timer and fetches again.
+    /// (Follower side) apply the leader's Fetch response: truncate on a
+    /// divergence hint, append the carried batches at their leader-assigned
+    /// offsets, advance our HWM to `min(leader_hwm, own log_end)`, apply the
+    /// newly-committed records to the image, then feed the core
+    /// `ReceiveFetchResponse` (which re-arms the fetch timer / re-fetches).
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -1932,7 +2549,7 @@ impl Engine {
         else {
             return;
         };
-        let _ = from;
+        self.peers.remember_peer(from, leader_id);
 
         // The leader signalled our fetch offset is below its pruned log-start:
         // we must fetch the snapshot instead of replicating from the log. Start
@@ -1966,6 +2583,8 @@ impl Engine {
             // `point.offset` is the core's raw i64 divergence point.
             if let Err(e) = self.log.truncate_to(Offset(point.offset)) {
                 tracing::error!(?e, "kraft: follower truncate failed");
+            } else {
+                self.restore_control_state_after_truncation(point.offset);
             }
         } else if !records.is_empty() {
             // Append the carried batches at their leader-assigned offsets. A
@@ -1991,6 +2610,10 @@ impl Engine {
                         }
                         if let Err(e) = self.log.append_at(&mut batch, at) {
                             tracing::error!(?e, at = at.0, "kraft: follower append_at failed");
+                            break;
+                        }
+                        if let Err(e) = self.apply_control_batch(&batch) {
+                            tracing::error!(?e, at = at.0, "kraft: invalid fetched control batch");
                             break;
                         }
                         // Appended past the snapshot boundary: the log now has a
@@ -2020,12 +2643,10 @@ impl Engine {
         });
     }
 
-    /// Follower path: handles a `FetchSnapshot` response chunk.
-    ///
-    /// The method reassembles the snapshot through the [`SnapshotFetchState`]
-    /// and requests the next range until the snapshot is complete. It then
-    /// installs the assembled snapshot and resumes normal fetching. Any error
-    /// or abort falls back to a plain Fetch against the same peer.
+    /// (Follower side) handle a `FetchSnapshot` response chunk: reassemble via
+    /// the [`SnapshotFetchState`], requesting the next range until complete, then
+    /// install the assembled snapshot and resume normal fetching. Any error /
+    /// abort falls back to a plain Fetch against the same peer.
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.me.0, from = from.0))]
     fn on_fetch_snapshot_response(&mut self, from: NodeId, body: &[u8]) {
         let Some(wire::PeerResponse::FetchSnapshot {
@@ -2065,12 +2686,10 @@ impl Engine {
         }
     }
 
-    /// Validates, persists, and installs a fetched snapshot.
-    ///
-    /// The method rebuilds the image from the snapshot's records, writes the
-    /// checkpoint, and installs the snapshot into the log, which resets the
-    /// log-start and log-end to `end_offset`. It then publishes the new image
-    /// and arms the post-install fetch epoch. See `send_fetch`.
+    /// Validate, persist, and install a fetched snapshot: rebuild the image from
+    /// its records, write the checkpoint, install it into the log (resetting the
+    /// log-start/end to `end_offset`), publish the new image, and arm the
+    /// post-install fetch epoch (see `send_fetch`).
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -2083,24 +2702,33 @@ impl Engine {
         let (end_offset, epoch) = id;
         let end_offset_pos = Offset(end_offset);
         // Validate the bytes decode before mutating any durable state.
-        let records = crate::snapshot::SnapshotReader::read_records(bytes)?;
+        let contents = crate::snapshot::SnapshotReader::read(bytes)?;
         if end_offset_pos <= self.log.log_end_offset() {
             return Ok(()); // stale; we already advanced past this snapshot
         }
         let cluster_id = self.image.cluster_id();
-        let mut new_image = MetadataImage::from_records(cluster_id, &records);
-        // KIP-630 snapshots cover the KIP-631-framed metadata records only;
-        // `to_records` does NOT emit the raft-control `V1Voters` (the controller
-        // voter set lives in the raft `QuorumState`, not the metadata log — see
-        // `spawn_with_image`). Rebuilding the image straight from snapshot
-        // records would therefore drop the live quorum membership, leaving image
-        // readers (DescribeQuorum / auto-join) blind on a follower that caught up
-        // via snapshot. Mirror the live voter set back in, exactly as spawn does.
-        new_image.apply(&MetadataRecord::V1Voters(VotersRecord {
-            voters: self.core.quorum_state().voters.clone(),
-        }));
+        let mut new_image = MetadataImage::from_records(cluster_id, &contents.metadata_records);
+        if let Some(control) = &contents.control_state {
+            new_image.apply(&MetadataRecord::V1KRaftVersion(
+                crabka_metadata::KRaftVersionRecord {
+                    kraft_version: control.kraft_version,
+                },
+            ));
+            new_image.apply(&MetadataRecord::V1Voters(VotersRecord {
+                voters: control.voters.clone(),
+            }));
+        }
         write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset, epoch, bytes)?;
         self.image = new_image;
+        if let Some(control) = contents.control_state {
+            self.controls = KraftControlState::new(control.voters.clone(), control.kraft_version);
+            self.core.set_kraft_version(control.kraft_version);
+            let actions = self
+                .core
+                .apply_voter_set(control.voters.clone(), self.now());
+            self.peers.update_voters(&control.voters);
+            self.execute(actions);
+        }
         self.log.install_snapshot(end_offset_pos)?;
         self.last_snapshot_end_offset = end_offset_pos;
         self.installed_snapshot_epoch = Some(u32::try_from(epoch).unwrap_or(0));
@@ -2109,10 +2737,9 @@ impl Engine {
         Ok(())
     }
 
-    /// Sends to a peer fire-and-forget. The method spawns a task that does the
-    /// RPC, decodes the response into the matching `Receive*Response` core
-    /// event, and posts it back to the loop. The loop NEVER awaits a peer RPC
-    /// inline.
+    /// Fire-and-forget a peer send: spawn a task that performs the RPC, decodes
+    /// the response into the matching `Receive*Response` core event, and posts
+    /// it back to the loop. The loop NEVER awaits a peer RPC inline.
     fn spawn_send(&self, peer: NodeId, api_key: i16, body: bytes::Bytes) {
         let peers = Arc::clone(&self.peers);
         let cmd_tx = self.cmd_tx.clone();
@@ -2162,15 +2789,11 @@ impl Engine {
     }
 }
 
-/// Decodes a non-Fetch peer response body into the matching `Receive*Response`
-/// event.
-///
-/// `peer` is the responder, and it fills `from`. This function returns `None`
-/// in three cases. `Ack` produces no core event, because the
-/// `BeginQuorumEpoch` and `EndQuorumEpoch` acks produce none. `Fetch` goes
-/// through the dedicated [`Engine::on_fetch_response`] path, which must touch
-/// the log before the core sees the event. An undecodable body also returns
-/// `None`.
+/// Decode a non-Fetch peer response body into the matching `Receive*Response`
+/// event. `peer` is the responder, used to fill `from`. Returns `None` for
+/// `Ack` (Begin/End acks produce no core event), `Fetch` (handled by the
+/// dedicated [`Engine::on_fetch_response`] path, which must touch the log before
+/// the core sees the event), and undecodable bodies.
 fn response_to_event(peer: NodeId, api_key: i16, body: &[u8]) -> Option<Event> {
     match api_key {
         self::api_key::VOTE => match wire::PeerResponse::decode_vote(body)? {
@@ -2187,8 +2810,8 @@ fn response_to_event(peer: NodeId, api_key: i16, body: &[u8]) -> Option<Event> {
     }
 }
 
-/// Returns a `Some` sleep future for an armed deadline. For a disarmed timer it
-/// returns a never-ready future, so `select!` ignores that timer.
+/// `Some` sleep future for an armed deadline; a never-ready future otherwise so
+/// `select!` ignores the disarmed timer.
 async fn sleep_until_opt(deadline: Option<Instant>) {
     match deadline {
         Some(at) => tokio::time::sleep_until(at).await,
@@ -2196,12 +2819,10 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-/// Encodes a run of `RecordBatch`es into one contiguous `Bytes` blob.
-///
-/// Each batch is self-describing through its `batch_length` header, so the
-/// batches concatenate and decode back in order. See [`decode_batches`]. The
-/// leader's Fetch serve path uses this function to ship replicated record bytes
-/// to a follower.
+/// Encode a run of `RecordBatch`es into one contiguous `Bytes` blob (each batch
+/// is self-describing via its `batch_length` header, so they concatenate and
+/// decode back in order — see [`decode_batches`]). Used by the leader's Fetch
+/// serve path to ship replicated record bytes to a follower.
 fn encode_batches(batches: &[RecordBatch]) -> bytes::Bytes {
     let mut out = bytes::BytesMut::new();
     for batch in batches {
@@ -2212,9 +2833,9 @@ fn encode_batches(batches: &[RecordBatch]) -> bytes::Bytes {
     out.freeze()
 }
 
-/// Decodes the contiguous `Bytes` blob that [`encode_batches`] produced back
-/// into a `Vec<RecordBatch>`, and keeps each batch's `base_offset`. The
-/// follower's Fetch-response apply path uses it.
+/// Decode the contiguous `Bytes` blob produced by [`encode_batches`] back into a
+/// `Vec<RecordBatch>` (each batch's `base_offset` is preserved). Used by the
+/// follower's Fetch-response apply path.
 fn decode_batches(mut buf: &[u8]) -> Result<Vec<RecordBatch>, RaftError> {
     let mut out = Vec::new();
     while !buf.is_empty() {
@@ -2230,27 +2851,30 @@ fn decode_batches(mut buf: &[u8]) -> Result<Vec<RecordBatch>, RaftError> {
     Ok(out)
 }
 
-/// Voter ids from the core's current quorum state. These fill the first
-/// published snapshot, before the loop runs.
+/// Voter ids from the core's current quorum state (for the initial published
+/// snapshot, before the loop runs).
 fn initial_state_voters(core: &QuorumStateMachine) -> Vec<NodeId> {
     core.quorum_state().voters.ids().into_iter().collect()
 }
 
-/// Builds the leader's `LeaderChange` control batch for `epoch`.
-///
-/// The batch holds a single KIP-595 `LeaderChange` control record, with the
-/// control-batch attribute set, and it names the new leader and the current
-/// voter set. A real `KRaft` batch MUST contain at least one record, because an
-/// empty batch crashes a JVM follower with `Batch must contain at least one
-/// record`. This batch therefore carries the proper `LeaderChangeMessage` and
-/// not zero records. Crabka readers skip it through `is_control_batch()`. It
-/// occupies exactly one log offset, with `last_offset_delta = 0`, which is
-/// unchanged from the earlier empty batch.
+/// Build the leader's `LeaderChange` control batch for `epoch`: a single
+/// KIP-595 `LeaderChange` control record (control-batch attribute set), naming
+/// the new leader and the current voter set. A real `KRaft` batch MUST contain at
+/// least one record — an empty batch crashes a JVM follower
+/// (`Batch must contain at least one record`) — so this carries the proper
+/// `LeaderChangeMessage` rather than zero records. Crabka readers skip it via
+/// `is_control_batch()`; it occupies exactly one log offset
+/// (`last_offset_delta = 0`), unchanged from the prior empty batch.
 // The `version: 0` field equals `LeaderChangeMessage`'s `Default` (i16 -> 0), so
 // deleting it yields byte-identical encoding; it is not the wire schema version
 // (that is the `0` passed to `msg.encode`). Equivalent mutant.
 #[cfg_attr(test, mutants::skip)]
-fn leader_change_batch(epoch: Epoch, leader_id: NodeId, voter_ids: &[NodeId]) -> RecordBatch {
+fn leader_change_batch(
+    epoch: Epoch,
+    leader_id: NodeId,
+    voter_set: &VoterSet,
+    kraft_version: u16,
+) -> RecordBatch {
     use crabka_protocol::{
         Encode,
         owned::{
@@ -2262,15 +2886,19 @@ fn leader_change_batch(epoch: Epoch, leader_id: NodeId, voter_ids: &[NodeId]) ->
         },
     };
 
-    let voters: Vec<Voter> = voter_ids
+    let message_version = i16::from(kraft_version >= 1);
+    let voters: Vec<Voter> = voter_set
         .iter()
-        .map(|&id| Voter {
-            voter_id: i32::try_from(id.0).unwrap_or(i32::MAX),
+        .map(|voter| Voter {
+            voter_id: i32::try_from(voter.id.0).unwrap_or(i32::MAX),
+            voter_directory_id: crabka_protocol::primitives::uuid::Uuid(
+                *voter.directory_id.as_bytes(),
+            ),
             ..Default::default()
         })
         .collect();
     let msg = LeaderChangeMessage {
-        version: 0,
+        version: message_version,
         leader_id: i32::try_from(leader_id.0).unwrap_or(i32::MAX),
         voters: voters.clone(),
         granting_voters: voters,
@@ -2278,7 +2906,7 @@ fn leader_change_batch(epoch: Epoch, leader_id: NodeId, voter_ids: &[NodeId]) ->
     };
     let mut value = bytes::BytesMut::new();
     // LeaderChangeMessage v0; encode is infallible for a well-formed message.
-    let _ = msg.encode(&mut value, 0);
+    let _ = msg.encode(&mut value, message_version);
     let key = control_record_key(ControlRecordType::LeaderChange);
     RecordBatch {
         partition_leader_epoch: i32::try_from(epoch).unwrap_or(i32::MAX),
@@ -2294,9 +2922,8 @@ fn leader_change_batch(epoch: Epoch, leader_id: NodeId, voter_ids: &[NodeId]) ->
     }
 }
 
-/// Replays the committed log batches from `from` into `image`. The replay is
-/// idempotent, and it skips every record that fails `validate`. Restart
-/// recovery uses it.
+/// Replay committed log batches starting at `from` into `image` (idempotent:
+/// records that fail `validate` are skipped). Used by restart recovery.
 fn replay_committed(
     log: &KraftLog,
     image: &mut MetadataImage,
@@ -2304,7 +2931,7 @@ fn replay_committed(
     max: MetadataRaftFetchMax,
 ) {
     let mut cursor = from;
-    let target = log.log_end_offset();
+    let target = log.hwm();
     while cursor < target {
         match log.read_decoded(cursor, max.size()) {
             Ok(batches) => {
@@ -2313,6 +2940,9 @@ fn replay_committed(
                     break;
                 }
                 for batch in &batches {
+                    if Offset(batch.base_offset) >= target {
+                        continue;
+                    }
                     if batch.attributes.is_control_batch() {
                         continue;
                     }
@@ -2340,6 +2970,57 @@ fn replay_committed(
     }
 }
 
+fn replay_control_records(log: &KraftLog, state: &mut QuorumState, max: MetadataRaftFetchMax) {
+    let mut cursor = log.log_start_offset();
+    let target = log.hwm();
+    while cursor < target {
+        match log.read_decoded(cursor, max.size()) {
+            Ok(batches) => {
+                let next = next_batch_offset(&batches);
+                if batches.is_empty() {
+                    break;
+                }
+                for batch in &batches {
+                    if Offset(batch.base_offset) >= target {
+                        continue;
+                    }
+                    if !batch.attributes.is_control_batch() {
+                        continue;
+                    }
+                    for record in &batch.records {
+                        match decode_control_record(record) {
+                            Ok(Some(ControlRecord::KRaftVersion(record))) => {
+                                if let Ok(version) = u16::try_from(record.k_raft_version) {
+                                    state.kraft_version = version;
+                                }
+                            }
+                            Ok(Some(ControlRecord::Voters(record))) => {
+                                if let Ok(voters) = voter_set_from_wire(&record) {
+                                    state.voters = voters;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => tracing::error!(
+                                ?error,
+                                offset = batch.base_offset,
+                                "kraft: invalid control record during recovery"
+                            ),
+                        }
+                    }
+                }
+                let Some(next) = next.filter(|next| *next > cursor) else {
+                    break;
+                };
+                cursor = next;
+            }
+            Err(error) => {
+                tracing::error!(?error, "kraft: control replay for recovery failed");
+                break;
+            }
+        }
+    }
+}
+
 fn next_batch_offset(batches: &[RecordBatch]) -> Option<Offset> {
     batches.last().map(|batch| {
         Offset(
@@ -2353,74 +3034,118 @@ fn next_batch_offset(batches: &[RecordBatch]) -> Option<Offset> {
 
 // ---- quorum-state file --------------------------------------------------------
 
-/// Writes `state` to the node-local `quorum-state` file atomically, with a temp
-/// file and a rename.
-///
-/// The format is node-local and not a wire format, so it is a compact,
-/// deterministic little-endian layout: cluster id (16 bytes), leader epoch
-/// (u32), leader id (tag u8 then u64), and voted key (tag u8, then u64, then a
-/// 16-byte directory id). The voter set is NOT persisted here. It is
-/// reconstructed from the bootstrap config and the metadata image, because the
-/// voters are static.
+/// Write Kafka's JSON `QuorumStateData` atomically. Level 0 uses schema v0
+/// (including the legacy voter ids); level 1 uses schema v1 with the voted
+/// directory id and no embedded voter set.
 fn save_quorum_state(dir: &std::path::Path, state: &QuorumState) -> Result<(), RaftError> {
-    let mut buf = Vec::with_capacity(64);
-    buf.extend_from_slice(state.cluster_id.as_bytes());
-    buf.put_u32(state.leader_epoch);
-    if let Some(id) = state.leader_id {
-        buf.put_u8(1);
-        buf.put_u64(id.0);
+    use std::io::Write as _;
+
+    let leader_id = state
+        .leader_id
+        .and_then(|id| i32::try_from(id.0).ok())
+        .unwrap_or(-1);
+    let leader_epoch = i32::try_from(state.leader_epoch).unwrap_or(i32::MAX);
+    let voted_id = state
+        .voted_key
+        .and_then(|key| i32::try_from(key.id.0).ok())
+        .unwrap_or(-1);
+    let json = if state.kraft_version == 0 {
+        let current_voters = state
+            .voters
+            .ids()
+            .into_iter()
+            .map(|id| {
+                format!(
+                    "{{\"voterId\":{}}}",
+                    i32::try_from(id.0).unwrap_or(i32::MAX)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"clusterId\":\"{}\",\"leaderId\":{leader_id},\"leaderEpoch\":{leader_epoch},\"votedId\":{voted_id},\"appliedOffset\":0,\"currentVoters\":[{current_voters}],\"data_version\":0}}",
+            state.cluster_id
+        )
     } else {
-        buf.put_u8(0);
-        buf.put_u64(0);
-    }
-    if let Some(k) = state.voted_key {
-        buf.put_u8(1);
-        buf.put_u64(k.id.0);
-        buf.extend_from_slice(k.directory_id.as_bytes());
-    } else {
-        buf.put_u8(0);
-        buf.put_u64(0);
-        buf.extend_from_slice(&[0u8; 16]);
-    }
+        let voted_directory_id = state
+            .voted_key
+            .map_or([0; 16], |key| *key.directory_id.as_bytes());
+        format!(
+            "{{\"leaderId\":{leader_id},\"leaderEpoch\":{leader_epoch},\"votedId\":{voted_id},\"votedDirectoryId\":\"{}\",\"data_version\":1}}",
+            kafka_uuid_string(voted_directory_id)
+        )
+    };
     let path = dir.join(QUORUM_STATE_FILE);
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &buf).map_err(crabka_log::LogError::Io)?;
+    let mut file = std::fs::File::create(&tmp).map_err(crabka_log::LogError::Io)?;
+    file.write_all(json.as_bytes())
+        .map_err(crabka_log::LogError::Io)?;
+    file.sync_all().map_err(crabka_log::LogError::Io)?;
     std::fs::rename(&tmp, &path).map_err(crabka_log::LogError::Io)?;
     Ok(())
 }
 
-/// Loads `<dir>/quorum-state` back into a [`QuorumState`], and uses `voters` for
-/// the static voter set. Returns `None` when the file is absent.
+/// Load Kafka JSON `QuorumStateData`. The configured voter metadata supplies
+/// endpoints at level 0; level-1 membership is recovered from snapshots/log.
 fn load_quorum_state(
     dir: &std::path::Path,
     cluster_id: Uuid,
     voters: &crabka_metadata::voters::VoterSet,
 ) -> Result<Option<QuorumState>, RaftError> {
-    use bytes::Buf;
     let path = dir.join(QUORUM_STATE_FILE);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(RaftError::Storage(crabka_log::LogError::Io(e))),
     };
-    // 16 + 4 + (1+8) + (1+8+16) = 54 bytes minimum.
-    if bytes.len() < 54 {
+    // Releases before Kafka-compatible QuorumStateData used a fixed 54-byte
+    // binary record. Migrate it in place so an upgrade keeps the durable term
+    // and vote instead of silently restarting from epoch zero.
+    if bytes.len() == 54 {
+        let mut cluster = [0_u8; 16];
+        cluster.copy_from_slice(&bytes[..16]);
+        let leader_epoch = u32::from_be_bytes(bytes[16..20].try_into().unwrap_or_default());
+        let voted = bytes[29] != 0;
+        let voted_id = u64::from_be_bytes(bytes[30..38].try_into().unwrap_or_default());
+        let mut voted_directory = [0_u8; 16];
+        voted_directory.copy_from_slice(&bytes[38..54]);
+        let state = QuorumState {
+            cluster_id: Uuid::from_bytes(cluster),
+            kraft_version: 0,
+            leader_epoch,
+            leader_id: None,
+            voted_key: voted.then(|| ReplicaKey {
+                id: NodeId(voted_id),
+                directory_id: Uuid::from_bytes(voted_directory),
+            }),
+            voters: voters.clone(),
+        };
+        save_quorum_state(dir, &state)?;
+        return Ok(Some(state));
+    }
+    let Ok(json) = std::str::from_utf8(&bytes) else {
+        return Ok(None);
+    };
+    if !json.trim_start().starts_with('{') || json_i64(json, "leaderEpoch").is_none() {
         return Ok(None);
     }
-    let mut cur: &[u8] = &bytes;
-    let mut cid = [0u8; 16];
-    cur.copy_to_slice(&mut cid);
-    let _ = cluster_id; // file is authoritative for cluster id
-    let leader_epoch = cur.get_u32();
-    let _leader_present_tag = cur.get_u8();
-    let _leader_raw = cur.get_u64();
-    let voted_present = cur.get_u8() != 0;
-    let voted_id = cur.get_u64();
-    let mut dir_bytes = [0u8; 16];
-    cur.copy_to_slice(&mut dir_bytes);
-    let voted_key = voted_present.then(|| ReplicaKey {
-        id: NodeId(voted_id),
-        directory_id: Uuid::from_bytes(dir_bytes),
+    let data_version = json_i64(json, "data_version").unwrap_or(0);
+    if !(0..=1).contains(&data_version) {
+        return Ok(None);
+    }
+    let leader_epoch = json_i64(json, "leaderEpoch")
+        .and_then(|epoch| u32::try_from(epoch).ok())
+        .unwrap_or(0);
+    let voted_id = json_i64(json, "votedId").unwrap_or(-1);
+    let voted_key = (voted_id >= 0).then(|| ReplicaKey {
+        id: NodeId(u64::try_from(voted_id).unwrap_or(0)),
+        directory_id: if data_version == 1 {
+            json_string(json, "votedDirectoryId")
+                .and_then(kafka_uuid_bytes)
+                .map_or_else(Uuid::nil, Uuid::from_bytes)
+        } else {
+            Uuid::nil()
+        },
     });
     // Leadership is VOLATILE, not durable: Raft persists only currentTerm
     // (`leader_epoch`) and votedFor (`voted_key`), never the current leader. A
@@ -2431,16 +3156,80 @@ fn load_quorum_state(
     // with no known leader; the node re-attaches via the current leader's
     // `BeginQuorumEpoch` heartbeat (higher epoch → Follower) or a re-election.
     Ok(Some(QuorumState {
-        cluster_id: Uuid::from_bytes(cid),
+        cluster_id,
         leader_epoch,
         leader_id: None,
         voted_key,
         voters: voters.clone(),
+        kraft_version: u16::try_from(data_version).unwrap_or(0),
     }))
 }
 
-/// Writes a KIP-630 `.checkpoint` artifact, the bytes only, directly, with
-/// temp-and-rename atomicity.
+fn json_i64(json: &str, field: &str) -> Option<i64> {
+    let marker = format!("\"{field}\":");
+    let tail = json.split_once(&marker)?.1.trim_start();
+    let end = tail
+        .find(|character: char| !character.is_ascii_digit() && character != '-')
+        .unwrap_or(tail.len());
+    tail[..end].parse().ok()
+}
+
+fn json_string<'a>(json: &'a str, field: &str) -> Option<&'a str> {
+    let marker = format!("\"{field}\":\"");
+    let tail = json.split_once(&marker)?.1;
+    Some(tail.split_once('"')?.0)
+}
+
+const KAFKA_UUID_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn kafka_uuid_string(bytes: [u8; 16]) -> String {
+    let mut result = String::with_capacity(22);
+    let mut accumulator = 0u32;
+    let mut bits = 0u8;
+    for byte in bytes {
+        accumulator = (accumulator << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 6 {
+            bits -= 6;
+            let index = usize::try_from((accumulator >> bits) & 0x3f).unwrap_or(0);
+            result.push(char::from(KAFKA_UUID_ALPHABET[index]));
+            accumulator &= (1u32 << bits).saturating_sub(1);
+        }
+    }
+    if bits > 0 {
+        let index = usize::try_from((accumulator << (6 - bits)) & 0x3f).unwrap_or(0);
+        result.push(char::from(KAFKA_UUID_ALPHABET[index]));
+    }
+    result
+}
+
+fn kafka_uuid_bytes(value: &str) -> Option<[u8; 16]> {
+    let mut output = [0u8; 16];
+    let mut output_index = 0usize;
+    let mut accumulator = 0u32;
+    let mut bits = 0u8;
+    for byte in value.bytes() {
+        let sextet = KAFKA_UUID_ALPHABET
+            .iter()
+            .position(|candidate| *candidate == byte)?;
+        accumulator = (accumulator << 6) | u32::try_from(sextet).ok()?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            if output_index >= output.len() {
+                return None;
+            }
+            output[output_index] = u8::try_from((accumulator >> bits) & 0xff).ok()?;
+            output_index += 1;
+            accumulator &= (1u32 << bits).saturating_sub(1);
+        }
+    }
+    (output_index == output.len()).then_some(output)
+}
+
+/// Write a KIP-630 `.checkpoint` artifact (bytes only) directly with
+/// temp+rename atomicity.
 fn write_checkpoint(
     dir: &std::path::Path,
     end_offset: i64,
@@ -2456,13 +3245,11 @@ fn write_checkpoint(
     Ok(())
 }
 
-/// Scans `dir` for `<end_offset>-<epoch>.checkpoint` artifacts, picks the
-/// highest `(end_offset, epoch)`, and returns its raw bytes. Returns `None` when
-/// the directory is absent or holds no checkpoint.
-///
-/// `snapshot::load_latest` also reads the `.meta` sidecar. This function reads
-/// only the `.checkpoint`, because this engine has no `.meta` sidecar and keeps
-/// the durable epoch in the quorum-state file.
+/// Scan `dir` for `<end_offset>-<epoch>.checkpoint` artifacts, pick the highest
+/// `(end_offset, epoch)`, and return its raw bytes. Returns `None` when the
+/// directory is absent or holds no checkpoint. Unlike `snapshot::load_latest`,
+/// this reads only the `.checkpoint` (the `.meta` sidecar is gone in
+/// this engine — the durable epoch lives in the quorum-state file).
 fn load_latest_checkpoint(dir: &std::path::Path) -> Result<Option<Vec<u8>>, RaftError> {
     let Some((end_offset, epoch)) = latest_checkpoint_id(dir) else {
         return Ok(None);
@@ -2482,7 +3269,7 @@ pub(crate) fn parse_checkpoint_name(name: &str) -> Option<(i64, i32)> {
     Some((off.parse().ok()?, ep.parse().ok()?))
 }
 
-/// Scans `dir` for `<end_offset>-<epoch>.checkpoint` artifacts and returns the
+/// Scan `dir` for `<end_offset>-<epoch>.checkpoint` artifacts and return the
 /// highest `(end_offset, epoch)` id, or `None` when the directory is absent or
 /// holds no checkpoint.
 fn latest_checkpoint_id(dir: &std::path::Path) -> Option<(i64, i32)> {
@@ -2505,10 +3292,9 @@ fn checkpoint_id_is_newer(candidate: (i64, i32), current: (i64, i32)) -> bool {
     matches!(candidate.cmp(&current), std::cmp::Ordering::Greater)
 }
 
-/// Deletes every `.checkpoint` in `dir` except the latest `(end_offset, epoch)`.
-/// This keeps the checkpoint directory at one snapshot after a snapshot and
-/// prune, or after an install. The delete is best-effort, and it ignores read
-/// and remove errors.
+/// Delete every `.checkpoint` in `dir` except the latest `(end_offset, epoch)`,
+/// keeping the checkpoint directory single-snapshot after a snapshot+prune or
+/// install. Best-effort: read/remove errors are ignored.
 fn retain_latest_checkpoint(dir: &std::path::Path) {
     let Some(latest) = latest_checkpoint_id(dir) else {
         return;
@@ -2528,9 +3314,8 @@ fn retain_latest_checkpoint(dir: &std::path::Path) {
     }
 }
 
-/// Reads a specific checkpoint `<end_offset>-<epoch>.checkpoint` by id, or
-/// returns `None` if it is absent. This is the leader's `FetchSnapshot` serve
-/// path.
+/// Read a specific checkpoint `<end_offset>-<epoch>.checkpoint` by id, or `None`
+/// if it is absent (the leader's `FetchSnapshot` serve path).
 fn load_checkpoint_by_id(dir: &std::path::Path, end_offset: i64, epoch: i32) -> Option<Vec<u8>> {
     std::fs::read(dir.join(checkpoint_name(end_offset, epoch))).ok()
 }
@@ -2545,7 +3330,7 @@ mod tests {
     use super::*;
     use crate::kraft::transport::NullPeerSender;
 
-    /// Deadline that bounds every test-side channel receive.
+    /// Deadline every test-side channel receive is bounded by.
     const TEST_RECV_TIMEOUT: Time = secs(1);
 
     /// Default election timeout for engines built by [`build`].
@@ -2560,6 +3345,59 @@ mod tests {
                 kraft_version: crabka_metadata::voters::KRaftVersionRange::default(),
             }
         }))
+    }
+
+    #[test]
+    fn control_state_applies_before_commit_and_restores_on_truncation() {
+        let initial = voter_set(&[NodeId(1)]);
+        let two_voters = voter_set(&[NodeId(1), NodeId(2)]);
+        let replacement = voter_set(&[NodeId(1), NodeId(3)]);
+        let mut controls = KraftControlState::new(initial.clone(), 0);
+
+        controls
+            .apply(5, &ControlRecord::Voters(voter_set_to_wire(&two_voters)))
+            .unwrap();
+        assert!(controls.latest_voters() == &two_voters);
+        assert!(controls.committed_voters == initial);
+        assert!(controls.commit_to(6));
+        assert!(controls.committed_voters == two_voters);
+
+        controls
+            .apply(7, &ControlRecord::Voters(voter_set_to_wire(&replacement)))
+            .unwrap();
+        assert!(controls.latest_voters() == &replacement);
+        controls.truncate_to(7);
+        assert!(controls.latest_voters() == &two_voters);
+        assert!(!controls.commit_to(8));
+        assert!(controls.committed_voters == two_voters);
+    }
+
+    #[test]
+    fn restart_replays_control_records_only_through_persisted_high_watermark() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let initial = voter_set(&[NodeId(1)]);
+        let committed = voter_set(&[NodeId(1), NodeId(2)]);
+        let uncommitted = voter_set(&[NodeId(1), NodeId(3)]);
+        {
+            let mut log = KraftLog::open(dir.path()).expect("open log");
+            let mut batch =
+                typed_control_batch(1, &[ControlRecord::Voters(voter_set_to_wire(&committed))])
+                    .expect("committed voter batch");
+            log.append(&mut batch)
+                .expect("append committed voter batch");
+            log.advance_hwm(log.log_end_offset());
+            let mut batch =
+                typed_control_batch(1, &[ControlRecord::Voters(voter_set_to_wire(&uncommitted))])
+                    .expect("uncommitted voter batch");
+            log.append(&mut batch)
+                .expect("append uncommitted voter batch");
+        }
+
+        let log = KraftLog::open(dir.path()).expect("reopen log");
+        assert2::assert!(log.hwm() < log.log_end_offset());
+        let mut state = QuorumState::bootstrap(uuid::Uuid::nil(), initial);
+        replay_control_records(&log, &mut state, MetadataRaftFetchMax::default());
+        assert2::assert!(state.voters == committed);
     }
 
     fn build(me: NodeId, ids: &[NodeId]) -> (KraftController, tempfile::TempDir) {
@@ -2665,13 +3503,20 @@ mod tests {
             high_watermark: log.hwm().0,
             log_end_offset: log.log_end_offset().0,
             log_start_offset: log.log_start_offset().0,
-            voters: initial_state_voters(&core),
-            per_voter_fetch_offset: std::collections::BTreeMap::new(),
+            voters: core.quorum_state().voters.clone(),
+            voted_directory_id: core
+                .quorum_state()
+                .voted_key
+                .as_ref()
+                .map(|key| key.directory_id),
+            observers: Vec::new(),
+            per_replica_fetch_offset: std::collections::BTreeMap::new(),
         };
         let (quorum_tx, _quorum_rx) = watch::channel(initial_snapshot);
         let (cmd_tx, _cmd_rx) = mpsc::channel(1);
         let held_epoch = core.quorum_state().leader_epoch;
         let was_leader = core.role().is_leader();
+        let controls = KraftControlState::new(core.quorum_state().voters.clone(), 0);
         let clock_base = Instant::now();
         (
             Engine {
@@ -2701,6 +3546,9 @@ mod tests {
                 last_snapshot_end_offset: Offset(0),
                 snapshot_fetch: None,
                 installed_snapshot_epoch: None,
+                controls,
+                replica_fetch_offsets: BTreeMap::new(),
+                pending_reconfig: None,
             },
             dir,
         )
@@ -2787,8 +3635,7 @@ mod tests {
 
     #[test]
     fn initial_election_deadline_matches_startup_role() {
-        /// Base election timeout that the staggered startup deadline derives
-        /// from.
+        /// Base election timeout the staggered startup deadline is derived from.
         const TIMEOUT: Time = millis(400);
         /// The same extent in the integer milliseconds the core's jitter uses.
         const TIMEOUT_MS: u64 = 400;
@@ -2863,7 +3710,14 @@ mod tests {
             initial_state_voters(&engine.core) == vec![NodeId(1), NodeId(2), NodeId(3)]
         );
         assert2::assert!(
-            engine.quorum_tx.borrow().voters.clone() == vec![NodeId(1), NodeId(2), NodeId(3)]
+            engine
+                .quorum_tx
+                .borrow()
+                .voters
+                .ids()
+                .into_iter()
+                .collect::<Vec<_>>()
+                == vec![NodeId(1), NodeId(2), NodeId(3)]
         );
     }
 
@@ -3258,7 +4112,8 @@ mod tests {
             records::metadata::control::{ControlRecordType, control_record_key},
         };
 
-        let batch = leader_change_batch(7, NodeId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
+        let voters = voter_set(&[NodeId(1), NodeId(2), NodeId(3)]);
+        let batch = leader_change_batch(7, NodeId(2), &voters, 0);
 
         check!(
             (
@@ -3836,25 +4691,19 @@ mod tests {
     }
 
     /// A realistic single-partition create batch: a `V1Topic` plus its one
-    /// `V1Partition`.
-    ///
-    /// KIP-631 framing derives the topic's partition count from the partition
-    /// records, because the `TopicRecord` wire shape carries no count. A bare
-    /// `V1Topic` would therefore round-trip back to zero partitions and fail
+    /// `V1Partition`. KIP-631 framing derives the topic's partition count from
+    /// the partition records (the `TopicRecord` wire shape carries no count), so
+    /// a bare `V1Topic` would round-trip back to zero partitions and fail
     /// validation on apply.
     fn topic_record(name: &str) -> Vec<crabka_metadata::MetadataRecord> {
         topic_record_named(name, 1)
     }
 
-    /// Drives a voter to leadership in a multi-voter cluster under
-    /// `NullPeerSender` by injection of the vote responses it would have
-    /// received.
-    ///
-    /// `ElectionTimeout` starts a pre-vote round and leaves the epoch
-    /// unchanged. A granted pre-vote from `helper` promotes the voter to
-    /// `Candidate`, raises the epoch by 1, and broadcasts a real vote. A granted
-    /// real vote from `helper` reaches a majority and promotes the voter to
-    /// `Leader`.
+    /// Drive a voter to leadership in a multi-voter cluster under `NullPeerSender`
+    /// by injecting the vote responses it would have received: `ElectionTimeout`
+    /// starts a pre-vote round (epoch unchanged), a granted pre-vote from `helper`
+    /// promotes to `Candidate` (epoch +1) and broadcasts a real vote, and a
+    /// granted real vote from `helper` reaches majority and promotes to `Leader`.
     async fn elect_leader_with_helper(ctrl: &KraftController, me: NodeId, helper: NodeId) {
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
         // Pre-vote round runs at the current (pre-bump) epoch 0.
@@ -3984,7 +4833,7 @@ mod tests {
     // ---- timers + liveness ----
 
     /// A single-voter engine started with the REAL clock auto-elects after the
-    /// election timeout, with no injected event.
+    /// election timeout — no injected event.
     #[tokio::test]
     async fn single_voter_auto_elects_on_election_timeout() {
         let (ctrl, _dir) = build_with_timeout(NodeId(1), &[NodeId(1)], millis(80));
@@ -3998,9 +4847,8 @@ mod tests {
         ctrl.shutdown().await;
     }
 
-    /// A follower with a live leader, where the heartbeats keep arriving, does
-    /// not elect spuriously. The leader stays node 2 across several fetch
-    /// cycles.
+    /// A follower with a live leader (heartbeats keep arriving) does not
+    /// spuriously elect: the leader stays node 2 across several fetch cycles.
     #[tokio::test]
     async fn follower_with_live_leader_does_not_elect() {
         // Node 1 is a follower in a 3-voter cluster; the NullPeerSender means
@@ -4072,13 +4920,11 @@ mod tests {
     }
 
     /// FIX 1: a leader that parks a `submit_change` waiter and then steps down
-    /// must fail the parked waiter promptly with `NotLeader`, and must not leave
-    /// it hung until engine shutdown. A higher-epoch `BeginQuorumEpoch` forces
-    /// the move from Leader to Follower.
-    ///
-    /// In a 3-voter cluster with a `NullPeerSender` no follower ever fetches, so
-    /// the appended record never commits. The leadership-loss drain is then the
-    /// only way the waiter resolves.
+    /// (higher-epoch `BeginQuorumEpoch` forces Leader → Follower) must fail the
+    /// parked waiter promptly with `NotLeader` rather than leaving it hung until
+    /// engine shutdown. In a 3-voter cluster with a `NullPeerSender`, no follower
+    /// ever fetches, so the appended record never commits — the only way the
+    /// waiter resolves is the leadership-loss drain.
     #[tokio::test]
     async fn submit_waiter_fails_on_leadership_loss() {
         let (ctrl, _dir) = build(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
@@ -4147,16 +4993,13 @@ mod tests {
         ]
     }
 
-    /// FIX 2: a committed record that fails the apply-time `validate` must fail
-    /// only the waiter whose appended range actually contains it, and no later
-    /// waiter.
-    ///
-    /// The test parks three submits in a 3-voter leader, where no peer fetches
-    /// and so nothing commits on its own. A creates "first", which is valid. B
-    /// re-creates "first", which is a duplicate and is rejected at apply. C
-    /// creates "third", which is valid. The test then drives a single HWM
-    /// advance past all three with a follower fetch. B must get `Err`, and C
-    /// must get `Ok` and must not bleed the rejection from B's earlier offset.
+    /// FIX 2: a committed record that fails apply-`validate` must only fail the
+    /// waiter whose appended range actually contains it, not every later waiter.
+    /// Park three submits in a 3-voter leader (no peer fetches → nothing commits
+    /// on its own): A creates "first" (valid), B re-creates "first" (duplicate →
+    /// rejected at apply), C creates "third" (valid). Then drive a single HWM
+    /// advance past all three via a follower fetch. B must get `Err`; C must get
+    /// `Ok` (not bled the rejection from B's earlier offset).
     #[tokio::test]
     async fn rejection_scoped_to_owning_waiter_range() {
         let (ctrl, _dir) = build(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
@@ -4300,6 +5143,73 @@ mod tests {
                 loaded.cluster_id,
             ) == (5, None, Some(NodeId(3)), cid)
         );
+        let json = std::fs::read_to_string(dir.path().join(QUORUM_STATE_FILE)).unwrap();
+        assert2::assert!(json.contains("\"currentVoters\""));
+        assert2::assert!(json.contains("\"data_version\":0"));
+        assert2::assert!(!json.contains("votedDirectoryId"));
+    }
+
+    #[test]
+    fn quorum_state_level_one_uses_voted_directory_and_omits_static_voters() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let voters = voter_set(&[NodeId(1), NodeId(2)]);
+        let mut state = QuorumState::bootstrap(uuid::Uuid::from_u128(9), voters.clone());
+        state.kraft_version = 1;
+        state.voted_key = Some(ReplicaKey {
+            id: NodeId(2),
+            directory_id: uuid::Uuid::from_u128(0x0102_0304),
+        });
+        save_quorum_state(dir.path(), &state).unwrap();
+
+        let json = std::fs::read_to_string(dir.path().join(QUORUM_STATE_FILE)).unwrap();
+        assert2::assert!(json.contains("\"data_version\":1"));
+        assert2::assert!(json.contains("\"votedDirectoryId\""));
+        assert2::assert!(!json.contains("currentVoters"));
+        let loaded = load_quorum_state(dir.path(), state.cluster_id, &voters)
+            .unwrap()
+            .unwrap();
+        assert2::assert!(loaded.kraft_version == 1);
+        assert2::assert!(loaded.voted_key == state.voted_key);
+    }
+
+    #[test]
+    fn legacy_binary_quorum_state_migrates_without_losing_epoch_or_vote() {
+        use bytes::BufMut as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cluster_id = uuid::Uuid::from_u128(0x1234);
+        let voted_directory = uuid::Uuid::from_u128(0x5678);
+        let mut bytes = Vec::with_capacity(54);
+        bytes.extend_from_slice(cluster_id.as_bytes());
+        bytes.put_u32(17);
+        bytes.put_u8(1);
+        bytes.put_u64(2);
+        bytes.put_u8(1);
+        bytes.put_u64(3);
+        bytes.extend_from_slice(voted_directory.as_bytes());
+        std::fs::write(dir.path().join(QUORUM_STATE_FILE), bytes).expect("write legacy state");
+
+        let loaded = load_quorum_state(
+            dir.path(),
+            uuid::Uuid::nil(),
+            &voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
+        )
+        .expect("load legacy state")
+        .expect("legacy state exists");
+
+        assert2::assert!(loaded.cluster_id == cluster_id);
+        assert2::assert!(loaded.leader_epoch == 17);
+        assert2::assert!(loaded.leader_id.is_none());
+        assert2::assert!(
+            loaded.voted_key
+                == Some(ReplicaKey {
+                    id: NodeId(3),
+                    directory_id: voted_directory,
+                })
+        );
+        let migrated = std::fs::read_to_string(dir.path().join(QUORUM_STATE_FILE))
+            .expect("read migrated JSON");
+        assert2::assert!(migrated.starts_with('{'));
     }
 
     #[test]
@@ -4327,8 +5237,8 @@ mod tests {
 
     /// A single-voter leader with `snapshot_interval_records = 3` snapshots and
     /// prunes once the committed offset has advanced past the threshold. After
-    /// a commit of four distinct topics, a checkpoint exists on disk and the log
-    /// has been pruned, so its log-start offset has risen above 0.
+    /// committing four distinct topics, a checkpoint exists on disk and the log
+    /// has been pruned (its log-start offset rose above 0).
     #[tokio::test]
     async fn leader_snapshots_and_prunes_at_threshold() {
         let (ctrl, dir) = build_with_snapshot_interval(NodeId(1), &[NodeId(1)], 3);

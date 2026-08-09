@@ -1,16 +1,16 @@
-//! Integration tests for the `KafkaNodePool` reconciler with a mocked
-//! client.
+//! Mocked-client integration tests for the `KafkaNodePool`
+//! reconciler.
 //!
-//! The request sequence of the happy path on a new pool:
-//!   1. GET   kafkas/<parent>                  gives 200 and the parent Kafka
-//!   2. GET   statefulsets/<parent>-<pool>     before the apply, for the monotonic-storage check
-//!   3. PATCH statefulsets/<parent>-<pool>     SSA
-//!   4. GET   statefulsets/<parent>-<pool>     after the apply, to read the status
-//!   5. PATCH kafkanodepools/<pool>/status     merge
+//! Happy-path request sequence on a fresh pool:
+//!   1. GET   kafkas/<parent>                  (-> 200 parent Kafka)
+//!   2. GET   statefulsets/<parent>-<pool>     (pre-apply; monotonic-storage check)
+//!   3. PATCH statefulsets/<parent>-<pool>     (SSA)
+//!   4. GET   statefulsets/<parent>-<pool>     (post-apply status read)
+//!   5. PATCH kafkanodepools/<pool>/status     (merge)
 //!
-//! A validation failure stops early and goes to step 5. When the cluster
-//! label is absent, it skips step 1 as well. A monotonic-storage failure
-//! stops after step 2.
+//! Validation-failure paths short-circuit to step 5 (or skip step 1
+//! entirely when the cluster label is missing). Monotonic-
+//! storage failures short-circuit after step 2.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -25,9 +25,12 @@ use http::{Method, Response};
 mod shared;
 
 use shared::{
-    MockRule, MockState, fake_parent_kafka_body, fake_pool_body, fake_sts_body,
-    fake_sts_body_with_storage, fixture_ctx, json_response, mock_client, not_found_body,
+    MockRule, MockState, fake_parent_kafka_body, fake_pool_body, fake_pool_list_body,
+    fake_secret_body, fake_sts_body, fake_sts_body_with_storage, fixture_ctx, json_response,
+    mock_client, not_found_body,
 };
+
+const DIRECTORY_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
 
 fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> KafkaNodePool {
     let mut p = KafkaNodePool::new(
@@ -46,6 +49,7 @@ fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> 
     );
     p.metadata.namespace = Some(namespace.into());
     p.metadata.uid = Some("pool-uid".into());
+    p.metadata.finalizers = Some(vec!["crabka.io/kafka-node-pool-finalizer".into()]);
     if let Some(parent_name) = parent {
         let mut labels = BTreeMap::new();
         labels.insert("crabka.io/cluster".into(), parent_name.into());
@@ -54,11 +58,89 @@ fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> 
     p
 }
 
-/// A parent Kafka whose version model has NOT cleared.
-///
-/// The Kafka controller published `KafkaVersionValid=False` and finalized
-/// no metadata version. This is the case of a new cluster with an invalid
-/// `kafkaVersion`.
+fn dynamic_secret_body(parent: &str, pool: &str, namespace: &str) -> serde_json::Value {
+    use base64::Engine as _;
+
+    let mut secret = fake_secret_body(
+        &format!("{parent}-cluster-id"),
+        namespace,
+        "00000000-0000-0000-0000-000000000001",
+    );
+    let data = secret["data"]
+        .as_object_mut()
+        .expect("fake Secret data object");
+    let encode = |value: &str| {
+        serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(value))
+    };
+    data.insert("quorumBootstrapNodeId".into(), encode("0"));
+    data.insert("quorumBootstrapPool".into(), encode(pool));
+    data.insert("quorumBootstrapInitialized".into(), encode("true"));
+    data.insert(
+        "quorumDirectoryId-0".into(),
+        encode(&DIRECTORY_ID.to_string()),
+    );
+    secret
+}
+
+fn dynamic_quorum_rules(parent: &str, pool: &str, namespace: &str) -> Vec<MockRule> {
+    let secret = dynamic_secret_body(parent, pool, namespace);
+    vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkanodepools?".into(),
+            response: json_response(
+                200,
+                &fake_pool_list_body(&[fake_pool_body(pool, namespace, parent)]),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &secret),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &secret),
+        },
+    ]
+}
+
+fn stopped_pool_rules(parent: &str, pool: &str, parent_body: &serde_json::Value) -> Vec<MockRule> {
+    vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, parent_body),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{parent}-{pool}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("StatefulSet already stopped"))
+                .expect("404 builds"),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/pods?".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "PodList",
+                    "metadata": { "resourceVersion": "1" },
+                    "items": [],
+                }),
+            ),
+        },
+    ]
+}
+
+/// A parent Kafka whose version model has NOT cleared: the Kafka
+/// controller published `KafkaVersionValid=False` and finalized no
+/// metadata version (the fresh-cluster, invalid-`kafkaVersion` case).
 fn fake_parent_kafka_body_version_invalid(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -77,19 +159,16 @@ fn fake_parent_kafka_body_version_invalid(name: &str, namespace: &str) -> serde_
     })
 }
 
-/// The rules of the happy path. The parent Kafka exists, the STS apply
-/// succeeds, the STS status read returns `ready_replicas`, and the pool
-/// status patch echoes the pool.
+/// Happy-path rules: parent Kafka exists, STS apply succeeds, STS status
+/// read returns `ready_replicas`, pool status patch echoes the pool.
 ///
-/// The reconcile flow has one STS GET before the apply, for the
-/// monotonic-storage validation. The rule sequence is therefore:
-///   1. GET the parent Kafka.
-///   2. GET the STS before the apply. A 404 means the first reconcile, and
-///      the validation accepts any spec.
-///   3. PATCH the STS with SSA.
-///   4. GET the STS after the apply. It returns `ready_replicas` for the
-///      status mirror.
-///   5. PATCH the pool status.
+/// The reconcile flow includes a pre-apply STS GET (for
+/// monotonic-storage validation), so the rule sequence is:
+///   1. GET parent Kafka.
+///   2. GET STS (pre-apply): 404 → first-reconcile, validation accepts any spec.
+///   3. PATCH STS (SSA).
+///   4. GET STS (post-apply): returns `ready_replicas` for the status mirror.
+///   5. PATCH pool status.
 fn happy_path_rules(
     parent: &str,
     pool: &str,
@@ -98,13 +177,16 @@ fn happy_path_rules(
 ) -> Vec<MockRule> {
     let sts_name = format!("{parent}-{pool}");
 
-    vec![
+    let mut rules = vec![
         // 1. GET parent Kafka.
         MockRule {
             method: Method::GET,
             path_substr: format!("/kafkas/{parent}"),
             response: json_response(200, &fake_parent_kafka_body(parent, namespace)),
         },
+    ];
+    rules.extend(dynamic_quorum_rules(parent, pool, namespace));
+    rules.extend([
         // 2. GET statefulset (pre-apply, monotonic-storage check):
         //    no live STS on first reconcile.
         MockRule {
@@ -134,7 +216,8 @@ fn happy_path_rules(
             path_substr: format!("/kafkanodepools/{pool}/status"),
             response: json_response(200, &fake_pool_body(pool, namespace, parent)),
         },
-    ]
+    ]);
+    rules
 }
 
 fn build_ctx(
@@ -172,11 +255,29 @@ async fn pool_applies_statefulset_with_pool_name() {
 
 #[tokio::test]
 async fn pool_status_ready_when_sts_ready() {
+    use crabka_client_admin::{MetadataQuorum, QuorumReplica};
+
     let state = MockState::new(happy_path_rules("demo", "brokers", "y", Some(1)));
     let mut ctx = fixture_ctx(mock_client(&state, "y"), "y");
     Arc::get_mut(&mut ctx.config)
         .expect("fixture owns operator config")
         .controller_dependency_requeue = crabka_units::millis(1_234);
+    let admin = shared::fake_admin::FakeAdminClient::new();
+    admin.set_metadata_quorum(MetadataQuorum {
+        leader_id: 0,
+        leader_epoch: 1,
+        high_watermark: 1,
+        voters: vec![QuorumReplica {
+            node_id: 0,
+            directory_id: DIRECTORY_ID,
+            log_end_offset: 1,
+            last_fetch_timestamp: -1,
+            last_caught_up_timestamp: -1,
+        }],
+        observers: Vec::new(),
+    });
+    ctx.insert_admin_client_for_test("demo", Arc::new(tokio::sync::Mutex::new(admin)))
+        .await;
     let pool = pool_cr("brokers", "y", Some("demo"), 1);
 
     let action = reconcile(Arc::new(pool), Arc::new(ctx)).await.unwrap();
@@ -207,6 +308,178 @@ async fn pool_status_ready_when_sts_ready() {
         assert!(cond[field] == want, "field {field}; body = {body}");
     }
 
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn deleting_pool_removes_exact_committed_voter() {
+    use crabka_client_admin::{MetadataQuorum, QuorumReplica};
+
+    let parent = "demo";
+    let pool_name = "brokers";
+    let ns = "y";
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &dynamic_secret_body(parent, pool_name, ns)),
+        },
+    ];
+    let state = MockState::new(rules);
+    let ctx = fixture_ctx(mock_client(&state, ns), ns);
+    let admin = Arc::new(tokio::sync::Mutex::new(
+        shared::fake_admin::FakeAdminClient::new(),
+    ));
+    admin.lock().await.set_metadata_quorum(MetadataQuorum {
+        leader_id: 1,
+        leader_epoch: 3,
+        high_watermark: 7,
+        voters: vec![
+            QuorumReplica {
+                node_id: 0,
+                directory_id: DIRECTORY_ID,
+                log_end_offset: 7,
+                last_fetch_timestamp: -1,
+                last_caught_up_timestamp: -1,
+            },
+            QuorumReplica {
+                node_id: 1,
+                directory_id: uuid::Uuid::from_u128(2),
+                log_end_offset: 7,
+                last_fetch_timestamp: -1,
+                last_caught_up_timestamp: -1,
+            },
+        ],
+        observers: Vec::new(),
+    });
+    ctx.insert_admin_client_for_test("demo", admin.clone())
+        .await;
+    let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
+    pool.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        "2026-08-08T00:00:00Z".parse().unwrap(),
+    ));
+
+    reconcile(Arc::new(pool), Arc::new(ctx)).await.unwrap();
+
+    let calls = admin.lock().await.calls();
+    assert!(matches!(
+        calls.as_slice(),
+        [
+            shared::fake_admin::RecordedCall::DescribeMetadataQuorum,
+            shared::fake_admin::RecordedCall::RemoveRaftVoter {
+                node_id: 0,
+                directory_id: DIRECTORY_ID,
+                ..
+            }
+        ]
+    ));
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn deleting_last_voter_keeps_finalizer_and_reports_blocked() {
+    use crabka_client_admin::{MetadataQuorum, QuorumReplica};
+
+    let parent = "demo";
+    let pool_name = "brokers";
+    let ns = "y";
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &dynamic_secret_body(parent, pool_name, ns)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}/status"),
+            response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
+        },
+    ];
+    let state = MockState::new(rules);
+    let ctx = fixture_ctx(mock_client(&state, ns), ns);
+    let admin = shared::fake_admin::FakeAdminClient::new();
+    admin.set_metadata_quorum(MetadataQuorum {
+        leader_id: 0,
+        leader_epoch: 3,
+        high_watermark: 7,
+        voters: vec![QuorumReplica {
+            node_id: 0,
+            directory_id: DIRECTORY_ID,
+            log_end_offset: 7,
+            last_fetch_timestamp: -1,
+            last_caught_up_timestamp: -1,
+        }],
+        observers: Vec::new(),
+    });
+    ctx.insert_admin_client_for_test("demo", Arc::new(tokio::sync::Mutex::new(admin)))
+        .await;
+    let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
+    pool.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        "2026-08-08T00:00:00Z".parse().unwrap(),
+    ));
+
+    reconcile(Arc::new(pool), Arc::new(ctx)).await.unwrap();
+
+    let status = state
+        .take_observed()
+        .into_iter()
+        .find(|request| request.uri().to_string().contains("/status"))
+        .expect("blocked status patch");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    assert!(body["status"]["conditions"][0]["reason"] == "LastVoterDeletionBlocked");
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn parent_deletion_releases_pool_finalizer_without_dismantling_quorum() {
+    let parent = "demo";
+    let pool_name = "brokers";
+    let ns = "y";
+    let mut parent_body = fake_parent_kafka_body(parent, ns);
+    parent_body["metadata"]["deletionTimestamp"] =
+        serde_json::Value::String("2026-08-08T00:00:00Z".into());
+    let mut rules = stopped_pool_rules(parent, pool_name, &parent_body);
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: format!("/kafkanodepools/{pool_name}"),
+        response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
+    });
+    let (ctx, state) = build_ctx(ns, rules);
+    let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
+    pool.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        "2026-08-08T00:00:00Z".parse().unwrap(),
+    ));
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let finalizer_patch = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains(&format!("/kafkanodepools/{pool_name}"))
+        })
+        .expect("finalizer patch");
+    let body: serde_json::Value = serde_json::from_slice(finalizer_patch.body()).unwrap();
+    assert!(body["metadata"]["finalizers"] == serde_json::json!([]));
+    assert!(
+        observed
+            .iter()
+            .all(|request| !request.uri().to_string().contains("/secrets/"))
+    );
     assert!(state.remaining_rules() == 0);
 }
 
@@ -361,7 +634,7 @@ async fn pool_persistent_claim_renders_volume_claim_template() {
     let ns = "y";
     let sts_name = format!("{parent}-{pool_name}");
 
-    let rules = vec![
+    let mut rules = vec![
         // 1. GET parent Kafka.
         MockRule {
             method: Method::GET,
@@ -397,6 +670,7 @@ async fn pool_persistent_claim_renders_volume_claim_template() {
             response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
         },
     ];
+    rules.extend(dynamic_quorum_rules(parent, pool_name, ns));
 
     let (ctx, state) = build_ctx(ns, rules);
     let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
@@ -466,7 +740,7 @@ async fn pool_storage_shrink_is_rejected() {
     let ns = "y";
     let sts_name = format!("{parent}-{pool_name}");
 
-    let rules = vec![
+    let mut rules = vec![
         // 1. GET parent Kafka.
         MockRule {
             method: Method::GET,
@@ -490,6 +764,7 @@ async fn pool_storage_shrink_is_rejected() {
             response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
         },
     ];
+    rules.extend(dynamic_quorum_rules(parent, pool_name, ns));
 
     let (ctx, state) = build_ctx(ns, rules);
     let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
@@ -537,10 +812,9 @@ async fn pool_storage_shrink_is_rejected() {
     assert!(state.remaining_rules() == 0);
 }
 
-/// A JBOD pool renders one `volumeClaimTemplate` for each disk, which are
-/// `data` and `data-{id}`, one retention policy for the whole set, and the
-/// `CRABKA_EXTRA_LOG_DIRS` env on the broker container with every
-/// non-primary disk.
+/// A JBOD pool renders one `volumeClaimTemplate` per disk
+/// (`data` + `data-{id}`), a set-wide retention policy, and the broker
+/// container's `CRABKA_EXTRA_LOG_DIRS` env listing every non-primary disk.
 #[tokio::test]
 async fn pool_jbod_renders_multiple_volume_claim_templates() {
     use crabka_operator::crd::{JbodSpec, JbodVolume, Storage};
@@ -550,7 +824,7 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
     let ns = "y";
     let sts_name = format!("{parent}-{pool_name}");
 
-    let rules = vec![
+    let mut rules = vec![
         // 1. GET parent Kafka.
         MockRule {
             method: Method::GET,
@@ -586,6 +860,7 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
             response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
         },
     ];
+    rules.extend(dynamic_quorum_rules(parent, pool_name, ns));
 
     let (ctx, state) = build_ctx(ns, rules);
     let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
@@ -674,13 +949,10 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
 }
 
 /// The rendered `StatefulSet` must:
-///   1. hold a `broker-config` `ConfigMap` volume in the pod template.
-///   2. pass `--config-file=/run/crabka/broker.toml` in the args of the
-///      broker container.
-///   3. mount the `ConfigMap` read-only at `/etc/crabka/config` in the
-///      broker container.
-///   4. NOT hold `CRABKA_ADVERTISED_LISTENER` in the env of the broker
-///      container.
+///   1. Include a `broker-config` `ConfigMap` volume in the pod template.
+///   2. Pass `--config-file=/run/crabka/broker.toml` in the broker container args.
+///   3. Mount the `ConfigMap` at `/etc/crabka/config` (readOnly) in the broker container.
+///   4. NOT include `CRABKA_ADVERTISED_LISTENER` in the broker container env.
 #[tokio::test]
 async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
     let parent = "demo";
@@ -688,7 +960,7 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
     let ns = "y";
     let sts_name = format!("{parent}-{pool_name}");
 
-    let rules = vec![
+    let mut rules = vec![
         // 1. GET parent Kafka.
         MockRule {
             method: Method::GET,
@@ -730,6 +1002,7 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
             response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
         },
     ];
+    rules.extend(dynamic_quorum_rules(parent, pool_name, ns));
 
     let (ctx, state) = build_ctx(ns, rules);
     let pool = pool_cr(pool_name, ns, Some(parent), 1);
@@ -819,14 +1092,11 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
     assert!(state.remaining_rules() == 0);
 }
 
-/// A new cluster whose parent Kafka has an invalid `kafkaVersion` must
-/// NOT bring broker pods up.
-///
-/// The pool reconciler reads the `KafkaVersionValid=False` verdict of the
-/// parent and stops early with a `Ready=False` status patch. It sends no
-/// `StatefulSet` GET and no `StatefulSet` PATCH. The error therefore
-/// appears as a CR condition, and the cluster does not crash-loop or run
-/// with a silently clamped version.
+/// A fresh cluster whose parent Kafka has an invalid `kafkaVersion` must
+/// NOT bring up broker pods. The pool reconciler reads the parent's
+/// `KafkaVersionValid=False` verdict and short-circuits to a `Ready=False`
+/// status patch — no `StatefulSet` GET/PATCH — so the error surfaces as a CR
+/// condition rather than a crash-looping (or silently-clamped) cluster.
 #[tokio::test]
 async fn pool_blocks_pod_creation_when_parent_version_invalid() {
     let parent = "demo";

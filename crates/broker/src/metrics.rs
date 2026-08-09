@@ -1,17 +1,18 @@
 //! Broker-side Prometheus metrics.
 //!
-//! This module mirrors the operator's `telemetry` / `health` pattern. It wraps
-//! a shared `Registry` in `Arc<Mutex<…>>`, so callers can look up hot-path
-//! counters without the registry lock. The [`BrokerMetrics`] struct hands out
-//! cheap `Arc<Counter>` / `Arc<Gauge>` handles. Handlers and background tasks
-//! clone these handles and increment them directly.
+//! Mirrors the operator's `telemetry` / `health` pattern: a shared
+//! `Registry` is wrapped in `Arc<Mutex<…>>` so hot-path counters can
+//! be looked up without holding the registry lock. The
+//! [`BrokerMetrics`] struct hands out cheap `Arc<Counter>` / `Arc<Gauge>`
+//! handles that handlers and background tasks clone and increment
+//! directly.
 //!
-//! Names follow the Prometheus convention: `crabka_broker_<subject>_<unit>`.
-//! Where Kafka has a canonical JMX name, the metric semantics stay close to
-//! it. For example, `BrokerTopicMetrics:BytesInPerSec` maps to
-//! `crabka_broker_topic_bytes_in_total`. But the units change from per-second
-//! gauges to monotonic counters, as Prometheus best practice recommends.
-//! Operators compute rates with `rate()` at scrape time.
+//! Naming follows Prometheus convention: `crabka_broker_<subject>_<unit>`.
+//! Where Kafka has a canonical JMX name, we keep the metric semantics
+//! close to it (e.g. `BrokerTopicMetrics:BytesInPerSec` ↔
+//! `crabka_broker_topic_bytes_in_total`), but the units convert from
+//! per-second gauges to monotonic counters per Prometheus best practice
+//! — operators compute rates with `rate()` at scrape time.
 
 use std::sync::Arc;
 
@@ -23,24 +24,21 @@ use prometheus_client::{
 use tokio::sync::Mutex;
 
 /// Latency buckets (seconds) for the per-API `request_duration_seconds`
-/// histogram. The range spans about 100µs, an idempotent `ApiVersions`, to
-/// 10s, a slow controller round-trip or a throttled admin RPC. The bucket
-/// edges put the common Produce/Fetch band, 0.5ms to 50ms, on distinct
-/// buckets.
+/// histogram. Spans ~100µs (idempotent `ApiVersions`) to 10s (a slow
+/// controller round-trip or a throttled admin RPC), tuned so the common
+/// Produce/Fetch band (0.5ms–50ms) lands on distinct buckets.
 const REQUEST_DURATION_BUCKETS: [f64; 12] = [
     0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 10.0,
 ];
 
-/// Shared registry that owns every metric the broker emits. The registry sits
-/// in `Arc<Mutex<…>>` because `prometheus-client` needs `&mut Registry` to
-/// register a metric, and the broker registers lazily from more than one init
-/// path.
+/// Shared registry owning every metric the broker emits. Wrapped in
+/// `Arc<Mutex<…>>` because `prometheus-client` requires `&mut Registry`
+/// to register and we want lazy registration from multiple init paths.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
-/// Sentinel label value that folds unbounded inputs into one series. The
-/// unbounded inputs are unrecognised `api_key`s and `SaslAuthenticate`
-/// without a prior handshake. The single series keeps label cardinality
-/// bounded.
+/// Sentinel label value that folds unbounded inputs (unrecognised
+/// `api_key`s, `SaslAuthenticate` without a prior handshake) into one
+/// series, keeping label cardinality bounded.
 pub(crate) const UNKNOWN_LABEL: &str = "Unknown";
 
 /// Per-topic label set. `EncodeLabelSet` is the prometheus-client
@@ -50,8 +48,8 @@ pub struct TopicLabel {
     pub topic: String,
 }
 
-/// Per-partition label set for the `partition_*` metric families. The
-/// rebalancer's metric scraper reads these samples.
+/// Per-partition label set, paired with the new `partition_*` metric
+/// families. Consumed by the rebalancer's metric scraper.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct PartitionLabel {
     pub topic: String,
@@ -75,237 +73,259 @@ pub struct ClientSoftwareLabel {
     pub software_version: String,
 }
 
-/// Per-Kafka-API request fingerprint for the `api_requests` counter family.
-/// `api_key` is the `ApiKey::IntoStaticStr`-derived variant name, for example
-/// `"Produce"` or `"DescribeQuorum"`, so operators see readable api-name
-/// labels. `ApiKey::ALL.len()` bounds the cardinality to about 80 entries.
-/// Requests for unknown api keys land under the `"Unknown"` sentinel label.
+/// Per-Kafka-API request fingerprint, paired with the
+/// `api_requests` counter family. `api_key` is the
+/// `ApiKey::IntoStaticStr`-derived variant name (e.g. `"Produce"`,
+/// `"DescribeQuorum"`) so operators see human-readable api-name
+/// labels. Cardinality is bounded by `ApiKey::ALL.len()` (~80
+/// entries); requests for unknown api keys land under the
+/// `"Unknown"` sentinel label.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ApiKeyLabel {
     pub api_key: String,
 }
 
-/// SASL mechanism fingerprint for the
-/// `{successful,failed}_authentication_total` counter families. When the
-/// `SaslAuthenticate` frame arrived in a valid sequence, `mechanism` is the
-/// canonical Kafka wire name from
-/// [`crabka_security::SaslMechanism::wire_name`]: `"PLAIN"`,
-/// `"SCRAM-SHA-256"`, `"SCRAM-SHA-512"`, or `"OAUTHBEARER"`. The `"Unknown"`
-/// sentinel covers `ILLEGAL_SASL_STATE` rejects where no prior
-/// `SaslHandshake` ran and the mechanism is unset. `SaslMechanism::*` + 1
-/// bounds the cardinality. The set stays small for any client population.
+/// Controller directory identity attached to the current vote.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct DirectoryLabel {
+    pub directory_id: String,
+}
+
+/// SASL mechanism fingerprint, paired with the
+/// `{successful,failed}_authentication_total` counter families.
+/// `mechanism` is the canonical Kafka wire name from
+/// [`crabka_security::SaslMechanism::wire_name`] (`"PLAIN"`,
+/// `"SCRAM-SHA-256"`, `"SCRAM-SHA-512"`, `"OAUTHBEARER"`) when the
+/// `SaslAuthenticate` frame arrived in a valid sequence; the
+/// `"Unknown"` sentinel covers `ILLEGAL_SASL_STATE` rejects where
+/// no prior `SaslHandshake` ran and the mechanism is unset.
+/// Cardinality is bounded by `SaslMechanism::*` + 1 — a tight set
+/// regardless of client population.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct SaslMechanismLabel {
     pub mechanism: String,
 }
 
-/// Cheaply-clonable bundle of counter / gauge handles. Construct it once in
-/// `Broker::start`. Then hand out clones to every subsystem that emits. Each
-/// clone is a single `Arc::clone`.
+/// Cheaply-clonable bundle of counter / gauge handles. Construct once
+/// in `Broker::start`; hand out clones (each clone is a single
+/// `Arc::clone`) to every subsystem that emits.
 #[derive(Clone)]
 pub struct BrokerMetrics {
     pub registry: SharedRegistry,
     pub topic_bytes_in: Family<TopicLabel, Counter>,
     pub topic_bytes_out: Family<TopicLabel, Counter>,
-    /// Cumulative count of records received from producers, per topic. The
-    /// broker sums `RecordBatch.records.len()` for every batch on the Produce
-    /// path. This mirrors Kafka's `BrokerTopicMetrics.MessagesInPerSec` and
-    /// pairs with `topic_bytes_in` to show both volume and message rate.
-    /// Legacy (v0/v1) producers do not contribute. `RecordsPayload` keeps
-    /// their bytes opaque until the v2 conversion, so the broker counts them
-    /// there. The `produce_message_conversions` counter still tracks how often
-    /// legacy batches arrive, so operators can detect under-counting from a
-    /// legacy fleet.
+    /// Cumulative count of records received from producers,
+    /// per topic. Sums `RecordBatch.records.len()` for every batch on
+    /// the Produce path. Mirrors Kafka's
+    /// `BrokerTopicMetrics.MessagesInPerSec`; pairs with
+    /// `topic_bytes_in` to surface both volume and message rate.
+    /// Legacy (v0/v1) producers don't contribute — `RecordsPayload`
+    /// keeps their bytes opaque until the v2 conversion, so we
+    /// count there. The accompanying `produce_message_conversions`
+    /// counter still tracks how often legacy batches arrive, so
+    /// operators can detect under-counting from a legacy fleet.
     pub topic_messages_in: Family<TopicLabel, Counter>,
     pub topic_produce_requests: Family<TopicLabel, Counter>,
     pub topic_fetch_requests: Family<TopicLabel, Counter>,
-    /// Per-topic counter of Produce partition responses that carried a
-    /// non-zero error code. This mirrors Kafka's
-    /// `BrokerTopicMetrics.FailedProduceRequestsPerSec`. The broker increments
-    /// it once per failed partition, which matches the JVM's per-row mark. A
-    /// request whose two partitions both fail therefore bumps the topic
-    /// counter by 2. Topic-level authorization denials and unknown-topic
-    /// responses also count, as they do in the JVM.
+    /// Per-topic counter of Produce partition responses
+    /// that carried a non-zero error code. Mirrors Kafka's
+    /// `BrokerTopicMetrics.FailedProduceRequestsPerSec`. Incremented
+    /// once per failed partition (matching the JVM's per-row mark),
+    /// so a request whose two partitions both fail bumps the topic
+    /// counter by 2. Topic-level authorization denials and
+    /// unknown-topic responses count, mirroring JVM behavior.
     pub topic_failed_produce_requests: Family<TopicLabel, Counter>,
-    /// Per-topic counter of Fetch partition responses that carried a non-zero
-    /// error code. This mirrors Kafka's
-    /// `BrokerTopicMetrics.FailedFetchRequestsPerSec` and pairs with
-    /// `topic_fetch_requests` to give the error rate.
+    /// Per-topic counter of Fetch partition responses
+    /// that carried a non-zero error code. Mirrors Kafka's
+    /// `BrokerTopicMetrics.FailedFetchRequestsPerSec`. Pairs with
+    /// `topic_fetch_requests` to surface error rate.
     pub topic_failed_fetch_requests: Family<TopicLabel, Counter>,
     pub partition_bytes_in: Family<PartitionLabel, Counter>,
     pub partition_bytes_out: Family<PartitionLabel, Counter>,
-    /// Cumulative bytes this broker accepted from a partition leader as a
-    /// follower, over the `Fetch(replica_id >= 0)` round-trip. This mirrors
-    /// Kafka's `BrokerTopicMetrics.replicationBytesInPerSec`. Operators graph
-    /// `rate(replication_bytes_in_total[1m])` to find ISR fall-behind that
-    /// ingest causes, not client read load.
+    /// Cumulative bytes this broker accepted from a partition
+    /// leader as a follower (`Fetch(replica_id >= 0)` round-trip). Mirrors
+    /// Kafka's `BrokerTopicMetrics.replicationBytesInPerSec`. Operators
+    /// graph `rate(replication_bytes_in_total[1m])` to spot ISR fall-behind
+    /// caused by ingest, not by client read load.
     pub replication_bytes_in: Family<PartitionLabel, Counter>,
-    /// Cumulative bytes this broker served *to* a follower, that is, the
-    /// leader-side outbound for inter-broker `Fetch`. This mirrors Kafka's
-    /// `BrokerTopicMetrics.replicationBytesOutPerSec`. Operators graph the
-    /// per-partition rate to split leader outbound between followers and
-    /// consumers. Consumer traffic still rolls up to `partition_bytes_out`.
+    /// Cumulative bytes this broker served *to* a follower
+    /// (i.e. the leader-side outbound for inter-broker `Fetch`). Mirrors
+    /// Kafka's `BrokerTopicMetrics.replicationBytesOutPerSec`. Operators
+    /// graph the per-partition rate to attribute leader outbound to
+    /// followers vs. consumers (the latter still rolls up to
+    /// `partition_bytes_out`).
     pub replication_bytes_out: Family<PartitionLabel, Counter>,
     pub partition_disk_bytes: Family<PartitionLabel, Gauge>,
     /// Records waiting for acquisition in each share-group partition.
     pub share_group_backlog: Family<ShareGroupLabel, Gauge>,
-    /// Cumulative handler-thread microseconds spent on each (topic,
-    /// partition). The broker exports it as
-    /// `crabka_broker_partition_cpu_micros_total`. The rebalancer takes
-    /// `rate(...)` to get micros/sec. Divide that by `1_000_000` to get the
-    /// per-partition core occupancy. The counter holds microseconds as an
-    /// integer rather than seconds as a float, because `prometheus-client`
+    /// Cumulative handler-thread microseconds spent processing each
+    /// (topic, partition). Exported as
+    /// `crabka_broker_partition_cpu_micros_total`. Rebalancer takes
+    /// `rate(...)` to get micros/sec; dividing by `1_000_000` yields the
+    /// per-partition core occupancy. We track microseconds (integer
+    /// counter) rather than seconds (float) because `prometheus-client`
     /// counters are `u64`.
     pub partition_cpu_micros: Family<PartitionLabel, Counter>,
     pub partitions_led: Gauge,
-    /// Total number of partitions this broker hosts, both leader and follower
-    /// replicas. This mirrors Kafka's `ReplicaManager.PartitionCount`. The
-    /// broker samples it in the same per-second tick as `partitions_led`.
+    /// Total number of partitions (leader + follower
+    /// replicas) this broker hosts. Mirrors Kafka's
+    /// `ReplicaManager.PartitionCount`. Sampled in the same per-second
+    /// tick as `partitions_led`.
     pub partitions_total: Gauge,
-    /// Count of partitions this broker leads whose ISR is smaller than the
-    /// assigned replica set. This is Kafka's
-    /// `ReplicaManager.UnderReplicatedPartitions`. The broker samples it from
-    /// the current `MetadataImage` and matches the partitions where this
+    /// Count of partitions this broker leads whose ISR is
+    /// smaller than the assigned replica set — Kafka's
+    /// `ReplicaManager.UnderReplicatedPartitions`. Sampled by reading
+    /// the current `MetadataImage` and matching partitions where this
     /// broker is the leader. Operators alert on
-    /// `under_replicated_partitions > 0` to find stuck followers before they
-    /// fail an unclean election.
+    /// `under_replicated_partitions > 0` to spot stuck followers
+    /// before they fail an unclean election.
     pub under_replicated_partitions: Gauge,
-    /// Count of partitions this broker leads whose ISR is strictly less than
-    /// the topic's `min.insync.replicas`. This mirrors Kafka's
-    /// `ReplicaManager.UnderMinIsrPartitionCount`. Operators alert on
-    /// `under_min_isr_partition_count > 0`. Partitions in this state reject
-    /// `acks=all` produces with `NOT_ENOUGH_REPLICAS`, so the metric shows
-    /// that writes are blocked before clients start to retry.
+    /// Count of partitions this broker leads whose ISR is
+    /// strictly less than the topic's `min.insync.replicas`. Mirrors
+    /// Kafka's `ReplicaManager.UnderMinIsrPartitionCount`. Operators
+    /// alert on `under_min_isr_partition_count > 0`: partitions in
+    /// this state reject `acks=all` produces with
+    /// `NOT_ENOUGH_REPLICAS`, so the metric
+    /// surfaces "writes are blocked" before clients start retrying.
     pub under_min_isr_partition_count: Gauge,
-    /// Count of partitions this broker leads that currently have no live
-    /// leader, that is, the leader broker is dead and no ISR replacement is
-    /// eligible. This mirrors Kafka's
-    /// `ReplicaManager.OfflinePartitionsCount`. Operators alert on `> 0`.
-    /// Such partitions stay wholly unavailable until an ISR member returns or
-    /// an unclean election runs.
+    /// Count of partitions this broker leads that
+    /// currently have no live leader (leader broker dead with no
+    /// eligible ISR replacement). Mirrors Kafka's
+    /// `ReplicaManager.OfflinePartitionsCount`. Operators alert on
+    /// `> 0`: such partitions are wholly unavailable until an ISR
+    /// member returns or an unclean election runs.
     pub offline_partitions_count: Gauge,
     pub active_controller: Gauge,
-    /// Cumulative count of distinct controller-leader transitions this broker
-    /// has observed. Any change in the raft leader counts, including this
-    /// broker gaining or losing leadership. This mirrors Kafka's
-    /// `KafkaController.LeaderElectionRateAndTimeMs`. Operators alert on
-    /// `rate(controller_leader_changes_total[5m]) > 0` over sustained periods
-    /// to find unstable raft leadership.
+    /// Configured static voters ignored after `kraft.version` reaches 1.
+    pub ignored_static_voters: Gauge,
+    /// One-hot series for the directory identity voted for in this epoch.
+    pub voted_directory: Family<DirectoryLabel, Gauge>,
+    /// Cumulative count of distinct controller-leader
+    /// transitions this broker has observed (any change in the raft
+    /// leader, including this broker becoming or ceasing to be
+    /// leader). Mirrors Kafka's
+    /// `KafkaController.LeaderElectionRateAndTimeMs`. Operators alert
+    /// on `rate(controller_leader_changes_total[5m]) > 0` for sustained
+    /// periods to spot flapping raft leadership.
     pub controller_leader_changes_total: Counter,
     pub isr_shrinks_total: Counter,
     pub isr_expands_total: Counter,
     /// KIP-227: current count of live incremental-fetch sessions across the
-    /// per-broker cache. The broker samples it periodically from
-    /// `FetchSessionCache::len()`.
+    /// per-broker cache. Sampled periodically from `FetchSessionCache::len()`.
     pub incremental_fetch_sessions: Gauge,
     /// KIP-227: cumulative count of incremental-fetch sessions evicted to
-    /// make room for a new allocation. The cache increments it.
+    /// make room for a new allocation. Incremented inside the cache.
     pub incremental_fetch_session_evictions_total: Counter,
     /// KIP-227: sum of `session.partitions.len()` across every live session.
-    /// The broker samples it periodically with `incremental_fetch_sessions`.
+    /// Sampled periodically alongside `incremental_fetch_sessions`.
     pub incremental_fetch_partitions_cached: Gauge,
     /// KIP-511: per-(name, version) counter of accepted v3+ `ApiVersions`
-    /// handshakes. Operators graph this to see which client libraries and
-    /// versions connect.
+    /// handshakes. Operators graph this to see which client libraries
+    /// and versions are connecting.
     pub client_software_versions: Family<ClientSoftwareLabel, Counter>,
-    /// Cumulative count of completed `SaslAuthenticate` frames per mechanism
-    /// that ended in a successful auth state transition. This mirrors Kafka's
-    /// `kafka.network:type=Selector,name=successful-authentication-total`. It
-    /// pairs with `failed_authentication`, so operators compute the auth
-    /// failure ratio per mechanism at scrape time.
+    /// Cumulative count of completed `SaslAuthenticate`
+    /// frames per mechanism that ended in a successful auth state
+    /// transition. Mirrors Kafka's
+    /// `kafka.network:type=Selector,name=successful-authentication-total`.
+    /// Paired with `failed_authentication` so operators compute the
+    /// auth failure ratio per mechanism at scrape time.
     pub successful_authentication: Family<SaslMechanismLabel, Counter>,
-    /// Cumulative count of `SaslAuthenticate` frames per mechanism that
-    /// returned a non-zero error code. This mirrors Kafka's
-    /// `failed-authentication-total`. The `"Unknown"` mechanism label covers
-    /// `ILLEGAL_SASL_STATE` rejects where the connection sent
-    /// `SaslAuthenticate` before it completed a `SaslHandshake`.
-    /// Per-mechanism failures land under the canonical wire name: `PLAIN`,
-    /// `SCRAM-SHA-256`, `SCRAM-SHA-512`, or `OAUTHBEARER`.
+    /// Cumulative count of `SaslAuthenticate` frames per
+    /// mechanism that returned a non-zero error code. Mirrors
+    /// Kafka's `failed-authentication-total`. The `"Unknown"`
+    /// mechanism label covers `ILLEGAL_SASL_STATE` rejects where
+    /// the connection sent `SaslAuthenticate` without first
+    /// completing a `SaslHandshake`; per-mechanism failures land
+    /// under the canonical wire name (`PLAIN`, `SCRAM-SHA-256`,
+    /// `SCRAM-SHA-512`, `OAUTHBEARER`).
     pub failed_authentication: Family<SaslMechanismLabel, Counter>,
-    /// Per-Kafka-API request counter. The network dispatcher bumps it once
-    /// per dispatched request and labels it with the `ApiKey` variant name,
-    /// or with `"Unknown"` for unrecognised keys. This mirrors Kafka's
-    /// `RequestMetrics.RequestsPerSec`. rate(...) gives operators per-API
-    /// request throughput across the broker without a per-handler slice of
-    /// the dashboard.
+    /// Per-Kafka-API request counter. Bumped once per
+    /// dispatched request from the network dispatcher, labelled by
+    /// the `ApiKey` variant name (or `"Unknown"` for unrecognised
+    /// keys). Mirrors Kafka's `RequestMetrics.RequestsPerSec`; rate(...)
+    /// gives operators per-API request throughput across the
+    /// broker without needing to slice the dashboard by handler.
     pub api_requests: Family<ApiKeyLabel, Counter>,
-    /// Per-Kafka-API counter of requests the dispatcher answered with the
-    /// synthetic `UNSUPPORTED_VERSION` response because no handler matched
-    /// the `api_key`. For unknown `api_key`s, the dispatcher did not
-    /// recognise the key at all. Operators alert on
-    /// `rate(unsupported_api_requests_total[5m]) > 0` to catch clients on
-    /// `api_key`/version pairs the broker does not speak. This is often the
-    /// cause of upgrade skew or a misconfigured client.
+    /// Per-Kafka-API counter of requests the dispatcher
+    /// answered with the synthetic `UNSUPPORTED_VERSION` response
+    /// because no handler matched the `api_key` (or, for unknown
+    /// `api_key`s, the dispatcher didn't recognise the key at all).
+    /// Operators alert on `rate(unsupported_api_requests_total[5m]) > 0`
+    /// to catch clients on `api_key`/version pairs the broker
+    /// doesn't speak — frequently the smoking gun for upgrade-skew
+    /// or misconfigured clients.
     pub unsupported_api_requests: Family<ApiKeyLabel, Counter>,
-    /// Per-Kafka-API request-handling latency in seconds, exported as
-    /// `crabka_broker_request_duration_seconds{api}`. The dispatch path
-    /// observes it around the full handler round-trip, decode → handle →
-    /// encode, for every dispatched frame, and labels it with the `ApiKey`
+    /// Per-Kafka-API request-handling latency in seconds
+    /// (`crabka_broker_request_duration_seconds{api}`). Observed in the
+    /// dispatch path around the full handler round-trip (decode → handle →
+    /// encode) for every dispatched frame, labelled by the `ApiKey`
     /// variant name. Operators graph
     /// `histogram_quantile(0.99, rate(request_duration_seconds_bucket[5m]))`
-    /// per api to find handler tail-latency regressions. They also use
-    /// `_count` as a request-rate stream that pairs with `api_requests`.
+    /// per api to spot handler tail-latency regressions, and use `_count`
+    /// as a request-rate stream that pairs with `api_requests`.
     pub request_duration_seconds: Family<ApiKeyLabel, Histogram>,
-    /// Number of requests this broker currently handles (gauge). The
-    /// dispatcher increments it on entry and decrements it on exit, including
-    /// on the error/close path. A sustained climb shows a handler stall or a
-    /// stuck downstream component such as the controller or replication.
+    /// Number of requests currently being handled by this
+    /// broker (gauge). Incremented on dispatch entry, decremented on exit
+    /// (including the error/close path). A sustained climb signals handler
+    /// stalls or a wedged downstream (controller / replication).
     pub in_flight_requests: Gauge,
-    /// Number of client connections currently open to this broker (gauge).
-    /// The broker increments it when it accepts a connection and starts the
-    /// per-connection serve loop. It decrements the gauge when that loop
-    /// exits on EOF, on an error, or on SASL-session expiry. This mirrors the
-    /// intent of Kafka's `kafka.network:type=Acceptor` connection count.
+    /// Number of client connections currently open to this
+    /// broker (gauge). Incremented when a connection is accepted and the
+    /// per-connection serve loop starts, decremented when that loop exits
+    /// (EOF, error, or SASL-session expiry). Mirrors Kafka's
+    /// `kafka.network:type=Acceptor` connection-count intent.
     pub active_connections: Gauge,
-    /// Per-Kafka-API counter of requests whose handler returned an error. In
-    /// that case the dispatcher closed the connection. The label is the
-    /// `ApiKey` variant name. This family is disjoint from
-    /// `unsupported_api_requests`, which counts the synthetic
-    /// `UNSUPPORTED_VERSION` arm. Operators alert on
+    /// Per-Kafka-API counter of requests whose handler
+    /// returned an error (the dispatcher closed the connection). Labelled
+    /// by the `ApiKey` variant name; disjoint from
+    /// `unsupported_api_requests` (which counts the synthetic
+    /// `UNSUPPORTED_VERSION` arm). Operators alert on
     /// `rate(request_errors_total[5m]) > 0` to catch handler-level faults.
     pub request_errors: Family<ApiKeyLabel, Counter>,
-    /// KIP-405: `1` when this broker has swapped in the topic-backed
-    /// `RemoteLogMetadataManager` and answers metadata queries from the
-    /// durable `__remote_log_metadata` topic. The value is `0` while the
-    /// broker is still on the fail-closed `NotReadyRlmm` placeholder, which
-    /// is the default until a configured `[remote_storage.kafka_metadata]`
-    /// bootstrap completes. Operators alert on
-    /// `min_over_time(tiered_storage_rlmm_topic_backed[5m]) == 0` against
-    /// clusters that asked for `metadataManager: Topic`, to catch a stuck
-    /// bootstrap.
+    /// KIP-405: `1` when this broker has finished swapping in
+    /// the topic-backed `RemoteLogMetadataManager` and is
+    /// answering metadata queries from the durable
+    /// `__remote_log_metadata` topic; `0` while still on the
+    /// fail-closed `NotReadyRlmm` placeholder (the default until a
+    /// configured `[remote_storage.kafka_metadata]` bootstrap completes).
+    /// Operators alert on
+    /// `min_over_time(tiered_storage_rlmm_topic_backed[5m]) == 0`
+    /// against clusters that asked for `metadataManager: Topic` to catch
+    /// a stuck bootstrap.
     pub tiered_storage_rlmm_topic_backed: Gauge,
-    /// Number of topic-backed RLMM bootstrap attempts. The counter climbs
-    /// while the bootstrap retries, and stays flat once
-    /// `tiered_storage_rlmm_topic_backed` flips to 1.
+    /// Number of topic-backed RLMM bootstrap attempts; climbs while stuck
+    /// retrying, flat once `tiered_storage_rlmm_topic_backed` flips to 1.
     pub tiered_storage_rlmm_bootstrap_attempts: Counter,
-    /// Per-topic counter of v0/v1 → v2 record-batch up-conversions on the
-    /// Produce path. This mirrors Kafka's
-    /// `BrokerTopicMetrics.ProduceMessageConversionsPerSec`. The broker bumps
-    /// it once per partition's slice of a Produce request whose `records`
-    /// field arrived as a legacy `MessageSet`.
+    /// Per-topic counter of v0/v1 → v2 record-batch
+    /// up-conversions on the Produce path. Mirrors Kafka's
+    /// `BrokerTopicMetrics.ProduceMessageConversionsPerSec`. Bumped
+    /// once per partition's slice of a Produce request whose
+    /// `records` field arrived as a legacy `MessageSet`.
     pub produce_message_conversions: Family<TopicLabel, Counter>,
-    /// Per-topic counter of v2 → v0/v1 record-batch down-conversions on the
-    /// Fetch path. This mirrors Kafka's
-    /// `BrokerTopicMetrics.FetchMessageConversionsPerSec`. The broker bumps
-    /// it once per partition's slice of a Fetch response whose payload it
-    /// down-converted for a legacy `Fetch v < 4` client.
+    /// Per-topic counter of v2 → v0/v1 record-batch
+    /// down-conversions on the Fetch path. Mirrors Kafka's
+    /// `BrokerTopicMetrics.FetchMessageConversionsPerSec`. Bumped
+    /// once per partition's slice of a Fetch response whose response
+    /// payload was down-converted to satisfy a legacy (`Fetch v < 4`)
+    /// client.
     pub fetch_message_conversions: Family<TopicLabel, Counter>,
-    /// KIP-841: cumulative count of unclean leader elections this broker has
-    /// driven as controller leader. These are elections that picked an
-    /// out-of-ISR replica as the new leader, because the topic had
-    /// `unclean.leader.election.enable=true` and the ISR was empty at
-    /// failover time. This mirrors Kafka's
-    /// `ControllerStats.UncleanLeaderElectionsPerSec`. An operator alert on
-    /// `rate(unclean_leader_elections_total[5m]) > 0` flags the risk of data
-    /// loss.
+    /// KIP-841: cumulative count of unclean leader
+    /// elections this broker, as controller leader, has driven —
+    /// i.e. elections that picked an out-of-ISR replica as the new
+    /// leader because the topic had
+    /// `unclean.leader.election.enable=true` and the ISR was empty
+    /// at failover time. Mirrors Kafka's
+    /// `ControllerStats.UncleanLeaderElectionsPerSec`. An operator
+    /// alert on `rate(unclean_leader_elections_total[5m]) > 0`
+    /// flags the data-loss footgun.
     pub unclean_leader_elections_total: Counter,
-    /// `FedRAMP` MLA: cumulative audit records written to the audit topic.
-    /// The audit subsystem increments it on each successful produce to
-    /// `__crabka_audit`.
+    /// `FedRAMP` MLA: cumulative audit records successfully written to the
+    /// audit topic. Incremented by the audit subsystem on each successful
+    /// produce to `__crabka_audit`.
     pub audit_events_total: Counter,
     /// `FedRAMP` MLA: cumulative audit records that failed to write to the
-    /// audit topic. The audit subsystem increments it on each produce error.
-    /// Operators alert on `rate(audit_write_failures_total[5m]) > 0`.
+    /// audit topic. Incremented on each produce error; operators alert on
+    /// `rate(audit_write_failures_total[5m]) > 0`.
     pub audit_write_failures_total: Counter,
     /// Current count of audit records buffered in the durable spool (gauge).
     pub audit_spool_depth: Gauge,
@@ -315,23 +335,23 @@ pub struct BrokerMetrics {
     pub audit_records_spooled_total: Counter,
     /// Cumulative audit records drained from the spool back to the topic.
     pub audit_records_replayed_total: Counter,
-    /// Cumulative audit records lost because the channel or the spool was
-    /// full.
+    /// Cumulative audit records lost (channel-full or spool-full).
     pub audit_records_dropped_total: Counter,
-    /// Cumulative count of completed log-compaction sweeps this broker's
-    /// cleaner ran. Each `tick_all` pass adds one, whether or not any
-    /// partition was eligible. Tests and operators use it to see that the
-    /// compaction ticker completed at least one full pass after a segment was
-    /// sealed. A poll on this counter replaces a fixed `sleep`. This mirrors
-    /// the intent of Kafka's `LogCleaner` run accounting.
+    /// Cumulative count of completed log-compaction sweeps run by this
+    /// broker's cleaner — one increment per `tick_all` pass, whether or
+    /// not any partition was eligible. Lets tests (and operators) observe
+    /// that the compaction ticker has completed at least one full pass
+    /// after a segment was sealed, replacing fixed `sleep`s with a poll on
+    /// this counter. Mirrors the intent of Kafka's `LogCleaner` run
+    /// accounting.
     pub log_cleaner_runs_total: Counter,
-    /// Per-partition cumulative count of `Partition::compact_log` passes this
-    /// broker's cleaner completed. The cleaner bumps it once per sweep for
-    /// each eligible partition, that is, each leader partition with
-    /// `cleanup.policy=compact`. It pairs with `log_cleaner_runs_total`. A
-    /// test that seals a segment and then waits for this counter to advance
-    /// knows the sealed segment went through a compaction pass, and does not
-    /// have to guess a duration.
+    /// Per-partition cumulative count of compaction passes
+    /// (`Partition::compact_log`) this broker's cleaner completed
+    /// successfully. Bumped once per eligible (leader &&
+    /// `cleanup.policy=compact`) partition per sweep. Pairs with
+    /// `log_cleaner_runs_total`: a test that seals a segment then waits for
+    /// this counter to advance knows the sealed segment has been through a
+    /// compaction pass without guessing a duration.
     pub log_compactions_total: Family<PartitionLabel, Counter>,
 }
 
@@ -359,6 +379,8 @@ impl BrokerMetrics {
             under_min_isr_partition_count: Gauge::default(),
             offline_partitions_count: Gauge::default(),
             active_controller: Gauge::default(),
+            ignored_static_voters: Gauge::default(),
+            voted_directory: Family::default(),
             controller_leader_changes_total: Counter::default(),
             isr_shrinks_total: Counter::default(),
             isr_expands_total: Counter::default(),
@@ -507,6 +529,18 @@ impl BrokerMetrics {
             "active_controller",
             "1 if this broker is the raft (controller) leader, 0 otherwise.",
             self.active_controller.clone(),
+        );
+
+        registry.register(
+            "ignored_static_voters",
+            "Configured static controller voters ignored at kraft.version 1.",
+            self.ignored_static_voters.clone(),
+        );
+
+        registry.register(
+            "voted_directory",
+            "1 for the controller directory identity voted for in this epoch.",
+            self.voted_directory.clone(),
         );
 
         registry.register(
@@ -817,9 +851,7 @@ impl BrokerMetrics {
     /// Build and register every broker metric.
     #[must_use]
     /// # Panics
-    /// This function panics if the synchronized log state is poisoned. It also
-    /// panics if a segment that was validated as nonempty does not have its
-    /// required batch or index entry.
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn new() -> Self {
         let registry = Arc::new(Mutex::new(Registry::with_prefix("crabka_broker")));
         let metrics = Self::unregistered(registry);
@@ -838,9 +870,8 @@ impl BrokerMetrics {
     }
 
     /// KIP-511: bump the per-(name, version) handshake counter.
-    ///
-    /// The caller must make sure both inputs already passed
-    /// `handlers::api_versions::is_valid_client_info`, so that the label
+    /// Caller guarantees both inputs already passed
+    /// `handlers::api_versions::is_valid_client_info` so the label
     /// values stay bounded.
     pub fn record_client_software(&self, name: &str, version: &str) {
         let lbl = ClientSoftwareLabel {
@@ -850,13 +881,13 @@ impl BrokerMetrics {
         self.client_software_versions.get_or_create(&lbl).inc();
     }
 
-    /// Account one completed `SaslAuthenticate` frame on `mechanism`.
-    ///
-    /// `success = true` increments `successful_authentication_total`.
-    /// `success = false` increments `failed_authentication_total`. The
-    /// mechanism label is the canonical Kafka wire name. For the
-    /// `ILLEGAL_SASL_STATE` reject, where no prior handshake ran, pass
-    /// `"Unknown"` to keep cardinality bounded.
+    /// Account one completed `SaslAuthenticate` frame on
+    /// `mechanism`. `success = true` increments
+    /// `successful_authentication_total`; `success = false`
+    /// increments `failed_authentication_total`. The mechanism
+    /// label is the canonical Kafka wire name; pass `"Unknown"`
+    /// for the `ILLEGAL_SASL_STATE` reject (no prior handshake)
+    /// to keep cardinality bounded.
     pub fn record_authentication(&self, mechanism: &str, success: bool) {
         let lbl = SaslMechanismLabel {
             mechanism: mechanism.to_string(),
@@ -868,10 +899,9 @@ impl BrokerMetrics {
         }
     }
 
-    /// Account one dispatched request for `api_key`.
-    ///
-    /// The label is the readable variant name from `ApiKey::IntoStaticStr`.
-    /// Unknown keys fold under `"Unknown"`.
+    /// Account one dispatched request for `api_key`. The
+    /// label is the human-readable variant name from
+    /// `ApiKey::IntoStaticStr`; unknown keys fold under `"Unknown"`.
     pub fn record_api_request(&self, api_key: crate::handlers::ApiKeyCode) {
         let lbl = ApiKeyLabel {
             api_key: api_key_label_name(api_key).to_string(),
@@ -880,10 +910,9 @@ impl BrokerMetrics {
     }
 
     /// Account one request the dispatcher rejected with
-    /// `UNSUPPORTED_VERSION` because no handler matched `api_key`.
-    ///
-    /// This covers an unknown `api_key`, and a known `api_key` with no
-    /// negotiated version. The labelling matches `record_api_request`.
+    /// `UNSUPPORTED_VERSION` because no handler matched `api_key`
+    /// (e.g. unknown `api_key`, or known `api_key` with no version
+    /// negotiated). Mirrors the labelling of `record_api_request`.
     pub fn record_unsupported_api_request(&self, api_key: crate::handlers::ApiKeyCode) {
         let lbl = ApiKeyLabel {
             api_key: api_key_label_name(api_key).to_string(),
@@ -891,13 +920,12 @@ impl BrokerMetrics {
         self.unsupported_api_requests.get_or_create(&lbl).inc();
     }
 
-    /// Observe the wall-clock handling latency for one dispatched request on
-    /// the `request_duration_seconds{api}` histogram.
-    ///
-    /// This function resolves `api_key` to the same readable label as
-    /// `record_api_request`, and unknown keys fold under `"Unknown"`, so the
-    /// two families share a label set. The dispatch path calls it once per
-    /// frame with the elapsed seconds of the full handler round-trip.
+    /// Observe the wall-clock handling latency for one dispatched
+    /// request on the `request_duration_seconds{api}` histogram. `api_key`
+    /// is resolved to the same human-readable label as
+    /// `record_api_request` (unknown keys fold under `"Unknown"`), so the
+    /// two families share a label set. Called from the dispatch path once
+    /// per frame with the elapsed seconds of the full handler round-trip.
     pub fn observe_request_duration(&self, api_key: i16, seconds: f64) {
         let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
             Some(k) => k.into(),
@@ -911,11 +939,10 @@ impl BrokerMetrics {
             .observe(seconds);
     }
 
-    /// Account one request whose handler returned an error, after which the
-    /// dispatcher closed the connection.
-    ///
-    /// The labelling matches `record_api_request`. This family is disjoint
-    /// from the `unsupported_api_requests` family.
+    /// Account one request whose handler returned an error (the
+    /// dispatcher closed the connection). Labelled like
+    /// `record_api_request`; disjoint from the
+    /// `unsupported_api_requests` family.
     pub fn record_request_error(&self, api_key: i16) {
         let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
             Some(k) => k.into(),
@@ -927,10 +954,9 @@ impl BrokerMetrics {
         self.request_errors.get_or_create(&lbl).inc();
     }
 
-    /// Record a Produce hit on `topic` with the given payload size.
-    ///
-    /// This function does nothing on the error path. Do not call it if the
-    /// broker rejected the request.
+    /// Convenience: record a Produce hit on `topic` with the given
+    /// payload size. No-op on the error path — callers shouldn't call
+    /// this if the request was rejected.
     pub fn record_produce(&self, topic: &str, bytes: u64) {
         let lbl = TopicLabel {
             topic: topic.to_string(),
@@ -941,13 +967,12 @@ impl BrokerMetrics {
         }
     }
 
-    /// Account `messages` records received on the Produce path for `topic`.
-    ///
-    /// This mirrors Kafka's `BrokerTopicMetrics.MessagesInPerSec`. The
-    /// Produce path calls it once per `RecordBatch` with the batch's record
-    /// count. Zero is a valid value, because the broker cannot cheaply derive
-    /// the record count of a legacy batch without a full conversion. On zero
-    /// the function does nothing.
+    /// Account `messages` records received on the Produce
+    /// path for `topic`. Mirrors Kafka's
+    /// `BrokerTopicMetrics.MessagesInPerSec`. Called once per
+    /// `RecordBatch` with the batch's record count. Zero is a
+    /// legitimate value (legacy batches whose record count we can't
+    /// cheaply derive without a full conversion) and is a no-op.
     pub fn record_produce_messages(&self, topic: &str, messages: u64) {
         if messages == 0 {
             return;
@@ -958,10 +983,9 @@ impl BrokerMetrics {
         self.topic_messages_in.get_or_create(&lbl).inc_by(messages);
     }
 
-    /// Record a Fetch hit on `topic` with the bytes delivered.
-    ///
-    /// The `bytes` argument can validly be zero for an empty fetch. The
-    /// request counter still increments.
+    /// Convenience: record a Fetch hit on `topic` with the bytes
+    /// delivered. The `bytes` arg may legitimately be zero (empty
+    /// fetch); the request counter still increments.
     pub fn record_fetch(&self, topic: &str, bytes: u64) {
         let lbl = TopicLabel {
             topic: topic.to_string(),
@@ -972,10 +996,9 @@ impl BrokerMetrics {
         }
     }
 
-    /// Record a single failed Produce partition response for `topic`.
-    ///
-    /// Callers bump the counter once per partition whose response carries a
-    /// non-zero error code. This mirrors the JVM's per-row
+    /// Record a single failed Produce partition response
+    /// for `topic`. Callers bump once per partition whose response
+    /// carries a non-zero error code — mirrors the JVM's per-row
     /// `failedProduceRequestRate.mark()`.
     pub fn record_failed_produce(&self, topic: &str) {
         let lbl = TopicLabel {
@@ -984,9 +1007,9 @@ impl BrokerMetrics {
         self.topic_failed_produce_requests.get_or_create(&lbl).inc();
     }
 
-    /// Record a single failed Fetch partition response for `topic`.
-    ///
-    /// The per-partition semantics match `record_failed_produce`.
+    /// Record a single failed Fetch partition response
+    /// for `topic`. Same per-partition semantics as
+    /// `record_failed_produce`.
     pub fn record_failed_fetch(&self, topic: &str) {
         let lbl = TopicLabel {
             topic: topic.to_string(),
@@ -994,10 +1017,9 @@ impl BrokerMetrics {
         self.topic_failed_fetch_requests.get_or_create(&lbl).inc();
     }
 
-    /// Account a partition's slice of a Produce request.
-    ///
-    /// The request handler calls this once per partition, together with the
-    /// topic-level `record_produce`.
+    /// Convenience: account a partition's slice of a Produce request.
+    /// Called once per partition by the request handler (alongside the
+    /// existing topic-level `record_produce`).
     pub fn record_partition_produce(&self, topic: &str, partition: i32, bytes: u64) {
         if bytes == 0 {
             return;
@@ -1009,7 +1031,7 @@ impl BrokerMetrics {
         self.partition_bytes_in.get_or_create(&lbl).inc_by(bytes);
     }
 
-    /// Account a partition's slice of a Fetch response.
+    /// Convenience: account a partition's slice of a Fetch response.
     pub fn record_partition_fetch(&self, topic: &str, partition: i32, bytes: u64) {
         if bytes == 0 {
             return;
@@ -1021,10 +1043,9 @@ impl BrokerMetrics {
         self.partition_bytes_out.get_or_create(&lbl).inc_by(bytes);
     }
 
-    /// Account bytes this broker received from the partition leader as a
-    /// follower, on the follower side of the inter-broker `Fetch` round-trip.
-    ///
-    /// The replicator calls this after a successful append.
+    /// Account bytes this broker received from the partition
+    /// leader as a follower (inter-broker `Fetch` round-trip, follower
+    /// side). Called from the replicator after a successful append.
     pub fn record_replication_in(&self, topic: &str, partition: i32, bytes: u64) {
         if bytes == 0 {
             return;
@@ -1036,10 +1057,9 @@ impl BrokerMetrics {
         self.replication_bytes_in.get_or_create(&lbl).inc_by(bytes);
     }
 
-    /// Account one v0/v1 → v2 up-conversion on the Produce path.
-    ///
-    /// The partition's `records` field arrived as a legacy `MessageSet`, and
-    /// the broker decoded it into a v2 `RecordBatch`.
+    /// Account one v0/v1 → v2 up-conversion on the Produce
+    /// path (the partition's `records` field arrived as a legacy
+    /// `MessageSet` and was decoded into a v2 `RecordBatch`).
     pub fn record_produce_message_conversion(&self, topic: &str) {
         let lbl = TopicLabel {
             topic: topic.to_string(),
@@ -1047,10 +1067,9 @@ impl BrokerMetrics {
         self.produce_message_conversions.get_or_create(&lbl).inc();
     }
 
-    /// Account one v2 → v0/v1 down-conversion on the Fetch path.
-    ///
-    /// The broker assembles a legacy client's Fetch v < 4 response from a v2
-    /// record batch.
+    /// Account one v2 → v0/v1 down-conversion on the Fetch
+    /// path (a legacy client's Fetch v < 4 response is being assembled
+    /// from a v2 record batch).
     pub fn record_fetch_message_conversion(&self, topic: &str) {
         let lbl = TopicLabel {
             topic: topic.to_string(),
@@ -1058,18 +1077,16 @@ impl BrokerMetrics {
         self.fetch_message_conversions.get_or_create(&lbl).inc();
     }
 
-    /// KIP-841: account one unclean leader election.
-    ///
-    /// Such an election picked an out-of-ISR replica because the ISR was
-    /// empty and the topic had `unclean.leader.election.enable=true`.
+    /// KIP-841: account one unclean leader election (an
+    /// election that picked an out-of-ISR replica because the ISR was
+    /// empty and the topic had `unclean.leader.election.enable=true`).
     pub fn record_unclean_leader_election(&self) {
         self.unclean_leader_elections_total.inc();
     }
 
-    /// Account bytes this broker served to a follower as the partition
-    /// leader, on the leader side of the inter-broker `Fetch` round-trip.
-    ///
-    /// The `Fetch` handler calls this when `replica_id >= 0`.
+    /// Account bytes this broker served to a follower as the
+    /// partition leader (inter-broker `Fetch` round-trip, leader side).
+    /// Called from the `Fetch` handler when `replica_id >= 0`.
     pub fn record_replication_out(&self, topic: &str, partition: i32, bytes: u64) {
         if bytes == 0 {
             return;
@@ -1081,11 +1098,10 @@ impl BrokerMetrics {
         self.replication_bytes_out.get_or_create(&lbl).inc_by(bytes);
     }
 
-    /// Account handler-thread microseconds spent on a partition.
-    ///
-    /// The produce and fetch hot paths call this around the per-partition
-    /// work. On zero the function does nothing, so a trivial measurement does
-    /// not allocate a label entry.
+    /// Convenience: account handler-thread microseconds spent on a
+    /// partition. Called from the produce / fetch hot paths around the
+    /// per-partition work. No-ops on zero so we don't allocate a label
+    /// entry for trivial measurements.
     pub fn record_partition_cpu_micros(&self, topic: &str, partition: i32, micros: u64) {
         if micros == 0 {
             return;
@@ -1097,18 +1113,16 @@ impl BrokerMetrics {
         self.partition_cpu_micros.get_or_create(&lbl).inc_by(micros);
     }
 
-    /// Account one completed log-compaction sweep, that is, a full `tick_all`
-    /// pass.
-    ///
-    /// The cleaner calls this once per tick, whether or not any partition was
-    /// eligible. A test can therefore see that a full pass ran after it
+    /// Account one completed log-compaction sweep (a full `tick_all`
+    /// pass). Called once per cleaner tick, whether or not any partition
+    /// was eligible, so a test can observe that a full pass ran after it
     /// sealed a segment.
     pub fn record_cleaner_run(&self) {
         self.log_cleaner_runs_total.inc();
     }
 
-    /// Account one per-partition compaction pass where
-    /// `Partition::compact_log` returned `Ok`.
+    /// Account one successful per-partition compaction pass
+    /// (`Partition::compact_log` returned `Ok`).
     pub fn record_compaction(&self, topic: &str, partition: i32) {
         let lbl = PartitionLabel {
             topic: topic.to_string(),
@@ -1124,8 +1138,8 @@ impl Default for BrokerMetrics {
     }
 }
 
-/// Resolve a wire `api_key` to the `ApiKey` variant name used as the metric
-/// label. Unrecognised keys fold under [`UNKNOWN_LABEL`].
+/// Resolve a wire `api_key` to the `ApiKey` variant name used as the
+/// metric label, folding unrecognised keys under [`UNKNOWN_LABEL`].
 fn api_key_label_name(api_key: crate::handlers::ApiKeyCode) -> &'static str {
     match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
         Some(k) => k.into(),
@@ -1187,6 +1201,12 @@ mod tests {
         m.under_min_isr_partition_count.set(2);
         m.offline_partitions_count.set(1);
         m.active_controller.set(1);
+        m.ignored_static_voters.set(3);
+        m.voted_directory
+            .get_or_create(&DirectoryLabel {
+                directory_id: "00000000-0000-0000-0000-000000000001".into(),
+            })
+            .set(1);
         m.controller_leader_changes_total.inc();
         m.isr_shrinks_total.inc();
         m.isr_expands_total.inc_by(2);
@@ -1206,6 +1226,8 @@ mod tests {
             "crabka_broker_under_min_isr_partition_count",
             "crabka_broker_offline_partitions_count",
             "crabka_broker_active_controller",
+            "crabka_broker_ignored_static_voters",
+            "crabka_broker_voted_directory",
             "crabka_broker_controller_leader_changes_total",
             "crabka_broker_isr_shrinks_total",
             "crabka_broker_isr_expands_total",

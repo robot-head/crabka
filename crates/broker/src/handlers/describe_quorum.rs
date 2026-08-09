@@ -174,7 +174,19 @@ fn build_topic_responses(
                                     }
                                 })
                                 .collect(),
-                            observers: Vec::new(),
+                            observers: quorum
+                                .per_voter_matched_index
+                                .iter()
+                                .filter(|(id, _)| !quorum.voters.contains(id))
+                                .map(|(id, offset)| ReplicaState {
+                                    replica_id: i32::try_from(id.0).unwrap_or(-1),
+                                    replica_directory_id: Uuid::ZERO,
+                                    log_end_offset: i64::try_from(*offset).unwrap_or(i64::MAX),
+                                    last_fetch_timestamp: -1,
+                                    last_caught_up_timestamp: -1,
+                                    ..Default::default()
+                                })
+                                .collect(),
                             ..Default::default()
                         }
                     } else {

@@ -13,7 +13,11 @@
 //! Peer addresses are resolved from the static voter set's CONTROLLER
 //! endpoints.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -116,7 +120,9 @@ fn api_version_for(key: ApiKey) -> ApiVersion {
 /// connection, so the next send dials again.
 pub(crate) struct RealPeerSender {
     connections: DashMap<NodeId, Arc<Connection>>,
-    voters: VoterSet,
+    voters: RwLock<VoterSet>,
+    bootstrap: BTreeMap<NodeId, String>,
+    aliases: RwLock<BTreeMap<NodeId, String>>,
     client_id: String,
     dialer: Arc<dyn OutboundDialer>,
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
@@ -126,14 +132,26 @@ pub(crate) struct RealPeerSender {
 impl RealPeerSender {
     pub(crate) fn new(
         voters: VoterSet,
+        bootstrap_servers: &[String],
         client_id: String,
         dialer: Arc<dyn OutboundDialer>,
         dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
         frame_max: crabka_client_core::ClientFrameMax,
     ) -> Self {
+        let bootstrap = bootstrap_servers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, address)| {
+                u64::try_from(index)
+                    .ok()
+                    .map(|index| (NodeId(u64::MAX - index), address.clone()))
+            })
+            .collect();
         Self {
             connections: DashMap::new(),
-            voters,
+            voters: RwLock::new(voters),
+            bootstrap,
+            aliases: RwLock::new(BTreeMap::new()),
             client_id,
             dialer,
             dispatch_queue_capacity,
@@ -147,7 +165,21 @@ impl RealPeerSender {
         if let Some(c) = self.connections.get(&peer) {
             return Ok(Arc::clone(c.value()));
         }
-        let addr = controller_addr(&self.voters, peer).ok_or(RaftError::NotLeader {
+        let addr = {
+            let voters = self
+                .voters
+                .read()
+                .map_err(|_| RaftError::ChangeRejected("voter endpoint lock poisoned".into()))?;
+            controller_addr(&voters, peer)
+        }
+        .or_else(|| {
+            self.aliases
+                .read()
+                .ok()
+                .and_then(|aliases| aliases.get(&peer).cloned())
+        })
+        .or_else(|| self.bootstrap.get(&peer).cloned())
+        .ok_or(RaftError::NotLeader {
             current_leader: None,
         })?;
         let opts = ConnectionOptions {
@@ -180,6 +212,78 @@ impl PeerSender for RealPeerSender {
                 self.connections.remove(&peer);
                 Err(RaftError::Network(e))
             }
+        }
+    }
+
+    async fn probe_kraft_version(
+        &self,
+        address: &str,
+        finalized_version: u16,
+    ) -> Result<bool, RaftError> {
+        use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+
+        let connection = self
+            .dialer
+            .dial(
+                NodeId(u64::MAX),
+                address,
+                ConnectionOptions {
+                    client_id: "crabka-voter-probe".into(),
+                    dispatch_queue_capacity: self.dispatch_queue_capacity,
+                    frame_max: self.frame_max,
+                    ..ConnectionOptions::default()
+                },
+            )
+            .await
+            .map_err(RaftError::Network)?;
+        let response = connection
+            .send(ApiVersionsRequest {
+                client_software_name: "crabka".into(),
+                client_software_version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
+            })
+            .await
+            .map_err(RaftError::Network)?;
+        connection.close();
+        Ok(response
+            .supported_features
+            .iter()
+            .find(|feature| {
+                feature.name == crabka_metadata::metadata_version::KRAFT_VERSION_FEATURE
+            })
+            .is_some_and(|feature| {
+                i16::try_from(finalized_version).is_ok_and(|version| {
+                    feature.min_version <= version && version <= feature.max_version
+                })
+            }))
+    }
+
+    fn update_voters(&self, voters: &VoterSet) {
+        if let Ok(mut current) = self.voters.write() {
+            *current = voters.clone();
+            // Endpoint updates must force the next request through DNS/dialing.
+            self.connections.clear();
+        }
+    }
+
+    fn discovery_peers(&self) -> Vec<NodeId> {
+        self.bootstrap.keys().copied().collect()
+    }
+
+    fn remember_peer(&self, source: NodeId, actual: NodeId) {
+        if source == actual {
+            return;
+        }
+        let address = self.bootstrap.get(&source).cloned().or_else(|| {
+            self.aliases
+                .read()
+                .ok()
+                .and_then(|aliases| aliases.get(&source).cloned())
+        });
+        if let Some(address) = address
+            && let Ok(mut aliases) = self.aliases.write()
+        {
+            aliases.insert(actual, address);
         }
     }
 }
@@ -234,6 +338,29 @@ mod tests {
         let mut buf = bytes::BytesMut::new();
         resp.encode(&mut buf, 0).unwrap();
         buf.to_vec()
+    }
+
+    #[test]
+    fn bootstrap_servers_remain_available_without_a_voter_set() {
+        let sender = RealPeerSender::new(
+            VoterSet::default(),
+            &["controller.example:9093".into()],
+            "raft-client".into(),
+            Arc::new(PlaintextDialer),
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            crabka_client_core::ClientFrameMax::default(),
+        );
+        let bootstrap = sender.discovery_peers();
+        assert2::assert!(bootstrap.len() == 1);
+        sender.remember_peer(bootstrap[0], NodeId(7));
+        assert2::assert!(
+            sender
+                .aliases
+                .read()
+                .expect("alias lock")
+                .get(&NodeId(7))
+                .is_some_and(|address| address == "controller.example:9093")
+        );
     }
 
     async fn read_frame(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
@@ -373,6 +500,7 @@ mod tests {
         let voters = voter_set_with_controller(NodeId(2), &addr.ip().to_string(), addr.port());
         let sender = RealPeerSender::new(
             voters,
+            &[],
             "raft-client".into(),
             Arc::new(PlaintextDialer),
             crabka_client_core::ConnectionDispatchQueueCapacity::new(7).unwrap(),

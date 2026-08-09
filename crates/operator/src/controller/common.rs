@@ -1,11 +1,11 @@
 //! Shared helpers across the `Kafka` and `KafkaNodePool` reconcilers.
 //!
-//! The `Kafka`-owned cluster-level objects are here: the `Service`, the
-//! `ConfigMap`, and the cluster-id `Secret`. They are here because both
-//! reconcilers must refer to their names. The pool reconciler reads the
-//! Secret, and the parent reconciler renders and applies the objects. Both
-//! reconcilers also share the status-derivation helper, the SSA and
-//! merge-patch wrappers, and the labels and owner-ref helpers verbatim.
+//! The `Kafka`-owned cluster-level objects (`Service`, `ConfigMap`,
+//! cluster-id `Secret`) live here because both reconcilers need to refer
+//! to their names (the pool reconciler reads the Secret; the parent
+//! reconciler renders+applies them). The status-derivation helper, the
+//! SSA / merge-patch wrappers, and the labels / owner-ref helpers are
+//! shared verbatim.
 
 use std::{collections::BTreeMap, fmt::Debug, future::Future, pin::Pin, sync::Arc};
 
@@ -40,10 +40,13 @@ pub(crate) const FIELD_MANAGER: &str = "crabka-operator";
 
 pub(crate) const BROKER_PORT: i32 = 9092;
 /// `KRaft` controller listener port. Every broker binds its controller
-/// listener on `0.0.0.0:9093`, and peers reach each other on this port through
-/// the per-pod DNS A-records of the headless Service.
+/// listener on `0.0.0.0:9093` and peers reach each other on this port
+/// via the headless Service's per-pod DNS A-records.
 pub(crate) const CONTROLLER_PORT: i32 = 9093;
 pub(crate) const APP_LABEL: &str = "crabka-broker";
+pub(crate) const QUORUM_BOOTSTRAP_NODE_ID_KEY: &str = "quorumBootstrapNodeId";
+pub(crate) const QUORUM_BOOTSTRAP_POOL_KEY: &str = "quorumBootstrapPool";
+pub(crate) const QUORUM_BOOTSTRAP_INITIALIZED_KEY: &str = "quorumBootstrapInitialized";
 pub(crate) const DEFAULT_BROKER_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-broker:",
     env!("CARGO_PKG_VERSION")
@@ -59,10 +62,10 @@ pub(crate) fn requeue(delay: Time) -> Action {
     Action::requeue(delay.to_std())
 }
 
-/// A millisecond count held as `u64`, as a time extent. The count is a
-/// `refined_type` newtype such as the `PositiveMillis` of
-/// `crabka_gres_control`. [`TimeExt::from_millis`] takes an `i64`, so a value
-/// past `i64::MAX` milliseconds saturates and does not wrap negative.
+/// A millisecond count held as `u64` — a `refined_type` newtype such as
+/// `crabka_gres_control`'s `PositiveMillis` — as a time extent.
+/// [`TimeExt::from_millis`] takes an `i64`, so a value past `i64::MAX`
+/// milliseconds saturates rather than wrapping negative.
 pub(crate) fn time_from_millis_u64(millis: u64) -> Time {
     Time::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
 }
@@ -118,53 +121,51 @@ pub enum ReconcileError {
     MissingOauthTrustKey { secret: String, key: String },
     #[error("oauth trust Secret '{secret}' key '{key}' is empty")]
     EmptyOauthTrustValue { secret: String, key: String },
-    /// An oauth listener's `accessTokenIsJwt` setting disagrees with the
-    /// mode-specific fields that are set. JWT-mode requires `jwksEndpointUri`
-    /// and rejects the introspection fields. Introspection-mode requires
-    /// `introspectionEndpointUri`, `clientId`, and `clientSecret`, and rejects
-    /// `jwksEndpointUri`.
+    /// An oauth listener's `accessTokenIsJwt` setting
+    /// disagrees with which mode-specific fields are set (JWT-mode
+    /// requires `jwksEndpointUri` and rejects introspection fields;
+    /// introspection-mode requires `introspectionEndpointUri` + `clientId`
+    /// + `clientSecret` and rejects `jwksEndpointUri`).
     #[error("listener OAuth: {0}")]
     InvalidListenerOauthAccessTokenIsJwt(String),
-    /// An oauth listener's `clientSecret.secretName` does not exist in the
-    /// cluster's namespace.
+    /// An oauth listener's `clientSecret.secretName` doesn't
+    /// exist in the cluster's namespace.
     #[error("oauth introspection Secret '{0}' not found")]
     MissingOauthIntrospectionSecret(String),
     /// An oauth listener's `clientSecret.secretName` exists
     /// but does not contain the named `key`.
     #[error("oauth introspection Secret '{secret}' has no key '{key}'")]
     MissingOauthIntrospectionKey { secret: String, key: String },
-    /// An oauth listener's `clientSecret` Secret and key both exist, but the
-    /// value is zero bytes.
+    /// An oauth listener's `clientSecret` Secret + key both
+    /// exist but the value is zero bytes.
     #[error("oauth introspection Secret '{secret}' key '{key}' is empty")]
     EmptyOauthIntrospectionValue { secret: String, key: String },
-    /// `type: gssapi` listener references a keytab Secret that does not
-    /// exist.
+    /// `type: gssapi` listener references a keytab Secret that doesn't exist.
     #[error("gssapi keytab Secret '{0}' not found")]
     MissingGssapiKeytabSecret(String),
-    /// The keytab Secret exists but does not have the referenced key.
+    /// keytab Secret exists but lacks the referenced key.
     #[error("gssapi keytab Secret '{secret}' has no key '{key}'")]
     MissingGssapiKeytabKey { secret: String, key: String },
-    /// `spec.krb5ConfSecretRef` references a Secret that does not exist.
+    /// `spec.krb5ConfSecretRef` references a Secret that doesn't exist.
     #[error("krb5.conf Secret '{0}' not found")]
     MissingKrb5ConfSecret(String),
-    /// The `spec.krb5ConfSecretRef` Secret exists but does not have the
-    /// referenced key.
+    /// `spec.krb5ConfSecretRef` Secret exists but lacks the referenced key.
     #[error("krb5.conf Secret {secret:?} is missing key {key:?}")]
     MissingKrb5ConfKey { secret: String, key: String },
-    /// KIP-405: `spec.tieredStorage` failed shape validation. The concrete
-    /// cases are `type = "S3"` without `spec.tieredStorage.s3`,
-    /// `type = "Local"` with `spec.tieredStorage.s3` set, and an S3 spec
-    /// without the required `bucket` or `region`. The reconciler returns this
-    /// error before it renders any `ConfigMap`, so the broker pod never boots
+    /// KIP-405: `spec.tieredStorage` failed shape
+    /// validation. Concrete cases: `type = "S3"` without `spec.tieredStorage.s3`,
+    /// `type = "Local"` with `spec.tieredStorage.s3` set, or an S3 spec
+    /// missing required `bucket` / `region`. The reconciler returns this
+    /// before rendering any `ConfigMap` so the broker pod never boots
     /// against malformed `[remote_storage]` TOML.
     #[error("tieredStorage: {0}")]
     TieredStorageInvalid(String),
 
-    /// `spec.tracing` failed shape validation. The concrete cases are
-    /// `type = "Otlp"` without an `otlp` block, an empty `otlp.endpoint`, a
-    /// `sampleRatio` outside `[0.0, 1.0]`, and `timeoutSecs = 0`. The
-    /// reconciler returns this error before it renders any pod template, so
-    /// the broker pod never boots with broken OTLP env vars.
+    /// `spec.tracing` failed shape validation. Concrete
+    /// cases: `type = "Otlp"` without an `otlp` block; `otlp.endpoint`
+    /// empty; `sampleRatio` outside `[0.0, 1.0]`; `timeoutSecs = 0`.
+    /// The reconciler returns this before rendering any pod template
+    /// so the broker pod never boots with broken OTLP env vars.
     #[error("tracing: {0}")]
     TracingInvalid(String),
     #[error("broker tuning: {0}")]
@@ -185,8 +186,22 @@ pub enum ReconcileError {
     PgdogAdmin(#[from] crate::context::PgdogAdminError),
 }
 
-/// Build a Kubernetes-style condition with `lastTransitionTime` set to now.
-/// The format is RFC3339 with second precision and a `Z` suffix.
+/// The controller chosen to seed a new dynamic `KRaft` quorum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuorumBootstrapController {
+    pub(crate) node_id: i32,
+    pub(crate) pool: String,
+}
+
+/// Bootstrap state persisted alongside the cluster id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuorumBootstrapState {
+    pub(crate) controller: QuorumBootstrapController,
+    pub(crate) initialized: bool,
+}
+
+/// Build a Kubernetes-style condition with `lastTransitionTime` set to
+/// now (RFC3339, second precision, with `Z`).
 pub(crate) fn condition(type_: &str, status: &str, reason: &str, message: &str) -> KafkaCondition {
     KafkaCondition {
         type_: type_.into(),
@@ -243,10 +258,10 @@ where
     result
 }
 
-/// Server-side apply a typed object. The field manager is `crabka-operator`.
-/// Force-takeover is on, so the operator takes fields back from any previous
-/// manager that lingers. The object shape is stable across reconciles, because
-/// the renderers are pure functions of the owner.
+/// Server-side apply a typed object. Field manager is `crabka-operator`,
+/// force-takeover is on so we wrest fields back from any previous manager
+/// if any happen to linger. Object shape is stable across reconciles
+/// because renderers are pure functions of the owner.
 #[tracing::instrument(level = "debug", skip_all, fields(name = %name), err)]
 pub(crate) async fn apply_object<K>(api: &Api<K>, name: &str, obj: &K) -> Result<(), ReconcileError>
 where
@@ -261,10 +276,10 @@ where
     Ok(())
 }
 
-/// Server-side apply an arbitrary object that is not in `k8s-openapi`, for
-/// example an `OpenShift` `Route`. The caller gives the GVK, the plural, and a
-/// JSON body. All errors propagate to the caller, including a 404 when the
-/// cluster does not serve the CRD's API, as on a non-`OpenShift` cluster.
+/// Server-side apply an arbitrary object that is not in `k8s-openapi` (e.g. an
+/// `OpenShift` `Route`), given its GVK + plural and a JSON body. Errors —
+/// including a 404 when the CRD's API is not served (a non-`OpenShift` cluster)
+/// — propagate to the caller.
 #[tracing::instrument(
     level = "debug",
     skip_all,
@@ -292,11 +307,10 @@ pub(crate) async fn apply_dynamic(
     Ok(())
 }
 
-/// Merge-patch the status subresource of a CR. This function uses
-/// `Patch::Merge`, so it overwrites only the fields that it sets and does not
-/// replace the whole status. A full replacement would conflict with any future
-/// status writer. The function is generic over the parent resource `K` and the
-/// status payload `S`.
+/// Merge-patch the status subresource of a CR. Uses `Patch::Merge` so we
+/// only overwrite the fields we set rather than replacing the whole
+/// status (which would conflict with any future status writers). Generic
+/// over the parent resource `K` and status payload `S`.
 #[tracing::instrument(level = "info", skip_all, fields(name = %name), err)]
 pub(crate) async fn patch_status<K, S>(
     api: &Api<K>,
@@ -318,10 +332,10 @@ where
     Ok(())
 }
 
-/// Common labels for objects owned by a `Kafka`. When the object belongs to
-/// one pool, that is, pod-level labels on a `StatefulSet`, pass
-/// `Some(<pool name>)`. For the cluster-level objects, the `Service`, the
-/// `ConfigMap`, and the `Secret`, pass `None`.
+/// Common labels for objects owned by a `Kafka`. When the object belongs
+/// to a specific pool (i.e. pod-level labels on a `StatefulSet`), pass
+/// `Some(<pool name>)`; cluster-level objects (`Service` / `ConfigMap` /
+/// `Secret`) pass `None`.
 pub(crate) fn common_labels(
     kafka_name: &str,
     kafka_version: &str,
@@ -341,9 +355,9 @@ pub(crate) fn common_labels(
     m
 }
 
-/// Generic owner-reference builder. It works for any CR whose
-/// `DynamicType = ()`, such as `Kafka` and `KafkaNodePool`. It reads
-/// `apiVersion` and `kind` from the trait, and the name from the metadata.
+/// Generic owner-reference builder. Works for any CR (`Kafka`,
+/// `KafkaNodePool`) whose `DynamicType = ()`. Reads `apiVersion` and
+/// `kind` from the trait, name from the metadata.
 pub(crate) fn owner_ref<T>(obj: &T) -> Result<OwnerReference, ReconcileError>
 where
     T: Resource<DynamicType = ()>,
@@ -363,9 +377,9 @@ where
     })
 }
 
-/// Render the cluster-level headless `Service`. It has an owner reference to
-/// the parent `Kafka`. The selector matches the pods of every pool with the
-/// shared `app.kubernetes.io/instance` and `app.kubernetes.io/name` labels.
+/// Render the cluster-level headless `Service`. Owner-ref'd to the
+/// parent `Kafka`. Selector matches every pool's pods via the shared
+/// `app.kubernetes.io/instance` + `app.kubernetes.io/name` labels.
 pub(crate) fn render_service(owner: &Kafka) -> Result<Service, ReconcileError> {
     let name = owner.meta().name.clone().unwrap_or_default();
     let labels = common_labels(&name, &owner.spec.kafka_version, None);
@@ -406,10 +420,10 @@ pub(crate) fn render_service(owner: &Kafka) -> Result<Service, ReconcileError> {
     Ok(svc)
 }
 
-/// Render the cluster-level `ConfigMap`. It has an owner reference to the
-/// parent `Kafka`. It emits one `broker-{id}.toml` key per entry in
-/// `addresses_per_broker`, and
-/// [`crate::controller::listeners::render_broker_toml`] generates each key.
+/// Render the cluster-level `ConfigMap`. Owner-ref'd to the parent
+/// `Kafka`. Emits one `broker-{id}.toml` key per entry in
+/// `addresses_per_broker`, generated by
+/// [`crate::controller::listeners::render_broker_toml`].
 // each arg is an independent operator-owned render input
 pub(crate) fn render_configmap(
     owner: &Kafka,
@@ -456,21 +470,21 @@ pub(crate) fn render_configmap(
     // `tier-storage` pod volume) light up together.
     let tiered_storage = owner.spec.tiered_storage.as_ref();
     let inter_broker_kerberos = owner.spec.inter_broker_kerberos.as_ref();
-    // KRaft controller quorum voter set. Build the full cluster voter list
-    // ONCE (sorted by broker_id via the BTreeMap iteration order) and emit
-    // the identical complete list into every broker's TOML. Each voter is
-    // `<id>@<host>:9093`, where `host` is the broker's inter-broker
-    // advertised FQDN (the headless per-pod DNS name) paired with the
-    // controller port. A broker with no inter-broker advertised address is
-    // skipped (shouldn't happen in practice).
-    let controller_quorum_voters: Vec<String> = addresses_per_broker
-        .iter()
-        .filter_map(|(broker_id, addrs)| {
+    // Dynamic KRaft discovery and admin endpoints use the controller listener,
+    // matching Kafka's controller-quorum bootstrap semantics. BTreeMap
+    // iteration keeps the identical endpoint order in every broker TOML.
+    let controller_bootstrap_servers: Vec<String> = addresses_per_broker
+        .values()
+        .filter_map(|addrs| {
             addrs
                 .get(inter_broker_listener_name)
-                .map(|adv| format!("{broker_id}@{}:{CONTROLLER_PORT}", adv.host))
+                .map(|adv| format!("{}:{CONTROLLER_PORT}", adv.host))
         })
         .collect();
+    let dynamic_quorum_config = format!(
+        "bootstrap_servers = {}\nauto_join = true\n",
+        serde_json::to_string(&controller_bootstrap_servers)?
+    );
     // TLS server-name (SNI) every broker presents when dialing a peer's
     // controller listener for the KIP-595 quorum. The shared headless-Service
     // FQDN is a SAN on every broker's serving cert (see `kafka.rs` keystore
@@ -480,7 +494,7 @@ pub(crate) fn render_configmap(
     let controller_server_name = format!("{name}-broker-headless.{ns}.svc.cluster.local");
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
-        let mut toml = crate::controller::listeners::render_broker_toml(
+        let rendered = crate::controller::listeners::render_broker_toml(
             (*broker_id, listeners, addrs, inter_broker_listener_name),
             (&server_properties, tls_for_broker, clients_ca_path),
             (
@@ -489,8 +503,11 @@ pub(crate) fn render_configmap(
                 inter_broker_kerberos,
             ),
             tiered_storage,
-            (&controller_quorum_voters, &controller_server_name),
+            (&[], &controller_server_name),
         );
+        let mut toml = String::with_capacity(dynamic_quorum_config.len() + rendered.len());
+        toml.push_str(&dynamic_quorum_config);
+        toml.push_str(&rendered);
         if let Some(tuning) = &owner.spec.broker_tuning {
             toml.push_str(&tuning.render_runtime_toml());
         }
@@ -510,9 +527,9 @@ pub(crate) fn render_configmap(
     })
 }
 
-/// Render the cluster-id `Secret`. It has an owner reference to the parent
-/// `Kafka`. The `clusterId` value is the canonical hyphenated UUID encoded as
-/// UTF-8 bytes. Kubernetes wraps it with base64 on the wire.
+/// Render the cluster-id `Secret`. Owner-ref'd to the parent `Kafka`.
+/// The `clusterId` value is the canonical hyphenated UUID encoded as
+/// UTF-8 bytes (k8s wraps with base64 on the wire).
 pub(crate) fn render_secret(owner: &Kafka, cluster_id: Uuid) -> Result<Secret, ReconcileError> {
     let name = owner.meta().name.clone().unwrap_or_default();
     let labels = common_labels(&name, &owner.spec.kafka_version, None);
@@ -537,10 +554,10 @@ pub(crate) fn render_secret(owner: &Kafka, cluster_id: Uuid) -> Result<Secret, R
     })
 }
 
-/// Read `data.clusterId` from a Secret, decode the bytes as UTF-8, and parse
-/// the hyphenated UUID. Returns `MalformedSecret` and does not panic if the
-/// Secret was hand-edited or is otherwise unparsable. The operator must not
-/// crash on bad operator input.
+/// Read `data.clusterId` from a Secret, decode the bytes as UTF-8, and
+/// parse the hyphenated UUID. Returns `MalformedSecret` rather than
+/// panicking if the Secret was hand-edited or otherwise unparsable —
+/// the operator should not crash on bad operator input.
 pub(crate) fn uuid_from_secret(secret: &Secret) -> Result<Uuid, ReconcileError> {
     let data = secret
         .data
@@ -556,6 +573,234 @@ pub(crate) fn uuid_from_secret(secret: &Secret) -> Result<Uuid, ReconcileError> 
         .map_err(|e| ReconcileError::MalformedSecret(format!("clusterId not a UUID: {e}")))
 }
 
+fn quorum_bootstrap_state_from_secret(
+    secret: &Secret,
+) -> Result<Option<QuorumBootstrapState>, ReconcileError> {
+    let Some(data) = secret.data.as_ref() else {
+        return Ok(None);
+    };
+    let node_id = data.get(QUORUM_BOOTSTRAP_NODE_ID_KEY);
+    let pool = data.get(QUORUM_BOOTSTRAP_POOL_KEY);
+    match (node_id, pool) {
+        (None, None) => Ok(None),
+        (Some(node_id), Some(pool)) => {
+            let node_id = std::str::from_utf8(&node_id.0)
+                .map_err(|error| {
+                    ReconcileError::MalformedSecret(format!(
+                        "{QUORUM_BOOTSTRAP_NODE_ID_KEY} not UTF-8: {error}"
+                    ))
+                })?
+                .parse::<i32>()
+                .map_err(|error| {
+                    ReconcileError::MalformedSecret(format!(
+                        "{QUORUM_BOOTSTRAP_NODE_ID_KEY} not an i32: {error}"
+                    ))
+                })?;
+            if !(0..=999_999).contains(&node_id) {
+                return Err(ReconcileError::MalformedSecret(format!(
+                    "{QUORUM_BOOTSTRAP_NODE_ID_KEY} is out of range 0..=999999"
+                )));
+            }
+            let pool = std::str::from_utf8(&pool.0)
+                .map_err(|error| {
+                    ReconcileError::MalformedSecret(format!(
+                        "{QUORUM_BOOTSTRAP_POOL_KEY} not UTF-8: {error}"
+                    ))
+                })?
+                .to_string();
+            if pool.is_empty() {
+                return Err(ReconcileError::MalformedSecret(format!(
+                    "{QUORUM_BOOTSTRAP_POOL_KEY} is empty"
+                )));
+            }
+            let initialized = match data.get(QUORUM_BOOTSTRAP_INITIALIZED_KEY) {
+                None => false,
+                Some(value) if value.0.as_slice() == b"true" => true,
+                Some(value) if value.0.as_slice() == b"false" => false,
+                Some(_) => {
+                    return Err(ReconcileError::MalformedSecret(format!(
+                        "{QUORUM_BOOTSTRAP_INITIALIZED_KEY} must be true or false"
+                    )));
+                }
+            };
+            Ok(Some(QuorumBootstrapState {
+                controller: QuorumBootstrapController { node_id, pool },
+                initialized,
+            }))
+        }
+        _ => Err(ReconcileError::MalformedSecret(format!(
+            "{QUORUM_BOOTSTRAP_NODE_ID_KEY} and {QUORUM_BOOTSTRAP_POOL_KEY} must both be present"
+        ))),
+    }
+}
+
+/// Persist the first controller chosen for dynamic-quorum bootstrap.
+/// Existing state always wins so adding a lower-numbered pool later cannot
+/// turn it into a second standalone quorum.
+pub(crate) async fn ensure_quorum_bootstrap_state(
+    secret_api: &Api<Secret>,
+    kafka_name: &str,
+    candidate: &QuorumBootstrapController,
+) -> Result<QuorumBootstrapState, ReconcileError> {
+    let secret_name = format!("{kafka_name}-cluster-id");
+    let secret = secret_api.get(&secret_name).await?;
+    if let Some(state) = quorum_bootstrap_state_from_secret(&secret)? {
+        return Ok(state);
+    }
+
+    let params = PatchParams {
+        field_manager: Some(FIELD_MANAGER.into()),
+        ..Default::default()
+    };
+    secret_api
+        .patch(
+            &secret_name,
+            &params,
+            &Patch::Merge(json!({
+                "stringData": {
+                    (QUORUM_BOOTSTRAP_NODE_ID_KEY): candidate.node_id.to_string(),
+                    (QUORUM_BOOTSTRAP_POOL_KEY): candidate.pool.as_str(),
+                    (QUORUM_BOOTSTRAP_INITIALIZED_KEY): "false",
+                }
+            })),
+        )
+        .await?;
+    Ok(QuorumBootstrapState {
+        controller: candidate.clone(),
+        initialized: false,
+    })
+}
+
+/// Mark the initial standalone controller usable. The Secret-backed flag is
+/// consumed only by fresh format runs, so updating it never rolls a pod.
+pub(crate) async fn mark_quorum_bootstrap_initialized(
+    secret_api: &Api<Secret>,
+    kafka_name: &str,
+) -> Result<(), ReconcileError> {
+    let secret_name = format!("{kafka_name}-cluster-id");
+    let params = PatchParams {
+        field_manager: Some(FIELD_MANAGER.into()),
+        ..Default::default()
+    };
+    secret_api
+        .patch(
+            &secret_name,
+            &params,
+            &Patch::Merge(json!({
+                "stringData": {
+                    (QUORUM_BOOTSTRAP_INITIALIZED_KEY): "true",
+                }
+            })),
+        )
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn quorum_directory_id_key(node_id: i32) -> String {
+    format!("quorumDirectoryId-{node_id}")
+}
+
+pub(crate) fn quorum_directory_id_from_secret(
+    secret: &Secret,
+    node_id: i32,
+) -> Result<Option<Uuid>, ReconcileError> {
+    let key = quorum_directory_id_key(node_id);
+    let Some(value) = secret.data.as_ref().and_then(|data| data.get(&key)) else {
+        return Ok(None);
+    };
+    let value = std::str::from_utf8(&value.0)
+        .map_err(|error| ReconcileError::MalformedSecret(format!("{key} not UTF-8: {error}")))?;
+    Uuid::parse_str(value)
+        .map(Some)
+        .map_err(|error| ReconcileError::MalformedSecret(format!("{key}: {error}")))
+}
+
+/// Return the operator-owned directory identity for one controller node,
+/// creating it in the cluster Secret on first use.
+pub(crate) async fn ensure_quorum_directory_id(
+    secret_api: &Api<Secret>,
+    kafka_name: &str,
+    node_id: i32,
+) -> Result<Uuid, ReconcileError> {
+    let secret_name = format!("{kafka_name}-cluster-id");
+    let secret = secret_api.get(&secret_name).await?;
+    if let Some(directory_id) = quorum_directory_id_from_secret(&secret, node_id)? {
+        return Ok(directory_id);
+    }
+
+    let directory_id = Uuid::new_v4();
+    let key = quorum_directory_id_key(node_id);
+    let params = PatchParams {
+        field_manager: Some(FIELD_MANAGER.into()),
+        ..Default::default()
+    };
+    secret_api
+        .patch(
+            &secret_name,
+            &params,
+            &Patch::Merge(json!({
+                "stringData": { (key): directory_id.to_string() }
+            })),
+        )
+        .await?;
+    Ok(directory_id)
+}
+
+#[cfg(test)]
+mod quorum_bootstrap_tests {
+    use assert2::assert;
+
+    use super::*;
+
+    #[test]
+    fn reads_persisted_quorum_bootstrap_state() {
+        let mut data = BTreeMap::new();
+        data.insert(
+            QUORUM_BOOTSTRAP_NODE_ID_KEY.into(),
+            ByteString(b"12".to_vec()),
+        );
+        data.insert(
+            QUORUM_BOOTSTRAP_POOL_KEY.into(),
+            ByteString(b"controllers".to_vec()),
+        );
+        data.insert(
+            QUORUM_BOOTSTRAP_INITIALIZED_KEY.into(),
+            ByteString(b"true".to_vec()),
+        );
+        let secret = Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+
+        assert!(
+            quorum_bootstrap_state_from_secret(&secret).expect("valid state")
+                == Some(QuorumBootstrapState {
+                    controller: QuorumBootstrapController {
+                        node_id: 12,
+                        pool: "controllers".into(),
+                    },
+                    initialized: true,
+                })
+        );
+    }
+
+    #[test]
+    fn rejects_partial_quorum_bootstrap_identity() {
+        let secret = Secret {
+            data: Some(BTreeMap::from([(
+                QUORUM_BOOTSTRAP_NODE_ID_KEY.into(),
+                ByteString(b"12".to_vec()),
+            )])),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            quorum_bootstrap_state_from_secret(&secret),
+            Err(ReconcileError::MalformedSecret(_))
+        ));
+    }
+}
+
 /// Read a PEM string from a Secret's data field. Returns `None` if the key is
 /// absent, the data map is missing, or the bytes are not valid UTF-8.
 pub(crate) fn read_pem_key(secret: &Secret, key: &str) -> Option<String> {
@@ -566,11 +811,10 @@ pub(crate) fn read_pem_key(secret: &Secret, key: &str) -> Option<String> {
 
 /// Get-or-create the cluster-id Secret. Returns the parsed UUID.
 ///
-/// This function creates the Secret with a `POST` that is equivalent to
-/// `Patch::Apply` semantics, that is, a plain create. A plain create never
-/// overwrites an existing Secret. The cluster id is a one-shot value that must
-/// never change. If the Secret already exists, this function reads its
-/// `clusterId` back.
+/// The Secret is created with `Patch::Apply` semantics-equivalent
+/// `POST` (i.e. a plain create) so that an existing Secret is never
+/// overwritten — the cluster id is a one-shot value that must never
+/// change. If the Secret already exists, we read its `clusterId` back.
 pub(crate) async fn ensure_cluster_id_secret(
     secret_api: &Api<Secret>,
     parent: &Kafka,
@@ -586,10 +830,9 @@ pub(crate) async fn ensure_cluster_id_secret(
     Ok(id)
 }
 
-/// Pure helper that derives the status fields from the live `StatefulSet`.
+/// Pure helper deriving the status fields from the live `StatefulSet`.
 /// Returns `(replicas, readyReplicas, reason, message)`. The caller maps
-/// `reason == "Available"` to `Ready=True`, and any other reason to
-/// `Ready=False`.
+/// `reason == "Available"` to `Ready=True`, anything else to `Ready=False`.
 pub(crate) fn derive_status(
     live: Option<&StatefulSet>,
     desired_replicas: i32,
@@ -623,13 +866,14 @@ pub(crate) fn derive_status(
     }
 }
 
-/// Truncated SHA-256 hex digest of the given content, with 16 hex chars and 8
-/// bytes of entropy. The operator uses it to detect `Kafka.spec.config`
-/// changes that the K8s `StatefulSet` controller cannot see directly.
+/// Truncated SHA-256 hex digest (16 hex chars / 8 bytes of entropy)
+/// of the given content. Used to detect `Kafka.spec.config`
+/// changes that the K8s `StatefulSet` controller can't see directly.
 ///
-/// The full sha256 is 64 hex chars, which is more than the 63-char K8s
-/// label-value limit. 64 bits of entropy is enough for a drift detector,
-/// because a collision for an accidental config change is very unlikely.
+/// The full sha256 is 64 hex chars, which exceeds the 63-char K8s
+/// label-value limit. 64 bits of entropy is more than enough for a
+/// drift detector — collisions for accidental config changes are
+/// astronomically unlikely.
 #[must_use]
 pub fn config_hash(content: &str) -> String {
     use std::fmt::Write;
@@ -645,40 +889,40 @@ pub fn config_hash(content: &str) -> String {
     out
 }
 
-/// Combined hash over the user `spec.config`, the canonical listener intent,
-/// a `metrics_config.is_some()` bit, and the cluster CA cert PEM. Empty
-/// listeners produce an empty intent, and unset metrics produce an empty third
-/// segment. So the combined hash is identical to the bare
-/// `config_hash(spec.config)` for an unchanged `spec.config` with no listeners
-/// and no metrics.
+/// Combined hash over user `spec.config`, the
+/// canonical listener intent, a `metrics_config.is_some()` bit, and
+/// the cluster CA cert PEM.
+/// Empty listeners produce empty intent and metrics-unset produces an
+/// empty third segment, so the combined hash is identical to the
+/// bare `config_hash(spec.config)` for an unchanged `spec.config` with neither listeners
+/// nor metrics.
 ///
-/// The metrics segment is a coarse `metrics_enabled` bit and not a hash of the
-/// full `metrics_config` body. A toggle of `metricsConfig` changes the broker
-/// pod template, because it adds or removes the metrics port and the CLI flag.
-/// That change must trigger a pool reconcile, which renders the `StatefulSet`
-/// again. Sub-field changes such as the interval and the scrape labels affect
-/// only the `PodMonitor` and `ServiceMonitor` objects, not the broker pod, and
-/// they need no roll.
+/// The metrics segment is a coarse `metrics_enabled` bit, not a hash of
+/// the full `metrics_config` body — toggling `metricsConfig` on/off
+/// changes the broker pod template (adds/removes the metrics port + CLI
+/// flag) and so must trigger a pool reconcile (which re-renders the
+/// `StatefulSet`). Sub-field changes (interval, scrape labels) affect
+/// only the `PodMonitor`/`ServiceMonitor` objects, not the broker pod,
+/// and do not need a roll.
 ///
-/// `cluster_ca_cert_pem`: when `Some`, the hash includes the cluster CA cert
-/// PEM as a fourth segment. A rotation of the cluster CA forces a cluster
-/// roll. A leaf renewal does not, because hot-reload handles it.
+/// `cluster_ca_cert_pem` — when `Some`, the cluster CA cert PEM is
+/// included as a fourth segment. Rotating the cluster CA forces a
+/// cluster roll; leaf renewal does not (hot-reload handles it).
 ///
-/// `metadata_version_pin`: when `Some`, the hash includes an *explicit*
-/// `spec.metadataVersion` pin as a fifth segment, so a change of the pin rolls
-/// the cluster. The caller passes `None` for a *defaulted* metadata version,
-/// because a binary bump already rolls the cluster through the pod-template
-/// image change. This keeps the empty-hash collapse.
+/// `metadata_version_pin` — when `Some`, an *explicit*
+/// `spec.metadataVersion` pin is included as a fifth segment, so changing
+/// the pin rolls the cluster. A *defaulted* metadata version is passed as
+/// `None` here (a binary bump already rolls via the pod-template image
+/// change), which preserves the empty-hash collapse.
 ///
-/// `logging_filter`: when `Some`, the hash includes the resolved `RUST_LOG`
-/// env-filter string as a sixth segment. The broker reads `RUST_LOG` again
-/// only on restart, so a *value* change and not only an on-off change must
-/// roll the cluster. `None`, which means logging is unset or external
-/// resolution failed, contributes an empty segment and keeps the empty-hash
-/// collapse.
+/// `logging_filter` — when `Some`, the resolved `RUST_LOG`
+/// env-filter string is included as a sixth segment. The broker only re-reads
+/// `RUST_LOG` on restart, so a *value* change (not just on/off) must roll the
+/// cluster. `None` (logging unset, or external resolution failed) contributes
+/// an empty segment, preserving the empty-hash collapse.
 ///
 /// Nonempty `broker_tuning` contributes its deterministic rendered `[runtime]`
-/// TOML. Absent tuning and all-`None` tuning contribute an empty segment.
+/// TOML. Absent and all-`None` tuning contribute an empty segment.
 #[must_use]
 pub fn combined_config_hash(
     spec: &crate::crd::KafkaSpec,
@@ -759,10 +1003,9 @@ pub fn combined_config_hash(
     config_hash(&buf)
 }
 
-/// One pool's observed state, which the caller feeds to [`plan_rollout`].
-/// `current_hash` is the pool's `crabka.io/config-hash` label, and it is
-/// `None` if the operator never stamped it. `ready` shows whether the pool's
-/// single broker has reached Ready.
+/// One pool's observed state, fed to [`plan_rollout`]. `current_hash` is
+/// the pool's `crabka.io/config-hash` label (`None` if never stamped);
+/// `ready` is whether the pool's single broker has reached Ready.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PoolRolloutState {
     pub name: String,
@@ -771,23 +1014,23 @@ pub(crate) struct PoolRolloutState {
 }
 
 /// Decide the config-hash to write to each pool for an ordered,
-/// one-node-at-a-time rollout. The caller must pre-sort `pools` into the
-/// desired roll order, by `(node_id_start, name)`. Returns the target hash per
+/// one-node-at-a-time rollout. `pools` must be pre-sorted into the desired
+/// roll order (by `(node_id_start, name)`). Returns the target hash per
 /// pool name, in the same order.
 ///
-/// - **Bring-up / recovery**: if any pool has no current hash, or if there is
-///   more than one distinct *non-desired* hash among the pools, every pool
-///   gets `desired` in parallel. This is required so that a `KRaft` controller
-///   quorum can form. A gate on the initial creation one-at-a-time would
-///   deadlock, because a single controller cannot reach Ready without a
-///   quorum. This branch also covers the single-pool first-reconcile path.
-/// - **Steady state**: if every pool already carries `desired`, all pools stay
-///   at `desired`. This is a no-op.
-/// - **Established roll**: in any other case the cluster is uniform on one old
-///   hash, or mid-roll between `{old, desired}`, and is in transition. Walk
-///   the pools in order. A pool is *converged* when it already carries
+/// - **Bring-up / recovery** — if any pool has no current hash, or there
+///   is more than one distinct *non-desired* hash among pools, every pool
+///   gets `desired` (parallel). This is required so a `KRaft` controller
+///   quorum can form: gating initial creation one-at-a-time would deadlock
+///   (a single controller can't reach Ready without quorum). Also the
+///   single-pool first-reconcile path.
+/// - **Steady state** — if every pool already carries `desired`, all stay
+///   `desired` (no-op).
+/// - **Established roll** — otherwise the cluster is uniform on one old
+///   hash (or mid-roll between `{old, desired}`) and transitioning. Walk
+///   pools in order; a pool is *converged* when it already carries
 ///   `desired` AND is Ready. Advance the first non-converged pool to
-///   `desired`. Every later pool keeps its current hash until the earlier
+///   `desired`; every later pool keeps its current hash until the earlier
 ///   pools converge.
 pub(crate) fn plan_rollout(pools: &[PoolRolloutState], desired: &str) -> Vec<(String, String)> {
     let all_have_hash = pools.iter().all(|p| p.current_hash.is_some());
@@ -832,21 +1075,21 @@ pub(crate) fn plan_rollout(pools: &[PoolRolloutState], desired: &str) -> Vec<(St
 
 /// Parse a K8s `Quantity` string into a comparable byte count.
 ///
-/// This function accepts:
-/// - Binary suffixes: `Ki`, `Mi`, `Gi`, `Ti`, `Pi`, `Ei`, where 1 Ki = 1024.
-/// - Decimal suffixes: `K`, `M`, `G`, `T`, `P`, `E`, where 1 K = 1000.
-/// - Bare numbers with no suffix, which are bytes.
-/// - An integer or a decimal mantissa, such as `1.5Gi`.
+/// Accepts:
+/// - Binary suffixes: `Ki`, `Mi`, `Gi`, `Ti`, `Pi`, `Ei` (1 Ki = 1024).
+/// - Decimal suffixes: `K`, `M`, `G`, `T`, `P`, `E` (1 K = 1000).
+/// - Bare numbers (no suffix → bytes).
+/// - Integer or decimal mantissa (`1.5Gi`).
 ///
-/// This function rejects scientific notation, negative numbers, zero, empty
-/// strings, and any value that does not match `<mantissa><suffix?>`.
+/// Rejects: scientific notation, negative numbers, zero, empty
+/// strings, or any value that doesn't match `<mantissa><suffix?>`.
 ///
-/// Returns the byte count as `i128`. 1.5 Pi fits with headroom for arithmetic.
-/// The result is only for an ordered comparison. The operator never converts
-/// it back to a string, so the sub-byte rounding from the `f64` intermediate
-/// is acceptable. The in-tree implementation is about 50 lines and saves a
-/// workspace dependency. No third-party Quantity parser is wired into Crabka
-/// yet.
+/// Returns the byte count as `i128` (1.5 Pi fits with headroom for
+/// arithmetic). The result is only used for ordered comparison
+/// — we never round-trip back to a string, so sub-byte rounding from
+/// the `f64` intermediate is acceptable. The in-tree implementation
+/// is ~50 lines and saves a workspace dependency; no third-party
+/// Quantity parser is wired into Crabka yet.
 ///
 /// # Errors
 ///
@@ -1564,7 +1807,7 @@ mod cluster_object_tests {
     }
 
     #[test]
-    fn configmap_emits_full_voter_set_into_every_broker_toml() {
+    fn configmap_emits_dynamic_quorum_bootstrap_into_every_broker_toml() {
         let listeners = vec![internal_listener("PLAIN", 9092)];
         // Three brokers, each with its own inter-broker advertised host.
         let mut addresses_per_broker: BTreeMap<i32, BTreeMap<String, AdvertisedAddress>> =
@@ -1593,8 +1836,7 @@ mod cluster_object_tests {
         .expect("render_configmap");
         let data = cm.data.expect("configmap data");
 
-        let expected =
-            "controller_quorum_voters = [\"0@host-a:9093\", \"1@host-b:9093\", \"2@host-c:9093\"]";
+        let expected = "bootstrap_servers = [\"host-a:9093\",\"host-b:9093\",\"host-c:9093\"]";
         // The controller TLS server-name is the shared headless-Service FQDN
         // (`<name>-broker-headless.<ns>.svc.cluster.local`), identical across
         // every broker — a SAN on each broker's serving cert.
@@ -1606,14 +1848,16 @@ mod cluster_object_tests {
                 .unwrap_or_else(|| panic!("broker-{id}.toml missing"));
             assert!(
                 toml.contains(expected),
-                "broker-{id}.toml must carry the full voter set, got:\n{toml}"
+                "broker-{id}.toml must carry every bootstrap endpoint, got:\n{toml}"
             );
+            assert!(toml.contains("auto_join = true"));
+            assert!(!toml.contains("controller_quorum_voters"));
             assert!(
                 toml.contains(expected_server_name),
                 "broker-{id}.toml must carry the controller server name, got:\n{toml}"
             );
-            // Voters must precede the first [[listeners]] header.
-            let key_pos = toml.find("controller_quorum_voters").unwrap();
+            // Dynamic quorum keys must precede the first [[listeners]] header.
+            let key_pos = toml.find("bootstrap_servers").unwrap();
             let listeners_pos = toml.find("[[listeners]]").unwrap();
             assert!(key_pos < listeners_pos);
             // The server-name top-level scalar must also precede [[listeners]].

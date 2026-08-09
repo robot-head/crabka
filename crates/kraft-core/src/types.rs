@@ -60,6 +60,9 @@ pub trait LogView {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QuorumState {
     pub cluster_id: Uuid,
+    /// Finalized `KRaft` protocol feature level. Level 0 uses configured static
+    /// voters; level 1 persists membership in Raft control records.
+    pub kraft_version: u16,
     pub leader_epoch: Epoch,
     pub leader_id: Option<NodeId>,
     pub voted_key: Option<ReplicaKey>,
@@ -71,6 +74,7 @@ impl QuorumState {
     pub fn bootstrap(cluster_id: Uuid, voters: VoterSet) -> Self {
         Self {
             cluster_id,
+            kraft_version: 0,
             leader_epoch: 0,
             leader_id: None,
             voted_key: None,
@@ -98,6 +102,7 @@ mod tests {
         assert2::assert!(
             qs == QuorumState {
                 cluster_id: uuid::Uuid::nil(),
+                kraft_version: 0,
                 leader_epoch: 0,
                 leader_id: None,
                 voted_key: None,

@@ -496,23 +496,22 @@ jobs:
               -o jsonpath='{.data.rust\.log}' 2>/dev/null || true)
             status=$(kubectl get kafka demo -n default \
               -o jsonpath='{.status.conditions[?(@.type=="LoggingReady")].status}' 2>/dev/null || true)
-            echo "attempt $i: rust.log='$rl' LoggingReady=$status"
-            if [ "$rl" = "crabka_broker=debug,info" ] && [ "$status" = "True" ]; then
+            cmref=$(kubectl get sts demo-brokers -n default \
+              -o jsonpath='{.spec.template.spec.containers[?(@.name=="broker")].env[?(@.name=="RUST_LOG")].valueFrom.configMapKeyRef.name}' 2>/dev/null || true)
+            cmkey=$(kubectl get sts demo-brokers -n default \
+              -o jsonpath='{.spec.template.spec.containers[?(@.name=="broker")].env[?(@.name=="RUST_LOG")].valueFrom.configMapKeyRef.key}' 2>/dev/null || true)
+            echo "attempt $i: rust.log='$rl' LoggingReady=$status RUST_LOG=$cmref/$cmkey"
+            if [ "$rl" = "crabka_broker=debug,info" ] && [ "$status" = "True" ] \
+              && [ "$cmref" = "demo-broker-config" ] && [ "$cmkey" = "rust.log" ]; then
               ok=1
               break
             fi
             sleep 2
           done
-          [ -n "$ok" ] || { echo "::error::rust.log not rendered or LoggingReady!=True"; kubectl get configmap demo-broker-config -n default -o yaml; kubectl get kafka demo -n default -o yaml; exit 1; }
+          [ -n "$ok" ] || { echo "::error::logging configuration did not converge"; kubectl get configmap demo-broker-config -n default -o yaml; kubectl get kafka demo -n default -o yaml; kubectl get sts demo-brokers -n default -o yaml; exit 1; }
 
           # The broker pod template references rust.log via configMapKeyRef so
           # a config-hash roll re-reads the value at restart.
-          cmref=$(kubectl get sts demo-brokers -n default \
-            -o jsonpath='{.spec.template.spec.containers[?(@.name=="broker")].env[?(@.name=="RUST_LOG")].valueFrom.configMapKeyRef.name}')
-          cmkey=$(kubectl get sts demo-brokers -n default \
-            -o jsonpath='{.spec.template.spec.containers[?(@.name=="broker")].env[?(@.name=="RUST_LOG")].valueFrom.configMapKeyRef.key}')
-          [ "$cmref" = "demo-broker-config" ] || { echo "::error::RUST_LOG env not wired to configMapKeyRef (name='$cmref')"; exit 1; }
-          [ "$cmkey" = "rust.log" ] || { echo "::error::RUST_LOG configMapKeyRef key wrong: '$cmkey'"; exit 1; }
           echo "logging wired: RUST_LOG -> $cmref/$cmkey"
 
           # Reset so later steps run against a clean spec (no RUST_LOG env).

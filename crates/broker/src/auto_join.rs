@@ -1,23 +1,22 @@
 //! KIP-853 controller auto-join.
 //!
-//! A broker started in [`crate::BootstrapMode::Join`] with `auto_join = true`
-//! is NOT yet a member of the controller raft group. Its raft log is empty and
-//! it waits in openraft's `Learner` state. This module drives the joiner side.
-//! It discovers the leader through the configured `bootstrap_servers` and sends
-//! the **Kafka `AddRaftVoter` wire RPC**, `api_key` 80, with its own voter
-//! identity. The leader-side handler `crate::handlers::add_raft_voter` runs
-//! `add_learner`, which dials this joiner's controller listener to replicate the
-//! log. The handler then waits for the observer to catch up, promotes it with
-//! `change_membership`, and submits the authoritative `V1Voters` record. The
-//! joiner stops once it sees itself in the committed voter set.
+//! A broker started in [`crate::BootstrapMode::Join`] with
+//! `auto_join = true` is NOT yet a member of the controller raft group: its
+//! Raft log is empty and it waits as an observer. This module
+//! drives the joiner side of the dance — it discovers the leader via the
+//! configured `bootstrap_servers` and sends the **Kafka `AddRaftVoter` wire
+//! RPC** (`api_key` 80) carrying its own voter identity. The leader-side
+//! handler (`crate::handlers::add_raft_voter`) waits for the observer to catch
+//! up and appends the authoritative `VotersRecord`. Once the joiner sees its
+//! exact node and directory identity in the committed voter set it stops.
 //!
-//! The joiner advertises its **real bound** controller endpoint, so the leader's
-//! `add_learner` can dial it back. It does not advertise the configured
-//! `controller_listen_addr`, which can carry port 0 for an OS-assigned port.
+//! The joiner advertises its **real bound** controller endpoint (not the
+//! configured `controller_listen_addr`, which may carry port 0 for an
+//! OS-assigned port) so the leader's `add_learner` can dial it back.
 //!
-//! This module is only a client-side driver. It does NOT touch the
-//! reconfiguration coordinator or openraft membership directly. All the lockstep
-//! safety lives on the leader.
+//! This is purely a client-side driver: it does NOT touch the reconfiguration
+//! Raft state directly. All lockstep safety lives in the leader's single-owner
+//! Raft engine.
 
 use std::sync::Arc;
 
@@ -27,19 +26,24 @@ use crabka_protocol::{
     owned::{
         add_raft_voter_request::{self, AddRaftVoterRequest, Listener},
         add_raft_voter_response::AddRaftVoterResponse,
+        remove_raft_voter_request::{self, RemoveRaftVoterRequest},
+        remove_raft_voter_response::RemoveRaftVoterResponse,
+        update_raft_voter_request::{
+            self, KRaftVersionFeature, Listener as UpdateListener, UpdateRaftVoterRequest,
+        },
+        update_raft_voter_response::UpdateRaftVoterResponse,
     },
 };
 use crabka_units::{Time, convert::TimeExt as _};
 
 use crate::codes;
 
-/// Everything the auto-join driver needs, taken from `BrokerConfig` and
-/// `Broker`.
-///
-/// This struct lets the caller spawn the loop *before* the full `Broker` Arc
-/// exists. A `Join` broker's `Broker::start` blocks and waits for a leader. That
-/// leader appears only after this loop drives the leader-side `add_learner` and
-/// the promotion, so the two must run at the same time.
+/// Everything the auto-join driver needs, pulled out of `BrokerConfig` +
+/// `Broker` so the loop can be spawned *before* the full `Broker` Arc exists.
+/// A `Join` broker's `Broker::start` blocks waiting for a leader, and that
+/// leader only appears once this loop has driven the leader-side `add_learner`
+/// + promotion — so the two must run concurrently.
+#[derive(Clone)]
 pub(crate) struct AutoJoinParams {
     pub auto_join: bool,
     pub retry_backoff: Time,
@@ -47,21 +51,96 @@ pub(crate) struct AutoJoinParams {
     pub node_id: crabka_raft::NodeId,
     pub directory_id: uuid::Uuid,
     pub cluster_id: Option<uuid::Uuid>,
-    pub bootstrap_servers: Vec<std::net::SocketAddr>,
-    /// Protocol of the bootstrap server's data-plane listener, that is, the
-    /// inter-broker listener protocol. `AddRaftVoter` is served there.
+    pub bootstrap_servers: Vec<String>,
+    /// Protocol of the bootstrap server's controller listener.
     pub listener_protocol: crabka_security::ListenerProtocol,
     pub inter_broker_server_name: String,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
 }
 
-/// Drive the auto-join loop.
-///
-/// The function returns immediately, and does not touch the network, when
-/// `auto_join` is disabled. If not, it loops until this broker appears in the
-/// committed voter set, and it rotates across `bootstrap_servers`. The caller
-/// spawns it as a detached background task during `Broker::start`.
+/// Advertise this controller at startup and after each leader change. The
+/// leader accepts this at both `kraft.version` levels; level zero keeps the
+/// data in memory for upgrade preflight, while level one persists it.
+pub(crate) async fn run_voter_updates(params: AutoJoinParams) {
+    if params.bootstrap_servers.is_empty() {
+        tracing::debug!(
+            node_id = params.node_id.0,
+            "no bootstrap server is available for UpdateVoter"
+        );
+        return;
+    }
+    let Ok(voter_id) = i32::try_from(params.node_id.0) else {
+        tracing::error!(
+            node_id = params.node_id.0,
+            "node_id exceeds i32; cannot update voter"
+        );
+        return;
+    };
+    let listener = controller_listener(params.controller.controller_bound_addr());
+    let mut last_updated = None;
+    let mut next_server = 0usize;
+    loop {
+        let quorum = params.controller.quorum_state();
+        let leader = quorum.current_leader;
+        let epoch = i32::try_from(quorum.current_term).unwrap_or(i32::MAX);
+        if leader.is_some() && last_updated != Some((leader, epoch)) {
+            let target = select_bootstrap_server(&params.bootstrap_servers, next_server);
+            next_server = next_server.wrapping_add(1);
+            let request = UpdateRaftVoterRequest {
+                cluster_id: params.cluster_id.map(|id| id.to_string()),
+                current_leader_epoch: epoch,
+                voter_id,
+                voter_directory_id: crabka_protocol::primitives::uuid::Uuid(
+                    *params.directory_id.as_bytes(),
+                ),
+                listeners: vec![UpdateListener {
+                    name: listener.name.clone(),
+                    host: listener.host.clone(),
+                    port: listener.port,
+                    ..Default::default()
+                }],
+                k_raft_version_feature: KRaftVersionFeature {
+                    min_supported_version: 0,
+                    max_supported_version: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            match send_update_voter(
+                &params.inter_broker_client,
+                params.listener_protocol,
+                &params.inter_broker_server_name,
+                target,
+                &request,
+            )
+            .await
+            {
+                Ok(response) if response.error_code == codes::NONE => {
+                    last_updated = Some((leader, epoch));
+                }
+                Ok(response) => tracing::debug!(
+                    node_id = params.node_id.0,
+                    server = %target,
+                    error_code = response.error_code,
+                    "UpdateVoter was not acknowledged; retrying"
+                ),
+                Err(error) => tracing::debug!(
+                    node_id = params.node_id.0,
+                    server = %target,
+                    %error,
+                    "UpdateVoter failed; retrying"
+                ),
+            }
+        }
+        tokio::time::sleep(params.retry_backoff.to_std()).await;
+    }
+}
+
+/// Drive the auto-join loop. Returns immediately (without touching the
+/// network) when `auto_join` is disabled. Otherwise loops until this broker
+/// appears in the committed voter set, rotating across `bootstrap_servers`.
+/// Intended to be spawned as a detached background task during `Broker::start`.
 pub(crate) async fn run(params: AutoJoinParams) {
     if !params.auto_join {
         return;
@@ -106,13 +185,35 @@ pub(crate) async fn run(params: AutoJoinParams) {
     let mut next_server = 0usize;
     loop {
         // Terminate as soon as the committed voter set includes us.
-        if controller.current_image().voters().contains(self_id) {
+        if let Some(existing) = controller.current_image().voters().get(self_id)
+            && existing.directory_id == params.directory_id
+        {
             tracing::info!(node_id = self_id.0, "auto-join complete; node is a voter");
             return;
         }
 
         let target = select_bootstrap_server(&bootstrap_servers, next_server);
         next_server = next_server.wrapping_add(1);
+
+        if let Some(existing) = controller.current_image().voters().get(self_id)
+            && existing.directory_id != params.directory_id
+        {
+            let req = RemoveRaftVoterRequest {
+                cluster_id: cluster_id.map(|id| id.to_string()),
+                voter_id,
+                voter_directory_id: crabka_protocol::primitives::uuid::Uuid(
+                    *existing.directory_id.as_bytes(),
+                ),
+                ..Default::default()
+            };
+            if let Err(error) =
+                send_remove_raft_voter(&client, protocol, &server_name, target, &req).await
+            {
+                tracing::debug!(node_id = self_id.0, server = %target, %error, "auto-join: stale voter removal failed");
+            }
+            tokio::time::sleep(retry_backoff.to_std()).await;
+            continue;
+        }
 
         let req = build_add_raft_voter_request(
             cluster_id,
@@ -140,20 +241,96 @@ pub(crate) async fn run(params: AutoJoinParams) {
     }
 }
 
+async fn send_remove_raft_voter(
+    client: &crate::network::client::InterBrokerClient,
+    protocol: crabka_security::ListenerProtocol,
+    server_name: &str,
+    target: &str,
+    req: &RemoveRaftVoterRequest,
+) -> Result<RemoveRaftVoterResponse, String> {
+    let version = remove_raft_voter_request::MAX_VERSION;
+    let mut body = BytesMut::with_capacity(req.encoded_len(version));
+    req.encode(&mut body, version)
+        .map_err(|error| format!("RemoveRaftVoter encode: {error}"))?;
+    let (host, port) = split_bootstrap_server(target)?;
+    let connection = client
+        .connect_as_connection(
+            host,
+            port,
+            protocol,
+            server_name,
+            auto_join_connection_options(),
+        )
+        .await
+        .map_err(|error| format!("dial {target}: {error}"))?;
+    let response = connection
+        .raw_request(
+            remove_raft_voter_request::API_KEY,
+            version,
+            Bytes::from(body),
+        )
+        .await
+        .map_err(|error| format!("RemoveRaftVoter raw_request: {error}"));
+    connection.close();
+    let response = response?;
+    let mut cursor: &[u8] = &response;
+    RemoveRaftVoterResponse::decode(&mut cursor, version)
+        .map_err(|error| format!("RemoveRaftVoter decode: {error}"))
+}
+
+async fn send_update_voter(
+    client: &crate::network::client::InterBrokerClient,
+    protocol: crabka_security::ListenerProtocol,
+    server_name: &str,
+    target: &str,
+    request: &UpdateRaftVoterRequest,
+) -> Result<UpdateRaftVoterResponse, String> {
+    let version = update_raft_voter_request::MAX_VERSION;
+    let mut body = BytesMut::with_capacity(request.encoded_len(version));
+    request
+        .encode(&mut body, version)
+        .map_err(|error| format!("UpdateVoter encode: {error}"))?;
+    let (host, port) = split_bootstrap_server(target)?;
+    let connection = client
+        .connect_as_connection(
+            host,
+            port,
+            protocol,
+            server_name,
+            auto_join_connection_options(),
+        )
+        .await
+        .map_err(|error| format!("dial {target}: {error}"))?;
+    let response = connection
+        .raw_request(
+            update_raft_voter_request::API_KEY,
+            version,
+            Bytes::from(body),
+        )
+        .await
+        .map_err(|error| format!("UpdateVoter raw_request: {error}"));
+    connection.close();
+    let response = response?;
+    UpdateRaftVoterResponse::decode(&mut response.as_ref(), version)
+        .map_err(|error| format!("UpdateVoter decode: {error}"))
+}
+
 fn controller_listener(bound: std::net::SocketAddr) -> Listener {
+    let host = if bound.ip().is_unspecified() {
+        std::env::var("HOSTNAME").unwrap_or_else(|_| "127.0.0.1".to_string())
+    } else {
+        bound.ip().to_string()
+    };
     Listener {
         name: "CONTROLLER".to_string(),
-        host: bound.ip().to_string(),
+        host,
         port: bound.port(),
         ..Default::default()
     }
 }
 
-fn select_bootstrap_server(
-    bootstrap_servers: &[std::net::SocketAddr],
-    attempt: usize,
-) -> std::net::SocketAddr {
-    bootstrap_servers[attempt % bootstrap_servers.len()]
+fn select_bootstrap_server(bootstrap_servers: &[String], attempt: usize) -> &str {
+    &bootstrap_servers[attempt % bootstrap_servers.len()]
 }
 
 fn build_add_raft_voter_request(
@@ -169,7 +346,7 @@ fn build_add_raft_voter_request(
         voter_id,
         voter_directory_id: directory_id,
         listeners: vec![listener],
-        ack_when_committed: true,
+        ack_when_committed: false,
         unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
     }
 }
@@ -183,13 +360,12 @@ enum JoinOutcome {
     Unexpected(i16),
 }
 
-/// Log the leader's `AddRaftVoter` reply at the correct level.
-///
-/// No outcome ends the loop. The `voters().contains` check at the top of `run`
-/// is the only exit, so this function is diagnostic only.
+/// Log the leader's `AddRaftVoter` reply at the appropriate level. None of the
+/// outcomes terminate the loop — the `voters().contains` check at the top of
+/// `run` is the sole exit — so this is purely diagnostic.
 fn log_join_outcome(
     self_id: crabka_raft::NodeId,
-    target: std::net::SocketAddr,
+    target: &str,
     resp: &AddRaftVoterResponse,
 ) -> JoinOutcome {
     match resp.error_code {
@@ -248,16 +424,15 @@ fn log_join_outcome(
     }
 }
 
-/// Dial `target`'s controller listener and send one `AddRaftVoter` request.
-///
-/// The function terminates TLS and SASL as the protocol demands, and returns the
-/// decoded response. It opens a new connection for each attempt, which mirrors
+/// Dial `target`'s controller listener (terminating TLS / SASL as the
+/// protocol demands) and send a single `AddRaftVoter` request, returning the
+/// decoded response. A fresh connection per attempt mirrors
 /// `Controller::forward_submit_to`.
 async fn send_add_raft_voter(
     client: &crate::network::client::InterBrokerClient,
     protocol: crabka_security::ListenerProtocol,
     server_name: &str,
-    target: std::net::SocketAddr,
+    target: &str,
     req: &AddRaftVoterRequest,
 ) -> Result<AddRaftVoterResponse, String> {
     let version = add_raft_voter_request::MAX_VERSION;
@@ -266,15 +441,10 @@ async fn send_add_raft_voter(
     req.encode(&mut body, version)
         .map_err(|e| format!("AddRaftVoter encode: {e}"))?;
 
+    let (host, port) = split_bootstrap_server(target)?;
     let opts = auto_join_connection_options();
     let conn = client
-        .connect_as_connection(
-            &target.ip().to_string(),
-            target.port(),
-            protocol,
-            server_name,
-            opts,
-        )
+        .connect_as_connection(host, port, protocol, server_name, opts)
         .await
         .map_err(|e| format!("dial {target}: {e}"))?;
 
@@ -287,6 +457,16 @@ async fn send_add_raft_voter(
 
     let mut cur: &[u8] = &resp_body;
     AddRaftVoterResponse::decode(&mut cur, version).map_err(|e| format!("AddRaftVoter decode: {e}"))
+}
+
+fn split_bootstrap_server(target: &str) -> Result<(&str, u16), String> {
+    let (host, port) = target
+        .rsplit_once(':')
+        .ok_or_else(|| format!("bootstrap server {target:?} must use <host>:<port>"))?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|error| format!("invalid bootstrap server port in {target:?}: {error}"))?;
+    Ok((host.trim_matches(['[', ']']), port))
 }
 
 fn auto_join_connection_options() -> crabka_client_core::ConnectionOptions {
@@ -417,16 +597,15 @@ mod tests {
 
     #[test]
     fn select_bootstrap_server_wraps_attempts() {
-        let servers: Vec<std::net::SocketAddr> =
-            ["127.0.0.1:9092", "127.0.0.1:9093", "127.0.0.1:9094"]
-                .into_iter()
-                .map(|s| s.parse().unwrap())
-                .collect();
+        let servers: Vec<String> = ["127.0.0.1:9092", "127.0.0.1:9093", "127.0.0.1:9094"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
 
-        assert_eq!(select_bootstrap_server(&servers, 0), servers[0]);
-        assert_eq!(select_bootstrap_server(&servers, 2), servers[2]);
-        assert_eq!(select_bootstrap_server(&servers, 3), servers[0]);
-        assert_eq!(select_bootstrap_server(&servers, 5), servers[2]);
+        assert_eq!(select_bootstrap_server(&servers, 0), servers[0].as_str());
+        assert_eq!(select_bootstrap_server(&servers, 2), servers[2].as_str());
+        assert_eq!(select_bootstrap_server(&servers, 3), servers[0].as_str());
+        assert_eq!(select_bootstrap_server(&servers, 5), servers[2].as_str());
     }
 
     #[test]
@@ -457,7 +636,7 @@ mod tests {
             (Some(id), 1_234, 7, directory_id, 1, "CONTROLLER", "127.0.0.1", 19093)
                 if id == cluster_id_string && directory_id == *dir.as_bytes()
         ));
-        assert!(req.ack_when_committed);
+        assert!(!req.ack_when_committed);
     }
 
     #[test]
@@ -477,7 +656,7 @@ mod tests {
         let decoded =
             AddRaftVoterRequest::decode(&mut bytes.freeze(), version).expect("decode request");
 
-        assert!(decoded.ack_when_committed);
+        assert!(!decoded.ack_when_committed);
     }
 
     #[test]
@@ -489,7 +668,7 @@ mod tests {
 
     #[test]
     fn log_join_outcome_classifies_response_codes() {
-        let target = "127.0.0.1:9092".parse().unwrap();
+        let target = "127.0.0.1:9092";
         let response = |error_code| AddRaftVoterResponse {
             error_code,
             ..Default::default()
@@ -524,6 +703,7 @@ mod tests {
             .expect("bind ephemeral port");
         let target = listener.local_addr().expect("local addr");
         drop(listener);
+        let target = target.to_string();
 
         let client = crate::network::client::InterBrokerClient::new(None, None);
         let req = AddRaftVoterRequest::default();
@@ -531,7 +711,7 @@ mod tests {
             &client,
             crabka_security::ListenerProtocol::Plaintext,
             "broker.internal",
-            target,
+            &target,
             &req,
         )
         .await
@@ -539,14 +719,12 @@ mod tests {
         assert!(err.contains("dial"), "unexpected error: {err}");
     }
 
-    /// `run` returns immediately when `auto_join` is disabled, with no panic
-    /// and no network dial.
-    ///
-    /// The test builds params with a real controller and inter-broker client,
-    /// `auto_join = false`, and a deliberately bogus bootstrap server. If `run`
-    /// obeys the flag it never dials. If it regressed and dialed, the loop would
-    /// spin against the unreachable address and the timeout would fire, which
-    /// fails the test.
+    /// `run` returns immediately when `auto_join` is disabled — no panic, no
+    /// network dial. Build params with a real controller + inter-broker client
+    /// but `auto_join = false`, and a deliberately bogus bootstrap server. If
+    /// `run` honoured the flag it never dials; if it regressed and dialed, the
+    /// loop would spin against the unreachable address and the timeout would
+    /// fire (failing the test).
     #[tokio::test]
     async fn run_returns_immediately_when_auto_join_disabled() {
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -562,7 +740,7 @@ mod tests {
             directory_id: uuid::Uuid::from_u128(1),
             cluster_id: None,
             // Unroutable: would hang the loop if `run` ignored auto_join=false.
-            bootstrap_servers: vec!["127.0.0.1:1".parse().unwrap()],
+            bootstrap_servers: vec!["127.0.0.1:1".to_string()],
             listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_server_name: "broker.internal".to_string(),
             controller: broker.controller_for_test(),
@@ -590,7 +768,7 @@ mod tests {
             node_id: crabka_raft::NodeId(7),
             directory_id: uuid::Uuid::from_u128(7),
             cluster_id: None,
-            bootstrap_servers: vec!["127.0.0.1:1".parse().unwrap()],
+            bootstrap_servers: vec!["127.0.0.1:1".to_string()],
             listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_server_name: "broker.internal".to_string(),
             controller: source.clone(),

@@ -33,7 +33,7 @@ pub const DEFAULT_METADATA_RAFT_FETCH_MAX: ByteSize = mebibytes(8);
 pub struct ControllerFetchMissLimit(u32);
 
 impl ControllerFetchMissLimit {
-    /// Validates the consecutive fetch-miss limit.
+    /// Validate the consecutive fetch-miss limit.
     ///
     /// # Errors
     ///
@@ -78,7 +78,7 @@ impl fmt::Display for ControllerFetchMissLimit {
 pub struct MetadataRaftCommandQueueCapacity(usize);
 
 impl MetadataRaftCommandQueueCapacity {
-    /// Validates the metadata Raft command queue capacity.
+    /// Validate the metadata Raft command queue capacity.
     ///
     /// # Errors
     ///
@@ -123,7 +123,7 @@ impl fmt::Display for MetadataRaftCommandQueueCapacity {
 pub struct MetadataRaftFetchMax(i32);
 
 impl MetadataRaftFetchMax {
-    /// Validates the protocol byte count.
+    /// Validate the protocol byte count.
     ///
     /// # Errors
     ///
@@ -190,46 +190,45 @@ impl fmt::Display for MetadataRaftFetchMax {
 pub type ShardRouteFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Option<Bytes>, RaftError>> + Send + 'a>>;
 
-/// Classifies and serves shard-addressed KIP-595 requests before metadata
-/// dispatch.
+/// Classifies and serves shard-addressed KIP-595 requests before metadata dispatch.
 pub trait RaftShardRouter: Send + Sync {
     fn route(&self, api_key: i16, body: Bytes) -> ShardRouteFuture<'_>;
 }
 
 /// Bootstrap orchestration for a freshly-formatted controller node.
 ///
-/// Openraft 0.9 has no pre-vote, the KIP-595 equivalent, so a simultaneous
-/// `raft.initialize(full_voter_set)` on more than one broker can split-vote
-/// indefinitely on cold boot. This enum lets the operator or the test harness
+/// Openraft 0.9 lacks pre-vote (KIP-595's equivalent), so simultaneous
+/// `raft.initialize(full_voter_set)` on multiple brokers can split-vote
+/// indefinitely on cold boot. This enum lets the operator (or test harness)
 /// pick a deterministic boot order:
 ///
-/// 1. One broker boots with `Bootstrap`. It initializes as the sole voter in a
-///    singleton cluster and self-elects on the first election timeout.
-/// 2. The remaining brokers boot with `Join`. They do not initialize, so they
-///    do not race to elect. The bootstrap broker brings them in with
-///    [`crate::ControllerHandle::add_learner`] and
+/// 1. One broker boots with `Bootstrap` — it initializes as the sole voter
+///    in a singleton cluster and self-elects on the first election timeout.
+/// 2. Remaining brokers boot with `Join` — they don't initialize, so they
+///    don't race to elect. The bootstrap broker brings them in via
+///    [`crate::ControllerHandle::add_learner`] +
 ///    [`crate::ControllerHandle::change_membership`].
-/// 3. After the initial format, restarted brokers use `Rejoin`. Their on-disk
-///    raft log already carries the membership, and the engine replays it
-///    during `Raft::new`.
+/// 3. After the initial format, restarted brokers use `Rejoin` — their
+///    on-disk raft log already carries the membership and the engine replays
+///    it during `Raft::new`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapMode {
     /// Cold-boot the first voter of a fresh cluster. This node holds the
-    /// initial `VotersRecord`. `Controller::start` calls `raft.initialize`
-    /// with [`ControllerConfig::initial_voters`], which produces the seed
+    /// initial `VotersRecord`; `Controller::start` calls `raft.initialize`
+    /// with [`ControllerConfig::initial_voters`], producing the seed
     /// membership that elects this broker as leader on its first timeout.
     Bootstrap,
 
     /// Cold-boot a subsequent voter with an empty start. `Controller::start`
-    /// skips `initialize`. The engine sits in Learner state and discovers the
-    /// leader through [`ControllerConfig::bootstrap_servers`]. It then
-    /// auto-joins and issues `AddVoter` for itself once it is caught up, if
+    /// skips `initialize`; the engine sits in Learner state and discovers
+    /// the leader via [`ControllerConfig::bootstrap_servers`], then
+    /// auto-joins (issuing `AddVoter` for itself once caught up) when
     /// [`ControllerConfig::auto_join`] is set.
     Join,
 
-    /// Restart a previously-formatted broker. The on-disk raft log encodes the
-    /// cluster's current membership. `Controller::start` recovers the existing
-    /// state from the on-disk log and the checkpoint at startup.
+    /// Restart a previously-formatted broker. The on-disk raft log encodes
+    /// the cluster's current membership; `Controller::start` skips
+    /// recovers existing state from the on-disk log + checkpoint at startup.
     Rejoin,
 }
 
@@ -240,22 +239,20 @@ pub struct ControllerConfig {
     /// Maximum frame size used by outbound controller client connections.
     pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub node_id: NodeId,
-    /// Endpoints used only to discover the leader at cold start. KIP-853
-    /// dynamic.
-    pub bootstrap_servers: Vec<SocketAddr>,
-    /// This replica's stable directory id, generated at format time.
+    /// Endpoints used only to discover the leader at cold start (KIP-853 dynamic).
+    pub bootstrap_servers: Vec<String>,
+    /// This replica's stable directory id (generated at format time).
     pub directory_id: Uuid,
     /// Issue `AddVoter` for self once caught up as an observer.
     pub auto_join: bool,
-    /// Maximum lag, in log entries, that still lets an observer be promoted.
+    /// Max allowed lag (in log entries) for an observer to be promotable.
     pub observer_lag_bound: u64,
-    /// Initial voter set for the bootstrapping node only. It is empty for
-    /// joiners.
+    /// Initial voter set for the bootstrapping node only; empty for joiners.
     pub initial_voters: crabka_metadata::VoterSet,
     pub controller_listen_addr: SocketAddr,
     pub log_dir: PathBuf,
     pub election_timeout: Time,
-    /// Explicit heartbeat cadence. `None` keeps the derived
+    /// Explicit heartbeat cadence. `None` preserves the derived
     /// `election_timeout / 3` behavior.
     pub heartbeat_interval: Option<Time>,
     pub controller_fetch_miss_limit: ControllerFetchMissLimit,
@@ -264,34 +261,32 @@ pub struct ControllerConfig {
     pub client_id: String,
     pub bootstrap_mode: BootstrapMode,
     /// Cluster UUID applied to the `MetadataImage` on first construction.
-    /// `None` falls back to `Uuid::nil()`, the legacy single-node default.
-    /// The operator sets this to the `KafkaCluster` UID, so every broker in
-    /// the same cluster shares one identifier across restarts.
+    /// `None` falls back to `Uuid::nil()` (legacy single-node default).
+    /// The operator sets this to the `KafkaCluster` UID so every broker
+    /// in the same cluster shares one identifier across restarts.
     pub cluster_id: Option<Uuid>,
-    /// Optional outbound dialer. `None` opens a plain TCP socket to peers,
-    /// the legacy PLAINTEXT-only path. The broker injects an
-    /// `InterBrokerClient`-backed dialer here when inter-broker TLS or SASL is
-    /// configured.
+    /// Optional outbound dialer. `None` means: open a plain TCP socket
+    /// to peers (legacy PLAINTEXT-only path). The broker injects an
+    /// `InterBrokerClient`-backed dialer here when inter-broker TLS or
+    /// SASL is configured.
     pub dialer: Option<Arc<dyn OutboundDialer>>,
-    /// Optional inbound handshake hook. `None` keeps the legacy PLAINTEXT
-    /// path. The broker injects a `BrokerRaftHandshake` implementation here
-    /// when the controller listener should terminate TLS, SASL, or both before
-    /// the raft frames start to flow.
+    /// Optional inbound handshake hook. `None` keeps the legacy
+    /// PLAINTEXT path. The broker injects a `BrokerRaftHandshake`
+    /// implementation here when the controller listener should
+    /// terminate TLS and/or SASL before raft frames start flowing.
     pub handshake: Option<Arc<dyn crate::RaftListenerHandshake>>,
-    /// Optional KIP-595 shard router. Metadata traffic returns `None`.
-    /// Diskless WAL shards return an encoded response body and bypass metadata
-    /// dispatch.
+    /// Optional KIP-595 shard router. Metadata traffic returns `None`; diskless
+    /// WAL shards return an encoded response body and bypass metadata dispatch.
     pub shard_router: Option<Arc<dyn RaftShardRouter>>,
-    /// `metadata.log.max.record.bytes.between.snapshots`. Default: 20 MiB.
+    /// `metadata.log.max.record.bytes.between.snapshots` (default 20 MiB).
     pub max_bytes_between_snapshots: ByteSize,
-    /// `metadata.log.max.snapshot.interval.ms`. Default: 1 h. 0 disables it.
+    /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
     pub max_snapshot_interval: Time,
-    /// Take a snapshot once the committed offset advances this many records
-    /// past the last snapshot, then prune the log below it. `0` disables
-    /// snapshots.
+    /// Snapshot once committed offset advances this many records past the last
+    /// snapshot, then prune the log below it. `0` disables snapshotting.
     pub snapshot_interval_records: u64,
-    /// Maximum metadata snapshot size this follower fetches. A deployment can
-    /// lower the default 1 GiB security ceiling, but it cannot raise it.
+    /// Maximum metadata snapshot size this follower will fetch. Deployments may
+    /// lower the default 1 GiB security ceiling but cannot raise it.
     pub metadata_snapshot_fetch_max: ByteSize,
 }
 

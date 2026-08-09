@@ -169,6 +169,13 @@ pub const INVALID_UPDATE_VERSION: i16 = 95;
 /// the write timed out.
 pub const FEATURE_UPDATE_FAILED: i16 = 96;
 
+/// KIP-853: the requested node id is already present in the voter set.
+pub const DUPLICATE_VOTER: i16 = 139;
+/// KIP-853: the exact node/directory voter identity was not found.
+pub const VOTER_NOT_FOUND: i16 = 140;
+/// KIP-853: an endpoint, directory, epoch, or feature-range update is invalid.
+pub const INVALID_UPDATE: i16 = 141;
+
 // ACL authorization codes.
 /// `TOPIC_AUTHORIZATION_FAILED` (29): principal lacks permission on the topic.
 pub const TOPIC_AUTHORIZATION_FAILED: i16 = 29;

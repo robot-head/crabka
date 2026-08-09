@@ -826,18 +826,59 @@ pub fn pool_cr(name: &str, namespace: &str, parent: &str, replicas: i32) -> Kafk
     );
     p.metadata.namespace = Some(namespace.into());
     p.metadata.uid = Some("pool-uid".into());
+    p.metadata.finalizers = Some(vec!["crabka.io/kafka-node-pool-finalizer".into()]);
     let mut labels = BTreeMap::new();
     labels.insert("crabka.io/cluster".into(), parent.into());
     p.metadata.labels = Some(labels);
     p
 }
 
-/// Build the FIFO rule sequence that the pool reconciler needs:
-///   1. GET kafkas/<parent>            → `parent_body`
-///   2. GET statefulsets/<parent>-<pool> → 404 (first reconcile)
-///   3. PATCH statefulsets/<parent>-<pool> (SSA)
-///   4. GET statefulsets/<parent>-<pool> (post-apply status read)
-///   5. PATCH kafkanodepools/<pool>/status
+/// Build the dynamic-quorum discovery rules used by pool reconciles.
+pub fn dynamic_quorum_rules(parent: &str, pool: &str, namespace: &str) -> Vec<MockRule> {
+    use base64::Engine as _;
+
+    let mut secret = fake_secret_body(
+        &format!("{parent}-cluster-id"),
+        namespace,
+        "00000000-0000-0000-0000-000000000001",
+    );
+    let data = secret["data"]
+        .as_object_mut()
+        .expect("fake Secret data object");
+    let encode = |value: &str| {
+        serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(value))
+    };
+    data.insert("quorumBootstrapNodeId".into(), encode("0"));
+    data.insert("quorumBootstrapPool".into(), encode(pool));
+    data.insert("quorumBootstrapInitialized".into(), encode("true"));
+    data.insert(
+        "quorumDirectoryId-0".into(),
+        encode("00000000-0000-0000-0000-000000000001"),
+    );
+
+    vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkanodepools?".into(),
+            response: json_response(
+                200,
+                &fake_pool_list_body(&[fake_pool_body(pool, namespace, parent)]),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &secret),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{parent}-cluster-id"),
+            response: json_response(200, &secret),
+        },
+    ]
+}
+
+/// Build the FIFO rule sequence that the pool reconciler needs.
 pub fn pool_reconcile_rules(
     parent: &str,
     pool: &str,
@@ -845,12 +886,13 @@ pub fn pool_reconcile_rules(
     parent_body: &serde_json::Value,
 ) -> Vec<MockRule> {
     let sts_name = format!("{parent}-{pool}");
-    vec![
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/kafkas/{parent}"),
-            response: json_response(200, parent_body),
-        },
+    let mut rules = vec![MockRule {
+        method: Method::GET,
+        path_substr: format!("/kafkas/{parent}"),
+        response: json_response(200, parent_body),
+    }];
+    rules.extend(dynamic_quorum_rules(parent, pool, namespace));
+    rules.extend([
         MockRule {
             method: Method::GET,
             path_substr: format!("/statefulsets/{sts_name}"),
@@ -863,19 +905,20 @@ pub fn pool_reconcile_rules(
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/statefulsets/{sts_name}"),
-            response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, Some(1))),
+            response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, Some(0))),
         },
         MockRule {
             method: Method::GET,
             path_substr: format!("/statefulsets/{sts_name}"),
-            response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, Some(1))),
+            response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, Some(0))),
         },
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/kafkanodepools/{pool}/status"),
             response: json_response(200, &fake_pool_body(pool, namespace, parent)),
         },
-    ]
+    ]);
+    rules
 }
 
 // ---------------------------------------------------------------------------

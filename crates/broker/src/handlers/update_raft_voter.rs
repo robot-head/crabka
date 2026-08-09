@@ -58,6 +58,54 @@ pub(crate) async fn handle(
         );
     }
 
+    let cluster_id = image.cluster_id().to_string();
+    let quorum = broker.controller.quorum_state();
+    if req.cluster_id.as_deref() != Some(cluster_id.as_str())
+        || req.voter_directory_id == crabka_protocol::primitives::uuid::Uuid::ZERO
+        || i64::from(req.current_leader_epoch)
+            != i64::try_from(quorum.current_term).unwrap_or(i64::MAX)
+        || req.listeners.is_empty()
+        || req.listeners.iter().any(|listener| {
+            listener.name.is_empty() || listener.host.is_empty() || listener.port == 0
+        })
+    {
+        return encode_resp(
+            version,
+            &UpdateRaftVoterResponse {
+                error_code: codes::INVALID_UPDATE,
+                ..Default::default()
+            },
+        );
+    }
+
+    let Ok(min_version) = u16::try_from(req.k_raft_version_feature.min_supported_version) else {
+        return encode_resp(
+            version,
+            &UpdateRaftVoterResponse {
+                error_code: codes::INVALID_UPDATE,
+                ..Default::default()
+            },
+        );
+    };
+    let Ok(max_version) = u16::try_from(req.k_raft_version_feature.max_supported_version) else {
+        return encode_resp(
+            version,
+            &UpdateRaftVoterResponse {
+                error_code: codes::INVALID_UPDATE,
+                ..Default::default()
+            },
+        );
+    };
+    if min_version > max_version {
+        return encode_resp(
+            version,
+            &UpdateRaftVoterResponse {
+                error_code: codes::INVALID_UPDATE,
+                ..Default::default()
+            },
+        );
+    }
+
     let Ok(id) = u64::try_from(req.voter_id) else {
         return encode_resp(
             version,
@@ -80,7 +128,10 @@ pub(crate) async fn handle(
                 port: l.port,
             })
             .collect(),
-        kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        kraft_version: crabka_metadata::KRaftVersionRange {
+            min: min_version,
+            max: max_version,
+        },
     };
 
     let (error_code, _msg) =
@@ -198,7 +249,11 @@ mod tests {
         };
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(&request(-7), version);
+        let mut request = request(-7);
+        request.cluster_id = Some(broker.controller.current_image().cluster_id().to_string());
+        request.current_leader_epoch =
+            i32::try_from(broker.controller.quorum_state().current_term).unwrap_or(i32::MAX);
+        let req_bytes = encode_request(&request, version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
@@ -222,14 +277,18 @@ mod tests {
         };
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
-        let req_bytes = encode_request(&request(2), version);
+        let mut request = request(2);
+        request.cluster_id = Some(broker.controller.current_image().cluster_id().to_string());
+        request.current_leader_epoch =
+            i32::try_from(broker.controller.quorum_state().current_term).unwrap_or(i32::MAX);
+        let req_bytes = encode_request(&request, version);
 
         let resp = super::handle(&broker, version, 123, &req_bytes, &ctx)
             .await
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert!(resp.error_code == codes::UNKNOWN_SERVER_ERROR);
+        assert!(resp.error_code == codes::VOTER_NOT_FOUND);
         broker_handle.shutdown().await;
     }
 }

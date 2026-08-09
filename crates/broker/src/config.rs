@@ -359,7 +359,7 @@ pub struct BrokerConfig {
     /// KIP-853 dynamic quorum: controller endpoints used only to discover
     /// the leader at cold start (the joiner path). Empty for a standalone
     /// bootstrap node. Maps to Kafka's `controller.quorum.bootstrap.servers`.
-    pub bootstrap_servers: Vec<SocketAddr>,
+    pub bootstrap_servers: Vec<String>,
 
     /// KIP-853: this replica's stable directory id, recovered from
     /// `meta.properties.json` at boot. Identifies which voter this node *is*.
