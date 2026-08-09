@@ -94,7 +94,10 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
         "DROP ROLE" | "SET ROLE" | "SET SESSION AUTHORIZATION" => {
             &["CREATE ROLE parser_commands_role"]
         }
-        "ANALYZE" | "REINDEX" | "EXPLAIN" | "CREATE STATISTICS" => {
+        // ANALYZE and VACUUM resolve the relations they name, so their probes
+        // need one. They did not while the whole target list was parsed for
+        // shape and thrown away.
+        "ANALYZE" | "VACUUM" | "REINDEX" | "EXPLAIN" | "CREATE STATISTICS" => {
             &["CREATE TABLE parser_commands_probe (id int4)"]
         }
         "LOCK" | "DECLARE" => &["CREATE TABLE parser_commands_probe (id int4)", "BEGIN"],
@@ -162,10 +165,6 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             "CREATE FUNCTION parser_commands_event_trigger_fn() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
             "CREATE EVENT TRIGGER parser_commands_event_trigger ON ddl_command_start EXECUTE FUNCTION parser_commands_event_trigger_fn()",
         ],
-        // Both maintenance commands resolve the relations they name, so their
-        // probes need one. They did not while the whole target list was parsed
-        // for shape and thrown away.
-        "ANALYZE" | "VACUUM" => &["CREATE TABLE parser_commands_probe (id int4)"],
         "SAVEPOINT" | "SET TRANSACTION" => &["BEGIN"],
         _ => &[],
     }
