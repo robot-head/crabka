@@ -261,6 +261,7 @@ fn prepare_raft_transport(
                 tls_acceptor,
                 plain_credentials: config.plain_credentials.clone(),
                 enabled_sasl_mechanisms: config.enabled_sasl_mechanisms.clone(),
+                gssapi: config.gssapi.clone(),
                 protocol: config.controller_listener_protocol,
                 controller: Arc::clone(&controller_cell),
                 authorizer: Arc::clone(&config.authorizer),
@@ -571,9 +572,10 @@ async fn recover_storage_and_groups(
         }
     }
     let offsets_log = Arc::new(
-        crate::coordinator::unified::offsets_log::ProductionOffsetsLog::new(Arc::clone(
-            &partitions,
-        )),
+        crate::coordinator::unified::offsets_log::ProductionOffsetsLog::new(
+            Arc::clone(&partitions),
+            Arc::clone(controller),
+        ),
     );
     let mut consumer_group = config.next_gen_consumer_group.as_ref().clone();
     consumer_group.session_expiry_tick = config.coordinator_session_expiry_tick.to_std();
@@ -594,7 +596,10 @@ async fn recover_storage_and_groups(
         offsets_log,
         streams_group,
     ));
-    let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
+    let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::clustered(
+        config.node_id,
+        Arc::clone(controller),
+    ));
     crate::coordinator::bootstrap::bootstrap(
         config,
         controller,
@@ -630,13 +635,29 @@ async fn start_coordinators(
     producer_ids: &Arc<crate::producer_id_manager::ProducerIdManager>,
     inter_broker_client: &Arc<crate::network::client::InterBrokerClient>,
 ) -> CoordinatorStartup {
-    let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
+    let listener_protocol = config
+        .effective_listeners()
+        .iter()
+        .find(|listener| listener.name == config.inter_broker_listener_name)
+        .map_or(crabka_security::ListenerProtocol::Plaintext, |listener| {
+            listener.protocol
+        });
+    let mut txn_coordinator = crate::txn::coordinator::TxnCoordinator::new(
         config.node_id,
         Arc::clone(partitions),
         Arc::clone(producer_ids),
         config.transaction_state_num_partitions,
         config.transaction_recovery_read_max,
-    ));
+    );
+    txn_coordinator.configure_marker_transport(
+        Arc::clone(controller),
+        Arc::clone(inter_broker_client),
+        listener_protocol,
+        config.inter_broker_listener_name.clone(),
+        config.inter_broker_server_name.clone(),
+        Arc::clone(group_coordinator),
+    );
+    let txn_coordinator = Arc::new(txn_coordinator);
     if let Err(error) = txn_coordinator.recover(&controller.current_image()).await {
         tracing::warn!(%error, "transaction coordinator recovery error");
     }
@@ -652,13 +673,6 @@ async fn start_coordinators(
     if let Err(error) = share_coordinator.recover(&controller.current_image()).await {
         tracing::warn!(%error, "share coordinator recovery error");
     }
-    let listener_protocol = config
-        .effective_listeners()
-        .iter()
-        .find(|listener| listener.name == config.inter_broker_listener_name)
-        .map_or(crabka_security::ListenerProtocol::Plaintext, |listener| {
-            listener.protocol
-        });
     let share_persister = Arc::new(
         crate::share_coordinator::persister_client::SharePersister::new(
             config.node_id,
@@ -1513,6 +1527,7 @@ fn start_runtime_watchers(
         Arc::new(ThrottleControllerAdapter {
             handle: Arc::clone(controller),
         });
+    crate::throttle::apply_image(&controller.current_image(), config.node_id, throttle_state);
     tokio::spawn(crate::throttle::run(
         throttle_watcher,
         config.node_id,
@@ -1567,6 +1582,7 @@ async fn bind_listeners_and_recover_moves(
     config: &mut BrokerConfig,
     mut supplied_listener: Option<TcpListener>,
     partitions: &Arc<PartitionRegistry>,
+    throttle_state: &Arc<crate::throttle::ThrottleState>,
 ) -> Result<ListenerStartup, BrokerError> {
     let listener_specs = config.effective_listeners();
     let mut bound = Vec::with_capacity(listener_specs.len());
@@ -1612,6 +1628,7 @@ async fn bind_listeners_and_recover_moves(
                 crate::future_log::MovePolicy {
                     retry_backoff: config.future_log_move_retry_backoff,
                     read_chunk: config.future_log_move_read_chunk,
+                    throttle: throttle_state.alter_log_dirs.clone(),
                 },
             ) {
                 tracing::warn!(%topic, partition = partition_id, ?error,
@@ -1769,7 +1786,13 @@ async fn finish_broker_startup(
         bound,
         listen_addr,
         future_logs,
-    } = bind_listeners_and_recover_moves(&mut config, data_listener, &metadata.1).await?;
+    } = bind_listeners_and_recover_moves(
+        &mut config,
+        data_listener,
+        &metadata.1,
+        &runtime.throttle_state,
+    )
+    .await?;
     let connections = ConnectionLimiter::new(config.max_connections, config.max_connections_per_ip);
     let broker = Arc::new(Broker {
         config,
@@ -3796,6 +3819,14 @@ impl Broker {
             &diskless_runtime,
         )
         .await?;
+
+        crate::coordinator::leadership::spawn(
+            config.node_id,
+            Arc::clone(&controller),
+            Arc::clone(&partitions),
+            Arc::clone(&group_coordinator),
+            runtime.supervisor_shutdown.child_token(),
+        );
 
         crate::share_partition::backlog_poller::BacklogPoller {
             node_id: config.node_id,

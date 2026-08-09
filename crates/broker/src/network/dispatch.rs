@@ -499,6 +499,9 @@ where
             return false;
         }
     };
+    if response.is_empty() && matches!(entry.kind(), crate::handlers::DispatchKind::Produce(_)) {
+        return true;
+    }
     if entry.quota_policy() == crate::handlers::RequestQuotaPolicy::ApplyFallbackAccounting {
         response = maybe_apply_request_quota(
             context.broker,
@@ -1011,7 +1014,15 @@ async fn dispatch_registered_bytes(
             );
             let body_offset = frame.len() - parsed.body.len();
             let body_bytes = frame.slice(body_offset..);
-            Some(encode_dispatch_result(
+            let response_required = match crate::handlers::produce::response_required(
+                parsed.body,
+                body_bytes.clone(),
+                parsed.api_version,
+            ) {
+                Ok(required) => required,
+                Err(error) => return Some(Err(error)),
+            };
+            let encoded = encode_dispatch_result(
                 parsed,
                 broker.config.socket_request_max.bytes_usize(),
                 handler(
@@ -1023,7 +1034,12 @@ async fn dispatch_registered_bytes(
                     &ctx,
                 )
                 .await,
-            ))
+            );
+            Some(if response_required {
+                encoded
+            } else {
+                encoded.map(|_| Bytes::new())
+            })
         }
         crate::handlers::DispatchKind::Telemetry(handler) => {
             let ctx = crate::handlers::TelemetryContext::new(

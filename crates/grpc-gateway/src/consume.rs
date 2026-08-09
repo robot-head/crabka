@@ -4,7 +4,7 @@
 //! The streaming/poll wire (later plan) drives this session. The codec decodes
 //! each record on the way out.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_units::prelude::*;
@@ -132,13 +132,35 @@ impl ConsumeSession {
     /// receiver acknowledges delivery.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
-    /// # Panics
-    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn commit(&self) -> Result<(), GatewayError> {
         self.consumer
             .as_ref()
-            .expect("ConsumeSession committed after close")
+            .ok_or_else(|| GatewayError::Other("consume session is closed".to_string()))?
             .commit_sync()
+            .await?;
+        Ok(())
+    }
+
+    /// Commit the next offset after one acknowledged record without advancing
+    /// any other assigned partition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid record offset or when the consumer
+    /// rejects the selected commit.
+    pub async fn commit_record(
+        &self,
+        topic: String,
+        partition: i32,
+        record_offset: i64,
+    ) -> Result<(), GatewayError> {
+        let next_offset = record_offset.checked_add(1).ok_or(
+            crabka_client_consumer::ConsumerError::InvalidOffset(record_offset),
+        )?;
+        self.consumer
+            .as_ref()
+            .ok_or_else(|| GatewayError::Other("consume session is closed".to_string()))?
+            .commit_offsets_sync(HashMap::from([((topic, partition), next_offset)]))
             .await?;
         Ok(())
     }

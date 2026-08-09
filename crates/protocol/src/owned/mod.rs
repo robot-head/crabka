@@ -156,6 +156,7 @@ pub mod offset_for_leader_epoch_response;
 pub mod partition_record;
 pub mod produce_request;
 pub mod produce_response;
+pub mod producer_ids_record;
 pub mod push_telemetry_request;
 pub mod push_telemetry_response;
 pub mod read_share_group_state_request;

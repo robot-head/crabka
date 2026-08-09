@@ -60,6 +60,14 @@ pub(crate) async fn handle(
             });
             continue;
         }
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &gid) {
+            results.push(DeletableGroupResult {
+                group_id: gid,
+                error_code,
+                ..Default::default()
+            });
+            continue;
+        }
 
         let error_code = match broker.group_coordinator.delete_group(&gid).await {
             Ok(()) => codes::NONE,

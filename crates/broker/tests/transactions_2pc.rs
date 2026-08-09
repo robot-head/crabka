@@ -1,14 +1,13 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
 
-//! KIP-939 two-phase-commit (2PC) participation, that is the `InitProducerId`
-//! v6 coordinator semantics:
-//!  - The broker rejects `enable2Pc` with
-//!    `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` when the cluster has
-//!    `transaction.two.phase.commit.enable=false`.
-//!  - `keepPreparedTxn` returns `UNSUPPORTED_VERSION`. This matches Kafka,
-//!    where the prepared-txn recovery flow is still unstable.
-//!  - With 2PC enabled, the broker persists an `enable2Pc` transaction with
-//!    the no-timeout sentinel `i32::MAX`, so the idle reaper skips it.
+//! KIP-939 two-phase-commit (2PC) participation — `InitProducerId` v6
+//! coordinator semantics:
+//!  - `enable2Pc` is rejected with `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` when
+//!    the cluster has `transaction.two.phase.commit.enable=false`;
+//!  - `keepPreparedTxn` succeeds with the no-ongoing sentinels when there is
+//!    no transaction to recover;
+//!  - with 2PC enabled, an `enable2Pc` transaction is persisted with the
+//!    no-timeout sentinel (`i32::MAX`), so it is exempt from the idle reaper.
 //!
 //! `txn::two_pc_model` proves the reaper's *decision*, that it never aborts a
 //! 2PC transaction, exhaustively. These tests pin the wire and handler
@@ -27,7 +26,6 @@ use tempfile::TempDir;
 
 // Kafka error codes (see crates/broker/src/codes.rs).
 const NONE: i16 = 0;
-const UNSUPPORTED_VERSION: i16 = 35;
 const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
 
 async fn boot(two_pc_enabled: bool) -> (BrokerHandle, String, TempDir) {
@@ -78,11 +76,19 @@ async fn enable_2pc_rejected_when_cluster_disabled() {
     broker.shutdown().await;
 }
 
-/// `keepPreparedTxn=true` returns `UNSUPPORTED_VERSION` whatever the 2PC flag
-/// holds. The prepared-txn recovery flow is not yet a stable Kafka feature.
+/// `keepPreparedTxn=true` with no ongoing transaction succeeds and reports the
+/// no-ongoing sentinels. A recovery client can therefore treat completion as a
+/// no-op without a separate describe round trip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn keep_prepared_txn_is_unsupported() {
+async fn keep_prepared_txn_without_ongoing_transaction_is_a_noop() {
     let (broker, bootstrap, _dir) = boot(true).await;
+    let producer = Producer::builder()
+        .bootstrap(bootstrap.clone())
+        .transactional_id("tid-keep")
+        .build()
+        .await
+        .unwrap();
+    producer.init_transactions().await.unwrap();
     let client = client(&bootstrap).await;
 
     let resp = client
@@ -91,7 +97,7 @@ async fn keep_prepared_txn_is_unsupported() {
             transaction_timeout_ms: 30_000,
             producer_id: -1,
             producer_epoch: -1,
-            enable2_pc: false,
+            enable2_pc: true,
             keep_prepared_txn: true,
             ..Default::default()
         })
@@ -99,10 +105,13 @@ async fn keep_prepared_txn_is_unsupported() {
         .expect("InitProducerId");
 
     assert!(
-        resp.error_code == UNSUPPORTED_VERSION,
-        "expected 35 (UNSUPPORTED_VERSION), got {}",
+        resp.error_code == NONE,
+        "keepPreparedTxn without an ongoing transaction failed: {}",
         resp.error_code
     );
+    assert!(resp.ongoing_txn_producer_id == -1);
+    assert!(resp.ongoing_txn_producer_epoch == -1);
+    producer.close().await.ok();
     broker.shutdown().await;
 }
 

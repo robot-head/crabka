@@ -20,7 +20,9 @@ use crate::{
 };
 
 pub struct ProduceCore {
-    producer: Arc<Producer>,
+    producer_all: Arc<Producer>,
+    producer_one: Arc<Producer>,
+    producer_zero: Arc<Producer>,
     codec: Arc<dyn RecordCodec>,
     /// When absent, keyed records take the plain producer path too.
     dedup: Option<Arc<crate::dedup::DedupEngine>>,
@@ -43,13 +45,13 @@ impl ProduceCore {
         codec: Arc<dyn RecordCodec>,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, GatewayError> {
-        Self::new_with_policy(
+        Box::pin(Self::new_with_policy(
             bootstrap,
             client_id,
             codec,
             security,
             &crate::config::GatewayRuntimeConfig::default(),
-        )
+        ))
         .await
     }
 
@@ -63,18 +65,26 @@ impl ProduceCore {
         security: Option<crabka_client_core::security::ClientSecurity>,
         policy: &crate::config::GatewayRuntimeConfig,
     ) -> Result<Self, GatewayError> {
-        let producer = Producer::builder()
-            .bootstrap(bootstrap.to_string())
-            .client_id(client_id.to_string())
-            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
-            .frame_max(policy.client_frame_max.size())
-            .enable_idempotence(true)
-            .acks(Acks::All)
-            .maybe_security(security)
-            .build()
-            .await?;
+        let build = |acks, enable_idempotence| {
+            Producer::builder()
+                .bootstrap(bootstrap.to_string())
+                .client_id(client_id.to_string())
+                .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+                .frame_max(policy.client_frame_max.size())
+                .enable_idempotence(enable_idempotence)
+                .acks(acks)
+                .maybe_security(security.clone())
+                .build()
+        };
+        let (producer_all, producer_one, producer_zero) = tokio::try_join!(
+            build(Acks::All, true),
+            build(Acks::One, false),
+            build(Acks::Zero, false),
+        )?;
         Ok(Self {
-            producer: Arc::new(producer),
+            producer_all: Arc::new(producer_all),
+            producer_one: Arc::new(producer_one),
+            producer_zero: Arc::new(producer_zero),
             codec,
             dedup: None,
             forwarding: None,
@@ -100,8 +110,11 @@ impl ProduceCore {
             .acks(Acks::One)
             .build()
             .await?;
+        let producer = Arc::new(producer);
         Ok(Self {
-            producer: Arc::new(producer),
+            producer_all: Arc::clone(&producer),
+            producer_one: Arc::clone(&producer),
+            producer_zero: producer,
             codec,
             dedup: None,
             forwarding: None,
@@ -153,6 +166,28 @@ impl ProduceCore {
         rec: GatewayRecord,
         principal: &Principal,
     ) -> Result<RecordOutcome, GatewayError> {
+        self.produce_with_acks(rec, principal, Acks::All).await
+    }
+
+    /// Produce using the caller's requested acknowledgement level. Keyed dedup
+    /// records require `acks=all` because their exactly-once transaction must be
+    /// durably acknowledged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for incompatible acknowledgement and dedup settings, or
+    /// when routing, encoding, or the producer fails.
+    pub async fn produce_with_acks(
+        &self,
+        rec: GatewayRecord,
+        principal: &Principal,
+        acks: Acks,
+    ) -> Result<RecordOutcome, GatewayError> {
+        if rec.idempotency_key.is_some() && acks != Acks::All {
+            return Err(GatewayError::Other(
+                "idempotency_key requires ACKS_ALL".to_string(),
+            ));
+        }
         // Resolve the route without holding a borrow of `rec` across its move.
         let forward_addr: Option<String> =
             match (&self.dedup, &self.forwarding, &rec.idempotency_key) {
@@ -173,10 +208,12 @@ impl ProduceCore {
 
         match forward_addr {
             Some(addr) => {
-                let fwd = self.forwarding.as_ref().expect("route implies forwarding");
+                let fwd = self.forwarding.as_ref().ok_or_else(|| {
+                    GatewayError::Other("forwarding route has no forwarder".to_string())
+                })?;
                 fwd.forwarder.forward(&addr, &rec, principal).await
             }
-            None => self.produce_local(rec).await,
+            None => self.produce_local_with_acks(rec, acks).await,
         }
     }
 
@@ -189,6 +226,14 @@ impl ProduceCore {
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn produce_local(&self, rec: GatewayRecord) -> Result<RecordOutcome, GatewayError> {
+        self.produce_local_with_acks(rec, Acks::All).await
+    }
+
+    async fn produce_local_with_acks(
+        &self,
+        rec: GatewayRecord,
+        acks: Acks,
+    ) -> Result<RecordOutcome, GatewayError> {
         let value = self
             .codec
             .encode(&rec.topic, rec.encode_body())
@@ -196,7 +241,7 @@ impl ProduceCore {
             .map_err(GatewayError::from)?;
         match (&self.dedup, &rec.idempotency_key) {
             (Some(dedup), Some(_key)) => dedup.dedup_produce(&rec, value).await,
-            _ => self.produce_plain(&rec, value).await,
+            _ => self.produce_plain(&rec, value, acks).await,
         }
     }
 
@@ -204,9 +249,15 @@ impl ProduceCore {
         &self,
         rec: &GatewayRecord,
         value: bytes::Bytes,
+        acks: Acks,
     ) -> Result<RecordOutcome, GatewayError> {
         let prec = to_producer_record(rec, value);
-        let rx = self.producer.send(prec).await;
+        let producer = match acks {
+            Acks::All => &self.producer_all,
+            Acks::One => &self.producer_one,
+            Acks::Zero => &self.producer_zero,
+        };
+        let rx = producer.send(prec).await;
         let meta = rx
             .await
             .map_err(|_| GatewayError::ProducerCanceled)?

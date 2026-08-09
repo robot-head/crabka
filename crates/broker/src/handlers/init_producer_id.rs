@@ -109,7 +109,7 @@ pub(crate) async fn handle(
     let resp = match req.transactional_id.as_deref() {
         None | Some("") => {
             // Non-transactional path (idempotence).
-            let (pid, epoch) = producer_ids.allocate();
+            let (pid, epoch) = producer_ids.allocate().await?;
             InitProducerIdResponse {
                 throttle_time_ms: 0,
                 error_code: codes::NONE,
@@ -132,7 +132,7 @@ pub(crate) async fn handle(
             // Validated up-front (like Kafka's `handleInitProducerId`), before
             // the coordinator-ness check, so a client learns its request is
             // unauthorized / unsupported regardless of which broker it hit.
-            if req.enable2_pc {
+            if req.enable2_pc || req.keep_prepared_txn {
                 // (1) Cluster must have 2PC enabled. Kafka maps a disabled
                 //     cluster to TRANSACTIONAL_ID_AUTHORIZATION_FAILED (not an
                 //     UNSUPPORTED_*), so a client can't probe the feature flag.
@@ -154,13 +154,12 @@ pub(crate) async fn handle(
                     return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
                 }
             }
-            // keepPreparedTxn (the prepared-txn recovery flow) is not yet a
-            // stable feature in Apache Kafka — its coordinator returns
-            // UNSUPPORTED_VERSION. Match that until the recovery path lands.
-            if req.keep_prepared_txn {
+            if req.keep_prepared_txn && (req.producer_id != -1 || req.producer_epoch != -1) {
+                return encode_err(version, codes::INVALID_REQUEST);
+            }
+            if req.keep_prepared_txn && !txnv.verified() {
                 return encode_err(version, codes::UNSUPPORTED_VERSION);
             }
-
             coord.refresh_leader_partitions(&image).await;
 
             // Verify we're the coordinator for this tid.
@@ -201,7 +200,15 @@ pub(crate) async fn handle(
                     broker.config.transaction_min_timeout.millis_i32(),
                     broker.config.transaction_max_timeout.millis_i32(),
                 );
-                handle_transactional(&coord, tid, txnv, txn_timeout).await?
+                handle_transactional(
+                    &coord,
+                    tid,
+                    txnv,
+                    txn_timeout,
+                    req.enable2_pc,
+                    req.keep_prepared_txn,
+                )
+                .await?
             } else {
                 InitProducerIdResponse {
                     error_code: codes::NOT_COORDINATOR,
@@ -233,13 +240,15 @@ async fn handle_transactional(
     tid: &str,
     txnv: crate::txn::version::TxnVersion,
     txn_timeout: i32,
+    enable_2pc: bool,
+    keep_prepared_txn: bool,
 ) -> Result<InitProducerIdResponse, BrokerError> {
     let now_ms = now_millis();
 
     match coord.get(tid) {
         None => {
             // Fresh tid — allocate a new producer id.
-            let (pid, epoch) = coord.producer_ids.allocate();
+            let (pid, epoch) = coord.producer_ids.allocate().await?;
             let entry = TxnEntry::new_empty(tid.to_string(), pid, epoch, txn_timeout, now_ms);
             coord.put(entry, txnv).await?;
             Ok(InitProducerIdResponse {
@@ -251,14 +260,75 @@ async fn handle_transactional(
             })
         }
         Some(existing) => {
+            if keep_prepared_txn {
+                let recovery = {
+                    let mut entry = existing.lock().await;
+                    if entry.state == TxnState::Ongoing {
+                        if entry.txn_timeout_ms != i32::MAX && !enable_2pc {
+                            return Ok(InitProducerIdResponse {
+                                error_code: codes::INVALID_TXN_STATE,
+                                producer_id: -1,
+                                producer_epoch: -1,
+                                ..Default::default()
+                            });
+                        }
+                        let ongoing_pid = entry.producer_id;
+                        let ongoing_epoch = entry.producer_epoch;
+                        if enable_2pc {
+                            entry.txn_timeout_ms = i32::MAX;
+                        }
+                        let (next_pid, next_epoch) =
+                            stage_recovery_identity(&mut entry, &coord.producer_ids).await?;
+                        entry.last_update_ms = now_ms;
+                        Some((
+                            entry.clone(),
+                            next_pid,
+                            next_epoch,
+                            ongoing_pid,
+                            ongoing_epoch,
+                        ))
+                    } else {
+                        None
+                    }
+                };
+                if let Some((snapshot, next_pid, next_epoch, ongoing_pid, ongoing_epoch)) = recovery
+                {
+                    coord.put(snapshot, txnv).await?;
+                    return Ok(InitProducerIdResponse {
+                        error_code: codes::NONE,
+                        producer_id: next_pid.get(),
+                        producer_epoch: next_epoch,
+                        ongoing_txn_producer_id: ongoing_pid.get(),
+                        ongoing_txn_producer_epoch: ongoing_epoch,
+                        ..Default::default()
+                    });
+                }
+                let state = existing.lock().await.state;
+                if matches!(state, TxnState::PrepareCommit | TxnState::PrepareAbort) {
+                    return Ok(InitProducerIdResponse {
+                        error_code: codes::CONCURRENT_TRANSACTIONS,
+                        producer_id: -1,
+                        producer_epoch: -1,
+                        ..Default::default()
+                    });
+                }
+            }
+
             // Reusing tid — bump epoch (KIP-1319 v2). If prior state was
             // Ongoing, write PrepareAbort + dispatch abort markers before
             // responding.
-            {
+            let aborted_ongoing = {
                 let mut e = existing.lock().await;
                 if matches!(e.state, TxnState::Ongoing) {
                     // Transition to PrepareAbort; persist; dispatch markers.
+                    let request_pid = crate::txn::handlers::end_txn::client_producer_identity(&e).0;
                     e.state = TxnState::PrepareAbort;
+                    crate::txn::handlers::end_txn::prepare_completion_identities(
+                        &mut e,
+                        txnv,
+                        &coord.producer_ids,
+                    )
+                    .await?;
                     e.last_update_ms = now_ms;
                     let entry_clone = e.clone();
                     drop(e); // release lock while we fan out markers
@@ -268,23 +338,35 @@ async fn handle_transactional(
                     let mut e2 = existing.lock().await;
                     e2.state = TxnState::CompleteAbort;
                     e2.last_update_ms = now_millis();
+                    let (completed_pid, completed_epoch) =
+                        crate::txn::handlers::end_txn::completion_producer_identity(&e2);
+                    if completed_pid != request_pid {
+                        e2.prev_producer_id = request_pid;
+                    }
+                    e2.producer_id = completed_pid;
+                    e2.producer_epoch = completed_epoch;
+                    e2.next_producer_id = crabka_log::ProducerId(-1);
+                    e2.next_producer_epoch = -1;
+                    e2.partitions.clear();
                     let snap = e2.clone();
                     drop(e2);
                     coord.put(snap, txnv).await?;
+                    true
+                } else {
+                    false
                 }
-            }
+            };
 
             // Bump epoch on the existing entry. Persist a new TxnEntry with
             // new epoch, Empty state, cleared partitions.
-            let mut e3 = existing.lock().await;
-            let new_epoch = e3.producer_epoch.checked_add(1).unwrap_or(0);
-            *e3 = TxnEntry::new_empty(
-                tid.to_string(),
-                e3.producer_id,
-                new_epoch,
-                txn_timeout,
-                now_ms,
-            );
+            let current = coord.get(tid).unwrap_or(existing);
+            let mut e3 = current.lock().await;
+            let (new_pid, new_epoch) = if aborted_ongoing && txnv.verified() {
+                (e3.producer_id, e3.producer_epoch)
+            } else {
+                next_init_producer_identity(&e3, txnv, &coord.producer_ids).await?
+            };
+            *e3 = TxnEntry::new_empty(tid.to_string(), new_pid, new_epoch, txn_timeout, now_ms);
             let snap = e3.clone();
             drop(e3);
             coord.put(snap.clone(), txnv).await?;
@@ -299,33 +381,46 @@ async fn handle_transactional(
     }
 }
 
+async fn next_init_producer_identity(
+    entry: &TxnEntry,
+    txnv: crate::txn::version::TxnVersion,
+    producer_ids: &crate::producer_id_manager::ProducerIdManager,
+) -> Result<(crabka_log::ProducerId, i16), BrokerError> {
+    let (pid, epoch) = crate::txn::handlers::end_txn::client_producer_identity(entry);
+    if txnv.verified() {
+        crate::txn::handlers::end_txn::next_producer_identity(txnv, pid, epoch, producer_ids).await
+    } else {
+        match epoch.checked_add(1) {
+            Some(next_epoch) => Ok((pid, next_epoch)),
+            None => Ok(producer_ids.allocate().await?),
+        }
+    }
+}
+
+async fn stage_recovery_identity(
+    entry: &mut TxnEntry,
+    producer_ids: &crate::producer_id_manager::ProducerIdManager,
+) -> Result<(crabka_log::ProducerId, i16), BrokerError> {
+    let (client_pid, client_epoch) = crate::txn::handlers::end_txn::client_producer_identity(entry);
+    let (next_pid, next_epoch) = crate::txn::handlers::end_txn::next_producer_identity(
+        crate::txn::version::TxnVersion::Verified,
+        client_pid,
+        client_epoch,
+        producer_ids,
+    )
+    .await?;
+    entry.next_producer_id = next_pid;
+    entry.next_producer_epoch = next_epoch;
+    Ok((next_pid, next_epoch))
+}
+
 async fn dispatch_abort_markers(
     coord: &TxnCoordinator,
     entry: &TxnEntry,
 ) -> Result<(), BrokerError> {
-    use crate::txn::marker::{MarkerType, build_marker_batch};
-    for tp in &entry.partitions {
-        let Some(part) = coord.partitions.get(&tp.topic, tp.partition) else {
-            // Not locally-led; would require inter-broker WriteTxnMarkers
-            // (Tasks 15-16). For abort-on-init-due-to-stale-Ongoing (rare),
-            // log + skip; the data partition retains the dangling open txn
-            // but the new epoch prevents the original producer from completing.
-            tracing::warn!(
-                topic = %tp.topic,
-                partition = tp.partition.get(),
-                "abort marker dispatch needs inter-broker WriteTxnMarkers (Tasks 15-16)"
-            );
-            continue;
-        };
-        let marker = build_marker_batch(
-            entry.producer_id,
-            entry.producer_epoch,
-            part.log_end_offset(),
-            MarkerType::Abort,
-        );
-        part.produce_batch(marker).await?;
-    }
-    Ok(())
+    coord
+        .dispatch_transaction_markers(entry, crate::txn::marker::MarkerType::Abort)
+        .await
 }
 
 #[cfg(test)]
@@ -394,11 +489,11 @@ mod tests {
         );
     }
 
-    /// `dispatch_abort_markers` skips a partition in the entry that isn't
-    /// hosted locally, and it reports no error. There is no marker to
-    /// dispatch. This is the loop's `else` branch.
+    /// Without remote transport, a partition that is not hosted locally must
+    /// fail the abort. Advancing the transaction without its marker would leave
+    /// an open transaction in the data partition.
     #[tokio::test]
-    async fn dispatch_abort_markers_skips_non_local_partition() {
+    async fn dispatch_abort_markers_rejects_missing_remote_transport() {
         let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
         let coord = TxnCoordinator::new(
             crabka_audit::NodeId(1),
@@ -412,10 +507,27 @@ mod tests {
             topic: "ghost".to_string(),
             partition: PartitionIndex(0),
         });
-        // No local partition registered → nothing appended, no error.
-        dispatch_abort_markers(&coord, &entry)
-            .await
-            .expect("skip non-local partition without error");
+        assert!(dispatch_abort_markers(&coord, &entry).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn recovery_identity_advances_on_every_call_and_rotates_before_marker_epoch() {
+        let ids = crate::producer_id_manager::ProducerIdManager::new();
+        let mut entry = TxnEntry::new_empty("tid-recover".into(), ProducerId(7), 3, i32::MAX, 0);
+        entry.state = TxnState::Ongoing;
+
+        assert!(stage_recovery_identity(&mut entry, &ids).await.unwrap() == (ProducerId(7), 4));
+        assert!(stage_recovery_identity(&mut entry, &ids).await.unwrap() == (ProducerId(7), 5));
+        assert!(entry.producer_id == 7);
+        assert!(entry.producer_epoch == 3);
+
+        entry.next_producer_id = ProducerId(7);
+        entry.next_producer_epoch = i16::MAX - 1;
+        let (rotated_pid, rotated_epoch) = stage_recovery_identity(&mut entry, &ids).await.unwrap();
+        assert!(rotated_pid != 7);
+        assert!(rotated_epoch == 0);
+        assert!(entry.producer_id == 7);
+        assert!(entry.producer_epoch == 3);
     }
 
     #[tokio::test]
@@ -490,6 +602,124 @@ mod tests {
                 .expect("persisted transaction entry");
             assert!(entry.lock().await.txn_timeout_ms == expected_ms, "{tid}");
         }
+
+        let ongoing = broker
+            .txn_coordinator
+            .get(tids[2])
+            .expect("2PC transaction entry");
+        let (ongoing_pid, ongoing_epoch, snapshot) = {
+            let mut entry = ongoing.lock().await;
+            entry.state = TxnState::Ongoing;
+            (entry.producer_id, entry.producer_epoch, entry.clone())
+        };
+        broker
+            .txn_coordinator
+            .put(snapshot, crate::txn::version::TxnVersion::Verified)
+            .await
+            .expect("persist ongoing 2PC transaction");
+
+        let recovery_request = InitProducerIdRequest {
+            transactional_id: Some(tids[2].to_string()),
+            transaction_timeout_ms: 500,
+            enable2_pc: true,
+            keep_prepared_txn: true,
+            ..Default::default()
+        };
+        let recovery_response = handle(
+            &broker,
+            version,
+            3,
+            &crate::test_support::encode_request(&recovery_request, version),
+            &context,
+        )
+        .await
+        .expect("recover prepared transaction");
+        let recovery_response: InitProducerIdResponse =
+            crate::test_support::decode_response(&recovery_response, version);
+        assert!(recovery_response.error_code == codes::NONE);
+        assert!(recovery_response.ongoing_txn_producer_id == ongoing_pid.get());
+        assert!(recovery_response.ongoing_txn_producer_epoch == ongoing_epoch);
+
+        let second_recovery_response = handle(
+            &broker,
+            version,
+            4,
+            &crate::test_support::encode_request(&recovery_request, version),
+            &context,
+        )
+        .await
+        .expect("recover prepared transaction again");
+        let second_recovery_response: InitProducerIdResponse =
+            crate::test_support::decode_response(&second_recovery_response, version);
+        assert!(second_recovery_response.error_code == codes::NONE);
+        assert!(second_recovery_response.producer_id == recovery_response.producer_id);
+        assert!(second_recovery_response.producer_epoch == recovery_response.producer_epoch + 1);
+        assert!(second_recovery_response.ongoing_txn_producer_id == ongoing_pid.get());
+        assert!(second_recovery_response.ongoing_txn_producer_epoch == ongoing_epoch);
+
+        let end_version = crabka_protocol::owned::end_txn_response::MAX_VERSION;
+        let fenced_end_request = crabka_protocol::owned::end_txn_request::EndTxnRequest {
+            transactional_id: tids[2].to_string(),
+            producer_id: recovery_response.producer_id,
+            producer_epoch: recovery_response.producer_epoch,
+            committed: true,
+            ..Default::default()
+        };
+        let fenced_end_response = crate::txn::handlers::end_txn::handle(
+            &broker,
+            end_version,
+            5,
+            &crate::test_support::encode_request(&fenced_end_request, end_version),
+            &context,
+        )
+        .await
+        .expect("reject fenced recovery client");
+        let fenced_end_response: crabka_protocol::owned::end_txn_response::EndTxnResponse =
+            crate::test_support::decode_response(&fenced_end_response, end_version);
+        assert!(fenced_end_response.error_code == codes::INVALID_PRODUCER_EPOCH);
+
+        let end_request = crabka_protocol::owned::end_txn_request::EndTxnRequest {
+            transactional_id: tids[2].to_string(),
+            producer_id: second_recovery_response.producer_id,
+            producer_epoch: second_recovery_response.producer_epoch,
+            committed: true,
+            ..Default::default()
+        };
+        let end_response = crate::txn::handlers::end_txn::handle(
+            &broker,
+            end_version,
+            6,
+            &crate::test_support::encode_request(&end_request, end_version),
+            &context,
+        )
+        .await
+        .expect("complete recovered transaction");
+        let end_response: crabka_protocol::owned::end_txn_response::EndTxnResponse =
+            crate::test_support::decode_response(&end_response, end_version);
+        assert!(end_response.error_code == codes::NONE);
+        assert!(end_response.producer_id == second_recovery_response.producer_id);
+        assert!(end_response.producer_epoch == second_recovery_response.producer_epoch + 1);
+
+        let retry_response = crate::txn::handlers::end_txn::handle(
+            &broker,
+            end_version,
+            7,
+            &crate::test_support::encode_request(&end_request, end_version),
+            &context,
+        )
+        .await
+        .expect("retry recovered transaction completion");
+        let retry_response: crabka_protocol::owned::end_txn_response::EndTxnResponse =
+            crate::test_support::decode_response(&retry_response, end_version);
+        assert!(retry_response == end_response);
+        let completed = broker
+            .txn_coordinator
+            .get(tids[2])
+            .expect("completed 2PC transaction entry");
+        let completed = completed.lock().await;
+        assert!(completed.state == TxnState::CompleteCommit);
+        assert!(completed.next_producer_id.is_none());
+        assert!(completed.next_producer_epoch == -1);
         broker_handle.shutdown().await;
     }
 }

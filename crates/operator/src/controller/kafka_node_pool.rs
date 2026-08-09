@@ -89,7 +89,7 @@ pub enum PoolValidationError {
     JbodNeedsTwoVolumes(usize),
     #[error("spec.storage.volumes has a duplicate id {0}")]
     JbodDuplicateVolumeId(i32),
-    #[error("spec.storage.volumes set changed: adding/removing JBOD disks is not yet supported")]
+    #[error("spec.storage.volumes is immutable after the StatefulSet is created")]
     JbodVolumesImmutable,
 }
 
@@ -1245,7 +1245,8 @@ fn default_resources() -> ResourceRequirements {
 /// - storage-type switch (`Ephemeral` / `PersistentClaim` / `Jbod`).
 /// - `class` change on any matched disk.
 /// - `size` decrease on any matched disk.
-/// - JBOD disk-set change (adding/removing disks, deferred).
+/// - JBOD disk-set change. `StatefulSet` volume-claim templates are immutable,
+///   and silently dropping a disk can lose broker data.
 ///
 /// `delete_claim` is *not* checked: it only affects the `StatefulSet`'s
 /// retention-policy field (mutable), not the PVC templates this compares.
@@ -1337,8 +1338,8 @@ fn check_class_and_shrink(
 /// JBOD-vs-JBOD monotonic check. Disks are matched by identity: the
 /// `data` template ↔ the desired primary (lowest id), and each
 /// `data-{N}` template ↔ desired disk id `N`. The non-primary id set
-/// must be identical (adding/removing disks — and reassigning the
-/// primary — is deferred), and each matched disk's `class`/`size` obey
+/// must be identical because `StatefulSet` claim templates and the primary-disk
+/// identity are immutable. Each matched disk's `class`/`size` obeys
 /// [`check_class_and_shrink`].
 fn validate_jbod_change(
     desired: &crate::crd::JbodSpec,
@@ -1445,8 +1446,7 @@ fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
         ),
         PoolValidationError::JbodVolumesImmutable => (
             "StorageImmutable",
-            "spec.storage.volumes set changed: adding/removing JBOD disks is not yet supported"
-                .to_string(),
+            "spec.storage.volumes is immutable after the StatefulSet is created".to_string(),
         ),
     };
     condition("Ready", "False", reason, &message)

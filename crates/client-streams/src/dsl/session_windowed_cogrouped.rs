@@ -19,6 +19,7 @@ use crate::{
         kgrouped::mint_store_name,
         ktable::KTable,
         names,
+        session_windowed_kgrouped::session_suppress_factory,
         windows::{SessionWindowedSerde, SessionWindows, Windowed},
     },
     processor::serde::Serde,
@@ -67,14 +68,8 @@ where
     /// Session-windowed terminal aggregation. It produces a
     /// `KTable<Windowed<K>, VOut>`.
     ///
-    /// The `merger` combines two session aggregates when the runtime merges
-    /// sessions. Session windows need it, because no default merger exists.
-    ///
-    /// Note: the returned table carries no suppress factory, so a
-    /// `.suppress(...)` call on it fails at topology-build time. Suppress on
-    /// windowed cogroup outputs is a deferred follow-up. The emit semantics are
-    /// emit-on-update across the cogroup surface, which is the KIP-150 slice
-    /// scope.
+    /// The `merger` combines two session aggregates when sessions are merged
+    /// (required for session windows — no default merger exists).
     pub fn aggregate_explicit<KS, VS, I, M>(
         self,
         init: I,
@@ -89,6 +84,10 @@ where
     {
         let materialized = materialized.into();
         let store_name = mint_store_name(&self.builder, &materialized, names::AGGREGATE_STORE);
+        let suppress_factory = session_suppress_factory::<K, VOut, KS, VS>(
+            materialized.key_serde.clone(),
+            materialized.value_serde.clone(),
+        );
         let Materialized {
             key_serde,
             value_serde,
@@ -134,6 +133,7 @@ where
             value_serde,
         )
         .with_window_grace(Some(self.windows.grace))
+        .with_suppress_factory(Some(suppress_factory))
     }
 }
 
@@ -143,7 +143,7 @@ mod caching_tests {
     use crabka_units::prelude::*;
 
     use crate::{
-        I64Serde, Materialized, Produced, SessionWindows, StringSerde,
+        BufferConfig, I64Serde, Materialized, Produced, SessionWindows, StringSerde, Suppressed,
         dsl::{StreamsBuilder, windows::SessionWindowedSerde},
         store::backend::StoreBackend,
     };
@@ -163,6 +163,7 @@ mod caching_tests {
             |_k: &String, a: i64, b: i64| a + b,
             Materialized::with(StringSerde, I64Serde).as_store("cg"),
         )
+        .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
         .to_stream()
         .to_explicit(
             "out",

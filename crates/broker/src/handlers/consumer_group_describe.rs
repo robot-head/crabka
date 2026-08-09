@@ -11,7 +11,6 @@ use crabka_protocol::{
         consumer_group_describe_response::{ConsumerGroupDescribeResponse, DescribedGroup},
     },
 };
-use futures_util::future::BoxFuture;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -27,74 +26,89 @@ const GROUP_STATE_EMPTY: &str = "EMPTY";
 /// Wire `group_state` reported for a next-gen group with at least one member.
 const GROUP_STATE_STABLE: &str = "STABLE";
 
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    ctx: &crate::handlers::RequestContext<'_>,
+) -> Result<Bytes, BrokerError> {
     let coordinator = broker.group_coordinator.clone();
     let image = broker.controller.current_image();
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
-        let req = ConsumerGroupDescribeRequest::decode(&mut cur, version)?;
+    let mut cur: &[u8] = req_bytes;
+    let req = ConsumerGroupDescribeRequest::decode(&mut cur, version)?;
 
-        let mut described: Vec<DescribedGroup> = Vec::with_capacity(req.group_ids.len());
-        let next_gen_enabled = coordinator.config.next_gen_enabled();
-        for group_id in &req.group_ids {
-            let mut row = ok_row(group_id);
-            // KIP-848 / KIP-584: next-gen describe requires finalized
-            // group.version >= 1; below that — including UNFINALIZED, which
-            // means disabled — reject (consistent with the heartbeat fallback).
-            if group_version_disabled(&image) {
-                row.error_code = codes::UNSUPPORTED_VERSION;
-                described.push(row);
-                continue;
-            }
-            if next_gen_config_disabled(next_gen_enabled) {
-                row.error_code = codes::GROUP_ID_NOT_FOUND;
-                described.push(row);
-                continue;
-            }
-            // Only next-gen (consumer) groups are described here; a classic
-            // group (or an unknown id) is GROUP_ID_NOT_FOUND. The `Describe` arm
-            // dispatches on the actor's LIVE `group.kind`: it replies ONLY for a
-            // consumer-kind group and drops the sender otherwise, so an UPGRADED
-            // group (spawned classic, now consumer in place via KIP-848) is
-            // reachable while a classic group's no-reply maps to
-            // GROUP_ID_NOT_FOUND — without consulting the stale spawn-time
-            // `h.kind`.
-            let Some(handle) = coordinator.find(group_id) else {
-                row.error_code = codes::GROUP_ID_NOT_FOUND;
-                described.push(row);
-                continue;
-            };
-            let (tx, rx) = oneshot::channel();
-            if handle
-                .tx
-                .send(GroupActorMessage::Describe { reply: tx })
-                .await
-                .is_err()
-            {
-                row.error_code = codes::COORDINATOR_LOAD_IN_PROGRESS;
-                described.push(row);
-                continue;
-            }
-            if let Ok(view) = rx.await {
-                row.group_state = group_state_for_member_count(view.members.len());
-                described.push(row);
-            } else {
-                // No reply means the live group is classic (not describable via
-                // api 69), which surfaces as GROUP_ID_NOT_FOUND — matching the
-                // pre-refactor behavior for a classic group.
-                row.error_code = codes::GROUP_ID_NOT_FOUND;
-                described.push(row);
-            }
+    let mut described: Vec<DescribedGroup> = Vec::with_capacity(req.group_ids.len());
+    let next_gen_enabled = coordinator.config.next_gen_enabled();
+    for group_id in &req.group_ids {
+        let mut row = ok_row(group_id);
+        if crate::handlers::acl_denied(
+            broker.config.authorizer.as_ref(),
+            &image,
+            ctx,
+            crabka_metadata::ResourceType::Group,
+            group_id,
+            crabka_metadata::AclOperation::Describe,
+        ) {
+            row.error_code = codes::GROUP_AUTHORIZATION_FAILED;
+            described.push(row);
+            continue;
         }
-        let resp = response(described);
-        crate::handlers::encode_response(&resp, version)
-    })
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, group_id) {
+            row.error_code = error_code;
+            described.push(row);
+            continue;
+        }
+        // KIP-848 / KIP-584: next-gen describe requires finalized
+        // group.version >= 1; below that — including UNFINALIZED, which
+        // means disabled — reject (consistent with the heartbeat fallback).
+        if group_version_disabled(&image) {
+            row.error_code = codes::UNSUPPORTED_VERSION;
+            described.push(row);
+            continue;
+        }
+        if next_gen_config_disabled(next_gen_enabled) {
+            row.error_code = codes::GROUP_ID_NOT_FOUND;
+            described.push(row);
+            continue;
+        }
+        // Only next-gen (consumer) groups are described here; a classic
+        // group (or an unknown id) is GROUP_ID_NOT_FOUND. The `Describe` arm
+        // dispatches on the actor's LIVE `group.kind`: it replies ONLY for a
+        // consumer-kind group and drops the sender otherwise, so an UPGRADED
+        // group (spawned classic, now consumer in place via KIP-848) is
+        // reachable while a classic group's no-reply maps to
+        // GROUP_ID_NOT_FOUND — without consulting the stale spawn-time
+        // `h.kind`.
+        let Some(handle) = coordinator.find(group_id) else {
+            row.error_code = codes::GROUP_ID_NOT_FOUND;
+            described.push(row);
+            continue;
+        };
+        let (tx, rx) = oneshot::channel();
+        if handle
+            .tx
+            .send(GroupActorMessage::Describe { reply: tx })
+            .await
+            .is_err()
+        {
+            row.error_code = codes::COORDINATOR_LOAD_IN_PROGRESS;
+            described.push(row);
+            continue;
+        }
+        if let Ok(view) = rx.await {
+            row.group_state = group_state_for_member_count(view.members.len());
+            described.push(row);
+        } else {
+            // No reply means the live group is classic (not describable via
+            // api 69), which surfaces as GROUP_ID_NOT_FOUND — matching the
+            // pre-refactor behavior for a classic group.
+            row.error_code = codes::GROUP_ID_NOT_FOUND;
+            described.push(row);
+        }
+    }
+    let resp = response(described);
+    crate::handlers::encode_response(&resp, version)
 }
 
 fn ok_row(group_id: &str) -> DescribedGroup {
@@ -256,8 +270,11 @@ mod tests {
         let (broker_handle, _dir) = start_broker().await;
         let broker = broker_handle.broker_arc_for_test();
         let req = request(vec!["missing-group"]);
+        let principal = crate::test_support::principal("admin");
+        let peer = crate::test_support::peer();
+        let ctx = crate::test_support::request_context(&principal, &peer, "admin-client");
 
-        let bytes = handle(&broker, VERSION, 3, &req)
+        let bytes = handle(&broker, VERSION, 3, &req, &ctx)
             .await
             .expect("ConsumerGroupDescribe handler");
         let resp = decode_response(&bytes);

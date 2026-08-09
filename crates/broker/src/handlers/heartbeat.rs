@@ -49,6 +49,17 @@ pub(crate) async fn handle(
             }
         }
 
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return crate::handlers::encode_response(
+                &HeartbeatResponse {
+                    error_code,
+                    throttle_time_ms: 0,
+                    ..Default::default()
+                },
+                version,
+            );
+        }
+
         let error_code = match coordinator.find(&req.group_id) {
             None => codes::UNKNOWN_MEMBER_ID,
             Some(handle) => {

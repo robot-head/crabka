@@ -525,21 +525,9 @@ fn grace_buffer_changelog_matches_golden_wire() {
 /// from the table sources. We assert only the observable `out` sequence, plus the
 /// assertion below that no extra changelog appeared.
 ///
-/// IGNORED pending a Task-4 join-read fix. With BOTH sides versioned, each join
-/// processor reads the OTHER side's current value with
-/// `ctx.get_state_store::<K, V>(other_store)`, at `ktable_join.rs` lines
-/// ~121/~188. That call downcasts to `KeyValueBytesStore` and returns `None` for
-/// the OTHER side's `VersionedBytesStore`. So the inner join never sees both
-/// sides present and emits NOTHING. The actual `out` is `[]` instead of
-/// `[(k,"1|2"),(k,"3|2")]`.
-///
-/// The out-of-order *gate* itself reads the SELF versioned store. It is correct
-/// and unit-tested in
-/// `ktable_join::tests::versioned_this_suppresses_out_of_order`. The missing
-/// piece is the versioned-aware OTHER-side read in the join processors. The
-/// golden expectation below is left CORRECT and is not adjusted to the wrong
-/// `[]`. Once the join reads the other side through the versioned store when it
-/// is versioned, remove `#[ignore]` and this test passes as-is.
+/// Both join processors use the versioned-store API for the other side's latest
+/// value and use their own versioned store to suppress stale updates. This test
+/// keeps that two-sided behavior pinned to the JVM result.
 #[test]
 fn table_table_versioned_join_matches_golden() {
     let golden = load_table_table_golden();

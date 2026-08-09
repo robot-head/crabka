@@ -1,23 +1,18 @@
 //! Pure decision core of the transaction coordinator's `EndTxn` path.
 //!
-//! It is separate from the handler so that a model checker can drive the
-//! KIP-98 and EOS state machine on its own. This module does no I/O.
-//!
-//! The phase-3 primitives `validate_complete_reacquire` and
-//! `next_producer_identity` live in `handlers::end_txn`, next to the handler
-//! that also persists. This module wraps them into one decision that both the
-//! handler and the stateright model can drive. See `decision_model.rs` and the
-//! design at
+//! The Phase-3 revalidation primitive lives in `handlers::end_txn` next to the
+//! handler that also persists. This module combines it with the completion
+//! identity selected during Phase 1 into one decision that the handler and the
+//! stateright model can drive. See `decision_model.rs` and the design:
 //! `docs/superpowers/specs/2026-06-14-crabka-txn-coordinator-model-design.md`.
 
 use crabka_log::ProducerId;
 
 use super::{
-    handlers::end_txn::{ReacquireDecision, next_producer_identity, validate_complete_reacquire},
+    handlers::end_txn::{ReacquireDecision, validate_complete_reacquire},
     state::{TxnEntry, TxnState},
-    version::TxnVersion,
 };
-use crate::{codes, producer_id_manager::ProducerIdManager};
+use crate::codes;
 
 /// Phase 1 of `EndTxn`: validates the `Ongoing → Prepare{Commit,Abort}`
 /// transition and applies it to `entry`.
@@ -69,31 +64,33 @@ pub(crate) enum CompletionDecision {
     Reject(i16),
 }
 
-/// Phase 3 of `EndTxn`: after the marker fan-out, it re-validates the
-/// re-acquired `entry` and decides whether to finalise.
-///
-/// The function is a pure wrapper over `validate_complete_reacquire` and
-/// `next_producer_identity`. `next_producer_identity` bumps the producer epoch
-/// at `TV_2`, so the broker fences a zombie that still holds the old epoch.
+/// Phase 3 of `EndTxn`: after marker fan-out, revalidate the entry and decide
+/// whether to adopt the completion identity that was persisted during Phase 1.
+/// The decision does not allocate or increment an identity.
 pub(crate) fn decide_end_txn_completion(
     entry: &TxnEntry,
     expected_pid: ProducerId,
     expected_epoch: i16,
+    expected_completion_pid: ProducerId,
+    expected_completion_epoch: i16,
     prepare: TxnState,
     complete: TxnState,
-    txnv: TxnVersion,
-    ids: &ProducerIdManager,
 ) -> CompletionDecision {
+    if entry.state == complete
+        && entry.producer_id == expected_completion_pid
+        && entry.producer_epoch == expected_completion_epoch
+    {
+        return CompletionDecision::AlreadyComplete {
+            response_pid: entry.producer_id,
+            response_epoch: entry.producer_epoch,
+        };
+    }
     match validate_complete_reacquire(entry, expected_pid, expected_epoch, prepare, complete) {
-        ReacquireDecision::Proceed => {
-            let (response_pid, response_epoch) =
-                next_producer_identity(txnv, entry.producer_id, entry.producer_epoch, ids);
-            CompletionDecision::Proceed {
-                next_state: complete,
-                response_pid,
-                response_epoch,
-            }
-        }
+        ReacquireDecision::Proceed => CompletionDecision::Proceed {
+            next_state: complete,
+            response_pid: expected_completion_pid,
+            response_epoch: expected_completion_epoch,
+        },
         ReacquireDecision::AlreadyComplete => CompletionDecision::AlreadyComplete {
             response_pid: entry.producer_id,
             response_epoch: entry.producer_epoch,

@@ -291,6 +291,10 @@ pub struct BrokerConfig {
     pub default_min_insync_replicas: i32,
     /// Bytes copied per future-log move read.
     pub future_log_move_read_chunk: ByteSize,
+    /// Partition count for the consumer-offsets internal topic.
+    pub offsets_topic_num_partitions: i32,
+    /// Desired replication factor for the consumer-offsets internal topic.
+    pub offsets_topic_replication_factor: i16,
     /// Partition count for the transaction-state internal topic.
     pub transaction_state_num_partitions: i32,
     /// Maximum bytes requested by each transaction-state recovery read.
@@ -1081,6 +1085,8 @@ impl BrokerConfig {
             partition_writer_queue_depth: 64,
             default_min_insync_replicas: 1,
             future_log_move_read_chunk: mebibytes(1),
+            offsets_topic_num_partitions: 50,
+            offsets_topic_replication_factor: 3,
             transaction_state_num_partitions: 50,
             transaction_recovery_read_max: mebibytes(1),
             transaction_state_replication_factor: 3,
@@ -1827,6 +1833,10 @@ impl BrokerConfig {
                 self.share_coordinator.state_topic_num_partitions,
             ),
             (
+                "offsets_topic_num_partitions",
+                self.offsets_topic_num_partitions,
+            ),
+            (
                 "transaction_state_num_partitions",
                 self.transaction_state_num_partitions,
             ),
@@ -1847,6 +1857,10 @@ impl BrokerConfig {
             (
                 "share_state_replication_factor",
                 self.share_coordinator.state_topic_replication_factor,
+            ),
+            (
+                "offsets_topic_replication_factor",
+                self.offsets_topic_replication_factor,
             ),
             (
                 "transaction_state_replication_factor",
@@ -1989,6 +2003,8 @@ impl Default for BrokerConfig {
             partition_writer_queue_depth: 64,
             default_min_insync_replicas: 1,
             future_log_move_read_chunk: mebibytes(1),
+            offsets_topic_num_partitions: 50,
+            offsets_topic_replication_factor: 3,
             transaction_state_num_partitions: 50,
             transaction_recovery_read_max: mebibytes(1),
             transaction_state_replication_factor: 3,
@@ -2603,6 +2619,12 @@ mod tests {
             }),
             ("share_state_replication_factor must be positive", |c| {
                 c.share_coordinator.state_topic_replication_factor = 0;
+            }),
+            ("offsets_topic_num_partitions must be positive", |c| {
+                c.offsets_topic_num_partitions = 0;
+            }),
+            ("offsets_topic_replication_factor must be positive", |c| {
+                c.offsets_topic_replication_factor = 0;
             }),
             ("transaction_state_num_partitions must be positive", |c| {
                 c.transaction_state_num_partitions = 0;

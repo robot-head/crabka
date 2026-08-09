@@ -69,12 +69,8 @@ where
     }
 
     /// Emit on every update (default) or only on window close (KIP-825).
-    ///
-    /// For `on_window_close`, set the session grace `>=` the inactivity gap. With
-    /// `grace < gap` a late, in-gap record can re-open and re-merge a session
-    /// that already emitted its final result, which produces a duplicate final.
-    /// The processor does not yet drop such late records. The JVM golden pins the
-    /// exact late-record semantics.
+    /// Records whose merged session has already closed at the current stream
+    /// time are dropped for both strategies.
     #[must_use]
     pub fn emit_strategy(mut self, emit: EmitStrategy) -> Self {
         self.emit = emit;
@@ -429,12 +425,13 @@ where
 }
 
 /// Build the suppress-store factory for a session-aggregation result table.
-///
-/// The factory captures the session key serde ([`SessionWindowedSerde`]) and the
-/// aggregate value serde. A downstream `suppress` then registers a
-/// `SuppressBytesStore<Windowed<K>, VA>` with the session-windowed key serde and
-/// the matching changelog config.
-fn session_suppress_factory<K, VA, KS, VS>(key_serde: KS, value_serde: VS) -> SuppressStoreFactory
+/// Captures the session key serde ([`SessionWindowedSerde`]) + the aggregate value
+/// serde so a downstream `suppress` registers a `SuppressBytesStore<Windowed<K>, VA>`
+/// with the session-windowed key serde + the matching changelog config.
+pub(crate) fn session_suppress_factory<K, VA, KS, VS>(
+    key_serde: KS,
+    value_serde: VS,
+) -> SuppressStoreFactory
 where
     K: Any + Send + Sync + Clone,
     VA: Any + Send + Clone,

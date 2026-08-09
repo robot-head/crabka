@@ -59,6 +59,7 @@ use crabka_protocol::{
         delegation_token_record::DelegationTokenRecord as KDelegationTokenRecord,
         feature_level_record::FeatureLevelRecord as KFeatureLevelRecord,
         partition_record::PartitionRecord as KPartitionRecord,
+        producer_ids_record::ProducerIdsRecord as KProducerIdsRecord,
         register_broker_record::{BrokerEndpoint as KBrokerEndpoint, RegisterBrokerRecord},
         remove_access_control_entry_record::RemoveAccessControlEntryRecord,
         remove_topic_record::RemoveTopicRecord,
@@ -79,8 +80,8 @@ use crate::{
     records::{
         BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
         DelegationTokenRecord, DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord,
-        LeaderEpoch, MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord,
-        TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
+        GroupConfigRecord, LeaderEpoch, MetadataRecord, NodeId, PartitionRecord, ProducerIdsRecord,
+        QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
     },
 };
 
@@ -360,10 +361,9 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, TranslateError> {
 
 /// Convert a single [`MetadataRecord`] to its KIP-631 counterpart.
 ///
-/// Every modeled variant yields exactly one record, except `V1TopicConfig`,
-/// which can fan out to N `Config` records. Use [`to_kraft_records`] for that
-/// variant. A multi-key `V1TopicConfig` yields its *first* key here. A caller
-/// that must preserve every key must use [`to_kraft_records`].
+/// Whole-map config variants may fan out to N `Config` records; callers that
+/// must preserve every key must use [`to_kraft_records`]. For a fanned record,
+/// this function returns only the first translated key.
 ///
 /// # Errors
 /// [`TranslateError::NoCounterpart`] for raft control records and delete-ACL
@@ -381,8 +381,9 @@ pub fn to_kraft(
 
 /// Convert a single [`MetadataRecord`] to one or more KIP-631 records.
 ///
-/// Only a `V1TopicConfig` with N keys fans out, to N `Config` records, one
-/// per key. Every other modeled variant yields exactly one record.
+/// Whole-map topic, client-metrics, and group configs fan out to one `Config`
+/// record per set key plus one tombstone per removed key. Every other modeled
+/// variant yields exactly one record.
 ///
 /// # Errors
 /// Same as [`to_kraft`].
@@ -393,18 +394,16 @@ pub fn to_kraft_records(
     Ok(to_kraft_iter(rec, image)?.collect())
 }
 
-/// The engine and snapshot framing entrypoint.
-///
-/// This function translates one [`MetadataRecord`] to the KIP-631 value byte
-/// blobs to put on the log, one blob per fanned-out record. Most records yield
-/// one. A `V1TopicConfig` yields one per key ± tombstones, and a
-/// `V1DeleteAccessControlEntry` yields one per matched ACL.
-/// [`PartitionRecord`] is enveloped at apiVersion 1 so its KIP-858
-/// `directories` survive; every other modeled record frames at apiVersion 0.
-///
-/// The function yields an empty `Vec` when a record fans out to nothing, that
-/// is, an empty config clear with no prior keys, or a delete-ACL filter that
-/// matches nothing. Callers treat an all-empty batch as a committed no-op.
+/// The engine/snapshot framing entrypoint: translate one [`MetadataRecord`] to
+/// the KIP-631 value byte blobs to put on the log — one per fanned-out record
+/// (most records yield one; whole-map configs yield one per key plus
+/// tombstones, and `V1DeleteAccessControlEntry` yields one per matched ACL).
+/// [`PartitionRecord`] is
+/// enveloped at apiVersion 1 so its KIP-858 `directories` survive; every other
+/// modeled record frames at apiVersion 0. Yields an empty `Vec` when a record
+/// fans out to nothing (an empty config clear with no prior keys, or a
+/// delete-ACL filter matching nothing) — callers treat an all-empty batch as a
+/// committed no-op.
 ///
 /// apiVersion 0 is the "defaulted KIP-631 framing": the core fields Crabka
 /// populates all exist at v0, and the remaining higher-version KIP-631 extras
@@ -476,6 +475,64 @@ fn topic_config_to_kraft(
             output.push(KraftMetadataRecord::Config(ConfigRecord {
                 resource_type: 2,
                 resource_name: config.topic.clone(),
+                name: key.clone(),
+                ..Default::default()
+            }));
+        }
+    }
+    output
+}
+
+fn group_config_to_kraft(
+    config: &GroupConfigRecord,
+    image: &MetadataImage,
+) -> Vec<KraftMetadataRecord> {
+    let empty = std::collections::BTreeMap::new();
+    let old = image.group_config(&config.group_id).unwrap_or(&empty);
+    let mut output = Vec::with_capacity(config.configs.len());
+    for (key, value) in &config.configs {
+        output.push(KraftMetadataRecord::Config(ConfigRecord {
+            resource_type: 32,
+            resource_name: config.group_id.clone(),
+            name: key.clone(),
+            value: Some(value.clone()),
+            ..Default::default()
+        }));
+    }
+    for key in old.keys() {
+        if !config.configs.contains_key(key) {
+            output.push(KraftMetadataRecord::Config(ConfigRecord {
+                resource_type: 32,
+                resource_name: config.group_id.clone(),
+                name: key.clone(),
+                ..Default::default()
+            }));
+        }
+    }
+    output
+}
+
+fn client_metrics_config_to_kraft(
+    config: &crate::records::ClientMetricsConfigRecord,
+    image: &MetadataImage,
+) -> Vec<KraftMetadataRecord> {
+    let empty = std::collections::BTreeMap::new();
+    let old = image.client_metrics_config(&config.name).unwrap_or(&empty);
+    let mut output = Vec::with_capacity(config.configs.len());
+    for (key, value) in &config.configs {
+        output.push(KraftMetadataRecord::Config(ConfigRecord {
+            resource_type: 16,
+            resource_name: config.name.clone(),
+            name: key.clone(),
+            value: Some(value.clone()),
+            ..Default::default()
+        }));
+    }
+    for key in old.keys() {
+        if !config.configs.contains_key(key) {
+            output.push(KraftMetadataRecord::Config(ConfigRecord {
+                resource_type: 16,
+                resource_name: config.name.clone(),
                 name: key.clone(),
                 ..Default::default()
             }));
@@ -632,16 +689,28 @@ fn to_kraft_iter(
             })]
         }
         MetadataRecord::V1TopicConfig(c) => topic_config_to_kraft(c, image),
-        MetadataRecord::V1DeleteAccessControlEntry(filter) => delete_acl_to_kraft(filter, image),
-        // ----- records main's KIP-584/KIP-714 work added with no KIP-631 wire
-        // counterpart yet: carry verbatim (wincode body) in an Unknown envelope
-        // so Crabka-only logs/snapshots round-trip. They never reach a JVM peer
-        // in the static-quorum interop path (no snapshot fetch / no client-metrics
-        // there); full KIP-631 fidelity (real ClientMetricsRecord; deriving the
-        // features epoch from FeatureLevel offsets) is future work. -----
-        MetadataRecord::V1ClientMetricsConfig(_) => {
-            vec![wincode_carrier(rec, PRIVATE_CLIENT_METRICS_KEY)?]
+        MetadataRecord::V1GroupConfig(c) => group_config_to_kraft(c, image),
+        MetadataRecord::V1ProducerIds(record) => {
+            vec![KraftMetadataRecord::ProducerIds(KProducerIdsRecord {
+                broker_id: i32::try_from(record.broker_id.0).map_err(|_| {
+                    TranslateError::Invalid {
+                        field: "producer IDs broker id",
+                        detail: format!("node_id {} exceeds i32", record.broker_id),
+                    }
+                })?,
+                broker_epoch: record.broker_epoch,
+                next_producer_id: record.next_producer_id,
+                ..KProducerIdsRecord::default()
+            })]
         }
+        MetadataRecord::V1DeleteAccessControlEntry(filter) => delete_acl_to_kraft(filter, image),
+        // KIP-714 CLIENT_METRICS is a standard ConfigRecord resource (type 16).
+        MetadataRecord::V1ClientMetricsConfig(config) => {
+            client_metrics_config_to_kraft(config, image)
+        }
+        // Snapshot-only state pin. Kafka derives this epoch from FeatureLevel
+        // record offsets, but a materialized snapshot no longer contains those
+        // offsets. Preserve the already-derived value in a private carrier.
         MetadataRecord::V1FeaturesEpoch(_) => {
             vec![wincode_carrier(rec, PRIVATE_FEATURES_EPOCH_KEY)?]
         }
@@ -652,8 +721,8 @@ fn to_kraft_iter(
         // `PartitionRecord` here would decode back as a full-replace
         // `V1Partition` and clobber any reassignment / ISR change committed
         // between this record's encode and its apply. Instead it rides a
-        // Crabka-private `Unknown` carrier (like `V1ClientMetricsConfig` /
-        // `V1FeaturesEpoch`), so it decodes back to `V1PartitionDirAssignment`
+        // Crabka-private `Unknown` carrier (like `V1FeaturesEpoch`), so it
+        // decodes back to `V1PartitionDirAssignment`
         // and applies as a one-slot merge — genuinely order-independent.
         MetadataRecord::V1PartitionDirAssignment(_) => {
             vec![wincode_carrier(rec, PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY)?]
@@ -672,11 +741,10 @@ fn to_kraft_iter(
     Ok(recs.into_iter())
 }
 
-/// Crabka-private metadata-record apiKeys, well outside Kafka's real
-/// non-sequential range 0..=27, for records carried verbatim through the
-/// KIP-631 `Unknown` envelope. These are NOT wire-faithful to a JVM peer. They
-/// are Crabka-only round-trip carriers.
-const PRIVATE_CLIENT_METRICS_KEY: u32 = 1000;
+/// Crabka-private metadata-record apiKeys (well outside Kafka's real
+/// non-sequential range 0..=27) for records carried verbatim through the
+/// KIP-631 `Unknown` envelope. NOT wire-faithful to a JVM peer — Crabka-only
+/// round-trip carriers.
 const PRIVATE_FEATURES_EPOCH_KEY: u32 = 1001;
 /// KIP-858 directory-assignment delta carried verbatim so it stays a
 /// one-slot merge on apply (never a full-`PartitionRecord` replace).
@@ -877,6 +945,13 @@ pub fn from_kraft(
         KraftMetadataRecord::ClientQuota(q) => {
             Ok(MetadataRecord::V1ClientQuota(client_quota_from_kraft(q)))
         }
+        KraftMetadataRecord::ProducerIds(record) => {
+            Ok(MetadataRecord::V1ProducerIds(ProducerIdsRecord {
+                broker_id: node_id_from_wire(record.broker_id, "producer IDs broker id")?,
+                broker_epoch: record.broker_epoch,
+                next_producer_id: record.next_producer_id,
+            }))
+        }
         KraftMetadataRecord::DelegationToken(t) => Ok(MetadataRecord::V1DelegationToken(
             delegation_token_from_kraft(t)?,
         )),
@@ -912,8 +987,7 @@ pub fn from_kraft(
         // Crabka-private carriers (see `wincode_carrier`): decode the verbatim
         // wincode body back to the original record.
         KraftMetadataRecord::Unknown { api_key, body, .. }
-            if *api_key == PRIVATE_CLIENT_METRICS_KEY
-                || *api_key == PRIVATE_FEATURES_EPOCH_KEY
+            if *api_key == PRIVATE_FEATURES_EPOCH_KEY
                 || *api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY
                 || *api_key == PRIVATE_PARTITION_OFFSET_ADVANCE_KEY =>
         {
@@ -1117,6 +1191,44 @@ fn config_from_kraft(
             Ok(MetadataRecord::V1TopicConfig(TopicConfigRecord {
                 topic: c.resource_name.clone(),
                 overrides,
+            }))
+        }
+        16 => {
+            let mut configs = image
+                .client_metrics_config(&c.resource_name)
+                .cloned()
+                .unwrap_or_default();
+            match &c.value {
+                Some(v) => {
+                    configs.insert(c.name.clone(), v.clone());
+                }
+                None => {
+                    configs.remove(&c.name);
+                }
+            }
+            Ok(MetadataRecord::V1ClientMetricsConfig(
+                crate::records::ClientMetricsConfigRecord {
+                    name: c.resource_name.clone(),
+                    configs,
+                },
+            ))
+        }
+        32 => {
+            let mut configs = image
+                .group_config(&c.resource_name)
+                .cloned()
+                .unwrap_or_default();
+            match &c.value {
+                Some(v) => {
+                    configs.insert(c.name.clone(), v.clone());
+                }
+                None => {
+                    configs.remove(&c.name);
+                }
+            }
+            Ok(MetadataRecord::V1GroupConfig(GroupConfigRecord {
+                group_id: c.resource_name.clone(),
+                configs,
             }))
         }
         other => Err(TranslateError::Invalid {
@@ -1550,11 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn client_metrics_config_round_trips_via_private_carrier() {
-        // KIP-714 client-metrics config has no modeled KIP-631 counterpart yet,
-        // so `to_kraft` envelopes it verbatim in a Crabka-private `Unknown`
-        // carrier and `from_kraft` decodes it back. Snapshots round-trip it this
-        // way; it never reaches the JVM in the static mixed-quorum path.
+    fn client_metrics_config_uses_standard_kraft_config_records() {
         let rec = MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
             name: "metrics-sub-1".into(),
             configs: [
@@ -1564,14 +1672,56 @@ mod tests {
             .into_iter()
             .collect(),
         });
-        // The carrier is an `Unknown` record, not a modeled KIP-631 variant.
-        let k = to_kraft(&rec, &img()).unwrap();
-        assert2::assert!(matches!(
-            k,
-            crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
-                if api_key == PRIVATE_CLIENT_METRICS_KEY
+        let mut image = img();
+        let records = to_kraft_records(&rec, &image).unwrap();
+        assert2::assert!(records.len() == 2);
+        assert2::assert!(records.iter().all(|record| matches!(
+            record,
+            KraftMetadataRecord::Config(config) if config.resource_type == 16
+        )));
+        for record in records {
+            let decoded = from_kraft(&record, &image).unwrap();
+            image.apply(&decoded);
+        }
+        assert2::assert!(
+            image.client_metrics_config("metrics-sub-1")
+                == match &rec {
+                    MetadataRecord::V1ClientMetricsConfig(config) => Some(&config.configs),
+                    _ => unreachable!(),
+                }
+        );
+    }
+
+    #[test]
+    fn client_metrics_config_clear_emits_standard_tombstones() {
+        let mut image = img();
+        image.apply(&MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: "metrics-sub-1".into(),
+                configs: std::collections::BTreeMap::from([
+                    ("interval.ms".into(), "60000".into()),
+                    ("metrics".into(), "org.apache.kafka".into()),
+                ]),
+            },
         ));
-        round_trip(&rec, &img());
+        let clear = MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
+            name: "metrics-sub-1".into(),
+            configs: std::collections::BTreeMap::new(),
+        });
+
+        let records = to_kraft_records(&clear, &image).unwrap();
+
+        assert2::assert!(records.len() == 2);
+        assert2::assert!(records.iter().all(|record| matches!(
+            record,
+            KraftMetadataRecord::Config(config)
+                if config.resource_type == 16 && config.value.is_none()
+        )));
+        for record in records {
+            let decoded = from_kraft(&record, &image).unwrap();
+            image.apply(&decoded);
+        }
+        assert2::assert!(image.client_metrics_config("metrics-sub-1").is_none());
     }
 
     #[test]
@@ -1794,6 +1944,59 @@ mod tests {
         }
         // All overrides gone (apply of an empty whole-map removes the entry).
         assert2::assert!(image.topic_config("t").is_none());
+    }
+
+    #[test]
+    fn group_config_change_uses_kraft_group_records_and_merges_back() {
+        let mut image = img();
+        image.apply(&MetadataRecord::V1GroupConfig(GroupConfigRecord {
+            group_id: "streams-app".into(),
+            configs: std::collections::BTreeMap::from([
+                ("streams.num.standby.replicas".into(), "0".into()),
+                ("streams.num.warmup.replicas".into(), "2".into()),
+            ]),
+        }));
+        let submitted = MetadataRecord::V1GroupConfig(GroupConfigRecord {
+            group_id: "streams-app".into(),
+            configs: std::collections::BTreeMap::from([(
+                "streams.num.standby.replicas".into(),
+                "1".into(),
+            )]),
+        });
+
+        let records = to_kraft_records(&submitted, &image).expect("translate group config");
+        assert2::assert!(records.len() == 2);
+        assert2::assert!(records.iter().all(|record| matches!(
+            record,
+            KraftMetadataRecord::Config(config) if config.resource_type == 32
+        )));
+        for record in records {
+            let decoded = from_kraft(&record, &image).expect("decode group config");
+            image.apply(&decoded);
+        }
+        assert2::assert!(
+            image.group_config("streams-app")
+                == match &submitted {
+                    MetadataRecord::V1GroupConfig(config) => Some(&config.configs),
+                    _ => unreachable!(),
+                }
+        );
+    }
+
+    #[test]
+    fn producer_ids_use_standard_kraft_record() {
+        let image = img();
+        let submitted = MetadataRecord::V1ProducerIds(ProducerIdsRecord {
+            broker_id: NodeId(3),
+            broker_epoch: 11,
+            next_producer_id: 5_000,
+        });
+        let values = to_kraft_values(&submitted, &image).expect("encode producer IDs record");
+        assert2::assert!(values.len() == 1);
+        let (wire, version) = KraftMetadataRecord::decode_value(&values[0]).unwrap();
+        assert2::assert!(wire.api_key() == 15);
+        assert2::assert!(version == 0);
+        assert2::assert!(from_kraft(&wire, &image).unwrap() == submitted);
     }
 
     #[test]

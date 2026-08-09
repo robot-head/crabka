@@ -98,6 +98,18 @@ impl Client {
         conn.send(req).await
     }
 
+    /// Send a request to the bootstrap broker without registering a pending
+    /// response. Intended for protocol operations such as Produce `acks=0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection cannot be opened or cannot accept
+    /// the encoded request.
+    pub async fn send_no_response<R: ProtocolRequest>(&self, req: R) -> Result<(), ClientError> {
+        let conn = self.pool.bootstrap_connection().await?;
+        conn.send_no_response(req).await
+    }
+
     /// Drop the cached bootstrap connection and refresh the bootstrap address
     /// list from the original bootstrap string.
     ///
@@ -301,6 +313,55 @@ impl Client {
         .await
     }
 
+    /// Fetch one partition from a specific broker with the requested isolation
+    /// level. The broker address must have been learned through
+    /// [`refresh_metadata`](Client::refresh_metadata).
+    ///
+    /// # Errors
+    ///
+    /// Returns a connection, protocol, or broker error. A failed connection to
+    /// a known broker is evicted, metadata is refreshed, and the request is
+    /// retried once against the broker's current advertised address.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            broker_id,
+            topic = %fetch.topic,
+            partition = fetch.partition,
+            fetch_offset = fetch.fetch_offset,
+            isolation_level = fetch.isolation_level,
+        ),
+        err,
+    )]
+    pub async fn fetch_partition_with_isolation_on(
+        &self,
+        broker_id: i32,
+        fetch: crate::fetch::IsolatedFetch<'_>,
+    ) -> Result<Vec<crate::fetch::FetchedRecord>, ClientError> {
+        let conn = match self.pool.get(broker_id).await {
+            Ok(conn) => conn,
+            Err(ClientError::Disconnected) if !self.pool.knows_broker(broker_id) => {
+                self.pool.bootstrap_connection().await?
+            }
+            Err(ClientError::Connect { .. } | ClientError::Timeout(_) | ClientError::Io(_))
+                if self.pool.knows_broker(broker_id) =>
+            {
+                self.pool.evict(broker_id);
+                self.refresh_metadata().await?;
+                match self.pool.get(broker_id).await {
+                    Ok(conn) => conn,
+                    Err(ClientError::Disconnected) if !self.pool.knows_broker(broker_id) => {
+                        self.pool.bootstrap_connection().await?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        crate::fetch::fetch_partition_with_isolation(&conn, fetch).await
+    }
+
     /// Close the client and all pooled connections.
     // cargo-mutants: teardown; delegates to BrokerPool::close_all
     #[cfg_attr(test, mutants::skip)]
@@ -367,6 +428,38 @@ impl BrokerHandle<'_> {
             Err(e) => return Err(e),
         };
         conn.send(req).await
+    }
+
+    /// Send a request to this specific broker without waiting for a response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if routing, connection setup, encoding, or writer
+    /// enqueue fails.
+    pub async fn send_no_response<R: ProtocolRequest>(&self, req: R) -> Result<(), ClientError> {
+        let conn = match self.client.pool.get(self.broker_id).await {
+            Ok(conn) => conn,
+            Err(ClientError::Disconnected) if !self.client.pool.knows_broker(self.broker_id) => {
+                self.client.pool.bootstrap_connection().await?
+            }
+            Err(ClientError::Connect { .. } | ClientError::Timeout(_) | ClientError::Io(_))
+                if self.client.pool.knows_broker(self.broker_id) =>
+            {
+                self.client.pool.evict(self.broker_id);
+                self.client.refresh_metadata().await?;
+                match self.client.pool.get(self.broker_id).await {
+                    Ok(conn) => conn,
+                    Err(ClientError::Disconnected)
+                        if !self.client.pool.knows_broker(self.broker_id) =>
+                    {
+                        self.client.pool.bootstrap_connection().await?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        conn.send_no_response(req).await
     }
 }
 

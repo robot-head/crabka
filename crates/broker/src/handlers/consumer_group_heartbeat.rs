@@ -55,6 +55,10 @@ pub(crate) async fn handle(
             );
         }
 
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return crate::handlers::encode_response(&error(error_code), version);
+        }
+
         // KIP-848 / KIP-584: the next-gen protocol is gated on a finalized
         // group.version >= 1. Below that — including UNFINALIZED, which means
         // disabled — reject so the client falls back to the classic protocol.

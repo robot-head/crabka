@@ -5,7 +5,8 @@ use crabka_broker::{Broker, BrokerConfig};
 use crabka_schema_registry::{
     config::{RegistryConfig, SecurityConfig},
     election::{Election, PrimaryState},
-    kafkastore::KafkaStore,
+    format::SchemaType,
+    kafkastore::{KafkaStore, RegisterSchema},
     rest::{self, AppState, forward::ForwardState},
 };
 use tokio_util::sync::CancellationToken;
@@ -61,10 +62,9 @@ async fn single_node_becomes_primary() {
 
 struct Node {
     port: i32,
-    // kept alive so the node's background reader/store outlives `start_node`
-    // (the `_` prefix suppresses the never-read-field lint).
-    _store: Arc<KafkaStore>,
+    store: Arc<KafkaStore>,
     primary: tokio::sync::watch::Receiver<PrimaryState>,
+    election_cancel: CancellationToken,
     cancel: CancellationToken,
 }
 
@@ -78,8 +78,10 @@ async fn start_node(bootstrap: &str) -> Node {
     let port = i32::from(listener.local_addr().unwrap().port());
     let c = cfg(bootstrap, port);
     let cancel = CancellationToken::new();
+    let election_cancel = cancel.child_token();
     let store = KafkaStore::start(&c, cancel.clone()).await.unwrap();
-    let primary = Election::start(&c, cancel.clone()).await.unwrap();
+    let primary = Election::start(&c, election_cancel.clone()).await.unwrap();
+    store.install_primary(primary.clone());
     let fwd = ForwardState {
         primary: primary.clone(),
         http: reqwest::Client::new(),
@@ -101,8 +103,9 @@ async fn start_node(bootstrap: &str) -> Node {
     });
     Node {
         port,
-        _store: store,
+        store,
         primary,
+        election_cancel,
         cancel,
     }
 }
@@ -169,12 +172,15 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
         .await;
     }
 
-    // FAILOVER: stop the primary; the survivor must take over and accept writes.
-    if a_is_primary {
-        a.cancel.cancel();
+    // FAILOVER: stop only the primary's election session. Keep its store and
+    // reader alive so the test can prove its stale generation is fenced.
+    let stale_store = if a_is_primary {
+        a.election_cancel.cancel();
+        a.store.clone()
     } else {
-        b.cancel.cancel();
-    }
+        b.election_cancel.cancel();
+        b.store.clone()
+    };
     let survivor = if a_is_primary { &mut b } else { &mut a };
     await_state(&mut survivor.primary, 30, |s| s.is_primary).await;
     let r2 = http
@@ -188,6 +194,32 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
         .await
         .unwrap();
     assert2::assert!(r2.status() == 200);
-    survivor.cancel.cancel();
+
+    // The old primary still holds its stale local PrimaryState. Its barrier can
+    // catch up, but TxnOffsetCommit carries the old group generation/member and
+    // the coordinator must reject the transaction. The schema record remains
+    // aborted and invisible to READ_COMMITTED readers.
+    let stale_write = stale_store
+        .register(RegisterSchema {
+            subject: "stale-primary",
+            ty: SchemaType::Avro,
+            schema: r#"{"type":"string"}"#,
+            references: &[],
+            message_type: None,
+            import_id: None,
+            import_version: None,
+        })
+        .await;
+    assert2::assert!(stale_write.is_err());
+    assert2::assert!(
+        stale_store
+            .store
+            .read()
+            .versions("stale-primary", true)
+            .is_none()
+    );
+
+    a.cancel.cancel();
+    b.cancel.cancel();
     broker.shutdown().await;
 }

@@ -74,6 +74,18 @@ pub(crate) async fn handle(
         }
     }
 
+    if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+        return crate::handlers::encode_response(
+            &OffsetFetchResponse {
+                topics: Vec::new(),
+                error_code,
+                throttle_time_ms: 0,
+                ..Default::default()
+            },
+            version,
+        );
+    }
+
     // Fetch the group's committed offsets from its actor (a classic actor is
     // created for an unknown id; offsets are protocol-agnostic, so an existing
     // actor of either kind serves `FetchCommitted` the same way).
@@ -291,6 +303,16 @@ async fn handle_groups(
                 });
                 continue;
             }
+        }
+
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &grp.group_id) {
+            groups_out.push(OffsetFetchResponseGroup {
+                group_id: grp.group_id.clone(),
+                topics: Vec::new(),
+                error_code,
+                ..Default::default()
+            });
+            continue;
         }
 
         // Fetch the group's committed offsets from its actor (a classic actor

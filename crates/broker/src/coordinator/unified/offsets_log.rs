@@ -12,38 +12,54 @@ use crate::{
 };
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
-pub const OFFSETS_PARTITION: i32 = 0;
 
 #[async_trait]
 pub trait OffsetsLog: Send + Sync + std::fmt::Debug {
-    async fn append(&self, batch: RecordBatch) -> Result<(), BrokerError>;
+    async fn append(&self, group_id: &str, batch: RecordBatch) -> Result<(), BrokerError>;
 }
 
-/// Resolves `__consumer_offsets-0` on every `append` call. Bootstrap registers
-/// the partition *after* the broker constructs `GroupCoordinator`, so a
-/// snapshot taken at construction time would stay empty forever.
-#[derive(Debug)]
+/// Resolves the group-id's live `__consumer_offsets` partition at every
+/// append. Partitions are registered by bootstrap after `GroupCoordinator`
+/// construction, so the registry is intentionally consulted lazily.
 pub(crate) struct ProductionOffsetsLog {
     partitions: Arc<PartitionRegistry>,
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
+}
+
+impl std::fmt::Debug for ProductionOffsetsLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProductionOffsetsLog")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProductionOffsetsLog {
     #[must_use]
-    pub(crate) fn new(partitions: Arc<PartitionRegistry>) -> Self {
-        Self { partitions }
+    pub(crate) fn new(
+        partitions: Arc<PartitionRegistry>,
+        controller: Arc<dyn crate::metadata_source::MetadataSource>,
+    ) -> Self {
+        Self {
+            partitions,
+            controller,
+        }
     }
 }
 
 #[async_trait]
 impl OffsetsLog for ProductionOffsetsLog {
-    async fn append(&self, batch: RecordBatch) -> Result<(), BrokerError> {
+    async fn append(&self, group_id: &str, batch: RecordBatch) -> Result<(), BrokerError> {
+        let partition_id = crate::coordinator::partitioner::partition_for_group(
+            &self.controller.current_image(),
+            group_id,
+        );
         let Some(partition) = self
             .partitions
-            .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
+            .get(OFFSETS_TOPIC, PartitionIndex(partition_id))
         else {
             return Err(BrokerError::PartitionWriterDied {
                 topic: OFFSETS_TOPIC.into(),
-                partition: OFFSETS_PARTITION,
+                partition: partition_id,
             });
         };
         let (ack_tx, ack_rx) = oneshot::channel();
@@ -58,7 +74,7 @@ impl OffsetsLog for ProductionOffsetsLog {
         {
             return Err(BrokerError::PartitionWriterDied {
                 topic: OFFSETS_TOPIC.into(),
-                partition: OFFSETS_PARTITION,
+                partition: partition_id,
             });
         }
         match ack_rx.await {
@@ -66,7 +82,7 @@ impl OffsetsLog for ProductionOffsetsLog {
             Ok(Err(e)) => Err(e),
             Err(_) => Err(BrokerError::PartitionWriterDied {
                 topic: OFFSETS_TOPIC.into(),
-                partition: OFFSETS_PARTITION,
+                partition: partition_id,
             }),
         }
     }
@@ -76,7 +92,7 @@ pub mod fake {
     use crabka_protocol::records::RecordBatch;
     use tokio::sync::Mutex;
 
-    use super::{BrokerError, OFFSETS_PARTITION, OFFSETS_TOPIC, OffsetsLog, async_trait};
+    use super::{BrokerError, OFFSETS_TOPIC, OffsetsLog, async_trait};
 
     #[derive(Debug, Default)]
     pub struct InMemoryOffsetsLog {
@@ -86,14 +102,14 @@ pub mod fake {
 
     #[async_trait]
     impl OffsetsLog for InMemoryOffsetsLog {
-        async fn append(&self, batch: RecordBatch) -> Result<(), BrokerError> {
+        async fn append(&self, _group_id: &str, batch: RecordBatch) -> Result<(), BrokerError> {
             if self
                 .fail_next
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
             {
                 return Err(BrokerError::PartitionWriterDied {
                     topic: OFFSETS_TOPIC.into(),
-                    partition: OFFSETS_PARTITION,
+                    partition: 0,
                 });
             }
             self.appended.lock().await.push(batch);
@@ -196,8 +212,8 @@ mod tests {
             max_timestamp: 42,
             ..Default::default()
         };
-        log.append(b1.clone()).await.unwrap();
-        log.append(b2.clone()).await.unwrap();
+        log.append("g", b1.clone()).await.unwrap();
+        log.append("g", b2.clone()).await.unwrap();
         let got = log.batches().await;
         assert!(got.len() == 2);
         assert!(got[1].max_timestamp == 42);
@@ -208,7 +224,7 @@ mod tests {
         let log = fake::InMemoryOffsetsLog::default();
         log.fail_next
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        assert!(log.append(RecordBatch::default()).await.is_err());
-        assert!(log.append(RecordBatch::default()).await.is_ok());
+        assert!(log.append("g", RecordBatch::default()).await.is_err());
+        assert!(log.append("g", RecordBatch::default()).await.is_ok());
     }
 }

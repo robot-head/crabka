@@ -250,17 +250,16 @@ macro_rules! plain_dispatches {
 
 plain_dispatches!(register_plain_dispatches;
     (ApiVersions, api_versions_request, crate::handlers::api_versions::handle),
+    (AllocateProducerIds, allocate_producer_ids_request, crate::handlers::allocate_producer_ids::handle),
     (AddOffsetsToTxn, add_offsets_to_txn_request, crate::txn::handlers::add_offset_commits_to_txn::handle),
     (WriteTxnMarkers, write_txn_markers_request, crate::txn::handlers::write_txn_markers::handle),
     (FetchSnapshot, fetch_snapshot_request, crate::handlers::fetch_snapshot::handle),
-    (ConsumerGroupDescribe, consumer_group_describe_request, crate::handlers::consumer_group_describe::handle),
     (AssignReplicasToDirs, assign_replicas_to_dirs_request, crate::handlers::assign_replicas_to_dirs::handle),
     (InitializeShareGroupState, initialize_share_group_state_request, crate::share_coordinator::handlers::initialize::handle),
     (ReadShareGroupState, read_share_group_state_request, crate::share_coordinator::handlers::read::handle),
     (WriteShareGroupState, write_share_group_state_request, crate::share_coordinator::handlers::write::handle),
     (DeleteShareGroupState, delete_share_group_state_request, crate::share_coordinator::handlers::delete::handle),
     (ReadShareGroupStateSummary, read_share_group_state_summary_request, crate::share_coordinator::handlers::read_summary::handle),
-    (StreamsGroupDescribe, streams_group_describe_request, crate::handlers::streams_group_describe::handle),
 );
 
 macro_rules! context_adapter {
@@ -736,6 +735,8 @@ context_dispatches!(register_context_dispatches;
     (consumer_group_heartbeat_adapter, ConsumerGroupHeartbeat, consumer_group_heartbeat_request, crate::handlers::consumer_group_heartbeat::handle),
     (share_group_heartbeat_adapter, ShareGroupHeartbeat, share_group_heartbeat_request, crate::handlers::share_group_heartbeat::handle),
     (streams_group_heartbeat_adapter, StreamsGroupHeartbeat, streams_group_heartbeat_request, crate::handlers::streams_group_heartbeat::handle),
+    (consumer_group_describe_adapter, ConsumerGroupDescribe, consumer_group_describe_request, crate::handlers::consumer_group_describe::handle),
+    (streams_group_describe_adapter, StreamsGroupDescribe, streams_group_describe_request, crate::handlers::streams_group_describe::handle),
     (find_coordinator_adapter, FindCoordinator, find_coordinator_request, crate::handlers::find_coordinator::handle),
     (list_offsets_adapter, ListOffsets, list_offsets_request, crate::handlers::list_offsets::handle),
     (describe_log_dirs_adapter, DescribeLogDirs, describe_log_dirs_request, crate::handlers::describe_log_dirs::handle),
@@ -859,7 +860,7 @@ mod tests {
         assert!(api_versions.body_flexible(3));
         assert!(!api_versions.body_flexible(2));
 
-        for key in [25, 27, 59, 69, 73, 83, 84, 85, 86, 87, 89] {
+        for key in [25, 27, 59, 73, 83, 84, 85, 86, 87] {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
@@ -908,11 +909,13 @@ mod tests {
             ApiKey::BrokerHeartbeat,
             ApiKey::GetReplicaLogInfo,
             ApiKey::ConsumerGroupHeartbeat,
+            ApiKey::ConsumerGroupDescribe,
             ApiKey::ShareGroupDescribe,
             ApiKey::ShareFetch,
             ApiKey::ShareAcknowledge,
             ApiKey::ShareGroupHeartbeat,
             ApiKey::StreamsGroupHeartbeat,
+            ApiKey::StreamsGroupDescribe,
             ApiKey::DescribeShareGroupOffsets,
             ApiKey::AlterShareGroupOffsets,
             ApiKey::DeleteShareGroupOffsets,

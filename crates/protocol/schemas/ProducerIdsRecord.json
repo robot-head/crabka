@@ -1,0 +1,18 @@
+// Licensed to the Apache Software Foundation (ASF) under one or more
+// contributor license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright ownership.
+// The ASF licenses this file to You under the Apache License, Version 2.0.
+{
+  "type": "data",
+  "name": "ProducerIdsRecord",
+  "validVersions": "0",
+  "flexibleVersions": "0+",
+  "fields": [
+    { "name": "BrokerId", "type": "int32", "versions": "0+", "entityType": "brokerId",
+      "about": "The ID of the requesting broker" },
+    { "name": "BrokerEpoch", "type": "int64", "versions": "0+", "default": "-1",
+      "about": "The epoch of the requesting broker" },
+    { "name": "NextProducerId", "type": "int64", "versions": "0+",
+      "about": "The first producer ID in the next unassigned block" }
+  ]
+}

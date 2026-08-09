@@ -77,7 +77,8 @@ impl TimeWindows {
         self.advance = advance;
         self
     }
-    /// Set the grace period. Here it affects only the changelog retention.
+    /// Set the grace period used to accept out-of-order records and size
+    /// changelog retention.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -196,7 +197,8 @@ impl SessionWindows {
             grace: Time::ZERO,
         }
     }
-    /// Set the grace period. Here it affects only the changelog retention.
+    /// Set the grace period used to accept out-of-order records and size
+    /// changelog retention.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.

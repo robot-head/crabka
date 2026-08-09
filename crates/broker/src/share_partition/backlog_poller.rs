@@ -12,10 +12,7 @@ use crabka_security::ListenerProtocol;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    coordinator::{
-        GroupCoordinator,
-        bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC},
-    },
+    coordinator::{GroupCoordinator, bootstrap::OFFSETS_TOPIC},
     metadata_source::MetadataSource,
     metrics::{BrokerMetrics, ShareGroupLabel},
     network::client::InterBrokerClient,
@@ -84,8 +81,8 @@ impl BacklogPoller {
     fn is_group_coordinator(&self) -> bool {
         self.metadata
             .current_image()
-            .partition(OFFSETS_TOPIC, OFFSETS_PARTITION)
-            .is_some_and(|partition| partition.leader == self.node_id)
+            .partitions_of(OFFSETS_TOPIC)
+            .any(|partition| partition.leader == self.node_id)
     }
 
     async fn snapshot(&self, groups: Vec<String>) -> Result<HashMap<ShareGroupLabel, i64>, String> {

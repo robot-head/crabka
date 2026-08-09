@@ -56,6 +56,18 @@ pub(crate) async fn handle(
             }
         }
 
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return crate::handlers::encode_response(
+                &LeaveGroupResponse {
+                    error_code,
+                    throttle_time_ms: 0,
+                    members: Vec::new(),
+                    ..Default::default()
+                },
+                version,
+            );
+        }
+
         let members = match coordinator.find(&req.group_id) {
             // No such group; respond OK but no member responses.
             None => Vec::new(),

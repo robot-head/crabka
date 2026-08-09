@@ -1,9 +1,8 @@
-//! KIP-595 consensus decision kernels.
-//!
-//! These kernels come out of `crabka-kraft-core`, so that Creusot can verify
-//! them. Creusot cannot translate the `Instant` and async surface of the host
-//! crate. A follow-up task adds the contracts. The bodies here are already
-//! written in the loop style that the proofs need, with no std sort.
+//! KIP-595 consensus decision kernels, extracted from `crabka-kraft-core` so
+//! Creusot can verify them (the host crate's `Instant`/async surface is
+//! untranslatable). The functions carry their Creusot preconditions,
+//! postconditions, invariants, variants, and supporting lemmas directly beside
+//! the executable bodies.
 
 use creusot_std::prelude::*;
 

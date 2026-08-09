@@ -66,6 +66,16 @@ pub(crate) async fn handle(
         }
     }
 
+    if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+        return encode(
+            version,
+            &JoinGroupResponse {
+                error_code,
+                ..Default::default()
+            },
+        );
+    }
+
     // Route to the one actor for this id, spawning a classic-kind actor if the
     // id is brand-new. Both RPC families reach the same actor; if a next-gen
     // consumer actor already owns the id, the actor's `ClassicJoin` arm replies

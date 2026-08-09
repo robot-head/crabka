@@ -10,21 +10,15 @@
 //! Schema, from cp-kafka 4.0 `TransactionLogValue.json` and
 //! `TransactionLogKey.json`:
 //!
-//! `TransactionLogKey`: validVersions "0", flexibleVersions "none". The wire
-//! form is an `int16` version, which is 0, and then the `TransactionalId` as a
-//! non-compact string: an `int16` length and the UTF-8 bytes.
-//!
-//! `TransactionLogValue`: validVersions "0-1", flexibleVersions "1+". The wire
-//! form, in field order: `int16` version, `int64` `ProducerId`, `int16`
-//! `ProducerEpoch`, `int32` `TransactionTimeoutMs`, `int8` `TransactionStatus`,
-//! a nullable array of `{ string Topic; int32[] PartitionIds }`, `int64`
-//! `TransactionLastUpdateTimestampMs`, `int64` `TransactionStartTimestampMs`.
-//! v1 adds a trailing tagged-field section on every struct. The codec writes
-//! these tags only when the value is not the default:
-//!
-//!   * tag 0, `PreviousProducerId`, default -1;
-//!   * tag 1, `NextProducerId`, default -1;
-//!   * tag 2, `ClientTransactionVersion`, default 0.
+//! `TransactionLogValue`: validVersions "0-1", flexibleVersions "1+". Wire, in
+//! field order: `int16` version, `int64` `ProducerId`, `int16` `ProducerEpoch`,
+//! `int32` `TransactionTimeoutMs`, `int8` `TransactionStatus`, a nullable array
+//! of `{ string Topic; int32[] PartitionIds }`, `int64`
+//! `TransactionLastUpdateTimestampMs`, `int64` `TransactionStartTimestampMs`. v1
+//! adds a trailing tagged-field section on every struct; tags 0
+//! (`PreviousProducerId`, default -1), 1 (`NextProducerId`, default -1), 2
+//! (`ClientTransactionVersion`, default 0), and 3 (`NextProducerEpoch`, default
+//! -1) are emitted only when non-default.
 //!
 //! v0 is non-flexible: arrays use `int32` lengths (-1 = null), strings use
 //! `int16` lengths, and there is no tagged-field section anywhere. v1 is
@@ -58,6 +52,7 @@ use crate::{
 const TAG_PREV_PRODUCER_ID: u32 = 0;
 const TAG_NEXT_PRODUCER_ID: u32 = 1;
 const TAG_CLIENT_TXN_VERSION: u32 = 2;
+const TAG_NEXT_PRODUCER_EPOCH: u32 = 3;
 
 /// Kafka's tagged-field default for the producer-id bookkeeping fields.
 const PRODUCER_ID_NONE: i64 = -1;
@@ -144,6 +139,12 @@ pub(crate) fn encode_value(entry: &TxnEntry, flexible: bool) -> Vec<u8> {
                 i64_to_bytes(entry.next_producer_id.get()),
             );
         }
+        if entry.next_producer_epoch != -1 {
+            tagged.add(
+                TAG_NEXT_PRODUCER_EPOCH,
+                i16_to_bytes(entry.next_producer_epoch),
+            );
+        }
         tagged.write(&mut buf, &UnknownTaggedFields::default());
     }
 
@@ -156,10 +157,14 @@ fn i64_to_bytes(v: i64) -> Bytes {
     b.freeze()
 }
 
-/// Decode a `TransactionLogValue`.
-///
-/// The caller supplies `transactional_id` from the companion key. It is not
-/// present in the value record.
+fn i16_to_bytes(v: i16) -> Bytes {
+    let mut b = BytesMut::with_capacity(2);
+    put_i16(&mut b, v);
+    b.freeze()
+}
+
+/// Decode a `TransactionLogValue`. `transactional_id` is supplied from the
+/// companion key (it is not present in the value record).
 pub(crate) fn decode_value(
     bytes: &[u8],
     transactional_id: String,
@@ -212,6 +217,7 @@ pub(crate) fn decode_value(
 
     let mut prev_producer_id = PRODUCER_ID_NONE;
     let mut next_producer_id = PRODUCER_ID_NONE;
+    let mut next_producer_epoch = -1;
     if flexible {
         read_tagged_fields(&mut buf, |tag, payload| match tag {
             TAG_PREV_PRODUCER_ID => {
@@ -225,6 +231,10 @@ pub(crate) fn decode_value(
             // ClientTransactionVersion: recognised but not stored on TxnEntry.
             TAG_CLIENT_TXN_VERSION => {
                 let _ = get_i16(payload)?;
+                Ok(true)
+            }
+            TAG_NEXT_PRODUCER_EPOCH => {
+                next_producer_epoch = get_i16(payload)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -247,6 +257,7 @@ pub(crate) fn decode_value(
         partitions,
         prev_producer_id: ProducerId(prev_producer_id),
         next_producer_id: ProducerId(next_producer_id),
+        next_producer_epoch,
         last_update_ms,
         start_ms,
     })
@@ -319,6 +330,7 @@ mod tests {
             partitions,
             prev_producer_id: ProducerId(-1),
             next_producer_id: ProducerId(-1),
+            next_producer_epoch: -1,
             last_update_ms: SAMPLE_TS,
             start_ms: SAMPLE_TS,
         }
@@ -333,6 +345,7 @@ mod tests {
         check!(entry.state == TxnState::Ongoing);
         check!(entry.prev_producer_id == -1);
         check!(entry.next_producer_id == -1);
+        check!(entry.next_producer_epoch == -1);
         check!(entry.last_update_ms == SAMPLE_TS);
         check!(entry.start_ms == SAMPLE_TS);
         let expected: HashSet<TopicPartition> = [TopicPartition {
@@ -379,6 +392,7 @@ mod tests {
             partitions,
             prev_producer_id: ProducerId(100),
             next_producer_id: ProducerId(200),
+            next_producer_epoch: 8,
             last_update_ms: 1_234_567,
             start_ms: 1_000_000,
         };
@@ -392,6 +406,7 @@ mod tests {
         check!(decoded.txn_timeout_ms == 30_000);
         check!(decoded.prev_producer_id == 100);
         check!(decoded.next_producer_id == 200);
+        check!(decoded.next_producer_epoch == 8);
         check!(decoded.last_update_ms == 1_234_567);
         check!(decoded.start_ms == 1_000_000);
         check!(decoded.partitions == entry.partitions);
@@ -419,6 +434,7 @@ mod tests {
             // dropped on encode and come back as the -1 default.
             prev_producer_id: ProducerId(5),
             next_producer_id: ProducerId(6),
+            next_producer_epoch: 3,
             last_update_ms: 111,
             start_ms: 222,
         };
@@ -436,6 +452,7 @@ mod tests {
         // v0 carries no tagged fields; bookkeeping ids default to -1.
         check!(decoded.prev_producer_id == -1);
         check!(decoded.next_producer_id == -1);
+        check!(decoded.next_producer_epoch == -1);
     }
 
     #[test]
@@ -465,6 +482,7 @@ mod tests {
                 partitions,
                 prev_producer_id: ProducerId(-1),
                 next_producer_id: ProducerId(-1),
+                next_producer_epoch: -1,
                 last_update_ms: 1,
                 start_ms: 1,
             }

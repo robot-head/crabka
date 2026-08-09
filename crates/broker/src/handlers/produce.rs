@@ -306,6 +306,16 @@ fn decode_produce_request(
     Ok(ProduceFramed::from_owned(owned))
 }
 
+/// Whether Kafka requires a response for this Produce request. `acks=0`
+/// requests are one-way even when an append or authorization check fails.
+pub(crate) fn response_required(
+    request_bytes: &[u8],
+    body_bytes: Bytes,
+    version: i16,
+) -> Result<bool, BrokerError> {
+    Ok(decode_produce_request(request_bytes, body_bytes, version)?.acks != 0)
+}
+
 struct ProduceAuthorization {
     transactional_id_denied: bool,
     denied_topics: std::collections::HashSet<String>,
@@ -801,6 +811,9 @@ async fn validate_transactional_produce(
         return Ok(None);
     };
     let mut entry = entry_mutex.lock().await;
+    if entry.has_staged_producer_identity() {
+        return Ok(Some(codes::INVALID_TXN_STATE));
+    }
     if entry.producer_epoch != batch.producer_epoch {
         return Ok(Some(codes::INVALID_PRODUCER_EPOCH));
     }

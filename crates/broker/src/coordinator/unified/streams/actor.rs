@@ -212,12 +212,14 @@ impl ActorState {
 
 async fn actor_loop(
     group_id: String,
-    config: Arc<StreamsGroupConfig>,
+    default_config: Arc<StreamsGroupConfig>,
     offsets_log: Arc<dyn OffsetsLog>,
     metadata_source: Option<Arc<dyn MetadataSource>>,
     coordinator: Arc<super::super::GroupCoordinator>,
     mut rx: mpsc::Receiver<StreamsGroupActorMessage>,
 ) {
+    let mut config = resolve_group_config(&default_config, metadata_source.as_ref(), &group_id);
+    let mut metadata_rx = metadata_source.as_ref().map(|source| source.watch_image());
     let mut actor = ActorState::new(group_id);
     let mut tick = tokio::time::interval(config.heartbeat_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -291,13 +293,83 @@ async fn actor_loop(
                     break;
                 }
             }
+            image = wait_for_metadata_change(&mut metadata_rx) => {
+                let Some(image) = image else {
+                    metadata_rx = None;
+                    continue;
+                };
+                let next = resolve_group_config_from_image(
+                    &default_config,
+                    &image,
+                    &actor.state.group_id,
+                );
+                if next != config {
+                    config = next;
+                    tick = tokio::time::interval(config.heartbeat_interval);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    actor.state.dirty = true;
+                    reconcile(&mut actor, &config, metadata_source.as_ref()).await;
+                    let pending = snapshot_pending_after_change(&actor, &[]);
+                    if flush_pending(
+                        &actor,
+                        pending,
+                        &*offsets_log,
+                        &coordinator,
+                        chrono_now_ms(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
         }
     }
 }
 
-/// Evicts members that stayed silent past the session timeout, reconciles, and
-/// persists the resulting tombstones. Returns `Err` if the log write fails,
-/// and the actor then exits.
+fn resolve_group_config(
+    defaults: &StreamsGroupConfig,
+    metadata_source: Option<&Arc<dyn MetadataSource>>,
+    group_id: &str,
+) -> StreamsGroupConfig {
+    metadata_source.map_or_else(
+        || defaults.clone(),
+        |source| resolve_group_config_from_image(defaults, &source.current_image(), group_id),
+    )
+}
+
+fn resolve_group_config_from_image(
+    defaults: &StreamsGroupConfig,
+    image: &crabka_metadata::MetadataImage,
+    group_id: &str,
+) -> StreamsGroupConfig {
+    let Some(overrides) = image.group_config(group_id) else {
+        return defaults.clone();
+    };
+    match defaults.with_group_overrides(overrides) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!(group_id, %error, "ignoring invalid persisted streams group config");
+            defaults.clone()
+        }
+    }
+}
+
+async fn wait_for_metadata_change(
+    rx: &mut Option<tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>>>,
+) -> Option<Arc<crabka_metadata::MetadataImage>> {
+    match rx {
+        Some(rx) => {
+            rx.changed().await.ok()?;
+            Some(rx.borrow_and_update().clone())
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Evict members silent past the session timeout, reconcile, and persist the
+/// resulting tombstones. Returns `Err` if the log write fails (the actor exits).
 async fn handle_session_tick(
     actor: &mut ActorState,
     config: &StreamsGroupConfig,
@@ -1016,7 +1088,7 @@ async fn flush_pending(
         return Ok(());
     }
     let batch = pending.into_batch(&actor.state.group_id, now_ms);
-    offsets_log.append(batch).await?;
+    offsets_log.append(&actor.state.group_id, batch).await?;
     coordinator.update_streams_cache(&actor.state.group_id, snapshot_seed(actor));
     Ok(())
 }
@@ -1112,6 +1184,29 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
+
+    #[test]
+    fn persisted_group_config_overrides_actor_defaults() {
+        use crate::coordinator::unified::streams::config::KEY_NUM_STANDBY_REPLICAS;
+
+        let mut image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&crabka_metadata::MetadataRecord::V1GroupConfig(
+            crabka_metadata::GroupConfigRecord {
+                group_id: "streams-app".into(),
+                configs: std::collections::BTreeMap::from([(
+                    KEY_NUM_STANDBY_REPLICAS.into(),
+                    "1".into(),
+                )]),
+            },
+        ));
+        let config =
+            resolve_group_config_from_image(&StreamsGroupConfig::default(), &image, "streams-app");
+        assert!(config.num_standby_replicas == 1);
+
+        let unaffected =
+            resolve_group_config_from_image(&StreamsGroupConfig::default(), &image, "other-app");
+        assert!(unaffected == StreamsGroupConfig::default());
+    }
     use crate::coordinator::unified::{
         GroupCoordinator, actor::MetadataProvider, config::NextGenConfig,
         offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,

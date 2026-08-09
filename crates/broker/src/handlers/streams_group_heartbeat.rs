@@ -63,6 +63,10 @@ pub(crate) async fn handle(
             );
         }
 
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &req.group_id) {
+            return crate::handlers::encode_response(&error(error_code), version);
+        }
+
         // KIP-1071: the streams protocol is gated on a finalized
         // streams.version >= 1 (early access, default-disabled) AND the
         // `streams_group.enable` config kill-switch. Either off → reject so the

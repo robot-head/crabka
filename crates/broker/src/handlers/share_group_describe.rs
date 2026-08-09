@@ -66,6 +66,14 @@ pub(crate) async fn handle(
             });
             continue;
         }
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, gid) {
+            groups.push(DescribedGroup {
+                group_id: gid.clone(),
+                error_code,
+                ..Default::default()
+            });
+            continue;
+        }
 
         if !share_enabled {
             groups.push(DescribedGroup {

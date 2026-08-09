@@ -37,11 +37,8 @@ impl UniformStickyPartitioner {
         }
     }
 
-    /// Rotate the sticky partition for `topic` to a new one. The sender calls
-    /// this after a batch flushes. It is not yet wired in: the sender will
-    /// invoke it on linger expiry in a follow-up. It is already documented and
-    /// tested.
-    #[allow(dead_code)]
+    /// Rotate the sticky partition for `topic` after the sender seals and
+    /// drains a batch, so later keyless records spread across partitions.
     pub fn rotate(&self, topic: &str, num_partitions: i32) {
         if num_partitions <= 0 {
             return;

@@ -95,18 +95,23 @@ pub struct TxnEntry {
     pub state: TxnState,
     pub txn_timeout_ms: i32,
     pub partitions: HashSet<TopicPartition>,
-    /// KIP-890 epoch bookkeeping, that is Kafka's
-    /// `TransactionLogValue.PreviousProducerId` and `NextProducerId` tagged
-    /// fields. `ProducerId(-1)` means "none", which matches Kafka's
-    /// tagged-field default.
+    /// KIP-890/KIP-939 producer identity bookkeeping. `next_producer_id` and
+    /// `next_producer_epoch` hold the fenced identity returned by
+    /// `InitProducerId(keepPreparedTxn=true)` until the older ongoing
+    /// transaction completes.
     pub prev_producer_id: ProducerId,
     pub next_producer_id: ProducerId,
+    pub next_producer_epoch: i16,
     pub last_update_ms: i64,
     pub start_ms: i64,
 }
 
 impl TxnEntry {
-    /// A fresh entry for a tid that the coordinator has never seen.
+    pub fn has_staged_producer_identity(&self) -> bool {
+        self.next_producer_epoch >= 0
+    }
+
+    /// Fresh entry for a tid that's never been seen.
     pub fn new_empty(
         transactional_id: String,
         producer_id: ProducerId,
@@ -123,6 +128,7 @@ impl TxnEntry {
             partitions: HashSet::new(),
             prev_producer_id: ProducerId(-1),
             next_producer_id: ProducerId(-1),
+            next_producer_epoch: -1,
             last_update_ms: now_ms,
             start_ms: now_ms,
         }

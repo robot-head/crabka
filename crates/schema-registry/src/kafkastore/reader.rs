@@ -9,7 +9,8 @@ use std::{
 };
 
 use crabka_client_core::{
-    ClientError, ClientSecurity, Connection, ConnectionOptions, fetch_partition,
+    ClientError, ClientSecurity, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX,
+    FetchMinBytes, IsolatedFetch, fetch_partition_with_isolation_progress,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_units::prelude::*;
@@ -180,18 +181,20 @@ pub fn spawn(
                         conn.close();
                         return;
                     }
-                    res = fetch_partition(
-                        &conn,
-                        &topic,
+                    res = fetch_partition_with_isolation_progress(&conn, IsolatedFetch {
+                        topic: &topic,
                         topic_id,
-                        0,
-                        next,
-                        policy.fetch_max_wait,
-                        policy.fetch_max,
-                    ) => {
+                        partition: 0,
+                        fetch_offset: next,
+                        max_wait: policy.fetch_max_wait,
+                        max: DEFAULT_FETCH_RESPONSE_MAX,
+                        partition_max: policy.fetch_max,
+                        fetch_min: FetchMinBytes::default(),
+                        isolation_level: 1,
+                    }) => {
                         match res {
-                            Ok(records) => {
-                                for r in records {
+                            Ok(progress) => {
+                                for r in progress.records {
                                     if r.offset < next {
                                         continue;
                                     }
@@ -200,8 +203,13 @@ pub fn spawn(
                                         &store_bg,
                                         SchemaRecord::decode(key, r.value.as_deref()),
                                     );
-                                    next = r.offset + 1;
-                                    let _ = applied_tx.send(r.offset);
+                                }
+                                if let Some(cursor) = progress.next_offset {
+                                    next = next.max(cursor);
+                                    // Publish cursor progress after all visible
+                                    // records have been applied. This also
+                                    // advances over aborted/control batches.
+                                    let _ = applied_tx.send(next - 1);
                                 }
                             }
                             Err(e) => {

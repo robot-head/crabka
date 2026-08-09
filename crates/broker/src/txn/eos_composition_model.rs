@@ -45,7 +45,7 @@ use super::{
     state::{TxnEntry, TxnState},
     version::TxnVersion,
 };
-use crate::{handlers::fetch::compute_visibility_window, producer_id_manager::ProducerIdManager};
+use crate::handlers::fetch::compute_visibility_window;
 
 const TARGET_STATE_COUNT: usize = 20_000_000;
 const MAX_UNIQUE_STATES: usize = 2_000_000;
@@ -278,15 +278,22 @@ impl Model for EosModel {
                 let Ok((prepare, complete)) = decide_phase1_transition(&mut entry, commit) else {
                     return None; // illegal transition
                 };
-                let ids = ProducerIdManager::new();
+                crate::txn::handlers::end_txn::prepare_completion_identities_with_fresh(
+                    &mut entry,
+                    TxnVersion::Verified,
+                    None,
+                )
+                .expect("model epochs never reach the rotation boundary");
+                let completion =
+                    crate::txn::handlers::end_txn::completion_producer_identity(&entry);
                 match decide_end_txn_completion(
                     &entry,
                     ProducerId(PID0 + i64::from(p)),
-                    pr.epoch,
+                    entry.producer_epoch,
+                    completion.0,
+                    completion.1,
                     prepare,
                     complete,
-                    TxnVersion::Verified,
-                    &ids,
                 ) {
                     CompletionDecision::Proceed {
                         next_state,

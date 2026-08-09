@@ -619,7 +619,7 @@ async fn init_producer_id_returns_fresh_pid() {
         .await
         .expect("InitProducerId");
     check!(r.error_code == 0);
-    check!(r.producer_id >= 1000);
+    check!(r.producer_id == 0);
     check!(r.producer_epoch == 0);
     p.broker.shutdown().await;
 }

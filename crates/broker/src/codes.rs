@@ -1,4 +1,4 @@
-//! Kafka wire-level error codes used in this MVP.
+//! Kafka wire-level error codes used by the broker.
 //!
 //! Per-(topic, partition) response fields use these `i16` values. JVM clients
 //! react to specific codes, so a substitution changes client behavior. The
@@ -45,6 +45,10 @@ pub const ILLEGAL_SASL_STATE: i16 = 34;
 /// the broker does not offer on this listener.
 pub const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
 pub const UNSUPPORTED_VERSION: i16 = 35;
+/// `SASL_AUTHENTICATION_FAILED` (58) — the supplied credentials were rejected.
+pub const SASL_AUTHENTICATION_FAILED: i16 = 58;
+pub const STALE_BROKER_EPOCH: i16 = 77;
+pub const BROKER_ID_NOT_REGISTERED: i16 = 102;
 pub const TOPIC_ALREADY_EXISTS: i16 = 36;
 pub const INVALID_PARTITIONS: i16 = 37;
 pub const INVALID_REPLICATION_FACTOR: i16 = 38;
@@ -72,21 +76,19 @@ pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
 /// (`transactional_id`, `producer_id`) pair. The Rust producer client maps
 /// this code to `ProducerError::FencedProducer`.
 pub const INVALID_PRODUCER_EPOCH: i16 = 47;
-/// Alias for handlers that check for an unknown (tid, pid) mapping. Both cases
-/// produce error code 47 on the wire. This matches Apache Kafka, which uses
-/// `INVALID_PRODUCER_EPOCH` for every epoch and pid mismatch.
-pub const INVALID_PRODUCER_ID_MAPPING: i16 = INVALID_PRODUCER_EPOCH;
+/// `INVALID_PRODUCER_ID_MAPPING` (49) — the transactional id is not mapped to
+/// the supplied producer id.
+pub const INVALID_PRODUCER_ID_MAPPING: i16 = 49;
 pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
 
 // Phase 9 additions — transactional protocol codes.
-pub const INVALID_TXN_STATE: i16 = 24;
-pub const INVALID_TXN_TIMEOUT: i16 = 48;
-pub const CONCURRENT_TRANSACTIONS: i16 = 49;
-pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
-/// `TRANSACTION_ABORTABLE` (120, KIP-890): the operation failed, but the
-/// client can still abort the transaction. For example, `AddPartitionsToTxn`
-/// verify-only found a partition that is not part of the ongoing
-/// transaction.
+pub const INVALID_TXN_STATE: i16 = 48;
+pub const INVALID_TXN_TIMEOUT: i16 = 50;
+pub const CONCURRENT_TRANSACTIONS: i16 = 51;
+pub const TRANSACTION_COORDINATOR_FENCED: i16 = 52;
+/// `TRANSACTION_ABORTABLE` (120, KIP-890) — the operation failed but the
+/// transaction can still be aborted by the client; e.g. `AddPartitionsToTxn`
+/// verify-only found a partition that is not part of the ongoing transaction.
 pub const TRANSACTION_ABORTABLE: i16 = 120;
 
 /// `FENCED_INSTANCE_ID` (82, KIP-345): another client is currently pinned to
@@ -421,6 +423,35 @@ mod tests {
     fn not_enough_replicas_codes_have_expected_values() {
         assert!(NOT_ENOUGH_REPLICAS == 19);
         assert!(NOT_ENOUGH_REPLICAS_AFTER_APPEND == 20);
+    }
+
+    #[test]
+    fn transaction_and_sasl_codes_match_kafka() {
+        let cases = [
+            ("INVALID_PRODUCER_EPOCH", INVALID_PRODUCER_EPOCH, 47),
+            ("INVALID_TXN_STATE", INVALID_TXN_STATE, 48),
+            (
+                "INVALID_PRODUCER_ID_MAPPING",
+                INVALID_PRODUCER_ID_MAPPING,
+                49,
+            ),
+            ("INVALID_TXN_TIMEOUT", INVALID_TXN_TIMEOUT, 50),
+            ("CONCURRENT_TRANSACTIONS", CONCURRENT_TRANSACTIONS, 51),
+            (
+                "TRANSACTION_COORDINATOR_FENCED",
+                TRANSACTION_COORDINATOR_FENCED,
+                52,
+            ),
+            (
+                "TRANSACTIONAL_ID_AUTHORIZATION_FAILED",
+                TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
+                53,
+            ),
+            ("SASL_AUTHENTICATION_FAILED", SASL_AUTHENTICATION_FAILED, 58),
+        ];
+        for (name, code, want) in cases {
+            assert!(code == want, "{name}");
+        }
     }
 
     #[test]

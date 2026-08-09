@@ -248,7 +248,6 @@ fn state_to_str(s: GroupState) -> &'static str {
         GroupState::PreparingRebalance => "PreparingRebalance",
         GroupState::CompletingRebalance => "CompletingRebalance",
         GroupState::Stable => "Stable",
-        GroupState::Dead => "Dead",
     }
 }
 
@@ -397,7 +396,6 @@ mod tests {
             (GroupState::PreparingRebalance, "PreparingRebalance"),
             (GroupState::CompletingRebalance, "CompletingRebalance"),
             (GroupState::Stable, "Stable"),
-            (GroupState::Dead, "Dead"),
         ];
         for (state, want) in cases {
             assert!(state_to_str(state) == want, "{state:?}");

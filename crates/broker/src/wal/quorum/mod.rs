@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use self::engine::WalShardEngine;
 use super::WalStore;
-use crate::{error::BrokerError, partition::ProduceData};
+use crate::error::BrokerError;
 
 const QUORUM_STATE_FILE: &str = "quorum-state.json";
 
@@ -168,13 +168,6 @@ fn sanitize_topic(topic: &str) -> String {
 
 #[async_trait]
 impl WalStore for QuorumWalStore {
-    async fn append(
-        &self,
-        datas: Vec<ProduceData>,
-    ) -> Result<(Vec<Result<Offset, BrokerError>>, Offset), BrokerError> {
-        crate::partition_writer::run_produce_append_batch(self.source.clone(), datas).await
-    }
-
     async fn sync_durable(&self, leo: Offset) -> Result<Offset, BrokerError> {
         let start = self.engine.durable_watermark();
         let durable = self.engine.replicate_and_sync(&self.source, leo).await?;
@@ -206,6 +199,18 @@ mod tests {
     use crabka_protocol::records::{Record, RecordBatch};
 
     use super::*;
+
+    async fn append_source(
+        store: &QuorumWalStore,
+        records: i32,
+    ) -> (Vec<Result<Offset, BrokerError>>, Offset) {
+        crate::partition_writer::run_produce_append_batch(
+            store.source.clone(),
+            vec![crate::partition::ProduceData::Owned(batch(records))],
+        )
+        .await
+        .unwrap()
+    }
 
     #[test]
     fn partition_quorum_uses_configured_local_replica_count() {
@@ -253,28 +258,19 @@ mod tests {
         ));
         let store = QuorumWalStore::new(source.clone(), engine.clone());
 
-        let (results, leo) = store
-            .append(vec![ProduceData::Owned(batch(3))])
-            .await
-            .unwrap();
+        let (results, leo) = append_source(&store, 3).await;
         assert!(results.iter().all(Result::is_ok));
         assert!(leo == Offset(3));
         assert!(store.sync_durable(leo).await.unwrap() == Offset(3));
         assert!(engine.durable_watermark() == Offset(3));
 
         engine.set_replica_alive(NodeId(3), false);
-        let (_results, leo) = store
-            .append(vec![ProduceData::Owned(batch(2))])
-            .await
-            .unwrap();
+        let (_results, leo) = append_source(&store, 2).await;
         assert!(store.sync_durable(leo).await.unwrap() == Offset(5));
         assert!(engine.durable_watermark() == Offset(5));
 
         engine.set_replica_alive(NodeId(2), false);
-        let (_results, leo) = store
-            .append(vec![ProduceData::Owned(batch(1))])
-            .await
-            .unwrap();
+        let (_results, leo) = append_source(&store, 1).await;
         assert!(store.sync_durable(leo).await.is_err());
         assert!(engine.durable_watermark() == Offset(5));
     }
@@ -313,10 +309,7 @@ mod tests {
             }),
         };
 
-        let (_results, leo) = store
-            .append(vec![ProduceData::Owned(batch(2))])
-            .await
-            .unwrap();
+        let (_results, leo) = append_source(&store, 2).await;
         assert!(store.sync_durable(leo).await.unwrap() == Offset(2));
 
         assert!(cache.get(topic_id, partition, 1, usize::MAX).is_some());

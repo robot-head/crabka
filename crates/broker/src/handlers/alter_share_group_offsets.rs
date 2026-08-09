@@ -69,6 +69,9 @@ pub(crate) async fn handle(
     if broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
         return encode_top_level(version, codes::GROUP_AUTHORIZATION_FAILED);
     }
+    if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &gid) {
+        return encode_top_level(version, error_code);
+    }
 
     let Some(persister) = ng_opt.as_ref().and_then(|ng| ng.share_persister().cloned()) else {
         return encode_top_level(version, codes::COORDINATOR_NOT_AVAILABLE);

@@ -46,10 +46,13 @@ const CONFIG_SOURCE_DYNAMIC_BROKER: i8 = 2;
 const CONFIG_SOURCE_DEFAULT: i8 = 5;
 /// `DescribeConfigsResponse.ConfigSource::CLIENT_METRICS_CONFIG` wire byte.
 const CONFIG_SOURCE_CLIENT_METRICS: i8 = 7;
+/// `ConfigSource::DYNAMIC_GROUP_CONFIG`.
+const CONFIG_SOURCE_DYNAMIC_GROUP: i8 = 8;
 
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
 const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
+const RESOURCE_TYPE_GROUP: i8 = 32;
 
 /// `ConfigDef.Type::UNKNOWN` wire byte. Crabka reports no typed config
 /// metadata, which matches brokers from before KIP-226's typed responses.
@@ -75,6 +78,7 @@ fn describe_one(
     image: &crabka_metadata::MetadataImage,
     r: crabka_protocol::owned::describe_configs_request::DescribeConfigsResource,
     client_metrics_default_interval_ms: i32,
+    streams_defaults: &crate::coordinator::unified::streams::config::StreamsGroupConfig,
 ) -> DescribeConfigsResult {
     let ok = |configs| DescribeConfigsResult {
         error_code: codes::NONE,
@@ -153,6 +157,31 @@ fn describe_one(
         return ok(configs);
     }
 
+    if r.resource_type == RESOURCE_TYPE_GROUP {
+        let overrides = image
+            .group_config(&r.resource_name)
+            .cloned()
+            .unwrap_or_default();
+        let effective = streams_defaults
+            .with_group_overrides(&overrides)
+            .unwrap_or_else(|_| streams_defaults.clone())
+            .group_config_values();
+        let key_filter: Option<&[String]> = r.configuration_keys.as_deref();
+        let configs = effective
+            .iter()
+            .filter(|(key, _)| key_filter.is_none_or(|keys| keys.iter().any(|k| k == *key)))
+            .map(|(key, value)| {
+                let source = if overrides.contains_key(key) {
+                    CONFIG_SOURCE_DYNAMIC_GROUP
+                } else {
+                    CONFIG_SOURCE_DEFAULT
+                };
+                make_entry(key, value, source)
+            })
+            .collect();
+        return ok(configs);
+    }
+
     // All other resource types: empty configs, no error.
     ok(Vec::new())
 }
@@ -184,6 +213,11 @@ fn resource_authz_failure(
             ResourceType::Cluster,
             crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
             codes::CLUSTER_AUTHORIZATION_FAILED,
+        ),
+        RESOURCE_TYPE_GROUP => (
+            ResourceType::Group,
+            resource_name,
+            codes::GROUP_AUTHORIZATION_FAILED,
         ),
         _ => return None,
     };
@@ -261,6 +295,7 @@ pub(crate) fn handle(
                         &image,
                         r,
                         broker.config.client_metrics_default_interval.millis_i32(),
+                        &broker.config.streams_group,
                     )
                 }
             })
@@ -363,6 +398,7 @@ mod tests {
                 ..Default::default()
             },
             300_000,
+            &crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         );
 
         let expected = DescribeConfigsResult {
@@ -398,6 +434,7 @@ mod tests {
                 ..Default::default()
             },
             300_000,
+            &crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         );
 
         let expected = DescribeConfigsResult {
@@ -480,7 +517,12 @@ mod tests {
             configuration_keys: None,
             ..Default::default()
         };
-        let res = super::describe_one(&img, r, 12_345);
+        let res = super::describe_one(
+            &img,
+            r,
+            12_345,
+            &crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        );
         assert_eq!(res.error_code, crate::codes::NONE);
         let by_name: std::collections::HashMap<_, _> =
             res.configs.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -495,6 +537,48 @@ mod tests {
                 "key {key}"
             );
         }
+    }
+
+    #[test]
+    fn group_describe_merges_dynamic_overrides_with_defaults() {
+        use crate::coordinator::unified::streams::config::{
+            KEY_NUM_STANDBY_REPLICAS, KEY_SESSION_TIMEOUT_MS, StreamsGroupConfig,
+        };
+        use crabka_metadata::GroupConfigRecord;
+
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1GroupConfig(GroupConfigRecord {
+            group_id: "streams-app".into(),
+            configs: BTreeMap::from([(KEY_NUM_STANDBY_REPLICAS.into(), "1".into())]),
+        }));
+        let result = super::describe_one(
+            &image,
+            crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+                resource_type: super::RESOURCE_TYPE_GROUP,
+                resource_name: "streams-app".into(),
+                configuration_keys: Some(vec![
+                    KEY_NUM_STANDBY_REPLICAS.into(),
+                    KEY_SESSION_TIMEOUT_MS.into(),
+                ]),
+                ..Default::default()
+            },
+            300_000,
+            &StreamsGroupConfig::default(),
+        );
+        let by_name: std::collections::HashMap<_, _> = result
+            .configs
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect();
+        assert!(
+            by_name[KEY_NUM_STANDBY_REPLICAS].value.as_deref() == Some("1")
+                && by_name[KEY_NUM_STANDBY_REPLICAS].config_source
+                    == super::CONFIG_SOURCE_DYNAMIC_GROUP
+        );
+        assert!(
+            by_name[KEY_SESSION_TIMEOUT_MS].value.as_deref() == Some("45000")
+                && by_name[KEY_SESSION_TIMEOUT_MS].config_source == super::CONFIG_SOURCE_DEFAULT
+        );
     }
 
     fn anon() -> crabka_security::Principal {

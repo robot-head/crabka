@@ -49,7 +49,7 @@ pub enum Decision {
     /// `OUT_OF_ORDER_SEQUENCE_NUMBER (45)`.
     OutOfOrder,
     /// `epoch < entry.epoch`. Caller responds with
-    /// `INVALID_PRODUCER_EPOCH (53)`.
+    /// `INVALID_PRODUCER_EPOCH (47)`.
     Fenced,
 }
 

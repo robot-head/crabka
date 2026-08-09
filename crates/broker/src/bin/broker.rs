@@ -254,6 +254,10 @@ struct RuntimeArgs {
     share_state_num_partitions: Option<PositiveI32>,
     #[arg(long, env = "CRABKA_SHARE_STATE_REPLICATION_FACTOR", value_parser = parse_positive_i16)]
     share_state_replication_factor: Option<PositiveI16>,
+    #[arg(long, env = "CRABKA_OFFSETS_TOPIC_NUM_PARTITIONS", value_parser = parse_positive_i32)]
+    offsets_topic_num_partitions: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_OFFSETS_TOPIC_REPLICATION_FACTOR", value_parser = parse_positive_i16)]
+    offsets_topic_replication_factor: Option<PositiveI16>,
     #[arg(long, env = "CRABKA_TRANSACTION_STATE_NUM_PARTITIONS", value_parser = parse_positive_i32)]
     transaction_state_num_partitions: Option<PositiveI32>,
     #[arg(long, env = "CRABKA_TRANSACTION_RECOVERY_READ_MAX", value_parser = crabka_units::parse::positive_byte_size)]
@@ -430,6 +434,8 @@ impl RuntimeArgs {
             max_produce_group,
             partition_writer_queue_depth,
             default_min_insync_replicas,
+            offsets_topic_num_partitions,
+            offsets_topic_replication_factor,
             transaction_state_num_partitions,
             transaction_state_replication_factor,
         );
@@ -521,7 +527,7 @@ impl RuntimeArgs {
 #[command(
     name = "crabka-broker",
     version,
-    about = "Single-node Kafka-compatible broker (MVP)"
+    about = "Cluster-capable Apache Kafka-compatible krabka broker"
 )]
 struct Args {
     #[command(flatten)]

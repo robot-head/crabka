@@ -366,6 +366,7 @@ async fn main() -> anyhow::Result<()> {
 
     let store = KafkaStore::start(&cfg, shutdown.clone()).await?;
     let primary = crabka_schema_registry::election::Election::start(&cfg, shutdown.clone()).await?;
+    store.install_primary(primary.clone());
 
     // ── Authentication state ────────────────────────────────────────────────
     let basic = match &cfg.security.basic {

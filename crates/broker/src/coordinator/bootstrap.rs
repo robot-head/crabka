@@ -34,23 +34,12 @@ use crate::{
 const REPLAY_READ_MAX: ByteSize = mebibytes(1);
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
+/// First offsets partition, used by focused compatibility tests.
+#[cfg(test)]
 pub const OFFSETS_PARTITION: i32 = 0;
-/// Number of partitions in `__consumer_offsets`.
-///
-/// Bootstrap creates a 1-partition topic with `OFFSETS_PARTITION = 0`, so all
-/// group-ids map to partition 0. The constant is shared, so the transaction
-/// handlers `AddOffsetsToTxn` and `EndTxn` agree on the partition that a
-/// group's offset commits land in.
-///
-/// CAVEAT for a future multi-partition `__consumer_offsets`: Kafka partitions
-/// this topic by group with `abs(groupId.hashCode()) % N`, the Java
-/// `String.hashCode`, and NOT with murmur2. `AddOffsetsToTxn` computes the
-/// group's partition today with `partition_for_tid`, which uses murmur2. That
-/// is correct only while `N == 1`. A value above 1 needs a dedicated
-/// `partition_for_group` that uses the Java-hashCode rule. The code must apply
-/// it here and in the offset storage path, which hardcodes
-/// `OFFSETS_PARTITION = 0` today.
-pub const OFFSETS_NUM_PARTITIONS: i32 = 1;
+/// Kafka's default offsets-topic partition count. Existing clusters retain the
+/// partition count recorded in metadata; this value is only used at creation.
+pub const OFFSETS_NUM_PARTITIONS: i32 = 50;
 
 /// Internal topic that carries tamper-evident OCSF audit records for the
 /// `FedRAMP` MLA.
@@ -155,9 +144,19 @@ struct Replayed {
     committed: HashMap<String, HashMap<(String, i32), OffsetEntry>>,
 }
 
-/// Make sure the `__consumer_offsets-0` partition exists on disk, open its
-/// `Log`, spawn a writer task, and replay every record into the given
-/// `GroupCoordinator`.
+impl Replayed {
+    fn merge(&mut self, other: Self) {
+        self.classic.extend(other.classic);
+        self.committed.extend(other.committed);
+    }
+}
+
+/// Ensure `__consumer_offsets` exists, open every partition assigned to this
+/// broker, spawn its writer task, and replay each local log into the supplied
+/// `GroupCoordinator`. Registers the topic via the metadata quorum
+/// (`controller.submit_change(...)`) with Kafka's default partition count;
+/// `TopicExists` is treated as success so a restart that finds the topic
+/// already in the log is a no-op.
 ///
 /// The function registers the topic through the metadata quorum with
 /// `controller.submit_change(...)` as a 1-partition internal topic. It treats
@@ -185,14 +184,6 @@ pub async fn bootstrap(
              cannot bootstrap the group-coordinator partition",
         )));
     }
-    let topic_dir = log_dir::place_partition_dir(&placement_dirs, OFFSETS_TOPIC, OFFSETS_PARTITION);
-    std::fs::create_dir_all(&topic_dir)?;
-    let log = crabka_log::Log::open(&topic_dir, config.log_config.clone())?;
-    let owning_dir = topic_dir
-        .parent()
-        .expect("placed partition dir always has a parent log.dir")
-        .to_path_buf();
-
     // Register the topic via the metadata quorum, but only from a SINGLE
     // consistent writer: the controller leader. The previous `is_none()` ->
     // `submit_change` path was a TOCTOU race — when two voters boot
@@ -212,26 +203,48 @@ pub async fn bootstrap(
         // don't hold the borrow across an await point.
         let am_leader = *controller.watch_leader().borrow() == Some(config.node_id);
         if am_leader {
-            let records = vec![
-                MetadataRecord::V1Topic(TopicRecord {
-                    name: OFFSETS_TOPIC.to_string(),
-                    topic_id: uuid::Uuid::new_v4(),
-                    partitions: 1,
-                    replication_factor: 1,
-                }),
-                MetadataRecord::V1Partition(PartitionRecord {
+            let image = controller.current_image();
+            let mut brokers: Vec<_> = image.brokers().map(|broker| broker.node_id).collect();
+            drop(image);
+            if brokers.is_empty() {
+                brokers.push(config.node_id);
+            }
+            brokers.sort_unstable();
+            let replication_factor =
+                i16::try_from(crate::bootstrap::internal_topic_replication_factor(
+                    config.offsets_topic_replication_factor,
+                    brokers.len(),
+                ))
+                .expect("effective offsets replication factor fits i16");
+            let assignments = crate::handlers::create_topics::round_robin_replicas(
+                &brokers,
+                config.offsets_topic_num_partitions,
+                replication_factor,
+            );
+            let mut records = Vec::with_capacity(
+                1 + usize::try_from(config.offsets_topic_num_partitions).unwrap_or_default(),
+            );
+            records.push(MetadataRecord::V1Topic(TopicRecord {
+                name: OFFSETS_TOPIC.to_string(),
+                topic_id: uuid::Uuid::new_v4(),
+                partitions: config.offsets_topic_num_partitions,
+                replication_factor,
+            }));
+            for (partition, replicas) in assignments.into_iter().enumerate() {
+                records.push(MetadataRecord::V1Partition(PartitionRecord {
                     topic: OFFSETS_TOPIC.to_string(),
-                    partition: OFFSETS_PARTITION,
-                    leader: config.node_id,
-                    replicas: vec![config.node_id],
-                    isr: vec![config.node_id],
+                    partition: i32::try_from(partition)
+                        .expect("offsets partition index overflows i32"),
+                    leader: replicas[0],
+                    replicas: replicas.clone(),
+                    isr: replicas,
                     leader_epoch: crabka_metadata::LeaderEpoch(0),
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],
                     partition_epoch: 0,
-                }),
-            ];
+                }));
+            }
             match controller.submit_change(records).await {
                 // An earlier boot of ours already registered it (single
                 // writer, so no conflicting-id race) — treat as success.
@@ -247,7 +260,10 @@ pub async fn bootstrap(
             let mut images = controller.watch_image();
             let deadline =
                 tokio::time::Instant::now() + config.offsets_topic_metadata_wait_timeout.to_std();
-            while controller.current_image().topic(OFFSETS_TOPIC).is_none() {
+            while !offsets_topic_ready(
+                &controller.current_image(),
+                config.offsets_topic_num_partitions,
+            ) {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     return Err(BrokerError::Startup(format!(
@@ -268,38 +284,99 @@ pub async fn bootstrap(
         }
     }
 
-    // Replay before spawning the writer so reads see consistent state.
-    let replayed = replay_records(&log, coordinator)?;
-    finalize(coordinator, replayed);
+    let local_records: Vec<PartitionRecord> = controller
+        .current_image()
+        .partitions_of(OFFSETS_TOPIC)
+        .filter(|record| record.replicas.contains(&config.node_id))
+        .cloned()
+        .collect();
+    let mut replayed = Replayed::default();
+    for record in local_records {
+        let partition_id = PartitionIndex(record.partition);
+        if let Some(partition) = partitions.get(OFFSETS_TOPIC, partition_id) {
+            if record.leader == config.node_id {
+                let log = partition.log.lock().map_err(|_| {
+                    BrokerError::Startup(format!(
+                        "{OFFSETS_TOPIC}-{} log lock poisoned during replay",
+                        record.partition
+                    ))
+                })?;
+                replayed.merge(replay_records(&log, coordinator)?);
+            }
+            continue;
+        }
 
-    // Spawn a writer + register the partition handle.
-    let partition = spawn_partition(
-        OFFSETS_TOPIC.to_string(),
-        PartitionIndex(OFFSETS_PARTITION),
-        owning_dir,
-        log,
-        log_dir_status.clone(),
-        producer_state.clone(),
-        false,
-    );
-    partitions.insert(
-        OFFSETS_TOPIC.into(),
-        PartitionIndex(OFFSETS_PARTITION),
-        partition,
-    );
+        let topic_dir =
+            log_dir::place_partition_dir(&placement_dirs, OFFSETS_TOPIC, record.partition);
+        std::fs::create_dir_all(&topic_dir)?;
+        let log = crabka_log::Log::open(&topic_dir, config.log_config.clone())?;
+        if record.leader == config.node_id {
+            replayed.merge(replay_records(&log, coordinator)?);
+        }
+        let owning_dir = topic_dir
+            .parent()
+            .expect("placed partition dir always has a parent log.dir")
+            .to_path_buf();
+        let partition = spawn_partition(
+            OFFSETS_TOPIC.to_string(),
+            partition_id,
+            owning_dir,
+            log,
+            log_dir_status.clone(),
+            producer_state.clone(),
+            false,
+        );
+        partitions.insert(OFFSETS_TOPIC.into(), partition_id, partition);
+    }
+    finalize(coordinator, replayed);
     Ok(())
 }
 
-/// Walk every `RecordBatch` in the log from offset 0 to `log_end_offset()` and
-/// apply each record's key and value.
-///
-/// Classic records and offsets go into the accumulator. Next-gen records go
-/// into the coordinator's seed accumulator.
+/// Replay one newly-led offsets partition into the coordinator after a
+/// metadata leadership change.
+pub(crate) fn replay_partition(
+    partitions: &PartitionRegistry,
+    coordinator: &Arc<GroupCoordinator>,
+    partition_id: PartitionIndex,
+) -> Result<(), BrokerError> {
+    let partition = partitions.get(OFFSETS_TOPIC, partition_id).ok_or_else(|| {
+        BrokerError::Startup(format!(
+            "newly-led {OFFSETS_TOPIC}-{} is not materialized locally",
+            partition_id.get()
+        ))
+    })?;
+    let log = partition.log.lock().map_err(|_| {
+        BrokerError::Startup(format!(
+            "{OFFSETS_TOPIC}-{} log lock poisoned during leadership replay",
+            partition_id.get()
+        ))
+    })?;
+    let replayed = replay_records(&log, coordinator)?;
+    drop(log);
+    finalize(coordinator, replayed);
+    Ok(())
+}
+
+fn offsets_topic_ready(image: &crabka_metadata::MetadataImage, expected_partitions: i32) -> bool {
+    image.topic(OFFSETS_TOPIC).is_some()
+        && image.topic_partition_count(OFFSETS_TOPIC) == expected_partitions
+}
+
+/// Walk every `RecordBatch` in the log from offset 0 to `log_end_offset()`
+/// and apply each record's key/value into the accumulator (classic + offsets)
+/// or, for next-gen records, the coordinator's seed accumulator.
 fn replay_records(
     log: &crabka_log::Log,
     coordinator: &Arc<GroupCoordinator>,
 ) -> Result<Replayed, BrokerError> {
+    struct DeferredRecord {
+        key: Key,
+        value: Option<bytes::Bytes>,
+        timestamp_ms: i64,
+    }
+
     let mut acc = Replayed::default();
+    let mut pending_transactions: HashMap<i64, Vec<DeferredRecord>> = HashMap::new();
     let mut next = log.log_start_offset();
     let end = log.log_end_offset();
     while next < end {
@@ -309,11 +386,48 @@ fn replay_records(
         }
         let mut advanced_to = next;
         for batch in &out.batches {
+            if batch.attributes.is_control_batch() {
+                let committed = batch
+                    .records
+                    .first()
+                    .and_then(|record| record.key.as_deref())
+                    .is_some_and(|key| key.len() >= 4 && key[2..4] == 1_i16.to_be_bytes());
+                if let Some(records) = pending_transactions.remove(&batch.producer_id)
+                    && committed
+                {
+                    for record in records {
+                        match record.value {
+                            Some(value) => apply_record_at_timestamp(
+                                coordinator,
+                                &mut acc,
+                                record.key,
+                                &value,
+                                record.timestamp_ms,
+                            )?,
+                            None => apply_tombstone(coordinator, record.key),
+                        }
+                    }
+                }
+                advanced_to =
+                    crabka_log::Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
+                continue;
+            }
             for record in &batch.records {
                 let Some(key_bytes) = &record.key else {
                     continue;
                 };
                 let key = persistence::parse_key(key_bytes)?;
+                if batch.attributes.is_transactional() {
+                    pending_transactions
+                        .entry(batch.producer_id)
+                        .or_default()
+                        .push(DeferredRecord {
+                            key,
+                            value: record.value.clone(),
+                            timestamp_ms: batch.max_timestamp,
+                        });
+                    continue;
+                }
                 match &record.value {
                     Some(value_bytes) => {
                         apply_record(coordinator, &mut acc, key, value_bytes, batch)?;
@@ -343,6 +457,16 @@ fn apply_record(
     value_bytes: &bytes::Bytes,
     batch: &RecordBatch,
 ) -> Result<(), BrokerError> {
+    apply_record_at_timestamp(coordinator, acc, key, value_bytes, batch.max_timestamp)
+}
+
+fn apply_record_at_timestamp(
+    coordinator: &Arc<GroupCoordinator>,
+    acc: &mut Replayed,
+    key: Key,
+    value_bytes: &bytes::Bytes,
+    timestamp_ms: i64,
+) -> Result<(), BrokerError> {
     match key {
         Key::OffsetCommit {
             group_id,
@@ -366,7 +490,7 @@ fn apply_record(
                 .classic
                 .entry(group_id.clone())
                 .or_insert_with(|| ClassicState::new(group_id));
-            apply_group_metadata(state, v, batch.max_timestamp);
+            apply_group_metadata(state, v, timestamp_ms);
         }
         Key::NextGen(ng_key) => {
             apply_next_gen_record(coordinator, ng_key, value_bytes)?;
@@ -910,7 +1034,10 @@ mod tests {
         partitions: &Arc<PartitionRegistry>,
     ) -> Arc<GroupCoordinator> {
         let offsets_log: Arc<dyn crate::coordinator::unified::offsets_log::OffsetsLog> = Arc::new(
-            crate::coordinator::unified::offsets_log::ProductionOffsetsLog::new(partitions.clone()),
+            crate::coordinator::unified::offsets_log::ProductionOffsetsLog::new(
+                partitions.clone(),
+                controller.clone(),
+            ),
         );
         Arc::new(GroupCoordinator::new(
             crate::coordinator::unified::config::NextGenConfig::default(),
@@ -1546,5 +1673,81 @@ mod tests {
         check!(committed[&("t".to_string(), 0)].offset == 100);
         check!(committed[&("t".to_string(), 1)].offset == 101);
         check!(committed[&("t".to_string(), 2)].offset == 202);
+    }
+
+    #[test]
+    fn replay_applies_only_committed_transactional_offsets() {
+        use crabka_log::{Offset, ProducerId};
+        use crabka_protocol::records::{Attributes, Record};
+
+        use crate::{
+            coordinator::unified::{
+                GroupCoordinator, offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+            },
+            txn::marker::{MarkerType, build_marker_batch},
+        };
+
+        #[derive(Debug)]
+        struct EmptyMeta;
+        impl crate::coordinator::unified::actor::MetadataProvider for EmptyMeta {
+            fn snapshot(&self) -> ReconcileInput {
+                ReconcileInput::default()
+            }
+        }
+
+        let coordinator = Arc::new(GroupCoordinator::new(
+            crate::coordinator::unified::config::NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            Arc::new(EmptyMeta),
+            Arc::new(InMemoryOffsetsLog::default()),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        ));
+        let record = |partition: i32, offset: i64| Record {
+            key: Some(OffsetCommitValue::encode_key("g", "t", partition)),
+            value: Some(
+                OffsetCommitValue {
+                    offset: Offset(offset),
+                    leader_epoch: -1,
+                    metadata: String::new(),
+                    commit_timestamp_ms: 0,
+                }
+                .encode_value(),
+            ),
+            ..Default::default()
+        };
+        let transactional = |partition: i32, offset: i64| RecordBatch {
+            producer_id: 7,
+            producer_epoch: 0,
+            attributes: Attributes::default().with_transactional(true),
+            records: vec![record(partition, offset)],
+            ..RecordBatch::default()
+        };
+
+        let dir = tempdir().unwrap();
+        let mut log = crabka_log::Log::open(dir.path(), crabka_log::LogConfig::default()).unwrap();
+        log.append(&mut transactional(0, 111)).unwrap();
+        log.append(&mut build_marker_batch(
+            ProducerId(7),
+            0,
+            Offset(0),
+            MarkerType::Commit,
+        ))
+        .unwrap();
+        log.append(&mut transactional(1, 222)).unwrap();
+        log.append(&mut build_marker_batch(
+            ProducerId(7),
+            0,
+            Offset(0),
+            MarkerType::Abort,
+        ))
+        .unwrap();
+        log.append(&mut transactional(2, 333)).unwrap();
+
+        let replayed = replay_records(&log, &coordinator).unwrap();
+        let committed = replayed.committed.get("g").expect("committed transaction");
+        check!(committed.len() == 1);
+        check!(committed[&("t".to_string(), 0)].offset == 111);
+        check!(!committed.contains_key(&("t".to_string(), 1)));
+        check!(!committed.contains_key(&("t".to_string(), 2)));
     }
 }

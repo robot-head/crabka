@@ -1020,18 +1020,16 @@ async fn handle_session_tick(
     Ok(())
 }
 
-/// KIP-848 DOWNGRADE trigger.
-///
-/// After a membership change on a consumer-kind group, this function flips the
-/// group back to classic in place when no NATIVE consumer member remains,
-/// there ARE hosted classic members, and policy allows it. The flip is one
-/// atomic batch: it tombstones the next-gen k3 and k6 (both group-level) and
-/// every member's k5, k7, and k8, then writes the classic k2 `GroupMetadata`.
-///
-/// It returns `Ok(true)` when a flip happened, `Ok(false)` when the conditions
-/// were not met, and `Err` on a log-write failure. The caller then exits the
-/// actor loop.
-// TODO(kip-848): confirm exact downgrade trigger boundary against mirror.gcr.io/apache/kafka:4.0.0
+/// KIP-848 DOWNGRADE trigger. After a membership change on a consumer-kind
+/// group, flip it back to classic in place when no NATIVE consumer member
+/// remains, there ARE hosted classic members, and policy allows it. The flip
+/// is one atomic batch: tombstone the next-gen k3 + k6 (both group-level) +
+/// every member's k5/k7/k8, and write the classic k2 `GroupMetadata`. Returns `Ok(true)` if a flip
+/// happened, `Ok(false)` if the conditions weren't met, `Err` on a log-write
+/// failure (the caller exits the actor loop).
+// Matches Kafka's `validateOnlineDowngradeWithFencedMembers`: downgrade only
+// when the remaining group is nonempty, every remaining member uses the
+// classic protocol, and the migration policy permits downgrade.
 async fn maybe_downgrade(
     group: &mut CoordinatorGroup,
     config: &NextGenConfig,
@@ -1086,7 +1084,7 @@ async fn maybe_downgrade(
     let pending = migration::downgrade_pending_records(state, &classic);
     let group_id = group.group_id.clone();
     let batch = pending.into_batch(&group_id, chrono_now_ms());
-    offsets_log.append(batch).await?;
+    offsets_log.append(&group_id, batch).await?;
     coordinator.mark_classic_after_downgrade(&group_id);
     *group.kind_mut() = GroupKind::Classic(classic);
     Ok(true)
@@ -1994,7 +1992,7 @@ async fn flush_pending(
     // Consume `pending` by value: `into_batch` moves the per-member
     // record vectors straight into the batch instead of deep-cloning them.
     let batch = pending.into_batch(&state.group_id, now_ms);
-    offsets_log.append(batch).await?;
+    offsets_log.append(&state.group_id, batch).await?;
     coordinator.update_cache(&state.group_id, snapshot_seed(state));
     Ok(())
 }

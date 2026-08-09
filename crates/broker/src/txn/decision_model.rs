@@ -35,7 +35,6 @@ use super::{
     },
     CompletionDecision, decide_end_txn_completion, decide_phase1_transition,
 };
-use crate::producer_id_manager::ProducerIdManager;
 
 const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 60;
@@ -50,6 +49,7 @@ struct TxnModel {
 /// window.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct PendingEnd {
+    generation_epoch: i16,
     expected_epoch: i16,
     prepare: i8, // TxnState::to_kafka_status()
     complete: i8,
@@ -155,7 +155,11 @@ impl Model for TxnModel {
                     cur,
                     TxnState::Ongoing | TxnState::PrepareCommit | TxnState::PrepareAbort
                 ) {
-                    record(&mut s.committed, &mut s.aborted, s.epoch, false);
+                    let generation_epoch = s
+                        .pending
+                        .as_ref()
+                        .map_or(s.epoch, |pending| pending.generation_epoch);
+                    record(&mut s.committed, &mut s.aborted, generation_epoch, false);
                 }
                 s.epoch += 1;
                 s.state = TxnState::Empty.to_kafka_status();
@@ -176,11 +180,20 @@ impl Model for TxnModel {
                     return None;
                 }
                 let mut entry = rebuild(&s);
+                let generation_epoch = s.epoch;
                 match decide_phase1_transition(&mut entry, committed) {
                     Ok((prepare, complete)) => {
+                        crate::txn::handlers::end_txn::prepare_completion_identities_with_fresh(
+                            &mut entry,
+                            TxnVersion::Verified,
+                            None,
+                        )
+                        .expect("model epochs never reach the rotation boundary");
                         s.state = prepare.to_kafka_status();
+                        s.epoch = entry.producer_epoch;
                         s.pending = Some(PendingEnd {
-                            expected_epoch: s.epoch,
+                            generation_epoch,
+                            expected_epoch: entry.producer_epoch,
                             prepare: prepare.to_kafka_status(),
                             complete: complete.to_kafka_status(),
                             committed,
@@ -193,15 +206,14 @@ impl Model for TxnModel {
             TxnAction::EndTxnPhase3 => {
                 let p = s.pending.clone()?;
                 let entry = rebuild(&s);
-                let ids = ProducerIdManager::new();
                 match decide_end_txn_completion(
                     &entry,
                     PID,
                     p.expected_epoch,
+                    PID,
+                    p.expected_epoch,
                     st(p.prepare),
                     st(p.complete),
-                    TxnVersion::Verified,
-                    &ids,
                 ) {
                     CompletionDecision::Proceed {
                         next_state,
@@ -219,7 +231,7 @@ impl Model for TxnModel {
                         record(
                             &mut s.committed,
                             &mut s.aborted,
-                            p.expected_epoch,
+                            p.generation_epoch,
                             p.committed,
                         );
                         s.state = next_state.to_kafka_status();

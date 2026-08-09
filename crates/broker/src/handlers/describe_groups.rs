@@ -72,6 +72,14 @@ pub(crate) async fn handle(
             });
             continue;
         }
+        if let Some(error_code) = crate::handlers::group_coordinator_error(broker, &gid) {
+            groups.push(DescribedGroup {
+                group_id: gid,
+                error_code,
+                ..Default::default()
+            });
+            continue;
+        }
 
         // KIP-1071: a Streams-locked group's offset home is a drained classic
         // actor; describing it via the classic projection would mislabel it.
@@ -169,6 +177,5 @@ fn state_to_str(s: GroupState) -> &'static str {
         GroupState::PreparingRebalance => "PreparingRebalance",
         GroupState::CompletingRebalance => "CompletingRebalance",
         GroupState::Stable => "Stable",
-        GroupState::Dead => "Dead",
     }
 }
