@@ -3808,15 +3808,24 @@ mod tests {
     fn circle_to_polygon_matches_postgres() {
         use assert2::assert;
 
-        assert!(
-            circle("<(0,0),3>").to_polygon(5)
-                == Ok(polygon(
-                    "((-3,0),(-0.9270509831248424,2.8531695488854605),\
-                     (2.427050983124842,1.7633557568774196),\
-                     (2.427050983124843,-1.7633557568774192),\
-                     (-0.9270509831248417,-2.853169548885461))"
-                ))
-        );
+        // Compared as geometry, not as rendered text: `to_polygon` walks the
+        // circle with cos/sin, and those differ by an ULP between platforms'
+        // libm, so pinning the string asserts which libm built the binary.
+        let five = circle("<(0,0),3>").to_polygon(5).expect("five points");
+        assert!(five.points.len() == 5);
+        for (i, point) in five.points.iter().enumerate() {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "five vertices; the index is exact in f64"
+            )]
+            let angle = std::f64::consts::PI - (i as f64) * std::f64::consts::TAU / 5.0;
+            let (want_x, want_y) = (3.0 * angle.cos(), 3.0 * angle.sin());
+            assert!(
+                (point.x - want_x).abs() < 1e-12 && (point.y - want_y).abs() < 1e-12,
+                "vertex {i}: {point:?} is not on the circle at angle {angle}"
+            );
+        }
+
         let zero = circle("<(3,5),0>").to_polygon(12).expect_err("zero radius");
         assert!(zero.sqlstate() == "0A000");
         assert!(zero.to_string() == "cannot convert circle with radius zero to polygon");
