@@ -1502,6 +1502,18 @@ pub(crate) fn execute_ddl(
             member_of,
             options,
         } => {
+            crate::privilege::require_role_create(kv, fctx.effective_role(), *options)?;
+            // `IN ROLE r` writes exactly the membership `GRANT r TO …` writes,
+            // so it passes exactly the same gate. Every named role is checked
+            // before the first membership is written.
+            for role in member_of {
+                crate::privilege::require_role_grant(
+                    kv,
+                    fctx.effective_role(),
+                    role,
+                    crate::privilege::RoleGrant::Grant,
+                )?;
+            }
             let mut attributes = crabka_pgcatalog::RoleAttributes::default();
             let login = apply_role_options(&mut attributes, *can_login, *options);
             let ops = crabka_pgcatalog::create_role_with_memberships_ops(
@@ -1510,13 +1522,17 @@ pub(crate) fn execute_ddl(
             Ok((command("CREATE ROLE"), ops))
         }
         Statement::AlterRole { name, options } => {
+            // The name is resolved first: `PostgreSQL` reports an unknown role
+            // as unknown even when the session could not have altered it.
             let role = crabka_pgcatalog::get_role(kv, name)?;
+            crate::privilege::require_role_alter(kv, fctx.effective_role(), name, *options)?;
             let mut attributes = role.attributes;
             let login = apply_role_options(&mut attributes, role.can_login, *options);
             let ops = crabka_pgcatalog::alter_role_ops(kv, name, login, attributes)?;
             Ok((command("ALTER ROLE"), ops))
         }
         Statement::DropRole { name, if_exists } => {
+            crate::privilege::require_role_drop(kv, fctx.effective_role())?;
             let ops = match crabka_pgcatalog::drop_role_ops(kv, name) {
                 Ok(ops) => ops,
                 Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => Vec::new(),
@@ -1552,6 +1568,13 @@ pub(crate) fn execute_ddl(
             members,
             admin_option: _,
         } => {
+            require_role_memberships(
+                kv,
+                &fctx,
+                roles,
+                members,
+                crate::privilege::RoleGrant::Grant,
+            )?;
             let ops = crabka_pgcatalog::grant_role_memberships_ops(kv, roles, members)?;
             Ok((command("GRANT ROLE"), ops))
         }
@@ -1560,6 +1583,13 @@ pub(crate) fn execute_ddl(
             members,
             admin_option,
         } => {
+            require_role_memberships(
+                kv,
+                &fctx,
+                roles,
+                members,
+                crate::privilege::RoleGrant::Revoke,
+            )?;
             // The names are checked either way; `ADMIN OPTION FOR` then keeps
             // the membership and strips only the admin right, which is all this
             // catalog does not hold, so it writes nothing.
@@ -6609,18 +6639,21 @@ async fn execute_merge(
     scope.columns.extend(source_rel.scope.columns.clone());
     let spec = ReturningSpec::new(&t, qualifier, returning.as_ref(), Some(&scope), true)?;
 
-    // MERGE reaches rows through its own join and may update or delete them.
-    // `UPDATE` is the narrower of the two policy commands a matched row can
-    // meet, and a row this statement cannot update it also cannot delete. Its
-    // `ON` condition always reads the target, so the `SELECT` privilege is not
-    // conditional here — `WriteAction::Merge` carries that.
+    // MERGE reaches rows through its own join, so `SELECT` policies decide
+    // which rows it sees and the clauses it was written with decide which
+    // privileges it needs. Both are settled here, before the first row is read:
+    // `PostgreSQL` checks a MERGE's privileges at statement start whether or
+    // not a particular `WHEN` clause ever fires.
     let target_rows = write_candidate_rows(
         write_ctx,
         &t,
-        crate::privilege::WriteAction::Merge,
+        crate::privilege::WriteAction::Merge(crate::privilege::MergeClauses::of(clauses)),
         None,
         true,
     )?;
+    // The `UPDATE` and `DELETE` policies then judge each row an action reaches,
+    // one row at a time, and raise rather than skip — see `MergeRowSecurity`.
+    let row_security = MergeRowSecurity::compile(write_ctx, &t)?;
     let mut matched: HashSet<u64> = HashSet::new();
     let mut returned_rows = Vec::new();
     let mut n: u64 = 0;
@@ -6665,6 +6698,7 @@ async fn execute_merge(
                     rowid: *rowid,
                     joined: &joined,
                     action: &when.action,
+                    security: &row_security,
                 },
                 writes,
                 &mut ops,
@@ -6809,6 +6843,7 @@ async fn execute_merge(
                 rowid: *rowid,
                 joined: &joined,
                 action: &when.action,
+                security: &row_security,
             },
             writes,
             &mut ops,
@@ -6850,6 +6885,52 @@ struct MergeRowAction<'a> {
     rowid: u64,
     joined: &'a [Datum],
     action: &'a crabka_pgparser::ast::MergeAction,
+    security: &'a MergeRowSecurity,
+}
+
+/// The `USING` qual each `MERGE` action judges an already-matched target row
+/// against.
+///
+/// A plain `UPDATE` or `DELETE` applies its command's `USING` qual as a filter:
+/// a row that fails it was never a candidate, and the statement reports a lower
+/// count. A `MERGE` cannot do that. It found the row through its own join,
+/// under the `SELECT` policies, and it has already decided which `WHEN` clause
+/// the row meets — so dropping the row now would silently turn a matched row
+/// into a row that matched nothing. `PostgreSQL` raises instead:
+///
+/// ```text
+/// ERROR:  42501: target row violates row-level security policy (USING expression) for table "t"
+/// ```
+///
+/// which is exactly [`crate::rls::CheckSubject::TargetRow`], the same shape
+/// `INSERT … ON CONFLICT DO UPDATE` uses for the row it found and is about to
+/// change.
+///
+/// Both quals are compiled once per statement rather than once per row. A
+/// relation without row security costs nothing to compile: the decision
+/// short-circuits on the relation's own flag before it reads a policy.
+struct MergeRowSecurity {
+    update: crate::rls::RowSecurityCheck,
+    delete: crate::rls::RowSecurityCheck,
+}
+
+impl MergeRowSecurity {
+    fn compile(write_ctx: &WriteContext<'_>, table: &Table) -> Result<Self, ExecError> {
+        use crabka_pgcatalog::policy::PolicyCommand;
+        let governor = write_ctx.governor(table);
+        let compile = |command| {
+            crate::rls::RowSecurityCheck::compile(
+                &write_ctx.rls(),
+                governor,
+                command,
+                crate::rls::CheckSubject::TargetRow,
+            )
+        };
+        Ok(Self {
+            update: compile(PolicyCommand::Update)?,
+            delete: compile(PolicyCommand::Delete)?,
+        })
+    }
 }
 
 /// Apply an `UPDATE`/`DELETE` merge action to one already-matched target row,
@@ -6883,6 +6964,7 @@ async fn apply_merge_row_action(
     let source = request.joined[t.columns.len()..].to_vec();
     match request.action {
         MergeAction::Update(assignments) => {
+            request.security.update.permit_row(t, &cur_row, ctx)?;
             let targets = resolve_assignments(write_ctx, request.ctes, t, assignments)?;
             let mut joined = cur_row.clone();
             joined.extend_from_slice(&source);
@@ -6940,6 +7022,7 @@ async fn apply_merge_row_action(
             }))
         }
         MergeAction::Delete => {
+            request.security.delete.permit_row(t, &cur_row, ctx)?;
             if crate::trigger::fire_before_row(
                 write_ctx.catalog_kv,
                 crate::trigger::WriteTarget {
@@ -19519,6 +19602,32 @@ fn pg_prepared_statement_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
             ]
         })
         .collect())
+}
+
+/// Check that the session may move membership in every role a `GRANT`/`REVOKE
+/// ROLE` names.
+///
+/// The names come first and the rights come second, which is the order
+/// `PostgreSQL` reports them in: it resolves the grantees, then resolves and
+/// checks each granted role in turn, so a statement naming a role that does not
+/// exist says so rather than reporting a denial for a name that means nothing.
+/// Every name is checked before any membership is written, so a statement that
+/// fails on its second role writes nothing for its first.
+fn require_role_memberships(
+    kv: &dyn Kv,
+    fctx: &ForeignCtx,
+    roles: &[String],
+    members: &[String],
+    direction: crate::privilege::RoleGrant,
+) -> Result<(), ExecError> {
+    for member in members {
+        crabka_pgcatalog::get_role(kv, member)?;
+    }
+    for role in roles {
+        crabka_pgcatalog::get_role(kv, role)?;
+        crate::privilege::require_role_grant(kv, fctx.effective_role(), role, direction)?;
+    }
+    Ok(())
 }
 
 /// Fold a written `CREATE`/`ALTER ROLE` option list onto stored attributes,

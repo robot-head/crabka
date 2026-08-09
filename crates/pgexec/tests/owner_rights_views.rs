@@ -345,7 +345,9 @@ async fn a_policy_qual_reading_current_user_names_the_invoker() {
 #[tokio::test]
 async fn a_nested_view_body_runs_as_its_own_owner() {
     let (engine, mut alice) = owned_engine().await;
-    run(&mut alice, "CREATE ROLE dave").await;
+    // `CREATE ROLE` needs the `CREATEROLE` attribute, which `alice` does not
+    // hold, so the role comes from an unauthenticated (bootstrap) session.
+    run(&mut engine.connect(), "CREATE ROLE dave").await;
     let mut dave = as_role(&engine, "dave").await;
     run(
         &mut dave,

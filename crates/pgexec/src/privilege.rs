@@ -38,6 +38,36 @@
 //! never reach [`ReadPermit::acquire`] because `build_base_table` answers them
 //! before it looks for a stored relation — which lands in the same place
 //! `PostgreSQL` does, where they carry a `PUBLIC` `SELECT` grant.
+//!
+//! # Who may change the roles themselves
+//!
+//! [`require_role_create`], [`require_role_alter`], [`require_role_drop`] and
+//! [`require_role_grant`] judge a role against the *role* catalog rather than
+//! against one relation's grants. They belong here because they decide who the
+//! rest of this module is even asked about: a session that can write a role
+//! record can give itself `SUPERUSER`, or grant itself into a table's owning
+//! role, and walk past every other gate in the file.
+//!
+//! `PostgreSQL` 16 moved role administration off `CREATEROLE` alone and onto
+//! `CREATEROLE` **plus the `ADMIN` option on the target role**, and 18 keeps
+//! that. This catalog stores a membership as a bare key with no payload — see
+//! [`crabka_pgparser::ast::Statement::GrantRoles`] — so there is nowhere to
+//! record an admin right and nothing to read one back from. The rule is
+//! implemented as far as it is representable and no further:
+//!
+//! * The parts that read only role *attributes* are exact. Whether the acting
+//!   role holds `SUPERUSER`, `CREATEROLE`, `CREATEDB`, `REPLICATION` or
+//!   `BYPASSRLS` is a fact this catalog holds, so `CREATE ROLE` and the
+//!   `SUPERUSER` gate on `ALTER ROLE` match `PostgreSQL` statement for
+//!   statement.
+//! * The parts that need the `ADMIN` option admit the superuser and nobody
+//!   else. That is narrower than `PostgreSQL`, where a `CREATEROLE` role may
+//!   alter, drop and hand out the roles it administers. Narrow is the safe
+//!   direction to be wrong in, and widening it means storing the admin right
+//!   first.
+//!
+//! The `DETAIL` lines still state `PostgreSQL`'s rule, which is the rule a
+//! client reading one is reading about.
 
 use crabka_pgcatalog::{RelationName, Table};
 use crabka_pgkv::Kv;
@@ -248,6 +278,237 @@ pub(crate) fn require_ownership(
     )))
 }
 
+/// Raise 42501 unless `actor` may run `CREATE ROLE` with these options.
+///
+/// `PostgreSQL` checks `CREATEROLE` first and the individual attributes after,
+/// and it gates an attribute on the **value** the statement asks for, not on
+/// the option being written: `CREATE ROLE r NOSUPERUSER` needs no `SUPERUSER`.
+/// `ALTER ROLE` is the other way round — see [`require_role_alter`].
+///
+/// # Errors
+///
+/// Returns 42501 when the role may not create this role, or storage/corruption
+/// errors from the catalog KV seam.
+pub(crate) fn require_role_create(
+    kv: &dyn Kv,
+    actor: &str,
+    options: crabka_pgparser::ast::RoleOptions,
+) -> Result<(), ExecError> {
+    if crate::rls::role_is_superuser(kv, actor)? {
+        return Ok(());
+    }
+    if !role_holds(kv, actor, crabka_pgcatalog::RoleAttribute::CreateRole)? {
+        return Err(role_denial(
+            "create role",
+            "Only roles with the CREATEROLE attribute may create roles.".into(),
+        ));
+    }
+    // `PostgreSQL` reports the first of these the statement asks for, in this
+    // order. `CREATEROLE` is absent deliberately: a role holding it may hand it
+    // on, which is why it needs no gate of its own.
+    for (asked, attribute, name) in gated_attributes(options) {
+        if asked == Some(true) && !role_holds(kv, actor, attribute)? {
+            return Err(role_denial(
+                "create role",
+                format!(
+                    "Only roles with the {name} attribute may create roles with the {name} attribute."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Raise 42501 unless `actor` may run `ALTER ROLE target WITH <options>`.
+///
+/// `PostgreSQL` orders this differently from `CREATE ROLE`, and the difference
+/// is load-bearing: `SUPERUSER` is judged **before** the general gate, so a role
+/// with no rights over the target that asks for `SUPERUSER` is told about
+/// `SUPERUSER` rather than about the target. The remaining attribute gates come
+/// after the general one. Here the general gate admits only the superuser, who
+/// then passes all of them, so those later gates are unreachable and are not
+/// spelled out.
+///
+/// An attribute is gated on being **written**, whatever value it is written
+/// with: `ALTER ROLE r NOSUPERUSER` is refused for the same reason
+/// `ALTER ROLE r SUPERUSER` is.
+///
+/// An option list that writes nothing changes nothing. `PostgreSQL` lets a role
+/// change its own password and refuses it on anyone else's, and this parser
+/// drops `PASSWORD`, so a self-directed `ALTER ROLE … WITH PASSWORD …` arrives
+/// here as an empty option list. Allowing an empty list on the acting role
+/// alone is that rule as far as this engine can see it.
+///
+/// # Errors
+///
+/// Returns 42501 when the role may not alter `target`, or storage/corruption
+/// errors from the catalog KV seam.
+pub(crate) fn require_role_alter(
+    kv: &dyn Kv,
+    actor: &str,
+    target: &str,
+    options: crabka_pgparser::ast::RoleOptions,
+) -> Result<(), ExecError> {
+    if crate::rls::role_is_superuser(kv, actor)? {
+        return Ok(());
+    }
+    if options.superuser.is_some() {
+        return Err(role_denial(
+            "alter role",
+            "Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.".into(),
+        ));
+    }
+    if !writes_any_attribute(options) && actor == target {
+        return Ok(());
+    }
+    Err(role_denial(
+        "alter role",
+        format!(
+            "Only roles with the CREATEROLE attribute and the ADMIN option on role \"{target}\" may alter this role."
+        ),
+    ))
+}
+
+/// Raise 42501 unless `actor` may run `DROP ROLE`.
+///
+/// # Errors
+///
+/// Returns 42501 when the role may not drop roles, or storage/corruption errors
+/// from the catalog KV seam.
+pub(crate) fn require_role_drop(kv: &dyn Kv, actor: &str) -> Result<(), ExecError> {
+    if crate::rls::role_is_superuser(kv, actor)? {
+        return Ok(());
+    }
+    Err(role_denial(
+        "drop role",
+        "Only roles with the CREATEROLE attribute and the ADMIN option on the target roles may drop roles."
+            .into(),
+    ))
+}
+
+/// Which way a membership is moving, for the one error message that differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoleGrant {
+    Grant,
+    Revoke,
+}
+
+impl RoleGrant {
+    const fn verb(self) -> &'static str {
+        match self {
+            Self::Grant => "grant",
+            Self::Revoke => "revoke",
+        }
+    }
+}
+
+/// Raise 42501 unless `actor` may hand out — or take back — membership in
+/// `granted`.
+///
+/// This is the gate that keeps every other one honest. A membership is
+/// ownership for [`holds`], so a role that can grant itself into a table's
+/// owning role has read and written every relation that role owns without any
+/// grant naming it, and has passed the relation's row-security policies too.
+/// `CREATE ROLE … IN ROLE r` writes the same membership and goes through here
+/// for that reason.
+///
+/// # Errors
+///
+/// Returns 42501 when the role holds no admin right over `granted`, or
+/// storage/corruption errors from the catalog KV seam.
+pub(crate) fn require_role_grant(
+    kv: &dyn Kv,
+    actor: &str,
+    granted: &str,
+    direction: RoleGrant,
+) -> Result<(), ExecError> {
+    if crate::rls::role_is_superuser(kv, actor)? {
+        return Ok(());
+    }
+    let verb = direction.verb();
+    Err(ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "42501",
+            format!("permission denied to {verb} role \"{granted}\""),
+        )
+        .with_detail(format!(
+            "Only roles with the ADMIN option on role \"{granted}\" may {verb} this role."
+        )),
+    ))
+}
+
+/// The attributes `PostgreSQL` gates on the acting role holding the same one,
+/// in the order it reports them.
+fn gated_attributes(
+    options: crabka_pgparser::ast::RoleOptions,
+) -> [(Option<bool>, crabka_pgcatalog::RoleAttribute, &'static str); 4] {
+    use crabka_pgcatalog::RoleAttribute;
+    [
+        (options.superuser, RoleAttribute::Superuser, "SUPERUSER"),
+        (options.createdb, RoleAttribute::CreateDb, "CREATEDB"),
+        (
+            options.replication,
+            RoleAttribute::Replication,
+            "REPLICATION",
+        ),
+        (options.bypassrls, RoleAttribute::BypassRls, "BYPASSRLS"),
+    ]
+}
+
+/// Whether the option list changes any stored attribute or the login flag.
+fn writes_any_attribute(options: crabka_pgparser::ast::RoleOptions) -> bool {
+    let crabka_pgparser::ast::RoleOptions {
+        superuser,
+        inherit,
+        createrole,
+        createdb,
+        login,
+        replication,
+        bypassrls,
+    } = options;
+
+    [
+        superuser,
+        inherit,
+        createrole,
+        createdb,
+        login,
+        replication,
+        bypassrls,
+    ]
+    .into_iter()
+    .any(|written| written.is_some())
+}
+
+/// Whether `role` holds one boolean role attribute.
+///
+/// The bootstrap role holds every attribute and has no `pg_authid` row to read
+/// one from, which is the same exception [`crate::rls::role_is_superuser`]
+/// makes; a role that does not exist holds none.
+fn role_holds(
+    kv: &dyn Kv,
+    role: &str,
+    attribute: crabka_pgcatalog::RoleAttribute,
+) -> Result<bool, ExecError> {
+    if role == crabka_pgcatalog::BOOTSTRAP_ROLE {
+        return Ok(true);
+    }
+    match crabka_pgcatalog::get_role(kv, role) {
+        Ok(role) => Ok(role.attributes.has(attribute)),
+        Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// `PostgreSQL`'s `permission denied to <verb>` with the `DETAIL` that names the
+/// rule.
+fn role_denial(verb: &str, detail: String) -> ExecError {
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error("42501", format!("permission denied to {verb}"))
+            .with_detail(detail),
+    )
+}
+
 /// Proof that the session may read the rows of one stored relation.
 ///
 /// A token rather than a bare call, for the reason [`crate::rls::RawScan`] is a
@@ -333,20 +594,68 @@ pub(crate) enum WriteAction {
     /// alone: the privilege was checked on the whole truncate set before the
     /// first relation was touched, and `TRUNCATE` reads no column.
     Truncate,
-    /// `MERGE`. Needs `UPDATE` and `SELECT` — `UPDATE` because it is the
-    /// narrower of the two commands a matched row can meet (a row this
-    /// statement cannot update it also cannot delete), and `SELECT`
-    /// unconditionally because its `ON` condition reads the target.
-    Merge,
+    /// `MERGE`, carrying the kinds of action its `WHEN` clauses were written
+    /// with. Needs one privilege per kind, plus `SELECT` for the target its
+    /// `ON` condition reads.
+    Merge(MergeClauses),
+}
+
+/// Which kinds of action a `MERGE`'s `WHEN` clauses can take.
+///
+/// A `MERGE` is not one command. `PostgreSQL` requires `INSERT`, `UPDATE` and
+/// `DELETE` on the target for the clauses that spell each, and it decides that
+/// once, at statement start, "whether or not particular `WHEN` clauses are
+/// executed". So this is a property of the statement text and not of the rows
+/// the statement meets: a `MERGE` whose `DELETE` clause never fires is still
+/// refused when the role holds no `DELETE`.
+///
+/// Three booleans rather than three separate [`WriteAction`] variants because
+/// one statement carries all three at once, and the privilege check runs once
+/// before the first row is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct MergeClauses {
+    insert: bool,
+    update: bool,
+    delete: bool,
+}
+
+impl MergeClauses {
+    /// The kinds of action this clause list can take.
+    ///
+    /// `DO NOTHING` contributes nothing, which is why a `MERGE` written only
+    /// with `DO NOTHING` clauses needs no write privilege at all.
+    pub(crate) fn of(clauses: &[crabka_pgparser::ast::MergeWhen]) -> Self {
+        use crabka_pgparser::ast::MergeAction;
+        let mut found = Self::default();
+        for clause in clauses {
+            match clause.action {
+                MergeAction::Insert { .. } => found.insert = true,
+                MergeAction::Update(_) => found.update = true,
+                MergeAction::Delete => found.delete = true,
+                MergeAction::DoNothing => {}
+            }
+        }
+        found
+    }
 }
 
 impl WriteAction {
     /// The policy command row security applies to the rows this action gathers.
+    ///
+    /// `MERGE` gathers its rows by *reading* the target — the join its `ON`
+    /// condition drives is a scan — so `SELECT` policies decide which rows it
+    /// can see, exactly as they decide what a `SELECT` returns. A row a
+    /// `SELECT` policy hides is therefore not matched at all, and a `WHEN NOT
+    /// MATCHED` clause fires for it. The `UPDATE` and `DELETE` policies do
+    /// still apply, per row and per action, but they are not a filter: see
+    /// [`crate::rls::CheckSubject::TargetRow`] for why failing one raises
+    /// rather than skips.
     pub(crate) const fn policy_command(self) -> crabka_pgcatalog::policy::PolicyCommand {
         use crabka_pgcatalog::policy::PolicyCommand;
         match self {
-            Self::Update | Self::Merge => PolicyCommand::Update,
+            Self::Update => PolicyCommand::Update,
             Self::Delete | Self::Truncate => PolicyCommand::Delete,
+            Self::Merge(_) => PolicyCommand::Select,
         }
     }
 
@@ -358,14 +667,37 @@ impl WriteAction {
     /// b.x = 5` reads a column of `b` and none of `a`, so it needs `SELECT` on
     /// `b` (which `b`'s own read gate demands) and not on `a`.
     fn privileges(self, reads_columns: bool) -> Vec<Privilege> {
-        let (needed, may_read) = match self {
-            Self::Update => (Privilege::Update, true),
-            Self::Delete => (Privilege::Delete, true),
-            Self::Truncate => (Privilege::Truncate, false),
-            Self::Merge => (Privilege::Update, true),
+        // A MERGE needs one privilege per kind of clause it was written with,
+        // and each one is independent: a role holding UPDATE and not DELETE may
+        // run the matched-update MERGE and not the matched-delete one.
+        //
+        // Its `SELECT` is unconditional, which is stricter than `PostgreSQL`:
+        // there the target must be read for `SELECT` to be demanded, and
+        // `MERGE … ON false` reads none of it. Every MERGE with a reason to run
+        // reads the target through its `ON` condition, and demanding a
+        // privilege the statement does not use refuses a statement that would
+        // have worked rather than admitting one that should not.
+        let (needed, may_read): (&[Privilege], bool) = match self {
+            Self::Update => (&[Privilege::Update], true),
+            Self::Delete => (&[Privilege::Delete], true),
+            Self::Truncate => (&[Privilege::Truncate], false),
+            Self::Merge(clauses) => {
+                let mut privileges = Vec::with_capacity(4);
+                for (wanted, privilege) in [
+                    (clauses.insert, Privilege::Insert),
+                    (clauses.update, Privilege::Update),
+                    (clauses.delete, Privilege::Delete),
+                ] {
+                    if wanted {
+                        privileges.push(privilege);
+                    }
+                }
+                privileges.push(Privilege::Select);
+                return privileges;
+            }
         };
-        let mut privileges = vec![needed];
-        if may_read && (reads_columns || self == Self::Merge) {
+        let mut privileges = needed.to_vec();
+        if may_read && reads_columns {
             privileges.push(Privilege::Select);
         }
         privileges
@@ -474,8 +806,9 @@ mod tests {
     use crabka_pgtypes::ColumnType;
 
     use super::{
-        Privilege, PrivilegeCtx, ReadPermit, RelationKind, WriteAction, dml_reads_target, holds,
-        require, require_write,
+        ExecError, MergeClauses, Privilege, PrivilegeCtx, ReadPermit, RelationKind, RoleGrant,
+        WriteAction, dml_reads_target, holds, require, require_role_alter, require_role_create,
+        require_role_drop, require_role_grant, require_write,
     };
 
     const OWNER: &str = "owner_role";
@@ -548,9 +881,27 @@ mod tests {
     }
 
     fn superuser() -> RoleAttributes {
+        attributes_with(&[RoleAttribute::Superuser])
+    }
+
+    fn attributes_with(held: &[RoleAttribute]) -> RoleAttributes {
         let mut attributes = RoleAttributes::default();
-        attributes.set(RoleAttribute::Superuser, true);
+        for attribute in held {
+            attributes.set(*attribute, true);
+        }
         attributes
+    }
+
+    /// The clause kinds of a `MERGE` written with `clauses`, taken from the
+    /// parser rather than from a hand-built `MergeClauses`, so the mapping this
+    /// checks is the one a real statement produces.
+    fn merge_clauses(clauses: &str) -> MergeClauses {
+        let sql = format!("MERGE INTO document USING source ON document.id = source.id {clauses}");
+        let parsed = crabka_pgparser::parse(&sql).expect("parse");
+        let [crabka_pgparser::ast::Statement::Merge { clauses, .. }] = parsed.as_slice() else {
+            panic!("not a MERGE: {sql}")
+        };
+        MergeClauses::of(clauses)
     }
 
     /// Every way a role reaches a relation, and the one way it does not.
@@ -742,12 +1093,62 @@ mod tests {
                 sufficient: &["TRUNCATE"],
                 insufficient: &["DELETE", "SELECT"],
             },
+            // Every MERGE below is written with the clause set its name gives,
+            // and needs one privilege per clause kind plus SELECT. The
+            // `insufficient` column is the grant set that is short of exactly
+            // the privilege the extra clause added, which is the escalation
+            // this pairing exists to refuse.
             Case {
-                name: "MERGE always needs UPDATE and SELECT",
-                action: WriteAction::Merge,
+                name: "MERGE with only DO NOTHING clauses needs only SELECT",
+                action: WriteAction::Merge(MergeClauses::default()),
+                reads_columns: false,
+                sufficient: &["SELECT"],
+                insufficient: &[],
+            },
+            Case {
+                name: "matched-update MERGE needs UPDATE and SELECT",
+                action: WriteAction::Merge(merge_clauses(
+                    "WHEN MATCHED THEN UPDATE SET body = 'x'",
+                )),
                 reads_columns: false,
                 sufficient: &["UPDATE", "SELECT"],
-                insufficient: &["UPDATE"],
+                insufficient: &["SELECT"],
+            },
+            Case {
+                name: "matched-delete MERGE needs DELETE, not UPDATE",
+                action: WriteAction::Merge(merge_clauses("WHEN MATCHED THEN DELETE")),
+                reads_columns: false,
+                sufficient: &["DELETE", "SELECT"],
+                insufficient: &["UPDATE", "SELECT"],
+            },
+            Case {
+                name: "insert-only MERGE needs INSERT, not UPDATE",
+                action: WriteAction::Merge(merge_clauses(
+                    "WHEN NOT MATCHED THEN INSERT VALUES (1, 'x')",
+                )),
+                reads_columns: false,
+                sufficient: &["INSERT", "SELECT"],
+                insufficient: &["UPDATE", "SELECT"],
+            },
+            Case {
+                name: "update-and-delete MERGE needs both, and UPDATE alone is short",
+                action: WriteAction::Merge(merge_clauses(
+                    "WHEN MATCHED AND id > 1 THEN UPDATE SET body = 'x' WHEN MATCHED THEN DELETE",
+                )),
+                reads_columns: false,
+                sufficient: &["UPDATE", "DELETE", "SELECT"],
+                insufficient: &["UPDATE", "SELECT"],
+            },
+            Case {
+                name: "all three clause kinds need all three privileges",
+                action: WriteAction::Merge(merge_clauses(
+                    "WHEN MATCHED THEN UPDATE SET body = 'x' \
+                     WHEN NOT MATCHED BY SOURCE THEN DELETE \
+                     WHEN NOT MATCHED THEN INSERT VALUES (1, 'x')",
+                )),
+                reads_columns: false,
+                sufficient: &["INSERT", "UPDATE", "DELETE", "SELECT"],
+                insufficient: &["INSERT", "UPDATE", "SELECT"],
             },
         ];
         for case in cases {
@@ -764,6 +1165,10 @@ mod tests {
 
     /// Row security and privileges must ask the same question of a write, so a
     /// `TRUNCATE` still meets `DELETE` policies while needing `TRUNCATE`.
+    ///
+    /// A `MERGE` gathers its rows by reading the target, so `SELECT` policies
+    /// decide what it can see. Its `UPDATE` and `DELETE` policies apply per row
+    /// and per action instead, which is not a filter and so not this question.
     #[test]
     fn write_actions_map_to_policy_commands() {
         use crabka_pgcatalog::policy::PolicyCommand;
@@ -771,9 +1176,63 @@ mod tests {
             (WriteAction::Update, PolicyCommand::Update),
             (WriteAction::Delete, PolicyCommand::Delete),
             (WriteAction::Truncate, PolicyCommand::Delete),
-            (WriteAction::Merge, PolicyCommand::Update),
+            (
+                WriteAction::Merge(MergeClauses::default()),
+                PolicyCommand::Select,
+            ),
+            (
+                WriteAction::Merge(merge_clauses("WHEN MATCHED THEN DELETE")),
+                PolicyCommand::Select,
+            ),
         ] {
             assert!(action.policy_command() == command);
+        }
+    }
+
+    /// The clause set is read off the statement text, so a clause that never
+    /// fires still counts. `PostgreSQL` decides a `MERGE`'s privileges at
+    /// statement start "whether or not particular `WHEN` clauses are executed".
+    #[test]
+    fn merge_clause_kinds_come_from_the_statement() {
+        for (sql, expected) in [
+            ("WHEN MATCHED THEN DO NOTHING", MergeClauses::default()),
+            (
+                "WHEN MATCHED THEN UPDATE SET body = 'x'",
+                MergeClauses {
+                    insert: false,
+                    update: true,
+                    delete: false,
+                },
+            ),
+            (
+                "WHEN MATCHED THEN DELETE",
+                MergeClauses {
+                    insert: false,
+                    update: false,
+                    delete: true,
+                },
+            ),
+            (
+                "WHEN NOT MATCHED THEN INSERT VALUES (1, 'x')",
+                MergeClauses {
+                    insert: true,
+                    update: false,
+                    delete: false,
+                },
+            ),
+            (
+                "WHEN MATCHED AND id > 9000 THEN DELETE \
+                 WHEN MATCHED THEN UPDATE SET body = 'x' \
+                 WHEN NOT MATCHED THEN INSERT VALUES (1, 'x') \
+                 WHEN NOT MATCHED BY SOURCE THEN DO NOTHING",
+                MergeClauses {
+                    insert: true,
+                    update: true,
+                    delete: true,
+                },
+            ),
+        ] {
+            assert!(merge_clauses(sql) == expected, "{sql}");
         }
     }
 
@@ -868,6 +1327,298 @@ mod tests {
             };
             let read = dml_reads_target(&table(), "document", filter, returning, assignments);
             assert!(read == case.reads, "{}", case.name);
+        }
+    }
+
+    /// What a role-administration gate decided, stated whole: a refusal carries
+    /// its SQLSTATE, message and `DETAIL`, so a case pins the answer a client
+    /// sees rather than only that an answer happened.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Decision {
+        Allowed,
+        Denied {
+            sqlstate: String,
+            message: String,
+            detail: Option<String>,
+        },
+    }
+
+    fn decide(outcome: Result<(), ExecError>) -> Decision {
+        let Some(error) = outcome.err() else {
+            return Decision::Allowed;
+        };
+        let rendered = error.into_pg();
+        Decision::Denied {
+            detail: rendered
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.detail.clone()),
+            sqlstate: rendered.code,
+            message: rendered.message,
+        }
+    }
+
+    fn refusal(message: &str, detail: &str) -> Decision {
+        Decision::Denied {
+            sqlstate: "42501".to_string(),
+            message: message.to_string(),
+            detail: Some(detail.to_string()),
+        }
+    }
+
+    /// Who may write the role catalog, checked against `postgres:18.4`.
+    ///
+    /// This is the gate everything else in the module rests on: a role that can
+    /// set `SUPERUSER` on itself holds every privilege on every relation, and a
+    /// role that can grant itself into an owning role owns that role's tables.
+    /// So each case states the whole refusal — code, message and `DETAIL` — and
+    /// each success is a statement `PostgreSQL` also admits.
+    #[test]
+    fn role_administration_gates() {
+        use crabka_pgparser::ast::RoleOptions;
+
+        let plain = RoleOptions::default();
+        let wants_superuser = RoleOptions {
+            superuser: Some(true),
+            ..RoleOptions::default()
+        };
+        let drops_superuser = RoleOptions {
+            superuser: Some(false),
+            ..RoleOptions::default()
+        };
+        let wants_createdb = RoleOptions {
+            createdb: Some(true),
+            ..RoleOptions::default()
+        };
+        let wants_createrole = RoleOptions {
+            createrole: Some(true),
+            ..RoleOptions::default()
+        };
+        let wants_bypassrls = RoleOptions {
+            bypassrls: Some(true),
+            ..RoleOptions::default()
+        };
+
+        let kv = store(&[
+            ("stranger", RoleAttributes::default(), &[]),
+            ("root", superuser(), &[]),
+            (
+                "creator",
+                attributes_with(&[RoleAttribute::CreateRole]),
+                &[],
+            ),
+            (
+                "dbcreator",
+                attributes_with(&[RoleAttribute::CreateRole, RoleAttribute::CreateDb]),
+                &[],
+            ),
+        ]);
+
+        let alter_denied = |target: &str| {
+            format!(
+                "Only roles with the CREATEROLE attribute and the ADMIN option on role \"{target}\" may alter this role."
+            )
+        };
+        let grant_denied = |role: &str| {
+            format!("Only roles with the ADMIN option on role \"{role}\" may grant this role.")
+        };
+
+        struct Case<'a> {
+            name: &'a str,
+            outcome: Result<(), ExecError>,
+            expected: Decision,
+        }
+        let cases = [
+            // CREATE ROLE: CREATEROLE first, then the attribute the statement
+            // asks for, and an attribute asked for as false is not asked for.
+            Case {
+                name: "an ordinary role cannot create a role",
+                outcome: require_role_create(&kv, "stranger", plain),
+                expected: refusal(
+                    "permission denied to create role",
+                    "Only roles with the CREATEROLE attribute may create roles.",
+                ),
+            },
+            Case {
+                name: "CREATEROLE creates an ordinary role",
+                outcome: require_role_create(&kv, "creator", plain),
+                expected: Decision::Allowed,
+            },
+            Case {
+                name: "CREATEROLE passes on its own attribute",
+                outcome: require_role_create(&kv, "creator", wants_createrole),
+                expected: Decision::Allowed,
+            },
+            Case {
+                name: "CREATEROLE cannot create a superuser",
+                outcome: require_role_create(&kv, "creator", wants_superuser),
+                expected: refusal(
+                    "permission denied to create role",
+                    "Only roles with the SUPERUSER attribute may create roles with the SUPERUSER attribute.",
+                ),
+            },
+            Case {
+                name: "CREATEROLE cannot create a BYPASSRLS role",
+                outcome: require_role_create(&kv, "creator", wants_bypassrls),
+                expected: refusal(
+                    "permission denied to create role",
+                    "Only roles with the BYPASSRLS attribute may create roles with the BYPASSRLS attribute.",
+                ),
+            },
+            Case {
+                name: "CREATEROLE cannot create a CREATEDB role without CREATEDB",
+                outcome: require_role_create(&kv, "creator", wants_createdb),
+                expected: refusal(
+                    "permission denied to create role",
+                    "Only roles with the CREATEDB attribute may create roles with the CREATEDB attribute.",
+                ),
+            },
+            Case {
+                name: "CREATEROLE with CREATEDB may pass CREATEDB on",
+                outcome: require_role_create(&kv, "dbcreator", wants_createdb),
+                expected: Decision::Allowed,
+            },
+            Case {
+                name: "NOSUPERUSER asks for nothing, so CREATEROLE may write it",
+                outcome: require_role_create(&kv, "creator", drops_superuser),
+                expected: Decision::Allowed,
+            },
+            Case {
+                name: "the superuser creates anything",
+                outcome: require_role_create(&kv, "root", wants_superuser),
+                expected: Decision::Allowed,
+            },
+            // ALTER ROLE: SUPERUSER is judged before the general gate, and an
+            // attribute is judged on being written rather than on its value.
+            Case {
+                name: "a role cannot make itself a superuser",
+                outcome: require_role_alter(&kv, "stranger", "stranger", wants_superuser),
+                expected: refusal(
+                    "permission denied to alter role",
+                    "Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.",
+                ),
+            },
+            Case {
+                name: "clearing SUPERUSER is still changing SUPERUSER",
+                outcome: require_role_alter(&kv, "stranger", "stranger", drops_superuser),
+                expected: refusal(
+                    "permission denied to alter role",
+                    "Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.",
+                ),
+            },
+            Case {
+                name: "a role cannot make another role a superuser",
+                outcome: require_role_alter(&kv, "stranger", "root", wants_superuser),
+                expected: refusal(
+                    "permission denied to alter role",
+                    "Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.",
+                ),
+            },
+            Case {
+                name: "a role cannot give itself BYPASSRLS",
+                outcome: require_role_alter(&kv, "stranger", "stranger", wants_bypassrls),
+                expected: refusal("permission denied to alter role", &alter_denied("stranger")),
+            },
+            Case {
+                name: "a role cannot give itself CREATEROLE",
+                outcome: require_role_alter(&kv, "stranger", "stranger", wants_createrole),
+                expected: refusal("permission denied to alter role", &alter_denied("stranger")),
+            },
+            Case {
+                name: "CREATEROLE alone does not carry the ADMIN option this catalog cannot store",
+                outcome: require_role_alter(&kv, "creator", "stranger", wants_createdb),
+                expected: refusal("permission denied to alter role", &alter_denied("stranger")),
+            },
+            Case {
+                name: "an option list that writes nothing is allowed on yourself",
+                outcome: require_role_alter(&kv, "stranger", "stranger", plain),
+                expected: Decision::Allowed,
+            },
+            Case {
+                name: "an option list that writes nothing is refused on anyone else",
+                outcome: require_role_alter(&kv, "stranger", "root", plain),
+                expected: refusal("permission denied to alter role", &alter_denied("root")),
+            },
+            Case {
+                name: "the superuser alters anything",
+                outcome: require_role_alter(&kv, "root", "stranger", wants_superuser),
+                expected: Decision::Allowed,
+            },
+            // DROP ROLE and the membership gates.
+            Case {
+                name: "an ordinary role cannot drop a role",
+                outcome: require_role_drop(&kv, "stranger"),
+                expected: refusal(
+                    "permission denied to drop role",
+                    "Only roles with the CREATEROLE attribute and the ADMIN option on the target roles may drop roles.",
+                ),
+            },
+            Case {
+                name: "the superuser drops roles",
+                outcome: require_role_drop(&kv, "root"),
+                expected: Decision::Allowed,
+            },
+            Case {
+                name: "a role cannot grant itself into an owning role",
+                outcome: require_role_grant(&kv, "stranger", OWNER, RoleGrant::Grant),
+                expected: refusal(
+                    &format!("permission denied to grant role \"{OWNER}\""),
+                    &grant_denied(OWNER),
+                ),
+            },
+            Case {
+                name: "CREATEROLE does not carry the ADMIN option either",
+                outcome: require_role_grant(&kv, "creator", OWNER, RoleGrant::Grant),
+                expected: refusal(
+                    &format!("permission denied to grant role \"{OWNER}\""),
+                    &grant_denied(OWNER),
+                ),
+            },
+            Case {
+                name: "a revoke names itself a revoke",
+                outcome: require_role_grant(&kv, "stranger", OWNER, RoleGrant::Revoke),
+                expected: refusal(
+                    &format!("permission denied to revoke role \"{OWNER}\""),
+                    &format!(
+                        "Only roles with the ADMIN option on role \"{OWNER}\" may revoke this role."
+                    ),
+                ),
+            },
+            Case {
+                name: "the superuser grants any membership",
+                outcome: require_role_grant(&kv, "root", OWNER, RoleGrant::Grant),
+                expected: Decision::Allowed,
+            },
+        ];
+        for case in cases {
+            assert!(decide(case.outcome) == case.expected, "{}", case.name);
+        }
+    }
+
+    /// A membership is ownership for [`holds`], which is why
+    /// [`require_role_grant`] is a security gate and not a tidiness one.
+    ///
+    /// Without it, an ordinary role reaches every relation an owning role owns
+    /// by granting itself the membership — no `GRANT` on the relation, and the
+    /// relation's row security passes too.
+    #[test]
+    fn membership_is_ownership() {
+        let kv = store(&[
+            ("stranger", RoleAttributes::default(), &[]),
+            ("insider", RoleAttributes::default(), &[OWNER]),
+        ]);
+        let table = table();
+        for (role, reaches) in [("stranger", false), ("insider", true)] {
+            let ctx = PrivilegeCtx::new(&kv, role);
+            for privilege in [
+                Privilege::Select,
+                Privilege::Insert,
+                Privilege::Update,
+                Privilege::Delete,
+            ] {
+                let held = holds(&ctx, &table.name, &table.owner, privilege).expect("decide");
+                assert!(held == reaches, "{role} {privilege:?}");
+            }
         }
     }
 }

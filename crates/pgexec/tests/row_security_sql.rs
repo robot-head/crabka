@@ -1009,3 +1009,166 @@ async fn a_view_shows_the_rows_its_owner_can_read() {
     assert!(query(&mut bob, "SELECT id FROM own_documents ORDER BY id").await == rows(&["4", "5"]));
     assert!(query(&mut bob, "SELECT id FROM document ORDER BY id").await == rows(&["4", "5"]));
 }
+
+/// A `MERGE` meets each command's policies through the action it takes, not
+/// through one command chosen for the whole statement.
+///
+/// This is the hole the per-action check closes. `MERGE` used to gather its
+/// rows under the `UPDATE` policies and then delete them with no check at all,
+/// so a permissive `UPDATE` policy beside a narrow `DELETE` one let a protected
+/// row be deleted. Checked against `postgres:18.4`.
+#[tokio::test]
+async fn merge_meets_the_policies_of_the_action_it_takes() {
+    let (engine, mut alice) = owned_engine().await;
+    run(
+        &mut alice,
+        "CREATE TABLE source (id int4);
+         INSERT INTO source VALUES (1), (2), (3), (4), (5);
+         GRANT SELECT ON source TO bob;
+         GRANT SELECT, INSERT, UPDATE, DELETE ON document TO bob;
+         CREATE POLICY readable ON document FOR SELECT USING (true);
+         CREATE POLICY updatable ON document FOR UPDATE USING (true) WITH CHECK (true);
+         CREATE POLICY removable ON document FOR DELETE USING (id > 4);
+         ALTER TABLE document ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE document FORCE ROW LEVEL SECURITY",
+    )
+    .await;
+    let mut bob = as_bob(&engine).await;
+
+    // The UPDATE policy admits every row, and the statement is an update, so it
+    // runs.
+    run(
+        &mut bob,
+        "MERGE INTO document d USING source s ON d.id = s.id
+           WHEN MATCHED THEN UPDATE SET title = 'touched'",
+    )
+    .await;
+    assert!(
+        query(
+            &mut alice,
+            "SELECT count(*) FROM document WHERE title = 'touched'"
+        )
+        .await
+            == rows(&["5"])
+    );
+
+    // The same rows under a delete action meet the DELETE policy instead, which
+    // admits only id 5. PostgreSQL raises on the first row that fails it rather
+    // than skipping the row.
+    let (sqlstate, message) = error_of(
+        &mut bob,
+        "MERGE INTO document d USING source s ON d.id = s.id WHEN MATCHED THEN DELETE",
+    )
+    .await;
+    assert!(sqlstate == "42501");
+    assert!(
+        message
+            == "target row violates row-level security policy (USING expression) for table \"document\""
+    );
+    // And the statement left every row where it was.
+    assert!(query(&mut alice, "SELECT count(*) FROM document").await == rows(&["5"]));
+
+    // A delete aimed only at the row the DELETE policy admits goes through.
+    run(
+        &mut bob,
+        "MERGE INTO document d USING source s ON d.id = s.id AND s.id = 5
+           WHEN MATCHED THEN DELETE",
+    )
+    .await;
+    assert!(query(&mut alice, "SELECT count(*) FROM document").await == rows(&["4"]));
+}
+
+/// The same rule the other way round: a narrow `UPDATE` policy does not stop a
+/// delete the `DELETE` policy admits.
+#[tokio::test]
+async fn a_narrow_update_policy_does_not_gate_a_merge_delete() {
+    let (engine, mut alice) = owned_engine().await;
+    run(
+        &mut alice,
+        "CREATE TABLE source (id int4);
+         INSERT INTO source VALUES (1), (2), (3), (4), (5);
+         GRANT SELECT ON source TO bob;
+         GRANT SELECT, UPDATE, DELETE ON document TO bob;
+         CREATE POLICY readable ON document FOR SELECT USING (true);
+         CREATE POLICY updatable ON document FOR UPDATE USING (false) WITH CHECK (true);
+         CREATE POLICY removable ON document FOR DELETE USING (true);
+         ALTER TABLE document ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE document FORCE ROW LEVEL SECURITY",
+    )
+    .await;
+    let mut bob = as_bob(&engine).await;
+
+    run(
+        &mut bob,
+        "MERGE INTO document d USING source s ON d.id = s.id WHEN MATCHED THEN DELETE",
+    )
+    .await;
+    assert!(query(&mut alice, "SELECT count(*) FROM document").await == rows(&["0"]));
+}
+
+/// A `MERGE` finds its rows under the `SELECT` policies, because the join it
+/// drives is a read.
+///
+/// The consequence is visible rather than internal: a row a `SELECT` policy
+/// hides is not matched, so a `WHEN NOT MATCHED` clause fires for it. A relation
+/// whose only policy is an `UPDATE` policy therefore shows a `MERGE` nothing at
+/// all, exactly as it shows a `SELECT` nothing at all.
+#[tokio::test]
+async fn a_merge_sees_the_rows_a_select_policy_shows_it() {
+    let (engine, mut alice) = owned_engine().await;
+    // The checking session is the bootstrap superuser rather than `alice`:
+    // `FORCE ROW LEVEL SECURITY` subjects the owner to the policies too, and
+    // for most of this test there is no `SELECT` policy for anyone to read
+    // through, so `alice` would report zero either way.
+    let mut bootstrap = engine.connect();
+    run(
+        &mut alice,
+        "CREATE TABLE source (id int4);
+         INSERT INTO source VALUES (1), (2);
+         GRANT SELECT ON source TO bob;
+         GRANT SELECT, UPDATE ON document TO bob;
+         CREATE POLICY updatable ON document FOR UPDATE USING (true) WITH CHECK (true);
+         ALTER TABLE document ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE document FORCE ROW LEVEL SECURITY",
+    )
+    .await;
+    let mut bob = as_bob(&engine).await;
+
+    // No SELECT policy exists, so default-deny hides every row from both.
+    assert!(query(&mut bob, "SELECT count(*) FROM document").await == rows(&["0"]));
+    run(
+        &mut bob,
+        "MERGE INTO document d USING source s ON d.id = s.id
+           WHEN MATCHED THEN UPDATE SET title = 'touched'",
+    )
+    .await;
+    assert!(
+        query(
+            &mut bootstrap,
+            "SELECT count(*) FROM document WHERE title = 'touched'"
+        )
+        .await
+            == rows(&["0"])
+    );
+
+    // Add the SELECT policy and the same statement finds the rows it names.
+    run(
+        &mut alice,
+        "CREATE POLICY readable ON document FOR SELECT USING (true)",
+    )
+    .await;
+    run(
+        &mut bob,
+        "MERGE INTO document d USING source s ON d.id = s.id
+           WHEN MATCHED THEN UPDATE SET title = 'touched'",
+    )
+    .await;
+    assert!(
+        query(
+            &mut bootstrap,
+            "SELECT count(*) FROM document WHERE title = 'touched'"
+        )
+        .await
+            == rows(&["2"])
+    );
+}

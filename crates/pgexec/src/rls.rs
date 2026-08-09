@@ -705,8 +705,11 @@ impl CheckSubject {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CheckExemption {
     /// `DELETE` removes a row rather than writing one, and `PostgreSQL`'s
-    /// policies carry no `WITH CHECK` for it. The row it removes was already
-    /// filtered by the `USING` qual at `write_candidate_rows`.
+    /// policies carry no `WITH CHECK` for it. The `DELETE` `USING` qual has
+    /// already judged the row: for a plain `DELETE` as a filter at
+    /// `write_candidate_rows`, and for a `MERGE` as a per-row
+    /// [`CheckSubject::TargetRow`] check that raises. This exemption is about
+    /// the *new* row, of which a delete has none.
     RemovesRows,
     /// A referential action (`ON DELETE CASCADE`, `ON UPDATE SET NULL`, …),
     /// which `PostgreSQL` runs as the referenced relation's owner with row

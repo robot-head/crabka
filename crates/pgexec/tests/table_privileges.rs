@@ -750,3 +750,145 @@ async fn one_grant_may_name_several_relations() {
     assert!(!permitted(&mut bob, "SELECT id FROM document").await);
     assert!(!permitted(&mut bob, "SELECT id FROM second").await);
 }
+
+/// A `MERGE` needs one privilege per kind of `WHEN` clause it was written with,
+/// and `PostgreSQL` decides that at statement start "whether or not particular
+/// `WHEN` clauses are executed".
+///
+/// This is the case that made the rule worth stating as a set rather than as a
+/// single privilege. `MERGE` used to demand `UPDATE` and nothing else, so a role
+/// holding `UPDATE` and no `DELETE` could delete rows through a matched-delete
+/// clause, and an insert-only `MERGE` was refused for want of an `UPDATE` it
+/// never used. Every arm below was checked against `postgres:18.4`.
+#[tokio::test]
+async fn merge_needs_a_privilege_for_every_clause_it_was_written_with() {
+    struct Case {
+        name: &'static str,
+        /// The privileges `bob` is granted on the target, beside `SELECT`.
+        grants: &'static [&'static str],
+        clauses: &'static str,
+        permitted: bool,
+    }
+    let cases = [
+        Case {
+            name: "a matched delete needs DELETE, and UPDATE does not stand in for it",
+            grants: &["UPDATE"],
+            clauses: "WHEN MATCHED THEN DELETE",
+            permitted: false,
+        },
+        Case {
+            name: "a matched delete is admitted by DELETE",
+            grants: &["DELETE"],
+            clauses: "WHEN MATCHED THEN DELETE",
+            permitted: true,
+        },
+        Case {
+            name: "an insert-only merge needs INSERT and not UPDATE",
+            grants: &["UPDATE"],
+            clauses: "WHEN NOT MATCHED THEN INSERT (id, body) VALUES (s.id, s.body)",
+            permitted: false,
+        },
+        Case {
+            name: "an insert-only merge is admitted by INSERT alone",
+            grants: &["INSERT"],
+            clauses: "WHEN NOT MATCHED THEN INSERT (id, body) VALUES (s.id, s.body)",
+            permitted: true,
+        },
+        Case {
+            name: "a matched update still needs UPDATE",
+            grants: &[],
+            clauses: "WHEN MATCHED THEN UPDATE SET body = s.body",
+            permitted: false,
+        },
+        Case {
+            name: "a matched update is admitted by UPDATE",
+            grants: &["UPDATE"],
+            clauses: "WHEN MATCHED THEN UPDATE SET body = s.body",
+            permitted: true,
+        },
+        Case {
+            name: "update and delete together need both",
+            grants: &["UPDATE"],
+            clauses: "WHEN MATCHED AND s.id > 1 THEN UPDATE SET body = s.body \
+                      WHEN MATCHED THEN DELETE",
+            permitted: false,
+        },
+        Case {
+            name: "update and delete together are admitted by both",
+            grants: &["UPDATE", "DELETE"],
+            clauses: "WHEN MATCHED AND s.id > 1 THEN UPDATE SET body = s.body \
+                      WHEN MATCHED THEN DELETE",
+            permitted: true,
+        },
+        Case {
+            name: "a clause that never fires is still checked",
+            // No source row matches, so the DELETE clause cannot run. The
+            // privilege is still demanded.
+            grants: &["UPDATE"],
+            clauses: "WHEN MATCHED THEN DELETE",
+            permitted: false,
+        },
+        Case {
+            name: "DO NOTHING asks for no write privilege at all",
+            grants: &[],
+            clauses: "WHEN MATCHED THEN DO NOTHING",
+            permitted: true,
+        },
+    ];
+
+    for case in cases {
+        let engine = SqlEngine::new();
+        let mut alice = engine.connect();
+        run(&mut alice, SETUP).await;
+        run(
+            &mut alice,
+            "CREATE TABLE source (id int4, body text);
+             INSERT INTO source VALUES (1, 'from-source');
+             ALTER TABLE source OWNER TO alice;
+             GRANT SELECT ON source TO bob;
+             GRANT SELECT ON document TO bob",
+        )
+        .await;
+        for privilege in case.grants {
+            run(&mut alice, &format!("GRANT {privilege} ON document TO bob")).await;
+        }
+        let mut bob = engine.connect();
+        run(&mut bob, "SET SESSION AUTHORIZATION bob").await;
+        let sql = format!(
+            "MERGE INTO document d USING source s ON d.id = s.id {}",
+            case.clauses
+        );
+        assert!(
+            permitted(&mut bob, &sql).await == case.permitted,
+            "{}",
+            case.name
+        );
+    }
+}
+
+/// The denial a missing `MERGE` privilege raises is `PostgreSQL`'s, word for
+/// word: one message that names the relation and not the privilege.
+#[tokio::test]
+async fn a_merge_denial_names_the_relation() {
+    let engine = SqlEngine::new();
+    let mut alice = engine.connect();
+    run(&mut alice, SETUP).await;
+    run(
+        &mut alice,
+        "CREATE TABLE source (id int4, body text);
+         ALTER TABLE source OWNER TO alice;
+         GRANT SELECT ON source TO bob;
+         GRANT SELECT, UPDATE ON document TO bob",
+    )
+    .await;
+    let mut bob = engine.connect();
+    run(&mut bob, "SET SESSION AUTHORIZATION bob").await;
+
+    let (sqlstate, message) = error_of(
+        &mut bob,
+        "MERGE INTO document d USING source s ON d.id = s.id WHEN MATCHED THEN DELETE",
+    )
+    .await;
+    assert!(sqlstate == "42501");
+    assert!(message == "permission denied for table document");
+}

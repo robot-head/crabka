@@ -93,6 +93,19 @@ async fn as_role(engine: &SqlEngine, role: &str) -> SqlSession {
     session
 }
 
+/// A session that never authenticated, which this engine reads as the bootstrap
+/// superuser.
+///
+/// Role administration runs through here rather than through `alice`.
+/// `PostgreSQL` needs the `ADMIN` option on a role to hand it out and the
+/// `CREATEROLE` attribute to create one, and `alice` holds neither — she owns a
+/// table, which is a different thing. Granting a membership is what makes a
+/// role an owner, so a table owner who could grant memberships could hand her
+/// own tables to anyone.
+fn bootstrap(engine: &SqlEngine) -> SqlSession {
+    engine.connect()
+}
+
 /// A membership granted with `GRANT … TO …` is the membership row security
 /// reads: `bob` sees the group's rows only while he is in the group.
 #[tokio::test]
@@ -103,12 +116,12 @@ async fn granting_a_role_widens_the_policies_that_apply() {
     // matches bob, so the table is empty to him.
     assert!(query(&mut bob, "SELECT id FROM document ORDER BY id").await == rows(&[]));
 
-    let mut alice = as_role(&engine, "alice").await;
-    run(&mut alice, "GRANT readers TO bob").await;
+    let mut root = bootstrap(&engine);
+    run(&mut root, "GRANT readers TO bob").await;
     let mut bob = as_role(&engine, "bob").await;
     assert!(query(&mut bob, "SELECT id FROM document ORDER BY id").await == rows(&["1", "2"]));
 
-    run(&mut alice, "REVOKE readers FROM bob").await;
+    run(&mut root, "REVOKE readers FROM bob").await;
     let mut bob = as_role(&engine, "bob").await;
     assert!(query(&mut bob, "SELECT id FROM document ORDER BY id").await == rows(&[]));
 }
@@ -118,10 +131,11 @@ async fn granting_a_role_widens_the_policies_that_apply() {
 #[tokio::test]
 async fn the_two_spellings_of_membership_agree() {
     let engine = engine_with_group_policy().await;
+    let mut root = bootstrap(&engine);
     let mut alice = as_role(&engine, "alice").await;
-    run(&mut alice, "CREATE ROLE carol IN ROLE readers").await;
-    run(&mut alice, "CREATE ROLE dave").await;
-    run(&mut alice, "GRANT readers TO dave").await;
+    run(&mut root, "CREATE ROLE carol IN ROLE readers").await;
+    run(&mut root, "CREATE ROLE dave").await;
+    run(&mut root, "GRANT readers TO dave").await;
     run(&mut alice, "GRANT SELECT ON document TO carol, dave").await;
 
     for role in ["carol", "dave"] {
@@ -134,7 +148,7 @@ async fn the_two_spellings_of_membership_agree() {
 
     // And `REVOKE` reaches the `IN ROLE` membership too, because there is only
     // one record behind both spellings.
-    run(&mut alice, "REVOKE readers FROM carol").await;
+    run(&mut root, "REVOKE readers FROM carol").await;
     let mut carol = as_role(&engine, "carol").await;
     assert!(query(&mut carol, "SELECT id FROM document ORDER BY id").await == rows(&[]));
 }
@@ -145,11 +159,12 @@ async fn the_two_spellings_of_membership_agree() {
 #[tokio::test]
 async fn list_forms_and_admin_option_are_accepted() {
     let engine = engine_with_group_policy().await;
+    let mut root = bootstrap(&engine);
     let mut alice = as_role(&engine, "alice").await;
-    run(&mut alice, "CREATE ROLE writers; CREATE ROLE carol").await;
+    run(&mut root, "CREATE ROLE writers; CREATE ROLE carol").await;
     run(&mut alice, "GRANT SELECT ON document TO carol").await;
     run(
-        &mut alice,
+        &mut root,
         "GRANT readers, writers TO bob, carol WITH ADMIN OPTION",
     )
     .await;
@@ -163,11 +178,11 @@ async fn list_forms_and_admin_option_are_accepted() {
 
     // `ADMIN OPTION FOR` strips only the admin right, so the membership — and
     // with it the policy — survives.
-    run(&mut alice, "REVOKE ADMIN OPTION FOR readers FROM bob").await;
+    run(&mut root, "REVOKE ADMIN OPTION FOR readers FROM bob").await;
     let mut bob = as_role(&engine, "bob").await;
     assert!(query(&mut bob, "SELECT id FROM document ORDER BY id").await == rows(&["1", "2"]));
 
-    run(&mut alice, "REVOKE readers, writers FROM bob, carol").await;
+    run(&mut root, "REVOKE readers, writers FROM bob, carol").await;
     for role in ["bob", "carol"] {
         let mut session = as_role(&engine, role).await;
         assert!(
@@ -193,7 +208,7 @@ async fn the_privilege_spelling_is_unaffected() {
 #[tokio::test]
 async fn an_unknown_role_is_refused() {
     let engine = engine_with_group_policy().await;
-    let mut alice = as_role(&engine, "alice").await;
+    let mut alice = bootstrap(&engine);
     for sql in [
         "GRANT nosuchgroup TO bob",
         "GRANT readers TO nosuchmember",

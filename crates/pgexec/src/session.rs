@@ -7905,7 +7905,43 @@ impl SqlSession {
     /// Indexes are not touched. They are ordinary catalog objects over the
     /// relation, and the refill goes through the write path that maintains them,
     /// so a refresh leaves every index on the matview both present and correct.
+    ///
+    /// The empty and the refill are one statement, so they run in one
+    /// transaction. PostgreSQL reaches the same place from the other side: it
+    /// builds the new contents into a transient heap and swaps the relfilenodes
+    /// at the end, inside the refresh's own transaction, so a query that raises
+    /// leaves the old contents in place. Without a transaction of its own an
+    /// autocommit refresh commits the empty first, and a query that raises then
+    /// leaves an empty relation the catalog still calls populated.
     async fn run_refresh_materialized_view(
+        &mut self,
+        stmt: &Statement,
+    ) -> Result<QueryResult, ExecError> {
+        // Inside a block the enclosing transaction already makes the whole
+        // refresh one unit, and a nested BEGIN would commit at the inner end.
+        if !matches!(self.state, TxnState::Idle) {
+            return self.refresh_materialized_view_steps(stmt).await;
+        }
+        // A materialized view is never sharded — `CREATE MATERIALIZED VIEW`
+        // has no `SHARDED` spelling — so the writes below never take the
+        // sharded route `run_write_traced` keeps out of an implicit block.
+        self.begin_implicit_transaction(None).await?;
+        let result = Box::pin(self.refresh_materialized_view_steps(stmt)).await;
+        let result = match result {
+            Ok(result) => self.commit_cmd(false).await.map(|_| result),
+            Err(error) => {
+                let _ = self.rollback_cmd(false).await;
+                Err(error)
+            }
+        };
+        self.implicit_transaction = false;
+        self.implicit_xid = None;
+        result
+    }
+
+    /// The work a `REFRESH` does, with no transaction of its own: emptying the
+    /// heap, then either refilling it or marking it unpopulated.
+    async fn refresh_materialized_view_steps(
         &mut self,
         stmt: &Statement,
     ) -> Result<QueryResult, ExecError> {
@@ -9486,10 +9522,66 @@ impl SqlSession {
     /// paid for on each level of that recursion, and this arm's file buffer is
     /// the largest of them.
     async fn run_copy(&mut self, copy: &CopyStmt) -> Result<QueryResult, ExecError> {
+        // First, before the relation is opened and before either endpoint is
+        // reached, exactly where `DoCopy` puts it.
+        self.require_server_file_endpoint_role(&copy.direction)?;
         match &copy.direction {
             CopyDirection::From(source) => self.run_copy_from(copy, source).await,
             CopyDirection::To(destination) => self.run_copy_to(copy, destination).await,
         }
+    }
+
+    /// Refuse a server-side file endpoint to a role that may not name one.
+    ///
+    /// A file endpoint runs in the server process, under the server's identity,
+    /// so `COPY … FROM '/path'` reads whatever the server can read and
+    /// `COPY … TO '/path'` creates or truncates whatever the server can write.
+    /// Neither is a table privilege, and no table privilege can stand in for
+    /// one: the rule is about the role, not about the relation.
+    ///
+    /// PostgreSQL gates the two endpoints on the predefined roles
+    /// `pg_read_server_files` and `pg_write_server_files`. This engine has no
+    /// predefined roles, so the only part of that rule it can represent is the
+    /// part a superuser satisfies — a superuser holds the privileges of every
+    /// role — and the gate is therefore superuser-only. The `DETAIL` still names
+    /// PostgreSQL's rule, because that is the rule the client is reading the
+    /// refusal against and the one a grant would have to satisfy.
+    ///
+    /// `STDIN` and `STDOUT` are open to anyone: they move the bytes over the
+    /// connection the caller already has, and read nothing the caller could not
+    /// read through `SELECT`.
+    fn require_server_file_endpoint_role(
+        &self,
+        direction: &CopyDirection,
+    ) -> Result<(), ExecError> {
+        let (message, detail) = match direction {
+            CopyDirection::From(CopySource::File(_)) => (
+                "permission denied to COPY from a file",
+                "Only roles with privileges of the \"pg_read_server_files\" role may COPY from a file.",
+            ),
+            CopyDirection::To(CopyDestination::File(_)) => (
+                "permission denied to COPY to a file",
+                "Only roles with privileges of the \"pg_write_server_files\" role may COPY to a file.",
+            ),
+            CopyDirection::From(CopySource::Stdin) | CopyDirection::To(CopyDestination::Stdout) => {
+                return Ok(());
+            }
+        };
+        // The same `PUBLIC`-to-bootstrap resolution every other decision in this
+        // session makes, so a session that authenticated as nobody is judged as
+        // the role it actually acts as rather than as a pseudo-role that holds
+        // no attributes.
+        let role = self.current_role_for_row_security();
+        if crate::rls::role_is_superuser(self.catalog_kv.as_ref(), &role)? {
+            return Ok(());
+        }
+        Err(ExecError::Remote(
+            PgError::error("42501", message)
+                .with_detail(detail)
+                .with_hint(
+                    r"Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.",
+                ),
+        ))
     }
 
     async fn run_copy_from(
@@ -18335,6 +18427,216 @@ mod tests {
             .is_err(),
             "payments was not in LIMIT TO and must not be imported"
         );
+    }
+
+    /// The hint PostgreSQL gives with both server-file refusals.
+    const SERVER_FILE_HINT: &str =
+        r"Anyone can COPY to stdout or from stdin. psql's \copy command also works for anyone.";
+
+    /// A server-side `COPY` file endpoint is refused for an ordinary role, in
+    /// both directions, before the file is touched.
+    ///
+    /// The role holds `SELECT` and `INSERT` on the table, so the only thing
+    /// left to refuse it is the file endpoint itself.
+    #[tokio::test]
+    async fn copy_between_a_table_and_a_server_file_is_refused_for_a_non_superuser() {
+        use crabka_pgwire::error::PgError;
+
+        let engine = SqlEngine::new();
+        let mut owner = engine.connect();
+        owner
+            .simple_query(
+                "CREATE TABLE t (id int4); \
+                 INSERT INTO t VALUES (1); \
+                 CREATE ROLE loader; \
+                 GRANT SELECT, INSERT ON TABLE t TO loader",
+            )
+            .await
+            .expect("setup");
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.txt");
+        std::fs::write(&source, b"2\n").expect("write the file the role must not read");
+        let sink = dir.path().join("sink.txt");
+
+        let mut session = engine.connect();
+        session
+            .simple_query("SET SESSION AUTHORIZATION loader")
+            .await
+            .expect("become an ordinary role");
+        for (sql, message, detail) in [
+            (
+                format!("COPY t FROM '{}'", source.display()),
+                "permission denied to COPY from a file",
+                "Only roles with privileges of the \"pg_read_server_files\" role may COPY from a file.",
+            ),
+            (
+                format!("COPY t TO '{}'", sink.display()),
+                "permission denied to COPY to a file",
+                "Only roles with privileges of the \"pg_write_server_files\" role may COPY to a file.",
+            ),
+        ] {
+            let error = session.simple_query(&sql).await.expect_err(&sql);
+            assert!(
+                error
+                    == PgError::error("42501", message)
+                        .with_detail(detail)
+                        .with_hint(SERVER_FILE_HINT),
+                "{sql}"
+            );
+        }
+        // The refusals came before either file was touched: the sink was never
+        // created, and the source's row never reached the table.
+        assert!(!sink.exists());
+        assert!(
+            rows_or_sqlstate(&mut owner, "SELECT id FROM t ORDER BY id").await
+                == Ok(vec![vec!["1".to_string()]])
+        );
+    }
+
+    /// The same two statements still work for a superuser — both the bootstrap
+    /// role a session with no authentication acts as, and a role created with
+    /// the `SUPERUSER` attribute.
+    #[tokio::test]
+    async fn copy_between_a_table_and_a_server_file_still_works_for_a_superuser() {
+        let engine = SqlEngine::new();
+        let mut setup = engine.connect();
+        setup
+            .simple_query(
+                "CREATE TABLE bootstrap_target (id int4); \
+                 INSERT INTO bootstrap_target VALUES (1); \
+                 CREATE TABLE admin_target (id int4); \
+                 INSERT INTO admin_target VALUES (1); \
+                 CREATE ROLE admin SUPERUSER",
+            )
+            .await
+            .expect("setup");
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        // A session with no authentication acts as the bootstrap superuser; the
+        // second role is a superuser by attribute instead.
+        for (authorization, table) in [(None, "bootstrap_target"), (Some("admin"), "admin_target")]
+        {
+            let mut session = engine.connect();
+            if let Some(role) = authorization {
+                session
+                    .simple_query(&format!("SET SESSION AUTHORIZATION {role}"))
+                    .await
+                    .expect("become a superuser role");
+            }
+            let path = dir.path().join(format!("{table}.txt"));
+            session
+                .simple_query(&format!("COPY {table} TO '{}'", path.display()))
+                .await
+                .unwrap_or_else(|error| panic!("COPY TO as {authorization:?}: {error:?}"));
+            assert!(
+                std::fs::read(&path).expect("written file") == b"1\n",
+                "{authorization:?}"
+            );
+            session
+                .simple_query(&format!("COPY {table} FROM '{}'", path.display()))
+                .await
+                .unwrap_or_else(|error| panic!("COPY FROM as {authorization:?}: {error:?}"));
+            assert!(
+                rows_or_sqlstate(&mut session, &format!("SELECT id FROM {table}")).await
+                    == Ok(vec![vec!["1".to_string()], vec!["1".to_string()]]),
+                "{authorization:?}"
+            );
+        }
+    }
+
+    /// `REFRESH MATERIALIZED VIEW` is one statement, so a failure while its
+    /// stored query runs leaves the view as it was: still populated, and still
+    /// holding the rows the last good refresh gave it.
+    ///
+    /// The autocommit case is the one that needs a transaction of its own. The
+    /// explicit-transaction case gets its atomicity from the enclosing block,
+    /// and is here so that the wrapper cannot take it away.
+    #[tokio::test]
+    async fn a_failing_refresh_leaves_the_previous_contents_and_the_populated_flag() {
+        for explicit in [false, true] {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            session
+                .simple_query(
+                    "CREATE TABLE base (a int4); \
+                     INSERT INTO base VALUES (1), (2), (3); \
+                     CREATE MATERIALIZED VIEW mv AS SELECT a, 1 / (a - 9) AS q FROM base",
+                )
+                .await
+                .expect("setup");
+            session
+                .simple_query("INSERT INTO base VALUES (9)")
+                .await
+                .expect("make the stored query divide by zero");
+
+            if explicit {
+                session.simple_query("BEGIN").await.expect("begin");
+            }
+            assert!(
+                sqlstate(&mut session, "REFRESH MATERIALIZED VIEW mv").await == "22012",
+                "explicit={explicit}"
+            );
+            if explicit {
+                session.simple_query("ROLLBACK").await.expect("rollback");
+            }
+
+            // A scan answering rows is the populated flag: an unpopulated
+            // materialized view is an error to read, not an empty one.
+            assert!(
+                rows_or_sqlstate(&mut session, "SELECT a FROM mv ORDER BY a").await
+                    == Ok(vec![
+                        vec!["1".to_string()],
+                        vec!["2".to_string()],
+                        vec!["3".to_string()],
+                    ]),
+                "explicit={explicit}"
+            );
+        }
+    }
+
+    /// A refresh that succeeds still replaces the contents and reports the same
+    /// tag, in either transaction mode.
+    #[tokio::test]
+    async fn a_successful_refresh_replaces_the_contents_in_either_transaction_mode() {
+        for explicit in [false, true] {
+            let engine = SqlEngine::new();
+            let mut session = engine.connect();
+            session
+                .simple_query(
+                    "CREATE TABLE base (a int4); \
+                     INSERT INTO base VALUES (1), (2); \
+                     CREATE MATERIALIZED VIEW mv AS SELECT a FROM base; \
+                     INSERT INTO base VALUES (3)",
+                )
+                .await
+                .expect("setup");
+
+            if explicit {
+                session.simple_query("BEGIN").await.expect("begin");
+            }
+            let results = session
+                .simple_query("REFRESH MATERIALIZED VIEW mv")
+                .await
+                .unwrap_or_else(|error| panic!("explicit={explicit}: {error:?}"));
+            let [QueryResult::Command { tag }] = results.as_slice() else {
+                panic!("explicit={explicit}: expected one command tag, got {results:?}");
+            };
+            assert!(tag == "REFRESH MATERIALIZED VIEW", "explicit={explicit}");
+            if explicit {
+                session.simple_query("COMMIT").await.expect("commit");
+            }
+
+            assert!(
+                rows_or_sqlstate(&mut session, "SELECT a FROM mv ORDER BY a").await
+                    == Ok(vec![
+                        vec!["1".to_string()],
+                        vec!["2".to_string()],
+                        vec!["3".to_string()],
+                    ]),
+                "explicit={explicit}"
+            );
+        }
     }
 }
 #[cfg(test)]
