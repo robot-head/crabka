@@ -1533,11 +1533,12 @@ pub(crate) fn execute_ddl(
             // applied before any of them is written.
             let mut ops = Vec::new();
             for table in tables {
+                let name = resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
+                if let Some(error) = grant_wrong_kind(kv, &name) {
+                    return Err(error);
+                }
                 ops.extend(crabka_pgcatalog::grant_table_privileges_ops(
-                    kv,
-                    &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?,
-                    grantees,
-                    privileges,
+                    kv, &name, grantees, privileges,
                 )?);
             }
             Ok((command("GRANT"), ops))
@@ -1584,11 +1585,12 @@ pub(crate) fn execute_ddl(
             // applied before any of them is written.
             let mut ops = Vec::new();
             for table in tables {
+                let name = resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
+                if let Some(error) = grant_wrong_kind(kv, &name) {
+                    return Err(error);
+                }
                 ops.extend(crabka_pgcatalog::revoke_table_privileges_ops(
-                    kv,
-                    &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?,
-                    grantees,
-                    privileges,
+                    kv, &name, grantees, privileges,
                 )?);
             }
             Ok((command("REVOKE"), ops))
@@ -3739,8 +3741,15 @@ fn statement_trigger_targets(
         )?;
         let tables = names
             .iter()
-            .map(|name| crabka_pgcatalog::get_table(write_ctx.catalog_kv, name))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|name| {
+                // This runs before the TRUNCATE arm itself, so a wrong-kind
+                // target has to be refused here or it is reported as missing.
+                match truncate_wrong_kind(write_ctx.catalog_kv, name) {
+                    Some(error) => Err(error),
+                    None => Ok(crabka_pgcatalog::get_table(write_ctx.catalog_kv, name)?),
+                }
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?;
         return Ok(
             crate::fk::expand_truncate_set(write_ctx.catalog_kv, &tables, *cascade)?
                 .tables
@@ -5766,6 +5775,9 @@ async fn execute_write_body(
             for name in
                 resolve_relations(catalog_kv, resolution, &written, SchemaDisposition::Utility)?
             {
+                if let Some(error) = truncate_wrong_kind(catalog_kv, &name) {
+                    return Err(error);
+                }
                 let t = crabka_pgcatalog::get_table(catalog_kv, &name)?;
                 if table_uses_global_visibility(&t) {
                     return Err(ExecError::Unsupported(
@@ -12926,6 +12938,13 @@ impl BindPass<'_, '_> {
                     Err(error @ ExecError::AmbiguousColumn(_)) if self.error.is_none() => {
                         self.error = Some(error);
                     }
+                    // A bare name that is no outer column may still name an
+                    // outer *relation*, and then it is that relation's whole
+                    // row — the same range-table fallback `eval` takes for a
+                    // reference it can resolve in place. Without it a
+                    // correlated subquery reported 42703 for a whole row every
+                    // uncorrelated path already answered.
+                    Err(ExecError::UndefinedColumn(_)) => self.whole_row(expr, shadow),
                     Err(_) => {}
                 }
             }
@@ -12937,6 +12956,52 @@ impl BindPass<'_, '_> {
         for query in query_children_mut(expr) {
             self.query(query, shadow);
         }
+    }
+
+    /// Substitute `expr` — a bare name that resolved to no outer column — with
+    /// the whole row of the outer relation it names, when it names one.
+    ///
+    /// The enclosing FROM clauses are consulted first and win outright: an
+    /// inner relation of the same name is what `PostgreSQL` binds, so
+    /// `SELECT (SELECT count(*) FROM ca WHERE ca IS NOT NULL) FROM ca` counts
+    /// the inner `ca`. `Shadow::columns` cannot answer that on its own — it
+    /// holds the names a FROM *supplies*, and a relation's own name is not
+    /// among them — so the qualifier list is what rules the outer row out.
+    ///
+    /// Only an unqualified name reaches this: `PostgreSQL` reads `s.t` as
+    /// "column `t` of range-table entry `s`" and reports a missing FROM entry
+    /// for `s`, never as the whole row of `s.t`.
+    ///
+    /// A row an outer join invented for that side has no whole row, so
+    /// [`Scope::whole_row_value`] hands back NULL and the substitution carries
+    /// it — which is what keeps `(,)` and NULL distinguishable in one result
+    /// set. Leaving `expr` untouched when nothing matches keeps the inner
+    /// scope's own 42703 exactly as it was.
+    fn whole_row(&mut self, expr: &mut Expr, shadow: &Shadow) {
+        let Expr::Column {
+            table: None,
+            name: qualifier,
+        } = &*expr
+        else {
+            return;
+        };
+        if shadow.qualifiers.iter().any(|q| q == qualifier) {
+            return;
+        }
+        let Some(value) = self.outer.whole_row_value(qualifier, self.row) else {
+            return;
+        };
+        self.substituted = true;
+        if self.referenced.is_none() {
+            self.referenced = Some(qualifier.clone());
+        }
+        // The relation's composite type is not registered in `pg_type` here, so
+        // a whole row carries the anonymous `record` — the same type
+        // `eval::infer_type` reports for one it resolves in place.
+        *expr = Expr::Const {
+            value,
+            ty: ColumnType::Record(None),
+        };
     }
 }
 
@@ -15453,7 +15518,10 @@ fn build_base_table(
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
         Err(error) => return Err(error.into()),
     }
-    let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
+    // Consulted only once `get_table` has missed, so an ordinary read pays no
+    // second catalog lookup for it.
+    let t = crabka_pgcatalog::get_table(catalog_kv, name)
+        .map_err(|error| open_wrong_kind(catalog_kv, name).unwrap_or_else(|| error.into()))?;
     // An unpopulated materialized view is refused here, at the one place every
     // stored-relation read passes, rather than in each of the planner's
     // pushdowns: the refusal has to hold whichever path a query takes, and a
@@ -17223,7 +17291,9 @@ fn build_table_expr_schema_with_ctes(
                 Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
                 Err(error) => return Err(error.into()),
             }
-            let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
+            let t = crabka_pgcatalog::get_table(catalog_kv, name).map_err(|error| {
+                open_wrong_kind(catalog_kv, name).unwrap_or_else(|| error.into())
+            })?;
             let qualifier = alias.as_deref().unwrap_or(&t.name.name);
             Ok(Relation {
                 scope: Scope::single(&t, qualifier),
@@ -23928,19 +23998,27 @@ fn alter_table_ops(
         };
     }
 
-    let table = match crabka_pgcatalog::get_table(kv, table_name) {
+    let fetched = crabka_pgcatalog::get_table(kv, table_name);
+    // A relation of any other kind is still a relation, so PostgreSQL reports
+    // the *subcommand* as unsupported for it rather than claiming the relation
+    // is missing — and IF EXISTS does not suppress that, because the relation
+    // exists. A materialized view is stored as a table here and so arrives
+    // through the `Ok` side; asking the fetched record for its kind is what
+    // catches it without costing an ordinary table a second lookup.
+    let kind = match &fetched {
+        Ok(table) => Some(stored_relation_kind(table)),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => relation_kind(kv, table_name),
+        Err(_) => None,
+    };
+    if let Some(kind) = kind
+        && kind != "table"
+        && kind != "foreign table"
+        && let Some(error) = alter_action_wrong_kind(table_name, actions, kind)
+    {
+        return Err(error);
+    }
+    let table = match fetched {
         Ok(table) => table,
-        // A view is a relation, so PostgreSQL reports the *action* as
-        // unsupported for it rather than claiming the relation is missing —
-        // and IF EXISTS does not suppress that, because the relation exists.
-        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_))
-            if crabka_pgcatalog::get_view(kv, table_name).is_ok() =>
-        {
-            let action = actions.first().map_or("ALTER", alter_action_label);
-            return Err(ExecError::WrongObjectType(format!(
-                "ALTER action {action} cannot be performed on relation \"{table_name}\""
-            )));
-        }
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if if_exists => {
             return Ok((command("ALTER TABLE"), Vec::new()));
         }
@@ -24377,17 +24455,116 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
         Action::ResetStorageParameters(_) => "RESET",
         Action::SetTablespace(_) => "SET TABLESPACE",
         Action::OwnerTo(_) => "OWNER TO",
-        Action::SetTriggerMode { .. } => "ENABLE/DISABLE TRIGGER",
-        Action::EnableRowSecurity => "ENABLE ROW LEVEL SECURITY",
-        Action::DisableRowSecurity => "DISABLE ROW LEVEL SECURITY",
-        Action::ForceRowSecurity => "FORCE ROW LEVEL SECURITY",
-        Action::NoForceRowSecurity => "NO FORCE ROW LEVEL SECURITY",
+        // `PostgreSQL` spells the exact form back, so the selector and the mode
+        // both show: `ENABLE TRIGGER ALL`, `DISABLE TRIGGER` for a named one,
+        // and `ENABLE REPLICA TRIGGER` / `ENABLE ALWAYS TRIGGER` for the two
+        // session-replication modes, which never name a selector suffix.
+        Action::SetTriggerMode { selector, mode } => {
+            use crabka_pgparser::ast::{TriggerEnableMode, TriggerSelector};
+
+            match (mode, selector) {
+                (TriggerEnableMode::Replica, _) => "ENABLE REPLICA TRIGGER",
+                (TriggerEnableMode::Always, _) => "ENABLE ALWAYS TRIGGER",
+                (TriggerEnableMode::Origin, TriggerSelector::All) => "ENABLE TRIGGER ALL",
+                (TriggerEnableMode::Origin, TriggerSelector::User) => "ENABLE TRIGGER USER",
+                (TriggerEnableMode::Origin, TriggerSelector::Named(_)) => "ENABLE TRIGGER",
+                (TriggerEnableMode::Disabled, TriggerSelector::All) => "DISABLE TRIGGER ALL",
+                (TriggerEnableMode::Disabled, TriggerSelector::User) => "DISABLE TRIGGER USER",
+                (TriggerEnableMode::Disabled, TriggerSelector::Named(_)) => "DISABLE TRIGGER",
+            }
+        }
+        // The statement is spelled `ROW LEVEL SECURITY`; the diagnostic drops
+        // the `LEVEL`, which is how `PostgreSQL` names these four subcommands.
+        Action::EnableRowSecurity => "ENABLE ROW SECURITY",
+        Action::DisableRowSecurity => "DISABLE ROW SECURITY",
+        Action::ForceRowSecurity => "FORCE ROW SECURITY",
+        Action::NoForceRowSecurity => "NO FORCE ROW SECURITY",
         Action::AttachPartition { .. } => "ATTACH PARTITION",
         Action::DetachPartition { .. } => "DETACH PARTITION",
         Action::ClusterOn(_) => "CLUSTER ON",
         Action::SetWithoutCluster => "SET WITHOUT CLUSTER",
         Action::Unsupported(_) => "ALTER",
     }
+}
+
+/// Whether `PostgreSQL` lets an `ALTER TABLE` subcommand run against a relation
+/// of kind `kind`, for the kinds that are not a table.
+///
+/// This is `PostgreSQL`'s `ATSimplePermissions` mask, one subcommand at a time:
+/// each declares the relation kinds it accepts, and a name of any other kind is
+/// refused before the subcommand does any work. There is no rule behind the
+/// shape of it — `SET DEFAULT` works on a view and not on a materialized view,
+/// `SET TABLESPACE` the other way round — so every cell here was measured
+/// against `PostgreSQL` 18.4 rather than reasoned about.
+///
+/// A relation kind that can *hold* the subcommand still has to be one this
+/// engine can carry it out on; this answers only whether `PostgreSQL` refuses
+/// on kind alone.
+fn alter_action_allows(action: &crabka_pgparser::ast::AlterTableAction, kind: &str) -> bool {
+    use crabka_pgparser::ast::AlterTableAction as Action;
+
+    match action {
+        // Every kind can be handed to another role.
+        Action::OwnerTo(_) => true,
+        // A view's columns take defaults, which is what an INSTEAD OF trigger
+        // and an auto-updatable view both read.
+        Action::SetDefault { .. } | Action::DropDefault(_) => kind == "view",
+        // Renaming a column, and the storage-parameter pair, reach everything
+        // with named columns or reloptions — every kind but a sequence.
+        Action::RenameColumn { .. }
+        | Action::RenameConstraint { .. }
+        | Action::SetStorageParameters(_)
+        | Action::ResetStorageParameters(_) => kind != "sequence",
+        // Only the two kinds with storage of their own can be moved.
+        Action::SetTablespace(_) => kind == "index" || kind == "materialized view",
+        // A materialized view has a heap and can carry a clustered index; the
+        // index it then names is checked after this.
+        Action::ClusterOn(_) | Action::SetWithoutCluster => kind == "materialized view",
+        // A subcommand this engine's grammar did not recognize cannot be
+        // looked up in the mask at all, so it is passed through to the
+        // unsupported-subcommand refusal that already names it. Claiming a kind
+        // rules it out would put a confident wrong answer in front of an honest
+        // one: `ALTER MATERIALIZED VIEW … SET SCHEMA` parses this way, and
+        // PostgreSQL performs it.
+        Action::Unsupported(_) => true,
+        // Everything else is a table-only subcommand.
+        _ => false,
+    }
+}
+
+/// The refusal `ALTER TABLE` owes when `name` is a relation of a kind some
+/// subcommand does not accept, or `None` when every subcommand accepts it.
+///
+/// `PostgreSQL` prepares the subcommands in the order they were written and
+/// stops at the first one the kind rules out, so a list whose first entry is
+/// fine and whose second is not reports the second.
+///
+/// Renaming is worded differently from the rest: it comes from the rename path
+/// rather than the subcommand table, and says `cannot rename columns of
+/// relation "x"` instead of naming an action at all.
+fn alter_action_wrong_kind(
+    name: &crabka_pgcatalog::RelationName,
+    actions: &[crabka_pgparser::ast::AlterTableAction],
+    kind: &str,
+) -> Option<ExecError> {
+    use crabka_pgparser::ast::AlterTableAction as Action;
+
+    let refused = actions
+        .iter()
+        .find(|action| !alter_action_allows(action, kind))?;
+    let message = if matches!(
+        refused,
+        Action::RenameColumn { .. } | Action::RenameConstraint { .. }
+    ) {
+        format!("cannot rename columns of relation \"{}\"", name.name)
+    } else {
+        format!(
+            "ALTER action {} cannot be performed on relation \"{}\"",
+            alter_action_label(refused),
+            name.name
+        )
+    };
+    Some(relkind_not_supported(message, kind))
 }
 
 /// The role an `OWNER TO` clause names, validated the way `PostgreSQL`
@@ -27025,6 +27202,173 @@ pub(crate) fn wrong_relation_kind_write_error(name: &crabka_pgcatalog::RelationN
     ExecError::WrongObjectType(format!("\"{}\" is not a table", name.name))
 }
 
+/// The wrong-kind refusal a statement owes for `name`, or `None` when it owes
+/// none.
+///
+/// `crabka_pgcatalog::get_table` answers `UndefinedTable` for every name a
+/// view, sequence or index holds, because those live under other catalog keys.
+/// A caller that only tries `get_table` therefore reports a relation of the
+/// wrong *kind* as one that does not exist — 42P01 where `PostgreSQL` says
+/// 42809 and names what the relation actually is. Threading that miss through
+/// here recovers the kind and lets the caller word its own refusal.
+///
+/// `refusal` is asked about the kind that is really there and answers `None`
+/// for a kind the statement *accepts*, which is how `LOCK TABLE` keeps working
+/// on a view while refusing a sequence. `None` also comes back when no relation
+/// of that name exists at all — then the caller's 42P01 was right all along.
+fn wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+    refusal: impl FnOnce(&str) -> Option<ExecError>,
+) -> Option<ExecError> {
+    refusal(relation_kind(kv, name)?)
+}
+
+/// The plural noun `PostgreSQL`'s `errdetail_relkind_not_supported` writes for
+/// a relation kind, as in `This operation is not supported for sequences.`
+fn relkind_plural(kind: &str) -> &'static str {
+    match kind {
+        "view" => "views",
+        "sequence" => "sequences",
+        "index" => "indexes",
+        "materialized view" => "materialized views",
+        "foreign table" => "foreign tables",
+        _ => "tables",
+    }
+}
+
+/// A 42809 refusal carrying `PostgreSQL`'s relkind `DETAIL`.
+///
+/// A whole family of refusals — `ALTER action …`, `cannot open relation`,
+/// `cannot lock relation`, `cannot create index on relation` — says only which
+/// relation it would not touch, and leaves the reason to a `DETAIL` naming the
+/// kind. The message is useless without it, so the two are built together.
+///
+/// [`ExecError::WrongObjectType`] is a bare string and cannot carry one, so
+/// these go out as [`ExecError::Remote`], which `ExecError::into_pg` hands to
+/// the wire untouched — the same route the `MERGE`-on-a-materialized-view
+/// refusal already takes.
+pub(crate) fn relkind_not_supported(message: String, kind: &str) -> ExecError {
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error("42809", message).with_detail(format!(
+            "This operation is not supported for {}.",
+            relkind_plural(kind)
+        )),
+    )
+}
+
+/// `TRUNCATE` against a relation of the wrong kind.
+///
+/// `PostgreSQL`'s `truncate_check_rel` refuses every kind it cannot empty with
+/// the one wording, so a view, a sequence, an index and a materialized view all
+/// get `"x" is not a table`.
+pub(crate) fn truncate_wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    wrong_kind(kv, name, |kind| {
+        (kind != "table" && kind != "foreign table").then(|| wrong_relation_kind_write_error(name))
+    })
+}
+
+/// `CLUSTER` against a relation of the wrong kind.
+///
+/// `PostgreSQL` rejects a relation with no heap while the name is still being
+/// opened. A materialized view has one and gets past this, to be refused later
+/// for having no clustered index.
+pub(crate) fn cluster_wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    wrong_kind(kv, name, |kind| {
+        (kind == "view" || kind == "sequence" || kind == "index").then(|| {
+            ExecError::WrongObjectType(format!(
+                "\"{}\" is not a table or materialized view",
+                name.name
+            ))
+        })
+    })
+}
+
+/// `LOCK TABLE` against a relation of the wrong kind.
+///
+/// A view is lockable — `PostgreSQL` locks it and, recursively, what it reads —
+/// so only the three kinds it refuses reach the refusal. A materialized view is
+/// among them, which is why this cannot be phrased as "anything without a
+/// heap".
+pub(crate) fn lock_wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    wrong_kind(kv, name, |kind| {
+        (kind == "sequence" || kind == "index" || kind == "materialized view")
+            .then(|| relkind_not_supported(format!("cannot lock relation \"{}\"", name.name), kind))
+    })
+}
+
+/// Reading or writing a relation that cannot be opened as one at all.
+///
+/// An index is the only kind that gets this: `PostgreSQL`'s `relation_open`
+/// checks lock the relkind out before any statement-specific rule runs, so
+/// `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `COPY` all report the same thing
+/// for an index and their own wordings for everything else.
+///
+/// Only the index key is read, not [`relation_kind`]'s four, because every
+/// caller reaches this having already missed in `get_table` — so the one lookup
+/// it adds is paid only by a statement that is failing anyway.
+pub(crate) fn open_wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    crabka_pgcatalog::get_index(kv, name)
+        .ok()
+        .map(|_| relkind_not_supported(format!("cannot open relation \"{}\"", name.name), "index"))
+}
+
+/// `GRANT`/`REVOKE … ON <relation>` against a relation of the wrong kind.
+///
+/// Table privileges are the same privileges a view, a sequence and a
+/// materialized view hold, so all three are granted on without complaint. An
+/// index holds none — nothing can be granted or revoked on one — and
+/// `PostgreSQL` says so in a wording that names what the relation *is* rather
+/// than what it is not.
+pub(crate) fn grant_wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    // Asked through `relation_kind` rather than the index key alone, because
+    // unlike the other helpers this one runs with no `get_table` ahead of it,
+    // and only the full lookup can say the name is an index and nothing else.
+    // `GRANT` is a per-statement path, so the extra reads cost nothing that
+    // matters.
+    wrong_kind(kv, name, |kind| {
+        (kind == "index")
+            .then(|| ExecError::WrongObjectType(format!("\"{}\" is an index", name.name)))
+    })
+}
+
+/// `INSERT`/`UPDATE`/`DELETE` against a relation of the wrong kind.
+///
+/// A sequence has its own wording, and an index never gets as far as one —
+/// [`open_wrong_kind`] refuses it while the relation is still being opened. A
+/// view is writable when it is auto-updatable or carries an `INSTEAD OF`
+/// trigger, so the view path owns that decision; a materialized view is refused
+/// by the write pre-check that already names it.
+///
+/// Reads the two keys it can answer from rather than [`relation_kind`]'s four.
+/// Its caller is on the pre-check every write statement runs and consults this
+/// only once `get_table` has missed, so a write to a table pays nothing here.
+pub(crate) fn write_wrong_kind(
+    kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Option<ExecError> {
+    open_wrong_kind(kv, name).or_else(|| {
+        crabka_pgcatalog::get_sequence(kv, name).ok().map(|_| {
+            ExecError::WrongObjectType(format!("cannot change sequence \"{}\"", name.name))
+        })
+    })
+}
+
 /// The `DROP <kind>` refusal for `name`, or `None` when no relation of that
 /// name exists at all — which is the caller's own 42P01, not a kind mismatch.
 fn drop_kind_mismatch(
@@ -27107,8 +27451,11 @@ fn require_relation_kind(
     } else {
         "a"
     };
+    // Named bare rather than schema-qualified, like every other wrong-kind
+    // refusal: the name in the message is the one the statement wrote.
     Err(ExecError::WrongObjectType(format!(
-        "\"{name}\" is not {article} {requested}"
+        "\"{}\" is not {article} {requested}",
+        name.name
     )))
 }
 

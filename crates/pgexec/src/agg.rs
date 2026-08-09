@@ -1406,6 +1406,9 @@ fn eval_grouped_depth(
                 return Ok(result);
             }
             let v = eval_grouped_depth(expr, grouped, d)?;
+            if let Some(result) = crate::rowexpr::composite_is_null(&v, *negated) {
+                return Ok(result);
+            }
             Ok(Datum::Bool(v.is_null() ^ *negated))
         }
         Expr::InList {

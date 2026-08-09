@@ -305,19 +305,13 @@ fn eval_depth_inner(
                 return Ok(result);
             }
             let v = eval_depth(expr, scope, values, ctx, d)?;
-            // A whole-row reference is a composite operand, which PostgreSQL
-            // tests field by field exactly as it tests a row constructor: `t IS
-            // NOT NULL` is false for a row with any NULL field.
-            if let Expr::Column { table: None, name } = &**expr
-                && let Datum::Record(record) = &v
-                && scope.resolve(None, name).is_err()
-                && scope.whole_row(name).is_some()
-            {
-                return Ok(Datum::Bool(if *negated {
-                    record.values.iter().all(|f| !f.is_null())
-                } else {
-                    record.values.iter().all(Datum::is_null)
-                }));
+            // Every composite operand is tested field by field, not just a
+            // whole-row reference: `PostgreSQL` sets `argisrow` from the
+            // operand's type, so a column of a composite type obeys the same
+            // rule. Reading the shape off the value settles it without the two
+            // scope scans naming the operand used to cost per row.
+            if let Some(result) = rowexpr::composite_is_null(&v, *negated) {
+                return Ok(result);
             }
             Ok(Datum::Bool(v.is_null() ^ *negated))
         }

@@ -4819,6 +4819,18 @@ impl SqlSession {
             tables,
             crate::relname::SchemaDisposition::Utility,
         )? {
+            if let Some(error) = crate::exec::lock_wrong_kind(&*self.catalog_kv, &name) {
+                return Err(error);
+            }
+            // A view is lockable in PostgreSQL, which locks it and recursively
+            // what it reads. Gres's relation locks are consulted by `LOCK TABLE`
+            // alone — ordinary DML serializes on row locks — so a view has no
+            // lock identity to take, and resolving it is the whole of the
+            // observable behaviour. Every other name still goes through
+            // `get_table`, so one that belongs to nothing keeps its 42P01.
+            if crabka_pgcatalog::get_view(&*self.catalog_kv, &name).is_ok() {
+                continue;
+            }
             let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &name)?;
             ids.push((name, table.id));
         }
@@ -4864,6 +4876,9 @@ impl SqlSession {
                     &target.table,
                     crate::relname::SchemaDisposition::Utility,
                 )?;
+                if let Some(error) = crate::exec::cluster_wrong_kind(&*self.catalog_kv, &name) {
+                    return Err(error);
+                }
                 let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &name)?;
                 vec![(name, table.id)]
             }
@@ -7053,7 +7068,17 @@ impl SqlSession {
             {
                 return Ok(false);
             }
-            Err(error) => return Err(error.into()),
+            // This pre-check is the first thing a write statement reaches, so a
+            // target of a kind that cannot be written has to be refused here or
+            // it is reported as a relation that does not exist. It is consulted
+            // only once `get_table` has missed, so a write to a table pays
+            // nothing for it.
+            Err(error) => {
+                return Err(
+                    crate::exec::write_wrong_kind(self.catalog_kv.as_ref(), &name)
+                        .unwrap_or_else(|| error.into()),
+                );
+            }
         };
         Ok(crate::exec::table_uses_global_visibility(&table))
     }
@@ -9530,6 +9555,13 @@ impl SqlSession {
                         "42809",
                         format!("cannot copy from sequence \"{}\"", resolved.name),
                     )));
+                }
+                // An index never reaches a COPY-specific rule: PostgreSQL
+                // refuses it while the relation is still being opened.
+                if let Some(error) =
+                    crate::exec::open_wrong_kind(self.catalog_kv.as_ref(), &resolved)
+                {
+                    return Err(error);
                 }
                 return Err(error.into());
             }
@@ -12474,15 +12506,35 @@ impl SqlSession {
     /// and widening it costs stack on every level of that recursion.
     fn precheck_copy_from(&self, copy: &CopyStmt) -> Result<(), ExecError> {
         let target = copy_into_target(copy)?;
-        let table = crabka_pgcatalog::get_table(
+        let resolved = crate::relname::resolve_relation(
             self.catalog_kv.as_ref(),
-            &crate::relname::resolve_relation(
-                self.catalog_kv.as_ref(),
-                &self.resolution_scope(),
-                target.name,
-                crate::relname::SchemaDisposition::Utility,
-            )?,
+            &self.resolution_scope(),
+            target.name,
+            crate::relname::SchemaDisposition::Utility,
         )?;
+        // A relation this copy cannot fill row by row. PostgreSQL names the
+        // kind, and for a view points at what would make it work — a refusal
+        // that has to arrive before `CopyInResponse` for the same reason the
+        // privilege test does.
+        if crabka_pgcatalog::get_view(self.catalog_kv.as_ref(), &resolved).is_ok() {
+            return Err(ExecError::Remote(
+                PgError::error(
+                    "42809",
+                    format!("cannot copy to view \"{}\"", resolved.name),
+                )
+                .with_hint("To enable copying to a view, provide an INSTEAD OF INSERT trigger."),
+            ));
+        }
+        if crabka_pgcatalog::get_sequence(self.catalog_kv.as_ref(), &resolved).is_ok() {
+            return Err(ExecError::Remote(PgError::error(
+                "42809",
+                format!("cannot copy to sequence \"{}\"", resolved.name),
+            )));
+        }
+        if let Some(error) = crate::exec::open_wrong_kind(self.catalog_kv.as_ref(), &resolved) {
+            return Err(error);
+        }
+        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &resolved)?;
         // A materialized view holds rows but takes none: PostgreSQL words this
         // refusal for `COPY` specifically rather than reusing the DML one, and
         // it belongs in the precheck for the same reason the privilege test

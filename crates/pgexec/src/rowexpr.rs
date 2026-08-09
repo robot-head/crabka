@@ -195,12 +195,41 @@ pub(crate) fn eval_is_null(
         return Ok(None);
     };
     let values = fields(items, &mut eval_child)?;
-    let holds = if negated {
-        values.iter().all(|v| !v.is_null())
+    Ok(Some(field_wise_is_null(&values, negated)))
+}
+
+/// `IS [NOT] NULL` over an already-evaluated operand, when that operand turned
+/// out to be a composite value.
+///
+/// `PostgreSQL`'s `NullTest` carries an `argisrow` flag, set for every operand
+/// whose *type* is composite, and the field-wise rule
+/// [`eval_is_null`] applies to a row constructor is the same rule that flag
+/// selects. So it is the value's shape, not the expression's, that decides:
+/// a whole-row reference, a column of a composite type, and a composite the
+/// correlated walker already folded to a constant are all tested field by
+/// field, and only `ROW(1, NULL)`-shaped operands can satisfy neither
+/// `IS NULL` nor `IS NOT NULL`.
+///
+/// A composite that is itself NULL arrives as [`Datum::Null`], not as a record
+/// of NULLs, so it never reaches here and keeps the scalar answer — which is
+/// the same answer `PostgreSQL` gives it.
+///
+/// `None` when the operand is not composite, leaving the scalar test in place.
+pub(crate) fn composite_is_null(value: &Datum, negated: bool) -> Option<Datum> {
+    let Datum::Record(record) = value else {
+        return None;
+    };
+    Some(field_wise_is_null(&record.values, negated))
+}
+
+/// The field-wise `IS [NOT] NULL` answer shared by a row constructor and a
+/// composite value.
+fn field_wise_is_null(values: &[Datum], negated: bool) -> Datum {
+    Datum::Bool(if negated {
+        values.iter().all(|value| !value.is_null())
     } else {
         values.iter().all(Datum::is_null)
-    };
-    Ok(Some(Datum::Bool(holds)))
+    })
 }
 
 /// `row [NOT] IN (row, …)`, compared row-wise with the same three-valued logic
