@@ -1,7 +1,7 @@
 //! Ed25519 checkpoint signing for the audit hash-chain.
 //!
-//! `checkpoint_signing_bytes` defines the canonical signed payload; both the
-//! writer (signing) and the verifier (verifying) call it — never reimplement.
+//! `checkpoint_signing_bytes` defines the canonical signed payload. The writer
+//! calls it to sign, and the verifier calls it to verify. Never reimplement it.
 
 use std::path::Path;
 
@@ -12,14 +12,15 @@ use crate::{
     sink::AuditError,
 };
 
-/// Domain-separation prefix for checkpoint signatures (versioned).
+/// Versioned domain-separation prefix for checkpoint signatures.
 pub const CHECKPOINT_DOMAIN: &[u8] = b"crabka-audit-ckpt-v1\0";
 
-/// Source of the broker's audit signing key. A file-backed Ed25519 impl ships
-/// in Slice 2; a KMS/HSM backend can implement this trait later without
-/// touching the chain logic.
+/// Source of the broker's audit signing key.
+///
+/// A file-backed Ed25519 implementation ships in Slice 2. A KMS or HSM backend
+/// can implement this trait later without a change to the chain logic.
 pub trait SigningKeyProvider: Send + Sync + std::fmt::Debug {
-    /// Stable identifier for the key, recorded on every checkpoint so chains
+    /// Stable identifier for the key. Every checkpoint records it, so chains
     /// span key-rotation epochs verifiably.
     fn key_id(&self) -> &str;
     /// Ed25519 signature over `msg`.
@@ -28,7 +29,7 @@ pub trait SigningKeyProvider: Send + Sync + std::fmt::Debug {
     fn public_key(&self) -> Vec<u8>;
 }
 
-/// File-backed Ed25519 signer (PKCS#8 v2 DER key).
+/// File-backed Ed25519 signer that reads a PKCS#8 v2 DER key.
 pub struct FileEd25519Signer {
     key_id: String,
     key_pair: Ed25519KeyPair,
@@ -49,7 +50,8 @@ impl FileEd25519Signer {
     /// Load a PKCS#8 Ed25519 key from `path`.
     #[tracing::instrument(level = "debug", skip_all, fields(key_id = %key_id), err)]
     /// # Errors
-    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+    /// Returns an error if the file at `path` cannot be read. Returns an error
+    /// if the file does not hold a valid PKCS#8 Ed25519 key.
     pub fn from_pkcs8_file(path: impl AsRef<Path>, key_id: String) -> Result<Self, AuditError> {
         let der = std::fs::read(path.as_ref())
             .map_err(|e| AuditError::Key(format!("read key file: {e}")))?;
@@ -59,7 +61,7 @@ impl FileEd25519Signer {
     /// Load a PKCS#8 Ed25519 key from DER bytes.
     #[tracing::instrument(level = "debug", skip_all, fields(key_id = %key_id, bytes = der.len()), err)]
     /// # Errors
-    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+    /// Returns an error if `der` is not a valid PKCS#8 Ed25519 key.
     pub fn from_pkcs8_bytes(der: &[u8], key_id: String) -> Result<Self, AuditError> {
         let key_pair = Ed25519KeyPair::from_pkcs8(der)
             .map_err(|_| AuditError::Key("invalid PKCS#8 Ed25519 key".to_string()))?;
@@ -86,11 +88,14 @@ impl SigningKeyProvider for FileEd25519Signer {
     }
 }
 
-/// Canonical checkpoint signed payload:
+/// Canonical checkpoint signed payload.
+///
+/// The layout is
 /// `DOMAIN ‖ key_id_len(u16 BE) ‖ key_id ‖ seq_high(u64 BE) ‖ head(32) ‖ time_ms(i64 BE)`.
 #[must_use]
 /// # Panics
-/// Panics if synchronized state is poisoned or validated input is missing a field required to produce the output.
+/// Panics if the key-id length does not fit a `u16`. The function caps that
+/// length at `u16::MAX` first, so this cannot happen.
 pub fn checkpoint_signing_bytes(
     key_id: &str,
     seq_high: Seq,
@@ -110,7 +115,9 @@ pub fn checkpoint_signing_bytes(
     v
 }
 
-/// Verify an Ed25519 signature. Returns `false` on any error.
+/// Verify an Ed25519 signature.
+///
+/// Returns `false` on any error.
 #[must_use]
 pub fn verify_signature(public_key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     UnparsedPublicKey::new(&ED25519, public_key)

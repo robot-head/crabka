@@ -1,12 +1,13 @@
-//! Per-broker log-compaction ticker. Every `interval`, walks the
-//! partitions registry and dispatches [`Partition::compact_log`] for
-//! every partition where:
+//! Per-broker log-compaction ticker.
+//!
+//! Every `interval`, it walks the partitions registry and dispatches
+//! [`Partition::compact_log`] for every partition where both of these hold:
 //!
 //!   - the topic's `cleanup.policy` is `compact`, and
 //!   - this broker is currently the leader.
 //!
-//! The actual compaction runs on the partition's writer actor, so
-//! appends and compaction are serialized.
+//! The compaction itself runs on the partition's writer actor, so appends and
+//! compaction run in sequence.
 
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -25,10 +26,10 @@ use crate::{metrics::BrokerMetrics, partition::Partition, partition_registry::Pa
 #[derive(Clone)]
 pub(crate) struct CleanerConfig {
     pub interval: Time,
-    /// Relative sleeper driving the compaction-sweep cadence. Production uses
-    /// [`qubit_clock::sleep::SystemSleeper`] (real time); tests inject a
-    /// [`qubit_clock::sleep::MockSleeper`] so the sweep interval fires on a
-    /// controlled mock timeline instead of wall-clock time.
+    /// Relative sleeper that drives the compaction-sweep cadence. Production
+    /// uses [`qubit_clock::sleep::SystemSleeper`], which is real time. Tests
+    /// inject a [`qubit_clock::sleep::MockSleeper`], so the sweep interval
+    /// fires on a controlled mock timeline instead of wall-clock time.
     pub sleeper: Arc<dyn AsyncSleeper>,
 }
 

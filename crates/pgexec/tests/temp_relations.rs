@@ -2,9 +2,9 @@
 //! emptied when the session ends.
 //!
 //! Every expectation here was captured from a live `postgres:18.4` and is
-//! written down as that server answered, including the places where the answer
-//! contradicts a careful reading of the documentation. The one recorded
-//! divergence is noted where it appears: this engine has no notice channel, so
+//! written down as that server answered. This includes the places where the
+//! answer contradicts a careful reading of the documentation. The one recorded
+//! divergence is noted where it appears. This engine has no notice channel, so
 //! the `NOTICE` 18.4 emits when it converts a view to a temporary view is
 //! silently absent.
 
@@ -36,8 +36,8 @@ impl Client {
         }
     }
 
-    /// A session with a chosen backend id, which is what makes "a later session
-    /// inherits this namespace" reachable from a test.
+    /// A session with a chosen backend id, which is what makes "a later
+    /// session inherits this namespace" reachable from a test.
     fn with_pid(engine: &SqlEngine, pid: i32) -> Self {
         Self {
             session: engine.connect_with_pid(pid),
@@ -73,8 +73,8 @@ impl Client {
         self.outcome(sql).await.expect_err("statement is refused")
     }
 
-    /// The statement's rows as text, so a case compares a whole table rather
-    /// than a chain of per-cell assertions.
+    /// The statement's rows as text, so a case compares a whole table instead
+    /// of a chain of per-cell assertions.
     async fn rows(&mut self, sql: &str) -> Vec<Vec<Option<String>>> {
         text_rows(&self.run(sql).await)
     }
@@ -101,8 +101,8 @@ impl Client {
             .collect()
     }
 
-    /// This session's temporary namespace, read back from the session rather
-    /// than derived — the backend id is not the test's to know.
+    /// This session's temporary namespace, read back from the session and not
+    /// derived. The backend id is not the test's to know.
     async fn temp_namespace(&mut self) -> String {
         self.schemas(true)
             .await
@@ -147,7 +147,7 @@ fn is_temp_namespace(name: &str) -> bool {
 }
 
 /// A schema list with the session-specific backend id folded away, so a case
-/// asserts the whole list and its order rather than picking at its entries.
+/// asserts the whole list and its order instead of single entries.
 fn masked(schemas: &[String]) -> Vec<String> {
     schemas
         .iter()
@@ -161,9 +161,9 @@ fn masked(schemas: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The relations matching `predicate`, each with the namespace holding it and
-/// its persistence — `pg_class` joined to `pg_namespace` is where both facts are
-/// visible at once.
+/// The relations that match `predicate`, each with the namespace that holds it
+/// and its persistence. `pg_class` joined to `pg_namespace` is where both facts
+/// are visible at once.
 fn relations(predicate: &str) -> String {
     format!(
         "SELECT c.relname, n.nspname, c.relpersistence \
@@ -172,12 +172,14 @@ fn relations(predicate: &str) -> String {
     )
 }
 
-/// The case a plausible implementation gets wrong while getting everything else
-/// right. With a permanent `public.shad` holding 1 and a temporary `shad`
-/// holding 99, 18.4 answers: `SELECT x FROM shad` is 99, `SELECT x FROM
-/// public.shad` is 1, an unqualified `DROP TABLE shad` takes the TEMPORARY one,
-/// and `SELECT x FROM shad` afterwards is 1 — the permanent relation was never
-/// touched and is visible again.
+/// The case a plausible implementation gets wrong while it gets everything else
+/// right.
+///
+/// With a permanent `public.shad` that holds 1 and a temporary `shad` that
+/// holds 99, 18.4 answers `SELECT x FROM shad` with 99 and
+/// `SELECT x FROM public.shad` with 1. An unqualified `DROP TABLE shad` takes
+/// the TEMPORARY one, and `SELECT x FROM shad` afterwards is 1. The permanent
+/// relation was never touched and is visible again.
 #[tokio::test]
 async fn an_unqualified_drop_takes_the_temporary_relation_and_spares_the_permanent_one() {
     let engine = SqlEngine::new();
@@ -197,10 +199,12 @@ async fn an_unqualified_drop_takes_the_temporary_relation_and_spares_the_permane
 }
 
 /// The temporary namespace is placed implicitly, ahead of the implicit
-/// `pg_catalog`. Before any temporary relation exists 18.4 reports
-/// `current_schemas(true)` as `{pg_catalog,public}`; after `CREATE TEMP TABLE t
-/// (x int)` it is `{pg_temp_<n>,pg_catalog,public}`. `current_schema` stays
-/// `public` throughout — the implicit placement affects lookup, not the
+/// `pg_catalog`.
+///
+/// Before any temporary relation exists, 18.4 reports `current_schemas(true)`
+/// as `{pg_catalog,public}`. After `CREATE TEMP TABLE t (x int)` it is
+/// `{pg_temp_<n>,pg_catalog,public}`. `current_schema` stays `public`
+/// throughout, because the implicit placement affects lookup and not the
 /// creation slot.
 #[tokio::test]
 async fn the_temporary_namespace_leads_the_implicit_search_path() {
@@ -215,11 +219,13 @@ async fn the_temporary_namespace_leads_the_implicit_search_path() {
 }
 
 /// A written `pg_temp` sits where it was written and suppresses the
-/// implicit-first placement: 18.4 reports `current_schemas(true)` as
-/// `{pg_catalog,public,pg_temp_<n>}` after `SET search_path = public, pg_temp`.
-/// With `SET search_path = pg_temp` alone, `current_schema` is `pg_temp_<n>` and
-/// a following `CREATE TABLE inpath (x int)` — no `TEMP` keyword — lands there
-/// with `relpersistence = 't'`.
+/// implicit-first placement.
+///
+/// 18.4 reports `current_schemas(true)` as `{pg_catalog,public,pg_temp_<n>}`
+/// after `SET search_path = public, pg_temp`. With `SET search_path = pg_temp`
+/// alone, `current_schema` is `pg_temp_<n>`, and a following
+/// `CREATE TABLE inpath (x int)` with no `TEMP` keyword lands there with
+/// `relpersistence = 't'`.
 #[tokio::test]
 async fn a_written_pg_temp_sits_where_it_was_written() {
     let engine = SqlEngine::new();
@@ -240,10 +246,12 @@ async fn a_written_pg_temp_sits_where_it_was_written() {
 }
 
 /// `pg_temp` as a written qualifier creates a TEMPORARY relation whether or not
-/// the `TEMP` keyword is there: 18.4 puts both `CREATE TABLE pg_temp.viaqual (x
-/// int)` and `CREATE TEMP TABLE pg_temp.ok (x int)` in `pg_temp_<n>` with
-/// `relpersistence = 't'`, and accepts the redundant spelling rather than
-/// refusing it.
+/// the `TEMP` keyword is there.
+///
+/// 18.4 puts both `CREATE TABLE pg_temp.viaqual (x int)` and
+/// `CREATE TEMP TABLE pg_temp.ok (x int)` in `pg_temp_<n>` with
+/// `relpersistence = 't'`, and it accepts the redundant spelling instead of a
+/// refusal.
 #[tokio::test]
 async fn a_pg_temp_qualifier_creates_a_temporary_relation() {
     let engine = SqlEngine::new();
@@ -261,13 +269,15 @@ async fn a_pg_temp_qualifier_creates_a_temporary_relation() {
 }
 
 /// The error names the qualifier AS WRITTEN, never the namespace it expands to.
-/// Once the session has a temporary namespace, 18.4 still reports `SELECT *
-/// FROM pg_temp.nothere` as `42P01 relation "pg_temp.nothere" does not exist`
-/// rather than naming `pg_temp_<n>`.
 ///
-/// The complementary case — no temporary namespace yet, where the same `SELECT`
-/// is `42P01` while `DROP TABLE pg_temp.nothere` is `3F000 schema "pg_temp"
-/// does not exist` — lives in `qualified_names.rs`.
+/// Once the session has a temporary namespace, 18.4 still reports
+/// `SELECT * FROM pg_temp.nothere` as
+/// `42P01 relation "pg_temp.nothere" does not exist`, and it does not name
+/// `pg_temp_<n>`.
+///
+/// The complementary case is in `qualified_names.rs`. There the session has no
+/// temporary namespace yet, the same `SELECT` is `42P01`, and
+/// `DROP TABLE pg_temp.nothere` is `3F000 schema "pg_temp" does not exist`.
 #[tokio::test]
 async fn a_pg_temp_reference_reports_the_qualifier_as_written() {
     let engine = SqlEngine::new();
@@ -281,8 +291,9 @@ async fn a_pg_temp_reference_reports_the_qualifier_as_written() {
 }
 
 /// A temporary relation cannot be put in a schema that is not a temporary one.
-/// 18.4 refuses both an ordinary schema and `pg_catalog` with `42P16 cannot
-/// create temporary relation in non-temporary schema`.
+///
+/// 18.4 refuses both an ordinary schema and `pg_catalog` with
+/// `42P16 cannot create temporary relation in non-temporary schema`.
 #[tokio::test]
 async fn a_temporary_relation_is_refused_in_a_non_temporary_schema() {
     let engine = SqlEngine::new();
@@ -304,10 +315,12 @@ async fn a_temporary_relation_is_refused_in_a_non_temporary_schema() {
     }
 }
 
-/// A temporary namespace belongs to one session. Naming another session's by
-/// its `pg_temp_<n>` spelling is `42P16 cannot create relations in temporary
-/// schemas of other sessions` in 18.4, with and without the `TEMP` keyword —
-/// the keyword changes nothing, because the schema decides.
+/// A temporary namespace belongs to one session.
+///
+/// In 18.4, a reference to another session's namespace by its `pg_temp_<n>`
+/// spelling is `42P16 cannot create relations in temporary schemas of other
+/// sessions`. This holds with and without the `TEMP` keyword. The keyword
+/// changes nothing, because the schema decides.
 #[tokio::test]
 async fn another_sessions_temporary_namespace_refuses_a_creation() {
     let engine = SqlEngine::new();
@@ -330,8 +343,10 @@ async fn another_sessions_temporary_namespace_refuses_a_creation() {
 }
 
 /// Inside an explicit block both `ON COMMIT` dispositions are held until the
-/// `COMMIT`: 18.4 shows one row in each of `oc_del` and `oc_drop` before it,
-/// and afterwards `oc_del` holds 0 rows while `oc_drop` is gone (`42P01`).
+/// `COMMIT`.
+///
+/// 18.4 shows one row in each of `oc_del` and `oc_drop` before the `COMMIT`.
+/// Afterwards `oc_del` holds 0 rows and `oc_drop` is gone, which is `42P01`.
 #[tokio::test]
 async fn on_commit_dispositions_fire_when_the_block_commits() {
     let engine = SqlEngine::new();
@@ -356,10 +371,11 @@ async fn on_commit_dispositions_fire_when_the_block_commits() {
 }
 
 /// Outside a block every statement is its own transaction, so an `ON COMMIT`
-/// disposition fires the moment the statement that armed it ends. 18.4 leaves
-/// nothing behind for `ON COMMIT DROP` — the following `SELECT` is `42P01` —
-/// and an `ON COMMIT DELETE ROWS` table is empty again after the separate
-/// `INSERT` commits, so the count is 0.
+/// disposition fires the moment the statement that armed it ends.
+///
+/// 18.4 leaves nothing behind for `ON COMMIT DROP`, and the following `SELECT`
+/// is `42P01`. An `ON COMMIT DELETE ROWS` table is empty again after the
+/// separate `INSERT` commits, so the count is 0.
 #[tokio::test]
 async fn outside_a_block_an_on_commit_disposition_fires_immediately() {
     let engine = SqlEngine::new();
@@ -378,8 +394,8 @@ async fn outside_a_block_an_on_commit_disposition_fires_immediately() {
 }
 
 /// `ON COMMIT` governs a relation that cannot outlive its session, so 18.4
-/// refuses it on a permanent table with `42P16 ON COMMIT can only be used on
-/// temporary tables`.
+/// refuses it on a permanent table with
+/// `42P16 ON COMMIT can only be used on temporary tables`.
 #[tokio::test]
 async fn on_commit_is_refused_on_a_permanent_table() {
     let engine = SqlEngine::new();
@@ -395,14 +411,15 @@ async fn on_commit_is_refused_on_a_permanent_table() {
 
 /// A relation that is gone by the end of the transaction has no rows to empty
 /// and nothing to drop, so its `ON COMMIT` disposition has nothing left to do.
-/// 18.4 accepts every statement in each of these sequences, including the
-/// `DROP SCHEMA`-shaped `DISCARD TEMP` and the `TRUNCATE` that leaves the
-/// relation standing.
 ///
-/// The trailing `SELECT 1` is the half that matters most: the disposition is
-/// discharged at the end of *every* transaction, so a disposition that cannot
-/// be discharged is not one bad `COMMIT` — it is a session that answers every
-/// later statement with the same error.
+/// 18.4 accepts every statement in each of these sequences. This includes the
+/// `DROP SCHEMA`-shaped `DISCARD TEMP` and the `TRUNCATE` that leaves the
+/// relation in place.
+///
+/// The trailing `SELECT 1` is the half that matters most. The disposition is
+/// discharged at the end of *every* transaction. A disposition that cannot be
+/// discharged is therefore not one bad `COMMIT`. It is a session that answers
+/// every later statement with the same error.
 #[tokio::test]
 async fn a_relation_that_does_not_survive_its_transaction_discharges_its_disposition() {
     let cases: &[(&str, &[&str])] = &[
@@ -471,11 +488,12 @@ async fn a_relation_that_does_not_survive_its_transaction_discharges_its_disposi
     }
 }
 
-/// `ON COMMIT` is keyed to the relation, not to the name it happens to hold.
-/// After a same-transaction `DROP TABLE` frees the name and a second
-/// `CREATE TEMP TABLE` takes it with `ON COMMIT PRESERVE ROWS`, 18.4 leaves the
-/// new table's two rows standing at the `COMMIT` — the dropped table's
-/// `DELETE ROWS` does not follow its name onto the relation that replaced it.
+/// `ON COMMIT` is keyed to the relation, not to the name it holds.
+///
+/// A same-transaction `DROP TABLE` frees the name, and a second
+/// `CREATE TEMP TABLE` takes it with `ON COMMIT PRESERVE ROWS`. 18.4 then keeps
+/// the new table's two rows at the `COMMIT`. The dropped table's `DELETE ROWS`
+/// does not follow its name onto the relation that replaced it.
 #[tokio::test]
 async fn on_commit_follows_the_relation_and_not_the_name_it_held() {
     let engine = SqlEngine::new();
@@ -495,10 +513,11 @@ async fn on_commit_follows_the_relation_and_not_the_name_it_held() {
     assert!(client.rows("SELECT x FROM reuse ORDER BY x").await == vec![row(&["7"]), row(&["8"])]);
 }
 
-/// `DISCARD` drops every temporary relation but leaves the namespace standing:
-/// in 18.4 the following `SELECT` is `42P01` while `current_schemas(true)` still
-/// reports `pg_temp_<n>` first. `DISCARD ALL` does the same, its `RESET ALL`
-/// notwithstanding.
+/// `DISCARD` drops every temporary relation but keeps the namespace.
+///
+/// In 18.4 the following `SELECT` is `42P01`, while `current_schemas(true)`
+/// still reports `pg_temp_<n>` first. `DISCARD ALL` does the same, even with
+/// its `RESET ALL`.
 #[tokio::test]
 async fn discard_drops_the_temporary_relations_and_keeps_the_namespace() {
     for discard in ["DISCARD TEMP", "DISCARD ALL"] {
@@ -521,8 +540,8 @@ async fn discard_drops_the_temporary_relations_and_keeps_the_namespace() {
 }
 
 /// A temporary relation is reachable by name only from the session that made
-/// it: 18.4 answers another session's `SELECT * FROM mine` with `42P01 relation
-/// "mine" does not exist`.
+/// it. 18.4 answers another session's `SELECT * FROM mine` with
+/// `42P01 relation "mine" does not exist`.
 #[tokio::test]
 async fn another_session_cannot_resolve_a_temporary_relation_by_name() {
     let engine = SqlEngine::new();
@@ -536,10 +555,10 @@ async fn another_session_cannot_resolve_a_temporary_relation_by_name() {
     );
 }
 
-/// `pg_class` DOES show another session's temporary relation — verified on
-/// 18.4, where the row carries the other session's `pg_temp_<a>` and
+/// `pg_class` DOES show another session's temporary relation. This was verified
+/// on 18.4, where the row carries the other session's `pg_temp_<a>` and
 /// `relpersistence = 't'`. This is deliberate and must not be "fixed" into
-/// hiding; name resolution is what is per-session, not the catalog.
+/// hiding. Name resolution is what is per-session, and the catalog is not.
 #[tokio::test]
 async fn pg_class_shows_another_sessions_temporary_relation() {
     let engine = SqlEngine::new();
@@ -551,9 +570,9 @@ async fn pg_class_shows_another_sessions_temporary_relation() {
     assert!(b.rows(&relations("c.relname = 'mine'")).await == vec![row(&["mine", &temp_a, "t"])]);
 }
 
-/// `information_schema` is the other way round from `pg_class`: 18.4 shows a
-/// session its own temporary relation in `tables` and `columns` and shows
-/// another session's in neither.
+/// `information_schema` is the other way round from `pg_class`. 18.4 shows a
+/// session its own temporary relation in `tables` and `columns`, and it shows
+/// another session's relation in neither.
 #[tokio::test]
 async fn information_schema_hides_another_sessions_temporary_relation() {
     let engine = SqlEngine::new();
@@ -572,8 +591,8 @@ async fn information_schema_hides_another_sessions_temporary_relation() {
     assert!(b.rows(columns).await.is_empty());
 }
 
-/// The namespaces themselves are public knowledge, unlike the relations in
-/// them: 18.4 lists every session's `pg_temp_<n>` in `pg_namespace` and in
+/// The namespaces themselves are public knowledge, and the relations in them
+/// are not. 18.4 lists every session's `pg_temp_<n>` in `pg_namespace` and in
 /// `information_schema.schemata`, to both sessions.
 #[tokio::test]
 async fn every_sessions_temporary_namespace_is_listed() {
@@ -600,13 +619,15 @@ async fn every_sessions_temporary_namespace_is_listed() {
 }
 
 /// Persistence follows the namespace, so everything a `CREATE TEMP TABLE`
-/// brings with it is temporary too. 18.4 puts `tseq`, the `serial` column's
-/// sequence `tseq_id_seq` and the primary key's index `tseq_pkey` all in
-/// `pg_temp_<n>` with `relpersistence = 't'`, and the permanent counterparts
-/// all in `public` with `'p'`.
+/// brings with it is temporary too.
 ///
-/// The whole contents of both namespaces are compared, so nothing a `CREATE`
-/// brings with it can go unaccounted for.
+/// 18.4 puts `tseq`, the `serial` column's sequence `tseq_id_seq` and the
+/// primary key's index `tseq_pkey` all in `pg_temp_<n>` with
+/// `relpersistence = 't'`. It puts the permanent counterparts all in `public`
+/// with `'p'`.
+///
+/// This case compares the whole contents of both namespaces, so nothing a
+/// `CREATE` brings with it can go unaccounted for.
 #[tokio::test]
 async fn relpersistence_covers_a_temporary_tables_index_and_sequence() {
     let engine = SqlEngine::new();
@@ -635,13 +656,15 @@ async fn relpersistence_covers_a_temporary_tables_index_and_sequence() {
 }
 
 /// A view over a temporary relation cannot outlive it, so 18.4 silently
-/// converts it: `CREATE VIEW v AS SELECT * FROM src` over a temporary `src`
-/// lands in `pg_temp_<n>` with `relpersistence = 't'` even though nothing in
-/// the statement said `TEMP`.
+/// converts the view.
+///
+/// `CREATE VIEW v AS SELECT * FROM src` over a temporary `src` lands in
+/// `pg_temp_<n>` with `relpersistence = 't'`, even though nothing in the
+/// statement said `TEMP`.
 ///
 /// 18.4 also emits `NOTICE: view "v" will be a temporary view`. This engine has
-/// no notice channel, so the conversion is silent — a recorded divergence, not
-/// something asserted here.
+/// no notice channel, so the conversion is silent. That is a recorded
+/// divergence, and this case does not assert it.
 #[tokio::test]
 async fn a_view_over_a_temporary_relation_is_converted_to_a_temporary_view() {
     let engine = SqlEngine::new();
@@ -654,9 +677,8 @@ async fn a_view_over_a_temporary_relation_is_converted_to_a_temporary_view() {
 }
 
 /// The conversion cannot happen where the statement pinned the view to an
-/// ordinary schema, and 18.4 then reports the same refusal a temporary table
-/// gets there: `42P16 cannot create temporary relation in non-temporary
-/// schema`.
+/// ordinary schema. 18.4 then reports the same refusal a temporary table gets
+/// there: `42P16 cannot create temporary relation in non-temporary schema`.
 #[tokio::test]
 async fn a_qualified_view_over_a_temporary_relation_is_refused() {
     let engine = SqlEngine::new();
@@ -676,10 +698,12 @@ async fn a_qualified_view_over_a_temporary_relation_is_refused() {
 }
 
 /// `CREATE TEMP VIEW` puts the view in the session's temporary namespace even
-/// when everything it reads is permanent, and it dies with the session. 18.4:
-/// `CREATE TEMP VIEW tv AS SELECT * FROM permsrc` lands `tv` in `pg_temp_<n>`
-/// with `relpersistence = 't'`, and a written qualifier naming an ordinary
-/// schema is `42P16 cannot create temporary relation in non-temporary schema`.
+/// when everything it reads is permanent, and the view dies with the session.
+///
+/// In 18.4, `CREATE TEMP VIEW tv AS SELECT * FROM permsrc` lands `tv` in
+/// `pg_temp_<n>` with `relpersistence = 't'`. A written qualifier that names an
+/// ordinary schema is
+/// `42P16 cannot create temporary relation in non-temporary schema`.
 #[tokio::test]
 async fn a_temporary_view_lives_in_the_temporary_namespace() {
     let engine = SqlEngine::new();
@@ -707,9 +731,11 @@ async fn a_temporary_view_lives_in_the_temporary_namespace() {
 }
 
 /// A foreign key may not cross the temporary boundary in either direction, and
-/// 18.4 words the two refusals from the constrained table's side. Both spellings
-/// of the same constraint — inline at `CREATE TABLE` and a later `ALTER TABLE …
-/// ADD FOREIGN KEY` — report identically. The matching pairs are accepted.
+/// 18.4 words the two refusals from the constrained table's side.
+///
+/// Both spellings of the same constraint report identically. The spellings are
+/// inline at `CREATE TABLE` and a later `ALTER TABLE … ADD FOREIGN KEY`. The
+/// matching pairs are accepted.
 #[tokio::test]
 async fn a_foreign_key_may_not_cross_the_temporary_boundary() {
     let cases = [
@@ -762,10 +788,12 @@ async fn a_foreign_key_may_not_cross_the_temporary_boundary() {
     }
 }
 
-/// A session's temporary relations die with the session. `terminate` is what the
-/// wire layer calls once the message loop ends, however it ends, and after it
-/// the relation is gone from `pg_class` — observed here from a second session,
-/// which is the only place the row was ever visible from anyway.
+/// A session's temporary relations die with the session.
+///
+/// `terminate` is what the wire layer calls once the message loop ends, however
+/// it ends. After that call the relation is gone from `pg_class`. This case
+/// observes that from a second session, which is the only place the row was
+/// ever visible from.
 #[tokio::test]
 async fn terminating_a_session_drops_its_temporary_relations() {
     let engine = SqlEngine::new();
@@ -788,11 +816,12 @@ async fn terminating_a_session_drops_its_temporary_relations() {
 }
 
 /// A backend that never reached `terminate` leaves its relations behind under
-/// the name the next session of that backend id will use, so that session
-/// purges the namespace before it creates anything in it. Here the first
-/// session is dropped outright — no `terminate` — its leftover is still in
-/// `pg_class`, and a second session on the same backend id clears it as soon as
-/// it creates a temporary relation of its own.
+/// the name the next session of that backend id will use. That session purges
+/// the namespace before it creates anything in it.
+///
+/// Here the first session is dropped outright, with no `terminate`. Its
+/// leftover is still in `pg_class`, and a second session on the same backend id
+/// clears it as soon as that session creates a temporary relation of its own.
 #[tokio::test]
 async fn a_session_inheriting_a_backend_id_purges_the_leftovers() {
     let engine = SqlEngine::new();

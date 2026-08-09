@@ -1,16 +1,20 @@
 //! Exhaustive stateright enumeration of the fetch read-path visibility decision
-//! (`super::compute_visibility_window`). The state is the advancing partition
-//! watermarks `{log_start, hw, lso, log_end}` (Kafka invariant
-//! `0 <= log_start <= lso <= hw <= log_end`); `Advance*` actions raise them
-//! monotonically (appends raise LEO, ISR catch-up raises HW, txn commits raise
-//! LSO, retention raises `log_start`), and `Fetch` probes drive the real decision.
+//! (`super::compute_visibility_window`).
 //!
-//! Per `Fetch` it asserts the clamp contract — a consumer fetch never exposes an
-//! offset beyond the high-watermark (no dirty read), a `read_committed` consumer
-//! is clamped at `lso.min(hw)`, a follower is served up to the log-end — plus the
-//! single-source-of-truth response-field contract (the de-dup'd hazard from
-//! `do_read`). On every `Advance*` it asserts KIP-227 monotonicity: the reported
-//! HW/LSO never regress as the log progresses. See the design spec
+//! The state is the advancing partition watermarks
+//! `{log_start, hw, lso, log_end}`, with the Kafka invariant
+//! `0 <= log_start <= lso <= hw <= log_end`. `Advance*` actions raise them
+//! monotonically: appends raise LEO, ISR catch-up raises HW, txn commits raise
+//! LSO, and retention raises `log_start`. `Fetch` probes drive the real
+//! decision.
+//!
+//! For each `Fetch` the model asserts the clamp contract. A consumer fetch
+//! never exposes an offset beyond the high-watermark, so there is no dirty
+//! read. The broker clamps a `read_committed` consumer at `lso.min(hw)`, and it
+//! serves a follower up to the log-end. The model also asserts the
+//! single-source-of-truth response-field contract, the de-dup'd hazard from
+//! `do_read`. For each `Advance*` the model asserts KIP-227 monotonicity: the
+//! reported HW/LSO never regress as the log progresses. See the design spec
 //! `docs/superpowers/specs/2026-06-14-crabka-fetch-hwm-visibility-model-design.md`.
 
 use std::time::Duration;
@@ -41,12 +45,13 @@ enum VisAction {
     AdvanceHw,
     AdvanceLso,
     AdvanceLogStart,
-    /// `(is_follower, read_committed, fetch_offset)` — `read_committed` implies
+    /// `(is_follower, read_committed, fetch_offset)`. `read_committed` implies
     /// `!is_follower`.
     Fetch(bool, bool, i64),
 }
 
-/// Mirror of the fn's `response_hw` formula (the contract being asserted).
+/// Mirror of the `response_hw` formula of the fn. This is the contract that
+/// the model asserts.
 fn response_hw(is_follower: bool, hw: i64, log_end: i64) -> i64 {
     if is_follower { log_end } else { hw }
 }
@@ -161,7 +166,7 @@ impl Model for VisModel {
     }
 }
 
-/// KIP-227: advancing a watermark must never lower the reported HW/LSO for any
+/// KIP-227: a watermark advance must never lower the reported HW/LSO for any
 /// fixed fetch shape.
 fn assert_monotonic(old: &VisState, new: &VisState) {
     for &fol in &[false, true] {

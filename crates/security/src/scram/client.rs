@@ -1,5 +1,6 @@
-//! `ScramClientExchange` — RFC 5802 SCRAM client state machine.
-//! Supports SCRAM-SHA-256 and SCRAM-SHA-512; the mechanism is fixed at
+//! `ScramClientExchange`, the RFC 5802 SCRAM client state machine.
+//!
+//! It supports SCRAM-SHA-256 and SCRAM-SHA-512. The mechanism is fixed at
 //! construction.
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};

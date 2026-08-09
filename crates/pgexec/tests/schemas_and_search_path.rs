@@ -2,7 +2,7 @@
 //! unqualified name reaches.
 //!
 //! Every expectation here was captured from `postgres:18.4` before it was
-//! written down; the cases that contradict a careful reading of the
+//! written down. The cases that contradict a careful reading of the
 //! documentation are called out where they appear.
 
 use assert2::assert;
@@ -95,8 +95,8 @@ async fn the_search_path_decides_which_of_two_same_named_relations_is_read() {
     }
 }
 
-/// A write resolves the same way a read does — the defect class this wave
-/// exists to close is an operation that silently does not shadow.
+/// A write resolves the same way a read does. The defect class this wave exists
+/// to close is an operation that silently does not shadow.
 #[tokio::test]
 async fn every_operation_resolves_through_the_same_search_path() {
     let engine = SqlEngine::new();
@@ -235,8 +235,8 @@ async fn current_schema_functions_follow_the_search_path() {
 }
 
 /// A missing schema is `3F000` for a utility statement and `42P01` for a
-/// reference — the split the resolver's disposition argument exists for, and
-/// one the plan this wave started from had backwards.
+/// reference. That is the split the resolver's disposition argument exists for,
+/// and the plan this wave started from had it backwards.
 #[tokio::test]
 async fn a_missing_schema_is_reported_differently_by_statement_kind() {
     let engine = SqlEngine::new();
@@ -275,8 +275,8 @@ async fn a_dotted_relation_name_and_a_qualified_one_are_different_relations() {
 
 /// A relation whose name holds a `/` is an ordinary relation. It used to be
 /// storable and queryable but invisible to every catalog projection, because
-/// the catalog scan recovered a name by rejecting any key suffix holding a
-/// slash — which also meant `DROP SCHEMA … CASCADE` walked straight past it.
+/// the catalog scan recovered a name by rejecting any key suffix that holds a
+/// slash. That also meant `DROP SCHEMA … CASCADE` walked straight past it.
 #[tokio::test]
 async fn a_relation_whose_name_holds_a_slash_is_visible_to_the_catalog() {
     let engine = SqlEngine::new();
@@ -328,7 +328,7 @@ async fn drop_schema_cascade_finds_every_relation_in_the_schema() {
     client.run("CREATE SCHEMA s1").await;
 }
 
-/// The implicit `pg_catalog` entry genuinely shadows: a user relation called
+/// The implicit `pg_catalog` entry genuinely shadows. A user relation called
 /// `pg_class` in `public` does not displace the catalog relation for an
 /// unqualified read.
 #[tokio::test]
@@ -343,7 +343,7 @@ async fn the_implicit_pg_catalog_entry_shadows_a_user_relation() {
     client.run("SELECT relname FROM pg_class").await;
 }
 
-/// A relation moves nowhere when it is renamed: `RENAME TO` takes an
+/// A relation moves nowhere when it is renamed. `RENAME TO` takes an
 /// unqualified name and leaves the relation in the schema it was already in.
 #[tokio::test]
 async fn rename_keeps_a_relation_in_its_own_schema() {
@@ -371,9 +371,9 @@ async fn rename_keeps_a_relation_in_its_own_schema() {
 /// the table's schema. On `postgres:18.4`,
 /// `CREATE TABLE nm.t (id serial PRIMARY KEY, y int UNIQUE, z int CHECK (z > 0))`
 /// followed by `CREATE INDEX ON nm.t (y)` gives constraints `t_pkey`,
-/// `t_y_key`, `t_z_check` (beside the `t_id_not_null` the `serial` brings) and
-/// relations `t`, `t_id_seq`, `t_pkey`, `t_y_key`, `t_y_idx` — every one of
-/// them unqualified, all of them in `nm`.
+/// `t_y_key` and `t_z_check`, beside the `t_id_not_null` the `serial` brings,
+/// and relations `t`, `t_id_seq`, `t_pkey`, `t_y_key` and `t_y_idx`. Every one
+/// of them is unqualified, and all of them are in `nm`.
 #[tokio::test]
 async fn default_constraint_names_do_not_carry_the_schema() {
     let engine = SqlEngine::new();

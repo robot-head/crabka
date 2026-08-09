@@ -1,6 +1,6 @@
-//! Schema Registry primary election (cp-exact `"sr"` Kafka group). A node joins
-//! the group; the leader selects the primary and broadcasts it; every node
-//! publishes its `PrimaryState` for the forwarding middleware.
+//! Schema Registry primary election over the cp-exact `"sr"` Kafka group. A
+//! node joins the group. The leader selects the primary and broadcasts it.
+//! Every node publishes its `PrimaryState` for the forwarding middleware.
 
 pub mod client;
 pub mod protocol;
@@ -26,7 +26,7 @@ pub struct Election;
 impl Election {
     /// Parse `advertised_url` into a `SchemaRegistryIdentity`, spawn the `"sr"`
     /// group loop, and return a watch receiver of `PrimaryState`. The task runs
-    /// until `cancel` fires (then it `LeaveGroup`s).
+    /// until `cancel` fires, and it then sends `LeaveGroup`.
     pub fn start(
         cfg: &RegistryConfig,
         cancel: CancellationToken,
@@ -49,7 +49,7 @@ impl Election {
     }
 }
 
-/// Parse `http://host:port` into a `SchemaRegistryIdentity` (version 1).
+/// Parse `http://host:port` into a version 1 `SchemaRegistryIdentity`.
 fn parse_identity(url: &str, eligible: bool) -> anyhow::Result<SchemaRegistryIdentity> {
     let (scheme, rest) = url
         .split_once("://")

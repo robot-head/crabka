@@ -3,7 +3,7 @@
 //! Kafka's `MetadataVersion` enum over the range Crabka advertises
 //! (`[METADATA_VERSION_MIN, METADATA_VERSION_MAX]`). JVM clients call
 //! `MetadataVersion.fromFeatureLevel(N)` and throw on any level their
-//! enum doesn't know, so the levels and `X.Y-IVn` names here MUST match
+//! enum does not know, so the levels and `X.Y-IVn` names here MUST match
 //! upstream exactly. Verify against the cp-kafka 4.0 enum before editing.
 
 /// The `metadata.version` feature name (KIP-584 / KIP-778).
@@ -24,7 +24,7 @@ pub const STREAMS_VERSION_MIN: i16 = 0;
 /// Maximum supported `streams.version` level: `1` (KIP-1071 early access).
 pub const STREAMS_VERSION_MAX: i16 = 1;
 
-/// Minimum supported level: `3.3-IV3` (`KRaft` GA) — the floor real Kafka
+/// Minimum supported level: `3.3-IV3` (`KRaft` GA), the floor that real Kafka
 /// 4.0 supports.
 pub const METADATA_VERSION_MIN: i16 = 7;
 /// Maximum supported level: `4.0-IV3`.
@@ -164,9 +164,10 @@ pub fn from_feature_level(level: i16) -> Option<MetadataVersion> {
     TABLE.iter().copied().find(|m| m.level == level)
 }
 
-/// Resolve a version string to a level. Accepts both the exact `X.Y-IVn`
-/// form and the short `X.Y` form; the short form resolves to the highest
-/// level within that minor (matching `MetadataVersion.fromVersionString`).
+/// Resolve a version string to a level. The function accepts both the exact
+/// `X.Y-IVn` form and the short `X.Y` form. The short form resolves to the
+/// highest level within that minor, which matches
+/// `MetadataVersion.fromVersionString`.
 #[must_use]
 pub fn from_version_string(s: &str) -> Option<MetadataVersion> {
     let s = s.trim();

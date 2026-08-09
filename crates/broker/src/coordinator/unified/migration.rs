@@ -1,8 +1,9 @@
-//! Classic ↔ next-gen consumer-group conversion predicates (KIP-848).
+//! Conversion predicates between classic and next-gen consumer groups
+//! (KIP-848).
 //!
 //! This module owns the [`super::config::ConsumerGroupMigrationPolicy`], the
-//! convertibility predicates, and the state translation helpers used by live
-//! migration.
+//! convertibility predicates, and the state-translation helpers that live
+//! migration uses.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -26,13 +27,18 @@ use super::{
     reconciler::ReconcileInput,
 };
 
-/// Decode a classic member's `protocol_metadata` blob as a
-/// `ConsumerProtocolSubscription`. The blob carries a leading `i16` version
-/// (the "consumer" embedded-protocol version negotiation, separate from the
-/// `ConsumerProtocolSubscription` schema's per-field version gates) followed by
-/// the schema body. Returns `None` on any decode error or unknown version —
-/// such a member's subscription cannot survive translation to the server-side
-/// consumer model. Mirrors `offset_delete::decode_subscribed_topics`.
+/// Decodes a classic member's `protocol_metadata` blob as a
+/// `ConsumerProtocolSubscription`.
+///
+/// The blob carries a leading `i16` version, then the schema body. That
+/// version is the "consumer" embedded-protocol version negotiation, which is
+/// separate from the per-field version gates in the
+/// `ConsumerProtocolSubscription` schema.
+///
+/// This function returns `None` on any decode error, and on an unknown
+/// version. Such a member's subscription cannot survive translation to the
+/// server-side consumer model. It mirrors
+/// `offset_delete::decode_subscribed_topics`.
 pub(crate) fn decode_consumer_subscription(
     metadata: &[u8],
 ) -> Option<ConsumerProtocolSubscription> {
@@ -50,11 +56,11 @@ pub(crate) fn decode_consumer_subscription(
 
 /// Can this classic group be upgraded to a next-gen consumer group?
 ///
-/// Mirrors Apache Kafka's `ConsumerGroup.fromClassicGroup` admission rule: the
-/// group must use the `"consumer"` protocol type and **every** current member's
-/// selected `protocol_metadata` must decode as a valid
-/// `ConsumerProtocolSubscription`, so each subscription survives translation. An
-/// empty group is trivially convertible.
+/// This mirrors the admission rule in Apache Kafka's
+/// `ConsumerGroup.fromClassicGroup`. The group must use the `"consumer"`
+/// protocol type. **Every** current member's selected `protocol_metadata` must
+/// decode as a valid `ConsumerProtocolSubscription`, so that each subscription
+/// survives translation. An empty group is always convertible.
 pub(crate) fn classic_is_convertible(state: &ClassicState) -> bool {
     if state.protocol_type.as_deref() != Some("consumer") {
         return false;
@@ -65,23 +71,29 @@ pub(crate) fn classic_is_convertible(state: &ClassicState) -> bool {
         .all(|m| decode_consumer_subscription(&m.protocol_metadata).is_some())
 }
 
-/// Can this consumer group be downgraded to a classic group? Always `true` in
-/// Kafka — a server-managed consumer group can always be re-expressed as a
-/// classic group (members become classic members, the server target becomes the
-/// seed assignment). Provided for symmetry with the upgrade path.
+/// Can this consumer group be downgraded to a classic group?
+///
+/// The answer is always `true` in Kafka. A server-managed consumer group can
+/// always be re-expressed as a classic group: members become classic members,
+/// and the server target becomes the seed assignment. This function exists for
+/// symmetry with the upgrade path.
 pub(crate) fn consumer_is_convertible() -> bool {
     true
 }
 
-/// Convert a classic group into a consumer group that **hosts its classic
-/// members** during KIP-848 upgrade. Each classic member becomes a
-/// [`MemberState`] carrying a [`ClassicMemberFacade`]; its subscription is
-/// decoded from its `ConsumerProtocolSubscription` metadata (topic names — the
-/// reconciler resolves them to topic-IDs against the metadata image). The
-/// group is marked dirty so the next reconcile computes the unified target.
+/// Converts a classic group into a consumer group that **hosts its classic
+/// members** during a KIP-848 upgrade.
+///
+/// Each classic member becomes a [`MemberState`] that carries a
+/// [`ClassicMemberFacade`]. This function decodes the member's subscription
+/// from its `ConsumerProtocolSubscription` metadata, which holds topic names.
+/// The reconciler resolves those names to topic IDs against the metadata
+/// image. The function marks the group dirty, so the next reconcile computes
+/// the unified target.
 ///
 /// Precondition: the caller has checked [`classic_is_convertible`]. Committed
-/// offsets live on the kind-agnostic `Group` container and are untouched here.
+/// offsets live on the kind-agnostic `Group` container, and this function does
+/// not change them.
 pub(crate) fn convert_classic_to_consumer(classic: &ClassicState) -> ConsumerState {
     let mut state = ConsumerState::new(classic.group_id.clone());
     // Seed the group epoch from the classic generation so epochs stay
@@ -122,24 +134,28 @@ pub(crate) fn convert_classic_to_consumer(classic: &ClassicState) -> ConsumerSta
     state
 }
 
-/// The atomic record batch for an upgrade: tombstone the classic k2
-/// `GroupMetadata` and write the full next-gen record set for the converted
-/// group. The two go into one batch so the flip is all-or-nothing.
+/// The atomic record batch for an upgrade. It tombstones the classic k2
+/// `GroupMetadata` and writes the full next-gen record set for the converted
+/// group. Both go into one batch, so the flip is all-or-nothing.
 pub(crate) fn upgrade_pending_records(state: &ConsumerState) -> super::actor::PendingRecords {
     let mut pending = super::actor::full_pending_records(state);
     pending.classic_group_metadata_tombstone = true;
     pending
 }
 
-/// Convert a consumer group back into a classic group during KIP-848 downgrade.
-/// Every member is re-expressed as a classic [`ClassicMember`] restored from its
-/// [`ClassicMemberFacade`]; its assignment seed is the server-computed target
-/// translated to a `ConsumerProtocolAssignment` blob, so the member keeps its
-/// partitions across the flip with no spurious revoke. Committed offsets live on
-/// the kind-agnostic `Group` container and are untouched here.
+/// Converts a consumer group back into a classic group during a KIP-848
+/// downgrade.
 ///
-/// Precondition: every member is a hosted classic member (`classic.is_some()`),
-/// which holds once the last native consumer-protocol member has departed.
+/// Every member becomes a classic [`ClassicMember`] again, restored from its
+/// [`ClassicMemberFacade`]. Its assignment seed is the server-computed target,
+/// translated to a `ConsumerProtocolAssignment` blob, so the member keeps its
+/// partitions across the flip with no false revoke. Committed offsets live on
+/// the kind-agnostic `Group` container, and this function does not change
+/// them.
+///
+/// Precondition: every member is a hosted classic member, that is
+/// `classic.is_some()`. That holds once the last native consumer-protocol
+/// member has left.
 pub(crate) fn convert_consumer_to_classic(
     state: &ConsumerState,
     image: &ReconcileInput,
@@ -186,17 +202,20 @@ pub(crate) fn convert_consumer_to_classic(
     classic
 }
 
-/// The atomic record batch for a downgrade: tombstone the consumer group's
-/// group-level next-gen k3 `GroupMetadata` and k6 `TargetAssignmentMetadata`,
-/// every member's k5/k7/k8, and write the classic k2 `GroupMetadata` for the
-/// re-expressed classic group. All in one batch so the flip is all-or-nothing
-/// (and bootstrap replay sees a clean next-gen-drop → classic-write sequence;
-/// log order wins).
+/// The atomic record batch for a downgrade.
 ///
-/// The k6 tombstone is load-bearing under log compaction: `__consumer_offsets`
-/// is compacted, so without it a surviving post-upgrade k6 write (group-level,
-/// never per-member-tombstoned) would outlive the GC'd k3 and re-create a
-/// next-gen seed on replay, resurrecting the downgraded group as next-gen.
+/// It tombstones the consumer group's group-level next-gen k3 `GroupMetadata`
+/// and k6 `TargetAssignmentMetadata`, and every member's k5, k7, and k8. It
+/// then writes the classic k2 `GroupMetadata` for the re-expressed classic
+/// group. All of that is in one batch, so the flip is all-or-nothing, and
+/// bootstrap replay sees a clean next-gen drop followed by a classic write.
+/// Log order decides.
+///
+/// The k6 tombstone matters under log compaction. `__consumer_offsets` is
+/// compacted. Without the tombstone, a surviving post-upgrade k6 write, which
+/// is group-level and never tombstoned per member, would outlive the collected
+/// k3. It would then re-create a next-gen seed on replay and bring the
+/// downgraded group back as next-gen.
 pub(crate) fn downgrade_pending_records(
     consumer: &ConsumerState,
     classic: &ClassicState,
@@ -215,11 +234,14 @@ pub(crate) fn downgrade_pending_records(
     pending
 }
 
-/// Translate a member's server-side target (topic-ID → partitions) into a
-/// classic `ConsumerProtocolAssignment` wire blob (topic-name → partitions),
-/// with the leading `i16` version prefix a classic client expects in the
-/// `SyncGroup` assignment field. Topic IDs absent from the metadata image are
-/// dropped (the topic was deleted). Deterministic order (by topic name).
+/// Translates a member's server-side target, which maps topic ID to
+/// partitions, into a classic `ConsumerProtocolAssignment` wire blob, which
+/// maps topic name to partitions. The blob carries the leading `i16` version
+/// prefix that a classic client expects in the `SyncGroup` assignment field.
+///
+/// This function drops a topic ID that the metadata image does not hold,
+/// because the topic was deleted. The output order is deterministic, by topic
+/// name.
 pub(crate) fn target_to_consumer_assignment(
     target: &HashMap<Uuid, Vec<i32>>,
     image: &ReconcileInput,
@@ -271,10 +293,11 @@ pub(crate) fn target_to_consumer_assignment(
 use super::actor::{JoinResult, JoinResultMember, SyncResult};
 use crate::codes;
 
-/// Classic `Heartbeat` for a hosted member: refresh liveness and signal a
-/// re-sync while the member's current target differs from what it last synced.
-/// `REBALANCE_IN_PROGRESS` tells a classic client to re-`JoinGroup`/`SyncGroup`
-/// to pick up the changed assignment; `NONE` once it is in sync.
+/// Classic `Heartbeat` for a hosted member. It refreshes liveness, and signals
+/// a re-sync while the member's current target differs from what it last
+/// synced. `REBALANCE_IN_PROGRESS` tells a classic client to send `JoinGroup`
+/// and `SyncGroup` again to pick up the changed assignment. The code is `NONE`
+/// once the member is in sync.
 pub(crate) fn serve_classic_heartbeat(
     state: &mut ConsumerState,
     member_id: &str,
@@ -298,11 +321,13 @@ pub(crate) fn serve_classic_heartbeat(
     }
 }
 
-/// Translate a member's server-side TARGET (the source of truth for what it
-/// should own, mirroring the native heartbeat response) into a
-/// `ConsumerProtocolAssignment` blob. In the next-gen model a member's
-/// `assigned_partitions` only fills in as the client acks the target; a hosted
-/// classic member has no such ack loop, so the target is what it must sync.
+/// Translates a member's server-side TARGET into a
+/// `ConsumerProtocolAssignment` blob. The target is the source of truth for
+/// what the member should own, and it mirrors the native heartbeat response.
+///
+/// In the next-gen model a member's `assigned_partitions` fills in only as the
+/// client acknowledges the target. A hosted classic member has no such
+/// acknowledgement loop, so the target is what it must sync.
 fn member_target_assignment(
     state: &ConsumerState,
     member_id: &str,
@@ -317,9 +342,9 @@ fn member_target_assignment(
     target_to_consumer_assignment(&target, image)
 }
 
-/// Classic `SyncGroup` for a hosted member: return its current target
-/// translated to a `ConsumerProtocolAssignment` blob and record it as
-/// `last_synced_assignment` so subsequent heartbeats report `NONE`.
+/// Classic `SyncGroup` for a hosted member. It returns the member's current
+/// target, translated to a `ConsumerProtocolAssignment` blob, and records that
+/// blob as `last_synced_assignment`, so later heartbeats report `NONE`.
 pub(crate) fn serve_classic_sync(
     state: &mut ConsumerState,
     member_id: &str,
@@ -346,13 +371,16 @@ pub(crate) fn serve_classic_sync(
     }
 }
 
-/// Upsert a hosted classic member from a classic `JoinGroup` into the consumer
-/// group. A rejoin of an existing member refreshes its facade/subscription and
-/// preserves its `assigned_partitions` / `last_synced_assignment`; a brand-new
-/// member is added with a fresh facade (`awaiting_sync = true`).
+/// Upserts a hosted classic member from a classic `JoinGroup` into the
+/// consumer group.
 ///
-/// `add_or_update_member` marks the group dirty iff the subscription is new or
-/// changed, so the caller can reconcile + persist only when needed.
+/// A rejoin of an existing member refreshes its facade and its subscription,
+/// and keeps its `assigned_partitions` and `last_synced_assignment`. A new
+/// member arrives with a fresh facade, where `awaiting_sync = true`.
+///
+/// `add_or_update_member` marks the group dirty if and only if the
+/// subscription is new or changed, so the caller reconciles and persists only
+/// when it needs to.
 pub(crate) struct ClassicMemberRegistration {
     pub member_id: String,
     pub subscription_topics: HashSet<String>,
@@ -424,9 +452,9 @@ pub(crate) fn upsert_classic_member(
     });
 }
 
-/// Build the `JoinGroup` result for a hosted classic member. The group is
+/// Builds the `JoinGroup` result for a hosted classic member. The group is
 /// server-assigned, so the member is its own leader of a single-member view at
-/// `generation = group_epoch`; the real assignment arrives on the next
+/// `generation = group_epoch`. The real assignment arrives on the next
 /// `SyncGroup`.
 pub(crate) fn build_hosted_classic_join_result(
     state: &ConsumerState,
@@ -464,9 +492,9 @@ mod tests {
         *,
     };
 
-    /// Encode a `ConsumerProtocolSubscription` with the leading version prefix,
-    /// as a real classic consumer client sends in its `JoinGroup` protocol
-    /// metadata.
+    /// Encodes a `ConsumerProtocolSubscription` with the leading version
+    /// prefix, as a real classic consumer client sends it in its `JoinGroup`
+    /// protocol metadata.
     fn subscription_blob(topics: &[&str]) -> Bytes {
         let sub = ConsumerProtocolSubscription {
             topics: topics.iter().map(|s| (*s).to_string()).collect(),

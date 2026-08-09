@@ -7,17 +7,18 @@
 //!   [`crabka_raft::kraft::KraftLog`] (slice 3b).
 //!
 //! The harness wires N [`QuorumStateMachine`]s together through an in-memory
-//! message bus and a logical clock, translates every emitted [`Action`] into the
-//! [`Event`]s its peers would observe, and drives the cluster to its canonical
-//! single-leader / agreed-high-watermark fixed point. The per-node log is
-//! abstracted behind the [`SimNodeLog`] trait so the exact same scheduler and
-//! action-translation logic drives both the fake and the real log.
+//! message bus and a logical clock. It translates every emitted [`Action`] into
+//! the [`Event`]s its peers would observe, and drives the cluster to its
+//! canonical fixed point of one leader and an agreed high watermark. The
+//! [`SimNodeLog`] trait abstracts the per-node log, so the exact same scheduler
+//! and action-translation logic drives both the fake log and the real log.
 //!
-//! Determinism is non-negotiable: there is no `Instant::now`, no `rand`, and no
+//! Determinism is non-negotiable. There is no `Instant::now`, no `rand`, and no
 //! `HashMap` iteration-order dependence anywhere. The clock is a `u64` of
-//! logical milliseconds; all node/message containers are `BTreeMap`/`BTreeSet`
-//! so iteration order is fixed; election timeouts are staggered by node id so
-//! ties break deterministically and elections converge.
+//! logical milliseconds. All node containers and message containers are
+//! `BTreeMap` or `BTreeSet`, so the iteration order is fixed. Election timeouts
+//! are staggered by node id, so ties break deterministically and elections
+//! converge.
 
 // The two test binaries each include this module but exercise different subsets
 // of its surface (the fake-log binary never constructs a `KraftBackedLog`, etc.),
@@ -39,34 +40,38 @@ use crabka_units::prelude::{Time, TimeExt as _};
 // Pluggable per-node log
 // --------------------------------------------------------------------------
 
-/// The log operations the harness performs on a node's behalf, abstracted so the
-/// same scheduler drives both the in-memory fake and the real on-disk
-/// `KraftLog`. Implementors are also [`LogView`]s (the queries the core needs).
+/// The log operations the harness does on a node's behalf. The trait abstracts
+/// them, so the same scheduler drives both the in-memory fake and the real
+/// on-disk `KraftLog`. Implementors are also [`LogView`]s, which are the
+/// queries the core needs.
 pub trait SimNodeLog: LogView {
-    /// Append `count` data records produced in `epoch` (the leader's own
-    /// appends and the new-leader `LeaderChange` control record).
+    /// Appends `count` data records produced in `epoch`. These are the leader's
+    /// own appends and the new-leader `LeaderChange` control record.
     fn append_in_epoch(&mut self, epoch: Epoch, count: usize);
 
-    /// Truncate the log so that exactly `offset` records remain.
+    /// Truncates the log so that exactly `offset` records remain.
     fn truncate_to(&mut self, offset: i64);
 
-    /// Advance the log's own high-watermark bookkeeping to `hwm` (the consensus
-    /// HWM the core just computed). For the in-memory fake this is a no-op (the
-    /// harness mirrors the HWM separately); the real `KraftLog` uses it to gate
-    /// committed reads. Default: no-op.
+    /// Advances the log's own high-watermark bookkeeping to `hwm`, which is the
+    /// consensus HWM the core has just computed. For the in-memory fake this is
+    /// a no-op, because the harness mirrors the HWM separately. The real
+    /// `KraftLog` uses it to gate committed reads. Default: no-op.
     fn advance_hwm(&mut self, hwm: i64) {
         let _ = hwm;
     }
 
-    /// Replicate from `leader` into `self`: bring `self` byte-for-byte in line
-    /// with the leader's log by (a) truncating any diverging/conflicting suffix
-    /// `self` holds that the leader does not, then (b) copying the suffix the
-    /// follower is missing. Epoch-faithful. Called only when the leader is the
-    /// genuine leader and neither endpoint is partitioned.
+    /// Replicates from `leader` into `self` and brings `self` byte-for-byte in
+    /// line with the leader's log.
+    ///
+    /// The method first truncates any diverging or conflicting suffix that
+    /// `self` holds and the leader does not. It then copies the suffix the
+    /// follower is missing. The copy is epoch-faithful. The harness calls this
+    /// method only when the leader is the genuine leader and neither endpoint is
+    /// partitioned.
     fn replicate_from(&mut self, leader: &Self);
 
-    /// The number of records in the log (its end offset, as `usize`). Used in
-    /// the convergence fingerprint.
+    /// The number of records in the log, which is its end offset as a `usize`.
+    /// The convergence fingerprint uses it.
     fn record_count(&self) -> usize;
 
     /// The log tip as carried in Vote/Fetch requests.
@@ -82,10 +87,12 @@ pub trait SimNodeLog: LogView {
 // In-memory fake log (slice 3a)
 // --------------------------------------------------------------------------
 
-/// A growable in-memory replicated log. Each appended record stores the leader
-/// epoch that produced it, so `end_offset_for_epoch` is a real lookup rather
-/// than a stub: it returns the offset of the first record whose epoch is
-/// strictly greater than the queried one (i.e. where that epoch's run ends).
+/// A growable in-memory replicated log.
+///
+/// Each appended record stores the leader epoch that produced it, so
+/// `end_offset_for_epoch` is a real lookup and not a stub. It returns the offset
+/// of the first record whose epoch is strictly greater than the queried epoch,
+/// which is where that epoch's run ends.
 #[derive(Debug, Clone, Default)]
 pub struct SimLog {
     /// `epochs[i]` is the leader epoch of the record at offset `i`.
@@ -151,8 +158,8 @@ impl SimNodeLog for SimLog {
 // Messages and timers
 // --------------------------------------------------------------------------
 
-/// A message in flight on the bus: a destination node plus the event it will
-/// observe. `src` is recorded for partition filtering.
+/// A message in flight on the bus: a destination node plus the event that node
+/// observes. The `src` field is recorded for partition filtering.
 #[derive(Debug, Clone, Copy)]
 struct Message {
     src: NodeId,
@@ -165,19 +172,21 @@ struct Node<L: SimNodeLog> {
     id: NodeId,
     machine: QuorumStateMachine,
     log: L,
-    /// Harness mirror of the leader's high watermark (also readable off the
-    /// `Role::Leader` variant, but tracked here for non-leaders / observers).
+    /// Harness mirror of the leader's high watermark. The `Role::Leader`
+    /// variant also carries it, but the harness tracks it here for non-leaders
+    /// and observers.
     high_watermark: i64,
     /// Next election-timer deadline, if armed.
     election_deadline: Option<SimInstant>,
     /// Next fetch-timer deadline, if armed.
     fetch_deadline: Option<SimInstant>,
-    /// Next leader heartbeat deadline, if armed. A leader periodically re-sends
-    /// `BeginQuorumEpoch` to voters that are not actively fetching from it — this
-    /// is genuine `KRaft` behaviour (the leader resends `BeginQuorumEpoch` to such
-    /// voters) and is how a deposed leader that rejoins after a partition learns
-    /// of the newer epoch and steps down. The core does not emit this on a timer
-    /// (a leader has no core-level timer), so the harness drives it.
+    /// Next leader heartbeat deadline, if armed.
+    ///
+    /// A leader periodically re-sends `BeginQuorumEpoch` to voters that are not
+    /// actively fetching from it. This is genuine `KRaft` behaviour, and it is
+    /// how a deposed leader that rejoins after a partition learns of the newer
+    /// epoch and steps down. The core does not emit this on a timer, because a
+    /// leader has no core-level timer, so the harness drives it.
     heartbeat_deadline: Option<SimInstant>,
 }
 
@@ -191,15 +200,17 @@ pub struct Sim<L: SimNodeLog> {
     voter_ids: Vec<NodeId>,
     /// Logical clock in milliseconds.
     now: SimInstant,
-    /// FIFO queue of in-flight messages (processed before the clock advances).
+    /// FIFO queue of in-flight messages. They are processed before the clock
+    /// advances.
     queue: VecDeque<Message>,
-    /// Partitioned nodes: all messages to/from them are dropped.
+    /// Partitioned nodes. Every message to them or from them is dropped.
     partitioned: BTreeSet<NodeId>,
 }
 
 impl<L: SimNodeLog> Sim<L> {
-    /// Construct a cluster of `voter_ids` whose per-node logs are produced by
-    /// `make_log` (one fresh log per node — e.g. a tempdir-backed `KraftLog`).
+    /// Constructs a cluster of `voter_ids` whose per-node logs `make_log`
+    /// produces. There is one fresh log per node, for example a tempdir-backed
+    /// `KraftLog`.
     pub fn new_with(voter_ids: &[NodeId], mut make_log: impl FnMut(NodeId) -> L) -> Self {
         let voters = make_voter_set(voter_ids);
         let mut nodes = BTreeMap::new();
@@ -238,15 +249,18 @@ impl<L: SimNodeLog> Sim<L> {
 
     // ---- public test surface -------------------------------------------------
 
-    /// Drive the simulation until it reaches a fixed point or `max_ticks` event
-    /// steps elapse. Each step delivers one queued message, or — when the queue
-    /// drains — fires the earliest pending timer. Because a healthy cluster keeps
-    /// long-polling forever (the fetch watchdog re-polls indefinitely), "stable"
-    /// is detected as a fixed point: a whole timer-driven round that leaves every
-    /// node's observable state (role, epoch, log length, HWM) unchanged. That
-    /// strips the otherwise-unbounded steady-state fetch loop without masking
-    /// real progress (an election or a replication advance always changes the
-    /// fingerprint and resets the counter).
+    /// Drives the simulation until it reaches a fixed point, or until
+    /// `max_ticks` event steps have elapsed.
+    ///
+    /// Each step delivers one queued message. When the queue drains, the step
+    /// fires the earliest pending timer instead. A healthy cluster long-polls
+    /// forever, because the fetch watchdog re-polls indefinitely, so the harness
+    /// detects "stable" as a fixed point: one whole timer-driven round that
+    /// leaves every node's observable state unchanged, that is its role, epoch,
+    /// log length, and HWM. That strips the otherwise-unbounded steady-state
+    /// fetch loop and masks no real progress, because an election or a
+    /// replication advance always changes the fingerprint and resets the
+    /// counter.
     pub fn run_until_stable(&mut self, max_ticks: usize) {
         let mut last_fingerprint = self.fingerprint();
         let mut stable_rounds = 0u32;
@@ -275,8 +289,8 @@ impl<L: SimNodeLog> Sim<L> {
         }
     }
 
-    /// A deterministic snapshot of every node's observable state, used to detect
-    /// the steady-state fixed point. Ordered by node id (`BTreeMap`).
+    /// A deterministic snapshot of every node's observable state, which detects
+    /// the steady-state fixed point. It is ordered by node id, in a `BTreeMap`.
     fn fingerprint(&self) -> Vec<(NodeId, &'static str, Epoch, usize, i64)> {
         self.nodes
             .values()
@@ -296,32 +310,35 @@ impl<L: SimNodeLog> Sim<L> {
             .collect()
     }
 
-    /// Isolate a node: drop every message to or from it, and stop its timers
-    /// from affecting peers (it keeps ticking internally but can't be heard).
+    /// Isolates a node. The harness drops every message to it and from it, and
+    /// its timers no longer affect its peers. The node keeps ticking
+    /// internally, but no peer can hear it.
     pub fn partition(&mut self, node: NodeId) {
         self.partitioned.insert(node);
         // Drop any in-flight messages touching the partitioned node.
         self.queue.retain(|m| m.src != node && m.dst != node);
     }
 
-    /// Heal a partition: the node can send and receive again.
+    /// Heals a partition. The node can send and receive again.
     pub fn heal(&mut self, node: NodeId) {
         self.partitioned.remove(&node);
     }
 
-    /// Append `n` data records to `leader`'s log in its current leader epoch and
-    /// re-run the leader's HWM bookkeeping over the new end offset. This models
-    /// a produce: the records must then be majority-replicated (via the fetch
-    /// loop) before the HWM can advance past them.
+    /// Appends `n` data records to the log of `leader` in its current leader
+    /// epoch, then re-runs the leader's HWM bookkeeping over the new end offset.
+    ///
+    /// This models a produce. The records must then be replicated to a majority
+    /// through the fetch loop before the HWM can advance past them.
     pub fn leader_append(&mut self, leader: NodeId, n: usize) {
         let epoch = self.nodes[&leader].machine.quorum_state().leader_epoch;
         let node = self.nodes.get_mut(&leader).unwrap();
         node.log.append_in_epoch(epoch, n);
     }
 
-    /// Inject a conflicting-epoch tail into `follower`'s log directly (bypassing
-    /// the leader) so the next fetch round forces a divergence + truncation. The
-    /// `epoch` should differ from what the leader holds at those offsets.
+    /// Injects a conflicting-epoch tail straight into the log of `follower` and
+    /// bypasses the leader, so the next fetch round forces a divergence and a
+    /// truncation. The `epoch` should differ from what the leader holds at those
+    /// offsets.
     pub fn inject_conflicting_tail(&mut self, follower: NodeId, epoch: Epoch, n: usize) {
         let node = self.nodes.get_mut(&follower).unwrap();
         node.log.append_in_epoch(epoch, n);
@@ -341,8 +358,8 @@ impl<L: SimNodeLog> Sim<L> {
         self.voter_ids.clone()
     }
 
-    /// The set of distinct leader epochs across all voters (should be one once
-    /// the cluster has converged).
+    /// The set of distinct leader epochs across all voters. It holds one epoch
+    /// once the cluster has converged.
     pub fn distinct_epochs(&self) -> BTreeSet<Epoch> {
         self.nodes
             .values()
@@ -363,7 +380,8 @@ impl<L: SimNodeLog> Sim<L> {
         self.nodes[&node].log.end_offset()
     }
 
-    /// Borrow `node`'s log (for byte-level / decoded assertions in tests).
+    /// Borrows the log of `node`, for byte-level and decoded assertions in
+    /// tests.
     pub fn node_log(&self, node: NodeId) -> &L {
         &self.nodes[&node].log
     }
@@ -377,9 +395,9 @@ impl<L: SimNodeLog> Sim<L> {
 
     // ---- scheduler internals -------------------------------------------------
 
-    /// Find the earliest armed timer across all (non-partitioned-internally-OK)
-    /// nodes, advance the clock to it, and fire it. Returns `false` if no timer
-    /// is armed.
+    /// Finds the earliest armed timer across all nodes, advances the clock to
+    /// it, and fires it. A partitioned node still ticks internally and still
+    /// counts here. Returns `false` if no timer is armed.
     fn fire_next_timer(&mut self) -> bool {
         // Pick the node with the earliest deadline; ties break by node id
         // (BTreeMap iteration is ascending by id, so the first minimum wins).
@@ -451,10 +469,11 @@ impl<L: SimNodeLog> Sim<L> {
         }
     }
 
-    /// A leader's periodic heartbeat: re-broadcast `BeginQuorumEpoch` to all
-    /// peers (faithful to `KRaft`'s resend to non-fetching voters) and re-arm the
-    /// heartbeat. This is how a stale leader that rejoins after a partition learns
-    /// of the newer epoch from the current leader and steps down to follower.
+    /// A leader's periodic heartbeat. It re-broadcasts `BeginQuorumEpoch` to
+    /// every peer, faithful to the `KRaft` resend to non-fetching voters, and
+    /// re-arms the heartbeat. This is how a stale leader that rejoins after a
+    /// partition learns of the newer epoch from the current leader and steps
+    /// down to follower.
     fn fire_leader_heartbeat(&mut self, id: NodeId) {
         if !self.nodes[&id].machine.role().is_leader() {
             return;
@@ -465,7 +484,8 @@ impl<L: SimNodeLog> Sim<L> {
         self.nodes.get_mut(&id).unwrap().heartbeat_deadline = Some(deadline);
     }
 
-    /// Deliver a queued message, dropping it if either endpoint is partitioned.
+    /// Delivers a queued message, and drops it if either endpoint is
+    /// partitioned.
     fn deliver(&mut self, msg: Message) {
         if self.partitioned.contains(&msg.src) || self.partitioned.contains(&msg.dst) {
             return;
@@ -476,8 +496,8 @@ impl<L: SimNodeLog> Sim<L> {
         self.step(msg.dst, msg.event);
     }
 
-    /// Feed one event to a node and translate the resulting actions into new
-    /// messages / timer arming / log + HWM bookkeeping.
+    /// Feeds one event to a node and translates the resulting actions into new
+    /// messages, timer arming, and log and HWM bookkeeping.
     fn step(&mut self, id: NodeId, event: Event) {
         let now = self.now;
         // A `ReceiveFetch` is a leader-side request; remember who asked and the
@@ -538,22 +558,23 @@ impl<L: SimNodeLog> Sim<L> {
         self.reconcile_timers_for_role(id);
     }
 
-    /// Enforce per-role timer ownership, which the core does not fully manage via
-    /// `ResetTimer` actions alone:
+    /// Enforces per-role timer ownership, which the core does not fully manage
+    /// through `ResetTimer` actions alone:
     ///
-    /// - A **leader** runs neither an election nor a fetch timer (its liveness is
-    ///   a separate check-quorum mechanism, out of scope for slice 3a).
-    /// - A **follower/observer** runs only the fetch watchdog, never an election
-    ///   timer — yet `handle_begin_quorum_epoch` only emits `ResetTimer{Fetch}`,
-    ///   leaving a previously-armed election timer live. Without clearing it, a
-    ///   healthy follower's stale election timer fires, it goes `Prospective`, and
-    ///   the cluster never stabilises.
-    /// - An **electing role** (Unattached/Voted/Prospective/Candidate) runs only
-    ///   the election timer, never a fetch watchdog.
+    /// - A leader runs neither an election timer nor a fetch timer. Its liveness
+    ///   is a separate check-quorum mechanism, out of scope for slice 3a.
+    /// - A follower or an observer runs only the fetch watchdog, and never an
+    ///   election timer. But `handle_begin_quorum_epoch` emits only
+    ///   `ResetTimer{Fetch}`, which leaves a previously-armed election timer
+    ///   live. Without a clear of that timer, a healthy follower's stale
+    ///   election timer fires, the follower goes `Prospective`, and the cluster
+    ///   never stabilises.
+    /// - An electing role, which is Unattached, Voted, Prospective, or
+    ///   Candidate, runs only the election timer, and never a fetch watchdog.
     ///
-    /// The core *does* arm the correct timer on each transition; this just clears
-    /// the stale opposite one so the harness scheduler matches `KRaft`'s per-role
-    /// timer model.
+    /// The core does arm the correct timer on each transition. This method only
+    /// clears the stale opposite timer, so the harness scheduler matches the
+    /// per-role timer model of `KRaft`.
     fn reconcile_timers_for_role(&mut self, id: NodeId) {
         let node = self.nodes.get_mut(&id).unwrap();
         match node.machine.role() {
@@ -580,7 +601,7 @@ impl<L: SimNodeLog> Sim<L> {
         }
     }
 
-    /// Broadcast a (pre-)vote request from `id` to every other voter.
+    /// Broadcasts a vote or pre-vote request from `id` to every other voter.
     fn broadcast_vote_request(&mut self, id: NodeId, epoch: Epoch, pre_vote: bool) {
         let cand_log = self.nodes[&id].log.log_end();
         for peer in self.voter_ids.clone() {
@@ -601,8 +622,8 @@ impl<L: SimNodeLog> Sim<L> {
         }
     }
 
-    /// Translate a single emitted `Action` from node `id` into bus messages,
-    /// timer updates, and log/HWM bookkeeping.
+    /// Translates a single emitted `Action` from node `id` into bus messages,
+    /// timer updates, and log and HWM bookkeeping.
     fn apply_action(&mut self, id: NodeId, action: Action) {
         match action {
             Action::SendVoteRequest { epoch, pre_vote } => {
@@ -707,11 +728,14 @@ impl<L: SimNodeLog> Sim<L> {
         }
     }
 
-    /// Copy log entries from `leader` that `follower` is missing, so follower
-    /// logs converge and the follower's fetch offset advances toward the
-    /// leader's end. Respects epochs by delegating the byte-faithful copy +
-    /// divergence truncation to the log impl. Only runs when `leader` actually
-    /// believes it is the leader and neither endpoint is partitioned.
+    /// Copies the log entries from `leader` that `follower` is missing, so the
+    /// follower logs converge and the follower's fetch offset advances toward
+    /// the leader's end.
+    ///
+    /// The method respects the epochs, because it delegates the byte-faithful
+    /// copy and the divergence truncation to the log impl. It runs only when
+    /// `leader` actually believes it is the leader and neither endpoint is
+    /// partitioned.
     fn replicate_from_leader(&mut self, follower: NodeId, leader: NodeId) {
         if follower == leader {
             return;
@@ -737,9 +761,9 @@ impl<L: SimNodeLog> Sim<L> {
         self.nodes.insert(follower, follower_node);
     }
 
-    /// Enqueue an event to be delivered to `dst`, unless either endpoint is
-    /// currently partitioned (in which case the message is silently dropped, as
-    /// a real network partition would).
+    /// Enqueues an event for delivery to `dst`. If either endpoint is currently
+    /// partitioned, the harness silently drops the message, the same way a real
+    /// network partition does.
     fn send(&mut self, src: NodeId, dst: NodeId, event: Event) {
         if self.partitioned.contains(&src) || self.partitioned.contains(&dst) {
             return;
@@ -752,8 +776,9 @@ impl<L: SimNodeLog> Sim<L> {
     }
 }
 
-/// Harness-level timer kinds. Extends the core's `TimerKind` (Election/Fetch)
-/// with the leader `Heartbeat` the core does not model on a timer.
+/// Harness-level timer kinds. This extends the core's `TimerKind`, which is
+/// Election and Fetch, with the leader `Heartbeat` that the core does not model
+/// on a timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimTimer {
     Election,
@@ -761,29 +786,30 @@ enum SimTimer {
     Heartbeat,
 }
 
-/// Leader heartbeat period. Kept comfortably below the election timeout so a
-/// healthy leader's re-announcements always reach voters before any watchdog
-/// would escalate.
+/// Leader heartbeat period. It stays well below the election timeout, so a
+/// healthy leader's re-announcements always reach the voters before any
+/// watchdog escalates.
 const HEARTBEAT_MS: u64 = 300;
 
-/// The base election timeout (and fetch watchdog period) configured for node
-/// `id`. Staggered by node id so timer ties break deterministically and the
-/// lowest live id tends to win the election race — elections always converge.
+/// The base election timeout, which is also the fetch watchdog period,
+/// configured for node `id`. It is staggered by node id, so timer ties break
+/// deterministically and the lowest live id tends to win the election race.
+/// Elections therefore always converge.
 fn election_timeout_ms_of(id: NodeId) -> u64 {
     1000 + id.0 * 50
 }
 
 /// [`election_timeout_ms_of`] as the quantity [`QuorumStateMachine::new`] takes.
-/// The simulation's own clock stays integer logical milliseconds — a
-/// [`SimInstant`] is a coordinate, not an extent — so this conversion happens
-/// only at the core's constructor.
+/// The simulation's own clock stays in integer logical milliseconds, because a
+/// [`SimInstant`] is a coordinate and not an extent. This conversion therefore
+/// happens only at the core's constructor.
 fn election_timeout_of(id: NodeId) -> Time {
     Time::from_millis(i64::try_from(election_timeout_ms_of(id)).unwrap_or(i64::MAX))
 }
 
-/// Update `best` to the earliest `(deadline, id, kind)` seen so far. Earlier
-/// deadlines win; on a tie the smaller node id wins (callers iterate ids in
-/// ascending order, so this keeps the choice deterministic).
+/// Updates `best` to the earliest `(deadline, id, kind)` seen so far. An earlier
+/// deadline wins. On a tie the smaller node id wins. Callers iterate the ids in
+/// ascending order, so this keeps the choice deterministic.
 fn consider(
     best: &mut Option<(SimInstant, NodeId, SimTimer)>,
     deadline: SimInstant,

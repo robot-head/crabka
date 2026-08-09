@@ -3,7 +3,7 @@
 //! One object concatenates many partitions' verbatim v2-batch runs, delimited by
 //! a footer manifest:
 //! `[MAGIC + version:u16] + runs + [manifest] + [footer_len:u32 + MAGIC]`.
-//! Framing is little-endian and Crabka-private; only the embedded runs need
+//! Framing is little-endian and Crabka-private. Only the embedded runs need
 //! Kafka byte-exactness.
 
 #![allow(dead_code)] // Consumed by later diskless WAL slice tasks.
@@ -135,7 +135,7 @@ impl WalObjectBuilder {
         out.freeze()
     }
 
-    /// Test convenience: append one run and finish.
+    /// Test convenience. It appends one run and finishes.
     #[cfg(test)]
     #[must_use]
     pub fn finish_with_run(

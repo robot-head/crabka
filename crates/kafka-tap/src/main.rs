@@ -1,5 +1,6 @@
 //! Standalone tap: `kafka-tap <listen> <upstream> <spool.ndjson>`.
-//! Writes one JSON record per frame to the spool file.
+//!
+//! The tap writes one JSON record per frame to the spool file.
 use std::{
     io::Write,
     sync::{Arc, Mutex},

@@ -1,11 +1,13 @@
-//! `DescribeLogDirs` (`api_key=35`, KIP-113). Reports, per configured log
-//! directory, the partitions it physically holds and their on-disk sizes.
-//! Backs the `kafka-log-dirs --describe` admin tool.
+//! `DescribeLogDirs` (`api_key=35`, KIP-113).
 //!
-//! Surfaces both current logs and in-progress future logs (KIP-113
-//! intra-broker moves): a future-log entry is reported under the
-//! destination dir with `is_future_key = true` and an `offset_lag`
-//! equal to `current_log.LEO − future_log.LEO`.
+//! The handler reports, for each configured log directory, the partitions that
+//! the directory physically holds and their on-disk sizes. It backs the
+//! `kafka-log-dirs --describe` admin tool.
+//!
+//! The handler reports both current logs and the future logs of in-progress
+//! KIP-113 intra-broker moves. It reports a future-log entry under the
+//! destination dir, with `is_future_key = true` and an `offset_lag` equal to
+//! `current_log.LEO − future_log.LEO`.
 
 use std::collections::BTreeMap;
 
@@ -31,9 +33,10 @@ use crate::{
     log_dir,
 };
 
-/// Filter derived from the request `topics` field:
-/// - `None`  → report every partition (admin-client default).
-/// - `Some`  → report only listed topics; an empty partition list for a
+/// Filter that the handler derives from the request `topics` field.
+///
+/// - `None`  → report every partition. This is the admin-client default.
+/// - `Some`  → report only the listed topics. An empty partition list for a
 ///   topic means "all partitions of that topic".
 enum Filter {
     All,
@@ -214,7 +217,9 @@ fn offline_result(dir: &std::path::Path) -> DescribeLogDirsResult {
     }
 }
 
-/// `Describe` on `Cluster("kafka-cluster")` gate. Returns `true` when denied.
+/// Gate for `Describe` on `Cluster("kafka-cluster")`.
+///
+/// Returns `true` when the authorizer denies the operation.
 fn cluster_describe_denied(
     authorizer: &dyn crate::authorizer::Authorizer,
     image: &crabka_metadata::MetadataImage,
@@ -233,7 +238,7 @@ fn cluster_describe_denied(
     ) == AuthorizationResult::Deny
 }
 
-/// Whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` response built on Deny.
+/// Whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` response for a Deny.
 fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
     let resp = DescribeLogDirsResponse {
         throttle_time_ms: 0,
@@ -244,8 +249,9 @@ fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
     crate::handlers::encode_response(&resp, version)
 }
 
-/// `LEO − HW`, clamped to ≥ 0, for a loaded current log; 0 when the
-/// partition isn't materialized on this broker.
+/// `LEO − HW` for a loaded current log, with a clamp at 0.
+///
+/// Returns 0 when the partition is not materialized on this broker.
 async fn offset_lag_for(
     partitions: &crate::partition_registry::PartitionRegistry,
     topic: &str,
@@ -260,11 +266,13 @@ async fn offset_lag_for(
     (leo.0 - hw.0).max(0)
 }
 
-/// `current_log.LEO − future_log.LEO`, clamped to ≥ 0, for an
-/// in-progress KIP-113 move. Returns 0 if the partition isn't
-/// materialized locally; falls back to 0 if the future-log registry
-/// has no entry (broker just started and the resume task hasn't yet
-/// opened the future log).
+/// `current_log.LEO − future_log.LEO` for an in-progress KIP-113 move, with a
+/// clamp at 0.
+///
+/// Returns 0 if the partition is not materialized locally. Also returns 0 if
+/// the future-log registry has no entry. The registry has no entry when the
+/// broker has just started and the resume task has not opened the future log
+/// yet.
 fn future_offset_lag(
     partitions: &crate::partition_registry::PartitionRegistry,
     future_logs: &dashmap::DashMap<
@@ -292,9 +300,11 @@ fn future_offset_lag(
     (current_leo.0 - future_leo.0).max(0)
 }
 
-/// Best-effort absolute path string for a log dir, matching Kafka's
-/// "absolute log directory path" contract. Falls back to the lexical path
-/// when canonicalization fails (e.g. the dir was removed out from under us).
+/// Best-effort absolute path string for a log dir.
+///
+/// The result matches the "absolute log directory path" contract of Kafka. The
+/// function falls back to the lexical path when the canonicalization fails, for
+/// example after another process removes the dir.
 fn absolute_path(dir: &std::path::Path) -> String {
     std::fs::canonicalize(dir)
         .unwrap_or_else(|_| dir.to_path_buf())
@@ -302,15 +312,16 @@ fn absolute_path(dir: &std::path::Path) -> String {
         .to_string()
 }
 
-/// `(total_bytes, usable_bytes)` for the filesystem hosting `dir`,
-/// matching the KIP-827 `DescribeLogDirsResult` v4 fields. `total_bytes`
-/// is the filesystem capacity; `usable_bytes` is what's available to a
-/// non-root caller (i.e. respects the typical 5 % root reserve).
+/// `(total_bytes, usable_bytes)` for the filesystem that hosts `dir`.
 ///
-/// Returns `(-1, -1)` — the Kafka "unknown" sentinel — when the platform
-/// has no `statvfs` (Windows) or the syscall fails (path vanished mid-
-/// reconfigure, permissions). The JVM admin tools tolerate `-1` and
-/// just skip the column.
+/// The pair matches the KIP-827 `DescribeLogDirsResult` v4 fields.
+/// `total_bytes` is the capacity of the filesystem. `usable_bytes` is the space
+/// available to a non-root caller, so it respects the typical 5 % root reserve.
+///
+/// Returns `(-1, -1)`, the Kafka "unknown" sentinel, when the platform has no
+/// `statvfs`, as on Windows, or when the syscall fails. The syscall fails when
+/// the path vanishes during a reconfigure, or on a permission error. The JVM
+/// admin tools tolerate `-1` and skip the column.
 fn log_dir_capacity(dir: &std::path::Path) -> (i64, i64) {
     disk_stats(dir).unwrap_or((-1, -1))
 }
@@ -375,11 +386,13 @@ mod tests {
         }
     }
 
-    /// On unix, `statvfs` against any tempdir must return positive,
-    /// sensible numbers — `total_bytes >= usable_bytes > 0`. Catches
-    /// fragment-size vs block-count multiplication regressions, which
-    /// would otherwise silently report zeros (Kafka tools then
-    /// display "0 B free" and operators chase a ghost).
+    /// On unix, `statvfs` against any tempdir must return sensible positive
+    /// numbers.
+    ///
+    /// The rule is `total_bytes >= usable_bytes > 0`. This test catches a
+    /// regression in the multiplication of the fragment size by the block
+    /// count. Such a regression reports zeros silently. The Kafka tools then
+    /// display "0 B free", and operators chase a problem that does not exist.
     #[cfg(unix)]
     #[test]
     fn log_dir_capacity_returns_sensible_unix_numbers() {
@@ -400,10 +413,12 @@ mod tests {
         );
     }
 
-    /// Vanished path yields the Kafka "unknown" sentinel rather than
-    /// propagating the syscall error. Operators see `-1` and the JVM
-    /// tool skips the column; the alternative — a 500-like
-    /// `KafkaStorageException` — would block the whole describe.
+    /// A vanished path gives the Kafka "unknown" sentinel and not the syscall
+    /// error.
+    ///
+    /// Operators see `-1`, and the JVM tool skips the column. The alternative
+    /// is a `KafkaStorageException`, much like a 500, which would block the
+    /// whole describe.
     #[cfg(unix)]
     #[test]
     fn log_dir_capacity_returns_minus_one_for_missing_path() {
@@ -411,9 +426,11 @@ mod tests {
         assert!(log_dir_capacity(phantom) == (-1, -1));
     }
 
-    /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>` via the
-    /// real `spawn_partition` path (mirrors the `future_log` / registry test
-    /// fixtures) and append `count` records so its LEO advances to `count`.
+    /// Builds a `Partition` rooted at `<log_dir>/<topic>-<partition>`.
+    ///
+    /// The function uses the real `spawn_partition` path and mirrors the
+    /// `future_log` and registry test fixtures. It appends `count` records, so
+    /// the LEO of the partition advances to `count`.
     fn partition_with_leo(
         log_dir: &std::path::Path,
         topic: &str,
@@ -438,8 +455,9 @@ mod tests {
         part
     }
 
-    /// Append a single `count`-record batch to a `Log` behind a mutex,
-    /// advancing its LEO by `count`.
+    /// Appends one batch of `count` records to a `Log` behind a mutex.
+    ///
+    /// The LEO of the log advances by `count`.
     fn append_n(log: &std::sync::Mutex<crabka_log::Log>, count: i32) {
         use bytes::Bytes;
         use crabka_protocol::records::{Attributes, Record, RecordBatch};
@@ -470,17 +488,20 @@ mod tests {
             .expect("append records");
     }
 
-    /// A partition that isn't materialized locally reports lag `0`, not the
-    /// `-1` a whole-function replacement mutant would return.
+    /// A partition that is not materialized locally reports lag `0`.
+    ///
+    /// It does not report the `-1` that a whole-function replacement mutant
+    /// returns.
     #[tokio::test]
     async fn offset_lag_missing_partition_is_zero() {
         let reg = crate::partition_registry::PartitionRegistry::new();
         assert!(offset_lag_for(&reg, "ghost", 0).await == 0);
     }
 
-    /// A materialized partition with LEO ahead of HW reports `LEO - HW`
-    /// (fresh HW is 0), pinning the real subtraction against the whole-fn
-    /// `-> -1` replacement.
+    /// A materialized partition with LEO ahead of HW reports `LEO - HW`.
+    ///
+    /// A fresh HW is 0. This test pins the real subtraction against the
+    /// whole-function `-> -1` replacement.
     #[tokio::test]
     async fn offset_lag_uses_leo_minus_hw() {
         let dir = tempfile::tempdir().unwrap();
@@ -492,7 +513,7 @@ mod tests {
         assert!(offset_lag_for(&reg, "t", 0).await == 5);
     }
 
-    /// Build a `FutureLogState` whose future log has LEO `future_count`.
+    /// Builds a `FutureLogState` whose future log has LEO `future_count`.
     fn future_state_with_leo(
         dir: &std::path::Path,
         future_count: i32,
@@ -513,8 +534,10 @@ mod tests {
         })
     }
 
-    /// With no local partition, the future-log lag is `0`, not the `1` a
-    /// whole-function `-> 1` replacement mutant would return.
+    /// With no local partition, the future-log lag is `0`.
+    ///
+    /// It is not the `1` that a whole-function `-> 1` replacement mutant
+    /// returns.
     #[tokio::test]
     async fn future_offset_lag_missing_partition_is_zero() {
         let reg = crate::partition_registry::PartitionRegistry::new();
@@ -524,9 +547,10 @@ mod tests {
     }
 
     /// `future_offset_lag` is `current_log.LEO − future_log.LEO`, clamped at 0.
-    /// With current LEO 5 and future LEO 2 the answer is 3 — which
-    /// distinguishes the real subtraction from every mutant: `-> 0` (0),
-    /// `-> 1` (1), `-` → `+` (7), and `-` → `/` (2).
+    ///
+    /// With current LEO 5 and future LEO 2 the answer is 3. This value
+    /// separates the real subtraction from every mutant: `-> 0` gives 0,
+    /// `-> 1` gives 1, `-` → `+` gives 7, and `-` → `/` gives 2.
     #[tokio::test]
     async fn future_offset_lag_is_current_minus_future_leo() {
         let cur_dir = tempfile::tempdir().unwrap();

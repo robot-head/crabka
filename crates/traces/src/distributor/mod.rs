@@ -60,7 +60,7 @@ const CONTENT_ENCODING: &str = "content-encoding";
 pub struct TenantLimits {
     pub max_spans_per_request: usize,
     pub max_spans_per_trace: usize,
-    /// Sustained ingest rate ceiling; zero is unlimited.
+    /// Sustained ingest rate ceiling. Zero is unlimited.
     pub max_ingest_rate: Frequency,
     pub ingest_rate_burst: usize,
     /// Maximum size of one attribute key plus its value.
@@ -454,13 +454,15 @@ async fn jaeger_push(
     }
 }
 
-/// Record one push-handler ingest outcome from the response status and return
-/// the response unchanged. `ok` is true for any 2xx; the WAL/produce failure
-/// counter is bumped separately at the [`produce_spans`] error site, so a 4xx
-/// validation/rate-limit reject here does not inflate it.
+/// Record one push-handler ingest outcome from the response status, and return
+/// the response unchanged.
 ///
-/// `start` stays an [`Instant`](std::time::Instant) — an instant is a
-/// coordinate, not a magnitude; only the elapsed extent is a quantity.
+/// `ok` is true for any 2xx. The [`produce_spans`] error site bumps the
+/// WAL/produce failure counter separately, so a 4xx validation or rate-limit
+/// reject here does not inflate that counter.
+///
+/// `start` stays an [`Instant`](std::time::Instant). An instant is a
+/// coordinate, not a magnitude, and only the elapsed extent is a quantity.
 fn record_ingest_response(
     state: &DistributorState,
     resp: Response,
@@ -700,10 +702,10 @@ fn check_shared_attrs(limits: &Limits, attrs: &[KeyValue]) -> Result<(), TracesE
 
 /// Pair an attribute key with the TRUE encoded byte length of its value.
 ///
-/// Measuring the real byte length (rather than stringifying) ensures the
-/// `Limits::max_attribute` cap sees the actual size of `Bytes`/`Int`/`Double`
-/// values, which a `String` conversion would mis-report (e.g. a large byte
-/// blob would otherwise read as length 0 and bypass the limit).
+/// This measures the real byte length rather than the length of a string form.
+/// The `Limits::max_attribute` cap therefore sees the true size of `Bytes`,
+/// `Int` and `Double` values. A `String` conversion would mis-report them: a
+/// large byte blob would read as length 0 and would bypass the limit.
 fn shared_attr_measured(attr: &KeyValue) -> (String, u64) {
     let value_bytes = match &attr.value {
         AttrValue::Str(value) => value.len(),
@@ -769,16 +771,20 @@ fn grpc_status_from_error(err: &TracesError) -> GrpcStatus {
 
 /// Append decoded spans to the WAL sink.
 ///
-/// All spans in one request are appended concurrently: each `append` enqueues
-/// its record into the producer's per-partition accumulator (a fast, non-broker
-/// hop) and then awaits the broker ack. Awaiting them sequentially would force N
-/// serial produce+ack round-trips — on a single-partition WAL with
-/// `max.in.flight=1` that serialized a few-hundred-span batch into seconds,
-/// overrunning the OTLP client's deadline. Firing them together lets the
-/// producer coalesce them into a handful of batches drained in ~one round-trip.
-/// Per-partition ordering and idempotent sequencing are unaffected (the sender
-/// still drains each partition in order with one batch in flight); traces carry
-/// no cross-span WAL-order dependency (the block-builder regroups by `trace_id`).
+/// This function appends all spans in one request concurrently. Each `append`
+/// enqueues its record into the producer's per-partition accumulator, a fast
+/// hop that does not touch the broker, and then awaits the broker ack.
+///
+/// A sequential await would force N serial produce-and-ack round-trips. On a
+/// single-partition WAL with `max.in.flight=1`, that serialized a
+/// few-hundred-span batch into seconds and overran the OTLP client's deadline.
+/// One concurrent fire lets the producer coalesce the records into a handful of
+/// batches, drained in about one round-trip.
+///
+/// Per-partition ordering and idempotent sequencing do not change. The sender
+/// still drains each partition in order with one batch in flight. Traces carry
+/// no cross-span WAL-order dependency, because the block-builder regroups by
+/// `trace_id`.
 ///
 /// # Errors
 /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.

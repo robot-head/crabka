@@ -1,6 +1,8 @@
-//! `CombinedKey<KO,K>` byte codec (JVM `CombinedKeySchema`).
-//! Layout: `[ foreignKeyLen : 4 bytes BE ] [ foreignKeyBytes ] [ primaryKeyBytes ]`.
-//! Consumed by the FK-join subscription store (`store::fk_subscription`).
+//! The `CombinedKey<KO,K>` byte codec, the JVM `CombinedKeySchema`.
+//!
+//! The layout is
+//! `[ foreignKeyLen : 4 bytes BE ] [ foreignKeyBytes ] [ primaryKeyBytes ]`. The
+//! FK-join subscription store (`store::fk_subscription`) reads it.
 use bytes::{BufMut, Bytes, BytesMut};
 
 #[must_use]
@@ -26,8 +28,11 @@ pub(crate) fn split_combined_key(k: &[u8]) -> (&[u8], &[u8]) {
     (&k[4..4 + fk_len], &k[4 + fk_len..])
 }
 
-/// Half-open upper bound covering every combined key with foreign prefix `fk`:
-/// the lexicographic successor of `foreign_prefix(fk)` (strip trailing 0xFF, +1).
+/// The half-open upper bound that covers every combined key with the foreign
+/// prefix `fk`.
+///
+/// It is the lexicographic successor of `foreign_prefix(fk)`: strip the trailing
+/// 0xFF bytes and add 1.
 #[must_use]
 pub(crate) fn range_upper(fk: &[u8]) -> Bytes {
     let mut p = foreign_prefix(fk).to_vec();

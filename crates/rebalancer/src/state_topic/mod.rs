@@ -1,7 +1,7 @@
-//! Rebalancer state persistence via an internal compacted topic on the
-//! Crabka cluster being managed. Replaces the file-backed
-//! `{data_dir}/in_flight.json` store. Survives pod restart; prerequisite
-//! for multi-replica HA.
+//! Rebalancer state persistence through an internal compacted topic on the
+//! managed Crabka cluster. It replaces the file-backed
+//! `{data_dir}/in_flight.json` store. The state survives a pod restart, which
+//! is a prerequisite for multi-replica HA.
 
 mod error;
 pub mod loader;
@@ -22,9 +22,9 @@ pub use loader::StateTopicLoader;
 
 use crate::{config::RebalancerRuntimePolicy, executor::state::InFlightFile};
 
-/// In-memory mirror of the latest record under the `STATE_KEY` on the
-/// state topic. Populated by `StateTopicLoader` at startup and by
-/// `StateTopic::write` / `delete` thereafter.
+/// In-memory mirror of the latest record under the `STATE_KEY` on the state
+/// topic. `StateTopicLoader` fills it at startup, and `StateTopic::write` and
+/// `StateTopic::delete` fill it after that.
 #[derive(Debug, Default)]
 pub struct LoadedState {
     pub value: ArcSwap<Option<InFlightFile>>,
@@ -59,36 +59,37 @@ impl LoadedState {
     }
 }
 
-/// The fixed key under which the executor's state is published. Single
-/// in-flight record per topic; tombstone (null value) clears it.
+/// The fixed key under which the executor publishes its state. The topic holds
+/// a single in-flight record, and a tombstone with a null value clears it.
 pub const STATE_KEY: &str = "in_flight";
 
-/// Backend abstraction for the executor's persisted state. The
-/// production impl is `StateTopic`; tests use an in-memory fake
-/// (`fake::InMemoryBackend`) to drive the executor's state machine
-/// without a broker.
+/// Backend abstraction for the executor's persisted state.
+///
+/// The production impl is `StateTopic`. Tests use the in-memory fake
+/// `fake::InMemoryBackend` to drive the executor's state machine without a
+/// broker.
 #[async_trait::async_trait]
 pub trait StateBackend: Send + Sync {
-    /// Snapshot the latest known in-flight record. Returns `None` if
-    /// the topic is empty / tombstoned, or if the load hasn't
-    /// completed yet (caller must check `is_loaded` first).
+    /// Snapshot the latest known in-flight record. Returns `None` if the
+    /// topic is empty or tombstoned, or if the load has not completed yet.
+    /// The caller must check `is_loaded` first.
     fn loaded(&self) -> Option<InFlightFile>;
 
     /// `true` once the loader has finished its initial replay.
     fn is_loaded(&self) -> bool;
 
-    /// Persist an in-flight record. Production: produces to the topic
-    /// AND mirrors locally into `LoadedState` so the executor's next
-    /// `loaded()` call sees the write without waiting for the loader
-    /// to round-trip it back.
+    /// Persist an in-flight record. In production this produces to the topic
+    /// AND mirrors the record locally into `LoadedState`, so the executor's
+    /// next `loaded()` call sees the write without a round trip through the
+    /// loader.
     async fn write(&self, f: &InFlightFile) -> Result<(), StateTopicError>;
 
     /// Tombstone the state key.
     async fn delete(&self) -> Result<(), StateTopicError>;
 }
 
-/// Topic-backed `StateBackend` impl — produces to the state topic
-/// and reads from the shared `LoadedState` mirror.
+/// Topic-backed `StateBackend` impl. It produces to the state topic and reads
+/// from the shared `LoadedState` mirror.
 #[derive(Clone)]
 pub struct StateTopic {
     client: Arc<Client>,
@@ -159,7 +160,7 @@ impl StateBackend for StateTopic {
 
 pub mod fake {
     //! In-memory `StateBackend` for executor unit tests and integration
-    //! tests. Doesn't touch a broker.
+    //! tests. It does not touch a broker.
 
     use std::sync::{
         Mutex,
@@ -180,9 +181,9 @@ pub mod fake {
     }
 
     impl InMemoryBackend {
-        /// Construct in a "fully loaded, empty" state — `is_loaded()`
-        /// returns `true`, `loaded()` returns `None`. The most common
-        /// fixture for executor tests that don't care about the
+        /// Construct in a "fully loaded, empty" state, where `is_loaded()`
+        /// returns `true` and `loaded()` returns `None`. This is the most
+        /// common fixture for executor tests that do not cover the
         /// resume-from-state path.
         #[must_use]
         pub fn new_loaded() -> Self {

@@ -80,33 +80,37 @@ fn count_values_label_value(value: &SampleValue) -> Result<String> {
     }
 }
 
-/// Shared **simple** aggregation core (`sum`/`avg`/`count`/`group`/`min`/`max`/
-/// `stddev`/`stdvar`) over an already-evaluated instant vector.
+/// Shared simple-aggregation core over an already-evaluated instant vector.
 ///
-/// Backs both the interpreter (`PromqlEngine::eval_instant_aggregate`) and the
-/// operator path (`PromqlEngine::plan_aggregate_with_grouping`), so the two are
-/// identical by construction once their inputs match. Groups the samples by the
-/// `by`/`without` labelset, accumulates each group's [`AggregateState`], and
-/// emits one reduced sample per surviving group.
+/// The simple ops are `sum`, `avg`, `count`, `group`, `min`, `max`, `stddev`,
+/// and `stdvar`.
 ///
-/// The native-histogram rules are encoded entirely in [`AggregateState`] and
-/// [`AggregateOp`], matching Prometheus exactly:
-/// - `sum`/`avg` (`aggregates_histograms`): histogram samples are MERGED (sum
-///   adds, avg scales the merged histogram by `1/count`). A group that mixes a
-///   float and a histogram is marked invalid and DROPPED from the output (the
-///   `invalid_mixed_sample_type` flag), via either a float arriving after a
-///   histogram ([`AggregateState::mark_invalid_mixed_sample_type`]) or a
-///   histogram arriving after a float ([`AggregateState::push_histogram`]).
-/// - `count`/`group` (`counts_histograms`): every sample is counted regardless
-///   of type (histograms via [`AggregateState::push_observation`]).
+/// This function backs both the interpreter
+/// (`PromqlEngine::eval_instant_aggregate`) and the operator path
+/// (`PromqlEngine::plan_aggregate_with_grouping`), so the two are identical by
+/// construction once their inputs match. It groups the samples by the
+/// `by`/`without` label set, accumulates each group's [`AggregateState`], and
+/// returns one reduced sample per surviving group.
+///
+/// [`AggregateState`] and [`AggregateOp`] hold all the native-histogram rules,
+/// which match Prometheus exactly:
+/// - `sum`/`avg` (`aggregates_histograms`): histogram samples are MERGED. `sum`
+///   adds them, and `avg` scales the merged histogram by `1/count`. A group that
+///   mixes a float and a histogram is marked invalid and DROPPED from the
+///   output through the `invalid_mixed_sample_type` flag. This happens when a
+///   float arrives after a histogram
+///   ([`AggregateState::mark_invalid_mixed_sample_type`]) or when a histogram
+///   arrives after a float ([`AggregateState::push_histogram`]).
+/// - `count`/`group` (`counts_histograms`): every sample is counted, whatever
+///   its type. Histograms go through [`AggregateState::push_observation`].
 /// - `min`/`max`/`stddev`/`stdvar` (`ignores_histograms`): histogram samples are
-///   silently dropped (no-op), exactly as the interpreter ignores them - no
-///   annotation is emitted, matching Prometheus.
+///   dropped with no annotation, exactly as the interpreter ignores them. This
+///   matches Prometheus.
 ///
-/// Returns `Err` only for the (unreachable) case of a histogram sample under an
-/// op that neither aggregates, counts, nor ignores histograms - every
-/// [`AggregateOp`] falls into one of those three categories, so this mirrors the
-/// interpreter's identical defensive branch.
+/// This function returns `Err` only for the unreachable case of a histogram
+/// sample under an op that does not aggregate, count, or ignore histograms.
+/// Every [`AggregateOp`] is in one of those three groups, so this branch mirrors
+/// the interpreter's identical defensive branch.
 pub(super) fn apply_simple_aggregate(
     samples: Vec<InstantSample>,
     op: AggregateOp,
@@ -154,15 +158,16 @@ pub(super) fn apply_simple_aggregate(
 
 /// Shared `topk`/`bottomk` core over an already-evaluated instant vector.
 ///
-/// Backs both the interpreter (`PromqlEngine::eval_k_aggregate`) and the
-/// operator path (`PromqlEngine::plan_param_aggregate_expr`), so the two are
-/// identical by construction once their inputs match. Groups the samples by the
-/// `by`/`without` labelset, sorts each group by value (highest-first for
-/// `topk`, lowest-first for `bottomk`) with a `labels_key` tie-break, clamps to
-/// `k`, and returns the surviving **original** samples (labels - including
-/// `__name__` - ts, and value all preserved; this is a selection, not a
-/// reduction). Histogram-typed samples are skipped (they carry no float to
-/// rank); `k == 0` yields the empty vector.
+/// This function backs both the interpreter (`PromqlEngine::eval_k_aggregate`)
+/// and the operator path (`PromqlEngine::plan_param_aggregate_expr`), so the two
+/// are identical by construction once their inputs match. It groups the samples
+/// by the `by`/`without` label set and sorts each group by value: highest first
+/// for `topk`, lowest first for `bottomk`, with a `labels_key` tie-break. It
+/// then clamps each group to `k` and returns the surviving original samples.
+/// The labels, including `__name__`, the timestamp, and the value all stay
+/// unchanged, because this is a selection and not a reduction. This function
+/// skips histogram-typed samples, which carry no float to rank. A `k` of 0
+/// returns the empty vector.
 pub(super) fn apply_k_aggregate(
     samples: Vec<InstantSample>,
     op: TokenType,
@@ -191,13 +196,15 @@ pub(super) fn apply_k_aggregate(
     out
 }
 
-/// Shared `limitk(k, v)` (experimental) core over an already-evaluated instant
-/// vector. Backs both the interpreter
-/// (`PromqlEngine::eval_limitk_aggregate`) and the operator path. Groups by the
-/// `by`/`without` labelset and keeps the first `k` members of each group in a
-/// deterministic order (fingerprint, then `labels_key`), exactly as Prometheus'
-/// reproducible `limitk` does. The caller resolves `k` (and short-circuits `k==0`
-/// to the empty vector) before reaching here.
+/// Shared experimental `limitk(k, v)` core over an already-evaluated instant
+/// vector.
+///
+/// This function backs both the interpreter
+/// (`PromqlEngine::eval_limitk_aggregate`) and the operator path. It groups by
+/// the `by`/`without` label set and keeps the first `k` members of each group in
+/// a deterministic order: fingerprint first, then `labels_key`. This is exactly
+/// what Prometheus' reproducible `limitk` does. The caller resolves `k` before
+/// reaching here, and short-circuits `k==0` to the empty vector.
 #[cfg(feature = "experimental-functions")]
 pub(super) fn apply_limitk_aggregate(
     samples: Vec<InstantSample>,
@@ -230,13 +237,16 @@ fn limit_ratio_includes_sample(ratio: f64, labels: &Labels) -> bool {
     (ratio >= 0.0 && sample_offset < ratio) || (ratio < 0.0 && sample_offset >= 1.0 + ratio)
 }
 
-/// Shared `limit_ratio(ratio, v)` (experimental) core over an already-evaluated
-/// instant vector. Backs both the interpreter
-/// (`PromqlEngine::eval_limit_ratio_aggregate`) and the operator path. Keeps
-/// each sample whose labelset hash falls in the ratio's deterministic selection
-/// band ([`limit_ratio_includes_sample`]). The caller resolves and caps the
-/// ratio (emitting the `InvalidRatioWarning` when it was out of range) and
-/// short-circuits `ratio==0` to the empty vector before reaching here.
+/// Shared experimental `limit_ratio(ratio, v)` core over an already-evaluated
+/// instant vector.
+///
+/// This function backs both the interpreter
+/// (`PromqlEngine::eval_limit_ratio_aggregate`) and the operator path. It keeps
+/// each sample whose label-set hash falls in the ratio's deterministic selection
+/// band, as [`limit_ratio_includes_sample`] defines. The caller resolves and
+/// caps the ratio before reaching here, and raises the `InvalidRatioWarning`
+/// when the ratio was out of range. The caller also short-circuits `ratio==0` to
+/// the empty vector.
 #[cfg(feature = "experimental-functions")]
 pub(super) fn apply_limit_ratio_aggregate(
     samples: Vec<InstantSample>,
@@ -248,10 +258,12 @@ pub(super) fn apply_limit_ratio_aggregate(
         .collect()
 }
 
-/// Order two samples for `topk`/`bottomk` selection: by float value
-/// (`right.total_cmp(left)` for `topk` so the highest sorts first, the reverse
-/// for `bottomk`), tie-broken by `labels_key`. A non-float sample (which the
-/// caller already filters) or a NaN sorts via `total_cmp`, matching Prometheus.
+/// Orders two samples for `topk`/`bottomk` selection.
+///
+/// The first key is the float value. `topk` uses `right.total_cmp(left)` so that
+/// the highest value sorts first, and `bottomk` uses the reverse. The tie-break
+/// is `labels_key`. A non-float sample, which the caller already filters out, or
+/// a NaN sorts through `total_cmp`. This matches Prometheus.
 fn compare_k_aggregate_samples(
     op: TokenType,
     left: &InstantSample,
@@ -269,15 +281,16 @@ fn compare_k_aggregate_samples(
 
 /// Shared `quantile(phi, v)` core over an already-evaluated instant vector.
 ///
-/// Backs both the interpreter (`PromqlEngine::eval_quantile_aggregate`) and
-/// the operator path. Groups the float samples by the `by`/`without` labelset
-/// and emits the phi-quantile of each group's values (linear interpolation in
-/// rank space via [`quantile_value`]; an empty group yields no row).
-/// Histogram-typed samples are skipped.
+/// This function backs both the interpreter
+/// (`PromqlEngine::eval_quantile_aggregate`) and the operator path. It groups
+/// the float samples by the `by`/`without` label set and returns the
+/// phi-quantile of each group's values. [`quantile_value`] does the linear
+/// interpolation in rank space. An empty group returns no row. This function
+/// skips histogram-typed samples.
 ///
-/// A `phi` outside `[0, 1]` (or NaN) is NOT an error: each group yields the
-/// signed `+/-Inf` / `NaN` [`quantile_value`] returns, and one
-/// `InvalidQuantileWarning` is raised - matching Prometheus and the
+/// A `phi` outside `[0, 1]`, or a NaN `phi`, is NOT an error. Each group returns
+/// the signed `+/-Inf` or `NaN` value that [`quantile_value`] returns, and the
+/// function raises one `InvalidQuantileWarning`. This matches Prometheus and the
 /// `histogram_quantile` family.
 pub(super) fn apply_quantile_aggregate(
     samples: Vec<InstantSample>,
@@ -316,11 +329,13 @@ pub(super) fn apply_quantile_aggregate(
 /// Shared `count_values("label", v)` core over an already-evaluated instant
 /// vector.
 ///
-/// Backs both the interpreter (`PromqlEngine::eval_count_values_aggregate`)
-/// and the operator path. Groups by the `by`/`without` labelset extended with
-/// the named label set to each sample's formatted value (floats via `Display`,
-/// histograms via JSON), and emits one series per distinct value carrying the
-/// group's count. Returns `Err` only when a histogram value cannot be encoded.
+/// This function backs both the interpreter
+/// (`PromqlEngine::eval_count_values_aggregate`) and the operator path. It
+/// groups by the `by`/`without` label set, extended with the named label, which
+/// it sets to each sample's formatted value. Floats use `Display` and histograms
+/// use JSON. The function returns one series per distinct value, and each series
+/// carries the group's count. It returns `Err` only when it cannot encode a
+/// histogram value.
 pub(super) fn apply_count_values_aggregate(
     samples: Vec<InstantSample>,
     label_name: &str,
@@ -347,18 +362,20 @@ pub(super) fn apply_count_values_aggregate(
         .collect())
 }
 
-/// Shared `stddev(v)` / `stdvar(v)` core over an already-evaluated **float-only**
+/// Shared `stddev(v)` / `stdvar(v)` core over an already-evaluated float-only
 /// instant vector.
 ///
-/// Backs both the interpreter (its general `PromqlEngine::eval_instant_aggregate`
-/// loop, which builds the same [`AggregateState`] and calls the same
-/// [`AggregateOp::finish`]) and the operator path. Groups the float samples by
-/// the `by`/`without` labelset, accumulates each group's running
-/// sum/sum-of-squares/count, and emits the population standard deviation
-/// (`Stddev`) or variance (`Stdvar`) per group. `op` must be
-/// [`AggregateOp::Stddev`] or [`AggregateOp::Stdvar`]. Histogram samples are
-/// ignored exactly as the interpreter ignores them for these ops; the operator
-/// path only feeds float-only inputs, so none appear in practice.
+/// This function backs both the interpreter and the operator path. The
+/// interpreter reaches it through the general
+/// `PromqlEngine::eval_instant_aggregate` loop, which builds the same
+/// [`AggregateState`] and calls the same [`AggregateOp::finish`]. The function
+/// groups the float samples by the `by`/`without` label set, accumulates each
+/// group's running sum, sum of squares, and count, and returns the population
+/// standard deviation (`Stddev`) or the variance (`Stdvar`) per group. `op` must
+/// be [`AggregateOp::Stddev`] or [`AggregateOp::Stdvar`]. This function ignores
+/// histogram samples exactly as the interpreter ignores them for these ops. The
+/// operator path feeds only float-only inputs, so no histogram sample appears in
+/// practice.
 pub(super) fn apply_stddev_stdvar_aggregate(
     samples: Vec<InstantSample>,
     op: AggregateOp,
@@ -451,28 +468,31 @@ struct AggregateState {
     count: usize,
     count_f64: f64,
     sum: f64,
-    /// Incremental Kahan-compensated mean for `avg` (`avg_mean + avg_comp`),
-    /// matching Prometheus. The naive `sum / count` overflows to +/-Inf for
-    /// very-large-magnitude groups; the incremental form stays finite (and, once
-    /// it does saturate, preserves the same-sign-infinity handling).
+    /// Incremental Kahan-compensated mean for `avg`, which is
+    /// `avg_mean + avg_comp`. This matches Prometheus. The naive `sum / count`
+    /// overflows to +/-Inf for groups with a very large magnitude. The
+    /// incremental form stays finite, and once it does saturate it keeps the
+    /// same-sign-infinity handling.
     avg_mean: f64,
     avg_comp: f64,
-    /// Welford running mean / `M2` accumulators for `stddev`/`stdvar`, each
-    /// Kahan-compensated. The naive `E[x^2] - E[x]^2` form suffers catastrophic
-    /// cancellation for large-magnitude close-valued groups (a negative variance
-    /// whose `sqrt` is NaN); Welford stays stable and matches Prometheus.
+    /// Welford running mean and `M2` accumulators for `stddev`/`stdvar`, each
+    /// Kahan-compensated. The naive `E[x^2] - E[x]^2` form has catastrophic
+    /// cancellation for groups of large, close values, and it then gives a
+    /// negative variance whose `sqrt` is NaN. Welford stays stable and matches
+    /// Prometheus.
     var_mean: f64,
     var_mean_comp: f64,
     var_aux: f64,
     var_aux_comp: f64,
-    /// Running `min`/`max` over the group's float samples. Prometheus' `min`/
-    /// `max` *ignore* NaN: a group's extremum is taken over its non-NaN values,
-    /// and the result is NaN only when **every** sample is NaN. We mirror
-    /// Prometheus' aggregation loop exactly (`promql/engine.go`): the running
-    /// value is seeded with the first sample (NaN included), and each subsequent
-    /// sample `f` replaces it when `running {>,<} f` *or* `running` is NaN. So a
-    /// later non-NaN always displaces an earlier NaN, and an all-NaN group keeps
-    /// NaN. `seen_float` tracks whether the seed has been taken.
+    /// Running `min`/`max` over the group's float samples. Prometheus' `min` and
+    /// `max` ignore NaN: a group's extremum comes from its non-NaN values, and
+    /// the result is NaN only when every sample is NaN. This code mirrors
+    /// Prometheus' aggregation loop in `promql/engine.go` exactly. The first
+    /// sample seeds the running value, NaN included, and each later sample `f`
+    /// replaces the running value when `running {>,<} f` or when `running` is
+    /// NaN. So a later non-NaN value always displaces an earlier NaN, and an
+    /// all-NaN group keeps NaN. `seen_float` tracks whether the code has taken
+    /// the seed.
     seen_float: bool,
     min: f64,
     max: f64,

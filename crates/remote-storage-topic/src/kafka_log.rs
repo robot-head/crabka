@@ -1,32 +1,32 @@
-//! [`KafkaMetadataEventLog`] — the production [`MetadataEventLog`]
+//! [`KafkaMetadataEventLog`]: the production [`MetadataEventLog`]
 //! adapter that persists events in the internal `__remote_log_metadata`
 //! Kafka topic.
 //!
 //! Writes flow through a [`crabka_client_producer::Producer`] with
 //! explicit per-record partition pinning. Reads come back through one
-//! cancellable manual-`Fetch` task per assigned partition, each driving
-//! its own dedicated [`crabka_client_core::Connection`] and emitting
+//! cancellable manual-`Fetch` task per assigned partition. Each task
+//! drives its own dedicated [`crabka_client_core::Connection`] and emits
 //! [`MetadataEventRecord`]s into a shared mpsc. There is **no consumer
-//! group and no broker-side offset commit**: the read position is owned
-//! by the RLMM (the manager assigns all partitions from offset 0 today;
-//! resume from snapshot offsets and restrict the consumed set).
+//! group and no broker-side offset commit**. The RLMM owns the read
+//! position. The manager assigns all partitions from offset 0 today, then
+//! resumes from snapshot offsets and restricts the consumed set.
 //!
-//! A dedicated connection per partition is required because the broker
-//! is serial per-connection: a long-`max_wait_ms` fetch would
-//! head-of-line-block any other RPC sharing the socket.
+//! A dedicated connection per partition is necessary because the broker is
+//! serial per-connection. A long-`max_wait_ms` fetch would
+//! head-of-line-block any other RPC that shares the socket.
 //!
-//! Topic provisioning runs once at [`KafkaMetadataEventLog::start`] via
-//! the [`crabka_client_admin::AdminClient`]: an existing topic is reused
-//! (the configured `num_partitions` is overridden by the topic's actual
-//! count), an absent topic is created with `cleanup.policy=delete`,
-//! `retention.ms=-1`. The same admin round-trip surfaces the topic's
-//! `Uuid`, which the manual `Fetch` path needs (Fetch v≥13 carries
-//! `topic_id`, not the name).
+//! Topic provisioning runs once at [`KafkaMetadataEventLog::start`] through
+//! the [`crabka_client_admin::AdminClient`]. It reuses an existing topic, and
+//! the topic's actual partition count then overrides the configured
+//! `num_partitions`. It creates an absent topic with `cleanup.policy=delete`
+//! and `retention.ms=-1`. The same admin round-trip surfaces the topic's
+//! `Uuid`, which the manual `Fetch` path needs, because Fetch v≥13 carries
+//! `topic_id` and not the name.
 //!
-//! High-water marks are pulled with one `ListOffsets(timestamp=-1)`
-//! over the raw [`crabka_client_core::Client`], not via a consumer, so
-//! [`MetadataEventLog::high_water_marks`] does not require any fetch
-//! task to have made progress.
+//! One `ListOffsets(timestamp=-1)` over the raw
+//! [`crabka_client_core::Client`] pulls the high-water marks, rather than a
+//! consumer. [`MetadataEventLog::high_water_marks`] therefore does not need
+//! any fetch task to have made progress.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -72,19 +72,19 @@ pub const DEFAULT_NUM_PARTITIONS: i32 = 50;
 pub const DEFAULT_REPLICATION: i32 = 3;
 
 /// How long `CreateTopics` may take to provision `__remote_log_metadata`
-/// before the broker gives up on the round-trip.
+/// before the broker abandons the round-trip.
 pub const DEFAULT_METADATA_TOPIC_CREATE_TIMEOUT: Time = secs(30);
 
-/// `max_wait_ms` for the per-partition metadata `Fetch`. Long enough that an
-/// idle partition costs one RPC per interval rather than a spin, short enough
-/// that cancellation on reassignment is prompt.
+/// `max_wait_ms` for the per-partition metadata `Fetch`. It is long enough
+/// that an idle partition costs one RPC per interval rather than a spin, and
+/// short enough that cancellation on reassignment is prompt.
 pub const DEFAULT_METADATA_FETCH_MAX_WAIT: Time = millis(500);
 
 /// Per-partition budget for the metadata `Fetch`. Metadata events are small,
 /// so one mebibyte is many thousands of them per round-trip.
 pub const DEFAULT_METADATA_FETCH_MAX_BYTES: ByteSize = mebibytes(1);
 
-/// Pause before retrying a failed metadata `Fetch`, so a broker that is down
+/// Pause before a retry of a failed metadata `Fetch`, so a broker that is down
 /// does not turn the fetch loop into a busy spin.
 pub const DEFAULT_METADATA_FETCH_RETRY_BACKOFF: Time = millis(200);
 
@@ -124,25 +124,26 @@ impl Default for MetadataEventQueueCapacity {
 /// Construction-time configuration for [`KafkaMetadataEventLog`].
 #[derive(Debug, Clone)]
 pub struct KafkaMetadataLogConfig {
-    /// `host:port` for the Kafka client to bootstrap from. The TBRLMM
-    /// in a broker connects via loopback to its own listener.
+    /// `host:port` for the Kafka client to bootstrap from. The TBRLMM in a
+    /// broker connects over loopback to its own listener.
     pub bootstrap: String,
-    /// Internal topic name. Production deployments stick with the
-    /// default; the field exists so multiple isolated clusters can
-    /// share an environment in tests.
+    /// Internal topic name. Production deployments keep the default. The
+    /// field exists so multiple isolated clusters can share an environment in
+    /// tests.
     pub topic: String,
     /// Number of partitions to create the topic with on first startup.
-    /// Ignored when the topic already exists — the existing count
-    /// wins (re-bucketing on partition growth is not supported).
+    /// The log ignores this value when the topic already exists, and the
+    /// existing count wins. The log does not support re-bucketing on
+    /// partition growth.
     pub num_partitions: i32,
     /// Replication factor to create the topic with on first startup.
-    /// Ignored when the topic already exists.
+    /// The log ignores this value when the topic already exists.
     pub replication: i32,
-    /// `client_id` for the producer and consumer (diagnostic).
+    /// `client_id` for the producer and consumer. It is diagnostic only.
     pub client_id: String,
     /// Client TLS/SASL security applied to the producer, the raw client,
     /// the admin client, and every per-partition fetch connection.
-    /// `None` = plaintext loopback (default).
+    /// `None` is plaintext loopback, and it is the default.
     pub security: Option<crabka_client_core::security::ClientSecurity>,
     /// Timeout for provisioning the internal topic.
     pub topic_create_timeout: Time,
@@ -254,7 +255,7 @@ pub struct KafkaMetadataEventLog {
 }
 
 impl KafkaMetadataEventLog {
-    /// Provision the topic if missing, connect the producer and the
+    /// Provision the topic if it is missing, connect the producer and the
     /// raw client, learn the topic id, and return the log.
     ///
     /// # Errors
@@ -315,7 +316,8 @@ impl KafkaMetadataEventLog {
         }))
     }
 
-    /// Cancel every active subscription's fetch tasks. Drop also cancels.
+    /// Cancel the fetch tasks of every active subscription. A drop also
+    /// cancels them.
     pub async fn shutdown(&self) {
         let mut subs = self.subscriptions.lock().await;
         for state in subs.drain(..) {
@@ -334,8 +336,8 @@ impl Drop for KafkaMetadataEventLog {
     }
 }
 
-/// Per-subscription live consumer: one cancellable fetch task per
-/// assigned partition, all emitting into the shared `tx`.
+/// Per-subscription live consumer: one cancellable fetch task per assigned
+/// partition, and every task emits into the shared `tx`.
 struct ConsumerState {
     bootstrap: String,
     client_id: String,
@@ -541,10 +543,12 @@ fn metadata_event_channel(
     mpsc::channel(capacity.capacity())
 }
 
-/// Provision the topic if missing and return `(partition_count,
-/// topic_id)`. An existing topic's count and id win; a freshly-created
-/// topic's id is re-read with a second metadata round-trip (the
-/// `CreateTopics` outcome does not reliably carry it).
+/// Provision the topic if it is missing and return `(partition_count,
+/// topic_id)`.
+///
+/// An existing topic's count and id win. This function re-reads a
+/// freshly-created topic's id with a second metadata round-trip, because the
+/// `CreateTopics` outcome does not reliably carry it.
 #[instrument(skip_all, fields(topic = %cfg.topic), err)]
 async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), MetadataLogError> {
     let mut admin = AdminClient::connect_with_options(
@@ -627,10 +631,10 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), M
     Ok((cfg.num_partitions, topic_id))
 }
 
-/// A zero topic id makes every Fetch v≥13 fail (it carries `topic_id`,
-/// not the name), which manifests as the metadata consumer spinning with
-/// no progress. Warn loudly so the misconfiguration is diagnosable
-/// rather than a silent hang.
+/// A zero topic id makes every Fetch v≥13 fail, because Fetch carries
+/// `topic_id` and not the name. The metadata consumer then spins with no
+/// progress. This function warns loudly, so an operator can diagnose the
+/// misconfiguration instead of seeing a silent hang.
 fn warn_if_zero_topic_id(topic: &str, topic_id: WireUuid) {
     if topic_id == WireUuid::ZERO {
         warn!(
@@ -649,8 +653,8 @@ fn to_wire_uuid(u: uuid::Uuid) -> WireUuid {
 
 /// Manual single-partition fetch loop over a dedicated connection.
 ///
-/// A dedicated connection per partition keeps the metadata consumer off
-/// any parkable/shared stream: the broker is serial per-connection, so a
+/// A dedicated connection per partition keeps the metadata consumer off any
+/// parkable or shared stream. The broker is serial per-connection, so a
 /// long-`max_wait_ms` fetch must not head-of-line-block other RPCs.
 // cargo-mutants: live-broker fetch loop over a real connection, not unit-testable
 #[cfg_attr(test, mutants::skip)]
@@ -908,10 +912,11 @@ mod tests {
         assert!(error.to_string().contains("topic_create_timeout"));
     }
 
-    /// The metadata client's tunables are quantities but reach Kafka as raw
-    /// `int32` milliseconds and bytes. Pin the wire images: a wrong scale here
-    /// is invisible in the types and would show up only as a metadata consumer
-    /// that spins (too short a `max_wait`) or truncates batches.
+    /// The metadata client's tunables are quantities, but they reach Kafka as
+    /// raw `int32` milliseconds and bytes. This test pins the wire images. A
+    /// wrong scale here is invisible in the types. It would show up only as a
+    /// metadata consumer that spins, when `max_wait` is too short, or that
+    /// truncates batches.
     #[test]
     fn client_tunables_convert_to_their_kafka_wire_images() {
         let cfg = KafkaMetadataLogConfig::new("127.0.0.1:9092");

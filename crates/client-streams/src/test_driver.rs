@@ -1,7 +1,9 @@
-//! Synchronous, broker-free driver for testing topologies (JVM
-//! `TopologyTestDriver` analog). Pipe a typed input record, read typed output.
-//! Records produced to an internal topic that is also a source (repartition)
-//! are looped back into the graph.
+//! Synchronous, broker-free driver for testing topologies.
+//!
+//! This driver is the analog of the JVM `TopologyTestDriver`. Pipe a typed
+//! input record, then read typed output. The driver loops a record back into
+//! the graph when the record goes to an internal repartition topic that is also
+//! a source.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -19,27 +21,29 @@ use crate::{
 /// A pending record entry in the repartition loop-back queue.
 type PendingRecord = (String, Option<Vec<u8>>, Vec<u8>, i64);
 
-/// Synchronous test driver: builds a runnable processor graph from a [`BuiltTopology`]
-/// and exposes `pipe_input` / `read_output` for exercising processing logic
-/// without a real broker.
+/// Synchronous test driver.
+///
+/// This driver builds a runnable processor graph from a [`BuiltTopology`]. It
+/// exposes `pipe_input` and `read_output`, so a test can exercise processing
+/// logic without a real broker.
 pub struct TopologyTestDriver {
     graph: Graph,
     source_topics: HashSet<String>,
     output: HashMap<String, VecDeque<OutputRecord>>,
-    /// Mock wall clock (ms), advanced by `advance_wall_clock_time`; the value
-    /// passed to `Graph::punctuate_wall_clock`. Starts at `0`, mirroring the JVM
-    /// `TopologyTestDriver` mock time at construction.
+    /// Mock wall clock in ms. `advance_wall_clock_time` advances it, and the
+    /// driver passes it to `Graph::punctuate_wall_clock`. It starts at `0`, the
+    /// same as the JVM `TopologyTestDriver` mock time at construction.
     mock_wall_ms: i64,
-    /// Accumulated changelog records the stores produced, in order:
+    /// Changelog records the stores produced, collected in order as
     /// `(changelog_topic, key, value, record_ts)`. The driver has no broker, so
-    /// instead of discarding drained changelog it retains it here for byte-exact
-    /// changelog assertions (`drain_changelog`).
+    /// it keeps the drained changelog here instead of discarding it. A test can
+    /// then assert byte-exact changelog records with `drain_changelog`.
     changelog_captured: Vec<(String, bytes::Bytes, Option<bytes::Bytes>, Option<i64>)>,
 }
 
 impl TopologyTestDriver {
-    /// Instantiate the topology's graph for testing. Errors if the topology is
-    /// invalid (propagates `instantiate`'s error).
+    /// Instantiates the topology's graph for testing. This method returns an
+    /// error if the topology is invalid. It propagates `instantiate`'s error.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn new(built: &BuiltTopology) -> Result<Self, ProcessorError> {
@@ -72,7 +76,8 @@ impl TopologyTestDriver {
         })
     }
 
-    /// Serialize + pipe one record on `topic`; loops repartition outputs back.
+    /// Serializes and pipes one record on `topic`, then loops repartition
+    /// outputs back.
     ///
     /// `consumed` is the same `Consumed::with(key_serde, value_serde)` pair the
     /// source for `topic` reads with.
@@ -113,8 +118,10 @@ impl TopologyTestDriver {
         }
     }
 
-    /// Advance the mock wall clock by `by`, firing wall-clock punctuators (each at
-    /// most once, value = the new clock) — mirrors JVM `TopologyTestDriver.advanceWallClockTime`.
+    /// Advances the mock wall clock by `by` and fires wall-clock punctuators.
+    ///
+    /// Each punctuator fires at most once, with the new clock as its value.
+    /// This mirrors the JVM `TopologyTestDriver.advanceWallClockTime`.
     pub fn advance_wall_clock_time(&mut self, by: std::time::Duration) {
         self.mock_wall_ms += i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
         let mut queue: VecDeque<PendingRecord> = VecDeque::new();
@@ -129,12 +136,15 @@ impl TopologyTestDriver {
         }
     }
 
-    /// Drain the graph's output buffer: outputs to a source topic re-enqueue
-    /// (repartition loop-back), all others append to `self.output`. Changelog
-    /// buffers are drained and retained in `changelog_captured` (the test driver
-    /// has no broker, so restore is a no-op with fresh stores, but tests can
-    /// assert the changelog bytes via `drain_changelog`). Shared by the
-    /// record-processing and stream-time-punctuation phases of `pipe_bytes`.
+    /// Drains the graph's output buffer.
+    ///
+    /// Outputs to a source topic go back on the queue as a repartition
+    /// loop-back. All other outputs append to `self.output`. This method also
+    /// drains the changelog buffers and keeps them in `changelog_captured`. The
+    /// test driver has no broker, so restore does nothing with fresh stores,
+    /// but a test can assert the changelog bytes with `drain_changelog`. Both
+    /// the record-processing phase and the stream-time-punctuation phase of
+    /// `pipe_bytes` call this method.
     fn route_outputs(&mut self, queue: &mut VecDeque<PendingRecord>) {
         for out in self.graph.take_output() {
             if self.source_topics.contains(&out.topic) {
@@ -163,8 +173,10 @@ impl TopologyTestDriver {
         );
     }
 
-    /// Inspect a state store's contents after piping (mirrors the JVM
-    /// `TopologyTestDriver.getKeyValueStore`). Test-only; not for interactive queries.
+    /// Inspects a state store's contents after piping.
+    ///
+    /// This method mirrors the JVM `TopologyTestDriver.getKeyValueStore`. It is
+    /// test-only. Do not use it for interactive queries.
     pub fn get_key_value_store<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
@@ -172,9 +184,11 @@ impl TopologyTestDriver {
         self.graph.stores.get_kv::<K, V>(name)
     }
 
-    /// Test-only synchronous store read (`block_on` the async store). The store
-    /// API is async; this drives a single typed `get` to completion so sync
-    /// `#[test]` assertions can inspect materialized state.
+    /// Test-only synchronous store read that calls `block_on` on the async
+    /// store.
+    ///
+    /// The store API is async. This method drives one typed `get` to
+    /// completion, so sync `#[test]` assertions can inspect materialized state.
     pub fn store_get<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         store: &str,
@@ -184,7 +198,7 @@ impl TopologyTestDriver {
         pollster::block_on(s.get(key))
     }
 
-    /// Latest live value of a key in a versioned store (test helper).
+    /// Latest live value of a key in a versioned store. This is a test helper.
     pub fn store_get_versioned<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         store_name: &str,
@@ -194,20 +208,25 @@ impl TopologyTestDriver {
         pollster::block_on(store.get(key)).map(|r| r.value)
     }
 
-    /// Drain the changelog records the stores have produced so far (test helper):
-    /// `(changelog_topic, key, value, record_ts)` in production order. Lets a test
-    /// assert byte-exact changelog records (e.g. the KIP-889 versioned changelog:
-    /// bare value bytes + version timestamp in the record-timestamp field).
+    /// Drains the changelog records the stores have produced so far. This is a
+    /// test helper.
+    ///
+    /// The records come back as `(changelog_topic, key, value, record_ts)` in
+    /// production order. A test can then assert byte-exact changelog records,
+    /// for example the KIP-889 versioned changelog, which holds bare value
+    /// bytes and the version timestamp in the record-timestamp field.
     pub fn drain_changelog(
         &mut self,
     ) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>, Option<i64>)> {
         std::mem::take(&mut self.changelog_captured)
     }
 
-    /// Populate a GLOBAL store directly (test-only). In a real app the global
-    /// consumer reads all partitions of the source topic and applies them to the
-    /// fully-replicated global store; the test driver injects values straight into
-    /// the shared global store manager so a stream-globaltable join can look them up.
+    /// Populates a GLOBAL store directly. This method is test-only.
+    ///
+    /// In a real app the global consumer reads all partitions of the source
+    /// topic and applies them to the fully-replicated global store. The test
+    /// driver instead injects values straight into the shared global store
+    /// manager, so a stream-globaltable join can look them up.
     pub fn pipe_global<K, V>(&mut self, store_name: &str, key: K, value: V)
     where
         K: Send + Sync + 'static,
@@ -224,8 +243,8 @@ impl TopologyTestDriver {
     // exercise the full DSL → store → IQ-byte-read round-trip, so a Rust IQ test
     // can assert read semantics without standing up the async supervisor.
 
-    /// Interactive-query KV read: value for `key`, else `None`. `None` if the
-    /// store is absent or not a key-value store.
+    /// Interactive-query KV read: the value for `key`, else `None`. The result
+    /// is `None` if the store is absent or is not a key-value store.
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_kv_get<K: 'static, V: 'static>(
@@ -242,7 +261,8 @@ impl TopologyTestDriver {
     }
 
     /// Interactive-query KV range read over the inclusive `[lo, hi]` key span,
-    /// in store (memcmp) order. Empty if the store is absent or not a KV store.
+    /// in store (memcmp) order. The result is empty if the store is absent or
+    /// is not a KV store.
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_kv_range<K: 'static, V: 'static>(
@@ -294,7 +314,8 @@ impl TopologyTestDriver {
             .collect()
     }
 
-    /// Interactive-query approximate entry count for a KV store (`0` if absent).
+    /// Interactive-query approximate entry count for a KV store. The result is
+    /// `0` if the store is absent.
     pub async fn iq_kv_count(&self, store: &str) -> u64 {
         match self.graph.stores.iq_get(store) {
             Some(q) => q.iq_kv_approx_count().await,
@@ -302,9 +323,10 @@ impl TopologyTestDriver {
         }
     }
 
-    /// Interactive-query window read: `(windowStart, value)` for every window of
-    /// `key` whose start is in the inclusive `[from, to]` span, ascending by
-    /// window start. Empty if the store is absent or not a window store.
+    /// Interactive-query window read: `(windowStart, value)` for every window
+    /// of `key` whose start is in the inclusive `[from, to]` span, ascending by
+    /// window start. The result is empty if the store is absent or is not a
+    /// window store.
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_window_fetch<K: 'static, V: 'static>(
@@ -345,9 +367,10 @@ impl TopologyTestDriver {
         Some(vs.deserialize(store, &vb).expect("iq deserialize"))
     }
 
-    /// Run an `IQv2` query against the single test graph (partition 0). `Position`
-    /// is empty (the driver does not track source offsets); use unit tests on
-    /// `Position::dominates` for bound behavior.
+    /// Runs an `IQv2` query against the single test graph, partition 0.
+    ///
+    /// `Position` is empty, because the driver does not track source offsets.
+    /// Use unit tests on `Position::dominates` for bound behavior.
     pub async fn query<Q: crate::runtime::iqv2::Query>(
         &self,
         req: crate::runtime::iqv2::StateQuery<Q>,
@@ -415,9 +438,9 @@ impl TopologyTestDriver {
         StateQueryResult::new(m)
     }
 
-    /// Interactive-query session read: `((start, end), value)` for every session
-    /// of `key`, in store order. Empty if the store is absent or not a session
-    /// store.
+    /// Interactive-query session read: `((start, end), value)` for every
+    /// session of `key`, in store order. The result is empty if the store is
+    /// absent or is not a session store.
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn iq_session_fetch<K: 'static, V: 'static>(
@@ -438,7 +461,7 @@ impl TopologyTestDriver {
             .collect()
     }
 
-    /// Pop + deserialize the next output record for `topic`.
+    /// Pops and deserializes the next output record for `topic`.
     ///
     /// `produced` is the same `Produced::with(key_serde, value_serde)` pair the
     /// sink writing `topic` produced with.

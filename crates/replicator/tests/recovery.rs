@@ -1,13 +1,15 @@
-//! Integration test: replicator restart *resumes* from the durable checkpoint
-//! (at-least-once), rather than re-reading the source topic from offset 0.
+//! Integration test: a replicator restart *resumes* from the durable
+//! checkpoint, which is at-least-once, and does not re-read the source topic
+//! from offset 0.
 //!
-//! Proves that when a `FlowSupervisor` is shut down and a new one is started
-//! with the same flow configuration (and therefore the same consumer group +
-//! checkpoint key), it seeks to the committed position and delivers every record
-//! produced during both runs to the target — no gap across the restart — while
-//! NOT re-delivering the whole pre-crash batch. The position is restored via
-//! `SourceConsumer::seek` (the loaded `SourceOffset` → `Consumer::seek`), so the
-//! target count after a 10-then-restart-then-10 sequence is close to 20, not ~30.
+//! The test shuts down a `FlowSupervisor` and starts a new one with the same
+//! flow configuration, and therefore the same consumer group and checkpoint
+//! key. It proves that the new supervisor seeks to the committed position and
+//! delivers every record from both runs to the target, with no gap across the
+//! restart, and that it does NOT re-deliver the whole pre-crash batch.
+//! `SourceConsumer::seek` restores the position: it passes the loaded
+//! `SourceOffset` to `Consumer::seek`. The target count after a
+//! 10-then-restart-then-10 sequence is therefore close to 20 and not about 30.
 
 mod common;
 
@@ -21,8 +23,8 @@ use crabka_replicator::{
 use crabka_units::prelude::secs;
 
 /// Build a `ReplicatorConfig` for the us-east → eu-west flow that replicates
-/// the `orders` topic.  Both brokers must already be running when this is
-/// called; the config is a cheap value type so we just construct it twice.
+/// the `orders` topic. Both brokers must already run when the test calls this
+/// function. The config is a cheap value type, so the test constructs it twice.
 fn make_config(source_bootstrap: &str, target_bootstrap: &str) -> ReplicatorConfig {
     let mut clusters = BTreeMap::new();
     clusters.insert(

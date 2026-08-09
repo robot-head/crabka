@@ -82,10 +82,10 @@ pub struct TsdbBlock {
     pub num_series: usize,
 }
 
-/// Resolves `PromQL` matchers to `DataFusion` tables over a tenant's metric data.
+/// Resolves `PromQL` matchers to `DataFusion` tables over the metric data of a tenant.
 #[async_trait::async_trait]
 pub trait MetricStore: Send + Sync {
-    /// Register float and histogram tables for matched series in `[start_ms, end_ms]`.
+    /// Registers the float and histogram tables for matched series in `[start_ms, end_ms]`.
     async fn scan(
         &self,
         tenant: &str,
@@ -94,7 +94,7 @@ pub trait MetricStore: Send + Sync {
         end_ms: i64,
     ) -> Result<ScanResult, PromqlError>;
 
-    /// Distinct label names across matched series.
+    /// Returns the distinct label names across matched series.
     async fn label_names(
         &self,
         tenant: &str,
@@ -103,7 +103,7 @@ pub trait MetricStore: Send + Sync {
         end_ms: i64,
     ) -> Result<Vec<String>, PromqlError>;
 
-    /// Distinct values of `name` across matched series.
+    /// Returns the distinct values of `name` across matched series.
     async fn label_values(
         &self,
         tenant: &str,
@@ -113,7 +113,7 @@ pub trait MetricStore: Send + Sync {
         end_ms: i64,
     ) -> Result<Vec<String>, PromqlError>;
 
-    /// Label sets of matched series.
+    /// Returns the label sets of matched series.
     async fn series(
         &self,
         tenant: &str,
@@ -122,7 +122,7 @@ pub trait MetricStore: Send + Sync {
         end_ms: i64,
     ) -> Result<Vec<Labels>, PromqlError>;
 
-    /// Exemplars attached to matched series in `[start_ms, end_ms]`.
+    /// Returns the exemplars attached to matched series in `[start_ms, end_ms]`.
     async fn exemplars(
         &self,
         tenant: &str,
@@ -131,32 +131,34 @@ pub trait MetricStore: Send + Sync {
         end_ms: i64,
     ) -> Result<Vec<ExemplarRecord>, PromqlError>;
 
-    /// Metric metadata for a tenant, optionally restricted to one metric family.
+    /// Returns the metric metadata for a tenant.
+    ///
+    /// The caller can restrict the result to one metric family.
     async fn metadata(
         &self,
         tenant: &str,
         metric: Option<&str>,
     ) -> Result<Vec<MetadataRecord>, PromqlError>;
 
-    /// Distinct active-series count for each label name in a tenant.
+    /// Returns the distinct active-series count for each label name in a tenant.
     async fn cardinality_label_names(
         &self,
         tenant: &str,
     ) -> Result<Vec<LabelNameCardinality>, PromqlError>;
 
-    /// Distinct active-series count for each label value in a tenant.
+    /// Returns the distinct active-series count for each label value in a tenant.
     async fn cardinality_label_values(
         &self,
         tenant: &str,
     ) -> Result<Vec<LabelValueCardinality>, PromqlError>;
 
-    /// Distinct active series label sets in a tenant.
+    /// Returns the distinct label sets of the active series in a tenant.
     async fn cardinality_active_series(&self, tenant: &str) -> Result<Vec<Labels>, PromqlError>;
 
-    /// Tenant-scoped TSDB status statistics.
+    /// Returns the tenant-scoped TSDB status statistics.
     async fn tsdb_stats(&self, tenant: &str) -> Result<TsdbStats, PromqlError>;
 
-    /// Tenant-scoped compacted block metadata.
+    /// Returns the tenant-scoped metadata of the compacted blocks.
     async fn tsdb_blocks(&self, tenant: &str) -> Result<Vec<TsdbBlock>, PromqlError>;
 }
 

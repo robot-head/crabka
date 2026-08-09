@@ -24,37 +24,40 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Recursively plan an instant expression onto the `DataFusion` operator
-    /// chain (plus the shared leaf kernels it reuses), dispatching on the
-    /// `PromQL` `Expr` node kind. This is the sole evaluation engine.
+    /// Plans an instant expression onto the `DataFusion` operator chain.
     ///
-    /// Returns `Ok(Some(plan))` for every valid shape and `Err(..)` for every
-    /// invalid one (`Err` also covers genuine store/plan failures). It is
-    /// **total**: it never returns `Ok(None)` for a query the public entry
-    /// points accept (proven by `plan_instant_expr_is_total_over_construct_sweep`
-    /// and the green conformance corpus). Supported node kinds:
+    /// This method recurses through the expression and dispatches on the
+    /// `PromQL` `Expr` node kind. It also reuses the shared leaf kernels. This is
+    /// the sole evaluation engine.
     ///
-    /// - [`Expr::Paren`] — recurse into the inner expression.
-    /// - [`Expr::VectorSelector`] — a bare instant-vector selector over
+    /// This method returns `Ok(Some(plan))` for every valid shape and `Err(..)`
+    /// for every invalid one. `Err` also covers genuine store and plan failures.
+    /// The dispatch is total: it never returns `Ok(None)` for a query that the
+    /// public entry points accept. The
+    /// `plan_instant_expr_is_total_over_construct_sweep` test and the green
+    /// conformance corpus prove this. Supported node kinds:
+    ///
+    /// - [`Expr::Paren`][]: recurse into the inner expression.
+    /// - [`Expr::VectorSelector`][]: a bare instant-vector selector over
     ///   float-only series (`SeriesDivide -> SeriesNormalize ->
     ///   InstantManipulate`). Histogram-bearing selectors return `None`.
-    /// - [`Expr::Call`] — a rate-family call or a non-experimental `*_over_time`
+    /// - [`Expr::Call`][]: a rate-family call or a non-experimental `*_over_time`
     ///   call over a bare matrix selector. A FLOAT-only selector lowers onto the
-    ///   operator chain (`... -> RangeManipulate -> rate/over_time-UDF`); a
-    ///   HISTOGRAM-bearing selector instead assembles the windowed range vector via
-    ///   the interpreter's `eval_matrix_selector` and applies the shared
-    ///   `apply_outer_range_fn` kernel as a `Precomputed` result (parity-exact). The
-    ///   experimental `*_over_time` members (`mad`/`first`/`ts_of_*`), subquery
-    ///   arguments, anchored/smoothed selectors, and present-but-empty-valued labels
-    ///   return `None`.
-    /// - [`Expr::Aggregate`] — a simple float aggregation
+    ///   operator chain (`... -> RangeManipulate -> rate/over_time-UDF`). A
+    ///   HISTOGRAM-bearing selector instead assembles the windowed range vector
+    ///   through the interpreter's `eval_matrix_selector` and applies the shared
+    ///   `apply_outer_range_fn` kernel as a `Precomputed` result, which is
+    ///   parity-exact. The experimental `*_over_time` members
+    ///   (`mad`/`first`/`ts_of_*`), subquery arguments, anchored and smoothed
+    ///   selectors, and present-but-empty-valued labels return `None`.
+    /// - [`Expr::Aggregate`][]: a simple float aggregation
     ///   (`sum|avg|min|max|count|group` with `by`/`without`) over a
     ///   planner-supported, float-only inner expression. Param aggregations
     ///   (`topk`/`bottomk`/`quantile`/`count_values`/`stddev`/`stdvar`),
     ///   histogram-typed inputs, and unsupported inner expressions return `None`.
     ///
-    /// Every other node kind (binary ops, unary, literals, raw matrix/subquery,
-    /// extensions) returns `None`.
+    /// Every other node kind returns `None`: binary ops, unary, literals, raw
+    /// matrix and subquery, and extensions.
     pub(super) fn plan_instant_expr<'a>(
         &'a self,
         tenant: &'a str,
@@ -153,12 +156,13 @@ impl<S: MetricStore> PromqlEngine<S> {
         .boxed()
     }
 
-    /// Plan a unary `Expr::Unary` (`-v` / `+v`) onto the operator path: recurse
-    /// the operand through the planner, assemble it, and apply the SHARED
-    /// [`negate_query_result`] — identical to [`Self::eval_instant_unary`] by
-    /// construction. The `PromQL` parser only ever produces a `-` unary (a leading
-    /// `+` is dropped), so this always negates. A non-plannable operand falls back
-    /// to the interpreter.
+    /// Plans a unary `Expr::Unary` (`-v` / `+v`) onto the operator path.
+    ///
+    /// This method recurses the operand through the planner, assembles it, and
+    /// applies the SHARED [`negate_query_result`]. It is identical to
+    /// [`Self::eval_instant_unary`] by construction. The `PromQL` parser only
+    /// ever produces a `-` unary and drops a leading `+`, so this method always
+    /// negates. A non-plannable operand falls back to the interpreter.
     async fn plan_unary_expr(
         &self,
         tenant: &str,
@@ -185,13 +189,15 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
     }
 
-    /// Plan a top-level `Expr::Extension` (an `anchored`/`smoothed` extended
-    /// selector) onto the operator path. The `smoothed` form reuses the
-    /// interpreter's [`Self::eval_smoothed_instant_selector`] kernel verbatim
-    /// (returned as `Precomputed`); the `anchored` form on an instant selector is
-    /// the same hard error the interpreter raises. Any other extension shape
-    /// (non-selector child, unknown extension) falls back to the interpreter,
-    /// which raises the canonical "not implemented yet" error.
+    /// Plans a top-level `Expr::Extension` onto the operator path.
+    ///
+    /// The extension is an `anchored` or `smoothed` extended selector. The
+    /// `smoothed` form reuses the interpreter's
+    /// [`Self::eval_smoothed_instant_selector`] kernel verbatim and returns it
+    /// as `Precomputed`. The `anchored` form on an instant selector raises the
+    /// same hard error that the interpreter raises. Any other extension shape,
+    /// such as a non-selector child or an unknown extension, falls back to the
+    /// interpreter, which raises the canonical "not implemented yet" error.
     async fn plan_extension_expr(
         &self,
         tenant: &str,
@@ -230,11 +236,14 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
     }
 
-    /// Plan an `Expr::Call` onto the operator path, dispatching on the function
-    /// kind. `expr` is the same node as `call_expr` (needed by the rate and
-    /// over-time matchers, which inspect the call's range argument). Each arm returns
-    /// `Ok(Some(..))` for a supported shape and `Ok(None)` (interpreter fallback)
-    /// otherwise; any function not recognized here falls back.
+    /// Plans an `Expr::Call` onto the operator path, with a dispatch on the
+    /// function kind.
+    ///
+    /// `expr` is the same node as `call_expr`. The rate and over-time matchers
+    /// need it, because they inspect the call's range argument. Each arm returns
+    /// `Ok(Some(..))` for a supported shape and `Ok(None)` for every other shape,
+    /// which falls back to the interpreter. Any function that this method does
+    /// not recognize also falls back.
     async fn plan_call_expr(
         &self,
         tenant: &str,

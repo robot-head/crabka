@@ -1,9 +1,12 @@
-//! Asserts our JSON framing/body matches bytes captured from Confluent's
-//! `JSONSerializer`. The golden in `testdata/schema_serde/json/order.hex` was
-//! captured against `mirror.gcr.io/confluentinc/cp-schema-registry` (schema id 3) via
-//! `tests/schema-serde-capture/run.sh`. Confluent emits compact JSON
-//! (`{"id":"o-1","total":9.5}`, no spaces, declaration field order) — which
-//! matches `serde_json`'s compact output, so the frames are byte-identical.
+//! Asserts our JSON framing and body match bytes captured from Confluent's
+//! `JSONSerializer`.
+//!
+//! `tests/schema-serde-capture/run.sh` captured the golden in
+//! `testdata/schema_serde/json/order.hex` against
+//! `mirror.gcr.io/confluentinc/cp-schema-registry` with schema id 3. Confluent
+//! emits compact JSON such as `{"id":"o-1","total":9.5}`, with no spaces and in
+//! declaration field order. That output matches `serde_json`'s compact output, so
+//! the frames are byte-identical.
 
 use assert2::check;
 use crabka_schema_serde::{

@@ -1,6 +1,8 @@
-//! Exactly-once (EOS v2 / KIP-447) primitives: the processing-guarantee config,
-//! the transactional-producer I/O seam, and the streams group metadata used by
-//! `send_offsets_to_transaction`. Wired into the runtime in T2/T3.
+//! Exactly-once (EOS v2 / KIP-447) primitives.
+//!
+//! This module holds the processing-guarantee config, the
+//! transactional-producer I/O seam, and the streams group metadata that
+//! `send_offsets_to_transaction` uses. The runtime wires these in at T2/T3.
 
 use async_trait::async_trait;
 
@@ -9,15 +11,16 @@ use crate::error::StreamsClientError;
 /// Delivery guarantee for the runtime (`processing.guarantee`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProcessingGuarantee {
-    /// Produce-then-commit; a crash mid-cycle may replay (the default).
+    /// Produce-then-commit. A crash mid-cycle can cause a replay. This is the default.
     #[default]
     AtLeastOnce,
     /// Transactional: produce + offset-commit atomically (KIP-447).
     ExactlyOnceV2,
 }
 
-/// Streams group metadata for `send_offsets_to_transaction` (maps to the native
-/// `crabka_client_consumer::ConsumerGroupMetadata`).
+/// Streams group metadata for `send_offsets_to_transaction`.
+///
+/// This type maps to the native `crabka_client_consumer::ConsumerGroupMetadata`.
 #[derive(Debug, Clone)]
 pub struct StreamsGroupMeta {
     pub group: String,
@@ -27,9 +30,11 @@ pub struct StreamsGroupMeta {
     pub group_instance: Option<String>,
 }
 
-/// EOS-v2 transactional producer seam (DI'd; `BrokerTransactionalProducer` in
-/// production, `MockTransactionalProducer` for tests). Also impls
-/// `RecordProducer` for `send`.
+/// EOS-v2 transactional producer seam.
+///
+/// The runtime injects the implementation. Production uses
+/// `BrokerTransactionalProducer`, and tests use `MockTransactionalProducer`. An
+/// implementor must also implement `RecordProducer` for `send`.
 #[async_trait]
 pub trait TransactionalProducer: crate::runtime::io::RecordProducer {
     async fn init_transactions(&self) -> Result<(), StreamsClientError>;
@@ -43,8 +48,10 @@ pub trait TransactionalProducer: crate::runtime::io::RecordProducer {
     async fn abort_transaction(&self) -> Result<(), StreamsClientError>;
 }
 
-/// KIP-447 transactional id: stable per (application, thread) so a restart fences
-/// a zombie via the producer-epoch bump in `init_transactions`.
+/// KIP-447 transactional id, stable for each application and thread pair.
+///
+/// A restart fences a zombie with the producer-epoch bump in
+/// `init_transactions`.
 #[must_use]
 pub fn transactional_id(application_id: &str, thread_idx: usize) -> String {
     format!("{application_id}-{thread_idx}")
@@ -70,12 +77,14 @@ pub(crate) mod mock {
         Abort,
     }
 
-    /// Records the call sequence; `fail_at` makes the FIRST time that step is
-    /// reached return an error (drives the abort/rollback tests).
+    /// Records the call sequence.
+    ///
+    /// `fail_at` makes the FIRST call that reaches that step return an error.
+    /// This drives the abort and rollback tests.
     #[derive(Default)]
     pub struct MockTransactionalProducer {
         pub calls: Mutex<Vec<Step>>,
-        /// `(topic, partition, key, value)` of each `send` — a test-only record log.
+        /// `(topic, partition, key, value)` of each `send`. A test-only record log.
         pub sent: Mutex<Vec<SentRecord>>,
         pub fail_at: Mutex<Option<Step>>,
     }

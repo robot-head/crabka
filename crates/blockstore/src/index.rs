@@ -20,12 +20,13 @@ use crate::{
 
 /// Maximum byte size of an index snapshot object accepted by [`Index::load`].
 ///
-/// Snapshots come from shared object storage and (per the threat model) may be
-/// corrupted or maliciously oversized; loading one fully buffers it in memory
-/// before `serde_json` parsing, so an unbounded read could OOM the process. The
-/// object is `head()`ed first and rejected when larger than this cap, mirroring
-/// the `max_decompressed` output cap used by the profiles gunzip path. Defaults
-/// to 256 MiB, comfortably above a realistic single-tenant-fleet index.
+/// Snapshots come from shared object storage and, per the threat model, may be
+/// corrupted or maliciously oversized. A load fully buffers a snapshot in
+/// memory before the `serde_json` parse, so an unbounded read could OOM the
+/// process. The loader `head()`s the object first and rejects it when it is
+/// larger than this cap. This mirrors the `max_decompressed` output cap that
+/// the profiles gunzip path uses. The default is 256 MiB, comfortably above a
+/// realistic single-tenant-fleet index.
 pub const MAX_INDEX_SNAPSHOT_BYTES: ByteSize = mebibytes(256);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,9 +41,9 @@ struct BlockEntry {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct TenantIndex {
     series: BTreeMap<SeriesFingerprint, Labels>,
-    /// `name -> value -> fingerprints`. Structured (rather than an in-band
-    /// `name\0value` key) so arbitrary label bytes — including NUL — can never
-    /// collide distinct `(name, value)` pairs into one bucket.
+    /// `name -> value -> fingerprints`. The map is structured, and not an
+    /// in-band `name\0value` key, so arbitrary label bytes, NUL included, can
+    /// never collide distinct `(name, value)` pairs into one bucket.
     postings: BTreeMap<String, BTreeMap<String, BTreeSet<SeriesFingerprint>>>,
     values: BTreeMap<String, BTreeSet<String>>,
     blocks: Vec<BlockEntry>,
@@ -50,8 +51,8 @@ struct TenantIndex {
 
 /// Multi-tenant in-memory index for label resolution and block pruning.
 ///
-/// This is the metrics/logs (series) index; it is embedded by the profiles and
-/// traces indexes for shared label posting and matcher resolution.
+/// This is the metrics and logs series index. The profiles index and the
+/// traces index embed it for shared label posting and matcher resolution.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Index {
     tenants: BTreeMap<String, TenantIndex>,
@@ -216,8 +217,9 @@ impl Index {
             .unwrap_or_default()
     }
 
-    /// Full label sets for the series matching `matchers` (every series when
-    /// `matchers` is empty).
+    /// Full label sets for the series that match `matchers`. An empty
+    /// `matchers` selects every series.
+    ///
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn series(&self, tenant: &str, matchers: &[LabelMatcher]) -> Result<Vec<Labels>> {
@@ -236,9 +238,10 @@ impl Index {
             .collect())
     }
 
-    /// Resolve matchers to fingerprints, treating an empty matcher set as
-    /// "all fingerprints in the tenant" (unlike [`Index::resolve`], which
-    /// rejects empty matchers).
+    /// Resolves matchers to fingerprints. An empty matcher set means "all
+    /// fingerprints in the tenant". [`Index::resolve`] differs here and
+    /// rejects empty matchers.
+    ///
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn matching_fingerprints(
@@ -255,7 +258,8 @@ impl Index {
         self.resolve(tenant, matchers)
     }
 
-    /// Distinct label names carried by the series matching `matchers`.
+    /// Distinct label names carried by the series that match `matchers`.
+    ///
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn label_names_for(&self, tenant: &str, matchers: &[LabelMatcher]) -> Result<Vec<String>> {
@@ -282,7 +286,8 @@ impl Index {
         names.into_iter().collect()
     }
 
-    /// Distinct values for `name` across the series matching `matchers`.
+    /// Distinct values for `name` across the series that match `matchers`.
+    ///
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn label_values_for(
@@ -317,7 +322,8 @@ impl Index {
         values.into_iter().collect()
     }
 
-    /// Project the series matching `matchers` onto `label_names`.
+    /// Projects the series that match `matchers` onto `label_names`.
+    ///
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn series_projected(
@@ -330,7 +336,7 @@ impl Index {
         Ok(self.series_for_fingerprints(tenant, &fps, label_names))
     }
 
-    /// Project the given fingerprints onto `label_names`.
+    /// Projects the given fingerprints onto `label_names`.
     #[must_use]
     pub fn series_for_fingerprints(
         &self,
@@ -377,8 +383,9 @@ impl Index {
         out.into_iter().collect()
     }
 
-    /// Time + fingerprint pruned candidate block keys (alias of
-    /// [`Self::candidate_blocks`], named for the profile index's call sites).
+    /// Candidate block keys pruned by time and fingerprint. This is an alias
+    /// of [`Self::candidate_blocks`], named for the profile index's call
+    /// sites.
     #[must_use]
     pub fn candidate_blocks_for_series(
         &self,
@@ -390,7 +397,8 @@ impl Index {
         self.candidate_blocks(tenant, fps, min_ts, max_ts)
     }
 
-    /// Tightest `(min, max)` time bounds across blocks overlapping the range.
+    /// Tightest `(min, max)` time bounds across the blocks that overlap the
+    /// range.
     #[must_use]
     pub fn block_time_bounds(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Option<(i64, i64)> {
         let tenant_index = self.tenants.get(tenant)?;
@@ -404,7 +412,8 @@ impl Index {
             })
     }
 
-    /// Replace the `remove_keys` blocks with `add` (compaction swap).
+    /// Replaces the `remove_keys` blocks with `add`. This is the compaction
+    /// swap.
     pub fn replace_blocks(&mut self, tenant: &str, remove_keys: &[String], add: &[BlockMeta]) {
         let tenant_index = self.tenants.entry(tenant.to_string()).or_default();
         let remove_keys = remove_keys.iter().collect::<BTreeSet<_>>();
@@ -449,8 +458,8 @@ impl Index {
             .map_or(0, |tenant_index| tenant_index.blocks.len())
     }
 
-    /// Object keys of blocks overlapping `[min_ts, max_ts]`, ignoring
-    /// fingerprints.
+    /// Object keys of the blocks that overlap `[min_ts, max_ts]`. The
+    /// fingerprints do not matter.
     #[must_use]
     pub fn blocks_in_range(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Vec<String> {
         let Some(tenant_index) = self.tenants.get(tenant) else {
@@ -464,7 +473,7 @@ impl Index {
             .collect()
     }
 
-    /// Persist the index as a JSON snapshot to object storage.
+    /// Persists the index as a JSON snapshot to object storage.
     #[instrument(
         skip_all,
         fields(object_key = %object_key, len = tracing::field::Empty),
@@ -480,11 +489,12 @@ impl Index {
         Ok(())
     }
 
-    /// Load an index JSON snapshot from object storage.
+    /// Loads an index JSON snapshot from object storage.
     ///
-    /// The object is `head()`ed first and rejected when larger than
-    /// [`MAX_INDEX_SNAPSHOT_BYTES`], so a corrupt or oversized snapshot from
-    /// shared storage cannot OOM the process during the buffered read.
+    /// The loader `head()`s the object first and rejects it when it is larger
+    /// than [`MAX_INDEX_SNAPSHOT_BYTES`], so a corrupt or oversized snapshot
+    /// from shared storage cannot OOM the process during the buffered read.
+    ///
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load(store: &Arc<dyn ObjectStore>, object_key: &str) -> Result<Self> {
@@ -684,9 +694,10 @@ fn anchored_regex(pattern: &str) -> String {
     format!("^(?:{pattern})$")
 }
 
-/// Whether `matcher` matches a series for which the label is absent (i.e. the
-/// matcher matches the empty string), following Prometheus `Matcher.Matches("")`
-/// semantics. A selector built entirely from such matchers restricts nothing.
+/// Whether `matcher` matches a series for which the label is absent, that is
+/// whether the matcher matches the empty string. This follows Prometheus
+/// `Matcher.Matches("")` semantics. A selector built entirely from such
+/// matchers restricts nothing.
 fn matcher_matches_empty(matcher: &LabelMatcher) -> Result<bool> {
     match matcher.op {
         MatchOp::Eq => Ok(matcher.value.is_empty()),

@@ -16,24 +16,24 @@ pub enum SchemaSerdeError {
     #[error("registry response decode failed: {0}")]
     RegistryDecode(String),
 
-    /// The Confluent wire frame was malformed (bad magic, truncated id).
+    /// The Confluent wire frame was malformed: bad magic, or a truncated id.
     #[error("malformed wire frame: {0}")]
     Wire(String),
 
-    /// Encoding a value to its format-specific body failed.
+    /// The serde could not encode a value to its format-specific body.
     #[error("serialize error: {0}")]
     Serialize(String),
 
-    /// Decoding a format-specific body into the target type failed.
+    /// The serde could not decode a format-specific body into the target type.
     #[error("deserialize error: {0}")]
     Deserialize(String),
 
-    /// Could not build/normalize the schema for a type.
+    /// The serde could not build or normalize the schema for a type.
     #[error("schema error: {0}")]
     Schema(String),
 
-    /// The writer schema for a seen id is not cached yet; a background fetch was
-    /// started. Retriable: re-deliver the record shortly.
+    /// The writer schema for a seen id is not cached yet, and the cache started
+    /// a background fetch. This error is retriable: re-deliver the record soon.
     #[error("writer schema for id {0} pending fetch")]
     WriterSchemaPending(u32),
 

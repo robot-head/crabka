@@ -1,8 +1,10 @@
-//! `AddOffsetsToTxn` (`api_key=25`). Registers a consumer-group's offset
-//! commit topic with an ongoing transaction so the broker knows to write
-//! `__consumer_offsets` markers when the transaction is finalised.
+//! `AddOffsetsToTxn` (`api_key=25`).
 //!
-//! Wire format: v0-2 non-flexible, v3-4 flexible (tagged fields).
+//! This handler registers a consumer-group's offset commit topic with an
+//! ongoing transaction. The broker then knows to write `__consumer_offsets`
+//! markers when it finalises the transaction.
+//!
+//! Wire format: v0-2 non-flexible, v3-4 flexible with tagged fields.
 //! Request fields: `transactional_id`, `producer_id`, `producer_epoch`, `group_id`.
 //! Response fields: `throttle_time_ms`, `error_code`.
 

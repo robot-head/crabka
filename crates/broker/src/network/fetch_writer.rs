@@ -1,33 +1,35 @@
 //! Zero-copy fetch response writer (Increments C + D).
 //!
-//! The generic dispatch loop writes every response via
+//! The generic dispatch loop writes every response with
 //! `Framed<S, LengthDelimitedCodec>::send`, which copies the whole body into
-//! the codec's write buffer (and the body itself was already copied once by
-//! `encode_response` to prepend the correlation header). For a 100 KB+ fetch
-//! that is hundreds of KB of avoidable `memcpy` per request.
+//! the codec's write buffer. `encode_response` already copied that body once
+//! to prepend the correlation header. For a 100 KB+ fetch that is hundreds of
+//! KB of avoidable `memcpy` per request.
 //!
 //! This module replaces that path **for Fetch responses only** with an ordered
 //! [`WriteOp`] plan:
 //!
-//! * **Increment C (portable, TLS-safe):** the response header + envelope
-//!   metadata are written inline from userspace, and each partition's records
-//!   region is handed to the socket as its own segment via a vectored
-//!   `write_all` — without copying the records bytes through the codec.
+//! * **Increment C (portable, TLS-safe):** the writer writes the response
+//!   header and the envelope metadata inline from userspace, and hands each
+//!   partition's records region to the socket as its own segment with a
+//!   vectored `write_all`. It does not copy the records bytes through the
+//!   codec.
 //! * **Increment D (Linux plaintext only):** for large records runs on a
 //!   plaintext `TcpStream`, the records region becomes a [`WriteOp::File`]
-//!   backed by the segment `.log` fd and drained by the kernel `sendfile(2)`
-//!   zero-copy path (page cache → NIC, never userspace). On TLS / non-Linux /
-//!   small runs it falls back to C's vectored/`pread` path, producing
-//!   byte-identical wire bytes.
+//!   backed by the segment `.log` fd. The kernel `sendfile(2)` zero-copy path
+//!   drains it from the page cache to the NIC and never through userspace. On
+//!   TLS, on non-Linux, and for small runs, the writer falls back to the
+//!   vectored/`pread` path of Increment C. The wire bytes are identical.
 //!
 //! ## Framing
 //!
 //! Kafka frames every response with a 4-byte big-endian length prefix. The
-//! length is **not** part of any records/file bytes, so the writer computes it
-//! up front from the exact body length (`correlation header + Σ op lengths`)
-//! and writes it from userspace before draining the ops. The body length is
-//! known exactly without materializing the body: the records/file ops carry
-//! their own length, and the inline ops are already-built `Bytes`.
+//! length is **not** part of any records or file bytes, so the writer computes
+//! it up front from the exact body length (`correlation header + Σ op
+//! lengths`) and writes it from userspace before it drains the ops. The writer
+//! knows the exact body length without materializing the body: the records and
+//! file ops carry their own length, and the inline ops are already-built
+//! `Bytes`.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_protocol::{
@@ -53,13 +55,14 @@ use crate::{
 /// One ordered segment of the fetch response wire frame.
 #[derive(Debug)]
 pub enum WriteOp {
-    /// Userspace bytes: the length prefix + correlation header, partition
-    /// metadata, records length prefixes, tagged-field trailers, and — on the
-    /// vectored (Increment C) path — the resolved records bytes.
+    /// Userspace bytes: the length prefix and correlation header, partition
+    /// metadata, records length prefixes, and tagged-field trailers. On the
+    /// vectored path of Increment C it also holds the resolved records bytes.
     Inline(Bytes),
     /// A records region backed by a segment `.log` file (Increments D + E).
-    /// Drained by `sendfile(2)` on a plaintext `TcpStream` (Linux + Apple +
-    /// FreeBSD/DragonFly), else a buffered `pread` + `write_all` fallback.
+    /// `sendfile(2)` drains it on a plaintext `TcpStream` (Linux + Apple +
+    /// FreeBSD/DragonFly). Every other stream uses a buffered `pread` +
+    /// `write_all` fallback.
     #[cfg(any(
         target_os = "linux",
         target_os = "macos",
@@ -73,8 +76,8 @@ pub enum WriteOp {
 }
 
 impl WriteOp {
-    /// Byte length this op contributes to the frame body. Used by the
-    /// frame-length accounting in tests.
+    /// Byte length this op contributes to the frame body. The frame-length
+    /// accounting in tests uses it.
     #[must_use]
     #[cfg(test)]
     pub fn len(&self) -> usize {
@@ -300,20 +303,20 @@ fn flush_fetch_inline(buf: &mut BytesMut, ops: &mut Vec<FetchWriteOp>) {
     ops.push(FetchWriteOp::Inline(buf.split().freeze()));
 }
 
-/// Build the ordered [`WriteOp`] plan for a v4+ fetch response, including the
-/// leading frame-length prefix + correlation header as the first inline op.
+/// Build the ordered [`WriteOp`] plan for a v4+ fetch response. The first
+/// inline op holds the leading frame-length prefix and the correlation header.
 ///
 /// Byte-exactness: the concatenation of every op's bytes equals exactly what
 /// `encode_response(api_key=1, correlation_id, body_flexible,
 /// &encode_fetch_response(resp))` would produce, because:
 ///   * the frame length == 4-byte big-endian `u32` of `(header_len + body_len)`,
-///   * the header == `correlation_id` (+ an empty tagged byte iff `body_flexible`),
+///   * the header == `correlation_id`, plus an empty tagged byte iff `body_flexible`,
 ///   * the body ops come straight from [`FetchResponse::write_plan`], whose
-///     concatenation is byte-identical to `FetchResponse::encode` (proven by
-///     the protocol-crate golden tests).
+///     concatenation is byte-identical to `FetchResponse::encode`. The
+///     protocol-crate golden tests prove that.
 ///
-/// `resolve_records` decides how each records segment is emitted — for the
-/// portable C path see [`resolve_records_inline`]; Increment D supplies a
+/// `resolve_records` decides how the writer emits each records segment. For
+/// the portable C path see [`resolve_records_inline`]. Increment D supplies a
 /// resolver that emits `WriteOp::File` on Linux plaintext.
 pub fn build_fetch_plan<F>(
     resp: &FetchResponse,
@@ -364,11 +367,12 @@ where
 }
 
 /// Portable (Increment C) records resolver: emit the records payload as a
-/// single inline segment. For `RecordsPayload::Raw` this hands the verbatim
-/// `.log` `Bytes` to the socket directly (a refcounted view — no copy of the
-/// records bytes). For parsed/legacy payloads it encodes them into a fresh
-/// buffer (the rare non-passthrough path). For a `FileRegions` payload (the
-/// TLS / non-Linux fallback) it `pread`s the regions into one buffer.
+/// single inline segment. For `RecordsPayload::Raw` this function hands the
+/// verbatim `.log` `Bytes` to the socket directly. That is a refcounted view
+/// and copies no records bytes. For parsed and legacy payloads it encodes them
+/// into a fresh buffer, which is the rare non-passthrough path. For a
+/// `FileRegions` payload, the TLS and non-Linux fallback, it `pread`s the
+/// regions into one buffer.
 pub fn resolve_records_inline(payload: &RecordsPayload) -> Result<Vec<WriteOp>, BrokerError> {
     let bytes = match payload {
         // `Raw`/`Legacy` are already verbatim wire bytes — share the `Bytes`.
@@ -405,11 +409,12 @@ pub fn resolve_records_inline(payload: &RecordsPayload) -> Result<Vec<WriteOp>, 
 
 crate::sendfile_cfg! {
     /// Plaintext-sendfile (Increments D + E) records resolver: emit each
-    /// `FileRegion` of a `FileRegions` payload as its own [`WriteOp::File`] (one
-    /// per contributing segment) for the kernel `sendfile` drain. Every other
-    /// payload kind (and a `FileRegions` payload that somehow arrives here on a
-    /// non-sendfile path) defers to [`resolve_records_inline`]. Compiled on the
-    /// SENDFILE alias (Linux + Apple + FreeBSD/DragonFly).
+    /// `FileRegion` of a `FileRegions` payload as its own [`WriteOp::File`],
+    /// one per contributing segment, for the kernel `sendfile` drain. Every
+    /// other payload kind defers to [`resolve_records_inline`], as does a
+    /// `FileRegions` payload that arrives here on a non-sendfile path. This
+    /// function compiles on the SENDFILE alias (Linux + Apple +
+    /// FreeBSD/DragonFly).
     pub fn resolve_records_sendfile(payload: &RecordsPayload) -> Result<Vec<WriteOp>, BrokerError> {
         match payload {
             RecordsPayload::FileRegions(regions) => {
@@ -420,18 +425,19 @@ crate::sendfile_cfg! {
     }
 }
 
-/// A byte sink that can additionally drain a segment-file-backed records region
-/// with the most efficient mechanism available to it.
+/// A byte sink that can also drain a segment-file-backed records region with
+/// the most efficient mechanism available to it.
 ///
-/// On a SENDFILE-alias platform (Linux + Apple + FreeBSD/DragonFly) a plaintext
-/// `TcpStream` exposes its underlying socket for the readiness-driven `sendfile`
-/// loop; every other stream (TLS — which encrypts in userspace) returns `None`,
-/// and the drainer falls back to a buffered `pread` + `write_all` that produces
-/// identical wire bytes. On Windows (no safe `sendfile`/`TransmitFile`) the
+/// On a SENDFILE-alias platform (Linux + Apple + FreeBSD/DragonFly) a
+/// plaintext `TcpStream` exposes its underlying socket for the
+/// readiness-driven `sendfile` loop. Every other stream returns `None`,
+/// including TLS, which encrypts in userspace. The drainer then falls back to
+/// a buffered `pread` + `write_all` that produces identical wire bytes.
+/// Windows has no safe `sendfile` or `TransmitFile`, so the
 /// `tcp_for_sendfile` method is compiled out and sendfile is never used.
 pub trait SendfileSink {
-    /// `true` when this stream can serve a records region via kernel
-    /// `sendfile(2)` — i.e. a plaintext `TcpStream` on a SENDFILE-alias
+    /// `true` when this stream can serve a records region with the kernel
+    /// `sendfile(2)`, that is, a plaintext `TcpStream` on a SENDFILE-alias
     /// platform. Always `false` on TLS and on Windows. The fetch handler uses
     /// this to decide whether to emit `RecordsPayload::FileRegions` at all.
     fn is_sendfile_capable(&self) -> bool;
@@ -440,7 +446,7 @@ pub trait SendfileSink {
         /// Borrow the underlying `TcpStream` for readiness-driven `sendfile`,
         /// when this stream *is* a plaintext `TcpStream`. `None` for TLS.
         /// Present only on SENDFILE-alias platforms (Linux + Apple +
-        /// FreeBSD/DragonFly); Windows has no compatible safe `sendfile`.
+        /// FreeBSD/DragonFly). Windows has no compatible safe `sendfile`.
         fn tcp_for_sendfile(&self) -> Option<&tokio::net::TcpStream>;
     }
 }
@@ -498,12 +504,12 @@ impl SendfileSink for ktls::KtlsStream<tokio::net::TcpStream> {
     }
 }
 
-/// Drain a fetch write-plan to `stream`, writing each op in order, then flush.
+/// Drain a fetch write-plan to `stream`, write each op in order, then flush.
 ///
-/// The caller MUST have flushed any pending `Framed` codec output first so the
-/// bytes do not interleave with the codec's write buffer. Inline ops use
-/// `write_all`; file ops use `sendfile` when the stream is a Linux plaintext
-/// `TcpStream`, else a buffered `pread` + `write_all` fallback.
+/// The caller MUST have flushed any pending `Framed` codec output first, so
+/// the bytes do not interleave with the codec's write buffer. Inline ops use
+/// `write_all`. File ops use `sendfile` when the stream is a Linux plaintext
+/// `TcpStream`, and a buffered `pread` + `write_all` fallback otherwise.
 pub async fn write_fetch_plan<S>(stream: &mut S, ops: Vec<WriteOp>) -> Result<(), BrokerError>
 where
     S: AsyncWrite + SendfileSink + Unpin,
@@ -532,10 +538,10 @@ where
 }
 
 crate::sendfile_cfg! {
-    /// Positioned, full read of a `FileRegion` into `dst` (which must be exactly
-    /// `region.len` bytes), looping over short reads. The TLS/non-sendfile
-    /// fallback for `WriteOp::File`. `read_at` (`FileExt`) is portable across
-    /// every SENDFILE-alias unix.
+    /// Positioned, full read of a `FileRegion` into `dst`, in a loop over
+    /// short reads. `dst` must be exactly `region.len` bytes. This is the TLS
+    /// and non-sendfile fallback for `WriteOp::File`. `read_at` (`FileExt`) is
+    /// portable across every SENDFILE-alias unix.
     fn read_region_exact(
         region: &crabka_protocol::records::FileRegion,
         dst: &mut [u8],
@@ -563,10 +569,10 @@ crate::sendfile_cfg! {
         Ok(())
     }
 
-    /// Drain one `FileRegion` to the socket. Uses kernel `sendfile(2)` when the
-    /// stream is a plaintext `TcpStream` on a SENDFILE-alias platform; otherwise
-    /// (TLS) falls back to a buffered `pread` + `write_all` producing identical
-    /// wire bytes.
+    /// Drain one `FileRegion` to the socket. This method uses the kernel
+    /// `sendfile(2)` when the stream is a plaintext `TcpStream` on a
+    /// SENDFILE-alias platform. On TLS it falls back to a buffered `pread` +
+    /// `write_all` that produces identical wire bytes.
     async fn drain_file_region<S>(
         stream: &mut S,
         region: &crabka_protocol::records::FileRegion,
@@ -592,20 +598,22 @@ crate::sendfile_cfg! {
 }
 
 crate::sendfile_cfg! {
-    /// `sendfile(2)` a `FileRegion` to a plaintext `TcpStream`, looping over
+    /// `sendfile(2)` a `FileRegion` to a plaintext `TcpStream`, in a loop over
     /// partial writes and `EAGAIN`.
     ///
-    /// The readiness loop is **shared** across every SENDFILE-alias platform:
-    /// the socket is non-blocking under tokio, so on a full socket buffer the
-    /// syscall reports `EAGAIN`/`WouldBlock`; we `await tcp.writable()` and
-    /// retry. `TcpStream::try_io` clears the readiness flag correctly on
-    /// `WouldBlock` — no `spawn_blocking`, no second `AsyncFd` over the fd.
+    /// Every SENDFILE-alias platform **shares** the readiness loop. The socket
+    /// is non-blocking under tokio, so on a full socket buffer the syscall
+    /// reports `EAGAIN`/`WouldBlock`. The loop then awaits `tcp.writable()`
+    /// and retries. `TcpStream::try_io` clears the readiness flag correctly on
+    /// `WouldBlock`, so this needs no `spawn_blocking` and no second `AsyncFd`
+    /// over the fd.
     ///
-    /// We track our own `sent_total` cursor and compute the absolute file offset
-    /// for each attempt as `region.offset + sent_total`, so the file's own cursor
-    /// is never touched and concurrent reads of the same `Arc<File>` are
-    /// unaffected. Only the single per-OS syscall attempt ([`sendfile_once`]) is
-    /// cfg-selected; everything around it is identical on Linux and Apple/BSD.
+    /// This method tracks its own `sent_total` cursor and computes the
+    /// absolute file offset for each attempt as `region.offset + sent_total`.
+    /// It never touches the file's own cursor, and concurrent reads of the
+    /// same `Arc<File>` stay unaffected. Only the single per-OS syscall
+    /// attempt ([`sendfile_once`]) is cfg-selected. Everything around it is
+    /// identical on Linux and on Apple/BSD.
     async fn sendfile_region(
         tcp: &tokio::net::TcpStream,
         region: &crabka_protocol::records::FileRegion,
@@ -655,15 +663,16 @@ crate::sendfile_cfg! {
     }
 }
 
-/// One non-blocking `sendfile(2)` attempt, returning the bytes transferred this
-/// call. A true would-block (zero forward progress) surfaces as
-/// `ErrorKind::WouldBlock` so the shared readiness loop re-arms; any positive
-/// transfer returns `Ok(n)` even if the kernel also signalled `EAGAIN`.
+/// One non-blocking `sendfile(2)` attempt. It returns the bytes transferred on
+/// this call. A true would-block, with zero forward progress, surfaces as
+/// `ErrorKind::WouldBlock` so the shared readiness loop re-arms. Any positive
+/// transfer returns `Ok(n)`, even when the kernel also signalled `EAGAIN`.
 ///
 /// **Linux** (`rustix`): `sendfile(out, in, Some(&mut offset), count)` returns
-/// the count and mutates `offset` in place. On `EAGAIN` it returns `Err`; the
-/// kernel does not report a partial count via `errno`, so `Err(EAGAIN)` always
-/// means zero bytes this call — we map it straight to `WouldBlock`.
+/// the count and mutates `offset` in place. On `EAGAIN` it returns `Err`. The
+/// kernel does not report a partial count in `errno`, so `Err(EAGAIN)` always
+/// means zero bytes on this call. This function maps it straight to
+/// `WouldBlock`.
 #[cfg(target_os = "linux")]
 fn sendfile_once(
     out_fd: std::os::fd::BorrowedFd<'_>,
@@ -676,24 +685,25 @@ fn sendfile_once(
 }
 
 /// **Apple / FreeBSD / `DragonFly`** (`nix`): the BSD-family `sendfile` returns
-/// `(nix::Result<()>, off_t)` where the `off_t` is the bytes transferred this
-/// call — **valid even on `Err(EAGAIN)`**. This is the correctness landmine: on
-/// these platforms `EAGAIN` with `n > 0` is *forward progress*, not would-block.
-/// We therefore:
+/// `(nix::Result<()>, off_t)`, where the `off_t` is the bytes transferred on
+/// this call. That count is **valid even on `Err(EAGAIN)`**. This is the
+/// correctness landmine: on these platforms `EAGAIN` with `n > 0` is *forward
+/// progress*, not would-block. So this function does the following:
 ///
-/// * `Ok(())` → return `Ok(n)` (fully or partially sent; the loop advances by
-///   `n`).
-/// * `Err(EAGAIN)` with `n>0` → return `Ok(n)` (count the progress, the loop
-///   advances and re-arms readiness for the rest).
-/// * `Err(EAGAIN)` with `n==0` → return `Err(WouldBlock)` (a real would-block).
+/// * `Ok(())` → return `Ok(n)`. The send was full or partial, and the loop
+///   advances by `n`.
+/// * `Err(EAGAIN)` with `n>0` → return `Ok(n)`. This counts the progress, and
+///   the loop advances and re-arms readiness for the rest.
+/// * `Err(EAGAIN)` with `n==0` → return `Err(WouldBlock)`, a real would-block.
 /// * any other `Err` → propagate as a hard I/O error.
 ///
-/// `count` is always `Some(region_remaining)` (never `None`/0 = "to EOF"), so we
-/// never overshoot into the next batch. Header/trailer `hdtr` slices are `None`:
-/// our frame metadata is a separate `WriteOp::Inline`, exactly as on Linux.
+/// `count` is always `Some(region_remaining)` and never `None` or 0, which
+/// would mean "to EOF", so this function never overshoots into the next batch.
+/// The header and trailer `hdtr` slices are `None`, because the frame metadata
+/// is a separate `WriteOp::Inline`, exactly as on Linux.
 ///
-/// NOTE: this arm is compile-reasoned only — it is not built or run on the
-/// Windows/WSL toolchains used here. It needs a macOS / FreeBSD CI runner to
+/// NOTE: this arm is compile-reasoned only. The Windows/WSL toolchains used
+/// here do not build or run it. It needs a macOS or FreeBSD CI runner to
 /// verify the syscall semantics and the byte-exact wire output.
 #[cfg(any(
     target_os = "macos",
@@ -746,11 +756,12 @@ fn sendfile_once(
 }
 
 /// Platform shim over the per-OS BSD-family `nix::sys::sendfile::sendfile`
-/// signatures (macOS uses `Option<off_t>` for `count` and no flags; FreeBSD
-/// additionally takes `SfFlags` + a readahead hint; `DragonFly` takes neither
-/// but uses `Option<usize>`). Returns `(nix::Result<()>, off_t bytes_sent)`.
+/// signatures. macOS uses `Option<off_t>` for `count` and no flags. FreeBSD
+/// also takes `SfFlags` and a readahead hint. `DragonFly` takes neither, but
+/// uses `Option<usize>`. Returns `(nix::Result<()>, off_t bytes_sent)`.
 ///
-/// Compile-reasoned only (no macOS/BSD toolchain here); needs CI verification.
+/// Compile-reasoned only, because there is no macOS or BSD toolchain here. It
+/// needs CI verification.
 #[cfg(any(
     target_os = "macos",
     target_os = "ios",
@@ -826,10 +837,10 @@ mod tests {
         buf.freeze()
     }
 
-    /// Extract the bytes of an `Inline` op (panics on a `File` op). Avoids a
-    /// `match`/`let-else` that is infallible on Windows (one variant) but
-    /// refutable on SENDFILE-alias platforms (two variants), keeping clippy happy
-    /// on both.
+    /// Extract the bytes of an `Inline` op. It panics on a `File` op. This
+    /// avoids a `match`/`let-else` that is infallible on Windows, with one
+    /// variant, but refutable on SENDFILE-alias platforms, with two variants.
+    /// Clippy stays happy on both.
     fn inline_bytes(op: &WriteOp) -> &Bytes {
         match op {
             WriteOp::Inline(b) => b,
@@ -884,10 +895,11 @@ mod tests {
         }
     }
 
-    /// The broker-level golden test: the full framed bytes produced by
-    /// `build_fetch_plan` (length prefix + correlation header + body) must
-    /// equal the bytes the old `encode_response(encode_fetch_response(..))`
-    /// path produced, for both non-flexible and flexible versions.
+    /// The broker-level golden test: the full framed bytes that
+    /// `build_fetch_plan` produces, which are the length prefix, the
+    /// correlation header, and the body, must equal the bytes from the
+    /// `encode_response(encode_fetch_response(..))` path, for both
+    /// non-flexible and flexible versions.
     #[test]
     fn build_fetch_plan_matches_legacy_encode_path() {
         for version in [4i16, 7, 11, 12, 13, 16, 18] {
@@ -1027,7 +1039,8 @@ mod tests {
         use super::*;
 
         /// Write `bytes` to a temp file and return a single-region
-        /// `RecordsPayload::FileRegions` describing the whole file (offset 0).
+        /// `RecordsPayload::FileRegions` that covers the whole file from
+        /// offset 0.
         fn file_payload(bytes: &[u8]) -> (tempfile::NamedTempFile, RecordsPayload) {
             let mut tf = tempfile::NamedTempFile::new().unwrap();
             tf.write_all(bytes).unwrap();
@@ -1041,11 +1054,11 @@ mod tests {
             (tf, payload)
         }
 
-        /// The Increment-D wire invariant: a `FileRegions` payload run through
-        /// the sendfile resolver produces the SAME framed wire bytes as the
-        /// equivalent `Raw` payload through the inline resolver — only the op
-        /// kinds differ (File vs Inline). The records bytes the broker emits are
-        /// identical whether sendfile'd or copied.
+        /// The Increment-D wire invariant: a `FileRegions` payload through the
+        /// sendfile resolver produces the SAME framed wire bytes as the
+        /// equivalent `Raw` payload through the inline resolver. Only the op
+        /// kinds differ, File against Inline. The records bytes the broker
+        /// emits are identical for both the sendfile path and the copy path.
         #[test]
         fn sendfile_plan_wire_bytes_equal_raw_plan() {
             for version in [4i16, 11, 12, 18] {
@@ -1116,9 +1129,9 @@ mod tests {
             }
         }
 
-        /// Resolve a plan to bytes, reading File ops out of their backing file
-        /// (mirrors what the sendfile drain transmits / the TLS pread fallback
-        /// copies).
+        /// Resolve a plan to bytes and read File ops out of their backing
+        /// file. This mirrors what the sendfile drain transmits and what the
+        /// TLS pread fallback copies.
         fn resolve_ops_to_bytes(ops: &[WriteOp]) -> Vec<u8> {
             use std::os::unix::fs::FileExt;
             let mut out = Vec::new();
@@ -1162,9 +1175,9 @@ mod tests {
             assert_eq!(&b[..], &records[..]);
         }
 
-        /// End-to-end `sendfile` over a real loopback TCP socket: the bytes the
-        /// client reads must equal the file region. Drives the readiness +
-        /// partial-write loop in `write_fetch_plan` for real.
+        /// End-to-end `sendfile` over a real loopback TCP socket: the bytes
+        /// the client reads must equal the file region. The test drives the
+        /// real readiness and partial-write loop in `write_fetch_plan`.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn sendfile_roundtrip_over_tcp_is_byte_exact() {
             use tokio::{
@@ -1209,14 +1222,15 @@ mod tests {
         /// Increment F end-to-end: `sendfile(2)` a `FileRegions` payload onto a
         /// `ktls::KtlsStream` (kernel-offloaded TLS) and assert the bytes a
         /// rustls TLS *client* decrypts are byte-identical to the file region.
-        /// This proves the kTLS path is wire-compatible: the kernel encrypts the
-        /// same plaintext the userspace rustls path would have, so the client
-        /// sees the same plaintext after decryption.
+        /// This proves that the kTLS path is wire-compatible: the kernel
+        /// encrypts the same plaintext the userspace rustls path would have,
+        /// so the client sees the same plaintext after decryption.
         ///
-        /// Skips (does not fail) when the host kernel lacks kTLS support — the
-        /// `tls` module isn't loaded / `CONFIG_TLS` absent. The startup probe
-        /// gates this exact condition in production, so a skip here mirrors the
-        /// fallback path being taken.
+        /// The test skips, and does not fail, when the host kernel has no
+        /// kTLS support, that is, when the `tls` module is not loaded or
+        /// `CONFIG_TLS` is absent. The startup probe gates this exact
+        /// condition in production, so a skip here mirrors a run of the
+        /// fallback path.
         ///
         /// Linux-only: `ktls` is a Linux-only dependency, so this test is not
         /// compiled on the Apple/BSD members of the SENDFILE alias.

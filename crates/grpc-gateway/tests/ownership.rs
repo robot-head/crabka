@@ -1,7 +1,10 @@
-//! Two ownership consumers in one group split the dedup-topic partitions, so a
-//! keyed produce is served only by the OWNING replica; the non-owner returns a
-//! retriable Unavailable. Timing-sensitive (group join/rebalance) — generous
-//! waits; the repo has prior consumer-group test-flake history.
+//! Two ownership consumers in one group split the dedup-topic partitions, so
+//! only the OWNING replica serves a keyed produce. The non-owner returns a
+//! retriable Unavailable.
+//!
+//! These tests are timing-sensitive, because of the group join and rebalance,
+//! so the waits are generous. The repo has a history of consumer-group test
+//! flakes.
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 

@@ -17,7 +17,8 @@ use crate::metricsgen::{
     sink::{RemoteWriteSink, SinkError, SpanSource},
 };
 
-/// Wires the source, processors, sink, and clock for the metrics-generator role.
+/// Wires the source, the processors, the sink, and the clock for the
+/// metrics-generator role.
 pub struct MetricsGenService<Src, Snk>
 where
     Src: SpanSource,
@@ -252,7 +253,8 @@ where
 
     /// # Errors
     ///
-    /// Returns an invalid-input error when the collection interval is not positive.
+    /// Returns an invalid-input error when the collection interval is not
+    /// positive.
     pub async fn run(self, shutdown: CancellationToken) -> std::io::Result<()> {
         if self.cfg.collection_interval <= Time::ZERO {
             return Err(std::io::Error::new(

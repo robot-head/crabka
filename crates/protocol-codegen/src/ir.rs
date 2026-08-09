@@ -19,9 +19,9 @@ pub struct MessageSpec {
     pub fields: Vec<FieldSpec>,
     #[serde(default)]
     pub common_structs: Vec<CommonStruct>,
-    /// crabka-internal RPC with no upstream Apache Kafka equivalent (e.g.
-    /// the KIP-966 `GetReplicaLogInfo` controller↔broker RPC). Such messages
-    /// are excluded from the JVM differential sweep — the oracle has no
+    /// crabka-internal RPC with no upstream Apache Kafka equivalent, for
+    /// example the KIP-966 `GetReplicaLogInfo` controller↔broker RPC. The JVM
+    /// differential sweep excludes such messages, because the oracle has no
     /// matching message class and crabka owns their wire shape outright.
     #[serde(default)]
     pub internal: bool,
@@ -59,9 +59,10 @@ pub struct FieldSpec {
     pub map_key: bool,
     #[serde(default)]
     pub about: String,
-    /// Per-field flexible-version override. `Some(FlexibleVersions::None)` means this
-    /// field always uses legacy (non-compact) encoding even in a flexible-version message.
-    /// `None` means "inherit from the message-level `flexible_versions`" (the common case).
+    /// Per-field flexible-version override. `Some(FlexibleVersions::None)`
+    /// means this field always uses legacy (non-compact) encoding, even in a
+    /// flexible-version message. `None` means the field inherits from the
+    /// message-level `flexible_versions`, which is the common case.
     #[serde(default)]
     pub flexible_versions: Option<FlexibleVersions>,
 }
@@ -169,7 +170,8 @@ pub enum IrError {
     },
 }
 
-/// Read every `*.json` file in `dir`, strip `//` comments, parse as `MessageSpec`.
+/// Read every `*.json` file in `dir`, strip `//` comments, and parse each file
+/// as a `MessageSpec`.
 /// # Errors
 /// Returns an error when the schema model is invalid or generated Rust cannot be formatted or written.
 pub fn load_dir(dir: &Path) -> Result<Vec<MessageSpec>, IrError> {
@@ -192,8 +194,9 @@ pub fn load_dir(dir: &Path) -> Result<Vec<MessageSpec>, IrError> {
     Ok(out)
 }
 
-/// Strip JavaScript-style `//` line comments, ignoring `//` that appears inside
-/// a double-quoted JSON string (so string values like URLs survive intact).
+/// Strip JavaScript-style `//` line comments. This function ignores `//` that
+/// appears inside a double-quoted JSON string, so string values such as URLs
+/// survive intact.
 fn strip_line_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     for line in src.lines() {

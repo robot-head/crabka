@@ -3,18 +3,19 @@ use thiserror::Error;
 
 use crate::SaslMechanism;
 
-/// How a [`Principal`] was authenticated. A strict superset of
-/// [`SaslMechanism`] that also covers mTLS client-cert authentication
-/// and the implicit ANONYMOUS path on PLAINTEXT / SSL-no-mTLS
-/// listeners.
+/// How a [`Principal`] was authenticated.
 ///
-/// Kept distinct from `SaslMechanism` because the latter has a
-/// `from_wire`/`wire_name` contract and is stored verbatim in
-/// `V1ScramCredential` metadata records — neither applies to mTLS.
+/// This is a strict superset of [`SaslMechanism`]. It also covers mTLS
+/// client-cert authentication and the implicit ANONYMOUS path on PLAINTEXT and
+/// SSL-no-mTLS listeners.
+///
+/// This enum stays distinct from `SaslMechanism`, because `SaslMechanism` has a
+/// `from_wire`/`wire_name` contract and the broker stores it verbatim in
+/// `V1ScramCredential` metadata records. Neither applies to mTLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AuthMethod {
-    /// Anonymous (no SASL, no mTLS). Used for PLAINTEXT listeners and
-    /// for SSL listeners where the client did not present a cert.
+    /// Anonymous, with no SASL and no mTLS. This covers PLAINTEXT listeners and
+    /// SSL listeners where the client did not present a cert.
     Anonymous,
     /// SASL/PLAIN.
     SaslPlain,
@@ -49,19 +50,22 @@ impl AuthMethod {
 pub struct Principal {
     pub name: String,
     pub auth_method: AuthMethod,
-    /// OAuth-derived group memberships from the listener's
-    /// `groupsClaim`. Empty vec for non-OAuth principals (PLAIN/SCRAM/
-    /// mTLS/anonymous) and for OAuth principals whose listener has no
-    /// `groupsClaim` configured. No broker-side authorizer reads this
-    /// yet; populated as scaffolding + for observability.
+    /// OAuth-derived group memberships from the listener's `groupsClaim`.
+    ///
+    /// The vec is empty for non-OAuth principals, which are PLAIN, SCRAM, mTLS,
+    /// and anonymous. It is also empty for OAuth principals whose listener has
+    /// no `groupsClaim` configured. No broker-side authorizer reads this field
+    /// yet. The broker fills it as scaffolding and for observability.
     pub groups: Vec<String>,
 }
 
 impl Principal {
     /// Project a runtime session [`Principal`] onto the Kafka wire-level
-    /// [`KafkaPrincipal`] (`principalType:name`) used by ACLs and
-    /// delegation-token records. All authenticated callers ride under
-    /// `principal_type = "User"`, matching Kafka's
+    /// [`KafkaPrincipal`].
+    ///
+    /// The wire-level form is `principalType:name`, and ACLs and
+    /// delegation-token records use it. All authenticated callers ride under
+    /// `principal_type = "User"`, which matches Kafka's
     /// `DefaultKafkaPrincipalBuilder`.
     #[must_use]
     pub fn to_kafka(&self) -> KafkaPrincipal {
@@ -72,12 +76,13 @@ impl Principal {
     }
 }
 
-/// KIP-48: Kafka wire-level principal — the `(principalType,
-/// name)` pair carried in delegation-token records, ACL entries, and
-/// `KafkaPrincipal`-shaped fields across the Kafka protocol. Distinct
-/// from [`Principal`] which models the *runtime session* identity
-/// (auth method + OAuth groups). Format-stable: `Display`/`FromStr`
-/// round-trip the canonical `Type:Name` form.
+/// KIP-48: Kafka wire-level principal.
+///
+/// This is the `(principalType, name)` pair that delegation-token records, ACL
+/// entries, and `KafkaPrincipal`-shaped fields carry across the Kafka protocol.
+/// It is distinct from [`Principal`], which models the *runtime session*
+/// identity, that is the auth method and the OAuth groups. The format is
+/// stable: `Display` and `FromStr` round-trip the canonical `Type:Name` form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KafkaPrincipal {
     pub principal_type: String,
@@ -115,15 +120,17 @@ pub enum AuthError {
     MalformedMessage,
     #[error("unsupported mechanism")]
     UnsupportedMechanism,
-    /// OAUTHBEARER token failed validation (expired, bad claims, signed token
-    /// rejected by the unsecured validator, missing principal, …). Maps to the
-    /// RFC 7628 `invalid_token` server error status.
+    /// OAUTHBEARER token failed validation. The token was expired, carried bad
+    /// claims, was a signed token that the unsecured validator rejected, had no
+    /// principal, and so on. This maps to the RFC 7628 `invalid_token` server
+    /// error status.
     #[error("invalid token")]
     InvalidToken,
     /// OAUTHBEARER introspection HTTP round-trip failed at the transport layer.
-    /// Distinct from `InvalidToken` so the SASL handler can
-    /// surface "`IdP` unreachable" separately from "client supplied a bad
-    /// token". Maps to the RFC 7628 `invalid_token` server error status.
+    ///
+    /// This is distinct from `InvalidToken`, so the SASL handler can surface
+    /// "`IdP` unreachable" separately from "client supplied a bad token". It
+    /// maps to the RFC 7628 `invalid_token` server error status.
     #[error("oauthbearer introspection transport: {0}")]
     IntrospectionTransport(String),
 }

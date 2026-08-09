@@ -1,6 +1,6 @@
-//! Text and binary wire encodings for Datums. NULL is signalled out-of-band by
-//! the wire layer (DataRow value length -1), so encoding a NULL Datum panics —
-//! it indicates a caller bug, never reachable from valid execution.
+//! Text and binary wire encodings for Datums. The wire layer signals NULL
+//! out-of-band (DataRow value length -1), so an encode of a NULL Datum panics.
+//! That panic shows a caller bug, and valid execution never reaches it.
 
 #![expect(
     clippy::pedantic,
@@ -25,8 +25,8 @@ pub struct OutputStyle<'a> {
 
 impl<'a> OutputStyle<'a> {
     /// A zone with every style left at its PostgreSQL default (`ISO, MDY` and
-    /// `postgres`), for the callers that render a canonical value rather than a
-    /// session-visible one — storage keys, catalog defaults, tests.
+    /// `postgres`). Use it for the callers that render a canonical value rather
+    /// than a session-visible one: storage keys, catalog defaults, and tests.
     #[must_use]
     pub fn with_zone(time_zone: &'a jiff::tz::TimeZone) -> Self {
         Self {
@@ -39,8 +39,8 @@ impl<'a> OutputStyle<'a> {
 }
 
 /// PostgreSQL text-format encoding of a (non-null) value, in the session's
-/// default styles. Prefer [`encode_text_in`] wherever the session is at hand;
-/// this spelling is the canonical one (`ISO` dates, `postgres` intervals).
+/// default styles. Prefer [`encode_text_in`] wherever the session is available.
+/// This spelling is the canonical one (`ISO` dates, `postgres` intervals).
 pub fn encode_text(d: &Datum, tz: &jiff::tz::TimeZone) -> Vec<u8> {
     encode_text_in(d, OutputStyle::with_zone(tz))
 }
@@ -133,12 +133,14 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
 /// output with it; only version 1 is defined.
 pub const JSONB_BINARY_VERSION: u8 = 1;
 
-/// PostgreSQL `float8out` text rendering. The IEEE specials are spelled exactly as
-/// PostgreSQL does (`Infinity`/`-Infinity`/`NaN`); finite values use Rust's `f64`
-/// `Display`, which — like PG since v12 — is the shortest round-tripping decimal, so the
-/// two agree byte-for-byte for moderate magnitudes (`1.5`, `2.0`→`2`, `-0.0`→`-0`). The
-/// one documented divergence is scientific notation for |x| ≥ 1e16 / 0 < |x| < 1e-4,
-/// which PG emits and Rust does not.
+/// PostgreSQL `float8out` text rendering.
+///
+/// This function spells the IEEE specials exactly as PostgreSQL does
+/// (`Infinity`/`-Infinity`/`NaN`). Finite values use Rust's `f64` `Display`,
+/// which is the shortest round-tripping decimal, as PG has been since v12. The
+/// two therefore agree byte-for-byte for moderate magnitudes (`1.5`, `2.0`→`2`,
+/// `-0.0`→`-0`). The one documented divergence is scientific notation for
+/// |x| ≥ 1e16 / 0 < |x| < 1e-4, which PG emits and Rust does not.
 fn encode_float8_text(f: f64) -> String {
     if f.is_nan() {
         "NaN".to_string()
@@ -150,11 +152,13 @@ fn encode_float8_text(f: f64) -> String {
 }
 
 /// PostgreSQL `float4out` text rendering (`extra_float_digits >= 1`, the default
-/// since PG 12): the shortest decimal that round-trips through `f32`, laid out
-/// like `printf %g` with precision `FLT_DIG` — fixed-point while the decimal
-/// exponent is in `-4 ..= 5`, scientific outside it, with a signed two-digit
-/// exponent (`1e+06`, `1e-05`, `3.4028235e+38`). The IEEE specials are spelled
-/// `Infinity` / `-Infinity` / `NaN`.
+/// since PG 12).
+///
+/// The output is the shortest decimal that round-trips through `f32`, laid out
+/// like `printf %g` with precision `FLT_DIG`. It is fixed-point while the
+/// decimal exponent is in `-4 ..= 5` and scientific outside it, with a signed
+/// two-digit exponent (`1e+06`, `1e-05`, `3.4028235e+38`). The IEEE specials are
+/// spelled `Infinity` / `-Infinity` / `NaN`.
 ///
 /// Rust supplies both halves: `{:e}` is the shortest round-tripping mantissa
 /// plus the decimal exponent, and `{}` is the same digits laid out fixed-point.
@@ -181,7 +185,7 @@ fn encode_float4_text(f: f32) -> String {
 }
 
 /// `FLT_DIG`: the decimal exponent at which `float4out` switches to scientific
-/// notation, matching `%g`'s precision-driven threshold.
+/// notation. It matches `%g`'s precision-driven threshold.
 const FLOAT4_FIXED_EXPONENT_LIMIT: i32 = 6;
 
 /// PostgreSQL binary-format encoding of a (non-null) value.
@@ -259,9 +263,9 @@ fn encode_record_binary(r: &crate::datum::RecordValue) -> Vec<u8> {
 }
 
 /// PostgreSQL `array_send`. An empty array is the 12-byte `ndim = 0` header with
-/// no dimension block — the form libpq and `tokio-postgres` emit, which must
-/// round-trip — and every other array carries one `(length, lower bound)` pair
-/// per dimension ahead of its row-major elements.
+/// no dimension block, the form libpq and `tokio-postgres` emit, which must
+/// round-trip. Every other array carries one `(length, lower bound)` pair per
+/// dimension ahead of its row-major elements.
 fn encode_array_binary(a: &crate::datum::ArrayValue) -> Vec<u8> {
     let has_null = a.elems.iter().any(Datum::is_null);
     let ndim = i32::try_from(a.dims.len()).expect("array dimensions exceed i32");
@@ -326,9 +330,9 @@ mod tests {
         assert_eq!(encode_text(&Datum::Float8(f64::NAN), &tz), b"NaN");
     }
 
-    /// Every pair here is `SELECT <input>::float4::text` on PostgreSQL 18.4,
-    /// covering both sides of the fixed/scientific threshold, the two-digit
-    /// exponent padding, negative zero, and the IEEE specials.
+    /// Every pair here is `SELECT <input>::float4::text` on PostgreSQL 18.4.
+    /// The pairs cover both sides of the fixed/scientific threshold, the
+    /// two-digit exponent padding, negative zero, and the IEEE specials.
     #[test]
     fn float4_text_matches_postgres_float4out() {
         use assert2::assert;

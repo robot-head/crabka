@@ -1,8 +1,10 @@
-//! Authentication middleware: resolve a `crabka_security::Principal` from each
-//! request (mTLS → Bearer → Basic → Anonymous) into request extensions; `401`
-//! on a bad credential or a missing one when `require_auth`. Reuses
-//! `crabka_security` validators; only `BasicAuthStore` is local. Models
-//! `grpc-gateway/src/authz/auth_layer.rs`.
+//! Authentication middleware.
+//!
+//! It resolves a `crabka_security::Principal` from each request into the
+//! request extensions, in the order mTLS → Bearer → Basic → Anonymous. It
+//! returns `401` on a bad credential, and on a missing credential when
+//! `require_auth` is set. It reuses the `crabka_security` validators, and only
+//! `BasicAuthStore` is local. It models `grpc-gateway/src/authz/auth_layer.rs`.
 pub mod basic;
 
 use std::sync::Arc;
@@ -17,13 +19,13 @@ use base64::Engine as _;
 use basic::BasicAuthStore;
 use crabka_security::{AuthMethod, OAuthBearerValidator, Principal};
 
-/// An mTLS-authenticated principal inserted by the TLS accept loop;
+/// An mTLS-authenticated principal that the TLS accept loop inserts.
 /// `auth_layer` consumes it as the highest-precedence source.
 #[derive(Clone)]
 pub struct MtlsPrincipal(pub Principal);
 
-/// Per-request authentication state shared by [`auth_layer`]. Cheaply cloned
-/// (the stores live behind `Arc`).
+/// Per-request authentication state shared by [`auth_layer`]. It is cheap to
+/// clone, because the stores live behind `Arc`.
 #[derive(Clone)]
 pub struct AuthState {
     /// HTTP Basic credential store; `None` disables Basic.
@@ -36,7 +38,7 @@ pub struct AuthState {
     pub realm: String,
 }
 
-/// The outcome of [`resolve`]: an authenticated principal, or a `401`.
+/// The outcome of [`resolve`]. It is an authenticated principal, or a `401`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AuthDecision {
     /// Request carries (or is permitted) this identity.
@@ -58,9 +60,9 @@ pub fn anonymous() -> Principal {
 
 /// Resolve the request's principal. `now_ms` is passed for Bearer expiry.
 ///
-/// Precedence: mTLS → Bearer → Basic → Anonymous. A presented-but-bad
-/// credential (or a presented credential whose scheme is not configured) is
-/// always [`AuthDecision::Unauthorized`], even when `require_auth` is off.
+/// Precedence: mTLS → Bearer → Basic → Anonymous. A presented credential that
+/// is bad, or a presented credential whose scheme is not configured, is always
+/// [`AuthDecision::Unauthorized`], even when `require_auth` is off.
 pub async fn resolve(
     headers: &HeaderMap,
     mtls: Option<Principal>,
@@ -112,9 +114,9 @@ pub async fn resolve(
     }
 }
 
-/// `from_fn_with_state` middleware: resolve the principal, insert it into
-/// request extensions on success, or return `401` (with a
-/// `WWW-Authenticate: basic realm="…"` challenge when Basic is configured).
+/// `from_fn_with_state` middleware. It resolves the principal and inserts it
+/// into the request extensions on success. Otherwise it returns `401`, with a
+/// `WWW-Authenticate: basic realm="…"` challenge when Basic is configured.
 pub async fn auth_layer(
     State(st): State<Arc<AuthState>>,
     mut req: Request,
@@ -150,18 +152,18 @@ pub async fn auth_layer(
 
 /// Build the cp-byte-exact `401` response.
 ///
-/// Calibrated against `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
-/// (`tests/fixtures/auth/basic.json`):
+/// Calibrated against `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`,
+/// in `tests/fixtures/auth/basic.json`:
 ///
-/// - status `401`;
+/// - status `401`.
 /// - body `{"error_code":401,"message":"Unauthorized"}` with the vendor
-///   `application/vnd.schemaregistry.v1+json` content-type (cp's standard error
-///   envelope — same shape as every other registry error);
+///   `application/vnd.schemaregistry.v1+json` content-type. This is cp's
+///   standard error envelope, the same shape as every other registry error.
 /// - when Basic is configured, `WWW-Authenticate: basic realm="<realm>"`. NOTE
 ///   the scheme token is lowercase `basic`, exactly as cp's Jetty
-///   `BasicAuthenticator` emits it; the realm is the operator's
-///   `authentication.realm` (the JAAS entry name — `SchemaRegistry-Props` in the
-///   capture).
+///   `BasicAuthenticator` emits it. The realm is the operator's
+///   `authentication.realm`, which is the JAAS entry name, and is
+///   `SchemaRegistry-Props` in the capture.
 fn unauthorized(st: &AuthState) -> Response {
     let body = serde_json::json!({ "error_code": 401, "message": "Unauthorized" }).to_string();
     let mut resp = (
@@ -354,12 +356,13 @@ mod tests {
         assert2::assert!(decision == AuthDecision::Authn(mtls));
     }
 
-    /// Model A: `auth_layer` TRUSTS a request carrying `FORWARD_HEADER` and runs
-    /// the handler even under `require_auth` with no credentials (the ingress node
-    /// already authenticated it). A non-forwarded credential-less request still
-    /// `401`s. This is the mechanism that lets ALL auth methods (incl. mTLS, whose
-    /// credential can't cross the secondary→primary hop) work — see `proxy()`,
-    /// which forwards no credential, only `FORWARD_HEADER`.
+    /// Model A: `auth_layer` TRUSTS a request that carries `FORWARD_HEADER` and
+    /// runs the handler even under `require_auth` with no credentials, because
+    /// the ingress node already authenticated it. A non-forwarded
+    /// credential-less request still returns `401`. This mechanism lets ALL
+    /// auth methods work, including mTLS, whose credential cannot cross the
+    /// secondary→primary hop. See `proxy()`, which forwards no credential, only
+    /// `FORWARD_HEADER`.
     #[tokio::test]
     async fn forwarded_request_bypasses_require_auth() {
         use axum::{Router, body::Body, routing::get};
@@ -392,19 +395,20 @@ mod tests {
         }
     }
 
-    /// cp-byte-exact pin: drive `auth_layer` (Basic configured) over a tiny
-    /// router with NO credentials and assert the `401` matches
-    /// `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` (`tests/fixtures/auth/basic.json`)
-    /// byte-for-byte:
+    /// cp-byte-exact pin. This test drives `auth_layer` with Basic configured
+    /// over a tiny router with NO credentials, and asserts that the `401`
+    /// matches `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0`
+    /// (`tests/fixtures/auth/basic.json`) byte-for-byte:
     ///
     ///   * status `401`,
-    ///   * `WWW-Authenticate: basic realm="SchemaRegistry-Props"` — lowercase
-    ///     `basic`, realm = the configured `authentication.realm`,
+    ///   * `WWW-Authenticate: basic realm="SchemaRegistry-Props"`, with
+    ///     lowercase `basic` and the realm set to the configured
+    ///     `authentication.realm`,
     ///   * body `{"error_code":401,"message":"Unauthorized"}` with the vendor
     ///     content-type.
     ///
-    /// This runs WITHOUT Docker — the durable regression proof that our `401`
-    /// reproduces cp's wire bytes.
+    /// This test runs WITHOUT Docker. It is the durable regression proof that
+    /// our `401` reproduces cp's wire bytes.
     #[tokio::test]
     async fn auth_layer_401_matches_cp_byte_exact() {
         use axum::{Router, body::Body, routing::get};

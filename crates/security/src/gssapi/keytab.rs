@@ -1,12 +1,11 @@
 //! MIT Kerberos keytab (version `0x0502`) parser.
 //!
-//! `sspi` does not ingest keytab files; its acceptor wants the raw
-//! ticket-decryption key bytes ([`sspi::Secret<Vec<u8>>`]). This module parses
-//! the on-disk MIT keytab format ourselves and extracts the service's long-term
-//! key so [`crate::gssapi::provider::SspiAcceptor`] can build server
-//! credentials.
+//! `sspi` does not read keytab files. Its acceptor wants the raw
+//! ticket-decryption key bytes, [`sspi::Secret<Vec<u8>>`]. This module parses
+//! the on-disk MIT keytab format and extracts the service's long-term key, so
+//! [`crate::gssapi::provider::SspiAcceptor`] can build server credentials.
 //!
-//! The format (big-endian throughout) is:
+//! The format is big-endian throughout:
 //!
 //! ```text
 //! file header : u16 magic (0x0502)
@@ -46,13 +45,14 @@ pub struct KeytabKey {
     pub key: Vec<u8>,
 }
 
-/// Errors produced while parsing a keytab or locating a service key.
+/// Errors from a keytab parse or from a service-key lookup.
 #[derive(Debug, thiserror::Error)]
 pub enum KeytabError {
     /// The file did not start with the expected `0x0502` magic.
     #[error("unexpected keytab magic 0x{0:04x}, expected 0x0502")]
     BadMagic(u16),
-    /// The byte stream ended in the middle of a field (corrupt / truncated).
+    /// The byte stream ended in the middle of a field. The file is corrupt or
+    /// truncated.
     #[error("keytab truncated: needed {needed} more bytes at offset {offset}")]
     Truncated {
         /// Offset at which the read was attempted.
@@ -120,7 +120,7 @@ impl<'a> Reader<'a> {
         Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
 
-    /// Read a `u16`-length-prefixed string (lossy UTF-8 decode).
+    /// Read a `u16`-length-prefixed string with a lossy UTF-8 decode.
     fn counted_str(&mut self) -> Result<String, KeytabError> {
         let len = self.u16()? as usize;
         let bytes = self.take(len)?;
@@ -128,7 +128,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Parse every key entry in a keytab, skipping holes.
+/// Parse every key entry in a keytab and skip the holes.
 ///
 /// # Errors
 ///
@@ -209,8 +209,9 @@ pub fn parse_keytab(bytes: &[u8]) -> Result<Vec<KeytabKey>, KeytabError> {
     Ok(entries)
 }
 
-/// Find the key for the principal whose FIRST component equals `service_name`,
-/// choosing the highest-kvno entry with the given `enctype`.
+/// Find the key for the principal whose FIRST component equals `service_name`.
+///
+/// This function chooses the highest-kvno entry with the given `enctype`.
 ///
 /// # Errors
 ///
@@ -233,17 +234,19 @@ pub fn load_service_key(
 }
 
 /// Find every distinct service principal whose FIRST component equals
-/// `service_name`, returning the highest-kvno key for each (one [`KeytabKey`]
-/// per distinct principal-name component list).
+/// `service_name`.
 ///
-/// A keytab routinely holds keys for several host SPNs of the same service
-/// (e.g. `kafka/localhost` and `kafka/host.docker.internal`). The GSSAPI
-/// acceptor needs all of them so it can validate an incoming ticket against
-/// whichever SPN the client actually named — matching the JVM broker, which
-/// keys off the whole keytab rather than one pinned hostname.
+/// This function returns the highest-kvno key for each one, which is one
+/// [`KeytabKey`] per distinct principal-name component list.
 ///
-/// Results are ordered by their component lists for determinism. Empty when no
-/// entry matches.
+/// A keytab routinely holds keys for several host SPNs of the same service, for
+/// example `kafka/localhost` and `kafka/host.docker.internal`. The GSSAPI
+/// acceptor needs all of them, so it can validate an incoming ticket against
+/// whichever SPN the client named. This matches the JVM broker, which keys off
+/// the whole keytab and not one pinned hostname.
+///
+/// This function orders the results by their component lists for determinism.
+/// The result is empty when no entry matches.
 ///
 /// # Errors
 ///
@@ -282,11 +285,11 @@ mod tests {
         kvno8: u8,
         enctype: u16,
         key: &'a [u8],
-        /// Adds a trailing 32-bit kvno (overrides `kvno8`) when `Some`.
+        /// When `Some`, adds a trailing 32-bit kvno that overrides `kvno8`.
         kvno32: Option<u32>,
     }
 
-    /// Build one keytab entry body (everything after the i32 size field).
+    /// Build one keytab entry body, which is everything after the i32 size field.
     fn entry_body(spec: &EntrySpec<'_>) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(&(u16::try_from(spec.components.len()).unwrap()).to_be_bytes());

@@ -11,23 +11,26 @@ use crate::{
     types::{Epoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant},
 };
 
-/// Deterministic per-`(node, epoch)` election-timeout jitter in
-/// `[0, base_ms)` — Raft's randomized backoff, made reproducible for the
-/// deterministic sims. Different nodes (and the same node across re-election
-/// epochs) get different spreads, so closely-synchronized voters don't arm their
-/// election timers in lockstep and split the vote indefinitely. Shared by the
-/// pure core and the async engine's initial timer arm so production self-staggers
-/// without per-node config.
+/// Deterministic per-`(node, epoch)` election-timeout jitter in `[0, base_ms)`.
+///
+/// This is Raft's randomized backoff, made reproducible for the deterministic
+/// sims. Different nodes get different spreads, and so does the same node
+/// across re-election epochs. Closely-synchronized voters therefore do not arm
+/// their election timers in lockstep and split the vote indefinitely.
+///
+/// Both the pure core and the async engine's initial timer arm call this
+/// function, so production self-staggers without per-node config.
 #[must_use]
 pub fn election_jitter_ms(me: NodeId, epoch: Epoch, base_ms: u64) -> u64 {
     crabka_verified::election_jitter_ms(me.0, epoch, base_ms)
 }
 
-/// The hand-rolled KIP-595 + KIP-996 quorum state machine. Pure and
-/// deterministic: it consumes [`Event`]s, reads the log through [`LogView`],
-/// takes the current time as an injected [`SimInstant`], and produces a list of
-/// [`Action`]s for the caller to execute. It never touches the clock, the wire,
-/// or the log bytes directly.
+/// The hand-rolled KIP-595 + KIP-996 quorum state machine.
+///
+/// The state machine is pure and deterministic. It consumes [`Event`]s, reads
+/// the log through [`LogView`], takes the current time as an injected
+/// [`SimInstant`], and produces a list of [`Action`]s for the caller to
+/// execute. It never touches the clock, the wire, or the log bytes directly.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct QuorumStateMachine {
     me: NodeId,
@@ -35,11 +38,11 @@ pub struct QuorumStateMachine {
     role: Role,
     /// Base election timeout, in whole milliseconds.
     ///
-    /// Held raw rather than as a [`Time`]: quantities store `f64`, so a field of
-    /// one would cost this struct its `Eq`/`Hash` derives, which the
-    /// `stateright` model checker needs of every state it explores. Whole
-    /// milliseconds is also the domain the verified jitter kernel is defined
-    /// over. [`QuorumStateMachine::new`] converts at that boundary.
+    /// This field holds a raw value and not a [`Time`]. Quantities store `f64`,
+    /// so a [`Time`] field would cost this struct its `Eq` and `Hash` derives.
+    /// The `stateright` model checker needs those derives on every state it
+    /// explores. Whole milliseconds is also the domain of the verified jitter
+    /// kernel. [`QuorumStateMachine::new`] converts at that boundary.
     election_timeout_ms: u64,
 }
 
@@ -54,10 +57,11 @@ struct VoteRequest {
 }
 
 impl QuorumStateMachine {
-    /// `election_timeout` is the base extent an election timer is armed for,
-    /// before jitter; callers vary it per node for liveness. It is rounded to
-    /// whole milliseconds here — the domain the verified jitter kernel and the
-    /// [`SimInstant`] clock are both defined over.
+    /// `election_timeout` is the base extent of an election timer, before
+    /// jitter; callers vary it per node for liveness.
+    ///
+    /// This constructor rounds the value to whole milliseconds. That is the
+    /// domain of both the verified jitter kernel and the [`SimInstant`] clock.
     #[must_use]
     pub fn new(me: NodeId, state: QuorumState, election_timeout: Time) -> Self {
         let observer = !state.voters.contains(me);
@@ -100,8 +104,10 @@ impl QuorumStateMachine {
         self.state.leader_epoch = e;
     }
 
-    /// `true` if `candidate_log` is at least as up-to-date as ours
-    /// (KIP-595: higher last epoch wins; on tie, higher/equal offset wins).
+    /// `true` if `candidate_log` is at least as up-to-date as ours.
+    ///
+    /// KIP-595: the higher last epoch wins. On a tie, the higher or equal
+    /// offset wins.
     fn log_is_up_to_date(log: &dyn LogView, cand: LogEnd) -> bool {
         crabka_verified::log_is_up_to_date(
             log.last_epoch(),
@@ -111,17 +117,19 @@ impl QuorumStateMachine {
         )
     }
 
-    /// The deadline for an election timer armed at `now`. Adds deterministic
-    /// per-`(node, epoch)` jitter (standard Raft randomized backoff, made
-    /// deterministic for the sims) so competing voters do not arm their election
-    /// timers in lockstep. Without this, a bare majority of in-process /
-    /// closely-synchronized voters (e.g. exactly 2 of a 3-voter set) splits the
-    /// vote every round — both become candidates, self-vote, and neither reaches
-    /// majority — livelocking elections until natural skew breaks the tie.
+    /// The deadline for an election timer armed at `now`.
     ///
-    /// The whole sum stays in integer milliseconds: the jitter is a verified
+    /// This method adds deterministic per-`(node, epoch)` jitter, the standard
+    /// Raft randomized backoff made deterministic for the sims. Competing
+    /// voters then do not arm their election timers in lockstep. Without the
+    /// jitter, a bare majority of in-process or closely-synchronized voters,
+    /// for example exactly 2 of a 3-voter set, splits the vote every round.
+    /// Both become candidates, both self-vote, and neither reaches a majority.
+    /// Elections then livelock until natural skew breaks the tie.
+    ///
+    /// The whole sum stays in integer milliseconds. The jitter is a verified
     /// integer kernel, and [`SimInstant`] is a coordinate on a millisecond
-    /// timeline rather than an extent.
+    /// timeline and not an extent.
     fn election_deadline(&self, now: SimInstant) -> SimInstant {
         now.saturating_add_ms(
             self.election_timeout_ms
@@ -183,10 +191,13 @@ impl QuorumStateMachine {
         }
     }
 
-    /// (Leader side) a follower fetched at `fetch_offset` claiming it last
-    /// replicated up to `fetch_epoch`. If the follower's claimed epoch extends
-    /// past where that epoch ends in our log, the logs diverged: reply with the
-    /// truncation point. Otherwise record its progress and advance the HWM.
+    /// Leader side: a follower fetched at `fetch_offset` and claims that it
+    /// last replicated up to `fetch_epoch`.
+    ///
+    /// If the follower's claimed epoch extends past where that epoch ends in
+    /// our log, the logs diverged. This method then replies with the truncation
+    /// point. If the logs agree, it records the follower's progress and
+    /// advances the HWM.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -232,14 +243,16 @@ impl QuorumStateMachine {
     }
 
     /// The HWM as the `majority()`-th largest match offset across the leader's
-    /// own log end and every follower's acknowledged fetch offset, gated on the
-    /// current leader epoch (Raft Fig.8 / KIP-595 leader completeness): the HWM
-    /// may only advance once a *current-epoch* entry has been majority-replicated.
-    /// We approximate that here by requiring the majority offset to be strictly
-    /// past `epoch_start_offset` (where this leader's first current-epoch record
-    /// sits). Otherwise the HWM is left unchanged. Never regresses.
+    /// own log end and every follower's acknowledged fetch offset.
     ///
-    /// Full per-offset epoch validation happens against the durable log; the
+    /// The current leader epoch gates the result (Raft Fig.8 and KIP-595 leader
+    /// completeness): the HWM may only advance once a *current-epoch* entry has
+    /// been majority-replicated. This method approximates that rule. It requires
+    /// the majority offset to be strictly past `epoch_start_offset`, where this
+    /// leader's first current-epoch record sits. In every other case the HWM
+    /// stays unchanged. The HWM never regresses.
+    ///
+    /// Full per-offset epoch validation happens against the durable log. The
     /// core tracks `epoch_start_offset` as its in-memory stand-in.
     fn recompute_high_watermark(&self, log_end: i64) -> i64 {
         let Role::Leader {
@@ -273,8 +286,10 @@ impl QuorumStateMachine {
         new_hwm
     }
 
-    /// (Follower side) the leader answered our Fetch. A diverging hint means we
-    /// must truncate; otherwise we re-arm the fetch timer and fetch again.
+    /// Follower side: the leader answered our Fetch.
+    ///
+    /// A diverging hint means that we must truncate. Without a hint, we re-arm
+    /// the fetch timer and fetch again.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -300,8 +315,9 @@ impl QuorumStateMachine {
         ]
     }
 
-    /// The fetch timer fired: a follower/observer lost contact with the leader.
-    /// A voter starts an election; an observer just keeps trying to find a leader.
+    /// The fetch timer fired: a follower or observer lost contact with the leader.
+    ///
+    /// A voter starts an election. An observer continues to look for a leader.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -315,9 +331,11 @@ impl QuorumStateMachine {
         }
     }
 
-    /// A leader announced its epoch. If it is at least our current epoch, follow
-    /// it (becoming `Follower`/an attached `Observer`); a stale (lower-epoch)
-    /// announcement is ignored.
+    /// A leader announced its epoch.
+    ///
+    /// If the epoch is at least our current epoch, we follow that leader and
+    /// become a `Follower` or an attached `Observer`. This method ignores a
+    /// stale announcement at a lower epoch.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -378,9 +396,11 @@ impl QuorumStateMachine {
         ]
     }
 
-    /// A resigning leader asked us to start an election. If it is not stale, a
-    /// voter immediately begins a pre-vote round (no waiting for the election
-    /// timer); an observer simply detaches and keeps observing.
+    /// A resigning leader asked us to start an election.
+    ///
+    /// If the request is not stale, a voter starts a pre-vote round immediately
+    /// and does not wait for the election timer. An observer detaches and
+    /// continues to observe.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -405,8 +425,10 @@ impl QuorumStateMachine {
         }
     }
 
-    /// The election timer fired. A voter begins a KIP-996 pre-vote round
-    /// (becomes `Prospective`); an observer never elects.
+    /// The election timer fired.
+    ///
+    /// A voter starts a KIP-996 pre-vote round and becomes `Prospective`. An
+    /// observer never elects.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -419,10 +441,12 @@ impl QuorumStateMachine {
         self.start_election(log, now)
     }
 
-    /// Shared election-start path (used by `ElectionTimeout` and a resigning
-    /// leader's `EndQuorumEpoch`): become `Prospective` and broadcast a
-    /// non-binding pre-vote at the *current* epoch (epoch is not bumped until the
-    /// pre-vote succeeds).
+    /// Shared election-start path for `ElectionTimeout` and for a resigning
+    /// leader's `EndQuorumEpoch`.
+    ///
+    /// This method makes the replica `Prospective` and broadcasts a non-binding
+    /// pre-vote at the *current* epoch. The epoch is not bumped until the
+    /// pre-vote succeeds.
     #[tracing::instrument(
         level = "info",
         skip_all,
@@ -762,9 +786,11 @@ mod tests {
             }
         }
     }
-    /// A `LogView` whose `end_offset` can change between calls, so a test can
-    /// model a leader promoted at a small log end (low `epoch_start_offset`)
-    /// and then growing before followers fetch.
+    /// A `LogView` whose `end_offset` can change between calls.
+    ///
+    /// A test can then model a leader that is promoted at a small log end, that
+    /// is, a low `epoch_start_offset`, and whose log grows before followers
+    /// fetch.
     struct CellLog {
         end: std::cell::Cell<i64>,
         last_epoch: Epoch,
@@ -800,7 +826,7 @@ mod tests {
         )
     }
 
-    /// The base election timeout every test machine is built with.
+    /// The base election timeout for every test machine.
     const TEST_ELECTION_TIMEOUT: Time = secs(1);
 
     #[test]

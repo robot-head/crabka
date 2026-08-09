@@ -1,14 +1,21 @@
-//! `ListGroups` (`api_key=16`). Returns every known group across all four
-//! registries: classic groups from `GroupCoordinator::list_groups` (type
-//! `"classic"`), next-gen KIP-848 consumer groups from the unified
-//! coordinator's consumer registry (type `"consumer"`), KIP-932 share
-//! groups from its share registry (type `"share"`), and KIP-1071 streams
-//! groups from its streams registry (type `"streams"`). The optional
-//! `states_filter` (v4+) and `types_filter` (v5+, e.g. `["share"]` from
-//! `kafka-share-groups.sh --list`, `["streams"]` from `kafka-streams-groups.sh
-//! --list`, or `["consumer"]` from `kafka-consumer-groups.sh --list`) are both
-//! honored. A `group_id` is emitted at most once: the registries are disjoint
-//! by `GroupType`, but we defensively dedup.
+//! `ListGroups` (`api_key=16`) returns every known group from all four
+//! registries.
+//!
+//! The four registries are:
+//!
+//! - Classic groups from `GroupCoordinator::list_groups`, type `"classic"`.
+//! - Next-gen KIP-848 consumer groups from the consumer registry of the
+//!   unified coordinator, type `"consumer"`.
+//! - KIP-932 share groups from its share registry, type `"share"`.
+//! - KIP-1071 streams groups from its streams registry, type `"streams"`.
+//!
+//! The handler honors both optional filters: `states_filter` (v4+) and
+//! `types_filter` (v5+). For example, `kafka-share-groups.sh --list` sends
+//! `["share"]`, `kafka-streams-groups.sh --list` sends `["streams"]`, and
+//! `kafka-consumer-groups.sh --list` sends `["consumer"]`.
+//!
+//! The handler emits a `group_id` at most once. The registries are disjoint by
+//! `GroupType`, but the handler dedups defensively.
 
 use std::collections::HashSet;
 
@@ -38,8 +45,9 @@ const GROUP_TYPE_CONSUMER: &str = "consumer";
 const GROUP_TYPE_SHARE: &str = "share";
 /// Wire `group_type` string for KIP-1071 streams groups.
 const GROUP_TYPE_STREAMS: &str = "streams";
-/// Kafka's consumer embedded-protocol type (`ConsumerProtocol.PROTOCOL_TYPE`),
-/// reported as `protocol_type` for classic and next-gen consumer groups.
+/// Kafka's consumer embedded-protocol type (`ConsumerProtocol.PROTOCOL_TYPE`).
+/// The handler reports it as `protocol_type` for classic and next-gen consumer
+/// groups.
 const CONSUMER_PROTOCOL_TYPE: &str = "consumer";
 
 #[tracing::instrument(
@@ -182,12 +190,14 @@ pub(crate) async fn handle(
     crate::handlers::encode_response(&resp, version)
 }
 
-/// Append one `ListedGroup` per next-gen group id (`group_type` is either
-/// `"consumer"` or `"share"`), honoring `states_filter` / `types_filter` and the
-/// per-group Describe ACL, and deduping against already-emitted ids. Stays sync:
-/// the group's runtime state isn't cheaply available without an actor
-/// round-trip, so we report the constant "Stable" — `--list` filters on
-/// `types_filter`, not on the state here.
+/// Appends one `ListedGroup` for each next-gen group id. The `group_type` is
+/// either `"consumer"` or `"share"`.
+///
+/// The function honors `states_filter` and `types_filter` and the per-group
+/// Describe ACL, and it dedups against the ids that it already emitted. It
+/// stays sync. The runtime state of the group is not cheaply available without
+/// an actor round-trip, so the function reports the constant "Stable". Here
+/// `--list` filters on `types_filter`, not on the state.
 fn append_next_gen(
     groups: &mut Vec<ListedGroup>,
     emitted: &mut HashSet<String>,

@@ -1,5 +1,5 @@
-//! Sink side: residency gate + naming + provenance loop-guard, produce to target,
-//! and emit source->target offset syncs.
+//! Sink side: residency gate, naming, and provenance loop-guard, then produce
+//! to the target and emit source-to-target offset syncs.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -54,12 +54,13 @@ pub struct SinkParams {
     pub source_partition_counts: BTreeMap<String, i32>,
 }
 
-/// A [`Sink`] that applies residency filtering, topic renaming, and
-/// loop-guard logic before producing records to the target cluster.
+/// A [`Sink`] that applies residency filtering, topic renaming, and loop-guard
+/// logic before it produces records to the target cluster.
 ///
 /// On each [`flush`](Sink::flush) it drains pending produce acknowledgements,
 /// sets the downstream offset on each [`OffsetSync`], and writes those syncs
-/// back to the target's offset-syncs topic (MM2-compatible).
+/// back to the offset-syncs topic of the target. Those syncs are
+/// MM2-compatible.
 pub struct TargetSink {
     producer: Producer,
     renamer: Renamer,
@@ -67,18 +68,19 @@ pub struct TargetSink {
     target_zones: Vec<String>,
     offset_syncs_topic: String,
     source_alias: String,
-    /// Bootstrap address of the target cluster (used to lazily create topics).
+    /// Bootstrap address of the target cluster, used for lazy topic creation.
     target_bootstrap: String,
     /// Security config retained for lazy topic creation calls.
     security: Option<crabka_client_core::security::ClientSecurity>,
     client_resource_policy: ClientResourcePolicy,
     runtime_policy: ReplicatorRuntimePolicy,
     source_partition_counts: BTreeMap<String, i32>,
-    /// Target topics that have already been ensured (to avoid redundant admin calls).
+    /// Target topics that the sink has already ensured, so it makes no
+    /// redundant admin calls.
     created_topics: HashSet<String>,
     /// In-flight produces awaiting broker acks (see [`PendingProduce`]).
     pending: Vec<PendingProduce>,
-    /// Completed offset-syncs, accessible via [`drain_offset_syncs`].
+    /// Completed offset-syncs, accessible through [`drain_offset_syncs`].
     offset_syncs: Vec<OffsetSync>,
 }
 
@@ -172,7 +174,7 @@ impl TargetSink {
     }
 
     /// Return and clear all completed [`OffsetSync`] records accumulated since
-    /// the last call (or since construction).
+    /// the last call, or since construction.
     pub fn drain_offset_syncs(&mut self) -> Vec<OffsetSync> {
         std::mem::take(&mut self.offset_syncs)
     }
@@ -201,14 +203,14 @@ async fn build_producer(
 
 #[async_trait]
 impl Sink<(), ReplicatedRecord> for TargetSink {
-    /// Accept a batch of replicated records, applying filtering and loop-guard
+    /// Accept a batch of replicated records, apply filtering and loop-guard
     /// logic, then enqueue produce calls for the accepted records.
     ///
-    /// Records are dropped (not buffered) when:
-    /// - `value` is `None` (tombstone or no payload).
-    /// - Identity-naming loop-guard fires: the record's `__crabka_origin` header
-    ///   matches our own `source_alias`.
-    /// - Residency gate blocks the topic for the target's zones.
+    /// The sink drops a record, and does not buffer it, when:
+    /// - `value` is `None`, that is, a tombstone or no payload.
+    /// - The identity-naming loop-guard fires: the `__crabka_origin` header of
+    ///   the record matches our own `source_alias`.
+    /// - The residency gate blocks the topic for the zones of the target.
     #[tracing::instrument(
         level = "debug",
         skip_all,

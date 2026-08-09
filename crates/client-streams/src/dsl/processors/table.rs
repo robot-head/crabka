@@ -2,19 +2,19 @@
 //!
 //! ## Change<old,new> propagation
 //!
-//! Every `KTable` node forwards a `Record<K, Change<V>>` change-stream so
-//! downstream nodes can detect tombstones (`Change::new == None`). The
-//! materialized **state stores still hold `V`** (the current value); only the
-//! inter-node forwarded value is wrapped in `Change<V>`, which keeps the
-//! changelog + wire topology byte-unchanged.
+//! Every `KTable` node forwards a `Record<K, Change<V>>` change-stream, so
+//! downstream nodes can detect a tombstone, where `Change::new == None`. The
+//! materialized **state stores still hold `V`**, the current value. Only the
+//! value forwarded between nodes is wrapped in `Change<V>`, and that keeps the
+//! changelog and the wire topology byte-unchanged.
 //!
-//! - [`KTableSourceProcessor`]: `V` in → `Change<V>` out (reads the prior store
-//!   value as `old`).
-//! - [`KTableToStreamProcessor`]: `Change<V>` in → `V` out (extracts `new`,
-//!   dropping tombstones — `toStream` produces a plain `KStream`).
-//! - [`KTableMapValuesProcessor`] / [`KTableMapValuesViewProcessor`]:
-//!   `Change<V>` in → `Change<V2>` out (`map` both sides).
-//! - [`KTableFilterProcessor`]: `Change<V>` in → `Change<V>` out — re-applies
+//! - [`KTableSourceProcessor`][]: `V` in → `Change<V>` out. It reads the prior
+//!   store value as `old`.
+//! - [`KTableToStreamProcessor`][]: `Change<V>` in → `V` out. It extracts `new`
+//!   and drops tombstones, because `toStream` produces a plain `KStream`.
+//! - [`KTableMapValuesProcessor`] and [`KTableMapValuesViewProcessor`]:
+//!   `Change<V>` in → `Change<V2>` out. They `map` both sides.
+//! - [`KTableFilterProcessor`][]: `Change<V>` in → `Change<V>` out. It re-applies
 //!   the predicate to both sides and **emits tombstones** for rows that stop
 //!   matching.
 
@@ -36,8 +36,10 @@ type Marker<T> = PhantomData<fn() -> T>;
 // ── KTableSourceProcessor ────────────────────────────────────────────────────
 
 /// Materializes incoming records into a `KeyValueStore`, then forwards a
-/// `Change<V>` (prior store value as `old`, incoming value as `new`). Backs
-/// `KTable` created from a source topic.
+/// `Change<V>`.
+///
+/// The change carries the prior store value as `old` and the incoming value as
+/// `new`. This processor backs a `KTable` created from a source topic.
 #[allow(dead_code)]
 pub(crate) struct KTableSourceProcessor<K, V> {
     pub store_name: String,
@@ -74,11 +76,13 @@ where
 
 // ── KStreamToTableProcessor ──────────────────────────────────────────────────
 
-/// Materializes a `KStream` into a `KTable` (`KStream::to_table`): writes each
-/// incoming `V` into the store and forwards a `Change<V>` (prior store value as
-/// `old`, incoming value as `new`). Like [`KTableSourceProcessor`], but its input
-/// is a plain `KStream` value rather than a source-topic record — so it is the
-/// boundary where a stream becomes a changelog-backed table.
+/// Materializes a `KStream` into a `KTable`, backing `KStream::to_table`.
+///
+/// This processor writes each incoming `V` into the store and forwards a
+/// `Change<V>`. The change carries the prior store value as `old` and the
+/// incoming value as `new`. It works like [`KTableSourceProcessor`], but its
+/// input is a plain `KStream` value and not a source-topic record. It is
+/// therefore the boundary where a stream becomes a changelog-backed table.
 #[allow(dead_code)]
 pub(crate) struct KStreamToTableProcessor<K, V> {
     pub store_name: String,
@@ -117,9 +121,10 @@ where
 
 // ── KTableToStreamProcessor ──────────────────────────────────────────────────
 
-/// Converts a `KTable` change-stream back to a `KStream` by extracting the
-/// `new` value of each `Change<V>`. Tombstones (`new == None`) are dropped — a
-/// `KStream` has no notion of a deletion record.
+/// Converts a `KTable` change-stream back to a `KStream`.
+///
+/// This processor extracts the `new` value of each `Change<V>`. It drops
+/// tombstones, where `new == None`, because a `KStream` has no deletion record.
 #[allow(dead_code)]
 pub(crate) struct KTableToStreamProcessor<K, V> {
     pub _pd: Marker<(K, V)>,
@@ -140,10 +145,12 @@ where
 
 // ── KTableMapValuesProcessor ─────────────────────────────────────────────────
 
-/// Applies a value-mapping function to both sides of the incoming `Change<V>`,
-/// reconciles the materialized store with the mapped `new` (put / delete on
-/// tombstone), and forwards the mapped `Change<V2>`. Used by the
-/// **materialized** `map_values` form (`map_values_materialized`).
+/// Applies a value-mapping function to both sides of the incoming `Change<V>`.
+///
+/// This processor reconciles the materialized store with the mapped `new`. It
+/// puts the value, or deletes it on a tombstone. It then forwards the mapped
+/// `Change<V2>`. The **materialized** `map_values` form,
+/// `map_values_materialized`, uses this processor.
 #[allow(dead_code)]
 pub(crate) struct KTableMapValuesProcessor<K, V, V2, F> {
     pub f: F,
@@ -199,9 +206,11 @@ where
 // ── KTableMapValuesViewProcessor ─────────────────────────────────────────────
 
 /// Applies a value-mapping function to both sides of the incoming `Change<V>`
-/// and forwards the mapped `Change<V2>` **without materializing** a store. Backs
-/// the bare `KTable::map_values` form (the JVM's non-materialized `mapValues`,
-/// which produces no changelog topic).
+/// and forwards the mapped `Change<V2>`.
+///
+/// This processor **does not materialize** a store. It backs the bare
+/// `KTable::map_values` form, which matches the JVM's non-materialized
+/// `mapValues` and produces no changelog topic.
 #[allow(dead_code)]
 pub(crate) struct KTableMapValuesViewProcessor<K, V, V2, F> {
     pub f: F,
@@ -232,10 +241,12 @@ where
 
 // ── KTableFilterProcessor ────────────────────────────────────────────────────
 
-/// Re-applies the predicate to both sides of the incoming `Change<V>`,
-/// reconciles the materialized store with the surviving `new`, and forwards a
-/// `Change<V>`. A row that previously matched but no longer does forwards a
-/// tombstone (`new == None`) so downstream `KTable` views can delete it.
+/// Re-applies the predicate to both sides of the incoming `Change<V>`.
+///
+/// This processor reconciles the materialized store with the surviving `new` and
+/// forwards a `Change<V>`. A row that matched before and no longer matches
+/// forwards a tombstone, where `new == None`, so downstream `KTable` views can
+/// delete it.
 #[allow(dead_code)]
 pub(crate) struct KTableFilterProcessor<K, V, P> {
     pub predicate: P,
@@ -303,9 +314,11 @@ where
 // ── VersionedKTableSourceProcessor ──────────────────────────────────────────
 
 /// Materializes incoming records into a `VersionedKeyValueStore` at the record's
-/// timestamp, then forwards a `Change<V>` whose `old` is the value that was valid
-/// at that timestamp *before* this record (KIP-914 table semantics). Out-of-order
-/// records still emit their local change; the store keeps the latest pointer.
+/// timestamp, then forwards a `Change<V>`.
+///
+/// The change's `old` is the value that was valid at that timestamp *before*
+/// this record. This follows the KIP-914 table semantics. An out-of-order record
+/// still emits its local change, and the store keeps the latest pointer.
 pub(crate) struct VersionedKTableSourceProcessor<K, V> {
     pub store_name: String,
     pub _pd: Marker<(K, V)>,
@@ -896,8 +909,8 @@ mod tests {
         stores
     }
 
-    /// Run `init` then two same-key `process` calls through the `KTable` source,
-    /// returning how many records reached the downstream buffer.
+    /// Run `init`, then two same-key `process` calls through the `KTable`
+    /// source. Returns how many records reached the downstream buffer.
     async fn source_run_two(stores: &mut StoreRegistry) -> usize {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -933,17 +946,17 @@ mod tests {
         buffer.len()
     }
 
-    /// Uncached store → the source forwards each record immediately (today's
-    /// behavior, unchanged): two records → two forwards.
+    /// Uncached store: the source forwards each record immediately, so two
+    /// records give two forwards.
     #[tokio::test]
     async fn uncached_source_forwards_each_record() {
         let mut stores = source_registry(false);
         check!(source_run_two(&mut stores).await == 2);
     }
 
-    /// Cached store → the immediate forward is suppressed (the cache flush will
-    /// forward the deduped change): two records → zero immediate forwards, and the
-    /// cached store still holds the dirty entry to flush.
+    /// Cached store: the processor suppresses the immediate forward, because the
+    /// cache flush forwards the deduped change. Two records give zero immediate
+    /// forwards, and the cached store still holds the dirty entry to flush.
     #[tokio::test]
     async fn cached_source_suppresses_immediate_forward() {
         let mut stores = source_registry(true);
@@ -962,8 +975,8 @@ mod tests {
 
     // ── KStream.to_table cache suppression ───────────────────────────────────
 
-    /// Run `init` then two same-key `process` calls through the `to_table`
-    /// processor, returning how many records reached the downstream buffer.
+    /// Run `init`, then two same-key `process` calls through the `to_table`
+    /// processor. Returns how many records reached the downstream buffer.
     async fn to_table_run_two(stores: &mut StoreRegistry) -> usize {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -999,17 +1012,18 @@ mod tests {
         buffer.len()
     }
 
-    /// Uncached → forwards each record immediately (today's behavior): two
-    /// records → two forwards.
+    /// Uncached: the processor forwards each record immediately, so two records
+    /// give two forwards.
     #[tokio::test]
     async fn uncached_to_table_forwards_each_record() {
         let mut stores = source_registry(false);
         check!(to_table_run_two(&mut stores).await == 2);
     }
 
-    /// Cached → the immediate forward is suppressed; the cache buffers the dirty
-    /// entry and flushing emits exactly ONE deduped change. Read-your-writes: the
-    /// cached store reflects the latest value (2) before flush.
+    /// Cached: the processor suppresses the immediate forward. The cache buffers
+    /// the dirty entry, and the flush emits exactly ONE deduped change. The test
+    /// also checks read-your-writes: the cached store holds the latest value (2)
+    /// before the flush.
     #[tokio::test]
     async fn cached_to_table_suppresses_immediate_forward() {
         let mut stores = source_registry(true);
@@ -1028,9 +1042,9 @@ mod tests {
 
     // ── KTable.filter cache suppression (Bug B) ──────────────────────────────
 
-    /// Run `init` then two same-key updates through the filter processor (both
-    /// matching the predicate so the store ends with the latest value),
-    /// returning how many records reached the downstream buffer.
+    /// Run `init`, then two same-key updates through the filter processor. Both
+    /// updates match the predicate, so the store ends with the latest value.
+    /// Returns how many records reached the downstream buffer.
     async fn filter_run_two(stores: &mut StoreRegistry) -> usize {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -1070,16 +1084,16 @@ mod tests {
         buffer.len()
     }
 
-    /// Uncached filter → forwards each matching update immediately (today's
-    /// behavior, unchanged): two updates → two forwards.
+    /// Uncached filter: the processor forwards each matching update immediately,
+    /// so two updates give two forwards.
     #[tokio::test]
     async fn uncached_filter_forwards_each_record() {
         let mut stores = source_registry(false);
         check!(filter_run_two(&mut stores).await == 2);
     }
 
-    /// Cached filter → the immediate forward is suppressed; the cache buffers the
-    /// dirty entry and flushing emits exactly ONE deduped change.
+    /// Cached filter: the processor suppresses the immediate forward. The cache
+    /// buffers the dirty entry, and the flush emits exactly ONE deduped change.
     #[tokio::test]
     async fn cached_filter_suppresses_immediate_forward() {
         let mut stores = source_registry(true);
@@ -1118,8 +1132,8 @@ mod tests {
         stores
     }
 
-    /// Run `init` then two same-key updates through the `map_values` processor,
-    /// returning how many records reached the downstream buffer.
+    /// Run `init`, then two same-key updates through the `map_values` processor.
+    /// Returns how many records reached the downstream buffer.
     async fn map_values_run_two(stores: &mut StoreRegistry) -> usize {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -1158,16 +1172,17 @@ mod tests {
         buffer.len()
     }
 
-    /// Uncached `map_values` → forwards each update immediately (unchanged): two
-    /// updates → two forwards.
+    /// Uncached `map_values`: the processor forwards each update immediately, so
+    /// two updates give two forwards.
     #[tokio::test]
     async fn uncached_map_values_forwards_each_record() {
         let mut stores = mv_registry(false);
         check!(map_values_run_two(&mut stores).await == 2);
     }
 
-    /// Cached `map_values` → the immediate forward is suppressed; the cache buffers
-    /// the dirty entry and flushing emits exactly ONE deduped change.
+    /// Cached `map_values`: the processor suppresses the immediate forward. The
+    /// cache buffers the dirty entry, and the flush emits exactly ONE deduped
+    /// change.
     #[tokio::test]
     async fn cached_map_values_suppresses_immediate_forward() {
         let mut stores = mv_registry(true);

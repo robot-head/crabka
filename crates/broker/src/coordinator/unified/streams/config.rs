@@ -1,9 +1,11 @@
 //! KIP-1071 Streams rebalance-protocol configuration.
 use std::time::Duration;
 
-/// Server-side task-assignor selection for a streams group. `Auto` (the Kafka
-/// default) picks `HighlyAvailable` when the topology has any stateful
-/// subtopology (a state-changelog topic) and `Sticky` otherwise.
+/// Server-side task-assignor selection for a streams group.
+///
+/// `Auto` is the Kafka default. It picks `HighlyAvailable` when the topology
+/// has any stateful subtopology, that is, a state-changelog topic. If not, it
+/// picks `Sticky`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamsAssignorKind {
     #[default]
@@ -14,15 +16,17 @@ pub enum StreamsAssignorKind {
     HighlyAvailable,
 }
 
-/// KIP-1071 streams-group membership + assignment configuration. Sourced from
-/// static broker defaults; per-group `IncrementalAlterConfigs` overrides
-/// (`group.streams.*`) are not yet implemented (deferred — no GROUP-resource
-/// config store exists).
+/// KIP-1071 streams-group membership + assignment configuration.
+///
+/// The values come from static broker defaults. Per-group
+/// `IncrementalAlterConfigs` overrides (`group.streams.*`) are not yet
+/// implemented. They are deferred, because no GROUP-resource config store
+/// exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamsGroupConfig {
     /// Config-level kill switch. The real gate is the `streams.version`
-    /// feature (KIP-1071 early access, default-disabled); this lets an operator
-    /// turn the protocol off even where the feature is finalized.
+    /// feature (KIP-1071 early access, default-disabled). This switch lets an
+    /// operator turn the protocol off even where the feature is finalized.
     pub enable: bool,
     pub session_timeout: Duration,
     pub heartbeat_interval: Duration,
@@ -32,19 +36,22 @@ pub struct StreamsGroupConfig {
     pub max_session_timeout: Duration,
     pub min_heartbeat_interval: Duration,
     pub max_heartbeat_interval: Duration,
-    /// Max number of streams groups (0 = unlimited).
+    /// Max number of streams groups. `0` means unlimited.
     pub max_groups: usize,
     /// Max members per group.
     pub max_size: usize,
     /// `num.standby.replicas`: standby copies per stateful task.
     pub num_standby_replicas: i32,
-    /// `max.warmup.replicas`: cap on concurrent warmup (state-migration) tasks.
+    /// `max.warmup.replicas`: cap on concurrent warmup tasks. A warmup task
+    /// migrates state.
     pub num_warmup_replicas: i32,
-    /// `acceptable.recovery.lag`: max changelog lag (records) at which a warmup
-    /// task is considered caught up and promotable to active/standby.
+    /// `acceptable.recovery.lag`: the maximum changelog lag in records at which
+    /// a warmup task is caught up. The assignor can then promote the task to
+    /// active or standby.
     pub acceptable_recovery_lag: i64,
-    /// How often a member reports task offsets so the assignor can evaluate
-    /// warmup catch-up (`task_offset_interval_ms` in the heartbeat response).
+    /// How often a member reports task offsets, so the assignor can evaluate
+    /// warmup catch-up. This is `task_offset_interval_ms` in the heartbeat
+    /// response.
     pub task_offset_interval: Duration,
     /// Server-side assignor selection.
     pub assignor: StreamsAssignorKind,

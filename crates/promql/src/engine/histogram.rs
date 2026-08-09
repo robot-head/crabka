@@ -73,22 +73,25 @@ pub(super) fn apply_histogram_accessor(
         .collect()
 }
 
-/// Apply `histogram_fraction(lower, upper, v)` to an instant vector `v`,
-/// mirroring `PromqlEngine::eval_histogram_fraction_call` exactly.
+/// Applies `histogram_fraction(lower, upper, v)` to an instant vector `v`.
 ///
-/// Native-histogram rows fold through [`native_histogram_fraction`] (keeping the
-/// source timestamp); classic `<metric>_bucket{le}` float rows are grouped by
-/// labelset (dropping `__name__` + `le`) and folded through
-/// [`classic_histogram_fraction`] (carrying `time_ms`). A labelset that carries
-/// both a classic and a native histogram is dropped from the output and raises
-/// the `MixedClassicNativeHistogramsWarning` (via the in-scope annotation sink),
-/// exactly as the interpreter does. Shared by the interpreter and the operator
-/// path so the two are parity-exact.
+/// This function mirrors `PromqlEngine::eval_histogram_fraction_call` exactly.
+/// Native-histogram rows fold through [`native_histogram_fraction`] and keep the
+/// source timestamp. This function groups classic `<metric>_bucket{le}` float
+/// rows by labelset and drops `__name__` and `le` from the group. Each group
+/// then folds through [`classic_histogram_fraction`] and carries `time_ms`.
+///
+/// This function drops a labelset that carries both a classic and a native
+/// histogram from the output. It raises the
+/// `MixedClassicNativeHistogramsWarning` through the in-scope annotation sink,
+/// exactly as the interpreter does. The interpreter and the operator path share
+/// this function, so the two are parity-exact.
 ///
 /// # Errors
 ///
-/// Returns [`PromqlError`] for an unparseable `le` bound or a non-float classic
-/// bucket count — exactly the errors the interpreter raised inline.
+/// Returns [`PromqlError`] for an unparseable `le` bound. Returns
+/// [`PromqlError`] for a non-float classic bucket count. These are exactly the
+/// errors the interpreter raised inline.
 pub(super) fn apply_histogram_fraction(
     lower: f64,
     upper: f64,
@@ -162,8 +165,9 @@ pub(super) fn apply_histogram_fraction(
 ///
 /// # Errors
 ///
-/// Returns [`PromqlError`] for an unparseable `le` bound or a non-float classic
-/// bucket count — exactly the errors the interpreter raised inline.
+/// Returns [`PromqlError`] for an unparseable `le` bound. Returns
+/// [`PromqlError`] for a non-float classic bucket count. These are exactly the
+/// errors the interpreter raised inline.
 pub(super) fn apply_histogram_quantile(
     quantile: f64,
     samples: Vec<InstantSample>,
@@ -226,23 +230,27 @@ pub(super) fn apply_histogram_quantile(
     Ok(out)
 }
 
-/// Apply the experimental `histogram_quantiles(label, v, phi...)` fold to an
-/// already-evaluated instant vector, emitting one output series per `(input
-/// series, quantile)` pair with the quantile written into the `label`-named label.
+/// Applies the experimental `histogram_quantiles(label, v, phi...)` fold.
 ///
-/// Shared between the interpreter (`PromqlEngine::eval_histogram_quantiles_call`)
-/// and the operator-path `histogram_quantiles` dispatch, so the two match
-/// Prometheus by construction for both classic `<metric>_bucket{le}` float-bucket
-/// vectors and native-histogram vectors. Unlike `histogram_quantile`, mixed
-/// classic+native keys are silently skipped (no annotation), matching the
-/// interpreter's `histogram_quantiles` behaviour: classic output samples carry
-/// `time_ms`, native ones keep the source sample timestamp, and both drop
-/// `__name__` (and `le` for classic buckets).
+/// The input is an already-evaluated instant vector. This function emits one
+/// output series for each `(input series, quantile)` pair and writes the
+/// quantile into the label that `label` names.
+///
+/// The interpreter method `PromqlEngine::eval_histogram_quantiles_call` and the
+/// operator-path `histogram_quantiles` dispatch share this function, so the two
+/// match Prometheus by construction. This holds for classic
+/// `<metric>_bucket{le}` float-bucket vectors and for native-histogram vectors.
+/// This function skips a mixed classic and native key silently, with no
+/// annotation, unlike `histogram_quantile`, and so matches the interpreter's
+/// `histogram_quantiles` behaviour. Classic output samples carry `time_ms`, and
+/// native output samples keep the source sample timestamp. Both drop `__name__`,
+/// and classic buckets also drop `le`.
 ///
 /// # Errors
 ///
-/// Returns [`PromqlError`] for an unparseable `le` bound or a non-float classic
-/// bucket count — exactly the errors the interpreter raised inline.
+/// Returns [`PromqlError`] for an unparseable `le` bound. Returns
+/// [`PromqlError`] for a non-float classic bucket count. These are exactly the
+/// errors the interpreter raised inline.
 #[cfg(feature = "experimental-functions")]
 pub(super) fn apply_histogram_quantiles(
     samples: Vec<InstantSample>,
@@ -844,9 +852,11 @@ impl HistogramAccessor {
     }
 }
 
-/// Map a native-histogram accessor function name to its [`HistogramAccessor`]
-/// variant, mirroring the accessor arms of `PromqlEngine::eval_instant_call`.
-/// Returns `None` for any other function so the planner dispatch falls through.
+/// Maps a native-histogram accessor function name to its [`HistogramAccessor`] variant.
+///
+/// This function mirrors the accessor arms of `PromqlEngine::eval_instant_call`.
+/// It returns `None` for any other function, so the planner dispatch falls
+/// through.
 pub(super) fn histogram_accessor_from_function_name(name: &str) -> Option<HistogramAccessor> {
     Some(match name {
         "histogram_count" => HistogramAccessor::Count,

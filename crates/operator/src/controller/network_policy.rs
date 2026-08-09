@@ -1,21 +1,23 @@
-//! `NetworkPolicy` reconcile — opt-in via `Kafka.spec.networkPolicy`.
+//! `NetworkPolicy` reconcile. You opt in with `Kafka.spec.networkPolicy`.
 //!
-//! One `NetworkPolicy` per cluster, named `<cluster>-broker-policy`,
-//! owner-ref'd to the parent `Kafka`. Selector targets every cluster pod
-//! (broker / controller / combined) via `app.kubernetes.io/name=crabka-broker`
-//! + `app.kubernetes.io/instance=<name>`.
+//! There is one `NetworkPolicy` per cluster. It is named
+//! `<cluster>-broker-policy` and has an owner reference to the parent `Kafka`.
+//! The selector targets every cluster pod, that is, broker, controller, and
+//! combined, with `app.kubernetes.io/name=crabka-broker` and
+//! `app.kubernetes.io/instance=<name>`.
 //!
-//! Ingress rules (stable order):
+//! Ingress rules, in stable order:
 //!   1. Inter-broker pod-to-pod on the inter-broker listener port.
-//!   2. Operator-auto-allow on every listener port (one rule each).
-//!   3. Per-listener peer rules — tri-state on `Listener.networkPolicyPeers`
-//!      (None=allow-all, Some([])=skip = deny-all, Some(peers)=restrict).
-//!   4. Metrics port (9404) allow-all when `spec.metricsConfig` is set.
+//!   2. Operator-auto-allow on every listener port, one rule for each port.
+//!   3. Per-listener peer rules. These are tri-state on
+//!      `Listener.networkPolicyPeers`: None=allow-all,
+//!      Some([])=skip = deny-all, Some(peers)=restrict.
+//!   4. Metrics port 9404 allow-all when `spec.metricsConfig` is set.
 //!
 //! Orphan cleanup: when `spec.networkPolicy` becomes `None` AND the cached
 //! status has `NetworkPolicyReady=Available`, the operator DELETEs the
-//! resource once. The next reconcile sees `Disabled` in status and stops
-//! re-attempting the delete.
+//! resource once. The next reconcile sees `Disabled` in status and stops the
+//! repeated delete attempts.
 
 use std::collections::BTreeMap;
 
@@ -45,8 +47,9 @@ use crate::{
 
 const OPERATOR_LABEL: &str = "crabka-operator";
 
-/// Render the `NetworkPolicy`. Pure function of the Kafka CR + effective
-/// listeners + inter-broker listener port + metrics-enabled bit.
+/// Render the `NetworkPolicy`. This is a pure function of the Kafka CR, the
+/// effective listeners, the inter-broker listener port, and the
+/// metrics-enabled bit.
 pub(crate) fn render_network_policy(
     owner: &Kafka,
     effective_listeners: &[Listener],
@@ -169,13 +172,14 @@ fn to_k8s_peer(p: &NetworkPolicyPeer) -> K8sPeer {
     }
 }
 
-/// Returns `None` when `spec.networkPolicy` is unset, `Some(Ok(()))` on
-/// successful apply, `Some(Err(_))` on apply error.
+/// Returns `None` when `spec.networkPolicy` is unset, `Some(Ok(()))` after a
+/// successful apply, and `Some(Err(_))` after an apply error.
 ///
 /// Orphan cleanup: when `spec.networkPolicy` is unset AND
-/// `status.conditions[NetworkPolicyReady].reason == "Available"`,
-/// DELETEs the resource once (404-tolerant). On the next reconcile the
-/// status will carry `reason=Disabled` so the delete won't repeat.
+/// `status.conditions[NetworkPolicyReady].reason == "Available"`, this
+/// function DELETEs the resource once and tolerates a 404. On the next
+/// reconcile the status carries `reason=Disabled`, so the delete does not
+/// repeat.
 #[tracing::instrument(
     level = "debug",
     skip_all,

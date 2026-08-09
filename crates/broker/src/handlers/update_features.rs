@@ -1,10 +1,12 @@
 //! `UpdateFeatures` handler (`api_key` 57, KIP-584).
 //!
-//! Finalizes broker-supported features (currently only `metadata.version`)
-//! through a Raft-persisted `V1FeatureLevel` record. Gated by `Alter` on
-//! `Cluster("kafka-cluster")`. Intercepted inline in `network::dispatch`
-//! (like `AlterUserScramCredentials`) so the handler receives the
-//! authenticated principal + peer for the ACL check.
+//! This handler finalizes broker-supported features, at present only
+//! `metadata.version`, through a Raft-persisted `V1FeatureLevel` record.
+//! `Alter` on `Cluster("kafka-cluster")` gates it.
+//!
+//! `network::dispatch` intercepts the request inline, as it does for
+//! `AlterUserScramCredentials`, so the handler receives the authenticated
+//! principal and the peer for the ACL check.
 
 use crabka_metadata::{AclOperation, FeatureLevelRecord, MetadataRecord};
 use crabka_protocol::owned::{
@@ -19,9 +21,9 @@ use crate::{
     codes,
 };
 
-/// True if every KIP-1022 dependency for a feature finalize is already met in
-/// the target image. `deps` is the feature's `dependencies(level)` slice:
-/// `(dependency_feature_name, min_finalized_level)` pairs.
+/// True when the target image already meets every KIP-1022 dependency for a
+/// feature finalize. `deps` is the feature's `dependencies(level)` slice, which
+/// holds `(dependency_feature_name, min_finalized_level)` pairs.
 fn dependencies_met(image: &crabka_metadata::MetadataImage, deps: &[(&str, i16)]) -> bool {
     deps.iter().all(|(dep, min_level)| {
         image
@@ -31,20 +33,21 @@ fn dependencies_met(image: &crabka_metadata::MetadataImage, deps: &[(&str, i16)]
     })
 }
 
-/// KIP-584 `FeatureUpdate.UpgradeType` wire code: safe (lossless) downgrade.
+/// KIP-584 `FeatureUpdate.UpgradeType` wire code for a safe downgrade, which
+/// loses nothing.
 const UPGRADE_TYPE_SAFE_DOWNGRADE: i8 = 2;
 
-/// KIP-584 `FeatureUpdate.UpgradeType` wire code: unsafe downgrade — the
-/// caller accepts losing metadata written at the higher feature level.
+/// KIP-584 `FeatureUpdate.UpgradeType` wire code for an unsafe downgrade. The
+/// caller accepts the loss of metadata written at the higher feature level.
 const UPGRADE_TYPE_UNSAFE_DOWNGRADE: i8 = 3;
 
 /// KIP-584: a requested `max_version_level` of `0` asks to *delete* the
 /// finalized feature rather than move it to another level.
 const DELETE_FINALIZED_LEVEL: i16 = 0;
 
-/// KIP-584 `FeatureUpdate.UpgradeType`: 1 = UPGRADE, 2 = `SAFE_DOWNGRADE`,
-/// 3 = `UNSAFE_DOWNGRADE`. Request v0 predates the field and carries the
-/// boolean `allow_downgrade` flag instead.
+/// KIP-584 `FeatureUpdate.UpgradeType`: 1 is UPGRADE, 2 is `SAFE_DOWNGRADE`,
+/// and 3 is `UNSAFE_DOWNGRADE`. Request v0 comes from before this field and
+/// carries the boolean `allow_downgrade` flag instead.
 fn downgrade_allowed(version: i16, allow_downgrade: bool, upgrade_type: i8) -> bool {
     if version == 0 {
         allow_downgrade
@@ -253,8 +256,8 @@ fn top_level_error(code: i16, msg: &str, version: i16) -> UpdateFeaturesResponse
     }
 }
 
-/// Overwrite every `ok` row with a request-wide failure code, and set the
-/// top-level error too.
+/// Overwrites every `ok` row with a request-wide failure code, and sets the
+/// top-level error as well.
 fn apply_request_wide(
     mut results: Vec<UpdatableFeatureResult>,
     code: i16,
@@ -271,9 +274,9 @@ fn apply_request_wide(
     resp
 }
 
-/// Assemble the final response. On v2 (no `results` array on the wire) the
-/// top-level `error_code` must carry the first non-zero row code so the
-/// client still sees the failure.
+/// Assembles the final response. On v2 the wire carries no `results` array, so
+/// the top-level `error_code` must carry the first non-zero row code. The
+/// client then still sees the failure.
 fn finalize(results: Vec<UpdatableFeatureResult>, version: i16) -> UpdateFeaturesResponse {
     let (top_code, top_msg) = if version >= 2 {
         results

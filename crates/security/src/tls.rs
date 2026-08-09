@@ -4,13 +4,12 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use thiserror::Error;
 
 /// Whether the server requests and verifies a client certificate during
-/// the TLS handshake (RFC 5246 §7.4.6 — Kafka's mTLS path).
+/// the TLS handshake, per RFC 5246 §7.4.6, which is Kafka's mTLS path.
 ///
 /// `Required` rejects connections that don't present a cert chaining to
-/// `client_ca_path`. `Optional` requests a cert but still accepts
-/// anonymous handshakes — the dispatch layer is responsible for
-/// surfacing the `Anonymous` outcome to gating logic. `Disabled` requests
-/// no client cert.
+/// `client_ca_path`. `Optional` requests a cert but still accepts anonymous
+/// handshakes. The dispatch layer must surface the `Anonymous` outcome to the
+/// gating logic. `Disabled` requests no client cert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientAuthMode {
     /// No client certificate requested. The handshake completes
@@ -30,17 +29,17 @@ pub enum ClientAuthMode {
 pub struct TlsConfig {
     pub cert_chain_path: PathBuf,
     pub private_key_path: PathBuf,
-    /// Roots used by the *client* side (this broker as an outbound
-    /// inter-broker dialer) to verify server certs. Mirrors Kafka's
+    /// Roots that the *client* side uses to verify server certs. The client
+    /// side is this broker as an outbound inter-broker dialer. Mirrors Kafka's
     /// `ssl.truststore.location` on the client.
     pub trust_roots_path: Option<PathBuf>,
-    /// PEM file containing the CA(s) used to verify
-    /// *incoming* client certs when `client_auth != Disabled`. Mirrors
-    /// Kafka's `ssl.client.auth.truststore.location` (operator-supplied
-    /// clients CA secret).
+    /// PEM file with the CA(s) that verify *incoming* client certs when
+    /// `client_auth != Disabled`. Mirrors Kafka's
+    /// `ssl.client.auth.truststore.location`, the operator-supplied clients CA
+    /// secret.
     pub client_ca_path: Option<PathBuf>,
-    /// Client-cert request mode. Defaults to `Disabled`
-    /// (no client cert requested).
+    /// Client-cert request mode. Default: `Disabled`, which requests no client
+    /// cert.
     pub client_auth: ClientAuthMode,
 }
 
@@ -60,9 +59,9 @@ pub enum TlsError {
     /// unset. A client-cert verifier needs at least one trust root.
     #[error("client_auth is enabled but no client_ca_path configured")]
     MissingClientCa,
-    /// rustls's `WebPkiClientVerifier::builder` rejected the supplied
-    /// trust roots (typically: cert isn't a CA, or the public key
-    /// algorithm isn't supported).
+    /// rustls's `WebPkiClientVerifier::builder` rejected the supplied trust
+    /// roots. Usually the cert is not a CA, or rustls does not support the
+    /// public key algorithm.
     #[error("client cert verifier build failed: {0}")]
     VerifierBuild(String),
 }
@@ -172,9 +171,11 @@ impl TlsConfig {
 
     /// Build a rustls `ClientConfig` that BOTH verifies the peer's server cert
     /// against `trust_roots_path` AND presents this node's own
-    /// `cert_chain_path`/`private_key_path` as a client certificate (mTLS).
-    /// Used by peer-to-peer dialers (e.g. the gRPC gateway forwarding to an
-    /// owning replica) that must mutually authenticate.
+    /// `cert_chain_path`/`private_key_path` as a client certificate, which is
+    /// mTLS.
+    ///
+    /// Peer-to-peer dialers that must mutually authenticate use this, for
+    /// example the gRPC gateway when it forwards to an owning replica.
     ///
     /// # Errors
     /// Propagates `TlsError` from cert/key loading or rustls config building.

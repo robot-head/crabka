@@ -1,6 +1,7 @@
-//! Insertion-ordered processor-node graph: the structural input the JVM's
-//! `makeNodeGroups` operates on. Order is load-bearing — it determines
-//! subtopology indices.
+//! Insertion-ordered processor-node graph: the structural input that the JVM's
+//! `makeNodeGroups` operates on.
+//!
+//! Order is load-bearing. It determines the subtopology indices.
 
 use std::collections::{HashMap, HashSet};
 
@@ -8,7 +9,7 @@ use crabka_units::prelude::*;
 
 use super::builder::TopologyError;
 
-/// What a node is and which topics/predecessors it touches.
+/// What a node is, and which topics and predecessors it touches.
 #[derive(Debug, Clone)]
 pub(crate) enum NodeKind {
     Source {
@@ -31,33 +32,35 @@ pub(crate) struct Node {
 
 /// Which changelog topic configuration a store's changelog topic gets.
 ///
-/// The retention and compaction-lag extents are [`Time`] quantities; the wire
-/// layer renders them as the raw millisecond integers Kafka's config keys
-/// require. `Time` stores `f64`, so this cannot derive `Eq` — nothing keys a map
-/// or set on it, so `PartialEq` is enough.
+/// The retention and compaction-lag extents are [`Time`] quantities. The wire
+/// layer renders them as the raw millisecond integers that Kafka's config keys
+/// need. `Time` stores `f64`, so this type cannot derive `Eq`. Nothing keys a map
+/// or a set on it, so `PartialEq` is enough.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ChangelogKind {
     /// KV store: `cleanup.policy=compact` only.
     Kv,
-    /// Aggregation window store: `cleanup.policy=compact,delete` + `retention.ms`.
+    /// Aggregation window store: `cleanup.policy=compact,delete` and
+    /// `retention.ms`.
     AggWindow { retention: Time },
-    /// Join window store: `cleanup.policy=delete` + `retention.ms`
-    /// (retainDuplicates prevents compaction).
+    /// Join window store: `cleanup.policy=delete` and `retention.ms`.
+    /// retainDuplicates prevents compaction.
     JoinWindow { retention: Time },
-    /// Versioned store: `cleanup.policy=compact` + `min.compaction.lag.ms`
-    /// (= `historyRetention` + one day) so recent version history is not
-    /// compacted away before restore reads it.
+    /// Versioned store: `cleanup.policy=compact` and `min.compaction.lag.ms`,
+    /// which equals `historyRetention` plus one day. Compaction therefore cannot
+    /// remove recent version history before restore reads it.
     Versioned { min_compaction_lag: Time },
 }
 
-/// A registered state store: its name, the processors it connects (used to
-/// union the owning subtopology), and an optional **changelog-topic override**.
+/// A registered state store: its name, the processors it connects, and an
+/// optional **changelog-topic override**. The connected processors union the
+/// owning subtopology.
 ///
-/// The override is `None` for the default case — the changelog topic name is
-/// then derived as `<app_id>-<store_name>-changelog`. The DSL
-/// `REUSE_KTABLE_SOURCE_TOPICS` optimizer sets it to the table's *source* topic
-/// so the materialized store reuses that topic as its changelog (no separate
-/// `app-<store>-changelog` topic is created).
+/// The override is `None` in the default case. The changelog topic name is then
+/// derived as `<app_id>-<store_name>-changelog`. The DSL
+/// `REUSE_KTABLE_SOURCE_TOPICS` optimizer sets the override to the table's
+/// *source* topic, so the materialized store reuses that topic as its changelog.
+/// No separate `app-<store>-changelog` topic is created.
 #[derive(Debug, Clone)]
 pub(crate) struct StoreEntry {
     pub name: String,
@@ -76,15 +79,15 @@ pub(crate) struct NodeRegistry {
     pub stores: Vec<StoreEntry>,
     /// Topic names registered as internal repartition topics.
     pub repartition_topics: HashSet<String>,
-    /// Topics consumed for a `GlobalKTable`: invisible in the wire (no
-    /// subtopology of their own, no changelog). The global source node still
+    /// Topics consumed for a `GlobalKTable`. They are invisible in the wire, with
+    /// no subtopology of their own and no changelog. The global source node still
     /// occupies a node-group index during grouping, so other subtopology ids
-    /// shift — but its topic is skipped in the source-bucketing pass, leaving the
-    /// group source-less so the final filter drops it.
+    /// shift. The source-bucketing pass skips the topic, which leaves the group
+    /// source-less, so the final filter drops it.
     pub global_source_topics: HashSet<String>,
-    /// Declared copartition groups: each a list of member topic names that must
-    /// share a partitioning (required for joins). The grouping pass assigns each
-    /// group to the subtopology containing its members.
+    /// Declared copartition groups. Each group is a list of member topic names
+    /// that must share one partitioning, which joins need. The grouping pass
+    /// assigns each group to the subtopology that holds its members.
     pub copartition_groups: Vec<Vec<String>>,
 }
 
@@ -98,9 +101,10 @@ impl NodeRegistry {
         Ok(())
     }
 
-    /// Reject any predecessor name not already present in the registry.
-    /// Called at add time to guarantee a DAG by construction — a forward
-    /// reference (including a self-reference) makes a cycle possible.
+    /// Reject any predecessor name that the registry does not already hold.
+    ///
+    /// The builder calls this at add time to guarantee a DAG by construction. A
+    /// forward reference, including a self-reference, makes a cycle possible.
     fn require_predecessors_exist(
         &self,
         node: &str,
@@ -166,9 +170,10 @@ impl NodeRegistry {
         });
     }
 
-    /// Register a windowed aggregation state store. The `retention` is stored and
-    /// passed to the wire layer so the changelog topic gets `compact,delete` +
-    /// `retention.ms` configs instead of the KV `compact`-only set.
+    /// Register a windowed aggregation state store. This method keeps the
+    /// `retention` and passes it to the wire layer, so the changelog topic gets
+    /// the `compact,delete` and `retention.ms` configs instead of the KV
+    /// `compact`-only set.
     pub fn add_window_store(
         &mut self,
         name: &str,
@@ -184,8 +189,8 @@ impl NodeRegistry {
         });
     }
 
-    /// Register a versioned state store. The changelog gets `compact` policy +
-    /// `min.compaction.lag.ms`.
+    /// Register a versioned state store. The changelog gets the `compact` policy
+    /// and `min.compaction.lag.ms`.
     pub fn add_versioned_store(
         &mut self,
         name: &str,
@@ -201,9 +206,9 @@ impl NodeRegistry {
         });
     }
 
-    /// Register a join window state store. The changelog gets `delete`-only
-    /// policy + `retention.ms` (retainDuplicates means the store cannot be
-    /// compacted — only deleted).
+    /// Register a join window state store. The changelog gets the `delete`-only
+    /// policy and `retention.ms`. retainDuplicates means the broker can only
+    /// delete the store's records, and cannot compact them.
     pub fn add_join_window_store(
         &mut self,
         name: &str,
@@ -224,20 +229,21 @@ impl NodeRegistry {
         self.copartition_groups.push(topics);
     }
 
-    /// Mark `topic` as a `GlobalKTable` source: it is consumed for a global store
-    /// and must NOT appear in the wire (no subtopology, no changelog). The global
-    /// node group still consumes a subtopology index (so other subtopology ids
-    /// shift).
+    /// Mark `topic` as a `GlobalKTable` source. A global store consumes it, and
+    /// it must NOT appear in the wire, with no subtopology and no changelog. The
+    /// global node group still consumes a subtopology index, so other subtopology
+    /// ids shift.
     pub fn add_global_source(&mut self, topic: &str) {
         self.global_source_topics.insert(topic.to_string());
     }
 
     /// Connect an additional processor to an existing store.
     ///
-    /// Mirrors `InternalTopologyBuilder.connectProcessorAndStateStores`: lets a
-    /// join processor read the joined table's store without being the original
-    /// owner. No-op if `processor` is already listed. No-op if `store` is not
-    /// found (callers ensure stores are registered before connecting).
+    /// This method matches `InternalTopologyBuilder.connectProcessorAndStateStores`.
+    /// It lets a join processor read the joined table's store even though the
+    /// processor is not the original owner. It is a no-op when `processor` is
+    /// already listed, and a no-op when it does not find `store`. Callers must
+    /// register a store before they connect to it.
     pub fn connect_processor_store(&mut self, processor: &str, store: &str) {
         if let Some(e) = self.stores.iter_mut().find(|e| e.name == store)
             && !e.processors.iter().any(|p| p == processor)
@@ -246,8 +252,8 @@ impl NodeRegistry {
         }
     }
 
-    /// Validate that every referenced predecessor exists. Call after all nodes
-    /// are added, before grouping.
+    /// Validate that every referenced predecessor exists. Call this after you add
+    /// all the nodes, and before the grouping pass.
     pub fn validate_predecessors(&self) -> Result<(), TopologyError> {
         for node in &self.nodes {
             let preds = match &node.kind {

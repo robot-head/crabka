@@ -1,4 +1,4 @@
-//! `crabka-audit` — offline audit-log tools.
+//! `crabka-audit`: offline audit-log tools.
 
 use std::{path::PathBuf, process::ExitCode};
 
@@ -16,10 +16,10 @@ struct Cli {
 enum Command {
     /// Verify a partition's hash-chain and signed checkpoints offline.
     Verify {
-        /// Path to the audit partition directory, e.g. `<log_dir>/__crabka_audit-0`
+        /// Path to the audit partition directory, for example `<log_dir>/__crabka_audit-0`
         #[arg(long)]
         partition_dir: PathBuf,
-        /// `key_id` the trusted public key corresponds to.
+        /// The `key_id` that the trusted public key corresponds to.
         #[arg(long)]
         key_id: String,
         /// Path to the trusted Ed25519 public key (raw 32 bytes).

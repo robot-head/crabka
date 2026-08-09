@@ -1,14 +1,14 @@
 // rustc 1.95 clippy ICEs on annotate-snippets in pedantic lints on these
 // raw-wire test files; match the opt-out used by compaction.rs / elect_leaders.rs.
 
-//! JBOD / multi-log-dir + `DescribeLogDirs` (KIP-113) end-to-end.
+//! End-to-end test of JBOD, multi-log-dir, and `DescribeLogDirs` (KIP-113).
 //!
-//! Boots a single broker with two log directories, creates a 6-partition
+//! It boots a single broker with two log directories, creates a 6-partition
 //! topic, and asserts:
-//!   1. partition data is spread across both directories (least-loaded
-//!      placement), and
-//!   2. `DescribeLogDirs` reports one result per directory whose union
-//!      covers every partition, consistent with what's on disk.
+//!   1. the partition data is spread across both directories, from
+//!      least-loaded placement, and
+//!   2. `DescribeLogDirs` reports one result per directory, and the union of
+//!      those results covers every partition and matches what is on disk.
 
 use std::{io, net::SocketAddr};
 

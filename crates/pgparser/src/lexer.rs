@@ -1,5 +1,7 @@
-//! Hand-written lexer. Produces (Token, byte-offset) pairs; offsets feed
-//! 42601 error positions.
+//! Hand-written lexer.
+//!
+//! The lexer produces (Token, byte-offset) pairs. The offsets feed 42601 error
+//! positions.
 //!
 //! The literal grammar tracks `PostgreSQL`'s `scan.l`: decimal, hexadecimal
 //! (`0x…`), octal (`0o…`) and binary (`0b…`) integers, `_` digit separators,
@@ -11,9 +13,11 @@ use crate::{
     token::{Keyword, Token},
 };
 
-/// SQLSTATE 22021 (`character_not_in_repertoire`) — the escape-string escapes
-/// (`\ddd`, `\xhh`) address raw bytes, so they can spell a sequence that is not
-/// valid UTF-8. `PostgreSQL` rejects those with this code, not with 42601.
+/// SQLSTATE 22021 (`character_not_in_repertoire`).
+///
+/// The escape-string escapes (`\ddd`, `\xhh`) address raw bytes, so they can
+/// spell a sequence that is not valid UTF-8. `PostgreSQL` rejects those with
+/// this code, not with 42601.
 const UNTRANSLATABLE: &str = "22021";
 
 /// Tokenize SQL text and preserve each token's byte offset.
@@ -204,10 +208,11 @@ fn digit_run(bytes: &[u8], start: usize, radix: u32) -> usize {
 /// Render a radix-`radix` digit string (already separator-free) as a decimal
 /// string of unbounded width.
 ///
-/// The width matters: `PostgreSQL` widens an integer literal that overflows
-/// `int8` to `numeric` rather than rejecting it (`0xFFFFFFFFFFFFFFFFF` is
-/// `295147905179352825855`), so the lexer must not truncate to a machine
-/// integer here — the value's type is decided downstream from the decimal text.
+/// The width matters. `PostgreSQL` does not reject an integer literal that
+/// overflows `int8`. It widens the literal to `numeric`
+/// (`0xFFFFFFFFFFFFFFFFF` is `295147905179352825855`). So the lexer must not
+/// truncate to a machine integer here. Code downstream decides the value's
+/// type from the decimal text.
 fn radix_to_decimal(digits: &str, radix: u32) -> String {
     // Little-endian decimal digits, multiplied by `radix` per input digit.
     let mut out: Vec<u8> = vec![0];
@@ -231,8 +236,8 @@ fn radix_to_decimal(digits: &str, radix: u32) -> String {
     out.iter().rev().map(|d| char::from(b'0' + d)).collect()
 }
 
-/// Scan the numeric literal starting at `start`, returning its token and the
-/// byte offset just past it.
+/// Scan the numeric literal at `start` and return its token with the byte
+/// offset just past it.
 ///
 /// Mirrors `PostgreSQL`'s `scan.l` literal grammar: `0x`/`0o`/`0b` integers
 /// (case-insensitive prefix), `_` digit separators anywhere a separator may sit
@@ -325,10 +330,11 @@ fn scan_number(sql: &str, bytes: &[u8], start: usize) -> Result<(Token, usize), 
     ))
 }
 
-/// Turn the accumulated literal bytes into a `String`, rejecting what
-/// `PostgreSQL` rejects: an embedded NUL, and any byte sequence that is not
-/// valid UTF-8 (22021). Only `E'…'` escapes can produce either — the other
-/// literal forms copy already-valid input.
+/// Turn the accumulated literal bytes into a `String`.
+///
+/// This function rejects what `PostgreSQL` rejects: an embedded NUL, and any
+/// byte sequence that is not valid UTF-8 (22021). Only `E'…'` escapes can
+/// produce either one. The other literal forms copy already-valid input.
 fn decode_utf8(bytes: Vec<u8>, position: usize) -> Result<String, ParseError> {
     if bytes.contains(&0) {
         return Err(ParseError::new_sqlstate(
@@ -347,14 +353,15 @@ fn decode_utf8(bytes: Vec<u8>, position: usize) -> Result<String, ParseError> {
     })
 }
 
-/// Scan a string literal whose opening quote is at `quote`, returning its
-/// decoded text and the offset just past its closing quote.
+/// Scan a string literal whose opening quote is at `quote` and return its
+/// decoded text with the offset just past its closing quote.
 ///
-/// `escape` selects `E'…'` semantics (backslash escapes expanded); a standard
-/// literal treats `\` as an ordinary character. Both forms read `''` as one
-/// embedded quote, and both absorb `PostgreSQL`'s literal continuation: two
-/// literals separated by whitespace CONTAINING A NEWLINE are one literal, and
-/// the continuation keeps the escape mode of the literal it continues.
+/// `escape` selects `E'…'` semantics, where the lexer expands backslash
+/// escapes. A standard literal treats `\` as an ordinary character. Both forms
+/// read `''` as one embedded quote. Both also absorb `PostgreSQL`'s literal
+/// continuation: two literals separated by whitespace CONTAINING A NEWLINE are
+/// one literal, and the continuation keeps the escape mode of the literal it
+/// continues.
 fn string_literal(bytes: &[u8], quote: usize, escape: bool) -> Result<(String, usize), ParseError> {
     let mut buf: Vec<u8> = Vec::new();
     let mut i = quote;
@@ -386,18 +393,20 @@ fn string_literal(bytes: &[u8], quote: usize, escape: bool) -> Result<(String, u
     Ok((decode_utf8(buf, quote)?, i))
 }
 
-/// `PostgreSQL`'s `quotecontinue`: from the offset just past a closing quote,
-/// skip whitespace and `--` comments across a NEWLINE; if the next byte is a
-/// quote, the literal continues there. Returns the offset of that quote, or
-/// `None` when this literal ended.
+/// `PostgreSQL`'s `quotecontinue`.
 ///
-/// The newline is load-bearing: `'a' 'b'` on ONE line is a syntax error in
-/// `PostgreSQL`, while the same pair split across lines is the single value
+/// From the offset just past a closing quote, skip whitespace and `--`
+/// comments across a NEWLINE. If the next byte is a quote, the literal
+/// continues there. Returns the offset of that quote, or `None` when this
+/// literal ended.
+///
+/// The newline is necessary. `'a' 'b'` on ONE line is a syntax error in
+/// `PostgreSQL`, but the same pair split across lines is the single value
 /// `ab`.
 ///
 /// BLOCK comments deliberately do not count. `PostgreSQL`'s `quotecontinue`
-/// admits only `{space}` and the `--` line comment — `/* … */` is scanned by a
-/// separate start condition — so `'a'/* c */\n'b'` is a syntax error there and
+/// admits only `{space}` and the `--` line comment, because a separate start
+/// condition scans `/* … */`. So `'a'/* c */\n'b'` is a syntax error there and
 /// must be one here too.
 fn literal_continuation(bytes: &[u8], from: usize) -> Option<usize> {
     let mut i = from;
@@ -420,12 +429,12 @@ fn literal_continuation(bytes: &[u8], from: usize) -> Option<usize> {
     (newline && bytes.get(i) == Some(&b'\'')).then_some(i)
 }
 
-/// Expand one `E'…'` backslash escape starting at the `\` at `i`, appending its
-/// bytes to `buf` and returning the offset just past it.
+/// Expand one `E'…'` backslash escape that starts at the `\` at `i`.
 ///
-/// `\ddd` (octal) and `\xhh` (hex) address RAW BYTES, so a pair of them can
-/// spell one multi-byte character — validity is judged once, over the whole
-/// literal, by [`decode_utf8`]. An unrecognised escape yields the escaped
+/// The function appends the escape's bytes to `buf` and returns the offset
+/// just past it. `\ddd` (octal) and `\xhh` (hex) address RAW BYTES, so a pair
+/// of them can spell one multi-byte character. [`decode_utf8`] judges validity
+/// once, over the whole literal. An unrecognised escape gives the escaped
 /// character itself (`\q` is `q`), which is what `PostgreSQL` does.
 fn escape_sequence(
     bytes: &[u8],
@@ -483,10 +492,12 @@ fn escape_sequence(
     Ok(i + 2)
 }
 
-/// Expand a `\uXXXX` (4 hex digits) or `\UXXXXXXXX` (8) escape, including
-/// `PostgreSQL`'s surrogate-pair rule: a high surrogate must be followed
-/// immediately by a `\u` low surrogate, and the pair encodes one character.
-/// An unpaired surrogate is 42601 "invalid Unicode surrogate pair".
+/// Expand a `\uXXXX` (4 hex digits) or `\UXXXXXXXX` (8) escape.
+///
+/// The function applies `PostgreSQL`'s surrogate-pair rule: a `\u` low
+/// surrogate must immediately follow a high surrogate, and the pair encodes
+/// one character. An unpaired surrogate is 42601 "invalid Unicode surrogate
+/// pair".
 fn unicode_escape(
     bytes: &[u8],
     i: usize,
@@ -528,14 +539,14 @@ fn unicode_escape(
     Ok(j)
 }
 
-/// Scan a `$tag$…$tag$` (or `$$…$$`) dollar-quoted literal starting at the `$`
-/// at `start`, returning its verbatim body and the offset just past the closing
-/// delimiter.
+/// Scan a `$tag$…$tag$` (or `$$…$$`) dollar-quoted literal at the `$` at
+/// `start`.
 ///
-/// The tag follows `PostgreSQL`'s `dolqdelim`: it may be empty, and otherwise
-/// starts with a letter/`_`/non-ASCII byte. Distinct tags nest — the body of
-/// `$outer$ … $inner$ … $outer$` includes the inner delimiters verbatim — because
-/// only the exact opening delimiter closes the literal.
+/// The function returns the verbatim body and the offset just past the closing
+/// delimiter. The tag follows `PostgreSQL`'s `dolqdelim`: it may be empty, and
+/// otherwise it starts with a letter/`_`/non-ASCII byte. Distinct tags nest,
+/// because only the exact opening delimiter closes the literal. So the body of
+/// `$outer$ … $inner$ … $outer$` includes the inner delimiters verbatim.
 fn dollar_quoted(sql: &str, bytes: &[u8], start: usize) -> Result<(String, usize), ParseError> {
     let tag_end = ident_end(bytes, start + 1);
     if bytes.get(tag_end) != Some(&b'$') {
@@ -553,8 +564,9 @@ fn dollar_quoted(sql: &str, bytes: &[u8], start: usize) -> Result<(String, usize
     ))
 }
 
-/// Skip the block comment opening at `i`, honouring `PostgreSQL`'s nesting.
-/// Returns the offset just past it and whether it was actually closed.
+/// Skip the block comment that opens at `i`, with `PostgreSQL`'s nesting rule.
+/// Returns the offset just past it and whether the comment was actually
+/// closed.
 fn skip_block_comment(bytes: &[u8], i: usize) -> (usize, bool) {
     let mut depth = 1usize;
     let mut j = i + 2;
@@ -575,21 +587,22 @@ fn skip_block_comment(bytes: &[u8], i: usize) -> (usize, bool) {
     (j, false)
 }
 
-/// Match the longest operator/punctuation lexeme starting at `bytes[i]`,
-/// returning it with its byte length.
+/// Match the longest operator/punctuation lexeme that starts at `bytes[i]`.
 ///
-/// MAXIMAL MUNCH is the whole contract of this function: every spelling whose
-/// first byte also begins a shorter spelling is listed longest-first — `->>`
+/// Returns the lexeme with its byte length.
+///
+/// MAXIMAL MUNCH is the whole contract of this function. Every spelling whose
+/// first byte also begins a shorter spelling is listed longest-first: `->>`
 /// before `->` before `-`, `#>>` before `#>` before `#`, `?|`/`?&` before `?`,
 /// `!~*` before `!~`, `||/` before `||` before `|/` before `|`, `<@`/`<=`/`<>`/
 /// `<<` before `<`, `::` before `:`. A slip re-reads `a->>'k'` as `a -> >'k'`,
-/// whose tail still lexes, so the lexer tests pin each neighbouring shorter
+/// whose tail still lexes. So the lexer tests pin each neighbouring shorter
 /// spelling explicitly.
 ///
-/// `--` and `/*` are claimed by the comment arms in [`lex`] before this runs, so
-/// a `-` or `/` reaching here is always the operator. The one place that still
-/// matters is `||/`: `PostgreSQL` stops an operator at an embedded comment
-/// opener, so `'a' ||/* c */ 'b'` is concatenation, not a cube root.
+/// The comment arms in [`lex`] claim `--` and `/*` before this function runs,
+/// so a `-` or `/` that reaches here is always the operator. The one place that
+/// still matters is `||/`. `PostgreSQL` stops an operator at an embedded
+/// comment opener, so `'a' ||/* c */ 'b'` is concatenation, not a cube root.
 fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
     let next_is = |byte: u8| bytes.get(i + 1) == Some(&byte);
     let next_two_are = |first: u8, second: u8| next_is(first) && bytes.get(i + 2) == Some(&second);

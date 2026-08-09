@@ -1,11 +1,14 @@
-//! KIP-595 consensus decision kernels, extracted from `crabka-kraft-core` so
-//! Creusot can verify them (the host crate's `Instant`/async surface is
-//! untranslatable). Contracts are added in a follow-up task; the bodies here
-//! are already written in the loop style the proofs need (no std sort).
+//! KIP-595 consensus decision kernels.
+//!
+//! These kernels come out of `crabka-kraft-core`, so that Creusot can verify
+//! them. Creusot cannot translate the `Instant` and async surface of the host
+//! crate. A follow-up task adds the contracts. The bodies here are already
+//! written in the loop style that the proofs need, with no std sort.
 
 use creusot_std::prelude::*;
 
-/// Members of `{log_end} U s` with value >= `v` (the majority-replication witness).
+/// Members of `{log_end} U s` with value >= `v`. This is the
+/// majority-replication witness.
 #[cfg(creusot)]
 #[logic]
 pub fn hwm_member_at(log_end: Int, s: Seq<i64>, k: Int) -> Int {
@@ -175,11 +178,13 @@ pub fn lemma_hwm_member_maximal(log_end: i64, s: &[i64], majority: usize, best: 
     lemma_hwm_threshold_has_member(log_end, s, majority);
 }
 
-/// Deterministic per-`(node, epoch)` election-timeout jitter in `[0, base_ms)`,
-/// Raft's randomized backoff made reproducible for the deterministic sims.
-/// Different nodes (and the same node across re-election epochs) get different
-/// spreads, so closely-synchronized voters don't arm their election timers in
-/// lockstep and split the vote indefinitely.
+/// Deterministic per-`(node, epoch)` election-timeout jitter in `[0, base_ms)`.
+///
+/// This is Raft's randomized backoff, made reproducible for the deterministic
+/// sims. Different nodes get different spreads, and the same node gets a
+/// different spread in each re-election epoch. Closely-synchronized voters thus
+/// do not arm their election timers in lockstep and do not split the vote
+/// indefinitely.
 #[ensures(base_ms@ == 0 ==> result@ == 0)]
 #[ensures(base_ms@ > 0 ==> result@ < base_ms@)]
 #[must_use]
@@ -194,8 +199,10 @@ pub fn election_jitter_ms(me: u64, epoch: u32, base_ms: u64) -> u64 {
     mix % base_ms
 }
 
-/// `true` if the candidate's log is at least as up-to-date as ours
-/// (KIP-595: higher last epoch wins; on tie, higher/equal offset wins).
+/// `true` if the candidate's log is at least as up-to-date as ours.
+///
+/// KIP-595: the higher last epoch wins. On a tie, the higher or equal offset
+/// wins.
 #[ensures(result == (cand_epoch@ > my_epoch@
     || (cand_epoch@ == my_epoch@ && cand_offset@ >= my_end@)))]
 #[must_use]
@@ -241,16 +248,18 @@ fn candidate_has_majority(
     count >= majority
 }
 
-/// The HWM as the majority-th largest match offset across the leader's own
-/// log end and every follower's acknowledged fetch offset, gated on the
-/// leader-completeness rule (Raft Fig.8 / KIP-595): the HWM may only advance
-/// once the majority offset is strictly past `epoch_start_offset`. Never
-/// regresses below `current_hwm`.
+/// The HWM as the majority-th largest match offset across the leader's own log
+/// end and every follower's acknowledged fetch offset.
 ///
-/// The majority-th largest is computed by its definition - the greatest
-/// member m of `{log_end} U follower_offsets` with at least `majority`
-/// members >= m - rather than by sorting: voter counts are tiny (<= ~7), and a
-/// definition-mirroring loop is what the Creusot proof quantifies over.
+/// The leader-completeness rule of Raft Fig.8 and KIP-595 gates this value: the
+/// HWM may only advance once the majority offset is strictly past
+/// `epoch_start_offset`. The HWM never regresses below `current_hwm`.
+///
+/// The function computes the majority-th largest by its definition, and not by
+/// a sort. That definition is the greatest member m of
+/// `{log_end} U follower_offsets` with at least `majority` members >= m. Voter
+/// counts are tiny, at most about 7, and the Creusot proof quantifies over a
+/// loop that mirrors the definition.
 #[requires(1 <= majority@ && majority@ <= follower_offsets@.len() + 1)]
 #[requires(current_hwm@ <= log_end@)]
 #[requires(forall<k: Int> 0 <= k && k < follower_offsets@.len()
@@ -307,7 +316,7 @@ pub fn recompute_high_watermark(
 
 /// Monotonic handoff from a previous visible diskless high watermark to a newly
 /// observed WAL-quorum frontier. A broker that becomes read-capable must never
-/// lower visibility during leader/member handoff.
+/// lower visibility during a leader handoff or a member handoff.
 #[ensures(result@ >= previous_hw@)]
 #[ensures(result@ >= quorum_frontier@)]
 #[ensures(result@ == previous_hw@ || result@ == quorum_frontier@)]
@@ -327,8 +336,9 @@ mod tests {
 
     use super::*;
 
-    /// The production implementation this kernel replaced: sort descending,
-    /// take the majority-th largest, gate on `epoch_start`, clamp monotonic.
+    /// The production implementation that this kernel replaced: sort
+    /// descending, take the majority-th largest, gate on `epoch_start`, and
+    /// clamp monotonic.
     fn hwm_sort_oracle(
         log_end: i64,
         follower_offsets: &[i64],

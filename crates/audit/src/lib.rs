@@ -1,4 +1,4 @@
-//! Crabka audit subsystem — event model, OCSF serialization, and write pipeline.
+//! Crabka audit subsystem: event model, OCSF serialization, and write pipeline.
 //!
 //! See `docs/superpowers/specs/2026-06-18-crabka-fedramp-mla-audit-design.md`.
 

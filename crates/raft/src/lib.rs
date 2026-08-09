@@ -1,13 +1,14 @@
 //! Metadata Raft quorum for Crabka.
 //!
-//! `crabka-raft` runs a hand-rolled KIP-595 `KRaft` consensus engine (the
-//! [`kraft::KraftController`]) over Crabka's storage ([`crabka_log`]) and
+//! `crabka-raft` runs a hand-rolled KIP-595 `KRaft` consensus engine, the
+//! [`kraft::KraftController`], over Crabka's storage ([`crabka_log`]) and
 //! transport ([`crabka_client_core`]). The public entry point is
-//! [`Controller::start`], which spawns the engine, opens a TCP listener serving
-//! the real KIP-595 RPCs (Fetch=1, Vote=52, BeginQuorumEpoch=53,
-//! EndQuorumEpoch=54) plus the Crabka-private observer/forward RPCs, and returns
-//! a [`ControllerHandle`] for submitting metadata changes and reading the
-//! current [`crabka_metadata::MetadataImage`].
+//! [`Controller::start`]. It spawns the engine and opens a TCP listener. That
+//! listener serves the real KIP-595 RPCs (Fetch=1, Vote=52,
+//! BeginQuorumEpoch=53, EndQuorumEpoch=54) and the Crabka-private observer and
+//! forward RPCs. [`Controller::start`] returns a [`ControllerHandle`], which
+//! submits metadata changes and reads the current
+//! [`crabka_metadata::MetadataImage`].
 //!
 //! ## Quick start
 //!
@@ -40,13 +41,15 @@
 //!
 //! ## Capabilities and boundaries
 //!
-//! The controller persists and recovers `KRaft` metadata records, serves and
-//! installs KIP-630 snapshots through `FetchSnapshot`, publishes the current
-//! metadata image to broker tasks, and exposes Crabka-private submit/fetch RPCs
-//! for broker and observer integration. KIP-853-style observer bootstrap and
-//! auto-join are wired through the broker/controller configuration; the older
-//! handle-level `add_learner` / `change_membership` compatibility methods still
-//! return [`RaftError::Unsupported`]. Mixed JVM+Crabka controller quorums are
+//! The controller persists and recovers `KRaft` metadata records, and it serves
+//! and installs KIP-630 snapshots through `FetchSnapshot`. It also publishes
+//! the current metadata image to broker tasks and exposes Crabka-private submit
+//! and fetch RPCs for broker and observer integration.
+//!
+//! KIP-853-style observer bootstrap and auto-join are wired through the broker
+//! and controller configuration. The older handle-level `add_learner` and
+//! `change_membership` compatibility methods still return
+//! [`RaftError::Unsupported`]. Mixed JVM and Crabka controller quorums are
 //! outside this crate's compatibility target.
 
 #![doc(html_root_url = "https://docs.rs/crabka-raft/0.3.9")]

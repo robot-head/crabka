@@ -3,10 +3,10 @@
 //! Covers the hot paths for the Raft state machine and for request handlers:
 //!
 //! - `MetadataImage::apply` for the common record kinds.
-//! - `MetadataImage::partitions_of` / `all_partitions` — per-topic lookups
+//! - `MetadataImage::partitions_of` and `all_partitions`: per-topic lookups
 //!   and the reconcile-loop scan, at many-topic cluster scale.
-//! - `MetadataImage::matching_acls` — called per `authorize()`.
-//! - `MetadataRecord` serialize/deserialize via wincode.
+//! - `MetadataImage::matching_acls`, called once per `authorize()`.
+//! - `MetadataRecord` serialize and deserialize with wincode.
 
 use crabka_metadata::{
     AclEntry, AclOperation, BrokerEndpoint, BrokerRegistrationRecord, LeaderEpoch, MetadataImage,

@@ -1,36 +1,37 @@
 //! `CachingWindowStore`: window-schema-keyed write-back cache layered over a
 //! windowed byte store.
 //!
-//! Ports Kafka `CachingWindowStore`. The cache is a [`NamedCache`] keyed by the
-//! *windowed store-key bytes* — exactly the
+//! This module ports Kafka `CachingWindowStore`. The cache is a [`NamedCache`]
+//! keyed by the *windowed store-key bytes*, which are exactly the
 //! [`window_schema::store_key`](crate::store::window_schema::store_key) layout
-//! (`key ‖ windowStart:8B BE ‖ seqnum:4B BE`) — so the cache and the inner byte
-//! store share one key space and `fetch` can merge the two over a windowed-key
-//! byte range. Cache values are the *wrapped* value bytes
-//! (`recordTs ‖ serialized`) the inner store also holds, so a flushed entry can
-//! be written through verbatim.
+//! `key ‖ windowStart:8B BE ‖ seqnum:4B BE`. The cache and the inner byte store
+//! share one key space, so `fetch` can merge the two over a windowed-key byte
+//! range. Cache values are the *wrapped* value bytes `recordTs ‖ serialized`
+//! that the inner store also holds, so a flush can write an entry through
+//! verbatim.
 //!
 //! ## Inner store
-//! The wrapped store is the raw [`ByteKeyValueStore`] backend (keyed by windowed
-//! store-key bytes), not the typed
-//! [`WindowBytesStore`](crate::store::window::WindowBytesStore): the cache works
-//! purely in bytes, mirroring Kafka where `CachingWindowStore` wraps a
-//! `WindowStore<Bytes, Bytes>`. `put`/`delete` on the backend take `&mut self`
-//! and are `async`, so the inner store is held behind a `tokio::sync::Mutex`
-//! whose guard is await-safe; the wrapper exposes `&self` methods.
+//! The wrapped store is the raw [`ByteKeyValueStore`] backend, keyed by windowed
+//! store-key bytes. It is not the typed
+//! [`WindowBytesStore`](crate::store::window::WindowBytesStore). The cache works
+//! purely in bytes, which matches Kafka, where `CachingWindowStore` wraps a
+//! `WindowStore<Bytes, Bytes>`. `put` and `delete` on the backend take
+//! `&mut self` and are `async`, so a `tokio::sync::Mutex` holds the inner store
+//! and its guard is await-safe. The wrapper exposes `&self` methods.
 //!
 //! ## Locking / async
-//! The `cache` is a `std::sync::Mutex` whose guard is never held across `.await`:
-//! `flush` collects the dirty entries under the cache lock, releases it, then
-//! writes each through to the inner store. The `inner` store uses an async-aware
-//! `tokio::sync::Mutex` so its guard may legally span the `async` backend calls.
+//! The `cache` is a `std::sync::Mutex`, and its guard is never held across
+//! `.await`. `flush` collects the dirty entries under the cache lock, releases
+//! the lock, then writes each entry through to the inner store. The `inner` store
+//! uses an async-aware `tokio::sync::Mutex`, so its guard may legally span the
+//! `async` backend calls.
 //!
 //! ## Ordered iteration
-//! [`NamedCache`] is backed by an ordered map, so it exposes
-//! [`range`](NamedCache::range) (bounded `[lo, hi)`) and [`all`](NamedCache::all)
-//! (unbounded) ascending-memcmp scans. The wrapper drives `fetch` off `range`
-//! over the windowed-key bounds and `fetch_all` off `all`, then filters each by
-//! key prefix / window start — no parallel key index.
+//! An ordered map backs [`NamedCache`], so it exposes two ascending-memcmp scans:
+//! [`range`](NamedCache::range), bounded by `[lo, hi)`, and
+//! [`all`](NamedCache::all), unbounded. The wrapper drives `fetch` off `range`
+//! over the windowed-key bounds, and `fetch_all` off `all`. It then filters each
+//! result by key prefix and window start. There is no parallel key index.
 
 use std::{
     collections::BTreeMap,
@@ -49,13 +50,13 @@ use crate::{
     },
 };
 
-/// Write-back caching wrapper over a windowed byte store. The cache holds
-/// windowed store-key bytes (`window_schema::store_key`) → wrapped value bytes.
+/// Write-back caching wrapper over a windowed byte store. The cache maps
+/// windowed store-key bytes (`window_schema::store_key`) to wrapped value bytes.
 pub(crate) struct CachingWindowStore {
     cache: Arc<Mutex<NamedCache>>,
     inner: Arc<AsyncMutex<Box<dyn ByteKeyValueStore>>>,
     /// Cache name, captured so `clear` can rebuild an empty [`NamedCache`]
-    /// under the same identity (mirrors `CachingKeyValueStore`).
+    /// under the same identity. This matches `CachingKeyValueStore`.
     name: String,
 }
 
@@ -80,8 +81,10 @@ impl CachingWindowStore {
         Self { cache, inner, name }
     }
 
-    /// Cache-first single windowed-store-key read: a cache hit (including a dirty
-    /// `None` tombstone) wins; otherwise fall through to the inner store.
+    /// Cache-first single windowed-store-key read.
+    ///
+    /// A cache hit wins, including a dirty `None` tombstone. Otherwise the read
+    /// falls through to the inner store.
     pub async fn get(&self, key: &[u8]) -> Option<Bytes> {
         let key = Bytes::copy_from_slice(key);
         let cached = {
@@ -94,10 +97,12 @@ impl CachingWindowStore {
         }
     }
 
-    /// Merged raw windowed-key range `[lo, hi)`: inner overlaid with the cache.
-    /// Cache entries win on key collision and a cached tombstone hides the inner
-    /// value. Returns key-sorted `(store_key, wrapped_value)`. Backs the typed
-    /// store's `fetch`/`fetch_with_ts`/IQ range reads.
+    /// Merged raw windowed-key range `[lo, hi)`, with the cache over the inner.
+    ///
+    /// Cache entries win on a key collision, and a cached tombstone hides the
+    /// inner value. This method returns key-sorted `(store_key, wrapped_value)`
+    /// pairs. It backs the typed store's `fetch`, `fetch_with_ts`, and IQ range
+    /// reads.
     pub async fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, Bytes)> {
         let mut merged: BTreeMap<Bytes, Bytes> = {
             let inner = self.inner.lock().await;
@@ -120,10 +125,11 @@ impl CachingWindowStore {
         merged.into_iter().collect()
     }
 
-    /// Merged unbounded scan: every inner entry overlaid with the cache. Cache
-    /// wins on key collision; a cached tombstone hides the inner value. Returns
-    /// key-sorted `(store_key, wrapped_value)`. Backs the typed store's
-    /// `fetch_all_in_range` / range-scan IQ reads.
+    /// Merged unbounded scan, with the cache over every inner entry.
+    ///
+    /// The cache wins on a key collision, and a cached tombstone hides the inner
+    /// value. This method returns key-sorted `(store_key, wrapped_value)` pairs.
+    /// It backs the typed store's `fetch_all_in_range` and range-scan IQ reads.
     pub async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
         let mut merged: BTreeMap<Bytes, Bytes> = {
             let inner = self.inner.lock().await;
@@ -146,13 +152,14 @@ impl CachingWindowStore {
         merged.into_iter().collect()
     }
 
-    /// Write straight through to the inner store, bypassing the cache (restore
-    /// path; mirrors `CachingKeyValueStore::put_inner`).
+    /// Write straight through to the inner store and bypass the cache.
+    ///
+    /// This is the restore path. It matches `CachingKeyValueStore::put_inner`.
     pub async fn put_inner(&self, key: Bytes, value: Bytes) {
         self.inner.lock().await.put(key, value).await;
     }
 
-    /// Delete straight through to the inner store, bypassing the cache (restore).
+    /// Delete straight through to the inner store and bypass the cache (restore).
     pub async fn delete_inner(&self, key: &[u8]) {
         self.inner.lock().await.delete(key).await;
     }
@@ -166,28 +173,33 @@ impl CachingWindowStore {
         self.inner.lock().await.clear().await;
     }
 
-    /// Write-back a windowed entry into the cache. `key_schema_bytes` is the
-    /// windowed store-key (`store_key(key, windowStart, seqnum)`); `value` is the
-    /// wrapped value (`recordTs ‖ serialized`). The entry is marked dirty so it
-    /// is later written through on `flush`.
+    /// Write-back a windowed entry into the cache.
+    ///
+    /// `key_schema_bytes` is the windowed store-key
+    /// `store_key(key, windowStart, seqnum)`. `value` is the wrapped value
+    /// `recordTs ‖ serialized`. The cache marks the entry dirty, and `flush`
+    /// later writes it through.
     pub fn put(&self, key_schema_bytes: Bytes, value: Bytes, ctx: RecordContext) {
         let mut cache = self.cache.lock().unwrap();
         cache.put(key_schema_bytes, LruCacheEntry::new(Some(value), true, ctx));
     }
 
-    /// Tombstone a windowed key in the cache (dirty `None`), hiding any inner
-    /// value until flush deletes it through.
+    /// Tombstone a windowed key in the cache with a dirty `None`.
+    ///
+    /// The tombstone hides any inner value until `flush` deletes it through.
     pub fn delete(&self, key_schema_bytes: Bytes, ctx: RecordContext) {
         let mut cache = self.cache.lock().unwrap();
         cache.delete(key_schema_bytes, ctx);
     }
 
     /// Cache-first windowed fetch for a single key over window starts in
-    /// `[time_from, time_to]`. Merges cache entries with the inner store over the
-    /// windowed-key byte range; cache values win on collision and cache
-    /// tombstones hide the inner value. Results are returned as
-    /// `(windowed_store_key, wrapped_value)` in ascending windowed-key (memcmp)
-    /// order, matching the inner store's ordering.
+    /// `[time_from, time_to]`.
+    ///
+    /// This method merges cache entries with the inner store over the
+    /// windowed-key byte range. Cache values win on a collision, and cache
+    /// tombstones hide the inner value. It returns
+    /// `(windowed_store_key, wrapped_value)` pairs in ascending windowed-key
+    /// memcmp order, which matches the inner store's order.
     pub async fn fetch(&self, key: &[u8], time_from: i64, time_to: i64) -> Vec<(Bytes, Bytes)> {
         let lo = store_key(key, time_from, 0);
         let hi = store_key(key, time_to.saturating_add(1), 0);
@@ -218,10 +230,12 @@ impl CachingWindowStore {
     }
 
     /// Cache-first fetch across ALL keys for window starts in
-    /// `[time_from, time_to]`. Mirrors Kafka `fetchAll`: a windowed-key-ordered
-    /// merge of cache + inner, filtered by window start (a suffix of the key, so
-    /// this is a filtered full scan). Cache wins on collision, tombstones hide
-    /// the inner value.
+    /// `[time_from, time_to]`.
+    ///
+    /// This method matches Kafka `fetchAll`. It merges the cache and the inner
+    /// store in windowed-key order, then filters by window start. The window
+    /// start is a suffix of the key, so this is a filtered full scan. The cache
+    /// wins on a collision, and tombstones hide the inner value.
     pub async fn fetch_all(&self, time_from: i64, time_to: i64) -> Vec<(Bytes, Bytes)> {
         let in_range = |k: &[u8]| {
             let ws = window_start_of(k);
@@ -253,9 +267,11 @@ impl CachingWindowStore {
         merge(cached, from_inner)
     }
 
-    /// Drain dirty entries (cache insertion order), writing each through to the
-    /// inner store (put wrapped value, or delete on tombstone), and return them
-    /// so the caller can forward them downstream / to the changelog.
+    /// Drain the dirty entries in cache insertion order.
+    ///
+    /// This method writes each entry through to the inner store. It puts the
+    /// wrapped value, or deletes on a tombstone. It then returns the entries, so
+    /// the caller can forward them downstream and to the changelog.
     pub async fn flush(&self) -> Vec<(Bytes, LruCacheEntry)> {
         let mut collected: Vec<(Bytes, LruCacheEntry)> = Vec::new();
         {
@@ -280,14 +296,16 @@ impl CachingWindowStore {
         collected
     }
 
-    /// Flush dirty entries in insertion order, capturing the inner OLD wrapped
-    /// value BEFORE each write-through. For each entry: read `old = inner.get(&k)`,
-    /// write the new value through (`put` / `delete` on a tombstone), and return
-    /// `(windowed_store_key, old, new, context)`. `old`/`new` are the *wrapped*
-    /// value bytes (`recordTs ‖ serialized`), `None` = absent / tombstone. Mirrors
-    /// `CachingKeyValueStore::flush_with_old`; the typed `WindowBytesStore` decodes
-    /// the windowed key + unwraps the values to build the deduped downstream
-    /// `Change`.
+    /// Flush the dirty entries in insertion order.
+    ///
+    /// This method captures the inner OLD wrapped value BEFORE each
+    /// write-through. For each entry it reads `old = inner.get(&k)`, writes the
+    /// new value through with `put`, or with `delete` on a tombstone, and returns
+    /// `(windowed_store_key, old, new, context)`. `old` and `new` are the
+    /// *wrapped* value bytes `recordTs ‖ serialized`, and `None` means absent or
+    /// tombstone. This method matches `CachingKeyValueStore::flush_with_old`. The
+    /// typed `WindowBytesStore` decodes the windowed key and unwraps the values
+    /// to build the deduped downstream `Change`.
     pub async fn flush_with_old(
         &self,
     ) -> Vec<(Bytes, Option<Bytes>, Option<Bytes>, RecordContext)> {
@@ -317,8 +335,10 @@ impl CachingWindowStore {
     }
 }
 
-/// Merge cached entries (cache wins, tombstone hides inner) with inner entries,
-/// returning `(windowed_key, wrapped_value)` in ascending windowed-key order.
+/// Merge the cached entries with the inner entries.
+///
+/// The cache wins, and a tombstone hides the inner value. The result is
+/// `(windowed_key, wrapped_value)` pairs in ascending windowed-key order.
 fn merge(
     cached: Vec<(Bytes, LruCacheEntry)>,
     from_inner: Vec<(Bytes, Bytes)>,
@@ -520,7 +540,7 @@ mod tests {
     }
 
     /// `flush_with_old` on a tombstone returns `new = None` and deletes the inner
-    /// wrapped value through (the tombstone arm).
+    /// wrapped value through. This is the tombstone arm.
     #[tokio::test]
     async fn flush_with_old_tombstone_deletes_through() {
         let s = store();
@@ -539,8 +559,8 @@ mod tests {
     }
 
     /// `range` overlays the cache on the inner store over a raw windowed-key
-    /// range: cache wins on collision and a cached tombstone hides the inner
-    /// value. Backs the typed store's `fetch`/IQ range reads.
+    /// range. The cache wins on a collision, and a cached tombstone hides the
+    /// inner value. `range` backs the typed store's `fetch` and IQ range reads.
     #[tokio::test]
     async fn range_merges_cache_over_inner_with_tombstone() {
         let s = store();
@@ -561,9 +581,9 @@ mod tests {
         assert_eq!(r, vec![(k0, wrapped(1, b"i0")), (k1, wrapped(9, b"c1"))]);
     }
 
-    /// `scan_all` overlays the full cache on the full inner store: cache wins on
-    /// collision, a cache-only entry is added, and a cached tombstone hides the
-    /// inner value.
+    /// `scan_all` overlays the full cache on the full inner store. The cache wins
+    /// on a collision, a cache-only entry is added, and a cached tombstone hides
+    /// the inner value.
     #[tokio::test]
     async fn scan_all_merges_cache_and_underlying() {
         let s = store();
@@ -591,7 +611,7 @@ mod tests {
         );
     }
 
-    /// `put_inner` / `delete_inner` bypass the cache (no dirty entry staged).
+    /// `put_inner` and `delete_inner` bypass the cache and stage no dirty entry.
     #[tokio::test]
     async fn put_and_delete_inner_bypass_the_cache() {
         let s = store();

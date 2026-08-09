@@ -3,9 +3,9 @@
 //! the propose/get/list paths plus the `Unavailable` / `Unimplemented`
 //! / `NotFound` / `InvalidArgument` error codes.
 //!
-//! Handlers are called directly (not via the axum router) so the test
-//! exercises handler logic at the same level a real Connect call
-//! would, but without any HTTP serialization. HTTP smoke is T15.
+//! The test calls the handlers directly, not through the axum router, so it
+//! exercises handler logic at the same level a real Connect call does, but
+//! without any HTTP serialization. HTTP smoke is T15.
 
 use std::sync::Arc;
 
@@ -46,9 +46,9 @@ use prometheus_client::registry::Registry;
 use tempfile::TempDir;
 
 /// Local stand-in for `executor::phases::tests::MockClient`, which lives
-/// behind `#[cfg(test)]` and therefore isn't reachable from this external
-/// integration-test crate. The 43a tests only need `client_facade` to
-/// satisfy the `AppState` field; they don't exercise the executor path.
+/// behind `#[cfg(test)]` and therefore is not reachable from this external
+/// integration-test crate. The 43a tests only need `client_facade` to satisfy
+/// the `AppState` field. They do not exercise the executor path.
 struct NoopClient;
 
 #[async_trait]
@@ -77,9 +77,11 @@ impl ClientFacade for NoopClient {
 
 /// Boot a single-broker in-process Crabka and return its handle, the
 /// bootstrap address as a `String`, and the tempdir backing its log
-/// directory. The tempdir is returned so the caller can keep it alive
-/// for the duration of the test — dropping it before broker shutdown
-/// would yank the log directory out from under the broker.
+/// directory.
+///
+/// The function returns the tempdir so that the caller can keep it alive for
+/// the whole test. A drop before broker shutdown would remove the log
+/// directory while the broker still uses it.
 async fn boot_broker() -> (BrokerHandle, String, TempDir) {
     let dir = TempDir::new().expect("tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
@@ -98,8 +100,8 @@ const DEFAULT_THROTTLE: ByteRate = bytes_per_sec(50_000_000);
 /// Bound on how long a test waits for a broker to shut down.
 const SHUTDOWN_TIMEOUT: Time = secs(30);
 
-/// Create a topic with `partitions` partitions and replication factor
-/// 1 via a short-lived [`Client`]. Asserts success on the response.
+/// Create a topic with `partitions` partitions and replication factor 1
+/// through a short-lived [`Client`]. This asserts success on the response.
 async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
     let client = Client::builder()
         .bootstrap(bootstrap)
@@ -130,8 +132,8 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
 }
 
 /// Build the `AppState` carried by the `Extension` layer in production,
-/// alongside the shared `Registry` the binary mounts on `/metrics`.
-/// Threshold + cap match the binary's defaults (see `bin/rebalancer.rs`).
+/// alongside the shared `Registry` the binary mounts on `/metrics`. The
+/// threshold and the cap match the binary's defaults in `bin/rebalancer.rs`.
 fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
     let mut registry = new_registry();
     let metrics = RebalancerMetrics::register(&mut registry);
@@ -172,9 +174,9 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
     (state, registry)
 }
 
-/// Helper for calling a handler. The crate's `ConnectRequest<T>` is a
-/// tuple struct `pub struct ConnectRequest<T>(pub T)`, so we can
-/// construct one with the tuple-struct constructor.
+/// Helper for calling a handler. The crate's `ConnectRequest<T>` is a tuple
+/// struct `pub struct ConnectRequest<T>(pub T)`, so the tuple-struct
+/// constructor builds one.
 fn req<T>(msg: T) -> ConnectRequest<T> {
     ConnectRequest(msg)
 }
@@ -462,13 +464,13 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
 
 /// Execute a proposal end-to-end against a single-broker Crabka.
 ///
-/// Single-broker means the only valid replica set is `[1]`; the
-/// optimizer would never generate movements here, so we construct a
-/// synthetic proposal directly (replicas `[1]` -> `[1]`) to exercise
-/// the executor's wire path. The plan is a no-op from the broker's
-/// perspective — `ApplyThrottle` / `Submit` / `Wait` / `ClearThrottle`
-/// still all fire, the state backend is written and then tombstoned,
-/// and the proposal reaches a terminal status.
+/// Single-broker means the only valid replica set is `[1]`. The optimizer
+/// would never generate movements here, so the test builds a synthetic
+/// proposal directly, with replicas `[1]` -> `[1]`, to exercise the executor's
+/// wire path. The plan is a no-op from the broker's perspective, but
+/// `ApplyThrottle` / `Submit` / `Wait` / `ClearThrottle` still all fire, the
+/// test writes and then tombstones the state backend, and the proposal reaches
+/// a terminal status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn execute_proposal_settles_against_real_broker() {
     use std::time::Instant;
@@ -563,10 +565,10 @@ async fn execute_proposal_settles_against_real_broker() {
         .expect("broker shutdown within 30s");
 }
 
-/// Cancelling an in-flight execution drives it to a terminal status
-/// and cleans up the state backend. We don't insist on
-/// `Cancelled` specifically — a single-broker no-op plan may race
-/// to `Completed` before the cancel token fires.
+/// Cancelling an in-flight execution drives it to a terminal status and cleans
+/// up the state backend. The test does not insist on `Cancelled` specifically,
+/// because a single-broker no-op plan may race to `Completed` before the cancel
+/// token fires.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_clears_throttle_and_reverts() {
     use crabka_rebalancer::{
@@ -672,10 +674,9 @@ async fn cancel_clears_throttle_and_reverts() {
         .expect("broker shutdown within 30s");
 }
 
-/// Simulate a restart-while-executing: the state backend contains an
-/// in-flight record pointing at `Submit`, and the resume path picks up
-/// where it left off, drives the state machine to terminal, and
-/// tombstones the backend entry.
+/// Simulate a restart during execution. The state backend holds an in-flight
+/// record that points at `Submit`. The resume path continues from there, drives
+/// the state machine to terminal, and tombstones the backend entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_resumes_in_flight_plan() {
     use crabka_rebalancer::{
@@ -758,11 +759,10 @@ async fn restart_resumes_in_flight_plan() {
         .expect("broker shutdown within 30s");
 }
 
-/// Synthetic `ClusterState` with three brokers in rack labels [A, A, B]
-/// and a partition with replicas on the two rack-A brokers. The
-/// `RackAware` goal must propose moving one off to a non-A rack. We
-/// drive the goal directly (no real broker needed) since this test
-/// is purely about goal interaction.
+/// Synthetic `ClusterState` with three brokers in rack labels [A, A, B] and a
+/// partition with replicas on the two rack-A brokers. The `RackAware` goal must
+/// propose moving one replica off to a non-A rack. The test drives the goal
+/// directly and needs no real broker, because it only covers goal interaction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rack_aware_eliminates_same_rack_collisions() {
     use crabka_rebalancer::{
@@ -826,9 +826,9 @@ async fn rack_aware_eliminates_same_rack_collisions() {
     );
 }
 
-/// Synthetic three-broker `ClusterState` where broker 1 holds 10
-/// replicas with `max_replicas: 5`. `ReplicaCapacity` must propose
-/// movements that reduce broker 1's load.
+/// Synthetic three-broker `ClusterState` where broker 1 holds 10 replicas with
+/// `max_replicas: 5`. `ReplicaCapacity` must propose movements that reduce
+/// broker 1's load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replica_capacity_evicts_over_capacity_broker() {
     use std::{collections::HashMap, sync::Arc};
@@ -928,10 +928,10 @@ async fn replica_capacity_evicts_over_capacity_broker() {
     );
 }
 
-/// Synthetic three-broker `ClusterState` with broker 1 holding 5× more
-/// disk than broker 2. The `UsageStore` is pre-populated with `disk_bytes`
-/// gauge samples. DiskUsage.propose must emit movements that reduce
-/// broker 1's total.
+/// Synthetic three-broker `ClusterState` where broker 1 holds 5× more disk than
+/// broker 2. The test pre-populates the `UsageStore` with `disk_bytes` gauge
+/// samples. DiskUsage.propose must emit movements that reduce broker 1's
+/// total.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disk_usage_evicts_hot_broker() {
     use std::sync::Arc;

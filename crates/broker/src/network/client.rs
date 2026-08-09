@@ -1,9 +1,10 @@
-//! Outbound inter-broker client. Establishes TCP, optionally wraps in TLS,
-//! optionally runs SASL client handshake. Returns a generic `AsyncRead +
-//! `AsyncWrite` stream the caller uses for normal RPCs.
+//! Outbound inter-broker client. It establishes TCP, and it optionally wraps
+//! the connection in TLS and runs the SASL client handshake. It returns a
+//! generic `AsyncRead + `AsyncWrite` stream that the caller uses for normal
+//! RPCs.
 //!
-//! Used by the replicator's Fetch path, the raft transport's
-//! outbound dial, and the controller-heartbeat loop.
+//! The replicator's Fetch path, the raft transport's outbound dial, and the
+//! controller-heartbeat loop all use this client.
 
 use std::sync::Arc;
 
@@ -20,8 +21,8 @@ use crate::config::InterBrokerCredentials;
 /// Map the broker's [`InterBrokerCredentials`] onto the client-core
 /// [`crabka_client_core::SaslCredentials`] understood by the shared
 /// [`crabka_client_core::outbound_sasl`] handshake. The two enums carry
-/// the same variants; this is a field-for-field copy. Shared with the
-/// RLMM bootstrap so the dialer and the metadata client agree on the
+/// the same variants, so this is a field-for-field copy. The RLMM bootstrap
+/// shares it, so the dialer and the metadata client agree on the
 /// mapping.
 pub(crate) fn to_client_creds(c: &InterBrokerCredentials) -> crabka_client_core::SaslCredentials {
     match c {
@@ -77,9 +78,10 @@ pub enum InterBrokerError {
 pub trait DuplexStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + ?Sized> DuplexStream for T {}
 
-/// Constructs outbound connections to other brokers, running TLS and SASL
-/// as the listener protocol demands. Cheap to clone-from / share — holds
-/// just a `TlsConnector` (an `Arc` under the hood) and credentials.
+/// Constructs outbound connections to other brokers, and runs TLS and SASL
+/// as the listener protocol demands. It is cheap to clone and share, because
+/// it holds only a `TlsConnector`, which is an `Arc` internally, and
+/// credentials.
 pub struct InterBrokerClient {
     tls_connector: Option<TlsConnector>,
     creds: Option<InterBrokerCredentials>,
@@ -119,10 +121,10 @@ impl InterBrokerClient {
         }
     }
 
-    /// Dial `host:port`, perform the protocol-appropriate handshakes
-    /// (TLS, SASL), and return an authenticated duplex stream. Callers
-    /// drive normal Kafka RPCs (Fetch, Vote, `AppendEntries`, …) through
-    /// the returned stream just as if it were a fresh `TcpStream`.
+    /// Dial `host:port`, do the protocol-appropriate TLS and SASL
+    /// handshakes, and return an authenticated duplex stream. Callers
+    /// drive normal Kafka RPCs, such as Fetch, Vote, and `AppendEntries`,
+    /// through the returned stream as if it were a fresh `TcpStream`.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub async fn connect(
@@ -166,11 +168,11 @@ impl InterBrokerClient {
         Ok(stream)
     }
 
-    /// Dial `host:port` (running TLS + SASL as needed) and return a
+    /// Dial `host:port`, run TLS and SASL as needed, and return a
     /// [`crabka_client_core::Connection`] over the resulting stream. The
-    /// connection is fully usable for normal typed Kafka requests —
-    /// `Fetch`, `OffsetForLeaderEpoch`, `BrokerHeartbeat`, raft RPCs via
-    /// `raw_request`, etc.
+    /// connection is fully usable for normal typed Kafka requests, such as
+    /// `Fetch`, `OffsetForLeaderEpoch`, `BrokerHeartbeat`, and raft RPCs
+    /// through `raw_request`.
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub async fn connect_as_connection(
@@ -230,8 +232,8 @@ impl InterBrokerClient {
 
 /// Adapter that lets `crabka_raft` reach the broker's
 /// [`InterBrokerClient`] without taking a build dependency on the
-/// broker crate. Wraps an `Arc<InterBrokerClient>` plus the protocol /
-/// SNI configuration once; the raft network factory clones it cheaply.
+/// broker crate. It wraps an `Arc<InterBrokerClient>` and the protocol and
+/// SNI configuration once, and the raft network factory clones it cheaply.
 pub struct InterBrokerDialer {
     client: Arc<InterBrokerClient>,
     listener_protocol: ListenerProtocol,

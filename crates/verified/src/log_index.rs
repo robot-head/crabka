@@ -1,14 +1,18 @@
-//! Offset-index lookup kernel, extracted from `crabka-log`'s `OffsetIndex` so
-//! Creusot can verify it. Hand-rolled binary search (the canonical Creusot
-//! loop) instead of `binary_search_by_key`, so the proof doesn't depend on
-//! std's search being modeled.
+//! Offset-index lookup kernel.
+//!
+//! This kernel comes out of the `OffsetIndex` of `crabka-log`, so that Creusot
+//! can verify it. It uses a hand-rolled binary search, the canonical Creusot
+//! loop, and not `binary_search_by_key`. The proof thus does not depend on a
+//! model of the std search.
 
 use creusot_std::prelude::*;
 
-/// The byte position to start reading at for `target`: the position field of
-/// the largest entry with `relative_offset <= target`, or 0 if none exists.
-/// `entries` must be strictly sorted by relative offset (true by construction
-/// of `OffsetIndex`).
+/// The byte position to start reading at for `target`.
+///
+/// This is the position field of the largest entry with
+/// `relative_offset <= target`, or 0 if no such entry exists. `entries` must be
+/// strictly sorted by relative offset, which the construction of `OffsetIndex`
+/// guarantees.
 #[requires(forall<i: Int, j: Int> 0 <= i && i < j && j < entries@.len()
     ==> entries@[i].0@ < entries@[j].0@)]
 #[ensures((exists<i: Int> 0 <= i && i < entries@.len() && entries@[i].0@ <= target@)
@@ -44,7 +48,8 @@ mod tests {
 
     use super::*;
 
-    /// The production implementation this kernel replaced (index.rs lookup).
+    /// The production implementation that this kernel replaced: the index.rs
+    /// lookup.
     fn binary_search_oracle(entries: &[(u32, u32)], target: u32) -> u32 {
         match entries.binary_search_by_key(&target, |&(rel, _)| rel) {
             Ok(i) => entries[i].1,

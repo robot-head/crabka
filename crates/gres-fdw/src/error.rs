@@ -1,4 +1,4 @@
-//! error
+//! Error types for the Kafka FDW.
 
 /// Top-level error type for the Kafka FDW.
 #[derive(Debug, thiserror::Error)]

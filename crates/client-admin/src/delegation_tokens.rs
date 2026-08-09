@@ -1,14 +1,14 @@
 //! KIP-48: delegation-token RPCs on `AdminClient`.
 //!
-//! Four operations the `KafkaUser` (`authentication.type: delegation-token`)
-//! reconciler drives via the cluster's admin connection:
+//! The `KafkaUser` reconciler, with `authentication.type: delegation-token`,
+//! drives four operations through the cluster's admin connection:
 //! `CreateDelegationToken` (`api_key` 38) with the act-as owner field
-//! populated, `RenewDelegationToken` (39), `ExpireDelegationToken` (40),
-//! and `DescribeDelegationToken` (41) filtered to a single owner.
+//! populated, `RenewDelegationToken` (39), `ExpireDelegationToken` (40), and
+//! `DescribeDelegationToken` (41) filtered to a single owner.
 //!
-//! Like `users.rs`, this module keeps wire concerns local: requests are
-//! built via small `build_*` helpers, responses are mapped via
-//! `parse_*` helpers, and unit tests cover each end of the pipe.
+//! Like `users.rs`, this module keeps wire concerns local. Small `build_*`
+//! helpers build the requests, `parse_*` helpers map the responses, and unit
+//! tests cover each end of the pipe.
 
 use bytes::Bytes;
 use crabka_metadata::DelegationToken;
@@ -30,21 +30,21 @@ use crabka_units::{Time, convert::wire::opt_time_to_millis_i64};
 use crate::{AdminClient, AdminError, kafka_error_name};
 
 impl AdminClient {
-    /// KIP-48 act-as create: mint a delegation token whose owner is
-    /// `owner_principal_name` (type always `"User"`).
+    /// KIP-48 act-as create: mints a delegation token whose owner is
+    /// `owner_principal_name`. The type is always `"User"`.
     ///
-    /// The caller MUST be a broker super-user (per broker
-    /// semantics) for the act-as path to take effect; non-super callers
-    /// get `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65). The full
-    /// response is returned so callers can pluck out `token_id`, `hmac`,
-    /// and the issue/expiry/max timestamps for downstream persistence.
+    /// The caller MUST be a broker super-user, per broker semantics, for the
+    /// act-as path to take effect. A non-super caller gets
+    /// `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65). The method returns the
+    /// full response, so callers can take `token_id`, `hmac`, and the issue,
+    /// expiry, and max timestamps for downstream persistence.
     ///
-    /// `renewers` items are `"User:bob"` form; entries without a `:`
-    /// are interpreted with type `"User"`.
+    /// `renewers` items are in `"User:bob"` form. An entry with no `:` gets
+    /// type `"User"`.
     ///
-    /// `max_lifetime` of `None` reaches the wire as KIP-48's `-1`
-    /// sentinel, deferring to the broker's
-    /// `delegation.token.max.lifetime.ms`.
+    /// A `max_lifetime` of `None` reaches the wire as KIP-48's `-1` sentinel,
+    /// which defers to the broker's `delegation.token.max.lifetime.ms`.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn create_delegation_token_as_owner(
@@ -61,9 +61,12 @@ impl AdminClient {
         Ok(resp)
     }
 
-    /// KIP-48 renew: bump the token's `expiry_timestamp_ms` capped by
-    /// `max_timestamp_ms`. `renew_period_ms = -1` tells the broker to
-    /// use its configured default. Returns the new expiry.
+    /// KIP-48 renew: bumps the token's `expiry_timestamp_ms`, capped by
+    /// `max_timestamp_ms`.
+    ///
+    /// `renew_period_ms = -1` tells the broker to use its configured default.
+    /// Returns the new expiry.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn renew_delegation_token(&mut self, hmac: &[u8]) -> Result<i64, AdminError> {
@@ -75,8 +78,9 @@ impl AdminClient {
         Ok(resp.expiry_timestamp_ms)
     }
 
-    /// KIP-48 expire: tombstone the token immediately
-    /// (`expiry_time_period_ms = -1`).
+    /// KIP-48 expire: tombstones the token immediately with
+    /// `expiry_time_period_ms = -1`.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn expire_delegation_token(&mut self, hmac: &[u8]) -> Result<(), AdminError> {
@@ -88,9 +92,11 @@ impl AdminClient {
         Ok(())
     }
 
-    /// KIP-48 describe filtered to a single owner. `owner_principal` is
-    /// a canonical `"Type:Name"` string (e.g. `"User:alice"`); entries
-    /// without a `:` default to type `"User"`.
+    /// KIP-48 describe, filtered to a single owner.
+    ///
+    /// `owner_principal` is a canonical `"Type:Name"` string, for example
+    /// `"User:alice"`. An entry with no `:` defaults to type `"User"`.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_delegation_tokens_owned_by(
@@ -103,9 +109,9 @@ impl AdminClient {
     }
 }
 
-/// Pure: build a `CreateDelegationTokenRequest` with the act-as owner
-/// fields populated and renewer strings split into the wire principal
-/// pair (`User` default for items lacking a `:`).
+/// Pure function. It builds a `CreateDelegationTokenRequest` with the act-as
+/// owner fields populated, and it splits the renewer strings into the wire
+/// principal pair. An item with no `:` gets the `User` default.
 fn build_create_delegation_token(
     owner_principal_name: &str,
     renewers: &[String],
@@ -123,8 +129,8 @@ fn build_create_delegation_token(
     }
 }
 
-/// Pure: build a `RenewDelegationTokenRequest`. `renew_period_ms = -1`
-/// signals "use broker default" per KIP-48.
+/// Pure function. It builds a `RenewDelegationTokenRequest`.
+/// `renew_period_ms = -1` signals "use broker default" per KIP-48.
 fn build_renew_delegation_token(hmac: &[u8]) -> RenewDelegationTokenRequest {
     RenewDelegationTokenRequest {
         hmac: Bytes::copy_from_slice(hmac),
@@ -133,8 +139,8 @@ fn build_renew_delegation_token(hmac: &[u8]) -> RenewDelegationTokenRequest {
     }
 }
 
-/// Pure: build an `ExpireDelegationTokenRequest`.
-/// `expiry_time_period_ms = -1` requests immediate tombstoning.
+/// Pure function. It builds an `ExpireDelegationTokenRequest`.
+/// `expiry_time_period_ms = -1` requests an immediate tombstone.
 fn build_expire_delegation_token(hmac: &[u8]) -> ExpireDelegationTokenRequest {
     ExpireDelegationTokenRequest {
         hmac: Bytes::copy_from_slice(hmac),
@@ -143,8 +149,8 @@ fn build_expire_delegation_token(hmac: &[u8]) -> ExpireDelegationTokenRequest {
     }
 }
 
-/// Pure: split `"Type:Name"` (default type `User`) into a wire
-/// `CreatableRenewers`.
+/// Pure function. It splits `"Type:Name"` into a wire `CreatableRenewers`.
+/// The default type is `User`.
 fn renewer_str_to_wire(s: &str) -> CreatableRenewers {
     let (pt, pn) = s.split_once(':').unwrap_or(("User", s));
     CreatableRenewers {
@@ -154,8 +160,8 @@ fn renewer_str_to_wire(s: &str) -> CreatableRenewers {
     }
 }
 
-/// Pure: build a `DescribeDelegationTokenRequest` whose `owners` filter
-/// is a single-entry list for the given `"Type:Name"` principal.
+/// Pure function. It builds a `DescribeDelegationTokenRequest` whose `owners`
+/// filter is a single-entry list for the given `"Type:Name"` principal.
 fn build_describe_owner_filter(owner_principal: &str) -> DescribeDelegationTokenRequest {
     let (pt, pn) = owner_principal
         .split_once(':')
@@ -170,9 +176,10 @@ fn build_describe_owner_filter(owner_principal: &str) -> DescribeDelegationToken
     }
 }
 
-/// Pure: response → `Vec<DelegationToken>` (the in-memory image type).
-/// Maps an `error_code != 0` to `AdminError::Broker` so callers get
-/// the same Kafka-error surface that the other admin methods use.
+/// Pure function. It maps the response to `Vec<DelegationToken>`, the
+/// in-memory image type. It maps an `error_code != 0` to
+/// `AdminError::Broker`, so callers get the same Kafka-error surface that the
+/// other admin methods use.
 fn parse_describe_delegation_tokens(
     resp: DescribeDelegationTokenResponse,
 ) -> Result<Vec<DelegationToken>, AdminError> {
@@ -182,7 +189,8 @@ fn parse_describe_delegation_tokens(
     Ok(resp.tokens.into_iter().map(described_to_image).collect())
 }
 
-/// Pure: wire `DescribedDelegationToken` → `crabka_metadata::DelegationToken`.
+/// Pure function. It maps wire `DescribedDelegationToken` →
+/// `crabka_metadata::DelegationToken`.
 ///
 /// Field rename notes:
 /// - wire `issue_timestamp` → image `issue_timestamp_ms`
@@ -286,16 +294,16 @@ mod tests {
 
     // ── build_renew_delegation_token / build_expire_delegation_token ─
 
-    /// Renew uses the broker default by passing `renew_period_ms = -1`;
-    /// the hmac is copied verbatim into the wire bytes field.
+    /// Renew uses the broker default with `renew_period_ms = -1`. The hmac is
+    /// copied verbatim into the wire bytes field.
     #[test]
     fn build_renew_uses_minus_one_for_broker_default() {
         let req = build_renew_delegation_token(b"\x01\x02\x03");
         assert2::assert!((req.hmac.as_ref(), req.renew_period_ms) == (&[0x01, 0x02, 0x03][..], -1));
     }
 
-    /// Expire-immediately is signaled by `expiry_time_period_ms = -1`;
-    /// the hmac is copied verbatim.
+    /// `expiry_time_period_ms = -1` signals expire-immediately. The hmac is
+    /// copied verbatim.
     #[test]
     fn build_expire_uses_minus_one_for_immediate_tombstone() {
         let req = build_expire_delegation_token(b"\xaa\xbb");
@@ -378,10 +386,10 @@ mod tests {
     // the Kafka-error name string the reconciler may inspect.
 
     /// Spec-style coverage for the non-zero-error path on
-    /// `create_delegation_token_as_owner` (and by symmetry the other
-    /// three methods, which use the same `broker_err` helper): a
-    /// `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65) response is mapped
-    /// to `AdminError::Broker { code: 65, .. }`.
+    /// `create_delegation_token_as_owner`. The other three methods use the
+    /// same `broker_err` helper, so the coverage extends to them. A
+    /// `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65) response maps to
+    /// `AdminError::Broker { code: 65, .. }`.
     #[test]
     fn broker_err_carries_api_and_kafka_code_name() {
         let e = broker_err("CreateDelegationToken", 65, Some("not super-user".into()));
@@ -410,9 +418,9 @@ mod tests {
         }
     }
 
-    /// Non-zero `error_code` on the top-level response surfaces as
-    /// `AdminError::Broker` so the reconciler can branch on the Kafka
-    /// error code (e.g. `DELEGATION_TOKEN_AUTH_DISABLED = 61`).
+    /// A non-zero `error_code` on the top-level response surfaces as
+    /// `AdminError::Broker`, so the reconciler can branch on the Kafka error
+    /// code, for example `DELEGATION_TOKEN_AUTH_DISABLED = 61`.
     #[test]
     fn parse_describe_propagates_nonzero_error_code() {
         let resp = DescribeDelegationTokenResponse {

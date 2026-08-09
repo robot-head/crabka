@@ -1,6 +1,8 @@
-//! `_schemas` topic record types. Keys drive log compaction and must serialise
-//! byte-exactly (field order fixed); values are parsed structurally (Confluent
-//! does not pin value field order). Pinned against tests/fixtures/.
+//! `_schemas` topic record types.
+//!
+//! Keys drive log compaction and must serialise byte-exactly, so their field
+//! order is fixed. Values are parsed structurally, because Confluent does not
+//! pin value field order. These types are pinned against tests/fixtures/.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,8 +41,9 @@ impl SchemaKey {
 
 /// Value for a `SCHEMA` record.
 ///
-/// `schemaType` is omitted for Avro (Confluent convention). `references` is
-/// omitted when empty. Field order is not pinned — parse structurally.
+/// `schemaType` is omitted for Avro, which is the Confluent convention.
+/// `references` is omitted when empty. Field order is not pinned, so parse the
+/// value structurally.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaValue {
     pub subject: String,
@@ -113,8 +116,9 @@ pub struct DeleteSubjectKey {
     pub magic: u8,
 }
 
-/// Value for a `DELETE_SUBJECT` record: the subject + the version up to which it
-/// is soft-deleted (the latest version at delete time).
+/// Value for a `DELETE_SUBJECT` record. It holds the subject and the version up
+/// to which the subject is soft-deleted, which is the latest version at delete
+/// time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteSubjectValue {
     pub subject: String,
@@ -123,9 +127,9 @@ pub struct DeleteSubjectValue {
 
 /// A decoded `_schemas` record.
 ///
-/// Unknown key-types and tombstones decode to a non-panicking variant — the
-/// reader replays a real registry topic that carries `NOOP` (and possibly
-/// `CONFIG`/`MODE`) records.
+/// Unknown key-types and tombstones decode to a non-panicking variant. The
+/// reader replays a real registry topic that carries `NOOP` records, and
+/// possibly `CONFIG` and `MODE` records.
 #[derive(Debug, Clone)]
 pub enum SchemaRecord {
     Schema(SchemaKey, SchemaValue),
@@ -143,8 +147,8 @@ pub enum SchemaRecord {
 
 impl SchemaRecord {
     /// Decode a raw `_schemas` `(key, value)` pair. `value = None` is a
-    /// tombstone. Never panics; unparseable / unknown key-types become
-    /// [`SchemaRecord::Unknown`].
+    /// tombstone. This function never panics. Unparseable and unknown
+    /// key-types become [`SchemaRecord::Unknown`].
     #[must_use]
     pub fn decode(key: &[u8], value: Option<&[u8]>) -> Self {
         let Ok(kv) = serde_json::from_slice::<serde_json::Value>(key) else {
@@ -193,14 +197,14 @@ impl SchemaRecord {
 /// Build the `(key, value)` bytes for a `CONFIG` record. `subject = None` is the
 /// global config.
 ///
-/// NOTE: not fixture-validated (cp-schema-registry writes no `CONFIG` record by
-/// default); shape follows the Confluent docs and is read back by our own reader,
-/// so it round-trips internally.
+/// NOTE: this record is not fixture-validated, because cp-schema-registry
+/// writes no `CONFIG` record by default. The shape follows the Confluent docs,
+/// and our own reader reads it back, so it round-trips internally.
 ///
 /// # Panics
 ///
-/// Panics only if `serde_json` fails to serialise a plain struct — i.e. never in
-/// practice.
+/// Panics only if `serde_json` fails to serialise a plain struct, which never
+/// happens in practice.
 #[must_use]
 pub fn encode_config(subject: Option<&str>, level: &str) -> (Vec<u8>, Vec<u8>) {
     let key = ConfigKey {
@@ -294,8 +298,9 @@ pub fn encode_schema_with_message_type(
     })
 }
 
-/// Build a soft-delete `SCHEMA` record: identical key/value to the original but
-/// with `deleted = true` (cp re-emits the full value with the flag flipped).
+/// Build a soft-delete `SCHEMA` record. The key and value are identical to the
+/// original, but `deleted` is `true`. cp re-emits the full value with the flag
+/// changed.
 #[must_use]
 pub fn encode_schema_deleted(
     subject: &str,
@@ -341,8 +346,9 @@ pub fn encode_schema_deleted_with_message_type(
     })
 }
 
-/// Build the `SCHEMA` key bytes for a permanent-delete tombstone (value is null,
-/// produced via [`crate::kafkastore::writer::SchemaWriter::produce_tombstone`]).
+/// Build the `SCHEMA` key bytes for a permanent-delete tombstone. The value is
+/// null, and [`crate::kafkastore::writer::SchemaWriter::produce_tombstone`]
+/// produces it.
 #[must_use]
 /// # Panics
 /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
@@ -382,8 +388,9 @@ pub fn mode_key(subject: Option<&str>) -> Vec<u8> {
     serde_json::to_vec(&key).expect("mode key serialises")
 }
 
-/// Serialise just the CONFIG key for a subject (or global when `subject` is
-/// `None`). Used to produce a tombstone that removes per-subject overrides.
+/// Serialise only the CONFIG key for a subject, or the global key when
+/// `subject` is `None`. Callers use it to produce a tombstone that removes
+/// per-subject overrides.
 /// # Panics
 /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub fn config_key(subject: Option<&str>) -> Vec<u8> {
@@ -541,9 +548,10 @@ mod tests {
     }
 
     /// The `_schemas` SCHEMA value `references` byte-shape must match cp 7.4.0
-    /// exactly (pinned against tests/fixtures/references/records.json): the
-    /// `references` array sits after `id`/`schemaType` and before `schema`, each
-    /// ref is `{name,subject,version}`, and it is omitted entirely when empty.
+    /// exactly, pinned against tests/fixtures/references/records.json. The
+    /// `references` array sits after `id`/`schemaType` and before `schema`. Each
+    /// ref is `{name,subject,version}`, and the array is omitted entirely when
+    /// empty.
     #[test]
     fn references_value_shape_matches_cp_capture() {
         for (_name, subject, id, schema_type, references, expected) in [
@@ -608,8 +616,9 @@ mod tests {
         }
     }
 
-    /// The `_schemas` keys we emit must match cp-schema-registry 7.4.0 byte-for-byte
-    /// (the compaction keys); confirmed against `tests/fixtures/admin/records.json`.
+    /// The `_schemas` keys we emit must match cp-schema-registry 7.4.0
+    /// byte-for-byte. These are the compaction keys, confirmed against
+    /// `tests/fixtures/admin/records.json`.
     #[test]
     fn encoders_match_cp_captured_keys() {
         for (_name, actual, expected) in [

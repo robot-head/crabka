@@ -68,9 +68,9 @@ pub(crate) fn canonicalize_timestamp_operations(
 
 /// Production handler for ranges hosted by one compute process.
 ///
-/// Every request is checked against the hosted-engine map before execution;
-/// therefore a stale registry entry is visible to callers instead of being
-/// accidentally served from another range's state.
+/// The service checks every request against the hosted-engine map before it
+/// executes the request. Callers therefore see a stale registry entry, and no
+/// request is served by accident from another range's state.
 pub struct HostedRangeService {
     engines: BTreeMap<RangeId, crabka_pgexec::SqlEngine>,
     tso: Option<Arc<dyn TsoRpc>>,
@@ -99,12 +99,13 @@ struct HostedSession {
     last_used: Instant,
 }
 
-/// Encode a lock-wait cap for the session wire, saturating instead of failing
-/// on a pathological over-large extent.
+/// Encode a lock-wait cap for the session wire. This function saturates on an
+/// over-large extent instead of a failure.
 ///
-/// Truncating, not rounding: the participant reconstructs the cap from this
-/// integer, and a cap rounded up past the range transport's RPC timeout would
-/// let the gateway time the call out before the participant reports its abort.
+/// It truncates rather than rounds. The participant reconstructs the cap from
+/// this integer, and a cap rounded up past the range transport's RPC timeout
+/// would let the gateway time the call out before the participant reports its
+/// abort.
 fn cap_to_millis(cap: Time) -> u64 {
     u64::try_from(cap.millis_i64_trunc()).unwrap_or(u64::MAX)
 }
@@ -115,7 +116,7 @@ fn cap_from_millis(millis: u64) -> Time {
 }
 
 impl HostedRangeService {
-    /// Build a hosted range service. Only range 0 may be given a TSO RPC.
+    /// Build a hosted range service. Only range 0 may receive a TSO RPC.
     #[must_use]
     pub fn new(engines: BTreeMap<RangeId, crabka_pgexec::SqlEngine>) -> Self {
         Self::new_with_policy(engines, crate::RangeRuntimePolicy::default())
@@ -144,9 +145,9 @@ impl HostedRangeService {
 
     /// Share the mutex that serializes catalog schema changes.
     ///
-    /// On the node hosting range 0 this must be the same `Arc` as the local
-    /// gateway's schema gate, so local DDL, forwarded DDL, and split
-    /// activation all serialize behind one mutex.
+    /// On the node that hosts range 0, this must be the same `Arc` as the local
+    /// gateway's schema gate, so local DDL, forwarded DDL, and split activation
+    /// all serialize behind one mutex.
     #[must_use]
     pub fn with_ddl_gate(mut self, gate: Arc<tokio::sync::Mutex<()>>) -> Self {
         self.ddl_gate = gate;
@@ -176,8 +177,8 @@ impl HostedRangeService {
         self
     }
 
-    /// Borrow the stable control dispatcher so a dynamic service wrapper can preserve it while
-    /// replacing the hosted-engine snapshot.
+    /// Borrow the stable control dispatcher, so a dynamic service wrapper can keep it while
+    /// it replaces the hosted-engine snapshot.
     #[must_use]
     pub fn range_control_dispatcher(
         &self,
@@ -185,25 +186,25 @@ impl HostedRangeService {
         self.range_control.clone()
     }
 
-    /// Borrow the stable durable inspector while replacing the hosted-engine snapshot.
+    /// Borrow the stable durable inspector while the caller replaces the hosted-engine snapshot.
     #[must_use]
     pub fn durable_inspector_dispatcher(&self) -> Option<Arc<dyn DurableRecordInspector>> {
         self.durable_inspector.clone()
     }
 
-    /// Borrow the shared DDL gate while replacing the hosted-engine snapshot.
+    /// Borrow the shared DDL gate while the caller replaces the hosted-engine snapshot.
     #[must_use]
     pub fn ddl_gate_dispatcher(&self) -> Arc<tokio::sync::Mutex<()>> {
         Arc::clone(&self.ddl_gate)
     }
 
-    /// Borrow the range-0 catalog follower while replacing the hosted-engine snapshot.
+    /// Borrow the range-0 catalog follower while the caller replaces the hosted-engine snapshot.
     #[must_use]
     pub fn catalog_follower_dispatcher(&self) -> Option<Arc<Range0Barrier>> {
         self.catalog_follower.clone()
     }
 
-    /// Borrow remote timestamp-primary routing while replacing the hosted-engine snapshot.
+    /// Borrow remote timestamp-primary routing while the caller replaces the hosted-engine snapshot.
     #[must_use]
     pub fn timestamp_primary_remote_dispatcher(&self) -> Option<(RangeRegistry, FramedTcpClient)> {
         self.timestamp_primary_remote.clone()
@@ -1274,11 +1275,11 @@ struct RangeFrameSink<'a> {
     terminal_error_sent: bool,
 }
 
-/// The `pg.operation` for one owner-session operation: its
+/// The `pg.operation` for one owner-session operation, which is its
 /// [`WireSessionOperation`] variant name.
 ///
-/// A closed set of `&'static str`, so the attribute stays low-cardinality and
-/// costs nothing to derive when the span is disabled.
+/// The result comes from a closed set of `&'static str`, so the attribute stays
+/// low-cardinality and costs nothing to derive when the span is disabled.
 const fn session_operation_name(operation: &WireSessionOperation) -> &'static str {
     match operation {
         WireSessionOperation::SimpleQuery { .. } => "SimpleQuery",
@@ -1299,10 +1300,10 @@ const fn session_operation_name(operation: &WireSessionOperation) -> &'static st
 
 /// Run one owner-side extended-protocol operation under its own span.
 ///
-/// This is the only place the forwarded extended protocol becomes visible: a
-/// `Bind` or `Execute` carries no SQL, so without this span the owner's share of
-/// a prepared-statement round trip is an unattributed gap between the gateway's
-/// `gres.range_rpc` and the executor's work.
+/// This is the only place the forwarded extended protocol becomes visible. A
+/// `Bind` or an `Execute` carries no SQL. Without this span, the owner's share
+/// of a prepared-statement round trip is an unattributed gap between the
+/// gateway's `gres.range_rpc` and the executor's work.
 async fn handle_session_operation(
     session: &mut crabka_pgexec::SqlSession,
     operation: WireSessionOperation,
@@ -1579,20 +1580,21 @@ pub trait RemoteForward: Send + Sync {
     /// Block until every follower node's range-0 replica covers all catalog
     /// writes committed before this call.
     ///
-    /// Non-distributed forwarders have no followers, so the default barrier is
+    /// A non-distributed forwarder has no followers, so the default barrier is
     /// already covered.
     async fn barrier_catalog_followers(&self) -> Result<(), ForwardError> {
         Ok(())
     }
 
-    /// Forward SQL and preserve row descriptions, values, and command results.
+    /// Forward SQL and keep the row descriptions, the values, and the command
+    /// results.
     async fn forward_query(
         &self,
         range_id: RangeId,
         sql: String,
     ) -> Result<Vec<QueryResult>, ForwardError>;
 
-    /// Forward SQL while preserving transport backpressure end to end.
+    /// Forward SQL and keep transport backpressure end to end.
     async fn forward_query_into(
         &self,
         range_id: RangeId,
@@ -3208,19 +3210,20 @@ impl RegistryRangeScanner {
 impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
     /// # Trace context across the bridge
     ///
-    /// The executor calls this from a blocking worker, and it answers by
-    /// spawning a scoped `std::thread` running a fresh current-thread runtime.
-    /// Two context losses stack there: the scoped thread does not inherit the
-    /// caller's span, and any span created inside would be a trace root.
+    /// The executor calls this from a blocking worker, and this method answers
+    /// it on a scoped `std::thread` that runs a fresh current-thread runtime.
+    /// Two context losses stack there. The scoped thread does not inherit the
+    /// caller's span, and any span created inside it would be a trace root.
     ///
-    /// So the caller's span is captured **outside** `thread::scope` — `Span` is
-    /// `Clone + Send`, and `tracing-opentelemetry` keys the `OTel` context off
-    /// the registry by span id rather than off a thread-local, so the clone
-    /// reconstitutes full context on the other thread. The payload is then
-    /// re-entered with [`tracing::Instrument`], **not** with an `enter()` guard:
-    /// `Instrumented` re-enters on every poll, so the `client.call(…)` awaits
-    /// deep inside see it as current. A guard held across `block_on` happens to
-    /// work for a single task and breaks the moment anything spawns.
+    /// This method therefore captures the caller's span **outside**
+    /// `thread::scope`. `Span` is `Clone + Send`, and `tracing-opentelemetry`
+    /// keys the `OTel` context off the registry by span id rather than off a
+    /// thread-local, so the clone reconstitutes full context on the other
+    /// thread. The payload then re-enters the span with [`tracing::Instrument`],
+    /// **not** with an `enter()` guard. `Instrumented` re-enters on every poll,
+    /// so the `client.call(…)` awaits deep inside see the span as current. A
+    /// guard held across `block_on` happens to work for a single task, and it
+    /// breaks the moment anything spawns.
     fn scan(
         &self,
         request: crabka_pgexec::ScanRequest<'_>,
@@ -3241,9 +3244,9 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
         })
     }
 
-    /// Bridges the same way [`RegistryRangeScanner::scan`] does; see there for
-    /// why the span is captured outside the scope and re-entered with
-    /// `Instrument`.
+    /// This method bridges the same way [`RegistryRangeScanner::scan`] does. See
+    /// that method for why the code captures the span outside the scope and
+    /// re-enters it with `Instrument`.
     fn join(
         &self,
         request: crabka_pgexec::JoinRangeRequest,
@@ -3295,17 +3298,18 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
 struct RegistryRangeCursor<'a> {
     scanner: &'a RegistryRangeScanner,
     request: crabka_pgexec::ScanRequest<'a>,
-    /// The span current when the cursor was opened.
+    /// The span current when the code opened the cursor.
     ///
-    /// Pages are pulled later, and the executor drives them from a blocking
-    /// worker on a runtime of its own, where nothing of the opening context is
-    /// current. Holding the handle here and re-entering it per page is what
-    /// keeps every owner RPC the cursor makes inside the statement's trace
-    /// rather than orphaned at the root.
+    /// The cursor pulls pages later, and the executor drives them from a
+    /// blocking worker on a runtime of its own, where nothing of the opening
+    /// context is current. The cursor holds the handle here and re-enters it per
+    /// page. That keeps every owner RPC the cursor makes inside the statement's
+    /// trace, and not orphaned at the root.
     span: tracing::Span,
     done: bool,
-    /// Range membership is statement-stable. Endpoint refresh may move an
-    /// owner, but must never add/remove owners halfway through a snapshot.
+    /// Range membership is statement-stable. An endpoint refresh may move an
+    /// owner, but it must never add or remove an owner halfway through a
+    /// snapshot.
     owners: Option<Vec<RangeId>>,
     tokens: BTreeMap<RangeId, Option<Vec<u8>>>,
     finished: std::collections::BTreeSet<RangeId>,

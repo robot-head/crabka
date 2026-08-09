@@ -1,12 +1,14 @@
-//! Fixed-key Processor API (KIP-820 `processValues`): a processor that may change
-//! the value but NOT the key. A thin typed facade over the regular [`Processor`]
-//! runtime. An internal adapter bridges a [`FixedKeyProcessor`] into a
-//! `Processor<KIn, VIn, KIn, VOut>` (the output key type equals the input key
-//! type, so the runtime keeps the partition assignment unchanged).
+//! Fixed-key Processor API (KIP-820 `processValues`).
+//!
+//! A fixed-key processor may change the value but NOT the key. This module is a
+//! thin typed facade over the regular [`Processor`] runtime. An internal adapter
+//! bridges a [`FixedKeyProcessor`] into a `Processor<KIn, VIn, KIn, VOut>`. The
+//! output key type equals the input key type, so the runtime keeps the partition
+//! assignment unchanged.
 //!
 //! The DSL surface `KStream::process_values` wraps a
-//! [`FixedKeyProcessorSupplier`] in that adapter; this module is the
-//! typed facade + adapter it builds on.
+//! [`FixedKeyProcessorSupplier`] in that adapter. This module holds the typed
+//! facade and the adapter that it builds on.
 
 use std::any::Any;
 
@@ -17,11 +19,13 @@ use crate::processor::{
     record::{Record, RecordContext},
 };
 
-/// A record whose KEY is immutable. [`with_value`](FixedKeyRecord::with_value)
-/// changes the value (possibly the type), keeping the key and timestamp. Unlike
-/// [`Record`], the key is **not** optional: a fixed-key processor is only reached
-/// for records that carry a key (a null-key record cannot have its key
-/// "preserved" — `process_values` requires a non-null key, matching the JVM).
+/// A record whose KEY is immutable.
+///
+/// [`with_value`](FixedKeyRecord::with_value) changes the value, and it can also
+/// change the value type. It keeps the key and the timestamp. Unlike [`Record`],
+/// the key is **not** optional. A record reaches a fixed-key processor only when
+/// it carries a key, because a null-key record has no key to preserve.
+/// `process_values` needs a non-null key, which matches the JVM.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixedKeyRecord<K, V> {
     pub key: K,
@@ -30,7 +34,8 @@ pub struct FixedKeyRecord<K, V> {
 }
 
 impl<K, V> FixedKeyRecord<K, V> {
-    /// Replace the value (and possibly its type), preserving key and timestamp.
+    /// Replace the value, and possibly its type. This keeps the key and the
+    /// timestamp.
     #[must_use]
     pub fn with_value<V2>(self, value: V2) -> FixedKeyRecord<K, V2> {
         FixedKeyRecord {
@@ -41,9 +46,11 @@ impl<K, V> FixedKeyRecord<K, V> {
     }
 }
 
-/// Handed to a [`FixedKeyProcessor::process`]. The only `forward` re-attaches the
-/// (unchanged) key, so a fixed-key processor cannot accidentally repartition. All
-/// other accessors delegate verbatim to the underlying [`ProcessorContext`].
+/// The context handed to [`FixedKeyProcessor::process`].
+///
+/// The only `forward` re-attaches the unchanged key, so a fixed-key processor
+/// cannot repartition by accident. All other accessors delegate verbatim to the
+/// underlying [`ProcessorContext`].
 pub struct FixedKeyProcessorContext<'a, 'ctx, 'd, K, VOut> {
     inner: &'a mut ProcessorContext<'ctx, 'd, K, VOut>,
 }
@@ -58,8 +65,8 @@ where
         Self { inner }
     }
 
-    /// Forward a record downstream, re-attaching the (unchanged) key. Mirrors the
-    /// JVM `FixedKeyProcessorContext.forward(FixedKeyRecord)`.
+    /// Forward a record downstream and re-attach the unchanged key. This mirrors
+    /// the JVM `FixedKeyProcessorContext.forward(FixedKeyRecord)`.
     pub fn forward(&mut self, record: FixedKeyRecord<K, VOut>) {
         self.inner.forward(Record::new(
             Some(record.key),
@@ -68,9 +75,10 @@ where
         ));
     }
 
-    /// Access a connected key/value state store, typed. Delegates to
-    /// [`ProcessorContext::get_state_store`]. (Window/session-store accessors are
-    /// omitted: no DSL path connects those to a `process_values` node yet.)
+    /// Access a connected key/value state store, typed. This method delegates to
+    /// [`ProcessorContext::get_state_store`]. This context has no window-store or
+    /// session-store accessor, because no DSL path connects those to a
+    /// `process_values` node yet.
     pub fn get_state_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
@@ -85,9 +93,11 @@ where
     }
 }
 
-/// A fixed-key record processor (KIP-820): it may change the value but not the
-/// key. The typed analogue of [`Processor`]; one instance is created per task via
-/// [`FixedKeyProcessorSupplier::get`].
+/// A fixed-key record processor (KIP-820).
+///
+/// It may change the value but not the key. It is the typed analogue of
+/// [`Processor`]. [`FixedKeyProcessorSupplier::get`] creates one instance per
+/// task.
 #[async_trait]
 pub trait FixedKeyProcessor<KIn: Send, VIn: Send, VOut: Send>: Send + 'static {
     async fn process(
@@ -97,11 +107,13 @@ pub trait FixedKeyProcessor<KIn: Send, VIn: Send, VOut: Send>: Send + 'static {
     );
 }
 
-/// A boxed fixed-key processor is itself a [`FixedKeyProcessor`], delegating to
-/// the inner value. Mirrors the `Box<dyn Processor>` blanket impl in
-/// [`crate::processor::api`]: it lets a [`FixedKeyProcessorSupplier`] closure
-/// return `Box<dyn FixedKeyProcessor<…>>` (chosen at runtime) and still feed a
-/// the internal fixed-key adapter, which requires `P: FixedKeyProcessor`.
+/// A boxed fixed-key processor is itself a [`FixedKeyProcessor`]. It delegates
+/// to the inner value.
+///
+/// This impl mirrors the `Box<dyn Processor>` blanket impl in
+/// [`crate::processor::api`]. It lets a [`FixedKeyProcessorSupplier`] closure
+/// return a `Box<dyn FixedKeyProcessor<…>>` chosen at runtime and still feed the
+/// internal fixed-key adapter, which needs `P: FixedKeyProcessor`.
 #[async_trait]
 impl<KIn, VIn, VOut> FixedKeyProcessor<KIn, VIn, VOut>
     for Box<dyn FixedKeyProcessor<KIn, VIn, VOut>>
@@ -119,9 +131,11 @@ where
     }
 }
 
-/// Factory for [`FixedKeyProcessor`] instances (one per task → per-task
-/// isolation). Mirrors [`ProcessorSupplier`](crate::processor::ProcessorSupplier);
-/// a closure `|| MyFixedProc` is a supplier via the blanket impl below.
+/// Factory for [`FixedKeyProcessor`] instances.
+///
+/// It creates one instance per task, which gives per-task isolation. It mirrors
+/// [`ProcessorSupplier`](crate::processor::ProcessorSupplier). A closure
+/// `|| MyFixedProc` is a supplier through the blanket impl below.
 pub trait FixedKeyProcessorSupplier<KIn, VIn, VOut>: Send + Sync + 'static {
     fn get(&self) -> Box<dyn FixedKeyProcessor<KIn, VIn, VOut>>;
 }
@@ -140,8 +154,10 @@ where
 }
 
 /// Bridges a [`FixedKeyProcessor`] into the regular [`Processor`] runtime with
-/// `KOut = KIn` (the key is preserved). Wrapped around a [`FixedKeyProcessorSupplier`]
-/// by [`KStream::process_values`](crate::dsl::kstream::KStream::process_values).
+/// `KOut = KIn`, so the key stays unchanged.
+///
+/// [`KStream::process_values`](crate::dsl::kstream::KStream::process_values)
+/// wraps this adapter around a [`FixedKeyProcessorSupplier`].
 pub(crate) struct FixedKeyAdapter<P> {
     pub inner: P,
 }
@@ -195,7 +211,7 @@ mod tests {
         check!(r2.timestamp == 42);
     }
 
-    /// A fixed-key processor that uppercases the value, preserving the key.
+    /// A fixed-key processor that uppercases the value and keeps the key.
     struct UpperValue;
     crate::impl_fixed_key_processor! {
         impl UpperValue: (String, String) -> String {

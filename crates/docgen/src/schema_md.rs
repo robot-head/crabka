@@ -1,18 +1,22 @@
-//! Render a JSON-Schema-shaped value (`OpenAPI` v3 / schemars output) to a
-//! markdown field table. Shared by the CRD and broker-config generators.
+//! Render a JSON-Schema-shaped value to a markdown field table.
+//!
+//! The input is `OpenAPI` v3 output or schemars output. The CRD generator and
+//! the broker-config generator share this module.
 
 use std::fmt::Write;
 
 use serde_json::Value;
 
-/// Render the `properties` of an object schema as a markdown table with one
-/// row per (possibly nested) field. Columns: Field, Type, Required, Default,
-/// Description. Nested object properties recurse with a dotted path.
+/// Render the `properties` of an object schema as a markdown table.
 ///
-/// The argument doubles as the root schema for resolving `$ref` pointers
-/// (schemars emits `$ref` into a top-level `$defs`/`definitions` table for
-/// nested structs); kube-generated CRD schemas are fully inlined and carry no
-/// refs, so they render identically.
+/// The table has one row per field, and a field can be nested. The columns are
+/// Field, Type, Required, Default, and Description. Nested object properties
+/// recurse with a dotted path.
+///
+/// The argument is also the root schema that resolves `$ref` pointers. schemars
+/// emits `$ref` into a top-level `$defs` or `definitions` table for nested
+/// structs. Kube-generated CRD schemas are fully inlined and carry no refs, so
+/// they render identically.
 #[must_use]
 pub fn render_field_table(schema: &Value) -> String {
     let mut rows = String::new();
@@ -23,21 +27,24 @@ pub fn render_field_table(schema: &Value) -> String {
 }
 
 /// Render the root schema's top-level properties as separate, captioned
-/// subsections instead of one flat table — easier to scan than the giant dense
-/// table `render_field_table` produces.
+/// subsections instead of one flat table.
 ///
-/// Each top-level property that resolves to an object (a schema with
-/// `properties`) gets its own `## <key>` heading, its description as a blurb,
-/// and a focused field table whose rows are relative to that subtree (the
-/// leading `<key>.` prefix is stripped). Every remaining top-level property —
-/// scalars, arrays, and objects without `properties` — is collected under a
-/// single leading `## General` section as one table keyed by the bare property
-/// name. Sections are separated by a `---` horizontal rule.
+/// These subsections are easier to scan than the large dense table that
+/// `render_field_table` produces.
 ///
-/// Shares all type/default/description/escaping logic with
-/// `render_field_table` via `effective_schema`, `type_label`, `render_default`,
-/// and `collect_rows`; `render_field_table` itself is unchanged so the CRD and
-/// other pages keep their flat layout.
+/// Each top-level property that resolves to an object, that is to a schema with
+/// `properties`, gets its own `## <key>` heading, its description as a blurb,
+/// and a focused field table. The rows of that table are relative to the
+/// subtree, so the function removes the leading `<key>.` prefix. All the other
+/// top-level properties go under one leading `## General` section, as one table
+/// keyed by the bare property name. These are the scalars, the arrays, and the
+/// objects without `properties`. A `---` horizontal rule separates the
+/// sections.
+///
+/// This function shares all the type, default, description, and escaping logic
+/// with `render_field_table` through `effective_schema`, `type_label`,
+/// `render_default`, and `collect_rows`. `render_field_table` keeps its flat
+/// layout, so the CRD pages and the other pages keep that layout too.
 #[must_use]
 pub fn render_sectioned_field_table(schema: &Value) -> String {
     let required: Vec<&str> = schema
@@ -98,8 +105,10 @@ pub fn render_sectioned_field_table(schema: &Value) -> String {
     parts.join("\n\n---\n\n")
 }
 
-/// The shared 5-column field-table header (also used by `render_field_table`'s
-/// literal, kept in sync here for the sectioned variant).
+/// The shared 5-column field-table header.
+///
+/// `render_field_table` holds the same header as a literal. This copy for the
+/// sectioned variant stays in sync with that literal.
 fn field_table_header() -> String {
     String::from(
         "| Field | Type | Required | Default | Description |\n\
@@ -107,10 +116,12 @@ fn field_table_header() -> String {
     )
 }
 
-/// Emit a single field row for `name` (used by the "General" section, which
-/// renders scalar/array top-level props as plain one-row entries). Mirrors the
-/// per-field formatting in `collect_rows` so type/default/description/escaping
-/// stay identical.
+/// Emit a single field row for `name`.
+///
+/// The "General" section uses this function, and it renders scalar and array
+/// top-level props as plain one-row entries. The function mirrors the per-field
+/// formatting in `collect_rows`, so the type, the default, the description, and
+/// the escaping stay identical.
 fn write_field_row(
     root: &Value,
     name: &str,
@@ -136,18 +147,22 @@ fn write_field_row(
     let _ = writeln!(out, "| `{name}` | {ty} | {req} | {default} | {desc} |");
 }
 
-/// Resolve a JSON-pointer `$ref` like `#/$defs/Foo` against `root`. Returns
-/// `None` for external or unresolvable refs.
+/// Resolve a JSON-pointer `$ref` like `#/$defs/Foo` against `root`.
+///
+/// The function returns `None` for external or unresolvable refs.
 fn resolve_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
     let pointer = reference.strip_prefix('#')?;
     root.pointer(pointer)
 }
 
-/// Resolve a field schema to its effective underlying schema. Follows a bare
-/// `$ref` into `$defs`/`definitions` and unwraps schemars' `Option<T>`-style
-/// wrappers — an `anyOf`/`allOf`/`oneOf` whose branches are `[T, null]`
-/// collapses to `T` (recursively). Returns a borrow of the effective schema
-/// `Value` (the field itself when no `$ref`/wrapper applies).
+/// Resolve a field schema to its effective underlying schema.
+///
+/// The function follows a bare `$ref` into `$defs` or `definitions`, and it
+/// unwraps schemars' `Option<T>`-style wrappers. An `anyOf`, `allOf`, or
+/// `oneOf` whose branches are `[T, null]` collapses to `T`, and the function
+/// applies this rule recursively. It returns a borrow of the effective schema
+/// `Value`. That value is the field itself when no `$ref` and no wrapper
+/// applies.
 fn effective_schema<'a>(root: &'a Value, field: &'a Value) -> &'a Value {
     if let Some(reference) = field.get("$ref").and_then(Value::as_str)
         && let Some(target) = resolve_ref(root, reference)
@@ -168,9 +183,11 @@ fn effective_schema<'a>(root: &'a Value, field: &'a Value) -> &'a Value {
     field
 }
 
-/// Maximum nesting depth for `$ref`/object recursion. Bounds work on
-/// self-referential or mutually-recursive schemas so rendering can't overflow
-/// the stack; deeper fields still emit their own row but aren't expanded.
+/// Maximum nesting depth for `$ref` and object recursion.
+///
+/// This bound limits the work on self-referential or mutually recursive
+/// schemas, so the rendering cannot overflow the stack. Deeper fields still
+/// emit their own row, but the renderer does not expand them.
 const MAX_DEPTH: usize = 12;
 
 fn collect_rows(root: &Value, schema: &Value, prefix: &str, depth: usize, out: &mut String) {
@@ -218,8 +235,9 @@ fn collect_rows(root: &Value, schema: &Value, prefix: &str, depth: usize, out: &
     }
 }
 
-/// First non-"null" entry of a `type` that may be a string or an array
-/// (schemars emits `["string", "null"]` for `Option<T>`).
+/// First non-"null" entry of a `type` that can be a string or an array.
+///
+/// schemars emits `["string", "null"]` for `Option<T>`.
 fn primitive_type(field: &Value) -> Option<String> {
     match field.get("type") {
         Some(Value::String(s)) => Some(s.clone()),
@@ -295,9 +313,10 @@ mod tests {
         assert2::assert!(md.contains("array<integer>"));
     }
 
-    /// Mimic schemars 1.x output: `Option<T>` types are arrays `["T","null"]`,
-    /// nested structs are `$ref` into `$defs` (directly or wrapped in `anyOf`
-    /// with a `null` branch), and `Vec<Struct>` arrays reference items by ref.
+    /// Mimic schemars 1.x output. `Option<T>` types are arrays `["T","null"]`.
+    /// Nested structs are a `$ref` into `$defs`, either directly or wrapped in
+    /// `anyOf` with a `null` branch. `Vec<Struct>` arrays reference items by
+    /// ref.
     #[test]
     fn resolves_refs_and_nullable_type_arrays() {
         let schema = json!({
@@ -336,9 +355,10 @@ mod tests {
         }
     }
 
-    /// A self-referential `$def` (a property that `$ref`s back to its own def)
-    /// must not recurse forever / overflow the stack. The cap bounds the work;
-    /// the top-level field row is still emitted.
+    /// A self-referential `$def` is a property that `$ref`s back to its own
+    /// def. It must not recurse forever and it must not overflow the stack. The
+    /// cap limits the work, and the renderer still emits the top-level field
+    /// row.
     #[test]
     fn caps_recursion_on_cyclic_ref() {
         let schema = json!({

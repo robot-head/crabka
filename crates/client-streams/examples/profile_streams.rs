@@ -1,15 +1,15 @@
 //! CPU-profiling harness for the streams processing hot path.
 //!
-//! Builds a stateful `group_by_key` -> `count` topology (single subtopology, no
-//! repartition) and feeds N records through the broker-free
-//! `TopologyTestDriver`, so the profile is dominated by the per-record engine
-//! path: source deserialize -> processor graph -> state-store get/put ->
-//! changelog drain. Bounded key cardinality keeps the store small and exercises
-//! the read-modify-write path on existing keys.
+//! This harness builds a stateful `group_by_key` -> `count` topology with a
+//! single subtopology and no repartition. It feeds N records through the
+//! broker-free `TopologyTestDriver`, so the per-record engine path dominates the
+//! profile: source deserialize, then processor graph, then state-store get and
+//! put, then changelog drain. A bounded key cardinality keeps the store small and
+//! exercises the read-modify-write path on existing keys.
 //!
-//! The test driver uses the in-memory (`BTreeMap`) store backend, so this
-//! measures the engine + in-memory store, not the `turso` state backend used
-//! in production.
+//! The test driver uses the in-memory (`BTreeMap`) store backend. This harness
+//! therefore measures the engine and the in-memory store, and not the `turso`
+//! state backend that production uses.
 //!
 //! ```text
 //! CARGO_PROFILE_RELEASE_DEBUG=true cargo run --release \

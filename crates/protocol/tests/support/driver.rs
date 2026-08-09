@@ -1,9 +1,13 @@
-//! Declarative battery of real JVM-client operations that, run against the
-//! broker through the tap, emit a broad set of `(api_key, version)` pairs.
+//! Declarative battery of real JVM-client operations.
+//!
+//! Run the battery against the broker through the tap. The operations emit a
+//! broad set of `(api_key, version)` pairs.
 use std::process::Command;
 
-/// Bootstrap the JVM CLI tools must dial so traffic traverses the tap.
-/// From inside the container, the tap (on the host) is `host.docker.internal:TAP_PORT`.
+/// Bootstrap address the JVM CLI tools must dial so traffic goes through the tap.
+///
+/// The tap runs on the host. From inside the container it is
+/// `host.docker.internal:TAP_PORT`.
 pub const BOOTSTRAP: &str = "host.docker.internal:19091";
 
 fn exec(container: &str, args: &[&str]) {
@@ -23,7 +27,9 @@ fn exec(container: &str, args: &[&str]) {
     }
 }
 
-/// Run the full battery. `mirror.gcr.io/apache/kafka:4.3.0` ships CLI tools under `/opt/kafka/bin`.
+/// Run the full battery.
+///
+/// `mirror.gcr.io/apache/kafka:4.3.0` ships CLI tools under `/opt/kafka/bin`.
 pub fn run(container: &str) {
     run_topic_ops(container);
     run_config_ops(container);

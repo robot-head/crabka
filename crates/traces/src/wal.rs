@@ -17,7 +17,8 @@ pub struct SpanRecord {
 }
 
 impl SpanRecord {
-    /// Encode via `serde-wincode`, matching Crabka's serde-derived wire records.
+    /// Encode with `serde-wincode`, which matches Crabka's serde-derived wire
+    /// records.
     ///
     /// # Errors
     /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.

@@ -228,7 +228,7 @@ async fn register_writer(http: &reqwest::Client, base: &str, subject: &str, sche
     eprintln!("CAPTURE registered writer for {subject}: {text}");
 }
 
-/// POST /compatibility/subjects/{subject}/versions/latest — returns `is_compatible`.
+/// POST /compatibility/subjects/{subject}/versions/latest. It returns `is_compatible`.
 async fn check_compat(http: &reqwest::Client, base: &str, subject: &str, reader: &str) -> bool {
     let url = format!("{base}/compatibility/subjects/{subject}/versions/latest");
     let body = serde_json::json!({ "schema": reader });

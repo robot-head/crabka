@@ -25,8 +25,8 @@ spec:
                 type: string
               image:
                 description: |-
-                  Compute container image override. When absent the operator uses its
-                  global Gres image override or compiled default.
+                  Compute container image override. When absent, the operator uses its
+                  global Gres image override or its compiled default.
                 minLength: 1
                 nullable: true
                 type: string
@@ -45,7 +45,9 @@ spec:
                     nullable: true
                     type: string
                   idleSeconds:
-                    description: Idle timeout in seconds; unset means never suspend by idleness.
+                    description: |-
+                      Idle timeout in seconds. When unset, the tenant never suspends
+                      because it is idle.
                     format: uint64
                     minimum: 0.0
                     nullable: true
@@ -69,8 +71,8 @@ spec:
                 type: object
               passwordSecretRef:
                 description: |-
-                  Secret key holding the plaintext tenant password. The reconciler hashes
-                  it to a verifier; the password is never copied to
+                  Secret key that holds the plaintext tenant password. The reconciler
+                  hashes it to a verifier. The reconciler never copies the password to
                   status.
                 properties:
                   key:
@@ -85,9 +87,10 @@ spec:
                 type: object
               ranges:
                 description: |-
-                  Optional ordered range layout. Omitted means one open-ended range r0.
+                  Optional ordered range layout. An omitted layout gives one open-ended
+                  range r0.
 
-                  Each entry is placed on a distinct range compute.
+                  The operator places each entry on a distinct range compute.
                 items:
                   description: One row-key range in a tenant layout.
                   properties:
@@ -96,7 +99,7 @@ spec:
                       nullable: true
                       properties:
                         bucket:
-                          description: Hash bucket at the boundary; absent for non-hash tables.
+                          description: Hash bucket at the boundary. It is absent for non-hash tables.
                           format: uint32
                           minimum: 0.0
                           nullable: true
@@ -125,7 +128,7 @@ spec:
                   type: object
                 type: array
               resources:
-                description: CPU / memory resource requests and limits for the tenant compute.
+                description: CPU and memory resource requests and limits for the tenant compute.
                 nullable: true
                 properties:
                   claims:
@@ -162,7 +165,7 @@ spec:
                     type: object
                 type: object
               suspended:
-                description: Suspends the tenant when true. Unset is treated as active.
+                description: Suspends the tenant when true. The operator treats unset as active.
                 nullable: true
                 type: boolean
               user:
@@ -195,7 +198,7 @@ spec:
                       description: '`True`, `False`, or `Unknown`.'
                       type: string
                     type:
-                      description: e.g. `Ready`.
+                      description: For example, `Ready`.
                       type: string
                   required:
                   - lastTransitionTime

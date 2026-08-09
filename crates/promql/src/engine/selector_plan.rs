@@ -25,10 +25,12 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Build (without executing) the instant-vector-selector operator plan: scan
-    /// the matched float series over `(eval_time - lookback, eval_time]`,
-    /// materialize their labels, and assemble the `SeriesDivide ->
-    /// SeriesNormalize -> InstantManipulate` chain.
+    /// Builds the instant-vector-selector operator plan without executing it.
+    ///
+    /// This method scans the matched float series over
+    /// `(eval_time - lookback, eval_time]`, materializes their labels, and
+    /// assembles the `SeriesDivide -> SeriesNormalize -> InstantManipulate`
+    /// chain.
     pub(super) async fn plan_instant_selector(
         &self,
         tenant: &str,
@@ -90,9 +92,11 @@ impl<S: MetricStore> PromqlEngine<S> {
         ))
     }
 
-    /// True when the selector matches at least one histogram series in the
-    /// instant-selector scan window. Such selectors stay on the interpreter
-    /// because the float-only operator chain cannot carry histogram samples.
+    /// Returns `true` when the selector matches at least one histogram series.
+    ///
+    /// The window is the instant-selector scan window. Such selectors stay on the
+    /// interpreter, because the float-only operator chain cannot carry histogram
+    /// samples.
     pub(super) async fn selector_has_histogram_series(
         &self,
         tenant: &str,
@@ -115,12 +119,15 @@ impl<S: MetricStore> PromqlEngine<S> {
             .any(|row| row.ts_ms > start_ms && row.ts_ms <= eval_time_ms))
     }
 
-    /// True when a matrix selector matches at least one histogram series in its
-    /// exact range window `(eval_time - range, eval_time]`. Such selectors stay
-    /// on the interpreter; the float-only rate operator chain cannot carry
-    /// histogram samples (the interpreter's `range_histogram_sample` handles
-    /// them). The window matches `eval_matrix_selector`'s `modifier == None`
-    /// scan window exactly (no lookback).
+    /// Returns `true` when a matrix selector matches at least one histogram
+    /// series.
+    ///
+    /// The window is the exact range window `(eval_time - range, eval_time]`.
+    /// Such selectors stay on the interpreter, because the float-only rate
+    /// operator chain cannot carry histogram samples. The interpreter's
+    /// `range_histogram_sample` handles them. The window matches
+    /// `eval_matrix_selector`'s `modifier == None` scan window exactly, with no
+    /// lookback.
     pub(super) async fn matrix_selector_has_histogram_series(
         &self,
         tenant: &str,
@@ -144,15 +151,16 @@ impl<S: MetricStore> PromqlEngine<S> {
             .any(|row| row.ts_ms > range_start_ms && row.ts_ms <= eval_end_ms))
     }
 
-    /// Build (without executing) the rate-family range-selector operator plan.
+    /// Builds the rate-family range-selector operator plan without executing it.
     ///
     /// The range-selector window is exactly `(eval_time - range, eval_time]`,
-    /// left-open and right-closed, with **no** 5m lookback — unlike the instant
-    /// path, which scans `(eval_time - lookback, eval_time]` and selects a single
-    /// sample. This matches Prometheus matrix-selector semantics and the
+    /// left-open and right-closed, with no 5m lookback. The instant path differs:
+    /// it scans `(eval_time - lookback, eval_time]` and selects a single sample.
+    /// This window matches Prometheus matrix-selector semantics and the
     /// interpreter's `range_function_sample_from_series`. The window's range
-    /// width feeds the UDF as its range extent; the eval instant feeds it as the scalar
-    /// `timestamp` column, from which the UDF re-derives `range_start = t - range`.
+    /// width feeds the UDF as its range extent. The eval instant feeds the UDF as
+    /// the scalar `timestamp` column, and the UDF re-derives
+    /// `range_start = t - range` from it.
     pub(super) async fn plan_rate_range(
         &self,
         tenant: &str,
@@ -212,13 +220,13 @@ impl<S: MetricStore> PromqlEngine<S> {
         ))
     }
 
-    /// Build (without executing) the `*_over_time` range-selector operator plan.
+    /// Builds the `*_over_time` range-selector operator plan without executing it.
     ///
-    /// Shares the rate path's window semantics: the window is exactly
-    /// `(eval_time - range, eval_time]`, left-open right-closed, with **no** 5m
-    /// lookback, matching the interpreter's `over_time_sample_from_series`. The
-    /// `phi` quantile literal is threaded for `quantile_over_time` and ignored
-    /// otherwise.
+    /// This plan shares the rate path's window semantics. The window is exactly
+    /// `(eval_time - range, eval_time]`, left-open and right-closed, with no 5m
+    /// lookback, and it matches the interpreter's `over_time_sample_from_series`.
+    /// This method passes the `phi` quantile literal through for
+    /// `quantile_over_time` and ignores it otherwise.
     pub(super) async fn plan_over_time_range(
         &self,
         tenant: &str,
@@ -282,26 +290,30 @@ impl<S: MetricStore> PromqlEngine<S> {
         ))
     }
 
-    /// Plan a histogram-bearing rate-family / `*_over_time` matrix-selector call
-    /// (`outer(selector[range])`) as a fully-computed [`PlannedInstant::Precomputed`].
+    /// Plans a histogram-bearing matrix-selector call as a fully-computed
+    /// [`PlannedInstant::Precomputed`].
     ///
-    /// This is the range analog of [`Self::histogram_fold_inner_vector`]: the
-    /// float-only operator leaf cannot carry native histograms, so instead of
-    /// lowering onto the `RangeManipulate + UDF` chain we assemble the per-series
-    /// windowed range vector via the interpreter's own
-    /// [`Self::eval_matrix_selector`] — identical by construction — and apply the
-    /// **same** shared [`apply_outer_range_fn`] kernel the interpreter's
-    /// `eval_*_call` uses. The histogram counter-reset/extrapolation rules
-    /// (rate/increase/delta), the float-only `irate`/`idelta` filter, and each
-    /// `_over_time` member's histogram behaviour (sum/avg merge; count/last/present
-    /// histogram-safe; min/max/stddev/stdvar/quantile ignore histograms) all live
-    /// in that kernel, so the result is byte-for-byte the interpreter's.
+    /// The call is a rate-family or `*_over_time` form, `outer(selector[range])`.
+    /// This method is the range analog of
+    /// [`Self::histogram_fold_inner_vector`]. The float-only operator leaf cannot
+    /// carry native histograms, so this method does not lower onto the
+    /// `RangeManipulate + UDF` chain. It assembles the per-series windowed range
+    /// vector through the interpreter's own [`Self::eval_matrix_selector`], which
+    /// is identical by construction, and applies the same shared
+    /// [`apply_outer_range_fn`] kernel that the interpreter's `eval_*_call` uses.
     ///
-    /// The window/`@`/offset resolution mirrors [`Self::eval_range_arg`]'s
-    /// matrix-selector arm exactly (`modifier: None` — the `anchored`/`smoothed`
-    /// modifiers parse to [`Expr::Extension`], which `match_rate_range_call` /
-    /// `match_over_time_range_call` reject, so a matrix selector here never carries
-    /// one).
+    /// That kernel holds the histogram counter-reset and extrapolation rules for
+    /// `rate`/`increase`/`delta`, the float-only `irate`/`idelta` filter, and
+    /// each `_over_time` member's histogram behaviour: `sum`/`avg` merge,
+    /// `count`/`last`/`present` are histogram-safe, and
+    /// `min`/`max`/`stddev`/`stdvar`/`quantile` ignore histograms. The result is
+    /// therefore byte-for-byte the interpreter's.
+    ///
+    /// The window, `@`, and offset resolution mirrors [`Self::eval_range_arg`]'s
+    /// matrix-selector arm exactly, with `modifier: None`. The `anchored` and
+    /// `smoothed` modifiers parse to [`Expr::Extension`], which
+    /// `match_rate_range_call` and `match_over_time_range_call` reject, so a
+    /// matrix selector here never carries one.
     pub(super) async fn plan_histogram_range_via_kernel(
         &self,
         tenant: &str,

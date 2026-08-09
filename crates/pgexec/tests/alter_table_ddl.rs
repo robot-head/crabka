@@ -1,5 +1,5 @@
 //! `ALTER TABLE` / `CREATE TABLE` DDL semantics that an adversarial diff
-//! against `PostgreSQL` 18.4 found diverging: constraint validation over an
+//! against `PostgreSQL` 18.4 found divergent: constraint validation over an
 //! in-flight column rewrite, index maintenance across a type change, `NOT
 //! VALID`, DDL-time analysis of `CHECK` and generation expressions, view
 //! dependencies, and the SQLSTATEs each of those reports.
@@ -65,9 +65,9 @@ fn text_row(values: &[&str]) -> Vec<Option<String>> {
 // ADD COLUMN with a constraint, over a table that already has rows.
 
 /// The back-validation of a constraint attached to a freshly added column must
-/// read the *rewritten* rows, not the pre-`ALTER` ones still in storage. Reading
-/// storage under the post-`ALTER` column list indexed past the end of every row
-/// and aborted the server process.
+/// read the *rewritten* rows, not the pre-`ALTER` ones still in storage. A read
+/// of storage under the post-`ALTER` column list indexed past the end of every
+/// row and aborted the server process.
 #[tokio::test]
 async fn add_column_with_constraint_over_existing_rows() {
     struct Case {
@@ -135,8 +135,8 @@ async fn add_column_with_constraint_over_existing_rows() {
 // ---------------------------------------------------------------------------
 // ALTER COLUMN TYPE.
 
-/// Index keys are encoded from the column's type, so a type change has to
-/// re-encode every index over it. Otherwise an index scan misses live rows and
+/// The column's type encodes the index keys, so a type change has to re-encode
+/// every index over that column. Otherwise an index scan misses live rows, and
 /// a unique index silently stops rejecting duplicates.
 #[tokio::test]
 async fn type_change_rebuilds_indexes_over_the_column() {
@@ -207,7 +207,7 @@ async fn type_change_ignores_settled_dead_row_versions() {
 }
 
 /// `PostgreSQL` coerces the stored value in assignment context, so a cast that
-/// is explicit-only is 42804 rather than an attempted per-row conversion.
+/// is explicit-only is 42804 and not an attempted per-row conversion.
 #[tokio::test]
 async fn type_change_requires_an_assignment_cast() {
     struct Case {
@@ -255,8 +255,9 @@ async fn type_change_requires_an_assignment_cast() {
     }
 }
 
-/// A type change that would leave a stored `CHECK` unresolvable is refused,
-/// rather than committing a table that rejects every subsequent write.
+/// The engine refuses a type change that would leave a stored `CHECK`
+/// unresolvable, and does not commit a table that rejects every subsequent
+/// write.
 #[tokio::test]
 async fn type_change_revalidates_dependent_check_constraints() {
     let (_engine, mut s) = engine_with(&[
@@ -277,8 +278,8 @@ async fn type_change_revalidates_dependent_check_constraints() {
 // NOT VALID.
 
 /// `NOT VALID` skips the existing-row scan and records the constraint
-/// unvalidated; it still governs every subsequent write, and `VALIDATE
-/// CONSTRAINT` runs the scan it skipped.
+/// unvalidated. The constraint still governs every subsequent write, and
+/// `VALIDATE CONSTRAINT` runs the scan it skipped.
 #[tokio::test]
 async fn not_valid_check_skips_back_validation_but_governs_new_rows() {
     let (_engine, mut s) = engine_with(&[
@@ -312,8 +313,8 @@ async fn not_valid_check_skips_back_validation_but_governs_new_rows() {
     );
 }
 
-/// `PostgreSQL` ignores `NOT VALID` in `CREATE TABLE` — a new table has no rows
-/// to skip validating, so the constraint is recorded valid.
+/// `PostgreSQL` ignores `NOT VALID` in `CREATE TABLE`. A new table has no rows
+/// to skip, so the constraint is recorded valid.
 #[tokio::test]
 async fn not_valid_is_ignored_by_create_table() {
     let (_engine, mut s) =
@@ -333,8 +334,9 @@ async fn not_valid_is_ignored_by_create_table() {
 // DDL-time analysis of CHECK and generation expressions.
 
 /// Every `CHECK` predicate `PostgreSQL` rejects during parse analysis, in both
-/// the `CREATE TABLE` and the `ALTER TABLE … ADD CONSTRAINT` spelling. Storing
-/// any of these leaves a table that fails (or silently mis-filters) writes.
+/// the `CREATE TABLE` and the `ALTER TABLE … ADD CONSTRAINT` spelling. A stored
+/// predicate of any of these kinds leaves a table that fails writes, or that
+/// silently mis-filters them.
 #[tokio::test]
 async fn check_predicates_are_analyzed_at_ddl_time() {
     struct Case {
@@ -437,8 +439,8 @@ async fn generation_expressions_are_analyzed_at_ddl_time() {
 // ---------------------------------------------------------------------------
 // Constraint naming.
 
-/// `PostgreSQL` assigns generated `CHECK` names in written order, skipping
-/// those already taken; an explicit name that collides with one already
+/// `PostgreSQL` assigns generated `CHECK` names in written order, and skips
+/// those already taken. An explicit name that collides with one already
 /// assigned in the same statement is 42710.
 #[tokio::test]
 async fn create_table_rejects_colliding_constraint_names() {
@@ -480,9 +482,9 @@ async fn create_table_rejects_colliding_constraint_names() {
 // ---------------------------------------------------------------------------
 // ADD PRIMARY KEY ordering.
 
-/// `PostgreSQL` builds the unique index before attaching `NOT NULL`, so
+/// `PostgreSQL` builds the unique index before it attaches `NOT NULL`, so
 /// duplicate data is 23505 even when the key column also holds NULLs, and the
-/// message names the index build rather than a row insertion.
+/// message names the index build and not a row insertion.
 #[tokio::test]
 async fn add_primary_key_reports_duplicates_before_nulls() {
     let (_engine, mut s) = engine_with(&[
@@ -516,9 +518,9 @@ async fn unique_index_build_over_duplicate_rows_reports_the_build() {
 // ---------------------------------------------------------------------------
 // View dependencies.
 
-/// `PostgreSQL` tracks a view's dependency per column: dropping a column no
-/// view reads is allowed, dropping one a view reads is 2BP01, and retyping one
-/// a view reads is 0A000.
+/// `PostgreSQL` tracks a view's dependency per column. A drop of a column no
+/// view reads is allowed. A drop of one a view reads is 2BP01, and a retype of
+/// one a view reads is 0A000.
 #[tokio::test]
 async fn view_dependencies_gate_drop_column_and_type_change() {
     let (_engine, mut s) = engine_with(&[
@@ -539,7 +541,7 @@ async fn view_dependencies_gate_drop_column_and_type_change() {
     assert!(err_code(&mut s, "SELECT a FROM v").await == "42P01");
 }
 
-/// Renaming a relation is not blocked by an unrelated view, and a view that
+/// An unrelated view does not block a rename of a relation, and a view that
 /// does read the renamed relation keeps working.
 #[tokio::test]
 async fn rename_to_only_touches_dependent_views() {
@@ -564,8 +566,8 @@ async fn rename_to_only_touches_dependent_views() {
     );
 }
 
-/// A generated column depends on every column its expression reads: retyping
-/// one is 0A000, dropping one is 2BP01, and `CASCADE` takes the generated
+/// A generated column depends on every column its expression reads. A retype of
+/// one is 0A000, a drop of one is 2BP01, and `CASCADE` takes the generated
 /// column with it.
 #[tokio::test]
 async fn generated_columns_depend_on_the_columns_they_read() {
@@ -586,7 +588,7 @@ async fn generated_columns_depend_on_the_columns_they_read() {
     assert!(err_code(&mut s, "SELECT b FROM t").await == "42703");
 }
 
-/// `NOT VALID` applies only to constraints `PostgreSQL` can validate lazily; an
+/// `NOT VALID` applies only to constraints `PostgreSQL` can validate lazily. An
 /// index-backed one has to be built now.
 #[tokio::test]
 async fn not_valid_is_refused_for_index_backed_constraints() {
@@ -620,7 +622,7 @@ async fn one_statement_may_not_retype_a_column_twice() {
 }
 
 /// A view is a relation, so `PostgreSQL` reports the *action* as unsupported
-/// for its kind rather than claiming the relation does not exist.
+/// for its kind, and does not claim the relation does not exist.
 #[tokio::test]
 async fn alter_table_on_a_view_reports_the_unsupported_action() {
     let (_engine, mut s) = engine_with(&[

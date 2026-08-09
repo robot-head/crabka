@@ -2,14 +2,15 @@
 //!
 //! [`outbound_sasl`] drives the client side of Kafka's
 //! `SaslHandshake` + `SaslAuthenticate` exchange over any
-//! `AsyncRead + AsyncWrite` stream (a plaintext `TcpStream`, a
-//! `tokio_rustls` TLS stream, or an in-process duplex for tests). It
-//! supports PLAIN (one round-trip), SCRAM-SHA-256/512 (two round-trips
-//! with server-final verification), and GSSAPI (multi-round AP-REQ /
-//! AP-REP + RFC 4752 security-layer negotiation).
+//! `AsyncRead + AsyncWrite` stream. That stream can be a plaintext
+//! `TcpStream`, a `tokio_rustls` TLS stream, or an in-process duplex for
+//! tests. It supports three mechanisms: PLAIN with one round-trip,
+//! SCRAM-SHA-256/512 with two round-trips and server-final verification, and
+//! GSSAPI with multi-round AP-REQ / AP-REP plus RFC 4752 security-layer
+//! negotiation.
 //!
 //! This is the shared implementation the broker's inter-broker dialer
-//! and the public clients both call; the only difference is the
+//! and the public clients both call. The only difference is the
 //! credentials value and the reporter `client_id`.
 
 use std::path::PathBuf;
@@ -42,12 +43,15 @@ struct SaslPolicy<'a> {
 }
 
 /// Maximum receive size advertised in the client's RFC 4752 security-layer
-/// choice. Auth-only QOP means no data is wrapped post-handshake, so the value
-/// only needs to be a sane non-zero buffer; mirror the server's offer size.
+/// choice. Auth-only QOP wraps no data after the handshake, so the value only
+/// needs to be a reasonable non-zero buffer. It mirrors the server's offer
+/// size.
 const GSSAPI_MAX_RECV: ByteSize = kibibytes(64);
 
-/// Outbound SASL credentials. Mirrors the broker's
-/// `InterBrokerCredentials`; one variant per supported mechanism.
+/// Outbound SASL credentials.
+///
+/// This enum mirrors the broker's `InterBrokerCredentials`. It has one
+/// variant per supported mechanism.
 #[derive(Debug, Clone)]
 pub enum SaslCredentials {
     /// SASL/PLAIN: `\0username\0password`.
@@ -58,8 +62,8 @@ pub enum SaslCredentials {
         username: String,
         password: String,
     },
-    /// SASL/GSSAPI: authenticate as `client_principal` using the long-term
-    /// key in `keytab_path` (no password).
+    /// SASL/GSSAPI: authenticate as `client_principal` with the long-term
+    /// key in `keytab_path`. This mechanism needs no password.
     Gssapi {
         keytab_path: PathBuf,
         client_principal: String,
@@ -80,7 +84,7 @@ impl SaslCredentials {
     }
 }
 
-/// Errors raised while running the outbound SASL handshake.
+/// Errors raised during the outbound SASL handshake.
 #[derive(Debug, Error)]
 pub enum OutboundSaslError {
     #[error("io: {0}")]
@@ -93,12 +97,12 @@ pub enum OutboundSaslError {
 
 /// Run the outbound SASL handshake to completion over `stream`.
 ///
-/// Sends `SaslHandshake` with the mechanism in `creds`, then drives the
-/// mechanism-specific `SaslAuthenticate` round-trips. `server_name` is the
-/// broker's canonical hostname, used only by the GSSAPI path to build the
-/// target SPN (`service_name/server_name`). Returns once the broker has
-/// accepted the credentials; the same `stream` is then usable for normal
-/// Kafka RPCs.
+/// This function sends `SaslHandshake` with the mechanism in `creds`, then
+/// drives the mechanism-specific `SaslAuthenticate` round-trips. `server_name`
+/// is the broker's canonical hostname. Only the GSSAPI path uses it, to build
+/// the target SPN (`service_name/server_name`). The function returns once the
+/// broker has accepted the credentials. The same `stream` is then usable for
+/// normal Kafka RPCs.
 ///
 /// # Errors
 ///
@@ -160,8 +164,8 @@ where
 /// read `SaslHandshakeResponse v1`, fail if `error_code != 0`.
 ///
 /// Wire framing: `SaslHandshake v1` uses the non-flexible request header
-/// (v1 — no trailing tagged-fields byte) and a non-flexible response
-/// header (v0 — bare `correlation_id`).
+/// (v1, no trailing tagged-fields byte) and a non-flexible response
+/// header (v0, bare `correlation_id`).
 async fn send_sasl_handshake<S>(
     stream: &mut S,
     mechanism: SaslMechanism,
@@ -231,9 +235,10 @@ where
 }
 
 /// Run the RFC 5802 SCRAM (SHA-256 or SHA-512) client state machine
-/// over two `SaslAuthenticate v2` round-trips. Verifies the
-/// server-final signature before declaring the connection
-/// authenticated.
+/// over two `SaslAuthenticate v2` round-trips.
+///
+/// This function verifies the server-final signature before it declares the
+/// connection authenticated.
 async fn run_scram_client<S>(
     stream: &mut S,
     user: &str,
@@ -281,19 +286,21 @@ where
 /// Run the SASL/GSSAPI (Kerberos) client state machine over
 /// `SaslAuthenticate v2` round-trips.
 ///
-/// Builds an `sspi`-backed initiator that authenticates as `client_principal`
-/// using the long-term key in `keytab_path` (no password), targeting the SPN
-/// `service_name/server_name` of the broker being dialed. `server_name` is the
-/// broker's canonical hostname (the same value used for TLS SNI), not the
-/// dialed IP — the SPN must match the service key in the broker's keytab.
-/// Drives [`GssapiClientExchange`]: the GSS context establishment
-/// (AP-REQ → AP-REP) followed by the RFC 4752 auth-only security-layer
-/// negotiation. Each non-terminal client token is sent as request
-/// `auth_bytes`; the server's reply token feeds the next step until the
-/// exchange reports `Done`.
+/// This function builds an `sspi`-backed initiator that authenticates as
+/// `client_principal` with the long-term key in `keytab_path` and no password.
+/// The initiator targets the SPN `service_name/server_name` of the broker it
+/// dials. `server_name` is the broker's canonical hostname, the same value
+/// used for TLS SNI, and not the dialed IP. The SPN must match the service key
+/// in the broker's keytab.
 ///
-/// The first initiator step performs the synchronous AS/TGS exchange with the
-/// KDC; subsequent steps only process tokens locally.
+/// The function then drives [`GssapiClientExchange`]: the GSS context
+/// establishment (AP-REQ → AP-REP) and then the RFC 4752 auth-only
+/// security-layer negotiation. It sends each non-terminal client token as
+/// request `auth_bytes`. The server's reply token feeds the next step until
+/// the exchange reports `Done`.
+///
+/// The first initiator step does the synchronous AS/TGS exchange with the
+/// KDC. Later steps only process tokens locally.
 async fn run_gssapi_client<S>(
     stream: &mut S,
     keytab_path: &std::path::Path,
@@ -385,11 +392,13 @@ where
     Ok(resp)
 }
 
-/// Build a `RequestHeader v1` (or v2 when `flexible`), append `body`, write
-/// the length-prefixed frame, read one response frame, strip the
-/// `ResponseHeader`. Returns the response body bytes.
+/// Send one framed request and return the response body bytes.
 ///
-/// Header rules (matching Kafka):
+/// This function builds a `RequestHeader v1` (or v2 when `flexible`), appends
+/// `body`, writes the length-prefixed frame, reads one response frame, and
+/// strips the `ResponseHeader`.
+///
+/// Header rules that match Kafka:
 /// - Request header: v1 for non-flexible, v2 for flexible (trailing 0x00
 ///   tagged-fields byte).
 /// - Response header: v0 for non-flexible *and* for `ApiVersions(18)`

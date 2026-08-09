@@ -155,7 +155,7 @@ spec:
                       description: '`True`, `False`, or `Unknown`.'
                       type: string
                     type:
-                      description: e.g. `Ready`.
+                      description: For example, `Ready`.
                       type: string
                   required:
                   - lastTransitionTime

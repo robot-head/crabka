@@ -1,18 +1,18 @@
-//! `UniformAssignor` — KIP-848's default. Distributes partitions as evenly
-//! as possible across members subscribed to each topic.
+//! `UniformAssignor`, the default of KIP-848. It distributes partitions as
+//! evenly as possible across the members that subscribe to each topic.
 //!
-//! Rack-aware: when the coordinator's `TopicMetadata` carries
-//! a `partition_racks` entry for `(topic_id, partition_index)`, the
-//! assignor prefers subscribers whose `rack_id` matches one of the
-//! partition's replica racks. If no subscriber matches (or the partition
-//! has no rack data), all subscribers are eligible — the original
+//! The assignor is rack-aware. When the `TopicMetadata` of the coordinator
+//! carries a `partition_racks` entry for `(topic_id, partition_index)`, the
+//! assignor prefers subscribers whose `rack_id` matches one of the replica
+//! racks of the partition. If no subscriber matches, or the partition has no
+//! rack data, all subscribers are eligible. This is the original
 //! non-rack-aware behavior.
 //!
-//! Selection within the eligible pool minimizes the running per-member
-//! partition count for this topic, with ties broken by member-id lex
-//! order. Without rack data the running-min reduces exactly to the
-//! original `p % subscribers.len()` round-robin, so behavior is
-//! unchanged for clusters that don't expose broker racks.
+//! In the eligible pool, the assignor selects the member with the lowest
+//! running partition count for this topic. It breaks ties by member-id lex
+//! order. Without rack data, the running minimum reduces exactly to the
+//! original `p % subscribers.len()` round-robin, so behavior does not change
+//! for clusters that do not expose broker racks.
 
 use std::collections::HashMap;
 
@@ -77,10 +77,11 @@ impl Assignor for UniformAssignor {
     }
 }
 
-/// Compute the pool of subscribers eligible for a partition. When the
-/// partition has rack info AND at least one subscriber rack matches, the
-/// pool is just those rack-collocated subscribers. Otherwise the pool is
-/// all subscribers (the non-rack-aware fallback).
+/// Computes the pool of subscribers eligible for a partition.
+///
+/// When the partition has rack info AND at least one subscriber rack
+/// matches, the pool holds only those rack-collocated subscribers. If not,
+/// the pool holds all subscribers. This is the non-rack-aware fallback.
 fn eligible_subscribers_for_partition<'a>(
     subscribers: &[&'a str],
     rack_by_member: &HashMap<&str, Option<&str>>,
@@ -210,7 +211,7 @@ mod tests {
 
     // ── rack-aware ────────────────────────────────────────────────
 
-    /// Build a `TopicMetadata` with rack info on every partition of `t`.
+    /// Builds a `TopicMetadata` with rack info on every partition of `t`.
     fn topics_with_racks(
         t: Uuid,
         partitions: i32,

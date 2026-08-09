@@ -44,7 +44,7 @@ async fn err_code(s: &mut SqlSession, sql: &str) -> String {
 ///
 /// Before the fix, two concurrent INSERTs both read seq=N, both allocate
 /// rowids starting at N, and the second batch's `Put` overwrites the first's
-/// rows at the same keys — silent data loss.
+/// rows at the same keys. That is silent data loss.
 ///
 /// After the fix (`write_lock` serializes all writes), every read-modify-write
 /// on the sequence is atomic from the perspective of other writers, so all N
@@ -98,9 +98,10 @@ async fn concurrent_inserts_do_not_lose_rows() {
 // SP6 concurrent-writer tests
 // ---------------------------------------------------------------------------
 
-/// T1 holds a row lock via UPDATE; T2's UPDATE on the same row blocks.
+/// T1 holds a row lock with UPDATE, and T2's UPDATE on the same row blocks.
+///
 /// When T1 commits, READ COMMITTED semantics re-find the updated row and apply
-/// T2's change on top → tag "UPDATE 1" and final value is T2's.
+/// T2's change on top. The tag is "UPDATE 1" and the final value is T2's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn same_row_update_blocks_then_read_committed_refinds() {
     let engine = Arc::new(SqlEngine::new());
@@ -142,8 +143,10 @@ async fn same_row_update_blocks_then_read_committed_refinds() {
 }
 
 /// Under REPEATABLE READ, T2 fixes its snapshot at BEGIN (before T1 commits).
+///
 /// After T1 commits and T2's blocked UPDATE wakes, the freshly committed row
-/// differs from T2's snapshot → serialization failure (40001).
+/// differs from T2's snapshot, so the engine reports a serialization failure
+/// (40001).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeatable_read_conflict_is_40001() {
     let engine = Arc::new(SqlEngine::new());
@@ -242,12 +245,12 @@ async fn blocker_abort_lets_waiter_proceed() {
 
 /// Updates on different rows must not block each other.
 ///
-/// Proof of non-blocking: T1 opens a transaction, updates row 1, and then
-/// deliberately stays open (does NOT commit). While T1 is still holding the
-/// lock on row 1, T2 updates row 2 and commits — and must finish within a
-/// short timeout. If the WHERE filter were applied after locking (the bug),
-/// T1's UPDATE would lock ALL rows (including row 2), and T2 would block here
-/// indefinitely, causing the timeout to fire.
+/// T1 opens a transaction, updates row 1, and then deliberately stays open.
+/// It does NOT commit. While T1 still holds the lock on row 1, T2 updates row 2
+/// and commits, and it must finish within a short timeout. If the WHERE filter
+/// were applied after locking (the bug), T1's UPDATE would lock ALL rows,
+/// including row 2. T2 would then block here indefinitely and the timeout would
+/// fire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn different_rows_run_concurrently() {
     let engine = Arc::new(SqlEngine::new());
@@ -388,9 +391,9 @@ async fn for_share_coexists_but_blocks_update() {
 /// table `b`, then tries table `a`. The engine must detect the cycle and abort
 /// exactly one transaction with 40P01; the other proceeds.
 ///
-/// We use two single-row tables so each UPDATE/FOR-UPDATE touches exactly one
-/// row (no cross-table lock acquisition from a single scan). Both spawned
-/// tasks are wrapped in timeouts so a regression FAILS instead of hanging.
+/// The test uses two single-row tables, so each UPDATE/FOR-UPDATE touches
+/// exactly one row and no single scan locks across tables. Timeouts wrap both
+/// spawned tasks, so a regression FAILS and does not hang.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deadlock_yields_one_40p01() {
     let engine = Arc::new(SqlEngine::new());
@@ -460,13 +463,14 @@ async fn deadlock_yields_one_40p01() {
     assert_eq!(ok_count, 1, "expected exactly one transaction to succeed");
 }
 
-/// End-to-end INSERT storm on a durable (disk-backed) store: block-cached
-/// rowid allocation must hand every concurrent statement a disjoint range, so
-/// the whole-table read-back count matches the inserted count exactly. A
-/// shared rowid would make one row's version shadow the other's and the count
-/// would come up short. The row volume crosses several allocation-block
-/// boundaries (blocks of 1024), so block extension itself runs under
-/// contention.
+/// End-to-end INSERT storm on a durable (disk-backed) store.
+///
+/// Block-cached rowid allocation must hand every concurrent statement a
+/// disjoint range, so the whole-table read-back count matches the inserted
+/// count exactly. A shared rowid would make one row's version shadow the
+/// other's, and the count would come up short. The row volume crosses several
+/// allocation-block boundaries (blocks of 1024), so block extension itself runs
+/// under contention.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_insert_storm_lands_every_row_exactly_once() {
     const TASKS: usize = 8;

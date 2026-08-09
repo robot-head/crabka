@@ -1,12 +1,12 @@
-//! `FindCoordinator` (`api_key=10`). Supports:
-//!   - `key_type=0` (GROUP): returns this broker as coordinator for every
-//!     group key (single-broker MVP).
-//!   - `key_type=1` (TRANSACTION): ensures `__transaction_state` exists,
+//! `FindCoordinator` (`api_key=10`). The handler supports:
+//!   - `key_type=0`, GROUP: it returns this broker as the coordinator for every
+//!     group key. This is the single-broker MVP.
+//!   - `key_type=1`, TRANSACTION: it makes sure `__transaction_state` exists,
 //!     hashes the transaction-id to a partition, resolves the leader, and
 //!     returns that broker's address.
 //!
-//! Response fields are populated in both the legacy single-coordinator form
-//! (v0-v3) and the per-key `coordinators` array (v4+).
+//! The handler populates the response fields in both the legacy
+//! single-coordinator form, v0-v3, and the per-key `coordinators` array, v4+.
 
 use std::sync::Arc;
 
@@ -32,9 +32,10 @@ const KEY_TYPE_GROUP: i8 = 0;
 const KEY_TYPE_TRANSACTION: i8 = 1;
 const KEY_TYPE_SHARE: i8 = 2;
 
-/// A per-key authorization-failed `Coordinator` entry. Kafka stamps the
-/// denied key's row with the authorization-failed code and leaves
-/// authorized keys to resolve normally.
+/// A per-key authorization-failed `Coordinator` entry.
+///
+/// Kafka stamps the denied key's row with the authorization-failed code.
+/// Authorized keys resolve as normal.
 fn denied_coordinator(key: String, error_code: i16) -> Coordinator {
     Coordinator {
         key,
@@ -47,11 +48,12 @@ fn denied_coordinator(key: String, error_code: i16) -> Coordinator {
     }
 }
 
-/// Authorize a single `FindCoordinator` key against its key-type ACL:
-/// GROUP → `Describe` on `Group(key)`; TRANSACTION → `Describe` on
-/// `TransactionalId(key)`. Returns the authorization-failed code to stamp
-/// on Deny, or `None` when allowed (or for key-types we don't gate, e.g.
-/// SHARE / unknown).
+/// Authorize a single `FindCoordinator` key against its key-type ACL.
+///
+/// GROUP needs `Describe` on `Group(key)`. TRANSACTION needs `Describe` on
+/// `TransactionalId(key)`. The function returns the authorization-failed code to
+/// stamp on Deny. It returns `None` when the ACL allows the key, and also for
+/// key-types this handler does not gate, such as SHARE and unknown types.
 fn key_authz_failure(
     authorizer: &dyn crate::authorizer::Authorizer,
     image: &crabka_metadata::MetadataImage,
@@ -390,8 +392,10 @@ fn unavailable_coordinator(key: String, message: &str) -> Coordinator {
     }
 }
 
-/// Build an error response (all coordinators carry the given error code).
-/// Used when a top-level failure (e.g. bootstrap) prevents per-key lookup.
+/// Build an error response in which all coordinators carry the given error code.
+///
+/// The handler uses this function when a top-level failure, for example a
+/// bootstrap failure, prevents the per-key lookup.
 fn encode_error_response(
     broker_id: i32,
     advertised: &str,
@@ -414,9 +418,11 @@ fn encode_error_response(
 }
 
 /// Parse a share-coordinator key `"{group}:{topicId}:{partition}"` into its
-/// `(group, topic_id, partition)` parts. Group ids may themselves contain `:`,
-/// so the partition and topic-id are peeled from the right. Returns `None` on a
-/// malformed partition int, topic-id UUID, or missing segments.
+/// `(group, topic_id, partition)` parts.
+///
+/// A group id can itself contain `:`, so the function reads the partition and
+/// the topic-id from the right. It returns `None` for a malformed partition int,
+/// a malformed topic-id UUID, or missing segments.
 fn parse_share_key(key: &str) -> Option<(&str, uuid::Uuid, i32)> {
     let (rest, partition_str) = key.rsplit_once(':')?;
     let (group, topic_str) = rest.rsplit_once(':')?;
@@ -425,18 +431,19 @@ fn parse_share_key(key: &str) -> Option<(&str, uuid::Uuid, i32)> {
     Some((group, topic_id, partition))
 }
 
-/// The local broker's advertised `host:port` string for the listener a
-/// request arrived on. Kafka returns the connection listener's advertised
-/// address, so a TLS client gets the TLS listener's `advertised` and a
-/// plaintext client gets the plaintext one. Falls back to the legacy
-/// top-level `advertised_listener` when the connection listener isn't among
-/// this broker's configured listeners (e.g. the single-listener default,
-/// where `connection_listener_name == "PLAINTEXT"` still resolves it).
+/// The local broker's advertised `host:port` string for the request's listener.
 ///
-/// A matched listener whose advertised port is `0` (an OS-assigned dynamic
-/// port, common in test harnesses) is unusable as a coordinator address, so
-/// we fall back to `advertised_listener`, which `Broker::start` rewrites to
-/// the real bound port after binding.
+/// Kafka returns the connection listener's advertised address, so a TLS client
+/// gets the TLS listener's `advertised` and a plaintext client gets the
+/// plaintext one. The function falls back to the legacy top-level
+/// `advertised_listener` when the connection listener is not one of this
+/// broker's configured listeners. The single-listener default is one such case,
+/// where `connection_listener_name == "PLAINTEXT"` still resolves it.
+///
+/// A matched listener whose advertised port is `0` is unusable as a coordinator
+/// address. That port is OS-assigned and dynamic, and it is common in test
+/// harnesses. In that case the function falls back to `advertised_listener`,
+/// which `Broker::start` rewrites to the real bound port after it binds.
 fn local_advertised_for_listener(
     config: &crate::config::BrokerConfig,
     connection_listener_name: &str,
@@ -504,8 +511,8 @@ mod tests {
     }
 
     /// A request on the `"tls"` listener resolves the local coordinator to the
-    /// tls listener's advertised address; a request on `"plain"` resolves to
-    /// the plain listener's address.
+    /// tls listener's advertised address. A request on `"plain"` resolves to the
+    /// plain listener's address.
     #[test]
     fn local_advertised_tracks_connection_listener() {
         let config = crate::config::BrokerConfig {
@@ -520,8 +527,8 @@ mod tests {
         assert!(local_advertised_for_listener(&config, "plain") == "plain-host:9092");
     }
 
-    /// When the connection listener isn't configured, fall back to the legacy
-    /// top-level `advertised_listener`.
+    /// When the connection listener is not configured, the function falls back
+    /// to the legacy top-level `advertised_listener`.
     #[test]
     fn local_advertised_falls_back_to_legacy() {
         let config = crate::config::BrokerConfig {

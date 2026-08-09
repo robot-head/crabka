@@ -28,12 +28,12 @@ use crate::{
 };
 
 pub const STACKTRACE_PARTITION: u64 = 0;
-/// Scale between the epoch-nanosecond timestamps the WAL carries and the
-/// epoch-millisecond timestamps blocks are indexed by.
+/// Scale between the epoch-nanosecond timestamps that the WAL carries and the
+/// epoch-millisecond timestamps that index blocks.
 ///
-/// This is instant arithmetic, not an extent, so it deliberately stays exact
-/// integer division: an absolute nanosecond timestamp is ~1.8e18 and cannot
-/// round-trip through the `f64` seconds a `Time` stores.
+/// This is instant arithmetic and not an extent, so it stays exact integer
+/// division. An absolute nanosecond timestamp is about 1.8e18 and cannot
+/// round-trip through the `f64` seconds that a `Time` stores.
 const NANOS_PER_MILLI: i64 = 1_000_000;
 pub const DEFAULT_WAL_FETCH_MAX: ByteSize = mebibytes(2);
 pub const DEFAULT_WAL_FETCH_PARTITION_MAX: ByteSize = kibibytes(256);
@@ -71,10 +71,11 @@ pub struct BlockBuilderConfig {
     pub poll_timeout: Time,
     pub index_snapshot_max: ByteSize,
     pub index_snapshot_retain: IndexSnapshotRetain,
-    /// Optional self-instrumentation metrics. When set, the block-builder bumps
-    /// `crabka_profiles_blocks_built_total` by the number of blocks each flush
-    /// wrote. `None` (the default) disables metric emission, keeping the
-    /// block-builder usable without a metrics registry (tests, `run()`).
+    /// Optional self-instrumentation metrics. When set, the block-builder adds
+    /// to `crabka_profiles_blocks_built_total` the number of blocks that each
+    /// flush wrote. `None`, the default, turns metric emission off. The
+    /// block-builder then still works without a metrics registry, as in tests
+    /// and in `run()`.
     pub metrics: Option<ServiceMetrics>,
 }
 

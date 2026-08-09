@@ -80,14 +80,14 @@ pub struct NativeHistogram {
 }
 
 impl NativeHistogram {
-    /// NHCB (native histogram with custom buckets) sentinel schema.
+    /// Sentinel schema for NHCB, a native histogram with custom buckets.
     #[must_use]
     pub fn is_nhcb(&self) -> bool {
         self.schema == -53
     }
 }
 
-/// Errors from the native-histogram Arrow codec.
+/// Errors raised by the native-histogram Arrow codec.
 #[derive(Debug, thiserror::Error)]
 pub enum HistogramCodecError {
     #[error("span/count mismatch: spans claim {spans} buckets, got {counts} counts")]
@@ -172,8 +172,8 @@ fn append_f64_list(builder: &mut ListBuilder<Float64Builder>, values: &[f64]) {
     builder.append(true);
 }
 
-/// Encode `(fingerprint, timestamp, NativeHistogram)` rows into a `RecordBatch`
-/// matching [`native_histogram_schema`].
+/// Encodes `(fingerprint, timestamp, NativeHistogram)` rows into a
+/// `RecordBatch` that matches [`native_histogram_schema`].
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn encode_native_histograms(
@@ -303,7 +303,7 @@ fn read_f64_list(
         .collect()
 }
 
-/// Decode a `RecordBatch` produced by [`encode_native_histograms`].
+/// Decodes a `RecordBatch` that [`encode_native_histograms`] produced.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_native_histograms(

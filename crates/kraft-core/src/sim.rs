@@ -1,19 +1,19 @@
 //! Curated, deterministic `KRaft` consensus failure scenarios with trace
 //! recording.
 //!
-//! This module promotes the deterministic, pure-synchronous (no tokio)
-//! multi-node `KRaft` simulator — the same scheduler the integration tests use
-//! (`crates/raft/tests/sim_harness/mod.rs`) — into the library behind the
-//! `scenarios` feature, and instruments it to RECORD a serializable
-//! [`ScenarioTrace`] of every step. `crabka-docgen` runs [`scenarios`] in
-//! process and renders the traces into a Mermaid sequence-diagram slideshow, so
-//! the diagrams reflect the real algorithm rather than a hand-drawn cartoon.
+//! This module promotes the deterministic, pure-synchronous multi-node `KRaft`
+//! simulator into the library behind the `scenarios` feature. The simulator
+//! uses no tokio, and it is the same scheduler the integration tests use
+//! (`crates/raft/tests/sim_harness/mod.rs`). This module also instruments it to
+//! RECORD a serializable [`ScenarioTrace`] of every step. `crabka-docgen` runs
+//! [`scenarios`] in process and renders the traces into a Mermaid
+//! sequence-diagram slideshow, so the diagrams show the real algorithm.
 //!
-//! Determinism is non-negotiable: there is no `Instant::now`, no `rand`, and no
+//! Determinism is non-negotiable. There is no `Instant::now`, no `rand`, and no
 //! `HashMap` iteration-order dependence anywhere. The clock is a `u64` of
-//! logical milliseconds; all node/message containers are `BTreeMap`/`BTreeSet`
-//! so iteration order is fixed; election timeouts are staggered by node id so
-//! ties break deterministically and elections converge.
+//! logical milliseconds. All node and message containers are `BTreeMap` or
+//! `BTreeSet`, so the iteration order is fixed. Node ids stagger the election
+//! timeouts, so ties break deterministically and elections converge.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -31,9 +31,11 @@ use crate::{
 // Recorded trace types
 // --------------------------------------------------------------------------
 
-/// A complete recording of one curated failure scenario: its identity, the
-/// invariant it demonstrates, and the ordered sequence of steps the simulator
-/// took (each with a snapshot of every node's role).
+/// A complete recording of one curated failure scenario.
+///
+/// The recording holds the scenario identity, the invariant it shows, and the
+/// ordered sequence of steps the simulator took. Each step carries a snapshot
+/// of every node's role.
 #[derive(serde::Serialize, Clone)]
 pub struct ScenarioTrace {
     pub id: String,
@@ -45,8 +47,11 @@ pub struct ScenarioTrace {
     pub outcome: String,
 }
 
-/// One step in a scenario: the action that occurred, a short human note, and a
-/// snapshot of every node's role taken immediately after the action.
+/// One step in a scenario.
+///
+/// A step holds the action that occurred, a short human note, and a snapshot of
+/// every node's role. The simulator takes the snapshot immediately after the
+/// action.
 #[derive(serde::Serialize, Clone)]
 pub struct TraceStep {
     pub index: usize,
@@ -84,8 +89,8 @@ pub enum TraceAction {
         node: u64,
         count: usize,
     },
-    /// An in-flight message was deliberately discarded by the operator (the
-    /// interactive playground's "drop" fault) instead of being delivered.
+    /// The operator deliberately discarded an in-flight message instead of
+    /// delivering it. This is the interactive playground's "drop" fault.
     Drop {
         src: u64,
         dst: u64,
@@ -112,19 +117,21 @@ pub struct InFlight {
     pub event: String,
 }
 
-/// A full, serializable snapshot of the simulation, read back by the browser UI
-/// after every interactive control action.
+/// A full, serializable snapshot of the simulation.
+///
+/// The browser UI reads this snapshot back after every interactive control
+/// action.
 #[derive(serde::Serialize, Clone)]
 pub struct SimSnapshot {
     /// Logical clock in milliseconds.
     pub clock_ms: u64,
-    /// Every node's observable role/epoch/log state, ascending by id.
+    /// Every node's observable role, epoch, and log state, ascending by id.
     pub nodes: Vec<NodeRole>,
     /// Messages currently queued on the bus, next-to-deliver first.
     pub in_flight: Vec<InFlight>,
     /// The ids of every node that currently believes it is leader.
     pub leaders: Vec<u64>,
-    /// How many timeline steps have been recorded so far.
+    /// How many timeline steps the simulator has recorded so far.
     pub step_count: usize,
 }
 
@@ -132,9 +139,10 @@ pub struct SimSnapshot {
 // In-memory fake log (a focused copy of the test harness `SimLog`)
 // --------------------------------------------------------------------------
 
-/// A growable in-memory replicated log. Each appended record stores the leader
-/// epoch that produced it, so `end_offset_for_epoch` is a real lookup rather
-/// than a stub.
+/// A growable in-memory replicated log.
+///
+/// Each appended record stores the leader epoch that produced it, so
+/// `end_offset_for_epoch` is a real lookup and not a stub.
 #[derive(Debug, Clone, Default)]
 struct SimLog {
     /// `epochs[i]` is the leader epoch of the record at offset `i`.
@@ -200,8 +208,10 @@ impl SimLog {
 // Messages and timers
 // --------------------------------------------------------------------------
 
-/// A message in flight on the bus: a destination node plus the event it will
-/// observe. `src` is recorded for partition filtering and trace labelling.
+/// A message in flight on the bus: a destination node and the event it will
+/// observe.
+///
+/// The bus records `src` for partition filtering and for trace labelling.
 #[derive(Debug, Clone)]
 struct Message {
     src: NodeId,
@@ -220,8 +230,11 @@ struct Node {
     heartbeat_deadline: Option<SimInstant>,
 }
 
-/// Harness-level timer kinds. Extends the core's `TimerKind` (Election/Fetch)
-/// with the leader `Heartbeat` the core does not model on a timer.
+/// Harness-level timer kinds.
+///
+/// This enum extends the core's `TimerKind`, which holds `Election` and
+/// `Fetch`, with the leader `Heartbeat`. The core does not model the heartbeat
+/// on a timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SimTimer {
     Election,
@@ -235,8 +248,9 @@ const HEARTBEAT: Time = millis(300);
 /// The election timeout a simulated voter with the lowest node id starts from.
 const BASE_ELECTION_TIMEOUT: Time = millis(1000);
 
-/// Added to [`BASE_ELECTION_TIMEOUT`] once per unit of node id, so voters do not
-/// arm their election timers in lockstep and ties break deterministically.
+/// The simulator adds this to [`BASE_ELECTION_TIMEOUT`] once per unit of node
+/// id. Voters then do not arm their election timers in lockstep, and ties break
+/// deterministically.
 const ELECTION_TIMEOUT_STAGGER: Time = millis(50);
 
 fn election_timeout_of(id: NodeId) -> Time {
@@ -248,8 +262,8 @@ fn election_timeout_of(id: NodeId) -> Time {
 /// [`SimInstant`] clock.
 ///
 /// A [`SimInstant`] is a coordinate on the simulator's logical millisecond
-/// timeline, not a magnitude, so it stays an integer; only the extents added to
-/// it are quantities. The conversion is exact for every extent the simulator
+/// timeline and not a magnitude, so it stays an integer. Only the extents added
+/// to it are quantities. The conversion is exact for every extent the simulator
 /// uses.
 fn deadline_millis(extent: Time) -> u64 {
     u64::try_from(extent.millis_i64()).unwrap_or(0)
@@ -309,12 +323,12 @@ fn event_label(event: &Event) -> String {
 /// A deterministic multi-node `KRaft` simulation over the in-memory fake log,
 /// instrumented to record a [`ScenarioTrace`].
 ///
-/// Beyond the curated [`scenarios`] it also backs the interactive in-browser
-/// playground (via `crabka-playground`): the same scheduler, driven one step at
-/// a time with operator-injected faults (partition, heal, drop, reorder,
-/// duplicate, append) and a serializable [`SimSnapshot`] read back after each
-/// step. The recorded [`steps`](Self::steps) double as the playground's event
-/// timeline.
+/// This type also backs the interactive in-browser playground through
+/// `crabka-playground`, not only the curated [`scenarios`]. The playground
+/// drives the same scheduler one step at a time with operator-injected faults:
+/// partition, heal, drop, reorder, duplicate, and append. It reads back a
+/// serializable [`SimSnapshot`] after each step. The recorded
+/// [`steps`](Self::steps) also serve as the playground's event timeline.
 pub struct Sim {
     nodes: BTreeMap<NodeId, Node>,
     voter_ids: Vec<NodeId>,
@@ -386,7 +400,7 @@ impl Sim {
             .collect()
     }
 
-    /// Push a recorded step capturing `action` + `note` and a fresh role snapshot.
+    /// Push a recorded step that holds `action`, `note`, and a fresh role snapshot.
     fn record(&mut self, action: TraceAction, note: impl Into<String>) {
         let index = self.steps.len();
         let roles = self.snapshot_roles();
@@ -399,7 +413,7 @@ impl Sim {
         });
     }
 
-    /// After running the machine, record any newly-promoted leaders.
+    /// Record any newly-promoted leaders after the machine runs.
     fn record_new_leaders(&mut self) {
         let promotions: Vec<(NodeId, Epoch)> = self
             .nodes
@@ -441,9 +455,11 @@ impl Sim {
             .collect()
     }
 
-    /// Run the scheduler until the cluster fingerprint stops changing (or
-    /// `max_ticks` is hit). Used both by the curated scenarios and by the
-    /// playground's "settle" button.
+    /// Run the scheduler until the cluster fingerprint stops changing or until
+    /// `max_ticks` is reached.
+    ///
+    /// Both the curated scenarios and the playground's "settle" button call
+    /// this method.
     pub fn run_until_stable(&mut self, max_ticks: usize) {
         let mut last_fingerprint = self.fingerprint();
         let mut stable_rounds = 0u32;
@@ -489,8 +505,9 @@ impl Sim {
     }
 
     /// # Panics
+    ///
     /// Panics if `leader` is not present in the simulated cluster. Callers must
-    /// elect or add the node before appending through it.
+    /// elect or add the node before they append through it.
     pub fn leader_append(&mut self, leader: NodeId, n: usize) {
         let epoch = self.nodes[&leader].machine.quorum_state().leader_epoch;
         let node = self.nodes.get_mut(&leader).unwrap();
@@ -515,9 +532,11 @@ impl Sim {
 
     // ---- interactive control surface (the in-browser playground) ------------
 
-    /// Advance the simulation by one scheduler microstep: deliver the
-    /// front-of-bus message if one is queued, otherwise fire the next-due timer.
-    /// Returns `true` if anything happened (there was a message or a timer).
+    /// Advance the simulation by one scheduler microstep.
+    ///
+    /// This method delivers the front-of-bus message if one is queued.
+    /// Otherwise it fires the next-due timer. It returns `true` if there was a
+    /// message or a timer.
     pub fn step_once(&mut self) -> bool {
         if let Some(msg) = self.queue.pop_front() {
             self.deliver(&msg);
@@ -526,8 +545,10 @@ impl Sim {
         self.fire_next_timer()
     }
 
-    /// Append `n` records on whichever node is currently leader (the playground
-    /// "produce" button). Returns `false` if there is no leader to append to.
+    /// Append `n` records on whichever node is currently the leader.
+    ///
+    /// This method backs the playground "produce" button. It returns `false` if
+    /// there is no leader to append to.
     pub fn append(&mut self, n: usize) -> bool {
         let Some(leader) = self.leaders().first().copied() else {
             return false;
@@ -536,9 +557,11 @@ impl Sim {
         true
     }
 
-    /// Discard the front-of-bus message instead of delivering it (the "drop"
-    /// fault). Returns `false` if the bus is empty. Recorded as a [`TraceAction::Drop`]
-    /// so it shows up on the event timeline.
+    /// Discard the front-of-bus message instead of delivering it: the "drop"
+    /// fault.
+    ///
+    /// This method returns `false` if the bus is empty. It records a
+    /// [`TraceAction::Drop`], so the fault appears on the event timeline.
     pub fn drop_next(&mut self) -> bool {
         let Some(msg) = self.queue.pop_front() else {
             return false;
@@ -555,14 +578,17 @@ impl Sim {
         true
     }
 
-    /// Deliver every queued message back-to-front (non-FIFO) — the "reorder"
-    /// fault. Returns the number delivered.
+    /// Deliver every queued message back-to-front, that is, non-FIFO: the
+    /// "reorder" fault.
+    ///
+    /// This method returns the number of messages delivered.
     pub fn reorder(&mut self) -> usize {
         self.deliver_queue_reversed()
     }
 
-    /// Deliver the front-of-bus message twice — the "duplicate" fault. Returns
-    /// `false` if the bus is empty.
+    /// Deliver the front-of-bus message twice: the "duplicate" fault.
+    ///
+    /// This method returns `false` if the bus is empty.
     pub fn duplicate_next(&mut self) -> bool {
         self.deliver_front_twice()
     }
@@ -579,8 +605,8 @@ impl Sim {
         self.voter_ids.clone()
     }
 
-    /// The recorded event timeline (every delivery, fault, timeout, and election
-    /// the simulation has taken so far).
+    /// The recorded event timeline: every delivery, fault, timeout, and
+    /// election the simulation has taken so far.
     #[must_use]
     pub fn steps(&self) -> &[TraceStep] {
         &self.steps
@@ -599,9 +625,11 @@ impl Sim {
             .collect()
     }
 
-    /// A full, serializable snapshot of the cluster: clock, every node's role,
-    /// the in-flight bus, the current leaders, and how many steps have elapsed.
-    /// This is what the browser UI renders after each control action.
+    /// A full, serializable snapshot of the cluster.
+    ///
+    /// The snapshot holds the clock, every node's role, the in-flight bus, the
+    /// current leaders, and the number of steps that elapsed. The browser UI
+    /// renders this after each control action.
     #[must_use]
     pub fn snapshot(&self) -> SimSnapshot {
         SimSnapshot {
@@ -933,10 +961,12 @@ impl Sim {
         self.nodes.keys().copied().collect()
     }
 
-    /// Drain and deliver currently-queued messages in a deliberately non-FIFO
-    /// (but deterministic) order: back-to-front. Returns the number delivered.
-    /// Used by `out_of_order_delivery` to show the log stays consistent under
-    /// reordered delivery.
+    /// Drain and deliver the queued messages back-to-front, a deliberately
+    /// non-FIFO but deterministic order.
+    ///
+    /// This method returns the number of messages delivered.
+    /// `out_of_order_delivery` calls it to show that the log stays consistent
+    /// under reordered delivery.
     fn deliver_queue_reversed(&mut self) -> usize {
         let mut drained: Vec<Message> = self.queue.drain(..).collect();
         drained.reverse();
@@ -947,9 +977,11 @@ impl Sim {
         n
     }
 
-    /// Deliver the front-of-queue message twice (the duplicate is a no-op on the
-    /// recipient because `KRaft` messages carry monotonic epochs/offsets). Returns
-    /// `true` if a message was available to duplicate.
+    /// Deliver the front-of-queue message twice.
+    ///
+    /// The duplicate is a no-op on the recipient because `KRaft` messages carry
+    /// monotonic epochs and offsets. This method returns `true` if a message
+    /// was available to duplicate.
     fn deliver_front_twice(&mut self) -> bool {
         let Some(msg) = self.queue.front().cloned() else {
             return false;
@@ -978,9 +1010,11 @@ pub fn scenarios() -> Vec<ScenarioTrace> {
     ]
 }
 
-/// Bootstrap one leader, partition it, watch the majority elect a fresh leader
-/// at a higher epoch while the isolated old leader cannot, then heal it and see
-/// it step down. The cluster ends with exactly one leader.
+/// Bootstrap one leader and then partition it.
+///
+/// The majority elects a fresh leader at a higher epoch, and the isolated old
+/// leader cannot. The scenario then heals the partition, and the old leader
+/// steps down. The cluster ends with exactly one leader.
 fn split_brain_prevented() -> ScenarioTrace {
     let nodes = [NodeId(1), NodeId(2), NodeId(3)];
     let mut sim = Sim::new(&nodes);
@@ -1022,9 +1056,11 @@ fn split_brain_prevented() -> ScenarioTrace {
     }
 }
 
-/// Drive a replication round whose bus messages are delivered in a deliberately
-/// non-FIFO order, demonstrating the log stays consistent because appends carry
-/// monotonic offsets + leader epochs so stale/late messages are detected.
+/// Drive a replication round that delivers its bus messages in a deliberately
+/// non-FIFO order.
+///
+/// The scenario shows that the log stays consistent. Appends carry monotonic
+/// offsets and leader epochs, so the replicas detect stale and late messages.
 fn out_of_order_delivery() -> ScenarioTrace {
     let nodes = [NodeId(1), NodeId(2), NodeId(3)];
     let mut sim = Sim::new(&nodes);
@@ -1070,7 +1106,7 @@ fn out_of_order_delivery() -> ScenarioTrace {
 }
 
 /// Deliver one message twice and show idempotent handling: no double
-/// application, no extra leader.
+/// application and no extra leader.
 fn message_duplication() -> ScenarioTrace {
     let nodes = [NodeId(1), NodeId(2), NodeId(3)];
     let mut sim = Sim::new(&nodes);
@@ -1162,8 +1198,10 @@ mod tests {
 
     // ---- interactive control surface (drives the browser playground) --------
 
-    /// Step the bus/timers one microstep at a time (the way the UI's "step"
-    /// button does) until a leader appears, with a bounded number of steps.
+    /// Step the bus and the timers one microstep at a time until a leader
+    /// appears, with a bounded number of steps.
+    ///
+    /// This is how the UI's "step" button works.
     fn step_until<F: Fn(&Sim) -> bool>(sim: &mut Sim, max: usize, done: F) {
         for _ in 0..max {
             if done(sim) {

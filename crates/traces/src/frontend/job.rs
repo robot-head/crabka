@@ -1,12 +1,13 @@
-//! Search-space sharding: turn the candidate block set + the hot/cold frontier
-//! into a list of bounded jobs (time -> shard -> block -> row-group), and the
-//! by-id candidate enumeration.
+//! Search-space sharding, plus the by-id candidate enumeration.
 //!
-//! The shard grain matches what the querier (`querier/http`) honors: a search
-//! job restricts to one block + a row-group range via `block` /
-//! `rowGroupStart` / `rowGroupEnd` (the querier's [`crabka_traceql::ScanJob`]);
-//! the live hot tier is the unrestricted scan. A block larger than
-//! `target_per_job` fans into multiple row-group-range jobs.
+//! Sharding turns the candidate block set and the hot/cold frontier into a list
+//! of bounded jobs, at the grain time -> shard -> block -> row-group.
+//!
+//! The shard grain matches what the querier in `querier/http` honors. A search
+//! job restricts to one block and a row-group range, through `block`,
+//! `rowGroupStart` and `rowGroupEnd`, which is the querier's
+//! [`crabka_traceql::ScanJob`]. The live hot tier is the unrestricted scan. A
+//! block larger than `target_per_job` fans into several row-group-range jobs.
 
 use std::collections::BTreeMap;
 
@@ -22,7 +23,7 @@ pub struct RowGroupInfo {
     pub compressed: ByteSize,
 }
 
-/// Block metadata the planner needs (from the querier's block catalog).
+/// Block metadata the planner needs, from the querier's block catalog.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockMetaInfo {
     pub block_id: String,
@@ -34,8 +35,8 @@ pub struct BlockMetaInfo {
 }
 
 impl BlockMetaInfo {
-    /// Total compressed size across this block's row-groups (falls back to
-    /// [`Self::size`] when row-group sizes are unavailable).
+    /// Total compressed size across this block's row-groups. It falls back to
+    /// [`Self::size`] when the row-group sizes are not available.
     #[must_use]
     pub fn total(&self) -> ByteSize {
         let rg_total: ByteSize = self.row_groups.iter().map(|rg| rg.compressed).sum();
@@ -59,8 +60,8 @@ pub enum JobShard {
     },
 }
 
-/// The output of planning: the jobs to dispatch + how many blocks they cover
-/// (seeds `metrics.totalBlocks`).
+/// The output of planning: the jobs to dispatch, and how many blocks they
+/// cover. The block count seeds `metrics.totalBlocks`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobPlan {
     pub jobs: Vec<JobShard>,
@@ -75,7 +76,9 @@ pub enum CatalogError {
 }
 
 /// The block-catalog door: which blocks overlap `[start_ns, end_ns]` for a
-/// tenant. Tests use [`MockCatalog`]; production uses [`TraceIndexCatalog`].
+/// tenant.
+///
+/// Tests use [`MockCatalog`]. Production uses [`TraceIndexCatalog`].
 #[async_trait]
 pub trait BlockCatalog: Send + Sync {
     async fn blocks(
@@ -115,10 +118,11 @@ impl BlockCatalog for MockCatalog {
     }
 }
 
-/// The production block catalog: backed by a pre-resolved
-/// [`crabka_blockstore::TraceIndex`] (per tenant). Built once at startup from
-/// the index; ports `backend_blocks_from_trace_index` from the legacy
-/// query-frontend.
+/// The production block catalog.
+///
+/// A pre-resolved per-tenant [`crabka_blockstore::TraceIndex`] backs it. It is
+/// built once at startup from the index. It ports
+/// `backend_blocks_from_trace_index` from the legacy query-frontend.
 pub struct TraceIndexCatalog {
     by_tenant: BTreeMap<String, Vec<BlockMetaInfo>>,
 }
@@ -129,11 +133,13 @@ impl TraceIndexCatalog {
         Self { by_tenant }
     }
 
-    /// Build the catalog from a `BlockStore` + `TraceIndex`, reading each
-    /// block's parquet row-group metadata (the per-tenant block list).
+    /// Build the catalog from a `BlockStore` and a `TraceIndex`.
+    ///
+    /// This reads each block's parquet row-group metadata, which is the
+    /// per-tenant block list.
     ///
     /// # Errors
-    /// Propagates object-store / parquet read errors.
+    /// Propagates object-store and parquet read errors.
     pub async fn from_trace_index(
         blocks: &BlockStore,
         index: &TraceIndex,
@@ -147,11 +153,13 @@ impl TraceIndexCatalog {
     }
 }
 
-/// Read the block metadata for one tenant out of a `TraceIndex` (+ parquet
-/// row-group metadata). Ported from the legacy `backend_blocks_from_trace_index`.
+/// Read the block metadata for one tenant out of a `TraceIndex`, together with
+/// the parquet row-group metadata.
+///
+/// This is ported from the legacy `backend_blocks_from_trace_index`.
 ///
 /// # Errors
-/// Propagates object-store / parquet read errors.
+/// Propagates object-store and parquet read errors.
 pub async fn blocks_for_tenant(
     blocks: &BlockStore,
     index: &TraceIndex,
@@ -205,7 +213,7 @@ impl BlockCatalog for TraceIndexCatalog {
     }
 }
 
-/// Fan one block into row-group-range jobs sized ~`target_per_job`.
+/// Fan one block into row-group-range jobs of about `target_per_job` each.
 fn plan_block_jobs(block: &BlockMetaInfo, target_per_job: ByteSize) -> Vec<JobShard> {
     // A whole-block job when sizing is disabled, the block has <=1 row-group, or
     // it fits under the budget.
@@ -252,13 +260,13 @@ fn plan_block_jobs(block: &BlockMetaInfo, target_per_job: ByteSize) -> Vec<JobSh
     jobs
 }
 
-/// Plan search jobs for a query window ending at `query_end_ns` over the
-/// candidate blocks + the hot/cold frontier.
+/// Plan search jobs for a query window that ends at `query_end_ns`, over the
+/// candidate blocks and the hot/cold frontier.
 ///
-/// - One `Live` job iff the query window reaches the hot tier
-///   (`query_end_ns >= hot_frontier_ns`).
-/// - For each block: one whole-block job if it fits the budget, else one
-///   row-group-range job per ~`target_per_job` chunk.
+/// - One `Live` job if and only if the query window reaches the hot tier, that
+///   is `query_end_ns >= hot_frontier_ns`.
+/// - For each block, one whole-block job if it fits the budget. If it does not,
+///   one row-group-range job per chunk of about `target_per_job`.
 #[must_use]
 pub fn plan_search_jobs(
     blocks: &[BlockMetaInfo],

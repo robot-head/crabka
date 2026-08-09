@@ -2,14 +2,14 @@
 //!
 //! The broker advertises `OffsetCommit` v10 and `OffsetFetch` v8+, so the
 //! client negotiates up to those versions. At v8+ `OffsetFetch` carries a
-//! per-group `groups[]` array (the legacy `group_id` + `topics` fields are
-//! v0-7 only), and at v10 both APIs key topics by `topic_id` instead of name.
+//! per-group `groups[]` array, and the legacy `group_id` + `topics` fields are
+//! v0-7 only. At v10 both APIs key topics by `topic_id` instead of by name.
 //!
-//! These builders populate BOTH the legacy and the new fields — the codegen
-//! encodes only the set valid for the negotiated version, so one request
-//! works regardless of what the broker negotiated. The parser flattens an
-//! `OffsetFetch` response across either shape, resolving `topic_id` back to a
-//! name (the name is dropped from the wire at v10).
+//! These builders populate BOTH the legacy and the new fields. The codegen
+//! encodes only the set that is valid for the negotiated version, so one
+//! request works regardless of what the broker negotiated. The parser flattens
+//! an `OffsetFetch` response across either shape and resolves `topic_id` back
+//! to a name, because the wire drops the name at v10.
 
 use std::collections::HashMap;
 
@@ -25,9 +25,11 @@ use crabka_protocol::{
     primitives::uuid::Uuid as WireUuid,
 };
 
-/// Build an `OffsetFetch` request covering `by_topic`, valid at any negotiated
-/// version. Legacy `group_id`/`topics` (v0-7) and the v8+ `groups[]` array
-/// (with `topic_id` for v10) are both populated.
+/// Build an `OffsetFetch` request that covers `by_topic` and is valid at any
+/// negotiated version.
+///
+/// This function populates both the legacy `group_id`/`topics` fields for v0-7
+/// and the v8+ `groups[]` array, which carries `topic_id` for v10.
 pub(crate) fn build_offset_fetch(
     group_id: &str,
     by_topic: &HashMap<String, Vec<i32>>,
@@ -63,9 +65,11 @@ pub(crate) fn build_offset_fetch(
 }
 
 /// Flatten an `OffsetFetch` response into `(topic_name, partition,
-/// committed_offset, committed_leader_epoch)` tuples. v8+ data lives in
-/// `groups`; v0-7 in `topics`. At v10 the per-topic name is empty, so
-/// resolve it from `topic_id` via `id_to_name`.
+/// committed_offset, committed_leader_epoch)` tuples.
+///
+/// v8+ data lives in `groups`, and v0-7 data lives in `topics`. At v10 the
+/// per-topic name is empty, so this function resolves it from `topic_id` with
+/// `id_to_name`.
 pub(crate) fn parse_offset_fetch(
     resp: &OffsetFetchResponse,
     id_to_name: &HashMap<WireUuid, String>,
@@ -104,9 +108,11 @@ pub(crate) fn parse_offset_fetch(
     out
 }
 
-/// Build the `topics` for an `OffsetCommit`, tagging each with its `topic_id`
-/// (required at v10, where the wire drops the topic name). The name is kept
-/// for v0-9. `offsets` maps `(topic, partition)` to
+/// Build the `topics` for an `OffsetCommit` and tag each one with its
+/// `topic_id`.
+///
+/// v10 needs the `topic_id`, because the wire drops the topic name there. This
+/// function keeps the name for v0-9. `offsets` maps `(topic, partition)` to
 /// `(committed_offset, committed_leader_epoch)`.
 pub(crate) fn build_commit_topics(
     offsets: HashMap<(String, i32), (i64, i32)>,
@@ -137,7 +143,7 @@ pub(crate) fn build_commit_topics(
 }
 
 /// Build the `topic_id → name` reverse map from the consumer's `name →
-/// topic_id` table, used to resolve `OffsetFetch` v10 responses.
+/// topic_id` table. The parser uses it to resolve `OffsetFetch` v10 responses.
 pub(crate) fn id_to_name(topic_ids: &HashMap<String, WireUuid>) -> HashMap<WireUuid, String> {
     topic_ids.iter().map(|(n, id)| (*id, n.clone())).collect()
 }

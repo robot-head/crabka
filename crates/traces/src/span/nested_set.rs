@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::Span;
 
-/// One span's nested-set assignment, index-aligned with the input spans.
+/// One span's nested-set assignment, aligned by index with the input spans.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NestedSet {
     pub left: i32,

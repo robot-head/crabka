@@ -5,7 +5,7 @@
 //!   `last_offset`:  i64 (big-endian)
 //!   `producer_id`:  i64 (big-endian)
 //!
-//! Byte layout matches Apache Kafka's `TransactionIndex`, so
+//! The byte layout matches Apache Kafka's `TransactionIndex`, so
 //! `kafka-dump-log --offsets-decoder` can dump it.
 
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
@@ -27,8 +27,8 @@ pub struct AbortedTxn {
     pub producer_id: ProducerId,
 }
 
-/// On-disk byte layout of one `AbortedTxn` entry. Reinterpreted in place
-/// from the file bytes via `zerocopy`.
+/// On-disk byte layout of one `AbortedTxn` entry. `zerocopy` reinterprets it
+/// in place from the file bytes.
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct AbortedTxnRaw {
@@ -46,9 +46,9 @@ pub struct TxnIndex {
 }
 
 impl TxnIndex {
-    /// Open (or recover) a `.txnindex` file at the given path. Reads
-    /// the entire file into memory at startup. An empty / missing file
-    /// is fine — we treat that as zero aborted transactions.
+    /// Open or recover a `.txnindex` file at the given path. This method
+    /// reads the entire file into memory at startup. An empty file or a
+    /// missing file is acceptable and means zero aborted transactions.
     #[instrument(
         level = "debug",
         skip_all,

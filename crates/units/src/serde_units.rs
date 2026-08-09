@@ -1,9 +1,9 @@
 //! `serde` adapters, so a config or API struct can hold quantities.
 //!
-//! `uom`'s own `Serialize`/`Deserialize` encodes the raw base-unit float — a
-//! timeout as `30.0`, a size as `536870912.0` — which is neither what an operator
-//! writes in YAML nor what an admin API should return. These modules are used
-//! through `#[serde(with = ...)]` and give a choice of two encodings:
+//! `uom`'s own `Serialize`/`Deserialize` encodes the raw base-unit float: a
+//! timeout as `30.0`, and a size as `536870912.0`. An operator does not write
+//! that in YAML, and an admin API should not return it. Use these modules through
+//! `#[serde(with = ...)]`. They give a choice of two encodings:
 //!
 //! - [`human`] — the operator-facing string form (`"512MiB"`, `"30s"`,
 //!   `"10MiB/s"`), for config files.
@@ -29,10 +29,10 @@
 //! # Ok::<_, serde_json::Error>(())
 //! ```
 //!
-//! A dimensioned field in [`human`] form must carry its unit: a bare number is
-//! rejected rather than assumed to be seconds or bytes, since guessing is the
-//! failure this crate exists to prevent. [`human::ratio`] is the exception — a
-//! fraction's unit is "none", so `0.25` is accepted alongside `"25%"`.
+//! A dimensioned field in [`human`] form must carry its unit. These modules
+//! reject a bare number and never assume seconds or bytes, because that guess is
+//! the failure this crate prevents. [`human::ratio`] is the exception. A
+//! fraction's unit is "none", so it accepts `0.25` as well as `"25%"`.
 
 /// The operator-facing string encoding: `"512MiB"`, `"30s"`, `"10MiB/s"`, `"25%"`.
 pub mod human {
@@ -310,8 +310,8 @@ pub mod numeric {
     }
 
     numeric_module!(
-        /// A time extent as whole milliseconds — Kafka's unit for retention,
-        /// timeout, and expiry fields.
+        /// A time extent as whole milliseconds. This is Kafka's unit for
+        /// retention, timeout, and expiry fields.
         millis_i64 / option_millis_i64,
         crate::Time,
         i64,
@@ -321,9 +321,9 @@ pub mod numeric {
     numeric_module!(
         /// A time extent as whole milliseconds, **truncated** on the way out.
         ///
-        /// For mirroring an external format that integer-divides rather than
-        /// rounds, such as Tempo's `durationMs`. Reading is exact, so this is
-        /// deliberately asymmetric — see
+        /// Use this module to match an external format that integer-divides and
+        /// does not round, such as Tempo's `durationMs`. Reading is exact, so
+        /// this module is asymmetric on purpose. See
         /// [`TimeExt::millis_i64_trunc`](crate::convert::TimeExt::millis_i64_trunc).
         millis_i64_trunc / option_millis_i64_trunc,
         crate::Time,

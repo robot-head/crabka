@@ -1,15 +1,18 @@
-//! `murmur2("{group}:{topicId}:{partition}") % num_partitions` — Apache
-//! Kafka's share-coordinator key form, hashed with the same
-//! `Utils.abs(murmur2(...)) % numPartitions` convention as
-//! `__transaction_state` so a share key resolves to the same
+//! `murmur2("{group}:{topicId}:{partition}") % num_partitions`.
+//!
+//! This is Apache Kafka's share-coordinator key form. The module hashes it
+//! with the same `Utils.abs(murmur2(...)) % numPartitions` convention as
+//! `__transaction_state`. A share key therefore resolves to the same
 //! `__share_group_state` partition on Crabka as on Apache Kafka.
 
 use crate::kafka_hash::murmur2_partition;
 
 /// Map a share-coordinator key `(group_id, topic_id, partition)` to a
-/// partition index in `__share_group_state`. Builds Kafka's key string
-/// `"{group_id}:{topic_id}:{partition}"`, hashes it with murmur2, and applies
-/// the JVM `Utils.abs(int)` semantics (returns 0 for `i32::MIN`).
+/// partition index in `__share_group_state`.
+///
+/// The function builds Kafka's key string
+/// `"{group_id}:{topic_id}:{partition}"` and hashes it with murmur2. It then
+/// applies the JVM `Utils.abs(int)` semantics, which return 0 for `i32::MIN`.
 #[must_use]
 pub fn partition_for_share_key(
     group_id: &str,

@@ -1,8 +1,9 @@
-//! Per-broker `TxnCoordinator`. Owns the in-memory state map of every
-//! `transactional_id` whose `__transaction_state` partition this broker
-//! hosts as leader. Persists every state change as a record in the
-//! corresponding `__transaction_state` partition. Recovers state on
-//! `Broker::start` by replaying those partitions.
+//! Per-broker `TxnCoordinator`.
+//!
+//! The coordinator owns the in-memory state map of every `transactional_id`
+//! whose `__transaction_state` partition this broker leads. It persists every
+//! state change as a record in the matching `__transaction_state` partition.
+//! On `Broker::start` it recovers the state by replaying those partitions.
 
 // `is_coordinator_for`, `get`, and a couple of admin helpers are consumed by
 // the transaction wire handlers. Remove this attribute once those land.
@@ -39,54 +40,66 @@ use crate::{
 pub(crate) type OffsetKey = (String, i32);
 
 /// Buffered transactional offsets for one producer, grouped by consumer
-/// `group_id`. A producer may fold offset commits for several groups into a
-/// single transaction (each `TxnOffsetCommit` carries its own `group_id`), so
-/// the buffer keys by group inside one producer's pending set.
+/// `group_id`.
+///
+/// A producer may put offset commits for several groups into one transaction,
+/// because each `TxnOffsetCommit` carries its own `group_id`. The buffer
+/// therefore keys by group inside one producer's pending set.
 pub(crate) type PendingTxnOffsets =
     std::collections::HashMap<String, Vec<(OffsetKey, OffsetEntry)>>;
 
 /// Live-dependency seam for the KIP-939 idle-transaction reaper.
 ///
-/// `sweep_expired`'s orchestration (the per-tid three-phase abort dance) is
-/// pure decision logic wrapped around four irreducible side effects: a
-/// coordinator-ownership check, two compare-and-swap-style persisted
-/// transitions (`Ongoing → PrepareAbort`, then `PrepareAbort → CompleteAbort`),
-/// the abort-marker fan-out, and producer-identity allocation. Each of those
-/// touches a live `__transaction_state` partition, partition leaders, or the
-/// producer-id allocator. Pulling them behind this trait lets the orchestration
-/// be unit-tested against a [`mockall`] mock — every method returns
-/// already-extracted plain data (snapshots), so the decisions consuming them
-/// are killable by a mock. The live adapter is [`TxnCoordinator`] itself.
+/// `sweep_expired` orchestrates a three-phase abort for each tid. That
+/// orchestration is pure decision logic around four irreducible side effects:
+/// a coordinator-ownership check, two compare-and-swap-style persisted
+/// transitions (`Ongoing → PrepareAbort`, then
+/// `PrepareAbort → CompleteAbort`), the abort-marker fan-out, and
+/// producer-identity allocation. Each one touches a live
+/// `__transaction_state` partition, partition leaders, or the producer-id
+/// allocator.
 ///
-/// The two `*_transition` methods perform the entry mutation **atomically under
-/// the per-tid lock** (so a concurrent `EndTxn`/`InitProducerId` is not
-/// clobbered) and return the resulting persisted snapshot, or `None` when the
-/// guard failed (lost race / no longer present). The pure helpers
-/// [`apply_prepare_abort`] / [`apply_complete_abort`] / [`complete_abort_guard_ok`]
-/// compute the transitions; the backend only owns the CAS + persistence, which
-/// is the irreducible part.
+/// This trait puts those effects behind a seam, so a unit test can drive the
+/// orchestration against a [`mockall`] mock. Every method returns
+/// already-extracted plain data, that is, snapshots, so a mock can kill the
+/// decisions that read them. The live adapter is [`TxnCoordinator`] itself.
+///
+/// The two `*_transition` methods mutate the entry **atomically under the
+/// per-tid lock**, so a concurrent `EndTxn` or `InitProducerId` is not
+/// overwritten. They return the resulting persisted snapshot, or `None` when
+/// the guard failed because the caller lost a race or the entry is no longer
+/// present. The pure helpers [`apply_prepare_abort`], [`apply_complete_abort`],
+/// and [`complete_abort_guard_ok`] compute the transitions. The backend owns
+/// only the compare-and-swap and the persistence, which is the irreducible
+/// part.
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub(crate) trait ReaperBackend: Send + Sync {
     /// Is this broker the transaction coordinator for `tid` right now?
     async fn is_coordinator_for(&self, tid: &str) -> bool;
 
-    /// Atomically, under `tid`'s entry lock: if the entry should be aborted as
-    /// an idle transaction at `now_ms`, transition `Ongoing → PrepareAbort`,
-    /// persist it, and return the persisted snapshot. Returns `None` when the
-    /// entry is absent, must not be reaped, or persistence failed.
+    /// Moves `Ongoing → PrepareAbort` under `tid`'s entry lock, atomically.
+    ///
+    /// If the entry should abort as an idle transaction at `now_ms`, this
+    /// method makes the transition, persists it, and returns the persisted
+    /// snapshot. It returns `None` when the entry is absent, when the entry
+    /// must not be reaped, or when the persistence failed.
     async fn prepare_abort(&self, tid: &str, now_ms: i64, txnv: TxnVersion) -> Option<TxnEntry>;
 
-    /// Fan out abort markers for `entry` to the partition leaders this broker
-    /// hosts (remote leaders are logged + skipped).
+    /// Fans out abort markers for `entry` to the partition leaders this
+    /// broker hosts. The method logs and skips remote leaders.
     async fn dispatch_abort_markers(&self, entry: &TxnEntry);
 
-    /// Atomically, under `tid`'s entry lock: re-validate that the current entry
-    /// still matches the `prepared` snapshot this reaper wrote (same identity +
-    /// still `PrepareAbort`), and if so transition to `CompleteAbort` — bumping
-    /// producer identity per KIP-890 at `now_ms` — persist it, and return the
-    /// persisted snapshot. Returns `None` when the entry advanced underneath us
-    /// or persistence failed.
+    /// Moves `PrepareAbort → CompleteAbort` under `tid`'s entry lock,
+    /// atomically.
+    ///
+    /// The method first checks that the current entry still matches the
+    /// `prepared` snapshot this reaper wrote: the same identity, and still
+    /// `PrepareAbort`. If it matches, the method moves the entry to
+    /// `CompleteAbort`, bumps the producer identity at `now_ms` as KIP-890
+    /// requires, persists the entry, and returns the persisted snapshot. It
+    /// returns `None` when another caller advanced the entry or when the
+    /// persistence failed.
     async fn complete_abort(
         &self,
         prepared: &TxnEntry,
@@ -95,18 +108,19 @@ pub(crate) trait ReaperBackend: Send + Sync {
     ) -> Option<TxnEntry>;
 }
 
-/// The `Ongoing → PrepareAbort` mutation for an idle-reaped entry: flip the
-/// state and stamp `last_update_ms`. Pure so the transition is unit-killable
-/// independently of persistence.
+/// Applies the `Ongoing → PrepareAbort` mutation for an idle-reaped entry. It
+/// changes the state and stamps `last_update_ms`. The function is pure, so a
+/// unit test can kill the transition without any persistence.
 fn apply_prepare_abort(entry: &mut TxnEntry, now_ms: i64) {
     entry.state = TxnState::PrepareAbort;
     entry.last_update_ms = now_ms;
 }
 
-/// The `PrepareAbort → CompleteAbort` mutation, given the freshly-allocated
-/// `(producer_id, producer_epoch)` from the KIP-890 identity bump. Records the
-/// prior id as `prev_producer_id` only when a roll actually happened (a fresh
-/// pid was allocated). Pure so the transition is unit-killable.
+/// Applies the `PrepareAbort → CompleteAbort` mutation from the newly
+/// allocated `(producer_id, producer_epoch)` of the KIP-890 identity bump. It
+/// records the prior id as `prev_producer_id` only when a roll happened, that
+/// is, when the allocator gave out a fresh pid. The function is pure, so a
+/// unit test can kill the transition.
 fn apply_complete_abort(entry: &mut TxnEntry, new_pid: ProducerId, new_epoch: i16, now_ms: i64) {
     if new_pid != entry.producer_id {
         entry.prev_producer_id = entry.producer_id;
@@ -117,20 +131,24 @@ fn apply_complete_abort(entry: &mut TxnEntry, new_pid: ProducerId, new_epoch: i1
     entry.last_update_ms = now_ms;
 }
 
-/// Does the current re-acquired `entry` still match the `prepared` snapshot this
-/// reaper wrote in Phase 1, so it is safe to finalise to `CompleteAbort`? Guards
-/// against a concurrent `EndTxn`/`InitProducerId` having advanced the entry.
-/// Pure so the guard is unit-killable.
+/// Reports whether the re-acquired `entry` still matches the `prepared`
+/// snapshot this reaper wrote in phase 1, so that it is safe to finalise to
+/// `CompleteAbort`. The guard protects against a concurrent `EndTxn` or
+/// `InitProducerId` that advanced the entry. The function is pure, so a unit
+/// test can kill the guard.
 fn complete_abort_guard_ok(entry: &TxnEntry, prepared: &TxnEntry) -> bool {
     entry.producer_id == prepared.producer_id
         && entry.producer_epoch == prepared.producer_epoch
         && entry.state == TxnState::PrepareAbort
 }
 
-/// The reaper orchestration loop, generic over the [`ReaperBackend`] seam so it
-/// is unit-testable against a mock. For each candidate tid it runs the
-/// three-phase abort: ownership check → `prepare_abort` (CAS) → marker fan-out →
-/// `complete_abort` (CAS). Returns the tids it finalised, in iteration order.
+/// Runs the reaper orchestration loop.
+///
+/// The loop is generic over the [`ReaperBackend`] seam, so a unit test can
+/// drive it against a mock. For each candidate tid it runs the three-phase
+/// abort: ownership check, `prepare_abort` (compare-and-swap), marker fan-out,
+/// then `complete_abort` (compare-and-swap). Returns the tids it finalised, in
+/// iteration order.
 async fn sweep_with_backend<B: ReaperBackend + ?Sized>(
     backend: &B,
     candidates: Vec<String>,
@@ -168,8 +186,8 @@ async fn sweep_with_backend<B: ReaperBackend + ?Sized>(
     aborted
 }
 
-/// Per-broker transaction coordinator. Constructed in `Broker::start`
-/// and shared via `Arc` with the transaction wire handlers.
+/// Per-broker transaction coordinator. `Broker::start` constructs it and
+/// shares it with the transaction wire handlers through an `Arc`.
 pub(crate) struct TxnCoordinator {
     pub(crate) node_id: crabka_metadata::NodeId,
     pub(crate) partitions: Arc<PartitionRegistry>,
@@ -180,19 +198,23 @@ pub(crate) struct TxnCoordinator {
     state: DashMap<String, Arc<Mutex<TxnEntry>>>,
     /// Set of `__transaction_state` partition indices this broker leads.
     leader_partitions: RwLock<HashSet<PartitionIndex>>,
-    /// Reverse lookup: `producer_id` → `transactional_id`. Used by the
-    /// Produce handler to verify transactional batches (KIP-1319 v2).
+    /// Reverse lookup: `producer_id` → `transactional_id`. The Produce
+    /// handler reads it to verify transactional batches (KIP-1319 v2).
     pid_to_tid: DashMap<ProducerId, String>,
-    /// KIP-447 transactional consumer offsets buffered per `producer_id`,
-    /// pending the transaction's COMMIT/ABORT marker. `TxnOffsetCommit`
-    /// appends the offset records to `__consumer_offsets` (held under the LSO)
-    /// AND records them here; on COMMIT (`EndTxn` with `committed=true`) the
-    /// buffer is drained and materialized into the owning group's in-memory
-    /// `committed_offsets` (the map `OffsetFetch` reads), matching Kafka's
-    /// "visible only after the commit marker" semantics. On ABORT the buffer
-    /// is dropped without applying. Keyed by `producer_id` because that is the
-    /// identity `EndTxn` finalizes on; the value groups offsets by the
-    /// `group_id` each `TxnOffsetCommit` named.
+    /// KIP-447 transactional consumer offsets, buffered for each
+    /// `producer_id` until the transaction's COMMIT or ABORT marker.
+    ///
+    /// `TxnOffsetCommit` appends the offset records to `__consumer_offsets`,
+    /// held under the LSO, AND records them here. On COMMIT, that is, `EndTxn`
+    /// with `committed=true`, the coordinator drains the buffer into the
+    /// owning group's in-memory `committed_offsets`, the map that
+    /// `OffsetFetch` reads. This matches Kafka's "visible only after the
+    /// commit marker" semantics. On ABORT the coordinator drops the buffer
+    /// without applying it.
+    ///
+    /// The map keys by `producer_id`, because that is the identity `EndTxn`
+    /// finalizes on. The value groups offsets by the `group_id` that each
+    /// `TxnOffsetCommit` named.
     pending_txn_offsets: DashMap<ProducerId, PendingTxnOffsets>,
 }
 
@@ -217,13 +239,14 @@ impl TxnCoordinator {
         }
     }
 
-    /// Buffer a `TxnOffsetCommit`'s offsets for `producer_id` under `group_id`,
-    /// pending the transaction's commit marker. Called from the
-    /// `TxnOffsetCommit` handler after the offset records are appended to
-    /// `__consumer_offsets`. Multiple commits for the same `(producer_id,
-    /// group_id)` within one transaction accumulate (later entries for the same
-    /// `(topic, partition)` are applied last-writer-wins at materialization, the
-    /// same as a non-transactional re-commit).
+    /// Buffers a `TxnOffsetCommit`'s offsets for `producer_id` under
+    /// `group_id`, until the transaction's commit marker arrives.
+    ///
+    /// The `TxnOffsetCommit` handler calls this after it appends the offset
+    /// records to `__consumer_offsets`. Several commits for the same
+    /// `(producer_id, group_id)` inside one transaction accumulate. At
+    /// materialization, the last entry for a given `(topic, partition)` wins,
+    /// the same as for a non-transactional re-commit.
     pub(crate) fn buffer_txn_offsets(
         &self,
         producer_id: ProducerId,
@@ -241,11 +264,13 @@ impl TxnCoordinator {
             .extend(entries);
     }
 
-    /// Remove and return all buffered transactional offsets for `producer_id`
-    /// (grouped by `group_id`). Used by `EndTxn`: on COMMIT the returned offsets
-    /// are materialized into each group's `committed_offsets`; on ABORT this is
-    /// still called so the buffer is dropped, and the result discarded. Returns
-    /// an empty map if the producer buffered no transactional offsets.
+    /// Removes and returns all buffered transactional offsets for
+    /// `producer_id`, grouped by `group_id`.
+    ///
+    /// `EndTxn` calls this method. On COMMIT it materializes the returned
+    /// offsets into each group's `committed_offsets`. On ABORT it still calls
+    /// this method, to drop the buffer, and discards the result. Returns an
+    /// empty map if the producer buffered no transactional offsets.
     pub(crate) fn take_txn_offsets(&self, producer_id: ProducerId) -> PendingTxnOffsets {
         self.pending_txn_offsets
             .remove(&producer_id)
@@ -253,9 +278,9 @@ impl TxnCoordinator {
             .unwrap_or_default()
     }
 
-    /// Recompute which `__transaction_state` partitions this broker leads
-    /// from the current `MetadataImage`. Called from `recover` and also
-    /// on every metadata change.
+    /// Recomputes which `__transaction_state` partitions this broker leads,
+    /// from the current `MetadataImage`. `recover` calls it, and so does
+    /// every metadata change.
     pub(crate) async fn refresh_leader_partitions(&self, image: &MetadataImage) {
         let mut set = HashSet::new();
         for p in image.partitions_of(bootstrap::TOPIC) {
@@ -277,37 +302,44 @@ impl TxnCoordinator {
         self.leader_partitions.read().await.contains(&p)
     }
 
-    /// Retrieve the locked `TxnEntry` for `tid`, or `None` if unknown.
+    /// Returns the locked `TxnEntry` for `tid`, or `None` if `tid` is
+    /// unknown.
     pub(crate) fn get(&self, tid: &str) -> Option<Arc<Mutex<TxnEntry>>> {
         self.state.get(tid).map(|e| e.value().clone())
     }
 
-    /// Reverse lookup: given a `producer_id`, return the `transactional_id`
-    /// it was registered under, or `None` if the pid is unknown.
+    /// Returns the `transactional_id` that `producer_id` was registered
+    /// under, or `None` if the pid is unknown.
     pub(crate) fn tid_for_pid(&self, pid: ProducerId) -> Option<String> {
         self.pid_to_tid.get(&pid).map(|e| e.value().clone())
     }
 
-    /// Evict the stale `prev_producer_id -> tid` mapping after a KIP-890
-    /// epoch-overflow roll. When the producer epoch is exhausted the `EndTxn`
-    /// completion path allocates a new `producer_id` and records the prior id
-    /// as `entry.prev_producer_id` (see `next_producer_identity`); without this
-    /// the old id's mapping would leak one entry per roll. Idempotent: a no-op
-    /// once the old id is gone, and skipped for entries that never rolled
-    /// (`prev == -1`). pids are globally unique, so the prior id only ever
-    /// mapped to this tid — removing it can't affect another transaction.
+    /// Evicts the stale `prev_producer_id -> tid` mapping after a KIP-890
+    /// epoch-overflow roll.
+    ///
+    /// When the producer epoch is exhausted, the `EndTxn` completion path
+    /// allocates a new `producer_id` and records the prior id as
+    /// `entry.prev_producer_id`. See `next_producer_identity`. Without this
+    /// eviction, the old id's mapping would leak one entry for each roll.
+    ///
+    /// The method is idempotent. It does nothing once the old id is gone, and
+    /// it skips entries that never rolled, where `prev == -1`. pids are
+    /// globally unique, so the prior id only ever mapped to this tid, and
+    /// removing it cannot affect another transaction.
     fn evict_rolled_pid(pid_to_tid: &DashMap<ProducerId, String>, entry: &TxnEntry) {
         if entry.prev_producer_id >= 0 && entry.prev_producer_id != entry.producer_id {
             pid_to_tid.remove(&entry.prev_producer_id);
         }
     }
 
-    /// Snapshot every locally-coordinated `TxnEntry`. Used by the KIP-664
-    /// admin handlers (`ListTransactions`, `DescribeTransactions`) to
-    /// expose the in-memory txn-state map. Each entry is locked + cloned
-    /// in turn so the snapshot is internally consistent per-tid but not
-    /// across the entire batch — acceptable for an admin introspection
-    /// API (Apache Kafka's JVM coordinator has the same property).
+    /// Snapshots every locally-coordinated `TxnEntry`.
+    ///
+    /// The KIP-664 admin handlers `ListTransactions` and
+    /// `DescribeTransactions` call this to expose the in-memory txn-state map.
+    /// The method locks and clones each entry in turn, so the snapshot is
+    /// consistent for one tid but not across the whole batch. That is
+    /// acceptable for an admin introspection API, and Apache Kafka's JVM
+    /// coordinator has the same property.
     pub(crate) async fn snapshot(&self) -> Vec<TxnEntry> {
         // Collect the `Arc<Mutex<_>>` handles first so we don't hold the
         // DashMap shard locks while taking the inner async mutex.
@@ -321,13 +353,13 @@ impl TxnCoordinator {
         out
     }
 
-    /// Persist `entry` to the corresponding `__transaction_state` partition
-    /// log, then update the in-memory map. The batch is appended via the
-    /// partition's writer task (ordered with all other produce appends).
+    /// Persists `entry` to the matching `__transaction_state` partition log,
+    /// then updates the in-memory map. The partition's writer task appends the
+    /// batch, in order with all other produce appends.
     ///
-    /// `txnv` is the finalized `transaction.version` resolved from the live
-    /// metadata image at the caller; it selects the byte-exact Kafka
-    /// `TransactionLogValue` format (v0 for `TV_0`, v1 for `TV >= 1`).
+    /// `txnv` is the finalized `transaction.version` that the caller resolved
+    /// from the live metadata image. It selects the byte-exact Kafka
+    /// `TransactionLogValue` format: v0 for `TV_0`, and v1 for `TV >= 1`.
     ///
     /// # Errors
     ///
@@ -374,22 +406,24 @@ impl TxnCoordinator {
         Ok(())
     }
 
-    /// KIP-939 idle-transaction reaper: abort every locally-coordinated,
+    /// KIP-939 idle-transaction reaper: aborts every locally-coordinated,
     /// non-2PC, `Ongoing` transaction whose timeout has elapsed at `now_ms`.
     ///
-    /// 2PC transactions (`txn_timeout_ms == NO_TIMEOUT_MS`) are skipped — their
-    /// external transaction manager owns the commit/abort decision, and Kafka
-    /// must never unilaterally abort a prepared 2PC transaction. The decision is
-    /// delegated to [`should_abort_idle_txn`], the exhaustively model-checked
-    /// core (see [`crate::txn::two_pc_model`]).
+    /// The reaper skips 2PC transactions, where
+    /// `txn_timeout_ms == NO_TIMEOUT_MS`. Their external transaction manager
+    /// owns the commit or abort decision, and Kafka must never abort a
+    /// prepared 2PC transaction on its own. [`should_abort_idle_txn`] makes
+    /// the decision; it is the exhaustively model-checked core. See
+    /// [`crate::txn::two_pc_model`].
     ///
-    /// Each abort runs the same two-step transition + marker fan-out as an
-    /// `EndTxn(committed=false)` and bumps the producer epoch on completion (at
-    /// `TV_2`) so the timed-out producer is fenced. Marker fan-out is local-only
-    /// (remote partitions are logged + skipped, mirroring the `InitProducerId`
-    /// abort-on-stale-Ongoing path); a concurrent caller that changed the entry
-    /// out from under us aborts this reap of that tid (re-validated before the
-    /// Complete write). Returns the tids it finalized.
+    /// Each abort runs the same two-step transition and marker fan-out as an
+    /// `EndTxn(committed=false)`, and bumps the producer epoch on completion
+    /// at `TV_2`, so the broker fences the timed-out producer. Marker fan-out
+    /// is local only: the reaper logs and skips remote partitions, as the
+    /// `InitProducerId` abort-on-stale-Ongoing path does. If a concurrent
+    /// caller changed the entry, the reaper abandons the reap of that tid,
+    /// because it re-checks the entry before the Complete write. Returns the
+    /// tids it finalized.
     // cargo-mutants: I/O orchestration over live DashMap/partition state
     #[cfg_attr(test, mutants::skip)]
     #[tracing::instrument(
@@ -407,14 +441,14 @@ impl TxnCoordinator {
         sweep_with_backend(self, candidates, now_ms, txnv).await
     }
 
-    /// Replay every locally-led `__transaction_state` partition into the
-    /// in-memory state map. Called from `Broker::start`.
+    /// Replays every locally-led `__transaction_state` partition into the
+    /// in-memory state map. `Broker::start` calls it.
     ///
     /// # Errors
     ///
-    /// Returns [`BrokerError`] if reading a partition's log fails with an
-    /// error other than reading past the end (which is treated as a normal
-    /// "partition is empty" condition).
+    /// Returns [`BrokerError`] if a read of a partition's log fails with an
+    /// error other than a read past the end. A read past the end is a normal
+    /// "partition is empty" condition.
     // The `base_offset + last_offset_delta + 1` next-batch offset advance is
     // only reachable by replaying real committed `__transaction_state` batches
     // from an on-disk `Log`; there is no pure seam over the read loop, so the
@@ -514,10 +548,10 @@ impl TxnCoordinator {
     }
 }
 
-/// Live adapter: the real reaper side effects against the in-memory state map,
-/// the `__transaction_state` partition log, partition leaders, and the
-/// producer-id allocator. Only the irreducible IO lives here; every decision is
-/// the pure helper / orchestration logic above.
+/// Live adapter that runs the real reaper side effects against the in-memory
+/// state map, the `__transaction_state` partition log, partition leaders, and
+/// the producer-id allocator. Only the irreducible IO lives here. The pure
+/// helpers and the orchestration logic above hold every decision.
 #[async_trait]
 impl ReaperBackend for TxnCoordinator {
     // cargo-mutants: thin adapter over inherent method / live lock state

@@ -1,27 +1,28 @@
 //! Byte-compatible reader/writer for Apache Kafka's on-disk log format.
 //!
-//! This crate provides the append-only storage layer used by the Crabka broker.
+//! This crate is the append-only storage layer that the Crabka broker uses.
 //! It reads and writes Kafka 4.x's on-disk log format byte-for-byte:
 //! 20-digit zero-padded segment filenames, sparse `.index` and
-//! `.timeindex` files, append-only `.log` files containing
+//! `.timeindex` files, and append-only `.log` files that hold
 //! [`crabka_protocol::records::RecordBatch`] v2 streams.
 //!
 //! ## What this crate does
 //!
-//! - Open + recover existing log directories.
+//! - Open and recover existing log directories.
 //! - Append `RecordBatch`es to the active segment.
 //! - Read sequentially from an absolute offset.
-//! - Truncate the log to an offset (for replication / leader election).
+//! - Truncate the log to an offset, for replication and leader election.
 //! - Time-based and size-based retention.
 //!
 //! ## Scope and boundaries
 //!
-//! This crate is the byte-compatible segment/index layer. It exposes append,
-//! read, truncation, leader-epoch checkpoint, transaction-index, retention, and
-//! compaction primitives over a single log directory. Broker-level policy —
-//! topic configuration, leader/follower ownership, tiered-storage scheduling,
-//! transaction visibility rules, and write serialization — is applied by
-//! `crabka-broker` above this storage layer.
+//! This crate is the byte-compatible segment and index layer. It exposes
+//! append, read, truncation, leader-epoch checkpoint, transaction-index,
+//! retention, and compaction primitives over a single log directory.
+//! `crabka-broker` applies broker-level policy above this storage layer. That
+//! policy covers topic configuration, leader and follower ownership,
+//! tiered-storage scheduling, transaction visibility rules, and write
+//! serialization.
 //!
 //! ## Quick start
 //!
@@ -59,15 +60,17 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-log/0.3.9")]
 
-/// Emit the wrapped item(s) only on platforms with a usable file→socket
-/// `sendfile(2)` for the zero-copy fetch path — Linux, the Apple targets, and
-/// FreeBSD/DragonFly (the "SENDFILE alias"). Windows is excluded: there is no
-/// safe `TransmitFile` wrapper under `unsafe_code = "forbid"`, so the fetch path
-/// `pread`s + `write_all`s there and never needs the file-region descriptors.
+/// Emit the wrapped items only on platforms with a usable file-to-socket
+/// `sendfile(2)` for the zero-copy fetch path.
 ///
-/// One macro per crate keeps the predicate identical across every sendfile-gated
-/// site (the `read_raw_desc` descriptor types, their impls, and the re-exports),
-/// so the cfg set can't drift between them.
+/// Those platforms are Linux, the Apple targets, and FreeBSD/DragonFly. They
+/// are the "SENDFILE alias". Windows is excluded, because there is no safe
+/// `TransmitFile` wrapper under `unsafe_code = "forbid"`. The fetch path there
+/// uses `pread` and `write_all`, and never needs the file-region descriptors.
+///
+/// One macro per crate keeps the predicate identical at every sendfile-gated
+/// site: the `read_raw_desc` descriptor types, their impls, and the re-exports.
+/// The cfg set therefore cannot drift between them.
 macro_rules! sendfile_cfg {
     ($($item:item)*) => {
         $(

@@ -19,10 +19,9 @@ use crate::{
 
 /// Shared hot-head metric store rebuilt from the metrics WAL tail.
 ///
-/// Reads clone the inner `Arc` pointer (O(1)); writers use `Arc::make_mut`
-/// which clones the store only if a reader is concurrently holding a snapshot.
-/// This avoids the O(N) full-store clone that the previous design incurred on
-/// every single query.
+/// Reads clone the inner `Arc` pointer, which is O(1). Writers use
+/// `Arc::make_mut`, which clones the store only when a reader holds a snapshot
+/// at the same time. This avoids an O(N) full-store clone on every query.
 #[derive(Clone, Default)]
 pub struct WalHead {
     inner: Arc<RwLock<Arc<InMemoryMetricStore>>>,
@@ -34,7 +33,7 @@ impl WalHead {
         Self::default()
     }
 
-    /// Build a head with an explicit retention window.
+    /// Builds a head with an explicit retention window.
     #[must_use]
     pub fn with_retention(retention: Time) -> Self {
         Self::from_store(InMemoryMetricStore::with_retention(retention))
@@ -47,18 +46,22 @@ impl WalHead {
         }
     }
 
-    /// Apply one decoded metrics WAL record into the shared hot head.
+    /// Applies one decoded metrics WAL record to the shared hot head.
     /// # Panics
-    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
+    ///
+    /// Panics if the shared metric state is poisoned. Panics if validated series
+    /// data is missing an index entry that the operation needs.
     pub fn apply_wal_record(&self, record: &WalRecord) {
         let mut guard = self.inner.write().expect("wal head lock poisoned");
         Arc::make_mut(&mut *guard).apply_wal_record(record);
     }
 
-    /// Apply one decoded metrics WAL record and advance the offset watermarks
+    /// Applies one decoded metrics WAL record and advances the offset watermarks
     /// for `partition` to include `offset`.
     /// # Panics
-    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
+    ///
+    /// Panics if the shared metric state is poisoned. Panics if validated series
+    /// data is missing an index entry that the operation needs.
     pub fn apply_wal_record_at(
         &self,
         record: &WalRecord,
@@ -71,22 +74,27 @@ impl WalHead {
         store.record_offset(partition, offset);
     }
 
-    /// Apply decoded metrics WAL records in log order.
+    /// Applies decoded metrics WAL records in log order.
     /// # Panics
-    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
+    ///
+    /// Panics if the shared metric state is poisoned. Panics if validated series
+    /// data is missing an index entry that the operation needs.
     pub fn apply_wal_records<'a>(&self, records: impl IntoIterator<Item = &'a WalRecord>) {
         let mut guard = self.inner.write().expect("wal head lock poisoned");
         Arc::make_mut(&mut *guard).apply_wal_records(records);
     }
 
-    /// Drop samples older than the retention window from the shared hot head.
+    /// Drops samples older than the retention window from the shared hot head.
     ///
-    /// Returns how many samples and series were evicted. Offset watermarks are
-    /// left untouched. The returned stats are advisory (metrics/tests); pruning
-    /// for the side effect of bounding memory and discarding them is valid.
+    /// This method returns how many samples and series it evicted. It does not
+    /// change the offset watermarks. The returned stats are advisory, for
+    /// metrics and tests. A caller can prune only to bound memory and discard
+    /// the stats.
     #[must_use]
     /// # Panics
-    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
+    ///
+    /// Panics if the shared metric state is poisoned. Panics if validated series
+    /// data is missing an index entry that the operation needs.
     pub fn prune(&self, now_ms: i64) -> PruneStats {
         let mut guard = self.inner.write().expect("wal head lock poisoned");
         Arc::make_mut(&mut *guard).prune(now_ms)
@@ -95,7 +103,9 @@ impl WalHead {
     /// The lowest WAL offset materialized in the head for `partition`.
     #[must_use]
     /// # Panics
-    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
+    ///
+    /// Panics if the shared metric state is poisoned. Panics if validated series
+    /// data is missing an index entry that the operation needs.
     pub fn low_water_offset(&self, partition: PartitionIndex) -> Option<Offset> {
         self.inner
             .read()
@@ -106,7 +116,9 @@ impl WalHead {
     /// The highest WAL offset materialized in the head for `partition`.
     #[must_use]
     /// # Panics
-    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
+    ///
+    /// Panics if the shared metric state is poisoned. Panics if validated series
+    /// data is missing an index entry that the operation needs.
     pub fn high_water_offset(&self, partition: PartitionIndex) -> Option<Offset> {
         self.inner
             .read()
@@ -117,7 +129,9 @@ impl WalHead {
     /// Snapshot of all per-partition WAL offset watermarks.
     #[must_use]
     /// # Panics
-    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
+    ///
+    /// Panics if the shared metric state is poisoned. Panics if validated series
+    /// data is missing an index entry that the operation needs.
     pub fn watermarks(&self) -> BTreeMap<PartitionIndex, PartitionWatermark> {
         self.inner
             .read()
@@ -129,7 +143,9 @@ impl WalHead {
     /// The retention window.
     #[must_use]
     /// # Panics
-    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
+    ///
+    /// Panics if the shared metric state is poisoned. Panics if validated series
+    /// data is missing an index entry that the operation needs.
     pub fn retention(&self) -> Time {
         self.inner
             .read()

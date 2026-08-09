@@ -66,8 +66,8 @@ pub struct TraceResult {
     pub root_trace_name: String,
     pub start_time_unix_nano: u64,
     /// How long the trace ran, from the earliest span start to the latest span
-    /// end. The Tempo search JSON renders this twice, as `durationMs` and as
-    /// the span-set `durationNanos`; both come from this one magnitude.
+    /// end. The Tempo search JSON shows this duration twice, as `durationMs`
+    /// and as the span-set `durationNanos`. Both come from this one field.
     pub duration: Time,
     pub span_sets: Vec<SpanSet>,
 }
@@ -77,9 +77,9 @@ pub struct TraceResult {
 pub struct SearchResponse {
     pub traces: Vec<TraceResult>,
     pub inspected_traces: usize,
-    /// Approximate span data the query inspected (the decoded size of the
-    /// scanned cold+live batches, before filtering). Surfaced as the Tempo
-    /// search `metrics.inspectedBytes`.
+    /// Approximate span data the query inspected: the decoded size of the
+    /// scanned cold and live batches, before filtering. The engine reports this
+    /// value as the Tempo search `metrics.inspectedBytes`.
     pub inspected: ByteSize,
 }
 

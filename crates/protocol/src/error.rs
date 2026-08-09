@@ -8,7 +8,8 @@ pub enum ProtocolError {
     #[error("unexpected end of buffer: needed {needed} more bytes")]
     UnexpectedEof { needed: usize },
 
-    /// Decoded a value that the schema says is impossible (e.g. negative array length).
+    /// Decoded a value that the schema says is impossible, such as a negative
+    /// array length.
     #[error("invalid value: {0}")]
     InvalidValue(&'static str),
 

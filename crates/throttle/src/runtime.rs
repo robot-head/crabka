@@ -1,8 +1,10 @@
-//! The concurrent [`TokenBucket`] runtime shell around the pure
-//! [`plan_consume`] arithmetic: atomics, the seqlock generation protocol, and
-//! the injected [`NanoClock`]. Split from `lib.rs` so the pure kernel is the
-//! only thing the Creusot verifier ever sees (this module uses atomics and
-//! `dyn` trait objects, which Creusot cannot translate).
+//! The concurrent [`TokenBucket`] runtime around the pure [`plan_consume`]
+//! arithmetic.
+//!
+//! This module holds the atomics, the seqlock generation protocol, and the
+//! injected [`NanoClock`]. It is separate from `lib.rs` so that the Creusot
+//! verifier sees the pure kernel only. Creusot cannot translate the atomics and
+//! `dyn` trait objects that this module uses.
 
 use std::sync::{
     Arc,
@@ -17,15 +19,16 @@ use qubit_clock::{NanoClock, NanoMonotonicClock};
 
 use crate::{AvailableTokens, BurstCapacity, RefillTokens, RequestedTokens, plan_consume};
 
-/// The window whose worth of throughput [`TokenBucket::set_byte_rate`] uses as the
-/// burst capacity when the caller does not name one.
+/// The time window that [`TokenBucket::set_byte_rate`] uses for the burst
+/// capacity when the caller does not give one. The burst is the throughput of
+/// this window.
 const DEFAULT_BURST_WINDOW: Time = secs(1);
 
 /// Reads the injected clock's current epoch-nanoseconds as a `u64`.
 ///
-/// Refill arithmetic only uses **differences** of this value, so the absolute
-/// anchor is irrelevant; a wall-clock-anchored epoch (~1.75e18 ns today) or a
-/// mock timeline anchored at the Unix epoch both fit comfortably in `u64`.
+/// The refill arithmetic uses **differences** of this value only, so the
+/// absolute anchor does not matter. A wall-clock-anchored epoch, about 1.75e18
+/// ns today, and a mock timeline anchored at the Unix epoch both fit in `u64`.
 #[inline]
 fn clock_nanos(clock: &dyn NanoClock) -> u64 {
     u64::try_from(clock.nanos()).expect("clock nanoseconds must fit in u64")
@@ -34,17 +37,17 @@ fn clock_nanos(clock: &dyn NanoClock) -> u64 {
 /// A throughput in the bucket's raw storage unit: whole bytes per second.
 ///
 /// The bucket stores its rate in an `AtomicU64` because the refill arithmetic is
-/// verified over integers, so every rate crossing the accessor boundary narrows
-/// here. A negative rate is not a throughput and collapses to `0`, the bucket's
-/// "no limit configured" sentinel.
+/// verified over integers. Every rate that crosses the accessor boundary
+/// narrows here. A negative rate is not a throughput, so it becomes `0`, the
+/// bucket's "no limit configured" sentinel.
 fn rate_to_bytes_per_sec(rate: ByteRate) -> u64 {
     u64::try_from(rate.bytes_per_sec_i64()).unwrap_or(0)
 }
 
 /// The inverse of [`rate_to_bytes_per_sec`].
 ///
-/// Exact for every value the bucket can hold: a stored rate came through
-/// [`rate_to_bytes_per_sec`], which saturates at `i64::MAX`.
+/// This is exact for every value the bucket can hold. A stored rate came
+/// through [`rate_to_bytes_per_sec`], which saturates at `i64::MAX`.
 fn rate_from_bytes_per_sec(raw: u64) -> ByteRate {
     ByteRate::from_bytes_per_sec(i64::try_from(raw).unwrap_or(i64::MAX))
 }
@@ -54,15 +57,16 @@ pub struct TokenBucket {
     burst: AtomicU64,
     available: AtomicU64,
     last_refill_nanos: AtomicU64,
-    /// Seqlock generation guarding the `{rate, burst, available, last_refill}`
-    /// group. `set_token_rate_with_burst` makes it odd while writing and even when
-    /// quiescent; a consumer that observes an odd value, or a value that
-    /// changed across its read-compute-commit, retries so a straddled reset is
-    /// never clobbered by a stale `available` CAS. See the stateright model in
-    /// `tests/bucket_model.rs`.
+    /// Seqlock generation that guards the `{rate, burst, available,
+    /// last_refill}` group. `set_token_rate_with_burst` makes it odd while it
+    /// writes and even when it is quiescent. A consumer that reads an odd
+    /// value, or a value that changed across its read-compute-commit, tries
+    /// again. A stale `available` CAS thus never clobbers a straddled reset.
+    /// See the stateright model in `tests/bucket_model.rs`.
     generation: AtomicU64,
-    /// Monotonic nanosecond time source. Injectable so tests can drive refills
-    /// deterministically with a [`qubit_clock::MockClock`] instead of sleeping.
+    /// Monotonic nanosecond time source. The caller injects it, so tests can
+    /// drive refills deterministically with a [`qubit_clock::MockClock`]
+    /// instead of sleeping.
     clock: Arc<dyn NanoClock>,
 }
 
@@ -86,9 +90,10 @@ impl TokenBucket {
 
     /// Constructs a bucket backed by a caller-supplied [`NanoClock`].
     ///
-    /// Production uses [`TokenBucket::new`] (a [`NanoMonotonicClock`]); tests
-    /// pass a [`qubit_clock::MockClock`] so refill windows advance by an exact,
-    /// controlled amount rather than by wall-clock sleeping.
+    /// Production code uses [`TokenBucket::new`], which supplies a
+    /// [`NanoMonotonicClock`]. Tests pass a [`qubit_clock::MockClock`], so
+    /// refill windows advance by an exact, controlled amount instead of by
+    /// wall-clock sleeping.
     #[must_use]
     pub fn with_clock(clock: Arc<dyn NanoClock>) -> Self {
         let last_refill_nanos = AtomicU64::new(clock_nanos(&*clock));
@@ -107,24 +112,25 @@ impl TokenBucket {
         clock_nanos(&*self.clock)
     }
 
-    /// Update the rate in raw tokens per second. Resets `available` to a
-    /// one-second burst at the new rate.
+    /// Updates the rate in raw tokens per second.
     ///
-    /// This is the primitive: the bucket counts tokens and does not care what a
-    /// token means. Callers metering a dimensioned quantity should reach for the
-    /// typed pair that says which — [`Self::set_byte_rate`] or
+    /// This method resets `available` to a one-second burst at the new rate.
+    ///
+    /// This is the primitive. The bucket counts tokens and does not know what a
+    /// token means. Callers that meter a dimensioned quantity should use the
+    /// typed pair that names the dimension: [`Self::set_byte_rate`] or
     /// [`Self::set_event_rate`].
     pub fn set_token_rate(&self, tokens_per_sec: u64) {
         self.set_token_rate_with_burst(tokens_per_sec, tokens_per_sec);
     }
 
-    /// Update the rate and independent burst capacity, both in raw tokens.
+    /// Updates the rate and the independent burst capacity, both in raw tokens.
     ///
-    /// The `{rate, burst, available, last_refill}` group is published as one
-    /// seqlock critical section: `generation` is bumped to an odd value before
-    /// the stores and to the next even value after, so a concurrent
-    /// `try_consume` that straddles the reset is forced to retry rather than
-    /// clobber the freshly reset `available` with a stale CAS.
+    /// This method publishes the `{rate, burst, available, last_refill}` group
+    /// as one seqlock critical section. It moves `generation` to an odd value
+    /// before the stores and to the next even value after them. A concurrent
+    /// `try_consume` that straddles the reset must thus try again, and it
+    /// cannot clobber the new `available` with a stale CAS.
     pub fn set_token_rate_with_burst(&self, new_rate: u64, burst: u64) {
         // Enter the write section (generation becomes odd).
         let gen_start = self.generation.fetch_add(1, Relaxed);
@@ -147,21 +153,22 @@ impl TokenBucket {
         self.rate_per_sec.load(Relaxed)
     }
 
-    /// The configured burst capacity in raw tokens — the most the bucket holds.
+    /// The configured burst capacity in raw tokens. This is the most the bucket
+    /// holds.
     #[must_use]
     pub fn token_burst(&self) -> u64 {
         self.burst.load(Relaxed)
     }
 
-    /// Update a byte throughput, bursting one second's worth.
+    /// Updates a byte throughput and bursts one second's worth.
     ///
-    /// The burst is `rate * DEFAULT_BURST_WINDOW`, which `uom` type-checks as a
-    /// [`ByteRate`] times a [`Time`] yielding a [`ByteSize`].
+    /// The burst is `rate * DEFAULT_BURST_WINDOW`. `uom` type-checks this as a
+    /// [`ByteRate`] times a [`Time`], which gives a [`ByteSize`].
     pub fn set_byte_rate(&self, new_rate: ByteRate) {
         self.set_byte_rate_with_burst(new_rate, (new_rate * DEFAULT_BURST_WINDOW).into());
     }
 
-    /// Update a byte throughput and an independent byte burst capacity.
+    /// Updates a byte throughput and an independent byte burst capacity.
     pub fn set_byte_rate_with_burst(&self, new_rate: ByteRate, burst: ByteSize) {
         self.set_token_rate_with_burst(rate_to_bytes_per_sec(new_rate), burst.bytes_u64());
     }
@@ -178,18 +185,18 @@ impl TokenBucket {
         ByteSize::from_bytes(self.token_burst())
     }
 
-    /// Update an event throughput — samples, records, requests — bursting one
-    /// second's worth.
+    /// Updates an event throughput, such as samples, records, or requests, and
+    /// bursts one second's worth.
     ///
-    /// A token here is one event, not one byte. Metering events through the byte
-    /// pair above would compile and would be wrong, which is the whole reason
-    /// these are separate.
+    /// A token here is one event, not one byte. If you meter events with the
+    /// byte pair above, the code compiles but the result is wrong. This is why
+    /// the two pairs are separate.
     pub fn set_event_rate(&self, new_rate: Frequency) {
         let per_sec = new_rate.per_sec_u64();
         self.set_token_rate_with_burst(per_sec, per_sec);
     }
 
-    /// Update an event throughput and an independent burst, in whole events.
+    /// Updates an event throughput and an independent burst, in whole events.
     pub fn set_event_rate_with_burst(&self, new_rate: Frequency, burst: u64) {
         self.set_token_rate_with_burst(new_rate.per_sec_u64(), burst);
     }
@@ -200,14 +207,17 @@ impl TokenBucket {
         Frequency::from_per_sec_u64(self.token_rate())
     }
 
-    /// Try to consume up to `requested` tokens. Returns the amount actually
-    /// granted. Rate-0 grants the full request.
+    /// Tries to consume up to `requested` tokens.
     ///
-    /// `rate` and `burst` are re-read inside the CAS loop under a seqlock
-    /// generation check so a concurrent [`Self::set_token_rate_with_burst`] reset that
-    /// straddles this call's refill-claim and CAS commit can never be applied
-    /// non-atomically: an odd or mismatched generation forces a retry, and on
-    /// retry the refill gap is re-claimed against the post-reset `last_refill`.
+    /// This method returns the amount actually granted. Rate-0 grants the full
+    /// request.
+    ///
+    /// The method re-reads `rate` and `burst` inside the CAS loop under a
+    /// seqlock generation check. A concurrent
+    /// [`Self::set_token_rate_with_burst`] reset that straddles this call's
+    /// refill-claim and CAS commit can thus never apply non-atomically. An odd
+    /// or mismatched generation forces a retry. On retry, the method claims the
+    /// refill gap again against the post-reset `last_refill`.
     /// # Panics
     /// Panics if validated compression or rate-limit state contains an impossible size or time value.
     pub fn try_consume(&self, requested: u64) -> u64 {
@@ -274,8 +284,10 @@ impl Default for TokenBucket {
     }
 }
 
-/// Broker-wide throttle state. Two buckets: outbound when this broker is leader,
-/// inbound when this broker is follower.
+/// Broker-wide throttle state.
+///
+/// There are two buckets: outbound when this broker is leader, and inbound when
+/// this broker is follower.
 #[derive(Debug)]
 pub struct ThrottleState {
     pub leader_out: Arc<TokenBucket>,
@@ -316,8 +328,11 @@ mod tests {
     use super::*;
 
     /// Builds a bucket whose refill clock is a mock timeline anchored at the
-    /// Unix epoch. Returns the bucket alongside the [`MockTime`] handle so the
-    /// test can advance logical time with `mock.advance(..)` instead of sleeping.
+    /// Unix epoch.
+    ///
+    /// The function returns the bucket with the [`MockTime`] handle, so the
+    /// test can advance logical time with `mock.advance(..)` instead of
+    /// sleeping.
     fn mock_bucket() -> (Arc<TokenBucket>, MockTime) {
         let mock = MockTime::unix_epoch();
         let bucket = Arc::new(TokenBucket::with_clock(Arc::new(mock.clock())));

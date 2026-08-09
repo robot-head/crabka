@@ -6,13 +6,13 @@
 //! 1. Open a fresh `crabka_log::Log` at
 //!    `<target_log_dir>/<topic>-<partition>-future/`.
 //! 2. Spawn a per-move replicator task that reads batches from the
-//!    partition's current `Log` and appends them to the future log via
-//!    `Log::append_at`, preserving leader-assigned offsets.
+//!    partition's current `Log` and appends them to the future log with
+//!    `Log::append_at`, which keeps the leader-assigned offsets.
 //! 3. Once `future_log.LEO == current_log.LEO`, ask the partition
-//!    writer to swap atomically via `WriterMessage::SwapFutureLog`.
+//!    writer to swap atomically with `WriterMessage::SwapFutureLog`.
 //!
 //! The on-disk `*-future` directory is the only persisted state. A
-//! crash mid-move leaves it behind; broker startup re-discovers it via
+//! crash mid-move leaves it behind. Broker startup re-discovers it with
 //! `log_dir::scan_future` and re-spawns the replicator.
 
 use std::{
@@ -38,18 +38,18 @@ use crate::{
 /// One in-progress intra-broker log-dir move. Inserted into
 /// `Broker.future_logs` keyed by `(topic, partition)`.
 ///
-/// Fields are held to keep ownership of the future log alive and to
-/// allow `DescribeLogDirs` + future cancellation paths to consult the
-/// move's state through the registry; the writer task consumes them
-/// indirectly via the `SwapFutureLog` message, which Rust's dead-code
-/// pass can't see through.
+/// The struct holds these fields to keep ownership of the future log alive
+/// and to let `DescribeLogDirs` and future cancellation paths consult the
+/// move's state through the registry. The writer task consumes them
+/// indirectly through the `SwapFutureLog` message, which Rust's dead-code
+/// pass cannot see through.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct FutureLogState {
-    /// Parent `log.dir` the move targets — one of the broker's
-    /// configured `log.dirs`. Used by the handler to make a duplicate
+    /// Parent `log.dir` that the move targets. It is one of the broker's
+    /// configured `log.dirs`. The handler uses it to make a duplicate
     /// `AlterReplicaLogDirs` for the same `(topic, partition)`
-    /// idempotent (or reject a conflicting target).
+    /// idempotent, or to reject a conflicting target.
     pub target_log_dir: PathBuf,
     /// The future log's `<target>/<topic>-<partition>-future` path.
     pub future_path: PathBuf,
@@ -57,20 +57,20 @@ pub struct FutureLogState {
     /// `SwapFutureLog` writer message so all three hold the same
     /// `Arc<Mutex<Log>>`.
     pub future_log: Arc<Mutex<Log>>,
-    /// Cancelled by the swap to unwind the replicator task. Also
-    /// cancelled if a follow-up `AlterReplicaLogDirs` cancels an
-    /// in-progress move (not implemented; future work).
+    /// The swap cancels this to unwind the replicator task. A follow-up
+    /// `AlterReplicaLogDirs` that cancels an in-progress move would also
+    /// cancel it. That path is not implemented yet.
     pub cancel: CancellationToken,
     /// Kept alive so the replicator task is reaped when the entry is
     /// removed from the registry.
     pub task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
-/// Why a [`start_move`] / [`resume_move`] call could not be honoured.
-/// Translated to the wire error codes
+/// Why a [`start_move`] or [`resume_move`] call could not be honoured.
+/// The handler translates these to the wire error codes
 /// [`crate::codes::LOG_DIR_NOT_FOUND`],
-/// [`crate::codes::REPLICA_NOT_AVAILABLE`],
-/// [`crate::codes::KAFKA_STORAGE_ERROR`] by the handler.
+/// [`crate::codes::REPLICA_NOT_AVAILABLE`], and
+/// [`crate::codes::KAFKA_STORAGE_ERROR`].
 #[derive(Debug)]
 pub enum MoveError {
     /// Target path is not one of this broker's configured `log.dirs`.
@@ -78,12 +78,12 @@ pub enum MoveError {
     /// The named partition is not hosted on this broker.
     ReplicaNotAvailable,
     /// A different move is already in flight for this partition with
-    /// a different target. Matches Kafka — a second alter only takes
-    /// effect after the first move completes (or is cancelled).
+    /// a different target. This matches Kafka. A second alter takes
+    /// effect only after the first move completes or is cancelled.
     AlreadyMoving,
-    /// `crabka_log::Log::open` or `mkdir` failed while staging the
-    /// future log. The inner error is held for tracing / future use;
-    /// the handler maps every storage failure to `KAFKA_STORAGE_ERROR`
+    /// `crabka_log::Log::open` or `mkdir` failed during the staging of the
+    /// future log. The variant holds the inner error for tracing and future
+    /// use. The handler maps every storage failure to `KAFKA_STORAGE_ERROR`
     /// on the wire.
     Storage(#[allow(dead_code)] BrokerError),
 }
@@ -112,12 +112,12 @@ pub(crate) struct MovePolicy {
     pub read_chunk: ByteSize,
 }
 
-/// Start (or no-op-confirm) a move of `(topic, partition)` to
-/// `target_log_dir`. Returns immediately after spawning the replicator
-/// task; the `AlterReplicaLogDirs` handler can then ack success.
+/// Start a move of `(topic, partition)` to `target_log_dir`, or confirm an
+/// identical move as a no-op. Returns immediately after it spawns the
+/// replicator task, so the `AlterReplicaLogDirs` handler can then ack success.
 ///
-/// Idempotency: if a move with the same target is already in flight,
-/// returns `Ok(())` without spawning a second task. A move with a
+/// The call is idempotent. If a move with the same target is already in
+/// flight, it returns `Ok(())` and spawns no second task. A move with a
 /// *different* target returns `Err(MoveError::AlreadyMoving)`.
 pub(crate) fn start_move(
     partitions: &Arc<PartitionRegistry>,
@@ -180,10 +180,10 @@ pub(crate) fn start_move(
     Ok(())
 }
 
-/// Recover an interrupted move discovered on disk at broker startup
-/// (a `<topic>-<partition>-future` directory in a configured log.dir
-/// whose corresponding partition exists). Re-opens the future log
-/// and re-spawns the replicator, picking up at whatever offset the
+/// Recover an interrupted move that broker startup discovered on disk. Such a
+/// move is a `<topic>-<partition>-future` directory in a configured log.dir
+/// whose corresponding partition exists. This function re-opens the future log
+/// and re-spawns the replicator, which starts at whatever offset the
 /// future log already holds.
 pub(crate) fn resume_move(
     partitions: &Arc<PartitionRegistry>,
@@ -213,8 +213,8 @@ pub(crate) fn resume_move(
     Ok(())
 }
 
-/// Shared between [`start_move`] and [`resume_move`]: build the
-/// `FutureLogState`, insert it into the registry, and spawn the
+/// Shared by [`start_move`] and [`resume_move`]. It builds the
+/// `FutureLogState`, inserts it into the registry, and spawns the
 /// per-move replicator task.
 struct MoveTask {
     partitions: Arc<PartitionRegistry>,
@@ -255,8 +255,8 @@ fn spawn_move(task: MoveTask) {
     task.future_logs.insert((task.topic, task.partition), state);
 }
 
-/// Replicator task body: incrementally copy batches from
-/// `part.log` to `future_log`, then ask the partition writer to swap.
+/// Replicator task body. It copies batches from `part.log` to `future_log`
+/// incrementally, then asks the partition writer to swap.
 struct ReplicatorTask {
     part: Arc<Partition>,
     future_log: Arc<Mutex<Log>>,
@@ -370,10 +370,10 @@ async fn replicator_loop(task: ReplicatorTask) {
     future_logs.remove(&(topic, partition));
 }
 
-/// One catch-up iteration: read whatever the future log is missing,
-/// up to `read_chunk`, and append it. Returns whether the
-/// future log was caught up at the end of the iteration (i.e. nothing
-/// was read AND `future.LEO >= source.LEO`).
+/// One catch-up iteration. It reads whatever the future log is missing,
+/// up to `read_chunk`, and appends it. Returns `true` if the
+/// future log was caught up at the end of the iteration, that is, if it read
+/// nothing AND `future.LEO >= source.LEO`.
 struct CatchUpProgress {
     caught_up: bool,
 }
@@ -426,10 +426,10 @@ fn catch_up(
     Ok(CatchUpProgress { caught_up: false })
 }
 
-/// Canonicalize a path for equality comparisons; falls back to the
-/// lexical path when canonicalisation fails (the directory may not
-/// exist yet — fine for log-dir comparisons since we compare via the
-/// configured value as well).
+/// Canonicalize a path for equality comparisons. It falls back to the
+/// lexical path when canonicalisation fails, because the directory may not
+/// exist yet. That is correct for log-dir comparisons, because this code also
+/// compares against the configured value.
 fn canonicalize_or_self(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
@@ -503,7 +503,7 @@ mod tests {
     }
 
     /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>`
-    /// without going through `Broker::start`. Returns the parent dir
+    /// and do not use `Broker::start`. Returns the parent dir
     /// and the `Arc<Partition>`.
     fn fixture_partition(log_dir: &Path, topic: &str, partition: PartitionIndex) -> Arc<Partition> {
         let part_dir = log_dir::partition_dir(log_dir, topic, partition.get());

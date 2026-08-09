@@ -1,6 +1,6 @@
 //! KTable–KTable join processors and the `result` rule.
 //!
-//! Two processors work in tandem: `KTableKTableJoinThisProcessor` is placed on
+//! Two processors work together: `KTableKTableJoinThisProcessor` is placed on
 //! the "this" (left) `KTable` side, and `KTableKTableJoinOtherProcessor` on the
 //! "other" (right) side. Each reads the *other* side's current value from a
 //! connected state store and applies the join.
@@ -55,13 +55,14 @@ impl JoinKind {
     }
 }
 
-/// Returns `Some(VR)` iff the join row exists for `(a, b)` under `kind`; else
-/// `None` (tombstone).
+/// Returns `Some(VR)` if and only if the join row exists for `(a, b)` under
+/// `kind`. Otherwise it returns `None`, a tombstone.
 ///
 /// Rules:
-/// - If `kind.a_required` and `a` is absent → `None`.
-/// - If `kind.b_required` and `b` is absent → `None`.
-/// - If both `a` and `b` are absent → `None` (outer still needs at least one).
+/// - If `kind.a_required` and `a` is absent, the result is `None`.
+/// - If `kind.b_required` and `b` is absent, the result is `None`.
+/// - If both `a` and `b` are absent, the result is `None`. Outer still needs at
+///   least one side.
 pub(crate) fn result<VA, VB, VR, F>(
     kind: JoinKind,
     joiner: &F,
@@ -77,22 +78,23 @@ where
     if present { Some(joiner(a, b)) } else { None }
 }
 
-/// Processor placed on the **"this"** (left/`VA`) side of a KTable–KTable join.
+/// Processor placed on the **"this"** (left, `VA`) side of a KTable–KTable join.
 ///
-/// Reads `b_cur` from the connected `other_store` (keyed by `K`, holding `VB`)
-/// and forwards a `Change<VR>` for every input `Change<VA>`.
+/// It reads `b_cur` from the connected `other_store`, which is keyed by `K` and
+/// holds `VB`. It then forwards a `Change<VR>` for every input `Change<VA>`.
 pub(crate) struct KTableKTableJoinThisProcessor<K, VA, VB, VR, F> {
     pub other_store: String,
     pub joiner: F,
     pub kind: JoinKind,
-    /// `Some(store)` when *this* input side is versioned (KIP-914): the join
-    /// suppresses out-of-order changes (record ts older than this store's latest
-    /// `valid_from`). `None` = non-versioned side, never suppresses.
+    /// `Some(store)` when *this* input side is versioned (KIP-914). The join then
+    /// suppresses an out-of-order change, which is a record whose ts is older
+    /// than this store's latest `valid_from`. `None` means a non-versioned side,
+    /// and it never suppresses.
     pub self_versioned_store: Option<String>,
-    /// `true` when the OTHER side's store (`other_store`, holding `VB`) is a
-    /// `VersionedBytesStore` (KIP-914): the latest-value read must go through
-    /// `get_versioned_store` rather than `get_state_store` (which only
-    /// downcasts to a plain `KeyValueBytesStore`).
+    /// `true` when the OTHER side's store, `other_store`, holds `VB` in a
+    /// `VersionedBytesStore` (KIP-914). The latest-value read must then go
+    /// through `get_versioned_store`, not through `get_state_store`, because
+    /// `get_state_store` only downcasts to a plain `KeyValueBytesStore`.
     pub other_is_versioned: bool,
     pub _pd: Marker<(K, VA, VB, VR)>,
 }
@@ -159,22 +161,24 @@ where
     }
 }
 
-/// Processor placed on the **"other"** (right/`VB`) side of a KTable–KTable join.
+/// Processor placed on the **"other"** (right, `VB`) side of a KTable–KTable
+/// join.
 ///
-/// Reads `a_cur` from the connected `other_store` (keyed by `K`, holding `VA`)
-/// and forwards a `Change<VR>` for every input `Change<VB>`.
+/// It reads `a_cur` from the connected `other_store`, which is keyed by `K` and
+/// holds `VA`. It then forwards a `Change<VR>` for every input `Change<VB>`.
 pub(crate) struct KTableKTableJoinOtherProcessor<K, VA, VB, VR, F> {
     pub other_store: String,
     pub joiner: F,
     pub kind: JoinKind,
-    /// `Some(store)` when *this* input side is versioned (KIP-914): the join
-    /// suppresses out-of-order changes (record ts older than this store's latest
-    /// `valid_from`). `None` = non-versioned side, never suppresses.
+    /// `Some(store)` when *this* input side is versioned (KIP-914). The join then
+    /// suppresses an out-of-order change, which is a record whose ts is older
+    /// than this store's latest `valid_from`. `None` means a non-versioned side,
+    /// and it never suppresses.
     pub self_versioned_store: Option<String>,
-    /// `true` when the OTHER side's store (`other_store`, holding `VA`) is a
-    /// `VersionedBytesStore` (KIP-914): the latest-value read must go through
-    /// `get_versioned_store` rather than `get_state_store` (which only
-    /// downcasts to a plain `KeyValueBytesStore`).
+    /// `true` when the OTHER side's store, `other_store`, holds `VA` in a
+    /// `VersionedBytesStore` (KIP-914). The latest-value read must then go
+    /// through `get_versioned_store`, not through `get_state_store`, because
+    /// `get_state_store` only downcasts to a plain `KeyValueBytesStore`.
     pub other_is_versioned: bool,
     pub _pd: Marker<(K, VA, VB, VR)>,
 }
@@ -394,8 +398,8 @@ mod tests {
         check!(buffer.is_empty());
     }
 
-    /// Inner join with empty store (no `"k"`): process an insert of `"A"`.
-    /// Should NOT forward — inner requires both sides present.
+    /// Inner join with an empty store (no `"k"`): process an insert of `"A"`.
+    /// It must NOT forward, because inner needs both sides present.
     #[tokio::test]
     async fn inner_join_empty_store_no_forward() {
         let mut stores = make_stores_with_b(None).await;
@@ -529,9 +533,9 @@ mod tests {
 
     /// Both sides versioned: the OTHER store "b" is a `VersionedBytesStore` whose
     /// latest value is "B". With `other_is_versioned: true` the This-processor must
-    /// read that latest value via `get_versioned_store` and emit a join row.
-    /// (Regression for KIP-914: a plain `get_state_store` downcast returns `None`
-    /// for a versioned store, so the inner join would emit nothing.)
+    /// read that latest value with `get_versioned_store` and emit a join row.
+    /// This is a regression test for KIP-914. A plain `get_state_store` downcast
+    /// returns `None` for a versioned store, so the inner join would emit nothing.
     #[tokio::test]
     async fn versioned_other_read_forwards_join() {
         let mut stores = StoreRegistry::default();

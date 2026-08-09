@@ -1,21 +1,21 @@
 //! How a WAL apply joins the trace of the commit that produced it.
 //!
-//! The relationship is an OpenTelemetry **link**, never a parent, and the
-//! assertions here are written to make an accidental "fix" back to
-//! `set_remote_parent` fail loudly: every test that checks for a link also
-//! checks that the apply span is *not* a child of the remote span and does not
-//! share its trace. Without that second half, a parented span would satisfy a
-//! links-only assertion just as well.
+//! The relationship is an OpenTelemetry **link**, never a parent. The
+//! assertions here make an accidental change back to `set_remote_parent` fail
+//! loudly. Every test that checks for a link also checks that the apply span is
+//! *not* a child of the remote span and does not share its trace. Without that
+//! second check, a parented span would satisfy a links-only assertion just as
+//! well.
 //!
-//! Why links: a replay at recovery can run hours after the commit; one commit
-//! fans out to every follower, every checkpoint service, and every future
-//! replay; and under `ParentBased` sampling a sampled remote parent would force
-//! export of every apply of every sampled write, forever.
+//! There are three reasons for links. A replay at recovery can run hours after
+//! the commit. One commit goes to every follower, every checkpoint service, and
+//! every future replay. Under `ParentBased` sampling, a sampled remote parent
+//! would force export of every apply of every sampled write, forever.
 //!
 //! Harness rules, both load-bearing:
 //!
-//! - Assert on exported [`SpanData`], never on a live `tracing::Span` — parent,
-//!   status, trace id and links are all resolved at close.
+//! - Assert on exported [`SpanData`], never on a live `tracing::Span`. Parent,
+//!   status, trace id, and links are all resolved at close.
 //! - Install the propagator as well as the subscriber. Without
 //!   `set_text_map_propagator`, header extraction silently yields nothing and
 //!   every propagation assertion passes vacuously.
@@ -39,8 +39,8 @@ use tempfile::TempDir;
 use tracing::Instrument as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 
-/// Serialises the tests: they share one process-wide subscriber and one
-/// in-memory exporter, and each drains everything the previous test left.
+/// Serialises the tests. They share one process-wide subscriber and one
+/// in-memory exporter, and each test drains everything the previous test left.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 static TRACING: OnceLock<(SdkTracerProvider, InMemorySpanExporter)> = OnceLock::new();
@@ -133,9 +133,9 @@ fn exported_apply(span: tracing::Span) -> SpanData {
     only(&spans, "gres.wal_apply").clone()
 }
 
-/// The batch is the unit of linking, so a batch of a thousand records from one
-/// commit must produce one link — and a batch spanning more traces than the cap
-/// must stop at the cap rather than exporting a link per record.
+/// The batch is the unit of linking. A batch of a thousand records from one
+/// commit must produce one link. A batch that spans more traces than the cap
+/// must stop at the cap and must not export a link per record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn links_are_deduplicated_by_trace_and_capped() {
     let _serial = SERIAL.lock().await;
@@ -171,9 +171,9 @@ async fn links_are_deduplicated_by_trace_and_capped() {
     check!(linked == expected);
 }
 
-/// Records with no trace headers must yield a span with no links at all — not
-/// a link built from an empty or invalid context, which would point a backend
-/// at a trace that does not exist.
+/// Records with no trace headers must yield a span with no links at all. A link
+/// built from an empty or invalid context would point a backend at a trace that
+/// does not exist.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_untraced_batch_gets_a_span_with_no_links() {
     let _serial = SERIAL.lock().await;
@@ -198,9 +198,9 @@ async fn an_untraced_batch_gets_a_span_with_no_links() {
     check!(attribute(&apply, "pg.wal.source") == Some(&Value::String("follower_bootstrap".into())));
 }
 
-/// The decisive test: a commit made under a caller's trace, then replayed by a
-/// second recovery, must show up on the apply span as a **link** — and the
-/// apply must be in its own trace, not a child of the commit.
+/// The decisive test. A commit made under a caller's trace, then replayed by a
+/// second recovery, must appear on the apply span as a **link**. The apply must
+/// be in its own trace and must not be a child of the commit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_replayed_commit_is_linked_from_the_apply_span_and_never_parented() {
     let _serial = SERIAL.lock().await;

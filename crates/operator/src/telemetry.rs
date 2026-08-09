@@ -8,18 +8,21 @@ use prometheus_client::{
 };
 use tokio::sync::Mutex;
 
-/// Shared Prometheus registry. Wrap in `Arc<Mutex<…>>` because
-/// `prometheus-client` requires `&mut Registry` to register metrics
-/// and we want controllers to register lazily on first reconcile.
+/// Shared Prometheus registry. Wrap it in `Arc<Mutex<…>>`, because
+/// `prometheus-client` needs `&mut Registry` to register metrics and the
+/// controllers register lazily on the first reconcile.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
-/// `{kind, result}` label for the reconcile-outcome counter. `kind` is the
-/// CRD kind (`Kafka`, `KafkaNodePool`, `KafkaTopic`, …); `result` is one of
-/// `ok` (reconcile returned an `Action` without error), `error` (reconcile
-/// returned `Err`), or `requeue` (a caller explicitly classified a
-/// surfaced-not-ready / invalid-spec short-circuit — see [`ReconcileResult`]).
-/// The per-kind `reconcile` wrappers auto-classify `ok`/`error`; the `requeue`
-/// value is reserved for call sites that record it deliberately.
+/// `{kind, result}` label for the reconcile-outcome counter. `kind` is the CRD
+/// kind, such as `Kafka`, `KafkaNodePool`, and `KafkaTopic`. `result` is one of
+/// three values. `ok` means the reconcile returned an `Action` without an
+/// error. `error` means the reconcile returned `Err`. `requeue` means a caller
+/// classified a surfaced-not-ready or invalid-spec short-circuit. See
+/// [`ReconcileResult`].
+///
+/// The per-kind `reconcile` wrappers classify `ok` and `error` automatically.
+/// The `requeue` value is reserved for call sites that record it
+/// deliberately.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ReconcileOutcomeLabels {
     pub kind: String,
@@ -38,11 +41,11 @@ pub struct KindLabel {
 pub enum ReconcileResult {
     /// Reconcile completed a full pass (resources applied, `Ready` derived).
     Ok,
-    /// Reconcile returned `Err` — surfaced through the controller's error
-    /// policy (requeue-with-backoff).
+    /// Reconcile returned `Err`. The controller's error policy surfaces it as
+    /// a requeue with backoff.
     Error,
-    /// Reconcile returned a requeue `Action` after writing a not-ready /
-    /// invalid-spec condition, rather than erroring.
+    /// Reconcile returned a requeue `Action` after it wrote a not-ready or
+    /// invalid-spec condition, and it did not return an error.
     Requeue,
 }
 
@@ -56,31 +59,34 @@ impl ReconcileResult {
     }
 }
 
-/// Cheaply-clonable bundle of operator-wide controller metrics. Handles are
-/// `Arc`-backed inside `prometheus-client`, so cloning the bundle into every
-/// per-reconciler [`crate::context::Context`] is a handful of `Arc::clone`s.
+/// Cheaply-clonable bundle of operator-wide controller metrics. The handles
+/// are `Arc`-backed inside `prometheus-client`, so a clone of the bundle into
+/// every per-reconciler [`crate::context::Context`] costs a few `Arc::clone`
+/// calls.
 ///
-/// Metric names are registered WITHOUT the `_total` suffix — `prometheus-client`
-/// appends it to `Counter`s at encode time — and WITHOUT a crate prefix (the
-/// shared [`Registry`] carries the `crabka_operator` prefix).
+/// The operator registers the metric names WITHOUT the `_total` suffix,
+/// because `prometheus-client` appends that suffix to `Counter`s at encode
+/// time. The operator also registers them WITHOUT a crate prefix, because the
+/// shared [`Registry`] carries the `crabka_operator` prefix.
 #[derive(Clone)]
 pub struct ControllerMetrics {
-    /// `reconciliations_total{kind,result}` — reconcile passes by CRD kind and
-    /// outcome (`ok` / `error` / `requeue`).
+    /// `reconciliations_total{kind,result}`: reconcile passes by CRD kind and
+    /// outcome, which is `ok`, `error`, or `requeue`.
     pub reconciliations: Family<ReconcileOutcomeLabels, Counter>,
-    /// `reconcile_duration_seconds{kind}` — wall-clock duration of one full
+    /// `reconcile_duration_seconds{kind}`: wall-clock duration of one full
     /// reconcile pass, per CRD kind.
     pub reconcile_duration: Family<KindLabel, Histogram>,
-    /// `managed_resources{kind}` — last-observed count of primary CRs the
-    /// operator reconciled in the most recent pass of each kind (a coarse
-    /// liveness/ownership signal; set, not accumulated).
+    /// `managed_resources{kind}`: last-observed count of primary CRs that the
+    /// operator reconciled in the most recent pass of each kind. This is a
+    /// coarse liveness and ownership signal. The operator sets it and does not
+    /// accumulate it.
     pub managed_resources: Family<KindLabel, Gauge>,
 }
 
 impl ControllerMetrics {
     /// Register every controller metric against `registry` and return the
-    /// handle bundle. Call once against the process registry before wrapping it
-    /// in the shared `Mutex`.
+    /// handle bundle. Call it once against the process registry before you wrap
+    /// the registry in the shared `Mutex`.
     #[must_use]
     pub fn register(registry: &mut Registry) -> Self {
         let reconciliations = Family::<ReconcileOutcomeLabels, Counter>::default();
@@ -145,9 +151,9 @@ impl ControllerMetrics {
     }
 }
 
-/// Initialise the global `tracing` subscriber. Idempotent: silently
-/// no-ops if a global subscriber is already installed (e.g., in tests
-/// that call this more than once across a process).
+/// Initialise the global `tracing` subscriber. This function is idempotent. It
+/// does nothing if a global subscriber is already installed, for example in
+/// tests that call it more than once in one process.
 // cargo-mutants: installs a process-global subscriber via idempotent try_init;
 // no return value or per-call observable effect to assert.
 #[cfg_attr(test, mutants::skip)]
@@ -161,16 +167,17 @@ pub fn init_tracing(filter: &str) {
         .try_init();
 }
 
-/// Build a fresh registry. Callers wrap in `Arc<Mutex<…>>`.
+/// Build a fresh registry. Callers wrap it in `Arc<Mutex<…>>`.
 #[must_use]
 pub fn new_registry() -> Registry {
     Registry::with_prefix("crabka_operator")
 }
 
 /// Build a fresh registry with the controller metrics already registered.
-/// Returns the registry (to be wrapped in `Arc<Mutex<…>>` for the `/metrics`
-/// exporter) alongside the cloneable [`ControllerMetrics`] handle bundle (to be
-/// threaded into every reconciler's [`crate::context::Context`]).
+///
+/// Returns the registry and the cloneable [`ControllerMetrics`] handle bundle.
+/// Wrap the registry in `Arc<Mutex<…>>` for the `/metrics` exporter. Thread the
+/// handle bundle into every reconciler's [`crate::context::Context`].
 #[must_use]
 pub fn new_registry_with_metrics() -> (Registry, ControllerMetrics) {
     let mut registry = new_registry();

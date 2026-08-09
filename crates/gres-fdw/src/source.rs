@@ -2,10 +2,10 @@
 //!
 //! Phase-1 contract:
 //! * [`scan_topic`] materialises all records between a per-partition start
-//!   offset (inclusive) and the high-water mark that was snapshotted at the
-//!   beginning of the scan (exclusive), using `READ_COMMITTED` isolation.
+//!   offset (inclusive) and the high-water mark that the scan snapshotted at
+//!   its start (exclusive). It uses `READ_COMMITTED` isolation.
 //! * [`plan_fetch`] is a pure helper that maps `(earliest, hwm, partition,
-//!   bounds)` → [`FetchPlan`]; it is unit-tested independently of any broker.
+//!   bounds)` → [`FetchPlan`]. Its unit tests need no broker.
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
@@ -27,7 +27,7 @@ use crate::{config::ConnProfile, error::KafkaFdwError};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
-/// A single Kafka record decoded from a raw fetch, before schema-aware decoding.
+/// A single Kafka record decoded from a raw fetch, before the schema-aware decode.
 #[derive(Debug, Clone)]
 pub struct RawRecord {
     /// Partition this record came from.
@@ -65,18 +65,20 @@ pub struct FetchPlan {
 
 // ── Pure boundary math ────────────────────────────────────────────────────────
 
-/// Compute the fetch plan for one partition.
+/// Computes the fetch plan for one partition.
 ///
-/// * `start = max(earliest, start_offset_for_partition)` — clamp to what the
-///   caller asked for, but never below the partition's earliest retained offset.
-/// * `stop  = min(hwm,      end_offset_for_partition)`   — clamp to the HWM
-///   snapshotted at scan-start; never read past the mark in effect when the
-///   scan started.
-/// * `max_records` — taken from the `ScanBounds::end_offsets` map when the
-///   stop offset is a tight bound (i.e. `end_offsets` is non-empty for this
-///   partition).  `None` otherwise.
+/// * `start = max(earliest, start_offset_for_partition)`. This clamps to what
+///   the caller asked for, but never below the partition's earliest retained
+///   offset.
+/// * `stop  = min(hwm,      end_offset_for_partition)`. This clamps to the HWM
+///   snapshotted at scan start. The scan never reads past the mark in effect
+///   when it started.
+/// * `max_records` comes from the `ScanBounds::end_offsets` map when the stop
+///   offset is a tight bound, that is when `end_offsets` is non-empty for this
+///   partition. It is `None` otherwise.
 ///
-/// The function is **pure** (no I/O) and is the TDD gate for offset clamping.
+/// The function is **pure** and does no I/O. It is the TDD gate for offset
+/// clamping.
 #[must_use]
 pub fn plan_fetch(earliest: i64, hwm: i64, partition: i32, bounds: &ScanBounds) -> FetchPlan {
     // Resolve per-partition start offset from `bounds.start_offsets`.
@@ -154,7 +156,7 @@ impl Default for FdwScanPolicy {
 }
 
 impl FdwScanPolicy {
-    /// Validate protocol-representable positive values.
+    /// Validates protocol-representable positive values.
     ///
     /// # Errors
     /// Returns an error for non-positive, non-finite or unrepresentable values.
@@ -190,17 +192,19 @@ impl FdwScanPolicy {
     }
 }
 
-/// Materialise a bounded snapshot of `topic` into a flat `Vec<RawRecord>`.
+/// Materialises a bounded snapshot of `topic` into a flat `Vec<RawRecord>`.
 ///
 /// # Behaviour
-/// 1. Installs the rustcrypto TLS provider (idempotent).
-/// 2. Resolves partition metadata via `AdminClient`.
+/// 1. Installs the rustcrypto TLS provider. The install is idempotent.
+/// 2. Resolves partition metadata with `AdminClient`.
 /// 3. Opens a **single** [`Connection`] to the first bootstrap address and
 ///    reuses it for both the `ListOffsets` RPCs and the per-partition fetch
-///    loop — no second connect, no `Client`/`ApiVersionsRequest` probe.
-/// 4. For each partition (filtered by `bounds.start_offsets`/`end_offsets` when
-///    non-empty), the batched `ListOffsets` RPCs supply the earliest retained
-///    offset and the current high-water mark.
+///    loop. There is no second connect and no `Client` or
+///    `ApiVersionsRequest` probe.
+/// 4. For each partition, the batched `ListOffsets` RPCs supply the earliest
+///    retained offset and the current high-water mark.
+///    `bounds.start_offsets` and `bounds.end_offsets` filter the partitions
+///    when they are non-empty.
 /// 5. Computes a [`FetchPlan`] per partition and loops
 ///    `fetch_partition_with_isolation` until the plan is exhausted.
 /// 6. Returns all records in (partition, offset) order.
@@ -225,7 +229,7 @@ pub async fn scan_topic(
     .await
 }
 
-/// Materialise a bounded snapshot with an explicit broker DNS deadline.
+/// Materialises a bounded snapshot with an explicit broker DNS deadline.
 ///
 /// # Errors
 /// Returns [`KafkaFdwError`] on transport failures, unknown topics, or broker
@@ -510,7 +514,7 @@ pub(crate) async fn scan_topic_with_policy(
     Ok(records)
 }
 
-/// Resolve the first address within the configured DNS deadline.
+/// Resolves the first address within the configured DNS deadline.
 async fn lookup_first<F, I>(
     host_port: &str,
     dns_timeout: crabka_client_core::ClientDnsTimeout,
@@ -534,13 +538,12 @@ where
         .ok_or_else(|| KafkaFdwError::Other(format!("no addresses for {host_port}")))
 }
 
-/// Open a single raw [`Connection`] to the first bootstrap address.
+/// Opens a single raw [`Connection`] to the first bootstrap address.
 ///
-/// `fetch_partition_with_isolation` requires a `&Connection`, and `Connection`
-/// also serves the `ListOffsets` RPCs via [`Connection::send`], so one
-/// connection covers the whole scan. (`Client` exposes neither a fetch method
-/// nor its underlying `Connection`, so there is nothing to be gained by also
-/// building a `Client`.)
+/// `fetch_partition_with_isolation` needs a `&Connection`, and `Connection`
+/// also serves the `ListOffsets` RPCs through [`Connection::send`], so one
+/// connection covers the whole scan. `Client` exposes neither a fetch method
+/// nor its underlying `Connection`, so a second `Client` would add nothing.
 async fn open_connection(
     profile: &ConnProfile,
     dns_timeout: crabka_client_core::ClientDnsTimeout,
@@ -562,7 +565,7 @@ async fn open_connection(
     .map_err(|e| KafkaFdwError::Other(format!("connect to {host_port}: {e}")))
 }
 
-/// The scan connection's knobs.
+/// The scan connection's settings.
 fn connection_options(
     profile: &ConnProfile,
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
@@ -601,9 +604,9 @@ mod tests {
 
     // ── Verbatim test from task brief (adapted to actual ScanBounds) ──────
 
-    /// Adapted from the task-8 brief: partition hwm=100, earliest=0;
-    /// bounds request start at offset 10 for partition 0; no end bound.
-    /// Expected: start=10, stop=100 (hwm), `max_records=None`.
+    /// Partition hwm=100, earliest=0. The bounds request a start at offset
+    /// 10 for partition 0, with no end bound. Expected: start=10, stop=100
+    /// (hwm), `max_records=None`.
     #[test]
     fn offset_bounds_clamp_to_hwm() {
         let plan = plan_fetch(0, 100, 0, &bounds_with(vec![(0, 10)], vec![]));
@@ -617,7 +620,7 @@ mod tests {
 
     // ── Additional coverage ───────────────────────────────────────────────
 
-    /// No bounds at all → scan from earliest to hwm.
+    /// No bounds at all: the scan runs from earliest to hwm.
     #[test]
     fn no_bounds_scans_full_range() {
         let plan = plan_fetch(5, 200, 0, &ScanBounds::default());
@@ -626,7 +629,7 @@ mod tests {
         assert_eq!(plan.max_records, None);
     }
 
-    /// `offset_lo` above hwm → empty range (start >= stop).
+    /// `offset_lo` above hwm gives an empty range, where start >= stop.
     #[test]
     fn start_offset_above_hwm_gives_empty_range() {
         let plan = plan_fetch(0, 50, 0, &bounds_with(vec![(0, 99)], vec![]));
@@ -639,7 +642,7 @@ mod tests {
         );
     }
 
-    /// `offset_lo` below earliest → clamped up to earliest.
+    /// `offset_lo` below earliest clamps up to earliest.
     #[test]
     fn start_offset_below_earliest_clamps_up() {
         let plan = plan_fetch(10, 100, 0, &bounds_with(vec![(0, 2)], vec![]));
@@ -658,7 +661,7 @@ mod tests {
         assert_eq!(plan.max_records, Some(40));
     }
 
-    /// End bound above hwm → clamped to hwm.
+    /// End bound above hwm clamps to hwm.
     #[test]
     fn end_offset_above_hwm_clamps_to_hwm() {
         let plan = plan_fetch(0, 50, 0, &bounds_with(vec![], vec![(0, 200)]));
@@ -679,7 +682,7 @@ mod tests {
         assert_eq!(plan.max_records, None);
     }
 
-    /// Both start and end offsets set → narrow range.
+    /// Both start and end offsets set: the range narrows.
     #[test]
     fn both_start_and_end_offset_set() {
         let plan = plan_fetch(0, 100, 0, &bounds_with(vec![(0, 20)], vec![(0, 60)]));

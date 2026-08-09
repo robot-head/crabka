@@ -1,4 +1,4 @@
-//! Per-partition metric scraper. Spawned from the binary entry when
+//! Per-partition metric scraper. The binary entry spawns it when
 //! `--metrics-scrape-targets` is non-empty.
 
 pub mod parse;
@@ -20,25 +20,27 @@ pub use window::{UsageStore, Window, WindowConfig};
 
 /// Edge-triggered log level for a scrape outcome.
 ///
-/// The scraper polls each target every interval; logging every failure of a
-/// permanently-dead target floods the log. Instead we emit a `Warn` on the
-/// transition from "ok or unknown" → "failed", a `Recovered` (info) on the
-/// transition from "failed" → "ok", and a quiet `Debug` for steady states.
+/// The scraper polls each target every interval, and a log line for every
+/// failure of a permanently dead target floods the log. The scraper therefore
+/// emits a `Warn` on the transition from "ok or unknown" to "failed", a
+/// `Recovered` at info level on the transition from "failed" to "ok", and a
+/// quiet `Debug` for steady states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrapeLogLevel {
-    /// First-time failure (previous state was Ok or unknown). Emit at WARN.
+    /// First failure, where the previous state was Ok or unknown. Emit at
+    /// WARN.
     Warn,
-    /// Recovery from a previously-failed state. Emit at INFO.
+    /// Recovery from a previously failed state. Emit at INFO.
     Recovered,
-    /// Steady state (ok→ok or fail→fail). Emit at DEBUG.
+    /// Steady state, either ok to ok or fail to fail. Emit at DEBUG.
     Debug,
 }
 
 /// Decide how loudly to log a scrape outcome, given the previous outcome.
 ///
-/// `prev` is `None` on first observation, `Some(true)` if the last scrape
-/// succeeded, `Some(false)` if it failed. `current` is the outcome of this
-/// scrape (`true` = ok, `false` = failed).
+/// `prev` is `None` on the first observation, `Some(true)` if the last scrape
+/// succeeded, and `Some(false)` if it failed. `current` is the outcome of this
+/// scrape: `true` for ok and `false` for failed.
 #[must_use]
 pub fn classify(prev: Option<bool>, current: bool) -> ScrapeLogLevel {
     match (prev, current) {
@@ -57,9 +59,9 @@ pub struct Scraper {
     store: Arc<UsageStore>,
     http: reqwest::Client,
     shutdown: CancellationToken,
-    /// Per-broker last-scrape outcome for edge-triggered logging.
-    /// Pruned each tick: brokers that disappear from `source.current()`
-    /// are dropped on the next iteration.
+    /// Per-broker last-scrape outcome for edge-triggered logging. Each tick
+    /// prunes the map: it drops brokers that disappeared from
+    /// `source.current()` on the next iteration.
     last_ok: HashMap<i32, bool>,
 }
 
@@ -205,7 +207,8 @@ impl Scraper {
     }
 }
 
-/// Outcome of a single scrape attempt, captured before we decide log level.
+/// Outcome of a single scrape attempt, captured before the log level is
+/// decided.
 enum Outcome {
     Ok { count: usize },
     BodyReadFailed(String),

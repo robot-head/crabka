@@ -1,6 +1,7 @@
-//! End-to-end: a hand-crafted Produce v0 request goes through up-conversion
-//! and lands on disk as a v2 `RecordBatch`. Fetching back via the typed client
-//! (whatever version it negotiates) should return the key/value we sent.
+//! End-to-end test. A hand-crafted Produce v0 request goes through
+//! up-conversion and lands on disk as a v2 `RecordBatch`. A fetch back through
+//! the typed client, at whatever version it negotiates, must return the key and
+//! value that the test sent.
 
 use assert2::assert;
 mod support;
@@ -31,9 +32,9 @@ use tokio::{
 
 // ── Raw TCP wire helpers ──────────────────────────────────────────────────────
 
-/// Build a v0 `MessageSet` containing one record per `(key, value)` pair.
-/// Uses `crabka_records_legacy::encode_flat_message_set` so we don't
-/// hand-roll CRC logic.
+/// Build a v0 `MessageSet` that contains one record per `(key, value)` pair.
+/// It uses `crabka_records_legacy::encode_flat_message_set`, so this file does
+/// not hand-roll the CRC logic.
 fn build_v0_messageset(pairs: &[(&str, &str)]) -> Bytes {
     let records: Vec<ParsedRecord> = pairs
         .iter()
@@ -51,11 +52,12 @@ fn build_v0_messageset(pairs: &[(&str, &str)]) -> Bytes {
 }
 
 /// Send a single length-prefixed request frame and return the response body
-/// bytes (`correlation_id` and any response-header bytes already stripped).
+/// bytes. The `correlation_id` and any response-header bytes are already
+/// stripped.
 ///
-/// For Produce v0 the request is non-flexible: the request header has no
-/// trailing tagged-fields byte, and the response header is v0 (4-byte
-/// `correlation_id` only, no tagged-fields byte).
+/// For Produce v0 the request is non-flexible. The request header has no
+/// trailing tagged-fields byte, and the response header is v0, with a 4-byte
+/// `correlation_id` only and no tagged-fields byte.
 async fn round_trip_v0(
     stream: &mut TcpStream,
     api_key: i16,
@@ -93,8 +95,8 @@ async fn round_trip_v0(
 
 // ── Topic helpers ─────────────────────────────────────────────────────────────
 
-/// Send a Metadata request to learn the topic's UUID (needed for Fetch on
-/// high versions that use `topic_id`).
+/// Send a Metadata request to learn the topic's UUID. Fetch needs it at the
+/// high versions that use `topic_id`.
 async fn topic_id_for(
     client: &crabka_client_core::Client,
     name: &str,

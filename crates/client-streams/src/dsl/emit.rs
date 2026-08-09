@@ -1,13 +1,15 @@
-//! `EmitStrategy` — when a windowed aggregation forwards results. Mirrors the JVM
-//! `org.apache.kafka.streams.kstream.EmitStrategy`: `on_window_update()` (the
-//! default, emit on every update) vs `on_window_close()` (emit each window's final
-//! result once stream-time passes its close).
+//! `EmitStrategy` sets when a windowed aggregation forwards its results. It
+//! mirrors the JVM `org.apache.kafka.streams.kstream.EmitStrategy`.
+//! `on_window_update()` is the default and emits on every update.
+//! `on_window_close()` emits each window's final result once stream-time passes
+//! that window's close.
 //!
-//! Carried as a `Copy` field on the windowed handles and threaded into the
-//! aggregate processors at lowering. It changes ONLY runtime forwarding behavior —
-//! the lowered topology (node kind, store registration, names) is identical for
-//! both strategies, matching the JVM (one `KStreamWindowAggregate` class
-//! parameterized by `EmitStrategy`).
+//! The windowed handles carry it as a `Copy` field, and the lowering threads it
+//! into the aggregate processors. It changes ONLY the runtime forwarding
+//! behavior. The lowered topology, that is the node kind, the store
+//! registration, and the names, is identical for both strategies. This matches
+//! the JVM, which has one `KStreamWindowAggregate` class parameterized by
+//! `EmitStrategy`.
 
 /// When a windowed aggregation forwards its results downstream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,7 +24,7 @@ enum EmitKind {
 }
 
 impl EmitStrategy {
-    /// Emit on every update (the default).
+    /// Emit on every update. This is the default.
     #[must_use]
     pub fn on_window_update() -> Self {
         Self {
@@ -38,8 +40,8 @@ impl EmitStrategy {
         }
     }
 
-    /// True for the emit-on-update (default) strategy. Aggregate processors guard
-    /// their per-update `ctx.forward` with this.
+    /// True for the emit-on-update strategy, which is the default. The aggregate
+    /// processors guard their per-update `ctx.forward` with this method.
     pub(crate) fn is_on_update(self) -> bool {
         matches!(self.kind, EmitKind::OnWindowUpdate)
     }

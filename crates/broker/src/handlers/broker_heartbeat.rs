@@ -174,7 +174,8 @@ fn encode_response(version: i16, resp: &BrokerHeartbeatResponse) -> Result<Bytes
 }
 
 /// `ClusterAction` on `Cluster("kafka-cluster")` gate. Returns `true`
-/// when the principal is denied (inter-broker control-plane RPC).
+/// when the authorizer denies the principal for this inter-broker
+/// control-plane RPC.
 fn cluster_action_denied(
     authorizer: &dyn crate::authorizer::Authorizer,
     image: &MetadataImage,
@@ -193,15 +194,16 @@ fn cluster_action_denied(
     ) == AuthorizationResult::Deny
 }
 
-/// Whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` response built on Deny.
+/// Whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` response, built on Deny.
 fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
     encode_response(version, &denied_response_body())
 }
 
-/// Run the KIP-112 offline-dir failover for `broker`'s reported offline dirs:
-/// compute the partition changes, submit them, and return any offset-aware
-/// recovery jobs (KIP-966) for the caller to enqueue. Controller-leader only;
-/// the caller gates on leadership. Submit failure is logged, not propagated.
+/// Run the KIP-112 offline-dir failover for `broker`'s reported offline dirs.
+/// It computes the partition changes, submits them, and returns any
+/// offset-aware recovery jobs (KIP-966) for the caller to enqueue. It runs on
+/// the controller leader only, and the caller gates on leadership. A submit
+/// failure is logged and does not propagate.
 pub(crate) async fn failover_offline_dirs(
     controller: &std::sync::Arc<dyn crate::metadata_source::MetadataSource>,
     broker: crabka_raft::NodeId,
@@ -224,17 +226,18 @@ pub(crate) async fn failover_offline_dirs(
 
 /// Scan partitions where `shutting_down` is currently leader, submit a
 /// replacement-leader record for each one where a live ISR alternative
-/// exists, and return `true` once every *transferable* partition has been
-/// re-led (i.e. the broker is safe to shut down). Partitions with no other
-/// live replica — single-replica internal topics like `__consumer_offsets`
-/// or `__crabka_audit` — cannot transfer leadership anywhere and are not
-/// counted; counting them would block controlled shutdown forever. Returns
-/// `false` while transferable leadership is still moving; the client retries
-/// on the next heartbeat tick.
+/// exists, and return `true` once every *transferable* partition has a new
+/// leader, which means the broker is safe to shut down. A partition with no
+/// other live replica, such as a single-replica internal topic like
+/// `__consumer_offsets` or `__crabka_audit`, cannot transfer leadership
+/// anywhere, so this function does not count it. A count of those partitions
+/// would block controlled shutdown forever. The function returns
+/// `false` while transferable leadership is still moving, and the client
+/// retries on the next heartbeat tick.
 ///
-/// Pure-by-construction: `MetadataImage` is read-only, the controller
-/// is the only side-effect channel. On submit failure we log and
-/// return `Ok(false)` so the client will retry rather than crash.
+/// The function is pure by construction. `MetadataImage` is read-only, and the
+/// controller is the only side-effect channel. On a submit failure it logs and
+/// returns `Ok(false)`, so the client retries rather than crashes.
 async fn drain_leaderships_for_shutdown(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     liveness: &Arc<ControllerLivenessState>,
@@ -311,8 +314,8 @@ mod tests {
     use super::*;
 
     /// Minimal `MetadataSource` that captures `submit_change` calls for
-    /// inspection. Returns a fixed image; `watch_leader` always reports
-    /// `Some(1)` (this node is the leader).
+    /// inspection. It returns a fixed image, and `watch_leader` always reports
+    /// `Some(1)`, so this node is the leader.
     struct MockSource {
         leader_rx: watch::Receiver<Option<NodeId>>,
         _leader_tx: watch::Sender<Option<NodeId>>,
@@ -668,8 +671,8 @@ mod tests {
         assert!(pr.leader == crabka_audit::NodeId(2)); // leadership handed to the live ISR replica
     }
 
-    /// Empty ACLs + no super-users → every principal is denied
-    /// `ClusterAction`, so the denied response carries
+    /// With empty ACLs and no super-users, the authorizer denies
+    /// `ClusterAction` to every principal, so the denied response carries
     /// `CLUSTER_AUTHORIZATION_FAILED`.
     #[test]
     fn cluster_action_denied_yields_cluster_authorization_failed() {

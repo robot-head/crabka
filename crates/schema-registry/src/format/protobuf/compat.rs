@@ -1,15 +1,16 @@
 //! Backward-compatibility classification for Protobuf differences. CALIBRATED
-//! against the golden cp-schema-registry matrix (`compat_conformance` →
-//! `engine_matches_cp_protobuf_verdicts`, 88 cases from real cp 7.4.0). cp is the
-//! authority; every verdict below is the one cp emits.
+//! against the golden cp-schema-registry matrix, which is `compat_conformance` →
+//! `engine_matches_cp_protobuf_verdicts`, 88 cases from real cp 7.4.0. cp is the
+//! authority, and every verdict below is the one cp emits.
 //!
 //! Direction note: `diff::compare(original, update)` is called with
-//! `original = writer` for BACKWARD and `original = reader` for FORWARD (the
-//! engine swaps the pair per direction). So an asymmetric rule — e.g. adding a
-//! message is BACKWARD-ok but FORWARD-broken — is encoded by classifying the two
-//! mirror `Kind`s differently (`MessageAdded` true, `MessageRemoved` false): for
-//! BACKWARD a new reader message shows up as `MessageAdded`; for FORWARD the same
-//! schema pair diffs the other way and shows up as `MessageRemoved`.
+//! `original = writer` for BACKWARD and `original = reader` for FORWARD, because
+//! the engine swaps the pair per direction. An asymmetric rule is therefore
+//! encoded by a different classification of the two mirror `Kind`s. For example,
+//! a new message is BACKWARD-ok but FORWARD-broken, so `MessageAdded` is true
+//! and `MessageRemoved` is false. For BACKWARD a new reader message appears as
+//! `MessageAdded`. For FORWARD the same schema pair diffs the other way and
+//! appears as `MessageRemoved`.
 
 use super::diff::{Difference, Kind};
 

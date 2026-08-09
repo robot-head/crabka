@@ -1,6 +1,6 @@
-//! `Scenario` is the on-disk YAML schema the driver reads; `RunOutput` is
+//! `Scenario` is the on-disk YAML schema the driver reads. `RunOutput` is
 //! the on-disk JSON schema the driver writes. The report aggregator reads
-//! `RunOutput` documents and emits Markdown.
+//! `RunOutput` documents and writes Markdown.
 //!
 //! # Encoding of dimensioned fields
 //!
@@ -8,17 +8,17 @@
 //! carries an explicit `#[serde(with = ...)]` so the file never holds a bare
 //! base-unit float. The scenario an operator writes uses the human form
 //! (`msg_size: 1KiB`, `linger: 5ms`, `rate: 20000/s`), which refuses a bare
-//! number — guessing whether `5` is seconds or milliseconds is the mistake the
-//! types exist to prevent. The measured output uses the exact integer form
-//! (nanoseconds for latencies, bytes for sizes) so the numbers a report
+//! number. A guess about whether `5` is seconds or milliseconds is the mistake
+//! the types prevent. The measured output uses the exact integer form,
+//! nanoseconds for latencies and bytes for sizes, so the numbers a report
 //! compares or plots survive the round trip unrounded.
 //!
 //! Epoch timestamps (`wallclock_*_unix_ms`, `Disturbance::kill_at_ms`) stay raw
-//! integers: they are coordinates, not magnitudes.
+//! integers, because they are coordinates and not magnitudes.
 //!
-//! Every input magnitude is also range-checked as it is read — see [`bounded`]
-//! — so a scenario file that asks for something unrunnable fails at load rather
-//! than at the far end of the driver.
+//! [`bounded`] also range-checks every input magnitude as the driver reads it, so
+//! a scenario file that asks for something unrunnable fails at load and not at
+//! the far end of the driver.
 
 use crabka_units::{prelude::*, serde_units};
 use serde::{Deserialize, Serialize};
@@ -27,24 +27,24 @@ use crate::ids::{MessageCount, TimeOffsetMs, WallclockMs};
 
 /// `#[serde(with = ...)]` adapters that bound an operator-written magnitude.
 ///
-/// The human forms accept a signed magnitude — `-1B` reads as minus one byte —
-/// where the `usize`/`u64` fields they replaced could not be negative at all. Left
-/// unchecked, a negative size deserializes cleanly and then saturates to zero deep
-/// inside the driver: `payload::template` would quietly emit header-sized records
-/// for a scenario asking for `-1B`, and the run would be reported under the name of
-/// the benchmark it did not perform. Bounding on the read path turns that into a
-/// load failure naming the field.
+/// The human forms accept a signed magnitude, so `-1B` reads as minus one byte.
+/// The `usize`/`u64` fields they replaced could not be negative at all. Without a
+/// check, a negative size deserializes cleanly and then saturates to zero deep
+/// inside the driver. `payload::template` would emit header-sized records for a
+/// scenario that asks for `-1B`, and the report would name the run after a
+/// benchmark it did not perform. A bound on the read path turns that into a load
+/// failure that names the field.
 ///
 /// Whether zero is admissible is a per-field question, so each field picks the
-/// adapter that matches it: a keyless record (`key_size: 0`) and an unbuffered
-/// producer (`linger: 0`) are runnable, a zero-length measurement window or a
+/// adapter that matches it. A keyless record (`key_size: 0`) and an unbuffered
+/// producer (`linger: 0`) are runnable. A zero-length measurement window or a
 /// zero-byte record is not.
 mod bounded {
     /// Defines a `#[serde(with = ...)]` module that reads a quantity's human form
     /// and then rejects a magnitude this field cannot run.
     ///
-    /// Serialization delegates to the unbounded sibling: a value admitted on the
-    /// way in is by construction in range on the way out.
+    /// Serialization delegates to the unbounded sibling, because a value that
+    /// the read path admitted is in range on the way out by construction.
     macro_rules! bounded_module {
         (
             $(#[$meta:meta])*
@@ -134,8 +134,8 @@ mod bounded {
     );
 
     bounded_module!(
-        /// An event rate that must be positive: a paced producer that asks for no
-        /// messages at all never sends one, which no scenario means to express.
+        /// An event rate that must be positive. A paced producer that asks for
+        /// no messages at all never sends one, and no scenario means that.
         positive_rate,
         Frequency,
         crabka_units::serde_units::human::frequency::serialize,
@@ -145,8 +145,8 @@ mod bounded {
     );
 }
 
-/// Which Kafka stack the scenario is running against. Pure metadata; the
-/// driver's client behaviour is identical for both — Crabka's
+/// Which Kafka stack the scenario runs against. This is metadata only. The
+/// driver's client behaviour is the same for both, because Crabka's
 /// wire-compatible client speaks to either broker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -156,9 +156,9 @@ pub enum Stack {
 }
 
 impl Stack {
-    /// Pod-name regex used by `prom.rs` to pick out the right brokers.
-    /// Both regexes match the `StatefulSet` names produced by the
-    /// respective operators with cluster name `demo`.
+    /// Pod-name regex that `prom.rs` uses to pick out the right brokers.
+    /// Both regexes match the `StatefulSet` names that each operator
+    /// creates with cluster name `demo`.
     #[must_use]
     pub fn broker_pod_regex(self) -> &'static str {
         match self {
@@ -243,12 +243,12 @@ pub enum LoadMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FailoverSpec {
-    /// How far into the scenario the target broker pod is deleted (`4s`). Zero
-    /// kills at the very start of warmup, which is extreme but runnable.
+    /// How far into the scenario the driver deletes the target broker pod
+    /// (`4s`). Zero kills at the start of warmup, which is extreme but runnable.
     #[serde(with = "bounded::nonnegative_time")]
     pub kill_after: Time,
-    /// Target: `partition0_leader` picks the broker hosting partition 0's
-    /// leader; `any_broker` picks the first matching pod. Only
+    /// Which broker to kill. `partition0_leader` picks the broker that hosts
+    /// partition 0's leader. `any_broker` picks the first matching pod. Only
     /// `partition0_leader` is wired today.
     #[serde(default = "default_failover_target")]
     pub target: String,
@@ -258,15 +258,16 @@ fn default_failover_target() -> String {
     "partition0_leader".to_string()
 }
 
-/// The scenario configuration. Loaded from YAML by the driver and
-/// echoed back into `RunOutput.scenario` for the report.
+/// The scenario configuration. The driver loads it from YAML and
+/// echoes it back into `RunOutput.scenario` for the report.
 ///
-/// Unknown keys are rejected. Almost every field has a default, so without that
-/// a stale or misspelled key is not an error — it is silently ignored and the
-/// default substituted, which means the driver runs a *different* benchmark than
-/// the file describes and labels the results with the file's name. A scenario
-/// written as `msg_size_bytes: 102400` before sizes carried units would have run
-/// at the 1 KiB default and been reported as a 100 KiB benchmark.
+/// This struct rejects unknown keys. Almost every field has a default, so
+/// without that rejection a stale or misspelled key is not an error. Serde would
+/// ignore the key and substitute the default, and the driver would run a
+/// *different* benchmark from the one the file describes and label the results
+/// with the file's name. A scenario written as `msg_size_bytes: 102400` before
+/// sizes carried units would have run at the 1 KiB default and been reported as
+/// a 100 KiB benchmark.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Scenario {
@@ -274,7 +275,8 @@ pub struct Scenario {
     #[serde(default = "default_mode_tag")]
     pub mode_tag: ModeTag,
     /// Record value size on the wire (`1KiB`). A zero-byte record measures
-    /// nothing, so it is rejected rather than floored at the payload header.
+    /// nothing, so this field rejects it and does not floor it at the payload
+    /// header.
     #[serde(default = "default_msg_size", with = "bounded::positive_size")]
     pub msg_size: ByteSize,
     /// Record key size (`0` for keyless records).
@@ -301,10 +303,10 @@ pub struct Scenario {
     #[serde(default = "default_batch_size", with = "bounded::positive_size")]
     pub batch_size: ByteSize,
     /// Length of the measurement window (`60s`). A zero-length window measures
-    /// nothing, so it is rejected.
+    /// nothing, so this field rejects it.
     #[serde(default = "default_duration", with = "bounded::positive_time")]
     pub duration: Time,
-    /// Length of the discarded warmup window preceding it (`10s`). Zero skips
+    /// Length of the discarded warmup window before it (`10s`). Zero skips
     /// warmup and measures from the first record.
     #[serde(default = "default_warmup", with = "bounded::nonnegative_time")]
     pub warmup: Time,
@@ -348,10 +350,10 @@ fn default_warmup() -> Time {
 
 // ── Output schema ───────────────────────────────────────────────────────────
 
-/// Latency percentiles as measured extents. Encoded as whole nanoseconds: the
-/// driver records latencies at microsecond resolution and the report renders
-/// them in milliseconds to three decimal places, both of which a millisecond
-/// integer would round away.
+/// Latency percentiles as measured extents, encoded as whole nanoseconds. The
+/// driver records latencies at microsecond resolution, and the report renders
+/// them in milliseconds to three decimal places. A millisecond integer would
+/// round both away.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatencyPercentiles {
     #[serde(with = "serde_units::numeric::nanos_i64")]
@@ -392,22 +394,23 @@ pub struct Resource {
     pub broker_cpu: Time,
     #[serde(with = "serde_units::numeric::bytes_u64")]
     pub mem_cgroup_working_set: ByteSize,
-    /// Strimzi-only: JVM heap used (sum across broker pods).
+    /// JVM heap used, summed across broker pods. Strimzi only.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "serde_units::numeric::option_bytes_u64"
     )]
     pub jvm_heap_used: Option<ByteSize>,
-    /// Strimzi-only: JVM non-heap used.
+    /// JVM non-heap used. Strimzi only.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "serde_units::numeric::option_bytes_u64"
     )]
     pub jvm_nonheap_used: Option<ByteSize>,
-    /// Derived: cgroup working set minus JVM heap + non-heap. Approximates
-    /// page-cache footprint on the broker pod. Strimzi-only.
+    /// The cgroup working set minus JVM heap and non-heap. This is an
+    /// approximation of the page-cache footprint on the broker pod. Strimzi
+    /// only.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -421,8 +424,8 @@ pub struct Resource {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Disturbance {
-    /// Unix-epoch millisecond at which the broker pod was deleted — an instant,
-    /// so it stays a raw stamp.
+    /// Unix-epoch millisecond at which the driver deleted the broker pod. This
+    /// is an instant, so it stays a raw stamp.
     pub kill_at_ms: TimeOffsetMs,
     /// Unix-epoch millisecond of the first ack after the kill.
     pub recovery_at_ms: TimeOffsetMs,
@@ -438,11 +441,11 @@ pub struct Topology {
     pub broker_count: u32,
 }
 
-/// One time-series sample of client-side throughput + latency over a fixed
-/// interval (default 2s) of the measurement window. Lets the report graph
-/// values *over the test* rather than only end-of-run aggregates. The
-/// latency percentiles are per-interval (this window only), not cumulative,
-/// so a latency-vs-time curve shows real movement.
+/// One time-series sample of client-side throughput and latency over a fixed
+/// interval of the measurement window. The default interval is 2s. This lets the
+/// report graph values *over the test* and not only end-of-run aggregates. The
+/// latency percentiles cover this window only and are not cumulative, so a
+/// latency-vs-time curve shows real movement.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     /// Milliseconds since the measurement window started.
@@ -462,8 +465,9 @@ pub struct Sample {
 }
 
 /// One time-series sample of broker resource usage, scraped from Prometheus
-/// as a range query over the run window (default 15s step = the scrape
-/// interval). Covers the full wallclock window (warmup + measurement).
+/// as a range query over the run window. The default step is 15s, which is the
+/// scrape interval. This covers the full wallclock window, warmup and
+/// measurement.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrokerSample {
     /// Milliseconds since `wallclock_start_unix_ms`.
@@ -476,8 +480,8 @@ pub struct BrokerSample {
     pub mem_working_set: ByteSize,
 }
 
-/// One run = one scenario × one stack. Written by the driver, read by
-/// the report aggregator.
+/// One run = one scenario × one stack. The driver writes it and the report
+/// aggregator reads it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunOutput {
     pub scenario: Scenario,
@@ -491,9 +495,9 @@ pub struct RunOutput {
     pub resource: Resource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disturbance: Option<Disturbance>,
-    /// Operator+broker startup wall-clock from CR apply → broker Ready
-    /// (filled in by `run-scenario.sh` after the driver finishes), in whole
-    /// milliseconds so a shell script can write the field.
+    /// Operator and broker startup wall-clock from CR apply to broker Ready, in
+    /// whole milliseconds so a shell script can write the field.
+    /// `run-scenario.sh` fills it in after the driver finishes.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -508,11 +512,12 @@ pub struct RunOutput {
     pub errors: Vec<String>,
     #[serde(default)]
     pub notes: Vec<String>,
-    /// Per-interval client throughput + latency over the measurement window.
-    /// Empty for runs produced before time-series sampling existed.
+    /// Per-interval client throughput and latency over the measurement window.
+    /// This is empty for runs made before time-series sampling existed.
     #[serde(default)]
     pub samples: Vec<Sample>,
-    /// Per-interval broker CPU/memory over the run window (Prometheus range).
+    /// Per-interval broker CPU and memory over the run window, from a Prometheus
+    /// range query.
     #[serde(default)]
     pub broker_samples: Vec<BrokerSample>,
 }

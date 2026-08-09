@@ -1,20 +1,21 @@
 //! KIP-48: `ExpireDelegationToken` (`api_key` 40).
 //!
-//! Per spec §1.4: caller must be SASL-authenticated; the request's
-//! `hmac` selects an existing token; only the owner, a `renewers`
-//! entry, or a configured super-user may expire it (else
-//! `DELEGATION_TOKEN_AUTHORIZATION_FAILED`). The super-user bypass
-//! matches Kafka's `DelegationTokenManager.isAuthorizedToOperateOnToken`
-//! (via `SecurityUtils.isAuthorized`) and is what the operator
-//! relies on for cleaning up tokens it minted via act-as on behalf of
-//! `KafkaUser` principals.
+//! Per spec §1.4, the caller must be SASL-authenticated. The request's `hmac`
+//! selects an existing token. Only the owner, a `renewers` entry, or a
+//! configured super-user may expire that token. Any other caller gets
+//! `DELEGATION_TOKEN_AUTHORIZATION_FAILED`.
 //!
-//! Decision on `expiry_time_period_ms`:
-//!   - `< 0`  → append `V1DeleteDelegationToken` tombstone; respond with
-//!     a past-sentinel `expiry_timestamp_ms = now - 1` per KIP-48.
-//!   - `== 0` → set expiry to `now` (record-replace).
-//!   - `> 0`  → set expiry to `now + period`, clamped to the token's
-//!     `max_timestamp_ms` (record-replace).
+//! The super-user bypass matches Kafka's
+//! `DelegationTokenManager.isAuthorizedToOperateOnToken`, through
+//! `SecurityUtils.isAuthorized`. The operator depends on it to clean up the
+//! tokens that it created through act-as on behalf of `KafkaUser` principals.
+//!
+//! The handler decides on `expiry_time_period_ms` as follows:
+//!   - Below 0: it appends a `V1DeleteDelegationToken` tombstone, and responds
+//!     with the past sentinel `expiry_timestamp_ms = now - 1`, per KIP-48.
+//!   - Equal to 0: it sets the expiry to `now`, and replaces the record.
+//!   - Above 0: it sets the expiry to `now + period`, clamped to the token's
+//!     `max_timestamp_ms`, and replaces the record.
 
 use std::{collections::HashSet, hash::BuildHasher};
 
@@ -123,9 +124,9 @@ fn err_response(code: i16) -> ExpireDelegationTokenResponse {
     }
 }
 
-/// Project an image-level [`DelegationToken`] back into a
-/// [`DelegationTokenRecord`] so a partial update (only `expiry_*`
-/// changing) can be expressed via struct-update syntax.
+/// Projects an image-level [`DelegationToken`] back into a
+/// [`DelegationTokenRecord`], so that struct-update syntax can express a
+/// partial update in which only the `expiry_*` fields change.
 fn token_to_record(t: &DelegationToken) -> DelegationTokenRecord {
     DelegationTokenRecord {
         token_id: t.token_id.clone(),
@@ -149,14 +150,14 @@ mod tests {
 
     use super::*;
 
-    /// Helper: empty super-users set for the pre-existing tests, which
-    /// all exercise the owner/renewer path.
+    /// Helper that gives an empty super-users set, for the older tests. They
+    /// all exercise the owner and renewer path.
     fn empty_super_users() -> HashSet<String> {
         HashSet::new()
     }
 
-    /// Helper: super-users set containing the given names (for the new
-    /// super-user-bypass tests).
+    /// Helper that gives a super-users set with the given names, for the new
+    /// super-user-bypass tests.
     fn super_users_with(names: &[&str]) -> HashSet<String> {
         names.iter().map(|s| (*s).to_string()).collect()
     }
@@ -364,12 +365,12 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// A super-user caller may expire a token they
-    /// neither own nor are listed as a renewer on. Mirrors Kafka's
-    /// `DelegationTokenManager.isAuthorizedToOperateOnToken` and is the
-    /// load-bearing gate for the operator's finalizer — on
-    /// `KafkaUser` delete, the operator tombstones the act-as-minted
-    /// token by calling `ExpireDelegationToken` with period = -1.
+    /// A super-user caller can expire a token that it does not own and is not
+    /// a renewer on. This mirrors Kafka's
+    /// `DelegationTokenManager.isAuthorizedToOperateOnToken`, and it is the
+    /// gate that the operator's finalizer needs. On a `KafkaUser` delete, the
+    /// operator tombstones the act-as token by a call to
+    /// `ExpireDelegationToken` with period -1.
     #[tokio::test]
     async fn super_user_can_expire_any_token() {
         let dir = TempDir::new().unwrap();
@@ -414,10 +415,9 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// A non-super-user caller who is also not the
-    /// owner and not a listed renewer must still be rejected with
-    /// `DELEGATION_TOKEN_AUTHORIZATION_FAILED`. Guards against
-    /// accidentally widening the bypass beyond `super_users`.
+    /// A caller that is not a super-user, not the owner, and not a listed
+    /// renewer must still get `DELEGATION_TOKEN_AUTHORIZATION_FAILED`. This
+    /// test guards against a bypass that reaches past `super_users`.
     #[tokio::test]
     async fn non_super_user_non_owner_non_renewer_still_rejected() {
         let dir = TempDir::new().unwrap();

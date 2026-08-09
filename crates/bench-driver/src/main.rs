@@ -1,4 +1,4 @@
-//! `crabka-bench-driver` — runs one scenario × one stack and writes a
+//! `crabka-bench-driver` runs one scenario × one stack and writes a
 //! `RunOutput` JSON file.
 
 use std::path::PathBuf;
@@ -41,17 +41,19 @@ struct Cli {
         value_parser = parse_client_frame_max
     )]
     client_frame_max: ByteSize,
-    /// Which Kafka stack this is — pure metadata, doesn't change behaviour.
+    /// Which Kafka stack this is. This is metadata only and does not change
+    /// behaviour.
     #[arg(long, env = "BENCH_STACK", value_enum)]
     stack: StackArg,
-    /// Topic name (must already exist; orchestrator creates it via `KafkaTopic` CR).
+    /// Topic name. The topic must already exist. The orchestrator creates it
+    /// with a `KafkaTopic` CR.
     #[arg(long, env = "BENCH_TOPIC", default_value = "bench-topic")]
     topic: String,
-    /// Namespace the brokers live in (used for Prometheus pod regex).
+    /// Namespace the brokers live in. The Prometheus pod regex uses it.
     #[arg(long, env = "BENCH_NAMESPACE", default_value = "default")]
     namespace: String,
-    /// Prometheus base URL. If absent, resource fields are zero and
-    /// `notes` reflects the skip.
+    /// Prometheus base URL. Without it, the resource fields are zero and
+    /// `notes` records the skip.
     #[arg(long, env = "BENCH_PROMETHEUS_URL")]
     prometheus: Option<String>,
     /// HTTP request timeout for Prometheus queries.
@@ -140,29 +142,31 @@ struct Cli {
     /// Output path for the `RunOutput` JSON.
     #[arg(long, env = "BENCH_OUTPUT_PATH", default_value = "/results/run.json")]
     out: PathBuf,
-    /// Enable a TLS-encrypted data path: producers and consumers dial the
-    /// broker's `Ssl` listener instead of plaintext. Unset (the default) keeps
-    /// the existing plaintext benchmark path unchanged.
+    /// Enable a TLS-encrypted data path, so producers and consumers dial the
+    /// broker's `Ssl` listener instead of plaintext. The default is unset, which
+    /// keeps the plaintext benchmark path unchanged.
     #[arg(long, env = "BENCH_TLS_ENABLED", default_value_t = false)]
     tls_enabled: bool,
-    /// PEM CA bundle the client trusts to verify the broker serving cert.
-    /// Required when `--tls-enabled`; mounted from the per-stack cluster-CA
-    /// Secret (e.g. `/etc/bench-ca/ca.crt`).
+    /// PEM CA bundle that the client trusts to verify the broker serving cert.
+    /// This is required when `--tls-enabled`. It is mounted from the per-stack
+    /// cluster-CA Secret, for example `/etc/bench-ca/ca.crt`.
     #[arg(long, env = "BENCH_TLS_CA_PATH")]
     tls_ca_path: Option<PathBuf>,
-    /// SNI / server-name presented in the TLS handshake, matched against a SAN
-    /// on the broker serving cert. LOAD-BEARING: the bootstrap is resolved to a
-    /// pod IP and dialed by IP, so the SNI must be set explicitly to a SAN name
-    /// (crabka: `demo-broker-headless.<ns>.svc.cluster.local`;
-    /// Strimzi: `demo-kafka-bootstrap`). Required when `--tls-enabled`.
+    /// SNI server name that the client presents in the TLS handshake. The broker
+    /// matches it against a SAN on its serving cert. LOAD-BEARING: the client
+    /// resolves the bootstrap to a pod IP and dials by IP, so you must set the
+    /// SNI to a SAN name. For crabka that name is
+    /// `demo-broker-headless.<ns>.svc.cluster.local`, and for Strimzi it is
+    /// `demo-kafka-bootstrap`. This is required when `--tls-enabled`.
     #[arg(long, env = "BENCH_TLS_SERVER_NAME")]
     tls_server_name: Option<String>,
-    /// Optional mTLS client certificate (PEM). One-way TLS is sufficient for
-    /// the benchmark; set this (with `--tls-client-key`) only when the listener
-    /// requires client auth.
+    /// Optional mTLS client certificate in PEM form. One-way TLS is enough for
+    /// the benchmark. Set this, together with `--tls-client-key`, only when the
+    /// listener requires client auth.
     #[arg(long, env = "BENCH_TLS_CLIENT_CERT")]
     tls_client_cert: Option<PathBuf>,
-    /// Optional mTLS client private key (PEM). Pairs with `--tls-client-cert`.
+    /// Optional mTLS client private key in PEM form. It pairs with
+    /// `--tls-client-cert`.
     #[arg(long, env = "BENCH_TLS_CLIENT_KEY")]
     tls_client_key: Option<PathBuf>,
 }

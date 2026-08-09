@@ -1,13 +1,14 @@
 //! The one place a parsed [`RelationRef`] becomes a [`RelationName`].
 //!
-//! The AST carries a relation name *as written* — an optional schema and a
-//! name — while the catalog stores it *as resolved*, a schema and a name that
+//! The AST carries a relation name *as written*, which is an optional schema
+//! and a name. The catalog stores it *as resolved*, as a schema and a name that
 //! together key the record. [`resolve_relation`] is the only crossing of that
-//! boundary, and the catalog offers no lookup that takes a bare string, so an
-//! operation cannot accidentally skip the search path: it would not compile.
+//! boundary, and the catalog offers no lookup that takes a bare string. An
+//! operation therefore cannot accidentally skip the search path, because it
+//! would not compile.
 //!
-//! [`parse_written_relation`] is the step *before* that, for the names that
-//! arrive as a runtime string rather than through the grammar — a `regclass`
+//! [`parse_written_relation`] is the step *before* that. It handles the names
+//! that arrive as a runtime string and not through the grammar: a `regclass`
 //! input and the `nextval`/`setval` argument, which is the same thing.
 
 use std::sync::LazyLock;
@@ -23,10 +24,10 @@ use crate::{error::ExecError, search_path::SearchPath};
 /// is reported.
 ///
 /// `PostgreSQL` draws the reporting distinction inside
-/// `RangeVarGetRelidExtended`: a utility statement looks the schema up
-/// strictly, so a missing one is `3F000`, while parse analysis of a
-/// `SELECT`/DML target looks it up permissively and then reports the whole
-/// dotted name as a missing relation. Verified against `postgres:18.4`:
+/// `RangeVarGetRelidExtended`. A utility statement looks the schema up
+/// strictly, so a missing one is `3F000`. Parse analysis of a `SELECT`/DML
+/// target looks it up permissively, and then reports the whole dotted name as
+/// a missing relation. Verified against `postgres:18.4`:
 ///
 /// ```text
 /// SELECT * FROM nope.t;         42P01  relation "nope.t" does not exist
@@ -40,19 +41,19 @@ pub enum SchemaDisposition {
     /// A `SELECT`, `INSERT`, `UPDATE`, `DELETE` or `MERGE` target: a missing
     /// schema is never reported as such, only as a missing relation.
     Reference,
-    /// A utility statement naming an existing relation — every `ALTER`/`DROP`,
-    /// plus `TRUNCATE`, `COPY`, `GRANT`, `REVOKE` and `COMMENT`: the schema is
-    /// resolved first, so a missing one is reported before the relation is
-    /// ever looked for.
+    /// A utility statement that names an existing relation: every
+    /// `ALTER`/`DROP`, plus `TRUNCATE`, `COPY`, `GRANT`, `REVOKE` and
+    /// `COMMENT`. The schema is resolved first, so a missing one is reported
+    /// before the relation is ever looked for.
     Utility,
-    /// A statement creating a relation. The schema is resolved strictly, as
-    /// for [`SchemaDisposition::Utility`], but an unqualified name lands in
-    /// the first *existing* explicit search-path entry rather than wherever it
-    /// already exists — `SET search_path = nosuch, s1, s2` creates in `s1` —
-    /// and `3F000 no schema has been selected to create in` when there is
-    /// none.
+    /// A statement that creates a relation. The schema is resolved strictly,
+    /// as for [`SchemaDisposition::Utility`]. But an unqualified name lands in
+    /// the first *existing* explicit search-path entry, and not where it
+    /// already exists. `SET search_path = nosuch, s1, s2` creates in `s1`.
+    /// When the path names no existing entry, the result is
+    /// `3F000 no schema has been selected to create in`.
     Creation,
-    /// A `CREATE TEMPORARY` — the search path does not decide where this lands.
+    /// A `CREATE TEMPORARY`. The search path does not decide where this lands.
     /// An unqualified name goes to the session's own temporary namespace, and a
     /// qualifier is only accepted when it names that same namespace:
     ///
@@ -65,10 +66,10 @@ pub enum SchemaDisposition {
 
 /// Everything an unqualified relation name needs in order to name a schema.
 ///
-/// It is one value rather than three parameters because it has exactly the
-/// lifetime of a session, and because every resolution needs all of it: the
-/// path says which schemas to look in, the user is what `"$user"` expands to,
-/// and the backend id names the session's own temporary namespace.
+/// It is one value and not three parameters, because it has exactly the
+/// lifetime of a session and because every resolution needs all of it. The
+/// path says which schemas to look in. The user is what `"$user"` expands to.
+/// The backend id names the session's own temporary namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolutionScope {
     /// The session's `search_path`, unexpanded.
@@ -95,7 +96,7 @@ static DEFAULT_SCOPE: LazyLock<ResolutionScope> = LazyLock::new(ResolutionScope:
 impl ResolutionScope {
     /// The scope a context with no session resolves against: `PostgreSQL`'s
     /// own default `search_path`. Planning contexts and unit tests genuinely
-    /// have no session, and a relation named in one still has to resolve.
+    /// have no session, and a relation named in one still must resolve.
     #[must_use]
     pub fn default_scope() -> &'static Self {
         &DEFAULT_SCOPE
@@ -110,10 +111,10 @@ impl ResolutionScope {
     /// The schemas an unqualified name is looked for in, in order, filtered to
     /// the ones that exist.
     ///
-    /// Two entries are implicit, and each is suppressed by writing it. The
-    /// session's temporary namespace comes first, then `pg_catalog`; a path
-    /// that names either puts it where it was written instead. Verified against
-    /// `postgres:18.4`:
+    /// Two entries are implicit, and you suppress each one when you write it.
+    /// The session's temporary namespace comes first, then `pg_catalog`. A path
+    /// that names either one puts it where it was written instead. Verified
+    /// against `postgres:18.4`:
     ///
     /// ```text
     /// SET search_path = "$user", public;   {pg_temp_1,pg_catalog,public}
@@ -187,8 +188,8 @@ impl ResolutionScope {
 /// when a written qualifier names a schema that does not exist and
 /// `disposition` is not [`SchemaDisposition::Reference`], or when a
 /// [`SchemaDisposition::Creation`] finds no schema to create in. A
-/// [`SchemaDisposition::Reference`] never fails here: its missing schema
-/// surfaces as the `42P01` the relation lookup raises against the dotted name.
+/// [`SchemaDisposition::Reference`] never fails here. Its missing schema
+/// appears as the `42P01` the relation lookup raises against the dotted name.
 ///
 /// [`ExecError::InvalidTableDefinition`] (`42P16`) for the two ways a creation
 /// can name the wrong kind of namespace: `cannot create temporary relation in
@@ -277,7 +278,7 @@ pub fn resolve_relation(
     Ok(RelationName::public(reference.name.clone()))
 }
 
-/// [`resolve_relation`] over a statement's whole name list — `DROP TABLE a, b,
+/// [`resolve_relation`] over a statement's whole name list: `DROP TABLE a, b,
 /// c` and its relatives.
 ///
 /// # Errors
@@ -299,13 +300,13 @@ pub fn resolve_relations(
 
 /// A relation name that arrived as a runtime string, parsed into its parts.
 ///
-/// Produced by [`parse_written_relation`], which is the only reader of such a
-/// string; the parts then resolve through [`resolve_relation`] like any name
-/// the grammar produced.
+/// [`parse_written_relation`] produces this value, and it is the only reader of
+/// such a string. The parts then resolve through [`resolve_relation`] like any
+/// name the grammar produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrittenRelation {
     /// The schema and relation the parts denote, each already unquoted and
-    /// case-folded — the same shape the lexer hands the grammar.
+    /// case-folded. This is the same shape the lexer hands the grammar.
     pub reference: RelationRef,
     /// Every parsed part joined by dots and left unquoted, which is
     /// `PostgreSQL`'s `NameListToString` and what its diagnostics from this
@@ -316,7 +317,7 @@ pub struct WrittenRelation {
 }
 
 impl WrittenRelation {
-    /// The `42P01` for a name nothing answers to, naming it as
+    /// The `42P01` for a name nothing answers to, spelled as
     /// `NameListToString` renders it.
     #[must_use]
     pub fn undefined_table(&self) -> ExecError {
@@ -327,15 +328,15 @@ impl WrittenRelation {
 /// Read a `regclass` input the way `PostgreSQL`'s `regclassin` reads one.
 ///
 /// The text is *not* one identifier. `stringToQualifiedNameList` splits it on
-/// the dots that fall outside double quotes, downcases each unquoted part,
-/// unwraps each quoted one — where `""` is one literal quote and a dot is an
-/// ordinary character — and tolerates whitespace around every part.
-/// `makeRangeVarFromNameList` then reads one part as a relation, two as
-/// `schema.relation` and three as `catalog.schema.relation`.
+/// the dots that fall outside double quotes, downcases each unquoted part, and
+/// unwraps each quoted one. Inside a quoted part, `""` is one literal quote and
+/// a dot is an ordinary character. The function also tolerates whitespace
+/// around every part. `makeRangeVarFromNameList` then reads one part as a
+/// relation, two as `schema.relation` and three as `catalog.schema.relation`.
 ///
 /// This is the input half of the `regclass` round trip whose output half is
 /// `crate::catalog_fn::relation_name_by_oid`, so every spelling that one quotes
-/// has to read back here.
+/// must read back here.
 ///
 /// Verified against `postgres:18.4`:
 ///
@@ -354,13 +355,14 @@ impl WrittenRelation {
 ///
 /// One `PostgreSQL` step is deliberately absent: `truncate_identifier` clips
 /// each part to `NAMEDATALEN - 1` bytes. crabka does not truncate an identifier
-/// anywhere — not in the lexer, not at `CREATE` — so truncating only here would
+/// anywhere, not in the lexer and not at `CREATE`. A truncation only here would
 /// make an over-long name unreadable back out of the catalog that stored it.
 ///
 /// # Errors
 ///
 /// 42602 `invalid name syntax` for text that is not a qualified name, 42601 for
-/// more than three parts, and 0A000 for a catalog part naming another database.
+/// more than three parts, and 0A000 for a catalog part that names another
+/// database.
 pub fn parse_written_relation(text: &str) -> Result<WrittenRelation, ExecError> {
     let parts = split_identifier_string(text).ok_or_else(invalid_name_syntax)?;
     let dotted = parts.join(".");
@@ -456,8 +458,8 @@ fn quoted_identifier(body: &str) -> Option<(String, &str)> {
     }
 }
 
-/// Whitespace as `PostgreSQL`'s scanner counts it — the `{space}` class in
-/// `scan.l` that `scanner_isspace` mirrors, vertical tab included.
+/// Whitespace as `PostgreSQL`'s scanner counts it. This is the `{space}` class
+/// in `scan.l` that `scanner_isspace` mirrors, and it includes the vertical tab.
 fn is_scanner_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}')
 }
@@ -492,9 +494,9 @@ mod tests {
     }
 
     /// Every shape `postgres:18.4` accepts, with the parts it reads out of it.
-    /// A quoted part keeps its case and may hold a dot; an unquoted one
-    /// downcases and ends at the first dot or whitespace; `""` inside quotes is
-    /// one literal quote; and whitespace may sit anywhere around a part.
+    /// A quoted part keeps its case and may hold a dot. An unquoted one
+    /// downcases and ends at the first dot or whitespace. `""` inside quotes is
+    /// one literal quote. Whitespace may sit anywhere around a part.
     #[test]
     fn a_written_name_is_read_the_way_regclassin_reads_one() {
         let cases = [
@@ -588,8 +590,8 @@ mod tests {
     }
 
     /// The `42P01` a name nothing answers to raises spells the *parsed* parts,
-    /// joined by dots and unquoted — `PostgreSQL`'s `NameListToString`, not the
-    /// text as typed.
+    /// joined by dots and unquoted. This is `PostgreSQL`'s `NameListToString`,
+    /// not the text as typed.
     #[test]
     fn a_missing_relation_is_named_by_its_parsed_parts() {
         for (input, named) in [
@@ -747,8 +749,8 @@ mod tests {
     }
 
     /// `pg_temp` names the session's own namespace wherever it is written, and
-    /// an unqualified `CREATE TEMPORARY` lands there without the search path
-    /// having any say.
+    /// an unqualified `CREATE TEMPORARY` lands there. The search path has no
+    /// say.
     #[test]
     fn a_temporary_creation_lands_in_the_sessions_own_namespace() {
         let kv = with_schemas(&["s1"]);
@@ -808,9 +810,9 @@ mod tests {
         }
     }
 
-    /// The temporary namespace is implicit and FIRST — ahead of the implicit
-    /// `pg_catalog` — until the path names it, in which case it sits where it
-    /// was written. It is absent entirely until the session has one.
+    /// The temporary namespace is implicit and FIRST, ahead of the implicit
+    /// `pg_catalog`, until the path names it. Then it sits where it was
+    /// written. It is absent completely until the session has one.
     #[test]
     fn the_temporary_namespace_is_implicit_first_unless_written() {
         let kv = with_schemas(&[]);

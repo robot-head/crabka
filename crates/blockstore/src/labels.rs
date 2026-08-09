@@ -15,7 +15,7 @@ impl Labels {
         Self(BTreeMap::new())
     }
 
-    /// Build a label set from an iterator of `(name, value)` pairs.
+    /// Builds a label set from an iterator of `(name, value)` pairs.
     #[must_use]
     pub fn from_pairs<I, K, V>(pairs: I) -> Self
     where
@@ -53,16 +53,18 @@ impl Labels {
         self.0.is_empty()
     }
 
-    /// FNV-1a 64-bit hash over canonical length-prefixed `name`/`value` entries.
+    /// FNV-1a 64-bit hash over canonical length-prefixed `name` and `value`
+    /// entries.
     ///
-    /// Each name and value is preceded by its byte length (`u64` little-endian)
-    /// so the encoding is injective: a name or value containing `=` or a newline
-    /// cannot be re-parsed across the field boundary, which a bare `name=value\n`
-    /// separator encoding would allow (e.g. `a=b\nc` vs `a` with value `b\nc`).
-    /// Profile labels are user-controlled, so this collision is reachable; the
-    /// length prefix closes it. `BTreeMap` keeps names sorted, so the hash is
-    /// independent of insertion order. Greenfield, so no persisted fingerprints
-    /// depend on the old encoding.
+    /// Each name and value carries its byte length first (`u64`
+    /// little-endian), so the encoding is injective. A name or value that
+    /// contains `=` or a newline cannot be re-parsed across the field
+    /// boundary. A bare `name=value\n` separator encoding would allow that,
+    /// for example `a=b\nc` against `a` with value `b\nc`. Profile labels are
+    /// user-controlled, so this collision is reachable, and the length prefix
+    /// closes it. `BTreeMap` keeps names sorted, so the hash does not depend
+    /// on insertion order. Crabka is greenfield, so no persisted fingerprint
+    /// depends on the old encoding.
     #[must_use]
     pub fn fingerprint(&self) -> SeriesFingerprint {
         const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;

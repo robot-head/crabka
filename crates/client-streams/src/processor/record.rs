@@ -1,10 +1,10 @@
-//! `Record<K,V>` flowing through the processor graph + `RecordContext`.
+//! `Record<K,V>` and `RecordContext`, which flow through the processor graph.
 
 /// A key/value record with a timestamp.
 ///
-/// `key` is optional because Kafka records may have null keys. `value` is typed
-/// and present at this layer; table deletions are represented in the DSL as
-/// change records whose `new` value is `None`.
+/// `key` is optional, because a Kafka record can have a null key. `value` is
+/// typed and always present at this layer. The DSL represents a table deletion
+/// as a change record whose `new` value is `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record<K, V> {
     pub key: Option<K>,
@@ -23,9 +23,11 @@ impl<K, V> Record<K, V> {
     }
 }
 
-/// Metadata about the source record currently being processed (JVM
-/// `RecordContext`). Exposed via
-/// [`ProcessorContext::record_context`](crate::processor::ProcessorContext::record_context).
+/// Metadata about the source record that the processor handles now. This is the
+/// JVM `RecordContext`.
+///
+/// [`ProcessorContext::record_context`](crate::processor::ProcessorContext::record_context)
+/// exposes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordContext {
     pub topic: String,

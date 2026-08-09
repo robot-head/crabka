@@ -1,20 +1,24 @@
-//! In-memory lock manager for concurrent writers. Exclusive/shared locks over
-//! two key spaces — heap rows (`(table, rowid)`) and unique local index keys
-//! (`LockKey::UniqueKey`) — transaction-scoped (released at COMMIT/ROLLBACK).
-//! A blocked writer calls the integrated async `acquire`, which detects a
-//! conflict and registers a per-waiter `Notify` ATOMICALLY under one guard; the
-//! holder's `release_all` wakes each waiter with `notify_one` (which stores a
-//! permit if the waiter has not yet awaited, so no wakeup is ever lost). A
-//! wait-for graph (each waiting xid -> the xid it blocks on) is checked eagerly
-//! for cycles before blocking, aborting the would-be waiter with a deadlock
-//! error; both key spaces share the one graph, so a cycle spanning a row lock
-//! and a unique-key lock is still detected. Purely in-memory: after a restart
-//! no transactions are in flight, so no lock state must survive.
+//! In-memory lock manager for concurrent writers.
+//!
+//! It holds exclusive and shared locks over two key spaces: heap rows
+//! (`(table, rowid)`) and unique local index keys (`LockKey::UniqueKey`). Locks
+//! are transaction-scoped, and COMMIT/ROLLBACK releases them. A blocked writer
+//! calls the integrated async `acquire`, which detects a conflict and registers
+//! a per-waiter `Notify` ATOMICALLY under one guard. The holder's `release_all`
+//! wakes each waiter with `notify_one`, which stores a permit if the waiter has
+//! not yet awaited, so no wakeup is ever lost.
+//!
+//! A wait-for graph maps each waiting xid to the xid it blocks on. The manager
+//! checks that graph for cycles eagerly, before it blocks, and aborts the
+//! would-be waiter with a deadlock error. Both key spaces share the one graph,
+//! so it still detects a cycle that spans a row lock and a unique-key lock. The
+//! state is purely in-memory: after a restart no transactions are in flight, so
+//! no lock state must survive.
 //!
 //! The graph sees only this engine's waits, so a cycle whose edges span two
-//! engines (each leg of a cross-range transaction waiting on the other's
-//! participant) is invisible to it. Sessions that can be enlisted in such a
-//! cycle pass a wait cap to `acquire`; the cap expiring aborts the waiter as a
+//! engines is invisible to it. That happens when each leg of a cross-range
+//! transaction waits on the other's participant. A session that can join such a
+//! cycle passes a wait cap to `acquire`. An expired cap aborts the waiter as a
 //! presumed distributed deadlock, the detector of last resort where no shared
 //! wait-for graph exists.
 
@@ -33,8 +37,8 @@ pub enum LockMode {
 }
 
 impl LockMode {
-    /// The mode's name as a span attribute — a fixed pair of strings, so
-    /// `pg.lock.mode` stays a discriminator rather than free text.
+    /// The mode's name as a span attribute. It is a fixed pair of strings, so
+    /// `pg.lock.mode` stays a discriminator and not free text.
     const fn as_str(self) -> &'static str {
         match self {
             Self::Shared => "shared",
@@ -43,15 +47,15 @@ impl LockMode {
     }
 }
 
-/// `40P01` — `deadlock_detected`, which is what a caller maps both
-/// [`AcquireError`] variants onto. Recorded here so a lock span carries the
-/// same discriminator the statement span will.
+/// `40P01`, `deadlock_detected`, which is what a caller maps both
+/// [`AcquireError`] variants onto. This records it here so a lock span carries
+/// the same discriminator the statement span will.
 const DEADLOCK_SQLSTATE: &str = "40P01";
 
 /// Build the span covering a *blocked* lock acquisition.
 ///
-/// Created only from the conflict arm of [`RowLockManager::acquire_key`], and
-/// deliberately so: an uncontended acquire happens once per row a write
+/// Only the conflict arm of [`RowLockManager::acquire_key`] creates this, and
+/// deliberately so. An uncontended acquire happens once per row a write
 /// touches, so a span each would bury the statement's trace under thousands of
 /// zero-duration spans. What an operator wants from a lock is the wait, and a
 /// span exists here exactly when there was one.
@@ -95,7 +99,7 @@ fn wait_span(key: &LockKey, mode: LockMode, my_xid: u64) -> tracing::Span {
 /// Result of a non-blocking lock attempt.
 pub enum Acquire {
     Acquired,
-    /// Held by `holder` (one of the holders) — an xid to wait on.
+    /// Held by `holder`, one of the holders. This is an xid to wait on.
     Conflict(u64),
 }
 
@@ -110,23 +114,23 @@ pub enum CycleCheck {
 pub enum AcquireError {
     /// Blocking would close a wait-for cycle on this engine.
     Deadlock,
-    /// The caller's wait cap expired before the lock was granted — treated as
-    /// a distributed deadlock, since a cross-engine cycle never shows up in
-    /// any single engine's wait-for graph.
+    /// The caller's wait cap expired before the grant. The manager treats this
+    /// as a distributed deadlock, because a cross-engine cycle never shows up
+    /// in any single engine's wait-for graph.
     CapExpired,
 }
 
 /// Identity of a lockable resource. Row locks and unique-key locks live in the
-/// same table (and the same wait-for graph), so deadlock cycles spanning both
-/// kinds are detected.
+/// same table and the same wait-for graph, so the manager detects a deadlock
+/// cycle that spans both kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LockKey {
     /// A heap row: `(table, rowid)`.
     Row(crabka_pgcatalog::TableId, u64),
     /// A unique local index key: the encoded index-entry prefix
     /// (`secondary_index_entry_prefix(table, index, values)`), a deterministic
-    /// identity for `(table, index, key values)`. Serializes the
-    /// check-then-write unique probe per key instead of engine-wide.
+    /// identity for `(table, index, key values)`. This serializes the
+    /// check-then-write unique probe per key, not engine-wide.
     UniqueKey(Vec<u8>),
 }
 
@@ -163,13 +167,13 @@ impl RowLockManager {
         }
     }
 
-    /// Non-blocking acquire. Idempotent if `my_xid` already holds compatibly; a
-    /// sole shared holder may upgrade to exclusive. Thin wrapper that locks and
-    /// delegates to [`try_acquire_locked`].
+    /// Non-blocking acquire. It is idempotent if `my_xid` already holds
+    /// compatibly, and a sole shared holder may upgrade to exclusive. This is a
+    /// thin wrapper that locks and delegates to [`try_acquire_locked`].
     ///
-    /// This is how `NOWAIT` and `SKIP LOCKED` are served: both need to know
-    /// whether the row is free *without* waiting, and differ only in what they do
-    /// with a conflict.
+    /// This is what serves `NOWAIT` and `SKIP LOCKED`. Both need to know
+    /// whether the row is free *without* a wait, and they differ only in what
+    /// they do with a conflict.
     pub(crate) fn try_acquire(
         &self,
         table: crabka_pgcatalog::TableId,
@@ -181,24 +185,27 @@ impl RowLockManager {
         try_acquire_locked(&mut g, LockKey::Row(table, rowid), mode, my_xid)
     }
 
-    /// Number of lock-table entries currently held (both key spaces). Lets
-    /// tests assert released entries are REMOVED, not left empty.
+    /// Number of lock-table entries currently held, over both key spaces. This
+    /// lets tests assert that released entries are REMOVED, not left empty.
     #[cfg(test)]
     pub(crate) fn held_entry_count(&self) -> usize {
         self.inner.lock().expect("lockmgr").locks.len()
     }
 
     /// Recovery re-acquisition (SP24 abort atomicity): grab `(table, rowid)`
-    /// EXCLUSIVELY for an inherited in-doubt local xid `Li` whose `Prepared(Li -> g)`
-    /// row version this leader inherited but whose in-memory lock was wiped by the
-    /// failover. Always installs the lock under `my_xid` — overwriting any holder of
-    /// the SAME row, because on the rising edge no live transaction holds this row
-    /// (the lock table started empty) and the inherited marker is the sole claimant.
-    /// Idempotent: re-acquiring an already-held lock is a no-op. The lock is freed by
-    /// the rise sweep's `release_all(Li)` once `g` is driven terminal — so a
-    /// concurrent re-staging writer BLOCKS here until the inherited row resolves,
-    /// giving exactly one live version (the serialize-before-serve invariant the
-    /// per-session `effective_global_xid` fence cannot enforce under apply lag).
+    /// EXCLUSIVELY for an inherited in-doubt local xid `Li`. This leader
+    /// inherited that xid's `Prepared(Li -> g)` row version, but the failover
+    /// wiped its in-memory lock.
+    ///
+    /// This always installs the lock under `my_xid` and overwrites any holder of
+    /// the SAME row. On the rising edge no live transaction holds this row,
+    /// because the lock table started empty, and the inherited marker is the
+    /// sole claimant. It is idempotent: a re-acquire of an already-held lock is
+    /// a no-op. The rise sweep's `release_all(Li)` frees the lock once `g` is
+    /// driven terminal. So a concurrent re-staging writer BLOCKS here until the
+    /// inherited row resolves, which gives exactly one live version.
+    /// That is the serialize-before-serve invariant the per-session
+    /// `effective_global_xid` fence cannot enforce under apply lag.
     pub(crate) fn reacquire_exclusive(
         &self,
         table: crabka_pgcatalog::TableId,
@@ -223,9 +230,10 @@ impl RowLockManager {
         lock.holders.insert(my_xid);
     }
 
-    /// Acquire `(table, rowid)` in `mode` for `my_xid`, blocking until granted
-    /// or `wait_cap` (when given) expires. Returns the deadlock or cap error
-    /// (caller maps both to 40P01). See [`Self::acquire_key`].
+    /// Acquire `(table, rowid)` in `mode` for `my_xid`. This blocks until the
+    /// grant, or until `wait_cap` expires when the caller gives one. Returns the
+    /// deadlock or cap error, and the caller maps both to 40P01. See
+    /// [`Self::acquire_key`].
     pub async fn acquire(
         &self,
         table: crabka_pgcatalog::TableId,
@@ -238,14 +246,16 @@ impl RowLockManager {
             .await
     }
 
-    /// Acquire `key` in `mode` for `my_xid`, blocking until granted or
-    /// `wait_cap` (when given) expires. Returns [`AcquireError::Deadlock`] if
-    /// blocking would close a wait-for cycle and [`AcquireError::CapExpired`]
-    /// when the cap runs out first (callers map both to 40P01).
+    /// Acquire `key` in `mode` for `my_xid`. This blocks until the grant, or
+    /// until `wait_cap` expires when the caller gives one. Returns
+    /// [`AcquireError::Deadlock`] if a block would close a wait-for cycle, and
+    /// [`AcquireError::CapExpired`] when the cap runs out first. Callers map
+    /// both to 40P01.
+    ///
     /// Conflict-detect and waiter-register happen ATOMICALLY under one guard,
-    /// and the holder's `release_all` wakes us via a permit-backed
-    /// `notify_one` — so there is no lost-wakeup window and no chance of
-    /// registering on a holder that already released.
+    /// and the holder's `release_all` wakes the waiter with a permit-backed
+    /// `notify_one`. So there is no lost-wakeup window, and no chance of a
+    /// registration on a holder that already released.
     pub async fn acquire_key(
         &self,
         key: LockKey,
@@ -331,8 +341,9 @@ impl RowLockManager {
         }
     }
 
-    /// Number of waiters currently registered against `holder` (test-only:
-    /// lets the cap-expiry test assert the abandoned wait was deregistered).
+    /// Number of waiters currently registered against `holder`. Test-only: it
+    /// lets the cap-expiry test assert that the abandoned wait was
+    /// deregistered.
     #[cfg(test)]
     pub(crate) fn waiter_queue_len(&self, holder: u64) -> usize {
         self.inner
@@ -343,16 +354,16 @@ impl RowLockManager {
             .map_or(0, Vec::len)
     }
 
-    /// Release ONE lock held by `my_xid`, waking every waiter blocked on
-    /// `my_xid` and clearing its edge.
+    /// Release ONE lock held by `my_xid`. This wakes every waiter blocked on
+    /// `my_xid` and clears its edge.
     ///
-    /// O(1) in the lock-table size, unlike [`Self::release_all`]'s full-table
-    /// walk. The vacuum sweep holds at most one row lock at a time and drops
-    /// it after every candidate row; paying a full-table walk per row is
-    /// quadratic whenever a concurrent bulk writer holds a large lock set. A
-    /// waiter woken here that was actually blocked on a DIFFERENT key still
-    /// held by `my_xid` (impossible for the single-lock sweep, but harmless
-    /// in general) simply re-attempts its acquire and re-blocks.
+    /// It is O(1) in the lock-table size, unlike [`Self::release_all`]'s
+    /// full-table walk. The vacuum sweep holds at most one row lock at a time
+    /// and drops it after every candidate row. A full-table walk per row would
+    /// be quadratic whenever a concurrent bulk writer holds a large lock set. A
+    /// waiter woken here that was blocked on a DIFFERENT key `my_xid` still
+    /// holds simply re-attempts its acquire and re-blocks. That cannot happen
+    /// for the single-lock sweep, and it is harmless in general.
     pub fn release_key(&self, key: &LockKey, my_xid: u64) {
         let to_wake = {
             let mut g = self.inner.lock().expect("lockmgr");
@@ -372,7 +383,8 @@ impl RowLockManager {
         }
     }
 
-    /// Release every lock held by `my_xid`, wake its waiters, clear its edge.
+    /// Release every lock held by `my_xid`, wake its waiters, and clear its
+    /// edge.
     pub fn release_all(&self, my_xid: u64) {
         let to_wake = {
             let mut g = self.inner.lock().expect("lockmgr");
@@ -403,8 +415,8 @@ impl RowLockManager {
             .collect()
     }
 
-    /// Restore `my_xid`'s lock set to a savepoint snapshot, releasing locks
-    /// acquired later and undoing a later shared-to-exclusive upgrade.
+    /// Restore `my_xid`'s lock set to a savepoint snapshot. This releases locks
+    /// acquired later and undoes a later shared-to-exclusive upgrade.
     pub(crate) fn restore_locks(&self, my_xid: u64, snapshot: &HashMap<LockKey, LockMode>) {
         let to_wake = {
             let mut inner = self.inner.lock().expect("lockmgr");
@@ -449,8 +461,9 @@ impl RowLockManager {
     }
 }
 
-/// Locked, non-blocking acquire over `&mut Inner`. Idempotent if `my_xid`
-/// already holds compatibly; a sole shared holder may upgrade to exclusive.
+/// Locked, non-blocking acquire over `&mut Inner`. It is idempotent if `my_xid`
+/// already holds compatibly, and a sole shared holder may upgrade to
+/// exclusive.
 fn try_acquire_locked(inner: &mut Inner, key: LockKey, mode: LockMode, my_xid: u64) -> Acquire {
     match inner.locks.get_mut(&key) {
         None => {
@@ -486,8 +499,8 @@ fn try_acquire_locked(inner: &mut Inner, key: LockKey, mode: LockMode, my_xid: u
     }
 }
 
-/// Would adding `my_xid -> holder` close a cycle? Walk the chain from `holder`;
-/// if it reaches `my_xid`, the edge closes a cycle.
+/// Would a new `my_xid -> holder` edge close a cycle? This walks the chain from
+/// `holder`. If the chain reaches `my_xid`, the edge closes a cycle.
 fn check_cycle(wait_for: &HashMap<u64, u64>, holder: u64, my_xid: u64) -> CycleCheck {
     let mut cur = holder;
     let mut seen = HashSet::new();
@@ -506,7 +519,7 @@ fn check_cycle(wait_for: &HashMap<u64, u64>, holder: u64, my_xid: u64) -> CycleC
 }
 
 /// A session's identity in the S3 table/advisory lock tables. Sessions are the
-/// lock holders there, not transactions: `LOCK TABLE` and the advisory-lock
+/// lock holders there, not transactions. `LOCK TABLE` and the advisory-lock
 /// family both work in a read-only transaction that never assigns an xid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionLockId(pub u64);
@@ -521,9 +534,9 @@ struct TableHold {
 
 /// S3: relation-level locks with `PostgreSQL`'s eight modes and conflict matrix.
 ///
-/// Holds are session-scoped and released together at the end of the transaction
-/// that took them, exactly as `PostgreSQL` releases relation locks. Locks a
-/// session already holds never conflict with its own new request, so a
+/// Holds are session-scoped, and the end of the transaction that took them
+/// releases them together, exactly as `PostgreSQL` releases relation locks.
+/// Locks a session already holds never conflict with its own new request, so a
 /// transaction can escalate freely.
 #[derive(Debug, Default)]
 pub struct TableLockManager {
@@ -533,7 +546,8 @@ pub struct TableLockManager {
 /// Why a table-lock acquisition failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableLockError {
-    /// `NOWAIT` was requested and another session holds a conflicting mode.
+    /// The statement asked for `NOWAIT`, and another session holds a
+    /// conflicting mode.
     NotAvailable,
 }
 
@@ -557,7 +571,7 @@ impl TableLockManager {
             .map(|(_, hold)| hold.session)
     }
 
-    /// Take `mode` on `table` for `session`, recording the hold.
+    /// Take `mode` on `table` for `session`, and record the hold.
     ///
     /// # Errors
     ///
@@ -632,9 +646,9 @@ impl TableLockManager {
 /// The scope an advisory lock is released at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvisoryScope {
-    /// Held until explicitly unlocked or the session ends.
+    /// Held until an explicit unlock, or until the session ends.
     Session,
-    /// Released automatically at the end of the current transaction.
+    /// The end of the current transaction releases it automatically.
     Transaction,
 }
 
@@ -648,7 +662,7 @@ struct AdvisoryHold {
 
 /// S3: the advisory-lock family's shared state.
 ///
-/// `PostgreSQL` advisory locks are counted: taking the same key twice requires
+/// `PostgreSQL` advisory locks are counted: a second take of the same key needs
 /// two unlocks. Both the 64-bit and the `(int4, int4)` key spellings map onto
 /// one `i64` key, exactly as `PostgreSQL` packs them.
 #[derive(Debug, Default)]
@@ -668,8 +682,9 @@ impl AdvisoryLockManager {
         ((high as i64) << 32) | (low as u32) as i64
     }
 
-    /// Take `key` for `session` when no other session conflicts. Returns whether
-    /// the lock was granted (`pg_try_advisory_lock`'s boolean).
+    /// Take `key` for `session` when no other session conflicts. Returns
+    /// whether the manager granted the lock (`pg_try_advisory_lock`'s
+    /// boolean).
     pub fn try_lock(
         &self,
         key: i64,

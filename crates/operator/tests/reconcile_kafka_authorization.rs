@@ -1,13 +1,14 @@
-//! Integration tests for `Kafka.spec.authorization` —
-//! verifies the operator reconcile renders the `[authorization]` TOML
-//! block into the broker `ConfigMap` for both `simple` and `opa`
-//! variants.
+//! Integration tests for `Kafka.spec.authorization`.
 //!
-//! The pure-function render tests already live alongside
-//! `render_broker_toml` in `controller/listeners.rs`. The added value at
-//! this layer is verifying that the rendered TOML actually lands in the
-//! broker-config `ConfigMap` PATCH (`<cluster>-broker-config`, data key
-//! `broker-<id>.toml`) on a real reconcile.
+//! They confirm that the operator reconcile renders the `[authorization]`
+//! TOML block into the broker `ConfigMap` for the `simple` variant and for
+//! the `opa` variant.
+//!
+//! The tests of the pure render function live next to
+//! `render_broker_toml` in `controller/listeners.rs`. These tests add one
+//! thing: they confirm that the rendered TOML lands in the broker-config
+//! `ConfigMap` PATCH on a real reconcile. That `ConfigMap` is
+//! `<cluster>-broker-config`, and the data key is `broker-<id>.toml`.
 
 use std::sync::Arc;
 
@@ -25,9 +26,11 @@ use shared::{build_ctx, fake_pool_list_item, happy_path_rules};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Build a `Kafka` CR with the given namespace, name, and authorization
-/// spec. Mirrors the helper shape used in `reconcile_inter_broker_mtls.rs`
-/// + `reconcile_listener_oauth.rs`.
+/// Builds a `Kafka` CR with the given namespace, name, and authorization
+/// spec.
+///
+/// It follows the shape of the helper in
+/// `reconcile_inter_broker_mtls.rs` and `reconcile_listener_oauth.rs`.
 fn kafka_cr_with_authorization(
     name: &str,
     namespace: &str,
@@ -61,9 +64,12 @@ fn kafka_cr_with_authorization(
     k
 }
 
-/// Extract the `broker-0.toml` string from the captured `ConfigMap` PATCH
-/// body. Panics with a helpful message when the PATCH (or the key) is
-/// missing — both are reconcile-path invariants for these tests.
+/// Extracts the `broker-0.toml` string from the captured `ConfigMap`
+/// PATCH body.
+///
+/// This function panics with a clear message when the PATCH is absent, and
+/// when the key is absent. Both are invariants of the reconcile path in
+/// these tests.
 fn broker_0_toml_from_observed(
     observed: &[http::Request<hyper::body::Bytes>],
     cluster: &str,
@@ -83,11 +89,12 @@ fn broker_0_toml_from_observed(
 
 // ── test 1: type: opa renders [authorization] + [authorization.opa] ──────────
 
-/// A `Kafka` spec with `authorization: { type: opa,
-/// url, superUsers: ["ANONYMOUS"] }` must produce a broker `ConfigMap`
-/// whose `broker-0.toml` data field carries the `[authorization]` block
-/// with `type = "opa"`, `super_users = ["ANONYMOUS"]`, and a nested
-/// `[authorization.opa]` table with the configured `url`.
+/// A `Kafka` spec with
+/// `authorization: { type: opa, url, superUsers: ["ANONYMOUS"] }` must
+/// give a broker `ConfigMap` whose `broker-0.toml` data field carries the
+/// `[authorization]` block. That block must hold `type = "opa"`,
+/// `super_users = ["ANONYMOUS"]`, and a nested `[authorization.opa]` table
+/// with the configured `url`.
 #[tokio::test]
 async fn kafka_with_opa_authorization_renders_correct_broker_toml() {
     let items = vec![fake_pool_list_item("brokers", "y", "c1", 1, 1)];
@@ -138,11 +145,11 @@ async fn kafka_with_opa_authorization_renders_correct_broker_toml() {
 
 // ── test 2: type: simple round-trips super_users ─────────────────────────────
 
-/// A `Kafka` spec with `authorization: { type:
-/// simple, superUsers: ["User:admin"] }` must produce a broker
-/// `ConfigMap` whose `broker-0.toml` carries `[authorization]` with
-/// `type = "simple"` and `super_users = ["User:admin"]`. No
-/// `[authorization.opa]` subtable should appear.
+/// A `Kafka` spec with
+/// `authorization: { type: simple, superUsers: ["User:admin"] }` must give
+/// a broker `ConfigMap` whose `broker-0.toml` carries `[authorization]`
+/// with `type = "simple"` and `super_users = ["User:admin"]`. No
+/// `[authorization.opa]` subtable may appear.
 #[tokio::test]
 async fn kafka_with_simple_authorization_super_users_round_trip() {
     let items = vec![fake_pool_list_item("brokers", "y", "c1", 1, 1)];

@@ -1,7 +1,9 @@
-//! Typed, read-only composite views over local state stores (Interactive
-//! Queries). Each view owns its Serdes and round-trips byte-level `IqRequest`s
-//! to the supervisor; results are eagerly materialized `Vec`s (one intentional
-//! divergence from the JVM's lazy `KeyValueIterator`).
+//! Typed, read-only composite views over the local state stores, for
+//! Interactive Queries.
+//!
+//! Each view owns its serdes and round-trips byte-level `IqRequest`s to the
+//! supervisor. The results are eagerly materialized `Vec`s. This is one
+//! deliberate difference from the JVM's lazy `KeyValueIterator`.
 
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
@@ -14,7 +16,8 @@ use crate::{
     store::iq::StoreKind,
 };
 
-/// Round-trip one op to the supervisor. Shared by all three views.
+/// Round-trip one operation to the supervisor. All three views share this
+/// function.
 async fn query(
     tx: &mpsc::Sender<IqRequest>,
     store: &str,
@@ -49,7 +52,8 @@ pub(crate) fn unexpected(p: &IqPayload) -> StreamsClientError {
     StreamsClientError::Runtime(format!("iq: unexpected payload {p:?}"))
 }
 
-/// Validate a store exists locally + has the requested kind (eager, in accessors).
+/// Check that a store exists locally and has the requested kind. The accessors
+/// run this check eagerly.
 #[tracing::instrument(
     name = "streams.iq.validate",
     level = "debug",
@@ -68,7 +72,7 @@ pub(crate) async fn validate(
     }
 }
 
-/// Read-only composite KV store view (Interactive Queries).
+/// Read-only composite KV store view, for Interactive Queries.
 pub struct ReadOnlyKeyValueStore<K, V> {
     pub(crate) tx: mpsc::Sender<IqRequest>,
     pub(crate) store: String,
@@ -77,7 +81,7 @@ pub struct ReadOnlyKeyValueStore<K, V> {
 }
 
 impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
-    /// Value for `key`, or `None` if absent.
+    /// The value for `key`, or `None` when the key is absent.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn get(&self, key: &K) -> Result<Option<V>, StreamsClientError> {
@@ -125,7 +129,8 @@ impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
         }
     }
 
-    /// Approximate entry count (exact for in-memory; summed across partitions).
+    /// The approximate entry count. It is exact for an in-memory store, and it
+    /// is summed across the partitions.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn approximate_num_entries(&self) -> Result<u64, StreamsClientError> {
@@ -155,7 +160,8 @@ impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
     }
 }
 
-/// Read-only composite window store view. `fetch` yields `(windowStart, V)`.
+/// Read-only composite window store view. `fetch` gives `(windowStart, V)`
+/// pairs.
 pub struct ReadOnlyWindowStore<K, V> {
     pub(crate) tx: mpsc::Sender<IqRequest>,
     pub(crate) store: String,
@@ -164,7 +170,8 @@ pub struct ReadOnlyWindowStore<K, V> {
 }
 
 impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
-    /// Value of the window for `key` starting exactly at `window_start`, else `None`.
+    /// The value of the window for `key` that starts exactly at `window_start`,
+    /// or `None`.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn fetch_single(
@@ -190,8 +197,9 @@ impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
         }
     }
 
-    /// Windows for `key` with start in inclusive `[time_from, time_to]`,
-    /// ascending by start. Each item is `(windowStart, value)`.
+    /// The windows for `key` whose start is in the inclusive range
+    /// `[time_from, time_to]`, in ascending order by start. Each item is a
+    /// `(windowStart, value)` pair.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn fetch(
@@ -222,8 +230,9 @@ impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
     }
 }
 
-/// Read-only composite session store view. `fetch` yields each session as a
-/// `Windowed<K>` (key + `[start, end]`) with its value.
+/// Read-only composite session store view. `fetch` gives each session as a
+/// `Windowed<K>`, which holds the key and `[start, end]`, together with its
+/// value.
 pub struct ReadOnlySessionStore<K, V> {
     pub(crate) tx: mpsc::Sender<IqRequest>,
     pub(crate) store: String,
@@ -279,7 +288,8 @@ mod tests {
         store::{api::KeyValueStore, kv::KeyValueBytesStore, registry::StoreRegistry},
     };
 
-    /// Spawn a tiny servicer over one registry; returns the sender the views use.
+    /// Spawn a small servicer over one registry. It returns the sender that the
+    /// views use.
     pub(super) fn servicer(reg: StoreRegistry) -> mpsc::Sender<IqRequest> {
         let (tx, mut rx) = mpsc::channel::<IqRequest>(16);
         tokio::spawn(async move {

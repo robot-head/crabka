@@ -1,5 +1,7 @@
-//! `GroupTopics` + `application_id` → the byte-exact `StreamsGroupHeartbeat`
-//! wire `Topology`. Every ordering rule here matches the JVM 4.x client.
+//! `GroupTopics` and `application_id` → the byte-exact `StreamsGroupHeartbeat`
+//! wire `Topology`.
+//!
+//! Every ordering rule here matches the JVM 4.x client.
 
 use crabka_protocol::owned::{
     common::streams_group_heartbeat_request::{key_value::KeyValue, topic_info::TopicInfo},
@@ -10,21 +12,22 @@ use serde::Serialize;
 
 use super::grouping::GroupTopics;
 
-/// `replication_factor` the JVM client sends for every internal topic: `-1`
-/// means "use the broker's `replication.factor` default" (KIP-1071 / the
-/// `StreamsGroupHeartbeat` `TopicInfo` convention).
+/// `replication_factor` the JVM client sends for every internal topic.
+///
+/// `-1` means "use the broker's `replication.factor` default". This is the
+/// KIP-1071 `StreamsGroupHeartbeat` `TopicInfo` convention.
 const INTERNAL_TOPIC_DEFAULT_RF: i16 = -1;
 
-/// `segment.bytes` the JVM 4.x client sets on a repartition topic (50 MiB), so
-/// consumed segments are deleted promptly.
+/// `segment.bytes` the JVM 4.x client sets on a repartition topic (50 MiB). This
+/// value lets the broker delete consumed segments quickly.
 const REPARTITION_SEGMENT_SIZE: ByteSize = mebibytes(50);
 
 /// Topic configs the JVM 4.x client attaches to a **repartition** topic, sorted
-/// by key (the wire array order the fixture pins).
+/// by key. That sort order is the wire array order the fixture pins.
 ///
-/// A repartition topic keeps records only until they are consumed, which the JVM
-/// expresses as `retention.ms=-1` — the absence of a retention bound, not an
-/// extent, so it renders through the `-1` wire sentinel.
+/// A repartition topic keeps records only until a consumer reads them. The JVM
+/// expresses this as `retention.ms=-1`. That value is the absence of a retention
+/// bound and not an extent, so it renders through the `-1` wire sentinel.
 fn repartition_topic_configs() -> Vec<KeyValue> {
     topic_configs([
         ("cleanup.policy", "delete".to_string()),
@@ -50,11 +53,14 @@ fn changelog_topic_configs() -> Vec<KeyValue> {
 }
 
 /// Topic configs the JVM 4.x client attaches to a **windowed-store changelog**
-/// topic: `compact,delete` policy + `retention.ms` to ensure expired windows are
-/// actually purged. Keys are in sorted order (same rule as repartition configs).
+/// topic.
 ///
-/// `retention` is rendered as the raw millisecond integer Kafka's `retention.ms`
-/// takes — the key name and the string value are wire contract.
+/// The configs are the `compact,delete` policy and `retention.ms`, which make
+/// sure the broker purges expired windows. The keys are in sorted order, the
+/// same rule as the repartition configs.
+///
+/// This function renders `retention` as the raw millisecond integer that Kafka's
+/// `retention.ms` takes. The key name and the string value are wire contract.
 fn windowed_changelog_topic_configs(retention: Time) -> Vec<KeyValue> {
     vec![
         KeyValue {
@@ -75,13 +81,15 @@ fn windowed_changelog_topic_configs(retention: Time) -> Vec<KeyValue> {
     ]
 }
 
-/// Versioned-store changelog topic configs (KIP-889): `cleanup.policy=compact` +
-/// `message.timestamp.type=CreateTime` + `min.compaction.lag.ms` so recent
-/// versions survive (un-compacted) until restore reads them. Keys are in sorted
-/// order (same rule as the other changelog configs).
+/// Versioned-store changelog topic configs (KIP-889).
 ///
-/// `min_compaction_lag` is rendered as the raw millisecond integer Kafka's
-/// `min.compaction.lag.ms` takes.
+/// The configs are `cleanup.policy=compact`,
+/// `message.timestamp.type=CreateTime`, and `min.compaction.lag.ms`. Together
+/// they let recent versions survive un-compacted until a restore reads them. The
+/// keys are in sorted order, the same rule as the other changelog configs.
+///
+/// This function renders `min_compaction_lag` as the raw millisecond integer
+/// that Kafka's `min.compaction.lag.ms` takes.
 fn versioned_changelog_topic_configs(min_compaction_lag: Time) -> Vec<KeyValue> {
     vec![
         KeyValue {
@@ -103,11 +111,13 @@ fn versioned_changelog_topic_configs(min_compaction_lag: Time) -> Vec<KeyValue> 
 }
 
 /// Topic configs the JVM 4.x client attaches to a **join-window-store changelog**
-/// topic: `delete`-only policy + `retention.ms`. Join window stores use
-/// `retainDuplicates=true`, which prohibits compaction.
+/// topic.
 ///
-/// `retention` is rendered as the raw millisecond integer Kafka's `retention.ms`
-/// takes.
+/// The configs are the `delete`-only policy and `retention.ms`. Join window
+/// stores use `retainDuplicates=true`, which prohibits compaction.
+///
+/// This function renders `retention` as the raw millisecond integer that Kafka's
+/// `retention.ms` takes.
 fn join_window_changelog_topic_configs(retention: Time) -> Vec<KeyValue> {
     vec![
         KeyValue {
@@ -128,8 +138,8 @@ fn join_window_changelog_topic_configs(retention: Time) -> Vec<KeyValue> {
     ]
 }
 
-/// Build the `KeyValue` config array from `(key, value)` pairs (already in
-/// sorted order at the call site).
+/// Build the `KeyValue` config array from `(key, value)` pairs. The call site
+/// gives the pairs in sorted order.
 fn topic_configs<const N: usize>(pairs: [(&str, String); N]) -> Vec<KeyValue> {
     pairs
         .into_iter()
@@ -141,7 +151,8 @@ fn topic_configs<const N: usize>(pairs: [(&str, String); N]) -> Vec<KeyValue> {
         .collect()
 }
 
-/// Build the wire `Topology` (epoch 0, sorted subtopologies + topic arrays).
+/// Build the wire `Topology` at epoch 0, with sorted subtopologies and sorted
+/// topic arrays.
 pub(crate) fn to_wire(groups: &[GroupTopics], application_id: &str) -> Topology {
     let mut subtopologies: Vec<Subtopology> = groups
         .iter()
@@ -231,22 +242,25 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
 // Serializable view of the wire `Topology`
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// A serde-serializable view of the `StreamsGroupHeartbeat` wire `Topology`,
-/// used to assert byte-exact interop against captured JVM fixtures.
+/// A serde-serializable view of the `StreamsGroupHeartbeat` wire `Topology`.
 ///
-/// The protocol `Topology` is auto-generated (and carries `unknown_tagged_fields`
-/// that the JVM JSON fixtures omit), so we project it onto these flat structs
-/// whose `serde(rename_all)`-free `snake_case` field names match the captured
-/// fixture shape exactly. Field *order* is irrelevant — fixtures are compared as
-/// `serde_json::Value` (a key-sorted map), and topic/subtopology array order is
-/// already fixed by [`BuiltTopology::to_wire`](crate::topology::BuiltTopology::to_wire).
+/// The tests use it to assert byte-exact interop against captured JVM fixtures.
+///
+/// The protocol `Topology` is auto-generated, and it carries
+/// `unknown_tagged_fields` that the JVM JSON fixtures omit. This crate therefore
+/// projects it onto these flat structs. Their `snake_case` field names carry no
+/// `serde(rename_all)` and match the captured fixture shape exactly. Field
+/// *order* does not matter, because the tests compare fixtures as
+/// `serde_json::Value`, which is a key-sorted map. The topic and subtopology
+/// array order is already fixed by
+/// [`BuiltTopology::to_wire`](crate::topology::BuiltTopology::to_wire).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireTopology {
     pub epoch: i32,
     pub subtopologies: Vec<WireSubtopology>,
 }
 
-/// One subtopology in a [`WireTopology`] (fixture-shaped).
+/// One fixture-shaped subtopology in a [`WireTopology`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireSubtopology {
     pub subtopology_id: String,
@@ -258,7 +272,7 @@ pub struct WireSubtopology {
     pub copartition_groups: Vec<WireCopartitionGroup>,
 }
 
-/// An internal-topic descriptor (repartition source / state changelog).
+/// An internal-topic descriptor for a repartition source or a state changelog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireTopicInfo {
     pub name: String,
@@ -274,8 +288,8 @@ pub struct WireKeyValue {
     pub value: String,
 }
 
-/// A copartition group: `int16` indices into the sorted source / repartition
-/// arrays.
+/// A copartition group. It holds `int16` indices into the sorted source and
+/// repartition arrays.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireCopartitionGroup {
     pub source_topics: Vec<i16>,
@@ -346,10 +360,12 @@ impl From<&CopartitionGroup> for WireCopartitionGroup {
     }
 }
 
-/// Encode a copartition group as `int16` indices into the sorted `sources` /
-/// `repartition` arrays. The `subtopology()` builder calls this once per declared
-/// copartition group, passing the same sorted source/repartition arrays it emits
-/// for the wire `source_topics` / `repartition_source_topics` fields.
+/// Encode a copartition group as `int16` indices into the sorted `sources` and
+/// `repartition` arrays.
+///
+/// The `subtopology()` builder calls this once per declared copartition group.
+/// It passes the same sorted source and repartition arrays that it emits for the
+/// wire `source_topics` and `repartition_source_topics` fields.
 pub(crate) fn copartition_group(
     sources: &[String],
     repartition: &[String],
@@ -704,9 +720,9 @@ mod tests {
     /// Every changelog flavour's rendered `(key, value)` config array, pinned
     /// against the exact strings Kafka's topic configs take.
     ///
-    /// The quantity lives in `ChangelogKind`; only this rendering step turns it
+    /// The quantity lives in `ChangelogKind`. Only this rendering step turns it
     /// back into a millisecond integer, and a scale slip here would silently
-    /// change how long a changelog is retained.
+    /// change how long the broker retains a changelog.
     #[test]
     fn changelog_kinds_render_kafka_config_strings_verbatim() {
         let cases = [
@@ -764,9 +780,9 @@ mod tests {
         }
     }
 
-    /// Repartition topics carry a fixed config array — including a `segment.bytes`
-    /// that must stay the byte count the JVM client sends, not a rounded or
-    /// rescaled one.
+    /// Repartition topics carry a fixed config array. It includes a
+    /// `segment.bytes` that must stay the byte count the JVM client sends, and
+    /// not a rounded or rescaled one.
     #[test]
     fn repartition_topic_configs_render_verbatim() {
         let configs = repartition_topic_configs();

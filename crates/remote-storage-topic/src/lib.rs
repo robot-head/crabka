@@ -3,12 +3,11 @@
 //!
 //! This crate ships [`TopicBasedRemoteLogMetadataManager`], the
 //! production replacement for [`crabka_remote_storage::InmemoryRemoteLogMetadataManager`].
-//! Remote-segment lifecycle events (add / update / partition-delete)
-//! are appended to an event log — in production the
-//! `__remote_log_metadata` Kafka topic — and every broker's local
-//! cache is rebuilt by consuming the same log. After a restart, a
-//! broker re-reads the topic from offset 0 and re-applies the full
-//! history to recover its cache.
+//! The manager appends remote-segment lifecycle events, which are add,
+//! update, and partition-delete, to an event log. In production that log is
+//! the `__remote_log_metadata` Kafka topic. Every broker rebuilds its local
+//! cache from the same log. After a restart, a broker re-reads the topic from
+//! offset 0 and re-applies the full history to recover its cache.
 //!
 //! ## What this crate provides
 //!
@@ -21,7 +20,7 @@
 //!   tests and for modelling the multi-broker case without bringing
 //!   up a real cluster (multiple managers cloned from the same `Arc`
 //!   observe each other's writes).
-//! - [`MetadataEvent`] + the [`serde`] module — the on-wire binary
+//! - [`MetadataEvent`] and the [`serde`] module — the on-wire binary
 //!   codec for the three event variants.
 //! - [`metadata_partition_for`] — the
 //!   `TopicIdPartition → metadata-topic-partition` hash.
@@ -30,7 +29,7 @@
 //!   [`crabka_client_producer`] / [`crabka_client_core`] /
 //!   [`crabka_client_admin`], persisting events in the
 //!   `__remote_log_metadata` topic. Reads use manual per-partition
-//!   `Fetch` loops over `crabka_client_core` (no consumer group).
+//!   `Fetch` loops over `crabka_client_core`, with no consumer group.
 //! - [`SwappableRlmm`] — the hot-swap facade the broker boots behind so
 //!   it can start on the fail-closed `NotReadyRlmm` and upgrade to the
 //!   topic-backed manager once its listener is serving.
@@ -44,7 +43,7 @@
 //! and infinite retention. The manager maintains a local snapshot cache so
 //! restarts can resume from committed per-partition offsets instead of replaying
 //! the full topic every time. It does not use a Kafka consumer group or broker
-//! offset commits; the broker drives assignments explicitly with
+//! offset commits. The broker drives assignments explicitly with
 //! [`TopicBasedRemoteLogMetadataManager::reconcile_assignment`]. Internal Kafka
 //! clients use plaintext loopback by default, or the TLS/SASL settings supplied
 //! through [`KafkaMetadataLogConfig::security`].

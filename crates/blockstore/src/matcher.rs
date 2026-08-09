@@ -4,12 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::labels::SeriesFingerprint;
 
-/// Synthetic label naming the active query shard (`N_of_M`).
+/// Synthetic label that names the active query shard (`N_of_M`).
 ///
-/// Crabka's sharding is an internal scheme over the FNV [`SeriesFingerprint`]
-/// (see [`QueryShardSelector::matches`]); it is self-consistent but not
-/// byte-compatible with Mimir's stable label-hash sharding, so this label is
-/// internal-only and must not cross the Mimir-facing wire boundary.
+/// Crabka's sharding is an internal scheme over the FNV
+/// [`SeriesFingerprint`]. See [`QueryShardSelector::matches`]. It is
+/// self-consistent but not byte-compatible with Mimir's stable label-hash
+/// sharding, so this label is internal-only and must not cross the
+/// Mimir-facing wire boundary.
 pub const QUERY_SHARD_LABEL: &str = "__query_shard__";
 
 /// Matcher operator.
@@ -54,13 +55,14 @@ pub struct QueryShardSelector {
 impl QueryShardSelector {
     /// Whether series fingerprint `fp` falls in this shard.
     ///
-    /// This shards on the crate's internal FNV [`SeriesFingerprint`] (a 0-based
-    /// remap of Mimir's 1-based `N_of_M`). It is self-consistent within Crabka
-    /// but is **not** byte-compatible with Mimir's stable label-hash sharding,
-    /// which hashes the label set with a different algorithm. Consequently
-    /// `__query_shard__` is an internal-only sharding scheme: it must never be
-    /// exposed to, nor accepted from, a real Mimir client, since the shard
-    /// boundaries would not agree across the two systems.
+    /// This shards on the crate's internal FNV [`SeriesFingerprint`], a
+    /// 0-based remap of Mimir's 1-based `N_of_M`. It is self-consistent within
+    /// Crabka, but it is **not** byte-compatible with Mimir's stable
+    /// label-hash sharding, which hashes the label set with a different
+    /// algorithm, so `__query_shard__` is an internal-only sharding scheme.
+    /// It must never be exposed to, nor accepted from, a real Mimir
+    /// client, because the shard boundaries would not agree across the two
+    /// systems.
     #[must_use]
     pub fn matches(self, fp: SeriesFingerprint) -> bool {
         fp % self.total as u64 == (self.index - 1) as u64

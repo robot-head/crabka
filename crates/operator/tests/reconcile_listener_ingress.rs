@@ -1,8 +1,9 @@
-//! Integration tests for `ingress` / `route` external listeners.
+//! Integration tests for `ingress` and `route` external listeners.
 //!
-//! Drives `reconcile` against the FIFO mock transport (see `shared/mod.rs`) and
-//! asserts the operator renders the `ClusterIP` backend Services, the
-//! `Ingress`/`Route` objects, a `ConfigMap` whose advertised address is
+//! These tests drive `reconcile` against the FIFO mock transport. See
+//! `shared/mod.rs`. They assert that the operator renders the `ClusterIP`
+//! backend Services and the `Ingress`/`Route` objects. They also assert that
+//! the operator renders a `ConfigMap` whose advertised address is
 //! `<host>:443`, and a `ListenersReady=True` status.
 
 use std::sync::Arc;

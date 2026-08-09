@@ -2,9 +2,9 @@
 //! before anything is created in it, which of those may be created or dropped,
 //! and what `pg_namespace` projects for each.
 //!
-//! Every SQLSTATE, message and `DETAIL` asserted here was captured from a live
-//! `PostgreSQL` 18.4 server rather than from documentation. Where this engine
-//! knowingly diverges the test pins the *current* behaviour and says so at the
+//! Every SQLSTATE, message and `DETAIL` asserted here comes from a live
+//! `PostgreSQL` 18.4 server, not from documentation. Where this engine
+//! knowingly diverges, the test pins the *current* behaviour and says so at the
 //! assertion.
 
 use assert2::assert;
@@ -40,9 +40,10 @@ fn text_row(values: &[&str]) -> Vec<Option<String>> {
     values.iter().map(|v| Some((*v).to_string())).collect()
 }
 
-/// A failed statement, as everything `PostgreSQL` puts on the wire for it —
-/// compared as one value so a case states its whole expected error rather than
-/// a chain of field assertions.
+/// A failed statement, as everything `PostgreSQL` puts on the wire for it.
+///
+/// A case compares this as one value, so it states its whole expected error
+/// instead of a chain of field assertions.
 #[derive(Debug, PartialEq, Eq)]
 struct Failure {
     code: String,
@@ -115,9 +116,10 @@ async fn engine_with(setup: &[&str]) -> (SqlEngine, SqlSession) {
 // What a database starts with
 // ---------------------------------------------------------------------------
 
-/// A database that has never run a `CREATE SCHEMA` still has three schemas, and
-/// `public` is owned by `pg_database_owner` rather than by the bootstrap
-/// superuser — the one place `PostgreSQL`'s ownership differs across them.
+/// A database that has never run a `CREATE SCHEMA` still has three schemas.
+///
+/// `pg_database_owner` owns `public`, not the bootstrap superuser. This is the
+/// one place where `PostgreSQL`'s ownership differs across them.
 #[tokio::test]
 async fn a_fresh_database_has_the_three_bootstrap_schemas() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -131,10 +133,12 @@ async fn a_fresh_database_has_the_three_bootstrap_schemas() {
     );
 }
 
-/// The regression this file exists for: `public` was both hard-coded into the
-/// `pg_namespace` projection *and* creatable, so a `CREATE SCHEMA public` left
-/// two rows behind — both claiming oid 2200. Every way of reaching the schema
-/// has to leave exactly one row.
+/// The regression this file exists for.
+///
+/// `public` was both hard-coded into the `pg_namespace` projection *and*
+/// creatable, so a `CREATE SCHEMA public` left two rows behind. Both rows
+/// claimed oid 2200. Every way of reaching the schema must leave exactly one
+/// row.
 #[tokio::test]
 async fn public_has_exactly_one_pg_namespace_row() {
     struct Case {
@@ -183,9 +187,11 @@ async fn public_has_exactly_one_pg_namespace_row() {
 // ---------------------------------------------------------------------------
 
 /// The three refusals `CREATE SCHEMA` has, with the SQLSTATE and wording
-/// `PostgreSQL` 18.4 reports. Note the ordering the reserved-prefix cases pin:
-/// `pg_catalog` exists, yet the unacceptable-name refusal outranks the
-/// duplicate one, and `IF NOT EXISTS` does not waive it.
+/// `PostgreSQL` 18.4 reports.
+///
+/// Note the order that the reserved-prefix cases pin: `pg_catalog` exists, but
+/// the unacceptable-name refusal outranks the duplicate one, and
+/// `IF NOT EXISTS` does not waive it.
 #[tokio::test]
 async fn create_schema_errors_match_postgresql() {
     struct Case {
@@ -253,6 +259,7 @@ async fn create_schema_accepts_ordinary_names() {
 }
 
 /// `CREATE SCHEMA IF NOT EXISTS public` succeeds where the bare form is 42P06.
+///
 /// `PostgreSQL` also emits a NOTICE that this engine does not.
 #[tokio::test]
 async fn create_schema_if_not_exists_accepts_a_schema_that_is_already_there() {
@@ -271,8 +278,10 @@ async fn create_schema_if_not_exists_accepts_a_schema_that_is_already_there() {
 // DROP SCHEMA
 // ---------------------------------------------------------------------------
 
-/// What `DROP SCHEMA` refuses. The system schemas are refused however they are
-/// reached, and `IF EXISTS` does not help, because they do exist.
+/// What `DROP SCHEMA` refuses.
+///
+/// The engine refuses the system schemas however a statement reaches them, and
+/// `IF EXISTS` does not help, because they do exist.
 #[tokio::test]
 async fn drop_schema_errors_match_postgresql() {
     struct Case {
@@ -335,8 +344,10 @@ async fn drop_schema_errors_match_postgresql() {
     }
 }
 
-/// `public` is genuinely droppable, and stays dropped: a second drop reports it
-/// missing rather than finding a schema this engine bootstraps back.
+/// `public` is genuinely droppable, and it stays dropped.
+///
+/// A second drop reports it missing and does not find a schema that this engine
+/// bootstraps back.
 #[tokio::test]
 async fn public_is_droppable_and_stays_dropped() {
     let (_engine, mut s) = engine_with(&["DROP SCHEMA public"]).await;
@@ -354,8 +365,10 @@ async fn public_is_droppable_and_stays_dropped() {
     run(&mut s, "DROP SCHEMA IF EXISTS public").await;
 }
 
-/// Created again, `public` is an ordinary schema owned by whoever created it —
-/// `pg_database_owner` owns only the one the database was bootstrapped with.
+/// Created again, `public` is an ordinary schema owned by whoever created it.
+///
+/// `pg_database_owner` owns only the schema that the database was bootstrapped
+/// with.
 #[tokio::test]
 async fn public_can_be_created_again_after_being_dropped() {
     let (_engine, mut s) = engine_with(&["DROP SCHEMA public", "CREATE SCHEMA public"]).await;
@@ -369,8 +382,10 @@ async fn public_can_be_created_again_after_being_dropped() {
     );
 }
 
-/// A non-empty `public` needs `CASCADE`, and `CASCADE` takes its relations with
-/// it — the same rule every other schema is under.
+/// A non-empty `public` needs `CASCADE`, and `CASCADE` takes its relations
+/// with it.
+///
+/// Every other schema is under the same rule.
 #[tokio::test]
 async fn dropping_a_populated_public_needs_cascade() {
     let (_engine, mut s) = engine_with(&["CREATE TABLE t (id int4)"]).await;
@@ -397,9 +412,10 @@ async fn dropping_a_populated_public_needs_cascade() {
 // ALTER SCHEMA
 // ---------------------------------------------------------------------------
 
-/// Re-owning a bootstrap schema stores a row over the synthesised one. The
-/// owner still projects as the bootstrap superuser, because this engine has no
-/// ownership model — but the schema is not duplicated by acquiring a row.
+/// Re-owning a bootstrap schema stores a row over the synthesised one.
+///
+/// The owner still projects as the bootstrap superuser, because this engine has
+/// no ownership model. But a new row does not duplicate the schema.
 #[tokio::test]
 async fn re_owning_a_bootstrap_schema_replaces_its_row() {
     let (_engine, mut s) = engine_with(&[
@@ -422,10 +438,11 @@ async fn re_owning_a_bootstrap_schema_replaces_its_row() {
 // information_schema.schemata
 // ---------------------------------------------------------------------------
 
-/// The standard view is a projection of `pg_namespace`, not a fixed list: a
-/// created schema shows up in it and a dropped `public` leaves it. Both views
-/// name the same owner for each schema, because `PostgreSQL` builds `schemata`
-/// by joining `nspowner` to `pg_authid`.
+/// The standard view is a projection of `pg_namespace`, not a fixed list.
+///
+/// A created schema shows up in it, and a dropped `public` leaves it. Both
+/// views name the same owner for each schema, because `PostgreSQL` builds
+/// `schemata` with a join from `nspowner` to `pg_authid`.
 #[tokio::test]
 async fn information_schema_schemata_tracks_pg_namespace() {
     let (_engine, mut s) = engine_with(&[]).await;
@@ -451,9 +468,10 @@ async fn information_schema_schemata_tracks_pg_namespace() {
     assert!(standard_schemas(&mut s).await == schemas(&mut s).await);
 }
 
-/// The full column list `PostgreSQL` 18.4 projects, in its order. The three
-/// `default_character_set_*` columns and `sql_path` are NULL there too — the
-/// standard defines them and `PostgreSQL` fills none of them.
+/// The full column list `PostgreSQL` 18.4 projects, in its order.
+///
+/// The three `default_character_set_*` columns and `sql_path` are NULL there
+/// too. The standard defines them, and `PostgreSQL` fills none of them.
 #[tokio::test]
 async fn information_schema_schemata_projects_the_standard_columns() {
     let (_engine, mut s) = engine_with(&[]).await;

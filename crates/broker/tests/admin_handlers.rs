@@ -4,10 +4,10 @@
 
 //! Broker-side integration tests for the admin handlers.
 //!
-//! Each test spins up a 1-broker cluster via [`support::start_n_node`],
-//! dispatches the relevant request through `crabka-client-core`, and
-//! asserts on either the response or observable broker state exposed by
-//! the `BrokerHandle` test-helper methods.
+//! Each test starts a 1-broker cluster with [`support::start_n_node`] and
+//! dispatches the relevant request through `crabka-client-core`. The test
+//! then asserts on the response, or on observable broker state that the
+//! `BrokerHandle` test-helper methods expose.
 
 use assert2::{assert, check};
 mod support;
@@ -74,8 +74,8 @@ async fn create_topic_helper(client: &crabka_client_core::Client, name: &str, pa
 
 // ── AlterConfigs (api_key 33) ────────────────────────────────────────────────
 
-/// `AlterConfigs` round-trip: setting `retention.ms` on a known topic returns
-/// `error_code == 0`, and the supervisor eventually pushes the new config
+/// `AlterConfigs` round-trip: a request that sets `retention.ms` on a known
+/// topic returns `error_code == 0`. The supervisor then pushes the new config
 /// into the partition's log.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_configs_round_trip() {
@@ -178,12 +178,12 @@ async fn alter_configs_rejects_unknown_key() {
     );
 }
 
-/// `min.insync.replicas` pre-flight: after the operator sets
-/// `min.insync.replicas=2` via `AlterConfigs`, an `acks=-1` produce
-/// against a 1-broker cluster (ISR={1}, isr.len()=1) must fail fast
-/// with `NOT_ENOUGH_REPLICAS` (19) — before the writer queues the
-/// batch. An `acks=1` produce against the same topic still succeeds
-/// because leader-only acks bypass the ISR threshold entirely.
+/// `min.insync.replicas` pre-flight: the operator sets
+/// `min.insync.replicas=2` with `AlterConfigs`. An `acks=-1` produce
+/// against a 1-broker cluster (ISR={1}, isr.len()=1) must then fail fast
+/// with `NOT_ENOUGH_REPLICAS` (19), before the writer queues the batch.
+/// An `acks=1` produce against the same topic still succeeds, because
+/// leader-only acks bypass the ISR threshold entirely.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn min_insync_replicas_blocks_acks_all_when_isr_too_small() {
     let cluster = start_n_node(1).await.expect("start_n_node");
@@ -306,9 +306,9 @@ async fn min_insync_replicas_blocks_acks_all_when_isr_too_small() {
 
 // ── CreatePartitions (api_key 37) ────────────────────────────────────────────
 
-/// `CreatePartitions`: extending a 1-partition topic to 3 returns
-/// `error_code == 0`, and all three partitions materialise in the broker's
-/// local registry within a few seconds.
+/// `CreatePartitions`: a request that extends a 1-partition topic to 3
+/// returns `error_code == 0`. All three partitions then materialise in the
+/// broker's local registry within a few seconds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_partitions_extends_topic() {
     let cluster = start_n_node(1).await.expect("start_n_node");
@@ -425,9 +425,9 @@ async fn create_partitions_honors_explicit_assignments() {
 
 // ── DeleteRecords (api_key 21) ───────────────────────────────────────────────
 
-/// `DeleteRecords`: producing 100 records and then trimming from offset 50
-/// returns a valid `low_watermark`, and the broker's `log_start_offset`
-/// moves forward.
+/// `DeleteRecords`: the test produces 100 records and then trims from offset
+/// 50. The response carries a valid `low_watermark`, and the broker's
+/// `log_start_offset` moves forward.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_records_trims_log_start() {
     let cluster = start_n_node(1).await.expect("start_n_node");
@@ -504,9 +504,9 @@ async fn describe_cluster_lists_brokers() {
 
 /// KIP-919: `DescribeCluster` with `endpoint_type = 2` (CONTROLLERS) projects
 /// the `KRaft` voter set instead of the broker set, so an `AdminClient` can
-/// discover the controller quorum. On a 1-node cluster that is the single
-/// bootstrap voter (id=1) advertised on its CONTROLLER listener endpoint, and
-/// the response echoes `endpoint_type = 2`.
+/// discover the controller quorum. On a 1-node cluster that voter set is the
+/// single bootstrap voter (id=1) advertised on its CONTROLLER listener
+/// endpoint. The response echoes `endpoint_type = 2`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_cluster_endpoint_type_controllers_lists_voters() {
     const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
@@ -549,9 +549,9 @@ async fn describe_cluster_endpoint_type_controllers_lists_voters() {
 
 /// `DescribeQuorum` against the cluster-metadata topic on a 1-broker
 /// cluster returns one partition row carrying the broker's voter id with
-/// `leader_id` == 1. Verifies the dispatch glue, the ACL allow path, and
-/// the response encoding — the pure `build_topic_responses` helper has
-/// its own unit tests in
+/// `leader_id` == 1. This test verifies the dispatch glue, the ACL allow
+/// path, and the response encoding. The pure `build_topic_responses` helper
+/// has its own unit tests in
 /// `crates/broker/src/handlers/describe_quorum.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_quorum_reports_cluster_metadata_voter_set() {
@@ -610,9 +610,9 @@ async fn describe_quorum_reports_cluster_metadata_voter_set() {
 // ── ListConfigResources (api_key 74, KIP-1142) ─────────────────────────────
 
 /// `ListConfigResources` v1 with empty `resource_types` returns the default
-/// set: every topic + every broker (+ empty client-metrics). Verifies the
-/// dispatch glue, the ACL gate's allow path, and the response encoding —
-/// the pure `collect_resources` helper has its own unit tests in
+/// set: every topic and every broker, plus empty client-metrics. This test
+/// verifies the dispatch glue, the ACL gate's allow path, and the response
+/// encoding. The pure `collect_resources` helper has its own unit tests in
 /// `crates/broker/src/handlers/list_config_resources.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_config_resources_default_set_includes_topics_and_brokers() {
@@ -657,8 +657,8 @@ async fn list_config_resources_default_set_includes_topics_and_brokers() {
 
 // ── ListGroups (api_key 16) ──────────────────────────────────────────────────
 
-/// `ListGroups` includes a group that was injected directly into the
-/// `GroupManager` via the test helper, without running a full `JoinGroup` /
+/// `ListGroups` includes a group that the test helper injected directly into
+/// the `GroupManager`. The test does not run a full `JoinGroup` /
 /// `SyncGroup` exchange.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_groups_includes_freshly_created_group() {

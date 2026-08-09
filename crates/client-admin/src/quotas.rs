@@ -1,13 +1,14 @@
 //! Client-quota admin RPCs.
 //!
-//! Two admin operations the `KafkaUser` reconciler drives:
-//! `DescribeClientQuotas` (`api_key` 48) reads the current set of
-//! quota keys → values for a single (user) entity;
-//! `AlterClientQuotas` (`api_key` 49) upserts and/or removes those keys.
+//! The `KafkaUser` reconciler drives two admin operations.
+//! `DescribeClientQuotas` (`api_key` 48) reads the current set of quota keys →
+//! values for a single user entity. `AlterClientQuotas` (`api_key` 49) upserts
+//! those keys, removes them, or both.
 //!
-//! Only the per-user shape is exposed (entity `[("user", Some(name))]`).
-//! Per-`client-id`, per-`ip`, and tuple entities (e.g. `(user, client-id)`)
-//! are reserved for later operator surfaces.
+//! This module exposes only the per-user shape, entity
+//! `[("user", Some(name))]`. Per-`client-id` entities, per-`ip` entities, and
+//! tuple entities such as `(user, client-id)` are reserved for later operator
+//! surfaces.
 
 use std::collections::BTreeMap;
 
@@ -24,8 +25,8 @@ use crate::{AdminClient, AdminError, KafkaError, kafka_error_if, kafka_error_nam
 /// Wire `match_type` constant from KIP-546 / `DescribeClientQuotasRequest.json`.
 const MATCH_TYPE_EXACT: i8 = 0;
 
-/// One mutation against a (user) quota entity. The reconciler computes
-/// these by diffing the spec against the current broker state.
+/// One mutation against a user quota entity. The reconciler computes these
+/// from a diff of the spec against the current broker state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuotaOp {
     /// Upsert `key` → `value`. `value` must be finite and non-negative;
@@ -36,16 +37,18 @@ pub enum QuotaOp {
     Remove { key: String },
 }
 
-/// Snapshot of the broker's quota state for a single user. Empty map ==
-/// no per-user quotas configured.
+/// Snapshot of the broker's quota state for a single user. An empty map means
+/// no per-user quotas are configured.
 pub type UserQuotaConfig = BTreeMap<String, f64>;
 
 impl AdminClient {
-    /// Read the broker's current client-quota config for the named user.
-    /// Filters strictly on the single-component entity
-    /// `[("user", Some(username))]`; broker entries whose entity also
-    /// carries a `client-id` axis do not match (matches Kafka admin-tool
-    /// strict-component semantics).
+    /// Reads the broker's current client-quota config for the named user.
+    ///
+    /// The filter is strict on the single-component entity
+    /// `[("user", Some(username))]`. Broker entries whose entity also carries
+    /// a `client-id` axis do not match. This follows Kafka's admin-tool
+    /// strict-component semantics.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_user_quotas(
@@ -82,11 +85,12 @@ impl AdminClient {
         Ok(out)
     }
 
-    /// Apply `ops` against the (user) entity. Returns the per-entry
-    /// `KafkaError` surfaced by the broker, or `None` on success.
+    /// Applies `ops` against the user entity. Returns the per-entry
+    /// `KafkaError` that the broker surfaced, or `None` on success.
     ///
-    /// `validate_only` mirrors the wire flag — when `true` the broker
+    /// `validate_only` mirrors the wire flag. When it is `true`, the broker
     /// runs validation but writes no metadata record.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn alter_user_quotas(
@@ -136,9 +140,9 @@ fn op_to_wire(op: &QuotaOp) -> AlterOp {
     }
 }
 
-/// Pure: diff the desired key-set against the current key-set, producing
-/// the minimal `(set, remove)` op stream. Floats compare bit-equal so a
-/// no-op `Set` with the same value is not re-issued.
+/// Pure function. It diffs the desired key-set against the current key-set and
+/// produces the minimal `(set, remove)` op stream. Floats compare bit-equal,
+/// so it does not re-issue a no-op `Set` with the same value.
 #[must_use]
 pub fn diff_user_quotas(current: &UserQuotaConfig, desired: &UserQuotaConfig) -> Vec<QuotaOp> {
     let mut ops = Vec::new();

@@ -21,13 +21,14 @@ fn rust_decode<T: for<'a> Decode<'a>>(bytes: &[u8], version: i16) -> T {
 }
 
 /// Assemble the oracle JSON value for a default `MetadataRequest` at the given version.
-/// The key challenges:
-/// - v0: topics must be an empty array (not null); default means "all topics".
-/// - v1-3: topics=null (all topics), no other variable fields.
-/// - v4-7: allowAutoTopicCreation present (schema default: true).
+///
+/// The version-specific rules:
+/// - v0: topics must be an empty array, not null. The default means "all topics".
+/// - v1-3: topics=null, which means all topics. There are no other variable fields.
+/// - v4-7: allowAutoTopicCreation is present, with schema default true.
 /// - v8-10: includeClusterAuthorizedOperations + includeTopicAuthorizedOperations.
-/// - v9-10: same fields but flexible encoding.
-/// - v11-13: includeClusterAuthorizedOperations removed; includeTopicAuthorizedOperations stays.
+/// - v9-10: the same fields, but flexible encoding.
+/// - v11-13: includeClusterAuthorizedOperations is removed. includeTopicAuthorizedOperations stays.
 fn request_oracle_value(version: i16) -> serde_json::Value {
     match version {
         0 => json!({"topics": []}),

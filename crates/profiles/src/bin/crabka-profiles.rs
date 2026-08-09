@@ -242,9 +242,9 @@ struct Cli {
         value_parser = parse_positive_time_or_legacy_millis
     )]
     block_builder_flush_max_age: Time,
-    /// debuginfod base URLs (comma-separated) to fetch DWARF for unsymbolized
+    /// debuginfod base URLs, comma-separated, to fetch DWARF for unsymbolized
     /// native frames. Empty by default: the symbolizer makes NO outbound
-    /// requests unless an operator explicitly opts in by supplying URLs.
+    /// requests until an operator supplies URLs.
     #[arg(
         long = "debuginfod-url",
         env = "CRABKA_PROFILES_DEBUGINFOD_URLS",
@@ -407,11 +407,12 @@ fn build_object_store(
 
 /// How long each hot WAL-tail poll waits for records.
 /// Periodically reload the profile block index from object storage and swap it
-/// into the cold store. The block-builder writes new blocks continuously; without
-/// this the querier only ever sees the index snapshot it loaded at boot, so blocks
-/// created afterwards are invisible (manifests as recent profiles — especially
-/// sparse ones like memory that age out of the hot tier — returning empty). Mirrors
-/// the traces querier's `TraceIndex` refresh loop.
+/// into the cold store. The block-builder writes new blocks continuously.
+/// Without this reload the querier only ever sees the index snapshot that it
+/// loaded at boot, so blocks created after boot stay invisible. The symptom is
+/// that recent profiles return empty, above all sparse ones such as memory that
+/// age out of the hot tier. This loop mirrors the `TraceIndex` refresh loop of
+/// the traces querier.
 fn spawn_profile_index_refresh(
     cold: Arc<ColdProfileStore>,
     store: Arc<dyn ObjectStore>,

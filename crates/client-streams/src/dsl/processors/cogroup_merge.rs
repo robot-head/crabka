@@ -1,6 +1,8 @@
-//! `KStreamPassThrough<K, V>`: forwards every record unchanged. Used as the
-//! KIP-150 cogroup merge node — it fans the per-input aggregate processors
-//! (each forwarding `Change<VOut>`) into the single result `KTable` source.
+//! `KStreamPassThrough<K, V>`: forwards every record unchanged.
+//!
+//! It works as the KIP-150 cogroup merge node. It fans the per-input aggregate
+//! processors into the one result `KTable` source. Each of those processors
+//! forwards a `Change<VOut>`.
 
 use std::marker::PhantomData;
 

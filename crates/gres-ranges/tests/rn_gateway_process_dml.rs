@@ -1,15 +1,15 @@
 //! Live-process end-to-end for any-node DML coordination.
 //!
-//! Real `crabka-gres` binaries over a real broker: node 0 hosts r0, node 1
-//! hosts only r1 and carries a genuinely lagging range-0 follower catalog
-//! replica. Every statement drives through node 1's SQL front door, so
-//! classification and planning run against the follower replica, timestamps
-//! mint over the remote TSO wire path, and cross-range writes forward to the
-//! r0 owner — the path that failed with `0A000` before any-node coordination.
+//! This test uses real `crabka-gres` binaries over a real broker. Node 0 hosts
+//! r0. Node 1 hosts only r1 and carries a range-0 follower catalog replica that
+//! truly lags. Every statement drives through node 1's SQL front door, so
+//! classification and planning run against the follower replica, timestamps mint
+//! over the remote TSO wire path, and cross-range writes forward to the r0
+//! owner. That last path failed with `0A000` before any-node coordination.
 //!
-//! The harness boundaries are `0:0,50:10`: the interval-sharded table `t50`
-//! splits at rowid 10 (ids below 10 are r0-owned, 10 and above r1-owned) and
-//! the ordinary table `t40` lives wholly on r0, which node 1 does not host.
+//! The harness boundaries are `0:0,50:10`. The interval-sharded table `t50`
+//! splits at rowid 10, so r0 owns the ids below 10 and r1 owns 10 and above. The
+//! ordinary table `t40` lives wholly on r0, which node 1 does not host.
 
 mod harness;
 
@@ -91,7 +91,8 @@ async fn non_r0_compute_coordinates_sharded_and_ordinary_dml() {
     system.shutdown().await;
 }
 
-/// All `id` values in `table`, sorted so scatter-gather order never matters.
+/// All `id` values in `table`, sorted, so the scatter-gather order never
+/// matters.
 async fn table_ids(client: &tokio_postgres::Client, table: &str) -> Vec<i32> {
     let rows = client
         .query(&format!("SELECT id FROM {table}"), &[])

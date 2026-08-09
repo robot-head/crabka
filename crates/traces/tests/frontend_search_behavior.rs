@@ -1,12 +1,16 @@
-//! Router-level behavioral coverage for the query-frontend, driven through the
-//! *real* `HttpQuerier` pool against loopback stub queriers (mirroring the role
-//! binary's wiring) with an in-memory `TraceIndexCatalog`.
+//! Router-level behavioral coverage for the query-frontend.
 //!
-//! The frontend shards a search/metrics/tag query into a live shard (probed when
-//! the window reaches `hot_frontier_ns`) plus one job per catalog block /
-//! row-group range. The live shard sends **no** scan params; a cold-block shard
-//! sends the querier's real `block` / `rowGroupStart` / `rowGroupEnd` params (the
-//! authoritative slice-5 querier contract). Stub queriers therefore distinguish
+//! The tests drive the *real* `HttpQuerier` pool against loopback stub
+//! queriers, which mirrors the role binary's wiring, with an in-memory
+//! `TraceIndexCatalog`.
+//!
+//! The frontend shards a search, metrics or tag query into a live shard plus
+//! one job per catalog block or row-group range. It probes the live shard when
+//! the window reaches `hot_frontier_ns`.
+//!
+//! The live shard sends **no** scan params. A cold-block shard sends the
+//! querier's real `block`, `rowGroupStart` and `rowGroupEnd` params, which is
+//! the authoritative slice-5 querier contract. Stub queriers therefore separate
 //! the tiers by the presence of a `block=` param, not by a tier header.
 
 use std::{
@@ -38,9 +42,11 @@ use serde_json::{Value, json};
 use tokio::{sync::Barrier, time::timeout};
 use tower::ServiceExt as _;
 
-/// Mirror the role binary's builder: build the new query-frontend router from a
-/// list of querier URLs (with scheme, comma-form allowed) + a pre-resolved block
-/// catalog and frontend config.
+/// Mirror the role binary's builder.
+///
+/// This builds the new query-frontend router from a list of querier URLs, which
+/// carry a scheme and may use the comma form, plus a pre-resolved block catalog
+/// and a frontend config.
 fn build_router(querier_urls: &str, cfg: FrontendConfig, catalog: TraceIndexCatalog) -> Router {
     let backend =
         HttpQuerier::new(parse_addrs(querier_urls), cfg.request_timeout.to_std()).unwrap();
@@ -68,9 +74,11 @@ fn parse_addrs(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// A catalog with a single block covering `[0, far-future]` for `tenant-a`, so a
-/// query window over `[0, end]` plans `[Live, Block]` (= 2 shards) when the
-/// window reaches `hot_frontier_ns`. One row-group keeps it a whole-block job.
+/// A catalog with a single block covering `[0, far-future]` for `tenant-a`.
+///
+/// A query window over `[0, end]` therefore plans `[Live, Block]`, which is 2
+/// shards, when the window reaches `hot_frontier_ns`. One row-group keeps it a
+/// whole-block job.
 fn single_block_catalog() -> TraceIndexCatalog {
     let block = BlockMetaInfo {
         block_id: "blocks/a.parquet".to_string(),
@@ -85,8 +93,8 @@ fn single_block_catalog() -> TraceIndexCatalog {
     TraceIndexCatalog::new(BTreeMap::from([("tenant-a".to_string(), vec![block])]))
 }
 
-/// Config that always probes the live tier (`hot_frontier_ns = 0`) and runs
-/// shards with the default high concurrency.
+/// Config that always probes the live tier, through `hot_frontier_ns = 0`, and
+/// runs shards with the default high concurrency.
 fn two_shard_cfg() -> FrontendConfig {
     FrontendConfig {
         hot_frontier_ns: 0,
@@ -94,15 +102,18 @@ fn two_shard_cfg() -> FrontendConfig {
     }
 }
 
-/// True when the querier received a cold-block shard (carries `block=`); false
-/// for the live shard (no scan params).
+/// True when the querier received a cold-block shard, which carries `block=`.
+/// It is false for the live shard, which sends no scan params.
 fn is_backend_shard(query: &str) -> bool {
     query.contains("block=")
 }
 
-/// A complete matched span in the querier's `search_json` shape. The frontend
-/// parses spans into the typed [`crabka_traces::frontend::wire::SpanJson`], which
-/// requires `startTimeUnixNano` + `durationNanos`, so stub spans must carry them.
+/// A complete matched span in the querier's `search_json` shape.
+///
+/// The frontend parses spans into the typed
+/// [`crabka_traces::frontend::wire::SpanJson`], which needs
+/// `startTimeUnixNano` and `durationNanos`. Stub spans must therefore carry
+/// both.
 fn span(span_id: &str) -> Value {
     json!({
         "spanID": span_id,
@@ -352,9 +363,10 @@ async fn defaults_merged_trace_limit_to_twenty() {
     assert2::assert!(json["traces"].as_array().unwrap().len() == 20);
 }
 
-/// Config for the spss tests: two shards (Live + one block), dispatched in plan
-/// order (`max_concurrency = 1`) so the reunioned span order is deterministic
-/// (live spans first, then backend spans).
+/// Config for the spss tests: two shards, Live plus one block.
+///
+/// `max_concurrency = 1` dispatches them in plan order, so the reunioned span
+/// order is deterministic: live spans first, then backend spans.
 fn ordered_two_shard_cfg() -> FrontendConfig {
     FrontendConfig {
         hot_frontier_ns: 0,
@@ -1206,9 +1218,10 @@ async fn reject_search() -> (StatusCode, String) {
     )
 }
 
-/// A search shard that fails (e.g. an invalid `TraceQL` query) must surface the
-/// querier's status + body, not degrade to a silent empty `200`. (Search shards
-/// partition the data, so a failed shard means missing results.)
+/// A search shard that fails, for example on an invalid `TraceQL` query, must
+/// surface the querier's status and body. It must not degrade to a silent empty
+/// `200`. Search shards partition the data, so a failed shard means missing
+/// results.
 #[tokio::test]
 async fn search_propagates_upstream_querier_error() {
     let upstream = spawn(Router::new().route("/api/search", get(reject_search))).await;

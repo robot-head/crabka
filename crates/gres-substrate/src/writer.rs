@@ -198,12 +198,12 @@ pub trait TransactionalWalWriter: Send + Sync {
     ) -> Result<GroupCommitAck, SubstrateError>;
 }
 
-/// Write-once activation handle used to assemble recovered engines without
-/// acquiring the canonical producer lease.
+/// Write-once activation handle that assembles recovered engines without the
+/// canonical producer lease.
 ///
 /// Every engine-facing operation fails closed until [`Self::activate`] binds
 /// the already-prepared live writer. Activation is an infallible pointer swap
-/// after ownership of `writer` has been constructed by the caller.
+/// after the caller has constructed ownership of `writer`.
 pub struct DeferredWalWriter<W> {
     live: std::sync::RwLock<Option<Arc<W>>>,
 }
@@ -253,7 +253,7 @@ impl<W> DeferredWalWriter<W> {
 }
 
 impl DeferredWalWriter<ProducerWalWriter> {
-    /// Pause the activated producer, rejecting staged handles fail-closed.
+    /// Pause the activated producer and reject staged handles fail-closed.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -290,8 +290,8 @@ where
 
 /// An exact committed WAL boundary established while its range writer is paused.
 ///
-/// Dropping this value resumes the writer. Call [`Self::resume`] when the
-/// resume point should be explicit instead.
+/// When the caller drops this value, the writer resumes. Call [`Self::resume`]
+/// when the resume point should be explicit instead.
 pub struct PausedWalWriter {
     pause: PauseReservation,
     permit: Option<OwnedSemaphorePermit>,
@@ -571,11 +571,11 @@ impl ProducerWalWriter {
     /// Pause new commits, wait for every already accepted commit, then append
     /// and commit an exact empty WAL barrier.
     ///
-    /// The returned guard owns the sole commit permit. Therefore every commit
+    /// The returned guard owns the sole commit permit. So every commit
     /// acknowledged before this method returns precedes `barrier_offset`, and
-    /// no later commit can be acknowledged until the guard is resumed or
-    /// dropped. The permit is a semaphore permit, not a mutex guard; no mutex
-    /// is held across broker awaits.
+    /// no later commit can be acknowledged until the caller resumes or drops
+    /// the guard. The permit is a semaphore permit, not a mutex guard. The
+    /// writer holds no mutex across broker awaits.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -646,10 +646,11 @@ impl ProducerWalWriter {
 
     /// Append and commit one group inside the open Kafka transaction.
     ///
-    /// Split out of [`Self::commit_group_while_permitted`] so that every
-    /// "broker outcome unknown" exit is an [`AppendFailure::Indeterminate`]
-    /// value rather than an inline `pending()` await: the caller then owns the
-    /// single site that closes the span before the compute is terminated.
+    /// This method is separate from [`Self::commit_group_while_permitted`] so
+    /// that every "broker outcome unknown" exit is an
+    /// [`AppendFailure::Indeterminate`] value and not an inline `pending()`
+    /// await. The caller then owns the single site that closes the span before
+    /// the compute stops.
     async fn append_group(
         &self,
         request: GroupCommitRequest,
@@ -745,9 +746,11 @@ impl ProducerWalWriter {
     }
 }
 
-/// How one group-commit attempt ended, separating broker rejections (which the
-/// caller reports as an error) from an unknown outcome (which terminates the
-/// compute, because no SQL client may be told a durable write failed).
+/// How one group-commit attempt ended.
+///
+/// This type separates broker rejections from an unknown outcome. The caller
+/// reports a broker rejection as an error. An unknown outcome stops the
+/// compute, because no SQL client may be told that a durable write failed.
 #[derive(Debug)]
 enum AppendFailure {
     /// The broker proved the transaction did not commit.
@@ -848,10 +851,11 @@ impl ProducerWalWriter {
             .and_then(|injector| injector.inject(stage))
     }
 
-    /// Refuse an append because a pause barrier owns the writer, emitting the
-    /// `gres.wal_append` span that says so. The attempt is a real, observable
-    /// rejection, so it gets its own (very short) producer span rather than
-    /// vanishing.
+    /// Refuse an append because a pause barrier owns the writer, and emit the
+    /// `gres.wal_append` span that reports the refusal.
+    ///
+    /// The attempt is a real, observable rejection, so it gets its own very
+    /// short producer span instead of no span at all.
     fn reject_paused(&self, request: &GroupCommitRequest) -> SubstrateError {
         let error = SubstrateError::Unavailable("WAL writer is paused".into());
         let span =

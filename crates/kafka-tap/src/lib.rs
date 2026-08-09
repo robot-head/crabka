@@ -1,5 +1,7 @@
-//! Test-only Kafka wire tap: a TCP relay that tees complete frames to a
-//! `Recorder` while forwarding bytes byte-for-byte to a real broker.
+//! Test-only Kafka wire tap.
+//!
+//! The tap is a TCP relay. It tees complete frames to a `Recorder`, and at the
+//! same time it forwards the bytes byte-for-byte to a real broker.
 pub mod frame;
 
 use std::{
@@ -14,10 +16,12 @@ use frame::{CapturedFrame, Pending, parse_request_prefix, read_correlation_id};
 /// Callback invoked once per fully-read frame in either direction.
 pub type Recorder = Arc<dyn Fn(CapturedFrame) + Send + Sync>;
 
-/// Bind a listener, accept connections, and relay each to `upstream`,
-/// recording frames. Returns the bound local address (useful when the caller
-/// passes port 0). The accept loop runs on a background thread for the
-/// process lifetime.
+/// Bind a listener, accept connections, relay each one to `upstream`, and
+/// record the frames.
+///
+/// The function returns the bound local address, which is useful when the
+/// caller passes port 0. The accept loop runs on a background thread for the
+/// lifetime of the process.
 pub fn spawn(
     listen: impl ToSocketAddrs,
     upstream: &str,
@@ -58,8 +62,9 @@ fn handle_conn(client: TcpStream, upstream: &str, recorder: Recorder) -> io::Res
     Ok(())
 }
 
-/// Copy length-prefixed frames from `src` to `dst`, teeing each to the
-/// recorder. `is_request` selects header parsing vs correlation lookup.
+/// Copy length-prefixed frames from `src` to `dst`, and tee each frame to the
+/// recorder. `is_request` selects between header parsing and correlation
+/// lookup.
 fn pump(
     mut src: TcpStream,
     mut dst: TcpStream,

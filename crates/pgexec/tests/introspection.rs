@@ -401,8 +401,8 @@ async fn engine_with_foreign_key_fixtures() -> SqlEngine {
     engine
 }
 
-/// The SQL-standard views describe a foreign key from both ends: its deferral
-/// in `table_constraints`, its rules in `referential_constraints`, its
+/// The SQL-standard views describe a foreign key from both ends. They give its
+/// deferral in `table_constraints`, its rules in `referential_constraints`, its
 /// *referencing* columns in `key_column_usage`, and its *referenced* ones in
 /// `constraint_column_usage`.
 #[tokio::test]

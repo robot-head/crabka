@@ -1,23 +1,25 @@
-//! End-to-end coverage for the outbound webhook delivery engine
-//! (`outbound::run_subscription`). A real in-process broker holds the source
-//! topic; the subscription tails it and HTTP-posts each record to a mock
-//! receiver as a signed JSON envelope.
+//! End-to-end coverage for the outbound webhook delivery engine,
+//! `outbound::run_subscription`.
+//!
+//! A real in-process broker holds the source topic. The subscription tails it
+//! and HTTP-posts each record to a mock receiver as a signed JSON envelope.
 //!
 //! What the tests prove:
-//! - **2xx delivery**: each source record reaches the receiver exactly once
-//!   per attempt, with `X-Crabka-Event-Id = topic-partition-offset`, a verifying
+//! - 2xx delivery: each source record reaches the receiver exactly once per
+//!   attempt, with `X-Crabka-Event-Id = topic-partition-offset`, a verifying
 //!   `X-Crabka-Signature`, and a well-formed envelope body.
-//! - **at-least-once / retry**: a transient 5xx run is retried with backoff and
-//!   eventually delivered (the same event is sent ≥ 3 times) without
-//!   dead-lettering.
-//! - **DLQ on exhaustion**: a permanently-failing target dead-letters the
-//!   record (value + `x-crabka-dlq-source` header) after `max_attempts`, and the
-//!   loop keeps polling (a later record also reaches the DLQ — no wedge).
-//! - **ordering**: within one partition, records are delivered in
-//!   ascending-offset order.
-//! - **filter**: a `json:` filter skips non-matching records (only the matching
-//!   one is delivered).
-//! - **SSRF guard**: a target host outside `allowed_targets` fails to compile.
+//! - At-least-once and retry: a transient 5xx run is retried with backoff and
+//!   is eventually delivered. The same event is sent 3 or more times, and
+//!   nothing is dead-lettered.
+//! - DLQ on exhaustion: a target that always fails dead-letters the record,
+//!   with its value and an `x-crabka-dlq-source` header, after `max_attempts`.
+//!   The loop keeps polling, so a later record also reaches the DLQ and nothing
+//!   wedges.
+//! - Ordering: within one partition, records are delivered in ascending-offset
+//!   order.
+//! - Filter: a `json:` filter skips a record that does not match, so only the
+//!   matching record is delivered.
+//! - SSRF guard: a target host outside `allowed_targets` fails to compile.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -107,9 +109,9 @@ struct Received {
     timestamp: Option<String>,
 }
 
-/// Shared mock-receiver state: the captured request log plus the status to
-/// return. `queue` (when non-empty) pops one status per request (for the retry
-/// test); otherwise `default` is returned for every request.
+/// Shared mock-receiver state: the captured request log and the status to
+/// return. When `queue` is not empty, the receiver pops one status per request,
+/// which the retry test needs. Otherwise it returns `default` for every request.
 #[derive(Default)]
 struct MockState {
     received: Mutex<Vec<Received>>,
@@ -146,7 +148,7 @@ async fn mock_handler(
     }
 }
 
-/// Spawn a mock HTTP receiver on `127.0.0.1:0` with a single `POST /hook` route.
+/// Spawn a mock HTTP receiver on `127.0.0.1:0` with one `POST /hook` route.
 /// Returns the bound address and the shared state handle.
 async fn spawn_mock(state: Arc<MockState>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -163,8 +165,8 @@ async fn spawn_mock(state: Arc<MockState>) -> String {
     addr
 }
 
-/// Build a `CompiledSubscription` with test-fast backoff. All fields are pub, so
-/// we construct directly rather than round-tripping through TOML.
+/// Build a `CompiledSubscription` with a test-fast backoff. All fields are pub,
+/// so this builds one directly instead of a round trip through TOML.
 fn sub(
     name: &str,
     source_topic: &str,
@@ -191,7 +193,8 @@ fn sub(
     }
 }
 
-/// Poll `cond` up to ~20s (80 × 250ms). Returns whether it became true.
+/// Poll `cond` for up to about 20s, which is 80 rounds of 250ms. Returns
+/// whether it became true.
 async fn wait_until<F: FnMut() -> bool>(mut cond: F) -> bool {
     for _ in 0..80 {
         if cond() {
@@ -206,10 +209,11 @@ fn received_len(state: &Arc<MockState>) -> usize {
     state.received.lock().unwrap().len()
 }
 
-/// Verify a lowercase-hex HMAC-SHA256 signature over `body` with `secret`. This
-/// mirrors `webhook_config::verify_signature` (which is `pub(crate)`, so not
-/// reachable from this integration test) for the engine-produced
-/// `X-Crabka-Signature`.
+/// Verify a lowercase-hex HMAC-SHA256 signature over `body` with `secret`.
+///
+/// This matches `webhook_config::verify_signature` for the engine-produced
+/// `X-Crabka-Signature`. That function is `pub(crate)`, so this integration
+/// test cannot reach it.
 fn verify_sig_hex(secret: &[u8], body: &[u8], provided: &str) -> bool {
     let mut mac = <Hmac<Sha256>>::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(body);
@@ -230,18 +234,19 @@ async fn produce_value(producer: &Producer, topic: &str, value: &[u8]) {
     producer.send(rec).await.await.unwrap().unwrap();
 }
 
-/// Decoded DLQ record: value plus the `x-crabka-dlq-source` header (the group
-/// `Consumer` drops headers, so we issue a raw single-partition `Fetch` and
-/// decode the v2 `RecordBatch` ourselves).
+/// Decoded DLQ record: the value plus the `x-crabka-dlq-source` header. The
+/// group `Consumer` drops headers, so this test issues a raw single-partition
+/// `Fetch` and decodes the v2 `RecordBatch` itself.
 #[derive(Debug, Clone)]
 struct DlqRecord {
     value: Option<Vec<u8>>,
     dlq_source: Option<String>,
 }
 
-/// Raw-fetch partition 0 of `topic` from offset 0 and decode every user record
-/// (offset, value, and the `x-crabka-dlq-source` header). One in-process broker
-/// ⇒ the bootstrap connection is the leader, so a direct `Fetch` suffices.
+/// Raw-fetch partition 0 of `topic` from offset 0 and decode every user record,
+/// that is, its offset, its value, and the `x-crabka-dlq-source` header. There
+/// is one in-process broker ⇒ the bootstrap connection is the leader, so a
+/// direct `Fetch` is enough.
 async fn fetch_dlq(client: &Client, topic: &str) -> Vec<DlqRecord> {
     // Resolve the topic_id (Fetch v13 keys partitions by topic_id).
     let md = client.send(MetadataRequest::default()).await.unwrap();
@@ -305,7 +310,8 @@ async fn fetch_dlq(client: &Client, topic: &str) -> Vec<DlqRecord> {
     out
 }
 
-/// Poll the DLQ topic via raw fetch until it holds ≥ `n` records (~20s budget).
+/// Poll the DLQ topic with a raw fetch until it holds `n` or more records. The
+/// budget is about 20s.
 async fn wait_for_dlq(client: &Client, topic: &str, n: usize) -> Vec<DlqRecord> {
     let mut last = Vec::new();
     for _ in 0..80 {
@@ -322,8 +328,8 @@ async fn wait_for_dlq(client: &Client, topic: &str, n: usize) -> Vec<DlqRecord> 
 // Tests
 // ---------------------------------------------------------------------------
 
-/// 3 records, mock always 200: each is delivered once with the right event id,
-/// a verifying signature, and a well-formed envelope body.
+/// 3 records with the mock always at 200. Each record is delivered once with
+/// the right event id, a verifying signature, and a well-formed envelope body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delivers_2xx() {
     let topic = "outbound-2xx";
@@ -392,9 +398,9 @@ async fn delivers_2xx() {
     broker.shutdown().await;
 }
 
-/// Mock 500 for the first 2 requests then 200: the record is retried and
-/// eventually delivered (≥ 3 requests for the one event), and the configured DLQ
-/// stays empty.
+/// The mock returns 500 for the first 2 requests and then 200. The record is
+/// retried and eventually delivered, which takes 3 or more requests for that
+/// one event, and the configured DLQ stays empty.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retries_then_succeeds() {
     let topic = "outbound-retry";
@@ -456,9 +462,10 @@ async fn retries_then_succeeds() {
     broker.shutdown().await;
 }
 
-/// Mock always 500, `max_attempts = 2`: the record is dead-lettered after
-/// exhaustion (value + `x-crabka-dlq-source` header), and the loop keeps polling
-/// — a SECOND record produced afterwards also reaches the DLQ (no wedge).
+/// The mock always returns 500 and `max_attempts = 2`. The record is
+/// dead-lettered after exhaustion, with its value and an `x-crabka-dlq-source`
+/// header. The loop keeps polling, so a SECOND record produced afterwards also
+/// reaches the DLQ and nothing wedges.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dead_letters_on_exhaustion() {
     let topic = "outbound-dlq";
@@ -526,8 +533,9 @@ async fn dead_letters_on_exhaustion() {
     broker.shutdown().await;
 }
 
-/// One partition, values 0..5 produced in order, mock 200: the receiver sees the
-/// envelopes in ascending-offset order (offset order == produced order).
+/// One partition, values 0..5 produced in order, and the mock at 200. The
+/// receiver sees the envelopes in ascending-offset order, and offset order
+/// equals produced order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ordering_within_partition() {
     let topic = "outbound-order";
@@ -572,7 +580,7 @@ async fn ordering_within_partition() {
     broker.shutdown().await;
 }
 
-/// `filter = $.deliver`: of two records `{"deliver":true}` and
+/// With `filter = $.deliver` and two records, `{"deliver":true}` and
 /// `{"deliver":false}`, only the truthy one is delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn filter_skips_nonmatching() {
@@ -615,8 +623,8 @@ async fn filter_skips_nonmatching() {
     broker.shutdown().await;
 }
 
-/// Unit-level (no broker): an `OutboundFile` whose `target_url` host is not in
-/// `allowed_targets` fails to `compile()` (SSRF guard).
+/// Unit-level, with no broker. An `OutboundFile` whose `target_url` host is not
+/// in `allowed_targets` fails to `compile()`, which is the SSRF guard.
 #[test]
 fn ssrf_rejected_at_compile() {
     let toml = r#"

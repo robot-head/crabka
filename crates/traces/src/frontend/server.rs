@@ -1,11 +1,13 @@
-//! axum HTTP surface for the query-frontend: the Tempo query endpoints, tenant
-//! extraction, the v2 by-id `status`/`message` envelope, and time-param parsing
-//! that matches the querier's contract (`start`/`end` are epoch **seconds**,
-//! fractional allowed).
+//! axum HTTP surface for the query-frontend.
 //!
-//! The router is generic over the backend/catalog pair so tests drive
-//! `MockQuerier`+`MockCatalog` and production binds `HttpQuerier`+
-//! `TraceIndexCatalog`.
+//! It covers the Tempo query endpoints, tenant extraction, the v2 by-id
+//! `status`/`message` envelope, and time-param parsing that matches the
+//! querier's contract. `start` and `end` are epoch **seconds**, and a
+//! fractional part is allowed.
+//!
+//! The router is generic over the backend and catalog pair. Tests therefore
+//! drive `MockQuerier` with `MockCatalog`, and production binds `HttpQuerier`
+//! with `TraceIndexCatalog`.
 
 use std::sync::Arc;
 
@@ -28,9 +30,11 @@ use crate::frontend::{
 
 const TENANT_HEADER: &str = "x-scope-orgid";
 
-/// Render a propagated backend failure as the client response, preserving the
-/// upstream querier's status code and error text (so an invalid `TraceQL` query
-/// surfaces as the querier's `4xx` body rather than a silent empty `200`).
+/// Render a propagated backend failure as the client response.
+///
+/// This keeps the upstream querier's status code and error text. An invalid
+/// `TraceQL` query therefore surfaces as the querier's `4xx` body, not as a
+/// silent empty `200`.
 fn backend_error_response(err: &BackendError) -> Response {
     let (status, body) = err.to_http();
     let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -291,10 +295,12 @@ fn query_param(uri: &Uri, key: &str) -> Option<String> {
         .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
 }
 
-/// The `TraceQL` metrics query string. Tempo accepts both `q` and `query` on
-/// the metrics endpoints: the Explore `TraceQL` editor and the HTTP API send
-/// `q`, while the Grafana Tempo datasource powering the Traces Drilldown app
-/// sends `query`. Accept either, preferring `q`.
+/// The `TraceQL` metrics query string.
+///
+/// Tempo accepts both `q` and `query` on the metrics endpoints. The Explore
+/// `TraceQL` editor and the HTTP API send `q`. The Grafana Tempo datasource
+/// that powers the Traces Drilldown app sends `query`. This accepts either, and
+/// prefers `q`.
 fn metrics_query_param(uri: &Uri) -> Option<String> {
     query_param(uri, "q").or_else(|| query_param(uri, "query"))
 }
@@ -331,10 +337,12 @@ fn tags_to_traceql(tags: &str) -> Option<String> {
 }
 
 /// A legacy `tags=` key is a safe `TraceQL` attribute reference only if it is
-/// made of identifier characters (alphanumerics plus `._:-`). Anything else
-/// (`{`, `}`, `"`, `\`, `|`, `&`, `=`, whitespace, …) could inject query
-/// structure once interpolated unquoted into the generated `TraceQL`. Kept in
-/// sync with the querier's `key_is_safe_attribute`.
+/// made of identifier characters: alphanumerics plus `._:-`.
+///
+/// Any other character, such as `{`, `}`, `"`, `\`, `|`, `&`, `=` or
+/// whitespace, could inject query structure once it is interpolated unquoted
+/// into the generated `TraceQL`. This stays in sync with the querier's
+/// `key_is_safe_attribute`.
 fn key_is_safe_attribute(key: &str) -> bool {
     !key.is_empty()
         && key
@@ -440,16 +448,20 @@ fn required_step(uri: &Uri) -> Result<i64, String> {
     Ok(step)
 }
 
-/// `step` may be bare epoch-seconds OR a Go-duration like `30s`/`5m`/`100ms`
-/// (Grafana's Tempo datasource sends the duration form). Mirrors the querier's
-/// `parse_step_to_ns` so the frontend accepts exactly what the querier accepts —
-/// without it the frontend would `400` a query the querier handles.
+/// `step` may be bare epoch-seconds OR a Go-duration such as `30s`, `5m` or
+/// `100ms`. Grafana's Tempo datasource sends the duration form.
+///
+/// This mirrors the querier's `parse_step_to_ns`, so the frontend accepts
+/// exactly what the querier accepts. Without it, the frontend would `400` a
+/// query the querier handles.
 fn parse_step_to_ns(value: &str) -> Option<i64> {
     parse_seconds_to_ns(value).or_else(|| i64::try_from(parse_go_duration_ns(value).ok()?).ok())
 }
 
-/// Parse a Go-style duration (`1h`, `5m`, `30s`, `100ms`, `1m30s`, fractional
-/// like `1.5s`) to nanoseconds. Kept in sync with the querier's parser.
+/// Parse a Go-style duration to nanoseconds.
+///
+/// Accepted forms are `1h`, `5m`, `30s`, `100ms`, `1m30s`, and a fractional
+/// form such as `1.5s`. This stays in sync with the querier's parser.
 fn parse_go_duration_ns(value: &str) -> Result<u64, String> {
     if value.is_empty() {
         return Err("empty duration".into());

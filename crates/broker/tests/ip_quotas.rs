@@ -1,12 +1,14 @@
 //! Broker-side integration tests for KIP-612 IP quotas.
 //!
 //! Tests:
-//! 1. `ip_quota_alter_then_describe_round_trip` — SASL/PLAIN; alter
-//!    (ip=127.0.0.1) `connection_creation_rate=2.0`; describe; assert.
-//! 2. `connection_creation_rate_throttles_accept` — PLAINTEXT; rate=1;
-//!    open 5 connections sequentially; assert wall ≥3s.
-//! 3. `unthrottled_ip_unaffected` — PLAINTEXT; no quota; open 5 connections;
-//!    assert wall <500ms.
+//! 1. `ip_quota_alter_then_describe_round_trip`. Over SASL/PLAIN, it alters
+//!    (ip=127.0.0.1) `connection_creation_rate=2.0`, describes it, and
+//!    asserts.
+//! 2. `connection_creation_rate_throttles_accept`. Over PLAINTEXT with
+//!    rate=1, it opens 5 connections one after another and asserts a wall
+//!    time ≥3s.
+//! 3. `unthrottled_ip_unaffected`. Over PLAINTEXT with no quota, it opens 5
+//!    connections and asserts a wall time <500ms.
 
 use std::{io, net::SocketAddr};
 
@@ -155,8 +157,8 @@ async fn sasl_plain_authenticate(
 // Cluster setup helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Start a single-broker SASL/PLAINTEXT cluster.
-/// Returns `(handle, _dir, addr)`.
+/// Starts a single-broker SASL/PLAINTEXT cluster. Returns
+/// `(handle, _dir, addr)`.
 fn start_single_broker_sasl_plaintext_with_users(
     super_user: &str,
     users: &[(&str, &str)],
@@ -186,8 +188,8 @@ fn start_single_broker_sasl_plaintext_with_users(
     })
 }
 
-/// Start a single-broker PLAINTEXT cluster (no SASL).
-/// Returns `(handle, _dir, addr)`.
+/// Starts a single-broker PLAINTEXT cluster, with no SASL. Returns
+/// `(handle, _dir, addr)`.
 async fn start_single_broker_plaintext() -> (BrokerHandle, TempDir, SocketAddr) {
     let log_dir = tempfile::tempdir().unwrap();
     let cfg = crabka_broker::BrokerConfig::for_tests(log_dir.path().to_path_buf());
@@ -200,7 +202,7 @@ async fn start_single_broker_plaintext() -> (BrokerHandle, TempDir, SocketAddr) 
 // Wire drivers for AlterClientQuotas and DescribeClientQuotas
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `AlterClientQuotas` (`api_key=49`) over a SASL/PLAIN connection.
+/// Drives `AlterClientQuotas` (`api_key=49`) over a SASL/PLAIN connection.
 async fn drive_alter_client_quotas_sasl(
     addr: SocketAddr,
     user: &str,
@@ -269,7 +271,8 @@ async fn drive_alter_client_quotas_sasl(
         .collect()
 }
 
-/// Drive `DescribeClientQuotas` (`api_key=48`) over a SASL/PLAIN connection.
+/// Drives `DescribeClientQuotas` (`api_key=48`) over a SASL/PLAIN
+/// connection.
 ///
 /// `components` is a list of `(entity_type, match_type, match_value)`:
 /// - `match_type`: 0=EXACT, 1=DEFAULT, 2=ANY
@@ -335,8 +338,9 @@ async fn drive_describe_client_quotas_sasl(
 // Integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 1: `AlterClientQuotas` sets (ip=127.0.0.1) `connection_creation_rate=2.0`;
-/// the value appears in the metadata image and in `DescribeClientQuotas`.
+/// Test 1: `AlterClientQuotas` sets (ip=127.0.0.1)
+/// `connection_creation_rate=2.0`. The value must then appear in the metadata
+/// image and in `DescribeClientQuotas`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ip_quota_alter_then_describe_round_trip() {
     let (handle, _dir, addr) =
@@ -385,19 +389,22 @@ async fn ip_quota_alter_then_describe_round_trip() {
     );
 }
 
-/// Test 2: Set rate=1 connection/sec for loopback IP via `submit_metadata_record_for_test`
-/// (PLAINTEXT cluster — no SASL admin path). Open 5 connections sequentially;
-/// assert wall time >= 3 seconds (proves the throttle fires).
+/// Test 2: sets rate=1 connection per second for the loopback IP through
+/// `submit_metadata_record_for_test`, because a PLAINTEXT cluster has no SASL
+/// admin path. It opens 5 connections one after another and asserts a wall
+/// time >= 3 seconds, which proves that the throttle fires.
 ///
-/// Timeline with rate=1, capacity=1, cap=1s:
-///   conn 1: free (initial token)
-///   conn 2..5: bucket empty → sleep 1s → free each
-/// Total ~4s. Tolerance >=3s.
+/// The timeline with rate=1, capacity=1, and cap=1s is:
+///   connection 1: free, from the initial token
+///   connections 2 to 5: the bucket is empty, so each sleeps 1s and is then
+///   free
 ///
-/// Each connection sends `ApiVersions` and waits for the response. This
-/// ensures the accept loop has finished the throttle sleep for that
-/// connection before we open the next one (the OS backlog alone would
-/// complete the TCP handshake immediately and not measure throttle time).
+/// The total is about 4s, and the tolerance is >=3s.
+///
+/// Each connection sends `ApiVersions` and waits for the response. The accept
+/// loop therefore finishes the throttle sleep for that connection before the
+/// test opens the next one. The OS backlog alone would complete the TCP
+/// handshake immediately and measure no throttle time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connection_creation_rate_throttles_accept() {
     let (handle, _dir, addr) = start_single_broker_plaintext().await;
@@ -463,8 +470,8 @@ async fn connection_creation_rate_throttles_accept() {
     );
 }
 
-/// Test 3: No `connection_creation_rate` quota configured. Open 5 connections;
-/// assert wall time < 500ms (unthrottled baseline).
+/// Test 3: no `connection_creation_rate` quota is configured. The test opens 5
+/// connections and asserts a wall time < 500ms, the unthrottled baseline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unthrottled_ip_unaffected() {
     let (_handle, _dir, addr) = start_single_broker_plaintext().await;
@@ -485,8 +492,9 @@ async fn unthrottled_ip_unaffected() {
     );
 }
 
-/// Start a single-broker PLAINTEXT cluster with explicit connection caps
-/// (`max.connections` / `max.connections.per.ip`). Returns `(handle, _dir, addr)`.
+/// Starts a single-broker PLAINTEXT cluster with explicit connection caps,
+/// `max.connections` and `max.connections.per.ip`. Returns
+/// `(handle, _dir, addr)`.
 async fn start_single_broker_plaintext_with_conn_caps(
     max_connections: usize,
     max_connections_per_ip: usize,
@@ -500,8 +508,9 @@ async fn start_single_broker_plaintext_with_conn_caps(
     (handle, log_dir, addr)
 }
 
-/// M-2: a per-IP connection cap refuses connections beyond the limit, and the
-/// slot is freed once an existing connection closes (`ConnectionGuard::drop`).
+/// M-2: a per-IP connection cap refuses connections past the limit, and
+/// `ConnectionGuard::drop` frees the slot once an existing connection
+/// closes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn max_connections_per_ip_refuses_excess_and_frees_on_close() {
     use crabka_protocol::{Encode, owned::api_versions_request::ApiVersionsRequest};

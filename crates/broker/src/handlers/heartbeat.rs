@@ -1,5 +1,7 @@
-//! `Heartbeat` (`api_key=12`). Validates `(generation, member)` and
-//! refreshes the member's `last_heartbeat` clock inside the group's actor.
+//! `Heartbeat` (`api_key=12`).
+//!
+//! This handler validates `(generation, member)`. It then refreshes the
+//! member's `last_heartbeat` clock inside the group's actor.
 
 use bytes::Bytes;
 use crabka_protocol::{
@@ -73,7 +75,8 @@ pub(crate) async fn handle(
     }
 }
 
-/// Whole-response `GROUP_AUTHORIZATION_FAILED (30)` response built on Deny.
+/// Whole-response `GROUP_AUTHORIZATION_FAILED (30)` that the handler builds
+/// on Deny.
 fn encode_denied(version: i16) -> Result<Bytes, BrokerError> {
     let resp = HeartbeatResponse {
         error_code: codes::GROUP_AUTHORIZATION_FAILED,

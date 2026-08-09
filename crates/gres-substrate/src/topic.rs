@@ -128,8 +128,9 @@ pub fn wal_topic_for_range(tenant: &TenantName, range: RangeId) -> String {
 }
 
 /// Return the immutable physical WAL topic for one lifecycle generation.
-/// Generation zero preserves the original name; recreated generations get a
-/// distinct topic so a zombie admin request can only prune its old log.
+///
+/// Generation zero keeps the original name. A recreated generation gets a
+/// distinct topic, so a zombie admin request can only prune its old log.
 #[must_use]
 pub fn wal_topic_for_generation(
     tenant: &TenantName,

@@ -27,7 +27,8 @@ pub struct ProfileSampleRow {
     pub trace_id: Option<Vec<u8>>,
 }
 
-/// Encode rows into a `RecordBatch` matching `profile_samples_schema()`.
+/// Encodes rows into a `RecordBatch` that matches `profile_samples_schema()`.
+///
 /// # Errors
 /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub fn encode_profile_samples(rows: &[ProfileSampleRow]) -> Result<RecordBatch> {

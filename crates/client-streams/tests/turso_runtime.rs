@@ -1,12 +1,13 @@
-//! Turso end-to-end + restart-restore integration test.
+//! Turso end-to-end and restart-restore integration test.
 //!
-//! Proves the real runtime works with `StoreBackend::Turso`:
-//! - (a) state is read/written through a Turso-backed store during processing.
-//! - (b) on restart, the store rebuilds from the changelog into a fresh Turso DB
+//! This test proves the real runtime works with `StoreBackend::Turso`:
+//! - (a) the runtime reads and writes state through a Turso-backed store during
+//!   processing.
+//! - (b) on restart, the store rebuilds from the changelog into a fresh Turso DB,
 //!   so counts resume from where the previous instance left off.
 //!
-//! Mirrors the harness in `state_store_integration.rs`, adding a `tempdir`-based
-//! `StoreBackend::Turso` to both `KafkaStreams` instances.
+//! The test mirrors the harness in `state_store_integration.rs` and adds a
+//! `tempdir`-based `StoreBackend::Turso` to both `KafkaStreams` instances.
 
 use std::time::Duration;
 
@@ -73,7 +74,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 
 // ─── Counter processor ────────────────────────────────────────────────────────
 
-/// Counts per-value occurrences and forwards `(value_as_key, count)`.
+/// Counts occurrences per value and forwards `(value_as_key, count)`.
 struct Counter;
 
 #[async_trait::async_trait]
@@ -104,7 +105,8 @@ fn counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
 
 // ─── output collector ────────────────────────────────────────────────────────
 
-/// Poll `stream-out` partition 0 until `want` records arrive.
+/// Polls `stream-out` partition 0 until `want` records arrive.
+///
 /// Returns `(key, i64_value)` pairs in arrival order.
 async fn collect_output_keyed(
     admin: &Client,
@@ -182,13 +184,13 @@ async fn collect_output_keyed(
 
 // ─── test ─────────────────────────────────────────────────────────────────────
 
-/// Assertion (a): e2e on Turso — state is read/written through a Turso-backed
-/// store; counts 1 and 2 for key "a" are produced correctly.
+/// Assertion (a): end-to-end on Turso. The runtime reads and writes state through
+/// a Turso-backed store, and it produces counts 1 and 2 for key "a" correctly.
 ///
-/// Assertion (b): restart-restore — after the first instance closes, a FRESH
-/// `KafkaStreams` with the SAME `state_dir` drops and recreates the table
-/// (empty), then replays the changelog into the empty Turso DB. Processing
-/// one more "a" must emit count 3 (not 1 from a cold start).
+/// Assertion (b): restart-restore. After the first instance closes, a FRESH
+/// `KafkaStreams` with the SAME `state_dir` drops the table and recreates it
+/// empty, then replays the changelog into the empty Turso DB. One more "a" record
+/// must emit count 3, and not 1 from a cold start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turso_stateful_count_and_restart_restore() {
     let (broker, bootstrap, _broker_dir) = boot().await;

@@ -1,8 +1,11 @@
-//! `Kafka.spec.logging` — operator-side surface for the broker's
-//! `tracing` log filter. Strimzi-shaped `Logging`: `type: inline` carries a
-//! `loggers` map (tracing target → level) that the operator composes into a
-//! single `RUST_LOG` env-filter directive; `type: external` references a
-//! user-managed `ConfigMap` key holding a raw filter string.
+//! `Kafka.spec.logging`, the operator-side surface for the broker's
+//! `tracing` log filter.
+//!
+//! This is a Strimzi-shaped `Logging`. With `type: inline`, the field carries
+//! a `loggers` map from tracing target to level. The operator composes that
+//! map into a single `RUST_LOG` env-filter directive. With `type: external`,
+//! the field references a user-managed `ConfigMap` key that holds a raw
+//! filter string.
 
 use std::collections::BTreeMap;
 
@@ -14,16 +17,17 @@ use serde::{Deserialize, Serialize};
 pub struct Logging {
     #[serde(default)]
     pub r#type: LoggingType,
-    /// Inline loggers: tracing target → level. The key `root`
-    /// (case-insensitive) sets the global default level (a bare env-filter
-    /// directive); any other key is a tracing target (a Rust module path,
-    /// e.g. `crabka_broker`). Levels are `trace|debug|info|warn|error|off`
-    /// (case-insensitive; `fatal` is accepted as an alias for `error`).
+    /// Inline loggers, from tracing target to level. The key `root` is
+    /// case-insensitive and sets the global default level as a bare
+    /// env-filter directive. Any other key is a tracing target, that is, a
+    /// Rust module path such as `crabka_broker`. The levels are
+    /// `trace|debug|info|warn|error|off`, and they are case-insensitive.
+    /// `fatal` is accepted as an alias for `error`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub loggers: BTreeMap<String, String>,
-    /// External logging source. Required when `type: external`; the
-    /// referenced `ConfigMap` key's value is used verbatim as the broker's
-    /// `RUST_LOG` filter.
+    /// External logging source. This field is required when
+    /// `type: external`. The operator uses the value of the referenced
+    /// `ConfigMap` key verbatim as the broker's `RUST_LOG` filter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_from: Option<ExternalLoggingSource>,
 }

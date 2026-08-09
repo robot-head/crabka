@@ -1,6 +1,7 @@
-//! `DeleteShareGroupState` (`api_key=86`). Tombstones the durable share state
-//! for each `(group, topic, partition)` and drops the in-memory entry. Gates on
-//! local leadership of the target `__share_group_state` partition.
+//! `DeleteShareGroupState` (`api_key=86`). The handler tombstones the durable
+//! share state for each `(group, topic, partition)` and drops the in-memory
+//! entry. The handler gates on local leadership of the target
+//! `__share_group_state` partition.
 
 use std::sync::Arc;
 

@@ -1,7 +1,7 @@
-//! `InitializeShareGroupState` (`api_key=83`). Seeds the durable share state
-//! for each `(group, topic, partition)` at the requested `state_epoch` /
-//! `start_offset`. Gates every partition on local leadership of its
-//! `__share_group_state` partition.
+//! `InitializeShareGroupState` (`api_key=83`). It seeds the durable share state
+//! for each `(group, topic, partition)` at the requested `state_epoch` and
+//! `start_offset`. It gates every partition on local leadership of that
+//! partition's `__share_group_state` partition.
 
 use std::sync::Arc;
 

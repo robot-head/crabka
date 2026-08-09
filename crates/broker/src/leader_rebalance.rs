@@ -1,7 +1,9 @@
-//! KIP-460 auto preferred-replica rebalance. A background task on the
-//! controller leader periodically scans every partition; for each
-//! where `select_new_leader_for_partition(Preferred)` succeeds, queues
-//! a `V1Partition` update. Submits in one batch per tick when the
+//! KIP-460 auto preferred-replica rebalance.
+//!
+//! A background task on the controller leader scans every partition
+//! periodically. For each partition where
+//! `select_new_leader_for_partition(Preferred)` succeeds, the task queues a
+//! `V1Partition` update. The task submits one batch per tick when the
 //! cluster-wide imbalance ratio crosses the configured threshold.
 
 #![allow(dead_code)]
@@ -23,8 +25,8 @@ use crate::{
     leader_election::{ElectionType, select_new_leader_for_partition},
 };
 
-/// Minimal trait for the controller surface we use. Lets tests inject
-/// a mock without spinning up real raft.
+/// Minimal trait for the controller surface this module uses. It lets tests
+/// inject a mock without a real raft cluster.
 #[async_trait]
 pub(crate) trait ControllerLike: Send + Sync {
     fn is_leader(&self) -> bool;
@@ -257,11 +259,12 @@ mod tests {
         assert!(mock.submitted.lock().unwrap().len() == 10);
     }
 
-    /// The threshold is a [`Ratio`], so a fraction that falls between two
-    /// whole percentages is compared at full precision. `floor(100 * r) < T`
-    /// and `r < T / 100` agree for every integer `T`, so this pins that the
-    /// switch away from the old truncating `(imbalanced * 100) / total` left
-    /// the KIP-460 decision boundary exactly where it was.
+    /// The threshold is a [`Ratio`], so the code compares a fraction that
+    /// falls between two whole percentages at full precision.
+    /// `floor(100 * r) < T` and `r < T / 100` agree for every integer `T`.
+    /// This test therefore pins that the move away from the old truncating
+    /// `(imbalanced * 100) / total` left the KIP-460 decision boundary
+    /// exactly where it was.
     #[tokio::test]
     async fn fractional_percentages_compare_against_the_threshold_exactly() {
         // 200 partitions gives half-percent granularity either side of 10%.

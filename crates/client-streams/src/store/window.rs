@@ -1,5 +1,8 @@
-//! Window store over the byte backend: composite `WindowKeySchema` keys +
-//! `ValueAndTimestamp` values. A second typed store beside `KeyValueBytesStore`.
+//! Window store over the byte backend.
+//!
+//! The keys are composite `WindowKeySchema` keys, and the values are
+//! `ValueAndTimestamp` values. This is a second typed store beside
+//! `KeyValueBytesStore`.
 use std::{
     any::Any,
     sync::{Arc, Mutex},
@@ -20,16 +23,20 @@ use crate::{
     },
 };
 
-/// The window store's backing: either a plain boxed byte store or a record-cache
-/// wrapper over it. `Cached` is opted into via [`WindowBytesStore::enable_cache`];
-/// uncached stores keep today's behavior exactly. Mirrors `kv::Backing`.
+/// The window store's backing.
+///
+/// The backing is either a plain boxed byte store or a record-cache wrapper over
+/// it. A caller opts into `Cached` with [`WindowBytesStore::enable_cache`].
+/// Uncached stores keep their behavior exactly. This mirrors `kv::Backing`.
 enum Backing {
     Plain(Box<dyn ByteKeyValueStore>),
     Cached(CachingWindowStore),
 }
 
 impl Backing {
-    /// Cache-first single-key read when `Cached`; direct otherwise.
+    /// Reads a single key.
+    ///
+    /// `Cached` reads the cache first. `Plain` reads directly.
     async fn get(&self, key: &[u8]) -> Option<Bytes> {
         match self {
             Backing::Plain(b) => b.get(key).await,
@@ -49,8 +56,10 @@ impl Backing {
         }
     }
 
-    /// Processing-path write. Plain: direct put. Cached: write-back put carrying
-    /// the record context (changelog deferred to flush).
+    /// Processing-path write.
+    ///
+    /// `Plain` does a direct put. `Cached` does a write-back put that carries the
+    /// record context, and defers the changelog to flush.
     async fn put(&mut self, key: Bytes, value: Bytes, ctx: RecordContext) {
         match self {
             Backing::Plain(b) => b.put(key, value).await,
@@ -58,7 +67,9 @@ impl Backing {
         }
     }
 
-    /// Restore-path write (below the cache; never stages a dirty entry).
+    /// Restore-path write that goes below the cache.
+    ///
+    /// This method never stages a dirty entry.
     async fn apply(&mut self, key: Bytes, value: Option<Bytes>) {
         match (self, value) {
             (Backing::Plain(b), Some(v)) => b.put(key, v).await,
@@ -78,21 +89,27 @@ impl Backing {
     }
 }
 
-/// Typed windowed store keyed by `(K, windowStart)`, holding `V` + a record
-/// timestamp. `fetch_single` returns `(storedTs, V)` so the aggregator can compute
+/// Typed windowed store keyed by `(K, windowStart)`.
+///
+/// The store holds `V` and a record timestamp. `fetch_single` returns
+/// `(storedTs, V)`, so the aggregator can compute
 /// `newTs = max(recordTs, storedTs)`.
 #[async_trait]
 pub trait WindowStore<K: Send + Sync, V: Send>: StateStore {
     async fn fetch_single(&self, key: &K, window_start: i64) -> Option<(i64, V)>;
     async fn fetch(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, V)>;
-    /// Like `fetch`, but also returns each window's stored record timestamp:
-    /// `(windowStart, recordTs, value)`. Used by the sliding-window aggregator,
-    /// which needs `windowMaxRecordTimestamp` to place left/right windows.
+    /// Like `fetch`, but also returns each window's stored record timestamp.
+    ///
+    /// The result is `(windowStart, recordTs, value)`. The sliding-window
+    /// aggregator uses this method, because it needs `windowMaxRecordTimestamp`
+    /// to place the left and right windows.
     async fn fetch_with_ts(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, i64, V)>;
-    /// Every window across ALL keys whose `windowStart` is in `[start_from,
-    /// start_to]`, as `(key, windowStart, recordTs, value)`. Backs emit-final's
-    /// closed-window scan (the byte layout is key-prefixed, so this is a filtered
-    /// full scan, mirroring the JVM `fetchAll`).
+    /// Returns every window across ALL keys whose `windowStart` is in
+    /// `[start_from, start_to]`.
+    ///
+    /// The result is `(key, windowStart, recordTs, value)`. The emit-final
+    /// closed-window scan uses this method. The byte layout is key-prefixed, so
+    /// this is a filtered full scan that mirrors the JVM `fetchAll`.
     async fn fetch_all_in_range(&self, start_from: i64, start_to: i64) -> Vec<(K, i64, i64, V)>;
     async fn put(&mut self, key: K, window_start: i64, value: V, record_ts: i64);
 }
@@ -105,14 +122,14 @@ pub struct WindowBytesStore<K, V> {
     value_serde: Box<dyn Serde<V>>,
     changelog: Vec<(Bytes, Option<Bytes>)>,
     logging: bool,
-    /// Window size. The windowed store-key bytes encode only the window START
-    /// (and seqnum), not the size/end, so the store must know its size to
-    /// reconstruct `end = start + window_size` for the downstream
-    /// [`Windowed`](crate::dsl::windows::Windowed) key forwarded on cache flush.
+    /// Window size. The windowed store-key bytes encode only the window START and
+    /// the seqnum, not the size or the end. So the store must know its size to
+    /// rebuild `end = start + window_size` for the downstream
+    /// [`Windowed`](crate::dsl::windows::Windowed) key it forwards on cache flush.
     window_size: Time,
-    /// Set via [`StateStore::set_record_context`]; attached to the next cached
-    /// write so the deduped `Change` can be forwarded with the right context on
-    /// flush. Only meaningful when `backing` is `Cached`.
+    /// Set by [`StateStore::set_record_context`]. The store attaches it to the
+    /// next cached write, so it can forward the deduped `Change` with the right
+    /// context on flush. It is only meaningful when `backing` is `Cached`.
     pending_ctx: Option<RecordContext>,
 }
 
@@ -157,9 +174,11 @@ impl<K: 'static, V: 'static> WindowBytesStore<K, V> {
         )
     }
 
-    /// Wrap this store's backend in a record cache (moves the backend into a
-    /// [`CachingWindowStore`]). The caller supplies the [`NamedCache`] registered
-    /// in the task's `ThreadCache`. Re-wrapping an already-cached store is a no-op.
+    /// Wraps this store's backend in a record cache.
+    ///
+    /// This method moves the backend into a [`CachingWindowStore`]. The caller
+    /// supplies the [`NamedCache`] registered in the task's `ThreadCache`. A
+    /// re-wrap of an already-cached store does nothing.
     pub(crate) fn enable_cache(&mut self, cache: Arc<Mutex<NamedCache>>) {
         if !matches!(self.backing, Backing::Plain(_)) {
             return; // already cached
@@ -176,15 +195,17 @@ impl<K: 'static, V: 'static> WindowBytesStore<K, V> {
         ));
     }
 
-    /// Whether this store's backend has been wrapped in a record cache.
+    /// Returns `true` when a record cache wraps this store's backend.
     #[must_use]
     pub(crate) fn is_cached(&self) -> bool {
         matches!(self.backing, Backing::Cached(_))
     }
 
-    /// The context to stamp on the next cached write: the stashed
-    /// [`set_record_context`](StateStore::set_record_context) if present, else a
-    /// default rooted at the changelog topic.
+    /// Returns the context to stamp on the next cached write.
+    ///
+    /// The context is the stashed
+    /// [`set_record_context`](StateStore::set_record_context) if there is one. If
+    /// not, it is a default rooted at the changelog topic.
     fn write_ctx(&self) -> RecordContext {
         self.pending_ctx.clone().unwrap_or(RecordContext {
             topic: self.changelog_topic.clone(),
@@ -837,9 +858,9 @@ mod tests {
         assert_eq!(change.new, Some(1));
     }
 
-    /// Cached `fetch` / `fetch_with_ts` route through `Backing::Cached::range`
-    /// and serve read-your-writes (the cache overlay) before any flush; cache
-    /// wins over a colliding inner window.
+    /// Cached `fetch` and `fetch_with_ts` route through `Backing::Cached::range`.
+    /// The cache overlay serves reads of your own writes before any flush, and
+    /// the cache wins over a colliding inner window.
     #[tokio::test]
     async fn cached_window_store_fetch_overlays_cache() {
         let mut s = cached_store(millis(10));
@@ -866,8 +887,8 @@ mod tests {
         );
     }
 
-    /// Cached `fetch_all_in_range` routes through `Backing::Cached::scan_all`,
-    /// overlaying the cache across all keys.
+    /// Cached `fetch_all_in_range` routes through `Backing::Cached::scan_all`. It
+    /// overlays the cache across all keys.
     #[tokio::test]
     async fn cached_window_store_fetch_all_overlays_cache() {
         let mut s = cached_store(millis(10));
@@ -887,8 +908,9 @@ mod tests {
         );
     }
 
-    /// `apply_changelog` on a cached window store writes BELOW the cache (no
-    /// dirty entry → an empty cache flush) and a `None` deletes through.
+    /// `apply_changelog` on a cached window store writes BELOW the cache, so it
+    /// stages no dirty entry and the cache flush is empty. A `None` deletes
+    /// through.
     #[tokio::test]
     async fn cached_window_store_apply_changelog_goes_below_cache() {
         let mut s = cached_store(millis(10));
@@ -926,8 +948,8 @@ mod tests {
         assert!(buffer.is_empty());
     }
 
-    /// `enable_cache` is idempotent: re-wrapping an already-cached store is a
-    /// no-op.
+    /// `enable_cache` is idempotent. A re-wrap of an already-cached store does
+    /// nothing.
     #[tokio::test]
     async fn enable_cache_is_idempotent() {
         let mut s = WindowBytesStore::<String, i64>::in_memory(
@@ -964,10 +986,10 @@ mod tests {
         assert!(buffer.is_empty());
     }
 
-    /// Plain-store lifecycle: `set_logging(false)` suppresses the changelog,
-    /// `apply_changelog` restores below the store (Some then None deletes),
-    /// `flush`/`close` are no-ops, and `StateStore::clear` wipes state +
-    /// changelog.
+    /// Plain-store lifecycle. `set_logging(false)` suppresses the changelog,
+    /// `apply_changelog` restores below the store with Some and then deletes with
+    /// None, `flush` and `close` do nothing, and `StateStore::clear` wipes the
+    /// state and the changelog.
     #[tokio::test]
     async fn plain_window_store_lifecycle_and_apply_changelog() {
         let mut s = WindowBytesStore::<String, i64>::in_memory(

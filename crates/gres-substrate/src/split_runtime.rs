@@ -58,7 +58,7 @@ impl SplitStateStore for InMemorySplitStateStore {
 /// Concrete raw-KV runtime and [`SplitHooks`] adapter.
 ///
 /// All accepted data keys must be `pgkv` table-row keys. This restriction is
-/// intentional: a range interval cannot safely classify other key classes.
+/// intentional. A range interval cannot safely classify other key classes.
 pub struct RawKvSplitRuntime {
     tenant: String,
     checkpoints: Arc<InMemoryCheckpointStore>,

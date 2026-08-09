@@ -40,8 +40,8 @@ spec:
                     type: string
                   image:
                     description: |-
-                      Container image override. When absent the operator uses its global
-                      activator image override or compiled default.
+                      Container image override. When absent, the operator uses its global
+                      activator image override or its compiled default.
                     minLength: 1
                     nullable: true
                     type: string
@@ -64,8 +64,8 @@ spec:
                 type: object
               balancer:
                 description: |-
-                  Dry-run Gres balancer planning knobs. Live execution is intentionally
-                  not performed by the operator yet.
+                  Dry-run Gres balancer planning knobs. The operator does not yet do
+                  live execution, and this is on purpose.
                 nullable: true
                 properties:
                   enabled:
@@ -117,7 +117,7 @@ spec:
                     description: |-
                       Explicit capability declaration for Kafka's transactional registry
                       protocol. This protocol does not make any physical Move, Split, or
-                      Merge operation executable; the operator reports plans only.
+                      Merge operation executable. The operator reports plans only.
                     properties:
                       transactionalRegistryProtocol:
                         default: false
@@ -586,8 +586,8 @@ spec:
                 type: object
               defaults:
                 description: |-
-                  Default tenant runtime settings inherited by `GresTenant`s unless
-                  they set `spec.overrides`.
+                  Default tenant runtime settings. Each `GresTenant` inherits them
+                  unless it sets `spec.overrides`.
                 nullable: true
                 properties:
                   checkpointFrames:
@@ -601,7 +601,9 @@ spec:
                     nullable: true
                     type: string
                   idleSeconds:
-                    description: Idle timeout in seconds; unset means never suspend by idleness.
+                    description: |-
+                      Idle timeout in seconds. When unset, the tenant never suspends
+                      because it is idle.
                     format: uint64
                     minimum: 0.0
                     nullable: true
@@ -659,7 +661,7 @@ spec:
                     type: string
                   image:
                     description: |-
-                      Container image override. When absent the operator uses
+                      Container image override. When absent, the operator uses
                       `--default-pgdog-image`.
                     nullable: true
                     type: string
@@ -715,20 +717,22 @@ spec:
                 description: |-
                   Distributed-tracing wiring for this fleet's tenant compute pods.
 
-                  When set, the `GresTenant` reconciler renders the `CRABKA_OTLP_*` /
-                  `OTEL_SERVICE_NAME` env contract on every compute container and
-                  `crabka-gres` installs the OTLP exporter at startup. When absent no
-                  OTLP env var is emitted at all, which is what leaves tracing off: an
-                  empty endpoint would still switch the exporter on and then fail to
+                  When this field is set, the `GresTenant` reconciler renders the
+                  `CRABKA_OTLP_*` and `OTEL_SERVICE_NAME` env contract on every
+                  compute container, and `crabka-gres` installs the OTLP exporter at
+                  startup. When the field is absent, the reconciler writes no OTLP env
+                  var at all. That is what keeps tracing off. An empty endpoint would
+                  still switch the exporter on, and the exporter would then fail to
                   reach a collector.
 
-                  The schema is the one `Kafka.spec.tracing` uses, so the two fleets have
-                  one shape, one validation path, and the field names an operator already
-                  knows.
+                  This field uses the schema of `Kafka.spec.tracing`. The two fleets
+                  therefore have one shape, one validation path, and the field names
+                  that an operator already knows.
 
-                  Deliberately fleet-scoped rather than per-`GresTenant`: the collector
-                  endpoint, protocol and export timeout are cluster infrastructure, and a
-                  tenant-writable copy would make telemetry routing a tenant decision.
+                  The field is fleet-scoped and not per-`GresTenant`, and this is on
+                  purpose. The collector endpoint, the protocol, and the export
+                  timeout are cluster infrastructure. A tenant-writable copy would
+                  make telemetry routing a tenant decision.
                 nullable: true
                 properties:
                   otlp:
@@ -737,15 +741,15 @@ spec:
                     properties:
                       endpoint:
                         description: |-
-                          Required. OTLP collector endpoint (`scheme://host:port`).
-                          Rendered as `CRABKA_OTLP_ENDPOINT`; turning the field on
-                          implicitly sets `CRABKA_OTLP_ENABLED=true` as well.
+                          Required. OTLP collector endpoint in the form `scheme://host:port`.
+                          The operator renders it as `CRABKA_OTLP_ENDPOINT`. A set field also
+                          sets `CRABKA_OTLP_ENABLED=true`.
                         type: string
                       protocol:
                         description: |-
-                          OTLP wire protocol selector. Mirrors the broker's
-                          internal `OtlpProtocol` enum and the `OTEL_EXPORTER_OTLP_PROTOCOL`
-                          spec values.
+                          OTLP wire protocol selector. It has the same shape as the broker's
+                          internal `OtlpProtocol` enum and the `OTEL_EXPORTER_OTLP_PROTOCOL` spec
+                          values.
                         enum:
                         - grpc
                         - http_protobuf
@@ -753,23 +757,24 @@ spec:
                         type: string
                       sampleRatio:
                         description: |-
-                          Optional sampling ratio in `[0.0, 1.0]`. Rendered as
-                          `CRABKA_OTLP_SAMPLE_RATIO`. Unset leaves the binary's own default
-                          of `1.0` (sample every trace).
+                          Optional sampling ratio in `[0.0, 1.0]`. The operator renders it as
+                          `CRABKA_OTLP_SAMPLE_RATIO`. An unset field leaves the binary's own
+                          default of `1.0`, which samples every trace.
                         format: double
                         nullable: true
                         type: number
                       serviceName:
                         description: |-
-                          Optional `service.name` resource attribute. Rendered as
-                          `OTEL_SERVICE_NAME`. Unset leaves the binary's own name —
-                          `"crabka-broker"` for `Kafka`, `"crabka-gres"` for `Gres`.
+                          Optional `service.name` resource attribute. The operator renders it as
+                          `OTEL_SERVICE_NAME`. An unset field leaves the binary's own name, which
+                          is `"crabka-broker"` for `Kafka` and `"crabka-gres"` for `Gres`.
                         nullable: true
                         type: string
                       timeout:
                         description: |-
-                          Optional export timeout. Rendered as `CRABKA_OTLP_TIMEOUT`.
-                          Unset leaves the binary's own default of `10s`.
+                          Optional export timeout. The operator renders it as
+                          `CRABKA_OTLP_TIMEOUT`. An unset field leaves the binary's own default
+                          of `10s`.
                         nullable: true
                         type: string
                     required:
@@ -803,7 +808,9 @@ spec:
                       type: string
                     type: array
                   dryRunOnly:
-                    description: True while the operator reports planner status without executing live changes.
+                    description: |-
+                      True while the operator reports planner status and does not execute
+                      live changes.
                     type: boolean
                   enabled:
                     description: Whether planner status is enabled by spec.
@@ -816,7 +823,7 @@ spec:
                   executableOperationKinds:
                     description: |-
                       Distinct planned operation kinds executable by the operator. Empty
-                      until physical orchestration is implemented.
+                      until the operator implements physical orchestration.
                     items:
                       type: string
                     type: array
@@ -894,7 +901,7 @@ spec:
                       description: '`True`, `False`, or `Unknown`.'
                       type: string
                     type:
-                      description: e.g. `Ready`.
+                      description: For example, `Ready`.
                       type: string
                   required:
                   - lastTransitionTime

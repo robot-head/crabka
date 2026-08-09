@@ -1,12 +1,13 @@
 //! Concurrent registry of locally-hosted partitions.
 //!
-//! Replaces the former `Arc<DashMap<(String, i32), Arc<Partition>>>` keying,
-//! which forced every lookup to allocate an owned `String` to build the tuple
-//! key (`partitions.get(&(topic.to_string(), idx))`). On the produce/fetch hot
-//! path a single request may resolve hundreds of partitions, turning that into
-//! an O(partitions) allocation storm. Backing the registry with a nested
-//! `DashMap<String, DashMap<i32, Arc<Partition>>>` lets lookups run with a
-//! borrowed `&str` topic name and no per-lookup allocation.
+//! The registry uses a nested `DashMap<String, DashMap<i32, Arc<Partition>>>`,
+//! so a lookup runs with a borrowed `&str` topic name and allocates nothing.
+//!
+//! A flat `Arc<DashMap<(String, i32), Arc<Partition>>>` would force every
+//! lookup to allocate an owned `String` for the tuple key, as in
+//! `partitions.get(&(topic.to_string(), idx))`. On the produce and fetch hot
+//! path one request can resolve hundreds of partitions, which would make that
+//! an O(partitions) burst of allocations.
 
 use std::sync::Arc;
 
@@ -15,12 +16,13 @@ use dashmap::DashMap;
 
 use crate::partition::Partition;
 
-/// Concurrent registry of locally-hosted partitions, keyed by (topic, partition).
+/// Concurrent registry of locally-hosted partitions, keyed by
+/// (topic, partition).
 ///
-/// Backed by a nested `DashMap<String, DashMap<PartitionIndex, Arc<Partition>>>`
-/// so lookups can be performed with a borrowed `&str` topic name — no per-lookup
-/// `String` allocation, which matters on the produce/fetch hot path where a
-/// single request may resolve hundreds of partitions.
+/// A nested `DashMap<String, DashMap<PartitionIndex, Arc<Partition>>>` backs
+/// it, so a lookup runs with a borrowed `&str` topic name and allocates no
+/// `String`. That matters on the produce and fetch hot path, where one request
+/// can resolve hundreds of partitions.
 #[derive(Debug, Default)]
 pub(crate) struct PartitionRegistry {
     inner: DashMap<String, DashMap<PartitionIndex, Arc<Partition>>>,
@@ -32,7 +34,8 @@ impl PartitionRegistry {
         Self::default()
     }
 
-    /// Alloc-free lookup. Returns a cheap `Arc` clone of the partition, if present.
+    /// Allocation-free lookup. It returns a cheap `Arc` clone of the
+    /// partition, if the registry holds it.
     #[must_use]
     pub(crate) fn get(&self, topic: &str, partition: PartitionIndex) -> Option<Arc<Partition>> {
         self.inner
@@ -48,7 +51,8 @@ impl PartitionRegistry {
             .is_some_and(|m| m.contains_key(&partition))
     }
 
-    /// Insert (replace) a partition. Returns the previous value if any.
+    /// Inserts a partition and replaces any current one. It returns the
+    /// previous value, if there was one.
     pub(crate) fn insert(
         &self,
         topic: String,
@@ -58,8 +62,8 @@ impl PartitionRegistry {
         self.inner.entry(topic).or_default().insert(partition, part)
     }
 
-    /// Remove a partition, returning it if present. Prunes the topic's inner map
-    /// if it becomes empty.
+    /// Removes a partition and returns it, if the registry held it. It also
+    /// drops the topic's inner map when that map becomes empty.
     pub(crate) fn remove(&self, topic: &str, partition: PartitionIndex) -> Option<Arc<Partition>> {
         let removed = self
             .inner
@@ -71,11 +75,12 @@ impl PartitionRegistry {
         removed
     }
 
-    /// Atomically materialize a partition only if absent, running `build` UNDER
-    /// the per-key lock so two concurrent materializations of the same
-    /// (topic, partition) can never both build (preserves the KIP-113
-    /// TOCTOU-free guarantee that the old `DashMap::entry` provided). `build` is
-    /// only called when the slot is vacant.
+    /// Materializes a partition atomically, and only when the registry does
+    /// not hold it. It runs `build` UNDER the per-key lock, so two concurrent
+    /// materializations of the same (topic, partition) can never both build.
+    /// That keeps the TOCTOU-free KIP-113 guarantee that the old
+    /// `DashMap::entry` gave. This method calls `build` only when the slot is
+    /// empty.
     pub(crate) fn materialize_if_vacant<E>(
         &self,
         topic: &str,
@@ -94,9 +99,9 @@ impl PartitionRegistry {
         }
     }
 
-    /// Partition indices currently hosted for `topic`. Empty if the topic
-    /// hosts nothing locally. Used by `DeleteTopics` to enumerate the local
-    /// partitions to tear down without a full-registry key scan.
+    /// The partition indices currently hosted for `topic`. It is empty when
+    /// the topic hosts nothing locally. `DeleteTopics` uses it to list the
+    /// local partitions to remove, without a scan of every registry key.
     #[must_use]
     pub(crate) fn partitions_of(&self, topic: &str) -> Vec<PartitionIndex> {
         self.inner
@@ -105,7 +110,8 @@ impl PartitionRegistry {
             .unwrap_or_default()
     }
 
-    /// Snapshot of all partition handles (cheap `Arc` clones). For maintenance sweeps.
+    /// Snapshot of all partition handles, as cheap `Arc` clones. Maintenance
+    /// sweeps use it.
     #[must_use]
     pub(crate) fn arcs(&self) -> Vec<Arc<Partition>> {
         self.inner
@@ -133,8 +139,9 @@ mod tests {
     use super::PartitionRegistry;
     use crate::partition::Partition;
 
-    /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>` via the
-    /// real `spawn_partition` path, mirroring `future_log`'s test fixture.
+    /// Builds a `Partition` rooted at `<log_dir>/<topic>-<partition>` through
+    /// the real `spawn_partition` path. It mirrors the test fixture in
+    /// `future_log`.
     fn fixture_partition(log_dir: &Path, topic: &str, partition: PartitionIndex) -> Arc<Partition> {
         let part_dir = crate::log_dir::partition_dir(log_dir, topic, partition.get());
         std::fs::create_dir_all(&part_dir).unwrap();

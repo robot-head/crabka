@@ -1,6 +1,7 @@
-//! Listener-related rendering and validation. Kept in its own module
-//! to keep `controller/kafka.rs` and `controller/common.rs` from
-//! growing further.
+//! Listener rendering and validation.
+//!
+//! This code has its own module so that `controller/kafka.rs` and
+//! `controller/common.rs` do not become larger.
 
 use std::{collections::BTreeMap, net::IpAddr};
 
@@ -50,18 +51,19 @@ fn sasl_mechanism(auth: &ListenerAuthentication) -> Option<SaslMechanism> {
 }
 
 /// Reason values for the `ListenersValid` status condition.
-/// Stable strings — consumed by `kubectl wait --for=condition=…` and
-/// asserted by tests.
+///
+/// These strings are stable. `kubectl wait --for=condition=…` reads them
+/// and the tests assert on them.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
     DuplicateListenerName(String),
     DuplicateListenerPort(i32),
     /// `ingress` / `route` listener with `tls: false`. SNI-passthrough routing
-    /// requires TLS — the controller routes by the TLS `ClientHello` SNI.
+    /// needs TLS, because the controller routes by the TLS `ClientHello` SNI.
     ListenerIngressRequiresTls(String),
     /// `ingress` / `route` listener with no `configuration.bootstrap.host`.
-    /// There is no way to derive a bootstrap hostname; the user must supply one.
+    /// The operator cannot derive a bootstrap hostname. The user must supply one.
     ListenerIngressBootstrapHostMissing(String),
     DuplicateBrokerOverride {
         listener: String,
@@ -72,50 +74,51 @@ pub enum ValidationError {
     NoInternalListener,
     ListenerMtlsRequiresTransportTls(String),
     /// `authentication: oauth` listener with `tls: false`. The signed-JWT
-    /// validator requires bearer-token confidentiality; without TLS the
-    /// access token leaks on the wire.
+    /// validator needs the bearer token to stay confidential. Without TLS,
+    /// the access token is visible on the network.
     ListenerOauthRequiresTransportTls(String),
     /// `authentication.oauth.validIssuerUri` empty / unset.
     ListenerOauthIssuerUriEmpty(String),
-    /// `authentication.oauth.jwksEndpointUri` doesn't start with
+    /// `authentication.oauth.jwksEndpointUri` does not start with
     /// `http://` or `https://`.
     ListenerOauthJwksUriBadScheme(String),
     /// `authentication.oauth.jwksRefreshSeconds` set below the 30-second
-    /// floor (would hammer the `IdP`).
+    /// floor. A smaller value sends too many requests to the `IdP`.
     ListenerOauthJwksRefreshTooSmall {
         listener: String,
         got: u32,
     },
     /// `validTokenType` set on an `accessTokenIsJwt: false`
     /// listener. Introspection-mode validation has no JWT header to
-    /// check `typ` against; the field is rejected. The `String` carries
-    /// the listener name + a human-readable description.
+    /// check `typ` against, so the operator rejects the field. The
+    /// `String` gives the listener name and a description for the user.
     ListenerOauthValidTokenTypeRejectedInIntrospectionMode(String),
     /// Any of `jwksMinRefreshPauseSeconds`,
     /// `jwksExpirySeconds`, `jwksIgnoreKeyUse` set on an
     /// `accessTokenIsJwt: false` listener. Introspection mode
-    /// doesn't use JWKS; setting these fields is a configuration
-    /// error worth surfacing at apply time. The String carries the
-    /// listener name + which field(s) were rejected.
+    /// does not use JWKS. These fields are a configuration error, and the
+    /// operator reports it at apply time. The `String` gives the listener
+    /// name and the fields that the operator rejected.
     ListenerOauthJwksFieldsRejectedInIntrospectionMode(String),
-    /// Two or more OAuth listeners declare differing configs. The broker
-    /// `[oauthbearer]` block is broker-global, so per-listener
-    /// OAuth divergence is not representable.
+    /// Two or more OAuth listeners declare different configurations. The
+    /// broker `[oauthbearer]` block is broker-global, so the operator
+    /// cannot give each listener its own OAuth configuration.
     ConflictingOAuthListenerConfig,
     /// An OAuth listener's `accessTokenIsJwt` setting disagrees
-    /// with which mode-specific fields are set. The `String` carries a
-    /// human-readable description (which listener + which invariant was
-    /// violated). JWT mode requires `jwksEndpointUri` and forbids all
-    /// introspection-mode fields; introspection mode requires
-    /// `introspectionEndpointUri` + `clientId` + `clientSecret` and forbids
-    /// `jwksEndpointUri`.
+    /// with which mode-specific fields are set. The `String` gives a
+    /// description for the user with the listener name and the broken
+    /// invariant. JWT mode needs `jwksEndpointUri` and forbids all
+    /// introspection-mode fields. Introspection mode needs
+    /// `introspectionEndpointUri`, `clientId`, and `clientSecret`, and
+    /// forbids `jwksEndpointUri`.
     ListenerOauthAccessTokenIsJwtInvalid(String),
     /// `type: gssapi` listener missing `keytabSecretRef` (secretName/key).
     ListenerGssapiKeytabSecretMissing(String),
     /// A `principalToLocalRules` entry failed `auth_to_local` parsing.
     ListenerGssapiInvalidRule(String),
-    /// Two or more GSSAPI listeners declare differing config. The broker
-    /// `[gssapi]` block is broker-global, so divergence isn't representable.
+    /// Two or more GSSAPI listeners declare different configurations. The
+    /// broker `[gssapi]` block is broker-global, so the operator cannot
+    /// give each listener its own GSSAPI configuration.
     ConflictingGssapiListenerConfig,
     /// The inter-broker listener is `type: gssapi` but
     /// `spec.interBrokerKerberos` is absent.
@@ -222,13 +225,14 @@ impl ValidationError {
     }
 }
 
-/// Return a "canonical" form of an OAuth listener config used for
-/// cross-listener conflict detection. The broker `[oauthbearer]` block
-/// is broker-global, so the only field a per-listener OAuth config may
-/// differ in without contradicting the global block is
-/// `enable_oauth_bearer` (which only gates the per-listener
-/// `sasl_mechanisms`). Mask that bit to a constant so two listeners
-/// differing only in it dedup to the same canonical value.
+/// Returns a canonical form of an OAuth listener configuration.
+///
+/// Cross-listener conflict detection uses this form. The broker
+/// `[oauthbearer]` block is broker-global, so only one field can differ
+/// between per-listener OAuth configurations without a contradiction of
+/// that block: `enable_oauth_bearer`, which gates only the per-listener
+/// `sasl_mechanisms`. This function masks that field to a constant, so two
+/// listeners that differ only in it give the same canonical value.
 #[must_use]
 fn oauth_canonical(cfg: &ListenerAuthenticationOAuth) -> ListenerAuthenticationOAuth {
     let mut out = cfg.clone();
@@ -236,9 +240,11 @@ fn oauth_canonical(cfg: &ListenerAuthenticationOAuth) -> ListenerAuthenticationO
     out
 }
 
-/// Canonical form for cross-listener GSSAPI conflict detection. The broker
-/// `[gssapi]` block is broker-global, so every field must agree across
-/// GSSAPI listeners. Compare the whole struct.
+/// Returns a canonical form of a GSSAPI listener configuration.
+///
+/// Cross-listener conflict detection uses this form. The broker `[gssapi]`
+/// block is broker-global, so every field must agree between GSSAPI
+/// listeners. Compare the whole struct.
 #[must_use]
 fn gssapi_canonical(
     cfg: &crate::crd::ListenerAuthenticationGssapi,
@@ -282,10 +288,11 @@ fn validate_gssapi_listener(
     Ok(())
 }
 
-/// Validate `spec.listeners` + `spec.interBrokerListenerName`. Returns
-/// `Ok(())` if everything is well-formed; otherwise the first error
-/// encountered (validation is short-circuit — surface the most
-/// actionable problem rather than a list).
+/// Validates `spec.listeners` and `spec.interBrokerListenerName`.
+///
+/// This function returns `Ok(())` when all values are well-formed. If not,
+/// it returns the first error that it finds. Validation stops at the first
+/// error to show the most useful problem instead of a list.
 pub fn validate_listeners(
     listeners: &[Listener],
     inter_broker_listener_name: Option<&str>,
@@ -514,8 +521,11 @@ pub fn validate_listeners(
     Ok(())
 }
 
-/// When the resolved inter-broker listener uses GSSAPI, `spec.interBrokerKerberos`
-/// must be present. `ib_kerberos_present` is `spec.inter_broker_kerberos.is_some()`.
+/// Checks that a GSSAPI inter-broker listener has `spec.interBrokerKerberos`.
+///
+/// When the resolved inter-broker listener uses GSSAPI,
+/// `spec.interBrokerKerberos` must be present. `ib_kerberos_present` is
+/// `spec.inter_broker_kerberos.is_some()`.
 pub fn validate_inter_broker_gssapi(
     listeners: &[Listener],
     inter_broker_listener_name: &str,
@@ -533,11 +543,13 @@ pub fn validate_inter_broker_gssapi(
     Ok(())
 }
 
-/// Return one warning string per listener that has SCRAM authentication
-/// without transport TLS. These are not hard errors — SCRAM itself is
-/// cryptographically safe — but the SCRAM exchange does traverse the
-/// network before the authentication is complete, so credentials can be
-/// observed by a passive eavesdropper on a plaintext connection.
+/// Returns one warning string for each listener that has SCRAM
+/// authentication without transport TLS.
+///
+/// These conditions are not errors, because SCRAM itself is
+/// cryptographically safe. But the SCRAM exchange crosses the network
+/// before the authentication is complete. On a plaintext connection, a
+/// passive eavesdropper can see the credentials.
 pub(crate) fn weak_auth_warnings(listeners: &[Listener]) -> Vec<String> {
     let mut warnings: Vec<String> = listeners
         .iter()
@@ -570,10 +582,12 @@ pub(crate) fn weak_auth_warnings(listeners: &[Listener]) -> Vec<String> {
     warnings
 }
 
-/// Pick the inter-broker listener name. Honors an explicit override;
-/// otherwise picks the first `internal` listener. Returns the synthesized
-/// default name (`"PLAIN"`) when `listeners` is empty (the
-/// no-listeners compatibility path).
+/// Picks the inter-broker listener name.
+///
+/// An explicit override wins. If there is no override, this function picks
+/// the first `internal` listener. When `listeners` is empty, it returns the
+/// synthesized default name `"PLAIN"`. This is the no-listeners
+/// compatibility path.
 #[allow(dead_code)]
 #[must_use]
 pub fn effective_inter_broker_listener_name(
@@ -592,21 +606,25 @@ pub fn effective_inter_broker_listener_name(
         .map_or_else(|| "PLAIN".to_string(), |l| l.name.clone())
 }
 
-/// Render the per-broker external Service for the given listener +
-/// broker id. The Service's selector uses the built-in
-/// `statefulset.kubernetes.io/pod-name` label (K8s 1.28+) to pin it
-/// to exactly the pod that hosts this broker.
+/// Renders the per-broker external Service for one listener and broker id.
 ///
-/// `pod_name` is the StatefulSet-allocated pod name (e.g.
-/// `demo-controller-0`). Caller computes it from pool+ordinal.
+/// The Service selector uses the built-in
+/// `statefulset.kubernetes.io/pod-name` label (K8s 1.28+). This pins the
+/// Service to the one pod that hosts this broker.
 ///
-/// `nodeport`/`loadbalancer` emit `NodePort`/`LoadBalancer`; `ingress`/`route`
-/// emit a `ClusterIP` Service used as the Ingress/Route backend.
+/// `pod_name` is the pod name that the `StatefulSet` allocated, for example
+/// `demo-controller-0`. The caller computes it from the pool and the
+/// ordinal.
+///
+/// `nodeport` and `loadbalancer` give a `NodePort` or `LoadBalancer`
+/// Service. `ingress` and `route` give a `ClusterIP` Service that the
+/// Ingress or Route uses as its backend.
 ///
 /// # Panics
 ///
-/// Panics if called with the `internal` listener type — internal listeners use
-/// the cluster-wide headless Service and never get a per-broker Service.
+/// Panics if called with the `internal` listener type. Internal listeners
+/// use the cluster-wide headless Service and never get a per-broker
+/// Service.
 #[allow(dead_code)]
 pub fn render_broker_service(
     owner: &Kafka,
@@ -675,11 +693,13 @@ pub fn render_broker_service(
     Ok(svc)
 }
 
-/// Render the bootstrap Service for the given external listener. Its
-/// selector matches every broker pod of the cluster.
+/// Renders the bootstrap Service for one external listener.
 ///
-/// `nodeport`/`loadbalancer` emit `NodePort`/`LoadBalancer`; `ingress`/`route`
-/// emit a `ClusterIP` Service used as the bootstrap Ingress/Route backend.
+/// Its selector matches every broker pod of the cluster.
+///
+/// `nodeport` and `loadbalancer` give a `NodePort` or `LoadBalancer`
+/// Service. `ingress` and `route` give a `ClusterIP` Service that the
+/// bootstrap Ingress or Route uses as its backend.
 ///
 /// # Panics
 ///
@@ -769,56 +789,75 @@ pub fn render_bootstrap_service(
 // Ingress / Route external listeners
 // ---------------------------------------------------------------------------
 
-/// Advertised port for `ingress` / `route` listeners — the standard HTTPS port
-/// the ingress controller / `OpenShift` router terminates on. Overridable per
-/// broker via `configuration.brokers[].advertisedPort`.
+/// Advertised port for `ingress` and `route` listeners.
+///
+/// This is the standard HTTPS port that the ingress controller or the
+/// `OpenShift` router terminates on. Each broker can override it with
+/// `configuration.brokers[].advertisedPort`.
 pub(crate) const INGRESS_PORT: i32 = 443;
 
-/// KIP-405: mount path for the local-tier RSM. Same path
-/// is used by the operator's broker TOML render
-/// (`[remote_storage].storage_dir`) and the broker pod template's
-/// `tier-storage` `volumeMount` so the broker's `LocalTieredStorage`
-/// writes through one canonical location.
+/// KIP-405: mount path for the local-tier RSM.
+///
+/// The operator writes this path into the broker TOML as
+/// `[remote_storage].storage_dir`, and into the `tier-storage`
+/// `volumeMount` of the broker pod template. Both use the same path, so
+/// the broker's `LocalTieredStorage` writes through one canonical
+/// location.
 pub(crate) const TIER_STORAGE_PATH: &str = "/var/lib/crabka/remote";
 
 /// Fixed in-pod path where the operator mounts the GSSAPI keytab.
-/// Both the `[gssapi]` and `[inter_broker_credentials]` TOML blocks reference it.
+///
+/// Both the `[gssapi]` and `[inter_broker_credentials]` TOML blocks refer
+/// to it.
 pub(crate) const GSSAPI_KEYTAB_PATH: &str = "/etc/crabka/gssapi-keytab/keytab";
 
-/// Directory the GSSAPI keytab Secret is mounted into; the projected item
-/// path `keytab` under it yields `GSSAPI_KEYTAB_PATH`.
+/// Directory that the operator mounts the GSSAPI keytab Secret into.
+///
+/// The projected item path `keytab` below this directory gives
+/// `GSSAPI_KEYTAB_PATH`.
 pub(crate) const GSSAPI_KEYTAB_DIR: &str = "/etc/crabka/gssapi-keytab";
 
-/// KIP-405: fixed in-pod directory where the operator mounts an explicit
-/// GCS service-account JSON key Secret (file-based credentials). The
-/// Secret's projected item lands at `key.json` under this dir, so the
-/// broker TOML's `[remote_storage.gcs].service_account_path` points at
-/// `<GCS_CREDENTIALS_DIR>/key.json`. Only used when
-/// `gcs.credentials` is set; keyless Workload Identity / ADC mounts
-/// nothing.
+/// KIP-405: fixed in-pod directory for the GCS service-account key.
+///
+/// The operator mounts an explicit GCS service-account JSON key Secret
+/// here for file-based credentials. The projected item of the Secret lands
+/// at `key.json` below this directory, so
+/// `[remote_storage.gcs].service_account_path` in the broker TOML points
+/// at `<GCS_CREDENTIALS_DIR>/key.json`. The operator uses this directory
+/// only when `gcs.credentials` is set. Keyless Workload Identity and ADC
+/// mount nothing.
 pub(crate) const GCS_CREDENTIALS_DIR: &str = "/etc/crabka/gcs-credentials";
 
-/// Projected filename for the GCS service-account JSON key under
-/// [`GCS_CREDENTIALS_DIR`]. The full `service_account_path` rendered into
-/// the broker TOML is `<GCS_CREDENTIALS_DIR>/<GCS_CREDENTIALS_FILE>`.
+/// Projected filename for the GCS service-account JSON key below
+/// [`GCS_CREDENTIALS_DIR`].
+///
+/// The full `service_account_path` that the operator writes into the
+/// broker TOML is `<GCS_CREDENTIALS_DIR>/<GCS_CREDENTIALS_FILE>`.
 pub(crate) const GCS_CREDENTIALS_FILE: &str = "key.json";
 
-/// Escape a string for embedding inside a TOML basic (double-quoted)
-/// string. Only `\` and `"` need escaping for our render — the operator
-/// rejects newlines and other control characters at CRD validation
-/// time, so the broker's TOML parser will never see them here.
+/// Escapes a string for use inside a TOML basic, double-quoted string.
+///
+/// This render must escape only `\` and `"`. The operator rejects newlines
+/// and other control characters during CRD validation, so the TOML parser
+/// of the broker never sees them here.
 fn toml_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// The de-facto annotation that tells the (nginx) ingress controller to forward
-/// the raw TLS stream — SNI-routed — to the backend rather than terminating
-/// TLS. Harmless on controllers that ignore it; required for Kafka-over-Ingress.
+/// The de-facto annotation that tells the nginx ingress controller not to
+/// terminate TLS.
+///
+/// The controller forwards the raw TLS stream to the backend and routes it
+/// by SNI. The annotation does no damage on controllers that ignore it.
+/// Kafka-over-Ingress needs it.
 const SSL_PASSTHROUGH_ANNOTATION: &str = "nginx.ingress.kubernetes.io/ssl-passthrough";
 
-/// Resolve the externally-resolvable hostname for one (ingress/route, broker).
-/// `advertisedHost` override wins over the `host` field. Returns `None` when
-/// neither is set (a configuration error surfaced at advertised-address time).
+/// Resolves the external hostname for one ingress or route listener and
+/// broker.
+///
+/// The `advertisedHost` override wins over the `host` field. This function
+/// returns `None` when neither field is set. That is a configuration error,
+/// and the operator reports it when it computes the advertised addresses.
 #[must_use]
 pub(crate) fn ingress_broker_host(listener: &Listener, broker_id: i32) -> Option<String> {
     let o = listener
@@ -830,8 +869,10 @@ pub(crate) fn ingress_broker_host(listener: &Listener, broker_id: i32) -> Option
     o.advertised_host.clone().or_else(|| o.host.clone())
 }
 
-/// Resolve the bootstrap hostname for an ingress/route listener. Validation
-/// guarantees this is `Some` for a listener that passed `validate_listeners`.
+/// Resolves the bootstrap hostname for an ingress or route listener.
+///
+/// For a listener that passed `validate_listeners`, validation guarantees
+/// that the result is `Some`.
 #[must_use]
 pub(crate) fn ingress_bootstrap_host(listener: &Listener) -> Option<String> {
     listener
@@ -852,9 +893,11 @@ fn ingress_labels(cluster_name: &str, listener: &Listener) -> BTreeMap<String, S
     labels
 }
 
-/// Render one `Ingress` (networking.k8s.io/v1) that routes `host` to
-/// `service_name:listener.port` over TLS passthrough (SNI). Used for both the
-/// per-broker and bootstrap Ingress objects.
+/// Renders one `Ingress` (networking.k8s.io/v1) that routes `host` to
+/// `service_name:listener.port`.
+///
+/// The route uses TLS passthrough with SNI. Both the per-broker Ingress
+/// object and the bootstrap Ingress object come from this function.
 fn build_ingress(
     owner: &Kafka,
     listener: &Listener,
@@ -914,8 +957,10 @@ fn build_ingress(
     Ok(ingress)
 }
 
-/// Per-broker Ingress: `<cluster>-<listener>-<broker>` routing the broker's
-/// hostname to its `ClusterIP` backend Service.
+/// Renders the per-broker Ingress `<cluster>-<listener>-<broker>`.
+///
+/// It routes the hostname of the broker to the `ClusterIP` backend Service
+/// of that broker.
 #[allow(dead_code)]
 pub fn render_broker_ingress(
     owner: &Kafka,
@@ -939,8 +984,9 @@ pub fn render_broker_ingress(
     )
 }
 
-/// Bootstrap Ingress: `<cluster>-<listener>-bootstrap` routing the bootstrap
-/// hostname to the all-pods bootstrap Service.
+/// Renders the bootstrap Ingress `<cluster>-<listener>-bootstrap`.
+///
+/// It routes the bootstrap hostname to the all-pods bootstrap Service.
 #[allow(dead_code)]
 pub fn render_bootstrap_ingress(
     owner: &Kafka,
@@ -969,9 +1015,12 @@ pub fn render_bootstrap_ingress(
     )
 }
 
-/// Render one `OpenShift` `Route` (`route.openshift.io/v1`) as a JSON body,
-/// applied dynamically (the type is not in `k8s-openapi`). Passthrough TLS
-/// termination makes the router SNI-route the raw TLS stream to the broker.
+/// Renders one `OpenShift` `Route` (`route.openshift.io/v1`) as a JSON
+/// body.
+///
+/// The operator applies this body dynamically, because `k8s-openapi` does
+/// not hold the type. Passthrough TLS termination makes the router route
+/// the raw TLS stream to the broker by SNI.
 fn build_route(
     owner: &Kafka,
     listener: &Listener,
@@ -1002,7 +1051,7 @@ fn build_route(
     }))
 }
 
-/// Per-broker Route: `<cluster>-<listener>-<broker>`.
+/// Renders the per-broker Route `<cluster>-<listener>-<broker>`.
 #[allow(dead_code)]
 pub fn render_broker_route(
     owner: &Kafka,
@@ -1018,7 +1067,7 @@ pub fn render_broker_route(
     build_route(owner, listener, &object_name, host, &service_name, labels)
 }
 
-/// Bootstrap Route: `<cluster>-<listener>-bootstrap`.
+/// Renders the bootstrap Route `<cluster>-<listener>-bootstrap`.
 #[allow(dead_code)]
 pub fn render_bootstrap_route(
     owner: &Kafka,
@@ -2388,8 +2437,9 @@ pub struct AdvertisedAddress {
     pub port: i32,
 }
 
-/// Errors that block advertised-listener computation. They map onto
-/// `ListenersReady=False reason=PendingExternalAddresses`.
+/// Errors that block the computation of the advertised listeners.
+///
+/// They map onto `ListenersReady=False reason=PendingExternalAddresses`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum AdvertisedError {
@@ -2438,16 +2488,16 @@ impl AdvertisedError {
     }
 }
 
-/// Compute the advertised host:port for one (listener, broker).
+/// Computes the advertised host and port for one listener and broker.
 ///
-/// `pod_node_name` is `Pod.spec.nodeName` of the pod hosting this
-/// broker (None if not yet scheduled). `nodes_by_name` is a map of
-/// all Nodes the operator has observed. `per_broker_service` is the
-/// per-broker Service the operator just rendered+applied (None until
-/// the apiserver returns it).
+/// `pod_node_name` is the `Pod.spec.nodeName` of the pod that hosts this
+/// broker. It is `None` while the pod is not yet scheduled.
+/// `nodes_by_name` is a map of all Nodes that the operator has observed.
+/// `per_broker_service` is the per-broker Service that the operator just
+/// rendered and applied. It is `None` until the apiserver returns it.
 ///
-/// `ingress` / `route` listeners resolve their host from config (no Node/Pod
-/// lookup) and advertise on port 443.
+/// `ingress` and `route` listeners resolve their host from the
+/// configuration, without a Node or Pod lookup, and advertise on port 443.
 #[allow(dead_code)]
 pub fn compute_advertised(
     listener: &Listener,
@@ -2901,52 +2951,57 @@ mod advertised_tests {
     }
 }
 
-/// Inputs to render the broker config-file's TLS block for a
-/// single broker. The operator builds this once per reconcile and feeds
-/// it into every per-broker TOML — only the leaf cert paths differ per
-/// broker (the cert files are addressed by broker id inside the same
-/// mount).
+/// Inputs that render the TLS block of the broker config file for one
+/// broker.
+///
+/// The operator builds this once for each reconcile and puts it into every
+/// per-broker TOML. Only the leaf cert paths differ for each broker,
+/// because the cert files carry the broker id inside the same mount.
 #[derive(Debug, Clone)]
 pub struct BrokerTlsRender {
-    /// e.g. `"Ssl"` or `"SaslSsl"`. Written as the
+    /// For example `"Ssl"` or `"SaslSsl"`. The operator writes it as the
     /// `controller_listener_protocol = "<v>"` line.
     pub controller_listener_protocol: String,
-    /// Path to the broker's own cert (e.g. `/etc/crabka/broker-tls/0.crt`).
+    /// Path to the broker's own cert, for example
+    /// `/etc/crabka/broker-tls/0.crt`.
     pub cert_path: String,
     /// Path to the broker's own private key.
     pub key_path: String,
-    /// Path to the cluster CA cert used to verify peer client certs.
+    /// Path to the cluster CA cert that verifies peer client certs.
     pub client_ca_path: String,
     /// `"Required"` for inter-broker mTLS.
     pub client_auth: String,
-    /// Path to the cluster CA cert used as TLS trust roots when this
-    /// broker dials a PEER's controller listener (KIP-595 quorum mTLS).
-    /// Written as the `trust_roots_path = "<v>"` line inside
-    /// `[tls_config]`.
+    /// Path to the cluster CA cert that gives the TLS trust roots when
+    /// this broker dials the controller listener of a PEER (KIP-595
+    /// quorum mTLS). The operator writes it as the
+    /// `trust_roots_path = "<v>"` line inside `[tls_config]`.
     pub trust_roots_path: String,
 }
 
-/// Intermediate shape for rendering the `[authorization]`
-/// TOML block. Built from `Kafka.spec.authorization` (+ the
-/// delegation-token enablement flag) by
-/// [`AuthorizationRender::from_spec`] / [`AuthorizationRender::auto_injected_simple`].
+/// Intermediate shape that renders the `[authorization]` TOML block.
+///
+/// [`AuthorizationRender::from_spec`] and
+/// [`AuthorizationRender::auto_injected_simple`] build it from
+/// `Kafka.spec.authorization` and the delegation-token enablement flag.
 struct AuthorizationRender {
-    /// `"simple"` or `"opa"` — matches the broker's `AuthzType` wire
-    /// names (`snake_case`). Never `"allow_all"`: that's the omit-block
-    /// case, not a render shape.
+    /// `"simple"` or `"opa"`. These match the `AuthzType` wire names of
+    /// the broker in `snake_case`. The value is never `"allow_all"`: that
+    /// is the omit-block case, not a render shape.
     kind: &'static str,
-    /// Final super-user list emitted to TOML. Always rendered (even when
-    /// empty) so the broker's `[authorization].super_users`
-    /// authoritative-overwrite path is deterministic.
+    /// Final super-user list for the TOML. The operator always renders it,
+    /// also when it is empty, so that the authoritative-overwrite path of
+    /// the broker's `[authorization].super_users` is deterministic.
     super_users: Vec<String>,
-    /// `Some` iff `kind == "opa"`; carries the `[authorization.opa]`
-    /// subtable inputs.
+    /// `Some` if and only if `kind == "opa"`. It holds the
+    /// `[authorization.opa]` subtable inputs.
     opa: Option<AuthorizationOpaRender>,
 }
 
-/// `[authorization.opa]` subtable inputs. `initial_cache_capacity` is
-/// intentionally omitted — the broker's `FileOpaConfig` uses
-/// `deny_unknown_fields` and only carries `maximum_cache_size`.
+/// `[authorization.opa]` subtable inputs.
+///
+/// This struct omits `initial_cache_capacity` on purpose. The
+/// `FileOpaConfig` of the broker uses `deny_unknown_fields` and holds only
+/// `maximum_cache_size`.
 struct AuthorizationOpaRender {
     url: String,
     allow_on_error: Option<bool>,
@@ -2955,11 +3010,13 @@ struct AuthorizationOpaRender {
 }
 
 impl AuthorizationRender {
-    /// Build from an explicit `Kafka.spec.authorization`. When
-    /// `delegation_token_enabled`, merges `"ANONYMOUS"` into
-    /// `super_users` (de-duplicated, ordering preserved) — the
-    /// delegation-token act-as path requires the operator's PLAINTEXT
-    /// inter-broker principal to be a super-user.
+    /// Builds the render from an explicit `Kafka.spec.authorization`.
+    ///
+    /// When `delegation_token_enabled` is set, this function merges
+    /// `"ANONYMOUS"` into `super_users`. The merge removes duplicates and
+    /// keeps the order. The delegation-token act-as path needs the
+    /// PLAINTEXT inter-broker principal of the operator to be a
+    /// super-user.
     fn from_spec(a: &crate::crd::kafka::Authorization, delegation_token_enabled: bool) -> Self {
         match a {
             crate::crd::kafka::Authorization::Simple(s) => Self {
@@ -2980,10 +3037,13 @@ impl AuthorizationRender {
         }
     }
 
+    /// Builds the injected default authorization block.
+    ///
     /// When `delegation_token_enabled` is set but
-    /// `Kafka.spec.authorization` is unset, the operator silently
-    /// injects a `type = "simple", super_users = ["ANONYMOUS"]` block so
-    /// the act-as path keeps working. Documented in the spec §2.2.
+    /// `Kafka.spec.authorization` is unset, the operator injects a
+    /// `type = "simple", super_users = ["ANONYMOUS"]` block without a
+    /// message, so that the act-as path continues to work. The spec
+    /// documents this in §2.2.
     fn auto_injected_simple() -> Self {
         Self {
             kind: "simple",
@@ -2993,9 +3053,10 @@ impl AuthorizationRender {
     }
 }
 
-/// Merge `"ANONYMOUS"` into `base` when `inject` is set. Preserves
-/// `base`'s ordering and de-duplicates — if `"ANONYMOUS"` is already in
-/// `base` the merge is a no-op.
+/// Merges `"ANONYMOUS"` into `base` when `inject` is set.
+///
+/// The merge keeps the order of `base` and removes duplicates. If `base`
+/// already holds `"ANONYMOUS"`, the merge changes nothing.
 fn merge_anonymous(base: &[String], inject: bool) -> Vec<String> {
     let mut out: Vec<String> = base.to_vec();
     if inject && !out.iter().any(|s| s == "ANONYMOUS") {
@@ -3004,18 +3065,22 @@ fn merge_anonymous(base: &[String], inject: bool) -> Vec<String> {
     out
 }
 
-/// Render a `Vec<String>` as a TOML inline string array, e.g.
-/// `["a", "b"]`. Each element is double-quoted; no escaping (the
-/// principal strings we emit never contain `"` or `\`).
+/// Renders a `Vec<String>` as a TOML inline string array, for example
+/// `["a", "b"]`.
+///
+/// This function puts double quotes around each element and escapes
+/// nothing. The principal strings that the operator writes never contain
+/// `"` or `\`.
 fn toml_string_array(items: &[String]) -> String {
     let quoted: Vec<String> = items.iter().map(|s| format!("\"{s}\"")).collect();
     format!("[{}]", quoted.join(", "))
 }
 
-/// Render the complete TOML for one broker (cluster-wide content +
-/// this broker's advertised addresses). Deterministic — same input
-/// always produces byte-identical output so the config-hash
-/// is stable.
+/// Renders the complete TOML for one broker.
+///
+/// The output holds the cluster-wide content and the advertised addresses
+/// of this broker. The render is deterministic: the same input always
+/// gives byte-identical output, so the config hash is stable.
 // Each arg is an independent operator-owned broker-pod render input —
 // extraction obscures the single deterministic render shape.
 fn render_remote_storage(
@@ -3559,9 +3624,11 @@ pub fn render_broker_toml(
     out
 }
 
-/// Build the synthesized internal-only listener used when
-/// `Kafka.spec.listeners` is empty. Kept here so the operator and
-/// tests agree on the bytes.
+/// Builds the synthesized internal-only listener for an empty
+/// `Kafka.spec.listeners`.
+///
+/// This function lives here so that the operator and the tests agree on
+/// the bytes.
 #[allow(dead_code)]
 #[must_use]
 pub fn synthesized_default_listener() -> Listener {
@@ -4111,10 +4178,10 @@ mod toml_rendering_tests {
 
     // ── S3 tiered storage TOML render ────────────────────────────────
 
-    /// Full S3 spec — bucket, region, prefix, endpoint, `allow_http`,
-    /// multipart overrides — must render every field into
-    /// `[remote_storage.s3]` and round-trip through the broker's
-    /// `FileConfig` so the broker pod boots against the rendered TOML.
+    /// A full S3 spec sets bucket, region, prefix, endpoint, `allow_http`,
+    /// and the multipart overrides. The render must write every field into
+    /// `[remote_storage.s3]` and round-trip through the `FileConfig` of
+    /// the broker, so that the broker pod boots against the rendered TOML.
     #[test]
     fn render_broker_toml_emits_kafka_metadata_when_topic_rlmm_set() {
         let mut addrs = std::collections::BTreeMap::new();
@@ -4379,10 +4446,10 @@ mod toml_rendering_tests {
         check!(s3.secret_access_key.is_none());
     }
 
-    /// Minimal S3 spec — only `bucket` + `region` set. Optional fields
-    /// must be omitted from the rendered TOML so the broker falls back
-    /// to its defaults (multipart threshold / chunk size, no prefix, no
-    /// endpoint override, `allow_http = false`).
+    /// A minimal S3 spec sets only `bucket` and `region`. The rendered
+    /// TOML must omit the optional fields, so that the broker uses its
+    /// defaults: the multipart threshold and chunk size, no prefix, no
+    /// endpoint override, and `allow_http = false`.
     #[test]
     fn render_broker_toml_emits_remote_storage_s3_minimal_spec() {
         let mut addrs = std::collections::BTreeMap::new();
@@ -4441,10 +4508,10 @@ mod toml_rendering_tests {
         assert!(s3.region == "r");
     }
 
-    /// Reserved TOML metacharacters (`"`, `\`) in a user-supplied
-    /// string field must be escaped, not pass through verbatim — a
-    /// stray quote in `prefix` would otherwise produce TOML that
-    /// fails to parse at the broker.
+    /// The render must escape the reserved TOML metacharacters `"` and
+    /// `\` in a string field that the user supplied. It must not let them
+    /// pass through verbatim. One extra quote in `prefix` gives TOML that
+    /// the broker cannot parse.
     #[test]
     fn render_broker_toml_escapes_toml_metacharacters_in_s3_strings() {
         let mut addrs = std::collections::BTreeMap::new();
@@ -4486,9 +4553,10 @@ mod toml_rendering_tests {
         assert!(s3.prefix.as_deref() == Some(r#"weird"prefix\"#));
     }
 
-    /// GCS backend with an explicit service-account key Secret: the
-    /// `[remote_storage.gcs]` block must render verbatim non-credential
-    /// fields plus a `service_account_path` pointing at the mounted file.
+    /// A GCS backend with an explicit service-account key Secret. The
+    /// `[remote_storage.gcs]` block must render the non-credential fields
+    /// verbatim, and add a `service_account_path` that points at the
+    /// mounted file.
     #[test]
     fn render_broker_toml_emits_remote_storage_gcs_with_credentials() {
         let mut addrs = std::collections::BTreeMap::new();
@@ -4564,9 +4632,10 @@ mod toml_rendering_tests {
         check!(gcs.multipart_chunk_size == Some(1024));
     }
 
-    /// Keyless GCS (Workload Identity / ADC): with `credentials` unset,
-    /// NO `service_account_path` line may appear — the broker pod resolves
-    /// credentials from the bound KSA via the metadata server.
+    /// Keyless GCS with Workload Identity or ADC. With `credentials`
+    /// unset, NO `service_account_path` line may appear. The broker pod
+    /// resolves the credentials from the bound KSA through the metadata
+    /// server.
     #[test]
     fn render_broker_toml_gcs_keyless_omits_service_account_path() {
         let mut addrs = std::collections::BTreeMap::new();
@@ -5683,9 +5752,10 @@ mod toml_rendering_tests {
     }
 }
 
-/// Deterministic serialization of `spec.listeners` intent. Empty
-/// (or absent) listeners produce the empty string so a cluster with
-/// no `spec.listeners` set keeps its config hash on upgrade.
+/// Serializes the intent of `spec.listeners` deterministically.
+///
+/// Empty or absent listeners give the empty string, so that a cluster with
+/// no `spec.listeners` keeps its config hash through an upgrade.
 #[allow(dead_code)]
 pub fn canonical_listener_intent(
     listeners: &[Listener],
@@ -5797,7 +5867,7 @@ mod intent_tests {
 pub(crate) struct ListenerObservedAddresses {
     /// External node addresses for `NodePort` listeners.
     pub nodeport_node_addresses: Vec<NodeAddress>,
-    /// Per-broker `LoadBalancer` ingress entries (keyed by broker id).
+    /// Per-broker `LoadBalancer` ingress entries, keyed by broker id.
     pub lb_per_broker: BTreeMap<i32, Vec<LbIngress>>,
     /// Bootstrap Service `LoadBalancer` ingress entries.
     pub lb_bootstrap: Vec<LbIngress>,
@@ -5821,12 +5891,13 @@ pub(crate) enum SanComputationError {
     SansNotReady { broker_id: i32, listener: String },
 }
 
-/// Compute the extra SANs needed for external TLS listeners for one broker.
+/// Computes the extra SANs that external TLS listeners need for one
+/// broker.
 ///
-/// Pure function — no I/O. Returns `Err(SansNotReady)` when a
-/// `LoadBalancer` listener has TLS but the per-broker ingress isn't
-/// provisioned yet; callers skip cert issuance for that broker and
-/// requeue.
+/// This is a pure function and does no I/O. It returns
+/// `Err(SansNotReady)` when a `LoadBalancer` listener has TLS but the
+/// per-broker ingress is not yet provisioned. Callers then skip the cert
+/// issuance for that broker and requeue.
 pub(crate) fn compute_extra_sans(
     broker_id: i32,
     listeners: &[Listener],
@@ -5895,10 +5966,11 @@ pub(crate) fn compute_extra_sans(
     Ok(sans)
 }
 
-/// Observe external addresses needed for SAN extension from the Kubernetes API.
+/// Reads the external addresses that the SAN extension needs from the
+/// Kubernetes API.
 ///
-/// Reads `Node.status.addresses` for `NodePort` listeners and
-/// `Service.status.loadBalancer.ingress` for `LoadBalancer` listeners.
+/// This function reads `Node.status.addresses` for `NodePort` listeners
+/// and `Service.status.loadBalancer.ingress` for `LoadBalancer` listeners.
 pub(crate) async fn observe_listener_addresses(
     ctx: &crate::context::Context,
     namespace: &str,

@@ -1,5 +1,7 @@
-//! pgkv: ordered key-value storage with order-preserving key encoding and a
-//! versioned row value encoding. The permanent storage seam for Crabka Gres.
+//! pgkv: ordered key-value storage with an order-preserving key encoding and
+//! a versioned row-value encoding.
+//!
+//! It is the permanent storage seam for Crabka Gres.
 
 #![doc(html_root_url = "https://docs.rs/crabka-pgkv/0.3.9")]
 

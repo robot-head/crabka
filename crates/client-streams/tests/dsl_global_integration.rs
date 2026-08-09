@@ -1,11 +1,12 @@
 //! Broker integration test: DSL `GlobalKTable` stream-globaltable join.
 //!
-//! Proves the full `GlobalKTable` runtime path end-to-end against a real broker:
-//! the global consumer bootstraps a fully-replicated store from **every**
-//! partition of the source topic (exercising the metadata-backed `partitions`
-//! override) *before* tasks process, and a `KStream::join_global` then looks up
-//! global values keyed off the stream record's value — including a key that lives
-//! on a non-zero partition of the global topic.
+//! This test proves the full `GlobalKTable` runtime path end-to-end against a
+//! real broker. The global consumer bootstraps a fully-replicated store from
+//! **every** partition of the source topic *before* tasks process, which
+//! exercises the metadata-backed `partitions` override. A
+//! `KStream::join_global` then looks up global values keyed off the stream
+//! record's value. One such key lives on a non-zero partition of the global
+//! topic.
 
 use std::time::Duration;
 
@@ -70,9 +71,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 
 // ─── DSL global-table join topology ────────────────────────────────────────────
 
-/// Build the stream-globaltable join topology:
-/// `global` (2 partitions) → fully-replicated `global-store`;
-/// `in` → `join_global` (lookup key = stream value) → `out`.
+/// Builds the stream-globaltable join topology.
+///
+/// `global`, which has 2 partitions, feeds the fully-replicated `global-store`.
+/// `in` → `join_global` → `out`, where the lookup key is the stream value.
 fn global_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
     let g: GlobalKTable<String, String> =
@@ -94,8 +96,10 @@ fn global_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
 
 // ─── output collector ──────────────────────────────────────────────────────────
 
-/// Poll `out` partition 0 until `want` string records arrive (or the outer
-/// timeout fires). Returns `(key, value)` pairs in arrival order.
+/// Polls `out` partition 0 until `want` string records arrive.
+///
+/// The poll also stops when the outer timeout fires. Returns `(key, value)` pairs
+/// in arrival order.
 async fn collect_output(
     admin: &Client,
     bootstrap: &str,

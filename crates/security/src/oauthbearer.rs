@@ -1,16 +1,16 @@
-//! SASL/OAUTHBEARER (KIP-255 / RFC 7628) — pure logic.
+//! Pure SASL/OAUTHBEARER logic (KIP-255 / RFC 7628).
 //!
 //! Two pieces, both I/O-free so the broker can unit-test them without a
 //! socket:
 //!
-//! 1. [`parse_client_initial_response`] — decode the RFC 7628 client initial
+//! 1. [`parse_client_initial_response`] decodes the RFC 7628 client initial
 //!    response (`n,,\x01auth=Bearer <token>\x01\x01`) into its bearer token
 //!    and optional authzid.
-//! 2. [`UnsecuredJwsValidator`] — validate the bearer token as an *unsecured*
-//!    JWS (`alg: none`) and extract the connection principal from a claim.
+//! 2. [`UnsecuredJwsValidator`] validates the bearer token as an *unsecured*
+//!    JWS (`alg: none`) and reads the connection principal from a claim.
 //!    This mirrors Kafka's `OAuthBearerUnsecuredValidatorCallbackHandler`,
 //!    the built-in development/testing validator. Signed-token (JWKS)
-//!    validation is handled separately.
+//!    validation is separate.
 
 use std::sync::Arc;
 
@@ -22,16 +22,18 @@ use serde_json::Value;
 use crate::{AuthError, AuthMethod, Principal, jwks::JwksHandle};
 
 /// Outcome of an OAUTHBEARER validation: the authenticated principal plus the
-/// token's expiry. The expiry populates
-/// `SaslAuthenticateResponse.session_lifetime_ms` and what the dispatch loop
-/// uses to schedule per-connection re-auth deadlines (KIP-368).
+/// token's expiry.
+///
+/// The expiry populates `SaslAuthenticateResponse.session_lifetime_ms`. The
+/// dispatch loop also uses it to schedule per-connection re-auth deadlines
+/// (KIP-368).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthOutcome {
     pub principal: Principal,
     /// Token expiry as Unix epoch milliseconds. `None` means "no expiry / no
-    /// re-auth required" — reserved for future non-OAuth paths. For
-    /// OAUTHBEARER this is always `Some` (validators reject tokens without
-    /// `exp`).
+    /// re-auth required" and is reserved for future non-OAuth paths. For
+    /// OAUTHBEARER this is always `Some`, because validators reject tokens
+    /// without `exp`.
     pub expires_at_ms: Option<i64>,
 }
 
@@ -49,10 +51,11 @@ pub struct ClientInitialResponse {
 /// Wire shape (`^A` = `\x01`):
 /// `gs2-header ^A auth=Bearer <token> [^A key=value ...] ^A ^A`
 ///
-/// The GS2 header is `gs2-cb-flag "," [authzid] ","` — for OAUTHBEARER over a
-/// TLS / plaintext listener the channel-binding flag is `n` (none). We accept
-/// `n` / `y` and ignore everything else in the header except the authzid.
-/// Non-`auth` kvpairs (host / port / extensions) are ignored.
+/// The GS2 header is `gs2-cb-flag "," [authzid] ","`. For OAUTHBEARER over a
+/// TLS / plaintext listener the channel-binding flag is `n`, which means none.
+/// This function accepts `n` / `y` and ignores everything else in the header
+/// except the authzid. It also ignores non-`auth` kvpairs such as host, port,
+/// and extensions.
 ///
 /// # Errors
 ///
@@ -86,8 +89,9 @@ pub fn parse_client_initial_response(bytes: &[u8]) -> Result<ClientInitialRespon
     Ok(ClientInitialResponse { token, authzid })
 }
 
-/// Parse a GS2 header `cb-flag "," [authzid] ","`, returning the authzid if
-/// non-empty. The `a=` prefix RFC 5801 puts on the authzid is stripped.
+/// Parse a GS2 header `cb-flag "," [authzid] ","` and return a non-empty authzid.
+///
+/// This function strips the `a=` prefix that RFC 5801 puts on the authzid.
 fn parse_gs2_header(gs2: &str) -> Result<Option<String>, AuthError> {
     // cb-flag is one of "n", "y", or "p=<name>". OAUTHBEARER never negotiates
     // channel binding, so a "p=" flag is malformed here.
@@ -120,26 +124,27 @@ pub struct UnsecuredJwsValidator {
     /// Tolerance applied to the `exp` / `iat` temporal checks to absorb clock
     /// drift between the client and broker.
     pub allowable_clock_skew: Time,
-    /// Precompiled `JsonPath` expression evaluated against the
-    /// token's claim set. Token is rejected when the expression yields
-    /// empty/null/false. Compile once at validator construction.
+    /// Precompiled `JsonPath` expression that the validator evaluates against
+    /// the token's claim set. The validator rejects the token when the
+    /// expression yields empty/null/false. Compile it once at validator
+    /// construction.
     pub custom_claim_check: Option<JpQuery>,
     /// When set, the JWT `typ` header field must equal this
-    /// string. Ignored when unset.
+    /// string. The validator ignores this field when unset.
     pub valid_token_type: Option<String>,
     /// Alternate claim name to read the principal name from
-    /// when `principal_claim_name` is absent or empty. Strimzi's
-    /// "service-account fallback" — `sub` typically holds a UUID,
+    /// when `principal_claim_name` is absent or empty. Strimzi calls this the
+    /// "service-account fallback": `sub` typically holds a UUID, and
     /// `client_id` is the readable name.
     pub fallback_user_name_claim: Option<String>,
     /// Prepended to the resolved principal name ONLY when
     /// the fallback claim fires. Strimzi convention: "service-account-".
     pub fallback_user_name_prefix: Option<String>,
-    /// Precompiled `JsonPath` expression extracting group
-    /// memberships from the token claims. Compile-once-at-startup.
+    /// Precompiled `JsonPath` expression that extracts group
+    /// memberships from the token claims. Compile it once at startup.
     pub groups_claim: Option<JpQuery>,
-    /// When `groups_claim` resolves to a string (not an
-    /// array), split on this delimiter. Common: "," or " ".
+    /// When `groups_claim` resolves to a string and not an
+    /// array, split on this delimiter. Common values: "," or " ".
     pub groups_claim_delimiter: Option<String>,
 }
 
@@ -159,8 +164,10 @@ impl Default for UnsecuredJwsValidator {
 }
 
 impl UnsecuredJwsValidator {
-    /// Validate `token` against `now_ms` (Unix epoch milliseconds), returning
-    /// the authenticated [`Principal`] on success.
+    /// Validate `token` against `now_ms` and return the authenticated
+    /// [`Principal`] on success.
+    ///
+    /// `now_ms` is Unix epoch milliseconds.
     ///
     /// # Errors
     ///
@@ -270,16 +277,16 @@ impl UnsecuredJwsValidator {
     }
 }
 
-/// Extract group memberships from token claims using a
-/// precompiled `JsonPath`. Each result element is interpreted per its
-/// JSON type:
+/// Extract group memberships from token claims with a precompiled `JsonPath`.
+///
+/// This function reads each result element by its JSON type:
 /// - `String`: if `delimiter` is set, split + trim + drop empty;
 ///   otherwise the whole string becomes one group.
 /// - `Array`: each string element becomes a group.
-/// - `Number` / `Object` / `Null`: ignored (no error).
+/// - `Number` / `Object` / `Null`: ignored, with no error.
 ///
-/// Returns `vec![]` for empty matches (no groups extracted is not an
-/// error — the token may legitimately have no groups).
+/// This function returns `vec![]` for empty matches. Zero groups is not an
+/// error, because the token can legitimately have no groups.
 fn extract_groups(path: &JpQuery, claims: &Value, delimiter: Option<&str>) -> Vec<String> {
     let Ok(refs) = js_path_process(path, claims) else {
         return Vec::new();
@@ -306,9 +313,11 @@ fn extract_groups(path: &JpQuery, claims: &Value, delimiter: Option<&str>) -> Ve
 }
 
 /// Evaluate a precompiled `JsonPath` expression against the token claims.
-/// Returns true when the result is truthy (non-empty, with no element being
-/// null or false); false otherwise. Matches Strimzi's "expression yields
-/// truthy" semantics. Errors during evaluation count as falsy (rejection).
+///
+/// This function returns true when the result is truthy, which means non-empty
+/// with no element that is null or false. It returns false in every other case.
+/// This matches Strimzi's "expression yields truthy" semantics. An error during
+/// evaluation counts as falsy and rejects the token.
 fn evaluate_custom_claim_check(path: &JpQuery, claims: &Value) -> bool {
     let Ok(refs) = js_path_process(path, claims) else {
         return false;
@@ -344,19 +353,20 @@ fn decode_json_segment(seg: &str) -> Result<Value, AuthError> {
     serde_json::from_slice(&bytes).map_err(|_| AuthError::InvalidToken)
 }
 
-/// A clock-skew tolerance in whole milliseconds, the unit the JWT
-/// `NumericDate` claims are normalized to.
+/// A clock-skew tolerance in whole milliseconds, the unit this module
+/// normalizes the JWT `NumericDate` claims to.
 ///
 /// The temporal checks compare epoch-millisecond instants, which stay raw
-/// integers, so the tolerance has to meet them in that unit. Rounding to
-/// nearest matches every other timeout that crosses this seam; no wire field
-/// carries this value, so truncation is not required.
+/// integers, so the tolerance must use that unit. Rounding to nearest matches
+/// every other timeout that crosses this seam. No wire field carries this
+/// value, so truncation is not necessary.
 fn skew_millis(skew: Time) -> i64 {
     skew.millis_i64()
 }
 
-/// Read a JWT `NumericDate` claim (seconds since the epoch, possibly
-/// fractional) and convert it to integer milliseconds.
+/// Read a JWT `NumericDate` claim and convert it to integer milliseconds.
+///
+/// A `NumericDate` is a count of seconds since the epoch and can be fractional.
 fn numeric_date_ms(claims: &Value, key: &str) -> Option<i64> {
     let v = claims.get(key)?;
     // The common case: an integer second count. Avoids any float rounding.
@@ -372,22 +382,25 @@ fn numeric_date_ms(claims: &Value, key: &str) -> Option<i64> {
     }
 }
 
-/// The RFC 7628 server error response body for a rejected token. The JVM
-/// `OAuthBearerSaslClient` treats any non-empty first server message as an
-/// error and replies with a single `\x01` kvsep, after which the broker
-/// completes the failure handshake.
+/// The RFC 7628 server error response body for a rejected token.
+///
+/// The JVM `OAuthBearerSaslClient` treats any non-empty first server message as
+/// an error and replies with a single `\x01` kvsep. The broker then completes
+/// the failure handshake.
 #[must_use]
 pub fn invalid_token_json() -> String {
     "{\"status\":\"invalid_token\"}".to_string()
 }
 
 /// Validates a *signed* JWS bearer token (`RS256` / `ES256`) against a JWKS
-/// key set fetched from the identity provider, then checks the standard JWT
-/// claims and derives the connection principal.
+/// key set from the identity provider.
+///
+/// The validator then checks the standard JWT claims and derives the connection
+/// principal.
 ///
 /// The key set lives behind a [`JwksHandle`] so the broker's background
-/// refresher can rotate keys without restarting the broker or taking a lock;
-/// each [`validate`](Self::validate) reads the current set.
+/// refresher can rotate keys without a broker restart and without a lock. Each
+/// call to [`validate`](Self::validate) reads the current set.
 #[derive(Debug, Clone)]
 pub struct SignedJwsValidator {
     /// Claim whose string value becomes the principal name. Default `sub`.
@@ -407,17 +420,17 @@ pub struct SignedJwsValidator {
     pub fallback_user_name_claim: Option<String>,
     /// Prepended to the principal name only on fallback.
     pub fallback_user_name_prefix: Option<String>,
-    /// Precompiled `JsonPath` extracting group memberships.
+    /// Precompiled `JsonPath` that extracts group memberships.
     pub groups_claim: Option<JpQuery>,
     /// Delimiter when `groups_claim` resolves to a string.
     pub groups_claim_delimiter: Option<String>,
     /// Hard cache-expiry threshold. When set, the validator rejects tokens if
-    /// the paired refresher has not had a successful fetch within this window
-    /// (using [`JwksHandle::last_successful_fetch_ms`]). `None` = no expiry
-    /// check. Fails closed on prolonged `IdP` outage so a rotated-out key
-    /// can't keep signing valid tokens indefinitely.
+    /// the paired refresher has not had a successful fetch within this window.
+    /// The check reads [`JwksHandle::last_successful_fetch_ms`]. `None` = no
+    /// expiry check. The validator fails closed on a long `IdP` outage, so a
+    /// rotated-out key can't keep signing valid tokens indefinitely.
     pub cache_expiry: Option<Time>,
-    /// The live JWKS, swapped in by the broker's refresher.
+    /// The live JWKS. The broker's refresher swaps it in.
     keys: JwksHandle,
 }
 
@@ -449,7 +462,9 @@ impl SignedJwsValidator {
         self.keys.clone()
     }
 
-    /// Validate a signed bearer token against `now_ms` (Unix epoch ms).
+    /// Validate a signed bearer token against `now_ms`.
+    ///
+    /// `now_ms` is Unix epoch milliseconds.
     ///
     /// # Errors
     ///
@@ -533,9 +548,11 @@ impl SignedJwsValidator {
         self.check_claims(&claims, now_ms)
     }
 
-    /// Apply the claim policy (temporal, issuer, audience, scope, principal) to
-    /// already-signature-verified `claims`. Split out so the policy is
-    /// unit-testable without minting signed tokens.
+    /// Apply the claim policy to already-signature-verified `claims`.
+    ///
+    /// The policy covers the temporal, issuer, audience, scope, and principal
+    /// checks. It is a separate function so tests can drive it without minting
+    /// signed tokens.
     fn check_claims(&self, claims: &Value, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         let skew_ms = skew_millis(self.allowable_clock_skew);
         // `exp` required and in the future (within skew).
@@ -619,13 +636,14 @@ impl SignedJwsValidator {
     }
 }
 
-/// The broker's configured OAUTHBEARER token validator: the
-/// development-only unsecured-JWS path, production signed-JWT
-/// validation against a JWKS endpoint, or RFC 7662 opaque-token
-/// introspection. Defaults to unsecured.
+/// The broker's configured OAUTHBEARER token validator.
+///
+/// The choices are the development-only unsecured-JWS path, production
+/// signed-JWT validation against a JWKS endpoint, or RFC 7662 opaque-token
+/// introspection. The default is unsecured.
 #[derive(Debug, Clone)]
 pub enum OAuthBearerValidator {
-    /// Unsecured JWS (`alg:none`) — development / testing only.
+    /// Unsecured JWS (`alg:none`). Development / testing only.
     Unsecured(UnsecuredJwsValidator),
     /// Signed JWS verified against a JWKS key set.
     Signed(SignedJwsValidator),
@@ -640,7 +658,7 @@ impl Default for OAuthBearerValidator {
 }
 
 impl OAuthBearerValidator {
-    /// Validate `token` against `now_ms`, dispatching to the configured path.
+    /// Validate `token` against `now_ms` and dispatch to the configured path.
     ///
     /// # Errors
     ///
@@ -673,13 +691,14 @@ impl OAuthBearerValidator {
 }
 
 /// HTTP transport contract for RFC 7662 introspection + OIDC userinfo.
-/// Lives in this crate to keep `crates/security` as the validator surface;
-/// the concrete reqwest-backed impl lives in `crates/broker`
-/// (`oauth_introspection.rs`) so this crate stays I/O-free.
+///
+/// This trait lives in this crate to keep `crates/security` as the validator
+/// surface. The concrete reqwest-backed impl lives in `crates/broker`, in
+/// `oauth_introspection.rs`, so this crate stays I/O-free.
 #[async_trait::async_trait]
 pub trait IntrospectionClient: Send + Sync + std::fmt::Debug {
     /// POST the `IdP`'s introspection endpoint with `token` in a
-    /// form-encoded body. Caller checks `active` + claims.
+    /// form-encoded body. The caller checks `active` + claims.
     async fn introspect(&self, token: &str) -> Result<serde_json::Value, IntrospectionError>;
 
     /// GET the `IdP`'s userinfo endpoint with `Authorization: Bearer
@@ -688,9 +707,10 @@ pub trait IntrospectionClient: Send + Sync + std::fmt::Debug {
     async fn userinfo(&self, token: &str) -> Result<Option<serde_json::Value>, IntrospectionError>;
 }
 
-/// Transport-layer failures surfaced by [`IntrospectionClient`]. The
-/// validator maps these onto [`AuthError::IntrospectionTransport`] for
-/// the SASL handler.
+/// Transport-layer failures that [`IntrospectionClient`] reports.
+///
+/// The validator maps these onto [`AuthError::IntrospectionTransport`] for the
+/// SASL handler.
 #[derive(Debug, thiserror::Error)]
 pub enum IntrospectionError {
     #[error("transport: {0}")]
@@ -701,12 +721,14 @@ pub enum IntrospectionError {
     Parse,
 }
 
-/// RFC 7662 opaque-token introspection validator. Calls the
-/// introspection endpoint per token (no caching — RFC 7662 §4 discourages
-/// caching without explicit lifetime info; SASL is once per connection so
-/// the cost is acceptable). Optionally calls OIDC userinfo after a
-/// successful introspection and merges the profile claims over the
-/// introspection claims.
+/// RFC 7662 opaque-token introspection validator.
+///
+/// The validator calls the introspection endpoint once per token and does no
+/// caching. RFC 7662 §4 discourages caching without explicit lifetime info, and
+/// SASL runs once per connection, so the cost is acceptable.
+///
+/// After a successful introspection the validator can also call OIDC userinfo
+/// and merge the profile claims over the introspection claims.
 #[derive(Debug, Clone)]
 pub struct IntrospectionValidator {
     pub client: Arc<dyn IntrospectionClient>,
@@ -718,32 +740,33 @@ pub struct IntrospectionValidator {
     /// [`UnsecuredJwsValidator`] for semantics. Introspection has no JWT
     /// header, so there is no `valid_token_type` field here.
     pub custom_claim_check: Option<JpQuery>,
-    /// `true` iff a `userinfo_endpoint_uri` is configured; the validator
+    /// `true` iff a `userinfo_endpoint_uri` is configured. The validator then
     /// calls `client.userinfo(token)` after a successful introspection and
     /// merges the response over the introspection claims.
     pub call_userinfo: bool,
     /// Clock-skew tolerance for `exp`/`iat`/`nbf` checks on
-    /// introspection-response timestamps (when present).
+    /// introspection-response timestamps, when present.
     pub allowable_clock_skew: Time,
     /// When set, the introspection-response `aud` claim (RFC 7662 §2.2) must
-    /// contain this value. Defaults to `None` (no audience restriction).
-    /// Prevents a token minted for another resource server of the same `IdP`,
-    /// which still introspects as `active: true`, from authenticating here.
+    /// contain this value. The default is `None`, which applies no audience
+    /// restriction. This check stops a token minted for another resource server
+    /// of the same `IdP` from authenticating here, even though that token still
+    /// introspects as `active: true`.
     pub expected_audience: Option<String>,
     /// Alternate principal claim. See [`UnsecuredJwsValidator`].
     pub fallback_user_name_claim: Option<String>,
     /// Prepended to the principal name only on fallback.
     pub fallback_user_name_prefix: Option<String>,
-    /// Precompiled `JsonPath` extracting group memberships,
-    /// evaluated against the merged claims (introspection + optional
-    /// userinfo).
+    /// Precompiled `JsonPath` that extracts group memberships from the merged
+    /// claims, which are the introspection claims plus the optional userinfo
+    /// claims.
     pub groups_claim: Option<JpQuery>,
     /// Delimiter when `groups_claim` resolves to a string.
     pub groups_claim_delimiter: Option<String>,
 }
 
 impl IntrospectionValidator {
-    /// Validate a bearer token via RFC 7662 introspection + optional
+    /// Validate a bearer token with RFC 7662 introspection and optional
     /// userinfo enrichment.
     ///
     /// # Errors
@@ -853,7 +876,9 @@ impl IntrospectionValidator {
 }
 
 /// Skew-tolerant temporal-claims check for introspection responses.
-/// RFC 7662 doesn't mandate exp/iat/nbf, but honor them when present.
+///
+/// RFC 7662 does not mandate exp/iat/nbf, but this check honors them when they
+/// are present.
 fn check_temporal_claims(claims: &Value, now_ms: i64, skew: Time) -> Result<(), AuthError> {
     let skew_ms = skew_millis(skew);
     if let Some(exp_s) = claims.get("exp").and_then(Value::as_i64) {
@@ -877,10 +902,11 @@ fn check_temporal_claims(claims: &Value, now_ms: i64, skew: Time) -> Result<(), 
     Ok(())
 }
 
-/// Merge userinfo response over introspection claims. Userinfo wins for
-/// profile-style claims (`preferred_username`, email, name, `given_name`,
-/// `family_name`, ...); introspection wins for the small set of
-/// authorization claims listed in `RESERVED`.
+/// Merge the userinfo response over the introspection claims.
+///
+/// Userinfo wins for profile-style claims such as `preferred_username`, email,
+/// name, `given_name`, and `family_name`. Introspection wins for the small set
+/// of authorization claims that `RESERVED` lists.
 fn merge_userinfo_over_introspection(introspection: &mut Value, userinfo: Value) {
     const RESERVED: &[&str] = &["active", "exp", "iat", "nbf", "scope", "client_id", "sub"];
     let (Some(obj), Value::Object(ui_map)) = (introspection.as_object_mut(), userinfo) else {
@@ -916,9 +942,10 @@ mod tests {
         )
     }
 
-    /// Build an unsecured-JWS from an explicit header + claim object (so
-    /// callers can drive the `typ` header for `typ`-check tests). The
-    /// signature segment is left empty per `alg:none`.
+    /// Build an unsecured-JWS from an explicit header + claim object, so
+    /// callers can drive the `typ` header for `typ`-check tests.
+    ///
+    /// This helper leaves the signature segment empty, as `alg:none` requires.
     fn make_unsecured_jws_with_header(
         header: &serde_json::Value,
         claims: &serde_json::Value,
@@ -1018,9 +1045,9 @@ mod tests {
     }
 
     /// The temporal checks compare epoch-millisecond instants, so the
-    /// configured skew has to arrive there in whole milliseconds. Pins the
-    /// seam, including that a sub-millisecond tolerance rounds rather than
-    /// collapsing to zero the way an `as i64` truncation would.
+    /// configured skew must arrive there in whole milliseconds. This test pins
+    /// the seam. It also pins that a sub-millisecond tolerance rounds and does
+    /// not collapse to zero the way an `as i64` truncation would.
     #[test]
     fn clock_skew_crosses_into_the_temporal_checks_in_whole_milliseconds() {
         for (_name, skew, expected_ms) in [
@@ -1419,7 +1446,7 @@ mod tests {
 
     use crate::jwks::{Jwks, JwksHandle, mint_es256, mint_rs256, mint_rs256_with_header};
 
-    /// Build a `SignedJwsValidator` whose key set is populated from `jwks_json`.
+    /// Build a `SignedJwsValidator` whose key set comes from `jwks_json`.
     fn signed(jwks_json: &str) -> (SignedJwsValidator, JwksHandle) {
         let handle = JwksHandle::new(Jwks::from_json(jwks_json, false).unwrap());
         (SignedJwsValidator::new(handle.clone()), handle)
@@ -1747,9 +1774,11 @@ mod tests {
 
     // ---- cache expiry + signal-on-verify-failure ----------------
 
-    /// Build a signed validator whose paired `JwksHandle` carries explicit
-    /// `last_successful_fetch_ms` and a fresh signal channel. Returns the
-    /// validator and the receiver so tests can assert on emitted signals.
+    /// Build a signed validator whose paired `JwksHandle` carries an explicit
+    /// `last_successful_fetch_ms` and a fresh signal channel.
+    ///
+    /// This helper returns the validator and the receiver, so tests can assert
+    /// on the emitted signals.
     fn signed_with_handles(
         jwks_json: &str,
         last_successful_fetch_ms: i64,
@@ -1954,9 +1983,11 @@ mod introspection_tests {
         }
     }
 
-    /// Per-token canned responses. `introspect` returns the entry for
-    /// the matching token (or a Transport error if absent so a test can
-    /// exercise the transport-error path).
+    /// Per-token canned responses.
+    ///
+    /// `introspect` returns the entry for the matching token. When there is no
+    /// entry it returns a Transport error, so a test can drive the
+    /// transport-error path.
     #[derive(Debug, Default)]
     struct MockIntrospectionClient {
         introspect_responses: Mutex<HashMap<String, Result<Value, IntrospectionError>>>,

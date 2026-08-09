@@ -1,5 +1,6 @@
-//! `InitProducerId` (`api_key=22`). Hands out `(producer_id, producer_epoch)`
-//! to a producer, or initialises / re-initialises a transactional producer.
+//! `InitProducerId` (`api_key=22`). This handler hands out
+//! `(producer_id, producer_epoch)` to a producer, or it initialises /
+//! re-initialises a transactional producer.
 //!
 //! Non-transactional path: idempotent-producer support.
 //! Transactional path:     coordinator routing.
@@ -343,9 +344,9 @@ mod tests {
     };
 
     /// `dispatch_abort_markers` appends an abort control-marker batch to each
-    /// locally-led partition in the entry's partition set — advancing that
-    /// partition's LEO by one. A whole-function `Ok(())` replacement would
-    /// skip the dispatch entirely, leaving the LEO at 0.
+    /// locally-led partition in the entry's partition set. Each append advances
+    /// that partition's LEO by one. A whole-function `Ok(())` replacement would
+    /// skip the dispatch entirely and leave the LEO at 0.
     #[tokio::test]
     async fn dispatch_abort_markers_appends_marker_to_local_partition() {
         let dir = tempfile::tempdir().unwrap();
@@ -393,8 +394,9 @@ mod tests {
         );
     }
 
-    /// A partition in the entry that isn't hosted locally is skipped without
-    /// error (no marker to dispatch) — the loop's `else` branch.
+    /// `dispatch_abort_markers` skips a partition in the entry that isn't
+    /// hosted locally, and it reports no error. There is no marker to
+    /// dispatch. This is the loop's `else` branch.
     #[tokio::test]
     async fn dispatch_abort_markers_skips_non_local_partition() {
         let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());

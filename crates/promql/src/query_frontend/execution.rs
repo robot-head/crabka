@@ -46,7 +46,7 @@ impl<S: MetricStore> RangeQueryExecutor for PromqlEngine<S> {
     }
 }
 
-/// Execute a range query through query-frontend planning, cache, and merge.
+/// Executes a range query through query-frontend planning, cache, and merge.
 #[tracing::instrument(
     name = "promql.query_frontend_range",
     level = "info",
@@ -129,14 +129,15 @@ where
     merge_range_query_results_with_reducer(results, reducer)
 }
 
-/// Execute the planned sub-queries (split sub-ranges x shards) concurrently.
+/// Executes the planned sub-queries concurrently, one per sub-range and shard.
 ///
-/// The planned sub-queries are independent, so they are dispatched all at once
-/// via [`futures::future::join_all`] rather than awaited one-by-one. Results are
-/// collected indexed by planned position, preserving the deterministic ordering
-/// the matrix-stitching merge relies on regardless of which sub-query completes
-/// first. The [`RangeQueryExecutor`] / [`RangeQueryCache`] bounds are `Send +
-/// Sync`, so the per-sub-query futures are `Send` and safe to drive together.
+/// The planned sub-queries are independent, so this function dispatches them all
+/// at once with [`futures::future::join_all`] and does not await them one by
+/// one. It collects the results by planned position, so the order does not
+/// depend on which sub-query completes first. The matrix-stitching merge needs
+/// that deterministic order. The [`RangeQueryExecutor`] and [`RangeQueryCache`]
+/// bounds are `Send + Sync`, so the per-sub-query futures are `Send` and safe to
+/// drive together.
 pub(super) async fn execute_planned_range_queries<E, C>(
     executor: &E,
     cache: &C,

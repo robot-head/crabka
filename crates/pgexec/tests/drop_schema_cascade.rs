@@ -1,28 +1,31 @@
 //! `DROP SCHEMA … CASCADE` against a real in-process engine, for the
-//! dependencies that reach *out* of the dropped schema: a foreign key declared
-//! in another schema, a partition stored in another schema, and a view defined
-//! in another schema.
+//! dependencies that reach *out* of the dropped schema.
 //!
-//! These are the cases where leaving a dependency behind is worse than stale
-//! metadata. A surviving foreign key resolves its parent by name while the
-//! parent side of the same constraint is keyed by id, so recreating the schema
-//! and a same-named table rebinds one half and not the other: the checks fire
-//! but the referential actions do not. A surviving partition keeps a parent link
-//! to a deleted relation, and a recreated parent adopts it — rows routed into a
-//! relation that was never attached to it. Each case therefore drops, recreates,
-//! and asserts the dependency is either wholly gone or wholly live.
+//! Those dependencies are a foreign key declared in another schema, a partition
+//! stored in another schema, and a view defined in another schema.
+//!
+//! These are the cases where a dependency left behind is worse than stale
+//! metadata. A surviving foreign key resolves its parent by name, while the
+//! parent side of the same constraint is keyed by id. A recreation of the
+//! schema and of a same-named table therefore rebinds one half and not the
+//! other, so the checks fire but the referential actions do not. A surviving
+//! partition keeps a parent link to a deleted relation, and a recreated parent
+//! adopts it, so rows are routed into a relation that was never attached to it.
+//! Each case therefore drops, recreates, and asserts that the dependency is
+//! either wholly gone or wholly live.
 //!
 //! Every SQLSTATE, message and outcome asserted here was captured from a live
-//! `PostgreSQL` 18.4 server rather than from documentation. Where this engine
-//! knowingly diverges the test pins the *current* behaviour and says so at the
+//! `PostgreSQL` 18.4 server, and not from documentation. Where this engine
+//! knowingly diverges, the test pins the *current* behaviour and says so at the
 //! assertion.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
 
-/// Everything one statement can produce, as a single comparable value, so a case
-/// states its whole expected script rather than a chain of field assertions.
+/// Everything one statement can produce, as a single comparable value, so a
+/// case states its whole expected script instead of a chain of field
+/// assertions.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
     Tag(String),
@@ -76,8 +79,8 @@ async fn outcome(session: &mut SqlSession, sql: &str) -> Outcome {
     }
 }
 
-/// One drop scenario: the schemas and relations it starts from, and the script
-/// whose every outcome is compared as one value.
+/// One drop scenario. It holds the schemas and relations the scenario starts
+/// from, and the script whose every outcome is compared as one value.
 struct Case {
     why: &'static str,
     setup: &'static [&'static str],
@@ -134,9 +137,11 @@ const CROSS_SCHEMA_VIEW: &[&str] = &[
 // Foreign keys reaching in from another schema
 // ---------------------------------------------------------------------------
 
-/// `CASCADE` drops the referencing *constraint* and leaves the child table and
-/// its rows standing — the split `PostgreSQL` makes between a foreign key, which
-/// is a dependency of the parent, and the relation that declares it.
+/// `CASCADE` drops the referencing *constraint* and keeps the child table and
+/// its rows.
+///
+/// This is the split `PostgreSQL` makes between a foreign key, which is a
+/// dependency of the parent, and the relation that declares it.
 #[tokio::test]
 async fn cascade_drops_a_foreign_key_declared_in_another_schema() {
     run_cases(vec![
@@ -177,11 +182,14 @@ async fn cascade_drops_a_foreign_key_declared_in_another_schema() {
     .await;
 }
 
-/// Recreating the schema and a same-named parent must not resurrect half a
-/// constraint. The child side resolves its parent by name and the parent side by
-/// id, so a leftover record binds its checks to the new table while leaving the
-/// new table with no referencing entry at all: `INSERT` is policed, `DELETE` is
-/// not, and orphan rows appear with nothing reporting a violation.
+/// A recreation of the schema and of a same-named parent must not bring back
+/// half a constraint.
+///
+/// The child side resolves its parent by name and the parent side resolves by
+/// id. A leftover record therefore binds its checks to the new table, and the
+/// new table has no referencing entry at all. `INSERT` is then policed,
+/// `DELETE` is not, and orphan rows appear with nothing to report a
+/// violation.
 #[tokio::test]
 async fn a_recreated_parent_does_not_adopt_a_leftover_foreign_key() {
     run_cases(vec![Case {
@@ -223,7 +231,7 @@ async fn a_recreated_parent_does_not_adopt_a_leftover_foreign_key() {
 // ---------------------------------------------------------------------------
 
 /// A partition has no independent existence, so it goes with its parent even
-/// when it is stored elsewhere — `PostgreSQL` drops it, and leaving it behind
+/// when it is stored elsewhere. `PostgreSQL` drops it. A partition left behind
 /// would leak a relation whose parent link names a deleted table.
 #[tokio::test]
 async fn cascade_drops_a_partition_stored_in_another_schema() {
@@ -244,10 +252,12 @@ async fn cascade_drops_a_partition_stored_in_another_schema() {
     .await;
 }
 
-/// A leftover partition is worse than a leak: the dead parent's children index
-/// still lists it, so a recreated parent of the same name adopts it — its bound
-/// blocks a new partition covering the same range, and rows inserted into the
-/// new parent land in a relation that was never attached to it.
+/// A leftover partition is worse than a leak.
+///
+/// The dead parent's children index still lists it, so a recreated parent of
+/// the same name adopts it. Its bound then blocks a new partition that covers
+/// the same range, and rows inserted into the new parent land in a relation
+/// that was never attached to it.
 #[tokio::test]
 async fn a_recreated_parent_does_not_adopt_a_leftover_partition() {
     run_cases(vec![Case {
@@ -278,8 +288,9 @@ async fn a_recreated_parent_does_not_adopt_a_leftover_partition() {
     .await;
 }
 
-/// The other direction: a partition *in* the dropped schema whose parent lives
-/// outside it is dropped and detached, leaving the surviving parent consistent.
+/// The other direction. A partition *in* the dropped schema whose parent is
+/// outside it is dropped and detached, and the surviving parent stays
+/// consistent.
 #[tokio::test]
 async fn cascade_detaches_a_partition_from_a_parent_in_another_schema() {
     run_cases(vec![Case {
@@ -313,8 +324,9 @@ async fn cascade_detaches_a_partition_from_a_parent_in_another_schema() {
 // Views defined in another schema
 // ---------------------------------------------------------------------------
 
-/// A view is a dependency of what it reads, so `CASCADE` drops it outright —
-/// unlike a foreign key, whose relation survives minus the constraint.
+/// A view is a dependency of what it reads, so `CASCADE` drops it outright.
+/// This is unlike a foreign key, whose relation survives without the
+/// constraint.
 #[tokio::test]
 async fn cascade_drops_a_view_defined_in_another_schema() {
     run_cases(vec![Case {
@@ -335,9 +347,9 @@ async fn cascade_drops_a_view_defined_in_another_schema() {
     .await;
 }
 
-/// Recreating the schema and a same-named table must not hand the leftover view
-/// a new binding: the view is gone, so the name is free for a definition of its
-/// own shape.
+/// A recreation of the schema and of a same-named table must not give the
+/// leftover view a new binding. The view is gone, so the name is free for a
+/// definition of its own shape.
 #[tokio::test]
 async fn a_recreated_table_does_not_adopt_a_leftover_view() {
     run_cases(vec![Case {
@@ -368,8 +380,10 @@ async fn a_recreated_table_does_not_adopt_a_leftover_view() {
 // ---------------------------------------------------------------------------
 
 /// Without `CASCADE` a non-empty schema is refused whatever depends on it, and
-/// nothing is dropped. `PostgreSQL` adds a `DETAIL` naming each dependency and a
-/// `HINT`; this engine reports the message and SQLSTATE only, which is what the
+/// nothing is dropped.
+///
+/// `PostgreSQL` adds a `DETAIL` that names each dependency, and a `HINT`. This
+/// engine reports the message and the SQLSTATE only, which is what the
 /// assertion pins.
 #[tokio::test]
 async fn drop_schema_without_cascade_refuses_and_drops_nothing() {
@@ -413,9 +427,10 @@ async fn drop_schema_without_cascade_refuses_and_drops_nothing() {
 // ---------------------------------------------------------------------------
 
 /// `DISCARD TEMP` empties the session's namespace through the same batch, and a
-/// permanent view is not collateral: nothing outside a temporary namespace may
-/// depend on what is inside it, because a view over a temporary relation is
-/// itself temporary.
+/// permanent view is not collateral.
+///
+/// Nothing outside a temporary namespace may depend on what is inside it,
+/// because a view over a temporary relation is itself temporary.
 #[tokio::test]
 async fn discarding_temporary_relations_leaves_permanent_views_alone() {
     run_cases(vec![

@@ -1,14 +1,19 @@
-//! Instrumented orders-analytics demo. Three roles, all on crabka-broker + the
-//! schema registry, emitting metrics/logs/traces/profiles via crabka libs.
+//! Instrumented orders-analytics demo.
 //!
-//! Cross-service traces: the `produce` role injects the current span's W3C trace
-//! context (`traceparent`) into each record's Kafka headers; the `consume` role
-//! extracts it so its multi-stage processing spans (validate → enrich →
-//! `fraud_check` → fulfill) join the producer's trace. Opening one of these in
-//! Grafana Tempo shows a single distributed trace spanning demo-produce → the
-//! broker's Produce/Fetch server spans → demo-consume. The `stream` role keeps
-//! the Kafka-Streams aggregation (`group_by` → count → order-counts) as the
-//! streams showcase.
+//! There are three roles. All of them run on crabka-broker with the schema
+//! registry, and they emit metrics, logs, traces, and profiles through the
+//! crabka libraries.
+//!
+//! The demo shows cross-service traces. The `produce` role injects the current
+//! span's W3C trace context, `traceparent`, into the Kafka headers of each
+//! record. The `consume` role extracts that context, so its multi-stage
+//! processing spans join the producer's trace. Those stages are validate,
+//! enrich, `fraud_check`, and fulfill. In Grafana Tempo, one of these traces is
+//! a single distributed trace over demo-produce, the broker's Produce and Fetch
+//! server spans, and demo-consume.
+//!
+//! The `stream` role keeps the Kafka-Streams aggregation as the streams
+//! showcase: `group_by`, then count, then order-counts.
 
 use std::{
     num::NonZeroUsize,
@@ -48,8 +53,9 @@ use tracing::Instrument as _;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Value serde used by both the producer (serialize) and the traced consumer
-/// (deserialize) — the same protobuf `Order` schema resolved via the registry.
+/// Value serde for both the producer, which serializes, and the traced
+/// consumer, which deserializes. Both use the same protobuf `Order` schema, and
+/// the registry resolves it.
 type OrderSerde = SchemaSerde<Order, ProtobufSerde<Order>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -311,7 +317,7 @@ struct Cli {
     /// Capacity shared by the Client Streams interactive-query request queues.
     #[arg(long, env = "CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY")]
     streams_interactive_query_queue_capacity: Option<NonZeroUsize>,
-    /// Client Streams state-store record-cache budget; zero disables it.
+    /// Client Streams state-store record-cache budget. Zero disables it.
     #[arg(
         long,
         env = "CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX",
@@ -910,7 +916,9 @@ async fn main() -> Result<(), BoxError> {
 }
 
 /// Build the protobuf `Order` value serde and warm the registry subject for
-/// `topic`. Shared by the producer and the traced consumer.
+/// `topic`.
+///
+/// The producer and the traced consumer share this function.
 async fn order_serde(
     cli: &Cli,
     topic: &str,
@@ -1095,10 +1103,12 @@ async fn run_stream(
     Ok(())
 }
 
-/// The traced order processor. Consumes the RAW `orders` topic, continues the
-/// producer's distributed trace via the `traceparent` header, and runs a
-/// multi-stage processing pipeline (validate → enrich → `fraud_check` → fulfill),
-/// each stage a child span with a per-stage latency metric.
+/// The traced order processor.
+///
+/// It consumes the RAW `orders` topic and continues the producer's distributed
+/// trace with the `traceparent` header. It then runs a multi-stage processing
+/// pipeline: validate, enrich, `fraud_check`, and fulfill. Each stage is a
+/// child span with a per-stage latency metric.
 #[allow(clippy::too_many_arguments)]
 async fn run_consume(
     cli: &Cli,
@@ -1157,8 +1167,8 @@ async fn run_consume(
 }
 
 /// Build the consumer-side `process_order` span, make it a child of the
-/// producer's trace (from the record's `traceparent` header), and run the
-/// staged processing under it.
+/// producer's trace, and run the staged processing under it. The `traceparent`
+/// header of the record gives that trace.
 async fn process_order_record(
     cli: &Cli,
     serde: &OrderSerde,

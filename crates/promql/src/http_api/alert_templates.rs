@@ -5,16 +5,17 @@ use serde_json::{Map, Value};
 
 use super::format_sample_value;
 
-/// Expand the minimal Prometheus alert-template subset used for annotation and
+/// Expands the minimal Prometheus alert-template subset for annotation and
 /// label values.
 ///
-/// Supported actions (whitespace inside the braces is ignored):
-/// - `{{ $value }}` -> the firing sample value via [`format_sample_value`].
-/// - `{{ $labels.NAME }}` / `{{ $labels."NAME" }}` -> the series label `NAME`
-///   ("" if absent).
+/// This function ignores whitespace inside the braces. It supports these
+/// actions:
+/// - `{{ $value }}` -> the firing sample value through [`format_sample_value`].
+/// - `{{ $labels.NAME }}` / `{{ $labels."NAME" }}` -> the series label `NAME`,
+///   or "" when the label is absent.
 ///
-/// Any other `{{ ... }}` action is passed through verbatim (Prometheus's
-/// `humanize` and friends are out of scope).
+/// This function passes through any other `{{ ... }}` action unchanged.
+/// Prometheus's `humanize` and the related functions are out of scope.
 pub(crate) fn expand_alert_template(tmpl: &str, value: f64, labels: &Labels) -> String {
     let mut out = String::with_capacity(tmpl.len());
     let mut rest = tmpl;
@@ -39,7 +40,7 @@ pub(crate) fn expand_alert_template(tmpl: &str, value: f64, labels: &Labels) -> 
     out
 }
 
-/// Build a [`Labels`] set from an alert label map for template `$labels.NAME`
+/// Builds a [`Labels`] set from an alert label map for template `$labels.NAME`
 /// lookups.
 pub(super) fn labels_from_map(map: &BTreeMap<String, String>) -> Labels {
     let mut labels = Labels::new();
@@ -49,9 +50,10 @@ pub(super) fn labels_from_map(map: &BTreeMap<String, String>) -> Labels {
     labels
 }
 
-/// Apply [`expand_alert_template`] to every string value of a JSON object,
-/// leaving keys and non-string values untouched. Used for alert annotation
-/// maps.
+/// Applies [`expand_alert_template`] to every string value of a JSON object.
+///
+/// Keys and non-string values stay unchanged. Alert annotation maps use this
+/// function.
 pub(super) fn expand_alert_mapping_json(mapping: &Value, value: f64, labels: &Labels) -> Value {
     let Value::Object(object) = mapping else {
         return mapping.clone();

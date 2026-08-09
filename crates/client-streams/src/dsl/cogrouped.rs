@@ -1,15 +1,19 @@
-//! KIP-150 cogroup: aggregate multiple co-partitioned input streams (each with
-//! its own value type `Vn` but a shared key `K` and output type `VOut`) into one
-//! `KTable`. Each input contributes an `Aggregator<K, Vn, VOut>`. The topology is
-//! one aggregate processor per input — all writing to a single shared store —
-//! fanning into one passthrough merge node the result `KTable` reads.
+//! KIP-150 cogroup. It aggregates several co-partitioned input streams into one
+//! `KTable`. Each stream has its own value type `Vn`, but they share the key `K`
+//! and the output type `VOut`, and each input contributes an
+//! `Aggregator<K, Vn, VOut>`.
 //!
-//! `KGroupedStream::cogroup` / `CogroupedKStream::cogroup` capture each input's
-//! lineage plus a **type-erased** `make_agg` thunk (closing over the concrete
-//! `Vn` + aggregator). The terminal `aggregate` / `windowed_by*` supply the
-//! shared `Initializer` (and, for sessions, the `Merger`) as an internal `CogroupSpec`,
-//! then `lower_cogroup` records the per-input repartition+aggregate nodes and
-//! the merge node, registering the shared store exactly once in the merge thunk.
+//! The topology holds one aggregate processor per input. All of them write to a
+//! single shared store, and they fan into one passthrough merge node that the
+//! result `KTable` reads.
+//!
+//! `KGroupedStream::cogroup` and `CogroupedKStream::cogroup` capture each input's
+//! lineage and a **type-erased** `make_agg` thunk that closes over the concrete
+//! `Vn` and the aggregator. The terminal `aggregate` and `windowed_by*` supply
+//! the shared `Initializer`, and for sessions the `Merger`, as an internal
+//! `CogroupSpec`. `lower_cogroup` then records the per-input repartition and
+//! aggregate nodes and the merge node, and it registers the shared store exactly
+//! once in the merge thunk.
 
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
@@ -30,10 +34,12 @@ use crate::{
     topology::NodeHandle,
 };
 
-/// Which window flavor the terminal aggregation uses. Carries the window spec;
-/// the shared init + (session) merger live alongside in [`CogroupSpec`]. Each
-/// variant is constructed by its cogroup terminal (`aggregate`/`windowed_by*`)
-/// and matched in [`make_agg_for_input`].
+/// Which window flavor the terminal aggregation uses.
+///
+/// This enum carries the window spec. The shared init, and the session merger,
+/// sit beside it in [`CogroupSpec`]. Each cogroup terminal, `aggregate` or
+/// `windowed_by*`, builds its own variant, and [`make_agg_for_input`] matches on
+/// it.
 #[derive(Clone)]
 pub(crate) enum CogroupKind {
     NonWindowed,
@@ -42,9 +48,11 @@ pub(crate) enum CogroupKind {
     Session(crate::dsl::windows::SessionWindows),
 }
 
-/// The terminal aggregation spec, built once at `aggregate()` time and cloned
-/// per input. `init`/`merger` are `Arc`-erased so a per-input `make_agg` thunk
-/// (which doesn't know `VOut`'s concrete closure type) can hold them.
+/// The terminal aggregation spec. The code builds it once at `aggregate()` time
+/// and clones it per input.
+///
+/// `init` and `merger` are `Arc`-erased, so a per-input `make_agg` thunk can hold
+/// them. Such a thunk does not know the concrete closure type of `VOut`.
 type CogroupInitializer<VOut> = Arc<dyn Fn() -> VOut + Send + Sync>;
 type CogroupMerger<K, VOut> = Arc<dyn Fn(&K, VOut, VOut) -> VOut + Send + Sync>;
 
@@ -79,14 +87,18 @@ pub(crate) struct CogroupInput<K, VOut> {
     pub key_changing_upstream: bool,
     pub repartition_lower: Option<RepartitionLowerFn>,
     pub make_agg: MakeAggFn<K, VOut>,
-    /// The single source topic this input traces to (when not key-changing),
-    /// used to register a copartition group over all cogroup inputs.
+    /// The single source topic that this input traces to, when the input is not
+    /// key-changing. The code uses it to register a copartition group over all
+    /// cogroup inputs.
     pub source_topic: Option<String>,
 }
 
-/// Handle accumulating cogrouped inputs; terminal `aggregate`/`windowed_by*`
-/// consume it. `builder`/`inputs` are `pub(crate)` so the windowed-handle modules
-/// can move the inputs into their own handles; construct via the DSL entry points.
+/// A handle that collects the cogrouped inputs. The terminal `aggregate` and
+/// `windowed_by*` consume it.
+///
+/// `builder` and `inputs` are `pub(crate)`, so the windowed-handle modules can
+/// move the inputs into their own handles. Build this type through the DSL entry
+/// points.
 pub struct CogroupedKStream<K, VOut> {
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     pub(crate) inputs: Vec<CogroupInput<K, VOut>>,
@@ -94,8 +106,8 @@ pub struct CogroupedKStream<K, VOut> {
 }
 
 impl<K, VOut> CogroupedKStream<K, VOut> {
-    /// Construct from the builder + accumulated inputs. Keeps the `_pd` marker
-    /// private so call sites don't depend on the field set.
+    /// Build the handle from the builder and the collected inputs. It keeps the
+    /// `_pd` marker private, so no call site depends on the field set.
     pub(crate) fn new(
         builder: Rc<RefCell<InternalStreamsBuilder>>,
         inputs: Vec<CogroupInput<K, VOut>>,
@@ -108,10 +120,12 @@ impl<K, VOut> CogroupedKStream<K, VOut> {
     }
 }
 
-/// Build the erased `make_agg` for one input, closing over concrete `Vn` + the
-/// aggregator. The returned thunk matches on the window kind to attach the right
-/// per-window processor. Shared by `KGroupedStream::cogroup` and the chained
-/// `CogroupedKStream::cogroup`.
+/// Build the erased `make_agg` for one input. It closes over the concrete `Vn`
+/// and the aggregator.
+///
+/// The returned thunk matches on the window kind and attaches the right
+/// per-window processor. `KGroupedStream::cogroup` and the chained
+/// `CogroupedKStream::cogroup` share this function.
 pub(crate) fn make_agg_for_input<K, Vn, VOut, A>(agg: A) -> MakeAggFn<K, VOut>
 where
     K: Any + Send + Sync + Clone,
@@ -291,7 +305,7 @@ where
         self
     }
 
-    /// Non-windowed terminal aggregation → `KTable<K, VOut>`.
+    /// Non-windowed terminal aggregation, which gives a `KTable<K, VOut>`.
     pub fn aggregate_explicit<KS, VS, I>(
         self,
         init: I,
@@ -390,15 +404,18 @@ where
 }
 
 /// Registers the shared cogroup store with the given per-input processor names.
-/// Boxed so each terminal supplies its window-specific store type + serdes.
+/// It is boxed, so each terminal supplies its own window-specific store type and
+/// serdes.
 pub(crate) type StoreRegistrarFn = Box<dyn FnOnce(&mut LowerState, Vec<String>) + Send>;
 
-/// Record, in id order: each input's optional repartition + its aggregate node
-/// (shared store), then the merge node. The merge thunk attaches the passthrough
-/// processor (parents = all aggregate handles) and runs `registrar` once to
-/// register the shared store. Returns the merge node id (the result `KTable`'s
-/// source). Generic over the merge output key `KOut` (`K` non-windowed,
-/// `Windowed<K>` windowed).
+/// Record the nodes in id order: each input's optional repartition, then its
+/// aggregate node against the shared store, and last the merge node.
+///
+/// The merge thunk attaches the passthrough processor, whose parents are all the
+/// aggregate handles, and runs `registrar` once to register the shared store. The
+/// function returns the merge node id, which is the result `KTable`'s source. It
+/// is generic over the merge output key `KOut`, which is `K` when non-windowed
+/// and `Windowed<K>` when windowed.
 pub(crate) fn lower_cogroup<K, VOut, KOut>(
     builder: &Rc<RefCell<InternalStreamsBuilder>>,
     inputs: Vec<CogroupInput<K, VOut>>,
@@ -505,10 +522,10 @@ mod tests {
 
     use crate::dsl::StreamsBuilder;
 
-    /// Cogroup store is record-cached when the budget is positive and caching is
-    /// enabled (the default). Per-input aggregators suppress their immediate forward
-    /// when the store is cached; the merge passthrough relays only the deduped flush
-    /// change, so there is no double-emit.
+    /// The cogroup store is record-cached when the budget is positive and
+    /// caching is on, which is the default. Each per-input aggregator suppresses
+    /// its immediate forward when the store is cached. The merge passthrough
+    /// relays only the deduped flush change, so there is no double emit.
     #[test]
     fn cogroup_store_is_cached_with_positive_budget() {
         let b = StreamsBuilder::new();
@@ -548,11 +565,13 @@ mod cogroup_caching_tests {
         store::backend::StoreBackend,
     };
 
-    /// Two co-grouped inputs aggregating into one cached KV store. Within a
-    /// single batch, in1 adds `len(value)` and in2 adds 1; the cached store is
-    /// marked (`cache_owner` rooted), both per-input forwards are suppressed,
-    /// and flush emits ONE deduped record whose value (3 = 2 + 1) proves in2's
-    /// aggregator read in1's buffered accumulator (cross-input read-your-writes).
+    /// Two co-grouped inputs aggregate into one cached KV store.
+    ///
+    /// Within a single batch, in1 adds `len(value)` and in2 adds 1. The cached
+    /// store is marked, so `cache_owner` is rooted, and both per-input forwards
+    /// are suppressed. The flush then emits ONE deduped record. Its value,
+    /// 3 = 2 + 1, proves that in2's aggregator read in1's buffered accumulator,
+    /// which is cross-input read-your-writes.
     #[test]
     fn cogroup_caches_marks_and_dedups_cross_input() {
         let b = StreamsBuilder::new();
@@ -589,7 +608,8 @@ mod cogroup_caching_tests {
         check!(out[0].value.as_ref().unwrap().as_ref() == 3i64.to_be_bytes());
     }
 
-    /// `with_caching(false)`: the cogroup store stays uncached even with budget.
+    /// `with_caching(false)` keeps the cogroup store uncached even with a
+    /// budget.
     #[test]
     fn cogroup_uncached_when_caching_off() {
         let b = StreamsBuilder::new();

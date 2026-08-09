@@ -1,11 +1,12 @@
 //! SP27: aggregate functions + `GROUP BY` / `HAVING`.
 //!
-//! A whole table lives on a single range (`RangeMap::range_for_table`), so an
-//! aggregate query executes entirely inside one `execute_read` on one engine.
-//! This module is therefore a pure, deterministic fold over the already-correct
-//! MVCC-visible row set — no cross-range scatter/gather, no new lock, no new
-//! visibility rule, no new interleaving (see the SP27 design doc for why this
-//! single-range/pure-data feature warrants no Stateright model).
+//! A whole table belongs to a single range, through
+//! `RangeMap::range_for_table`, so an aggregate query executes entirely inside
+//! one `execute_read` on one engine. This module is therefore a pure,
+//! deterministic fold over the already-correct MVCC-visible row set. It adds no
+//! cross-range scatter/gather, no new lock, no new visibility rule and no new
+//! interleaving. See the SP27 design doc for why this single-range, pure-data
+//! feature needs no Stateright model.
 //!
 //! Supported: `COUNT(*)`, `COUNT(x)`, `SUM(x)`, `MIN(x)`, `MAX(x)`, their
 //! `DISTINCT` forms, multi-key `GROUP BY`, and `HAVING`. `AVG` is deferred until
@@ -23,14 +24,18 @@ use crabka_pgwire::engine::QueryResult;
 use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
 
 /// Maximum expression-tree depth the grouped evaluator (`eval_grouped_depth`)
-/// will recurse before returning `54001` (statement_too_complex). Mirrors
-/// `eval::MAX_EVAL_DEPTH` (3x headroom over the parser's parse-time AST depth cap
-/// of 50, below the test-thread overflow point) — defense-in-depth behind the
-/// parser cap (a tree this deep can never reach here in practice).
+/// will recurse before it returns `54001` (statement_too_complex).
+///
+/// This limit mirrors `eval::MAX_EVAL_DEPTH`. It gives 3x headroom over the
+/// parser's parse-time AST depth cap of 50, and it stays below the test-thread
+/// overflow point. It is defense-in-depth behind the parser cap, because a tree
+/// this deep can never reach here in practice.
 const MAX_GROUPED_DEPTH: usize = 150;
 
-/// The aggregate functions crabgresql supports. SP30 added `Avg` (returns float8,
-/// since there is no `numeric`) and float8 support for `Sum`/`Min`/`Max`.
+/// The aggregate functions crabgresql supports.
+///
+/// SP30 added `Avg`, which returns float8 because there is no `numeric`, and
+/// float8 support for `Sum`/`Min`/`Max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AggFunc {
     Count,
@@ -38,19 +43,19 @@ enum AggFunc {
     Avg,
     Min,
     Max,
-    /// `array_agg(x)` — the inputs as a one-dimensional array, in input order.
+    /// `array_agg(x)`, the inputs as a one-dimensional array, in input order.
     ArrayAgg,
-    /// `jsonb_agg(x)` — the inputs as a JSON array, in input order.
+    /// `jsonb_agg(x)`, the inputs as a JSON array, in input order.
     JsonbAgg,
-    /// `jsonb_object_agg(key, value)` — the inputs as a JSON object.
+    /// `jsonb_object_agg(key, value)`, the inputs as a JSON object.
     JsonbObjectAgg,
-    /// `string_agg(value, delimiter)` — the values joined by the delimiter.
+    /// `string_agg(value, delimiter)`, the values joined by the delimiter.
     StringAgg,
-    /// `bool_and(b)` / `every(b)` — true when no input is false.
+    /// `bool_and(b)` / `every(b)`, true when no input is false.
     BoolAnd,
-    /// `bool_or(b)` — true when some input is true.
+    /// `bool_or(b)`, true when some input is true.
     BoolOr,
-    /// `bit_and`/`bit_or`/`bit_xor` — the integer inputs folded bitwise.
+    /// `bit_and`/`bit_or`/`bit_xor`, the integer inputs folded bitwise.
     BitAnd,
     BitOr,
     BitXor,
@@ -77,7 +82,7 @@ enum AggFunc {
 }
 
 impl AggFunc {
-    /// Does this aggregate take `(Y, X)` rather than a single value?
+    /// Does this aggregate take `(Y, X)` instead of a single value?
     fn is_two_variable(self) -> bool {
         matches!(
             self,
@@ -109,9 +114,11 @@ impl AggFunc {
 }
 
 impl AggFunc {
-    /// Do NULL inputs contribute a row? `count`/`sum`/`avg`/`min`/`max` skip
-    /// them; the collecting aggregates keep them (a NULL becomes a NULL array
-    /// element or a JSON `null` value).
+    /// Do NULL inputs contribute a row?
+    ///
+    /// `count`/`sum`/`avg`/`min`/`max` skip them. The collecting aggregates
+    /// keep them, and a NULL becomes a NULL array element or a JSON `null`
+    /// value.
     fn keeps_nulls(self) -> bool {
         matches!(
             self,
@@ -120,17 +127,20 @@ impl AggFunc {
     }
 }
 
-/// Is `name` one of the aggregates this engine implements? An `OVER` clause on
-/// a call is legal for a window function or an aggregate and nothing else, so the
-/// window planner asks this to tell `PostgreSQL`'s 42809 (a real function used
-/// with `OVER`) from its 42883 (no such function).
+/// Is `name` one of the aggregates this engine implements?
+///
+/// An `OVER` clause on a call is legal for a window function or an aggregate
+/// and nothing else. The window planner therefore asks this function to tell
+/// `PostgreSQL`'s 42809, a real function used with `OVER`, from its 42883, no
+/// such function.
 pub(crate) fn is_aggregate_name(name: &str) -> bool {
     aggregate_func(name).is_some()
 }
 
-/// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
-/// `None` means "not a known aggregate" (the caller then tries the scalar-function
-/// path / reports an undefined function).
+/// Classify a lowercased function name. The lexer lowercases unquoted idents.
+///
+/// `None` means "not a known aggregate". The caller then tries the
+/// scalar-function path or reports an undefined function.
 fn aggregate_func(name: &str) -> Option<AggFunc> {
     match name {
         "count" => Some(AggFunc::Count),
@@ -169,7 +179,7 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
     }
 }
 
-/// Does `e` (or any subexpression) call a known aggregate function?
+/// Does `e`, or any subexpression of `e`, call a known aggregate function?
 pub(crate) fn contains_aggregate(e: &Expr) -> bool {
     match e {
         Expr::Func(fc) => {
@@ -214,8 +224,8 @@ pub(crate) fn contains_aggregate(e: &Expr) -> bool {
     }
 }
 
-/// A `SELECT` is an *aggregate query* iff it groups, has `HAVING`, or any
-/// aggregate call appears in the projection or `ORDER BY`.
+/// A `SELECT` is an *aggregate query* if and only if it groups, has `HAVING`,
+/// or has an aggregate call in the projection or `ORDER BY`.
 pub(crate) fn is_aggregate_query(s: &SelectStmt) -> bool {
     !s.group_by.is_empty()
         || s.having.is_some()
@@ -226,9 +236,11 @@ pub(crate) fn is_aggregate_query(s: &SelectStmt) -> bool {
         || s.order_by.iter().any(|o| contains_aggregate(&o.expr))
 }
 
-/// Error for a function call reached by scalar `eval` (i.e. NOT a resolved
-/// aggregate position): a known aggregate there is misplaced/nested (42803);
-/// anything else is an undefined function (42883).
+/// Error for a function call reached by scalar `eval`, which is NOT a resolved
+/// aggregate position.
+///
+/// A known aggregate there is misplaced or nested, which is 42803. Every other
+/// call is an undefined function, which is 42883.
 pub(crate) fn func_in_scalar_context_error(fc: &FuncCall) -> ExecError {
     if aggregate_func(&fc.name).is_some() {
         ExecError::Grouping(format!(
@@ -241,8 +253,10 @@ pub(crate) fn func_in_scalar_context_error(fc: &FuncCall) -> ExecError {
     }
 }
 
-/// The result column type of an aggregate call, for RowDescription — also
-/// validating name, arity, and argument type (all mapped to 42883).
+/// The result column type of an aggregate call, for RowDescription.
+///
+/// This function also validates the name, the arity and the argument type. It
+/// maps all three failures to 42883.
 pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
     let Some(func) = aggregate_func(&fc.name) else {
         return Err(undefined_function(&fc.name));
@@ -364,7 +378,7 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
     }
 }
 
-/// The two-variable statistical aggregates take `float8` parameters; every
+/// The two-variable statistical aggregates take `float8` parameters. Every
 /// numeric width reaches them through PostgreSQL's implicit widening cast.
 fn require_float_arg(name: &str, arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     let t = crate::eval::infer_type(arg, scope)?;
@@ -409,8 +423,9 @@ fn count_arity(fc: &FuncCall) -> Result<(), ExecError> {
     }
 }
 
-/// The single value argument of `sum`/`min`/`max` (and `count(x)`); errors
-/// (42883) for the wrong arity or the `*` form.
+/// The single value argument of `sum`/`min`/`max` and `count(x)`.
+///
+/// This function reports 42883 for the wrong arity and for the `*` form.
 fn single_value_arg(fc: &FuncCall) -> Result<&Expr, ExecError> {
     match &fc.args {
         FuncArgs::Exprs(args) if args.len() == 1 => Ok(&args[0]),
@@ -418,7 +433,8 @@ fn single_value_arg(fc: &FuncCall) -> Result<&Expr, ExecError> {
     }
 }
 
-/// The `(key, value)` arguments of `jsonb_object_agg`; 42883 for any other arity.
+/// The `(key, value)` arguments of `jsonb_object_agg`. Any other arity is
+/// 42883.
 fn two_value_args(fc: &FuncCall) -> Result<(&Expr, &Expr), ExecError> {
     match &fc.args {
         FuncArgs::Exprs(args) if args.len() == 2 => Ok((&args[0], &args[1])),
@@ -426,28 +442,37 @@ fn two_value_args(fc: &FuncCall) -> Result<(&Expr, &Expr), ExecError> {
     }
 }
 
-/// A resolved aggregate to compute: the function, its argument (`None` only for
-/// `count(*)`), the argument's static type (SP30 — picks the int vs float
-/// accumulator for `sum`/`avg`; `None` for `count(*)`), and whether `DISTINCT`.
-/// `PartialEq` lets identical aggregates share a single accumulator (deduped at
-/// collection time).
+/// A resolved aggregate to compute.
+///
+/// The spec holds the function, its argument, which is `None` only for
+/// `count(*)`, the argument's static type, and whether the call is `DISTINCT`.
+/// SP30 uses the static type to pick the int or the float accumulator for
+/// `sum`/`avg`, and that type is `None` for `count(*)`. `PartialEq` lets
+/// identical aggregates share a single accumulator, deduplicated at collection
+/// time.
 #[derive(Debug, Clone, PartialEq)]
 struct AggSpec {
     func: AggFunc,
     arg: Option<Expr>,
-    /// `jsonb_object_agg`'s VALUE argument (`arg` is then its key). `None` for
-    /// every other aggregate, all of which take at most one argument.
+    /// `jsonb_object_agg`'s VALUE argument, where `arg` is then its key.
+    ///
+    /// This field is `None` for every other aggregate, and all of those take at
+    /// most one argument.
     value_arg: Option<Expr>,
     arg_type: Option<ColumnType>,
     distinct: bool,
-    /// `agg(...) FILTER (WHERE predicate)` — evaluated per source row before the
-    /// argument is even looked at, so a row the predicate rejects never reaches
-    /// the accumulator and never joins the `DISTINCT` buffer.
+    /// `agg(...) FILTER (WHERE predicate)`.
+    ///
+    /// The predicate is evaluated per source row before the argument is read,
+    /// so a row the predicate rejects never reaches the accumulator and never
+    /// joins the `DISTINCT` buffer.
     filter: Option<Expr>,
 }
 
-/// Build the spec for one aggregate call, validating arity, argument type, and
-/// the no-nested-aggregate rule.
+/// Build the spec for one aggregate call.
+///
+/// This function validates the arity, the argument type and the
+/// no-nested-aggregate rule.
 fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
     let func = aggregate_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     // A FILTER predicate resolves in the same scope as the arguments: it must be
@@ -625,10 +650,12 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
 }
 
 impl AggSpec {
-    /// Evaluate this aggregate's argument expressions for one row: `[value]`, or
-    /// `[key, value]` for `jsonb_object_agg`. `DISTINCT` compares and
-    /// deduplicates the whole tuple, exactly as PostgreSQL does, so the value
-    /// argument is evaluated before that decision rather than after it.
+    /// Evaluate this aggregate's argument expressions for one row.
+    ///
+    /// The result is `[value]`, or `[key, value]` for `jsonb_object_agg`.
+    /// `DISTINCT` compares and deduplicates the whole tuple, exactly as
+    /// PostgreSQL does, so this function evaluates the value argument before
+    /// that decision and not after it.
     fn eval_args(
         &self,
         scope: &Scope,
@@ -656,8 +683,9 @@ fn reject_nested_aggregate(arg: &Expr) -> Result<(), ExecError> {
     Ok(())
 }
 
-/// Collect (deduped) every aggregate spec in `e`. A non-aggregate function call
-/// is an undefined function (42883).
+/// Collect every aggregate spec in `e`, deduplicated.
+///
+/// A non-aggregate function call is an undefined function, which is 42883.
 fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<(), ExecError> {
     match e {
         Expr::Func(fc) if aggregate_func(&fc.name).is_some() => {
@@ -744,8 +772,10 @@ fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<()
     Ok(())
 }
 
-/// The scalar function families that may WRAP an aggregate or a grouped column:
-/// the call itself is not an aggregate, but its arguments must be traversed.
+/// The scalar function families that may WRAP an aggregate or a grouped column.
+///
+/// The call itself is not an aggregate, but the caller must traverse its
+/// arguments.
 fn is_wrapping_scalar_func(name: &str) -> bool {
     crate::func::is_scalar(name)
         || crate::datetime_fn::is_datetime_func(name)
@@ -754,16 +784,19 @@ fn is_wrapping_scalar_func(name: &str) -> bool {
         || crate::array_fn::is_array_func(name)
 }
 
-/// Collect (deduped, in first-appearance order) the aggregate calls of one
-/// no-GROUP-BY projection expression, verifying the expression is built only
-/// from aggregate calls, constants, and scalar / date-time / formatting
-/// functions, operators, predicates, `CASE`, and casts over those.
+/// Collect the aggregate calls of one no-GROUP-BY projection expression,
+/// deduplicated and in first-appearance order.
 ///
-/// Returns `false` for anything else — a bare column, an unknown function, a
-/// `DISTINCT` aggregate, a parameter, an unresolved subquery — telling the
-/// streaming-aggregate path to keep the materializing scan (and its errors)
-/// for that query. Aggregate arguments are NOT descended into: they belong to
-/// the pushdown spec, and a non-column argument fails spec construction later.
+/// This function also verifies that the expression is built only from aggregate
+/// calls, constants, and scalar, date-time and formatting functions, operators,
+/// predicates, `CASE`, and casts over those.
+///
+/// The function returns `false` for every other expression, such as a bare
+/// column, an unknown function, a `DISTINCT` aggregate, a parameter or an
+/// unresolved subquery. A `false` result tells the streaming-aggregate path to
+/// keep the materializing scan, and its errors, for that query. This function
+/// does NOT descend into aggregate arguments. They belong to the pushdown spec,
+/// and a non-column argument fails spec construction later.
 pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncCall>) -> bool {
     match e {
         // A SQL/JSON expression is not streamable: its operands may contain
@@ -860,9 +893,11 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
 }
 
 /// Evaluate no-GROUP-BY projection expressions over already-finalized aggregate
-/// values: `values[i]` is the result of `calls[i]`. Aggregate calls resolve by
-/// spec lookup exactly as in the materializing fold, so a streamed projection
-/// evaluates identically to [`aggregate_rows`] fed the same aggregate results.
+/// values, where `values[i]` is the result of `calls[i]`.
+///
+/// Aggregate calls resolve by spec lookup exactly as in the materializing fold.
+/// A streamed projection therefore evaluates identically to [`aggregate_rows`]
+/// over the same aggregate results.
 pub(crate) fn eval_over_aggregate_values(
     exprs: &[Expr],
     scope: &Scope,
@@ -880,9 +915,11 @@ pub(crate) fn eval_over_aggregate_values(
         .collect()
 }
 
-/// Data-independent validation: every projection / `HAVING` / `ORDER BY`
-/// expression must be built from aggregate calls, `GROUP BY` expressions, and
-/// constants. A bare ungrouped column → 42803 (even on an empty table).
+/// Data-independent validation.
+///
+/// Every projection, `HAVING` and `ORDER BY` expression must be built from
+/// aggregate calls, `GROUP BY` expressions and constants. A bare ungrouped
+/// column is 42803, even on an empty table.
 ///
 /// Both `e` and `group_by` have had their column references canonicalized
 /// against the input scope by [`aggregate_rows`], so the structural comparison
@@ -977,9 +1014,9 @@ fn validate_grouped(e: &Expr, group_by: &[Expr], scope: &Scope) -> Result<(), Ex
     }
 }
 
-/// `PostgreSQL` names the offending column by its range-table alias — `gs.b`,
-/// never a bare `b` — so the qualifier the canonicalized reference carries is
-/// part of the message.
+/// `PostgreSQL` names the offending column by its range-table alias. It writes
+/// `gs.b` and never a bare `b`, so the qualifier the canonicalized reference
+/// carries is part of the message.
 fn ungrouped_column(qualifier: Option<&str>, name: &str) -> ExecError {
     let column = qualifier.map_or_else(|| name.to_string(), |table| format!("{table}.{name}"));
     ExecError::Grouping(format!(
@@ -987,10 +1024,12 @@ fn ungrouped_column(qualifier: Option<&str>, name: &str) -> ExecError {
     ))
 }
 
-/// Evaluate an expression in a group's context: aggregate calls resolve to their
-/// finalized per-group result; subexpressions matching a `GROUP BY` expression
-/// resolve to the group key; everything else recurses. (Validation already
-/// guarantees no ungrouped column reaches the `Column` arm.)
+/// Evaluate an expression in a group's context.
+///
+/// Aggregate calls resolve to their finalized per-group result. Subexpressions
+/// that match a `GROUP BY` expression resolve to the group key. Everything else
+/// recurses. Validation already guarantees that no ungrouped column reaches the
+/// `Column` arm.
 fn eval_grouped(
     e: &Expr,
     scope: &Scope,
@@ -1023,10 +1062,12 @@ struct GroupedEvalContext<'a> {
     eval_ctx: &'a EvalCtx,
 }
 
-/// Depth-tracking core of [`eval_grouped`]. Mirrors `eval::eval_depth`: every
-/// recursive descent increments `depth`, and exceeding `MAX_GROUPED_DEPTH`
-/// returns `54001`. Defense-in-depth — the parser already caps AST depth, so a
-/// tree this deep can never reach here in practice.
+/// Depth-tracking core of [`eval_grouped`].
+///
+/// This function mirrors `eval::eval_depth`. Every recursive descent increments
+/// `depth`, and a `depth` above `MAX_GROUPED_DEPTH` returns `54001`. This is
+/// defense-in-depth. The parser already caps AST depth, so a tree this deep can
+/// never reach here in practice.
 fn eval_grouped_depth(
     e: &Expr,
     grouped: &GroupedEvalContext<'_>,
@@ -1277,25 +1318,30 @@ fn eval_grouped_depth(
     }
 }
 
-/// One group's running accumulator for one aggregate: the running [`AccState`]
-/// plus, for a `DISTINCT` aggregate, the argument tuples it has yet to fold.
+/// One group's running accumulator for one aggregate.
 ///
-/// PostgreSQL implements `DISTINCT` by sorting the WHOLE argument tuple and
-/// dropping adjacent duplicates, so a `DISTINCT` aggregate buffers its rows and
-/// folds them at [`Acc::finish`] instead of on arrival. Two things follow that a
-/// fold-on-arrival "first value seen" set gets wrong:
-/// `jsonb_object_agg(DISTINCT k, v)` over `('k',1),('k',2)` keeps BOTH pairs (so
-/// the object's last value is `2`, not `1`), and `array_agg(DISTINCT x)` /
-/// `jsonb_agg(DISTINCT x)` emit sorted — not first-appearance — order.
+/// The accumulator holds the running [`AccState`]. For a `DISTINCT` aggregate
+/// it also holds the argument tuples it has yet to fold.
+///
+/// PostgreSQL implements `DISTINCT` by a sort of the WHOLE argument tuple and a
+/// drop of adjacent duplicates. A `DISTINCT` aggregate therefore buffers its
+/// rows and folds them at [`Acc::finish`] instead of on arrival. Two results
+/// follow that a fold-on-arrival "first value seen" set gets wrong.
+/// `jsonb_object_agg(DISTINCT k, v)` over `('k',1),('k',2)` keeps BOTH pairs,
+/// so the object's last value is `2`, not `1`. `array_agg(DISTINCT x)` and
+/// `jsonb_agg(DISTINCT x)` emit sorted order, not first-appearance order.
 struct Acc {
     state: AccState,
-    /// `Some` iff the spec is `DISTINCT`: each row's evaluated argument tuple.
+    /// `Some` if and only if the spec is `DISTINCT`. It holds each row's
+    /// evaluated argument tuple.
     distinct: Option<Vec<Vec<Datum>>>,
 }
 
-/// The running value of one aggregate. SP30 splits `Sum` into an integer (`SumI`,
-/// accumulated in a checked i64 so `sum(int4)` never overflows prematurely) and a
-/// float (`SumF`, accumulated in f64) variant, and adds `Avg` (float8 result).
+/// The running value of one aggregate.
+///
+/// SP30 splits `Sum` into an integer variant and a float variant. `SumI`
+/// accumulates in a checked i64, so `sum(int4)` never overflows early. `SumF`
+/// accumulates in f64. SP30 also adds `Avg`, which has a float8 result.
 enum AccState {
     Count {
         n: i64,
@@ -1307,13 +1353,14 @@ enum AccState {
         acc: f64,
         any: bool,
     },
-    /// `sum(float4)` — accumulated in `f32` and returned as `real`, because
+    /// `sum(float4)`, accumulated in `f32` and returned as `real`, because
     /// PostgreSQL's `sum(real)` transition function is `float4pl`.
     SumF4 {
         acc: f32,
         any: bool,
     },
-    /// SP32: numeric sum (exact, no overflow) — accumulated as a numeric `Datum`.
+    /// SP32: numeric sum, exact and without overflow, accumulated as a numeric
+    /// `Datum`.
     SumN {
         acc: Option<Datum>,
     },
@@ -1324,53 +1371,60 @@ enum AccState {
         sum: f64,
         n: i64,
     },
-    /// SP32: numeric mean — a numeric running sum and a count, divided at finish
-    /// with PostgreSQL's `select_div_scale` (so `avg(int)`/`avg(numeric)` are exact).
+    /// SP32: numeric mean. It is a numeric running sum and a count, divided at
+    /// finish with PostgreSQL's `select_div_scale`, so `avg(int)` and
+    /// `avg(numeric)` are exact.
     AvgN {
         sum: Option<Datum>,
         n: i64,
     },
-    /// `array_agg` — the values in fold order, NULLs included. Empty means zero
-    /// rows were folded, which is SQL NULL (not an empty array).
+    /// `array_agg`, the values in fold order, NULLs included.
+    ///
+    /// An empty state means zero rows were folded, which is SQL NULL and not an
+    /// empty array.
     ArrayAgg {
         elem: ElemType,
         elems: Vec<Datum>,
     },
-    /// `jsonb_agg` — the values in fold order, converted to JSON at `finish`.
+    /// `jsonb_agg`, the values in fold order, converted to JSON at `finish`.
     JsonbAgg {
         items: Vec<Datum>,
     },
-    /// `jsonb_object_agg` — the (key, value) pairs in fold order, built into one
-    /// object at `finish` (duplicate keys last-wins, a NULL key is 22023).
+    /// `jsonb_object_agg`, the (key, value) pairs in fold order, built into one
+    /// object at `finish`. A duplicate key takes the last value, and a NULL key
+    /// is 22023.
     JsonbObjectAgg {
         pairs: Vec<(Datum, Datum)>,
     },
-    /// `string_agg` — the joined value so far. The delimiter comes from each
-    /// row, as PostgreSQL's transition function reads it, and is written before
-    /// every value but the first.
+    /// `string_agg`, the joined value so far.
+    ///
+    /// The delimiter comes from each row, as PostgreSQL's transition function
+    /// reads it, and is written before every value but the first.
     StringAgg {
         acc: Option<StringAggAcc>,
     },
-    /// `bool_and`/`bool_or`/`every` — whether any input was true and whether
-    /// any was false. No rows at all is SQL NULL.
+    /// `bool_and`/`bool_or`/`every`, which record whether any input was true
+    /// and whether any input was false. No rows at all is SQL NULL.
     BoolAgg {
         any_true: bool,
         any_false: bool,
         seen: bool,
     },
-    /// `bit_and`/`bit_or`/`bit_xor` — the running fold, keeping the input width.
+    /// `bit_and`/`bit_or`/`bit_xor`, the running fold, which keeps the input
+    /// width.
     BitAgg {
         acc: Option<Datum>,
     },
-    /// The `float8` single-variable statistical state: PostgreSQL's
-    /// Youngs–Cramer `(N, Sx, Sxx)`, where `Sxx` is the running sum of squared
-    /// deviations rather than the sum of squares.
+    /// The `float8` single-variable statistical state.
+    ///
+    /// It is PostgreSQL's Youngs–Cramer `(N, Sx, Sxx)`, where `Sxx` is the
+    /// running sum of squared deviations and not the sum of squares.
     VarFloat {
         n: f64,
         sx: f64,
         sxx: f64,
     },
-    /// The exact `numeric` statistical state: `(N, Σx, Σx²)`, finalized by
+    /// The exact `numeric` statistical state `(N, Σx, Σx²)`, finalized by
     /// `numeric::stddev_internal`.
     VarNumeric {
         n: i64,
@@ -1389,7 +1443,7 @@ enum AccState {
     },
 }
 
-/// `string_agg`'s running value, in whichever of its two overloads is in play.
+/// `string_agg`'s running value, in whichever of its two overloads applies.
 enum StringAggAcc {
     Text(String),
     Bytea(Vec<u8>),
@@ -1403,8 +1457,10 @@ impl Acc {
         }
     }
 
-    /// Fold one source row into this accumulator — or, under `DISTINCT`, buffer
-    /// its argument tuple for the sorted fold [`Acc::finish`] performs.
+    /// Fold one source row into this accumulator.
+    ///
+    /// Under `DISTINCT`, buffer the row's argument tuple instead, for the
+    /// sorted fold that [`Acc::finish`] does.
     fn fold_row(
         &mut self,
         spec: &AggSpec,
@@ -1446,8 +1502,10 @@ impl Acc {
         }
     }
 
-    /// This aggregate's value for the group: any buffered `DISTINCT` tuples are
-    /// sorted, deduplicated, and folded first.
+    /// This aggregate's value for the group.
+    ///
+    /// This method first sorts, deduplicates and folds any buffered `DISTINCT`
+    /// tuples.
     fn finish(&mut self, spec: &AggSpec, ctx: &EvalCtx) -> Result<Datum, ExecError> {
         if let Some(tuples) = self.distinct.take() {
             for args in sorted_distinct(tuples)? {
@@ -1458,10 +1516,12 @@ impl Acc {
     }
 }
 
-/// PostgreSQL's `DISTINCT` input for an aggregate: the argument tuples sorted
-/// ascending with adjacent duplicates dropped. Sorting is what makes
-/// `array_agg(DISTINCT x)` emit ascending order, and comparing (rather than
-/// hashing) is what makes `1.0` and `1.00` one `numeric` value.
+/// PostgreSQL's `DISTINCT` input for an aggregate.
+///
+/// These are the argument tuples sorted ascending, with adjacent duplicates
+/// dropped. The sort is what makes `array_agg(DISTINCT x)` emit ascending
+/// order. A comparison, instead of a hash, is what makes `1.0` and `1.00` one
+/// `numeric` value.
 fn sorted_distinct(mut tuples: Vec<Vec<Datum>>) -> Result<Vec<Vec<Datum>>, ExecError> {
     // `sort_by` needs a total order, so an incomparable pair is recorded and
     // reported once the sort is over rather than panicking inside it.
@@ -1488,9 +1548,11 @@ fn sorted_distinct(mut tuples: Vec<Vec<Datum>>) -> Result<Vec<Vec<Datum>>, ExecE
     Ok(out)
 }
 
-/// The order `DISTINCT` sorts and deduplicates in: argument by argument,
-/// ascending, NULLs last. Two NULLs are EQUAL here — SQL `DISTINCT` folds NULLs
-/// together even though `NULL = NULL` is unknown.
+/// The order `DISTINCT` sorts and deduplicates in.
+///
+/// The order is argument by argument, ascending, with NULLs last. Two NULLs are
+/// EQUAL here. SQL `DISTINCT` folds NULLs together even though `NULL = NULL` is
+/// unknown.
 fn compare_tuples(a: &[Datum], b: &[Datum]) -> Result<Ordering, ExecError> {
     for (x, y) in a.iter().zip(b) {
         let ord = match (x.is_null(), y.is_null()) {
@@ -1576,8 +1638,9 @@ impl AccState {
         }
     }
 
-    /// Fold one already-evaluated argument tuple (`[value]`, or `[key, value]`
-    /// for `jsonb_object_agg`) into the running value.
+    /// Fold one already-evaluated argument tuple into the running value.
+    ///
+    /// The tuple is `[value]`, or `[key, value]` for `jsonb_object_agg`.
     fn fold_args(
         &mut self,
         spec: &AggSpec,
@@ -1936,8 +1999,8 @@ impl AccState {
     }
 }
 
-/// Append one row to a `string_agg` accumulator, writing the delimiter before
-/// every value but the first.
+/// Append one row to a `string_agg` accumulator. This function writes the
+/// delimiter before every value but the first.
 fn append_string_agg(
     acc: &mut Option<StringAggAcc>,
     value: &Datum,
@@ -1991,7 +2054,7 @@ fn append_string_agg(
     }
 }
 
-/// One step of `bit_and`/`bit_or`/`bit_xor`, preserving the integer width.
+/// One step of `bit_and`/`bit_or`/`bit_xor`, which keeps the integer width.
 fn bit_fold(func: AggFunc, a: &Datum, b: &Datum) -> Result<Datum, ExecError> {
     let apply = |x: i64, y: i64| match func {
         AggFunc::BitAnd => x & y,
@@ -2017,16 +2080,20 @@ fn bit_fold(func: AggFunc, a: &Datum, b: &Datum) -> Result<Datum, ExecError> {
 }
 
 /// PostgreSQL's `if (Sxx < 0.0) Sxx = 0.0` roundoff clamp on a sum of squared
-/// deviations. `f64::max` is the wrong tool: it *drops* a NaN operand in favour
-/// of the other one, which would turn the NaN a non-finite input poisoned the
-/// accumulator with back into a variance of zero.
+/// deviations.
+///
+/// `f64::max` is the wrong tool. It *drops* a NaN operand and keeps the other
+/// one. A non-finite input puts a NaN into the accumulator, and `f64::max`
+/// would turn that NaN back into a variance of zero.
 fn clamp_non_negative(value: f64) -> f64 {
     if value < 0.0 { 0.0 } else { value }
 }
 
 /// Finalize the two-variable Youngs–Cramer state into whichever member of the
-/// family asked for it. Every undefined case (too few rows, a zero spread) is
-/// SQL NULL, exactly as PostgreSQL's finalizers return it.
+/// family asked for it.
+///
+/// Every undefined case, such as too few rows or a zero spread, is SQL NULL,
+/// exactly as PostgreSQL's finalizers return it.
 fn finish_regr(func: AggFunc, n: f64, sx: f64, sxx: f64, sy: f64, syy: f64, sxy: f64) -> Datum {
     if n < 1.0 && func != AggFunc::RegrCount {
         return Datum::Null;
@@ -2058,11 +2125,14 @@ fn finish_regr(func: AggFunc, n: f64, sx: f64, sxx: f64, sy: f64, syy: f64, sxy:
 }
 
 /// Build a `jsonb` aggregate's result through the corresponding `json_fn`
-/// builder: `jsonb_agg` is exactly the row-wise fold of `jsonb_build_array`, and
-/// `jsonb_object_agg` of `jsonb_build_object`. Routing through the builders keeps
-/// ONE set of SQL-value → JSON rules (numeric scale, ISO date spelling, JSON
-/// `null` for a SQL NULL value, 22023 for a NULL key, last-wins duplicate keys)
-/// instead of a second copy that could drift.
+/// builder.
+///
+/// `jsonb_agg` is exactly the row-wise fold of `jsonb_build_array`, and
+/// `jsonb_object_agg` is the row-wise fold of `jsonb_build_object`. A route
+/// through the builders keeps ONE set of SQL-value to JSON rules instead of a
+/// second copy that could drift. Those rules cover numeric scale, ISO date
+/// spelling, JSON `null` for a SQL NULL value, 22023 for a NULL key, and
+/// last-wins duplicate keys.
 fn build_jsonb(builder: &str, args: Vec<Datum>, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let call = FuncCall {
         name: builder.to_string(),
@@ -2105,11 +2175,13 @@ fn as_f64(d: &Datum) -> Option<f64> {
     }
 }
 
-/// Execute an aggregate query over the already-`WHERE`-filtered `rows`, returning
-/// the final `QueryResult::Rows`. Thin wrapper over `aggregate_rows` — the row-
-/// producing core shared with derived tables (`select_to_relation`). `ctx` carries
-/// the session zone + clock for any temporal evaluation; non-temporal aggregation
-/// ignores it (UTC/epoch reproduces prior behavior).
+/// Execute an aggregate query over the already-`WHERE`-filtered `rows` and
+/// return the final `QueryResult::Rows`.
+///
+/// This function is a thin wrapper over `aggregate_rows`, the row-producing
+/// core that derived tables share through `select_to_relation`. `ctx` carries
+/// the session zone and clock for any temporal evaluation. Non-temporal
+/// aggregation ignores `ctx`, and UTC/epoch reproduces prior behavior.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn execute_aggregate(
     s: &SelectStmt,
@@ -2126,9 +2198,11 @@ pub(crate) fn execute_aggregate(
     ))
 }
 
-/// Fold an aggregate query over the already-`WHERE`-filtered `rows`, returning the
-/// projected output Datum rows (HAVING / DISTINCT / ORDER BY / OFFSET / LIMIT all
-/// applied). `execute_aggregate` renders these to a `QueryResult`; a derived table
+/// Fold an aggregate query over the already-`WHERE`-filtered `rows` and return
+/// the projected output Datum rows.
+///
+/// HAVING, DISTINCT, ORDER BY, OFFSET and LIMIT are all applied.
+/// `execute_aggregate` renders these rows to a `QueryResult`. A derived table
 /// re-qualifies them under its alias.
 pub(crate) fn aggregate_rows(
     s: &SelectStmt,
@@ -2349,9 +2423,11 @@ pub(crate) fn aggregate_rows(
     Ok(crate::exec::apply_row_window(out, window, &s.order_by))
 }
 
-/// One finalized group on its way out of [`aggregate_rows`]: the ORDER BY sort
-/// vector, the `DISTINCT ON` dedup-sort and grouping vectors (both empty without
-/// that clause), and the projected output row.
+/// One finalized group on its way out of [`aggregate_rows`].
+///
+/// The group holds the ORDER BY sort vector, the `DISTINCT ON` dedup-sort and
+/// grouping vectors, which are both empty without that clause, and the
+/// projected output row.
 struct GroupOutput {
     sort_keys: Vec<Datum>,
     dedup_keys: Vec<Datum>,
@@ -2382,7 +2458,7 @@ mod tests {
         }
     }
 
-    /// The table's single-relation scope, or the empty (FROM-less) scope.
+    /// The table's single-relation scope, or the empty FROM-less scope.
     fn scope_of(t: Option<&Table>) -> Scope {
         match t {
             Some(t) => Scope::single(t, &t.name.name),
@@ -2412,7 +2488,8 @@ mod tests {
         }
     }
 
-    /// Parse one SELECT and run it over the given (already-WHERE-filtered) rows.
+    /// Parse one SELECT and run it over the given rows, which are already
+    /// WHERE-filtered.
     fn agg(
         sql: &str,
         t: Option<&Table>,
@@ -2433,8 +2510,10 @@ mod tests {
         }
     }
 
-    /// Decode a result cell back to a (typed-enough) Datum for assertions: we
-    /// compare text-format payloads, so map back to Text/Null and ints by parse.
+    /// Decode a result cell back to a Datum for assertions.
+    ///
+    /// The tests compare text-format payloads, so this helper maps back to Text
+    /// and Null, and parses integers.
     fn cell_to_datum(c: Option<Cell>) -> Datum {
         match c {
             None => Datum::Null,
@@ -2448,8 +2527,10 @@ mod tests {
         }
     }
 
-    /// Like `agg`, but returns the raw text-format cells (so float results — which
-    /// `cell_to_datum` cannot round-trip cleanly — can be asserted directly).
+    /// Like `agg`, but returns the raw text-format cells.
+    ///
+    /// `cell_to_datum` cannot round-trip a float result cleanly, so a test can
+    /// assert the raw cells directly.
     fn agg_text(
         sql: &str,
         t: Option<&Table>,
@@ -2485,11 +2566,13 @@ mod tests {
     }
 
     /// `sum`/`avg`/`min`/`max` over the two new scalar types, in both the type
-    /// PostgreSQL reports and the text it prints. Every expectation is a
-    /// PostgreSQL 18.4 `pg_typeof` + value pair: `sum(int2)` is `bigint` (so it
-    /// outgrows `int2` rather than overflowing), `avg(int2)` is scale-padded
-    /// `numeric`, `sum(real)` stays `real` while `avg(real)` widens to `double
-    /// precision`, and `min`/`max` keep the argument type.
+    /// PostgreSQL reports and the text it prints.
+    ///
+    /// Every expectation is a PostgreSQL 18.4 `pg_typeof` and value pair.
+    /// `sum(int2)` is `bigint`, so it grows past `int2` instead of overflowing.
+    /// `avg(int2)` is scale-padded `numeric`. `sum(real)` stays `real`, while
+    /// `avg(real)` widens to `double precision`. `min` and `max` keep the
+    /// argument type.
     #[test]
     fn int2_and_float4_aggregate_result_types_match_postgres() {
         use assert2::assert;
@@ -3148,7 +3231,7 @@ mod tests {
 
     // ---- SP38: format functions compose with aggregates ----
 
-    /// A table with a `timestamp` column `ts` (and the int key `k`), for the
+    /// A table with a `timestamp` column `ts` and the int key `k`, for the
     /// format-function-over-aggregate composition tests.
     fn ts_table() -> Table {
         Table {
@@ -3240,7 +3323,8 @@ mod tests {
         ]
     }
 
-    /// The result types are what RowDescription reports, and follow the argument.
+    /// The result types are what RowDescription reports, and they follow the
+    /// argument.
     #[test]
     fn collecting_aggregates_infer_their_result_types() {
         let t = collect_table();
@@ -3286,8 +3370,9 @@ mod tests {
         );
     }
 
-    /// The three aggregates accumulate in INPUT order and keep NULL inputs (a
-    /// NULL array element, and the JSON `null` literal) — unlike sum/min/max.
+    /// The three aggregates accumulate in INPUT order and keep NULL inputs, as
+    /// a NULL array element and as the JSON `null` literal. `sum`, `min` and
+    /// `max` do not.
     #[test]
     fn collecting_aggregates_accumulate_in_input_order_keeping_nulls() {
         let t = collect_table();
@@ -3309,8 +3394,9 @@ mod tests {
         }
     }
 
-    /// Over ZERO rows every collecting aggregate is SQL NULL — `array_agg` in
-    /// particular is NULL, not an empty array (PostgreSQL's behavior).
+    /// Over ZERO rows every collecting aggregate is SQL NULL. `array_agg` in
+    /// particular is NULL and not an empty array, which is PostgreSQL's
+    /// behavior.
     #[test]
     fn collecting_aggregates_over_zero_rows_are_null() {
         let t = collect_table();
@@ -3388,10 +3474,12 @@ mod tests {
     }
 
     /// `DISTINCT` sorts the WHOLE argument tuple and drops adjacent duplicates,
-    /// as PostgreSQL does: the collecting aggregates emit ascending — not
-    /// first-appearance — order, and `jsonb_object_agg(DISTINCT k, v)` keeps
-    /// every distinct PAIR, so a repeated key still takes its last value. Each
-    /// expected row is PostgreSQL 18.4's output over the same rows.
+    /// as PostgreSQL does.
+    ///
+    /// The collecting aggregates emit ascending order, not first-appearance
+    /// order. `jsonb_object_agg(DISTINCT k, v)` keeps every distinct PAIR, so a
+    /// repeated key still takes its last value. Each expected row is PostgreSQL
+    /// 18.4's output over the same rows.
     #[test]
     fn distinct_sorts_and_dedups_the_whole_argument_tuple() {
         let t = collect_table();
@@ -3436,11 +3524,13 @@ mod tests {
         );
     }
 
-    /// `jsonb_object_agg`'s key is PostgreSQL's `"any"` parameter: every scalar
-    /// type is accepted and rendered through its output function. Only a
-    /// container key is refused, and — like a NULL key — it is refused at RUN
-    /// time as 22023, so a zero-row aggregate over one is NULL, not an error.
-    /// Each expected object is PostgreSQL 18.4's output over the same rows.
+    /// `jsonb_object_agg`'s key is PostgreSQL's `"any"` parameter.
+    ///
+    /// Every scalar type is accepted and rendered through its output function.
+    /// Only a container key is refused. Like a NULL key, it is refused at RUN
+    /// time as 22023, so a zero-row aggregate over one is NULL and not an
+    /// error. Each expected object is PostgreSQL 18.4's output over the same
+    /// rows.
     #[test]
     fn jsonb_object_agg_accepts_any_scalar_key() {
         let t = collect_table();
@@ -3485,13 +3575,13 @@ mod tests {
         }
     }
 
-    /// One statistical-aggregate case: the SQL, the input rows, and the text of
-    /// each expected output column.
+    /// One statistical-aggregate case. It holds the SQL, the input rows, and
+    /// the text of each expected output column.
     type StatCase<'a> = (&'a str, Vec<Vec<Datum>>, &'a [&'a str]);
 
-    /// A table shaped for the aggregate families added alongside the scalar
-    /// breadth work: a text value, a boolean, an integer, a numeric, and the
-    /// `(y, x)` pair the two-variable statistics take.
+    /// A table shaped for the aggregate families added beside the scalar
+    /// breadth work. It holds a text value, a boolean, an integer, a numeric,
+    /// and the `(y, x)` pair the two-variable statistics take.
     fn stats_table() -> Table {
         Table {
             id: 2,
@@ -3512,8 +3602,10 @@ mod tests {
     }
 
     /// The rows every statistical expectation below was measured against on a
-    /// PostgreSQL 18.4 oracle. Row 3 has a NULL text/bool/int and row 4 a NULL
-    /// `y`, so each family's NULL rule is exercised.
+    /// PostgreSQL 18.4 oracle.
+    ///
+    /// Row 3 has a NULL text, bool and int, and row 4 has a NULL `y`, so these
+    /// rows exercise each family's NULL rule.
     fn stats_rows() -> Vec<Vec<Datum>> {
         let num = |n: i64| Datum::Numeric(crabka_pgtypes::numeric::from_i64(n));
         vec![
@@ -3573,9 +3665,9 @@ mod tests {
             .collect()
     }
 
-    /// Every expectation here is a PostgreSQL 18.4 value: `string_agg` skips
-    /// NULLs, the boolean pair returns NULL only when no non-NULL row arrived,
-    /// and the bitwise trio folds in the argument's own width.
+    /// Every expectation here is a PostgreSQL 18.4 value. `string_agg` skips
+    /// NULLs. The boolean pair returns NULL only when no non-NULL row arrived.
+    /// The bitwise trio folds in the argument's own width.
     #[test]
     fn collecting_boolean_and_bitwise_aggregates_match_postgres() {
         use assert2::assert;
@@ -3598,8 +3690,8 @@ mod tests {
         }
     }
 
-    /// Zero qualifying rows is SQL NULL for every one of these — not an empty
-    /// string, not zero, and not an error.
+    /// Zero qualifying rows is SQL NULL for every one of these. It is not an
+    /// empty string, not zero, and not an error.
     #[test]
     fn the_new_aggregates_are_null_over_zero_rows() {
         use assert2::assert;
@@ -3627,8 +3719,8 @@ mod tests {
     }
 
     /// The `numeric` variance/stddev display scale comes from PostgreSQL's
-    /// `select_div_scale`, and the `float8` one from its Youngs-Cramer
-    /// transition — so the printed digits, not just the value, are the test.
+    /// `select_div_scale`, and the `float8` scale comes from its Youngs-Cramer
+    /// transition. The printed digits, and not only the value, are the test.
     #[test]
     fn statistical_aggregates_match_postgres_digit_for_digit() {
         use assert2::assert;
@@ -3676,7 +3768,7 @@ mod tests {
     }
 
     /// `variance`/`stddev` are PostgreSQL's aliases for the SAMPLE forms, and
-    /// `every` for `bool_and` — so each pair must agree exactly.
+    /// `every` is its alias for `bool_and`. Each pair must agree exactly.
     #[test]
     fn the_aggregate_aliases_agree_with_what_they_alias() {
         use assert2::assert;
@@ -3718,7 +3810,7 @@ mod tests {
     }
 
     /// One `(y, x)` row of the statistical table, with every other column NULL
-    /// so only the float pair reaches the accumulator.
+    /// so that only the float pair reaches the accumulator.
     fn yx(y: f64, x: f64) -> Vec<Datum> {
         vec![
             Datum::Null,
@@ -3732,9 +3824,10 @@ mod tests {
 
     /// A NaN or ±Infinity anywhere in the input poisons PostgreSQL's
     /// Youngs–Cramer sums of squared deviations, so the whole variance and
-    /// regression family answers NaN. Reporting a variance of zero instead —
-    /// which is what an accumulator that quietly drops the non-finite value
-    /// does — is a wrong answer with nothing to signal it.
+    /// regression family answers NaN.
+    ///
+    /// An accumulator that drops the non-finite value reports a variance of
+    /// zero instead. That is a wrong answer with nothing to signal it.
     #[test]
     fn non_finite_inputs_propagate_through_the_statistical_family() {
         use assert2::assert;
@@ -3803,9 +3896,9 @@ mod tests {
         }
     }
 
-    /// The same accumulator guard is 22003 rather than NaN when every input was
-    /// finite and it is the running sum that overflowed — PostgreSQL reports the
-    /// overflow only in that case.
+    /// The same accumulator guard is 22003, not NaN, when every input was
+    /// finite and the running sum overflowed. PostgreSQL reports the overflow
+    /// only in that case.
     #[test]
     fn finite_inputs_that_overflow_the_variance_sums_are_22003() {
         use assert2::assert;
@@ -3828,9 +3921,10 @@ mod tests {
         }
     }
 
-    /// The argument types each family accepts, and what it reports back —
-    /// `variance(int4)` is numeric while `variance(float8)` stays float8, and
-    /// `bit_and` keeps the integer width it was handed.
+    /// The argument types each family accepts, and what it reports back.
+    ///
+    /// `variance(int4)` is numeric, while `variance(float8)` stays float8.
+    /// `bit_and` keeps the integer width it was given.
     #[test]
     fn new_aggregate_result_types_match_postgres() {
         use assert2::assert;

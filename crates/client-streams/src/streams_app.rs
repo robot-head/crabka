@@ -1,11 +1,13 @@
-//! [`StreamsApp`] — one component that owns the schema-registry lifecycle and
-//! the managed [`KafkaStreams`] runtime, so applications don't hand-wire the
-//! cache, `set_default_registry`, pre-warm, and `KafkaStreams::builder()`.
+//! [`StreamsApp`] is one component that owns the schema-registry lifecycle and
+//! the managed [`KafkaStreams`] runtime. An application therefore does not
+//! hand-wire the cache, `set_default_registry`, the pre-warm, and
+//! `KafkaStreams::builder()`.
 //!
-//! Build it **first** — that installs the process default registry — then build a
-//! topology against it and `run` it. The registry must be installed before the
-//! topology is constructed, because the default Avro/Protobuf/JSON serdes read it
-//! when the DSL (or [`Topology`](crate::Topology)) builds them.
+//! Build it **first**, because that installs the process default registry. Then
+//! build a topology against it and `run` the topology. The registry must be
+//! installed before the code builds the topology, because the default Avro,
+//! Protobuf, and JSON serdes read it when the DSL or
+//! [`Topology`](crate::Topology) builds them.
 //!
 //! ```no_run
 //! use apache_avro::AvroSchema;
@@ -62,9 +64,11 @@ use crate::{
     topology::BuiltTopology,
 };
 
-/// Owns the schema-registry lifecycle (cache + process default + pre-warm) and
-/// the [`KafkaStreams`] wiring for a streams application. Construct via
-/// [`StreamsApp::builder`].
+/// Owns the schema-registry lifecycle and the [`KafkaStreams`] wiring for a
+/// streams application.
+///
+/// The lifecycle covers the cache, the process default, and the pre-warm. Build
+/// this type with [`StreamsApp::builder`].
 pub struct StreamsApp {
     bootstrap: String,
     application_id: String,
@@ -88,8 +92,8 @@ pub struct StreamsApp {
 impl StreamsApp {
     /// Configure the app and **install the process default schema registry**.
     ///
-    /// Installs the registry as a side effect of `build`, so it is ready before
-    /// the topology (and its default serdes) are constructed.
+    /// `build` installs the registry as a side effect, so the registry is ready
+    /// before the code builds the topology and its default serdes.
     #[must_use]
     #[builder(start_fn = builder, finish_fn = build)]
     pub fn new(
@@ -98,7 +102,8 @@ impl StreamsApp {
         /// Schema Registry base URL, e.g. `http://localhost:8081`.
         #[builder(into)]
         schema_registry: String,
-        /// Registry behavior (auto-register vs lookup); defaults to auto-register.
+        /// Registry behavior, either auto-register or lookup. Default:
+        /// auto-register.
         cache_config: Option<CacheConfig>,
         #[builder(default)] store_backend: StoreBackend,
         #[builder(default)] processing_guarantee: ProcessingGuarantee,
@@ -129,8 +134,9 @@ impl StreamsApp {
         /// Minimum bytes requested by broker fetches.
         #[builder(default)]
         fetch_min: crabka_client_core::FetchMinBytes,
-        /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
-        /// caching. Defaults to 10 MiB, matching the JVM default.
+        /// Record-cache budget, which is the JVM `statestore.cache.max.bytes`.
+        /// `0` turns caching off. Default: 10 MiB, which matches the JVM
+        /// default.
         #[builder(default = DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES)]
         cache_max_bytes: ByteSize,
         /// Capacity shared by the v1 and v2 interactive-query request queues.
@@ -164,7 +170,7 @@ impl StreamsApp {
 }
 
 impl StreamsApp {
-    /// A fresh DSL builder; the schema registry is already installed.
+    /// A fresh DSL builder. The schema registry is already installed.
     #[must_use]
     // cargo-mutants: trivial builder accessor.
     #[cfg_attr(test, mutants::skip)]
@@ -172,8 +178,9 @@ impl StreamsApp {
         StreamsBuilder::new()
     }
 
-    /// The configured application id — pass it to [`Topology::build`] if you wire
-    /// a Processor-API topology by hand and feed it to [`run_built`](Self::run_built).
+    /// The configured application id. Pass it to [`Topology::build`] when you
+    /// wire a Processor-API topology by hand and feed that topology to
+    /// [`run_built`](Self::run_built).
     ///
     /// [`Topology::build`]: crate::Topology::build
     #[must_use]
@@ -196,7 +203,8 @@ impl StreamsApp {
         self.run_built(built).await
     }
 
-    /// Like [`run`](Self::run), but for an already-built topology (Processor API).
+    /// Like [`run`](Self::run), but for a topology that the Processor API has
+    /// already built.
     #[tracing::instrument(
         name = "streams.app.run_built",
         level = "info",

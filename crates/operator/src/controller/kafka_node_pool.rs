@@ -1,15 +1,16 @@
 //! `KafkaNodePool` reconciler.
 //!
 //! A `KafkaNodePool` describes a group of broker pods that share role,
-//! image, and resources. The reconciler renders one `StatefulSet` per
-//! pool, owner-ref'd to the pool itself, scheduled into the shared
-//! headless `Service` owned by the parent `Kafka` (looked up via the
-//! `crabka.io/cluster` label).
+//! image, and resources. The reconciler renders one `StatefulSet` for each
+//! pool. The `StatefulSet` has an owner reference to the pool itself, and
+//! it is scheduled into the shared headless `Service` that the parent
+//! `Kafka` owns. The reconciler finds that `Service` with the
+//! `crabka.io/cluster` label.
 //!
-//! Constraints: pools must be mixed `{Controller, Broker}`,
-//! `replicas` must equal 1, and `nodeIdStart` must lie in `0..=999_999`.
-//! Validation errors surface as a `Ready=False` condition without
-//! attempting any further reconcile.
+//! Pools have three constraints. Pools must be mixed
+//! `{Controller, Broker}`. `replicas` must equal 1. `nodeIdStart` must lie
+//! in `0..=999_999`. A validation error becomes a `Ready=False` condition,
+//! and the reconciler does no further work on the pool.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -47,17 +48,19 @@ use crate::{
     },
 };
 
-/// Container port the broker binds for Prometheus `/metrics`
-/// when `Kafka.spec.metricsConfig` is `Some`. Kept here next to
-/// `BROKER_PORT` so the pod-template renderer has both numbers in one
-/// place; referenced by `controller::metrics` to build the
-/// `PodMonitor` / `ServiceMonitor` endpoints.
+/// Container port that the broker binds for Prometheus `/metrics` when
+/// `Kafka.spec.metricsConfig` is `Some`.
+///
+/// This constant sits next to `BROKER_PORT` so that the pod-template
+/// renderer has both numbers in one place. `controller::metrics` reads it
+/// to build the `PodMonitor` and `ServiceMonitor` endpoints.
 pub(crate) const METRICS_PORT: i32 = 9404;
 
-/// Validation errors for a `KafkaNodePool`. Each variant maps to a
-/// distinct condition reason; the operator surfaces the variant as
-/// `Ready=False` and does not attempt further reconcile until the spec
-/// is corrected.
+/// Validation errors for a `KafkaNodePool`.
+///
+/// Each variant maps to a distinct condition reason. The operator reports
+/// the variant as `Ready=False` and does not attempt further reconcile
+/// until the user corrects the spec.
 #[derive(Debug, thiserror::Error)]
 pub enum PoolValidationError {
     #[error("spec.roles must equal {{Controller, Broker}}; got {0:?}")]
@@ -92,7 +95,7 @@ pub enum PoolValidationError {
     JbodVolumesImmutable,
 }
 
-/// Validate a `KafkaNodePool` spec against its invariants.
+/// Validates a `KafkaNodePool` spec against its invariants.
 pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> {
     let roles: HashSet<NodeRole> = pool.spec.roles.iter().copied().collect();
     let expected: HashSet<NodeRole> = [NodeRole::Controller, NodeRole::Broker]
@@ -136,9 +139,11 @@ pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> 
     Ok(())
 }
 
-/// JBOD volumes sorted ascending by id. Empty for non-JBOD storage.
-/// Sorting makes the rendered `StatefulSet` deterministic regardless of
-/// the order disks are listed in the spec.
+/// Returns the JBOD volumes, sorted by id in ascending order.
+///
+/// The result is empty for storage that is not JBOD. The sort makes the
+/// rendered `StatefulSet` deterministic, whatever order the spec lists the
+/// disks in.
 fn jbod_volumes_sorted(storage: Option<&Storage>) -> Vec<JbodVolume> {
     match storage {
         Some(Storage::Jbod(j)) => {
@@ -150,11 +155,15 @@ fn jbod_volumes_sorted(storage: Option<&Storage>) -> Vec<JbodVolume> {
     }
 }
 
-/// PVC-template name + pod mount path for one JBOD disk. The primary
-/// (lowest-id) disk reuses the `data` / `/var/lib/crabka/data`
-/// so the metadata raft log, the init container, and the cluster-level
-/// broker TOML (`log_dir = "/var/lib/crabka/data"`) are all unchanged.
-/// Every other disk `id = N` lives at `data-{N}` / `/var/lib/crabka/data-{N}`.
+/// Returns the PVC-template name and the pod mount path for one JBOD
+/// disk.
+///
+/// The primary disk, which is the disk with the lowest id, keeps the name
+/// `data` and the path `/var/lib/crabka/data`. The metadata raft log, the
+/// init container, and the cluster-level broker TOML
+/// (`log_dir = "/var/lib/crabka/data"`) therefore stay unchanged. Every
+/// other disk with `id = N` lives at `data-{N}` and
+/// `/var/lib/crabka/data-{N}`.
 fn jbod_mount(volume_id: i32, is_primary: bool) -> (String, String) {
     if is_primary {
         ("data".to_string(), "/var/lib/crabka/data".to_string())
@@ -166,9 +175,12 @@ fn jbod_mount(volume_id: i32, is_primary: bool) -> (String, String) {
     }
 }
 
-/// `(name, mount_path)` for every non-primary JBOD disk, sorted by id.
-/// Empty for non-JBOD storage. These become the broker container's extra
-/// `volumeMounts` and the `CRABKA_EXTRA_LOG_DIRS` env value.
+/// Returns `(name, mount_path)` for every non-primary JBOD disk, sorted
+/// by id.
+///
+/// The result is empty for storage that is not JBOD. These pairs become
+/// the extra `volumeMounts` of the broker container and the
+/// `CRABKA_EXTRA_LOG_DIRS` env value.
 fn jbod_extra_mounts(storage: Option<&Storage>) -> Vec<(String, String)> {
     jbod_volumes_sorted(storage)
         .iter()
@@ -214,16 +226,17 @@ NODE_ID=\"$(cat /var/lib/crabka/data/.node-id)\"\n\
 cp /etc/crabka/config/broker-${NODE_ID}.toml /run/crabka/broker.toml\n\
 exec /usr/bin/crabka-broker \\\n  --config-file=/run/crabka/broker.toml \\\n  --broker-id=\"${NODE_ID}\"\n";
 
-/// Build the broker container's main shell script. The disabled variant
-/// returns `MAIN_SCRIPT` byte-for-byte so a cluster with
-/// `metrics_config: None` produces a byte-identical pod template (the
-/// pod-template-hash stays put, so no broker pod rolls). The enabled
-/// variant appends `--metrics-listen-addr=0.0.0.0:9404` so the broker
-/// binds its Prometheus endpoint.
+/// Builds the main shell script of the broker container.
 ///
-/// The enabled variant is a separate string literal (no `format!`) so a
-/// test failure shows the full expected text inline rather than a
-/// templated fragment.
+/// The disabled variant returns `MAIN_SCRIPT` byte-for-byte, so a cluster
+/// with `metrics_config: None` gets a byte-identical pod template. The
+/// pod-template hash then stays the same, and no broker pod rolls. The
+/// enabled variant adds `--metrics-listen-addr=0.0.0.0:9404`, so that the
+/// broker binds its Prometheus endpoint.
+///
+/// The enabled variant is a separate string literal and uses no
+/// `format!`. A test failure therefore shows the full expected text
+/// inline instead of a templated fragment.
 fn build_main_script(
     metrics_enabled: bool,
     client_dispatch_queue_capacity: Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
@@ -604,9 +617,11 @@ fn append_jbod_env(env: &mut Vec<serde_json::Value>, mounts: &[(String, String)]
     env.push(json!({ "name": "CRABKA_EXTRA_LOG_DIRS", "value": value }));
 }
 
-/// Build one `volumeClaimTemplate` for a single PVC: `accessModes`,
-/// requested `size`, optional `storageClassName`, and inherited pod
-/// labels (so the GC selector matches the bound PVC).
+/// Builds one `volumeClaimTemplate` for a single PVC.
+///
+/// The template carries `accessModes`, the requested `size`, an optional
+/// `storageClassName`, and the inherited pod labels. The labels let the GC
+/// selector match the bound PVC.
 fn pvc_template(
     name: &str,
     size: &str,
@@ -631,16 +646,18 @@ fn pvc_template(
     template
 }
 
-/// Build the `StatefulSet`'s pod-volume entries and its
-/// `volumeClaimTemplates` based on the pool's `Storage` setting.
-/// Returns `(pod_volumes_json, volume_claim_templates)`. An empty
-/// templates vec means "no PVCs" (the `Ephemeral` path).
+/// Builds the pod-volume entries and the `volumeClaimTemplates` of the
+/// `StatefulSet` from the `Storage` setting of the pool.
 ///
-/// The returned `volumes` array always includes the `broker-config`
-/// `ConfigMap` volume (unconditional). For `PersistentClaim` / `Jbod` the
-/// `data` (and `data-{id}`) volume entries are omitted: the `StatefulSet`
-/// controller mounts each PVC into the pod under the template name
-/// automatically, so an explicit pod-volume entry would conflict.
+/// This function returns `(pod_volumes_json, volume_claim_templates)`. An
+/// empty templates vec means that there are no PVCs. That is the
+/// `Ephemeral` path.
+///
+/// The returned `volumes` array always holds the `broker-config`
+/// `ConfigMap` volume. For `PersistentClaim` and `Jbod`, the function
+/// omits the `data` and `data-{id}` volume entries. The `StatefulSet`
+/// controller mounts each PVC into the pod under the template name by
+/// itself, so an explicit pod-volume entry would conflict.
 // each branch + secret mount is independent
 // pure render helper: each arg names one independent secret-mount / storage toggle
 type AuthenticationStorage<'a> = (
@@ -869,15 +886,17 @@ fn render_storage(
     (volumes, templates)
 }
 
-/// Build the `StatefulSet`'s `persistentVolumeClaimRetentionPolicy`
-/// block when any PVC is in play. Returns `None` only when neither
-/// the pool's data storage nor the tier-storage cache is a PVC.
+/// Builds the `persistentVolumeClaimRetentionPolicy` block of the
+/// `StatefulSet` when there is at least one PVC.
 ///
-/// A `StatefulSet`'s retention policy applies set-wide to every
-/// `volumeClaimTemplate`. Validation upstream ensures that
-/// when both data and tier PVCs exist, their `delete_claim` flags
-/// match — so we can pick the pool's value when present and the tier
-/// value otherwise.
+/// This function returns `None` only when neither the data storage of the
+/// pool nor the tier-storage cache is a PVC.
+///
+/// The retention policy of a `StatefulSet` applies to every
+/// `volumeClaimTemplate` in the set. Earlier validation makes sure that
+/// the `delete_claim` flags of the data PVC and the tier PVC match when
+/// both exist. This function can therefore take the value of the pool
+/// when it is present, and the tier value if it is not.
 fn render_pvc_retention_policy(
     storage: Option<&Storage>,
     tier_persistence: Option<&crate::crd::kafka::TieredStoragePersistence>,
@@ -896,10 +915,12 @@ fn render_pvc_retention_policy(
     }))
 }
 
-/// Overwrite `pod_spec`'s `volumes` field with the rendered
-/// `pod_volumes`. The `pod_spec` template already carries an emptyDir
-/// `data` entry from the inline `json!` block; this replaces it so the
-/// `PersistentClaim` path doesn't double-declare `data`.
+/// Overwrites the `volumes` field of `pod_spec` with the rendered
+/// `pod_volumes`.
+///
+/// The `pod_spec` template already carries an emptyDir `data` entry from
+/// the inline `json!` block. This function replaces that entry, so that
+/// the `PersistentClaim` path does not declare `data` two times.
 fn pod_spec_with_data_volume(
     mut pod_spec: serde_json::Value,
     pod_volumes: serde_json::Value,
@@ -908,11 +929,12 @@ fn pod_spec_with_data_volume(
     pod_spec
 }
 
-/// Render the `StatefulSet` for a pool. Naming: `<parent>-<pool>`,
-/// served from the parent's shared headless `Service`
-/// `<parent>-broker-headless`. Owner-ref points to the pool, not the
-/// parent — `kubectl delete knp <pool>` deletes the `StatefulSet`
-/// directly.
+/// Renders the `StatefulSet` for a pool.
+///
+/// The name is `<parent>-<pool>`. The shared headless `Service` of the
+/// parent, `<parent>-broker-headless`, serves it. The owner reference
+/// points to the pool and not to the parent, so
+/// `kubectl delete knp <pool>` deletes the `StatefulSet` directly.
 // linear render pipeline: pod template + storage + per-feature wiring
 pub(crate) fn render_statefulset(
     parent: &Kafka,
@@ -1206,23 +1228,28 @@ fn default_resources() -> ResourceRequirements {
     }
 }
 
-/// Monotonic validation of `spec.storage` against the live
-/// `StatefulSet`'s observed `volumeClaimTemplates`. `observed` is
-/// `None` when no live `StatefulSet` exists yet (first reconcile — any
-/// spec is acceptable) and `Some(templates)` (possibly empty, for an
-/// `Ephemeral` pool) otherwise.
+/// Validates `spec.storage` monotonically against the observed
+/// `volumeClaimTemplates` of the live `StatefulSet`.
 ///
-/// The observed storage *kind* is derived from the template count:
-/// `0 → Ephemeral`, `1 → PersistentClaim`, `>= 2 → Jbod` (JBOD always
-/// has >= 2 disks — see [`validate`]). Rejections (all map to
-/// `Ready=False, reason=StorageImmutable`):
-/// - storage-type switch (`Ephemeral` / `PersistentClaim` / `Jbod`).
-/// - `class` change on any matched disk.
-/// - `size` decrease on any matched disk.
-/// - JBOD disk-set change (adding/removing disks, deferred).
+/// `observed` is `None` when no live `StatefulSet` exists yet. That is the
+/// first reconcile, and any spec is acceptable. If not, `observed` is
+/// `Some(templates)`, and the templates can be empty for an `Ephemeral`
+/// pool.
 ///
-/// `delete_claim` is *not* checked: it only affects the `StatefulSet`'s
-/// retention-policy field (mutable), not the PVC templates this compares.
+/// This function derives the observed storage *kind* from the template
+/// count: `0 → Ephemeral`, `1 → PersistentClaim`, `>= 2 → Jbod`. JBOD
+/// always has 2 or more disks, as [`validate`] shows, so the count is an
+/// unambiguous discriminator. The function rejects these changes, and all
+/// of them map to `Ready=False, reason=StorageImmutable`:
+/// - a storage-type switch between `Ephemeral`, `PersistentClaim`, and
+///   `Jbod`.
+/// - a `class` change on any matched disk.
+/// - a `size` decrease on any matched disk.
+/// - a JBOD disk-set change. To add or remove disks is deferred work.
+///
+/// The function does *not* check `delete_claim`. That flag only affects
+/// the retention-policy field of the `StatefulSet`, which is mutable, and
+/// not the PVC templates that this function compares.
 fn validate_storage_change(
     desired: Option<&Storage>,
     observed: Option<&[PersistentVolumeClaim]>,
@@ -1257,9 +1284,11 @@ fn validate_storage_change(
     }
 }
 
-/// Derive the observed storage kind from the live `StatefulSet`'s
-/// `volumeClaimTemplates` count. JBOD is required to have >= 2 disks
-/// (see [`validate`]), so the count is an unambiguous discriminator.
+/// Derives the observed storage kind from the `volumeClaimTemplates`
+/// count of the live `StatefulSet`.
+///
+/// JBOD must have 2 or more disks, as [`validate`] shows, so the count is
+/// an unambiguous discriminator.
 fn observed_storage_kind(templates: &[PersistentVolumeClaim]) -> &'static str {
     match templates.len() {
         0 => "Ephemeral",
@@ -1268,8 +1297,10 @@ fn observed_storage_kind(templates: &[PersistentVolumeClaim]) -> &'static str {
     }
 }
 
-/// Extract `(size, class)` from a `volumeClaimTemplate`. A missing spec /
-/// request yields an empty size (compares as 0 bytes).
+/// Extracts `(size, class)` from a `volumeClaimTemplate`.
+///
+/// A missing spec or a missing request gives an empty size, which compares
+/// as 0 bytes.
 fn size_class_from_pvc(pvc: &PersistentVolumeClaim) -> (String, Option<String>) {
     let Some(spec) = pvc.spec.as_ref() else {
         return (String::new(), None);
@@ -1284,7 +1315,7 @@ fn size_class_from_pvc(pvc: &PersistentVolumeClaim) -> (String, Option<String>) 
     (size, spec.storage_class_name.clone())
 }
 
-/// Reject a `class` change or `size` decrease on one matched disk.
+/// Rejects a `class` change or a `size` decrease on one matched disk.
 fn check_class_and_shrink(
     desired_size: &str,
     desired_class: Option<&str>,
@@ -1308,11 +1339,14 @@ fn check_class_and_shrink(
     Ok(())
 }
 
-/// JBOD-vs-JBOD monotonic check. Disks are matched by identity: the
-/// `data` template ↔ the desired primary (lowest id), and each
-/// `data-{N}` template ↔ desired disk id `N`. The non-primary id set
-/// must be identical (adding/removing disks — and reassigning the
-/// primary — is deferred), and each matched disk's `class`/`size` obey
+/// Runs the monotonic check of one JBOD spec against another.
+///
+/// This function matches the disks by identity. The `data` template
+/// matches the desired primary, which is the disk with the lowest id, and
+/// each `data-{N}` template matches the desired disk with id `N`. The
+/// non-primary id set must be identical. To add disks, to remove disks,
+/// and to move the primary to another disk are all deferred work. The
+/// `class` and the `size` of each matched disk must obey
 /// [`check_class_and_shrink`].
 fn validate_jbod_change(
     desired: &crate::crd::JbodSpec,
@@ -1370,9 +1404,11 @@ fn storage_kind(s: Option<&Storage>) -> &'static str {
     }
 }
 
-/// Map a `PoolValidationError` to a `Ready=False` condition with a
-/// distinct `reason`. Reason strings are the contract that admins
-/// (and the e2e tests) match on.
+/// Maps a `PoolValidationError` to a `Ready=False` condition with a
+/// distinct `reason`.
+///
+/// The reason strings are the contract that admins and the e2e tests match
+/// on.
 fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
     let (reason, message) = match err {
         PoolValidationError::RolesNotMixed(roles) => (
@@ -1426,7 +1462,7 @@ fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
     condition("Ready", "False", reason, &message)
 }
 
-/// Wrap `common::patch_status` with the pool-specific status shape.
+/// Wraps `common::patch_status` with the pool-specific status shape.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -1446,38 +1482,41 @@ async fn patch_status_for_pool(
     common::patch_status::<KafkaNodePool, KafkaNodePoolStatus>(pool_api, name, status).await
 }
 
-/// Whether the parent `Kafka`'s version model has cleared this pool to
-/// render (and therefore format) broker pods.
+/// Shows whether the version model of the parent `Kafka` has cleared this
+/// pool to render, and thus to format, broker pods.
 ///
-/// Version validation lives in the *Kafka* controller ([`kafka::reconcile`]
-/// → [`crate::version::evaluate`]), which publishes the verdict as the
-/// parent's `KafkaVersionValid` condition and finalizes the resolved value
-/// in `status.metadataVersion`. The pool reconciler owns no version logic;
-/// it only reads that already-fetched parent status (no extra API request,
-/// mirroring [`common::plan_rollout`]'s status-from-the-watched-object
-/// posture) and refuses to format pods until the model has cleared —
-/// otherwise an invalid `spec.kafkaVersion` on a brand-new cluster would
-/// bring the brokers up at an unvalidated version instead of surfacing the
-/// error and waiting.
+/// Version validation lives in the *Kafka* controller
+/// ([`kafka::reconcile`] → [`crate::version::evaluate`]). That controller
+/// publishes the verdict as the `KafkaVersionValid` condition of the
+/// parent and finalizes the resolved value in `status.metadataVersion`.
+/// The pool reconciler owns no version logic. It only reads the parent
+/// status that the operator already fetched, with no more API requests.
+/// This is the same status-from-the-watched-object posture that
+/// [`common::plan_rollout`] uses. The pool reconciler refuses to format
+/// pods until the model has cleared. If not, an invalid
+/// `spec.kafkaVersion` on a new cluster would bring the brokers up at a
+/// version that nobody validated, instead of a reported error and a wait.
 #[derive(Debug)]
 enum VersionGate {
-    /// The parent's version model is valid (or already finalized): render
-    /// the `StatefulSet` as normal.
+    /// The version model of the parent is valid, or the operator already
+    /// finalized it. Render the `StatefulSet` as normal.
     Cleared,
-    /// The parent's version model has not cleared: refrain from rendering
-    /// and surface `cond` (a `Ready=False`) on the pool.
+    /// The version model of the parent has not cleared. Do not render, and
+    /// report `cond`, a `Ready=False`, on the pool.
     Blocked(KafkaCondition),
 }
 
-/// Decide whether `parent`'s version model clears this pool to format pods.
+/// Decides whether the version model of `parent` clears this pool to
+/// format pods.
 ///
-/// Clears when EITHER the parent carries `KafkaVersionValid=True`, OR a
-/// finalized `status.metadataVersion` is present. The finalized-version
-/// fallback is deliberate: a value there means a prior reconcile already
-/// validated the model and formatted the pods, so a *later* spec edit that
-/// flips `KafkaVersionValid=False` must not tear a running cluster down —
-/// the Kafka controller holds the previous finalized version and simply
-/// declines to advance it (see `kafka.rs` status patch).
+/// The pool clears when the parent carries `KafkaVersionValid=True`, or
+/// when a finalized `status.metadataVersion` is present. The
+/// finalized-version fallback is deliberate. A value there means that an
+/// earlier reconcile already validated the model and formatted the pods.
+/// A *later* spec edit that flips `KafkaVersionValid=False` must therefore
+/// not tear a running cluster down. The Kafka controller holds the
+/// previous finalized version and declines to advance it. See the status
+/// patch in `kafka.rs`.
 fn version_gate(parent: &Kafka) -> VersionGate {
     // Not cleared. Distinguish "the parent declared the version invalid"
     // from "the parent hasn't published a verdict yet" so admins can tell
@@ -1509,7 +1548,7 @@ fn version_gate(parent: &Kafka) -> VersionGate {
     VersionGate::Blocked(cond)
 }
 
-/// Run the `KafkaNodePool` controller forever. Returns only on
+/// Runs the `KafkaNodePool` controller forever. It returns only on an
 /// irrecoverable stream error.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
@@ -1529,8 +1568,9 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reconcile entry point. Times the pass and records the reconcile
-/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
+/// Reconcile entry point. It times the pass, records the reconcile
+/// counter and histogram, then calls the internal `reconcile_inner`
+/// operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -2574,7 +2614,7 @@ mod tests {
         }
     }
 
-    /// Build observed JBOD templates (`data` + `data-{id}`) for the
+    /// Builds the observed JBOD templates `data` and `data-{id}` for the
     /// monotonic-change tests.
     fn jbod_observed(volumes: &[(&str, &str, Option<&str>)]) -> Vec<PersistentVolumeClaim> {
         volumes
@@ -2945,10 +2985,10 @@ mod tests {
         assert!(rust_log.value.is_none());
     }
 
-    /// Without `spec.delegationToken`, the broker container's
-    /// env list must NOT carry `CRABKA_DELEGATION_TOKEN_SECRET_KEY` —
-    /// keeps the pod template byte-identical for clusters without it
-    /// (no spurious roll).
+    /// Without `spec.delegationToken`, the env list of the broker
+    /// container must NOT carry `CRABKA_DELEGATION_TOKEN_SECRET_KEY`. This
+    /// keeps the pod template byte-identical for clusters without that
+    /// field, so no pod rolls without a reason.
     #[test]
     fn render_statefulset_omits_dt_master_key_env_when_unset() {
         let parent = parent_fixture("demo");
@@ -2965,11 +3005,11 @@ mod tests {
         );
     }
 
-    /// With `spec.delegationToken.secretKeyRef`, the operator
-    /// must wire `CRABKA_DELEGATION_TOKEN_SECRET_KEY` via
-    /// `valueFrom.secretKeyRef` (NOT a literal value — otherwise the
-    /// Secret value leaks into the `StatefulSet` manifest). With the key
-    /// unset, it defaults to `secret-key`.
+    /// With `spec.delegationToken.secretKeyRef`, the operator must wire
+    /// `CRABKA_DELEGATION_TOKEN_SECRET_KEY` with `valueFrom.secretKeyRef`.
+    /// It must NOT use a literal value, because a literal value would put
+    /// the Secret value into the `StatefulSet` manifest. With the key
+    /// unset, the default is `secret-key`.
     #[test]
     fn render_statefulset_dt_master_key_env_from_secret_default_key() {
         use crate::crd::kafka::{DelegationTokenConfig, SecretKeyRef};
@@ -3003,7 +3043,7 @@ mod tests {
         assert!(secret_ref.key == "secret-key");
     }
 
-    /// Explicit `key` override surfaces in the `SecretKeySelector`.
+    /// An explicit `key` override shows in the `SecretKeySelector`.
     #[test]
     fn render_statefulset_dt_master_key_env_honors_explicit_key() {
         use crate::crd::kafka::{DelegationTokenConfig, SecretKeyRef};
@@ -3052,10 +3092,10 @@ mod tests {
         );
     }
 
-    /// Build a Kafka CR with one OAuth listener whose
-    /// `tls_trusted_certificates` contains one entry — exercises the
-    /// `Some(...)` branch of [`oauth_jwks_trust_secret_name`] from
-    /// inside the pool reconcile's render path.
+    /// Builds a Kafka CR with one OAuth listener whose
+    /// `tls_trusted_certificates` holds one entry. This exercises the
+    /// `Some(...)` branch of [`oauth_jwks_trust_secret_name`] from inside
+    /// the render path of the pool reconcile.
     fn parent_with_oauth_trust(name: &str) -> Kafka {
         use crate::crd::{
             Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
@@ -3232,15 +3272,15 @@ mod tests {
         );
     }
 
-    /// When the parent Kafka CR has an OAuth listener
-    /// configured for introspection mode (`accessTokenIsJwt: false` +
-    /// `clientSecret`), the rendered `StatefulSet` must:
-    /// - expose the user's source Secret as a pod volume with a
-    ///   projected `items` mapping that pins the user's key to the
-    ///   fixed in-pod filename `client-secret`;
-    /// - mount that volume on the broker container at the canonical
-    ///   path `/etc/crabka/oauth-introspection` (matching the broker TOML
-    ///   render).
+    /// When the parent Kafka CR has an OAuth listener in introspection
+    /// mode, with `accessTokenIsJwt: false` and `clientSecret`, the
+    /// rendered `StatefulSet` must do two things:
+    /// - show the source Secret of the user as a pod volume with a
+    ///   projected `items` mapping. That mapping pins the key of the user
+    ///   to the fixed in-pod filename `client-secret`.
+    /// - mount that volume on the broker container at the canonical path
+    ///   `/etc/crabka/oauth-introspection`, which is the path in the
+    ///   broker TOML render.
     #[test]
     fn render_statefulset_mounts_oauth_introspection_secret_when_introspection_mode() {
         use crate::crd::{
@@ -3328,11 +3368,12 @@ mod tests {
         );
     }
 
-    /// JWT-mode OAuth listeners (the default —
-    /// `accessTokenIsJwt: true`, no `clientSecret`) must NOT cause the
-    /// introspection volume / mount to be rendered. Confirms the
-    /// short-circuit in `oauth_introspection_secret_mount` flows through
-    /// to a byte-identical pod template for the common JWT path.
+    /// JWT-mode OAuth listeners are the default. They set
+    /// `accessTokenIsJwt: true` and no `clientSecret`, and they must NOT
+    /// make the operator render the introspection volume or mount. This
+    /// test confirms that the short-circuit in
+    /// `oauth_introspection_secret_mount` gives a byte-identical pod
+    /// template for the common JWT path.
     #[test]
     fn render_statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
         // parent_with_oauth_trust builds a JWT-mode OAuth listener with
@@ -3445,10 +3486,11 @@ mod tests {
 
     // ── S3 tiered storage env + volume gating ────────────────────────
 
-    /// S3 backend with credentials must inject AWS env vars from the
-    /// referenced Secret via `valueFrom.secretKeyRef`. The literal env
-    /// value must be empty so the secret never lands in the pod spec
-    /// JSON (same guarantee as the delegation-token wiring).
+    /// An S3 backend with credentials must inject the AWS env vars from
+    /// the referenced Secret with `valueFrom.secretKeyRef`. The literal
+    /// env value must be empty, so that the secret never lands in the pod
+    /// spec JSON. This is the same guarantee as the delegation-token
+    /// wiring.
     #[test]
     fn pod_template_injects_aws_credentials_env_from_secret_when_s3() {
         let parent = parent_with_s3_tiered_storage("demo", true);
@@ -3492,11 +3534,11 @@ mod tests {
         assert!(sk_ref.key == "secret-access-key");
     }
 
-    /// S3 backend without `credentials` must produce a byte-identical
-    /// env list to the no-tier baseline modulo any other tier-storage
-    /// signal — the broker pod inherits IRSA / instance-profile auth
-    /// from the cluster, and the operator must not inject placeholder
-    /// AWS env entries.
+    /// An S3 backend without `credentials` must give an env list that is
+    /// byte-identical to the no-tier baseline, apart from any other
+    /// tier-storage signal. The broker pod inherits IRSA or
+    /// instance-profile authentication from the cluster, and the operator
+    /// must not inject placeholder AWS env entries.
     #[test]
     fn pod_template_omits_aws_credentials_env_when_s3_credentials_absent() {
         let parent = parent_with_s3_tiered_storage("demo", false);
@@ -3516,9 +3558,10 @@ mod tests {
         );
     }
 
-    /// S3 backend must NOT mount the local-tier `tier-storage`
-    /// emptyDir — that volume is meaningful only to `LocalTieredStorage`,
-    /// and shipping it on every S3 cluster would waste pod-local disk.
+    /// An S3 backend must NOT mount the local-tier `tier-storage`
+    /// emptyDir. That volume has a meaning only for
+    /// `LocalTieredStorage`, and it would waste pod-local disk on every S3
+    /// cluster.
     #[test]
     fn pod_template_omits_tier_storage_volume_when_s3() {
         let parent = parent_with_s3_tiered_storage("demo", true);
@@ -3602,8 +3645,9 @@ mod tests {
     }
 
     /// GCS with an explicit service-account key Secret must mount that
-    /// Secret read-only as a FILE at `GCS_CREDENTIALS_DIR`, projecting the
-    /// referenced key to `key.json`. No AWS-style env vars are added.
+    /// Secret read-only as a FILE at `GCS_CREDENTIALS_DIR`. The mount
+    /// projects the referenced key to `key.json`. The operator adds no
+    /// AWS-style env vars.
     #[test]
     fn pod_template_mounts_gcs_credentials_file_when_creds_set() {
         let parent = parent_with_gcs_tiered_storage("demo", true);
@@ -3669,9 +3713,10 @@ mod tests {
         );
     }
 
-    /// Keyless GCS (Workload Identity / ADC): with `credentials` unset, no
-    /// gcs-credentials volume/mount and no env are added — the pod resolves
-    /// credentials from its bound KSA via the metadata server.
+    /// Keyless GCS with Workload Identity or ADC. With `credentials`
+    /// unset, the operator adds no gcs-credentials volume, no mount, and
+    /// no env. The pod resolves the credentials from its bound KSA through
+    /// the metadata server.
     #[test]
     fn pod_template_omits_gcs_credentials_when_keyless() {
         let parent = parent_with_gcs_tiered_storage("demo", false);
@@ -4077,8 +4122,9 @@ mod tests {
     // pods until the parent Kafka's version model has cleared. The decision is the pure
     // `version_gate`; the reconciler just acts on it. ---
 
-    /// Attach a `KafkaVersionValid` condition + finalized metadata version
-    /// to a parent fixture's status, mirroring what `kafka.rs` writes.
+    /// Attaches a `KafkaVersionValid` condition and a finalized metadata
+    /// version to the status of a parent fixture. This is what `kafka.rs`
+    /// writes.
     fn parent_with_version_status(
         name: &str,
         version_valid: Option<bool>,

@@ -1,5 +1,7 @@
-//! Connect-RPC handlers — thin adapters: proto in, `GatewayRecord` to the
-//! core, `RecordOutcome` back to proto.
+//! Connect-RPC handlers.
+//!
+//! Each handler is a thin adapter. It takes proto in, sends a `GatewayRecord`
+//! to the core, and turns the `RecordOutcome` back into proto.
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -12,9 +14,10 @@ use crabka_units::prelude::*;
 
 use crate::{metrics::metrics, pb, state::AppState};
 
-/// The principal used when no authenticated identity is present on the request
-/// (plaintext listener, or no proxy-injected identity). Mirrors Kafka's
-/// `ANONYMOUS` principal so ACLs can target it explicitly.
+/// The principal the gateway uses when the request carries no authenticated
+/// identity, for example on a plaintext listener or with no proxy-injected
+/// identity. It matches Kafka's `ANONYMOUS` principal, so an ACL can target it
+/// explicitly.
 pub(crate) fn anonymous_principal() -> Principal {
     Principal {
         name: "ANONYMOUS".into(),
@@ -23,20 +26,21 @@ pub(crate) fn anonymous_principal() -> Principal {
     }
 }
 
-/// The host used when the caller's peer address is not available on the
-/// request. Matches the broker's "unknown host" convention for ACL host
-/// matching (the `*` host pattern still matches it).
+/// The host the gateway uses when the request carries no caller peer address.
+/// It matches the broker's "unknown host" convention for ACL host matching, and
+/// the `*` host pattern still matches it.
 pub(crate) fn unknown_host() -> SocketAddr {
     "0.0.0.0:0".parse().expect("constant socket addr parses")
 }
 
 /// Authorize a single `(resource_type, resource_name, operation)` for the
-/// effective principal/host against the gateway's ACL cache, emitting an audit
-/// log line for the decision. Returns the binary result; callers decide how to
-/// surface a `Deny`.
+/// effective principal and host against the gateway's ACL cache.
 ///
-/// With the default `AllowAllAuthorizer` this always returns `Allow`, so the
-/// gateway's pre-authz behavior is preserved.
+/// This function writes an audit log line for the decision. It returns the
+/// binary result, and the caller decides how to surface a `Deny`.
+///
+/// With the default `AllowAllAuthorizer` it always returns `Allow`, which keeps
+/// the gateway's pre-authz behavior.
 pub(crate) fn authorize_resource(
     state: &AppState,
     principal: &Principal,
@@ -66,14 +70,16 @@ pub(crate) fn authorize_resource(
     result
 }
 
-/// Map a produce error to a per-record `RecordResult`. `Unavailable` is
-/// retriable (the caller should re-route to another replica); `Unauthorized`
-/// is a non-retriable `PERMISSION_DENIED`; everything else is reported
-/// non-retriable with a generic code.
+/// Map a produce error to a per-record `RecordResult`.
 ///
-/// Codec errors split by cause: a `Registry` transport/availability failure is
-/// retriable (the registry may recover), while `Serialize`/`Validate`/`Framing`
-/// faults are non-retriable (the same bytes will fail identically).
+/// `Unavailable` is retriable, and the caller should re-route to another
+/// replica. `Unauthorized` is a non-retriable `PERMISSION_DENIED`. Every other
+/// error is reported as non-retriable with a generic code.
+///
+/// Codec errors split by cause. A `Registry` transport or availability failure
+/// is retriable, because the registry can recover. A `Serialize`, `Validate`,
+/// or `Framing` fault is non-retriable, because the same bytes fail the same
+/// way.
 pub(crate) fn error_result(e: &crate::error::GatewayError) -> crate::pb::RecordResult {
     use crate::{codec::CodecError, error::GatewayError};
     let retriable = matches!(e, GatewayError::Unavailable)
@@ -97,9 +103,9 @@ pub(crate) fn error_result(e: &crate::error::GatewayError) -> crate::pb::RecordR
     }
 }
 
-/// Map a wire [`pb::SchemaFormat`] (an i32) to the codec [`SchemaFormat`].
-/// `SCHEMA_FORMAT_UNSPECIFIED` (and any unknown value) defaults to Avro — the
-/// Confluent default `schemaType`.
+/// Map a wire [`pb::SchemaFormat`], which is an i32, to the codec
+/// [`SchemaFormat`]. `SCHEMA_FORMAT_UNSPECIFIED` and any unknown value default
+/// to Avro, the Confluent default `schemaType`.
 fn schema_format_from_pb(format: i32) -> crate::codec::SchemaFormat {
     use crate::codec::SchemaFormat;
     match crate::pb::SchemaFormat::try_from(format) {
@@ -113,7 +119,8 @@ fn schema_format_from_pb(format: i32) -> crate::codec::SchemaFormat {
 }
 
 /// Map a wire [`pb::SchemaSelector`] to the codec [`SchemaSelector`]. An empty
-/// `subject` ⇒ `None` (`TopicNameStrategy`); a zero `id` ⇒ `None` (resolve latest).
+/// `subject` ⇒ `None`, which selects `TopicNameStrategy`. A zero `id` ⇒ `None`,
+/// which resolves the latest schema.
 fn schema_selector_from_pb(sel: crate::pb::SchemaSelector) -> crate::codec::SchemaSelector {
     crate::codec::SchemaSelector {
         subject: (!sel.subject.is_empty()).then_some(sel.subject),
@@ -124,10 +131,10 @@ fn schema_selector_from_pb(sel: crate::pb::SchemaSelector) -> crate::codec::Sche
 
 /// Convert a wire [`pb::Record`] into the transport-agnostic [`GatewayRecord`].
 ///
-/// The `body` oneof splits raw vs structured: `raw` (or an absent oneof) keeps
-/// `value` with no structured body; `structured` carries the JSON + the
-/// record's `schema` selector (the codec serializes it on the produce path),
-/// leaving `value` empty.
+/// The `body` oneof splits raw from structured. `raw`, or an absent oneof,
+/// keeps `value` and carries no structured body. `structured` carries the JSON
+/// and the record's `schema` selector, and it leaves `value` empty. The codec
+/// serializes that JSON on the produce path.
 pub(crate) fn to_gateway_record(r: crate::pb::Record) -> crate::types::GatewayRecord {
     use crate::pb::record::Body;
     let selector = r.schema.map(schema_selector_from_pb);

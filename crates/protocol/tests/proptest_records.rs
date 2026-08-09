@@ -81,12 +81,13 @@ proptest_codec!(lz4, CompressionType::Lz4);
 proptest_codec!(zstd, CompressionType::Zstd);
 
 proptest! {
-    /// KIP-534: stamping a delete horizon sets bit 6, repurposes
-    /// `base_timestamp`, and re-bases every record's `timestamp_delta` so the
-    /// reconstructed absolute timestamps survive an encode/decode round trip.
+    /// KIP-534: a stamped delete horizon sets bit 6, repurposes
+    /// `base_timestamp`, and re-bases every record's `timestamp_delta`, so the
+    /// reconstructed absolute timestamps survive an encode and decode round
+    /// trip.
     ///
-    /// Bounds are kept modest so absolute timestamps stay well within `i64`
-    /// after re-basing (no saturation in the helper).
+    /// The bounds stay modest, so absolute timestamps stay well within `i64`
+    /// after the re-basing. The helper does not saturate.
     #[test]
     fn delete_horizon_batches_round_trip(
         base in 0i64..1_000_000,

@@ -1,15 +1,16 @@
 //! Leaf source and `LogicalPlan` assembly for the instant-vector-selector
 //! operator path.
 //!
-//! The custom operators ([`SeriesDivide`], [`SeriesNormalize`],
-//! [`InstantManipulate`]) consume per-series batches carrying the series' label
-//! columns plus a `timestamp` (`Int64`) and `value` (`Float64`) column. The
-//! `MetricStore::scan` seam, by contrast, yields fingerprint/timestamp/value
-//! rows without label columns. This module bridges that gap: it materializes the
-//! matched series' labels (keyed by fingerprint) into label columns alongside
-//! the samples, registers the result as an in-memory leaf table, and assembles
-//! the `SeriesDivide -> SeriesNormalize -> InstantManipulate` chain that selects
-//! one sample per series within the lookback window.
+//! The custom operators [`SeriesDivide`], [`SeriesNormalize`], and
+//! [`InstantManipulate`] read per-series batches. Each batch carries the label
+//! columns of the series plus an `Int64` `timestamp` column and a `Float64`
+//! `value` column. The `MetricStore::scan` seam returns fingerprint, timestamp,
+//! and value rows with no label columns. This module fills that gap: it
+//! materializes the labels of the matched series, keyed by fingerprint, into
+//! label columns beside the samples. It then registers the result as an
+//! in-memory leaf table and assembles the
+//! `SeriesDivide -> SeriesNormalize -> InstantManipulate` chain that selects one
+//! sample per series inside the lookback window.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -35,16 +36,19 @@ use crate::{
     },
 };
 
-/// Leaf-batch column carrying the per-sample timestamp in epoch milliseconds.
-/// This is the operator chain's time index, so [`InstantManipulate`] rewrites
-/// it to the grid (eval) timestamp on output.
+/// Leaf-batch column with the per-sample timestamp in epoch milliseconds.
+///
+/// This column is the time index of the operator chain, so
+/// [`InstantManipulate`] rewrites it to the grid eval timestamp on output.
 pub const TIME_COLUMN: &str = "timestamp";
 /// Leaf-batch column carrying the per-sample float value.
 pub const VALUE_COLUMN: &str = "value";
-/// Leaf-batch column preserving the *original* sample timestamp. It is not the
-/// time index, so the operator chain carries it through unchanged via `take`,
-/// letting the engine recover the selected sample's true timestamp (which the
-/// interpreter reports as `InstantSample.ts_ms` and `timestamp()` reads).
+/// Leaf-batch column that keeps the original sample timestamp.
+///
+/// This column is not the time index, so the operator chain carries it through
+/// unchanged with `take`. The engine then recovers the true timestamp of the
+/// selected sample. The interpreter reports that timestamp as
+/// `InstantSample.ts_ms`, and `timestamp()` reads it.
 pub const SAMPLE_TIME_COLUMN: &str = "sample_timestamp";
 
 /// One float sample with its series identity resolved to a label set.
@@ -67,17 +71,18 @@ pub struct InstantSelectorPlan {
     pub labels_by_fp: std::collections::BTreeMap<SeriesFingerprint, Labels>,
 }
 
-/// Build the leaf table and operator chain that evaluates a bare instant-vector
-/// selector at `eval_time_ms` with the given `lookback_delta`.
+/// Builds the leaf table and operator chain for a bare instant-vector selector.
 ///
-/// `samples` are the float samples of the matched series over the scan window
-/// `(eval_time_ms - lookback_delta, eval_time_ms]`. Stale-NaN markers must be
-/// filtered out by the caller (matching interpreter staleness handling) before
-/// the values reach [`InstantManipulate`].
+/// The chain evaluates the selector at `eval_time_ms` with the given
+/// `lookback_delta`. `samples` are the float samples of the matched series over
+/// the scan window `(eval_time_ms - lookback_delta, eval_time_ms]`. The caller
+/// must filter out the stale-NaN markers before the values reach
+/// [`InstantManipulate`]. This matches the staleness handling of the
+/// interpreter.
 ///
 /// # Errors
 ///
-/// Returns an error if the Arrow batch or table cannot be constructed.
+/// Returns an error if this function cannot build the Arrow batch or the table.
 pub async fn plan_instant_vector_selector(
     samples: Vec<LabeledSample>,
     eval_time_ms: i64,

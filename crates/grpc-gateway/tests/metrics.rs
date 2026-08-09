@@ -1,18 +1,20 @@
 //! Integration tests for the `/metrics` endpoint and metric-increment helpers.
 //!
-//! These tests drive `crabka_grpc_gateway::metrics::router()` in-process via
-//! `tower::ServiceExt::oneshot` (the same pattern used in `tests/forward_unit.rs`)
-//! and assert against the global [`crabka_grpc_gateway::metrics::metrics()`]
-//! singleton that is rendered by the `/metrics` route.
+//! These tests drive `crabka_grpc_gateway::metrics::router()` in-process with
+//! `tower::ServiceExt::oneshot`, the same pattern as `tests/forward_unit.rs`.
+//! They assert against the global
+//! [`crabka_grpc_gateway::metrics::metrics()`] singleton that the `/metrics`
+//! route renders.
 //!
 //! ## Shared-global determinism
-//! The `static OnceLock` is shared across all tests in the binary, which run
-//! in parallel threads.  To keep increment assertions non-flaky:
-//! - Presence-only assertions simply call `.contains("crabka_gateway_<name>")`.
-//! - Increment assertions use a **unique label value** never recorded by any
-//!   other code path (`"p8_unique_*"`).  The helper `count_for_label` scans
-//!   the rendered text for that exact labeled series and parses its value, so
-//!   even under parallel execution only THIS test can touch that delta.
+//!
+//! All tests in the binary share the `static OnceLock`, and they run in
+//! parallel threads. Two rules keep the increment assertions non-flaky:
+//! - A presence-only assertion calls `.contains("crabka_gateway_<name>")`.
+//! - An increment assertion uses a unique label value that no other code path
+//!   ever records (`"p8_unique_*"`). The helper `count_for_label` scans the
+//!   rendered text for that exact labeled series and parses its value, so even
+//!   under parallel execution only THIS test can move that delta.
 
 use axum::{
     body::Body,
@@ -49,8 +51,8 @@ async fn render_metrics() -> (StatusCode, String) {
 }
 
 /// Parse the integer value of a labeled counter series line in `OpenMetrics`
-/// text output.  Returns `0` if the label is not yet present in the output
-/// (the counter was never incremented and therefore never serialised).
+/// text output. Returns `0` if the label is not yet in the output, which means
+/// the counter was never incremented and therefore never serialised.
 ///
 /// Expected line shape (OpenMetrics):
 /// ```text
@@ -74,12 +76,13 @@ fn count_for_label(text: &str, series: &str) -> u64 {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// GET `/metrics` returns 200 and a body that contains the expected metric
-/// family names, proving the registry, encoder, and route are all wired up.
+/// GET `/metrics` returns 200 and a body that holds the expected metric family
+/// names. That proves the registry, the encoder, and the route are all wired
+/// up.
 ///
 /// `prometheus-client` omits `Family` counters from the output until at least
-/// one label series has been recorded.  We prime every family here with unique
-/// `p8_router_*` labels before rendering so the assertion is exhaustive.
+/// one label series is recorded. This test primes every family with unique
+/// `p8_router_*` labels before it renders, so the assertion is exhaustive.
 #[tokio::test]
 async fn metrics_router_renders() {
     // Prime every family so the encoder emits all families in this binary run.
@@ -109,8 +112,8 @@ async fn metrics_router_renders() {
     assert2::assert!(missing == Vec::<&str>::new());
 }
 
-/// `record_send` increments `crabka_gateway_sends_total` for the provided
-/// result label.  Uses a unique label so parallel test runs cannot affect the
+/// `record_send` increments `crabka_gateway_sends_total` for the given result
+/// label. It uses a unique label, so a parallel test run cannot affect the
 /// delta.
 #[tokio::test]
 async fn send_increments_sends_total() {
@@ -132,9 +135,9 @@ async fn send_increments_sends_total() {
     assert2::assert!(after == before + 3);
 }
 
-/// Recording a webhook-out result and a dead-letter event causes those labeled
-/// series to appear in the rendered output.  Presence assertions — no broker
-/// needed.
+/// A recorded webhook-out result and a recorded dead-letter event make those
+/// labeled series appear in the rendered output. These are presence
+/// assertions, so the test needs no broker.
 #[tokio::test]
 async fn webhook_out_and_dead_letter_present() {
     metrics().record_webhook_out("p8_unique_wh");

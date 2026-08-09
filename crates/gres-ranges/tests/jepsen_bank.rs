@@ -91,11 +91,11 @@ async fn real_process_bank_history_preserves_exact_balances_across_writer_kill()
     assert_eq!((left, right, left + right), (104, 96, 200));
 }
 
-/// Drives one transfer to `COMMIT`, retrying the retryable aborts every
-/// Postgres client must handle (40P01 deadlock, 40001 serialization failure)
-/// — routine while a killed participant recovers. Bounded so a livelock fails
-/// the test instead of hanging it; the relative-delta transfer makes a retry
-/// after an abort exact.
+/// Drives one transfer to `COMMIT`, and retries the retryable aborts every
+/// Postgres client must handle: the 40P01 deadlock and the 40001 serialization
+/// failure. Both are routine while a killed participant recovers. The retry
+/// count is bounded, so a livelock fails the test instead of hangs it. The
+/// relative-delta transfer makes a retry after an abort exact.
 async fn transfer_until_committed(
     client: &tokio_postgres::Client,
     from_left: bool,
@@ -121,14 +121,14 @@ async fn transfer_until_committed(
 
 /// One bank transfer as a cross-range read-modify-write transaction.
 ///
-/// The deltas are applied in SQL (`balance = balance - 7`) rather than read
-/// into the client and written back as absolute values: at `READ COMMITTED` a
-/// client-side read-modify-write loses updates under concurrency (in
-/// vanilla `PostgreSQL` exactly as here), while a relative `UPDATE`
+/// The transaction applies the deltas in SQL, as `balance = balance - 7`. It
+/// does not read them into the client and write them back as absolute values. At
+/// `READ COMMITTED` a client-side read-modify-write loses updates under
+/// concurrency, in vanilla `PostgreSQL` exactly as here. A relative `UPDATE`
 /// re-evaluates against the current row under the row lock, so concurrent
-/// transfers commute and the final balances stay exact. Both statements
-/// update `bank50` first, so transfers never invert lock order across the
-/// two ranges.
+/// transfers commute and the final balances stay exact. Both statements update
+/// `bank50` first, so a transfer never inverts the lock order across the two
+/// ranges.
 async fn real_transfer(
     client: &tokio_postgres::Client,
     from_left: bool,

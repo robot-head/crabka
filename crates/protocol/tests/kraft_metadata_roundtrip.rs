@@ -1,15 +1,20 @@
-//! Byte-identity: decode every record/batch in real `mirror.gcr.io/apache/kafka:4.0.0`
-//! metadata logs + bootstrap.checkpoint through the generated record types +
-//! the `KraftMetadataRecord` envelope, re-encode, and assert the bytes are
-//! unchanged.
+//! Byte-identity test for real `KRaft` metadata logs.
+//!
+//! This test decodes every record and batch in real
+//! `mirror.gcr.io/apache/kafka:4.0.0` metadata logs and bootstrap.checkpoint. It
+//! decodes them through the generated record types and the `KraftMetadataRecord`
+//! envelope, re-encodes them, and asserts that the bytes are unchanged.
 
 use std::path::Path;
 
 use bytes::BytesMut;
 use crabka_protocol::records::{RecordBatch, metadata::record::KraftMetadataRecord};
 
-/// Walk every batch in `log`; assert each re-encodes byte-identically, and that
-/// every non-control record value round-trips through `KraftMetadataRecord`.
+/// Walk every batch in `log`.
+///
+/// This function asserts that each batch re-encodes byte-identically. It also
+/// asserts that every non-control record value round-trips through
+/// `KraftMetadataRecord`.
 fn assert_log_roundtrips(log: &[u8]) {
     let mut pos = 0usize;
     while pos < log.len() {

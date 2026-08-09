@@ -1,11 +1,11 @@
-//! Per-broker capacity configuration. Loaded from a YAML file at
-//! startup; threaded into `GoalContext` so the capacity goals can
-//! enforce operator-supplied limits.
+//! Per-broker capacity configuration. The binary loads it from a YAML file at
+//! startup and threads it into `GoalContext`, so the capacity goals can enforce
+//! operator-supplied limits.
 //!
-//! Sparse-by-design: missing field = no limit for that resource on
-//! that broker. Missing broker entry = no limits at all for that
-//! broker. Both are operator-explicit "this is unconstrained"
-//! signals.
+//! The configuration is sparse by design. A missing field means no limit for
+//! that resource on that broker. A missing broker entry means no limits at all
+//! for that broker. Both are explicit operator signals that the resource is
+//! unconstrained.
 
 pub mod load;
 
@@ -42,8 +42,8 @@ pub struct BrokerCapacity {
 }
 
 impl BrokerCapacities {
-    /// Convenience lookup. Returns `None` if the broker has no entry
-    /// at all (= entirely unconstrained).
+    /// Convenience lookup. Returns `None` if the broker has no entry at all,
+    /// which means it is entirely unconstrained.
     #[must_use]
     pub fn for_broker(&self, broker_id: i32) -> Option<&BrokerCapacity> {
         self.by_broker.get(&broker_id)

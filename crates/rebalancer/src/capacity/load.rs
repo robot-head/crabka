@@ -111,9 +111,9 @@ brokers:
         assert2::assert!(c.for_broker(3).is_none());
     }
 
-    /// The YAML keys carry plain byte counts and the loader is the seam that
-    /// turns them into quantities, so a value that is not a round power of two
-    /// has to survive exactly.
+    /// The YAML keys carry plain byte counts, and the loader is the seam that
+    /// turns them into quantities. A value that is not a round power of two
+    /// must therefore survive exactly.
     #[test]
     fn plain_byte_counts_parse_into_quantities_exactly() {
         let f = write_yaml(
@@ -164,10 +164,10 @@ brokers:
         );
     }
 
-    /// The YAML keys stay bare integers counting bytes and bytes/sec, so the
-    /// loader is the conversion seam: a round value must land on the
-    /// equivalent binary-unit quantity, an unround one must survive exactly,
-    /// and unwrapping must give the same integers back.
+    /// The YAML keys stay bare integers that count bytes and bytes/sec, so the
+    /// loader is the conversion seam. A round value must land on the equivalent
+    /// binary-unit quantity. An unround value must survive exactly. The unwrap
+    /// must give the same integers back.
     #[test]
     fn load_parses_raw_integers_into_quantities() {
         let f = write_yaml(

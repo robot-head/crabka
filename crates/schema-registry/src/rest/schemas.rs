@@ -55,8 +55,8 @@ pub fn types(State(_st): State<AppState>) -> Response {
     ok_json(&serde_json::json!(["AVRO", "JSON", "PROTOBUF"]))
 }
 
-/// GET /schemas/ids/{id}/versions -> [{"subject":..,"version":..}] | 404 when the
-/// id has no qualifying versions (cp returns 40403 Schema Not Found).
+/// GET /schemas/ids/{id}/versions -> [{"subject":..,"version":..}], or 404 when
+/// the id has no qualifying versions. cp returns 40403 Schema Not Found.
 #[tracing::instrument(level = "debug", name = "sr.get_by_id_versions", skip_all, fields(schema_id = id, deleted = q.deleted), err)]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
@@ -80,7 +80,8 @@ pub fn get_by_id_versions(
     Ok(ok_json(&serde_json::Value::Array(arr)))
 }
 
-/// GET /schemas/ids/{id}/schema — return the raw schema string (not JSON-wrapped).
+/// GET /schemas/ids/{id}/schema. It returns the raw schema string, not a
+/// JSON-wrapped value.
 #[tracing::instrument(level = "debug", name = "sr.get_by_id_schema", skip_all, fields(schema_id = id), err)]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
@@ -97,7 +98,8 @@ pub async fn get_by_id_schema(
     Ok(ok_raw(schema))
 }
 
-/// GET /schemas/ids/{id}/subjects[?deleted=true] — list subjects referencing this id.
+/// GET /schemas/ids/{id}/subjects[?deleted=true]. It lists the subjects that
+/// reference this id.
 #[tracing::instrument(level = "debug", name = "sr.get_by_id_subjects", skip_all, fields(schema_id = id, deleted = q.deleted), err)]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.

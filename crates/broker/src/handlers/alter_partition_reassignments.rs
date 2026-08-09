@@ -1,8 +1,8 @@
 //! `AlterPartitionReassignments` (`api_key` 45, KIP-455).
 //!
-//! The wire handler lives here too. The pure-logic
-//! `process_one_partition` helper turns one alter row
-//! into a `PartitionRecord` ready to submit, or a wire error code.
+//! The wire handler lives here too. The pure-logic `process_one_partition`
+//! helper turns one alter row into a `PartitionRecord` that is ready to
+//! submit, or into a wire error code.
 
 use crabka_metadata::{MetadataImage, PartitionRecord};
 use crabka_raft::NodeId;
@@ -12,14 +12,17 @@ use crate::codes::{
     UNKNOWN_TOPIC_OR_PARTITION,
 };
 
-/// Per-row rejection: Kafka wire error code plus a human-readable message.
+/// Per-row rejection: a Kafka wire error code and a readable message.
 type RowError = (i16, String);
 
 /// Process one (topic, partition, `target_opt`) row from an
-/// `AlterPartitionReassignments` request. Returns:
-///   - `Ok(Some(PartitionRecord))` — submit this intermediate record
-///   - `Ok(None)` — no-op (already at target, or empty alter)
-///   - `Err((wire_code, message))` — reject this row
+/// `AlterPartitionReassignments` request.
+///
+/// The return values are:
+///   - `Ok(Some(PartitionRecord))`: submit this intermediate record
+///   - `Ok(None)`: do nothing, because the row is already at target or the
+///     alter is empty
+///   - `Err((wire_code, message))`: reject this row
 pub(crate) fn process_one_partition(
     image: &MetadataImage,
     topic: &str,

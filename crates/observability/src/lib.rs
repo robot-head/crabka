@@ -147,8 +147,8 @@ pub enum QuerierIndexSource {
 
 /// Operator-facing service configuration.
 ///
-/// Not `Eq`: the quantity-typed limits store `f64`, and nothing in the workspace
-/// compares two configs for total equality.
+/// It is not `Eq`. The quantity-typed limits store `f64`, and nothing in the
+/// workspace compares two configs for total equality.
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(name = "crabka-observability")]
 pub struct ServiceConfig {
@@ -457,13 +457,14 @@ pub struct ServiceDependencies {
     hot_tail: Option<HotTailDependency>,
     compaction_frontier: Option<SharedCompactionFrontier>,
     delete_requests: Option<SharedLogDeleteRequests>,
-    /// Querier-only: params for the hot-tail WAL consumer that is connected
-    /// asynchronously after HTTP serving begins (FIX B2).
+    /// Querier-only: the params for the hot-tail WAL consumer. The connection
+    /// happens asynchronously after HTTP serving begins (FIX B2).
     deferred_wal_consumer_connect: Option<DeferredWalConsumerConnect>,
-    /// Shared RED-metrics bundle threaded into the per-role state. `None` in
-    /// tests that don't care about metrics (each state then gets a fresh
-    /// bundle); the binary constructs one bundle and threads it through here so
-    /// the `:9404` exporter and the handlers share the same registry.
+    /// Shared RED-metrics bundle threaded into the per-role state. It is
+    /// `None` in tests that do not care about metrics, and each state then
+    /// gets a fresh bundle. The binary constructs one bundle and threads it
+    /// through here, so the `:9404` exporter and the handlers share the same
+    /// registry.
     metrics: Option<ServiceMetrics>,
 }
 
@@ -538,9 +539,9 @@ pub enum ActiveLogDeleteFilterError {
 }
 
 impl ServiceDependencies {
-    /// Thread a shared RED-metrics bundle into the service so the per-role
-    /// state (distributor / querier) increments the same registry the `:9404`
-    /// exporter serves.
+    /// Threads a shared RED-metrics bundle into the service, so the per-role
+    /// state, that is the distributor or the querier, increments the same
+    /// registry the `:9404` exporter serves.
     #[must_use]
     pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
         self.metrics = Some(metrics);
@@ -807,7 +808,7 @@ pub async fn build_service_dependencies(
         .await
 }
 
-/// Build role dependencies with one validated Kafka client policy.
+/// Builds role dependencies with one validated Kafka client policy.
 ///
 /// # Errors
 /// Returns an error when a required Kafka dependency cannot connect.
@@ -1176,9 +1177,9 @@ pub async fn run_compactor_until_shutdown(
     }
 }
 
-/// Double the object-store retry backoff, capped.
+/// Doubles the object-store retry backoff, up to a cap.
 ///
-/// `Time` is `PartialOrd` but not `Ord`, so this is `Time::min` rather than
+/// `Time` is `PartialOrd` but not `Ord`, so this uses `Time::min` and not
 /// `std::cmp::min`.
 fn next_compactor_object_store_backoff(current: Time, max_backoff: Time) -> Time {
     (current * 2.0).min(max_backoff)
@@ -2489,16 +2490,16 @@ pub trait LogQueryAuthorizer: Send + Sync + 'static {
 pub trait LogHotTail: Send + Sync + 'static {
     fn records(&self) -> Vec<WalLogRecord>;
 
-    /// Return the hot-tail records whose `timestamp_ns` falls within the inclusive
-    /// window `[start_ns, end_ns]`.
+    /// Returns the hot-tail records whose `timestamp_ns` falls within the
+    /// inclusive window `[start_ns, end_ns]`.
     ///
-    /// Callers re-apply their exact per-record time bound downstream, so this may
-    /// return a *superset* of the in-window records (e.g. records sharing a coarse
-    /// time bucket with the window edges); it MUST NOT drop any record whose
-    /// timestamp lies in `[start_ns, end_ns]`. The default implementation simply
-    /// filters [`LogHotTail::records`], preserving its order; implementations that
-    /// maintain a time index (see [`BufferedLogHotTail`]) override this to avoid a
-    /// full-buffer scan.
+    /// Callers re-apply their exact per-record time bound downstream, so this
+    /// may return a *superset* of the in-window records, for example records
+    /// that share a coarse time bucket with the window edges. It MUST NOT drop
+    /// any record whose timestamp lies in `[start_ns, end_ns]`. The default
+    /// implementation filters [`LogHotTail::records`] and keeps its order.
+    /// Implementations that hold a time index, see [`BufferedLogHotTail`],
+    /// override this to avoid a full-buffer scan.
     fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
         self.records()
             .into_iter()
@@ -2610,16 +2611,19 @@ impl LogQueryAuthorizer for BrokerBackedQueryAuthorizer {
     }
 }
 
-/// A [`LogQueryAuthorizer`] whose underlying implementation can be swapped after construction.
+/// A [`LogQueryAuthorizer`] whose underlying implementation can change after
+/// construction.
 ///
-/// Used by the querier to start with a permissive allow-all policy while the real
-/// [`BrokerBackedQueryAuthorizer`] connects asynchronously in the background (FIX B2).
+/// The querier uses it to start with a permissive allow-all policy while the
+/// real [`BrokerBackedQueryAuthorizer`] connects asynchronously in the
+/// background (FIX B2).
 struct SwappableQueryAuthorizer {
     inner: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>,
 }
 
 impl SwappableQueryAuthorizer {
-    /// Create a new swappable authorizer starting with `AllowAllQueryAuthorizer`.
+    /// Creates a new swappable authorizer that starts with
+    /// `AllowAllQueryAuthorizer`.
     fn new() -> (Self, Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>) {
         let inner: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>> =
             Arc::new(tokio::sync::RwLock::new(Arc::new(AllowAllQueryAuthorizer)));
@@ -2830,8 +2834,9 @@ fn matches_acl_topic_pattern(acl: &AclEntry, wal_topic: &str) -> bool {
 
 /// Per-tenant byte token bucket for the `producer_byte_rate` ingest quota.
 ///
-/// `updated_at` stays an [`Instant`] because it is a coordinate, not an extent;
-/// the extent measured from it multiplies the rate into a byte allowance.
+/// `updated_at` stays an [`Instant`] because it is a coordinate and not an
+/// extent. The extent measured from it multiplies the rate into a byte
+/// allowance.
 #[derive(Debug)]
 struct IngestQuotaBucket {
     rate: ByteRate,
@@ -2908,32 +2913,35 @@ fn ingest_quota_bytes(records: &[WalLogRecord]) -> ByteSize {
     )
 }
 
-/// Width of a hot-tail time bucket.
+/// Maps a record timestamp to its bucket key.
 ///
-/// Coarse enough that a wide retention window holds few buckets, fine enough that
-/// a typical query window (minutes to hours) only touches the buckets it overlaps.
-/// Map a record timestamp to its bucket key. Uses [`i64::div_euclid`] so negative
-/// timestamps (pre-epoch) still bucket monotonically and the bucket containing a
-/// given timestamp is unambiguous.
+/// `bucket_width` is the width of a hot-tail time bucket. It is coarse enough
+/// that a wide retention window holds few buckets, and fine enough that a
+/// typical query window of minutes to hours only touches the buckets it
+/// overlaps. The function uses [`i64::div_euclid`], so negative, pre-epoch,
+/// timestamps still bucket monotonically, and the bucket that contains a given
+/// timestamp is unambiguous.
 fn hot_tail_bucket_key(timestamp_ns: i64, bucket_width: Time) -> i64 {
     timestamp_ns.div_euclid(bucket_width.nanos_i64())
 }
 
 /// Buffer holding polled hot-tail records.
 ///
-/// Records arrive from Kafka polling in NO timestamp order, so the buffer keeps two
-/// views of the same data:
+/// Records arrive from Kafka polling in NO timestamp order, so the buffer keeps
+/// two views of the same data:
 ///
-/// * `records` — the append-ordered log. [`records`](Self::records) clones this whole
-///   list; it backs the WebSocket tail path, which indexes into the buffer by arrival
-///   order and must see every record.
-/// * `buckets` — a per-minute time index mapping each [`hot_tail_bucket_key`] to the
-///   positions in `records` whose timestamps land in that bucket. Out-of-order arrivals
-///   simply land in the correct bucket; no global sort is ever needed.
+/// * `records` is the append-ordered log. [`records`](Self::records) clones
+///   this whole list. It backs the WebSocket tail path, which indexes into the
+///   buffer by arrival order and must see every record.
+/// * `buckets` is a per-minute time index. It maps each
+///   [`hot_tail_bucket_key`] to the positions in `records` whose timestamps
+///   land in that bucket. An out-of-order arrival lands in the correct bucket,
+///   and no global sort is ever needed.
 ///
-/// [`records_in_range`](Self::records_in_range) walks only the buckets overlapping the
-/// query window, so a 30-minute query over a buffer holding hours of logs touches only
-/// the window's records instead of scanning the entire buffer.
+/// [`records_in_range`](Self::records_in_range) walks only the buckets that
+/// overlap the query window, so a 30-minute query over a buffer that holds
+/// hours of logs touches only the window's records, instead of a scan of the
+/// entire buffer.
 #[derive(Debug)]
 struct HotTailBuffer {
     bucket_width: Time,
@@ -3109,7 +3117,7 @@ impl KafkaLogWalSink {
             .await
     }
 
-    /// Connect using the supplied validated Kafka connection limits.
+    /// Connects with the supplied validated Kafka connection limits.
     ///
     /// # Errors
     /// Returns an error when the producer cannot start.
@@ -3167,7 +3175,7 @@ impl KafkaLogWalConsumer {
         .await
     }
 
-    /// Connect using the supplied validated Kafka connection limits.
+    /// Connects with the supplied validated Kafka connection limits.
     ///
     /// # Errors
     /// Returns an error when the consumer cannot start.
@@ -3361,12 +3369,15 @@ fn spawn_log_hot_tail_poller(
     });
 }
 
-/// Spawn a background task that retries `KafkaLogWalConsumer::connect` until it succeeds,
-/// then runs the hot-tail poll loop.  On a cold boot the Kafka broker may not be ready yet;
-/// retrying here lets the querier serve its HTTP port immediately (FIX B2).
+/// Spawns a background task that retries `KafkaLogWalConsumer::connect` until
+/// it succeeds, then runs the hot-tail poll loop.
 ///
-/// Cancelling `token` causes the poll loop to exit and calls `consumer.close()` to send
-/// `LeaveGroup`, removing the consumer from the broker's group immediately on graceful shutdown.
+/// On a cold boot the Kafka broker may not be ready yet. The retry here lets
+/// the querier serve its HTTP port immediately (FIX B2).
+///
+/// A cancel of `token` makes the poll loop exit and calls `consumer.close()`,
+/// which sends `LeaveGroup`. That removes the consumer from the broker's group
+/// immediately on graceful shutdown.
 #[cfg_attr(test, mutants::skip)]
 fn spawn_wal_hot_tail_connect_and_poll(
     deferred: DeferredWalConsumerConnect,
@@ -3421,8 +3432,9 @@ fn spawn_wal_hot_tail_connect_and_poll(
     })
 }
 
-/// Spawn a background task that retries `BrokerBackedQueryAuthorizer::connect` until it succeeds,
-/// then swaps the provided `slot` from `AllowAll` to the real broker-backed authorizer (FIX B2).
+/// Spawns a background task that retries `BrokerBackedQueryAuthorizer::connect`
+/// until it succeeds, then swaps the given `slot` from `AllowAll` to the real
+/// broker-backed authorizer (FIX B2).
 #[cfg_attr(test, mutants::skip)]
 fn spawn_query_authorizer_connect(
     bootstrap: String,
@@ -4004,10 +4016,12 @@ struct OtlpKeyValueList {
     values: Option<Vec<OtlpKeyValue>>,
 }
 
-/// Tenant for an ingest request from `X-Scope-OrgID`, falling back to
-/// `"unknown"` when the header is missing, non-UTF-8, or empty. Used only to
-/// label the ingest span / per-tenant metric — the WAL records carry their own
-/// per-record tenant, so a permissive fallback here never affects storage.
+/// Tenant for an ingest request, from `X-Scope-OrgID`. It falls back to
+/// `"unknown"` when the header is missing, non-UTF-8, or empty.
+///
+/// The value only labels the ingest span and the per-tenant metric. The WAL
+/// records carry their own per-record tenant, so a permissive fallback here
+/// never affects storage.
 fn ingest_tenant(headers: &HeaderMap) -> String {
     headers
         .get("X-Scope-OrgID")
@@ -4130,10 +4144,12 @@ async fn push_otlp_logs(
     .await
 }
 
-/// Record one push-handler ingest outcome from the response status and return
-/// the response unchanged. `ok` is true for any 2xx; the WAL/produce failure
-/// counter is bumped separately at the [`append_distributor_wal_records`] error
-/// site, so a 4xx validation/quota reject here does not inflate it.
+/// Records one push-handler ingest outcome from the response status and returns
+/// the response unchanged.
+///
+/// `ok` is true for any 2xx. The WAL/produce failure counter is bumped
+/// separately at the [`append_distributor_wal_records`] error site, so a 4xx
+/// validation or quota reject here does not inflate it.
 fn record_ingest_response(
     state: &DistributorState,
     resp: Response,
@@ -5667,8 +5683,9 @@ pub struct QuerierState {
     max_query_series: Option<usize>,
     max_query_read: Option<ByteSize>,
     max_query_length: Option<ByteSize>,
-    /// Shared RED-metrics bundle. `None` for test routers that don't wire
-    /// metrics; the binary threads a shared bundle in via [`QuerierState::with_metrics`].
+    /// Shared RED-metrics bundle. It is `None` for test routers that do not
+    /// wire metrics. The binary threads a shared bundle in with
+    /// [`QuerierState::with_metrics`].
     metrics: Option<ServiceMetrics>,
 }
 
@@ -5961,17 +5978,19 @@ impl QuerierState {
         }
     }
 
-    /// Thread a shared RED-metrics bundle so each querier handler records its
-    /// per-route request count and latency on the same registry the `:9404`
-    /// exporter serves. A no-op when left unset (test routers).
+    /// Threads a shared RED-metrics bundle, so each querier handler records
+    /// its per-route request count and latency on the same registry the
+    /// `:9404` exporter serves. It is a no-op when left unset, as in test
+    /// routers.
     #[must_use]
     pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
         self.metrics = Some(metrics);
         self
     }
 
-    /// Record one querier request outcome (per-route count + latency) on the
-    /// shared bundle. No-op when metrics are not wired (test routers).
+    /// Records one querier request outcome, that is the per-route count and
+    /// latency, on the shared bundle. It is a no-op when metrics are not
+    /// wired, as in test routers.
     fn record_query(&self, route: &str, ok: bool, start: Instant) {
         if let Some(metrics) = &self.metrics {
             metrics.record_query(route, ok, start.elapsed().as_time());
@@ -11162,11 +11181,11 @@ fn validate_loki_query_range_resolution(
     Ok(())
 }
 
-/// Render an extent the way Loki spells a query length in its own error text.
+/// Renders an extent the way Loki spells a query length in its own error text.
 ///
-/// Whole seconds are taken from the nanosecond count by integer division, not
-/// [`TimeExt::secs_i64`], which rounds to nearest and would report a second more
-/// than Loki does for the same window.
+/// The whole seconds come from the nanosecond count by integer division, not
+/// from [`TimeExt::secs_i64`]. That method rounds to nearest and would report a
+/// second more than Loki does for the same window.
 fn format_loki_query_length(range: Time) -> String {
     let total_seconds = range.nanos_i64().max(0) / 1_000_000_000;
     let hours = total_seconds / 3_600;
@@ -13368,8 +13387,9 @@ fn log_line_pattern(line: &str) -> String {
         .join(" ")
 }
 
-/// Templatize a single-object JSON log line, returning `None` for anything that
-/// is not a JSON object (so the caller falls back to whitespace/logfmt mining).
+/// Templatizes a single-object JSON log line. Returns `None` for anything that
+/// is not a JSON object, so the caller falls back to whitespace or logfmt
+/// mining.
 fn json_log_pattern(line: &str) -> Option<String> {
     // `from_str` already rejects non-objects and non-JSON, so there is no
     // cheap pre-check guard here: a leading-`{` fast path would be a pure
@@ -13385,8 +13405,8 @@ fn json_log_pattern(line: &str) -> Option<String> {
     serde_json::to_string(&templatized).ok()
 }
 
-/// Replace variable JSON leaf values with the `<_>` placeholder while preserving
-/// object/array structure and constant (low-entropy) values.
+/// Replaces variable JSON leaf values with the `<_>` placeholder. It keeps the
+/// object and array structure, and it keeps constant, low-entropy, values.
 fn json_value_pattern(value: &Value) -> Value {
     match value {
         // Numbers are always high-cardinality dimensions (offsets, durations,
@@ -13404,9 +13424,10 @@ fn json_value_pattern(value: &Value) -> Value {
     }
 }
 
-/// Templatize the variable whitespace-delimited tokens inside a free-text value
-/// (e.g. an embedded request id or timestamp in a `message` field), leaving the
-/// constant words intact so distinct messages stay distinct patterns.
+/// Templatizes the variable whitespace-delimited tokens inside a free-text
+/// value, for example an embedded request id or timestamp in a `message`
+/// field. It leaves the constant words intact, so distinct messages stay
+/// distinct patterns.
 fn templatize_text(text: &str) -> String {
     text.split_whitespace()
         .map(|token| {
@@ -13438,13 +13459,14 @@ fn log_pattern_token(token: &str) -> String {
     }
 }
 
-/// Whether a token looks like variable (per-line-varying) data that should be
-/// templatized to `<_>` rather than kept as a constant part of the pattern.
+/// Whether a token looks like variable data, that is data that varies per line,
+/// which the pattern should templatize to `<_>` instead of keeping as a
+/// constant part.
 ///
-/// Timestamps and other numeric-leading values are caught by the leading-digit
-/// and float checks; identifiers that begin with a letter (UUIDs, trace/span
-/// hashes, opaque high-entropy tokens) need the explicit shape checks so they do
-/// not each become their own pattern.
+/// The leading-digit and float checks catch timestamps and other
+/// numeric-leading values. Identifiers that begin with a letter, such as
+/// UUIDs, trace and span hashes, and opaque high-entropy tokens, need the
+/// explicit shape checks, so they do not each become their own pattern.
 fn pattern_value_is_variable(value: &str) -> bool {
     let value = value.trim_matches('"');
     if value.is_empty() {
@@ -13468,16 +13490,18 @@ fn is_uuid(value: &str) -> bool {
     shaped && groups.next().is_none()
 }
 
-/// A long pure-hex string (trace/span id, digest, dash-less UUID). The length
-/// floor keeps short hex-looking words (`face`, `cafe`) from being templatized.
+/// A long pure-hex string, such as a trace or span id, a digest, or a dash-less
+/// UUID. The length floor keeps short hex-looking words such as `face` and
+/// `cafe` out of the templatize path.
 fn is_hex_id(value: &str) -> bool {
     value.len() >= 16 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// A long opaque identifier (session token, base62 id, api key): purely
-/// alphanumeric with both letters and digits. Requiring a digit avoids
-/// templatizing long lowercase or mixed-case words, and the punctuation
-/// exclusion keeps module paths and file locations intact.
+/// A long opaque identifier, such as a session token, a base62 id, or an api
+/// key. It is purely alphanumeric with both letters and digits. The required
+/// digit keeps long lowercase or mixed-case words out of the templatize path,
+/// and the punctuation exclusion keeps module paths and file locations
+/// intact.
 fn is_high_entropy_id(value: &str) -> bool {
     value.len() >= 16
         && value.bytes().all(|b| b.is_ascii_alphanumeric())
@@ -15777,14 +15801,16 @@ fn validate_query_bytes_limit(
     Ok(())
 }
 
-/// Snapshot the hot-tail records overlapping `time_range`, plus the compaction frontier.
+/// Snapshots the hot-tail records that overlap `time_range`, plus the
+/// compaction frontier.
 ///
-/// `time_range` must be the planned scan range (`plan.time_range`): every hot-tail
-/// query path re-applies the exact per-record time bound downstream, and that bound is
-/// always contained within the plan's scan range (the stream query range, or
-/// [`metric_scan_range`] for metric queries). Pruning to the plan range therefore drops
-/// only records the downstream filter would reject anyway, so results are identical to a
-/// full-buffer scan while a narrow window avoids touching the whole retained buffer.
+/// `time_range` must be the planned scan range (`plan.time_range`). Every
+/// hot-tail query path re-applies the exact per-record time bound downstream,
+/// and that bound is always inside the plan's scan range, which is the stream
+/// query range, or [`metric_scan_range`] for metric queries. A prune to the
+/// plan range drops only records the downstream filter would reject
+/// anyway. Results are identical to a full-buffer scan, and a narrow window
+/// avoids a touch of the whole retained buffer.
 fn hot_tail_snapshot(
     state: &QuerierState,
     time_range: TimeRange,
@@ -21023,9 +21049,10 @@ mod tests {
     }
 
     /// The OTLP/HTTP logs handler must decompress `Content-Encoding: gzip`
-    /// before protobuf-decoding. The OpenTelemetry SDK's `otlphttp` exporter
-    /// (what the demo's Alloy uses) gzips by default, so a regression here means
-    /// every emitted log line silently fails to decode and no logs are ingested.
+    /// before it protobuf-decodes. The OpenTelemetry SDK's `otlphttp` exporter,
+    /// which the demo's Alloy uses, gzips by default, so a regression here
+    /// means every emitted log line silently fails to decode, and no logs are
+    /// ingested.
     #[test]
     fn normalize_otlp_http_logs_decodes_gzip_identically_to_identity() {
         use std::io::Write as _;
@@ -21113,7 +21140,7 @@ mod tests {
     }
 
     /// The time-bucketed `records_in_range` MUST return exactly the same records (and
-    /// therefore the same label/field sets) as a full-buffer scan, for any inclusive
+    /// so the same label/field sets) as a full-buffer scan, for any inclusive
     /// `[start, end]`, even though records are appended in NO timestamp order. This is the
     /// soundness guarantee that lets the query paths prune to the window instead of
     /// scanning the whole retained buffer.
@@ -21452,8 +21479,9 @@ mod tests {
 
     // --- FIX B1 tests ---
 
-    /// A `TenantObjectStoreManifest` source backed by an empty in-memory store (no manifest present)
-    /// must return Ok with an empty (self-clone) index rather than propagating `NotFound` as an error.
+    /// A `TenantObjectStoreManifest` source backed by an empty in-memory
+    /// store, with no manifest present, must return Ok with an empty
+    /// self-clone index. It must not propagate `NotFound` as an error.
     #[tokio::test]
     async fn querier_state_with_request_tenant_index_tolerates_absent_manifest() {
         use object_store::memory::InMemory;
@@ -21843,7 +21871,7 @@ mod tests {
         assert_eq!(result.unwrap(), 42);
     }
 
-    /// `connect_with_startup_retry` retries on failure and returns Ok when a later attempt succeeds.
+    /// `connect_with_startup_retry` retries on failure and returns Ok when a later retry succeeds.
     #[tokio::test]
     async fn connect_with_startup_retry_retries_then_succeeds() {
         use std::sync::atomic::{AtomicU32, Ordering as AO};
@@ -22751,9 +22779,10 @@ mod tests {
 
     /// A negative range offset MUST render with a leading `-` sign, and a positive
     /// offset MUST NOT. This pins the `offset_ns.0 < 0` sign branch in
-    /// `format_metric_range_selector`: replacing `<` with `==` (never true here,
-    /// since the `== 0` case is handled by the outer guard) would drop the sign and
-    /// emit a positive offset for a query that asked to look *forward* in time.
+    /// `format_metric_range_selector`. A replacement of `<` with `==` would
+    /// drop the sign and emit a positive offset for a query that asked to look
+    /// *forward* in time. That `==` is never true here, because the outer guard
+    /// handles the `== 0` case.
     #[test]
     fn format_metric_range_selector_signs_negative_offset() {
         let negative = parse_metric_query("count_over_time({app=\"x\"}[5m] offset -3m)").unwrap();
@@ -22773,9 +22802,10 @@ mod tests {
 
     /// `count_loki_metric_result_hot_tail_samples` counts matched ingester samples and
     /// returns 0 when there is nothing to match: an `absent_over_time` query short-
-    /// circuits to 0, and a query whose response JSON has no `data.result` array also
-    /// yields 0. Replacing the whole body with a constant `1` (the mutant) would report
-    /// a phantom ingester sample and skew the store/ingester scan-stat split.
+    /// circuits to 0, and a query whose response JSON has no `data.result`
+    /// array also yields 0. A replacement of the whole body with a constant
+    /// `1`, the mutant, would report a phantom ingester sample and skew the
+    /// store/ingester scan-stat split.
     #[test]
     fn count_loki_metric_result_hot_tail_samples_returns_zero_when_nothing_matches() {
         let plan = StreamPlan {

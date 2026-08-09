@@ -157,7 +157,8 @@ pub struct ServeArgs {
     )]
     pub pgwire_scram_iterations: u32,
 
-    /// Directory for durable storage. Absent → ephemeral in-memory engine.
+    /// Directory for durable storage. If absent, the engine is in-memory and
+    /// ephemeral.
     #[arg(long, conflicts_with = "substrate_bootstrap")]
     pub data_dir: Option<PathBuf>,
 
@@ -492,7 +493,7 @@ pub struct ServeArgs {
     #[arg(long = "timestamp-source", value_enum, default_value = "logical-tso")]
     pub timestamp_source: TimestampSourceKind,
 
-    /// Maximum tolerated clock offset for --timestamp-source hlc; sizes the
+    /// Maximum tolerated clock offset for --timestamp-source hlc. It sizes the
     /// read uncertainty window.
     #[arg(
         long = "hlc-max-offset",
@@ -502,8 +503,8 @@ pub struct ServeArgs {
     pub hlc_max_offset: Time,
 
     /// Fault-injection knob for load and chaos testing only, not for
-    /// production use: skew this process's HLC wall-clock reads by a signed
-    /// duration. Only meaningful with --timestamp-source hlc.
+    /// production use. It skews this process's HLC wall-clock reads by a
+    /// signed duration. It applies only with --timestamp-source hlc.
     #[arg(
         long = "hlc-wall-offset",
         default_value = "0ms",
@@ -512,8 +513,8 @@ pub struct ServeArgs {
     )]
     pub hlc_wall_offset: Time,
 
-    /// Range-compute RPC address for hosted ranges. Required by deployments
-    /// whose registry layout routes any range to this process.
+    /// Range-compute RPC address for hosted ranges. Deployments whose registry
+    /// layout routes any range to this process must set it.
     #[arg(long = "range-listen", requires = "ranges")]
     pub range_listen: Option<String>,
 
@@ -634,30 +635,30 @@ pub struct ServeArgs {
 
     /// How much of a client-supplied W3C trace context a session honours.
     ///
-    /// A client fully controls the `traceparent` it appends to its SQL, and the
-    /// OTLP pipeline samples with `ParentBased(TraceIdRatioBased(ratio))`: a
-    /// *sampled* remote parent makes `ParentBased` return `RecordAndSample`
-    /// unconditionally, so a client that stamps `-01` on every statement forces
-    /// 100% export of every gres span its queries touch, on every range owner.
-    /// This is the knob that decides whether it may.
+    /// A client fully controls the `traceparent` it appends to its SQL. The
+    /// OTLP pipeline samples with `ParentBased(TraceIdRatioBased(ratio))`, and
+    /// a *sampled* remote parent makes `ParentBased` return `RecordAndSample`
+    /// unconditionally. A client that stamps `-01` on every statement therefore
+    /// forces 100% export of every gres span its queries touch, on every range
+    /// owner. This option decides whether the client may do that.
     ///
-    /// - `off` — ignore ingress context entirely; gres traces are always its own.
+    /// - `off` — ignore ingress context entirely. Gres traces are always its own.
     /// - `link` — record the client's context as an `OpenTelemetry` link rather
-    ///   than as a parent, and head-sample independently. Correlation without
-    ///   ceding the sampling decision.
+    ///   than as a parent, and head-sample independently. This correlates the
+    ///   traces but does not give up the sampling decision.
     /// - `resample` (default) — accept the context as the parent, but recompute
     ///   the sampled flag locally from the incoming trace-id at the pipeline's
-    ///   own head-sampling ratio (`CRABKA_OTLP_SAMPLE_RATIO`, adopted through
-    ///   [`ServeArgs::adopt_otlp_sample_ratio`] so the two cannot drift).
-    ///   Recompute, not clear: `ParentBased` returns `Drop` for a *non-sampled*
-    ///   parent — it does not fall through to the root sampler — so clearing the
-    ///   bit would drop exactly the statements a client took the trouble to
-    ///   instrument. Because `TraceIdRatioBased` is a pure function of the
-    ///   trace-id, a client and gres at the same ratio agree by construction and
-    ///   a trace stays whole across the boundary.
-    /// - `trust` — honour the client's sampled flag verbatim. Trusted clients
-    ///   only: it hands the export volume of the whole cluster to whoever can
-    ///   open a `PostgreSQL` connection.
+    ///   own head-sampling ratio `CRABKA_OTLP_SAMPLE_RATIO`, which is adopted
+    ///   through [`ServeArgs::adopt_otlp_sample_ratio`] so the two cannot drift.
+    ///   This mode recomputes the bit; it does not clear it. `ParentBased`
+    ///   returns `Drop` for a *non-sampled* parent and does not fall through to
+    ///   the root sampler, so clearing the bit would drop exactly the statements
+    ///   a client chose to instrument. `TraceIdRatioBased` is a pure function of
+    ///   the trace-id, so a client and gres at the same ratio agree by
+    ///   construction and a trace stays whole across the boundary.
+    /// - `trust` — honour the client's sampled flag verbatim. Use this for
+    ///   trusted clients only: it hands the export volume of the whole cluster
+    ///   to whoever can open a `PostgreSQL` connection.
     #[arg(
         long = "gres-trace-ingress",
         env = "CRABKA_GRES_TRACE_INGRESS",
@@ -669,11 +670,11 @@ pub struct ServeArgs {
     /// Head-sampling ratio the OTLP pipeline was built with, adopted from the
     /// resolved [`OtlpConfig`](telemetry::OtlpConfig) rather than parsed here.
     ///
-    /// Not a command-line argument: the pipeline is built in `main` (inside the
-    /// tokio runtime, so the exporter captures the runtime handle) and hands the
-    /// ratio back through [`ServeArgs::adopt_otlp_sample_ratio`]. `None` means
-    /// OTLP is disabled, and [`ServeArgs::ingress_trace_policy`] then falls back
-    /// to [`DEFAULT_SAMPLE_RATIO`].
+    /// This is not a command-line argument. `main` builds the pipeline inside
+    /// the tokio runtime, so the exporter captures the runtime handle, and then
+    /// hands the ratio back through [`ServeArgs::adopt_otlp_sample_ratio`].
+    /// `None` means OTLP is disabled, and [`ServeArgs::ingress_trace_policy`]
+    /// then falls back to [`DEFAULT_SAMPLE_RATIO`].
     #[arg(skip)]
     pub otlp_sample_ratio: Option<f64>,
 }
@@ -681,17 +682,17 @@ pub struct ServeArgs {
 /// Trust placed in a client-supplied W3C trace context, selected by
 /// `--gres-trace-ingress`.
 ///
-/// The mode mirrors [`IngressTracePolicy`] without the `resample` ratio, which
-/// is not a command-line input at all — it belongs to the OTLP pipeline;
-/// [`ServeArgs::ingress_trace_policy`] reattaches it.
+/// The mode mirrors [`IngressTracePolicy`] without the `resample` ratio. That
+/// ratio is not a command-line input at all. It belongs to the OTLP pipeline,
+/// and [`ServeArgs::ingress_trace_policy`] reattaches it.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TraceIngressMode {
     /// Ignore the client's context entirely.
     Off,
     /// Record the client's context as a link, and head-sample independently.
     Link,
-    /// Adopt the client's context as the parent, recomputing the sampled flag at
-    /// the pipeline's ratio.
+    /// Adopt the client's context as the parent, and recompute the sampled flag
+    /// at the pipeline's ratio.
     #[default]
     Resample,
     /// Honour the client's sampled flag verbatim.
@@ -703,7 +704,7 @@ impl ServeArgs {
     /// `--gres-trace-ingress resample` recomputes the sampled flag with exactly
     /// the ratio the exporter samples at.
     ///
-    /// `None` — OTLP disabled — leaves the ratio unset; see
+    /// `None` means OTLP is disabled and leaves the ratio unset. See
     /// [`Self::ingress_trace_policy`] for what that resolves to.
     pub fn adopt_otlp_sample_ratio(&mut self, otlp: Option<&telemetry::OtlpConfig>) {
         self.otlp_sample_ratio = otlp.map(|config| config.sample_ratio);
@@ -712,10 +713,11 @@ impl ServeArgs {
     /// Resolve the pgwire ingress trust policy from the selected mode and the
     /// adopted pipeline ratio.
     ///
-    /// With OTLP disabled no span is exported at all, so the ratio only decides
-    /// a recorded flag; it falls back to [`DEFAULT_SAMPLE_RATIO`], which is also
-    /// what the pipeline itself uses when no ratio is configured — enabling OTLP
-    /// with default settings therefore does not change ingress behaviour.
+    /// With OTLP disabled the process exports no span at all, so the ratio only
+    /// decides a recorded flag. The ratio falls back to
+    /// [`DEFAULT_SAMPLE_RATIO`], which the pipeline itself also uses when no
+    /// ratio is configured. Enabling OTLP with default settings therefore does
+    /// not change ingress behaviour.
     #[must_use]
     pub fn ingress_trace_policy(&self) -> IngressTracePolicy {
         match self.gres_trace_ingress {
@@ -1351,9 +1353,10 @@ fn effective_wal_producer_throughput_policy(
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
-/// A time extent back in whole milliseconds as `u64`, for the `refined_type`
-/// validators and `Duration` constructors that still take a raw count. A
-/// negative extent clamps to zero.
+/// Return a time extent in whole milliseconds as `u64`, for the `refined_type`
+/// validators and `Duration` constructors that still take a raw count.
+///
+/// A negative extent clamps to zero.
 #[cfg(test)]
 fn millis_u64(extent: Time) -> u64 {
     u64::try_from(extent.millis_i64()).unwrap_or_default()
@@ -1753,14 +1756,14 @@ fn parse_positive_u32(value: &str) -> Result<u32, String> {
 /// Timestamp-ordering source selected by `--timestamp-source`.
 ///
 /// The kind mirrors [`crabka_gres_ranges::TimestampSourceMode`] without the
-/// mode's parameters, which arrive through their own flags; [`Self::to_mode`]
-/// reattaches them.
+/// mode's parameters. Those parameters arrive through their own flags, and
+/// [`Self::to_mode`] reattaches them.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimestampSourceKind {
-    /// Centralized range-0 logical oracle — the solo default.
+    /// Centralized range-0 logical oracle. This is the solo default.
     #[default]
     LogicalTso,
-    /// Node-local Hybrid Logical Clock minting stamps without RPC.
+    /// Node-local Hybrid Logical Clock that mints stamps without RPC.
     Hlc,
 }
 
@@ -2774,10 +2777,11 @@ impl Session for RuntimeSession {
         }
     }
 
-    /// Forwarding this is what keeps the inner sessions' streaming fast paths
-    /// alive: the trait default materializes the whole result through
-    /// [`Session::simple_query`] before it pages, so a runtime that inherited it
-    /// would buffer every simple-protocol result no matter how large.
+    /// The runtime must forward this method to keep the inner sessions'
+    /// streaming fast paths alive. The trait default materializes the whole
+    /// result through [`Session::simple_query`] before it pages, so a runtime
+    /// that inherited the default would buffer every simple-protocol result,
+    /// however large.
     async fn simple_query_into<S: crabka_pgwire::engine::ResultSink>(
         &mut self,
         sql: &str,
@@ -2910,9 +2914,10 @@ impl Session for RuntimeSession {
         }
     }
 
-    /// Resolved through [`Session`] explicitly: [`crabka_pgexec::SqlSession`]
-    /// also has an inherent `take_notices`, which would otherwise win method
-    /// lookup and could drift from the trait contract the wire layer calls.
+    /// This resolves through [`Session`] explicitly, because
+    /// [`crabka_pgexec::SqlSession`] also has an inherent `take_notices`. That
+    /// inherent method would otherwise win method lookup, and it could drift
+    /// from the trait contract the wire layer calls.
     fn take_notices(
         &mut self,
     ) -> Option<tokio::sync::mpsc::Receiver<crabka_pgwire::error::PgError>> {
@@ -3097,10 +3102,10 @@ pub async fn try_suspend_idle_tenant(
 
 /// Whether `idle_window` has elapsed since the last recorded activity.
 ///
-/// The window is truncated, not rounded, on the way to milliseconds: it is
-/// compared against a delta of two epoch-millisecond instants, so rounding a
-/// sub-millisecond remainder up would hold the tenant warm for a whole extra
-/// millisecond that the operator never asked for.
+/// The conversion to milliseconds truncates the window; it does not round it.
+/// The window is compared against a delta of two epoch-millisecond instants.
+/// Rounding a sub-millisecond remainder up would hold the tenant warm for a
+/// whole extra millisecond that the operator never asked for.
 fn idle_window_elapsed(last_activity_unix_millis: u64, idle_window: Time) -> bool {
     let Some(now) = current_unix_millis() else {
         return false;
@@ -3599,8 +3604,10 @@ fn local_vacuum_spawn_policy(
     policy.filter(|_| supports_local_vacuum)
 }
 
-/// One pacing decision for the local vacuum loop: how long to sleep before
-/// the next bounded step and how many version keys that step may examine.
+/// One pacing decision for the local vacuum loop.
+///
+/// The decision holds how long to sleep before the next bounded step, and how
+/// many version keys that step may examine.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct VacuumPace {
     interval: Time,
@@ -3608,7 +3615,7 @@ struct VacuumPace {
 }
 
 impl VacuumPace {
-    /// The relaxed cadence: one default-budget step every couple of seconds.
+    /// The relaxed cadence: one default-budget step every idle interval.
     const fn idle(policy: LocalVacuumPolicy) -> Self {
         Self {
             interval: policy.idle_interval,
@@ -3617,54 +3624,58 @@ impl VacuumPace {
     }
 }
 
-/// What the vacuum loop observed across one bounded step, feeding the pacer.
+/// What the vacuum loop observed across one bounded step. The pacer reads it.
 #[derive(Debug, Clone, Copy)]
 struct VacuumStepObservation {
     /// Engine-wide committed primary-version Puts since the previous
     /// observation: the settle work foreground writes created meanwhile.
     writes_since_step: u64,
     /// Settle work this step retired: versions pruned + versions frozen +
-    /// deleter stamps cleared. Same units as `writes_since_step` — every
-    /// committed version Put eventually needs exactly one of the three.
+    /// deleter stamps cleared. This uses the same units as
+    /// `writes_since_step`, because every committed version Put eventually
+    /// needs exactly one of the three.
     versions_settled: u64,
-    /// Whether the step physically deleted or rewrote anything at all
-    /// (including secondary-index and clog deletes).
+    /// Whether the step physically deleted or rewrote anything at all,
+    /// including secondary-index and clog deletes.
     swept_anything: bool,
-    /// Whether the step wrapped past the last table, completing a cycle.
+    /// Whether the step wrapped past the last table and thus completed a cycle.
     cycle_completed: bool,
     /// Whether the foreground looked idle across this step: no write
     /// committed since the previous step and no session ran any statement
     /// within [`LocalVacuumPolicy::idle_after`].
     foreground_idle: bool,
-    /// Wall-clock extent of the step itself (excluding the sleep).
+    /// Wall-clock extent of the step itself, without the sleep.
     step_elapsed: Time,
 }
 
 /// Adaptive pacing for the local vacuum loop.
 ///
-/// The controller keeps a debt ledger in settle-work units: committed
-/// version Puts add debt, retired sweep work repays it. Debt above
+/// The controller keeps a debt ledger in settle-work units. Committed version
+/// Puts add debt, and retired sweep work repays it. Debt above
 /// [`LocalVacuumPolicy::hot_debt`] means the sweep is behind the write rate, so
-/// steps run back-to-back (zero interval) until it catches up; once caught
+/// steps run back-to-back at a zero interval until it catches up. Once caught
 /// up, the interval doubles from [`LocalVacuumPolicy::backoff_floor`] toward the
-/// idle cadence. A completed cycle that swept nothing proves the whole
-/// keyspace clean, which zeroes leftover debt — writes whose garbage the
-/// write path already pruned, or pinned work a later cycle retires — so
-/// insert-heavy load cannot wedge the loop at full speed forever. When the
-/// foreground goes idle before the store is proven clean, steps run
-/// back-to-back regardless of debt: reclaim capacity is spent while it is
-/// free instead of after throughput has already decayed. Step budgets grow
-/// toward [`LocalVacuumPolicy::max_key_budget`] only while hot steps stay fast and
-/// shrink as soon as they slow, so an individual step never becomes a
-/// foreground stall.
+/// idle cadence.
+///
+/// A completed cycle that swept nothing proves the whole keyspace clean, and
+/// that zeroes the leftover debt. The leftover debt is either garbage the write
+/// path already pruned, or pinned work a later cycle retires, so insert-heavy
+/// load cannot wedge the loop at full speed forever. When the foreground goes
+/// idle before the store is proven clean, steps run back-to-back whatever the
+/// debt: the loop spends reclaim capacity while it is free, instead of after
+/// throughput has already decayed. Step budgets grow toward
+/// [`LocalVacuumPolicy::max_key_budget`] only while hot steps stay fast, and they
+/// shrink as soon as the steps slow, so one step never becomes a foreground
+/// stall.
 struct VacuumPacer {
     policy: LocalVacuumPolicy,
-    /// Outstanding settle-work units (saturating at zero).
+    /// Outstanding settle-work units, saturating at zero.
     debt: u64,
     /// Whether the in-progress sweep cycle has physically changed anything.
     cycle_dirty: bool,
-    /// Whether the latest completed cycle proved the store clean (swept
-    /// nothing, no concurrent writes). Any later write invalidates it.
+    /// Whether the latest completed cycle proved the store clean, that is, it
+    /// swept nothing and saw no concurrent writes. Any later write invalidates
+    /// it.
     store_settled: bool,
     pace: VacuumPace,
 }
@@ -3755,11 +3766,12 @@ fn local_vacuum_maintenance_due(
 }
 
 /// Run bounded dead-MVCC-version sweep steps on the LOCAL serving engine
-/// until `shutdown` fires, paced by a [`VacuumPacer`]. The write paths
-/// already prune the rows they touch; the stepped sweep catches cold garbage
-/// a write never revisits, spreading each full pass across many steps so
-/// foreground statements never compete with a whole-store scan — while the
-/// pacing keeps the sweep cursor lapping the keyspace at sustained load.
+/// until `shutdown` fires, paced by a [`VacuumPacer`].
+///
+/// The write paths already prune the rows they touch. The stepped sweep catches
+/// cold garbage that a write never revisits. It spreads each full pass across
+/// many steps, so foreground statements never compete with a whole-store scan.
+/// The pacing keeps the sweep cursor lapping the keyspace at sustained load.
 async fn run_local_vacuum_loop(
     engine: SqlEngine,
     activity: Arc<crabka_pgwire::server::ActivityTracker>,
@@ -4200,9 +4212,9 @@ fn lifecycle_registry_bootstrap(
 /// Early-bound range transport whose serve task is aborted unless startup
 /// hands it to the normal serving flow.
 ///
-/// A startup error after the early bind must not leave a detached task
-/// serving the warming transport — and possibly live timestamp grants — in a
-/// process that reported failure to start.
+/// A startup error after the early bind must not leave a detached task in a
+/// process that reported failure to start. Such a task would keep serving the
+/// warming transport, and possibly live timestamp grants.
 struct EarlyRangeServer {
     server: Option<(tokio::task::JoinHandle<()>, SocketAddr)>,
 }
@@ -4227,10 +4239,10 @@ impl Drop for EarlyRangeServer {
 /// Bind the range transport before recovery when the boot is identifiably a
 /// live multirange runtime.
 ///
-/// The listener serves a warming service that answers every request with a
-/// re-resolvable error until recovery installs the range-0 timestamp oracle
-/// and, later, tenant assembly swaps in the full topology. Every other
-/// runtime mode returns `None` and keeps binding after the runtime opens.
+/// The listener serves a warming service. That service answers every request
+/// with a re-resolvable error until recovery installs the range-0 timestamp
+/// oracle, and until tenant assembly later swaps in the full topology. Every
+/// other runtime mode returns `None` and keeps binding after the runtime opens.
 async fn bind_early_range_transport(
     args: &ServeArgs,
 ) -> std::io::Result<Option<(Arc<DynamicLiveRangeService>, EarlyRangeServer)>> {
@@ -4426,9 +4438,9 @@ pub trait TenantConfigLoader: Sync {
 
 /// Kafka-backed tenant-config loader used by the binary.
 ///
-/// In-memory bootstraps (`memory://` / `in-memory://`) have no broker to
-/// dial, so the loader reports no tenant record instead of resolving the
-/// bootstrap as a socket address.
+/// In-memory bootstraps, `memory://` and `in-memory://`, have no broker to
+/// dial. The loader therefore reports no tenant record instead of resolving
+/// the bootstrap as a socket address.
 pub struct LiveTenantConfigLoader;
 
 #[async_trait::async_trait]
@@ -5151,17 +5163,17 @@ where
 
 /// This node's identity among the nodes of one tenant.
 ///
-/// A name no other live process shares, used for exactly one thing: recognising
-/// the notification records this node published itself.
+/// No other live process shares this name. It has exactly one job: it lets this
+/// node recognise the notification records it published itself.
 ///
-/// It is always suffixed with a per-process random component, because
-/// `--range-listen` is a *bind specification*, not a resolved address — every
-/// pod of a tenant is given the same `0.0.0.0:7432` by the operator, and the
-/// test harnesses pass the same `127.0.0.1:0` to every node. Deriving the
-/// identity from that string alone made every node of a cluster share one
-/// origin, so each discarded its peers' notifications as its own and
-/// cross-gateway delivery was a silent no-op. The endpoint is kept as a prefix
-/// only because it makes a record's origin readable in a log.
+/// The name always carries a per-process random suffix, because
+/// `--range-listen` is a *bind specification*, not a resolved address. The
+/// operator gives every pod of a tenant the same `0.0.0.0:7432`, and the test
+/// harnesses pass the same `127.0.0.1:0` to every node. An identity derived
+/// from that string alone makes every node of a cluster share one origin. Each
+/// node then discards its peers' notifications as its own, and cross-gateway
+/// delivery becomes a silent no-op. The name keeps the endpoint as a prefix
+/// only because that makes a record's origin readable in a log.
 fn node_identity(config: &SubstrateRuntimeConfig) -> String {
     let unique: u64 = rand::rng().random();
     match &config.advertised_endpoint {
@@ -5693,16 +5705,18 @@ fn build_range0_tso_rpc(
 /// Build the mode-appropriate range-0 grant oracle from an already-loaded
 /// durable horizon.
 ///
-/// Range 0 stays the single timestamp authority in both modes; only what
-/// backs the authority differs. `LogicalTso` recovers the dense logical
-/// oracle. `Hlc` recovers the wall-anchored oracle: its clock is seeded from
-/// the same persisted horizon (so its first grant dominates everything any
-/// predecessor granted, even across a wall-clock regression), it persists the
-/// horizon in packed strides through the same epoch-gated committer, and the
-/// node's fault-injection wall skew is applied exactly as on the in-memory
-/// bootstrap path. The returned RPC serves both remote `RangeRequest::Tso`
-/// grants and, wrapped by [`crabka_gres_ranges::pgexec_timestamp_oracle_from_rpc`],
-/// the local tenant timestamp source.
+/// Range 0 stays the single timestamp authority in both modes. Only what backs
+/// the authority differs. `LogicalTso` recovers the dense logical oracle.
+/// `Hlc` recovers the wall-anchored oracle. The `Hlc` clock is seeded from the
+/// same persisted horizon, so its first grant dominates everything any
+/// predecessor granted, even across a wall-clock regression. It persists the
+/// horizon in packed strides through the same epoch-gated committer, and it
+/// applies the node's fault-injection wall skew exactly as on the in-memory
+/// bootstrap path.
+///
+/// The returned RPC serves remote `RangeRequest::Tso` grants. It also serves
+/// the local tenant timestamp source, once
+/// [`crabka_gres_ranges::pgexec_timestamp_oracle_from_rpc`] wraps it.
 fn mode_tso_rpc_from_horizon(
     tso_horizon: &crabka_gres_substrate::SubstrateTsoHorizon,
     persisted_max_ts: u64,
@@ -10286,7 +10300,7 @@ mod tests {
     }
 
     /// `resample` recomputes a client's sampled bit, and only agrees with that
-    /// client when it uses the ratio the exporter samples at — a hardcoded 1.0
+    /// client when it uses the ratio the exporter samples at. A hardcoded 1.0
     /// would make every `resample` deployment behave as `trust`.
     #[test]
     fn resample_adopts_the_pipeline_sample_ratio() {
@@ -10310,9 +10324,9 @@ mod tests {
         assert!(config.ingress_trace == IngressTracePolicy::resample(0.25));
     }
 
-    /// With OTLP disabled nothing is exported, so the ratio only decides a
-    /// recorded flag: it falls back to the pipeline's own default, which keeps
-    /// ingress behaviour unchanged when OTLP is later switched on.
+    /// With OTLP disabled the process exports nothing, so the ratio only
+    /// decides a recorded flag. It falls back to the pipeline's own default,
+    /// which keeps ingress behaviour unchanged when OTLP is later switched on.
     #[test]
     fn disabled_otlp_leaves_resample_at_the_default_ratio() {
         let mut args = serve_args(None, Vec::new());
@@ -13361,17 +13375,19 @@ mod tests {
     /// `simple_query_into` must reach the engine, not the buffering default on
     /// [`Session`].
     ///
-    /// The two are told apart by where the page boundaries fall. The default
+    /// Where the page boundaries fall tells the two apart. The default
     /// materializes the whole result through
     /// [`Session::simple_query`](crabka_pgwire::engine::Session::simple_query)
     /// and only then splits it, so it can only ever produce uniform `page_rows`
-    /// chunks — every page but the last exactly `page_rows` rows, the last
-    /// non-empty, the tag on it. The engine paces its pages off the scan cursor
-    /// instead, so boundaries land where the scan reaches them and the tag
-    /// arrives on a trailing empty page once the cursor reports exhaustion.
-    /// Comparing the observed page sizes against the chunked shape is therefore
-    /// exactly the "streamed, not buffered" question: restore the default and
-    /// the two become equal by construction.
+    /// chunks. Every page but the last then holds exactly `page_rows` rows, and
+    /// the last page is non-empty and carries the tag.
+    ///
+    /// The engine paces its pages off the scan cursor instead, so boundaries
+    /// land where the scan reaches them. The tag then arrives on a trailing
+    /// empty page, once the cursor reports exhaustion. A comparison of the
+    /// observed page sizes against the chunked shape is therefore exactly the
+    /// "streamed, not buffered" question. Restore the default and the two
+    /// become equal by construction.
     #[tokio::test]
     async fn runtime_session_streams_simple_query_pages_from_the_engine_cursor() {
         use assert2::assert;
@@ -13442,11 +13458,11 @@ mod tests {
 
     /// The gateway arm forwards too.
     ///
-    /// This one cannot separate streamed from buffered the way its sibling
-    /// does: the gateway only streams for a range it does not host, and an
+    /// This test cannot separate streamed from buffered the way its sibling
+    /// does. The gateway only streams for a range it does not host, and an
     /// in-process tenant hosts every range, so both paths page the same
-    /// materialized result. What it does pin is that routing a `Query` through
-    /// the second arm still answers with every row, once, in order.
+    /// materialized result. The test does pin one thing: a `Query` routed
+    /// through the second arm still answers with every row, once, in order.
     #[tokio::test]
     async fn runtime_session_forwards_simple_query_into_on_the_gateway_arm() {
         use assert2::assert;

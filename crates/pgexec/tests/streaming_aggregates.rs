@@ -1,9 +1,11 @@
-//! Streaming local aggregates: COUNT/SUM/MIN/MAX/AVG over one local base
-//! table — bare or wrapped in scalar expressions (`CAST(count(*) AS BIGINT)`,
-//! `COALESCE(sum(x), 0)`, `sum(a) / count(*)`) — fold per cursor page, so they
-//! succeed over tables larger than the blocking-query memory budget while
-//! unsupported shapes (whole-row reads, DISTINCT, non-column aggregate
-//! arguments, unbounded group keys) still fail closed on that budget.
+//! Streaming local aggregates over one local base table.
+//!
+//! COUNT/SUM/MIN/MAX/AVG fold per cursor page, either bare or wrapped in scalar
+//! expressions such as `CAST(count(*) AS BIGINT)`, `COALESCE(sum(x), 0)`, and
+//! `sum(a) / count(*)`. So they succeed over tables larger than the
+//! blocking-query memory budget. Unsupported shapes still fail closed on that
+//! budget: whole-row reads, DISTINCT, non-column aggregate arguments, and
+//! unbounded group keys.
 
 use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
@@ -78,9 +80,10 @@ async fn assert_single_rows(session: &mut SqlSession, cases: &[(&str, &[Option<&
 const BIG_ROWS: i64 = 2500;
 const PAYLOAD_CHARS: usize = 8192;
 
-/// Build a table whose visible rows exceed the 16 MiB blocking-query budget:
-/// 2250 non-null 8 KiB payloads, each unique via its id prefix (v is NULL when
-/// id is a multiple of ten).
+/// Build a table whose visible rows exceed the 16 MiB blocking-query budget.
+///
+/// The table holds 2250 non-null 8 KiB payloads. The id prefix makes each
+/// payload unique. v is NULL when id is a multiple of ten.
 async fn seed_big_table(session: &mut SqlSession) {
     exec(session, "CREATE TABLE big (id BIGINT, grp BIGINT, v TEXT)").await;
     let padding = "x".repeat(PAYLOAD_CHARS - 8);
@@ -451,18 +454,19 @@ async fn grouped_streaming_aggregate_orders_groups_with_nulls_last() {
     );
 }
 
-/// `GROUPING()` outside a grouped query must keep `PostgreSQL`'s 42803, naming
-/// the missing GROUP BY, on the streaming path as well as the materializing one.
+/// `GROUPING()` outside a grouped query must keep `PostgreSQL`'s 42803 on the
+/// streaming path as well as the materializing one.
 ///
-/// The streaming cursor resolves projection expressions row-by-row and has no
-/// notion of `GROUPING()`, so if it accepts the shape at all it reports 42883
-/// "function grouping(...) does not exist" — a different error for the same SQL
-/// depending only on which path served it. Its eligibility gate therefore has
-/// to decline on `grouping::is_grouping_query`, not just on
-/// `agg::is_aggregate_query`: `GROUPING()` is not an aggregate.
+/// That error names the missing GROUP BY. The streaming cursor resolves
+/// projection expressions row by row and has no notion of `GROUPING()`. So if
+/// it accepts the shape at all, it reports 42883 "function grouping(...) does
+/// not exist". That is a different error for the same SQL, and only the path
+/// that served the query decides which one. Its eligibility gate must decline
+/// on `grouping::is_grouping_query`, not just on `agg::is_aggregate_query`:
+/// `GROUPING()` is not an aggregate.
 ///
 /// This regressed the differential-conformance parity gate the moment
-/// `RuntimeSession` began forwarding `simple_query_into`, which is what made
+/// `RuntimeSession` began to forward `simple_query_into`, which is what made
 /// the streaming path reachable in the first place.
 #[tokio::test]
 async fn bare_grouping_call_keeps_its_sqlstate_on_the_streaming_path() {
@@ -490,14 +494,14 @@ async fn bare_grouping_call_keeps_its_sqlstate_on_the_streaming_path() {
 /// `SELECT * FROM parent` on a partitioned table must return its partitions'
 /// rows on the streaming path, exactly as on the materializing one.
 ///
-/// A partitioned parent stores nothing itself, and the streaming cursor scans a
-/// single relation — so if it accepts the shape it returns an empty result for
-/// a table that plainly has rows. That is silent row loss, not an error, which
-/// makes it the worst failure mode available to a `SELECT`.
+/// A partitioned parent stores nothing itself, and the streaming cursor scans
+/// a single relation. So if the cursor accepts the shape, it returns an empty
+/// result for a table that plainly has rows. That is silent row loss, not an
+/// error, which makes it the worst failure mode available to a `SELECT`.
 ///
-/// Mirrors `alter_table.sql` in the `pg_regress` corpus, whose `select * from
+/// Mirrors `alter_table.sql` in the `pg_regress` corpus. Its `select * from
 /// bar1` regressed the differential parity gate the moment `RuntimeSession`
-/// began forwarding `simple_query_into` and made this path reachable.
+/// began to forward `simple_query_into` and made this path reachable.
 #[tokio::test]
 async fn selecting_a_partitioned_parent_streams_its_partitions_rows() {
     use crabka_pgwire::engine::CollectingResultSink;

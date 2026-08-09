@@ -1,19 +1,20 @@
-//! Per-store record cache: a doubly-linked LRU over `Bytes -> LruCacheEntry`
-//! plus a dirty-key set kept in insertion order. Ports Kafka `NamedCache`.
+//! Per-store record cache: a doubly-linked LRU over `Bytes -> LruCacheEntry`,
+//! plus a dirty-key set in insertion order.
 //!
-//! The entry map is a `BTreeMap<Bytes, Node>`, mirroring Kafka's backing
-//! `TreeMap`: keys are ordered in memcmp (lexicographic) byte order, which gives
-//! the ordered [`range`](NamedCache::range) / [`all`](NamedCache::all) scans
-//! the caching store wrappers need to merge cache + inner reads — for free,
-//! without a parallel key index.
+//! This module ports Kafka `NamedCache`. The entry map is a
+//! `BTreeMap<Bytes, Node>`, which matches Kafka's backing `TreeMap`. It orders
+//! keys in memcmp (lexicographic) byte order. That order gives the caching store
+//! wrappers the ordered [`range`](NamedCache::range) and
+//! [`all`](NamedCache::all) scans they need to merge cache and inner reads. The
+//! scans cost nothing extra and need no parallel key index.
 //!
-//! The LRU is implemented without `unsafe`: each [`Node`] stores its predecessor
-//! and successor *keys* in the map, with `head` (LRU/eviction end) and `tail`
-//! (MRU/most-recently-used end) tracking the list ends. LRU recency lives only in
-//! those links, independent of the map's iteration order, so ordered scans do not
-//! perturb recency. The dirty set is a `BTreeMap<u64, Bytes>` keyed by a
-//! monotonically increasing insertion counter, so `flush` visits dirty keys in
-//! the order they first became dirty.
+//! The LRU uses no `unsafe`. Each [`Node`] stores its predecessor and successor
+//! *keys* in the map. `head` is the LRU eviction end, `tail` is the MRU end, and
+//! the two track the list ends. LRU recency lives only in those links, apart from
+//! the map's iteration order, so an ordered scan does not disturb recency. The
+//! dirty set is a `BTreeMap<u64, Bytes>` keyed by a monotonically increasing
+//! insertion counter, so `flush` visits the dirty keys in the order they first
+//! became dirty.
 
 use std::collections::BTreeMap;
 
@@ -22,15 +23,15 @@ use crabka_units::prelude::*;
 
 use crate::{processor::record::RecordContext, store::cache::entry::LruCacheEntry};
 
-/// Callback invoked per dirty entry on flush/evict.
+/// Callback that runs for each dirty entry on flush and on evict.
 pub(crate) type FlushListener<'a> = dyn FnMut(&Bytes, &LruCacheEntry) + 'a;
 
 struct Node {
     entry: LruCacheEntry,
     prev: Option<Bytes>,
     next: Option<Bytes>,
-    /// Insertion-order sequence used to key the dirty set; only meaningful while
-    /// the entry is dirty.
+    /// Insertion-order sequence that keys the dirty set. It is only meaningful
+    /// while the entry is dirty.
     dirty_seq: Option<u64>,
 }
 
@@ -62,20 +63,23 @@ impl NamedCache {
         self.map.len()
     }
 
-    /// The cache's total held size. The running total is kept as a `usize` so the
-    /// incremental add/subtract stays exact; the dimension is put back on here.
+    /// The cache's total held size. A `usize` holds the running total, so the
+    /// incremental add and subtract stay exact. This method puts the dimension
+    /// back on.
     pub fn size_bytes(&self) -> ByteSize {
         ByteSize::from_bytes(self.size_bytes.try_into().unwrap_or(u64::MAX))
     }
 
-    /// Lookup without promotion (read-only borrow).
+    /// Look up a key and do not promote it. This is a read-only borrow.
     pub fn get(&self, key: &Bytes) -> Option<&LruCacheEntry> {
         self.map.get(key).map(|n| &n.entry)
     }
 
-    /// Entries with key in `[lo, hi)`, in ascending memcmp key order. Clones the
-    /// entries (incl. tombstones, so callers can hide the underlying value). A
-    /// range scan does NOT promote LRU recency (mirrors Kafka's range read).
+    /// Entries with a key in `[lo, hi)`, in ascending memcmp key order.
+    ///
+    /// This method clones the entries, tombstones included, so a caller can hide
+    /// the underlying value. A range scan does NOT promote LRU recency, which
+    /// matches Kafka's range read.
     pub fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, LruCacheEntry)> {
         self.map
             .range::<[u8], _>((std::ops::Bound::Included(lo), std::ops::Bound::Excluded(hi)))
@@ -83,8 +87,10 @@ impl NamedCache {
             .collect()
     }
 
-    /// Every entry in ascending memcmp key order (unbounded). Clones the entries
-    /// (incl. tombstones). Like [`range`](Self::range), does NOT promote recency.
+    /// Every entry in ascending memcmp key order, unbounded.
+    ///
+    /// This method clones the entries, tombstones included. Like
+    /// [`range`](Self::range), it does NOT promote recency.
     pub fn all(&self) -> Vec<(Bytes, LruCacheEntry)> {
         self.map
             .iter()
@@ -103,9 +109,9 @@ impl NamedCache {
         }
     }
 
-    /// Insert or update an entry. New keys are linked at the MRU end; updates
-    /// promote the key. Dirty entries are tracked in the dirty set in insertion
-    /// order; size accounting is kept current.
+    /// Insert or update an entry. This method links a new key at the MRU end, and
+    /// an update promotes the key. The dirty set tracks the dirty entries in
+    /// insertion order, and the size accounting stays current.
     pub fn put(&mut self, key: Bytes, entry: LruCacheEntry) {
         let new_value_size = entry.value_size();
         let dirty = entry.dirty;
@@ -188,8 +194,9 @@ impl NamedCache {
         self.dirty.clear();
     }
 
-    /// Evict the LRU (head) entry. If it is dirty, the listener is called for it
-    /// first. Returns the number of bytes freed (`key.len() + value_size`).
+    /// Evict the LRU (head) entry. The listener runs for that entry first when it
+    /// is dirty. This method returns the number of bytes freed, which is
+    /// `key.len() + value_size`.
     pub fn evict(&mut self, listener: &mut FlushListener) -> usize {
         let Some(key) = self.head.clone() else {
             return 0;
@@ -219,8 +226,9 @@ impl NamedCache {
         seq
     }
 
-    /// Unlink `key` from the doubly-linked list, fixing neighbors and head/tail.
-    /// Leaves the node in the map with stale `prev`/`next` (callers relink).
+    /// Unlink `key` from the doubly-linked list and fix the neighbors, the head,
+    /// and the tail. The node stays in the map with a stale `prev` and `next`,
+    /// and the caller relinks it.
     fn unlink(&mut self, key: &Bytes) {
         let (prev, next) = {
             let node = &self.map[key];

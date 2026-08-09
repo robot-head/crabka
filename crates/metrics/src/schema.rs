@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 
-/// Mandatory blockstore column: series fingerprint (`UInt64`).
+/// Mandatory blockstore column for the series fingerprint (`UInt64`).
 pub const COL_FINGERPRINT: &str = "series_fingerprint";
-/// Mandatory blockstore column: sample timestamp in epoch milliseconds (`Int64`).
+/// Mandatory blockstore column for the sample timestamp in epoch milliseconds
+/// (`Int64`).
 pub const COL_TIMESTAMP: &str = "timestamp";
 
 /// Native histogram schema column (`Int8`).
@@ -72,7 +73,8 @@ fn utf8_map_field(name: &str, nullable: bool) -> Field {
     )
 }
 
-/// Float samples: counters, gauges, and classic histogram bucket series.
+/// Float samples, which are counters, gauges, and classic histogram bucket
+/// series.
 #[must_use]
 pub fn float_sample_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -104,7 +106,7 @@ pub fn native_histogram_schema() -> SchemaRef {
     ]))
 }
 
-/// Exemplars with trace/span identifiers promoted to first-class columns.
+/// Exemplars whose trace and span identifiers are first-class columns.
 #[must_use]
 pub fn exemplar_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![

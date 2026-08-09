@@ -1,13 +1,13 @@
-//! SP37: date/time types — end-to-end over the wire.
+//! SP37: date/time types, end-to-end over the wire.
 //!
 //! Exercises `date`, `time`, `timestamp`, `timestamptz`, and `interval`:
-//! column round-trip + type OIDs, typed literals, arithmetic, comparison /
+//! column round-trip and type OIDs, typed literals, arithmetic, comparison /
 //! ORDER BY, casts, extract / `date_part` / `date_trunc` / age, clock functions
-//! (deterministic via `FixedClock`), `AT TIME ZONE`, `SET TIME ZONE` +
-//! rendering, transactional SET, and the error SQLSTATE surface.
+//! (`FixedClock` makes these deterministic), `AT TIME ZONE`, `SET TIME ZONE`
+//! and rendering, transactional SET, and the error SQLSTATE surface.
 //!
-//! Values are read in TEXT mode (simple query protocol) so the assertions
-//! exercise the engine's own `*_to_text` encodings directly.
+//! The tests read values in TEXT mode (simple query protocol), so the
+//! assertions exercise the engine's own `*_to_text` encodings directly.
 
 use std::sync::Arc;
 
@@ -52,7 +52,9 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
-/// First column of the first row as text (simple query → engine's own text encoding).
+/// First column of the first row as text.
+///
+/// The simple query protocol uses the engine's own text encoding.
 async fn text(client: &tokio_postgres::Client, sql: &str) -> Option<String> {
     use tokio_postgres::SimpleQueryMessage;
     for m in client.simple_query(sql).await.expect(sql) {

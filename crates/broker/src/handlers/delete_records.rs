@@ -1,7 +1,8 @@
-//! `DeleteRecords` (`api_key=21`). Leader-only local segment trim. The
-//! follower side picks up the new `log_start_offset` on the next Fetch
-//! via the existing `OFFSET_OUT_OF_RANGE` recovery path — matching the
-//! Apache Kafka model.
+//! `DeleteRecords` (`api_key=21`). Only the leader trims its local segments.
+//!
+//! The follower picks up the new `log_start_offset` on its next Fetch, through
+//! the existing `OFFSET_OUT_OF_RANGE` recovery path. This matches the Apache
+//! Kafka model.
 
 use bytes::Bytes;
 use crabka_log::Offset;

@@ -1,7 +1,7 @@
 //! Two-cluster integration tests for `crabka-replicator`.
 //!
-//! Test 1 — selective replication, remote-topic naming, residency zero-bytes.
-//! Test 2 — active/active loop prevention.
+//! Test 1: selective replication, remote-topic naming, residency zero-bytes.
+//! Test 2: active/active loop prevention.
 
 mod common;
 
@@ -24,8 +24,9 @@ use crabka_units::prelude::{TimeExt as _, secs};
 /// - Topics matching the selector are replicated to the target with the
 ///   `<source-alias>.<topic>` naming convention.
 /// - Topics excluded by a glob pattern (`*.internal`) are not replicated.
-/// - Topics blocked by a residency policy (`customers` allowed only in `gdpr`
-///   zones, but the target has no `gdpr` zone) produce zero bytes on the target.
+/// - Topics blocked by a residency policy produce zero bytes on the target. The
+///   policy allows `customers` only in `gdpr` zones, and the target has no
+///   `gdpr` zone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selective_replication_naming_and_residency() {
     // --- infrastructure ---------------------------------------------------
@@ -137,19 +138,22 @@ async fn selective_replication_naming_and_residency() {
 // Test 2 — active/active loop prevention
 // ---------------------------------------------------------------------------
 
-/// Verifies that when two symmetric flows replicate between clusters `ca` and
-/// `cb`, a topic replicated from `ca` to `cb` (appearing there as `ca.orders`)
-/// is NOT further replicated back to `ca` (which would create `cb.ca.orders`).
+/// Verifies that two symmetric flows between clusters `ca` and `cb` never
+/// replicate a topic back to its origin.
 ///
-/// The loop is prevented because the supervisor's topic discovery excludes any
-/// topic whose name contains `.` under the `Default` naming policy
-/// (`Renamer::is_remote`). `ca.orders` on broker `b` contains a `.` so the
-/// supervisor never subscribes to it for the `cb → ca` flow.
+/// A topic that replicates from `ca` to `cb` appears there as `ca.orders`. The
+/// test verifies that it does NOT replicate back to `ca`, which would create
+/// `cb.ca.orders`.
+///
+/// The topic discovery of the supervisor prevents the loop. Under the `Default`
+/// naming policy, `Renamer::is_remote` excludes any topic whose name contains
+/// `.`. `ca.orders` on broker `b` contains a `.`, so the supervisor never
+/// subscribes to it for the `cb → ca` flow.
 ///
 /// Setup: `cb` needs at least one non-remote topic so the `cb → ca` flow can
-/// build a valid consumer. We use a `pings` topic on `b` for this purpose.
-/// After replication starts, `ca.orders` appears on `b` but is excluded from
-/// the `cb → ca` topic list, so it never propagates back to `a`.
+/// build a valid consumer. The test uses a `pings` topic on `b` for this
+/// purpose. After replication starts, `ca.orders` appears on `b`, but the
+/// `cb → ca` topic list excludes it, so it never propagates back to `a`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn active_active_loop_prevention() {
     // --- infrastructure ---------------------------------------------------

@@ -1,6 +1,6 @@
-//! Soft goal: balance the count of replicas (any role) hosted on each
-//! broker. Greedy heuristic — swap one replica at a time from the
-//! most-loaded broker to the least-loaded.
+//! Soft goal: balance the count of replicas, in any role, hosted on each
+//! broker. The heuristic is greedy: it swaps one replica at a time from the
+//! most-loaded broker to the least-loaded broker.
 
 use std::collections::HashMap;
 

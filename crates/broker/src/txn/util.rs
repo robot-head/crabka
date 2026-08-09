@@ -2,7 +2,7 @@
 
 /// Returns the current wall-clock time in milliseconds since the Unix epoch.
 ///
-/// Used by transaction handlers to stamp `last_update_ms` on `TxnEntry`.
+/// Transaction handlers use this to stamp `last_update_ms` on `TxnEntry`.
 #[inline]
 pub(crate) fn now_millis() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};

@@ -2,8 +2,8 @@
 //!
 //! - `Segment::open_active` handles partial trailing batches in the
 //!   active segment.
-//! - [`swap_orphan_recover`] handles `.swap` files left behind by an
-//!   interrupted [`crate::compact::atomic_swap`].
+//! - [`swap_orphan_recover`] handles `.swap` files that an interrupted
+//!   [`crate::compact::atomic_swap`] left behind.
 
 use std::{collections::HashSet, path::Path};
 
@@ -13,13 +13,13 @@ use crate::{error::LogError, name};
 
 /// Heal any `<base>.log.swap` triples found in `dir`:
 ///
-/// - If the matching plain `<base>.log` exists, the swap was in
-///   step 1 or 2 (originals still authoritative) → delete the swap
-///   triple.
-/// - Else the swap was in step 3 mid-rename (originals deleted,
-///   `.swap` files complete) → finish the rename to final names.
+/// - If the matching plain `<base>.log` exists, the swap was in step 1 or 2
+///   and the originals are still authoritative, so delete the swap triple.
+/// - If it does not exist, the swap was in step 3, part-way through the
+///   rename. The originals are gone and the `.swap` files are complete, so
+///   finish the rename to the final names.
 ///
-/// Idempotent. Safe to call on every `Log::open`.
+/// This function is idempotent. It is safe to call on every `Log::open`.
 #[instrument(
     level = "info",
     skip_all,

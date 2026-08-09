@@ -1,6 +1,6 @@
-//! Ring buffer of recent `Proposal`s, UUID-keyed, with atomic on-disk
-//! persistence. Persists to `{data_dir}/proposals.json` so
-//! proposals survive a rebalancer restart.
+//! Ring buffer of recent `Proposal`s, keyed by UUID, with atomic on-disk
+//! persistence. It persists to `{data_dir}/proposals.json`, so proposals
+//! survive a rebalancer restart.
 
 use std::{
     collections::VecDeque,
@@ -38,13 +38,14 @@ struct OnDisk {
 pub struct ProposalStore {
     inner: Mutex<VecDeque<Proposal>>,
     capacity: usize,
-    /// Where to persist. `None` = in-memory only (tests or ephemeral runs).
+    /// Where to persist. `None` keeps the store in memory only, for tests or
+    /// ephemeral runs.
     path: Option<PathBuf>,
 }
 
 impl ProposalStore {
-    /// New in-memory-only store. Used in unit tests where persistence
-    /// isn't under test.
+    /// New in-memory-only store, for unit tests that do not cover
+    /// persistence.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -54,9 +55,9 @@ impl ProposalStore {
         }
     }
 
-    /// Open or create a persisted store at `{data_dir}/proposals.json`.
-    /// If the file is missing, returns an empty store and will create
-    /// the file on first write.
+    /// Open or create a persisted store at `{data_dir}/proposals.json`. If
+    /// the file is missing, this returns an empty store and creates the file
+    /// on the first write.
     /// # Errors
     /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub fn open(data_dir: &Path, capacity: usize) -> Result<Self, StoreError> {
@@ -96,8 +97,9 @@ impl ProposalStore {
         self.persist_if_durable();
     }
 
-    /// Apply `f` to the proposal with `id`. Returns the post-mutation
-    /// clone, or `None` if no such id. Persists.
+    /// Apply `f` to the proposal with `id`. Returns the clone made after the
+    /// mutation, or `None` if no proposal has that id. This persists the
+    /// store.
     /// # Panics
     /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn mutate<F: FnOnce(&mut Proposal)>(&self, id: &str, f: F) -> Option<Proposal> {

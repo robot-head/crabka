@@ -1,34 +1,36 @@
 //! Canonical newtypes for Crabka's cross-crate Kafka identifiers.
 //!
 //! A raw `i64` or `i32` carries no meaning, and Kafka's domain is full of
-//! same-typed values that are catastrophic to mix up — a log offset, a producer
-//! id, and a timestamp are all `i64`. Threading them as bare integers lets a
-//! caller transpose two arguments and still compile. These newtypes give the
-//! recurring *cross-crate* identifiers a single shared type so the compiler
-//! rejects the mix-up, and so the same `Offset` flows through the log, broker,
-//! consensus, replication, and observability crates rather than each crate
-//! minting its own incompatible copy.
+//! values of the same type that are catastrophic to mix up. A log offset, a
+//! producer id, and a timestamp are all `i64`. If the code threads them as bare
+//! integers, a caller can transpose two arguments and the code still compiles.
+//! These newtypes give the recurring *cross-crate* identifiers one shared type,
+//! so the compiler rejects the mix-up. The same `Offset` then flows through the
+//! log, broker, consensus, replication, and observability crates, and no crate
+//! mints its own incompatible copy.
 //!
 //! # Wire boundary
 //!
-//! The generated Kafka wire codec (`crabka-protocol`'s `generated` module) stays
-//! raw — it must be byte-exact. Wrap a value in one of these newtypes when it
-//! enters the hand-written domain layer, and unwrap it (`.0` or [`Into`]) when
-//! it is written back to a generated message or an on-disk format. Every newtype
-//! here is `#[serde(transparent)]`, so a serialized field is encoded as the bare
-//! inner primitive.
+//! The generated Kafka wire codec, the `generated` module of
+//! `crabka-protocol`, stays raw. It must be byte-exact. Wrap a value in one of
+//! these newtypes when it enters the hand-written domain layer. Unwrap it with
+//! `.0` or [`Into`] when you write it back to a generated message or to an
+//! on-disk format. Every newtype here is `#[serde(transparent)]`, so a
+//! serialized field carries the bare inner primitive.
 //!
 //! # Comparison against raw primitives
 //!
-//! For ergonomics, each newtype implements `PartialEq`/`PartialOrd` against its
-//! own inner primitive in both directions, so `offset >= 0`, `node_id == 7`, or
-//! `epoch == LeaderEpoch::UNKNOWN` read without an explicit `.0`. This is scoped
-//! to *comparisons only*: a newtype still cannot be passed where its primitive is
-//! expected (or vice versa), used as a differently-typed map key, or compared
-//! against a *different* newtype — so the argument-transposition safety that
-//! motivates these types is preserved. Sentinel values that carry Kafka meaning
-//! are exposed as named constants ([`Offset::ZERO`], [`ProducerId::NONE`],
-//! [`LeaderEpoch::UNKNOWN`]) rather than bare integers.
+//! Each newtype implements `PartialEq` and `PartialOrd` against its own inner
+//! primitive in both directions. `offset >= 0`, `node_id == 7`, and
+//! `epoch == LeaderEpoch::UNKNOWN` thus read without an explicit `.0`. This
+//! applies to *comparisons only*. You still cannot pass a newtype where its
+//! primitive is expected, and you cannot pass a primitive where its newtype is
+//! expected. You cannot use a newtype as a map key of a different type, and you
+//! cannot compare it against a *different* newtype. The argument-transposition
+//! safety that motivates these types thus stays.
+//!
+//! Named constants hold the sentinel values that carry Kafka meaning:
+//! [`Offset::ZERO`], [`ProducerId::NONE`], and [`LeaderEpoch::UNKNOWN`].
 //!
 //! See `docs/newtype-safety-rollout.md` and the code style guide's
 //! "Newtypes for Domain Values" section.
@@ -41,12 +43,12 @@ use core::{
 use derive_more::{Display, From, Into};
 use serde::{Deserialize, Serialize};
 
-/// A record offset within a topic partition's log (KIP wire type: `int64`).
+/// A record offset within a topic partition's log. KIP wire type: `int64`.
 ///
-/// Ordered, so it works as a `BTreeMap` key and in watermark comparisons.
-/// Advance or rewind by a count with `offset + n` / `offset - n` (where `n: i64`);
-/// the delta between two offsets is `a.0 - b.0`. Adding two offsets is
-/// meaningless and is deliberately not implemented.
+/// The type is ordered, so it works as a `BTreeMap` key and in watermark
+/// comparisons. Advance or rewind by a count with `offset + n` or `offset - n`,
+/// where `n: i64`. The delta between two offsets is `a.0 - b.0`. The addition
+/// of two offsets has no meaning, and this crate does not implement it.
 #[derive(
     Debug,
     Clone,
@@ -67,12 +69,12 @@ use serde::{Deserialize, Serialize};
 pub struct Offset(pub i64);
 
 impl Offset {
-    /// The log's first offset — also the initial log-start offset and the
+    /// The log's first offset. It is also the initial log-start offset and the
     /// high-watermark of an empty partition.
     pub const ZERO: Self = Offset(0);
 
-    /// The inner `i64` — use at the wire/generated boundary and for arithmetic
-    /// against other integer quantities.
+    /// The inner `i64`. Use it at the wire and generated boundary, and for
+    /// arithmetic against other integer quantities.
     #[must_use]
     pub const fn get(self) -> i64 {
         self.0
@@ -99,11 +101,11 @@ impl AddAssign<i64> for Offset {
     }
 }
 
-/// A partition index within a topic (KIP wire type: `int32`).
+/// A partition index within a topic. KIP wire type: `int32`.
 ///
-/// Ordered and hashable so it keys the per-partition maps that pervade the
-/// broker and replication paths. Partition indices are identifiers, not
-/// quantities, so no arithmetic is implemented.
+/// The type is ordered and hashable, so it keys the per-partition maps in the
+/// broker and replication paths. A partition index is an identifier, not a
+/// quantity, so this crate implements no arithmetic.
 #[derive(
     Debug,
     Clone,
@@ -124,19 +126,20 @@ impl AddAssign<i64> for Offset {
 pub struct PartitionIndex(pub i32);
 
 impl PartitionIndex {
-    /// The inner `i32` — use at the wire/generated boundary.
+    /// The inner `i32`. Use it at the wire and generated boundary.
     #[must_use]
     pub const fn get(self) -> i32 {
         self.0
     }
 }
 
-/// A broker / node / replica / controller identifier.
+/// A broker, node, replica, or controller identifier.
 ///
-/// Crabka carries this as a `u64` internally (consensus peer id, KIP-853 voter
-/// id, partition replica/leader/ISR id); on the Kafka wire the same value is an
-/// `int32` (`broker.id`, `node.id`, replica ids), converted at the protocol
-/// boundary. It is an identifier, not a quantity, so no arithmetic is provided.
+/// Crabka carries this value as a `u64` internally: the consensus peer id, the
+/// KIP-853 voter id, and the partition replica, leader, and ISR ids. On the
+/// Kafka wire the same value is an `int32`: `broker.id`, `node.id`, and the
+/// replica ids. The protocol boundary converts between the two. The value is an
+/// identifier, not a quantity, so this crate supplies no arithmetic.
 #[derive(
     Debug,
     Clone,
@@ -157,19 +160,19 @@ impl PartitionIndex {
 pub struct NodeId(pub u64);
 
 impl NodeId {
-    /// The inner `u64` — use at the wire/generated boundary.
+    /// The inner `u64`. Use it at the wire and generated boundary.
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
-/// A Kafka idempotent/transactional producer id (KIP-98 wire type: `int64`).
+/// A Kafka idempotent or transactional producer id. KIP-98 wire type: `int64`.
 ///
-/// Identifies a producer session across the broker's producer-state and
-/// transaction paths and the log's aborted-transaction index. `-1`
-/// (`NO_PRODUCER_ID`) is a valid sentinel and round-trips as the inner `i64`.
-/// It is an identifier, not a quantity, so no arithmetic is provided.
+/// The id identifies a producer session across the broker's producer-state and
+/// transaction paths and across the log's aborted-transaction index. `-1`, the
+/// `NO_PRODUCER_ID` sentinel, is valid and round-trips as the inner `i64`. The
+/// id is an identifier, not a quantity, so this crate supplies no arithmetic.
 #[derive(
     Debug,
     Clone,
@@ -190,34 +193,36 @@ impl NodeId {
 pub struct ProducerId(pub i64);
 
 impl ProducerId {
-    /// KIP-98 `NO_PRODUCER_ID` (`-1`): no idempotent/transactional producer is
-    /// assigned.
+    /// KIP-98 `NO_PRODUCER_ID` (`-1`): no idempotent or transactional producer
+    /// is assigned.
     pub const NONE: Self = ProducerId(-1);
 
-    /// The inner `i64` — use at the wire/generated boundary.
+    /// The inner `i64`. Use it at the wire and generated boundary.
     #[must_use]
     pub const fn get(self) -> i64 {
         self.0
     }
 
-    /// Whether this is the [`ProducerId::NONE`] sentinel (no producer assigned).
+    /// Whether this is the [`ProducerId::NONE`] sentinel, which means that no
+    /// producer is assigned.
     #[must_use]
     pub const fn is_none(self) -> bool {
         self.0 == Self::NONE.0
     }
 }
 
-/// A partition leader epoch (KIP-320 wire type: `int32`).
+/// A partition leader epoch. KIP-320 wire type: `int32`.
 ///
-/// Monotonic per-partition counter bumped on every leader change; used to fence
-/// stale leaders and to bound follower log truncation. `-1`
-/// (`UNKNOWN_LEADER_EPOCH`) is a valid wire sentinel and round-trips as the inner
-/// `i32`. Ordered so epochs compare directly; advance to the next epoch with
-/// [`LeaderEpoch::next`].
+/// This is a monotonic per-partition counter, and every leader change
+/// increments it. It fences stale leaders and it bounds follower log
+/// truncation. `-1`, the `UNKNOWN_LEADER_EPOCH` sentinel, is a valid wire value
+/// and round-trips as the inner `i32`. The type is ordered, so epochs compare
+/// directly. Advance to the next epoch with [`LeaderEpoch::next`].
 ///
-/// Note: the deterministic consensus core (`crabka-kraft-core`) tracks its own
-/// always-non-negative epoch as a `u32` (`crabka_kraft_core::types::Epoch`);
-/// `crabka-raft` converts to and from this wire type at the controller boundary.
+/// Note: the deterministic consensus core, `crabka-kraft-core`, tracks its own
+/// always-non-negative epoch as a `u32`, `crabka_kraft_core::types::Epoch`.
+/// `crabka-raft` converts to and from this wire type at the controller
+/// boundary.
 #[derive(
     Debug,
     Clone,
@@ -239,13 +244,14 @@ pub struct LeaderEpoch(pub i32);
 
 impl LeaderEpoch {
     /// KIP-320 `UNKNOWN_LEADER_EPOCH` (`-1`): the leader epoch is unknown or
-    /// unset (e.g. an older client, or a partition with no elected leader yet).
+    /// unset. Examples are an older client, and a partition with no elected
+    /// leader yet.
     pub const UNKNOWN: Self = LeaderEpoch(-1);
 
     /// The epoch a partition's first leader starts at (`0`).
     pub const INITIAL: Self = LeaderEpoch(0);
 
-    /// The inner `i32` — use at the wire/generated boundary.
+    /// The inner `i32`. Use it at the wire and generated boundary.
     #[must_use]
     pub const fn get(self) -> i32 {
         self.0
@@ -258,7 +264,8 @@ impl LeaderEpoch {
         self.0 >= 0
     }
 
-    /// The next epoch after this one (a leader change bumps the epoch by one).
+    /// The next epoch after this one. A leader change increments the epoch by
+    /// one.
     #[must_use]
     pub const fn next(self) -> Self {
         LeaderEpoch(self.0 + 1)
@@ -267,11 +274,12 @@ impl LeaderEpoch {
 
 /// A Kafka request API key, as the raw wire `int16`.
 ///
-/// This is the numeric code in a request header (`ApiKey` field). It is distinct
-/// from the typed `crabka_protocol::ApiKey` *enum*, which names each key
-/// (`Produce`, `Fetch`, …): this newtype is the boundary value threaded through
-/// hand-written header construction and the tap/proxy frame parsers, paired with
-/// an [`ApiVersion`] — two adjacent `i16`s that must not be transposed.
+/// This is the numeric code in the `ApiKey` field of a request header. It is
+/// different from the typed `crabka_protocol::ApiKey` *enum*, which names each
+/// key, such as `Produce` and `Fetch`. This newtype is the boundary value that
+/// goes through the hand-written header construction and through the tap and
+/// proxy frame parsers. It pairs with an [`ApiVersion`], and the two are
+/// adjacent `i16`s that must not be transposed.
 #[derive(
     Debug,
     Clone,
@@ -292,17 +300,17 @@ impl LeaderEpoch {
 pub struct ApiKey(pub i16);
 
 impl ApiKey {
-    /// The inner `i16` — use at the wire/generated boundary.
+    /// The inner `i16`. Use it at the wire and generated boundary.
     #[must_use]
     pub const fn get(self) -> i16 {
         self.0
     }
 }
 
-/// A Kafka request/response API version (wire type: `int16`).
+/// A Kafka request and response API version. Wire type: `int16`.
 ///
-/// Paired with an [`ApiKey`] in a request header; the two adjacent `i16`s are the
-/// textbook swap shape, which these distinct types prevent.
+/// It pairs with an [`ApiKey`] in a request header. The two adjacent `i16`s are
+/// the textbook swap shape, and these distinct types prevent that swap.
 #[derive(
     Debug,
     Clone,
@@ -323,17 +331,18 @@ impl ApiKey {
 pub struct ApiVersion(pub i16);
 
 impl ApiVersion {
-    /// The inner `i16` — use at the wire/generated boundary.
+    /// The inner `i16`. Use it at the wire and generated boundary.
     #[must_use]
     pub const fn get(self) -> i16 {
         self.0
     }
 }
 
-/// Generates cross-type comparison impls (both directions) so a domain newtype
-/// can be compared directly against its raw inner primitive — e.g. `offset >= 0`
-/// or `node_id == 7` — without an explicit `.0`. Deliberately scoped to
-/// comparisons (not argument passing or map keys); see the module docs.
+/// Generates cross-type comparison impls in both directions, so the code can
+/// compare a domain newtype directly against its raw inner primitive without an
+/// explicit `.0`. Examples are `offset >= 0` and `node_id == 7`. The macro is
+/// scoped to comparisons, not to argument passing and not to map keys. See the
+/// module docs.
 macro_rules! impl_primitive_cmp {
     ($ty:ty, $inner:ty) => {
         impl PartialEq<$inner> for $ty {

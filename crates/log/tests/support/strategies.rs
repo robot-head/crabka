@@ -4,11 +4,11 @@ use bytes::Bytes;
 use crabka_protocol::records::{Record, RecordBatch};
 use proptest::prelude::*;
 
-/// Arbitrary [`RecordBatch`] with the given record-count range and bounded
-/// key/value sizes.
+/// Arbitrary [`RecordBatch`] with the given record-count range and bounded key
+/// and value sizes.
 ///
-/// Each record gets a sequential `offset_delta` so the batch is internally
-/// consistent. The batch's `base_offset` is left at `0` because [`crabka_log::Log::append`]
+/// Each record gets a sequential `offset_delta`, so the batch is internally
+/// consistent. The batch's `base_offset` stays at `0`, because [`crabka_log::Log::append`]
 /// overwrites it with the next assigned offset.
 pub fn arb_batch(records_min: usize, records_max: usize) -> impl Strategy<Value = RecordBatch> {
     (
@@ -51,7 +51,7 @@ fn arb_record() -> impl Strategy<Value = Record> {
         })
 }
 
-/// A vector of arbitrary batches, each containing 1..=4 records.
+/// A vector of arbitrary batches. Each batch holds 1..=4 records.
 pub fn arb_batches(count_min: usize, count_max: usize) -> impl Strategy<Value = Vec<RecordBatch>> {
     proptest::collection::vec(arb_batch(1, 4), count_min..=count_max)
 }

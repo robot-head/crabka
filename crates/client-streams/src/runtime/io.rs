@@ -1,13 +1,16 @@
-//! Dependency-injected I/O the runtime depends on: fetching source records,
-//! producing sink records, and committing/fetching offsets. Real broker impls
-//! live in `io_broker.rs`; fakes in tests make `StreamTask`/`StreamThread`
-//! deterministically testable without a broker.
+//! The dependency-injected I/O that the runtime needs: it fetches source
+//! records, produces sink records, and commits and fetches offsets.
+//!
+//! The real broker implementations live in `io_broker.rs`. Fakes in the tests
+//! make `StreamTask` and `StreamThread` testable and deterministic without a
+//! broker.
 
 use bytes::Bytes;
 
 use crate::error::StreamsClientError;
 
-/// A fetched source record (timestamp is `-1` when the fetcher can't surface it).
+/// A fetched source record. The timestamp is `-1` when the fetcher cannot supply
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedRec {
     pub offset: i64,
@@ -23,19 +26,21 @@ pub struct FetchBatch {
 }
 
 impl FetchBatch {
-    /// The offset to fetch next: one past the last record, or `current` if empty.
+    /// The offset to fetch next. It is one past the last record, or `current`
+    /// when the batch is empty.
     #[must_use]
     pub fn next_offset(&self, current: i64) -> i64 {
         self.records.last().map_or(current, |r| r.offset + 1)
     }
 }
 
-/// Fetch isolation level (Kafka `Fetch.isolation_level`).
+/// Fetch isolation level, the Kafka `Fetch.isolation_level`.
 ///
-/// Under EOS-v2, changelog restore must read `ReadCommitted` so that aborted
-/// writes (records that were produced inside a transaction that later aborted)
-/// are excluded — the restored store reflects only committed state. Normal
-/// source processing and global-store bootstrap use `ReadUncommitted`.
+/// Under EOS-v2 the changelog restore must read `ReadCommitted`, so that it
+/// excludes aborted writes. An aborted write is a record produced inside a
+/// transaction that later aborted. The restored store then holds only committed
+/// state. Normal source processing and the global-store bootstrap use
+/// `ReadUncommitted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IsolationLevel {
     #[default]
@@ -45,8 +50,8 @@ pub enum IsolationLevel {
 
 #[async_trait::async_trait]
 pub trait RecordFetcher: Send + Sync + 'static {
-    /// Fetch records for `(topic, partition)` starting at `offset`, at the given
-    /// `isolation` level. An empty batch means nothing new yet.
+    /// Fetch the records for `(topic, partition)` from `offset`, at the given
+    /// `isolation` level. An empty batch means that nothing new is available.
     async fn fetch(
         &self,
         topic: &str,
@@ -55,9 +60,10 @@ pub trait RecordFetcher: Send + Sync + 'static {
         isolation: IsolationLevel,
     ) -> Result<FetchBatch, StreamsClientError>;
 
-    /// The partition indices of `topic`. The global consumer reads all of them to
-    /// materialize a fully-replicated global store. Default: a single partition 0
-    /// (overridden by the broker fetcher via metadata).
+    /// The partition indices of `topic`. The global consumer reads all of them
+    /// to materialize a fully-replicated global store. Default: the single
+    /// partition 0. The broker fetcher overrides the default from the
+    /// metadata.
     async fn partitions(&self, _topic: &str) -> Result<Vec<i32>, StreamsClientError> {
         Ok(vec![0])
     }
@@ -68,10 +74,11 @@ pub trait RecordProducer: Send + Sync + 'static {
     /// Enqueue a record to `topic`.
     ///
     /// `partition`:
-    /// - `None`  → use the producer's key-hash partitioner (correct for sink /
-    ///   repartition topics).
-    /// - `Some(p)` → pin to partition `p` (required for changelog topics so task
-    ///   restore can read back the record from the task partition).
+    /// - `None` uses the producer's key-hash partitioner. This is correct for a
+    ///   sink topic or a repartition topic.
+    /// - `Some(p)` pins the record to partition `p`. A changelog topic needs
+    ///   this, so that the task restore can read the record back from the task
+    ///   partition.
     async fn send(
         &self,
         topic: &str,
@@ -79,10 +86,13 @@ pub trait RecordProducer: Send + Sync + 'static {
         key: Option<Bytes>,
         value: Option<Bytes>,
     ) -> Result<(), StreamsClientError>;
-    /// Like `send`, but sets the record's timestamp (epoch millis) when
-    /// `timestamp_ms` is `Some`. Default delegates to `send` (producer fills
-    /// wall-clock time). Overridden by the broker producer so versioned-store
-    /// changelog records carry the version timestamp (KIP-889).
+    /// Like `send`, but it sets the record's timestamp in epoch milliseconds
+    /// when `timestamp_ms` is `Some`.
+    ///
+    /// The default delegates to `send`, and the producer then fills in the
+    /// wall-clock time. The broker producer overrides this method, so that a
+    /// versioned-store changelog record carries the version timestamp
+    /// (KIP-889).
     async fn send_with_timestamp(
         &self,
         topic: &str,
@@ -93,34 +103,39 @@ pub trait RecordProducer: Send + Sync + 'static {
     ) -> Result<(), StreamsClientError> {
         self.send(topic, partition, key, value).await
     }
-    /// Block until all enqueued records are acknowledged (durability barrier).
+    /// Block until the broker acknowledges every enqueued record. This is the
+    /// durability barrier.
     async fn flush(&self) -> Result<(), StreamsClientError>;
 }
 
-/// Lazy "begin the transaction" gate handed to the stream task's `process_once` operation
-/// under EOS-v2. The task invokes [`BeginTxnGate::ensure_begun`] exactly before
-/// its first produced record in a commit interval, so an interval that fetches
-/// no records opens no transaction (no empty-txn churn on an idle app). Under
-/// at-least-once no gate is passed.
+/// The lazy begin-the-transaction gate passed to the stream task's
+/// `process_once` operation under EOS-v2.
+///
+/// The task calls [`BeginTxnGate::ensure_begun`] exactly before its first
+/// produced record in a commit interval. An interval that fetches no records
+/// therefore opens no transaction, which avoids empty-txn churn on an idle app.
+/// Under at-least-once the caller passes no gate.
 #[async_trait::async_trait]
 pub trait BeginTxnGate: Send {
-    /// Ensure a transaction is open, beginning one on the first call within the
-    /// interval and a no-op on subsequent calls. Called by the task right before
-    /// the first sink/changelog `send`.
+    /// Make sure a transaction is open. The first call within the interval
+    /// begins one, and every later call does nothing. The task calls this method
+    /// right before the first sink or changelog `send`.
     async fn ensure_begun(&mut self) -> Result<(), StreamsClientError>;
 }
 
 #[async_trait::async_trait]
 pub trait OffsetStore: Send + Sync + 'static {
-    /// Committed offset for `(topic, partition)`, or `None` if never committed.
+    /// The committed offset for `(topic, partition)`, or `None` when no commit
+    /// happened.
     async fn committed(
         &self,
         topic: &str,
         partition: i32,
     ) -> Result<Option<i64>, StreamsClientError>;
-    /// The earliest available offset (auto.offset.reset = earliest).
+    /// The earliest available offset, which matches
+    /// `auto.offset.reset = earliest`.
     async fn earliest(&self, topic: &str, partition: i32) -> Result<i64, StreamsClientError>;
-    /// The latest available offset (log-end offset).
+    /// The latest available offset, that is the log-end offset.
     async fn latest(&self, topic: &str, partition: i32) -> Result<i64, StreamsClientError>;
     /// Commit `(topic, partition, offset)` triples for the streams group.
     async fn commit(&self, offsets: &[(String, i32, i64)]) -> Result<(), StreamsClientError>;

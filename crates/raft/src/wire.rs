@@ -1,10 +1,10 @@
 //! Crabka-private controller RPCs over Kafka TCP framing.
 //!
-//! These bodies are NOT part of `crabka-protocol`'s codegen — they're
-//! controller-only and Crabka-specific, with hand-written `encode_v0`/
-//! `decode_v0` methods. The KIP-595 quorum RPCs (Fetch/Vote/Begin/End) ride the
-//! generated codecs instead (see [`crate::kraft::transport::wire`]); the two
-//! types here back the observer metadata-fetch and the follower→leader
+//! These bodies are NOT part of `crabka-protocol`'s codegen. They are
+//! controller-only and Crabka-specific, with hand-written `encode_v0` and
+//! `decode_v0` methods. The KIP-595 quorum RPCs (Fetch, Vote, Begin, End) ride
+//! the generated codecs instead. See [`crate::kraft::transport::wire`]. The two
+//! types here back the observer metadata-fetch and the follower-to-leader
 //! submit-change forward.
 //!
 //! Api keys: `1003` `SubmitChange` (forward), `1004` `MetadataFetch` (observer).
@@ -17,15 +17,19 @@ const SUBMIT_CHANGE_RESPONSE_FIXED_LEN: usize = 10;
 const METADATA_FETCH_REQUEST_LEN: usize = 12;
 const METADATA_FETCH_RESPONSE_FIXED_LEN: usize = 30;
 
-/// Forward a `Controller::submit_change` from a follower to the leader. The body
-/// is the wincode-encoded `Vec<MetadataRecord>`; the response carries a single
-/// `error_code` (0 = applied, non-zero = not-leader / metadata-validation).
+/// Forwards a `Controller::submit_change` from a follower to the leader.
+///
+/// The body is the wincode-encoded `Vec<MetadataRecord>`. The response carries
+/// a single `error_code`, where 0 means applied and any non-zero value means
+/// not-leader or metadata-validation.
 pub const API_KEY_SUBMIT_CHANGE: i16 = 1003;
 
-/// Observer metadata fetch. The body carries a `fetch_offset` (`KraftLog`
-/// offset) + `max_bytes`; the response carries committed `__cluster_metadata`
-/// entries encoded as Kafka record batches, plus `log_start_offset` /
-/// `high_watermark` and a `leader_hint`.
+/// Observer metadata fetch.
+///
+/// The body carries a `fetch_offset`, which is a `KraftLog` offset, and
+/// `max_bytes`. The response carries committed `__cluster_metadata` entries
+/// encoded as Kafka record batches, plus `log_start_offset`, `high_watermark`,
+/// and a `leader_hint`.
 pub const API_KEY_METADATA_FETCH: i16 = 1004;
 
 fn require_remaining(buf: &[u8], required: usize) -> Result<(), ProtocolError> {
@@ -58,9 +62,11 @@ fn get_i32_len_prefixed_bytes(
     Ok(bytes)
 }
 
-/// Forward-to-leader payload. Body is opaque wincode bytes representing the
-/// `Vec<MetadataRecord>` to apply; the controller layer owns the serde details
-/// so the wire module stays metadata-agnostic.
+/// Forward-to-leader payload.
+///
+/// The body is opaque wincode bytes that represent the `Vec<MetadataRecord>` to
+/// apply. The controller layer owns the serde details, so the wire module stays
+/// metadata-agnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrabkaSubmitChangeRequest {
     pub records: Bytes,
@@ -83,18 +89,18 @@ impl CrabkaSubmitChangeRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrabkaSubmitChangeResponse {
-    /// 0 = success; otherwise an opaque transport-level error code (1 = not
-    /// leader, 2 = metadata validation, 3 = other).
+    /// 0 means success. Any other value is an opaque transport-level error
+    /// code: 1 is not leader, 2 is metadata validation, and 3 is other.
     pub error_code: i16,
-    /// Hint: the leader id the responder believes is current, when it cannot
-    /// apply the change itself. -1 means "unknown".
+    /// The leader id the responder believes is current, when the responder
+    /// cannot apply the change itself. -1 means "unknown".
     pub leader_hint: i64,
     /// Wincode-encoded [`crate::SubmitChangeResult`] on success.
     pub result: Bytes,
 }
 
 impl CrabkaSubmitChangeResponse {
-    /// Encode this response using wire version zero.
+    /// Encodes this response with wire version zero.
     ///
     /// # Errors
     ///
@@ -146,15 +152,16 @@ impl CrabkaMetadataFetchRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrabkaMetadataFetchResponse {
-    /// 0 = success; 1 = this node cannot serve — consult `leader_hint`.
+    /// 0 means success. 1 means this node cannot serve, so read
+    /// `leader_hint`.
     pub error_code: i16,
-    /// Leader id the responder believes is current; -1 = unknown.
+    /// Leader id the responder believes is current. -1 means unknown.
     pub leader_hint: i64,
     /// Lowest retained log offset on the responder.
     pub log_start_offset: i64,
-    /// Highest committed (applied) log offset on the responder.
+    /// Highest committed and applied log offset on the responder.
     pub high_watermark: i64,
-    /// Concatenated Kafka `RecordBatch`es (one per committed log batch).
+    /// Concatenated Kafka `RecordBatch`es, one for each committed log batch.
     pub records: Bytes,
 }
 

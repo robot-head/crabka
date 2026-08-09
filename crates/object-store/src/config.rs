@@ -1,55 +1,64 @@
 //! Object-store connection config types shared across Crabka.
 
-/// Default threshold above which a segment upload switches from a single PUT to
-/// a streaming multipart upload. 100 MiB (well below AWS's 5 GiB single-PUT cap).
+/// Default threshold above which a segment upload changes from a single PUT to
+/// a streaming multipart upload. The threshold is 100 MiB, well below AWS's
+/// 5 GiB single-PUT cap.
 pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
 
-/// Default per-part size for multipart uploads. 16 MiB (AWS requires >= 5 MiB per
-/// non-final part and caps parts at 10 000, so 16 MiB scales past any real segment).
+/// Default per-part size for multipart uploads. The size is 16 MiB. AWS
+/// requires >= 5 MiB per non-final part and caps the parts at 10 000, so 16 MiB
+/// scales past any real segment.
 pub const DEFAULT_MULTIPART_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Selects and parameterises the object-store backend to construct.
 #[derive(Clone, Debug)]
 pub enum ObjectStoreConfig {
-    /// Any S3-compatible endpoint (AWS S3, `MinIO`, Cloudflare R2).
+    /// Any S3-compatible endpoint, such as AWS S3, `MinIO`, or Cloudflare R2.
     S3(S3Config),
-    /// Native Google Cloud Storage (supports keyless GKE Workload Identity).
+    /// Native Google Cloud Storage. It supports keyless GKE Workload Identity.
     Gcs(GcsConfig),
-    /// Local filesystem rooted at `root` (dev / test).
+    /// Local filesystem rooted at `root`, for development and test.
     Local { root: std::path::PathBuf },
-    /// In-process store (tests).
+    /// In-process store, for tests.
     InMemory,
 }
 
-/// Connection / bucket parameters for an S3-compatible backend.
+/// Connection and bucket parameters for an S3-compatible backend.
 ///
-/// Either `access_key_id` + `secret_access_key` or the standard AWS credential
-/// chain supplies credentials; when both fields are `None`, `object_store` falls
-/// back to the environment-variable chain.
+/// The credentials come either from `access_key_id` and `secret_access_key` or
+/// from the standard AWS credential chain. When both fields are `None`,
+/// `object_store` falls back to the environment-variable chain.
 #[derive(Clone)]
 pub struct S3Config {
     /// S3 bucket name.
     pub bucket: String,
-    /// Optional key prefix inside the bucket (no leading or trailing slash).
+    /// Optional key prefix inside the bucket. No leading slash and no trailing
+    /// slash.
     pub prefix: Option<String>,
-    /// AWS region (required by AWS S3; placeholder `"us-east-1"` for MinIO/R2).
+    /// AWS region. AWS S3 requires it. Use the placeholder `"us-east-1"` for
+    /// `MinIO` and R2.
     pub region: String,
-    /// Optional custom endpoint URL (e.g. `http://minio:9000`, R2 endpoint).
+    /// Optional custom endpoint URL, for example `http://minio:9000` or an R2
+    /// endpoint.
     pub endpoint: Option<String>,
-    /// Optional explicit access key id (falls back to the AWS credential chain).
+    /// Optional explicit access key id. Without it, the backend falls back to
+    /// the AWS credential chain.
     pub access_key_id: Option<String>,
-    /// Optional explicit secret access key (falls back to the AWS credential chain).
+    /// Optional explicit secret access key. Without it, the backend falls back
+    /// to the AWS credential chain.
     pub secret_access_key: Option<String>,
-    /// Allow plaintext HTTP (required by `MinIO` without TLS).
+    /// Allow plaintext HTTP. `MinIO` without TLS requires it.
     pub allow_http: bool,
-    /// Files at least this large upload via multipart. Defaults to [`DEFAULT_MULTIPART_THRESHOLD`].
+    /// Files of at least this size upload with multipart. Defaults to
+    /// [`DEFAULT_MULTIPART_THRESHOLD`].
     pub multipart_threshold: u64,
     /// Per-part size for multipart. Defaults to [`DEFAULT_MULTIPART_CHUNK_SIZE`].
     pub multipart_chunk_size: usize,
 }
 
 impl std::fmt::Debug for S3Config {
-    /// Redacts credential fields so a stray `{:?}` / tracing call never leaks them.
+    /// Redacts credential fields, so a stray `{:?}` call or tracing call never
+    /// leaks them.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let redact = |opt: &Option<String>| opt.as_ref().map(|_| "***");
         f.debug_struct("S3Config")
@@ -82,34 +91,38 @@ impl Default for S3Config {
     }
 }
 
-/// Connection / bucket parameters for native Google Cloud Storage.
+/// Connection and bucket parameters for native Google Cloud Storage.
 ///
-/// Leaving every credential field `None` selects Workload Identity / ADC (the
-/// metadata server) — the keyless GKE production path.
+/// If every credential field is `None`, the config selects Workload Identity or
+/// ADC through the metadata server. This is the keyless GKE production path.
 #[derive(Clone, PartialEq, Eq)]
 pub struct GcsConfig {
     /// GCS bucket name.
     pub bucket: String,
-    /// Optional key prefix inside the bucket (no leading or trailing slash).
+    /// Optional key prefix inside the bucket. No leading slash and no trailing
+    /// slash.
     pub prefix: Option<String>,
     /// Optional path to a service-account JSON key file.
     pub service_account_path: Option<String>,
-    /// Optional inline service-account JSON key (mutually exclusive with the path).
+    /// Optional inline service-account JSON key. It is mutually exclusive with
+    /// the path.
     pub service_account_key: Option<String>,
     /// Optional path to an application-default-credentials JSON file.
     pub application_credentials_path: Option<String>,
-    /// Optional custom GCS API base URL (e.g. `http://fake-gcs:4443`).
+    /// Optional custom GCS API base URL, for example `http://fake-gcs:4443`.
     pub endpoint: Option<String>,
-    /// Allow plaintext HTTP (required by emulators without TLS).
+    /// Allow plaintext HTTP. Emulators without TLS require it.
     pub allow_http: bool,
-    /// Files at least this large upload via resumable multipart. Defaults to [`DEFAULT_MULTIPART_THRESHOLD`].
+    /// Files of at least this size upload with resumable multipart. Defaults
+    /// to [`DEFAULT_MULTIPART_THRESHOLD`].
     pub multipart_threshold: u64,
     /// Per-part size for multipart. Defaults to [`DEFAULT_MULTIPART_CHUNK_SIZE`].
     pub multipart_chunk_size: usize,
 }
 
 impl std::fmt::Debug for GcsConfig {
-    /// Redacts credential fields so a stray `{:?}` / tracing call never leaks them.
+    /// Redacts credential fields, so a stray `{:?}` call or tracing call never
+    /// leaks them.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let redact = |opt: &Option<String>| opt.as_ref().map(|_| "***");
         f.debug_struct("GcsConfig")

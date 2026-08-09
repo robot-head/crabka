@@ -1,26 +1,26 @@
-//! [`TopicBasedRemoteLogMetadataManager`] — production
-//! [`RemoteLogMetadataManager`] implementation backed by a publish /
+//! [`TopicBasedRemoteLogMetadataManager`]: the production
+//! [`RemoteLogMetadataManager`] implementation backed by a publish and
 //! subscribe [`MetadataEventLog`].
 //!
 //! The manager keeps the canonical in-memory view in an
-//! [`InmemoryRemoteLogMetadataManager`] (so the lifecycle state
-//! machine is the single source of truth for cache mutation) and uses
-//! the [`MetadataEventLog`] as the durable event log.
+//! [`InmemoryRemoteLogMetadataManager`], so the lifecycle state machine is the
+//! single source of truth for cache mutation. It uses the
+//! [`MetadataEventLog`] as the durable event log.
 //!
 //! Lifecycle:
 //!
-//! - [`TopicBasedRemoteLogMetadataManager::start`]: load any on-disk
+//! - [`TopicBasedRemoteLogMetadataManager::start`][]: load any on-disk
 //!   snapshot into the cache and spawn the consumer pump subscribed to
-//!   NOTHING. The broker then drives the consumed set via
-//!   [`TopicBasedRemoteLogMetadataManager::reconcile_assignment`], adding
-//!   only the `__remote_log_metadata` partitions covering the
-//!   user-partitions this broker leads or follows. A newly-added partition
-//!   is gated by `NotReady` until the pump reaches the HWM observed at
-//!   assignment time; a partition this broker does not consume is a genuine
-//!   `Ok(None)` (never served from any stale cache).
-//! - Mutation calls (`add`/`update`/`put_partition_delete`):
+//!   NOTHING. The broker then drives the consumed set with
+//!   [`TopicBasedRemoteLogMetadataManager::reconcile_assignment`]. That call
+//!   adds only the `__remote_log_metadata` partitions that cover the
+//!   user-partitions this broker leads or follows. `NotReady` gates a
+//!   newly-added partition until the pump reaches the HWM observed at
+//!   assignment time. A partition this broker does not consume is a genuine
+//!   `Ok(None)`, and the manager never serves it from any stale cache.
+//! - Mutation calls, which are `add`, `update`, and `put_partition_delete`:
 //!   serialize, publish, and wait until the consumer pump has applied
-//!   the published offset to the inner cache. The sync return implies
+//!   the published offset to the inner cache. The sync return means
 //!   "the event has been recorded and is visible to local reads".
 //! - Read calls: pure local lookups against the inner cache.
 //! - Drop / [`TopicBasedRemoteLogMetadataManager::shutdown`]: cancel the consumer pump.
@@ -47,12 +47,12 @@ use crate::{
     serde::MetadataEvent,
 };
 
-/// Sentinel target HWM meaning "this partition is assigned but its real
-/// high-water mark is not yet known" (the `high_water_marks` RPC failed,
-/// or the partition had no entry in the returned index). The gate treats
-/// it as `NotReady` (a real applied offset can never reach `i64::MAX`),
-/// and the next `reconcile_assignment` re-attempts the HWM fetch to
-/// replace it with the real target.
+/// Sentinel target HWM that means "this partition is assigned but its real
+/// high-water mark is not yet known". That happens when the
+/// `high_water_marks` RPC failed, or when the partition had no entry in the
+/// returned index. The gate treats the sentinel as `NotReady`, because a real
+/// applied offset can never reach `i64::MAX`. The next `reconcile_assignment`
+/// retries the HWM fetch and replaces the sentinel with the real target.
 const HWM_UNKNOWN: i64 = i64::MAX;
 
 /// Outcome of the per-metadata-partition readiness check that gates the
@@ -61,23 +61,23 @@ const HWM_UNKNOWN: i64 = i64::MAX;
 /// [`RemoteLogMetadataManager::list_remote_log_segments`],
 /// [`RemoteLogMetadataManager::highest_offset_for_epoch`]).
 enum ReadGate {
-    /// This broker does not consume the metadata partition (neither leads
-    /// nor follows any covered user-partition) → answer `Ok(None)`.
+    /// This broker does not consume the metadata partition, because it
+    /// neither leads nor follows any covered user-partition. Answer
+    /// `Ok(None)`.
     Unassigned,
-    /// Assigned but the consumer pump has not reached the assignment-time
-    /// HWM → answer `Err(NotReady)` (retryable).
+    /// Assigned, but the consumer pump has not reached the assignment-time
+    /// HWM. Answer with the retryable `Err(NotReady)`.
     NotReady,
-    /// Assigned and caught up → delegate to the inner cache.
+    /// Assigned and caught up. Delegate to the inner cache.
     Ready,
 }
 
 /// Production [`RemoteLogMetadataManager`] backed by the
-/// `__remote_log_metadata` topic (via a [`MetadataEventLog`]
-/// adapter).
+/// `__remote_log_metadata` topic through a [`MetadataEventLog`] adapter.
 ///
-/// Construct with [`Self::start`]; it loads any on-disk snapshot but
-/// consumes no metadata partitions until [`Self::reconcile_assignment`]
-/// adds the broker's leader/follower-derived set.
+/// Construct it with [`Self::start`]. That call loads any on-disk snapshot,
+/// but it consumes no metadata partitions until [`Self::reconcile_assignment`]
+/// adds the broker's leader-derived and follower-derived set.
 pub struct TopicBasedRemoteLogMetadataManager {
     log: Arc<dyn MetadataEventLog>,
     inner: Arc<InmemoryRemoteLogMetadataManager>,
@@ -89,47 +89,49 @@ pub struct TopicBasedRemoteLogMetadataManager {
     /// Directory the on-disk RLMM cache snapshot is written to (one
     /// [`SNAPSHOT_FILE_NAME`](crate::snapshot::SNAPSHOT_FILE_NAME) file).
     snapshot_dir: std::path::PathBuf,
-    /// Handle of the background snapshotter task; aborted on `Drop`,
-    /// joined on [`Self::shutdown_and_flush`].
+    /// Handle of the background snapshotter task. `Drop` aborts it, and
+    /// [`Self::shutdown_and_flush`] joins it.
     snapshotter: std::sync::Mutex<Option<JoinHandle<()>>>,
-    /// Live assignment handle for the metadata-log subscription. Held so
-    /// resume-from-snapshot and per-broker partition-assignment logic
-    /// assignment) can mutate the consumed set at runtime. Driven by
-    /// [`Self::reconcile_assignment`].
+    /// Live assignment handle for the metadata-log subscription. The manager
+    /// holds it so the resume-from-snapshot logic and the per-broker
+    /// partition-assignment logic can mutate the consumed set at runtime.
+    /// [`Self::reconcile_assignment`] drives it.
     assignment: Arc<dyn AssignmentHandle>,
-    /// Per-metadata-partition committed offsets loaded from the snapshot
-    /// at `start()`, indexed by metadata partition (`-1` == no committed
-    /// event for that partition / full replay). Retained as the single
-    /// canonical source for resume-offset lookups; assignment
-    /// reconciler reads it via [`Self::committed_offset`] when it
-    /// dynamically adds a partition (to start at `committed + 1`).
+    /// Per-metadata-partition committed offsets loaded from the snapshot at
+    /// `start()`, indexed by metadata partition. `-1` means there is no
+    /// committed event for that partition, so it needs a full replay. This
+    /// map is the single canonical source for resume-offset lookups. The
+    /// assignment reconciler reads it with [`Self::committed_offset`] when it
+    /// dynamically adds a partition, so that partition starts at
+    /// `committed + 1`.
     committed_offsets: Vec<i64>,
     /// Metadata partition → target HWM observed at assignment time.
-    /// Presence == this manager is currently assigned that partition;
-    /// reads for a user-partition hashing into it return
+    /// Presence means this manager is currently assigned that partition.
+    /// Reads for a user-partition that hashes into it return
     /// [`RemoteStorageError::NotReady`] until `applied[mp] >= target - 1`.
-    /// Empty for managers that never call [`Self::reconcile_assignment`]
-    /// (every read then delegates straight to `inner`).
+    /// The map is empty for managers that never call
+    /// [`Self::reconcile_assignment`], and every read then delegates straight
+    /// to `inner`.
     ready_targets: Arc<std::sync::Mutex<std::collections::HashMap<i32, i64>>>,
 }
 
 impl TopicBasedRemoteLogMetadataManager {
     /// Load any on-disk snapshot into the cache and spawn the consumer
-    /// pump with an empty assignment. The manager consumes nothing until
-    /// [`Self::reconcile_assignment`] is driven (by the broker).
+    /// pump with an empty assignment. The manager consumes nothing until the
+    /// broker drives [`Self::reconcile_assignment`].
     ///
-    /// `runtime` must be a Tokio runtime handle that lives at least
-    /// as long as the returned manager. The synchronous
-    /// [`RemoteLogMetadataManager`] methods bridge to this handle via
-    /// `block_on`, so they must NOT be called from a task running on
-    /// this same runtime — the broker only invokes them through
+    /// `runtime` must be a Tokio runtime handle that lives at least as long
+    /// as the returned manager. The synchronous
+    /// [`RemoteLogMetadataManager`] methods bridge to this handle with
+    /// `block_on`, so a caller must NOT call them from a task that runs on
+    /// this same runtime. The broker invokes them only through
     /// `spawn_blocking`, which is the only supported call pattern.
     ///
     /// # Errors
     ///
-    /// Currently infallible (the consumed set starts empty), but returns a
-    /// `Result` so the bootstrap contract stays stable if `start` regains a
-    /// fallible step.
+    /// This method is currently infallible, because the consumed set starts
+    /// empty. It returns a `Result` so the bootstrap contract stays stable if
+    /// `start` regains a fallible step.
     /// # Panics
     /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
     pub fn start(
@@ -243,15 +245,15 @@ impl TopicBasedRemoteLogMetadataManager {
         Ok(manager)
     }
 
-    /// Cancel the consumer pump. Read methods continue to work
-    /// against whatever was applied before shutdown; mutation methods
-    /// will time out / fail to make progress.
+    /// Cancel the consumer pump. Read methods continue to work against
+    /// whatever the pump applied before shutdown. Mutation methods time out
+    /// or fail to make progress.
     pub fn shutdown(&self) {
         self.shutdown.cancel();
     }
 
-    /// Cancel the pump + snapshotter, then write a final snapshot
-    /// capturing everything applied so far. Safe to call once on
+    /// Cancel the pump and the snapshotter, then write a final snapshot that
+    /// captures everything applied so far. It is safe to call this once on a
     /// graceful shutdown.
     /// # Panics
     /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
@@ -274,13 +276,14 @@ impl TopicBasedRemoteLogMetadataManager {
         }
     }
 
-    /// Capture the pump's committed offsets together with a cache
-    /// export under a consistent lock, and write a snapshot. The
-    /// `applied` lock is held only long enough to clone the offsets and
-    /// run `export()` (which takes the inner partitions lock); no Kafka
-    /// round-trips happen inside, so the hold is bounded. Returns the
-    /// highest committed offset written (for the "advanced since last"
-    /// check).
+    /// Capture the pump's committed offsets together with a cache export
+    /// under a consistent lock, and write a snapshot.
+    ///
+    /// This method holds the `applied` lock only long enough to clone the
+    /// offsets and run `export()`, which takes the inner partitions lock. No
+    /// Kafka round-trip happens inside, so the hold is bounded. Returns the
+    /// highest committed offset written, for the "advanced since last"
+    /// check.
     #[instrument(skip_all, err)]
     fn write_snapshot(&self) -> Result<i64, crate::error::SnapshotError> {
         // Benign-replay invariant: the pump updates `inner` BEFORE bumping
@@ -307,16 +310,18 @@ impl TopicBasedRemoteLogMetadataManager {
     }
 
     /// Canonical resume-from-snapshot computation, shared by `start()` and
-    /// the resume tests. Given an already-loaded snapshot (or `None` for a
-    /// missing/corrupt one) and the metadata-partition count `n`, produce:
+    /// the resume tests.
     ///
-    /// - the per-partition committed offsets, indexed by metadata
-    ///   partition and padded/truncated to `n` (`-1` == no committed
-    ///   event → full replay for that partition), and
+    /// Given an already-loaded snapshot, or `None` for a missing or corrupt
+    /// one, and the metadata-partition count `n`, this function produces:
+    ///
+    /// - the per-partition committed offsets, indexed by metadata partition
+    ///   and padded or truncated to `n`. `-1` means no committed event, so
+    ///   that partition needs a full replay.
     /// - the metadata-consumer assignment that resumes each partition at
     ///   `committed + 1`.
     ///
-    /// This is the ONLY place the `committed + 1` resume policy lives; do
+    /// This is the ONLY place the `committed + 1` resume policy lives. Do
     /// not recompute it elsewhere.
     fn resume_from_snapshot(
         snapshot: Option<&crate::snapshot::Snapshot>,
@@ -339,8 +344,8 @@ impl TopicBasedRemoteLogMetadataManager {
 
     /// Committed offset loaded from the snapshot for a single metadata
     /// partition, or `-1` when the partition is out of range or had no
-    /// committed event (full replay). The assignment reconciler uses
-    /// this to start a dynamically-added partition at `committed + 1`.
+    /// committed event and so needs a full replay. The assignment reconciler
+    /// uses this to start a dynamically-added partition at `committed + 1`.
     #[must_use]
     pub fn committed_offset(&self, partition: i32) -> i64 {
         usize::try_from(partition)
@@ -388,7 +393,7 @@ impl TopicBasedRemoteLogMetadataManager {
     }
 
     /// `true` when metadata partition `mp` is assigned and caught up to its
-    /// assignment-time HWM. Used by tests to poll for catch-up.
+    /// assignment-time HWM. Tests use this to poll for catch-up.
     #[cfg(test)]
     fn metadata_partition_ready(&self, mp: i32) -> bool {
         matches!(self.metadata_partition_gate(mp), ReadGate::Ready)
@@ -412,30 +417,32 @@ impl TopicBasedRemoteLogMetadataManager {
     }
 
     /// Diff `desired` against the current assignment and drive the
-    /// [`AssignmentHandle`]: add newly-needed partitions (seeded from the
-    /// snapshot committed offset + 1, falling back to 0 when there is
-    /// no committed event) and remove ones no longer needed. Records each
-    /// added partition's assignment-time HWM so reads gate on `NotReady`
-    /// until the pump catches up.
+    /// [`AssignmentHandle`].
     ///
-    /// HWM-fetch failure fails CLOSED: a partition whose real high-water
-    /// mark could not be obtained is recorded with the `HWM_UNKNOWN`
-    /// sentinel target so the gate returns `NotReady` (retryable), never a
-    /// false `Ok(None)`. Such partitions are re-attempted on every
-    /// subsequent reconcile (which the broker drives on each image change /
-    /// reconciler tick), so a transient `high_water_marks` failure
-    /// self-heals: the sentinel is replaced with the real target as soon as
-    /// the fetch succeeds.
+    /// This method adds newly-needed partitions, seeded from the snapshot
+    /// committed offset + 1, or from 0 when there is no committed event. It
+    /// removes partitions that are no longer needed. It records each added
+    /// partition's assignment-time HWM, so reads gate on `NotReady` until the
+    /// pump catches up.
     ///
-    /// MUST be driven by a SINGLE task. This method is not internally
-    /// serialized — it interleaves `.await` points with reads/writes of the
-    /// `ready_targets` map under short, non-overlapping locks — so two
-    /// concurrent callers could race the add/remove/refresh logic.
-    /// Correctness relies on the broker invoking it from exactly one
+    /// An HWM-fetch failure fails CLOSED. This method records a partition
+    /// whose real high-water mark it could not get with the `HWM_UNKNOWN`
+    /// sentinel target, so the gate returns the retryable `NotReady` and
+    /// never a false `Ok(None)`. Every subsequent reconcile retries such
+    /// partitions, and the broker drives a reconcile on each image change and
+    /// each reconciler tick. A transient `high_water_marks` failure therefore
+    /// self-heals: the real target replaces the sentinel as soon as the fetch
+    /// succeeds.
+    ///
+    /// A SINGLE task MUST drive this method. It is not internally serialized.
+    /// It interleaves `.await` points with reads and writes of the
+    /// `ready_targets` map under short, non-overlapping locks, so two
+    /// concurrent callers could race the add, remove, and refresh logic.
+    /// Correctness depends on the broker invoking it from exactly one
     /// reconciler task.
     ///
-    /// Async because it reads the log's high-water marks; the broker calls
-    /// it from its reconciler task (on the runtime), never from a
+    /// It is async because it reads the log's high-water marks. The broker
+    /// calls it from its reconciler task on the runtime, never from a
     /// `spawn_blocking` thread.
     /// # Panics
     /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
@@ -744,9 +751,9 @@ mod tests {
     };
 
     /// Test double that delegates to an inner [`InProcessMetadataEventLog`]
-    /// but can be told to fail `high_water_marks()` on demand. The
-    /// in-process fixture's HWM RPC always succeeds, which is why the rest
-    /// of the suite cannot exercise the C1 fail-closed path.
+    /// but can fail `high_water_marks()` on demand. The in-process fixture's
+    /// HWM RPC always succeeds, which is why the rest of the suite cannot
+    /// exercise the C1 fail-closed path.
     struct HwmFlakyLog {
         inner: Arc<InProcessMetadataEventLog>,
         fail_hwm: std::sync::atomic::AtomicBool,
@@ -838,7 +845,8 @@ mod tests {
         tokio::task::spawn_blocking(f).await.unwrap()
     }
 
-    /// Poll until `tp` reads `Ok(Some)` (assigned + caught up), or panic.
+    /// Poll until `tp` reads `Ok(Some)`, which means assigned and caught up,
+    /// or panic.
     async fn wait_ready(m: &Arc<TopicBasedRemoteLogMetadataManager>, tp: &TopicIdPartition) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -859,8 +867,8 @@ mod tests {
     }
 
     /// Start a manager that consumes NOTHING until the caller drives
-    /// `reconcile_assignment`. Used by the assignment/readiness tests, which
-    /// assert pre-assignment reads are a genuine miss.
+    /// `reconcile_assignment`. The assignment and readiness tests use this,
+    /// and they assert that pre-assignment reads are a genuine miss.
     fn start_manager(log: Arc<dyn MetadataEventLog>) -> Arc<TopicBasedRemoteLogMetadataManager> {
         TopicBasedRemoteLogMetadataManager::start(
             log,
@@ -871,11 +879,11 @@ mod tests {
         .unwrap()
     }
 
-    /// Start a manager and assign EVERY metadata partition (the eager
-    /// "consume all" behavior). Used by tests that publish through the
-    /// manager and read the result back, and by the multi-broker pre-seed
-    /// writers. Blocks until each non-empty partition has caught up to its
-    /// assignment-time HWM so a subsequent read does not race the pump.
+    /// Start a manager and assign EVERY metadata partition, which is the
+    /// eager "consume all" behavior. Tests that publish through the manager
+    /// and read the result back use this, and so do the multi-broker pre-seed
+    /// writers. It blocks until each non-empty partition has caught up to its
+    /// assignment-time HWM, so a subsequent read does not race the pump.
     async fn start_manager_all(
         log: Arc<dyn MetadataEventLog>,
     ) -> Arc<TopicBasedRemoteLogMetadataManager> {
@@ -1351,11 +1359,11 @@ mod tests {
         b.shutdown();
     }
 
-    /// Runtime `remove` then `add` reassignment must not
-    /// double-deliver a metadata partition's events into the cache. A
-    /// re-applied `AddSegment` is harmlessly rejected by the lifecycle state
-    /// machine, so the segment list stays at exactly one entry — proving no
-    /// duplicate corruption after remove + re-add.
+    /// A runtime `remove` and then `add` reassignment must not double-deliver
+    /// a metadata partition's events into the cache. The lifecycle state
+    /// machine harmlessly rejects a re-applied `AddSegment`, so the segment
+    /// list stays at exactly one entry. That proves there is no duplicate
+    /// corruption after a remove and re-add.
     #[tokio::test(flavor = "multi_thread")]
     async fn reassignment_remove_then_readd_applies_no_duplicates() {
         use crate::partitioning::metadata_partition_for;
@@ -1409,10 +1417,10 @@ mod tests {
     }
 
     /// C1: a HWM-fetch failure must fail CLOSED. When `high_water_marks`
-    /// errors at assignment time, the newly-added partition must gate
-    /// `NotReady` (retryable) — NEVER `Ok(None)` (a false end-of-tier) —
-    /// and the sentinel must self-heal on a later reconcile once the HWM
-    /// fetch succeeds.
+    /// errors at assignment time, the newly-added partition must gate on the
+    /// retryable `NotReady`. It must NEVER return `Ok(None)`, which would be
+    /// a false end-of-tier. The sentinel must also self-heal on a later
+    /// reconcile once the HWM fetch succeeds.
     #[tokio::test(flavor = "multi_thread")]
     async fn hwm_fetch_failure_gates_not_ready_then_self_heals() {
         use crate::partitioning::metadata_partition_for;

@@ -1,6 +1,8 @@
-//! Orders-analytics demo: a deterministic order generator + the Streams topology
-//! shape, plus the pure business rules the traced consumer applies. The real
-//! proto/registry/broker run lives in `main.rs`.
+//! Orders-analytics demo.
+//!
+//! This crate holds a deterministic order generator, the Streams topology
+//! shape, and the pure business rules that the traced consumer applies. The
+//! real proto, registry, and broker run lives in `main.rs`.
 
 use crabka_client_streams::{DefaultSerde, SchemaSerde};
 use crabka_schema_serde::format::protobuf::ProtobufSerde;
@@ -24,20 +26,23 @@ impl DefaultSerde for Order {
 
 /// The category keys the generator cycles through.
 pub const CATEGORIES: &[&str] = &["books", "electronics", "grocery", "toys", "garden"];
-/// Regions orders originate from. Cycles slower than category so each category
-/// spans regions (richer cross-product for span attributes / metric labels).
+/// Regions that orders come from. The list cycles more slowly than the category
+/// list, so each category spans regions. This gives a richer cross-product for
+/// the span attributes and the metric labels.
 pub const REGIONS: &[&str] = &["us-east", "us-west", "eu-west", "ap-south"];
-/// Fulfillment center serving each region (aligned index-for-index with
-/// [`REGIONS`]).
+/// Fulfillment center that serves each region. The index of each entry aligns
+/// with [`REGIONS`].
 pub const WAREHOUSES: &[&str] = &["wh-atl", "wh-sjc", "wh-fra", "wh-blr"];
-/// Payment methods (drives the fraud heuristic and payment-method labels).
+/// Payment methods. They drive the fraud heuristic and the payment-method
+/// labels.
 pub const PAYMENT_METHODS: &[&str] = &["card", "paypal", "wire", "crypto"];
 /// Customer tiers.
 pub const CUSTOMER_TIERS: &[&str] = &["free", "pro", "enterprise"];
 
-/// Deterministic order for index `i` (no RNG — varied but reproducible). Every
-/// field is varied at a different period so the pipeline emits a broad spread of
-/// span attributes and metric label combinations.
+/// Deterministic order for index `i`. The function uses no RNG, so the orders
+/// are varied but reproducible. Each field varies at a different period, so the
+/// pipeline emits a broad spread of span attributes and metric label
+/// combinations.
 #[must_use]
 pub fn order_at(i: u64) -> Order {
     let idx = |len: usize, div: u64| usize::try_from((i / div) % len as u64).unwrap_or(0);
@@ -69,23 +74,26 @@ pub fn order_at(i: u64) -> Order {
     }
 }
 
-/// A seeded anomaly (zero-amount) order. Drives the produce-side warn log and
-/// the consumer's `anomalous` processing outcome.
+/// Whether this is a seeded anomaly order, that is an order with a zero amount.
+/// The result drives the produce-side warn log and the consumer's `anomalous`
+/// processing outcome.
 #[must_use]
 pub fn is_anomalous(order: &Order) -> bool {
     order.amount.abs() < f64::EPSILON
 }
 
-/// Deterministic demo "fraud" heuristic that drives the fraud-check span outcome
-/// and the `fraud_rejected` processing metric: high-value crypto orders are
-/// flagged. Pure, so the trace/metric outcome is reproducible and unit-testable.
+/// Deterministic demo "fraud" heuristic. It drives the fraud-check span outcome
+/// and the `fraud_rejected` processing metric, and it flags high-value crypto
+/// orders. The function is pure, so the trace outcome and the metric outcome
+/// are reproducible and unit-testable.
 #[must_use]
 pub fn is_suspicious(order: &Order) -> bool {
     order.payment_method == "crypto" && order.amount > 150.0
 }
 
-/// The terminal outcome the traced consumer assigns to an order. Also the value
-/// of the `outcome` metric label and the `demo.order.outcome` span attribute.
+/// The terminal outcome the traced consumer assigns to an order. It is also the
+/// value of the `outcome` metric label and of the `demo.order.outcome` span
+/// attribute.
 #[must_use]
 pub fn classify_outcome(order: &Order) -> &'static str {
     if is_anomalous(order) {

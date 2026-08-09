@@ -1,8 +1,9 @@
-//! KIP-584 `UpdateFeatures` (`api_key` 57) write path. Finalizing
-//! `metadata.version` lands a Raft-persisted `V1FeatureLevel` record and
-//! surfaces the finalized feature + a real epoch through `ApiVersions`.
-//! Validation rejects unsupported features and out-of-range levels;
-//! `validate_only` runs all checks without persisting.
+//! The KIP-584 `UpdateFeatures` (`api_key` 57) write path.
+//!
+//! A finalize of `metadata.version` writes a Raft-persisted `V1FeatureLevel`
+//! record, and reports the finalized feature and a real epoch through
+//! `ApiVersions`. Validation rejects an unsupported feature and a level
+//! outside the range. `validate_only` runs every check and persists nothing.
 
 use assert2::assert;
 mod support;
@@ -63,9 +64,9 @@ async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
     p.broker.shutdown().await;
 }
 
-/// Assert a row carries `code`, tolerant of the wire version: on
-/// `UpdateFeatures` v2 the `results` array is not encoded, so the handler
-/// promotes the first non-zero row error to the top-level `error_code`.
+/// Asserts that a row carries `code`, whatever the wire version. On
+/// `UpdateFeatures` v2 the encoder omits the `results` array, so the handler
+/// moves the first non-zero row error to the top-level `error_code`.
 fn assert_feature_error(
     resp: &crabka_protocol::owned::update_features_response::UpdateFeaturesResponse,
     feature: &str,

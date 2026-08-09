@@ -70,11 +70,11 @@ fn check_emitted(flavor: &str, em: &EmittedMessage, name: &str) {
     }
 }
 
-/// `commonStructs` are MESSAGE-LOCAL in Kafka schemas: two different messages
+/// `commonStructs` are MESSAGE-LOCAL in Kafka schemas. Two different messages
 /// may each declare a struct named `Assignment` with different fields. The
-/// resolver must scope them per owning message so the paths differ and each
-/// carries its message segment — otherwise one shape silently wins globally and
-/// corrupts the other message's type.
+/// resolver must scope them per owning message, so the paths differ and each
+/// path carries its message segment. Without that scope, one shape silently
+/// wins globally and corrupts the other message's type.
 #[test]
 fn common_structs_are_message_scoped() {
     let specs = ir::load_dir(&schemas_dir()).unwrap();

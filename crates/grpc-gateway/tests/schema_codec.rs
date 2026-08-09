@@ -1,9 +1,10 @@
-//! Integration test: `SchemaRegistryCodec` encode→frame→decode round-trips for
-//! Avro, JSON Schema, and Protobuf against a mock Confluent Schema Registry
-//! HTTP server.
+//! Integration test for the `SchemaRegistryCodec` encode, frame, and decode
+//! round-trips for Avro, JSON Schema, and Protobuf, against a mock Confluent
+//! Schema Registry HTTP server.
 //!
-//! No broker, no Docker, no real registry. The mock server is a tiny in-process
-//! axum server that serves the three endpoints the codec calls.
+//! These tests need no broker, no Docker, and no real registry. The mock server
+//! is a small in-process axum server that serves the three endpoints the codec
+//! calls.
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
@@ -37,10 +38,10 @@ const JSON_SCHEMA: &str =
 
 const PROTO_SCHEMA: &str = r#"syntax = "proto3"; message O { int64 id = 1; string k = 2; }"#;
 
-/// Schema id → (schema string, schemaType string).
+/// A map of schema id → (schema string, schemaType string).
 type SchemaMap = HashMap<i32, (String, String)>;
 
-/// Build the in-memory schema map used by the mock registry.
+/// Build the in-memory schema map that the mock registry serves.
 fn schema_map() -> SchemaMap {
     let mut m = HashMap::new();
     m.insert(1, (AVRO_SCHEMA.to_owned(), "AVRO".to_owned()));
@@ -49,7 +50,7 @@ fn schema_map() -> SchemaMap {
     m
 }
 
-/// Subject → schema id mapping for `/subjects/{subject}/versions/latest`.
+/// The subject → schema id map for `/subjects/{subject}/versions/latest`.
 fn subject_map() -> HashMap<String, i32> {
     let mut m = HashMap::new();
     m.insert("orders-avro-value".to_owned(), 1);
@@ -112,7 +113,7 @@ async fn get_latest(
     .into_response()
 }
 
-/// Starts the mock server on `127.0.0.1:0`. Returns the bound port.
+/// Start the mock server on `127.0.0.1:0`. Returns the bound port.
 ///
 /// The server runs in the background for the duration of the test process.
 async fn start_mock_server() -> u16 {
@@ -147,7 +148,7 @@ async fn start_mock_server() -> u16 {
     port
 }
 
-/// Build a [`SchemaRegistryCodec`] pointing at the mock server.
+/// Build a [`SchemaRegistryCodec`] that points at the mock server.
 fn codec_for(port: u16) -> SchemaRegistryCodec {
     let base_url = format!("http://127.0.0.1:{port}/");
     let client = Arc::new(SchemaRegistryClient::new(&base_url).expect("valid URL"));
@@ -167,11 +168,12 @@ fn assert_confluent_header(framed: &Bytes, expected_id: i32) {
 
 // ── Round-trip tests ────────────────────────────────────────────────────────
 
-/// Avro encode→frame→decode round-trip against the mock registry (schema id 1).
+/// Avro encode, frame, and decode round-trip against the mock registry, with
+/// schema id 1.
 ///
 /// The codec fetches the schema from `GET /schemas/ids/1`, serializes the JSON
 /// as Avro binary, prepends the 5-byte Confluent header, then decodes back to
-/// JSON. Because Avro long fields round-trip as JSON numbers, the JSON output
+/// JSON. An Avro long field round-trips as a JSON number, so the JSON output
 /// matches the input exactly.
 async fn assert_avro_round_trip_via_mock_registry() {
     let port = start_mock_server().await;
@@ -226,11 +228,12 @@ async fn assert_avro_round_trip_via_mock_registry() {
     assert2::assert!(actual == expected);
 }
 
-/// JSON Schema encode→frame→decode round-trip against the mock registry (schema id 2).
+/// JSON Schema encode, frame, and decode round-trip against the mock registry,
+/// with schema id 2.
 ///
-/// For JSON Schema the wire payload IS JSON (no binary transcoding). The framed
-/// bytes are: `[0x00][id=2 BE][raw JSON]`. The decode path validates and
-/// returns the JSON bytes unchanged.
+/// For JSON Schema the wire payload IS JSON, with no binary transcoding. The
+/// framed bytes are `[0x00][id=2 BE][raw JSON]`. The decode path validates the
+/// JSON bytes and returns them unchanged.
 async fn assert_json_schema_round_trip_via_mock_registry() {
     let port = start_mock_server().await;
     let codec = codec_for(port);
@@ -281,13 +284,14 @@ async fn assert_json_schema_round_trip_via_mock_registry() {
     assert2::assert!(actual == expected);
 }
 
-/// Protobuf encode→frame→decode round-trip against the mock registry (schema id 3).
+/// Protobuf encode, frame, and decode round-trip against the mock registry,
+/// with schema id 3.
 ///
-/// After the 5-byte Confluent header the Protobuf wire format adds a
-/// message-index prefix `[0x00]` (first-message optimization). After decode,
-/// the proto3 JSON mapping encodes `int64` fields as decimal **strings**
-/// (e.g. `"1"` not `1`) — this is spec-correct and the test explicitly checks
-/// for this behavior.
+/// After the 5-byte Confluent header, the Protobuf wire format adds a
+/// message-index prefix `[0x00]`, the first-message optimization. After decode,
+/// the proto3 JSON mapping encodes an `int64` field as a decimal string, for
+/// example `"1"` and not `1`. That is spec-correct, and this test checks it
+/// explicitly.
 async fn assert_protobuf_round_trip_via_mock_registry() {
     let port = start_mock_server().await;
     let codec = codec_for(port);

@@ -23,9 +23,9 @@ pub enum ProfilesError {
     Block(String),
     #[error("pprof: {0}")]
     Pprof(String),
-    /// An unexpected server-side fault (e.g. a poisoned lock). The inner string
-    /// is for server-side logging only and must NOT be surfaced verbatim to
-    /// clients; the ingest edge maps this to a generic 500 message.
+    /// An unexpected server-side fault, for example a poisoned lock. The inner
+    /// string is for server-side logging only. Callers must NOT show it verbatim
+    /// to clients. The ingest edge maps this variant to a generic 500 message.
     #[error("internal error: {0}")]
     Internal(String),
 }

@@ -1,5 +1,5 @@
-//! Per-group state for KIP-848 next-gen consumer groups. Owned by exactly
-//! one `actor::GroupActor` task; never shared.
+//! Per-group state for KIP-848 next-gen consumer groups. Exactly one
+//! `actor::GroupActor` task owns this state. It is never shared.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -13,24 +13,31 @@ use regex::Regex;
 use super::{expired_member_ids, persistence_next_gen::MemberAssignmentState};
 
 /// Classic-protocol state for a member hosted inside an *upgraded* consumer
-/// group during KIP-848 upgrade. `None` on a native consumer-protocol member; `Some`
-/// once a classic member's group has been upgraded (or a classic member joins
-/// an already-upgraded group). The member keeps speaking the classic
-/// `JoinGroup`/`SyncGroup`/`Heartbeat` protocol; the coordinator serves it by
-/// mapping onto the consumer-group machinery and translating its target into a
+/// group during a KIP-848 upgrade.
+///
+/// The value is `None` on a native consumer-protocol member. It is `Some` once
+/// the broker upgraded a classic member's group, and when a classic member
+/// joins an already-upgraded group.
+///
+/// The member keeps speaking the classic `JoinGroup`, `SyncGroup`, and
+/// `Heartbeat` protocol. The coordinator serves it by mapping onto the
+/// consumer-group machinery, and by translating its target into a
 /// `ConsumerProtocolAssignment` blob on `SyncGroup`.
 #[derive(Debug, Clone)]
 pub struct ClassicMemberFacade {
-    /// Classic generation echoed to the member; advances with the group epoch.
+    /// Classic generation that the coordinator echoes to the member. It
+    /// advances with the group epoch.
     pub generation_id: i32,
     /// `(protocol_name, metadata)` pairs the member proposed in `JoinGroup`.
-    /// Preserved so downgrade can losslessly restore the classic member.
+    /// The state keeps them so that a downgrade restores the classic member
+    /// with no loss.
     pub supported_protocols: Vec<(String, Bytes)>,
     /// The member's classic `session.timeout.ms`.
     pub session_timeout: Duration,
-    /// The last `ConsumerProtocolAssignment` blob returned via `SyncGroup`.
+    /// The last `ConsumerProtocolAssignment` blob that `SyncGroup` returned.
     pub last_synced_assignment: Bytes,
-    /// `true` once the member must re-`SyncGroup` to pick up a changed target.
+    /// `true` once the member must send `SyncGroup` again to pick up a changed
+    /// target.
     pub awaiting_sync: bool,
 }
 
@@ -42,27 +49,31 @@ pub struct MemberState {
     pub client_id: String,
     pub client_host: String,
     pub subscribed_topic_names: HashSet<String>,
-    /// KIP-848 v1+ `subscribed_topic_regex`. When set, the reconciler
-    /// resolves it against the metadata image and unions the match with
-    /// `subscribed_topic_names`. `None` means "no regex" — exact-name
-    /// subscription only. Not persisted on `__consumer_offsets` yet;
-    /// the client re-supplies it on every heartbeat so a coordinator
-    /// failover loses at most one heartbeat interval of state.
+    /// KIP-848 v1+ `subscribed_topic_regex`. When set, the reconciler resolves
+    /// it against the metadata image and unions the match with
+    /// `subscribed_topic_names`. `None` means "no regex", that is an
+    /// exact-name subscription only.
+    ///
+    /// The broker does not persist this field on `__consumer_offsets` yet. The
+    /// client supplies it again on every heartbeat, so a coordinator failover
+    /// loses at most one heartbeat interval of state.
     pub subscribed_topic_regex: Option<String>,
-    /// Compiled form of `subscribed_topic_regex`, cached so the reconciler
-    /// doesn't recompile the pattern for this member on every recompute.
-    /// The cache distinguishes a compiled pattern, a cached compilation
-    /// failure, and an absent pattern. Always kept in sync via [`MemberState::set_regex`]
-    /// — never set `subscribed_topic_regex` directly.
+    /// Compiled form of `subscribed_topic_regex`. The cache stops the
+    /// reconciler from compiling the pattern for this member again on every
+    /// recompute. It separates three cases: a compiled pattern, a cached
+    /// compilation failure, and an absent pattern. Always keep it in step
+    /// through [`MemberState::set_regex`]. Never set `subscribed_topic_regex`
+    /// directly.
     ///
-    /// `Regex` is `Clone` + `Debug` but NOT `PartialEq`/`Eq`. `MemberState`
-    /// derives only `Clone`/`Debug` (no `PartialEq`), so this field needs no
-    /// special handling; if `PartialEq` is ever added, compare on the pattern
-    /// string instead and skip this cached field.
+    /// `Regex` is `Clone` and `Debug`, but NOT `PartialEq` or `Eq`.
+    /// `MemberState` derives only `Clone` and `Debug`, with no `PartialEq`, so
+    /// this field needs no special handling. If someone adds `PartialEq`,
+    /// compare on the pattern string instead and skip this cached field.
     ///
-    /// Public only so cross-module struct literals can initialize it to
-    /// its default; treat it as private and mutate exclusively via
-    /// [`MemberState::set_regex`] / [`MemberState::sync_regex_cache`].
+    /// This field is public only so that cross-module struct literals can
+    /// initialize it to its default. Treat it as private, and change it only
+    /// through [`MemberState::set_regex`] and
+    /// [`MemberState::sync_regex_cache`].
     pub compiled_regex: CompiledRegex,
     pub server_assignor: Option<String>,
     pub rebalance_timeout: Duration,
@@ -72,7 +83,8 @@ pub struct MemberState {
     pub assigned_partitions: HashMap<Uuid, Vec<i32>>,
     pub partitions_pending_revocation: HashMap<Uuid, Vec<i32>>,
     pub last_seen: Instant,
-    /// Set iff this is a classic member hosted in an upgraded group.
+    /// Set if and only if this is a classic member hosted in an upgraded
+    /// group.
     pub classic: Option<ClassicMemberFacade>,
 }
 
@@ -86,18 +98,20 @@ pub enum CompiledRegex {
 
 impl MemberState {
     /// `true` if this member speaks the classic protocol inside an upgraded
-    /// group (its RPCs are `JoinGroup`/`SyncGroup`/`Heartbeat`, not
-    /// `ConsumerGroupHeartbeat`).
+    /// group. Its RPCs are then `JoinGroup`, `SyncGroup`, and `Heartbeat`, not
+    /// `ConsumerGroupHeartbeat`.
     #[must_use]
     pub fn is_classic(&self) -> bool {
         self.classic.is_some()
     }
 
-    /// Set `subscribed_topic_regex` and (re)compile the cached `Regex`.
-    /// The compile is performed exactly once per distinct pattern — call
-    /// this only when the pattern actually changes. An invalid pattern is
-    /// cached as [`CompiledRegex::Invalid`] (warned once) so the reconciler neither
-    /// retries the compile nor treats it as "match everything".
+    /// Sets `subscribed_topic_regex` and compiles the cached `Regex` again.
+    ///
+    /// The compile runs exactly once per distinct pattern, so call this method
+    /// only when the pattern changes. An invalid pattern goes into the cache
+    /// as [`CompiledRegex::Invalid`], with one warning. The reconciler then
+    /// neither retries the compile nor treats the pattern as "match
+    /// everything".
     pub fn set_regex(&mut self, pattern: Option<String>) {
         self.compiled_regex = match pattern.as_deref() {
             None => CompiledRegex::Absent,
@@ -115,17 +129,21 @@ impl MemberState {
         self.subscribed_topic_regex = pattern;
     }
 
-    /// (Re)compile the cache from whatever is currently in
-    /// `subscribed_topic_regex`. For construction sites that set the pattern
-    /// field via a struct literal (cross-module, so they can't call the
-    /// setter inline); call this once afterwards to populate the cache.
+    /// Compiles the cache again from the current value of
+    /// `subscribed_topic_regex`.
+    ///
+    /// This method exists for construction sites that set the pattern field
+    /// through a struct literal. Those sites are in other modules, so they
+    /// cannot call the setter inline. Call this method once afterwards to fill
+    /// the cache.
     pub fn sync_regex_cache(&mut self) {
         let pattern = self.subscribed_topic_regex.take();
         self.set_regex(pattern);
     }
 
-    /// The successfully-compiled subscription regex, if any. Returns `None`
-    /// both when there is no pattern and when the pattern failed to compile.
+    /// The subscription regex that compiled successfully, if there is one. It
+    /// returns `None` when there is no pattern, and when the pattern failed to
+    /// compile.
     #[must_use]
     pub fn compiled_regex(&self) -> Option<&Regex> {
         match &self.compiled_regex {
@@ -168,13 +186,17 @@ impl GroupState {
         self.dirty = true;
     }
 
-    /// The KIP-848 `OffsetCommit` fencing decision: a member may commit only with
-    /// its CURRENT member epoch. `Ok(())` accepts; otherwise the Kafka error code.
-    /// Note: partition ownership is deliberately NOT checked here (Kafka permits a
-    /// right-epoch member to commit any partition) — the epoch is the only fence,
-    /// so a zombie from before a rebalance (whose epoch the group has since bumped)
-    /// is rejected. Pure; extracted from the actor's `ValidateCommit` so the
-    /// consumer-group composition model can drive the real rule.
+    /// The KIP-848 `OffsetCommit` fencing decision: a member may commit only
+    /// with its CURRENT member epoch. `Ok(())` accepts the commit. Any other
+    /// result is the Kafka error code.
+    ///
+    /// This method deliberately does NOT check partition ownership, because
+    /// Kafka lets a member with the right epoch commit any partition. The
+    /// epoch is the only fence. It therefore rejects a zombie from before a
+    /// rebalance, whose epoch the group has since raised.
+    ///
+    /// The method is pure. It is separate from the actor's `ValidateCommit` so
+    /// that the consumer-group composition model can drive the real rule.
     pub(crate) fn validate_commit_decision(&self, member_id: &str, epoch: i32) -> Result<(), i16> {
         match self.members.get(member_id) {
             None => Err(crate::codes::UNKNOWN_MEMBER_ID),
@@ -269,21 +291,28 @@ impl GroupState {
         }
     }
 
-    /// KIP-848 per-heartbeat reconciliation (the `CurrentAssignmentBuilder`):
-    /// compute `member_id`'s authoritative *current* assignment from its reported
-    /// owned set and the group target, **withholding any partition still held
-    /// (owned or pending revocation) by another member**. The returned set is
-    /// what the coordinator grants the member now and advertises in the heartbeat
-    /// response; storing it as `assigned_partitions` makes the grant
-    /// authoritative, so a partition is never advertised to two members at once
-    /// (the headline KIP-848 safety property — see `reconciler_model.rs`).
+    /// KIP-848 per-heartbeat reconciliation, the `CurrentAssignmentBuilder`.
     ///
-    /// A member keeps every target partition it already owns and gains target
-    /// partitions that are *free*; partitions it owns but no longer targets move
-    /// to `partitions_pending_revocation`. Other members claim a freed partition
-    /// only once its previous owner reports having released it (its next
-    /// heartbeat drops it from `reported_owned`, draining it from both sets).
-    /// Returns `true` if the member's assignment or pending set changed.
+    /// It computes the authoritative *current* assignment for `member_id` from
+    /// the member's reported owned set and the group target. It **withholds
+    /// any partition that another member still holds**, whether that member
+    /// owns it or has it pending revocation.
+    ///
+    /// The returned set is what the coordinator grants the member now and
+    /// advertises in the heartbeat response. Storing it as
+    /// `assigned_partitions` makes the grant authoritative, so the broker
+    /// never advertises a partition to two members at once. That is the main
+    /// KIP-848 safety property. See `reconciler_model.rs`.
+    ///
+    /// A member keeps every target partition it already owns, and gains target
+    /// partitions that are *free*. A partition it owns but no longer targets
+    /// moves to `partitions_pending_revocation`. Another member claims a freed
+    /// partition only once its previous owner reports that it released the
+    /// partition. That owner's next heartbeat drops the partition from
+    /// `reported_owned`, which drains it from both sets.
+    ///
+    /// It returns `true` when the member's assignment or pending set
+    /// changed.
     pub fn reconcile_member(
         &mut self,
         member_id: &str,

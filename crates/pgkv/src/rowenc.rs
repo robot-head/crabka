@@ -1,5 +1,6 @@
 //! Versioned row value encoding: a leading version byte then one tagged field
-//! per column. NOT order-preserving — values are never sorted by raw bytes.
+//! per column. It is NOT order-preserving. Values are never sorted by raw
+//! bytes.
 
 use crabka_pgtypes::Datum;
 
@@ -22,11 +23,11 @@ mod tag {
     pub const TIMESTAMPTZ: u8 = 10;
     pub const INTERVAL: u8 = 11;
     pub const BYTEA: u8 = 12;
-    /// `jsonb`, stored as its canonical text (`[13][u32 len][text]`); decoding
-    /// re-parses. Append-only — no version bump.
+    /// `jsonb`, stored as its canonical text (`[13][u32 len][text]`). The
+    /// decoder re-parses it. Append-only, with no version bump.
     pub const JSONB: u8 = 13;
-    /// A one-dimensional array (`[14][elem code][u32 count][elements...]`), each
-    /// element encoded by the same tagged-field format. Append-only.
+    /// A one-dimensional array (`[14][elem code][u32 count][elements...]`).
+    /// The same tagged-field format encodes each element. Append-only.
     pub const ARRAY: u8 = 14;
     /// `smallint` (`[15][i16 big-endian]`). Append-only.
     pub const INT2: u8 = 15;
@@ -46,7 +47,7 @@ mod tag {
     pub const TSQUERY: u8 = 21;
 }
 
-/// Encode one row using the current storage format.
+/// Encodes one row in the current storage format.
 ///
 /// # Panics
 ///
@@ -58,8 +59,8 @@ pub fn encode_row(cols: &[Datum]) -> Vec<u8> {
     out
 }
 
-/// Append `cols` as tagged fields (the row body, without the version byte —
-/// also the payload format for array elements).
+/// Appends `cols` as tagged fields. This is the row body without the version
+/// byte, and it is also the payload format for array elements.
 fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
     for d in cols {
         match d {
@@ -192,7 +193,7 @@ fn encode_search(tag: u8, text: &str, out: &mut Vec<u8>) {
     out.extend_from_slice(text.as_bytes());
 }
 
-/// Decode row bytes into datum values.
+/// Decodes row bytes into datum values.
 ///
 /// # Errors
 ///
@@ -201,8 +202,8 @@ fn encode_search(tag: u8, text: &str, out: &mut Vec<u8>) {
 ///
 /// # Panics
 ///
-/// Panics only if a fixed-width slice validated by the decoder cannot be
-/// converted to its corresponding fixed-size array.
+/// Panics only if a fixed-width slice that the decoder validated cannot
+/// convert to its matching fixed-size array.
 pub fn decode_row(bytes: &[u8]) -> Result<Vec<Datum>, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
@@ -218,7 +219,7 @@ pub fn decode_row(bytes: &[u8]) -> Result<Vec<Datum>, KvError> {
     Ok(cols)
 }
 
-/// Decode one tagged field, advancing `cur` past it.
+/// Decodes one tagged field and advances `cur` past it.
 fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
     let t = take_u8(cur)?;
     Ok(match t {

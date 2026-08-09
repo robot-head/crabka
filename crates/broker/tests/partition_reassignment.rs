@@ -9,12 +9,12 @@
 //! Broker-side integration tests for `AlterPartitionReassignments`
 //! (`api_key` 45) and `ListPartitionReassignments` (`api_key` 46).
 //!
-//! Uses a 3-broker PLAINTEXT cluster. The authorizer's compatibility shim
-//! (no `super_users` + no ACLs → Allow) lets the tests exercise the full wire
-//! path without a SASL handshake.
+//! These tests use a 3-broker PLAINTEXT cluster. The authorizer's
+//! compatibility shim allows every request when there are no `super_users` and
+//! no ACLs, so the tests exercise the full wire path without a SASL handshake.
 //!
-//! Gated to non-Windows to match the multi-broker test convention from
-//! slices 10b/12b/14.
+//! They are gated to non-Windows, to match the multi-broker test convention
+//! from slices 10b, 12b, and 14.
 
 use std::{
     io,
@@ -59,8 +59,8 @@ fn broker_id(node: crabka_metadata::NodeId) -> i32 {
 // Wire helpers — PLAINTEXT, no SASL
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Single length-prefixed request/response exchange over a PLAINTEXT
-/// connection. Copied verbatim from `elect_leaders.rs`.
+/// One length-prefixed request and response exchange over a PLAINTEXT
+/// connection. It is copied verbatim from `elect_leaders.rs`.
 async fn round_trip(
     stream: &mut TcpStream,
     api_key: i16,
@@ -105,8 +105,9 @@ async fn round_trip(
     Ok(cur.to_vec())
 }
 
-/// Create a topic via PLAINTEXT. The authorizer's compat shim (no `super_users`,
-/// no ACLs) lets the request through. Copied from `elect_leaders.rs`.
+/// Creates a topic over PLAINTEXT. The authorizer's compat shim, with no
+/// `super_users` and no ACLs, lets the request through. Copied from
+/// `elect_leaders.rs`.
 async fn create_topic_plaintext(
     addr: SocketAddr,
     name: &str,
@@ -148,7 +149,7 @@ async fn create_topic_plaintext(
 // Polling helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Wait until `handle` sees `(topic, partition)` present in its image.
+/// Waits until `handle` sees `(topic, partition)` in its image.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
     // Event-driven: subscribes to the image watch channel via the awaiter.
     handle.wait_until_partition_present(topic, partition).await;
@@ -158,9 +159,10 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
 // Cluster setup
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Start a 3-broker PLAINTEXT cluster. Returns (h1, h2, h3, d1, d2, d3, addr1)
-/// where addr1 is the listen address of broker 1. Waits for all 3 brokers to
-/// see each other registered before returning.
+/// Starts a 3-broker PLAINTEXT cluster. It returns
+/// (h1, h2, h3, d1, d2, d3, addr1), where addr1 is the listen address of
+/// broker 1. It waits until all 3 brokers see each other registered before it
+/// returns.
 async fn start_three_broker_plaintext_cluster() -> (
     BrokerHandle,
     BrokerHandle,
@@ -180,9 +182,9 @@ async fn start_three_broker_plaintext_cluster() -> (
     (h1, h2, h3, d1, d2, d3, addr1)
 }
 
-/// Poll until the raft controller leader is stable and return its listen addr.
-/// Tries each handle in `handles` to find the one whose `node_id` matches the
-/// reported raft leader.
+/// Polls until the raft controller leader is stable, then returns its listen
+/// address. It tries each handle in `handles` to find the one whose `node_id`
+/// matches the reported raft leader.
 async fn controller_leader_addr(handles: &[&BrokerHandle]) -> SocketAddr {
     // Event-driven: await a non-zero elected controller leader on the first
     // handle's leader watch channel instead of polling `controller_leader_id`.
@@ -203,8 +205,8 @@ async fn controller_leader_addr(handles: &[&BrokerHandle]) -> SocketAddr {
 // Wire drivers for AlterPartitionReassignments and ListPartitionReassignments
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `AlterPartitionReassignments` over a fresh PLAINTEXT connection.
-/// Returns `(topic_name, [(partition_index, error_code)])` rows.
+/// Drives `AlterPartitionReassignments` over a fresh PLAINTEXT connection. It
+/// returns `(topic_name, [(partition_index, error_code)])` rows.
 async fn drive_alter_reassignments(
     addr: SocketAddr,
     rows: Vec<(&str, i32, Option<Vec<i32>>)>,
@@ -268,8 +270,10 @@ async fn drive_alter_reassignments(
         .collect()
 }
 
-/// Drive `ListPartitionReassignments` over a fresh PLAINTEXT connection.
-/// Returns `(topic_name, [(partition_index, replicas, adding_replicas, removing_replicas)])` rows.
+/// Drives `ListPartitionReassignments` over a fresh PLAINTEXT connection. It
+/// returns
+/// `(topic_name, [(partition_index, replicas, adding_replicas, removing_replicas)])`
+/// rows.
 async fn drive_list_reassignments(
     addr: SocketAddr,
     filter: Option<Vec<(&str, Vec<i32>)>>,
@@ -333,9 +337,10 @@ async fn drive_list_reassignments(
 // Integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 1: Send `AlterPartitionReassignments`, then inject ISR to include the
-/// new replica. The background task observes adding ⊆ ISR and completes the
-/// reassignment, clearing `adding_replicas` and `removing_replicas`.
+/// Test 1: send `AlterPartitionReassignments`, then inject an ISR that
+/// includes the new replica. The background task sees that the adding set is
+/// inside the ISR, completes the reassignment, and clears `adding_replicas`
+/// and `removing_replicas`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alter_then_complete_via_isr_catchup() {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -416,8 +421,8 @@ async fn alter_then_complete_via_isr_catchup() {
     h3.shutdown().await;
 }
 
-/// Test 2: After `AlterPartitionReassignments` starts a reassignment, the
-/// `ListPartitionReassignments` handler should return the in-flight rows.
+/// Test 2: after `AlterPartitionReassignments` starts a reassignment, the
+/// `ListPartitionReassignments` handler must return the in-flight rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn list_in_flight_returns_pending_rows() {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -472,9 +477,10 @@ async fn list_in_flight_returns_pending_rows() {
 // SASL/PLAIN wire helpers (T10)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Open a TCP stream to `addr` and drive `ApiVersions` → `SaslHandshake(PLAIN)`
-/// → `SaslAuthenticate(\0user\0password)`. Returns the authenticated stream.
-/// Copied verbatim from `elect_leaders.rs`.
+/// Opens a TCP stream to `addr` and drives `ApiVersions`, then
+/// `SaslHandshake(PLAIN)`, then `SaslAuthenticate(\0user\0password)`. It
+/// returns the authenticated stream. Copied verbatim from
+/// `elect_leaders.rs`.
 async fn sasl_plain_authenticate(
     addr: SocketAddr,
     user: &str,
@@ -539,10 +545,10 @@ async fn sasl_plain_authenticate(
     Ok(stream)
 }
 
-/// Start a single-broker SASL/PLAINTEXT cluster.
-/// Returns `(handle, _dir, addr)`.
-/// `super_user` is set as the only super-user.
-/// `users` is a slice of `(username, password)` pairs added to `plain_credentials`.
+/// Starts a single-broker SASL/PLAINTEXT cluster and returns
+/// `(handle, _dir, addr)`. `super_user` becomes the only super-user. `users`
+/// is a slice of `(username, password)` pairs that this function adds to
+/// `plain_credentials`.
 fn start_single_broker_sasl_plaintext_with_users(
     super_user: &str,
     users: &[(&str, &str)],
@@ -575,8 +581,8 @@ fn start_single_broker_sasl_plaintext_with_users(
     })
 }
 
-/// Create a topic via SASL/PLAIN as the given admin user.
-/// Copied from `elect_leaders.rs`'s `create_topic_sasl_plain`.
+/// Creates a topic over SASL/PLAIN as the given admin user. Copied from
+/// `create_topic_sasl_plain` in `elect_leaders.rs`.
 async fn create_topic_as_admin(
     addr: SocketAddr,
     topic: &str,
@@ -616,8 +622,9 @@ async fn create_topic_as_admin(
     );
 }
 
-/// Drive `AlterPartitionReassignments` over a SASL/PLAIN authenticated connection.
-/// Returns `(topic_name, [(partition_index, error_code)])` rows.
+/// Drives `AlterPartitionReassignments` over a SASL/PLAIN authenticated
+/// connection. It returns `(topic_name, [(partition_index, error_code)])`
+/// rows.
 async fn drive_alter_reassignments_sasl_plain(
     addr: SocketAddr,
     user: &str,
@@ -689,12 +696,12 @@ async fn drive_alter_reassignments_sasl_plain(
 // T10: auth-deny integration test
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 4: alice (authenticated via SASL/PLAIN, no ACLs) sends
+/// Test 4: alice, who authenticated over SASL/PLAIN and holds no ACLs, sends
 /// `AlterPartitionReassignments` and must receive
-/// `CLUSTER_AUTHORIZATION_FAILED (31)` per-partition.
+/// `CLUSTER_AUTHORIZATION_FAILED (31)` on each partition.
 ///
-/// A dummy ACL is seeded first to disable the compat shim (the shim allows
-/// everything when `image.acls` is empty).
+/// The test seeds a dummy ACL first, to disable the compat shim. That shim
+/// allows everything when `image.acls` is empty.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_super_user_denied() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -765,9 +772,9 @@ async fn non_super_user_denied() {
     );
 }
 
-/// Test 3: Cancel an in-flight reassignment by sending target=None (null replicas).
-/// The partition record should revert to the original replica set with empty
-/// `adding_replicas` and `removing_replicas`.
+/// Test 3: cancel an in-flight reassignment with `target=None`, that is null
+/// replicas. The partition record must return to the original replica set,
+/// with empty `adding_replicas` and `removing_replicas`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_via_null_replicas_reverts() {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();

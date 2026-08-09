@@ -17,12 +17,12 @@ use uuid::Uuid;
 
 use crate::error::RemoteStorageError;
 
-/// A partition addressed by its stable topic UUID (plus the topic name for
-/// diagnostics).
+/// A partition addressed by its stable topic UUID, with the topic name for
+/// diagnostics.
 ///
-/// Equality and hashing are by `topic_id` + `partition` only — the topic
-/// name is informational and a topic's id is its identity, matching
-/// Kafka's `TopicIdPartition`.
+/// Equality and hash use `topic_id` and `partition` only. The topic name is
+/// informational, and a topic's id is its identity. This matches Kafka's
+/// `TopicIdPartition`.
 #[derive(Debug, Clone)]
 pub struct TopicIdPartition {
     /// Stable topic UUID, as assigned at topic creation.
@@ -34,7 +34,7 @@ pub struct TopicIdPartition {
 }
 
 impl TopicIdPartition {
-    /// Construct a [`TopicIdPartition`].
+    /// Constructs a [`TopicIdPartition`].
     #[must_use]
     pub fn new(topic_id: Uuid, topic: impl Into<String>, partition: i32) -> Self {
         Self {
@@ -71,7 +71,7 @@ pub struct RemoteLogSegmentId {
 }
 
 impl RemoteLogSegmentId {
-    /// Construct a [`RemoteLogSegmentId`] from an explicit UUID.
+    /// Constructs a [`RemoteLogSegmentId`] from an explicit UUID.
     #[must_use]
     pub fn new(topic_id_partition: TopicIdPartition, id: Uuid) -> Self {
         Self {
@@ -106,8 +106,8 @@ pub enum RemoteLogSegmentState {
 impl RemoteLogSegmentState {
     /// `true` if a segment currently in `self` may transition to `target`.
     ///
-    /// A same-state "transition" is not valid (callers treat it as a
-    /// no-op / duplicate, not an advance).
+    /// A same-state "transition" is not valid. Callers treat it as a no-op
+    /// or a duplicate, not as an advance.
     #[must_use]
     pub fn is_valid_transition(self, target: Self) -> bool {
         use RemoteLogSegmentState::{
@@ -124,14 +124,15 @@ impl RemoteLogSegmentState {
     }
 }
 
-/// Opaque bytes an [`RemoteStorageManager`](crate::RemoteStorageManager)
-/// may return from `copy_log_segment_data` and have echoed back on every
-/// later call for that segment (e.g. an object-store key or version id).
+/// Opaque bytes that an [`RemoteStorageManager`](crate::RemoteStorageManager)
+/// can return from `copy_log_segment_data`, for example an object-store key
+/// or a version id. The caller sends the bytes back on every later call for
+/// that segment.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CustomMetadata(pub Vec<u8>);
 
-/// Metadata describing one segment stored (or being stored) in the remote
-/// tier.
+/// Metadata for one segment that is stored, or is being stored, in the
+/// remote tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteLogSegmentMetadata {
     remote_log_segment_id: RemoteLogSegmentId,
@@ -174,7 +175,7 @@ impl RemoteLogSegmentDetails {
 }
 
 impl RemoteLogSegmentMetadata {
-    /// Construct a [`RemoteLogSegmentMetadata`].
+    /// Constructs a [`RemoteLogSegmentMetadata`].
     ///
     /// # Errors
     ///
@@ -225,7 +226,7 @@ impl RemoteLogSegmentMetadata {
         })
     }
 
-    /// Apply a [`RemoteLogSegmentMetadataUpdate`], returning the updated
+    /// Applies a [`RemoteLogSegmentMetadataUpdate`] and returns the updated
     /// copy. The update advances `state`, refreshes `event_timestamp_ms`
     /// and `broker_id`, and replaces `custom_metadata` when the update
     /// carries `Some`.
@@ -324,8 +325,8 @@ impl RemoteLogSegmentMetadata {
         &self.segment_leader_epochs
     }
 
-    /// Attach custom metadata (builder-style; used by RSM copy paths that
-    /// produce a key before recording `CopySegmentFinished`).
+    /// Attaches custom metadata in builder style. RSM copy paths use it when
+    /// they produce a key before they record `CopySegmentFinished`.
     #[must_use]
     pub fn with_custom_metadata(mut self, custom: CustomMetadata) -> Self {
         self.custom_metadata = Some(custom);
@@ -379,8 +380,9 @@ pub enum RemotePartitionDeleteState {
 }
 
 impl RemotePartitionDeleteState {
-    /// `true` if a partition currently in `from` (or never marked, when
-    /// `from` is `None`) may transition to `target`.
+    /// `true` if a partition currently in `from` may transition to `target`.
+    ///
+    /// A `from` of `None` means the partition was never marked.
     #[must_use]
     pub fn is_valid_transition(from: Option<Self>, target: Self) -> bool {
         use RemotePartitionDeleteState::{

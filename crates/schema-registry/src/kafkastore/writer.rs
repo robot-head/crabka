@@ -1,5 +1,5 @@
-//! Primary-only writer: serialises a `_schemas` record and produces it,
-//! returning the produced offset for read-your-writes gating.
+//! Primary-only writer. It serialises a `_schemas` record and produces it, then
+//! returns the produced offset for read-your-writes gating.
 
 use bytes::Bytes;
 use crabka_client_core::ClientSecurity;
@@ -35,7 +35,7 @@ impl SchemaWriter {
         })
     }
 
-    /// Produce one keyed `_schemas` record; return the assigned offset.
+    /// Produce one keyed `_schemas` record and return the assigned offset.
     #[tracing::instrument(level = "debug", name = "schema_writer.produce", skip_all, fields(topic = %self.topic, key_len = key.len(), value_len = value.len(), offset = tracing::field::Empty), err)]
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
@@ -56,8 +56,9 @@ impl SchemaWriter {
         Ok(meta.offset)
     }
 
-    /// Produce a tombstone (null value) for `key`; return the assigned offset.
-    /// Used for permanent deletes and mode-clears (compaction reclaims the key).
+    /// Produce a tombstone with a null value for `key` and return the assigned
+    /// offset. Callers use it for permanent deletes and mode-clears, and
+    /// compaction then reclaims the key.
     #[tracing::instrument(level = "debug", name = "schema_writer.produce_tombstone", skip_all, fields(topic = %self.topic, key_len = key.len(), offset = tracing::field::Empty), err)]
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.

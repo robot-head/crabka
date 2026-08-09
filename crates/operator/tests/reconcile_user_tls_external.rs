@@ -1,7 +1,8 @@
-//! Reconcile-level tests for the `tls-external` `KafkaUser`
-//! arm — credential-less users whose ACLs + quotas are reconciled under
-//! the bare-name principal `User:<metadata.name>` but for whom the
-//! operator creates no Secret and issues no cert.
+//! Reconcile-level tests for the `tls-external` `KafkaUser` arm.
+//!
+//! These users have no credentials. The operator reconciles their ACLs and
+//! quotas under the bare-name principal `User:<metadata.name>`. The operator
+//! creates no Secret for them and issues no cert.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -81,9 +82,9 @@ fn user_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Build a `KafkaUser` with `authentication.type: tls-external`, the
-/// cluster label, the user-finalizer pre-installed, and the supplied
-/// ACL rules + quota block.
+/// Build a `KafkaUser` with `authentication.type: tls-external`, the cluster
+/// label, the user-finalizer pre-installed, and the supplied ACL rules and
+/// quota block.
 fn ku_external_full(name: &str, acls: Vec<AclRule>, quotas: Option<KafkaUserQuotas>) -> KafkaUser {
     let mut ku = KafkaUser::new(
         name,
@@ -124,10 +125,10 @@ fn rule_topic(name: &str, ops: &[AclOp]) -> AclRule {
     }
 }
 
-/// Minimum kube-mock rule set for a non-finalizer `tls-external`
-/// reconcile: GET the Kafka and PATCH the status. The operator must
-/// not touch any Secret (the FIFO mock falls through to 404 on any
-/// other path, which would surface as a reconcile error).
+/// Minimum kube-mock rule set for a non-finalizer `tls-external` reconcile:
+/// GET the Kafka and PATCH the status. The operator must not touch any Secret.
+/// The FIFO mock falls through to 404 on any other path, and that 404 becomes
+/// a reconcile error.
 fn external_rules() -> Vec<MockRule> {
     vec![
         MockRule {
@@ -198,8 +199,8 @@ async fn tls_external_user_creates_no_secret() {
 }
 
 /// 2. `CreateAcls` for a `tls-external` user must use the bare-name
-///    principal `User:<metadata.name>` — same shape as SCRAM, *not* the
-///    `User:CN=<name>` TLS shape.
+///    principal `User:<metadata.name>`. This is the same shape as SCRAM,
+///    *not* the `User:CN=<name>` TLS shape.
 #[tokio::test]
 async fn tls_external_user_reconciles_acls_under_bare_name_principal() {
     let state = MockState::new(external_rules());
@@ -263,9 +264,9 @@ async fn tls_external_user_reconciles_acls_under_bare_name_principal() {
 }
 
 /// 3. `AlterClientQuotas` for a `tls-external` user keys by the bare
-///    `metadata.name` (the broker stores quotas under the username
-///    without the `User:` prefix). For TLS users this is `CN=<name>`;
-///    for SCRAM and `tls-external` users it's just `<name>`.
+///    `metadata.name`. The broker stores quotas under the username without
+///    the `User:` prefix. For TLS users this is `CN=<name>`. For SCRAM and
+///    `tls-external` users it is `<name>`.
 #[tokio::test]
 async fn tls_external_user_reconciles_quotas_under_bare_name_principal() {
     let state = MockState::new(external_rules());
@@ -316,8 +317,8 @@ async fn tls_external_user_reconciles_quotas_under_bare_name_principal() {
 }
 
 /// 4. Status after reconcile must report `external=true`,
-///    `tlsPrincipal="User:<name>"`, `secret=null` (no Secret),
-///    `scramSha512=false`, `tls=false`.
+///    `tlsPrincipal="User:<name>"`, `secret=null` for no Secret,
+///    `scramSha512=false`, and `tls=false`.
 #[tokio::test]
 async fn tls_external_user_status_reports_external_true_and_tls_principal_and_no_secret() {
     let state = MockState::new(external_rules());
@@ -355,9 +356,9 @@ async fn tls_external_user_status_reports_external_true_and_tls_principal_and_no
     check!(s["tls"] == false, "no operator-issued TLS cert: {body}");
 }
 
-/// 5. A minimal `tls-external` user (no authorization, no quotas)
+/// 5. A minimal `tls-external` user with no authorization and no quotas
 ///    still reaches `Ready=True`. The admin mock sees an empty
-///    `DescribeAcls` and no `CreateAcls` / quota calls.
+///    `DescribeAcls` and no `CreateAcls` or quota calls.
 #[tokio::test]
 async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_ready_true() {
     let state = MockState::new(external_rules());
@@ -416,8 +417,8 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
 }
 
 /// 6. Finalizer cleanup for a `tls-external` user must not call
-///    `AlterUserScramCredentials` (no SCRAM credential exists). It
-///    may issue `DeleteAcls` and quota cleanup; both are best-effort.
+///    `AlterUserScramCredentials`, because no SCRAM credential exists. It
+///    can issue `DeleteAcls` and quota cleanup. Both are best-effort.
 #[tokio::test]
 async fn tls_external_user_finalizer_does_not_call_alter_user_scram_credentials() {
     let rules = vec![

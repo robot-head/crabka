@@ -1,5 +1,6 @@
-//! `Compression` enum + mapping from the producer's choice to a
-//! `RecordBatch` v2 `attributes` value + a `crabka-compression::CompressionType`.
+//! The `Compression` enum, and the mapping from the producer's choice to a
+//! `RecordBatch` v2 `attributes` value and a
+//! `crabka-compression::CompressionType`.
 
 use std::{fmt, str::FromStr};
 
@@ -56,8 +57,8 @@ impl Compression {
         }
     }
 
-    /// The 3-bit `compression_type` field that goes into the `RecordBatch`
-    /// v2 `attributes` (bits 0..3).
+    /// The 3-bit `compression_type` field that goes into the `RecordBatch` v2
+    /// `attributes`, at bits 0..3.
     #[must_use]
     pub fn attribute_bits(self) -> i16 {
         match self {
@@ -69,8 +70,8 @@ impl Compression {
         }
     }
 
-    /// Compress the encoded record body. Returns the byte payload that
-    /// goes into the `RecordBatch.records_body` slot.
+    /// Compress the encoded record body. Returns the byte payload that goes
+    /// into the `RecordBatch.records_body` slot.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn compress(self, raw: &[u8]) -> Result<Bytes, ProducerError> {

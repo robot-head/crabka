@@ -1,40 +1,43 @@
-//! Q3: `GROUP BY` grouping sets — `ROLLUP`, `CUBE`, `GROUPING SETS`, the empty
-//! grouping set `()` — plus the `GROUPING()` bitmask function and the SQL92
-//! output references (`GROUP BY 1`, `GROUP BY <output alias>`).
+//! Q3: `GROUP BY` grouping sets, that is `ROLLUP`, `CUBE`, `GROUPING SETS` and
+//! the empty grouping set `()`. This module also holds the `GROUPING()` bitmask
+//! function and the SQL92 output references `GROUP BY 1` and
+//! `GROUP BY <output alias>`.
 //!
-//! A grouping-set query is one query over several grouping keys at once: every
+//! A grouping-set query is one query over several grouping keys at once. Every
 //! expanded set produces its own groups, and a grouping column that is *not* in
 //! the set reads as NULL in that set's output rows. `PostgreSQL` implements this
-//! by re-scanning the input once per set; this module does the same thing by
-//! **augmenting the input relation** rather than by running several aggregations:
+//! by a re-scan of the input once per set. This module does the same thing by
+//! **augmenting the input relation**, rather than by running several
+//! aggregations:
 //!
-//! - the scope grows one hidden column per distinct grouping expression, plus one
-//!   for the grouping-set ordinal (`$g0 … $gN`, `$gset` — `$` cannot begin an
-//!   unquoted identifier, so no user column can collide with them);
-//! - each input row is emitted once per grouping set, carrying that set's key
-//!   values (NULL for the expressions the set leaves out) and its ordinal;
+//! - the scope grows one hidden column per distinct grouping expression, plus
+//!   one for the grouping-set ordinal, named `$g0 … $gN` and `$gset`. `$` cannot
+//!   begin an unquoted identifier, so no user column can collide with them.
+//! - this module emits each input row once per grouping set, and the row carries
+//!   that set's key values and its ordinal. The expressions the set leaves out
+//!   read as NULL.
 //! - every reference to a grouping expression in the clauses evaluated above the
-//!   grouping — the select list, `HAVING`, `ORDER BY` and the `DISTINCT ON` keys
-//!   — is rewritten onto the hidden column, and every `GROUPING(…)` call is
-//!   folded to a `CASE` over the ordinal.
+//!   grouping is rewritten onto the hidden column, and every `GROUPING(…)` call
+//!   is folded to a `CASE` over the ordinal. Those clauses are the select list,
+//!   `HAVING`, `ORDER BY` and the `DISTINCT ON` keys.
 //!
-//! The rewritten statement is then a *plain* grouped aggregate over the augmented
-//! relation, so [`crate::agg::aggregate_rows`] computes it — which is what keeps
-//! `HAVING`, `DISTINCT`, `DISTINCT ON`, `ORDER BY`, `OFFSET`/`LIMIT` and every
-//! aggregate behaving identically to the non-grouping-set path.
+//! The rewritten statement is then a *plain* grouped aggregate over the
+//! augmented relation, so [`crate::agg::aggregate_rows`] computes it. That is
+//! what keeps `HAVING`, `DISTINCT`, `DISTINCT ON`, `ORDER BY`, `OFFSET`/`LIMIT`
+//! and every aggregate behaving identically to the non-grouping-set path.
 //!
-//! Window functions run *above* the grouping, so [`crate::window`] lowers a
-//! windowed query onto its grouped output by calling [`aggregate_rows`] — this
-//! module's, not [`crate::agg`]'s — with a leaf select that still carries the
-//! grouping-set clause. That is what makes `count(*) OVER ()` count the
-//! grouping-set rows rather than the input rows.
+//! Window functions run *above* the grouping. So [`crate::window`] lowers a
+//! windowed query onto its grouped output by a call to [`aggregate_rows`], this
+//! module's one rather than [`crate::agg`]'s, with a leaf select that still
+//! carries the grouping-set clause. That is what makes `count(*) OVER ()` count
+//! the grouping-set rows rather than the input rows.
 //!
 //! Two details of `PostgreSQL`'s semantics drive the shape:
 //!
 //! - The grouping-set ordinal is part of the key because two different sets may
-//!   produce the same visible key: `GROUP BY ROLLUP(a)` over a table with a NULL
+//!   produce the same visible key. `GROUP BY ROLLUP(a)` over a table with a NULL
 //!   `a` emits both an `a IS NULL` group and a grand-total group, and
-//!   `PostgreSQL` keeps them separate (`GROUPING(a)` is what tells them apart).
+//!   `PostgreSQL` keeps them separate. `GROUPING(a)` is what tells them apart.
 //! - The NULL substitution stops at an aggregate's arguments. `sum(a)` in a
 //!   grand-total row sums the real `a` values even though the row's own `a`
 //!   reads NULL, so the rewrite never descends into an aggregate call.
@@ -54,7 +57,7 @@ use crate::{
 
 /// Scope qualifier for this module's hidden columns. `$` cannot begin an
 /// unquoted identifier, so no user column can collide with one, and `*` skips
-/// them (see [`is_hidden_binding`]).
+/// them. See [`is_hidden_binding`].
 const GROUPING_QUALIFIER: &str = "$g";
 
 /// Hidden scope name for the value of grouping expression `index`.
@@ -77,8 +80,8 @@ pub(crate) fn is_hidden_binding(c: &ColumnBinding) -> bool {
 /// contributes the set `{a}`, not `{a, a}`.
 type GroupingSet = Vec<usize>;
 
-/// A grouping-set query resolved against its input scope: the grouping
-/// expressions with SQL92 output references substituted and their column
+/// A grouping-set query resolved against its input scope. It holds the grouping
+/// expressions, with SQL92 output references substituted and their column
 /// references canonicalized, their types, and the expanded grouping sets.
 struct GroupingPlan<'a> {
     scope: &'a Scope,
@@ -98,16 +101,17 @@ impl GroupingPlan<'_> {
 
 /// Does this SELECT need the aggregate/grouping pipeline at all?
 ///
-/// Extends [`crate::agg::is_aggregate_query`] with the two shapes it cannot see:
-/// a grouping-set clause with no aggregate call (`SELECT a FROM t GROUP BY
-/// ROLLUP(a)`) and a bare `GROUPING()` reference, which `PostgreSQL` rejects with
-/// 42803 rather than treating as an unknown function.
+/// This function extends [`crate::agg::is_aggregate_query`] with the two shapes
+/// it cannot see. The first is a grouping-set clause with no aggregate call,
+/// such as `SELECT a FROM t GROUP BY ROLLUP(a)`. The second is a bare
+/// `GROUPING()` reference, which `PostgreSQL` rejects with 42803 rather than
+/// treating as an unknown function.
 pub(crate) fn is_grouping_query(s: &SelectStmt) -> bool {
     s.grouping.is_some() || crate::agg::is_aggregate_query(s) || mentions_grouping_call(s)
 }
 
 /// Reject `GROUPING(…)` in a clause evaluated BELOW the grouping, where it has
-/// no meaning: `PostgreSQL` answers `42803` naming the clause.
+/// no meaning. `PostgreSQL` answers `42803` and names the clause.
 pub(crate) fn reject_misplaced_calls(s: &SelectStmt) -> Result<(), ExecError> {
     let reject = |expr: Option<&Expr>, clause: &str| -> Result<(), ExecError> {
         if expr.is_some_and(contains_grouping_call) {
@@ -159,9 +163,10 @@ fn mentions_grouping_call(s: &SelectStmt) -> bool {
 
 /// Run an aggregate/grouping query over the already-`WHERE`-filtered `rows`.
 ///
-/// Delegates straight to [`crate::agg::aggregate_rows`] for a plain aggregate;
-/// otherwise resolves output references, expands the grouping sets, and runs the
-/// augmented-relation rewrite described in the module docs.
+/// For a plain aggregate this function delegates straight to
+/// [`crate::agg::aggregate_rows`]. Otherwise it resolves output references,
+/// expands the grouping sets, and runs the augmented-relation rewrite the module
+/// docs describe.
 pub(crate) fn aggregate_rows(
     s: &SelectStmt,
     scope: &Scope,
@@ -240,9 +245,9 @@ fn expanded_projection(s: &SelectStmt, scope: &Scope) -> Result<SelectStmt, Exec
 /// equal.
 ///
 /// `PostgreSQL` matches a select-list entry against the `GROUP BY` list by the
-/// *variable* each names, not by how it was written, which is why `SELECT t.a …
-/// GROUP BY a` is grouped-valid there. A reference that does not resolve against
-/// this scope is left exactly as written.
+/// *variable* each names, not by how it was written. That is why
+/// `SELECT t.a … GROUP BY a` is grouped-valid there. This function leaves a
+/// reference that does not resolve against this scope exactly as written.
 pub(crate) fn canonicalize_columns(e: &Expr, scope: &Scope) -> Expr {
     rewrite(
         e,
@@ -266,11 +271,11 @@ pub(crate) fn canonicalize_columns(e: &Expr, scope: &Scope) -> Expr {
 
 /// The projected rows for an empty input.
 ///
-/// Only an *empty* grouping set produces a group when there are no input rows —
+/// Only an *empty* grouping set produces a group when there are no input rows.
 /// `PostgreSQL` still emits the grand total of a `ROLLUP`/`CUBE` over an empty
-/// table, but no per-key rows. Such a set is run as an ordinary bare aggregate
-/// (`GROUP BY` removed), which is exactly [`crate::agg::aggregate_rows`]'s
-/// zero-row path.
+/// table, but no per-key rows. Such a set runs as an ordinary bare aggregate,
+/// with `GROUP BY` removed, which is exactly
+/// [`crate::agg::aggregate_rows`]'s zero-row path.
 fn empty_input_rows(
     s: &SelectStmt,
     scope: &Scope,
@@ -407,13 +412,13 @@ fn rewrite_statement(s: &SelectStmt, plan: &GroupingPlan) -> Result<SelectStmt, 
     Ok(stmt)
 }
 
-/// Apply `fold` to every clause of `s` that is evaluated *above* the grouping —
-/// the select list, `HAVING`, `ORDER BY`, and the `DISTINCT ON` keys — writing
-/// the results into `stmt`.
+/// Apply `fold` to every clause of `s` that is evaluated *above* the grouping,
+/// and write the results into `stmt`. Those clauses are the select list,
+/// `HAVING`, `ORDER BY`, and the `DISTINCT ON` keys.
 ///
 /// `DISTINCT ON` belongs in that list because `PostgreSQL` evaluates its keys
-/// over the grouped output, so a key naming a grouping expression has to read
-/// the same hidden column the select list does.
+/// over the grouped output. So a key that names a grouping expression has to
+/// read the same hidden column the select list does.
 fn rewrite_clauses(
     stmt: &mut SelectStmt,
     s: &SelectStmt,
@@ -434,11 +439,11 @@ fn rewrite_clauses(
     Ok(())
 }
 
-/// Rewrite the projection, pinning each item's output label first.
+/// Rewrite the projection. This function pins each item's output label first.
 ///
-/// The rewrite replaces a grouping expression with a hidden column and a
-/// `GROUPING(…)` call with a `CASE`, either of which would otherwise change the
-/// name `PostgreSQL` derives for an unaliased item, so every expression item
+/// The rewrite replaces a grouping expression with a hidden column, and a
+/// `GROUPING(…)` call with a `CASE`. Either change would otherwise change the
+/// name `PostgreSQL` derives for an unaliased item. So every expression item
 /// carries its original label explicitly afterwards.
 fn rewrite_projection(
     projection: &[SelectItem],
@@ -462,8 +467,8 @@ fn output_label(expr: &Expr) -> String {
     crate::exec::derived_name(expr)
 }
 
-/// Replacement for one node in the multi-set rewrite: a grouping expression
-/// becomes its hidden column, a `GROUPING(…)` call becomes a `CASE` over the
+/// Replacement for one node in the multi-set rewrite. A grouping expression
+/// becomes its hidden column, and a `GROUPING(…)` call becomes a `CASE` over the
 /// grouping-set ordinal.
 fn fold_over_sets(e: &Expr, plan: &GroupingPlan<'_>) -> Result<Option<Expr>, ExecError> {
     if let Some(index) = plan.position_of(e) {
@@ -521,8 +526,9 @@ fn int4(value: i32) -> Expr {
     }
 }
 
-/// `GROUPING(a, b, …)`'s value for one grouping set: one bit per argument, set
-/// when that argument is *not* in the set, most significant bit first.
+/// `GROUPING(a, b, …)`'s value for one grouping set. There is one bit per
+/// argument, set when that argument is *not* in the set, most significant bit
+/// first.
 fn grouping_mask(indices: &[usize], set: &[usize]) -> i32 {
     indices.iter().fold(0i32, |mask, index| {
         (mask << 1) | i32::from(!set.contains(index))
@@ -560,9 +566,9 @@ fn grouping_argument_indices(
 
 /// Is this call `GROUPING(…)`?
 ///
-/// It is not a function: the grouping-set rewrite folds it to a `CASE` over the
+/// It is not a function. The grouping-set rewrite folds it to a `CASE` over the
 /// grouping-set ordinal, so nothing ever evaluates it as one. Its static result
-/// type is `int4`, which is what lets a select list carrying one type-check
+/// type is `int4`, which is what lets a select list that carries one type-check
 /// before the rewrite runs.
 pub(crate) fn is_grouping_call(call: &FuncCall) -> bool {
     !call.distinct
@@ -593,9 +599,9 @@ fn contains_grouping_call(e: &Expr) -> bool {
 /// Visit every node of `e`, outermost first.
 ///
 /// [`rewrite`] is this crate's one exhaustive [`Expr`] match, so read-only walks
-/// run through it as an identity fold rather than duplicating that match. A
-/// subquery node is visited but not descended into — its inner query is a
-/// separate scope and belongs to whatever walks query expressions.
+/// run through it as an identity fold rather than duplicating that match. This
+/// walk visits a subquery node but does not descend into it. Its inner query is
+/// a separate scope, and belongs to whatever walks query expressions.
 pub(crate) fn visit_expr(e: &Expr, visit: &mut impl FnMut(&Expr)) {
     let walked = rewrite(
         e,
@@ -608,11 +614,11 @@ pub(crate) fn visit_expr(e: &Expr, visit: &mut impl FnMut(&Expr)) {
     debug_assert!(walked.is_ok(), "the identity fold cannot fail");
 }
 
-/// Resolve `PostgreSQL`'s SQL92 output references in a `GROUP BY` list: a bare
-/// unsigned integer is an output-column position, and a bare name that does *not*
+/// Resolve `PostgreSQL`'s SQL92 output references in a `GROUP BY` list. A bare
+/// unsigned integer is an output-column position. A bare name that does *not*
 /// resolve against the input relation may name an output column's label.
 ///
-/// The input relation wins: `SELECT b AS a FROM t GROUP BY a` groups by `t.a`,
+/// The input relation wins. `SELECT b AS a FROM t GROUP BY a` groups by `t.a`,
 /// not by the output label, exactly as `PostgreSQL` does.
 pub(crate) fn resolve_group_references(
     s: &SelectStmt,
@@ -669,8 +675,8 @@ pub(crate) fn substitute_group_references(
 }
 
 /// Expand a `GROUP BY` clause to its grouping sets. Items combine by cross
-/// product — `GROUP BY a, ROLLUP(b)` is `{a,b}` then `{a}` — and `DISTINCT`
-/// removes duplicate sets afterwards.
+/// product, so `GROUP BY a, ROLLUP(b)` is `{a,b}` then `{a}`. `DISTINCT` then
+/// removes duplicate sets.
 fn expand(clause: &GroupingClause) -> Vec<GroupingSet> {
     let mut sets: Vec<GroupingSet> = vec![Vec::new()];
     for item in &clause.items {
@@ -732,8 +738,9 @@ fn flatten_selected(elements: &[GroupItem], keep: impl Fn(usize) -> bool) -> Gro
 }
 
 /// The grouping-expression indices an element contributes. A `ROLLUP`/`CUBE`
-/// element is an expression or a parenthesised tuple, so the nested set-producing
-/// forms cannot appear here; treating them as their full union keeps this total.
+/// element is an expression or a parenthesised tuple, so the nested
+/// set-producing forms cannot appear here. This function treats them as their
+/// full union, which keeps it total.
 fn leaf_indices(item: &GroupItem) -> Vec<usize> {
     match item {
         GroupItem::Expr(index) => vec![*index],
@@ -750,15 +757,16 @@ fn normalize(mut set: GroupingSet) -> GroupingSet {
     set
 }
 
-/// Bottom-up expression rewrite: `fold` is offered every node (the node itself
-/// first, then its rewritten children) and replaces it by returning `Some`.
+/// Bottom-up expression rewrite. This function offers `fold` every node, the
+/// node itself first and then its rewritten children, and `fold` replaces a node
+/// by returning `Some`.
 ///
-/// An aggregate call's arguments are left alone: `PostgreSQL` substitutes grouped
-/// columns only outside aggregates, so `sum(a)` still sums the real values in a
-/// row whose own `a` reads NULL.
+/// This function leaves an aggregate call's arguments alone. `PostgreSQL`
+/// substitutes grouped columns only outside aggregates, so `sum(a)` still sums
+/// the real values in a row whose own `a` reads NULL.
 ///
-/// The `match` is exhaustive on purpose — a new [`Expr`] variant must be given a
-/// rule here rather than silently escaping the grouping-column substitution.
+/// The `match` is exhaustive on purpose. A new [`Expr`] variant must be given a
+/// rule here, rather than silently escaping the grouping-column substitution.
 ///
 /// This is the crate's one exhaustive [`Expr`] fold, so other passes that need to
 /// map every node of an expression drive it rather than repeating the match.
@@ -969,9 +977,9 @@ fn rewrite_subscript(
     })
 }
 
-/// Is this call an aggregate whose arguments the grouped-column substitution must
-/// leave alone? A wrapping scalar function over an aggregate is not: its own
-/// arguments still need rewriting.
+/// Is this call an aggregate whose arguments the grouped-column substitution
+/// must leave alone? A wrapping scalar function over an aggregate is not. Its
+/// own arguments still need the rewrite.
 fn is_aggregate_call(call: &FuncCall) -> bool {
     let whole = Expr::Func(call.clone());
     if !crate::agg::contains_aggregate(&whole) {

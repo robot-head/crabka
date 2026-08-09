@@ -16,18 +16,21 @@ pub struct Node {
 }
 
 impl Node {
-    /// The controller RPC endpoint peers dial, as a `"<host>:<port>"` string.
-    /// By convention the first endpoint named "CONTROLLER"; falls back to the
-    /// first endpoint.
+    /// The controller RPC endpoint that peers dial, as a `"<host>:<port>"`
+    /// string.
     ///
-    /// The host is returned VERBATIM (a DNS name), never pre-resolved to a
-    /// `SocketAddr`: voter endpoints carry per-pod `StatefulSet` FQDNs, and the
-    /// dialer re-resolves the host per connect (`TcpStream::connect`) so a peer
-    /// that restarts on a new pod IP stays reachable. Parsing to a `SocketAddr`
-    /// here returned `None` for any DNS hostname — the same footgun that
-    /// silently broke `submit_change` leader-forwarding via
-    /// `ControllerHandle::voter_addr` (now `controller_endpoint_addr` in
-    /// `controller.rs`; mirrors `controller_addr` in `network.rs`).
+    /// By convention this is the first endpoint named "CONTROLLER". If there is
+    /// no such endpoint, this method falls back to the first endpoint.
+    ///
+    /// This method returns the host VERBATIM, as a DNS name, and never
+    /// pre-resolves it to a `SocketAddr`. Voter endpoints carry per-pod
+    /// `StatefulSet` FQDNs, and the dialer re-resolves the host on each connect
+    /// through `TcpStream::connect`, so a peer that restarts on a new pod IP
+    /// stays reachable. A parse to a `SocketAddr` here gives `None` for any DNS
+    /// hostname, and that silently breaks `submit_change` leader-forwarding
+    /// through `ControllerHandle::voter_addr`. That function is now
+    /// `controller_endpoint_addr` in `controller.rs`, and it mirrors
+    /// `controller_addr` in `network.rs`.
     #[must_use]
     pub fn controller_addr(&self) -> Option<String> {
         controller_endpoint_addr(&self.endpoints)
@@ -42,9 +45,10 @@ pub(crate) fn controller_endpoint_addr(endpoints: &[VoterEndpoint]) -> Option<St
     Some(format!("{}:{}", endpoint.host, endpoint.port))
 }
 
-/// What we ask Raft to replicate. A batch of `MetadataRecord`s so
-/// `submit_change` can group related records (Topic + N Partitions)
-/// in a single committed entry.
+/// What the controller asks Raft to replicate.
+///
+/// This is a batch of `MetadataRecord`s, so `submit_change` can group related
+/// records, such as one Topic and N Partitions, in a single committed entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppData {
     pub records: Vec<MetadataRecord>,
@@ -52,15 +56,15 @@ pub struct AppData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AppDataResponse {
-    /// Filled in by the state machine on apply; carries the new log
-    /// index so callers can correlate.
+    /// The state machine fills this in on apply. It carries the new log index,
+    /// so callers can correlate.
     pub applied_index: u64,
-    /// Records that failed `MetadataImage::validate` at apply-time and
-    /// were skipped. Carries the validation error message in order of
+    /// Records that failed `MetadataImage::validate` at apply time and were
+    /// skipped. This field carries the validation error message in order of
     /// rejection. `submit_change` translates a non-empty list into
-    /// `RaftError::Metadata` so a concurrent `CreateTopics` race ends
-    /// with one winner + one `TopicExists` per loser, rather than
-    /// silently committing every duplicate.
+    /// `RaftError::Metadata`, so a concurrent `CreateTopics` race ends with one
+    /// winner and one `TopicExists` for each loser, and not with a silent
+    /// commit of every duplicate.
     pub rejected: Vec<String>,
 }
 

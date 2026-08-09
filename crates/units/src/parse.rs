@@ -1,18 +1,18 @@
 //! Parsing the human forms of a quantity: `512MiB`, `30s`, `10MiB/s`, `25%`.
 //!
 //! Operators write sizes and durations with units, and a config file that spells
-//! them out is one that cannot be misread. Each parser takes a magnitude followed
-//! by a unit — optionally separated by spaces — and is case-insensitive, so
+//! them out cannot be misread. Each parser takes a magnitude followed by a unit,
+//! with optional spaces between them. Each parser is case-insensitive, so
 //! `512MiB`, `512 mib`, and `512MIB` are the same value.
 //!
-//! A unit is required. `30` is not a duration: whether it means 30 seconds or 30
-//! milliseconds is exactly the question the type is meant to settle. The single
+//! A unit is required. `30` is not a duration, because whether it means 30
+//! seconds or 30 milliseconds is the question the type must settle. The one
 //! exception is `0`, which is unambiguous in any unit.
 //!
 //! Binary and decimal size prefixes are distinct, as in the JEDEC/IEC split:
 //! `KiB`/`MiB`/`GiB`/`TiB` step by 1024, `kB`/`MB`/`GB`/`TB` by 1000.
 //!
-//! Exponent notation (`1e6`) is not accepted; a unit expresses the scale.
+//! The parsers do not accept exponent notation (`1e6`). A unit gives the scale.
 
 use crate::{
     ByteRate, ByteSize, Frequency, Ratio, Time,
@@ -70,7 +70,7 @@ pub enum ParseError {
 
 /// The magnitude and the lowercased unit of `input`.
 ///
-/// A unitless `0` yields an empty unit, which every dimension reads as zero.
+/// A unitless `0` gives an empty unit, which every dimension reads as zero.
 fn split(input: &str) -> Result<(f64, String), ParseError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -133,11 +133,11 @@ fn size_scale(unit: &str) -> Option<f64> {
 /// The seconds-per-unit named by a lowercased time unit, as a numerator over a
 /// denominator.
 ///
-/// Sub-second units are given as a division rather than a fractional multiplier
-/// because `1e-3` is not exactly a thousandth in binary, while `x / 1e3` is
-/// correctly rounded. The difference shows up when the result is rendered back:
-/// `250 * 1e-9` is not the nearest `f64` to 250 nanoseconds, and prints as
-/// `0.00000025000000000000004s`.
+/// This function gives sub-second units as a division and not as a fractional
+/// multiplier, because `1e-3` is not exactly a thousandth in binary while
+/// `x / 1e3` is correctly rounded. The difference shows when the code renders the
+/// result back. `250 * 1e-9` is not the nearest `f64` to 250 nanoseconds, and
+/// prints as `0.00000025000000000000004s`.
 fn time_scale(unit: &str) -> Option<(f64, f64)> {
     match unit {
         "ns" | "nanosecond" | "nanoseconds" => Some((1.0, 1e9)),
@@ -188,14 +188,14 @@ pub fn time(input: &str) -> Result<Time, ParseError> {
 
 /// A byte throughput: `10MiB/s`, `1048576B/s`, `64KiBps`, `5 MB / sec`.
 ///
-/// The rate is a size unit over a time unit; `/s` may also be written as the
-/// suffix `ps`, and the time unit may be any duration (`1GiB/h`).
+/// The rate is a size unit over a time unit. You can also write `/s` as the
+/// suffix `ps`. The time unit can be any duration, as in `1GiB/h`.
 ///
 /// # Errors
 ///
 /// [`ParseError`] if the magnitude is not a finite decimal number, the unit is
-/// missing on a non-zero magnitude, or either half of the compound unit is not a
-/// size and a duration respectively.
+/// missing on a non-zero magnitude, the first half of the compound unit is not a
+/// size, or the second half is not a duration.
 pub fn byte_rate(input: &str) -> Result<ByteRate, ParseError> {
     let (magnitude, unit) = split(input)?;
     let unknown = || ParseError::UnknownUnit {
@@ -252,8 +252,8 @@ pub fn frequency(input: &str) -> Result<Frequency, ParseError> {
 
 /// A dimensionless fraction: `25%`, `0.25`, `1`.
 ///
-/// Unlike the other dimensions a bare number is accepted, because a fraction's
-/// unit *is* "none"; `%` scales by a hundredth.
+/// This parser accepts a bare number, unlike the other dimensions, because a
+/// fraction's unit *is* "none". A `%` suffix scales by a hundredth.
 ///
 /// # Errors
 ///

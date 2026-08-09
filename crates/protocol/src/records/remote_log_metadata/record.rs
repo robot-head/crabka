@@ -1,10 +1,14 @@
-//! Dispatch enum over the generated KIP-405 remote-log metadata record types,
-//! keyed by the `__remote_log_metadata` record apiKey. This apiKey namespace is
-//! distinct from both RPC apiKeys and the `KRaft` `__cluster_metadata` namespace
+//! Dispatch enum over the generated KIP-405 remote-log metadata record types.
+//!
+//! The enum is keyed by the `__remote_log_metadata` record apiKey. This apiKey
+//! namespace is distinct from both RPC apiKeys and the `KRaft`
+//! `__cluster_metadata` namespace
 //! ([`KraftMetadataRecord`](crate::records::metadata::record::KraftMetadataRecord)),
-//! even though the small integers overlap. Encodes and decodes through the same
-//! `AbstractApiMessageSerde` value envelope the JVM `RemoteLogMetadataSerde`
-//! uses (`frameVersion=1`, apiKey, apiVersion, body).
+//! even though the small integers overlap.
+//!
+//! This module encodes and decodes through the same `AbstractApiMessageSerde`
+//! value envelope that the JVM `RemoteLogMetadataSerde` uses: `frameVersion=1`,
+//! apiKey, apiVersion, and body.
 
 use bytes::{Bytes, BytesMut};
 
@@ -19,15 +23,17 @@ use crate::{
     records::metadata::envelope::{decode_value_header, encode_value},
 };
 
-/// One `__remote_log_metadata` record (the value of a Kafka `Record`). All four
-/// record schemas are version 0, so the apiVersion is always written as 0.
+/// One `__remote_log_metadata` record, which is the value of a Kafka `Record`.
+///
+/// All four record schemas are version 0, so the apiVersion is always written
+/// as 0.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemoteLogMetadataRecord {
     SegmentMetadata(RemoteLogSegmentMetadataRecord), // apiKey 0
     SegmentMetadataUpdate(RemoteLogSegmentMetadataUpdateRecord), // apiKey 1
     PartitionDelete(RemotePartitionDeleteMetadataRecord), // apiKey 2
     SegmentMetadataSnapshot(RemoteLogSegmentMetadataSnapshotRecord), // apiKey 3
-    /// A record this build does not model. Body is the post-envelope bytes.
+    /// A record this build does not model. The body is the post-envelope bytes.
     Unknown {
         api_key: u32,
         api_version: u32,
@@ -39,7 +45,7 @@ pub enum RemoteLogMetadataRecord {
 ///
 /// # Errors
 /// Returns [`ProtocolError::SchemaMismatch`] if the declared version does not
-/// fit in `i16` (no real remote-log metadata record version does).
+/// fit in `i16`. No real remote-log metadata record version is that large.
 fn api_version_to_i16(version: u32) -> Result<i16, ProtocolError> {
     i16::try_from(version)
         .map_err(|_| ProtocolError::SchemaMismatch("remote-log metadata record apiVersion"))
@@ -58,7 +64,9 @@ impl RemoteLogMetadataRecord {
         }
     }
 
-    /// Encode to value bytes (envelope + body). All real records are apiVersion 0.
+    /// Encode to value bytes: the envelope, then the body.
+    ///
+    /// All real records are apiVersion 0.
     ///
     /// # Errors
     /// Propagates a [`ProtocolError`] from the underlying message encoder.

@@ -14,8 +14,8 @@ use crate::{
     telemetry::{ROUTE_TARGET, integer, record_error},
 };
 
-/// `pg.barrier.mode` for [`Range0Barrier::wait_for_fresh_end`] — the
-/// write-side wait that refuses to adopt any sample already in flight.
+/// `pg.barrier.mode` for [`Range0Barrier::wait_for_fresh_end`], the write-side
+/// wait that refuses to adopt any sample already in flight.
 const BARRIER_MODE_FRESH_END: &str = "fresh_end";
 
 /// `pg.barrier.mode` for the read-side [`Linearizer`] gate, which coalesces
@@ -29,7 +29,7 @@ pub trait Range0EndSampler: Send + Sync {
     async fn sample_end_after_call_begins(&self) -> Result<i64, BarrierError>;
 }
 
-/// `Linearizer` implementation for catalog/global reads guarded by range-0.
+/// `Linearizer` implementation for catalog and global reads that range 0 guards.
 #[derive(Clone)]
 pub struct Range0Barrier {
     tail: Range0Tail,
@@ -39,7 +39,8 @@ pub struct Range0Barrier {
     refresh_poke: Option<Arc<Notify>>,
 }
 
-/// The in-flight end sample, tagged so late arrivals can refuse to adopt it.
+/// The in-flight end sample. It is tagged, so a late arrival can refuse to adopt
+/// it.
 struct InflightSample {
     generation: u64,
     receiver: watch::Receiver<SampleState>,
@@ -87,20 +88,22 @@ impl Range0Barrier {
         self
     }
 
-    /// Wait using a committed-end sample initiated by this call.
+    /// Wait on a committed-end sample that this call started.
     ///
-    /// Never joins an inflight sample: a caller whose write committed before
-    /// this call began must not be satisfied by a sample that started earlier.
-    /// (Read barriers enforce the same rule per generation and additionally
-    /// coalesce concurrent callers; this path also wakes the follower.) If a
-    /// refresh poke is configured, the follower's poll loop is woken before
-    /// sampling so the tail can catch up without waiting out its poll timer.
+    /// This method never joins an in-flight sample. A sample that started
+    /// earlier must not satisfy a caller whose write committed before this call
+    /// began. Read barriers enforce the same rule per generation, and they also
+    /// coalesce concurrent callers. This path also wakes the follower. When a
+    /// refresh poke is configured, this method wakes the follower's poll loop
+    /// before it samples, so the tail can catch up without a wait for its poll
+    /// timer.
     ///
     /// # Errors
     ///
     /// Returns [`BarrierError::CatchUpTimeout`] when the local tail does not
-    /// apply the sampled end within the barrier timeout, and propagates
-    /// sampling and tail failures.
+    /// apply the sampled end within the barrier timeout.
+    ///
+    /// Propagates sampling failures and tail failures.
     pub async fn wait_for_fresh_end(&self) -> Result<(), BarrierError> {
         let span = barrier_span(BARRIER_MODE_FRESH_END, self.tail.applied_offset());
         let result = self.fresh_end_wait().instrument(span.clone()).await;
@@ -110,9 +113,10 @@ impl Range0Barrier {
         result
     }
 
-    /// The body of [`Range0Barrier::wait_for_fresh_end`], running inside its
-    /// span so both the sample and the catch-up wait are inside the measured
-    /// interval.
+    /// The body of [`Range0Barrier::wait_for_fresh_end`].
+    ///
+    /// It runs inside that method's span, so both the sample and the catch-up
+    /// wait are inside the measured interval.
     async fn fresh_end_wait(&self) -> Result<(), BarrierError> {
         if let Some(poke) = &self.refresh_poke {
             poke.notify_one();
@@ -126,21 +130,22 @@ impl Range0Barrier {
         Ok(())
     }
 
-    /// Return an end offset from a sample whose broker fetch started after
-    /// this call began — the [`Range0EndSampler`] contract — together with the
+    /// Return an end offset from a sample whose broker fetch started after this
+    /// call began, which is the [`Range0EndSampler`] contract. Return with it the
     /// number of sample generations this caller had to observe to get one.
     ///
-    /// That count is `pg.barrier.polls`: `1` when the caller started its own
-    /// sample, more when it arrived during someone else's and had to wait that
-    /// one out before its generation could start.
+    /// That count is `pg.barrier.polls`. It is `1` when the caller started its
+    /// own sample, and more when the caller arrived during another caller's
+    /// sample and had to wait that sample out before its own generation could
+    /// start.
     ///
-    /// A sample already in flight at arrival may have read the log end before
-    /// a write this caller must observe (a commit decision acknowledged just
-    /// before the caller's release RPC, say), so adopting it would wait to a
-    /// too-low offset and serve a stale read. Such a sample is only waited
-    /// OUT: arrivals during a fetch form the next generation's batch and share
-    /// one fresh fetch — the same conveyor coalescing as a single in-flight
-    /// slot, one generation later.
+    /// A sample already in flight on arrival can have read the log end before a
+    /// write this caller must observe, such as a commit decision acknowledged
+    /// just before the caller's release RPC. Adoption of that sample would
+    /// therefore wait to a too-low offset and serve a stale read. This method
+    /// only waits such a sample OUT. The arrivals during a fetch form the next
+    /// generation's batch and share one fresh fetch. That is the same conveyor
+    /// coalescing as a single in-flight slot, one generation later.
     async fn sample_target_offset(&self) -> Result<(i64, u64), BarrierError> {
         let mut stale_generation: Option<u64> = None;
         let mut polls = 0_u64;
@@ -189,8 +194,10 @@ impl Range0Barrier {
     }
 
     /// Start a new sample generation under the queue lock and return its
-    /// receiver. The spawned fetch clears the slot on completion so the next
-    /// arrival starts the following generation.
+    /// receiver.
+    ///
+    /// The spawned fetch clears the slot when it completes, so the next arrival
+    /// starts the following generation.
     fn start_sample(&self, guard: &mut SampleQueue) -> watch::Receiver<SampleState> {
         let (sender, receiver) = watch::channel(SampleState::Pending);
         let generation = guard.next_generation;
@@ -235,12 +242,12 @@ impl Linearizer for Range0Barrier {
 }
 
 impl Range0Barrier {
-    /// The body of the [`Linearizer`] gate, running inside its
+    /// The body of the [`Linearizer`] gate. It runs inside that gate's
     /// [`barrier_span`].
     ///
-    /// Returns [`BarrierError`] rather than [`ExecError`] so the span can name
-    /// *which* failure occurred: every variant collapses to
-    /// [`ExecError::Unavailable`] at the boundary, which is the right thing for
+    /// This method returns [`BarrierError`] rather than [`ExecError`], so the
+    /// span can name *which* failure occurred. Every variant collapses to
+    /// [`ExecError::Unavailable`] at the boundary. That is the right result for
     /// the client and useless for an operator.
     async fn read_gate_wait(&self) -> Result<(), BarrierError> {
         let (target_offset, polls) = self.sample_target_offset().await?;
@@ -255,18 +262,18 @@ impl Range0Barrier {
     }
 }
 
-/// Build the `range.barrier` span covering one wait on the range-0 read
+/// Build the `range.barrier` span that covers one wait on the range-0 read
 /// barrier.
 ///
-/// This is the second of the two unbounded blocking waits on a gres read path
-/// (the first is `tso.grant`): a catalog or global-clog read cannot serve until
-/// the local range-0 tail has applied an offset sampled after the read began,
-/// and the wait is bounded only by the configured catch-up timeout.
+/// This is the second of the two unbounded blocking waits on a gres read path.
+/// The first is `tso.grant`. A catalog read or a global-clog read cannot serve
+/// until the local range-0 tail applies an offset sampled after the read began,
+/// and only the configured catch-up timeout bounds the wait.
 ///
-/// `pg.barrier.applied_offset` is the tail's position when the barrier opened;
-/// with `pg.barrier.target_offset` it is exactly the catch-up distance the read
-/// paid for, which is what separates "range 0 is behind" from "the broker
-/// sample was slow".
+/// `pg.barrier.applied_offset` is the tail's position when the barrier opened.
+/// Together with `pg.barrier.target_offset` it is exactly the catch-up distance
+/// the read paid for. That distance separates a range 0 that is behind from a
+/// broker sample that was slow.
 #[must_use]
 fn barrier_span(mode: &'static str, applied_offset: i64) -> Span {
     tracing::debug_span!(
@@ -284,7 +291,7 @@ fn barrier_span(mode: &'static str, applied_offset: i64) -> Span {
     )
 }
 
-/// Record the sampled end this barrier is waiting for, and how many sample
+/// Record the sampled end this barrier waits for, and how many sample
 /// generations the caller observed before it got one it was allowed to adopt.
 fn record_barrier_target(span: &Span, target_offset: i64, polls: u64) {
     if span.is_disabled() {
@@ -294,9 +301,10 @@ fn record_barrier_target(span: &Span, target_offset: i64, polls: u64) {
     span.record("pg.barrier.polls", integer(polls));
 }
 
-/// The low-cardinality `error.type` for a failed barrier wait. `catch_up_timeout`
-/// is the one that means range 0 is not keeping up; the rest mean the sample or
-/// the local tail failed.
+/// The low-cardinality `error.type` for a failed barrier wait.
+///
+/// `catch_up_timeout` is the one value that means range 0 does not keep up. The
+/// other values mean the sample failed or the local tail failed.
 const fn barrier_error_type(error: &BarrierError) -> &'static str {
     match error {
         BarrierError::Sample(_) => "sample",
@@ -306,16 +314,16 @@ const fn barrier_error_type(error: &BarrierError) -> &'static str {
     }
 }
 
-/// Errors from range-0 barrier sampling or catch-up.
+/// Errors from a range-0 barrier sample or catch-up.
 #[derive(Debug, thiserror::Error)]
 pub enum BarrierError {
-    /// Broker-side end sampling failed.
+    /// The broker-side end sample failed.
     #[error("range-0 end sample failed: {0}")]
     Sample(String),
-    /// The tail observable closed while waiting.
+    /// The tail observable closed during the wait.
     #[error("range-0 barrier observable closed")]
     Closed,
-    /// Local tail application failed.
+    /// The local tail failed to apply the frame.
     #[error(transparent)]
     Tail(#[from] Range0TailError),
     /// The local tail did not apply the sampled end within the timeout.
@@ -389,7 +397,8 @@ mod tests {
         }
     }
 
-    /// Sampler whose calls block individually until released by call index.
+    /// Sampler whose calls block one by one until the test releases them by call
+    /// index.
     #[derive(Default)]
     struct IndexedSampler {
         calls: AtomicUsize,
@@ -525,8 +534,8 @@ mod tests {
         assert!(sampler.calls.load(Ordering::SeqCst) == 2);
     }
 
-    /// Per-call scripted sampler: each fetch pops the next queued offset,
-    /// blocking until the test releases it.
+    /// Per-call scripted sampler. Each fetch pops the next queued offset and
+    /// blocks until the test releases it.
     struct ScriptedSampler {
         calls: AtomicUsize,
         offsets: TokioMutex<Vec<i64>>,
@@ -563,14 +572,14 @@ mod tests {
         }
     }
 
-    /// The linearizability floor: a caller must never be satisfied by a
-    /// sample whose fetch started before the caller arrived. Here the stale
-    /// in-flight fetch returns 3 — enough for the tail's applied offset — but
-    /// the late caller must wait for a FRESH fetch (returning 9, covering the
-    /// write it must observe) and only complete once the tail applies 9.
-    /// Under the old join-any-in-flight behavior the late caller adopted the
-    /// stale 3 and returned early, serving a stale read (the 55000
-    /// "decision is `InProgress`" release failures under concurrent load).
+    /// The linearizability floor. A sample whose fetch started before the caller
+    /// arrived must never satisfy that caller. Here the stale in-flight fetch
+    /// returns 3, which is enough for the tail's applied offset. The late caller
+    /// must still wait for a FRESH fetch, which returns 9 and covers the write
+    /// the caller must observe, and it must complete only after the tail applies
+    /// 9. Under the old join-any-in-flight behavior the late caller adopted the
+    /// stale 3 and returned early, which served a stale read. That produced the
+    /// 55000 "decision is `InProgress`" release failures under concurrent load.
     #[tokio::test]
     async fn caller_never_adopts_a_sample_started_before_its_arrival() {
         let store = Arc::new(MemKv::default());

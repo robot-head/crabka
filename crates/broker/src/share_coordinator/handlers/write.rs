@@ -1,7 +1,8 @@
-//! `WriteShareGroupState` (`api_key=85`). Applies a delivery-state delta
-//! (advance start offset, upsert state batches, bump leader/state epoch +
-//! delivery-complete count) for each `(group, topic, partition)`. Gates on
-//! local leadership and surfaces epoch fencing as the per-partition error code.
+//! `WriteShareGroupState` (`api_key=85`). The handler applies a delivery-state
+//! delta for each `(group, topic, partition)`. The delta advances the start
+//! offset, upserts state batches, and bumps the leader/state epoch and the
+//! delivery-complete count. The handler gates on local leadership and surfaces
+//! epoch fencing as the per-partition error code.
 
 use std::sync::Arc;
 

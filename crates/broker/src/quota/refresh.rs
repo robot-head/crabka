@@ -1,7 +1,7 @@
-//! Background task that subscribes to `MetadataImage` changes and
-//! pushes new quota rates to the `QuotaBuckets` cache.
+//! Background task that subscribes to `MetadataImage` changes and pushes new
+//! quota rates to the `QuotaBuckets` cache.
 //!
-//! Mirrors the `throttle::refresh` shape.
+//! It mirrors the shape of `throttle::refresh`.
 
 use std::sync::Arc;
 

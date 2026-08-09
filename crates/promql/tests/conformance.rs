@@ -1,5 +1,5 @@
-//! Runs the vendored Prometheus `.test` subsets through the engine via the
-//! in-memory store. The headline conformance signal for Slice 2.
+//! Runs the vendored Prometheus `.test` subsets through the engine with the
+//! in-memory store. This is the main conformance signal for Slice 2.
 
 use std::path::Path;
 

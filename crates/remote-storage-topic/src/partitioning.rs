@@ -1,10 +1,10 @@
 //! Deterministic `TopicIdPartition` → metadata-topic-partition mapping.
 //!
 //! Every metadata event for one user partition must land in the same
-//! `__remote_log_metadata` partition so its lifecycle ordering survives
-//! the round trip through Kafka. The hash inputs (`topic_id` +
-//! `partition`) match the identity of `TopicIdPartition`, which means a
-//! topic rename does not move the bucket.
+//! `__remote_log_metadata` partition, so its lifecycle ordering survives the
+//! round trip through Kafka. The hash inputs are `topic_id` and `partition`,
+//! which match the identity of `TopicIdPartition`. A topic rename therefore
+//! does not move the bucket.
 
 use std::{collections::hash_map::DefaultHasher, hash::Hasher};
 
@@ -30,13 +30,14 @@ pub fn metadata_partition_for(tp: &TopicIdPartition, partition_count: i32) -> i3
 }
 
 /// Deduped, sorted set of `__remote_log_metadata` partitions that carry
-/// metadata for the given user-topic-partitions, given the metadata topic's
+/// metadata for the given user-topic-partitions, for the metadata topic's
 /// `partition_count`. This is the set a broker must consume to serve remote
 /// reads for the partitions it leads or follows.
 ///
 /// # Panics
 ///
-/// Panics when `partition_count <= 0` (via [`metadata_partition_for`]).
+/// Panics when `partition_count <= 0`. [`metadata_partition_for`] raises the
+/// panic.
 #[must_use]
 pub fn metadata_partitions_for<'a, I>(tps: I, partition_count: i32) -> Vec<i32>
 where

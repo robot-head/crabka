@@ -1,12 +1,12 @@
 //! Versioned metadata records and the immutable image they apply to.
 //!
-//! `crabka-metadata` provides [`MetadataRecord`] (the versioned union
-//! of topic / partition / broker registrations / topic deletions) and
-//! [`MetadataImage`] (an immutable snapshot of the cluster's metadata).
+//! `crabka-metadata` provides [`MetadataRecord`], the versioned union
+//! of topic, partition, broker-registration, and topic-deletion records, and
+//! [`MetadataImage`], an immutable snapshot of the cluster's metadata.
 //!
-//! The image is mutated only by [`MetadataImage::apply`] called from
-//! the Raft state machine in `crabka-raft`. Everywhere else it's read
-//! via shared references and Arc clones.
+//! Only [`MetadataImage::apply`] mutates the image, and the Raft state
+//! machine in `crabka-raft` calls that method. Everywhere else reads it
+//! through shared references and Arc clones.
 //!
 //! ## Applying controller records
 //!
@@ -57,8 +57,8 @@ pub mod transaction_version;
 
 pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
 /// KIP-853 voter-set value types, re-exported from the [`crabka_voters`] leaf
-/// crate. Kept as `crabka_metadata::voters` so existing call sites are
-/// unchanged; the types live in their own crypto-free crate so the consensus
+/// crate. The path stays `crabka_metadata::voters`, so existing call sites are
+/// unchanged. The types live in their own crypto-free crate, so the consensus
 /// core can compile to WebAssembly.
 pub use crabka_voters as voters;
 pub use error::MetadataError;

@@ -1,7 +1,7 @@
-//! Soft goal: balance per-broker total CPU usage. Per-broker total =
-//! sum over partitions a broker hosts of
-//! `UsageStore::cpu_cores_rate(broker, topic, partition, FiveMin)`.
-//! Greedy hot->cold swap, threshold-driven via
+//! Soft goal: balance per-broker total CPU usage. The per-broker total is the
+//! sum, over the partitions a broker hosts, of
+//! `UsageStore::cpu_cores_rate(broker, topic, partition, FiveMin)`. The goal
+//! does a greedy hot-to-cold swap, driven by the
 //! `GoalContext.imbalance_threshold`.
 
 use std::collections::HashMap;
@@ -19,8 +19,8 @@ pub struct CpuUsage;
 impl CpuUsage {
     pub const NAME: &'static str = "CpuUsage";
 
-    /// CPU micros/sec total per broker. Skips partitions with no
-    /// usage data.
+    /// CPU micros/sec total per broker. It skips partitions with no usage
+    /// data.
     fn totals(
         partitions: &[PartitionView],
         broker_ids: &[i32],
@@ -140,9 +140,9 @@ mod tests {
         }
     }
 
-    /// Build a `UsageStore` pre-populated with `CpuMicros` counter pairs.
-    /// Each tuple is `(broker, topic, partition, v_t0, v_t1)` inserted
-    /// at `now-1000` and `now` so the rate is `(v_t1 - v_t0)/sec`.
+    /// Build a `UsageStore` filled with `CpuMicros` counter pairs. Each tuple
+    /// is `(broker, topic, partition, v_t0, v_t1)`, inserted at `now-1000` and
+    /// `now`, so the rate is `(v_t1 - v_t0)/sec`.
     fn store_with_counter_pair(samples: Vec<(i32, &str, i32, f64, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
             scrape_interval: secs(30),

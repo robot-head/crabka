@@ -1,8 +1,9 @@
 //! Broker incarnation ID persistence.
 //!
-//! Each broker process invocation is identified by a UUID (`incarnation_id`).
-//! The UUID is generated once on first boot, written to `{log_dir}/incarnation_id`
-//! as a lowercase hex string, and reloaded on every subsequent start.
+//! A UUID, the `incarnation_id`, identifies each broker process invocation.
+//! The broker generates the UUID once on first boot, writes it to
+//! `{log_dir}/incarnation_id` as a lowercase hex string, and reloads it on
+//! every subsequent start.
 
 use std::{
     io::{Read, Write},
@@ -16,9 +17,10 @@ const FILE_NAME: &str = "incarnation_id";
 /// Load the persisted incarnation ID from `{log_dir}/incarnation_id`, or
 /// generate a fresh [`Uuid::new_v4`], persist it, and return it.
 ///
-/// Any I/O error on the read path is treated as "file not present" and a new
-/// UUID is generated. Failure to persist is logged as a warning; the ephemeral
-/// UUID is returned regardless (next restart will get a different UUID).
+/// This function treats any I/O error on the read path as a missing file and
+/// generates a new UUID. If it cannot persist the UUID, it logs a warning and
+/// returns the ephemeral UUID anyway. The next restart then gets a different
+/// UUID.
 pub fn load_or_generate(log_dir: &Path) -> Uuid {
     let path = log_dir.join(FILE_NAME);
     if let Ok(mut f) = std::fs::File::open(&path) {

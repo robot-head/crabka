@@ -1,4 +1,6 @@
-//! `Gres` fleet reconciler. Renders the `PgDog` front door from live tenants.
+//! `Gres` fleet reconciler.
+//!
+//! It renders the `PgDog` front door from the live tenants.
 
 use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
@@ -53,7 +55,7 @@ const DEFAULT_ACTIVATOR_REGISTRY_POLL: Time = crabka_units::millis(250);
 const DEFAULT_ACTIVATOR_COLD_START_TIMEOUT: Time = crabka_units::secs(30);
 const DEFAULT_ACTIVATOR_READINESS_PERIOD_SECONDS: i32 = 5;
 
-/// Run the controller forever.
+/// Runs the controller forever.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -330,12 +332,13 @@ fn validate_activator_config(spec: &crate::crd::GresSpec) -> Result<(), Reconcil
     Ok(())
 }
 
-/// Next requeue that lands on a credential-grace boundary, or `fallback` when
-/// every boundary is already behind `now`.
+/// Returns the next requeue that lands on a credential-grace boundary, or
+/// `fallback` when every boundary is already before `now`.
 ///
-/// The deadlines and `now` are epoch-millisecond instants; `direct_bootstrap_grace`
-/// and the result are extents, so the grace window narrows back to raw
-/// milliseconds only for the instant arithmetic.
+/// The deadlines and `now` are instants in epoch milliseconds.
+/// `direct_bootstrap_grace` and the result are extents. The grace window
+/// therefore becomes raw milliseconds only for the arithmetic on the
+/// instants.
 fn next_pgdog_transition_requeue(
     grace_deadlines: impl Iterator<Item = u64>,
     now: u64,

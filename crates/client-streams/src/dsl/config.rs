@@ -1,9 +1,12 @@
-//! DSL config objects mirroring JVM `Grouped`/`Materialized`/`Repartitioned`.
-//! `Consumed`/`Produced` are reused from `crate::processor::serde`.
+//! DSL config objects that mirror the JVM `Grouped`, `Materialized`, and
+//! `Repartitioned`.
+//!
+//! `Consumed` and `Produced` come from `crate::processor::serde`.
 
 use crabka_units::prelude::*;
 
-/// Serdes (+ optional repartition name) for `groupBy`/`groupByKey`.
+/// The serdes, and an optional repartition name, for `groupBy` and
+/// `groupByKey`.
 #[derive(Debug, Clone)]
 pub struct Grouped<KS, VS> {
     #[allow(dead_code)]
@@ -27,16 +30,19 @@ impl<KS, VS> Grouped<KS, VS> {
     }
 }
 
-/// Versioned-store settings for a `Materialized` (KIP-889). `segment_interval`
-/// only affects JVM eviction granularity (non-observable here); accepted for API
-/// parity. `None` segment interval uses the JVM default segment heuristic.
+/// Versioned-store settings for a `Materialized` (KIP-889).
+///
+/// `segment_interval` affects only the JVM eviction granularity, which is not
+/// observable here. This type accepts it for API parity. A `None` segment
+/// interval uses the JVM default segment heuristic.
 #[derive(Debug, Clone, Copy)]
 pub struct VersionedConfig {
     pub history_retention: Time,
     pub segment_interval: Option<Time>,
 }
 
-/// Store name + serdes + logging flag for a materialized `KTable`.
+/// The store name, the serdes, and the logging flag for a materialized
+/// `KTable`.
 #[derive(Debug, Clone)]
 pub struct Materialized<KS, VS> {
     #[allow(dead_code)]
@@ -69,8 +75,9 @@ impl<KS, VS> Materialized<KS, VS> {
         self.logging = on;
         self
     }
-    /// Enable/disable the record cache for this store (JVM
-    /// `Materialized.withCachingEnabled/Disabled`). Default enabled.
+    /// Turn the record cache for this store on or off. This is the JVM
+    /// `Materialized.withCachingEnabled` and
+    /// `Materialized.withCachingDisabled`. Default: on.
     #[must_use]
     pub fn with_caching(mut self, on: bool) -> Self {
         self.caching = on;
@@ -117,10 +124,12 @@ impl<KS, V1S, V2S> From<(KS, V1S, V2S)> for StreamJoined<KS, V1S, V2S> {
     }
 }
 
-/// Serdes for a windowed `KStream`-`KStream` join (`StreamJoined`): the key
-/// serde plus the per-side value serdes (`value1` for this/left side, `value2`
-/// for the other/right side). The two join-window stores are registered with
-/// `key_serde` + the matching value serde, mirroring JVM `StreamJoined.with`.
+/// The serdes for a windowed `KStream`-`KStream` join, the `StreamJoined`.
+///
+/// It holds the key serde and the per-side value serdes: `value1` for this side,
+/// the left side, and `value2` for the other side, the right side. The two
+/// join-window stores are registered with `key_serde` and the matching value
+/// serde, which mirrors the JVM `StreamJoined.with`.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamJoined<KS, V1S, V2S> {
     pub(crate) key: KS,
@@ -137,11 +146,13 @@ impl<KS, V1S, V2S> StreamJoined<KS, V1S, V2S> {
     }
 }
 
-/// Stream–table join config (KIP-923). Carries an optional grace period that
-/// buffers stream records so out-of-order records still join the table value
-/// as-of their own timestamp. `grace` requires the joined table to be versioned
-/// and must be `< history_retention` (asserted at build time by the join DSL).
-/// `name` optionally names the grace buffer store.
+/// Stream-table join config (KIP-923).
+///
+/// It carries an optional grace period that buffers the stream records, so an
+/// out-of-order record still joins the table value as of its own timestamp.
+/// `grace` needs the joined table to be versioned, and it must be
+/// `< history_retention`. The join DSL asserts that at build time. `name`
+/// optionally names the grace buffer store.
 #[derive(Debug, Clone, Default)]
 pub struct Joined {
     pub(crate) grace: Option<Time>,
@@ -162,7 +173,8 @@ impl Joined {
     }
 }
 
-/// Serdes + optional name/partitions for an explicit `repartition()`.
+/// The serdes, and an optional name and partition count, for an explicit
+/// `repartition()`.
 #[derive(Debug, Clone)]
 pub struct Repartitioned<KS, VS> {
     pub(crate) key_serde: KS,

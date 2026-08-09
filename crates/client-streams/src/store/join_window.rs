@@ -1,6 +1,8 @@
-//! retainDuplicates window store for stream-stream joins: composite
-//! `WindowKeySchema` keys with a per-store incrementing seqnum + RAW values
-//! (no `ValueAndTimestamp` wrap). `fetch` returns every duplicate in a range.
+//! The retainDuplicates window store for stream-stream joins.
+//!
+//! It uses composite `WindowKeySchema` keys with a per-store incrementing
+//! seqnum, and it stores RAW values with no `ValueAndTimestamp` wrap. `fetch`
+//! returns every duplicate in a range.
 use std::any::Any;
 
 use async_trait::async_trait;
@@ -15,10 +17,12 @@ use crate::{
     },
 };
 
-/// Typed windowed store that retains duplicates: every `put` with the same
-/// `(key, timestamp)` generates a distinct composite key via an incrementing
-/// seqnum, so duplicates coexist in the backend. Values are stored RAW (no
-/// `ValueAndTimestamp` wrap). Used by stream-stream join processors.
+/// A typed windowed store that retains duplicates.
+///
+/// Every `put` with the same `(key, timestamp)` builds a distinct composite key
+/// from an incrementing seqnum, so the duplicates coexist in the backend. The
+/// store keeps the values RAW, with no `ValueAndTimestamp` wrap. The
+/// stream-stream join processors use it.
 #[async_trait]
 pub trait JoinWindowStore<K: Send + Sync, V: Send>: StateStore {
     async fn put(&mut self, key: K, timestamp: i64, value: V);

@@ -10,8 +10,10 @@ use crate::{
     result::{InstantSample, SampleValue},
 };
 
-/// Remember the `__name__` of the first sample seen for a histogram group key,
-/// so a later mixed-histogram warning can name the metric like Prometheus does.
+/// Records the `__name__` of the first sample for a histogram group key.
+///
+/// A later mixed-histogram warning names the metric with this value, as
+/// Prometheus does.
 pub(super) fn record_metric_name(names: &mut BTreeMap<String, String>, key: &str, labels: &Labels) {
     if let Some(name) = labels.get("__name__") {
         names

@@ -1,5 +1,5 @@
-//! Coverage for the Forwarder's response/error mapping and the internal
-//! forward endpoint's error arm — without the full multi-replica path.
+//! Coverage for the Forwarder's response and error mapping, and for the
+//! internal forward endpoint's error arm, without the full multi-replica path.
 
 use std::{sync::Arc, time::Duration};
 
@@ -40,8 +40,9 @@ fn rec(topic: &str) -> GatewayRecord {
     }
 }
 
-/// The relayed caller for forward tests. With the mock owner / `AllowAll` the
-/// value is immaterial to the response — it only satisfies `forward`'s signature.
+/// The relayed caller for forward tests. With the mock owner and `AllowAll`,
+/// the value does not change the response. It only satisfies `forward`'s
+/// signature.
 fn anon() -> crabka_security::Principal {
     crabka_security::Principal {
         name: "ANONYMOUS".into(),
@@ -239,9 +240,10 @@ async fn forward_handler_error_arm_returns_retriable() {
     broker.shutdown().await;
 }
 
-/// The `/internal/v1/forward` gate: when `config.tls` is `Some` and NO
-/// principal extension is present (anonymous caller), the handler returns
-/// `403 FORBIDDEN` with `retriable: false` — before any broker interaction.
+/// The `/internal/v1/forward` gate. When `config.tls` is `Some` and NO
+/// principal extension is present, that is, an anonymous caller, the handler
+/// returns `403 FORBIDDEN` with `retriable: false`, before it touches the
+/// broker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_handler_rejects_anonymous_when_tls_enabled() {
     // Consts before any statements (clippy::items_after_statements).

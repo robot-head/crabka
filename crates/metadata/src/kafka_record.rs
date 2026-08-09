@@ -1,12 +1,12 @@
 //! Bridge between [`MetadataRecord`] and the Kafka `Record` wire type.
 //!
-//! `__cluster_metadata` is fetched by broker-only observers as Kafka
+//! Broker-only observers fetch `__cluster_metadata` as Kafka
 //! record batches (Component B). Each [`MetadataRecord`] maps to exactly
 //! one [`Record`]: `key = None`, `value = wincode(MetadataRecord)`. The
 //! enum variant itself is the record type + version, so no separate type
 //! tag is carried. This wire surface is crabka-private (clients never
 //! fetch `__cluster_metadata`), so it only needs to be stable and
-//! round-trippable — not byte-identical to Apache Kafka's `ApiMessage`
+//! round-trippable, and not byte-identical to Apache Kafka's `ApiMessage`
 //! framing.
 
 use bytes::Bytes;
@@ -30,8 +30,8 @@ pub enum KafkaRecordError {
 /// Encode one [`MetadataRecord`] as a Kafka [`Record`].
 ///
 /// # Errors
-/// Returns [`KafkaRecordError::Encode`] if wincode serialization fails
-/// (in practice this cannot happen for `MetadataRecord`).
+/// Returns [`KafkaRecordError::Encode`] if wincode serialization fails. In
+/// practice this cannot happen for `MetadataRecord`.
 pub fn to_kafka_record(rec: &MetadataRecord) -> Result<Record, KafkaRecordError> {
     let payload = <SerdeCompat<MetadataRecord>>::serialize(rec)
         .map_err(|e| KafkaRecordError::Encode(e.to_string()))?;

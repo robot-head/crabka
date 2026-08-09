@@ -1,20 +1,20 @@
 # Crate README Style Guide
 
-This guide defines the style and content expectations for per-crate `README.md` files in Crabka.
+This guide defines the style and content expectations for per-crate `README.md` files in Crabka. The [prose style guide](prose_style_guide.md) defines the wording rules that apply to everything you write here.
 
 ## Purpose
 
-Each crate README is the **entry point for someone encountering the crate for the first time**. It answers: "what is this, why does it exist, and how do I use it?" Crabka publishes its crates to crates.io (via release-plz), so READMEs serve two audiences:
+Each crate README is the **entry point for someone who sees the crate for the first time**. It answers: "what is this, why does it exist, and how do I use it?" Crabka publishes its crates to crates.io with release-plz, so READMEs serve two audiences:
 
-- **crates.io / docs.rs readers** — evaluating whether to use the crate.
-- **Internal developers** — understanding a crate's role in the Crabka workspace.
+- **crates.io and docs.rs readers** — people who evaluate whether to use the crate.
+- **Internal developers** — people who need to understand a crate's role in the Crabka workspace.
 
 ## What Belongs in READMEs
 
 - **One-line description** — what the crate does.
 - **Role in Crabka** — how it fits into the larger system.
-- **Key features / capabilities**, including which Kafka KIPs or wire APIs it covers.
-- **Quick start / usage example** (for binaries and public API crates).
+- **Key features and capabilities**, including which Kafka KIPs or wire APIs it covers.
+- **Quick start or usage example** (for binaries and public API crates).
 - **Configuration reference** (for server binaries).
 - **Links** to design docs, the [KIP matrix](../KIP_MATRIX.md), test coverage reports, and API documentation.
 
@@ -23,7 +23,7 @@ Each crate README is the **entry point for someone encountering the crate for th
 - **Exhaustive API reference** — that belongs in rustdoc.
 - **Design rationale** — that belongs in the design doc.
 - **Test coverage details** — that belongs in the coverage report.
-- **TODO lists or known issues** — those belong in the repo-level tracking docs (e.g. `KNOWN_ISSUES.md`), not per-crate READMEs.
+- **TODO lists or known issues** — those belong in the repo-level tracking docs, for example `KNOWN_ISSUES.md`, not per-crate READMEs.
 
 ## Document Structure
 
@@ -111,7 +111,7 @@ Apache-2.0. Derivative work of [Apache Kafka](https://kafka.apache.org); see [NO
 
 ### Small / Internal Library Crates
 
-For crates under ~200 lines with a single responsibility:
+For crates under about 200 lines with a single responsibility:
 
 ```markdown
 # crabka-<name>
@@ -129,25 +129,25 @@ Apache-2.0. Derivative work of [Apache Kafka](https://kafka.apache.org); see [NO
 ## Writing Style
 
 - **Be concise** — READMEs should be scannable. If a section exceeds a screenful, it probably belongs in a separate doc.
-- **Lead with the most useful information** — what it does, not how it's built.
+- **Lead with the most useful information** — what it does, not how it is built.
 - **Use concrete examples** — a 5-line code snippet is worth a paragraph of description.
-- **Link, don't duplicate** — point to docs.rs for API details, design docs for rationale, the KIP matrix for compatibility scope, and the coverage report for what's tested.
-- **State Kafka-compatibility scope honestly** — if the crate implements a KIP partially, say so and link the KIP matrix rather than implying full support.
+- **Link, do not duplicate** — point to docs.rs for API details, design docs for rationale, the KIP matrix for compatibility scope, and the coverage report for what is tested.
+- **State Kafka-compatibility scope honestly** — if the crate implements a KIP partially, say so and link the KIP matrix rather than imply full support.
 
 ## Badges
 
-The standard badge set (crates.io version, docs.rs, optionally CI) is the one form of image Crabka READMEs use, because they carry real information for crates.io readers. Avoid other, decorative images; prefer text descriptions.
+The standard badge set is the one form of image Crabka READMEs use, because the badges carry real information for crates.io readers. The set is the crates.io version badge, the docs.rs badge, and optionally a CI badge. Avoid other, decorative images. Prefer text descriptions.
 
 ## Naming Conventions
 
-- **Title**: use the crate name as-is (e.g., `# crabka-protocol`, not `# Kafka Protocol Library`).
-- **Links**: use relative paths within the repo (e.g., `../../NOTICE`, `../../docs/KIP_MATRIX.md`), not absolute URLs, except for external sites (crates.io, docs.rs, kafka.apache.org, KIP pages).
-- **License**: American spelling (`## License`), Apache-2.0, with the Kafka derivative-work line pointing at `NOTICE` — every crate is a derivative work of Apache Kafka.
+- **Title**: use the crate name as-is (for example, `# crabka-protocol`, not `# Kafka Protocol Library`).
+- **Links**: use relative paths within the repo (for example, `../../NOTICE`, `../../docs/KIP_MATRIX.md`), not absolute URLs, except for external sites (crates.io, docs.rs, kafka.apache.org, KIP pages).
+- **License**: American spelling (`## License`), Apache-2.0, and the Kafka derivative-work line that points at `NOTICE`. Every crate is a derivative work of Apache Kafka.
 
 ## Questions to Ask When Writing
 
 1. Could someone understand what this crate does from the first two sentences?
-2. Is there enough information to start using it without reading the source?
-3. Am I duplicating content that lives in another document (rustdoc, design doc, coverage report, KIP matrix)?
-4. Would this be useful on crates.io / docs.rs?
+2. Is there enough information to use the crate without the source code?
+3. Do I duplicate content that lives in another document, such as rustdoc, a design doc, a coverage report, or the KIP matrix?
+4. Would this be useful on crates.io and docs.rs?
 5. Is the Kafka-compatibility scope stated accurately, and does it match the KIP matrix?

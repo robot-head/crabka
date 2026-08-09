@@ -11,11 +11,11 @@ of Apache Kafka-compatible infrastructure and clients.
 
 ## Overview
 
-`crabka-client-producer` provides the high-level producer behavior above
-`crabka-client-core`: batching, compression, retries, idempotent sequence
-numbers, and transactional production. It accepts raw `bytes::Bytes` keys and
-values so applications can choose their own serialization layer, including
-`crabka-schema-serde`.
+`crabka-client-producer` holds the high-level producer behavior above
+`crabka-client-core`. It batches and compresses records, retries sends, stamps
+idempotent sequence numbers, and produces in transactions. It accepts raw
+`bytes::Bytes` keys and values, so an application can choose its own
+serialization layer, such as `crabka-schema-serde`.
 
 Use this crate for application writes, exactly-once produce flows, and
 consume-process-produce transactions.
@@ -33,12 +33,12 @@ consume-process-produce transactions.
 
 ## Kafka Scope
 
-Idempotence is enabled by default. `acks=One` is raised to `acks=All`, and
-`acks=Zero` is rejected when idempotence is enabled. Transaction APIs cover
-exactly-once production and the KIP-447 path for committing consumed offsets as
-part of a producer transaction.
+Idempotence is enabled by default. While idempotence is enabled, the producer
+raises `acks=One` to `acks=All` and rejects `acks=Zero`. Transaction APIs cover
+exactly-once production. They also cover the KIP-447 path that commits consumed
+offsets as part of a producer transaction.
 
-Serialization is caller-owned. Keys, values, and headers are byte payloads, not
+The caller owns serialization. Keys, values, and headers are byte payloads, not
 typed schema values.
 
 ## Install

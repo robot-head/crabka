@@ -1,5 +1,6 @@
-//! Top-level [`Client`]. Wraps a [`BrokerPool`] and
-//! exposes a typed-request `send` API.
+//! Top-level [`Client`].
+//!
+//! [`Client`] wraps a [`BrokerPool`] and exposes a typed-request `send` API.
 
 use std::sync::Arc;
 
@@ -17,10 +18,10 @@ use crate::{
 
 /// A Kafka client backed by a [`BrokerPool`].
 ///
-/// Construct via [`Client::builder`].
+/// Construct a `Client` with [`Client::builder`].
 ///
-/// Cloning a `Client` is cheap — it shares the underlying [`BrokerPool`] via
-/// an `Arc` and the connection options via a value clone.
+/// A clone of a `Client` is cheap. The clone shares the underlying
+/// [`BrokerPool`] through an `Arc` and copies the connection options by value.
 #[derive(Clone)]
 pub struct Client {
     bootstrap: String,
@@ -98,9 +99,10 @@ impl Client {
     }
 
     /// Drop the cached bootstrap connection and refresh the bootstrap address
-    /// list from the original bootstrap string. Callers that know their
-    /// bootstrap request is safe to retry can use this after a transport error
-    /// before sending again.
+    /// list from the original bootstrap string.
+    ///
+    /// Callers that know their bootstrap request is safe to retry can call
+    /// this after a transport error and before they send again.
     #[tracing::instrument(level = "debug", skip_all, fields(bootstrap = %self.bootstrap))]
     pub async fn reconnect_bootstrap(&self) {
         self.pool.evict_bootstrap();
@@ -109,10 +111,13 @@ impl Client {
         }
     }
 
-    /// Whether the pool knows a dialable address for `broker_id` (learned via
-    /// [`refresh_metadata`](Client::refresh_metadata), port not `0`). Lets a
-    /// caller choose between [`broker`](Client::broker) routing and the
-    /// bootstrap [`send`](Client::send) without a speculative connect.
+    /// Whether the pool knows a dialable address for `broker_id`.
+    ///
+    /// The pool knows one when
+    /// [`refresh_metadata`](Client::refresh_metadata) learned it and the port
+    /// was not `0`. A caller can then choose between
+    /// [`broker`](Client::broker) routing and the bootstrap
+    /// [`send`](Client::send) without a speculative connect.
     // cargo-mutants: one-line delegation to BrokerPool::knows_broker
     #[must_use]
     #[cfg_attr(test, mutants::skip)]
@@ -122,7 +127,7 @@ impl Client {
 
     /// Return a [`BrokerHandle`] that routes requests to a specific broker by id.
     ///
-    /// The broker must have been registered via [`refresh_metadata`] first.
+    /// [`refresh_metadata`] must have registered the broker first.
     ///
     /// [`refresh_metadata`]: Client::refresh_metadata
     #[must_use]
@@ -134,8 +139,10 @@ impl Client {
     }
 
     /// Drop the pooled connection to `broker_id` so the next request to it
-    /// reconnects (to its current advertised address). Call this after a send
-    /// fails so a bounced / failed-over broker isn't retried over a dead socket.
+    /// reconnects to its current advertised address.
+    ///
+    /// Call this after a send fails, so a bounced or failed-over broker is not
+    /// retried over a dead socket.
     // cargo-mutants: one-line delegation to BrokerPool::evict
     #[cfg_attr(test, mutants::skip)]
     pub fn evict_broker(&self, broker_id: i32) {
@@ -194,16 +201,18 @@ impl Client {
         Ok(resp)
     }
 
-    /// Send a single-partition `OffsetForLeaderEpoch` (`api_key=23`) via the
-    /// bootstrap connection. Thin wrapper over the free
-    /// [`offset_for_leader_epoch`](crate::offset_for_leader_epoch) helper used
-    /// by the consumer's KIP-320 position-validation pass; `Client` does not
-    /// otherwise expose its connection, so this borrows the same bootstrap
-    /// connection `send` uses.
+    /// Send a single-partition `OffsetForLeaderEpoch` (`api_key=23`) over the
+    /// bootstrap connection.
+    ///
+    /// This is a thin wrapper over the free
+    /// [`offset_for_leader_epoch`](crate::offset_for_leader_epoch) helper that
+    /// the consumer's KIP-320 position-validation pass uses. `Client` does not
+    /// otherwise expose its connection, so this method borrows the same
+    /// bootstrap connection that `send` uses.
     ///
     /// # Errors
-    /// Transport / version-negotiation failure, or a partition not present in
-    /// the response.
+    /// Returns an error on transport or version-negotiation failure, or when
+    /// the response does not contain the partition.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -241,18 +250,22 @@ impl Client {
     }
 
     /// Send a single-partition `OffsetForLeaderEpoch` (`api_key=23`) to a
-    /// *specific* broker by id, via [`BrokerPool::get`]. Mirrors
-    /// [`offset_for_leader_epoch`](Client::offset_for_leader_epoch) but targets
-    /// the partition leader instead of the bootstrap connection — KIP-320
-    /// requires the validation RPC reach the partition leader, which is the
-    /// only replica with the authoritative epoch→end-offset history.
+    /// *specific* broker by id, through [`BrokerPool::get`].
     ///
-    /// The broker must already be in the pool's registry (populated by
-    /// [`refresh_metadata`](Client::refresh_metadata)).
+    /// This method mirrors
+    /// [`offset_for_leader_epoch`](Client::offset_for_leader_epoch) but
+    /// targets the partition leader instead of the bootstrap connection.
+    /// KIP-320 requires the validation RPC to reach the partition leader,
+    /// which is the only replica with the authoritative epoch→end-offset
+    /// history.
+    ///
+    /// The broker must already be in the pool's registry, which
+    /// [`refresh_metadata`](Client::refresh_metadata) populates.
     ///
     /// # Errors
-    /// `Disconnected` if `broker_id` is not in the registry; transport /
-    /// version-negotiation failure; or a partition not present in the response.
+    /// Returns `Disconnected` if `broker_id` is not in the registry. Returns
+    /// an error on transport or version-negotiation failure. Returns an error
+    /// when the response does not contain the partition.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -300,7 +313,7 @@ impl Client {
 
 /// A handle to a specific broker within a [`Client`]'s pool.
 ///
-/// Obtained via [`Client::broker`].
+/// [`Client::broker`] returns this handle.
 pub struct BrokerHandle<'a> {
     client: &'a Client,
     broker_id: i32,
@@ -309,15 +322,17 @@ pub struct BrokerHandle<'a> {
 impl BrokerHandle<'_> {
     /// Send a request to this specific broker.
     ///
-    /// When the pool has no dialable address for `broker_id` — which happens
-    /// when the broker advertises port `0` (a single-broker cluster whose
-    /// OS-assigned port never got rewritten in metadata), so
-    /// [`BrokerPool::refresh_brokers`] deliberately skipped it — fall back to
-    /// the bootstrap connection. On such a cluster the bootstrap broker *is*
-    /// this broker (e.g. the group coordinator a consumer routes to), so the
-    /// request still reaches its intended target instead of failing
-    /// `Disconnected`. A *known* broker whose connect fails is not masked: the
-    /// fallback only triggers when the id was never in the registry.
+    /// When the pool has no dialable address for `broker_id`, this method
+    /// falls back to the bootstrap connection. That happens when the broker
+    /// advertises port `0`, which occurs on a single-broker cluster whose
+    /// OS-assigned port never got rewritten in metadata, so
+    /// [`BrokerPool::refresh_brokers`] deliberately skipped it. On such a
+    /// cluster the bootstrap broker *is* this broker, for example the group
+    /// coordinator a consumer routes to. The request therefore still reaches
+    /// its intended target instead of failing with `Disconnected`.
+    ///
+    /// This fallback does not mask a *known* broker whose connect fails. It
+    /// only triggers when the id was never in the registry.
     // cargo-mutants: live-broker send path; not unit-testable
     #[cfg_attr(test, mutants::skip)]
     #[tracing::instrument(
@@ -491,12 +506,14 @@ mod bootstrap_failover_tests {
         }
     }
 
-    /// Bounded poll: wait until `addr` refuses connections, i.e. a stopped
-    /// `MockBroker`'s listener (and its per-connection handlers, which share
-    /// the same cancelled token) have actually torn down. This replaces a
-    /// fixed post-`stop()` settle: the sleep was only waiting for that socket
-    /// teardown, so we poll the teardown directly and then run the unchanged
-    /// failover assertion. The timeout is a hang-guard.
+    /// Bounded poll: wait until `addr` refuses connections.
+    ///
+    /// At that point a stopped `MockBroker`'s listener has torn down, together
+    /// with its per-connection handlers, which share the same cancelled token.
+    /// This poll replaces a fixed settle after `stop()`. That sleep only
+    /// waited for the socket teardown, so this helper polls the teardown
+    /// directly and then runs the unchanged failover assertion. The timeout is
+    /// a hang-guard.
     async fn wait_for_listener_closed(addr: std::net::SocketAddr) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while tokio::net::TcpStream::connect(addr).await.is_ok() {

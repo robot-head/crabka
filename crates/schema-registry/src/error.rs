@@ -1,4 +1,4 @@
-//! Confluent-compatible error model: numeric `error_code` + HTTP status,
+//! Confluent-compatible error model: a numeric `error_code` and an HTTP status,
 //! serialised as `{"error_code":N,"message":"..."}` with the vendor
 //! content-type. Serdes branch on `error_code`, so the numbers are exact.
 
@@ -25,8 +25,8 @@ pub enum SrError {
     InvalidCompatibilityLevel(String),
     #[error("Error in the backend data store: {0}")]
     Backend(String),
-    /// Schema incompatible with prior version(s) under the subject. The strings
-    /// are best-effort reasons (Avro's wording, not Confluent's).
+    /// Schema incompatible with one or more prior versions under the subject.
+    /// The strings are best-effort reasons in Avro's wording, not Confluent's.
     #[error("Schema being registered is incompatible with an earlier schema; details: {0:?}")]
     Incompatible(Vec<String>),
     /// A write was attempted on a subject/registry in `READONLY` mode.
@@ -43,7 +43,8 @@ pub enum SrError {
     /// Unknown mode string on PUT /mode.
     #[error("Invalid mode: {0}")]
     InvalidMode(String),
-    /// A soft-deleted subject was soft-deleted again (cp: use `permanent=true`).
+    /// A soft-deleted subject was soft-deleted again. cp says to use
+    /// `permanent=true`.
     #[error("Subject '{0}' was soft deleted. Set permanent=true to delete permanently.")]
     SubjectSoftDeleted(String),
     /// GET/DELETE `/mode/{subject}` when the subject has no mode override.

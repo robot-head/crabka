@@ -1,4 +1,4 @@
-//! End-to-end metrics-generator wiring through mock source/sink/clock.
+//! End-to-end metrics-generator wiring through a mock source, sink and clock.
 
 use std::sync::Arc;
 

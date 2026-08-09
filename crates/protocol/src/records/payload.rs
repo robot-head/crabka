@@ -1,20 +1,19 @@
 //! `RecordsPayload`: the wire-field type for any Kafka message whose schema
 //! declares a `records` field (`Fetch`, `Produce`, `FetchSnapshot`, `ShareFetch`).
 //!
-//! Kafka's records-field is "opaque bytes" at the protocol layer; the
-//! contents may be a v2 `RecordBatch` (current) or a v0/v1 `MessageSet`
-//! (legacy, used by old clients on down-conversion). The discriminator
-//! is the **magic byte at offset 16** of the first batch, which is at
-//! the same offset for both formats by coincidence of layout (v2:
-//! `base_offset+batch_length+leader_epoch+magic`; legacy: `offset+
-//! message_size+crc+magic`).
+//! At the protocol layer the records field is opaque bytes. The contents are
+//! either a v2 `RecordBatch` (current) or a v0/v1 `MessageSet` (legacy, used
+//! by old clients on down-conversion). The discriminator is the magic byte at
+//! offset 16 of the first batch. Both formats put it at that offset by
+//! coincidence of layout: v2 is `base_offset+batch_length+leader_epoch+magic`,
+//! and legacy is `offset+message_size+crc+magic`.
 //!
-//! Eagerly parsing the v2 form keeps the existing broker code paths
-//! unchanged: where they used `RecordBatch::encoded_len` and similar,
-//! they now call the equivalent method on `RecordsPayload`. Legacy
-//! payloads are kept as raw [`Bytes`] and round-tripped verbatim — the
-//! [`crabka-records-legacy`](../../records_legacy/index.html) crate
-//! provides the codec when an old client actually appears on the wire.
+//! This type parses the v2 form eagerly, which keeps the broker code paths
+//! unchanged: a caller uses `RecordsPayload` methods such as `encoded_len` in
+//! place of the `RecordBatch` methods. Legacy payloads stay as raw [`Bytes`]
+//! and round-trip verbatim. The
+//! [`crabka-records-legacy`](../../records_legacy/index.html) crate supplies
+//! the codec when an old client appears on the wire.
 
 use bytes::{Buf, BufMut, Bytes};
 use crabka_compression::RecordDecompressionPolicy;
@@ -26,21 +25,22 @@ use crate::records::{
 /// Owned form of a records-field payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordsPayload {
-    /// Zero or more parsed v2 batches (the records field is a *sequence*).
+    /// Zero or more parsed v2 batches. The records field is a sequence.
     V2(Vec<RecordBatch>),
-    /// Verbatim, already-wire-format v2 bytes (one or more batches),
-    /// forwarded without parsing. Produced by the fetch pass-through path.
+    /// Verbatim wire-format v2 bytes, one or more batches, forwarded without
+    /// parsing. The fetch pass-through path produces this variant.
     Raw(Bytes),
-    /// Opaque pre-v2 bytes (v0/v1 `MessageSet`). Decode with
+    /// Opaque pre-v2 bytes, a v0 or v1 `MessageSet`. Decode them with
     /// `crabka_records_legacy::decode_message_set`.
     Legacy(Bytes),
-    /// Zero-copy fetch (Increments D + E): the records run lives in segment
-    /// `.log` files and is `sendfile(2)`d straight to a plaintext socket —
-    /// never materialized in userspace. One [`crate::records::FileRegion`] per contributing
-    /// segment. `encode_to` falls back to `pread` + `put_slice` (used on TLS /
-    /// non-sendfile platforms and for `encoded_len` agreement). Gated on the
-    /// SENDFILE alias (Linux + Apple + FreeBSD/DragonFly) because it only exists
-    /// to feed the `sendfile` drainer; on Windows the fallback `pread` path runs.
+    /// Zero-copy fetch (Increments D + E): the records run stays in segment
+    /// `.log` files. The broker `sendfile(2)`s it straight to a plaintext
+    /// socket and never materializes it in userspace. There is one
+    /// [`crate::records::FileRegion`] per contributing segment. `encode_to`
+    /// falls back to `pread` + `put_slice` on TLS and non-sendfile platforms,
+    /// and for `encoded_len` agreement. This variant is gated on the SENDFILE
+    /// alias (Linux + Apple + FreeBSD/DragonFly) because it only exists to feed
+    /// the `sendfile` drainer. On Windows the fallback `pread` path runs.
     #[cfg(any(
         target_os = "linux",
         target_os = "macos",
@@ -54,15 +54,18 @@ pub enum RecordsPayload {
 }
 
 impl RecordsPayload {
-    /// Construct from raw records-field bytes. When the bytes look like v2,
-    /// decode *every* batch in the field; otherwise keep as opaque legacy.
+    /// Constructs a payload from raw records-field bytes.
+    ///
+    /// When the bytes look like v2, this function decodes every batch in the
+    /// field. If they do not, it keeps the bytes as opaque legacy bytes.
     /// # Errors
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn from_bytes(bytes: Bytes) -> Result<Self, RecordsError> {
         Self::from_bytes_with_policy(bytes, RecordDecompressionPolicy::default())
     }
 
-    /// Construct from raw records bytes with explicit decompression limits.
+    /// Constructs a payload from raw records bytes with explicit decompression
+    /// limits.
     ///
     /// # Errors
     ///
@@ -103,12 +106,15 @@ impl RecordsPayload {
         }
     }
 
-    /// Write the payload bytes into `buf` (caller owns the outer framing).
+    /// Writes the payload bytes into `buf`.
     ///
-    /// For `FileRegions` this is the **fallback** path (TLS / non-Linux /
-    /// `encoded_len` agreement): it `pread`s each region out of the segment
-    /// file and copies it into `buf`. The zero-copy `sendfile` path in the
-    /// broker never calls this — it consumes the `FileRegion`s directly.
+    /// The caller owns the outer framing.
+    ///
+    /// For `FileRegions` this is the fallback path, used on TLS, on
+    /// non-Linux platforms, and for `encoded_len` agreement. It `pread`s
+    /// each region out of the segment file and copies it into `buf`. The
+    /// broker's zero-copy `sendfile` path never calls this method. That path
+    /// consumes the `FileRegion`s directly.
     /// # Errors
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn encode_to<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
@@ -165,9 +171,11 @@ impl RecordsPayload {
         }
     }
 
-    /// Borrow the parsed v2 batches, if this is a parsed `V2` payload.
-    /// Returns `None` for `Raw` (intentionally unparsed), `Legacy`, and
-    /// `FileRegions` (deliberately never materialized).
+    /// Borrows the parsed v2 batches, if this is a parsed `V2` payload.
+    ///
+    /// Returns `None` for `Raw`, which is intentionally unparsed, for
+    /// `Legacy`, and for `FileRegions`, which is deliberately never
+    /// materialized.
     #[must_use]
     pub fn as_v2(&self) -> Option<&[RecordBatch]> {
         match self {
@@ -186,7 +194,7 @@ impl RecordsPayload {
         }
     }
 
-    /// Borrow as raw legacy bytes, if that's what this payload is.
+    /// Borrows the raw legacy bytes, if this payload is `Legacy`.
     #[must_use]
     pub fn as_legacy(&self) -> Option<&Bytes> {
         match self {
@@ -205,20 +213,24 @@ impl RecordsPayload {
         }
     }
 
-    /// Decode a **response-side** records field, tolerating a truncated
-    /// trailing batch. Kafka returns a partial final `RecordBatch` when a
-    /// partition's fetch byte budget is hit mid-batch; the JVM consumer stops
-    /// at the first incomplete batch and re-fetches it from the next offset.
-    /// We mirror that: decode every complete batch, and on the first
-    /// `HeaderTooShort` / `BodyTooShort` stop and drop the remainder. A
-    /// *corrupt* complete batch (bad CRC/magic/content) still errors — leniency
-    /// forgives truncation only. Strict [`from_bytes`](Self::from_bytes) is
-    /// retained for Produce-request validation.
+    /// Decodes a response-side records field and tolerates a truncated
+    /// trailing batch.
     ///
-    /// Only `HeaderTooShort`/`BodyTooShort` are treated as truncation; a genuinely
-    /// invalid `batch_length` (`RecordParse`) is corruption and still errors —
-    /// legitimate Kafka truncation always preserves a valid `batch_length` prefix,
-    /// so it can only manifest as the too-short variants.
+    /// Kafka returns a partial final `RecordBatch` when a partition hits its
+    /// fetch byte budget mid-batch. The JVM consumer stops at the first
+    /// incomplete batch and re-fetches it from the next offset. This function
+    /// does the same: it decodes every complete batch, then stops at the first
+    /// `HeaderTooShort` or `BodyTooShort` and drops the remainder. A complete
+    /// batch that is corrupt in its CRC, magic byte, or content still returns
+    /// an error, because the leniency forgives truncation only.
+    /// Produce-request validation keeps the strict
+    /// [`from_bytes`](Self::from_bytes).
+    ///
+    /// This function treats only `HeaderTooShort` and `BodyTooShort` as
+    /// truncation. An invalid `batch_length` gives `RecordParse`, which is
+    /// corruption and still returns an error. Kafka truncation always keeps a
+    /// valid `batch_length` prefix, so truncation can appear only as the two
+    /// too-short variants.
     /// # Errors
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn from_fetch_bytes(bytes: Bytes) -> Result<Self, RecordsError> {
@@ -239,10 +251,12 @@ impl RecordsPayload {
         Ok(Self::V2(batches))
     }
 
-    /// `Decode`-shaped lenient entry point the generated codec calls for
-    /// records fields in **response** messages. Consumes the whole sliced
-    /// field buffer (the caller has already framed it) and parses leniently
-    /// via [`from_fetch_bytes`](Self::from_fetch_bytes).
+    /// Lenient `Decode`-shaped entry point for records fields in response
+    /// messages.
+    ///
+    /// The generated codec calls this method. It consumes the whole sliced
+    /// field buffer, which the caller has already framed, and parses the bytes
+    /// leniently through [`from_fetch_bytes`](Self::from_fetch_bytes).
     /// # Errors
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn decode_lenient<B: Buf>(
@@ -349,7 +363,7 @@ impl<'a> RecordsPayloadBorrowed<'a> {
         }
     }
 
-    /// Convert to the owned flavor, performing any necessary buffer copies.
+    /// Converts to the owned form and copies buffers where necessary.
     /// # Errors
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn to_owned(&self) -> Result<RecordsPayload, RecordsError> {
@@ -391,14 +405,16 @@ impl<'de> crate::DecodeBorrow<'de> for RecordsPayloadBorrowed<'de> {
     }
 }
 
-/// True when `bytes` look like a v2 record batch (magic byte 2 at the
-/// well-known offset). v0 and v1 legacy `MessageSets` carry magic 0 or 1
-/// at the same offset, so this check distinguishes the two.
+/// True when `bytes` look like a v2 record batch.
 ///
-/// The threshold is `MAGIC_OFFSET + 1 = 17`, not the full `HEADER_LEN`:
-/// a truncated v2 batch still needs to land in the V2 arm so the
-/// downstream `RecordBatch::decode` can surface a precise error,
-/// rather than be silently misclassified as legacy.
+/// A v2 batch has magic byte 2 at the well-known offset. Legacy v0 and v1
+/// `MessageSets` carry magic 0 or 1 at the same offset, so this check separates
+/// the two.
+///
+/// The threshold is `MAGIC_OFFSET + 1 = 17`, not the full `HEADER_LEN`. A
+/// truncated v2 batch must still land in the V2 arm, so that the downstream
+/// `RecordBatch::decode` can give a precise error instead of a silent
+/// misclassification as legacy.
 #[inline]
 fn looks_like_v2(bytes: &[u8]) -> bool {
     // The magic byte sits at `base_offset(8) + batch_length(4) +

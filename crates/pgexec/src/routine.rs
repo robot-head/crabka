@@ -1,15 +1,16 @@
-//! P2: SQL routines — definition, resolution, calling and catalog projection.
+//! P2: SQL routines. Definition, resolution, calling and catalog projection.
 //!
-//! A `LANGUAGE sql` routine is a query with holes. Rather than build a second
-//! executor for routine bodies, a call is *inlined*: the body is re-parsed from
-//! the catalog and its parameter references are replaced by the call's argument
-//! expressions, so the resulting expression or query runs through the ordinary
-//! evaluation path and sees the same snapshot the caller does. That is exactly
-//! how `PostgreSQL` treats a simple SQL function, and it means a routine never
-//! carries a stale plan.
+//! A `LANGUAGE sql` routine is a query with holes. Gres builds no second
+//! executor for routine bodies. Instead it *inlines* a call: it re-parses the
+//! body from the catalog and replaces the body's parameter references with the
+//! call's argument expressions. The resulting expression or query then runs
+//! through the ordinary evaluation path and sees the same snapshot the caller
+//! does. That is exactly how `PostgreSQL` treats a simple SQL function, and it
+//! means a routine never carries a stale plan.
 //!
-//! PL/pgSQL bodies are parsed when they are defined and re-parsed for execution,
-//! just like SQL bodies. Dynamic C/internal routines remain catalog-only.
+//! Gres parses PL/pgSQL bodies at definition time and re-parses them for
+//! execution, just like SQL bodies. Dynamic C/internal routines remain
+//! catalog-only.
 
 use std::{
     cell::{Cell, RefCell},
@@ -117,11 +118,11 @@ fn enter_plpgsql_call() -> Result<PlPgSqlCallGuard, ExecError> {
     })
 }
 
-/// The languages `pg_language` lists. A routine in any other language does not
-/// exist as far as `CREATE FUNCTION` is concerned (`42704`).
+/// The languages `pg_language` lists. For `CREATE FUNCTION`, a routine in any
+/// other language does not exist (`42704`).
 const LANGUAGES: [&str; 4] = ["internal", "c", "sql", "plpgsql"];
 
-/// `pg_proc.prolang` for each accepted language, matching `pg_language.oid`.
+/// `pg_proc.prolang` for each accepted language, matched to `pg_language.oid`.
 fn language_oid(language: &str) -> i32 {
     match language {
         "internal" => 12,
@@ -133,12 +134,13 @@ fn language_oid(language: &str) -> i32 {
 
 /// PostgreSQL 18 built-in type and pseudo-type names.
 ///
-/// A routine signature may name a type Gres does not implement — the regression
-/// corpus is full of `smallint`, `anyelement` and `cstring` — and refusing the
-/// *definition* would diverge from `PostgreSQL`, which accepts it. Such a type
-/// is recorded by name; a call that would have to produce a value of it is
-/// `0A000`. A name that is neither on this list, a built-in Gres resolves, nor
-/// a relation, is `42704`, exactly as `PostgreSQL` reports it.
+/// A routine signature may name a type Gres does not implement, and the
+/// regression corpus is full of `smallint`, `anyelement` and `cstring`. A
+/// refusal of the *definition* would diverge from `PostgreSQL`, which accepts
+/// it. Gres records such a type by name, and a call that would have to produce
+/// a value of it is `0A000`. A name that is neither on this list, a built-in
+/// Gres resolves, nor a relation, is `42704`, exactly as `PostgreSQL` reports
+/// it.
 const KNOWN_TYPE_NAMES: &[&str] = &[
     "aclitem",
     "any",
@@ -268,7 +270,7 @@ const KNOWN_TYPE_NAMES: &[&str] = &[
 /// 42704 for a type a routine signature names that does not exist.
 ///
 /// `PostgreSQL` quotes the name in the `RETURNS` position and leaves it bare in
-/// a parameter position; both spellings are reproduced verbatim.
+/// a parameter position. Gres reproduces both spellings verbatim.
 fn undefined_type(name: &str, quoted: bool) -> ExecError {
     let spelled = if quoted {
         format!("type \"{name}\" does not exist")
@@ -281,7 +283,7 @@ fn undefined_type(name: &str, quoted: bool) -> ExecError {
     }
 }
 
-/// 42P13 — a routine definition `PostgreSQL` rejects as invalid.
+/// 42P13: a routine definition `PostgreSQL` rejects as invalid.
 fn invalid_definition(message: impl Into<String>) -> ExecError {
     ExecError::FunctionError {
         sqlstate: "42P13",
@@ -289,7 +291,7 @@ fn invalid_definition(message: impl Into<String>) -> ExecError {
     }
 }
 
-/// 42809 — the named routine exists but is not of the kind the statement asked
+/// 42809: the named routine exists but is not of the kind the statement asked
 /// for.
 pub(crate) fn wrong_routine_kind(message: impl Into<String>) -> ExecError {
     ExecError::FunctionError {
@@ -298,7 +300,7 @@ pub(crate) fn wrong_routine_kind(message: impl Into<String>) -> ExecError {
     }
 }
 
-/// 42723 — a routine with this name and input signature already exists.
+/// 42723: a routine with this name and input signature already exists.
 fn duplicate_routine(name: &str) -> ExecError {
     ExecError::FunctionError {
         sqlstate: "42723",
@@ -306,12 +308,12 @@ fn duplicate_routine(name: &str) -> ExecError {
     }
 }
 
-/// 42883 — no routine matches the identity a statement or call named.
+/// 42883: no routine matches the identity a statement or call named.
 pub(crate) fn undefined_routine(message: impl Into<String>) -> ExecError {
     ExecError::UndefinedFunction(message.into())
 }
 
-/// 42725 — a routine name that more than one routine carries.
+/// 42725: a routine name that more than one routine carries.
 fn ambiguous_routine(name: &str) -> ExecError {
     ExecError::FunctionError {
         sqlstate: "42725",
@@ -905,17 +907,17 @@ pub(crate) fn resolve_call(
     )))
 }
 
-/// A resolved routine plus the call arguments after unknown-literal coercion
-/// and trailing parameter defaults have been applied.
+/// A resolved routine plus the call arguments, after unknown-literal coercion
+/// and trailing parameter defaults are applied.
 #[derive(Debug, Clone)]
 pub(crate) struct BoundRoutineCall {
     pub routine: Routine,
     pub args: Vec<Expr>,
 }
 
-/// Resolve an overload and bind its arguments without choosing an execution
-/// strategy. The returned routine retains its `strict` flag and kind so the
-/// caller can apply the appropriate function/procedure semantics.
+/// Resolve an overload and bind its arguments, but choose no execution
+/// strategy. The returned routine keeps its `strict` flag and kind, so the
+/// caller can apply the correct function/procedure semantics.
 pub(crate) fn bind_call(
     kv: &dyn Kv,
     name: &str,
@@ -930,9 +932,9 @@ pub(crate) fn bind_call(
 }
 
 /// Resolve a procedure call whose argument list includes `OUT` placeholders.
-/// Unlike function calls, procedure arguments remain aligned with the full
-/// declaration; output-only expressions do not participate in overload
-/// resolution and are never coerced or evaluated.
+/// Unlike function calls, procedure arguments stay aligned with the full
+/// declaration. Output-only expressions take no part in overload resolution,
+/// and Gres never coerces or evaluates them.
 pub(crate) fn bind_procedure_call(
     kv: &dyn Kv,
     name: &str,
@@ -1060,9 +1062,9 @@ pub(crate) fn bind_procedure_call(
 /// Is `source` implicitly coercible to `target` for the purpose of resolving a
 /// routine call?
 ///
-/// `PostgreSQL` resolves function calls with *implicit* casts only — which is
-/// why `f(bigint)` does not match `f(text)` even though the explicit cast
-/// exists. This is the implicit graph restricted to the types Gres models.
+/// `PostgreSQL` resolves function calls with *implicit* casts only. That is why
+/// `f(bigint)` does not match `f(text)` even though the explicit cast exists.
+/// This is the implicit graph restricted to the types Gres models.
 fn implicitly_coercible(source: ColumnType, target: ColumnType) -> bool {
     use ColumnType::{Char, Float8, Int4, Int8, Numeric, Text, Timestamp, Timestamptz, Varchar};
     if source == target {
@@ -1104,9 +1106,9 @@ fn spelled_arg_type(arg: ArgType) -> &'static str {
 
 /// How deep one statement may inline SQL routines into each other.
 ///
-/// A routine whose body calls another routine inlines transitively; a routine
-/// that (directly or mutually) calls itself would not terminate, so the depth
-/// is capped and reported with PostgreSQL's own `54001`.
+/// A routine whose body calls another routine inlines transitively. A routine
+/// that calls itself, directly or mutually, would not terminate. So Gres caps
+/// the depth and reports it with PostgreSQL's own `54001`.
 const MAX_INLINE_DEPTH: usize = 25;
 
 thread_local! {
@@ -1141,8 +1143,8 @@ pub(crate) fn enter_inline() -> Result<InlineGuard, ExecError> {
     })
 }
 
-/// The label `PostgreSQL` gives an unaliased call of `expr` — the function's
-/// own name — so inlining a routine does not rename its output column.
+/// The label `PostgreSQL` gives an unaliased call of `expr`, which is the
+/// function's own name. So an inlined routine keeps its output column name.
 pub(crate) fn call_label(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Func(call) => Some(call.name.clone()),
@@ -1152,10 +1154,10 @@ pub(crate) fn call_label(expr: &Expr) -> Option<String> {
 
 /// Is `name` a built-in function family this engine already provides?
 ///
-/// A user routine is tried first — `PostgreSQL`'s default `search_path` puts
-/// `public` ahead of `pg_catalog`, so a user function of the same signature
-/// wins — but when resolution *fails* the built-in families keep their own
-/// error rather than inheriting the routine catalog's.
+/// Gres tries a user routine first, because `PostgreSQL`'s default
+/// `search_path` puts `public` ahead of `pg_catalog`, so a user function of the
+/// same signature wins. When resolution *fails*, the built-in families keep
+/// their own error and do not inherit the routine catalog's.
 fn known_builtin(name: &str) -> bool {
     crate::catalog_fn::is_catalog_func(name)
         || crate::func::is_scalar(name)
@@ -1171,8 +1173,8 @@ fn known_builtin(name: &str) -> bool {
 /// caller's scope.
 ///
 /// A column reference resolves to [`ArgType::Opaque`], which matches any
-/// candidate: overloads are therefore disambiguated by literal arguments, and a
-/// name carrying exactly one overload always resolves.
+/// candidate. So literal arguments disambiguate overloads, and a name that
+/// carries exactly one overload always resolves.
 fn best_effort_arg_types(args: &[Expr]) -> Vec<ArgType> {
     args.iter()
         .map(|arg| {
@@ -1188,8 +1190,8 @@ fn best_effort_arg_types(args: &[Expr]) -> Vec<ArgType> {
 
 /// Inline a call of a user-defined SQL function, if `call` names one.
 ///
-/// This is the single seam through which a routine call becomes ordinary SQL;
-/// the expression walkers that rewrite a statement before execution call it, so
+/// This is the single seam through which a routine call becomes ordinary SQL.
+/// The expression walkers that rewrite a statement before execution call it, so
 /// both the value path and the describe path see the same rewritten tree.
 ///
 /// # Errors
@@ -1312,10 +1314,10 @@ pub(crate) fn is_plpgsql_scalar_runtime(call: &FuncCall, scope: &crate::scope::S
     })
 }
 
-/// Evaluate a PL/pgSQL scalar call against the current input row. Arguments
-/// are evaluated exactly once before parameter binding; the procedural body
-/// then uses ordinary scalar evaluation, so nested calls and lazy SQL
-/// conditionals keep the caller's semantics.
+/// Evaluate a PL/pgSQL scalar call against the current input row. This method
+/// evaluates the arguments exactly once before it binds the parameters. The
+/// procedural body then uses ordinary scalar evaluation, so nested calls and
+/// lazy SQL conditionals keep the caller's semantics.
 pub(crate) fn eval_plpgsql_scalar(
     call: &FuncCall,
     scope: &crate::scope::Scope,
@@ -1518,15 +1520,16 @@ fn plpgsql_has_return_value(block: &PlPgSqlBlock) -> bool {
             .any(|handler| statements_have_return_value(&handler.statements))
 }
 
-/// A `LANGUAGE sql` routine's final query — the one whose result is the
+/// A `LANGUAGE sql` routine's final query, the one whose result is the
 /// routine's result.
 ///
 /// `PostgreSQL` runs EVERY statement in the body and returns the last one's
-/// result. Gres reaches a SQL routine only by inlining its final query into the
-/// calling query, which cannot run the statements before it — so a body with
-/// more than one statement is refused rather than silently losing them. Running
-/// only the last statement would make `INSERT INTO audit VALUES ($1); SELECT $1`
-/// return the right answer while dropping the write.
+/// result. Gres reaches a SQL routine only when it inlines the final query into
+/// the calling query, and that cannot run the statements before it. So Gres
+/// refuses a body with more than one statement instead of silently losing
+/// them. A run of only the last statement would make
+/// `INSERT INTO audit VALUES ($1); SELECT $1` return the right answer and drop
+/// the write.
 fn final_query(routine: &Routine) -> Result<Option<QueryExpr>, ExecError> {
     let statements = parse_body(routine)?;
     if statements.len() > 1 {
@@ -1545,11 +1548,10 @@ fn final_query(routine: &Routine) -> Result<Option<QueryExpr>, ExecError> {
 /// Whether duplicating `arg` during inlining could change what the call does.
 ///
 /// Inlining substitutes the argument EXPRESSION at each parameter reference, so
-/// a parameter used twice evaluates its argument twice — `f(nextval('s'))` over
+/// a parameter used twice evaluates its argument twice. `f(nextval('s'))` over
 /// a body of `SELECT $1 + $1` would consume two sequence values. A literal or a
-/// plain column reference is free to duplicate; anything that could call a
-/// function is not. `PostgreSQL`'s own inliner makes the same check before
-/// inlining.
+/// plain column reference is free to duplicate. Anything that could call a
+/// function is not. `PostgreSQL`'s own inliner makes the same check first.
 fn unsafe_to_duplicate(arg: &Expr) -> bool {
     match arg {
         Expr::IntLiteral(_)
@@ -1598,8 +1600,8 @@ struct Binding<'a> {
     routine: &'a Routine,
     args: Vec<Expr>,
     /// How many times each argument has been substituted into the body so far.
-    /// Counted on `substitute`'s own traversal rather than a second walk, and
-    /// checked by [`Binding::reject_repeated_volatile_args`] once it finishes.
+    /// `substitute` counts these on its own traversal, not on a second walk, and
+    /// [`Binding::reject_repeated_volatile_args`] checks them once it finishes.
     uses: std::cell::RefCell<Vec<usize>>,
 }
 
@@ -1622,8 +1624,8 @@ impl Binding<'_> {
     /// once. Inlining substitutes the argument expression at every parameter
     /// reference, so `f(nextval('s'))` over a body of `SELECT $1 + $1` would
     /// consume two sequence values and return their sum. PostgreSQL's inliner
-    /// makes the same check; here there is no non-inlined path to fall back to,
-    /// so the call is refused rather than answered wrongly.
+    /// makes the same check. Here there is no non-inlined path to fall back to,
+    /// so Gres refuses the call instead of answering it wrongly.
     fn reject_repeated_volatile_args(&self) -> Result<(), ExecError> {
         for (position, count) in self.uses.borrow().iter().enumerate() {
             if *count > 1 && self.args.get(position).is_some_and(unsafe_to_duplicate) {
@@ -1839,8 +1841,8 @@ fn substitute(binding: &Binding, expr: &Expr) -> Result<Expr, ExecError> {
     })
 }
 
-/// A SQL routine body that is a single `SELECT <expr>` over no relation — the
-/// shape that inlines into the caller's own expression.
+/// A SQL routine body that is a single `SELECT <expr>` over no relation. This
+/// is the shape that inlines into the caller's own expression.
 fn scalar_body(query: &QueryExpr) -> Option<&Expr> {
     let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(select)) =
         &query.body
@@ -2053,9 +2055,9 @@ pub(crate) fn expand_table_function(
 
 /// Substitute a routine's parameters through a whole body query.
 ///
-/// Only the shapes a SQL function body actually uses are rewritten; a body
-/// whose parameters would have to reach into a nested query is refused rather
-/// than silently left unbound.
+/// This rewrites only the shapes a SQL function body actually uses. It refuses
+/// a body whose parameters would have to reach into a nested query, instead of
+/// silently leaving them unbound.
 fn substitute_in_query(binding: &Binding, query: &QueryExpr) -> Result<QueryExpr, ExecError> {
     use crabka_pgparser::ast::{QueryBody, SetExpr};
 
@@ -2108,7 +2110,7 @@ fn substitute_in_from(binding: &Binding, select: &mut SelectStmt) -> Result<(), 
     Ok(())
 }
 
-/// Does this FROM-clause function call name a user routine rather than a
+/// Does this FROM-clause function call name a user routine instead of a
 /// built-in set-returning function?
 ///
 /// `ROWS FROM (…)` with more than one call, and any call the built-in registry
@@ -2368,7 +2370,7 @@ pub(crate) fn expand_procedure_call(
         .collect()
 }
 
-/// `DO` — refused for every language, with the reason `PostgreSQL` gives when
+/// `DO`, refused for every language, with the reason `PostgreSQL` gives when
 /// it has one.
 pub(crate) fn do_block(language: &str) -> ExecError {
     if language == "sql" {
@@ -2391,7 +2393,7 @@ pub(crate) fn do_block(language: &str) -> ExecError {
 
 // ---------------------------------------------------------------- rendering
 
-/// `pg_get_function_arguments` — every parameter, with modes and defaults.
+/// `pg_get_function_arguments`: every parameter, with modes and defaults.
 #[must_use]
 pub(crate) fn render_arguments(routine: &Routine) -> String {
     let procedure = routine.kind == RoutineKind::Procedure;
@@ -2420,7 +2422,7 @@ pub(crate) fn render_arguments(routine: &Routine) -> String {
         .join(", ")
 }
 
-/// `pg_get_function_identity_arguments` — the input parameters only, with no
+/// `pg_get_function_identity_arguments`: the input parameters only, with no
 /// names dropped but no defaults, as `ALTER`/`DROP` accept them.
 #[must_use]
 pub(crate) fn render_identity_arguments(routine: &Routine) -> String {
@@ -2442,7 +2444,7 @@ pub(crate) fn render_identity_arguments(routine: &Routine) -> String {
         .join(", ")
 }
 
-/// `pg_get_function_result` — `NULL` for a procedure, as `PostgreSQL` reports.
+/// `pg_get_function_result`: `NULL` for a procedure, as `PostgreSQL` reports.
 #[must_use]
 pub(crate) fn render_result(routine: &Routine) -> Option<String> {
     if routine.kind == RoutineKind::Procedure {
@@ -2475,7 +2477,7 @@ pub(crate) fn render_result(routine: &Routine) -> Option<String> {
     })
 }
 
-/// `pg_get_functiondef` — the `CREATE OR REPLACE` text `PostgreSQL` renders.
+/// `pg_get_functiondef`: the `CREATE OR REPLACE` text `PostgreSQL` renders.
 #[must_use]
 pub(crate) fn render_functiondef(routine: &Routine) -> String {
     let mut out = format!(
@@ -2691,7 +2693,7 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
-/// `pg_proc.proallargtypes` — every parameter's type, in declaration order.
+/// `pg_proc.proallargtypes`: every parameter's type, in declaration order.
 fn catalog_all_types(routine: &Routine) -> Vec<Datum> {
     let mut out: Vec<Datum> = routine
         .params
@@ -2704,7 +2706,7 @@ fn catalog_all_types(routine: &Routine) -> Vec<Datum> {
     out
 }
 
-/// `pg_proc.proargmodes` — `t` for a `RETURNS TABLE` column, as `PostgreSQL`
+/// `pg_proc.proargmodes`: `t` for a `RETURNS TABLE` column, as `PostgreSQL`
 /// records it.
 fn catalog_all_modes(routine: &Routine) -> Vec<Datum> {
     let mut out: Vec<Datum> = routine
@@ -2720,7 +2722,7 @@ fn catalog_all_modes(routine: &Routine) -> Vec<Datum> {
 
 /// `pg_type.oid` for every name [`KNOWN_TYPE_NAMES`] accepts, so `pg_proc`
 /// reports the type a routine signature names even when Gres cannot produce a
-/// value of it. Taken from PostgreSQL 18.4's own `pg_type`.
+/// value of it. These come from PostgreSQL 18.4's own `pg_type`.
 const TYPE_OIDS: &[(&str, i32)] = &[
     ("aclitem", 1033),
     ("any", 2276),
@@ -2856,7 +2858,7 @@ fn named_type_oid(name: &str) -> i32 {
         .map_or(0, |(_, oid)| *oid)
 }
 
-/// A signature type's `pg_type.oid`; `0` for a relation's composite type.
+/// A signature type's `pg_type.oid`, or `0` for a relation's composite type.
 fn type_oid(ty: &RoutineType) -> i32 {
     ty.column.map_or_else(
         || named_type_oid(&ty.name),
@@ -2888,7 +2890,7 @@ mod tests {
 
     use super::*;
 
-    /// Run `sql` as a definition against `kv`, returning the completion tag.
+    /// Run `sql` as a definition against `kv` and return the completion tag.
     fn define(kv: &MemKv, sql: &str) -> Result<String, ExecError> {
         let statements = crabka_pgparser::parse(sql).expect("definition parses");
         let [Statement::CreateRoutine(stmt)] = statements.as_slice() else {

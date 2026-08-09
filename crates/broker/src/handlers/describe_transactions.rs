@@ -1,16 +1,14 @@
-//! `DescribeTransactions` (`api_key=65`, KIP-664). Admin RPC that
-//! returns the full state of every requested transactional id —
-//! producer id/epoch, current state, txn timeout, start time, and the
-//! set of `(topic, partition)` tuples enrolled in the current
-//! transaction.
+//! `DescribeTransactions` (`api_key=65`, KIP-664). This admin RPC returns the
+//! full state of every requested transactional id: the producer id and epoch,
+//! the current state, the txn timeout, the start time, and the set of
+//! `(topic, partition)` tuples enrolled in the current transaction.
 //!
 //! ## ACL
 //!
-//! Per-tid `Describe` on `TransactionalId(name)`. Deny → per-row
-//! `error_code = TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53)` with all
-//! other fields cleared. Unknown tid → per-row
-//! `TRANSACTIONAL_ID_NOT_FOUND (75)`. Matches the JVM `KafkaApis`
-//! shape.
+//! `Describe` on `TransactionalId(name)`, for each tid. A deny gives that row
+//! `error_code = TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53)` and clears every
+//! other field. An unknown tid gives that row `TRANSACTIONAL_ID_NOT_FOUND
+//! (75)`. This matches the JVM `KafkaApis` shape.
 
 use std::collections::BTreeMap;
 
@@ -48,10 +46,10 @@ fn txn_state_str(s: TxnState) -> &'static str {
     }
 }
 
-/// Build the `topics` list for one txn entry by grouping the entry's
-/// `(topic, partition)` set by topic name. Ordering: topics
-/// alphabetical, partitions ascending — JVM clients don't depend on
-/// ordering but deterministic output keeps wire-snapshot tests stable.
+/// Builds the `topics` list for one txn entry. It groups the entry's
+/// `(topic, partition)` set by topic name. Topics come out in alphabetical
+/// order, and partitions in ascending order. JVM clients do not depend on that
+/// order, but deterministic output keeps the wire-snapshot tests stable.
 fn topics_for(entry: &TxnEntry) -> Vec<TopicData> {
     let mut by_topic: BTreeMap<String, Vec<i32>> = BTreeMap::new();
     for tp in &entry.partitions {

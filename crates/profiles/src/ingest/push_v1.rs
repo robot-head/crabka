@@ -1,5 +1,6 @@
-//! Connect `push.v1.PusherService/Push` decode: each `RawSample.raw_profile` is
-//! a gzipped pprof; gunzip -> `PprofProfile::decode` -> one `RawProfile` per sample.
+//! Connect `push.v1.PusherService/Push` decode. Each `RawSample.raw_profile` is
+//! a gzipped pprof. The steps are gunzip, then `PprofProfile::decode`, then one
+//! `RawProfile` per sample.
 
 use std::io::Read;
 

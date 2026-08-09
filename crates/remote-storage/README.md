@@ -55,7 +55,7 @@ let _offset_index = storage.fetch_index(&metadata, IndexType::Offset)?;
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-remote-storage](https://docs.rs/crabka-remote-storage). The repository README contains project-wide setup, development, and release notes.
+Read the API documentation at [docs.rs/crabka-remote-storage](https://docs.rs/crabka-remote-storage). The repository README contains the project-wide setup, development, and release notes.
 
 ## License
 

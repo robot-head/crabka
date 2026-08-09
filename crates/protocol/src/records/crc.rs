@@ -1,5 +1,7 @@
-//! CRC-32C (Castagnoli) wrapping the `crc32c` crate. Kafka v2 record batches
-//! use this CRC over everything after the `crc` field of the header.
+//! CRC-32C (Castagnoli), a wrapper around the `crc32c` crate.
+//!
+//! Kafka v2 record batches use this CRC over everything after the `crc` field of
+//! the header.
 
 /// CRC-32C of the input.
 #[must_use]
@@ -19,7 +21,7 @@ mod tests {
     use super::*;
 
     /// Standard CRC-32C reference vectors.
-    /// "123456789" -> 0xE3069283 (RFC 3720 / iSCSI).
+    /// "123456789" -> 0xE3069283, from RFC 3720 for iSCSI.
     const VECTORS: &[(&[u8], u32)] = &[
         (b"", 0x0000_0000),
         (b"a", 0xC1D0_4330),

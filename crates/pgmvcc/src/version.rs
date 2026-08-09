@@ -72,8 +72,9 @@ pub fn xid_of_key(key: &[u8]) -> Result<u64, KvError> {
     Ok(xid.get())
 }
 
-/// Fixed 17-byte tuple header: tag + big-endian xmin/xmax. `#[repr(C)]` with
-/// alignment-1 fields packs with no padding, matching the on-disk layout.
+/// Fixed 17-byte tuple header: tag plus big-endian xmin/xmax. `#[repr(C)]`
+/// with alignment-1 fields packs with no padding, which matches the on-disk
+/// layout.
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct TupleHeader {
@@ -92,8 +93,8 @@ const TS_STATE_DELETED: u8 = 4;
 /// Timestamp-transaction state carried by a sharded-table tuple version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TsVersionState {
-    /// Durable prewrite intent. Readers must resolve it through the primary range
-    /// before deciding visibility.
+    /// Durable prewrite intent. Readers must resolve it through the primary
+    /// range before they decide visibility.
     Intent,
     /// Durable commit marker; visible when `commit_ts <= read_ts`.
     Committed { commit_ts: u64 },
@@ -104,7 +105,7 @@ pub enum TsVersionState {
 }
 
 impl TsVersionState {
-    /// Return the state code persisted in the tuple header.
+    /// Returns the state code persisted in the tuple header.
     #[must_use]
     pub const fn code(self) -> u8 {
         match self {
@@ -136,9 +137,9 @@ struct TsTupleHeader {
     commit_ts: U64,
 }
 
-/// Encode a tuple version: a 1-byte tag, the `xmin`/`xmax` header, then the row.
-/// `xmax == INVALID_XID` (0) marks a live version. A delete keeps the row bytes
-/// and sets `xmax` (Postgres retains the tuple until vacuum).
+/// Encodes a tuple version: a 1-byte tag, the `xmin`/`xmax` header, then the
+/// row. `xmax == INVALID_XID` (0) marks a live version. A delete keeps the row
+/// bytes and sets `xmax`, because Postgres retains the tuple until vacuum.
 #[must_use]
 pub fn encode_tuple(xmin: u64, xmax: u64, row: &[Datum]) -> Vec<u8> {
     let header = TupleHeader {
@@ -152,7 +153,7 @@ pub fn encode_tuple(xmin: u64, xmax: u64, row: &[Datum]) -> Vec<u8> {
     out
 }
 
-/// Encode a sharded-table timestamp version.
+/// Encodes a sharded-table timestamp version.
 #[must_use]
 pub fn encode_ts_tuple(start_ts: u64, state: TsVersionState, row: &[Datum]) -> Vec<u8> {
     let commit_ts = match state {
@@ -173,7 +174,7 @@ pub fn encode_ts_tuple(start_ts: u64, state: TsVersionState, row: &[Datum]) -> V
     out
 }
 
-/// Decode a tuple version into `(xmin, xmax, row)`.
+/// Decodes a tuple version into `(xmin, xmax, row)`.
 ///
 /// # Errors
 ///
@@ -189,7 +190,7 @@ pub fn decode_tuple(bytes: &[u8]) -> Result<(u64, u64, Vec<Datum>), KvError> {
     Ok((header.xmin.get(), header.xmax.get(), row))
 }
 
-/// Decode a timestamp-transaction tuple version.
+/// Decodes a timestamp-transaction tuple version.
 ///
 /// # Errors
 ///
@@ -224,10 +225,10 @@ pub fn decode_ts_tuple(bytes: &[u8]) -> Result<TsTupleVersion, KvError> {
     })
 }
 
-/// Rewrite only the tuple header's `xmin`, preserving `xmax` and row bytes.
+/// Rewrites only the tuple header's `xmin` and keeps `xmax` and the row bytes.
 ///
-/// This is the checkpoint/vacuum fast path: callers can freeze an old committed
-/// tuple without decoding and re-encoding its row payload.
+/// This is the checkpoint/vacuum fast path. Callers can freeze an old
+/// committed tuple with no decode and re-encode of its row payload.
 ///
 /// # Errors
 ///
@@ -244,7 +245,7 @@ pub fn rewrite_tuple_xmin(bytes: &[u8], xmin: Xid) -> Result<Vec<u8>, KvError> {
     Ok(rewritten)
 }
 
-/// Rewrite a tuple's `xmin` to [`FROZEN_XID`].
+/// Rewrites a tuple's `xmin` to [`FROZEN_XID`].
 ///
 /// # Errors
 ///
@@ -253,14 +254,14 @@ pub fn freeze_tuple_xmin(bytes: &[u8]) -> Result<Vec<u8>, KvError> {
     rewrite_tuple_xmin(bytes, FROZEN_XID)
 }
 
-/// Rewrite only the tuple header's `xmax` to [`crate::xid::INVALID_XID`],
-/// preserving `xmin` and the row bytes.
+/// Rewrites only the tuple header's `xmax` to [`crate::xid::INVALID_XID`] and
+/// keeps `xmin` and the row bytes.
 ///
-/// Vacuum uses this to erase an aborted (or crashed sub-horizon) deleter's
-/// stamp from a surviving version. Such a deleter's verdict is immutable and
-/// can never become a commit, so every snapshot already reads the version as
-/// not deleted; clearing the stamp only removes the version's dependence on
-/// the deleter's clog entry.
+/// Vacuum uses this to erase the stamp of an aborted deleter, or of a crashed
+/// sub-horizon deleter, from a surviving version. Such a deleter's verdict is
+/// immutable and can never become a commit, so every snapshot already reads
+/// the version as not deleted. The erased stamp only removes the version's
+/// dependence on the deleter's clog entry.
 ///
 /// # Errors
 ///

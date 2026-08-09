@@ -1,8 +1,10 @@
 //! End-to-end (slice 1): DFS nested-set -> span block -> `BlockWriter` ->
-//! `TraceIndex` bloom locate -> read back. Proves the by-id path is index-less
-//! (bloom only),
-//! across multiple traces, and that the nested-set columns survive the round-trip
-//! with ancestor-contains-descendant interval containment intact.
+//! `TraceIndex` bloom locate -> read back.
+//!
+//! It proves that the by-id path is index-less and uses the bloom only, across
+//! multiple traces. It also proves that the nested-set columns survive the
+//! round-trip with ancestor-contains-descendant interval containment
+//! intact.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,9 +25,10 @@ fn sid(n: u8) -> [u8; 8] {
     [n, 0, 0, 0, 0, 0, 0, 0]
 }
 
-/// Build the span rows for one trace from its forest of `SpanNode`s, computing
-/// the nested-set intervals via the slice-1 DFS builder. `service` is denormalized
-/// onto each row as both the root service name and a `service.name` attribute.
+/// Builds the span rows for one trace from its forest of `SpanNode`s. The
+/// slice-1 DFS builder computes the nested-set intervals. `service` is
+/// denormalized onto each row as both the root service name and a
+/// `service.name` attribute.
 fn build_trace(trace_id: [u8; 16], nodes: &[SpanNode], service: &str) -> Vec<SpanRow> {
     let ns = assign_nested_set(nodes);
     nodes
@@ -61,8 +64,9 @@ fn build_trace(trace_id: [u8; 16], nodes: &[SpanNode], service: &str) -> Vec<Spa
         .collect()
 }
 
-/// The per-block trace footprint a block-builder (slice 4) will register: a bloom
-/// seeded with every `trace_id` in the block plus the union of tag name/values.
+/// The per-block trace footprint that a block-builder (slice 4) will register.
+/// It is a bloom seeded with every `trace_id` in the block, plus the union of
+/// the tag names and values.
 fn block_stats(
     object_key: &str,
     min_ts: i64,

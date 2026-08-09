@@ -7,76 +7,76 @@
 //! `PostgreSQL` implements referential integrity as `AFTER ROW` triggers, so
 //! even a `NOT DEFERRABLE` constraint is checked once the statement's rows
 //! exist. `INSERT INTO t (id, boss) VALUES (1, 1)` against a self-referencing
-//! foreign key succeeds there with no `DEFERRABLE` clause anywhere. The write
-//! path therefore never probes inline: the hooks
-//! ([`FkCheckQueue::after_insert`] and friends) only append, and
-//! [`drain_statement_checks`] runs once the whole statement — `WITH` list plus
-//! body — is done.
+//! foreign key succeeds there with no `DEFERRABLE` clause anywhere. So the write
+//! path never probes inline. The hooks ([`FkCheckQueue::after_insert`] and
+//! friends) only append, and [`drain_statement_checks`] runs once the whole
+//! statement is done, that is the `WITH` list plus the body.
 //!
 //! # What the drain reads
 //!
 //! [`FkExecContext::kv`] is a read-only overlay: the statement's pending write
-//! batch layered over the store. The drain therefore reads the statement's own
-//! rows, which is what lets the self-referencing insert above find the parent
-//! it just wrote, and what lets a parent-side re-probe see a key another part
-//! of the same command re-supplied. The commit-time drain needs no overlay of
-//! its own: the statements whose checks it runs are finished, and their rows
-//! are in the KV under this transaction's xid.
+//! batch layered over the store. So the drain reads the statement's own rows.
+//! That is what lets the self-referencing insert above find the parent it just
+//! wrote, and what lets a parent-side re-probe see a key another part of the
+//! same command re-supplied. The commit-time drain needs no overlay of its own:
+//! the statements whose checks it runs are finished, and their rows are in the
+//! KV under this transaction's xid.
 //!
-//! The overlay grows as the drain runs: an action's ops are folded into it
-//! before [`FkCascade::modify_row`] returns, as well as handed back to the
-//! caller. Everything a probe sees is therefore the transaction's current
-//! state — a row an action deleted reads as gone, a row it re-keyed reads under
-//! its new key — so no probe has a set of exceptions to carry, and a second
-//! constraint's action reaching the same row operates on the image the first one
-//! left. It is also what terminates a cascade cycle, exactly as it terminates
+//! The overlay grows as the drain runs. The drain folds an action's ops into it
+//! before [`FkCascade::modify_row`] returns, and also hands them back to the
+//! caller. So everything a probe sees is the transaction's current state. A row
+//! an action deleted reads as gone, and a row it re-keyed reads under its new
+//! key. No probe has a set of exceptions to carry, and a second constraint's
+//! action reaching the same row operates on the image the first one left. The
+//! same fold terminates a cascade cycle, exactly as it terminates
 //! `PostgreSQL`'s: the row the cycle comes back to no longer matches the key
 //! being chased.
 //!
 //! # Deferral
 //!
 //! Only *checks* defer. `PostgreSQL` creates a constraint's check triggers with
-//! its declared deferrability and its referential-action triggers non-deferrable,
-//! so a `DEFERRABLE INITIALLY DEFERRED ON DELETE CASCADE` still deletes its
-//! children inside the `DELETE` statement and only the "does this row have a
-//! parent" checks wait for `COMMIT`. [`PendingCheck::is_check`] is that rule and
-//! [`DeferredConstraints::defer`] is the only thing that applies it, which is
-//! what leaves the commit-time drain with no referential action of its own to
-//! run.
+//! its declared deferrability, and creates its referential-action triggers
+//! non-deferrable. So a `DEFERRABLE INITIALLY DEFERRED ON DELETE CASCADE` still
+//! deletes its children inside the `DELETE` statement, and only the "does this
+//! row have a parent" checks wait for `COMMIT`. [`PendingCheck::is_check`] is
+//! that rule, and [`DeferredConstraints::defer`] is the only thing that applies
+//! it. That is what leaves the commit-time drain with no referential action of
+//! its own to run.
 //!
 //! # Concurrency
 //!
 //! Both sides of a foreign key name the same lock identity: the referenced
-//! index's entry prefix for the key value, the byte string the uniqueness check
-//! already locks. The child side takes it [`FkLockMode::Shared`], the parent
-//! side [`FkLockMode::Exclusive`], so many children of one parent key never
-//! contend, and a *non-key* update of the parent never touches the key lock at
-//! all. No new lock mode exists; key locks and row locks share one wait-for
-//! graph, so a cycle spanning both is still reported as `40P01`.
+//! index's entry prefix for the key value. That is the byte string the
+//! uniqueness check already locks. The child side takes it
+//! [`FkLockMode::Shared`] and the parent side takes it
+//! [`FkLockMode::Exclusive`]. So many children of one parent key never contend,
+//! and a *non-key* update of the parent never touches the key lock at all. No
+//! new lock mode exists; key locks and row locks share one wait-for graph, so a
+//! cycle spanning both is still reported as `40P01`.
 //!
 //! The engine's pre-existing `FOR KEY SHARE` row-lock over-blocking is a
-//! different thing entirely and this protocol does not inherit it.
+//! different thing, and this protocol does not inherit it.
 //!
 //! # Column order
 //!
 //! `PostgreSQL` stores both column lists in the order the `FOREIGN KEY` clause
 //! writes them, paired positionally, and matches the referenced *index* by
 //! column set. `crabka_pgkv::key::secondary_index_entry_prefix` length-prefixes
-//! the whole encoded tuple, so key bytes are order-sensitive and a partial value
-//! list is not a byte prefix of a full key: a composite foreign key whose column
-//! order differs from the referenced key's would probe the wrong bytes while
-//! every single-column test passed. [`key_permutation`] is the one function that
-//! computes that reordering, and every probe goes through it.
+//! the whole encoded tuple. So key bytes are order-sensitive, and a partial
+//! value list is not a byte prefix of a full key. A composite foreign key whose
+//! column order differs from the referenced key's would probe the wrong bytes,
+//! while every single-column test passed. [`key_permutation`] is the one
+//! function that computes that reordering, and every probe goes through it.
 //!
 //! # Engine seams
 //!
 //! The drain reaches the engine through two traits rather than the executor's
-//! internal write context: [`FkKeyLocks`] for the key lock and [`FkCascade`] for
-//! the row modifications a referential action performs. That keeps the MVCC row
-//! mutation (and the statement's write bookkeeping, which is what terminates
-//! cascade cycles) in the write path that owns it, and makes this module's logic
-//! testable without an engine. It is also the seam the sharded-table wave needs:
-//! the probe target is already a parameter.
+//! internal write context: [`FkKeyLocks`] for the key lock, and [`FkCascade`]
+//! for the row modifications a referential action does. That keeps the MVCC row
+//! mutation in the write path that owns it, together with the statement's write
+//! bookkeeping, which is what terminates cascade cycles. It also makes this
+//! module's logic testable without an engine. It is also the seam the
+//! sharded-table wave needs: the probe target is already a parameter.
 
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
@@ -109,7 +109,7 @@ use crate::{
 /// catalog.
 ///
 /// `CREATE TABLE` resolves its own constraints before the relation exists, so
-/// neither side of a self-reference can be looked up; the same shape describes a
+/// neither side of a self-reference can be looked up. The same shape describes a
 /// relation that *is* in the catalog, so [`resolve_foreign_key`] has one code
 /// path rather than two.
 pub struct FkRelation<'a> {
@@ -171,7 +171,7 @@ pub struct ForeignKeyRequest<'a> {
     /// The creation-order id to stamp the constraint with, from the statement's
     /// [`crabka_pgcatalog::ForeignKeyIds`] cursor. It decides which of two
     /// constraints acts first, so it has to ascend with the order the clauses
-    /// are written — one cursor per statement, not one read per clause.
+    /// are written. Use one cursor per statement, not one read per clause.
     pub id: ForeignKeyId,
     /// An explicit `CONSTRAINT <name>` label, or `None` to derive
     /// `<table>_<col>…_fkey`.
@@ -185,7 +185,7 @@ pub struct ForeignKeyRequest<'a> {
     /// clears it; `CREATE TABLE` never does, because `PostgreSQL` ignores
     /// `NOT VALID` where there are no stored rows to validate.
     pub validated: bool,
-    /// The relation being created, when the clause references *it* — the
+    /// The relation being created, when the clause references *it*. This is the
     /// `CREATE TABLE t (… REFERENCES t …)` case, where the parent is not in the
     /// catalog yet. Deliberately explicit: a caller that has no in-flight
     /// relation passes `None` and the parent is always the catalog's.
@@ -195,10 +195,10 @@ pub struct ForeignKeyRequest<'a> {
 /// The name `PostgreSQL` derives for an unnamed foreign key: the referencing
 /// relation, every referencing column in clause order, then `fkey`.
 ///
-/// The relation contributes its bare name, never its schema: `ChooseConstraintName`
-/// builds the label from `RelationGetRelationName`, so a `s.child` referencing
-/// `s.parent` carries a `child_pid_fkey`, and a constraint name is per-relation
-/// anyway.
+/// The relation contributes its bare name, never its schema.
+/// `ChooseConstraintName` builds the label from `RelationGetRelationName`, so a
+/// `s.child` referencing `s.parent` carries a `child_pid_fkey`. A constraint
+/// name is per-relation anyway.
 #[must_use]
 pub fn default_foreign_key_name(table: &RelationName, columns: &[String]) -> String {
     let mut name = table.name.clone();
@@ -213,10 +213,10 @@ pub fn default_foreign_key_name(table: &RelationName, columns: &[String]) -> Str
 /// Turn one parsed `FOREIGN KEY` clause into the catalog record, applying every
 /// DDL-time validation `PostgreSQL` applies and reporting its SQLSTATEs.
 ///
-/// The referenced-column list may be empty, meaning the parent's primary key.
-/// The referenced *index* is matched by column set — not by order — and the
-/// record keeps both column lists in clause order, paired positionally, exactly
-/// as `pg_constraint.conkey`/`confkey` do.
+/// The referenced-column list may be empty, which means the parent's primary
+/// key. This function matches the referenced *index* by column set, not by
+/// order. The record keeps both column lists in clause order, paired
+/// positionally, exactly as `pg_constraint.conkey`/`confkey` do.
 ///
 /// # Errors
 ///
@@ -346,7 +346,7 @@ pub fn resolve_foreign_key(
 ///
 /// The second direction is the one a reader expects not to exist, and it is
 /// real: a *temporary* table may not reference a permanent one either. Both are
-/// `42P16`, with the wording verified against `postgres:18.4`:
+/// `42P16`. The wording below is verified against `postgres:18.4`:
 ///
 /// ```text
 /// CREATE TABLE perm (a int REFERENCES <temp>(id));
@@ -376,13 +376,13 @@ fn sharded_refusal(constraint: &str) -> ExecError {
     ))
 }
 
-/// Read the referenced relation, distinguishing "no such relation" (42P01) from
-/// "that relation is not a table" (42809), which `PostgreSQL` words differently
-/// from its general wrong-object-type message.
+/// Read the referenced relation, and tell "no such relation" (42P01) apart from
+/// "that relation is not a table" (42809).
 ///
-/// The 42809 names the relation `RelationGetRelationName` would — the bare name,
-/// because the relation was opened. The 42P01 the catalog raises instead names it
-/// as written, which is the whole point of that message.
+/// `PostgreSQL` words 42809 differently from its general wrong-object-type
+/// message. The 42809 names the relation `RelationGetRelationName` would, that
+/// is the bare name, because the relation was opened. The 42P01 the catalog
+/// raises instead names it as written, which is the whole point of that message.
 fn load_referenced_relation(
     catalog_kv: &dyn Kv,
     name: &RelationName,
@@ -406,7 +406,7 @@ fn load_referenced_relation(
     }
 }
 
-/// The parent's primary-key columns, in index order — what an omitted
+/// The parent's primary-key columns, in index order. This is what an omitted
 /// referenced-column list means.
 fn primary_key_columns(parent: &FkRelation<'_>) -> Result<Vec<String>, ExecError> {
     parent
@@ -425,11 +425,11 @@ fn no_unique_constraint(parent: &FkRelation<'_>) -> ExecError {
 
 /// The unique index that proves the referenced columns are a key.
 ///
-/// Matching is by column *set*, as `PostgreSQL`'s is. When several indexes
-/// match, the primary key wins, then the lowest-named unique constraint, then
-/// the lowest-named bare unique index — `information_schema` reports a
-/// constraint name for the first two and NULL for the third, so the choice is
-/// observable.
+/// This function matches by column *set*, as `PostgreSQL` does. When several
+/// indexes match, the primary key wins, then the lowest-named unique
+/// constraint, then the lowest-named bare unique index. The choice is
+/// observable: `information_schema` reports a constraint name for the first two
+/// and NULL for the third.
 fn select_referenced_index<'a>(
     parent: &'a FkRelation<'a>,
     referenced_columns: &[String],
@@ -463,12 +463,12 @@ fn select_referenced_index<'a>(
 
 /// The comparison families a foreign key may pair.
 ///
-/// `PostgreSQL` requires an equality operator in the referenced index's operator
+/// `PostgreSQL` needs an equality operator in the referenced index's operator
 /// family, which is what makes `integer` and `numeric` incompatible even though
-/// both are numbers. Grouping by family reproduces that at the granularity the
-/// engine's types have, and the members of one family share a `Datum`
-/// representation or convert losslessly into one another at probe time (see
-/// [`align_probe_value`]).
+/// both are numbers. A family reproduces that at the granularity the engine's
+/// types have. The members of one family share a `Datum` representation, or
+/// convert losslessly into one another at probe time. See
+/// [`align_probe_value`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypeFamily {
     Integer,
@@ -518,14 +518,14 @@ fn action_of(parsed: crabka_pgparser::ast::ReferentialAction) -> ReferentialActi
 ///
 /// `permutation[j]` is the clause position of `index_columns[j]`, so
 /// `permuted[j] = clause_values[permutation[j]]` rebuilds the value tuple in the
-/// index's own order — the only order whose bytes match a stored index entry.
-/// Returns `None` when the two lists are not permutations of one another, which
-/// is a catalog inconsistency rather than a user error.
+/// index's own order. That is the only order whose bytes match a stored index
+/// entry. This function returns `None` when the two lists are not permutations
+/// of one another, which is a catalog inconsistency rather than a user error.
 ///
-/// This is the single place the reordering is computed. Every probe, every key
-/// lock and every child search goes through it, because a composite foreign key
-/// written `FOREIGN KEY (b, a) REFERENCES p (y, x)` over a `(x, y)` index probes
-/// the wrong bytes without it while every single-column case still passes.
+/// This is the single place that computes the reordering. Every probe, every key
+/// lock and every child search goes through it. Without it, a composite foreign
+/// key written `FOREIGN KEY (b, a) REFERENCES p (y, x)` over a `(x, y)` index
+/// probes the wrong bytes, while every single-column case still passes.
 #[must_use]
 pub fn key_permutation(clause_columns: &[String], index_columns: &[String]) -> Option<Vec<usize>> {
     if clause_columns.len() != index_columns.len() {
@@ -555,8 +555,8 @@ pub enum MatchOutcome {
     Satisfied,
     /// Probe the referenced key.
     Probe,
-    /// `MATCH FULL` mixed null and non-null columns — a 23503 whose DETAIL names
-    /// no key.
+    /// `MATCH FULL` mixed null and non-null columns. This is a 23503 whose
+    /// DETAIL names no key.
     MixedNulls,
 }
 
@@ -606,8 +606,8 @@ fn column_ordinals(table: &Table, columns: &[String]) -> Result<Vec<usize>, Exec
 ///
 /// Index-entry bytes are tagged per `Datum` variant, so a `bigint` child of an
 /// `integer` parent must probe with an `Int4` or it reads a key that cannot
-/// exist. `None` means the value has no counterpart in the target type — an
-/// out-of-range integer, say — which is exactly "the key is not present".
+/// exist. `None` means the value has no counterpart in the target type, an
+/// out-of-range integer for example, which is exactly "the key is not present".
 fn align_probe_value(value: &Datum, target: ColumnType) -> Option<Datum> {
     let integer = |n: i64| match target {
         ColumnType::Int2 => i16::try_from(n).ok().map(Datum::Int2),
@@ -637,7 +637,7 @@ fn align_probe_value(value: &Datum, target: ColumnType) -> Option<Datum> {
     }
 }
 
-/// Align a whole key, giving up as soon as one column cannot be represented.
+/// Align a whole key, and stop as soon as one column cannot be represented.
 fn align_probe_key(values: &[Datum], types: &[ColumnType]) -> Option<Vec<Datum>> {
     values
         .iter()
@@ -725,10 +725,10 @@ impl StatementFkContext {
     /// child relation is inside `truncate_set`.
     ///
     /// `TRUNCATE` refuses when a relation outside the set references one inside
-    /// it and `TRUNCATE … CASCADE` widens the *set* rather than firing the
-    /// actions, so by construction every remaining parent-side key of a
-    /// truncated relation is suppressed here — expressed as a set-membership
-    /// test rather than a "referential integrity off" mode.
+    /// it, and `TRUNCATE … CASCADE` widens the *set* rather than firing the
+    /// actions. So by construction this method suppresses every remaining
+    /// parent-side key of a truncated relation. The rule is a set-membership
+    /// test, not a "referential integrity off" mode.
     ///
     /// # Errors
     ///
@@ -783,11 +783,11 @@ pub enum PendingCheck {
         /// The referencing row. `UPDATE` preserves the rowid here, so this is a
         /// stable row identity for the life of the transaction.
         rowid: u64,
-        /// The key as the statement wrote it, in clause order — what the
-        /// statement drain checks, saving it the row read that would produce the
-        /// same values. A check that is *deferred* drops it, so the commit-time
-        /// drain re-derives the key from the row's then-current version and "the
-        /// row moved" is handled by construction.
+        /// The key as the statement wrote it, in clause order. The statement
+        /// drain checks this key, which saves it the row read that would produce
+        /// the same values. A check that is *deferred* drops it, so the
+        /// commit-time drain re-derives the key from the row's then-current
+        /// version, and "the row moved" is handled by construction.
         key: Option<Vec<Datum>>,
     },
     /// A referenced key was deleted or moved and the children must be accounted
@@ -829,13 +829,14 @@ impl PendingCheck {
     /// action?
     ///
     /// `PostgreSQL` splits one constraint's triggers in two and gives them
-    /// different deferrability. The check triggers — `RI_FKey_check_ins` and
-    /// `_upd` on the child side, `RI_FKey_noaction_del` and `_upd` on the parent
-    /// — are created with the constraint's own `deferrable` / `initdeferred`.
-    /// Every *action* trigger — `RI_FKey_restrict_*`, `cascade_*`, `setnull_*`,
-    /// `setdefault_*` — is created `NOT DEFERRABLE` whatever the clause says.
+    /// different deferrability. `PostgreSQL` creates the check triggers with the
+    /// constraint's own `deferrable` / `initdeferred`. Those are
+    /// `RI_FKey_check_ins` and `_upd` on the child side, and
+    /// `RI_FKey_noaction_del` and `_upd` on the parent side. It creates every
+    /// *action* trigger `NOT DEFERRABLE` whatever the clause says. Those are
+    /// `RI_FKey_restrict_*`, `cascade_*`, `setnull_*` and `setdefault_*`.
     ///
-    /// So an action always runs inside the statement that provoked it: a
+    /// So an action always runs inside the statement that provoked it. A
     /// `DEFERRABLE INITIALLY DEFERRED ON DELETE CASCADE` has already deleted its
     /// children by the next statement of the block, and only the constraint's
     /// checks wait for `COMMIT`.
@@ -883,8 +884,8 @@ impl FkCheckQueue {
 
     /// Queue the checks an inserted row owes.
     ///
-    /// A new row can only break the constraints it references; nothing that
-    /// references *it* can be disturbed by its arrival.
+    /// A new row can only break the constraints it references. Its arrival
+    /// cannot disturb anything that references *it*.
     ///
     /// # Errors
     ///
@@ -908,7 +909,7 @@ impl FkCheckQueue {
 
     /// Queue the checks an updated row owes on both sides.
     ///
-    /// A side whose key values are unchanged queues nothing: `PostgreSQL`'s
+    /// A side whose key values are unchanged queues nothing. `PostgreSQL`'s
     /// referential triggers compare the old and new keys first, and that is what
     /// keeps a non-key update of a hot parent row off the key lock entirely.
     ///
@@ -981,11 +982,11 @@ impl FkCheckQueue {
 
 /// The per-transaction `SET CONSTRAINTS` overrides.
 ///
-/// Kept apart from the pending entries because a savepoint has to capture and
-/// restore exactly this — `SET CONSTRAINTS` is a utility statement and *is*
-/// rollback-able, while the pending queue can never need unwinding (rolling back
-/// to a savepoint across a row-modifying sub-transaction is already refused, and
-/// every statement that queues a check modifies rows).
+/// These modes are kept apart from the pending entries because a savepoint has
+/// to capture and restore exactly this. `SET CONSTRAINTS` is a utility statement
+/// and *is* rollback-able. The pending queue can never need unwinding: a
+/// rollback to a savepoint across a row-modifying sub-transaction is already
+/// refused, and every statement that queues a check modifies rows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeferralModes {
     /// `SET CONSTRAINTS ALL { DEFERRED | IMMEDIATE }`, when one has run.
@@ -1044,15 +1045,15 @@ impl DeferralModes {
 
 /// The transaction's deferred checks and deferral modes.
 ///
-/// Modelled on the session's pending `NOTIFY` queue: it accumulates during a
-/// transaction, is drained as part of `COMMIT`, and is discarded on rollback
-/// through the same teardown that clears the rest of the transaction's state.
+/// This type follows the session's pending `NOTIFY` queue. It accumulates during
+/// a transaction, `COMMIT` drains it, and a rollback discards it through the
+/// same teardown that clears the rest of the transaction's state.
 #[derive(Debug, Clone, Default)]
 pub struct DeferredConstraints {
     modes: DeferralModes,
-    /// The entries waiting for `COMMIT`. Every one of them is a *check*:
-    /// [`DeferredConstraints::defer`] is the only way in and it is the one place
-    /// the rule lives, so a referential action can never be found here.
+    /// The entries waiting for `COMMIT`. Every one of them is a *check*.
+    /// [`DeferredConstraints::defer`] is the only way in, and it is the one
+    /// place the rule lives, so a referential action can never be found here.
     pending: Vec<PendingCheck>,
 }
 
@@ -1074,9 +1075,9 @@ impl DeferredConstraints {
         &mut self.modes
     }
 
-    /// Restore the modes a savepoint captured. The pending entries are left
-    /// alone: they belong to row-modifying statements, which cannot be rolled
-    /// back to a savepoint here.
+    /// Restore the modes a savepoint captured. This method leaves the pending
+    /// entries alone: they belong to row-modifying statements, which cannot be
+    /// rolled back to a savepoint here.
     pub fn restore_modes(&mut self, modes: DeferralModes) {
         self.modes = modes;
     }
@@ -1084,20 +1085,20 @@ impl DeferredConstraints {
     /// Take an entry that should wait for `COMMIT`, or hand it straight back to
     /// be run now.
     ///
-    /// Only a check ever waits — see [`PendingCheck::is_check`] — so a
+    /// Only a check ever waits. See [`PendingCheck::is_check`]. So a
     /// `DEFERRABLE INITIALLY DEFERRED` constraint carrying `CASCADE`,
-    /// `SET NULL`, `SET DEFAULT` or `RESTRICT` still performs it inside the
-    /// statement, and `RESTRICT` versus `NO ACTION` is the visible edge of that
-    /// same rule rather than a case of its own.
+    /// `SET NULL`, `SET DEFAULT` or `RESTRICT` still does it inside the
+    /// statement. `RESTRICT` against `NO ACTION` is the visible edge of that
+    /// same rule, not a case of its own.
     ///
-    /// The rule and the queue are one operation deliberately: it is what makes
-    /// "everything pending here is a check" hold by construction, which is in
-    /// turn what lets the commit-time drain assume no write of its own is
-    /// missing from what it reads.
+    /// The rule and the queue are one operation deliberately. That is what makes
+    /// "everything pending here is a check" hold by construction, which in turn
+    /// lets the commit-time drain assume no write of its own is missing from
+    /// what it reads.
     ///
-    /// A check a referential action produced defers like any other: its row is
+    /// A check a referential action produced defers like any other. Its row is
     /// only staged now, but every statement's ops reach the KV under this
-    /// transaction's xid before the next statement runs, so by `COMMIT` the
+    /// transaction's xid before the next statement runs. So by `COMMIT` the
     /// re-derivation reads the row the cascade wrote.
     pub fn defer(&mut self, check: PendingCheck) -> Option<PendingCheck> {
         if check.is_check() && self.modes.is_deferred(check.fk()) {
@@ -1107,12 +1108,12 @@ impl DeferredConstraints {
         Some(check)
     }
 
-    /// Take every deferred check — the `COMMIT` drain.
+    /// Take every deferred check. This is the `COMMIT` drain.
     pub fn take_all(&mut self) -> Vec<PendingCheck> {
         std::mem::take(&mut self.pending)
     }
 
-    /// Take the checks that are no longer deferred — what
+    /// Take the checks that are no longer deferred. This is what
     /// `SET CONSTRAINTS … IMMEDIATE` drains mid-transaction.
     pub fn take_immediate(&mut self) -> Vec<PendingCheck> {
         let (ready, still_deferred) = std::mem::take(&mut self.pending)
@@ -1146,8 +1147,8 @@ pub enum FkLockMode {
 /// The key lock both sides of a foreign key take.
 ///
 /// The key bytes are `secondary_index_entry_prefix(parent, referenced index,
-/// key)` — the same identity the uniqueness check locks, so the implementation
-/// is a `LockKey::UniqueKey` acquire in the engine's row-lock manager and no new
+/// key)`, the same identity the uniqueness check locks. So the implementation is
+/// a `LockKey::UniqueKey` acquire in the engine's row-lock manager, and no new
 /// lock mode exists.
 pub trait FkKeyLocks {
     /// Acquire `key`, blocking until granted.
@@ -1167,8 +1168,8 @@ pub enum FkRowChange {
     /// value)` pairs. The engine coerces each value to its column's type, as an
     /// ordinary assignment does.
     Assign(Vec<(usize, Datum)>),
-    /// `SET DEFAULT`: assign each named column its `DEFAULT`, which only the
-    /// engine can evaluate (a `nextval` default has a side effect).
+    /// `SET DEFAULT`: assign each named column its `DEFAULT`. Only the engine
+    /// can evaluate a `DEFAULT`, because a `nextval` default has a side effect.
     AssignDefaults(Vec<usize>),
 }
 
@@ -1187,35 +1188,35 @@ pub struct FkCascadeRequest<'a> {
 /// What the engine did with an [`FkCascadeRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FkCascadeOutcome {
-    /// The row was changed. `new_row` is the row as written, or `None` for a
-    /// delete; the drain needs it to queue the follow-on checks the change
+    /// The engine changed the row. `new_row` is the row as written, or `None`
+    /// for a delete. The drain needs it to queue the follow-on checks the change
     /// itself owes.
     Applied { new_row: Option<Vec<Datum>> },
-    /// Nothing happened, because there is no row left for the action to write:
-    /// it is gone — deleted by a concurrent committed transaction, by this
-    /// command's own DML, or by an earlier action of this same drain — or *this
-    /// constraint's* action has already written it, which bounds one drain's
-    /// work at one write per row per constraint.
+    /// Nothing happened, because there is no row left for the action to write.
+    /// Either the row is gone, deleted by a concurrent committed transaction, by
+    /// this command's own DML, or by an earlier action of this same drain. Or
+    /// *this constraint's* action has already written it, which bounds one
+    /// drain's work at one write per row per constraint.
     ///
     /// It is not a divergence and not a cycle terminator. Cycles terminate on
     /// the data, as `PostgreSQL`'s do: the drain folds each action's ops into
     /// the view it reads, so the row a cycle comes back to no longer matches the
-    /// key being chased and no search offers it here at all. Neither a row an
-    /// earlier part of the same *command* modified nor one *another*
-    /// constraint's action just rewrote is skipped — an action is a command of
-    /// its own, applied to that row's current image exactly as `PostgreSQL`
-    /// applies it, which is what nulls both referencing columns when one
-    /// `DELETE` removes a key two foreign keys point at.
+    /// key being chased and no search offers it here at all. The drain skips
+    /// neither a row an earlier part of the same *command* modified, nor one
+    /// *another* constraint's action just rewrote. An action is a command of its
+    /// own, applied to that row's current image exactly as `PostgreSQL` applies
+    /// it. That is what nulls both referencing columns when one `DELETE` removes
+    /// a key two foreign keys point at.
     Skipped,
 }
 
 /// The write path a referential action re-enters.
 ///
-/// The implementation shares the *outer statement's* write bookkeeping, claims
-/// each row it changes there under [`FkCascadeRequest::constraint`], and folds
-/// the ops it produces into what the drain reads before returning them. That
-/// fold is what lets every later probe see the action's effect, so the drain's
-/// searches and re-probes need no record of what it has written.
+/// The implementation shares the *outer statement's* write bookkeeping. It
+/// claims each row it changes there under [`FkCascadeRequest::constraint`], and
+/// folds the ops it produces into what the drain reads before it returns them.
+/// That fold is what lets every later probe see the action's effect, so the
+/// drain's searches and re-probes need no record of what it has written.
 pub trait FkCascade {
     /// Fire statement-level hooks around one referential-action query.
     ///
@@ -1245,8 +1246,8 @@ pub trait FkCascade {
         Ok(())
     }
 
-    /// Apply one referential action to one row, returning the ops to add to the
-    /// statement's batch — after folding them into the view the drain reads.
+    /// Apply one referential action to one row, and return the ops to add to the
+    /// statement's batch. Fold those ops into the view the drain reads first.
     ///
     /// Reports [`FkCascadeOutcome::Skipped`] when there is no row left to write.
     fn modify_row(
@@ -1260,7 +1261,7 @@ pub struct FkExecContext<'a> {
     pub catalog_kv: &'a dyn Kv,
     /// The row store the drain probes and scans. For the end-of-statement drain
     /// it is an overlay of the statement's pending write batch, whose premise is
-    /// that the statement's rows already exist; the commit-time drain reads the
+    /// that the statement's rows already exist. The commit-time drain reads the
     /// store as it stands. Either way the drain's own referential actions fold
     /// their ops in as they run, so every probe reads the transaction's current
     /// state.
@@ -1273,7 +1274,7 @@ pub struct FkExecContext<'a> {
 }
 
 /// A snapshot that sees every committed transaction, for the probe under the key
-/// lock: the lock serializes check-then-write per key, and the probe then reads
+/// lock. The lock serializes check-then-write per key, and the probe then reads
 /// the then-current committed state exactly as the uniqueness check does.
 fn all_committed() -> Snapshot {
     Snapshot {
@@ -1287,9 +1288,9 @@ impl FkExecContext<'_> {
     /// The visible version of one row, or `None` when nothing is visible.
     ///
     /// `global_snapshot` decides when a cross-range `Prepared` marker resolves,
-    /// and travels with `snapshot`: a probe under the key lock reads the
-    /// then-current committed state on both axes, a re-read of our own row reads
-    /// the statement's.
+    /// and it travels with `snapshot`. A probe under the key lock reads the
+    /// then-current committed state on both axes. A re-read of our own row reads
+    /// the statement's state.
     fn visible_row(
         &self,
         table: TableId,
@@ -1320,10 +1321,10 @@ impl FkExecContext<'_> {
 
     /// Rows currently holding `values` in `index`, as `(rowid, row)`.
     ///
-    /// Mirrors the executor's own equality probe: the index entry only names a
-    /// rowid, so each candidate is resolved through MVCC and its visible row's
-    /// values re-checked, which is what discounts dead entries left by old
-    /// versions and aborted writers.
+    /// This method mirrors the executor's own equality probe. The index entry
+    /// only names a rowid, so it resolves each candidate through MVCC and
+    /// re-checks the visible row's values. That is what discounts dead entries
+    /// left by old versions and aborted writers.
     fn rows_with_key(
         &self,
         table: &Table,
@@ -1461,10 +1462,11 @@ impl FkParts {
 
     /// The key bytes both sides lock.
     ///
-    /// Takes the values already in referenced-index order and already in the
-    /// referenced columns' representation — the identity has to be the one the
-    /// parent's own uniqueness check locks, so a `bigint` child of an `integer`
-    /// parent must not name a different byte string than the parent does.
+    /// This method takes the values already in referenced-index order and
+    /// already in the referenced columns' representation. The identity has to be
+    /// the one the parent's own uniqueness check locks, so a `bigint` child of
+    /// an `integer` parent must not name a different byte string than the parent
+    /// does.
     fn lock_bytes(&self, index_ordered: &[Datum]) -> Vec<u8> {
         crabka_pgkv::key::secondary_index_entry_prefix(
             self.parent.id,
@@ -1489,13 +1491,13 @@ impl FkParts {
 /// one to the transaction's queue, and loop until the referential actions stop
 /// producing work.
 ///
-/// Runs once for the whole statement — `WITH` list plus body — because
-/// `PostgreSQL` treats that as one command and fires its trigger queue once for
-/// it.
+/// This runs once for the whole statement, that is the `WITH` list plus the
+/// body, because `PostgreSQL` treats that as one command and fires its trigger
+/// queue once for it.
 ///
 /// # Errors
 ///
-/// The referential-integrity violations (23503 and 23001), plus whatever the
+/// The referential-integrity violations 23503 and 23001, plus whatever the
 /// catalog, the KV, the lock manager or a cascaded write reports.
 pub async fn drain_statement_checks<L, C>(
     ctx: &FkExecContext<'_>,
@@ -1520,10 +1522,10 @@ where
 /// written, so the existing abort path needs no addition.
 ///
 /// Every entry `checks` carries came out of [`DeferredConstraints`], so every
-/// one of them is a check rather than a referential action, and this drain
-/// therefore performs no cascade of its own. It reads the store as the
-/// transaction has left it, which is what makes a key re-supplied by a later
-/// statement satisfy a `NO ACTION` check queued by an earlier one.
+/// one of them is a check rather than a referential action. So this drain does
+/// no cascade of its own. It reads the store as the transaction has left it,
+/// which is what makes a key re-supplied by a later statement satisfy a
+/// `NO ACTION` check queued by an earlier one.
 ///
 /// # Errors
 ///
@@ -1628,14 +1630,13 @@ where
 
 /// Build the span covering one statement's referential-check drain.
 ///
-/// One span for the whole drain, never one per check: a `DELETE` of a widely
-/// referenced key queues a check per referencing row, and the useful signal is
-/// how long the batch took and how large it grew — both of which are fields
-/// here.
+/// One span covers the whole drain, never one per check. A `DELETE` of a widely
+/// referenced key queues a check per referencing row. The useful signal is how
+/// long the batch took and how large it grew, and both are fields here.
 ///
-/// `queued` is the batch the statement handed over; `pg.fk_checks` is what the
-/// drain actually ran, which is larger whenever a referential action cascaded
-/// into further checks and smaller whenever a check was deferred to `COMMIT`.
+/// `queued` is the batch the statement handed over. `pg.fk_checks` is what the
+/// drain ran, which is larger whenever a referential action cascaded into
+/// further checks, and smaller whenever a check was deferred to `COMMIT`.
 fn drain_span(queued: usize) -> tracing::Span {
     tracing::debug_span!(
         target: crate::telemetry::EXEC_TARGET,
@@ -1654,12 +1655,12 @@ fn drain_span(queued: usize) -> tracing::Span {
 /// Check that one referencing row's key exists in the parent.
 ///
 /// The statement drain checks the key the write staged rather than re-reading
-/// the row, because the two agree: through the overlay the row still reads as
-/// that write left it — no other part of the command may modify it a second
-/// time, and a referential action that has since deleted or re-keyed it is not
-/// in what the drain reads anyway — so the read would only return the values
-/// already in hand. A deferred check has no staged key and must re-derive one,
-/// whole statements having run since it was queued.
+/// the row, because the two agree. Through the overlay the row still reads as
+/// that write left it. No other part of the command may modify it a second time,
+/// and a referential action that has since deleted or re-keyed it is not in what
+/// the drain reads anyway. So the read would only return the values already in
+/// hand. A deferred check has no staged key and must re-derive one, because
+/// whole statements have run since it was queued.
 async fn run_child_check<L>(
     ctx: &FkExecContext<'_>,
     locks: &L,
@@ -1731,8 +1732,9 @@ struct ParentCheck<'a> {
     new_key: Option<&'a [Datum]>,
 }
 
-/// Account for the children of a referenced key that was deleted or moved,
-/// returning the checks the referential action itself owes.
+/// Account for the children of a referenced key that was deleted or moved.
+///
+/// Returns the checks the referential action itself owes.
 async fn run_parent_check<L, C>(
     ctx: &FkExecContext<'_>,
     locks: &L,
@@ -1839,11 +1841,11 @@ struct Action<'a> {
 
 /// The rows of the child relation that reference `key`.
 ///
-/// Prefers an index whose column list is a permutation of the foreign key's,
-/// falling back to a scan. No index is created for a foreign key —
-/// `PostgreSQL` does not create one either, and a synthetic one would show up in
-/// `\d` and `pg_indexes`. A leading-prefix index does not help, because the
-/// secondary-index key encoding length-prefixes the whole tuple.
+/// This function prefers an index whose column list is a permutation of the
+/// foreign key's, and falls back to a scan. Crabka creates no index for a
+/// foreign key. `PostgreSQL` does not create one either, and a synthetic one
+/// would show up in `\d` and `pg_indexes`. A leading-prefix index does not help,
+/// because the secondary-index key encoding length-prefixes the whole tuple.
 fn find_referencing_rows(
     ctx: &FkExecContext<'_>,
     catalog: &mut DrainCatalog<'_>,
@@ -1895,8 +1897,9 @@ fn find_referencing_rows(
     Ok(rows)
 }
 
-/// Run `CASCADE` / `SET NULL` / `SET DEFAULT` over the referencing rows,
-/// returning the checks the changes themselves owe.
+/// Run `CASCADE` / `SET NULL` / `SET DEFAULT` over the referencing rows.
+///
+/// Returns the checks the changes themselves owe.
 async fn apply_referential_action<C>(
     cascade: &mut C,
     catalog: &mut DrainCatalog<'_>,
@@ -2012,17 +2015,17 @@ where
 /// `ALTER TABLE … ADD CONSTRAINT` runs, that `NOT VALID` skips and
 /// `VALIDATE CONSTRAINT` runs later.
 ///
-/// `PostgreSQL` reuses the row-write message verbatim here, naming the first
+/// `PostgreSQL` reuses the row-write message verbatim here and names the first
 /// offending key, so this raises the same 23503 as an insert would.
 ///
-/// `rows` is supplied by the caller rather than scanned here, because a
+/// The caller supplies `rows` rather than this function scanning them, because a
 /// multi-subcommand `ALTER TABLE` must validate the rows as its earlier
 /// subcommands rewrote them, not as storage still holds them.
 ///
-/// No key lock is taken: the DDL that runs this already serializes against
-/// concurrent writers through the catalog lock and the table write gate, so
-/// per-key serialization would buy nothing and would hold one lock per stored
-/// row for the rest of the transaction.
+/// This function takes no key lock. The DDL that runs it already serializes
+/// against concurrent writers through the catalog lock and the table write gate.
+/// So per-key serialization would buy nothing, and would hold one lock per
+/// stored row for the rest of the transaction.
 ///
 /// # Errors
 ///
@@ -2099,8 +2102,8 @@ pub struct TruncateSet {
     /// Every relation in the set, the named ones first, then the ones `CASCADE`
     /// pulled in.
     pub tables: Vec<Table>,
-    /// The relations `CASCADE` added, in the order they were added — one
-    /// `truncate cascades to table "…"` NOTICE each.
+    /// The relations `CASCADE` added, in the order they were added. Each one
+    /// gets a `truncate cascades to table "…"` NOTICE.
     pub cascaded: Vec<RelationName>,
 }
 
@@ -2114,9 +2117,9 @@ impl TruncateSet {
 
 /// Expand a `TRUNCATE` list to the relations it must empty, or refuse.
 ///
-/// `PostgreSQL` does not fire `ON DELETE CASCADE` for `TRUNCATE`: it refuses
+/// `PostgreSQL` does not fire `ON DELETE CASCADE` for `TRUNCATE`. It refuses
 /// when a relation outside the set references one inside it, and
-/// `TRUNCATE … CASCADE` widens the *set* instead. Expansion is transitive.
+/// `TRUNCATE … CASCADE` widens the *set* instead. The expansion is transitive.
 ///
 /// # Errors
 ///
@@ -2158,8 +2161,8 @@ pub fn expand_truncate_set(
 
 /// The foreign keys that block dropping `table`, one `DETAIL` line each.
 ///
-/// A constraint the relation owns itself never blocks its own drop — it goes
-/// away with the relation — so only keys defined elsewhere count.
+/// A constraint the relation owns itself never blocks its own drop, because it
+/// goes away with the relation. So only keys defined elsewhere count.
 ///
 /// # Errors
 ///
@@ -2180,8 +2183,8 @@ pub fn dependents_blocking_table_drop(
     )
 }
 
-/// The foreign keys that block dropping `index` — the ones that chose it as the
-/// index proving their referenced columns unique.
+/// The foreign keys that block dropping `index`, that is the ones that chose it
+/// as the index proving their referenced columns unique.
 ///
 /// # Errors
 ///
@@ -2764,9 +2767,9 @@ mod tests {
     }
 
     /// The whole of the deferral rule, over a constraint that is
-    /// `DEFERRABLE INITIALLY DEFERRED` in every case: a parent-side entry waits
+    /// `DEFERRABLE INITIALLY DEFERRED` in every case. A parent-side entry waits
     /// for `COMMIT` only under `NO ACTION`, because that is the only parent-side
-    /// trigger `PostgreSQL` creates deferrable, and the child-side check waits
+    /// trigger `PostgreSQL` creates deferrable. The child-side check waits
     /// whatever the action is.
     #[test]
     fn only_a_check_ever_defers_never_a_referential_action() {
@@ -3040,10 +3043,11 @@ mod tests {
         }
     }
 
-    /// The seam's claim contract, read off its own results: a constraint gets
-    /// one bite at a row and a second reports `Skipped` changing nothing, while
-    /// a *different* constraint reaching the same row is applied — which is what
-    /// lets one `DELETE` run both foreign keys' actions over one child row.
+    /// The seam's claim contract, read off its own results. A constraint gets
+    /// one change to a row, and a second reports `Skipped` and changes nothing.
+    /// The seam applies a *different* constraint that reaches the same row. That
+    /// is what lets one `DELETE` run both foreign keys' actions over one child
+    /// row.
     #[test]
     fn one_constraint_writes_a_row_once_and_another_constraint_still_writes_it() {
         let table = Table {

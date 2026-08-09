@@ -11,14 +11,14 @@ pub enum CompressionError {
     #[error("compression feature `{0}` not enabled at compile time")]
     FeatureDisabled(&'static str),
 
-    /// The compressed payload could not be parsed (truncated input, bad
-    /// framing, invalid checksum, etc.).
+    /// The codec could not parse the compressed payload. Examples are truncated
+    /// input, bad framing, and an invalid checksum.
     #[error("invalid compressed data: {0}")]
     InvalidData(String),
 
-    /// Decompression produced (or would produce) more output than the caller's
-    /// `max_output` cap allows. Guards against decompression bombs: a small
-    /// compressed payload that expands to gigabytes.
+    /// Decompression produced, or would produce, more output than the caller's
+    /// `max_output` cap allows. This guards against decompression bombs, that
+    /// is a small compressed payload that expands to gigabytes.
     #[error("decompressed output exceeds limit of {limit} bytes")]
     TooLarge { limit: usize },
 

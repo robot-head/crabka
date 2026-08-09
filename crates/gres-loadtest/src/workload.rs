@@ -1,61 +1,65 @@
-//! SQL workload driver: connections, operation mix, pacing, measurement.
+//! SQL workload driver: connections, operation mix, pacing, and
+//! measurement.
 //!
 //! # Schema
 //!
-//! [`prepare_schema`] mirrors `scripts/gres-range-scaling.sh`: table names
+//! [`prepare_schema`] mirrors `scripts/gres-range-scaling.sh`. Table names
 //! carry an explicit numeric id and land on the range whose boundary span
-//! contains that id (boundaries sit at multiples of 1 000 000). Range `r`
-//! gets `t{r * 1_000_000} (id int4)`, and a hot table
+//! holds that id. The boundaries sit at multiples of 1 000 000. Range `r` gets
+//! `t{r * 1_000_000} (id int4)`. A hot table
 //! `t{(ranges - 1) * 1_000_000 + 1} (id int4, v int4)` lands inside the last
-//! range's span, seeded with `hot_rows` rows (`id` 1..=`hot_rows`, `v` 0) via
-//! batched multi-row `INSERT`s. Each table is preceded by a
-//! `DROP TABLE IF EXISTS`, so re-runs against a persistent external system
-//! (`run --external`) start from a clean slate; against a freshly-launched
-//! crabka cluster the drops are no-ops.
+//! range's span. Batched multi-row `INSERT`s seed it with `hot_rows` rows,
+//! where `id` runs 1..=`hot_rows` and `v` is 0. A `DROP TABLE IF EXISTS` comes
+//! before each table, so a re-run against a persistent external system, that
+//! is, `run --external`, starts from a clean slate. Against a freshly-launched
+//! crabka cluster the drops do nothing.
 //!
 //! # Operation classes
 //!
 //! Every operation stays inside the SQL surface proven against the sharded
-//! engine (`crates/gres-ranges/tests/jepsen_bank.rs` and `multirange.rs`) and
-//! the conformance corpus (`crates/gres-conformance/corpus/`):
+//! engine, in `crates/gres-ranges/tests/jepsen_bank.rs` and `multirange.rs`,
+//! and against the conformance corpus in `crates/gres-conformance/corpus/`:
 //!
-//! - [`OpClass::SingleShardInsert`] — autocommit
-//!   `INSERT INTO t<range> VALUES (<id>)` into a uniformly-chosen range
-//!   table; ids are `worker * 1_000_000 + counter`, mirroring the script's
+//! - [`OpClass::SingleShardInsert`] — an autocommit
+//!   `INSERT INTO t<range> VALUES (<id>)` into a uniformly-chosen range table.
+//!   Ids are `worker * 1_000_000 + counter`, which mirrors the script's
 //!   disjoint per-worker id spaces.
 //! - [`OpClass::CrossShardTxn`] — `BEGIN`, one `INSERT` into each of two
-//!   distinct range tables, `COMMIT` (best-effort `ROLLBACK` on error): the
-//!   2PC + global-timestamp path.
+//!   distinct range tables, then `COMMIT`, with a best-effort `ROLLBACK` on
+//!   error. This is the 2PC and global-timestamp path.
 //! - [`OpClass::ReadOnly`] —
-//!   `SELECT count(*) FROM t<range> WHERE id >= <lo> AND id < <lo + 1024>`:
-//!   a bounded slice, never an unbounded scan of an ever-growing table.
+//!   `SELECT count(*) FROM t<range> WHERE id >= <lo> AND id < <lo + 1024>`.
+//!   This is a bounded slice, never an unbounded scan of an ever-growing
+//!   table.
 //! - [`OpClass::ContendedUpdate`] —
 //!   `UPDATE t<hot> SET v = v + 1 WHERE id = <rank>` with Zipf-distributed
-//!   ranks. `SQLSTATE` 40001 (`serialization_failure`) is retried up to 5
-//!   times with jittered backoff before the transaction counts as failed.
+//!   ranks. The driver retries `SQLSTATE` 40001
+//!   (`serialization_failure`) up to 5 times with jittered backoff before the
+//!   transaction counts as failed.
 //!
 //! # Connection routing
 //!
-//! Every gateway routes DDL and DML for ranges it does not host locally, so
-//! no endpoint is special: worker `w` holds one connection to
-//! `endpoints[w % endpoint_count]` and issues its whole mix — writes and
-//! reads alike — through it, fanning load round-robin across every node's
-//! SQL front door. Each worker reconnects with independent backoff, and an
-//! endpoint's initial unavailability is counted and retried like any
-//! mid-run connection error.
+//! Every gateway routes DDL and DML for the ranges it does not host locally,
+//! so no endpoint is special. Worker `w` holds one connection to
+//! `endpoints[w % endpoint_count]` and issues its whole mix through it, both
+//! writes and reads. The load therefore fans out round-robin across every
+//! node's SQL front door. Each worker reconnects with its own backoff. The
+//! driver counts and retries an endpoint that is unavailable at the start in
+//! the same way as any mid-run connection error.
 //!
 //! # Pacing, faults, and measurement
 //!
-//! [`run`] drives one tokio task per configured connection. Workers pace
-//! through a shared token bucket under [`RateSpec::Fixed`] and free-run
-//! under [`RateSpec::Saturate`]. Connection loss triggers
-//! reconnect-with-backoff forever (faults are expected to kill links
-//! mid-run), and a per-operation timeout turns a blackholed link into an
-//! `unavailable` count instead of a hung worker. After the workload's
-//! `warmup` of unrecorded load, its `duration` window records per-class HDR
-//! histograms (1µs..60s, 3 significant figures), commit/failure counters,
-//! the error taxonomy, and a per-second timeline; in-flight operations get a
-//! short grace period to finish before workers are aborted.
+//! [`run`] drives one tokio task for each configured connection. Workers pace
+//! through a shared token bucket under [`RateSpec::Fixed`] and free-run under
+//! [`RateSpec::Saturate`]. A lost connection starts a reconnect with backoff,
+//! and that repeats forever, because faults are expected to kill links
+//! mid-run. A per-operation timeout turns a blackholed link into an
+//! `unavailable` count instead of a hung worker. The workload first drives
+//! `warmup` of unrecorded load. Its `duration` window then records per-class
+//! HDR histograms (1µs..60s, 3 significant figures), commit and failure
+//! counters, the error taxonomy, and a per-second timeline. In-flight
+//! operations get a short grace period to finish before the harness aborts the
+//! workers.
 
 use std::{
     collections::BTreeMap,
@@ -83,8 +87,8 @@ use crate::{
     scenario::{MixSpec, RateSpec, TopologySpec, WorkloadSpec},
 };
 
-/// Width of one range's id span; table `t{r * RANGE_SPAN}` lands on range
-/// `r` (matches `scripts/gres-range-scaling.sh`).
+/// Width of one range's id span. Table `t{r * RANGE_SPAN}` lands on range
+/// `r`. This matches `scripts/gres-range-scaling.sh`.
 const RANGE_SPAN: i64 = 1_000_000;
 /// Width of one worker's insert-id space.
 const WORKER_ID_SPAN: i64 = 1_000_000;
@@ -134,11 +138,12 @@ const ALL_CLASSES: [OpClass; 4] = [
 pub struct WorkloadOutcome {
     /// Transactions committed inside the measurement window.
     pub committed: u64,
-    /// Transactions that ultimately failed (retries exhausted or fatal).
+    /// Transactions that failed in the end, because the retries ran out or
+    /// the error was fatal.
     pub failed: u64,
     /// Latency distribution per class.
     pub latency_by_class: BTreeMap<OpClass, LatencySummary>,
-    /// Per-second committed/error counts.
+    /// Per-second committed counts and error counts.
     pub timeline: Vec<SecondSample>,
     /// Error taxonomy totals.
     pub errors: ErrorSummary,
@@ -148,13 +153,14 @@ pub struct WorkloadOutcome {
 
 /// Creates the workload schema and seed rows through one node.
 ///
-/// Any node's front door works: gateways route DDL and DML to every range
-/// engine, and DDL returns only after the cluster-wide catalog barrier, so
-/// the schema is visible everywhere once this returns.
+/// Any node's front door works. Gateways route DDL and DML to every range
+/// engine, and DDL returns only after the cluster-wide catalog barrier. The
+/// schema is therefore visible everywhere once this function returns.
 ///
 /// # Errors
 ///
-/// Returns an error if connecting or any DDL/seed statement fails.
+/// Returns an error if the connection fails, or if any DDL or seed statement
+/// fails.
 pub async fn prepare_schema(
     endpoint: &SqlEndpoint,
     workload: &WorkloadSpec,
@@ -169,10 +175,11 @@ pub async fn prepare_schema(
     .await
 }
 
-/// Creates schema with explicit harness policy.
+/// Creates the schema with an explicit harness policy.
 ///
 /// # Errors
-/// Returns an error if connecting or any DDL/seed statement fails.
+/// Returns an error if the connection fails, or if any DDL or seed statement
+/// fails.
 pub async fn prepare_schema_with_policy(
     endpoint: &SqlEndpoint,
     workload: &WorkloadSpec,
@@ -189,12 +196,13 @@ pub async fn prepare_schema_with_policy(
     Ok(())
 }
 
-/// Every statement [`prepare_schema`] issues, in order: per range table a
-/// `DROP TABLE IF EXISTS` then its `CREATE TABLE`, the same pair for the
-/// hot table, then the hot-table seed `INSERT`s. Statements are issued one
-/// at a time — each in its own implicit transaction — because external
-/// targets (`run --external`) may not accept DDL inside a multi-statement
-/// batch.
+/// Every statement that [`prepare_schema`] issues, in order. For each range
+/// table it issues a `DROP TABLE IF EXISTS` and then its `CREATE TABLE`. It
+/// issues the same pair for the hot table, then the hot-table seed `INSERT`s.
+///
+/// The driver issues the statements one at a time, each in its own implicit
+/// transaction, because an external target under `run --external` may not
+/// accept DDL inside a multi-statement batch.
 #[cfg(test)]
 fn schema_statements(ranges: u16, hot_rows: u32) -> Vec<String> {
     schema_statements_with_policy(ranges, hot_rows, LoadtestRuntimePolicy::default())
@@ -218,14 +226,14 @@ fn schema_statements_with_policy(
     statements
 }
 
-/// Runs warmup then the measured window against the given SQL endpoints
-/// (workers are spread round-robin across them).
+/// Runs the warmup and then the measured window against the given SQL
+/// endpoints. The workers spread round-robin across those endpoints.
 ///
 /// # Errors
 ///
-/// Returns an error only on harness-level failures (no endpoints to drive);
-/// workload-level errors are counted in the outcome, because faults are
-/// expected to cause them.
+/// Returns an error only on a harness-level failure, such as no endpoints to
+/// drive. Workload-level errors go into the counts in the outcome, because
+/// faults are expected to cause them.
 pub async fn run(
     endpoints: &[SqlEndpoint],
     workload: &WorkloadSpec,
@@ -240,7 +248,7 @@ pub async fn run(
     .await
 }
 
-/// Runs a workload with explicit harness policy.
+/// Runs a workload with an explicit harness policy.
 ///
 /// # Errors
 /// Returns an error when no SQL endpoints are available.
@@ -302,11 +310,11 @@ pub async fn run_with_policy(
 /// Table layout the operations target.
 #[derive(Debug, Clone, Copy)]
 struct TableLayout {
-    /// Number of ranges (one `t{r * RANGE_SPAN}` table each).
+    /// Number of ranges. Each range has one `t{r * RANGE_SPAN}` table.
     ranges: u16,
-    /// Numeric id of the hot table (inside the last range's span).
+    /// Numeric id of the hot table. It sits inside the last range's span.
     hot_table_id: i64,
-    /// Worker count, bounding the live insert-id space for reads.
+    /// Worker count. It bounds the live insert-id space for reads.
     connections: u32,
 }
 
@@ -346,15 +354,15 @@ fn build_context(
     }
 }
 
-/// The endpoint index a worker's connection dials: round-robin over every
-/// node's front door, for writes and reads alike (any gateway routes DML
-/// and DDL for ranges it does not host).
+/// The endpoint index that a worker's connection dials. The choice is
+/// round-robin over every node's front door, for writes and reads alike. Any
+/// gateway routes DML and DDL for the ranges it does not host.
 fn route_worker(worker: u32, endpoint_count: usize) -> usize {
     usize::try_from(worker).unwrap_or(usize::MAX) % endpoint_count.max(1)
 }
 
-/// The numeric id of range `range`'s table; the table lands on that range
-/// because its id falls inside the range's boundary span.
+/// The numeric id of the table of range `range`. The table lands on that
+/// range, because its id falls inside the range's boundary span.
 fn range_table_id(range: u16) -> i64 {
     i64::from(range) * RANGE_SPAN
 }
@@ -364,9 +372,9 @@ fn hot_table_id(ranges: u16) -> i64 {
     i64::from(ranges.saturating_sub(1)) * RANGE_SPAN + 1
 }
 
-/// A unique-ish `int4` insert value: disjoint per-worker id spaces, wrapping
-/// so long runs stay within `int4` (duplicates are harmless — the tables
-/// carry no unique constraint).
+/// An almost-unique `int4` insert value. The per-worker id spaces are
+/// disjoint, and the counter wraps so that long runs stay within `int4`.
+/// Duplicates are harmless, because the tables carry no unique constraint.
 fn insert_id(worker: u32, counter: u64) -> i64 {
     let base = i64::from(worker % WORKER_SLOTS) * WORKER_ID_SPAN;
     let offset = i64::try_from(counter % WORKER_COUNTER_SPAN).unwrap_or(0);
@@ -505,11 +513,12 @@ enum FailureKind {
     Unavailable,
     /// A live connection was closed or reset mid-operation.
     ConnectionLost,
-    /// Any other error (non-retryable `SQLSTATE`s included).
+    /// Any other error, including a non-retryable `SQLSTATE`.
     Other,
 }
 
-/// Classifies a driver error: `SQLSTATE` first, then transport inspection.
+/// Classifies a driver error. It reads the `SQLSTATE` first, then inspects
+/// the transport.
 fn classify(error: &tokio_postgres::Error) -> FailureKind {
     if let Some(code) = error.code() {
         return classify_sqlstate(code);
@@ -554,8 +563,8 @@ fn classify_transport(kind: Option<IoErrorKind>) -> FailureKind {
     }
 }
 
-/// Zipf sampler over ranks `1..=n` with probability proportional to
-/// `1 / rank^s`, via a precomputed CDF and binary search.
+/// Zipf sampler over ranks `1..=n`, with probability proportional to
+/// `1 / rank^s`. It uses a precomputed CDF and a binary search.
 #[derive(Debug, Clone)]
 struct ZipfSampler {
     cdf: Vec<f64>,
@@ -583,13 +592,13 @@ impl ZipfSampler {
     }
 }
 
-/// Continuously-refilled token bucket shared by all workers; capacity is one
-/// second of tokens, starting empty.
+/// Continuously-refilled token bucket that all workers share. Its capacity is
+/// one second of tokens, and it starts empty.
 ///
-/// Tokens are dimensionless permits, so the refill is the [`Ratio`] of a
-/// measured extent to the bucket's rate and the wait is the deficit divided
-/// by that same rate — both checked by the compiler rather than by a
-/// hand-written seconds multiply.
+/// Tokens are dimensionless permits. The refill is therefore the [`Ratio`] of
+/// a measured extent to the bucket's rate, and the wait is the deficit divided
+/// by that same rate. The compiler checks both, in place of a hand-written
+/// multiply by seconds.
 #[derive(Debug)]
 struct TokenBucket {
     state: Mutex<BucketState>,
@@ -669,7 +678,7 @@ impl Default for SecondAccum {
     }
 }
 
-/// Shared measurement state; every mutation is gated on `recording`.
+/// Shared measurement state. Every mutation is gated on `recording`.
 struct Stats {
     recording: AtomicBool,
     committed: AtomicU64,
@@ -713,7 +722,7 @@ impl Stats {
         second.latency_sum += elapsed;
     }
 
-    /// A transaction that ultimately failed.
+    /// A transaction that failed in the end.
     fn record_failure(&self, kind: FailureKind) {
         if !self.recording() {
             return;
@@ -722,7 +731,7 @@ impl Stats {
         self.bump_error(kind);
     }
 
-    /// A failed connection attempt (no transaction was in flight).
+    /// A failed connection attempt, with no transaction in flight.
     fn record_connect_failure(&self, kind: FailureKind) {
         if !self.recording() {
             return;
@@ -771,9 +780,9 @@ fn class_index(class: OpClass) -> usize {
     }
 }
 
-/// HDR histogram with the workspace-standard latency bounds
-/// (see `crates/bench-driver/src/hist.rs`). The recorder counts whole
-/// microseconds, which is the unit the bounds convert into.
+/// HDR histogram with the workspace-standard latency bounds. See
+/// `crates/bench-driver/src/hist.rs`. The recorder counts whole microseconds,
+/// which is the unit the bounds convert into.
 #[cfg(test)]
 fn new_histogram() -> Histogram<u64> {
     new_histogram_with_policy(LoadtestRuntimePolicy::default())
@@ -800,8 +809,8 @@ fn record_latency(histogram: &mut Histogram<u64>, latency: Time) {
     let _ = histogram.record(value);
 }
 
-/// A histogram reading, which `hdrhistogram` reports in the microseconds it
-/// was fed, as a latency.
+/// A histogram reading as a latency. `hdrhistogram` reports the reading in
+/// the microseconds that the recorder fed it.
 fn micros_reading(micros_count: f64) -> Time {
     micros(1) * micros_count
 }
@@ -870,7 +879,8 @@ async fn connect(endpoint: &SqlEndpoint) -> Result<Client, tokio_postgres::Error
     Ok(client)
 }
 
-/// Connects to one endpoint, retrying within the configured startup budget.
+/// Connects to one endpoint and retries within the configured startup
+/// budget.
 async fn connect_with_retry(
     endpoint: &SqlEndpoint,
     policy: LoadtestRuntimePolicy,
@@ -893,7 +903,8 @@ async fn connect_with_retry(
     }
 }
 
-/// One (re)connectable client with its own reconnect backoff.
+/// One client that can connect and reconnect, with its own reconnect
+/// backoff.
 struct ConnectionSlot {
     endpoint: SqlEndpoint,
     client: Option<Client>,
@@ -911,10 +922,13 @@ impl ConnectionSlot {
         }
     }
 
-    /// Returns the live client, making one (re)connect attempt if the slot
-    /// is empty. `None` means the attempt failed — already counted, backoff
-    /// already slept (stop-aware) — so the caller just continues its loop;
-    /// a worker is never wedged on one endpoint while another could serve.
+    /// Returns the live client. If the slot is empty, this method makes one
+    /// connect attempt first.
+    ///
+    /// `None` means that the attempt failed. The method has already counted
+    /// the failure and already slept the backoff, and that sleep is
+    /// stop-aware. The caller therefore continues its loop. A worker is never
+    /// stuck on one endpoint while another endpoint could serve it.
     async fn ensure_connected(
         &mut self,
         worker: u32,
@@ -968,8 +982,9 @@ impl ConnectionSlot {
     }
 }
 
-/// One worker: pick a class, run it on the worker's connection
-/// (reconnecting with backoff as needed, forever), until told to stop.
+/// One worker. It picks a class and runs it on the worker's connection until
+/// the harness tells it to stop. It reconnects with backoff whenever it must,
+/// and it does so forever.
 async fn worker_loop(
     context: Arc<WorkerContext>,
     worker: u32,
@@ -1091,9 +1106,10 @@ async fn run_op(
     }
 }
 
-/// Sends a plan over one connection: autocommit statement, or
-/// `BEGIN`/statements/`COMMIT` with best-effort `ROLLBACK` on error
-/// (the pattern proven in `crates/gres-ranges/tests/jepsen_bank.rs`).
+/// Sends a plan over one connection. The plan is either an autocommit
+/// statement, or `BEGIN`, the statements, and `COMMIT`, with a best-effort
+/// `ROLLBACK` on error. `crates/gres-ranges/tests/jepsen_bank.rs` proves this
+/// pattern.
 async fn execute_plan(client: &Client, plan: &OpPlan) -> Result<(), tokio_postgres::Error> {
     match plan {
         OpPlan::Statement(sql) => client.simple_query(sql).await.map(|_| ()),
@@ -1290,7 +1306,7 @@ mod tests {
         }
     }
 
-    /// HDR buckets are three-significant-figure wide, so a reading at the
+    /// HDR buckets are three significant figures wide, so a reading at the
     /// histogram ceiling lands just above the configured bound.
     const BUCKET_SLACK: Ratio = percent(1);
 

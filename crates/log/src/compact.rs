@@ -1,17 +1,16 @@
-//! Log compaction primitives. Pure-ish helpers that operate on
-//! [`Segment`] handles and the on-disk file layout, used by
-//! [`crate::Log::compact`].
+//! Log compaction primitives. These are almost-pure helpers that work on
+//! [`Segment`] handles and the on-disk file layout. [`crate::Log::compact`]
+//! uses them.
 //!
-//! The algorithm is single-pass over the **sealed** segment list,
-//! oldest-to-newest, building a key→latest-offset map and then
-//! rewriting the surviving records into a single new segment at the
-//! lowest input base offset. The active segment is never touched.
+//! The algorithm makes a single pass over the **sealed** segment list, from
+//! oldest to newest. It builds a key-to-latest-offset map, then rewrites the
+//! surviving records into a single new segment at the lowest input base
+//! offset. It never touches the active segment.
 //!
-//! Records with `key.is_none()` are dropped (matches Kafka's
-//! `LogCleaner`). Tombstones (records with `key.is_some()` and
-//! `value.is_none()`) are treated like any other value and are kept
-//! as the most-recent entry for their key. `delete.retention.ms`
-//! ages them out.
+//! The algorithm drops records with `key.is_none()`, as Kafka's `LogCleaner`
+//! does. A tombstone is a record with `key.is_some()` and `value.is_none()`.
+//! The algorithm treats a tombstone like any other value and keeps it as the
+//! most-recent entry for its key. `delete.retention.ms` ages tombstones out.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -47,13 +46,14 @@ use crate::{
 pub(crate) struct BatchMeta {
     pub is_control: bool,
     pub producer_id: ProducerId,
-    /// The batch's existing delete horizon (`base_timestamp` when bit 6 is
-    /// set), `None` if the batch has never been stamped.
+    /// The batch's existing delete horizon, which is `base_timestamp` when
+    /// bit 6 is set. It is `None` if the batch has never been stamped.
     pub existing_horizon: Option<i64>,
 }
 
-/// Compute the delete horizon timestamp: `now + delete.retention.ms`. The
-/// tombstone/marker is retained until wall-clock reaches this value.
+/// Compute the delete horizon timestamp: `now + delete.retention.ms`. The log
+/// retains the tombstone or the marker until the wall clock reaches this
+/// value.
 #[must_use]
 #[allow(dead_code)]
 pub(crate) const fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
@@ -84,19 +84,20 @@ pub(crate) const fn retain_decision(
     )
 }
 
-/// `build_offset_map` filter; the control-batch bug fix lives here. Control-batch
-/// records carry a control-type key (commit/abort marker) that must NEVER enter
-/// the dedup map. Null-key data is also never indexed.
+/// `build_offset_map` filter. The control-batch bug fix is here.
+/// Control-batch records carry a control-type key, a commit or abort marker,
+/// that must NEVER enter the dedup map. Null-key data is also never indexed.
 pub(crate) fn should_index_key(key: Option<&[u8]>, is_control_batch: bool) -> bool {
     !is_control_batch && key.is_some()
 }
 
-/// Reinterpret per-record timestamp deltas (`i64`) when stamping a delete
-/// horizon into `base_timestamp`, preserving each record's absolute timestamp.
+/// Reinterpret the per-record `i64` timestamp deltas when a delete horizon
+/// goes into `base_timestamp`. Each record keeps its absolute timestamp.
 ///
-/// Exercised by `core_tests` and the upcoming stateright/proptest model; the
-/// production rewrite path delegates the same arithmetic to
-/// `RecordBatch::with_delete_horizon`, hence `dead_code` outside tests.
+/// `core_tests` and the planned stateright and proptest model exercise this
+/// function. The production rewrite path delegates the same arithmetic to
+/// `RecordBatch::with_delete_horizon`, so the function is `dead_code` outside
+/// tests.
 #[allow(dead_code)]
 pub(crate) fn rewrite_batch_horizon(
     base_timestamp: i64,
@@ -110,13 +111,14 @@ pub(crate) fn rewrite_batch_horizon(
     (horizon, new)
 }
 
-/// Whether a transactional producer's data is fully compacted away: the
-/// `producer_id` is not in the `survivors` set of producers with a
-/// surviving data record.
+/// Whether compaction removed all of a transactional producer's data. That is
+/// true when the `producer_id` is not in the `survivors` set, the set of
+/// producers with a surviving data record.
 ///
-/// The production rewrite path uses [`CleanedTransactionMetadata::txn_state`]
-/// (which folds this in); this standalone form exists for `core_tests` and
-/// the upcoming stateright/proptest model.
+/// The production rewrite path uses
+/// [`CleanedTransactionMetadata::txn_state`], which folds this check in. This
+/// standalone form exists for `core_tests` and the planned stateright and
+/// proptest model.
 #[allow(dead_code)]
 pub(crate) fn txn_data_fully_gone(
     producer_id: ProducerId,
@@ -319,12 +321,14 @@ mod core_tests {
     }
 }
 
-/// Read every `RecordBatch` from a sealed segment by streaming the
-/// whole `.log` file directly. We bypass `Segment::read` because that
-/// path early-returns when the segment's in-memory `last_offset` is
-/// stale (sealed segments loaded from disk via `Segment::open` have
-/// `last_offset = base_offset - 1` until a tail-scan populates it,
-/// and `Segment::read(base_offset, ..)` would short-circuit to empty).
+/// Read every `RecordBatch` from a sealed segment. This function streams the
+/// whole `.log` file directly.
+///
+/// It avoids `Segment::read`, because that path returns early when the
+/// segment's in-memory `last_offset` is stale. A sealed segment loaded from
+/// disk through `Segment::open` has `last_offset = base_offset - 1` until a
+/// tail scan fills it in, so `Segment::read(base_offset, ..)` would
+/// short-circuit to an empty result.
 fn read_all_batches(seg: &Segment) -> Result<Vec<RecordBatch>, LogError> {
     let path = name::log_path(seg.dir(), seg.base_offset().0);
     let bytes = std::fs::read(&path)?;
@@ -339,12 +343,13 @@ fn read_all_batches(seg: &Segment) -> Result<Vec<RecordBatch>, LogError> {
     Ok(out)
 }
 
-/// Build a map of `key → latest absolute offset` across the given
-/// sealed segments in input order. Records with `key.is_none()` are
-/// excluded (they will be dropped by [`rewrite_segments`]).
+/// Build a map of `key → latest absolute offset` across the given sealed
+/// segments in input order.
 ///
-/// The map's value is the absolute offset of the **newest** record
-/// observed for each key (later writes overwrite earlier ones).
+/// The map excludes records with `key.is_none()`, because
+/// [`rewrite_segments`] drops them. The map's value is the absolute offset of
+/// the **newest** record seen for each key. Later writes overwrite earlier
+/// ones.
 #[instrument(
     level = "debug",
     skip_all,
@@ -379,14 +384,16 @@ pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, Offset>,
     Ok(map)
 }
 
-/// Per-producer transactional-data survival, computed in a first pass over
-/// the sealed segments. KIP-534 keeps a transaction's commit/abort marker as
-/// long as any of that transaction's data records survive compaction; once
-/// the data is fully gone the marker ages out via the delete horizon.
+/// Per-producer transactional-data survival, computed in a first pass over the
+/// sealed segments.
 ///
-/// Seeded with aborted-txn entries from each sealed segment's `.txnindex` so
-/// the rewritten survivor `.txnindex` can be reconstructed for transactions
-/// whose data still partially survives.
+/// KIP-534 keeps a transaction's commit or abort marker as long as any of that
+/// transaction's data records survive compaction. Once compaction removes all
+/// of the data, the marker ages out through the delete horizon.
+///
+/// This type is seeded with the aborted-txn entries from each sealed segment's
+/// `.txnindex`, so the rewrite can rebuild the survivor `.txnindex` for
+/// transactions whose data still partly survives.
 pub struct CleanedTransactionMetadata {
     /// Producers (`producer_id`) with at least one surviving data record.
     survivors: HashSet<ProducerId>,
@@ -396,10 +403,10 @@ pub struct CleanedTransactionMetadata {
 }
 
 impl CleanedTransactionMetadata {
-    /// Build the metadata: for each producer, whether any of its
-    /// transactional DATA records will survive (a data record that is
-    /// newest-for-key per `offset_map`). Aborted-txn entries are seeded from
-    /// every sealed segment's `.txnindex`.
+    /// Build the metadata. For each producer, this records whether any of its
+    /// transactional DATA records will survive, that is, a data record that is
+    /// newest-for-key in `offset_map`. The aborted-txn entries come from every
+    /// sealed segment's `.txnindex`.
     #[instrument(
         level = "debug",
         skip_all,
@@ -459,9 +466,10 @@ impl CleanedTransactionMetadata {
     }
 
     /// Aborted-txn entries to carry forward into the rewritten survivor
-    /// `.txnindex`: those whose aborted data still partially survives (the
-    /// producer is in the survivor set). Entries for producers whose data is
-    /// fully gone are dropped along with the (now-removable) marker.
+    /// `.txnindex`. These are the entries whose aborted data still partly
+    /// survives, that is, the producer is in the survivor set. The rewrite
+    /// drops the entries of producers whose data is fully gone, together with
+    /// the marker, which is then removable.
     fn retained_aborted(&self) -> impl Iterator<Item = &AbortedTxn> {
         self.aborted
             .iter()
@@ -512,9 +520,9 @@ mod build_map_tests {
         seg
     }
 
-    /// Write a sealed segment containing the given batches verbatim
-    /// (`base_offset`/attributes/`producer_id` preserved). Lets tests build
-    /// control batches and mixed data/control layouts.
+    /// Write a sealed segment that holds the given batches verbatim, with
+    /// `base_offset`, attributes, and `producer_id` preserved. Tests use it to
+    /// build control batches and mixed data and control layouts.
     pub(super) fn write_sealed_batches(dir: &Path, batches: &[RecordBatch]) -> Segment {
         let base = batches.first().map_or(0, |b| b.base_offset);
         let mut seg = Segment::create(dir, Offset(base)).unwrap();
@@ -525,8 +533,8 @@ mod build_map_tests {
         seg
     }
 
-    /// A control batch carrying a single commit/abort marker record. The
-    /// marker key is `(version: i16, marker_type: i16)` big-endian.
+    /// A control batch that carries a single commit or abort marker record.
+    /// The marker key is `(version: i16, marker_type: i16)` big-endian.
     pub(super) fn control_batch(
         base_offset: i64,
         producer_id: i64,
@@ -676,20 +684,20 @@ mod build_map_tests {
     }
 }
 
-/// Result of [`rewrite_segments`]: paths to the three `.swap` files
-/// that should be promoted by [`atomic_swap`].
+/// Result of [`rewrite_segments`]: paths to the three `.swap` files that
+/// [`atomic_swap`] should promote.
 pub struct RewriteOutput {
     pub log_swap: PathBuf,
     pub index_swap: PathBuf,
     pub timeindex_swap: PathBuf,
-    /// `base_offset` of the new segment (== lowest input segment).
+    /// `base_offset` of the new segment. It equals the lowest input segment.
     pub new_base_offset: Offset,
     /// Highest absolute offset of any surviving record.
     #[allow(dead_code)]
     pub new_last_offset: Offset,
-    /// Path to the rewritten survivor `.txnindex`, written only when any
-    /// aborted-txn entries were carried forward. `None` when no aborted
-    /// transactions survive.
+    /// Path to the rewritten survivor `.txnindex`. The rewrite writes this
+    /// file only when it carries forward one or more aborted-txn entries. It
+    /// is `None` when no aborted transaction survives.
     pub txnindex_swap: Option<PathBuf>,
 }
 
@@ -702,7 +710,7 @@ pub struct RewriteRetention {
     pub delete_retention: Time,
 }
 
-/// Stream `segments` (oldest → newest) into new `.swap` files, applying the
+/// Stream `segments`, oldest to newest, into new `.swap` files and apply the
 /// KIP-534 per-record [`retain_decision`].
 ///
 /// For each record the decision is:
@@ -711,18 +719,19 @@ pub struct RewriteRetention {
 ///     delete horizon `h` (bit 6 set, `base_timestamp = h`).
 ///   - `Delete` → drop it.
 ///
-/// Records keep their **absolute** offsets — the output `RecordBatch`es may
-/// contain gaps in their `offset_delta` values where superseded records used
-/// to live. This matches Kafka's on-disk format for compacted topics.
+/// Records keep their **absolute** offsets. The output `RecordBatch`es can
+/// therefore hold gaps in their `offset_delta` values where superseded records
+/// used to live. This matches Kafka's on-disk format for compacted topics.
 ///
-/// `RETAIN_EMPTY`: a batch that ends up with no kept records is normally
-/// skipped, but it is re-emitted as a bare header (no records) when it is the
-/// last batch of an active producer (`active_producers`) or the last batch of
-/// the consolidated output — preserving producer sequence/epoch and the
-/// log-end offset (Kafka's `retainEmpty`).
+/// `RETAIN_EMPTY`: this function normally skips a batch that ends up with no
+/// kept records. It writes such a batch again as a bare header with no records
+/// in two cases: when the batch is the last batch of an active producer in
+/// `active_producers`, and when it is the last batch of the consolidated
+/// output. The producer sequence, the producer epoch, and the log-end offset
+/// therefore survive. This is Kafka's `retainEmpty`.
 ///
-/// The `.swap` files are written to the segments' shared directory. Caller is
-/// responsible for fsyncing + promoting via [`atomic_swap`].
+/// This function writes the `.swap` files to the segments' shared directory.
+/// The caller must fsync them and promote them through [`atomic_swap`].
 #[instrument(
     level = "info",
     skip_all,
@@ -940,7 +949,8 @@ pub fn rewrite_segments(
 }
 
 /// Kafka's default `index.interval.bytes`. The compaction tests do not
-/// exercise sparse-index density, so they all pass the default through.
+/// exercise sparse-index density, so they all pass the default value
+/// through.
 #[cfg(test)]
 const INDEX_INTERVAL: ByteSize = crabka_units::kibibytes(4);
 
@@ -1101,8 +1111,8 @@ mod rewrite_tests {
         );
     }
 
-    /// (a) End-to-end control-batch bug fix: two commit markers at different
-    /// offsets BOTH survive when their transactions' data survives.
+    /// (a) End-to-end control-batch bug fix. Two commit markers at different
+    /// offsets BOTH survive when the data of their transactions survives.
     #[test]
     fn rewrite_both_commit_markers_survive_when_data_survives() {
         let dir = tempfile::tempdir().unwrap();
@@ -1201,8 +1211,8 @@ mod rewrite_tests {
         );
     }
 
-    /// (c) A commit marker whose transaction's data is fully gone and whose
-    /// existing horizon has elapsed is dropped.
+    /// (c) The rewrite drops a commit marker when the data of its transaction
+    /// is fully gone and its existing horizon has elapsed.
     #[test]
     fn rewrite_marker_dropped_when_data_gone_and_horizon_elapsed() {
         let dir = tempfile::tempdir().unwrap();
@@ -1252,9 +1262,9 @@ mod rewrite_tests {
         );
     }
 
-    /// (d) `RETAIN_EMPTY`: an active producer's fully-emptied batch is
-    /// re-emitted as a bare header (no records), preserving
-    /// `producer_id`/`epoch`/`sequence`.
+    /// (d) `RETAIN_EMPTY`: the rewrite writes the fully-emptied batch of an
+    /// active producer again as a bare header with no records. `producer_id`,
+    /// `epoch`, and `sequence` survive.
     #[test]
     fn rewrite_retain_empty_for_active_producer() {
         let dir = tempfile::tempdir().unwrap();
@@ -1382,9 +1392,8 @@ mod rewrite_tests {
     }
 }
 
-/// Promote the three `.swap` files produced by [`rewrite_segments`]
-/// to final segment files, deleting all consumed sealed segments in
-/// between.
+/// Promote the three `.swap` files that [`rewrite_segments`] produced to final
+/// segment files, and delete all consumed sealed segments in between.
 ///
 /// Algorithm (crash-safe):
 ///   1. `fsync` each `.swap` file.
@@ -1531,11 +1540,11 @@ mod swap_tests {
 #[path = "compact_model.rs"]
 mod compact_model;
 
-/// Proptest fuzz of the same KIP-534 retention cores at large N: a randomized
-/// op sequence is folded into an abstract log, every `Compact` is checked for
-/// convergence/idempotence, monotone shrink, no-data-loss, marker safety,
-/// tombstone aging, and single-horizon stamping. A separate prop checks the
-/// real `RecordBatch` delete-horizon wire round-trip.
+/// Proptest fuzz of the same KIP-534 retention cores at large N. The test
+/// folds a randomized op sequence into an abstract log. It checks every
+/// `Compact` for convergence, idempotence, monotone shrink, no data loss,
+/// marker safety, tombstone aging, and a single horizon stamp. A separate prop
+/// checks the delete-horizon wire round-trip of a real `RecordBatch`.
 #[cfg(test)]
 mod retention_fuzz {
     use proptest::prelude::*;
@@ -1565,8 +1574,9 @@ mod retention_fuzz {
         Compact,
     }
 
-    /// Key→newest-index dedup map over keyed data entries (control never
-    /// indexed), mirroring the production `build_offset_map` filter.
+    /// Key-to-newest-index dedup map over keyed data entries. Control entries
+    /// are never indexed. This mirrors the production `build_offset_map`
+    /// filter.
     fn offset_map(log: &[Entry]) -> std::collections::HashMap<u8, usize> {
         let mut map = std::collections::HashMap::new();
         for (idx, e) in log.iter().enumerate() {
@@ -1581,8 +1591,8 @@ mod retention_fuzz {
         map
     }
 
-    /// Producers (by key == pid association) whose newest-for-key live data
-    /// survives.
+    /// Producers whose newest-for-key live data survives. The association is
+    /// by key, where key equals pid.
     fn data_survives(
         log: &[Entry],
         map: &std::collections::HashMap<u8, usize>,
@@ -1611,8 +1621,9 @@ mod retention_fuzz {
         }
     }
 
-    /// One compaction pass: apply the real `retain_decision` to each entry,
-    /// returning the next log. Mirrors the abstract applier in the model.
+    /// One compaction pass. This function applies the real `retain_decision`
+    /// to each entry and returns the next log. It mirrors the abstract applier
+    /// in the model.
     fn compact(log: &[Entry], clock: i64, ret_ms: i64) -> Vec<Entry> {
         let map = offset_map(log);
         let survivors = data_survives(log, &map);
@@ -1762,8 +1773,9 @@ mod retention_fuzz {
         }
     }
 
-    /// `prop_assert_eq` is macro-bound to a `proptest!` body; inside a plain fn
-    /// we use a panicking equality so a mismatch surfaces as a case failure.
+    /// `prop_assert_eq` is macro-bound to a `proptest!` body. Inside a plain
+    /// fn this helper uses a panicking equality instead, so a mismatch shows up
+    /// as a case failure.
     fn prop_assert_eq_inner(a: &[Entry], b: &[Entry]) {
         assert2::assert!(a == b);
     }
@@ -1794,8 +1806,8 @@ mod retention_fuzz {
             }
         }
 
-        /// Wire round-trip: a real `RecordBatch` with two keyed records gets a
-        /// random delete horizon stamped, then encode→decode must preserve
+        /// Wire round-trip. A real `RecordBatch` with two keyed records gets
+        /// a random delete horizon stamp. The encode and decode must then keep
         /// `delete_horizon_ms()` and every record's absolute timestamp.
         #[test]
         fn delete_horizon_wire_round_trip(

@@ -1,6 +1,6 @@
-//! Codec helpers for `ConsumerProtocol` subscription / assignment payloads,
-//! and the [`AutoOffsetReset`] / [`IsolationLevel`] enums used by
-//! [`Consumer::builder`].
+//! Codec helpers for the `ConsumerProtocol` subscription and assignment
+//! payloads, plus the [`AutoOffsetReset`] and [`IsolationLevel`] enums that
+//! [`Consumer::builder`] uses.
 
 use bytes::{Bytes, BytesMut};
 
@@ -9,11 +9,11 @@ use bytes::{Bytes, BytesMut};
 pub enum AutoOffsetReset {
     /// Start from offset 0.
     Earliest,
-    /// Start from the log-end offset. Resolved lazily by `Consumer::poll`
-    /// using `ListOffsets(timestamp=-1)`.
+    /// Start from the log-end offset. `Consumer::poll` resolves it lazily with
+    /// `ListOffsets(timestamp=-1)`.
     Latest,
-    /// Do not reset automatically. On a missing offset or detected truncation,
-    /// `poll` returns `ConsumerError::LogTruncation` / surfaces the error.
+    /// Do not reset automatically. On a missing offset or a detected truncation,
+    /// `poll` returns `ConsumerError::LogTruncation` and surfaces the error.
     None,
 }
 
@@ -32,8 +32,8 @@ impl std::str::FromStr for AutoOffsetReset {
 
 /// Controls which records are visible to this consumer.
 ///
-/// Maps to Kafka's `isolation.level` configuration and the `isolation_level`
-/// field in the `Fetch` request (wire value: `i8`).
+/// This maps to Kafka's `isolation.level` configuration and to the
+/// `isolation_level` field in the `Fetch` request, whose wire value is an `i8`.
 ///
 /// The default is [`ReadUncommitted`](IsolationLevel::ReadUncommitted) for
 /// backward compatibility.
@@ -42,8 +42,8 @@ pub enum IsolationLevel {
     /// All records are visible, including those from open or aborted
     /// transactions. Equivalent to `isolation.level=read_uncommitted`.
     ReadUncommitted,
-    /// Only records from committed transactions (and non-transactional
-    /// records) are visible. Equivalent to `isolation.level=read_committed`.
+    /// Only records from committed transactions, plus non-transactional
+    /// records, are visible. Equivalent to `isolation.level=read_committed`.
     ReadCommitted,
 }
 
@@ -60,7 +60,7 @@ impl std::str::FromStr for IsolationLevel {
 }
 
 impl IsolationLevel {
-    /// Returns the wire encoding used in the `Fetch` request (`i8`).
+    /// Returns the `i8` wire encoding that the `Fetch` request uses.
     pub(crate) fn wire(self) -> i8 {
         match self {
             IsolationLevel::ReadUncommitted => 0,

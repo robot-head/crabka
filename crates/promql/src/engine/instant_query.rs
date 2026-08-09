@@ -14,7 +14,7 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Evaluate an instant query at `time_ms`.
+    /// Evaluates an instant query at `time_ms`.
     ///
     /// # Errors
     ///
@@ -30,8 +30,10 @@ impl<S: MetricStore> PromqlEngine<S> {
             .map(|(result, _)| result)
     }
 
-    /// Evaluate an instant query at `time_ms`, returning any warnings/infos
-    /// raised during evaluation alongside the result.
+    /// Evaluates an instant query at `time_ms` and returns the annotations.
+    ///
+    /// The annotations are the warnings and infos that the evaluation raised.
+    /// This method returns them with the result.
     ///
     /// # Errors
     ///
@@ -65,20 +67,19 @@ impl<S: MetricStore> PromqlEngine<S> {
             .await
     }
 
-    /// Dispatch a top-level instant query.
+    /// Dispatches a top-level instant query.
     ///
-    /// The query is handed to the recursive operator planner
-    /// (`Self::plan_instant_expr`), which dispatches on the `PromQL` `Expr` node
-    /// kind and assembles a `DataFusion` `LogicalPlan` over the custom operators
-    /// (plus the shared leaf kernels it reuses for histogram-bearing and other
-    /// directly-materialized shapes). The planner is **total**: it returns
-    /// `Ok(Some(..))` for every valid query and `Err(..)` for every invalid one,
-    /// and never `Ok(None)`. The plan is executed and its output batches assembled
-    /// into the result.
+    /// This method passes the query to the recursive operator planner
+    /// (`Self::plan_instant_expr`). The planner dispatches on the `PromQL` `Expr`
+    /// node kind and assembles a `DataFusion` `LogicalPlan` over the custom
+    /// operators. It also reuses the shared leaf kernels for histogram-bearing
+    /// shapes and other directly-materialized shapes. The planner is total: it
+    /// returns `Ok(Some(..))` for every valid query and `Err(..)` for every
+    /// invalid one, and never `Ok(None)`. This method then executes the plan and
+    /// assembles the output batches into the result.
     ///
-    /// `Ok(None)` is therefore unreachable; should it ever arise it is a planner
-    /// bug, surfaced as an internal `PromqlError::Plan` rather than silently
-    /// diverging.
+    /// `Ok(None)` is therefore unreachable. If it does occur, it is a planner
+    /// bug, and this method returns an internal `PromqlError::Plan`.
     #[tracing::instrument(
         name = "promql.eval_instant",
         level = "debug",

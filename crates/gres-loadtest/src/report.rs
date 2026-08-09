@@ -1,15 +1,16 @@
 //! Serialisable run results and their Markdown rendering.
 //!
-//! [`RunReport`] is the harness's durable output: written as JSON next to a
-//! rendered Markdown summary. [`render_comparison`] lines up two reports of
-//! the same scenario under different timestamp modes.
+//! [`RunReport`] is the harness's durable output. The harness writes it as
+//! JSON next to a rendered Markdown summary. [`render_comparison`] lines up
+//! two reports of the same scenario under different timestamp modes.
 //!
-//! Dimensioned fields are [`crabka_units`] quantities. Values a person reads
-//! off the report — the applied-fault offsets, peak RSS, the headline rates —
-//! serialize in their human form (`"20s"`, `"512MiB"`, `"1000/s"`); values
-//! that get compared or plotted — latency percentiles, the per-second
-//! timeline, CPU totals — serialize as exact integers in a named unit, so a
-//! plotting script never has to parse a suffix.
+//! Dimensioned fields are [`crabka_units`] quantities. Values that a person
+//! reads off the report serialize in their human form, such as `"20s"`,
+//! `"512MiB"`, and `"1000/s"`. Those are the applied-fault offsets, the peak
+//! RSS, and the headline rates. Values that a tool compares or plots serialize
+//! as exact integers in a named unit, so a plotting script never has to parse
+//! a suffix. Those are the latency percentiles, the per-second timeline, and
+//! the CPU totals.
 
 use std::{
     collections::BTreeMap,
@@ -35,22 +36,25 @@ pub struct RunReport {
     pub scenario: String,
     /// Scenario description.
     pub description: String,
-    /// Timestamp-source mode the run used (display form of `ModeSpec`).
+    /// Timestamp-source mode the run used, in the display form of
+    /// `ModeSpec`.
     pub mode: String,
-    /// Wall-clock start of the measurement window (unix milliseconds).
+    /// Wall-clock start of the measurement window, in unix milliseconds.
     pub started_unix_ms: u64,
     /// Topology summary.
     pub topology: TopologySummary,
-    /// Measured window length (excludes warmup).
+    /// Measured window length. It excludes the warmup.
     #[serde(with = "millis_i64")]
     pub duration: Time,
     /// Aggregate throughput over the measurement window.
     pub throughput: ThroughputSummary,
-    /// Latency percentiles per operation class (kebab-case class names).
+    /// Latency percentiles for each operation class, under the kebab-case
+    /// class names.
     pub latency_by_class: BTreeMap<String, LatencySummary>,
     /// Error and retry counts over the measurement window.
     pub errors: ErrorSummary,
-    /// Per-second progress timeline (throughput dips make faults visible).
+    /// Per-second progress timeline. Dips in throughput make the faults
+    /// visible.
     pub timeline: Vec<SecondSample>,
     /// Per-process resource usage over the measurement window.
     pub resources: Vec<ProcessResources>,
@@ -74,7 +78,7 @@ pub struct TopologySummary {
 pub struct ThroughputSummary {
     /// Transactions committed.
     pub committed_txn: u64,
-    /// Transactions that ultimately failed (after retries).
+    /// Transactions that failed in the end, after the retries.
     pub failed_txn: u64,
     /// Mean committed transaction rate.
     #[serde(with = "frequency")]
@@ -109,8 +113,8 @@ pub struct LatencySummary {
 /// Error and retry counts over the measurement window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ErrorSummary {
-    /// Serialization failures that were retried (the retry succeeded or was
-    /// itself counted elsewhere).
+    /// Serialization failures that the driver retried. The retry either
+    /// succeeded, or another counter holds it.
     pub serialization_retries: u64,
     /// Operations failed because the cluster was unreachable or unavailable.
     pub unavailable: u64,
@@ -138,11 +142,11 @@ pub struct SecondSample {
 /// Resource usage of one launched process over the measurement window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessResources {
-    /// Process label (`broker`, `node0`, ...).
+    /// Process label, such as `broker` or `node0`.
     pub label: String,
     /// OS process id.
     pub pid: u32,
-    /// CPU consumed, as core-time (user + system).
+    /// CPU consumed, as core-time. It is user time plus system time.
     #[serde(with = "millis_i64")]
     pub cpu_time: Time,
     /// Peak resident set size observed.
@@ -153,7 +157,7 @@ pub struct ProcessResources {
 /// Cluster-wide efficiency derived from throughput and resources.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct EfficiencySummary {
-    /// Total CPU consumed by broker + nodes, as core-time.
+    /// Total CPU consumed by the broker and the nodes, as core-time.
     #[serde(with = "millis_i64")]
     pub total_cpu: Time,
     /// Committed transactions per consumed CPU core-second.
@@ -167,15 +171,17 @@ pub struct AppliedFault {
     /// Offset from the start of the measurement window.
     #[serde(with = "time")]
     pub at: Time,
-    /// Human-readable description (e.g. `partition range:0 blackhole 10s`).
+    /// Human-readable description, for example
+    /// `partition range:0 blackhole 10s`.
     pub description: String,
 }
 
-/// Renders one run as a Markdown summary: headline throughput/efficiency,
-/// per-class latency table, error table, per-process resource table, fault
-/// log, and a compact per-second table of the interesting seconds (those
-/// near an applied fault or whose committed count deviates more than
-/// the configured threshold from the run's median).
+/// Renders one run as a Markdown summary. It holds the headline throughput
+/// and efficiency, the per-class latency table, the error table, the
+/// per-process resource table, the fault log, and a compact per-second table
+/// of the interesting seconds. A second is interesting when it is near an
+/// applied fault, or when its committed count deviates from the run's median
+/// by more than the configured threshold.
 #[must_use]
 pub fn render_markdown(report: &RunReport) -> String {
     render_markdown_with_policy(report, LoadtestRuntimePolicy::default())
@@ -195,10 +201,11 @@ pub fn render_markdown_with_policy(report: &RunReport, policy: LoadtestRuntimePo
     out
 }
 
-/// Renders two runs of the same scenario (typically `logical-tso` vs `hlc`)
-/// side by side with absolute values and relative deltas (`(right − left) /
-/// left`, `n/a` when the left value is zero), both runs' fault lists, and a
-/// notes line calling out the largest absolute delta.
+/// Renders two runs of the same scenario side by side, usually `logical-tso`
+/// against `hlc`. The output holds the absolute values, the relative deltas as
+/// `(right − left) / left`, which read `n/a` when the left value is zero, the
+/// fault lists of both runs, and a notes line that names the largest absolute
+/// delta.
 #[must_use]
 pub fn render_comparison(left: &RunReport, right: &RunReport) -> String {
     let mut out = String::new();
@@ -407,10 +414,10 @@ fn push_timeline(out: &mut String, report: &RunReport, policy: LoadtestRuntimePo
     out.push('\n');
 }
 
-/// Timeline samples worth rendering: any second within
-/// the configured window of an applied fault, plus any second whose committed
-/// count deviates more than the configured threshold from the run's median, in
-/// timeline order.
+/// Timeline samples worth rendering, in timeline order. These are every
+/// second inside the configured window around an applied fault, and every
+/// second whose committed count deviates from the run's median by more than
+/// the configured threshold.
 fn interesting_seconds_with_policy(
     report: &RunReport,
     policy: LoadtestRuntimePolicy,
@@ -435,17 +442,18 @@ fn interesting_seconds_with_policy(
         .collect()
 }
 
-/// Upper median of the per-second committed counts (0 for an empty timeline).
+/// Upper median of the per-second committed counts. It is 0 for an empty
+/// timeline.
 fn median_committed(timeline: &[SecondSample]) -> u64 {
     let mut counts: Vec<u64> = timeline.iter().map(|sample| sample.committed).collect();
     counts.sort_unstable();
     counts.get(counts.len() / 2).copied().unwrap_or(0)
 }
 
-/// True when `committed` deviates strictly more than the default threshold
-/// from `median`. A zero median makes any non-zero count deviate (the
-/// division is an infinity) and leaves an all-zero run boring (`NaN` compares
-/// false).
+/// True when `committed` deviates from `median` by strictly more than the
+/// default threshold. With a zero median, any non-zero count deviates, because
+/// the division gives an infinity. An all-zero run stays uninteresting,
+/// because `NaN` compares false.
 #[cfg(test)]
 fn deviates_from_median(committed: u64, median: u64) -> bool {
     deviates_from_median_with_threshold(
@@ -459,8 +467,8 @@ fn deviates_from_median_with_threshold(committed: u64, median: u64, threshold: R
     fraction(u64_as_f64(committed.abs_diff(median)) / u64_as_f64(median)) > threshold
 }
 
-/// One row of the side-by-side comparison table, values pre-formatted and
-/// the delta kept dimensioned for the notes line.
+/// One row of the side-by-side comparison table. The values are already
+/// formatted, and the delta stays dimensioned for the notes line.
 struct CompareRow {
     metric: String,
     left: String,
@@ -569,8 +577,8 @@ fn row_size(metric: impl Into<String>, left: ByteSize, right: ByteSize) -> Compa
     }
 }
 
-/// Relative delta as a fraction of the left value, `None` when that value is
-/// zero.
+/// Relative delta as a fraction of the left value. It is `None` when that
+/// value is zero.
 fn relative_delta(left: f64, right: f64) -> Option<Ratio> {
     (left != 0.0).then(|| fraction((right - left) / left))
 }
@@ -590,7 +598,8 @@ fn fmt2(value: f64) -> String {
     format!("{value:.2}")
 }
 
-/// Formats a relative delta as a signed percentage, `n/a` when undefined.
+/// Formats a relative delta as a signed percentage. It gives `n/a` when the
+/// delta is undefined.
 fn fmt_delta(delta: Option<Ratio>) -> String {
     delta.map_or_else(
         || "n/a".to_string(),
@@ -598,8 +607,8 @@ fn fmt_delta(delta: Option<Ratio>) -> String {
     )
 }
 
-/// Formats an optional per-second mean latency, `-` when no operations
-/// completed that second.
+/// Formats an optional per-second mean latency. It gives `-` when no
+/// operation completed in that second.
 fn fmt_mean_latency(mean: Option<Time>) -> String {
     mean.map_or_else(|| "-".to_string(), |mean| mean.human().to_string())
 }
@@ -610,8 +619,9 @@ fn push_fmt(out: &mut String, args: fmt::Arguments<'_>) {
         .expect("writing to a String cannot fail");
 }
 
-/// Lossless-for-practical-values `u64` → `f64` conversion built from exact
-/// `u32` → `f64` conversions, avoiding a precision-losing `as` cast.
+/// A `u64` → `f64` conversion that is lossless for practical values. It is
+/// built from exact `u32` → `f64` conversions, so it needs no `as` cast, which
+/// would lose precision.
 fn u64_as_f64(value: u64) -> f64 {
     const TWO_POW_32: f64 = 4_294_967_296.0;
     let high = u32::try_from(value >> 32).expect("u64 >> 32 fits in u32");
@@ -720,9 +730,9 @@ mod tests {
         assert!(!rendered.contains("| 25s |"));
     }
 
-    /// The `hlc` counterpart of [`fixture`]: TPS +25% (the largest delta),
-    /// only the shared latency class, a non-zero retry count against the
-    /// left's zero, and no faults.
+    /// The `hlc` counterpart of [`fixture`]. TPS is +25%, which is the
+    /// largest delta. It holds only the shared latency class, a non-zero retry
+    /// count against the left's zero, and no faults.
     fn right_fixture() -> RunReport {
         let mut report = fixture("hlc");
         report.throughput = ThroughputSummary {

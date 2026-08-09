@@ -1,5 +1,7 @@
-//! Canned-response engine: enough surface for psql, driver integration
-//! tests, and the conformance harness to exercise the wire protocol.
+//! Canned-response engine.
+//!
+//! It gives enough surface for psql, driver integration tests, and the
+//! conformance harness to exercise the wire protocol.
 
 use std::collections::HashMap;
 
@@ -34,8 +36,8 @@ impl Engine for StubEngine {
     }
 }
 
-/// Per-connection session for the canned stub engine. Holds no state; the
-/// transaction status is always `Idle`.
+/// Per-connection session for the canned stub engine. It holds no state, and
+/// the transaction status is always `Idle`.
 #[derive(Clone)]
 struct StubPrepared {
     sql: String,

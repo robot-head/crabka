@@ -1,21 +1,25 @@
-//! The running-transaction registry (PostgreSQL's ProcArray). Shared across all
-//! connections behind an `Arc`. Owns the next-xid counter (seeded from the
-//! durable `/0/meta/next_xid` at open) and the set of currently-running xids,
-//! and builds `crabka_pgmvcc::visibility::Snapshot`s. After a restart it starts empty, so
+//! The running-transaction registry (PostgreSQL's ProcArray).
+//!
+//! All connections share it behind an `Arc`. It owns the next-xid counter,
+//! which it seeds from the durable `/0/meta/next_xid` at open, and the set of
+//! currently-running xids. It also builds
+//! `crabka_pgmvcc::visibility::Snapshot`s. After a restart it starts empty, so
 //! any clog `in-progress` xid is in no snapshot and resolves as aborted.
 //!
-//! In `Durable` mode the on-disk counter is persisted in blocks *ahead* of
-//! hand-out (like `SequenceManager`'s rowid blocks), so most `begin_write`
-//! calls are pure memory ops and the mutex-held fsync happens once per
-//! ~[`DURABLE_XID_BLOCK`] transactions instead of once per write statement.
-//! The invariant is that the persisted value is always >= every xid ever
-//! handed out, so a restart never reuses an xid. A crash leaks up to a block
-//! of handed-out-but-undecided xids; leaked xids have no clog entry, which is
-//! exactly the crashed-transaction shape recovery already handles: an absent
-//! clog entry reads as `InProgress`, is in no post-restart snapshot, and once
-//! below the garbage horizon settles as decided-by-crash (aborted), so any
-//! versions it stamped become reclaimable and the horizon walk — which only
-//! visits EXISTING clog entries — is never wedged by the gap.
+//! In `Durable` mode the registry persists the on-disk counter in blocks
+//! *ahead* of hand-out, like `SequenceManager`'s rowid blocks. So most
+//! `begin_write` calls are pure memory ops, and the mutex-held fsync happens
+//! once per ~[`DURABLE_XID_BLOCK`] transactions instead of once per write
+//! statement. The invariant is that the persisted value is always >= every xid
+//! ever handed out, so a restart never reuses an xid.
+//!
+//! A crash leaks up to a block of handed-out-but-undecided xids. Leaked xids
+//! have no clog entry, which is exactly the crashed-transaction shape that
+//! recovery already handles. An absent clog entry reads as `InProgress` and is
+//! in no post-restart snapshot. Once it is below the garbage horizon it settles
+//! as decided-by-crash (aborted), so any versions it stamped become
+//! reclaimable. The gap never wedges the horizon walk, which visits only
+//! EXISTING clog entries.
 
 use std::{
     collections::BTreeSet,
@@ -32,20 +36,23 @@ use zerocopy::{FromBytes, IntoBytes, byteorder::big_endian::U64};
 use crate::{PersistMode, error::ExecError};
 
 /// How many xids beyond the current demand each durable extension reserves.
-/// Larger blocks mean fewer mutex-held fsyncs on the write path (one per
-/// ~`DURABLE_XID_BLOCK` transactions instead of one per statement) at the cost
-/// of a larger leaked xid gap after a crash or restart. Gaps are harmless —
-/// xids are visibility ordinals, not user-visible sequences, and a leaked xid
-/// is indistinguishable from any other crashed transaction — so this only
-/// trades fsync frequency against gap size. Matches `seq.rs`'s rowid block.
+///
+/// Larger blocks mean fewer mutex-held fsyncs on the write path, one per
+/// ~`DURABLE_XID_BLOCK` transactions instead of one per statement. The cost is
+/// a larger leaked xid gap after a crash or restart. Gaps are harmless. Xids
+/// are visibility ordinals, not user-visible sequences, and a leaked xid is
+/// indistinguishable from any other crashed transaction. So this only trades
+/// fsync frequency against gap size. Matches `seq.rs`'s rowid block.
 pub(crate) const DURABLE_XID_BLOCK: u64 = 1024;
 
-/// Registry state: `next_xid` is the next xid to hand out; `durable_end` is
-/// the exclusive end of the durably persisted reservation (the on-disk
-/// counter value in `Durable` mode). Invariant: `next_xid <= durable_end` in
-/// `Durable` mode, so every handed-out xid is below the persisted counter.
-/// In `Replicated` mode `durable_end` tracks `next_xid` and is otherwise
-/// unused (persistence rides the commit batch via `next_xid_op`).
+/// Registry state.
+///
+/// `next_xid` is the next xid to hand out. `durable_end` is the exclusive end
+/// of the durably persisted reservation, which is the on-disk counter value in
+/// `Durable` mode. Invariant: `next_xid <= durable_end` in `Durable` mode, so
+/// every handed-out xid is below the persisted counter. In `Replicated` mode
+/// `durable_end` tracks `next_xid` and is otherwise unused, because persistence
+/// rides the commit batch with `next_xid_op`.
 struct Inner {
     next_xid: u64,
     durable_end: u64,
@@ -61,9 +68,11 @@ pub(crate) struct ProcArray {
 }
 
 impl ProcArray {
-    /// Seed the next-xid counter from the durable key. Absent or stale reserved
-    /// values are clamped to the first normal xid; reserved xids are MVCC
-    /// sentinels and must never be assigned to a real transaction.
+    /// Seed the next-xid counter from the durable key.
+    ///
+    /// This clamps absent or stale reserved values to the first normal xid.
+    /// Reserved xids are MVCC sentinels and must never be assigned to a real
+    /// transaction.
     #[allow(dead_code)]
     pub fn open(kv: Arc<dyn Kv>, mode: PersistMode) -> Result<Self, ExecError> {
         Self::open_with_block(kv, mode, DURABLE_XID_BLOCK)
@@ -98,15 +107,18 @@ impl ProcArray {
         })
     }
 
-    /// Allocate the next xid and register it as running. In `Durable` mode the
-    /// allocation is served from the in-memory block reservation; only when the
-    /// reservation is exhausted is the counter extended by [`DURABLE_XID_BLOCK`]
-    /// and persisted (under the lock, BEFORE the xid is handed out, so the
-    /// durable counter can never regress below a handed-out xid and a restart
-    /// never reuses one, even when concurrent commit batches land out of
-    /// order). In `Replicated` mode, the counter is NOT persisted here: the
-    /// session folds `next_xid_op()` into the same commit batch as the write
-    /// that triggered it (max-merged by the state machine), and
+    /// Allocate the next xid and register it as running.
+    ///
+    /// In `Durable` mode the in-memory block reservation serves the allocation.
+    /// Only when the reservation is exhausted does the registry extend the
+    /// counter by [`DURABLE_XID_BLOCK`] and persist it. It does that under the
+    /// lock and BEFORE it hands out the xid, so the durable counter can never
+    /// regress below a handed-out xid and a restart never reuses one, even when
+    /// concurrent commit batches land out of order.
+    ///
+    /// In `Replicated` mode, this does NOT persist the counter. The session
+    /// folds `next_xid_op()` into the same commit batch as the write that
+    /// triggered it, and the state machine max-merges it.
     /// `reseed_from_applied` lifts the counter on leadership change.
     pub fn begin_write(&self) -> Result<u64, ExecError> {
         let mut g = self.inner.lock().expect("procarray");
@@ -142,8 +154,10 @@ impl ProcArray {
         Ok(xid)
     }
 
-    /// Reseed the in-memory counter from the applied store (called when this node
-    /// becomes leader, so it never hands out an xid the old leader already used).
+    /// Reseed the in-memory counter from the applied store.
+    ///
+    /// Callers use this when this node becomes leader, so it never hands out an
+    /// xid the old leader already used.
     pub fn reseed_from_applied(&self) -> Result<(), ExecError> {
         let durable = match self.kv.get(&crabka_pgkv::key::next_xid_key())? {
             Some(b) => {
@@ -164,8 +178,9 @@ impl ProcArray {
         Ok(())
     }
 
-    /// The WriteOp recording the current next_xid (folded into the commit batch in
-    /// Replicated mode).
+    /// The WriteOp that records the current next_xid.
+    ///
+    /// In Replicated mode it is folded into the commit batch.
     pub fn next_xid_op(&self) -> crabka_pgkv::WriteOp {
         let next = self.inner.lock().expect("procarray").next_xid;
         crabka_pgkv::WriteOp::Put {
@@ -174,10 +189,12 @@ impl ProcArray {
         }
     }
 
-    /// The in-memory next-xid value (one past the highest allocated). In
-    /// `Durable` mode `begin_write` persists a block-ahead reservation before
-    /// hand-out, so callers no longer batch the counter with their writes;
-    /// retained as a test accessor that proves the counter advanced.
+    /// The in-memory next-xid value, one past the highest allocated.
+    ///
+    /// In `Durable` mode `begin_write` persists a block-ahead reservation
+    /// before hand-out, so callers no longer batch the counter with their
+    /// writes. This stays as a test accessor that proves the counter
+    /// advanced.
     #[cfg(test)]
     pub(crate) fn next_xid(&self) -> u64 {
         self.inner.lock().expect("procarray").next_xid
@@ -192,8 +209,9 @@ impl ProcArray {
         Snapshot { xmin, xmax, xip }
     }
 
-    /// Deregister a finished (committed or aborted) transaction. Call only after
-    /// its clog entry is durable.
+    /// Deregister a finished (committed or aborted) transaction.
+    ///
+    /// Call this only after its clog entry is durable.
     pub fn finish(&self, xid: u64) {
         self.inner.lock().expect("procarray").running.remove(&xid);
     }
@@ -217,8 +235,10 @@ mod tests {
 
     use super::*;
 
-    /// A `Kv` that counts `write_batch` calls, proving allocations within the
-    /// durable block reservation never touch the store.
+    /// A `Kv` that counts `write_batch` calls.
+    ///
+    /// This proves that allocations within the durable block reservation never
+    /// touch the store.
     struct CountingKv {
         inner: MemKv,
         write_batches: AtomicUsize,

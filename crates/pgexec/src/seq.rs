@@ -1,12 +1,16 @@
-//! Atomic per-table rowid allocation for concurrent INSERTs. An in-memory
-//! counter per table, seeded once from the durable `/0/seq/<table>` key and
-//! bumped under a mutex. In `Durable` mode the on-disk counter is persisted in
-//! blocks *ahead* of hand-out (like a PostgreSQL sequence with `CACHE`), so
-//! most allocations are pure memory ops and the mutex-held fsync happens once
-//! per block instead of once per statement. The invariant is that the persisted
-//! value is always >= every rowid ever handed out — a restart never reuses a
-//! rowid, and a crash only leaks up to a block of unused rowids (gaps are fine;
-//! rowids are internal heap ids, not user-visible sequences).
+//! Atomic per-table rowid allocation for concurrent INSERTs.
+//!
+//! There is one in-memory counter per table. It is seeded once from the durable
+//! `/0/seq/<table>` key and bumped under a mutex. In `Durable` mode the manager
+//! persists the on-disk counter in blocks *ahead* of hand-out, like a
+//! PostgreSQL sequence with `CACHE`. So most allocations are pure memory ops,
+//! and the mutex-held fsync happens once per block instead of once per
+//! statement.
+//!
+//! The invariant is that the persisted value is always >= every rowid ever
+//! handed out. A restart never reuses a rowid, and a crash only leaks up to a
+//! block of unused rowids. Gaps are fine, because rowids are internal heap ids,
+//! not user-visible sequences.
 
 use std::{collections::HashMap, sync::Mutex};
 
@@ -16,27 +20,32 @@ use zerocopy::{IntoBytes, byteorder::big_endian::U64};
 use crate::{PersistMode, error::ExecError};
 
 /// How many rowids beyond the current demand each durable extension reserves.
-/// Larger blocks mean fewer mutex-held fsyncs on the INSERT path (one per
-/// ~`DURABLE_BLOCK` rows instead of one per statement) at the cost of a larger
-/// leaked rowid gap after a crash or restart. Gaps are harmless — scans are
-/// keyspace range scans, not per-rowid probes — so this only trades fsync
+///
+/// Larger blocks mean fewer mutex-held fsyncs on the INSERT path, one per
+/// ~`DURABLE_BLOCK` rows instead of one per statement. The cost is a larger
+/// leaked rowid gap after a crash or restart. Gaps are harmless, because scans
+/// are keyspace range scans, not per-rowid probes. So this only trades fsync
 /// frequency against gap size.
 pub(crate) const DURABLE_BLOCK: u64 = 1024;
 
-/// Per-table allocator state: `next` is the next rowid to hand out;
-/// `durable_end` is the exclusive end of the durably persisted reservation
-/// (the on-disk counter value in `Durable` mode). Invariant: `next <=
-/// durable_end` in `Durable` mode, so every handed-out rowid is below the
-/// persisted counter. In `Replicated` mode `durable_end` tracks `next` and is
-/// otherwise unused (persistence rides the commit batch).
+/// Per-table allocator state.
+///
+/// `next` is the next rowid to hand out. `durable_end` is the exclusive end of
+/// the durably persisted reservation, which is the on-disk counter value in
+/// `Durable` mode. Invariant: `next <= durable_end` in `Durable` mode, so every
+/// handed-out rowid is below the persisted counter. In `Replicated` mode
+/// `durable_end` tracks `next` and is otherwise unused, because persistence
+/// rides the commit batch.
 struct TableSeq {
     next: u64,
     durable_end: u64,
 }
 
 /// One SQL sequence's advance, staged for the caller to fold into a commit
-/// batch. `Replicated` mode hands these out instead of writing through the
-/// store, the same way [`SequenceManager::alloc`] hands out a rowid `WriteOp`.
+/// batch.
+///
+/// `Replicated` mode hands these out instead of a write through the store, the
+/// same way [`SequenceManager::alloc`] hands out a rowid `WriteOp`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StagedSequence {
     pub name: crabka_pgcatalog::RelationName,
@@ -45,11 +54,11 @@ pub(crate) struct StagedSequence {
 
 /// A session's sequence advances that are not in the applied store yet.
 ///
-/// Advancing a sequence happens inside *synchronous* expression evaluation,
-/// which cannot await a commit, so the advance is staged here and the session
-/// folds it into the next batch it commits — the same seam
-/// [`crate::clock::EvalCtx::notify`] gives `pg_notify()`. Keying by name rather
-/// than appending collapses the thousand advances of a thousand-row `INSERT`
+/// A sequence advance happens inside *synchronous* expression evaluation,
+/// which cannot await a commit. So the advance is staged here, and the session
+/// folds it into the next batch it commits. This is the same seam
+/// [`crate::clock::EvalCtx::notify`] gives `pg_notify()`. A key by name, rather
+/// than an append, collapses the thousand advances of a thousand-row `INSERT`
 /// into the one `Put` that records the last of them.
 #[derive(Debug, Default)]
 pub(crate) struct PendingSequences {
@@ -73,16 +82,17 @@ impl PendingSequences {
 
 pub(crate) struct SequenceManager {
     inner: Mutex<HashMap<crabka_pgcatalog::TableId, TableSeq>>,
-    /// The `Replicated`-mode SQL sequence cache: each sequence's record as of
-    /// this writer's most recent advance, which the applied store has not
-    /// necessarily caught up to yet.
+    /// The `Replicated`-mode SQL sequence cache.
+    ///
+    /// It holds each sequence's record as of this writer's most recent advance,
+    /// which the applied store has not necessarily caught up to yet.
     ///
     /// It exists because a `Replicated` advance does not write through the
-    /// store — it rides a commit batch — so without it every `nextval` inside
-    /// one uncommitted statement would re-read the same stale record and hand
-    /// out the same value. It is engine-wide, not per session, because two
-    /// sessions inserting into the same `SERIAL` table must not both be served
-    /// the value the other already took.
+    /// store. The advance rides a commit batch. Without the cache, every
+    /// `nextval` inside one uncommitted statement would re-read the same stale
+    /// record and hand out the same value. The cache is engine-wide, not per
+    /// session, because two sessions that insert into the same `SERIAL` table
+    /// must not both be served the value the other already took.
     ///
     /// Cache entries are authoritative only for the writer that filled them.
     /// See [`SequenceManager::reseed_sql_sequences`] for why that is safe and
@@ -107,15 +117,19 @@ impl SequenceManager {
         }
     }
 
-    /// Reserve `count` consecutive rowids for `table` and return the first, plus
-    /// the seq `WriteOp`. In `Durable` mode the op is returned as `None`: the
-    /// allocation is served from the in-memory block reservation, and only when
-    /// the reservation is exhausted is the counter extended by `DURABLE_BLOCK`
-    /// and persisted (under the lock, BEFORE the rowids are handed out, so the
-    /// durable counter can never regress below a handed-out rowid). In
-    /// `Replicated` mode nothing is persisted here: the op is returned as
+    /// Reserve `count` consecutive rowids for `table` and return the first,
+    /// plus the seq `WriteOp`.
+    ///
+    /// In `Durable` mode the op comes back as `None`. The in-memory block
+    /// reservation serves the allocation. Only when the reservation is
+    /// exhausted does the manager extend the counter by `DURABLE_BLOCK` and
+    /// persist it. It does that under the lock and BEFORE it hands out the
+    /// rowids, so the durable counter can never regress below a handed-out
+    /// rowid.
+    ///
+    /// In `Replicated` mode this persists nothing. The op comes back as
     /// `Some(op)` for the caller to fold into the same commit batch as the
-    /// inserted rows (max-merged by the state machine), and
+    /// inserted rows, and the state machine max-merges it.
     /// `reseed_from_applied` re-seeds on leadership change.
     pub fn alloc(
         &self,
@@ -172,36 +186,41 @@ impl SequenceManager {
         Ok((start, folded))
     }
 
-    /// Clear the rowid cache so the next alloc re-seeds from the applied store
-    /// (counters seed lazily via `read_seq_kv` on first use).
+    /// Clear the rowid cache so the next alloc re-seeds from the applied
+    /// store.
     ///
-    /// This is the *rowid* counter only. It is called both on leadership change
-    /// and whenever a distributed transaction another node owned resolves, so it
-    /// can fire while this node is midway through a statement — safe for rowids,
-    /// because a rowid is only ever observed through the batch that carries it,
-    /// but not for SQL sequences, whose values are handed to the client. Those
-    /// are cleared by [`SequenceManager::reseed_sql_sequences`] instead.
+    /// Counters seed lazily with `read_seq_kv` on first use.
+    ///
+    /// This is the *rowid* counter only. Callers use it both on leadership
+    /// change and whenever a distributed transaction another node owned
+    /// resolves, so it can fire while this node is midway through a statement.
+    /// That is safe for rowids, because a rowid is only ever observed through
+    /// the batch that carries it. It is not safe for SQL sequences, whose
+    /// values go to the client. [`SequenceManager::reseed_sql_sequences`]
+    /// clears those instead.
     pub fn reseed_from_applied(&self) {
         self.inner.lock().expect("seqmgr").clear();
     }
 
     /// Drop the whole SQL sequence cache, so the next `nextval` re-seeds from
-    /// the applied store. Called when this node becomes the writer.
+    /// the applied store.
+    ///
+    /// Callers use this when this node becomes the writer.
     ///
     /// This is the failover invariant, and it only holds because of what the
     /// caller of a staged advance guarantees: **no `nextval` value reaches a
     /// client before the op recording it is durable**. Every statement that can
-    /// advance a sequence commits before it returns, so at the moment a new
+    /// advance a sequence commits before it returns. So at the moment a new
     /// writer re-seeds, the applied store already reflects every value the old
-    /// writer handed out — re-seeding from it can only move forward. Values a
-    /// dead writer took but never committed were never observed by anyone, so
-    /// re-issuing them is invisible.
+    /// writer handed out, and a re-seed from it can only move forward. Nobody
+    /// ever observed the values a dead writer took but never committed, so a
+    /// second issue of them is invisible.
     ///
     /// The converse is why this is *not* wired into
-    /// [`SequenceManager::reseed_from_applied`]: clearing mid-statement would
+    /// [`SequenceManager::reseed_from_applied`]. A clear mid-statement would
     /// drop advances this writer had handed out but not yet committed, and the
-    /// re-seed would hand the same values out a second time — inside a single
-    /// multi-row `INSERT`, a duplicate key.
+    /// re-seed would hand the same values out a second time. Inside a single
+    /// multi-row `INSERT`, that is a duplicate key.
     pub fn reseed_sql_sequences(&self) {
         self.sql.lock().expect("sql seqmgr").clear();
     }
@@ -210,8 +229,9 @@ impl SequenceManager {
     ///
     /// `DROP SEQUENCE s; CREATE SEQUENCE s;` reuses the name for a record that
     /// starts over, and a cache entry that outlived the drop would keep
-    /// advancing the old one. Reading the names out of the committed batch
-    /// rather than the statement covers every path that reaches the catalog:
+    /// advancing the old one. A read of the names out of the committed batch,
+    /// rather than out of the statement, covers every path that reaches the
+    /// catalog:
     /// `CREATE`/`DROP SEQUENCE`, the implicit sequence of a `SERIAL` column, and
     /// a `DROP TABLE` that cascades to one.
     pub fn forget_sequences(&self, ops: &[crabka_pgkv::WriteOp]) {
@@ -237,9 +257,9 @@ impl SequenceManager {
     /// `nextval` over the sequence a stored column default names.
     ///
     /// The stored text is the catalog's own rendering of a
-    /// [`crabka_pgcatalog::RelationName`] — bare in `public`, `schema.name`
-    /// elsewhere, never quoted — not a `regclass` literal, so it is read back
-    /// the way it was written rather than through
+    /// [`crabka_pgcatalog::RelationName`]: bare in `public`, `schema.name`
+    /// elsewhere, never quoted. It is not a `regclass` literal, so this reads
+    /// it back the way it was written and not through
     /// [`crate::relname::parse_written_relation`]. `nextval('…')` as SQL calls
     /// it is [`SequenceManager::nextval_written`].
     pub fn nextval(
@@ -261,16 +281,18 @@ impl SequenceManager {
         self.advance(kv, written_sequence_name(kv, scope, written)?)
     }
 
-    /// Advance `name` and return its new value, plus — in `Replicated` mode —
-    /// the advance for the caller to fold into a commit batch.
+    /// Advance `name` and return its new value.
+    ///
+    /// In `Replicated` mode this also returns the advance for the caller to
+    /// fold into a commit batch.
     ///
     /// `Durable` mode writes the record through the store itself and stages
     /// nothing, exactly as [`SequenceManager::alloc`] does for rowids.
     /// `Replicated` mode may not: the applied store is only reachable through
     /// the replication log, so the record it reads would not see this writer's
-    /// own uncommitted advances. It therefore reads through the cache, which
-    /// holds the record as of the last advance whether or not that advance has
-    /// been applied yet, and hands the new record back to be committed.
+    /// own uncommitted advances. So it reads through the cache, which holds the
+    /// record as of the last advance whether or not that advance is applied
+    /// yet, and it hands the new record back for the caller to commit.
     fn advance(
         &self,
         kv: &dyn Kv,
@@ -298,8 +320,10 @@ impl SequenceManager {
         }
     }
 
-    /// `setval(regclass, …)` as SQL calls it. There is no stored-default
-    /// counterpart: only `nextval` appears in a column default.
+    /// `setval(regclass, …)` as SQL calls it.
+    ///
+    /// There is no stored-default counterpart: only `nextval` appears in a
+    /// column default.
     pub fn setval_written(
         &self,
         kv: &dyn Kv,
@@ -330,8 +354,10 @@ impl SequenceManager {
     }
 }
 
-/// Apply a `setval` to a sequence record, rejecting a value outside its bounds
-/// the way `PostgreSQL` does — before anything is written.
+/// Apply a `setval` to a sequence record.
+///
+/// This rejects a value outside the record's bounds the way `PostgreSQL` does,
+/// before it writes anything.
 fn setval_record(
     name: &crabka_pgcatalog::RelationName,
     sequence: &mut crabka_pgcatalog::Sequence,
@@ -351,17 +377,17 @@ fn setval_record(
 
 /// The sequence a `nextval('…')` / `setval('…')` argument names.
 ///
-/// The argument is a `regclass` input, so it is read by the one parser that
-/// reads those — [`crate::relname::parse_written_relation`] — and not split on
-/// a dot: `nextval('"My Seq"')` names one sequence with a space in it, and
+/// The argument is a `regclass` input, so the one parser that reads those,
+/// [`crate::relname::parse_written_relation`], reads it, and nothing splits it
+/// on a dot. `nextval('"My Seq"')` names one sequence with a space in it, and
 /// `nextval('MY SEQ')` is `42602 invalid name syntax`, both on `postgres:18.4`.
 /// An unqualified name then resolves through the session's search path like any
-/// other written name, which is why this takes a scope rather than assuming
+/// other written name, which is why this takes a scope and does not assume
 /// `public`.
 ///
-/// `regclassin` reports a missing schema as a missing *relation* —
+/// `regclassin` reports a missing schema as a missing *relation*.
 /// `nextval('nosuch.s')` is `42P01 relation "nosuch.s" does not exist` on
-/// `postgres:18.4`, not `3F000` — so the disposition is
+/// `postgres:18.4`, not `3F000`. So the disposition is
 /// [`SchemaDisposition::Reference`](crate::relname::SchemaDisposition::Reference).
 fn written_sequence_name(
     kv: &dyn Kv,
@@ -375,9 +401,10 @@ fn written_sequence_name(
     )
 }
 
-/// The sequence a stored `nextval` column default names, whose text is a
-/// [`crabka_pgcatalog::RelationName`]'s own rendering rather than a `regclass`
-/// literal: unquoted throughout, and dotted only outside `public`.
+/// The sequence a stored `nextval` column default names.
+///
+/// Its text is a [`crabka_pgcatalog::RelationName`]'s own rendering, not a
+/// `regclass` literal: unquoted throughout, and dotted only outside `public`.
 fn stored_sequence_name(
     kv: &dyn Kv,
     scope: &crate::relname::ResolutionScope,
@@ -455,7 +482,7 @@ mod tests {
 
     /// A `regclass` argument is written text, not one identifier: a dot in it
     /// separates the schema, a quoted part keeps its case, and an unqualified
-    /// name resolves through the session's search path rather than landing in
+    /// name resolves through the session's search path and does not land in
     /// `public`.
     #[test]
     fn a_written_sequence_name_resolves_through_the_search_path() {
@@ -667,9 +694,11 @@ mod tests {
         );
     }
 
-    /// The failover invariant at the manager level: once the staged advance is
-    /// applied, a fresh manager — the successor writer — resumes past every
-    /// value the predecessor handed out, never at one of them.
+    /// The failover invariant at the manager level.
+    ///
+    /// Once the staged advance is applied, a fresh manager, the successor
+    /// writer, resumes past every value the predecessor handed out, never at
+    /// one of them.
     #[test]
     fn a_reseeded_manager_resumes_past_every_value_already_handed_out() {
         let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
@@ -703,8 +732,10 @@ mod tests {
     }
 
     /// A batch that creates or drops a sequence invalidates that name and only
-    /// that name — the cache is read out of the committed ops, so a `SERIAL`
-    /// sequence nobody spelled is caught too.
+    /// that name.
+    ///
+    /// The cache is read out of the committed ops, so this catches a `SERIAL`
+    /// sequence nobody spelled too.
     #[test]
     fn forget_sequences_drops_exactly_the_names_the_batch_touches() {
         let kv: Arc<dyn Kv> = Arc::new(MemKv::new());

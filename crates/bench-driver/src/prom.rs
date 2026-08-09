@@ -1,6 +1,7 @@
 //! Prometheus query client. The driver issues a small set of instant
-//! queries at scenario end to capture resource usage on the broker pods
-//! and (Strimzi only) JVM heap / non-heap from the JMX exporter.
+//! queries at scenario end to capture resource usage on the broker pods.
+//! For Strimzi only, it also captures JVM heap and non-heap from the JMX
+//! exporter.
 
 use std::collections::BTreeMap;
 
@@ -23,8 +24,8 @@ pub struct PromClient {
 }
 
 impl PromClient {
-    /// `base_url` is the Prometheus root, e.g. `http://prom.monitoring.svc:9090`.
-    /// No trailing slash required.
+    /// `base_url` is the Prometheus root, for example
+    /// `http://prom.monitoring.svc:9090`. A trailing slash is not needed.
     /// # Errors
     /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn new(base_url: impl Into<String>, request_timeout: Time) -> Result<Self> {
@@ -38,8 +39,8 @@ impl PromClient {
         })
     }
 
-    /// Execute a `PromQL` instant query. Returns the first scalar value
-    /// across all returned series, summed. Returns `None` when the result
+    /// Runs a `PromQL` instant query. Returns the sum of the first scalar
+    /// value across all returned series. Returns `None` when the result
     /// vector is empty.
     /// # Errors
     /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
@@ -84,7 +85,7 @@ impl PromClient {
         Ok(had.then_some(sum))
     }
 
-    /// Execute a `PromQL` range query, summing across all returned series per
+    /// Runs a `PromQL` range query and sums across all returned series per
     /// timestamp. Returns `(unix_seconds, value)` points on the step grid.
     /// # Errors
     /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
@@ -146,10 +147,10 @@ impl PromClient {
             .collect())
     }
 
-    /// Capture a broker CPU/memory **time series** over `[start_s, end_s]` for
-    /// graphing values over the test. CPU is a 1-minute `rate()` (in cores),
-    /// memory is the summed working set. Aligned onto a single `step_s` grid;
-    /// `t_offset_ms` is relative to `start_s`.
+    /// Captures a broker CPU and memory **time series** over `[start_s, end_s]`,
+    /// so a graph can show the values over the test. CPU is a 1-minute `rate()`
+    /// in cores, and memory is the summed working set. Both align onto a single
+    /// `step_s` grid. `t_offset_ms` is relative to `start_s`.
     /// # Errors
     /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub async fn capture_resource_series(
@@ -200,9 +201,9 @@ impl PromClient {
             .collect())
     }
 
-    /// Capture broker resource usage for the given stack over a window
-    /// ending now. `window` should be slightly larger than the measured
-    /// scenario duration so the `rate()` window doesn't tail off.
+    /// Captures broker resource usage for the given stack over a window that
+    /// ends now. Make `window` a little larger than the measured scenario
+    /// duration, so the `rate()` window does not tail off.
     /// # Errors
     /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub async fn capture_resource(
@@ -305,11 +306,11 @@ struct PromData {
 
 #[derive(Debug, Deserialize)]
 struct PromResult {
-    /// `[<unix-ts>, "<string-value>"]` — Prometheus encodes the scalar
+    /// `[<unix-ts>, "<string-value>"]`. Prometheus encodes the scalar
     /// portion as a JSON string. The timestamp is f64 in seconds.
     #[serde(default)]
     value: Option<(f64, String)>,
-    /// Matrix (range-query) payload: `[[ts, "val"], ...]`.
+    /// The matrix payload of a range query: `[[ts, "val"], ...]`.
     #[serde(default)]
     values: Option<Vec<(f64, String)>>,
 }

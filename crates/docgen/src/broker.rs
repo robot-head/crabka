@@ -1,5 +1,7 @@
-//! Generate the three broker reference pages: server config (`FileConfig` JSON
-//! schema), topic configs (whitelist), and the protocol API catalog.
+//! Generate the three broker reference pages.
+//!
+//! The pages are the server config, from the `FileConfig` JSON schema, the
+//! topic configs whitelist, and the protocol API catalog.
 
 use std::fmt::Write;
 
@@ -7,9 +9,9 @@ use crate::schema_md::render_sectioned_field_table;
 
 /// Server-config reference, rendered from the `FileConfig` JSON schema.
 ///
-/// Uses [`render_sectioned_field_table`] so each top-level TOML key/table is
-/// its own captioned section with a horizontal-rule separator, rather than one
-/// dense flat table.
+/// This function uses [`render_sectioned_field_table`], so each top-level TOML
+/// key or table becomes its own captioned section with a horizontal-rule
+/// separator. The result is not one dense flat table.
 ///
 /// # Panics
 ///
@@ -26,7 +28,7 @@ pub fn server_config_md() -> String {
     out
 }
 
-/// Topic-config reference (the `AlterConfigs` whitelist).
+/// Topic-config reference: the `AlterConfigs` whitelist.
 #[must_use]
 pub fn topic_configs_md() -> String {
     let mut out = String::from(
@@ -47,14 +49,17 @@ pub fn topic_configs_md() -> String {
     out
 }
 
-/// Canonical specification for an API key: the KIP (or protocol-guide section)
-/// that defines it, as a `(label, url)` pair rendered into a markdown link.
+/// Canonical specification for an API key.
 ///
-/// The Kafka wire protocol isn't an IETF/RFC standard; it's specified by the
-/// [Apache Kafka protocol guide](https://kafka.apache.org/protocol) plus the
-/// per-feature KIP that introduced each RPC. We map each API key to the KIP
-/// that defines it where we know it confidently, and fall back to the protocol
-/// guide's API-keys section otherwise.
+/// This is the KIP, or the protocol-guide section, that defines the API key. It
+/// is a `(label, url)` pair that renders into a markdown link.
+///
+/// The Kafka wire protocol is not an IETF RFC standard. The
+/// [Apache Kafka protocol guide](https://kafka.apache.org/protocol) specifies
+/// it, together with the per-feature KIP that introduced each RPC. This
+/// function maps each API key to the KIP that defines it where we know that KIP
+/// confidently. For the other API keys, it falls back to the API-keys section
+/// of the protocol guide.
 fn api_spec(api_key: i16) -> (&'static str, &'static str) {
     // The general protocol-guide fallback for APIs without a single defining
     // KIP (the original Kafka 0.x core RPCs and a handful of admin RPCs).

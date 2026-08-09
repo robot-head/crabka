@@ -1,5 +1,6 @@
-//! In-process single-voter Controller. Validates the openraft + `log_store`
-//! + `state_machine` + listener wiring without needing a 3-node cluster.
+//! In-process single-voter Controller. It validates the wiring of openraft,
+//! `log_store`, `state_machine`, and the listener, and it needs no 3-node
+//! cluster.
 
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use crabka_units::prelude::{Time, millis};
 use tempfile::TempDir;
 use uuid::Uuid;
 
-/// Single-voter elections are instant; a short timeout keeps each test well
+/// Single-voter elections are instant, and a short timeout keeps each test well
 /// inside its 30-second leader deadline.
 const FAST_ELECTION_TIMEOUT: Time = millis(200);
 

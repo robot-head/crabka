@@ -14,7 +14,7 @@ pub const TENANT_REGISTRY_TOPIC: &str = "__gres_tenants";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SplitOperationPhase {
-    /// Immutable split intent has been accepted by the registry.
+    /// The registry has accepted the immutable split intent.
     Initiated,
     /// At least one execution attempt has started.
     Running,
@@ -30,7 +30,7 @@ pub enum SplitOperationPhase {
     LayoutPublished,
     /// Predecessor retirement is in progress or acknowledged.
     Retiring,
-    /// Serving successors are being resumed after retirement.
+    /// The serving successors resume after retirement.
     Resuming,
     /// The latest attempt failed and may be retried.
     Failed,
@@ -49,7 +49,8 @@ pub struct SplitOperationEvidence {
     pub marker_digest: Option<String>,
 }
 
-/// Immutable full-layout authority captured when the operation is initiated.
+/// Immutable full-layout authority captured when the caller initiates the
+/// operation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SplitOperationPlan {
@@ -60,11 +61,11 @@ pub struct SplitOperationPlan {
     pub target_layout: Vec<RangeLayoutEntry>,
 }
 
-/// Durable registry journal record for initiating a sealed split or move.
+/// Durable registry journal record that initiates a sealed split or move.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SplitOperationRecord {
-    /// Tenant whose range layout is being split.
+    /// Tenant whose range layout this operation splits.
     pub tenant: TenantName,
     /// Caller-chosen idempotency identity.
     pub operation_id: String,
@@ -153,7 +154,7 @@ pub struct MoveRangeState {
 }
 
 impl SplitOperationRecord {
-    /// Construct a revision-zero initiation record.
+    /// Constructs a revision-zero initiation record.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -224,7 +225,7 @@ impl SplitOperationRecord {
         Ok(self)
     }
 
-    /// Build the next revision while preserving monotone progress.
+    /// Builds the next revision while preserving monotone progress.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -261,7 +262,7 @@ impl SplitOperationRecord {
         Ok(next)
     }
 
-    /// Validate the complete durable operation shape and phase invariants.
+    /// Validates the complete durable operation shape and phase invariants.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -312,7 +313,7 @@ impl SplitOperationRecord {
         Ok(())
     }
 
-    /// Validate that this record is the next monotone revision of `prior`.
+    /// Validates that this record is the next monotone revision of `prior`.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -545,13 +546,13 @@ pub struct SqlUser(String);
 macro_rules! string_newtype_accessors {
     ($ty:ty) => {
         impl $ty {
-            /// Return the parsed string value.
+            /// Returns the parsed string value.
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
             }
 
-            /// Consume the wrapper and return the owned string.
+            /// Consumes the wrapper and returns the owned string.
             #[must_use]
             pub fn into_string(self) -> String {
                 self.0
@@ -624,7 +625,7 @@ impl TryFrom<&str> for SqlUser {
 pub enum TenantState {
     /// Tenant compute should be provisioned and routed.
     Active,
-    /// WAL parking has fenced resumes while the old WAL topics are being deleted.
+    /// WAL parking has fenced resumes while the controller deletes the old WAL topics.
     Parking,
     /// Tenant compute exited after a final checkpoint and should route to the activator.
     Suspended,
@@ -633,7 +634,7 @@ pub enum TenantState {
 }
 
 impl TenantState {
-    /// Return whether the registry state machine permits this transition.
+    /// Returns whether the registry state machine permits this transition.
     #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {
         if matches!(
@@ -680,7 +681,7 @@ pub struct TenantRecord {
     pub state: TenantState,
     /// `PostgreSQL` role used by end-user SQL clients.
     pub sql_user: SqlUser,
-    /// `PostgreSQL` `pg_authid` SCRAM verifier; never a plaintext password.
+    /// `PostgreSQL` `pg_authid` SCRAM verifier. This is never a plaintext password.
     pub scram_verifier: String,
     /// WAL topic replication factor for the tenant.
     pub wal_replication: i32,
@@ -699,7 +700,7 @@ pub struct TenantRecord {
     pub wal_generation: u64,
     /// Ordered row-range placement discovered by range computes.
     pub ranges: Vec<RangeLayoutEntry>,
-    /// Split predecessors whose old WAL generations are being retired after cutover.
+    /// Split predecessors whose old WAL generations retire after cutover.
     #[serde(default)]
     pub range_retirements: Vec<RangeRetirementRecord>,
     /// Hash-sharding placement metadata and co-location constraints.
@@ -722,7 +723,7 @@ pub struct RangeLayoutEntry {
     pub endpoint: String,
     /// Per-range WAL generation. Controllers bump this independently for parking.
     pub wal_generation: u64,
-    /// Range-scoped serving lifecycle; absent legacy values decode as serving.
+    /// Range-scoped serving lifecycle. An absent legacy value decodes as serving.
     #[serde(default)]
     pub lifecycle: RangeLifecycle,
     /// Durable predecessor-retirement intent while parking or parked.
@@ -748,7 +749,8 @@ pub struct RangeRetirement {
     pub checkpoint: FinalCheckpoint,
 }
 
-/// Durable sidecar for retiring a predecessor without changing successor serving state.
+/// Durable sidecar that retires a predecessor and leaves the successor serving
+/// state unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RangeRetirementRecord {
     pub operation_id: String,
@@ -867,7 +869,7 @@ pub struct RangeBoundary {
 pub struct RangeLayoutSplit {
     /// Existing range id that owns `split_key`.
     pub source_range_id: u32,
-    /// Generation expected on the predecessor being retired.
+    /// Generation expected on the predecessor that retires.
     pub predecessor_generation: u64,
     /// Fresh left replacement placement.
     pub left: RangeLayoutEntry,
@@ -947,7 +949,7 @@ impl RangeBoundary {
         rowid: 0,
     };
 
-    /// Build a boundary from table and row identifiers.
+    /// Builds a boundary from table and row identifiers.
     #[must_use]
     pub const fn new(table_id: u64, rowid: u64) -> Self {
         Self {
@@ -957,7 +959,7 @@ impl RangeBoundary {
         }
     }
 
-    /// Build a hash-sharded boundary in bucket-leading key order.
+    /// Builds a hash-sharded boundary in bucket-leading key order.
     #[must_use]
     pub const fn hash(table_id: u64, bucket: u32, rowid: u64) -> Self {
         Self {
@@ -967,7 +969,7 @@ impl RangeBoundary {
         }
     }
 
-    /// Build the first boundary for a table.
+    /// Builds the first boundary for a table.
     #[must_use]
     pub const fn table_start(table_id: u64) -> Self {
         Self::new(table_id, 0)
@@ -988,7 +990,7 @@ pub struct FinalCheckpoint {
 }
 
 impl TenantRecord {
-    /// Build a validated tenant record from already-parsed identity fields.
+    /// Builds a validated tenant record from already-parsed identity fields.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1025,7 +1027,7 @@ impl TenantRecord {
         Ok(record)
     }
 
-    /// Parse and validate every cross-field invariant.
+    /// Parses and validates every cross-field invariant.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1101,7 +1103,7 @@ impl TenantRecord {
         Ok(())
     }
 
-    /// Return a record advanced to `next` with a bumped record version.
+    /// Returns a record advanced to `next` with a bumped record version.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1122,7 +1124,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record marked active, including the endpoint activators should dial.
+    /// Returns a record marked active, with the endpoint that activators dial.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1145,7 +1147,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record marked suspended.
+    /// Returns a record marked suspended.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1160,7 +1162,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record marked suspended with the durable checkpoint that permits parking.
+    /// Returns a record marked suspended with the durable checkpoint that permits parking.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1179,7 +1181,8 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record with an activator resume request, or unchanged unless parking is complete.
+    /// Returns a record with an activator resume request. The record is
+    /// unchanged unless the tenant is suspended.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1191,7 +1194,7 @@ impl TenantRecord {
         self.transition_to(TenantState::ResumeRequested)
     }
 
-    /// Return a record with WAL generation advanced monotonically.
+    /// Returns a record with WAL generation advanced monotonically.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1205,7 +1208,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record with the full range layout replaced.
+    /// Returns a record with the full range layout replaced.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1223,7 +1226,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Atomically publish an exact successor layout and a predecessor-retirement intent.
+    /// Atomically publishes an exact successor layout and a predecessor-retirement intent.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1280,7 +1283,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Confirm that one exact predecessor WAL generation is absent.
+    /// Confirms that one exact predecessor WAL generation is absent.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1310,7 +1313,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record with hash placement/co-location metadata replaced.
+    /// Returns a record with hash placement/co-location metadata replaced.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1328,7 +1331,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record with one range WAL generation advanced monotonically.
+    /// Returns a record with one range WAL generation advanced monotonically.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1363,7 +1366,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Persist a generation-fenced parking intent for one range.
+    /// Persists a generation-fenced parking intent for one range.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1385,7 +1388,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Confirm one range parked after its retiring WAL generation is absent.
+    /// Confirms one range parked after its retiring WAL generation is absent.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1406,7 +1409,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record whose layout splits one row-key interval into two ranges.
+    /// Returns a record whose layout splits one row-key interval into two ranges.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1492,7 +1495,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record whose layout merges adjacent ranges into the left id.
+    /// Returns a record whose layout merges adjacent ranges into the left id.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1542,7 +1545,7 @@ impl TenantRecord {
         Ok(self)
     }
 
-    /// Return a record with one range-layout mutation applied.
+    /// Returns a record with one range-layout mutation applied.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1746,7 +1749,7 @@ fn ensure_boundaries_match_hash_placements(
 }
 
 impl FinalCheckpoint {
-    /// Validate checkpoint marker invariants.
+    /// Validates checkpoint marker invariants.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1785,7 +1788,7 @@ pub struct RegistryKey {
 }
 
 impl RegistryKey {
-    /// Build a tenant registry key.
+    /// Builds a tenant registry key.
     #[must_use]
     pub fn new(name: TenantName) -> Self {
         Self {
@@ -1795,7 +1798,7 @@ impl RegistryKey {
         }
     }
 
-    /// Parse and validate raw key bytes.
+    /// Parses and validates raw key bytes.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1819,7 +1822,7 @@ impl RegistryKey {
         Ok(key)
     }
 
-    /// Encode the key to bytes.
+    /// Encodes the key to bytes.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1834,7 +1837,7 @@ struct TenantRecordEnvelope {
     record: TenantRecord,
 }
 
-/// Build the registry key bytes for a tenant name.
+/// Builds the registry key bytes for a tenant name.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -1842,13 +1845,13 @@ pub fn tenant_registry_key(name: &TenantName) -> Result<Vec<u8>, ControlError> {
     RegistryKey::new(name.clone()).encode()
 }
 
-/// Return the ACL-scoped per-tenant config topic name for a compute.
+/// Returns the ACL-scoped per-tenant config topic name for a compute.
 #[must_use]
 pub fn tenant_config_topic(name: &TenantName) -> String {
     format!("{TENANT_CONFIG_TOPIC_PREFIX}{name}")
 }
 
-/// Encode a whole tenant record as bytes for `__gres_cfg.<tenant>`.
+/// Encodes a whole tenant record as bytes for `__gres_cfg.<tenant>`.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -1861,7 +1864,7 @@ pub fn encode_tenant_config_record(record: &TenantRecord) -> Result<Vec<u8>, Con
     Ok(serde_json::to_vec(&envelope)?)
 }
 
-/// Decode a per-tenant config topic value.
+/// Decodes a per-tenant config topic value.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -1869,7 +1872,7 @@ pub fn decode_tenant_config_record(value: &[u8]) -> Result<TenantRecord, Control
     decode_registry_record(value)
 }
 
-/// Encode a whole tenant record as `(key, value)` bytes for `__gres_tenants`.
+/// Encodes a whole tenant record as `(key, value)` bytes for `__gres_tenants`.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -1883,7 +1886,7 @@ pub fn encode_registry_record(record: &TenantRecord) -> Result<(Vec<u8>, Vec<u8>
     Ok((key, serde_json::to_vec(&envelope)?))
 }
 
-/// Decode a registry value. Tombstones are represented outside the value as `None`.
+/// Decodes a registry value. A tombstone appears outside the value as `None`.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.

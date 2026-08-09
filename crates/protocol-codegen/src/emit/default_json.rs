@@ -2,12 +2,13 @@
 //!
 //! The emitted function produces a `serde_json::Value` whose shape mirrors
 //! what Kafka's `*DataJsonConverter.read(json, version)` expects for the
-//! default state of a message — i.e. the JSON the JVM oracle should accept
+//! default state of a message. That is the JSON the JVM oracle should accept
 //! to yield the same bytes as `MessageName::default()` after encoding.
 //!
-//! The function is version-aware: it only includes fields that are valid for
-//! the requested version, and emits null only for versions where the field is
-//! actually nullable, preventing the JVM converter from rejecting bad input.
+//! The function is version-aware. It includes only fields that are valid for
+//! the requested version, and it emits null only for versions where the field
+//! is actually nullable. The JVM converter therefore never rejects the
+//! input.
 
 use std::{fmt::Write as FmtWrite, str::FromStr};
 
@@ -20,7 +21,7 @@ use crate::{
 };
 
 /// Emit the `default_json(version: i16)` function body for the given message.
-/// The output is plain Rust source intended to be appended to the
+/// The output is plain Rust source, and the caller appends it to the
 /// per-message owned module body.
 #[must_use]
 /// # Panics
@@ -47,8 +48,8 @@ pub fn emit_default_json(spec: &MessageSpec) -> String {
     tokens.to_string()
 }
 
-/// Build a `TokenStream` of `obj.insert(...)` statements for each field,
-/// guarded by version range checks.
+/// Build a `TokenStream` of `obj.insert(...)` statements for each field, with
+/// version range checks as guards.
 fn fields_stmts_tokens(fields: &[FieldSpec]) -> TokenStream {
     let stmts: Vec<TokenStream> = fields
         .iter()
@@ -81,7 +82,7 @@ fn fields_stmts_tokens(fields: &[FieldSpec]) -> TokenStream {
 }
 
 /// Parse an emitter-produced Rust fragment into tokens. The fragment came from
-/// a trusted generator, so a lex error is a generator bug, not bad input.
+/// a trusted generator, so a lex error is a generator bug and not bad input.
 fn parse_expr(s: &str) -> TokenStream {
     TokenStream::from_str(s).expect("leaf generator produced an unlexable fragment")
 }
@@ -105,14 +106,14 @@ fn version_cond(vr: VersionRange) -> Option<String> {
 /// oracle produces the same bytes as the Rust implementation.
 ///
 /// Key rules:
-/// - Nullable non-array fields with no default: Rust `Default` produces `None`
-///   (encodes as null), so emit `null` for nullable versions.
-/// - Nullable array fields with no default: Rust `Default` produces `None`
-///   (encodes as null array, i.e. -1), so emit `null` for nullable versions.
-///   For non-nullable versions, emit `[]` (empty array).
+/// - Nullable non-array fields with no default: Rust `Default` produces
+///   `None`, which encodes as null, so emit `null` for nullable versions.
+/// - Nullable array fields with no default: Rust `Default` produces `None`,
+///   which encodes as a null array of -1, so emit `null` for nullable
+///   versions. For non-nullable versions, emit the empty array `[]`.
 /// - Non-nullable array fields: always `[]`.
-/// - Fields with explicit null default: emit `null` (version-aware for split
-///   nullability ranges).
+/// - Fields with an explicit null default: emit `null`, and stay version-aware
+///   for split nullability ranges.
 fn json_value_expr_versioned(f: &FieldSpec) -> String {
     let is_array = f.field_type.starts_with("[]");
     let default_is_null = matches!(&f.default, Some(serde_json::Value::Null))
@@ -162,7 +163,8 @@ fn json_value_expr_versioned(f: &FieldSpec) -> String {
     }
 }
 
-/// Convert a schema `default` annotation to a Rust expression producing a `serde_json::Value`.
+/// Convert a schema `default` annotation to a Rust expression that produces a
+/// `serde_json::Value`.
 fn scalar_value_expr(field_type: &str, val: &serde_json::Value, f: &FieldSpec) -> String {
     let base = base_type(field_type);
 
@@ -223,7 +225,8 @@ fn scalar_value_expr(field_type: &str, val: &serde_json::Value, f: &FieldSpec) -
     }
 }
 
-/// The "zero" `serde_json::Value` expression for a type (when no default specified).
+/// The "zero" `serde_json::Value` expression for a type, used when the schema
+/// specifies no default.
 fn type_zero_expr(field_type: &str, f: &FieldSpec) -> String {
     let base = base_type(field_type);
     match base {
@@ -249,10 +252,13 @@ fn type_zero_expr(field_type: &str, f: &FieldSpec) -> String {
     }
 }
 
-/// Emit a Rust expression that builds a `serde_json::Value::Object` for a nested struct.
-/// Note: sub-field version guards are NOT applied here (nested struct defaults are
-/// version-independent relative to their parent field's guard). If this causes issues
-/// for specific complex schemas, fix at the per-field level.
+/// Emit a Rust expression that builds a `serde_json::Value::Object` for a
+/// nested struct.
+///
+/// Note that this function does NOT apply sub-field version guards, because
+/// nested struct defaults are version-independent relative to their parent
+/// field's guard. If this causes problems for specific complex schemas, fix it
+/// at the per-field level.
 fn emit_nested_struct_expr(fields: &[FieldSpec]) -> String {
     let mut s = String::new();
     s.push_str("{ let mut m = ::serde_json::Map::new(); ");
@@ -265,9 +271,10 @@ fn emit_nested_struct_expr(fields: &[FieldSpec]) -> String {
     s
 }
 
-/// Convert a Kafka schema field name (`PascalCase` like `TransactionalId`) to
-/// the JSON key used by the JVM's `*DataJsonConverter` (`camelCase` like
-/// `transactionalId` — lowercase the first character).
+/// Convert a Kafka schema field name in `PascalCase`, such as
+/// `TransactionalId`, to the JSON key the JVM's `*DataJsonConverter` uses. That
+/// key is `camelCase`, such as `transactionalId`, with the first character in
+/// lower case.
 #[must_use]
 pub fn json_field_name(name: &str) -> String {
     let mut chars = name.chars();

@@ -1,6 +1,6 @@
-//! Per-(topic, partition) accumulator. Each `try_append` enqueues a
-//! record + a oneshot tx; the sender drains in-flight batches and
-//! resolves the oneshots from the `ProduceResponse`.
+//! Per-(topic, partition) accumulator. Each `try_append` enqueues a record and
+//! a oneshot tx. The sender drains the in-flight batches and resolves the
+//! oneshots from the `ProduceResponse`.
 
 use std::{collections::VecDeque, sync::Arc};
 
@@ -29,15 +29,15 @@ pub(crate) struct PendingRecord {
     pub ack: oneshot::Sender<Result<RecordMetadata, ProducerError>>,
 }
 
-/// One in-progress `RecordBatch`. The sender wraps this into a Kafka
+/// One in-progress `RecordBatch`. The sender wraps it into a Kafka
 /// `RecordBatch` at flush time and assigns `base_sequence`.
 #[derive(Debug)]
 pub(crate) struct InProgressBatch {
     /// Recovery generation captured when transactional records were accepted.
     /// A batch is never allowed to cross a transaction recovery boundary.
     pub transaction_generation: Option<u64>,
-    /// Wall-clock time when this batch's first record was appended.
-    /// Used by the sender to decide batch-relative `linger.ms` expiry.
+    /// Wall-clock time when this batch's first record was appended. The sender
+    /// uses it to decide batch-relative `linger.ms` expiry.
     pub first_append_at: Instant,
     /// Approximate uncompressed body size.
     pub size_bytes: usize,
@@ -62,14 +62,14 @@ impl InProgressBatch {
 /// One accumulator per (topic, partition).
 #[derive(Debug)]
 pub(crate) struct Accumulator {
-    /// `None` until the first append. Sender pops the in-progress batch
-    /// into `ready` when it flushes (rotating the partitioner sticky if
-    /// applicable).
+    /// `None` until the first append. The sender pops the in-progress batch
+    /// into `ready` when it flushes, and rotates the partitioner sticky where
+    /// that applies.
     pub current: Option<InProgressBatch>,
-    /// FIFO of batches the sender hasn't flushed yet.
+    /// FIFO of batches the sender has not flushed yet.
     pub ready: VecDeque<InProgressBatch>,
-    /// `batch.size` cap. If a single record would push us past this, we
-    /// seal `current` first and start fresh.
+    /// `batch.size` cap. If a single record would push the batch past this
+    /// cap, the accumulator seals `current` first and starts a new batch.
     pub batch_size: usize,
 }
 
@@ -78,13 +78,13 @@ pub(crate) struct Accumulator {
 pub(crate) enum AppendResult {
     Appended {
         receiver: oneshot::Receiver<Result<RecordMetadata, ProducerError>>,
-        /// A new current batch (and therefore a new linger deadline) was
-        /// created. This is also true when the previous current batch rolled
-        /// into `ready`.
+        /// The accumulator created a new current batch, and therefore a new
+        /// linger deadline. This is also true when the previous current batch
+        /// rolled into `ready`.
         wakes_sender: bool,
     },
-    /// The accumulator's `batch.size` is full but a new batch could be
-    /// started. The caller (sender wakeup) needs to seal and rotate.
+    /// The accumulator's `batch.size` is full, but a new batch can start. The
+    /// caller, which is the sender wakeup, must seal and rotate.
     BatchFull,
 }
 
@@ -154,8 +154,9 @@ impl Accumulator {
         }
     }
 
-    /// Move the current in-progress batch into `ready`. Called by the
-    /// sender at flush time (linger expiry, explicit flush, batch full).
+    /// Move the current in-progress batch into `ready`. The sender calls this
+    /// at flush time: on linger expiry, on an explicit flush, or when the batch
+    /// is full.
     pub fn seal_current(&mut self) {
         if let Some(b) = self.current.take()
             && !b.is_empty()

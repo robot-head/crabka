@@ -14,8 +14,8 @@ use tempfile::tempdir;
 const NO_LIMIT: ByteSize = gibibytes(4);
 
 proptest! {
-    /// Appending an arbitrary list of batches and then reading the whole
-    /// log back yields the same total number of records.
+    /// An append of an arbitrary list of batches, followed by a read of the
+    /// whole log, gives back the same total number of records.
     #[test]
     fn write_then_read_records_match(batches in arb_batches(0, 8)) {
         let dir = tempdir().unwrap();
@@ -30,12 +30,12 @@ proptest! {
         prop_assert_eq!(actual_record_count, expected_record_count);
     }
 
-    /// After appending and then truncating to an arbitrary offset within
-    /// `[0, log_end)`, `log_end_offset()` is `<= trunc_to`. Truncation
-    /// happens on batch boundaries: if `trunc_to` falls in the middle of
-    /// a batch, the entire batch is dropped, so the resulting log end can
-    /// be lower than the requested point. We also assert the log can
-    /// still be read end-to-end without error.
+    /// After an append and then a truncate to an arbitrary offset within
+    /// `[0, log_end)`, `log_end_offset()` is `<= trunc_to`. Truncation happens
+    /// on batch boundaries. If `trunc_to` falls in the middle of a batch, the
+    /// truncate drops the whole batch, so the resulting log end can be lower
+    /// than the requested point. This test also asserts that the log still
+    /// reads end-to-end without an error.
     #[test]
     fn random_truncate_then_read(
         batches in arb_batches(1, 6),

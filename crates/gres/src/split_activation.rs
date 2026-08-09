@@ -421,8 +421,9 @@ impl LiveMultiRangeTransfer {
     }
 }
 
-/// Commit the one-way activation decision through the still-canonical predecessor r0.
-/// This is the final fallible instruction before canonical producer construction.
+/// Commit the one-way activation decision through the still-canonical
+/// predecessor r0. This is the last fallible instruction before canonical
+/// producer construction.
 pub(super) async fn persist_must_activate(
     transfer: &LiveMultiRangeTransfer,
 ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
@@ -676,8 +677,9 @@ pub(super) async fn copy_must_activate_before_bind(
     Ok(())
 }
 
-/// Execute the post-MustActivate state machine. `lib.rs` deliberately delegates the complete
-/// protocol here so producer ownership and receipt transitions have one implementation home.
+/// Execute the post-MustActivate state machine. `lib.rs` deliberately delegates
+/// the complete protocol here, so producer ownership and receipt transitions
+/// have one implementation home.
 pub(super) async fn activate_serving_topology(
     transfer: &LiveMultiRangeTransfer,
 ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
@@ -934,8 +936,9 @@ async fn cas_transfer_receipt(
     Ok(())
 }
 
-/// Read range zero without constructing a producer so startup can select the already
-/// activated writer generation instead of attempting to resurrect a fenced predecessor.
+/// Read range zero without a producer, so startup can select the already
+/// activated writer generation instead of an attempt to resurrect a fenced
+/// predecessor.
 pub(super) async fn discover_activation_receipt(
     config: &SubstrateRuntimeConfig,
     checkpoint_store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
@@ -1580,10 +1583,11 @@ async fn read_only_receipts(
 
 /// Resolve every durable activation receipt before a listener can advertise readiness.
 ///
-/// Before writer activation, aborting is safe.  Once either successor writer has been
-/// activated, the only safe direction is forward: reconstruct both successors from the
-/// recorded source checkpoint and bounded tail, recover their canonical WALs, checkpoint
-/// them, and publish the target map entirely in the not-yet-visible startup graph.
+/// Before writer activation, an abort is safe. Once either successor writer is
+/// activated, the only safe direction is forward. Startup then reconstructs
+/// both successors from the recorded source checkpoint and bounded tail,
+/// recovers their canonical WALs, checkpoints them, and publishes the target
+/// map entirely in the not-yet-visible startup graph.
 pub(super) async fn reconcile_before_readiness(
     config: &SubstrateRuntimeConfig,
     engines: &mut LiveMultirangeEngines,
@@ -2085,10 +2089,10 @@ fn physical_to_logical(
 
 /// Routing id for a relation, read from the trailing digits of its name.
 ///
-/// The split contract keys on the *unqualified* name: a schema qualifier
+/// The split contract keys on the *unqualified* name. A schema qualifier
 /// carries no digits, so `s.t42` and `public.t42` route identically. That is the
-/// same collision the convention already accepts between any two names ending in
-/// `42`.
+/// same collision the convention already accepts between any two names that end
+/// in `42`.
 fn routing_table_id(table: &str) -> TableId {
     let digits = table
         .chars()

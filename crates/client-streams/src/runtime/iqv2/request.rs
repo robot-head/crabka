@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::query::Query;
 
-/// Source-topic consumed offsets folded into a store: topic → partition →
-/// offset (the next offset to read, i.e. one past the last consumed record).
+/// Source-topic consumed offsets folded into a store, as topic to partition to
+/// offset. The offset is the next offset to read, one past the last consumed
+/// record.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Position(pub BTreeMap<String, BTreeMap<i32, i64>>);
 
@@ -18,8 +19,8 @@ impl Position {
         self.0.get(topic).and_then(|m| m.get(&partition)).copied()
     }
 
-    /// True if `self` meets or exceeds every `(topic, partition)` offset in
-    /// `bound`. A bound naming a partition `self` has never advanced fails.
+    /// True when `self` meets or exceeds every `(topic, partition)` offset in
+    /// `bound`. A bound that names a partition `self` has never advanced fails.
     #[must_use]
     pub(crate) fn dominates(&self, bound: &Position) -> bool {
         bound.0.iter().all(|(topic, parts)| {
@@ -31,8 +32,8 @@ impl Position {
 }
 
 /// Freshness bound for a query (KIP-796). `At` requires each partition's
-/// `Position` to dominate the given one, else that partition fails fast with
-/// `NotUpToBound` — the query never blocks.
+/// `Position` to dominate the given one. Otherwise that partition fails fast with
+/// `NotUpToBound`, and the query never blocks.
 #[derive(Debug, Clone, Default)]
 pub enum PositionBound {
     #[default]
@@ -48,7 +49,7 @@ pub(crate) enum PartitionSel {
     Set(BTreeSet<i32>),
 }
 
-/// A finalized `IQv2` request: built via
+/// A finalized `IQv2` request, built with
 /// `StateQueryRequest::in_store(name).with_query(q)`.
 pub struct StateQuery<Q: Query> {
     pub(crate) store: String,
@@ -59,7 +60,7 @@ pub struct StateQuery<Q: Query> {
 }
 
 impl<Q: Query> StateQuery<Q> {
-    /// Restrict to a specific set of local partitions (default: all).
+    /// Restrict the query to a set of local partitions. Default: all of them.
     #[must_use]
     pub fn with_partitions(mut self, set: BTreeSet<i32>) -> Self {
         self.partitions = PartitionSel::Set(set);
@@ -80,7 +81,7 @@ impl<Q: Query> StateQuery<Q> {
         self
     }
 
-    /// Only serve from active (not standby/restoring) tasks.
+    /// Serve only from active tasks, and not from standby or restoring tasks.
     #[must_use]
     pub fn require_active(mut self) -> Self {
         self.require_active = true;
@@ -99,13 +100,13 @@ impl StateQueryRequest {
     }
 }
 
-/// Half-built request awaiting `.with_query(q)`.
+/// Half-built request that waits for `.with_query(q)`.
 pub struct StateQueryRequestBuilder {
     store: String,
 }
 
 impl StateQueryRequestBuilder {
-    /// Attach the query, finalizing the request.
+    /// Attach the query and finalize the request.
     #[must_use]
     pub fn with_query<Q: Query>(self, query: Q) -> StateQuery<Q> {
         StateQuery {

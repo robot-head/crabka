@@ -59,7 +59,7 @@ impl StatusCode {
     }
 }
 
-/// A typed attribute value. Arrays are preserved by block encoding.
+/// A typed attribute value. Block encoding preserves arrays.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum AttrValue {
     Str(String),

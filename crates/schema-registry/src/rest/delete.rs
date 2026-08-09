@@ -1,4 +1,4 @@
-//! DELETE endpoints for versions and subjects (soft + permanent).
+//! DELETE endpoints for versions and subjects, both soft and permanent.
 
 use axum::{
     extract::{Path, Query, State},

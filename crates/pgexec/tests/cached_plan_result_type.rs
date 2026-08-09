@@ -1,11 +1,11 @@
 //! A statement prepared under one `search_path` and run under another is
-//! re-analysed against the path in force when it runs — `postgres:18.4` does
-//! the same, so an unqualified name really can reach a different relation than
-//! the one described to the client. What 18.4 will not do is answer with a
-//! result of a shape it has already announced a different one for: it raises
+//! re-analysed against the path in force when it runs. `postgres:18.4` does the
+//! same, so an unqualified name really can reach a different relation than the
+//! one described to the client. What 18.4 will not do is answer with a result of
+//! a shape it has already announced a different one for. It raises
 //! `0A000 cached plan must not change result type`.
 //!
-//! Every expectation here was taken from a live `postgres:18.4`, over a
+//! Every expectation here comes from a live `postgres:18.4`, over a
 //! protocol-level Parse/Bind/Execute (named and unnamed alike) and a SQL-level
 //! PREPARE/EXECUTE, which answer identically.
 //!
@@ -19,9 +19,9 @@ use assert2::assert;
 use crabka_pgexec::{SqlEngine, SqlSession};
 use crabka_pgwire::engine::{Engine, ExecuteOutcome, QueryResult, Session};
 
-/// What running the prepared statement under the second search path produced:
-/// the column names it answered with, or the SQLSTATE and message it was
-/// refused with.
+/// What the prepared statement produced under the second search path: the
+/// column names it answered with, or the SQLSTATE and message that refused
+/// it.
 type Outcome = Result<Vec<String>, (String, String)>;
 
 fn refused() -> Outcome {
@@ -161,9 +161,9 @@ async fn a_protocol_prepared_statement_may_not_change_its_result_type() {
     }
 }
 
-/// `postgres:18.4` makes no exception for the unnamed statement: an unnamed
-/// Parse whose result shape moved before its Bind is refused exactly as a named
-/// one is.
+/// `postgres:18.4` makes no exception for the unnamed statement. It refuses an
+/// unnamed Parse whose result shape moved before its Bind exactly as it refuses
+/// a named one.
 #[tokio::test]
 async fn an_unnamed_prepared_statement_may_not_change_its_result_type() {
     for case in cases() {
@@ -186,7 +186,7 @@ async fn a_sql_prepared_statement_may_not_change_its_result_type() {
     }
 }
 
-/// The search path is not the only way a cached statement's result can move:
+/// The search path is not the only way a cached statement's result can move.
 /// `postgres:18.4` refuses the same way when the relation itself is altered
 /// under a statement whose path never changed.
 #[tokio::test]
@@ -213,7 +213,7 @@ async fn a_relation_altered_under_a_prepared_statement_is_refused_the_same_way()
 }
 
 /// The same statement, prepared and run under one unchanged path, is never
-/// re-described and never refused — including when it is run more than once.
+/// re-described and never refused, even when it runs more than once.
 #[tokio::test]
 async fn an_unchanged_search_path_leaves_a_prepared_statement_alone() {
     let engine = SqlEngine::new();

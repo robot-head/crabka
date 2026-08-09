@@ -1,8 +1,9 @@
 //! Confluent wire framing: `magic(0x00) | schema_id(4 BE) | [msg_index] | body`.
 //!
-//! Protobuf adds a message-index between the id and the body: a varint count
-//! followed by that many varint indices. The common top-level case `[0]` is
-//! optimized by Confluent to a single `0x00` byte (count omitted). We match that.
+//! Protobuf adds a message-index between the id and the body. The message-index
+//! is a varint count and then that many varint indices. Confluent optimizes the
+//! common top-level case `[0]` to a single `0x00` byte and omits the count.
+//! This module writes and reads the same form.
 
 use bytes::{BufMut, Bytes, BytesMut};
 

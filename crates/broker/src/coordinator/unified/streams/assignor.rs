@@ -1,64 +1,70 @@
-//! KIP-1071 server-side task assignor (sticky / highly-available; active,
-//! standby, warmup placement + catch-up promotion).
+//! KIP-1071 server-side task assignor. It is sticky or highly available, and
+//! it places active, standby, and warmup tasks and promotes caught-up ones.
 //!
-//! This is a *pure* module: no async, no I/O, no metadata access. It takes
-//! already-resolved inputs ([`AssignorInput`] + a slice of [`AssignorMember`])
-//! and returns a target [`StreamsAssignment`]. The coordinator actor (a later
-//! slice) builds the inputs from member state + topology and applies the
-//! output as the next target assignment.
+//! This is a *pure* module, with no async, no I/O, and no metadata access. It
+//! takes already-resolved inputs, an [`AssignorInput`] and a slice of
+//! [`AssignorMember`], and returns a target [`StreamsAssignment`]. The
+//! coordinator actor builds the inputs from the member state and the topology,
+//! and applies the output as the next target assignment.
 //!
-//! A *task* is `(subtopology_id, partition)`. Tasks come in three roles:
-//! **active** (exactly one instance per task), **standby** (replicas of
-//! stateful tasks for failover), and **warmup** (transient: a member building
-//! up a stateful task's local state before it can safely take it over as
-//! active).
+//! A *task* is `(subtopology_id, partition)`. Tasks come in three roles.
+//! **active** has exactly one instance for each task. **standby** holds
+//! replicas of stateful tasks for failover. **warmup** is transient: a member
+//! builds up a stateful task's local state there before it can safely take the
+//! task over as active.
 //!
-//! Determinism is mandatory: members are processed in lexicographic
+//! Determinism is mandatory. The assignor processes members in lexicographic
 //! `member_id` order and tasks in `(subtopology_id, partition)` order, so the
-//! same inputs always yield the same assignment.
+//! same inputs always give the same assignment.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::config::StreamsAssignorKind;
 
-/// A single group member as seen by the assignor, with its current ownership
-/// (used for stickiness) and reported per-task changelog lag (used to decide
-/// warmup catch-up).
+/// One group member as the assignor sees it.
+///
+/// It carries the member's current ownership, which drives stickiness, and its
+/// reported per-task changelog lag, which decides warmup catch-up.
 #[derive(Debug, Clone)]
 pub struct AssignorMember {
     pub member_id: String,
     /// Process the member runs in. Standby placement spreads copies across
-    /// distinct processes for fault tolerance.
+    /// separate processes for fault tolerance.
     pub process_id: String,
     pub rack_id: Option<String>,
-    /// Active tasks the member currently owns (for stickiness):
-    /// `subtopology_id -> partitions`.
+    /// Active tasks the member currently owns, as
+    /// `subtopology_id -> partitions`. The assignor reads them for
+    /// stickiness.
     pub current_active: BTreeMap<String, Vec<i32>>,
     /// Standby tasks the member currently owns.
     pub current_standby: BTreeMap<String, Vec<i32>>,
     /// Warmup tasks the member currently owns.
     pub current_warmup: BTreeMap<String, Vec<i32>>,
-    /// Reported changelog lag per task: `(subtopology, partition) -> lag`
-    /// (`end - position`). An absent entry means unknown / not caught up.
+    /// Reported changelog lag for each task: `(subtopology, partition) -> lag`,
+    /// where the lag is `end - position`. An absent entry means the lag is
+    /// unknown and the task is not caught up.
     pub task_lag: BTreeMap<(String, i32), i64>,
 }
 
-/// Inputs to a single assignment computation. The task universe, which
-/// subtopologies are stateful, and the placement knobs (standby/warmup counts,
-/// acceptable recovery lag, and the assignor kind).
+/// Inputs to one assignment computation.
+///
+/// They hold the task universe, the set of stateful subtopologies, and the
+/// placement settings: the standby and warmup counts, the acceptable recovery
+/// lag, and the assignor kind.
 #[derive(Debug, Clone)]
 pub struct AssignorInput {
     /// The full task universe: `subtopology_id -> ALL partitions`.
     pub tasks: BTreeMap<String, Vec<i32>>,
-    /// Subtopology ids that have a changelog (i.e. are stateful).
+    /// Subtopology ids that have a changelog, that is, the stateful ones.
     pub stateful: BTreeSet<String>,
     /// `num.standby.replicas`: standby copies per stateful task.
     pub num_standby_replicas: i32,
-    /// `max.warmup.replicas`: global cap on concurrent warmup tasks created in
-    /// this assignment.
+    /// `max.warmup.replicas`: the global cap on the warmup tasks this
+    /// assignment creates at one time.
     pub num_warmup_replicas: i32,
-    /// `acceptable.recovery.lag`: max changelog lag at which a warmup target is
-    /// considered caught up and the active move is allowed immediately.
+    /// `acceptable.recovery.lag`: the maximum changelog lag at which the
+    /// assignor treats a warmup target as caught up and allows the active move
+    /// immediately.
     pub acceptable_recovery_lag: i64,
     /// Server-side assignor selection.
     pub kind: StreamsAssignorKind,
@@ -66,7 +72,7 @@ pub struct AssignorInput {
 
 /// The computed target assignment: per-member task maps for each role.
 ///
-/// A member with no tasks in a role simply has no entry in that role's map.
+/// A member with no tasks in a role has no entry in that role's map.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct StreamsAssignment {
     /// `member_id -> active tasks`.
@@ -80,9 +86,9 @@ pub struct StreamsAssignment {
 /// A `(subtopology_id, partition)` task in its canonical ordered form.
 type Task = (String, i32);
 
-/// Compute the target [`StreamsAssignment`] for a streams group.
+/// Computes the target [`StreamsAssignment`] for a streams group.
 ///
-/// See the module docs for the algorithm. With no members, returns an empty
+/// See the module docs for the algorithm. With no members, it returns an empty
 /// assignment.
 #[must_use]
 pub fn assign(members: &[AssignorMember], input: &AssignorInput) -> StreamsAssignment {
@@ -124,9 +130,9 @@ pub fn assign(members: &[AssignorMember], input: &AssignorInput) -> StreamsAssig
     }
 }
 
-/// Resolve `Auto` to a concrete kind: `HighlyAvailable` when any stateful
-/// subtopology exists, `Sticky` otherwise. `Sticky` / `HighlyAvailable` pass
-/// through unchanged.
+/// Resolves `Auto` to a concrete kind. It returns `HighlyAvailable` when a
+/// stateful subtopology exists, and `Sticky` otherwise. `Sticky` and
+/// `HighlyAvailable` pass through unchanged.
 fn resolve_kind(input: &AssignorInput) -> StreamsAssignorKind {
     match input.kind {
         StreamsAssignorKind::Auto => {
@@ -140,7 +146,7 @@ fn resolve_kind(input: &AssignorInput) -> StreamsAssignorKind {
     }
 }
 
-/// Flatten the `subtopology -> partitions` universe into an ordered, de-duped
+/// Flattens the `subtopology -> partitions` universe into an ordered, de-duped
 /// list of `(subtopology, partition)` tasks.
 fn flatten_tasks(tasks: &BTreeMap<String, Vec<i32>>) -> Vec<Task> {
     let mut out: Vec<Task> = Vec::new();
@@ -156,7 +162,8 @@ fn flatten_tasks(tasks: &BTreeMap<String, Vec<i32>>) -> Vec<Task> {
     out
 }
 
-/// Look up which member currently owns `task` as active, if any still present.
+/// Returns the member that currently owns `task` as active, if such a member
+/// is still present.
 fn current_active_owner<'a>(members: &[&'a AssignorMember], task: &Task) -> Option<&'a str> {
     members
         .iter()
@@ -164,15 +171,18 @@ fn current_active_owner<'a>(members: &[&'a AssignorMember], task: &Task) -> Opti
         .map(|m| m.member_id.as_str())
 }
 
-/// Whether a role map contains `task`.
+/// Reports whether a role map contains `task`.
 fn owns(role: &BTreeMap<String, Vec<i32>>, task: &Task) -> bool {
     role.get(&task.0)
         .is_some_and(|parts| parts.contains(&task.1))
 }
 
-/// Step 1: compute the balanced active target. Each task gets exactly one
-/// owner. Sticky-keep tasks whose current owner still exists, place the rest on
-/// the least-loaded member, then balance until max-min load `<= 1`.
+/// Step 1: computes the balanced active target, where each task gets exactly
+/// one owner.
+///
+/// The function keeps a task on its current owner when that owner still
+/// exists, places the rest on the least-loaded member, and then balances until
+/// the difference between the maximum and minimum load is `<= 1`.
 fn assign_active(members: &[&AssignorMember], tasks: &[Task]) -> HashMap<String, Vec<Task>> {
     let mut active: HashMap<String, Vec<Task>> = HashMap::new();
     for m in members {
@@ -226,7 +236,8 @@ fn assign_active(members: &[&AssignorMember], tasks: &[Task]) -> HashMap<String,
     active
 }
 
-/// Member id with the fewest active tasks (tie-break: lexicographic id).
+/// Returns the member id with the fewest active tasks. A tie breaks on the
+/// lexicographic id.
 fn least_loaded(members: &[&AssignorMember], active: &HashMap<String, Vec<Task>>) -> String {
     members
         .iter()
@@ -239,8 +250,8 @@ fn least_loaded(members: &[&AssignorMember], active: &HashMap<String, Vec<Task>>
         .expect("members non-empty")
 }
 
-/// `(most_loaded_id, least_loaded_id)` by active load, each with deterministic
-/// tie-breaks. `None` when there are no members.
+/// Returns `(most_loaded_id, least_loaded_id)` by active load, each with a
+/// deterministic tie-break. Returns `None` when there are no members.
 fn load_extremes(
     members: &[&AssignorMember],
     active: &HashMap<String, Vec<Task>>,
@@ -260,11 +271,13 @@ fn load_extremes(
     Some((max, min))
 }
 
-/// Step 2: warmup deferral (`HighlyAvailable` only). For each *stateful* task
-/// whose balanced-target owner differs from its current active owner (and a
-/// current owner exists), keep the move only if the target is caught up;
-/// otherwise leave it active on the current owner and stage a warmup on the
-/// intended target — subject to the global warmup cap.
+/// Step 2: warmup deferral, for `HighlyAvailable` only.
+///
+/// This step looks at each *stateful* task that has a current active owner and
+/// whose balanced-target owner differs from that owner. It keeps the move only
+/// if the target is caught up. Otherwise it leaves the task active on the
+/// current owner and stages a warmup on the intended target. The global warmup
+/// cap limits how many warmups it stages.
 fn defer_warmups(
     members: &[&AssignorMember],
     input: &AssignorInput,
@@ -316,7 +329,7 @@ fn defer_warmups(
     }
 }
 
-/// Move `task` from `from`'s active set to `to`'s active set.
+/// Moves `task` from the active set of `from` to the active set of `to`.
 fn move_active(active: &mut HashMap<String, Vec<Task>>, from: &str, to: &str, task: &Task) {
     if let Some(list) = active.get_mut(from)
         && let Some(idx) = list.iter().position(|t| t == task)
@@ -326,11 +339,13 @@ fn move_active(active: &mut HashMap<String, Vec<Task>>, from: &str, to: &str, ta
     active.entry(to.to_owned()).or_default().push(task.clone());
 }
 
-/// Step 3: standby placement (`HighlyAvailable` only). For each stateful task,
-/// place up to `num_standby_replicas` copies on members in processes distinct
-/// from the active owner, from each other, and from any warmup holder of the
-/// task. Prefer a different rack, then fewest standby load, then lexicographic
-/// id.
+/// Step 3: standby placement, for `HighlyAvailable` only.
+///
+/// For each stateful task, this step places up to `num_standby_replicas`
+/// copies on members whose processes differ from the active owner's, from each
+/// other's, and from that of any warmup holder of the task. It prefers a
+/// different rack first, then the smallest standby load, then the
+/// lexicographic id.
 fn assign_standby(
     members: &[&AssignorMember],
     input: &AssignorInput,
@@ -393,9 +408,9 @@ fn assign_standby(
     }
 }
 
-/// Ranking key for a standby candidate: prefer a *different* rack from the
-/// active owner, then fewest standby tasks so far, then lexicographic id.
-/// Smaller is better.
+/// Ranking key for a standby candidate. It prefers a rack *different* from the
+/// active owner's, then the fewest standby tasks so far, then the lexicographic
+/// id. A smaller key is better.
 fn standby_rank(
     m: &AssignorMember,
     active_rack: Option<&str>,
@@ -411,15 +426,17 @@ fn standby_rank(
     (rack_penalty, load, m.member_id.clone())
 }
 
-/// Whether `member` holds `task` in the given role map.
+/// Reports whether `member` holds `task` in the given role map.
 fn owns_role(role: &HashMap<String, Vec<Task>>, member: &str, task: &Task) -> bool {
     role.get(member).is_some_and(|ts| ts.contains(task))
 }
 
-/// Convert a `member -> Vec<Task>` working map into the public
-/// `member -> (subtopology -> partitions)` form, normalising every task map
-/// (sort + dedup partitions, drop empty subtopology entries) and dropping
-/// members with no tasks in the role.
+/// Converts a `member -> Vec<Task>` working map into the public
+/// `member -> (subtopology -> partitions)` form.
+///
+/// The function normalises every task map: it sorts and dedups the partitions
+/// and drops the empty subtopology entries. It also drops members that have no
+/// tasks in the role.
 fn to_role_maps(
     by_member: &HashMap<String, Vec<Task>>,
 ) -> HashMap<String, BTreeMap<String, Vec<i32>>> {
@@ -480,7 +497,8 @@ mod tests {
         }
     }
 
-    /// Total active tasks across all members in an assignment.
+    /// Returns the total number of active tasks across all members in an
+    /// assignment.
     fn count(role: &HashMap<String, BTreeMap<String, Vec<i32>>>) -> usize {
         role.values().flat_map(BTreeMap::values).map(Vec::len).sum()
     }

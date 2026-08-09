@@ -1,13 +1,13 @@
 //! Newtypes for same-typed profiles domain values that a call site could
 //! transpose and still compile.
 //!
-//! Each wrapper here guards a specific swap-shaped signature: two (or more)
-//! adjacent parameters of the same primitive type whose meanings differ, where
-//! passing them in the wrong order would be a silent bug. None of these values
-//! are serialised (they are query-path and metric arguments, plus an in-memory
-//! partition-map key), so no `#[serde(transparent)]` is required. Arithmetic on
-//! the inner value is done via `.0` at the (few) sites that need it, so `Add`/
-//! `Sub` are deliberately not derived.
+//! Each wrapper here guards a specific swap-shaped signature: two or more
+//! adjacent parameters of the same primitive type whose meanings differ. In such
+//! a signature, the wrong order is a silent bug. None of these values are
+//! serialised, because they are query-path and metric arguments plus one
+//! in-memory partition-map key, so they need no `#[serde(transparent)]`. The few
+//! sites that need arithmetic use the inner value through `.0`, so this module
+//! does not derive `Add` or `Sub`.
 
 use derive_more::{Display, From, Into};
 
@@ -46,8 +46,8 @@ pub struct IngestBytes(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
 pub struct IngestItems(pub u64);
 
-/// A partition key in the composite cold-read address space (per-block base
-/// OR-ed with a dense local id), used to route symbol resolution.
+/// A partition key in the composite cold-read address space: a per-block base
+/// OR-ed with a dense local id. Symbol resolution routes on this key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
 pub struct ExternalPartition(pub u64);
 

@@ -1,31 +1,33 @@
 //! Exhaustive stateright enumeration of the leader-epoch truncation core
 //! (`epoch_and_offset_for_entries`, KIP-101/320). This is the offset a follower
-//! truncates to when it rejoins a leader: it must keep every record both sides
-//! agree on (the committed common prefix) and drop every divergent higher-epoch
-//! record. See the design spec
+//! truncates to when it rejoins a leader. The follower must keep every record
+//! both sides agree on, the committed common prefix, and drop every divergent
+//! higher-epoch record. See the design spec
 //! `docs/superpowers/specs/2026-06-14-crabka-data-plane-safety-models-design.md`.
 //!
-//! The model enumerates every bounded *authoritative leader* epoch-history
-//! (strictly increasing epoch + `start_offset`, **with gaps allowed** so the
-//! floor-epoch branch is exercised) and, from each, probes the function with
-//! every requested epoch (including `UNDEFINED` and future epochs) and a small
-//! window of follower log-end offsets. A probe models a follower that holds the
-//! leader's records up to `leo` and asks "given my last epoch, where do I
-//! truncate?". The per-transition asserts encode the safety contract:
+//! The model enumerates every bounded *authoritative leader* epoch-history,
+//! that is, a history with strictly increasing epoch and `start_offset`, **with
+//! gaps allowed** so that the floor-epoch branch runs. From each history it
+//! probes the function with every requested epoch, including `UNDEFINED` and
+//! future epochs, and with a small window of follower log-end offsets. A probe
+//! models a follower that holds the leader's records up to `leo` and asks
+//! "given my last epoch, where do I truncate?". The per-transition asserts
+//! encode the safety contract:
 //!
 //!   * **valid target** — the truncation offset is always `>= 0`.
 //!   * **resolved epoch never exceeds requested** — `found_epoch <= requested`.
-//!   * **committed prefix preserved** (HEADLINE) — for a requested epoch the
-//!     leader also holds, the truncation offset is `>=` that epoch's start, so a
-//!     record in the agreed range is never truncated.
+//!   * **committed prefix preserved** (HEADLINE) — for a requested epoch that
+//!     the leader also holds, the truncation offset is `>=` that epoch's start,
+//!     so nothing ever truncates a record in the agreed range.
 //!   * **divergent suffix removed** — for an agreed *non-latest* epoch, the
-//!     truncation offset is exactly the next leader epoch's start (`<= leo`), so
-//!     every higher-epoch (divergent) record is dropped.
+//!     truncation offset is exactly the next leader epoch's start, which is
+//!     `<= leo`, so every divergent higher-epoch record is dropped.
 //!
-//! The follower-ahead case (requested epoch above the leader's latest) is the
-//! iterative KIP-320 step-back, not a single-call decision; the function returns
-//! `(UNDEFINED, leo)` there (no truncation this round) and the model only asserts
-//! the valid-target / resolved-epoch floor for it.
+//! In the follower-ahead case the requested epoch is above the leader's latest.
+//! That case is the iterative KIP-320 step-back, not a single-call decision. The
+//! function returns `(UNDEFINED, leo)` there, so there is no truncation this
+//! round, and the model asserts only the valid-target and resolved-epoch floor
+//! for it.
 
 use crabka_ids::{LeaderEpoch, Offset};
 use crabka_units::prelude::{Time, TimeExt as _, minutes};
@@ -35,8 +37,8 @@ use super::{EpochEntry, UNDEFINED_EPOCH, epoch_and_offset_for_entries};
 
 const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 40;
-/// Wall-clock budget for the exhaustive BFS; a runaway guard, not a bound
-/// on the model.
+/// Wall-clock budget for the exhaustive BFS. It is a runaway guard, not a
+/// bound on the model.
 const CHECK_TIMEOUT: Time = minutes(2);
 
 struct EpochModel {
@@ -46,9 +48,11 @@ struct EpochModel {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct EpochState {
-    /// Authoritative leader epoch-history: strictly increasing epoch + offset.
+    /// Authoritative leader epoch-history, with strictly increasing epoch and
+    /// offset.
     leader: Vec<EpochEntry>,
-    /// Non-vacuity witnesses, set by probes (monotonic false→true).
+    /// Non-vacuity witnesses. Probes set them, and they move only from false
+    /// to true.
     saw_truncation: bool,
     saw_gap: bool,
     saw_future: bool,

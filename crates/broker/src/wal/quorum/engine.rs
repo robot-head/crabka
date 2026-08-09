@@ -14,8 +14,8 @@ use crabka_units::{ByteSize, convert::ByteSizeExt as _, millis};
 
 use crate::error::BrokerError;
 
-/// Election timeout the in-process WAL quorum's state machine runs with. The
-/// replicas are local, so the window only has to cover a stalled replica task.
+/// Election timeout of the in-process WAL quorum's state machine. The replicas
+/// are local, so the window only has to cover a stalled replica task.
 const ELECTION_TIMEOUT: crabka_units::Time = millis(1_000);
 
 /// A single durable member of a WAL quorum.
@@ -44,7 +44,7 @@ impl WalReplica {
     }
 }
 
-/// Drives a WAL shard's durable quorum frontier.
+/// Drives the durable quorum frontier of a WAL shard.
 #[derive(Debug)]
 pub(crate) struct WalShardEngine {
     #[allow(dead_code)]

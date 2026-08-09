@@ -3,16 +3,15 @@
 //! and the underlying durable event store.
 //!
 //! The in-process implementation, [`InProcessMetadataEventLog`], is an
-//! in-memory broadcast-channel fixture used by unit tests (and a
-//! single-process model for the multi-broker case — multiple manager
-//! instances that share the same fixture observe each other's writes).
-//! The production Kafka-backed adapter implements the same trait.
+//! in-memory broadcast-channel fixture that unit tests use. It is also a
+//! single-process model for the multi-broker case, because multiple manager
+//! instances that share the same fixture observe each other's writes. The
+//! production Kafka-backed adapter implements the same trait.
 //!
-//! Instead of consuming every partition from offset 0,
-//! [`MetadataEventLog::subscribe`] takes an
-//! explicit [`PartitionStart`] assignment (a subset of partitions, each
-//! with its own start offset) and returns an [`AssignmentHandle`] that
-//! can mutate the live assignment at runtime.
+//! [`MetadataEventLog::subscribe`] does not consume every partition from
+//! offset 0. It takes an explicit [`PartitionStart`] assignment, which is a
+//! subset of partitions, each with its own start offset. It returns an
+//! [`AssignmentHandle`] that can mutate the live assignment at runtime.
 
 use std::{
     collections::HashMap,
@@ -37,7 +36,7 @@ pub struct MetadataEventRecord {
     pub partition: i32,
     /// Offset within that partition.
     pub offset: i64,
-    /// Encoded event payload (see [`crate::serde`]).
+    /// Encoded event payload. See [`crate::serde`].
     pub payload: Bytes,
 }
 
@@ -53,17 +52,18 @@ pub struct PartitionStart {
     pub start_offset: i64,
 }
 
-/// Runtime control over a live [`MetadataEventLog`] subscription's
-/// assigned partition set. Returned alongside the stream by
-/// [`MetadataEventLog::subscribe`].
+/// Runtime control over a live [`MetadataEventLog`] subscription's assigned
+/// partition set. [`MetadataEventLog::subscribe`] returns it together with
+/// the stream.
 pub trait AssignmentHandle: Send + Sync {
-    /// Begin consuming `start.partition` from `start.start_offset`;
-    /// no-op if already assigned. A newly-added partition emits its
-    /// backlog (from `start_offset`) into the existing stream, then
-    /// live records.
+    /// Begin to consume `start.partition` from `start.start_offset`. This
+    /// method does nothing if the partition is already assigned. A
+    /// newly-added partition emits its backlog from `start_offset` into the
+    /// existing stream, and then live records.
     fn add(&self, start: PartitionStart);
-    /// Stop consuming `partition` and stop emitting its events. No-op
-    /// if not currently assigned.
+    /// Stop the consumption of `partition` and stop the emission of its
+    /// events. This method does nothing if the partition is not currently
+    /// assigned.
     fn remove(&self, partition: i32);
     /// Current assigned partition set (unordered).
     fn assigned(&self) -> Vec<i32>;
@@ -85,8 +85,8 @@ pub trait AssignmentHandle: Send + Sync {
 /// - Records are delivered in publish order on a per-partition basis.
 #[async_trait]
 pub trait MetadataEventLog: Send + Sync {
-    /// Number of partitions the log holds. Stable for the lifetime of
-    /// the log; the manager hashes user partitions into
+    /// Number of partitions the log holds. It is stable for the lifetime of
+    /// the log. The manager hashes user partitions into
     /// `[0, partition_count())`.
     fn partition_count(&self) -> i32;
 
@@ -94,14 +94,14 @@ pub trait MetadataEventLog: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MetadataLogError`] if the transport refused the
-    /// write — e.g. the partition is out of range, or the log has
-    /// been closed.
+    /// Returns [`MetadataLogError`] if the transport refused the write. That
+    /// happens when the partition is out of range, or when the log has been
+    /// closed.
     async fn publish(&self, partition: i32, event: Bytes) -> Result<i64, MetadataLogError>;
 
-    /// Start consuming the given partitions, each from its start
-    /// offset (inclusive). Returns the event stream plus a handle to
-    /// mutate the live assignment.
+    /// Start to consume the given partitions, each from its start offset,
+    /// which is inclusive. Returns the event stream and a handle to mutate
+    /// the live assignment.
     ///
     /// The stream replays each assigned partition's backlog from its
     /// `start_offset`, then forwards live appends for the currently
@@ -117,14 +117,14 @@ pub trait MetadataEventLog: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MetadataLogError`] only on an underlying store
-    /// failure; an empty partition is `0`, not an error.
+    /// Returns [`MetadataLogError`] only on an underlying store failure. An
+    /// empty partition is `0`, not an error.
     async fn high_water_marks(&self) -> Result<Vec<i64>, MetadataLogError>;
 }
 
-/// Single-process [`MetadataEventLog`] used by unit tests and as the
-/// multi-broker fixture (multiple manager instances cloning the same
-/// `Arc` observe each other's writes).
+/// Single-process [`MetadataEventLog`] for unit tests and for the
+/// multi-broker fixture. Multiple manager instances that clone the same `Arc`
+/// observe each other's writes.
 pub struct InProcessMetadataEventLog {
     inner: Arc<InProcessInner>,
 }
@@ -132,28 +132,29 @@ pub struct InProcessMetadataEventLog {
 /// Live-assignment cursor for one partition within a subscription.
 #[derive(Debug, Clone, Copy)]
 struct PartitionCursor {
-    /// Next offset that has NOT yet been delivered by the backlog/live
-    /// path. Records below this are filtered out.
+    /// Next offset that the backlog or live path has NOT yet delivered. The
+    /// log filters out records below this offset.
     next: i64,
-    /// When set, live records for this partition are forwarded through
-    /// the `inject` FIFO rather than emitted directly on the broadcast
-    /// path. A partition added mid-stream sets this so its live appends
-    /// queue *behind* its already-injected backlog — otherwise
+    /// When set, the log forwards live records for this partition through
+    /// the `inject` FIFO rather than emits them directly on the broadcast
+    /// path. A partition added mid-stream sets this, so its live appends
+    /// queue *behind* its already-injected backlog. Without it,
     /// `stream::select` could interleave a live record ahead of undrained
-    /// backlog, violating per-partition publish order. Initially-assigned
-    /// partitions leave this `false`: their backlog goes through the
-    /// chained snapshot stream, which fully drains before any live record.
+    /// backlog and violate per-partition publish order. Initially-assigned
+    /// partitions leave this `false`. Their backlog goes through the chained
+    /// snapshot stream, which fully drains before any live record.
     via_inject: bool,
 }
 
-/// Per-subscription live assignment + a sender to inject backlog when a
-/// partition is added mid-stream. Keyed by a monotonically-increasing
-/// subscription id so multiple subscribers stay independent.
+/// Per-subscription live assignment, plus a sender to inject backlog when a
+/// partition is added mid-stream. A monotonically-increasing subscription id
+/// keys it, so multiple subscribers stay independent.
 struct SubscriptionState {
-    /// partition -> cursor. Presence in the map == assigned.
+    /// partition -> cursor. Presence in the map means the partition is
+    /// assigned.
     assigned: Mutex<HashMap<i32, PartitionCursor>>,
-    /// Inject backlog (and, for `add`-ed partitions, live) records in
-    /// FIFO publish order.
+    /// Inject backlog records in FIFO publish order. For `add`-ed partitions
+    /// this also injects live records.
     inject: mpsc::UnboundedSender<MetadataEventRecord>,
 }
 
@@ -417,9 +418,9 @@ impl AssignmentHandle for InProcessAssignmentHandle {
 enum Forward {
     /// Emit directly on the broadcast stream.
     Emit,
-    /// Re-route through the `inject` FIFO (added-mid-stream partition).
+    /// Re-route through the `inject` FIFO for a partition added mid-stream.
     Inject,
-    /// Not assigned / below cursor: discard.
+    /// Not assigned, or below the cursor. Discard the record.
     Drop,
 }
 
@@ -427,10 +428,10 @@ enum Forward {
 /// assigned and its offset is at/after the recorded live cursor for
 /// that partition.
 ///
-/// For a partition added mid-stream (`via_inject`), a passing record is
-/// re-routed into the `inject` FIFO instead of being emitted here, so it
-/// is ordered behind that partition's already-injected backlog rather
-/// than racing it through `stream::select`.
+/// For a partition added mid-stream, which is the `via_inject` case, this
+/// function re-routes a passing record into the `inject` FIFO instead of
+/// emitting it here. The record then sits behind that partition's
+/// already-injected backlog rather than races it through `stream::select`.
 fn filtered_broadcast(
     rx: broadcast::Receiver<MetadataEventRecord>,
     state: Arc<SubscriptionState>,

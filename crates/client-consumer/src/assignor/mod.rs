@@ -1,4 +1,5 @@
-//! Partition assignors: `range` (eager) and `cooperative-sticky` (KIP-429 incremental).
+//! Partition assignors: the eager `range` and the incremental
+//! `cooperative-sticky` from KIP-429.
 
 #![allow(dead_code)]
 

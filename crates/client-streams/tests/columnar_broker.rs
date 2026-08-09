@@ -1,10 +1,10 @@
 //! Live-broker integration test for the columnar topology runtime bridge.
 //!
-//! Boots an in-process broker, seeds two IPC-`DataFrame` records to `in`, runs
-//! [`run_partition_once`] through test-local `RecordFetcher`/`RecordProducer`
-//! adapters built over `crabka_client_core` (fetch) and `crabka_client_producer`
-//! (produce), then reads `out` and asserts the filtered row count plus the
-//! advanced next-offset.
+//! The test boots an in-process broker and seeds two IPC-`DataFrame` records to
+//! `in`. It then runs [`run_partition_once`] through test-local `RecordFetcher`
+//! and `RecordProducer` adapters. `crabka_client_core` backs the fetch adapter,
+//! and `crabka_client_producer` backs the produce adapter. The test then reads
+//! `out` and asserts the filtered row count and the advanced next-offset.
 #![cfg(feature = "polars")]
 
 use std::time::Duration;
@@ -108,8 +108,10 @@ async fn open_conn(bootstrap: &str, client_id: &str) -> Connection {
 
 // ─── test-local I/O adapters over client_core / client_producer ───────────────
 
-/// Fetches one partition over a raw `Connection`, polling until at least one
-/// record is available (so the seeded records are visible before processing).
+/// Fetches one partition over a raw `Connection`.
+///
+/// It polls until at least one record is available, so the seeded records are
+/// visible before processing.
 struct BrokerFetchAdapter {
     conn: Connection,
     topic_id: WireUuid,

@@ -1,7 +1,7 @@
 //! `KafkaRebalance` reconciler.
 //!
-//! Drives the standalone `crabka-rebalancer` service through its
-//! Connect-RPC API and reflects the proposal lifecycle into the CRD
+//! This reconciler drives the standalone `crabka-rebalancer` service through
+//! its Connect-RPC API. It reflects the proposal lifecycle into the CRD
 //! status. The state machine is Strimzi-shaped and annotation-driven:
 //!
 //! ```text
@@ -12,9 +12,10 @@
 //!                            (recompute)                   Ready  NotReady  (stop→Stopped)
 //! ```
 //!
-//! The optimizer call (`CreateProposal`) never mutates the cluster — only
-//! `approve` (→ `ExecuteProposal`) does. This keeps a human (or `GitOps`
-//! approval) in the loop before any partition data moves.
+//! The optimizer call `CreateProposal` never mutates the cluster. Only
+//! `approve`, which issues `ExecuteProposal`, mutates the cluster. This keeps
+//! a human or a `GitOps` approval in the loop before any partition data
+//! moves.
 
 use std::sync::Arc;
 
@@ -40,11 +41,11 @@ use crate::{
 /// Annotation that drives the rebalance state machine. Mirrors Strimzi's
 /// `strimzi.io/rebalance`.
 const ANNOTATION: &str = "crabka.io/rebalance";
-/// Default Connect-RPC port the rebalancer binds (`--listen-addr`).
+/// Default Connect-RPC port that the rebalancer binds with `--listen-addr`.
 const REBALANCER_PORT: u16 = 9300;
 
-/// The rebalance lifecycle state. Surfaced as the active condition's
-/// `type` in the CRD status.
+/// The rebalance lifecycle state. It appears as the `type` of the active
+/// condition in the CRD status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumString)]
 pub enum RebalanceState {
     New,
@@ -87,8 +88,8 @@ impl RebalanceCommand {
     }
 }
 
-/// The RPC the reconcile should issue this pass. Pure output of
-/// [`decide`].
+/// The RPC that the reconcile should issue this pass. It is the pure output
+/// of [`decide`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebalanceAction {
     /// Compute a fresh proposal (`CreateProposal`).
@@ -99,14 +100,15 @@ pub enum RebalanceAction {
     PollExecution,
     /// Cancel the in-flight execution (`CancelExecution`).
     Cancel,
-    /// Nothing to do this pass (await approval / terminal state /
-    /// no-op command).
+    /// Nothing to do this pass: await approval, terminal state, or a no-op
+    /// command.
     Idle,
 }
 
-/// Pure state-machine core: given the current state, an optional pending
-/// command, and whether a proposal id is on file, decide which RPC to
-/// issue. Fully unit-tested below — the reconcile fn only does I/O.
+/// Pure state-machine core. It takes the current state, an optional pending
+/// command, and a flag for a proposal id on file, and decides which RPC to
+/// issue. The unit tests below cover it fully, and the reconcile function only
+/// does I/O.
 #[must_use]
 pub fn decide(
     state: RebalanceState,
@@ -159,12 +161,14 @@ struct Outcome {
     reason: String,
     message: String,
     requeue: Time,
-    /// Set when a fresh proposal id should be recorded (`CreateProposal`).
+    /// Set when the operator should record a fresh proposal id for
+    /// `CreateProposal`.
     new_session: Option<String>,
     /// Set when a fresh optimization result should be recorded.
     new_optimization: Option<OptimizationResult>,
-    /// Advance `observedGeneration` to the current generation (only when
-    /// a new proposal is computed against the current spec).
+    /// Advance `observedGeneration` to the current generation. This happens
+    /// only when the operator computes a new proposal against the current
+    /// spec.
     advance_generation: bool,
 }
 
@@ -196,7 +200,7 @@ impl Outcome {
         }
     }
 
-    /// Map an `ExecuteProposal` / `GetProposal` (poll) result onto a state.
+    /// Map an `ExecuteProposal` or `GetProposal` poll result onto a state.
     fn from_execute_or_poll(
         p: &RebalancerProposal,
         poll_interval: Time,
@@ -247,8 +251,8 @@ impl Outcome {
         )
     }
 
-    /// An RPC-level error from the rebalancer (`failed_precondition`,
-    /// `not_found`, …). Surfaces as `NotReady`.
+    /// An RPC-level error from the rebalancer, such as `failed_precondition`
+    /// or `not_found`. It appears as `NotReady`.
     fn from_rpc_error(e: &RebalancerError, idle_interval: Time) -> Self {
         Self::transient(
             RebalanceState::NotReady,
@@ -258,7 +262,7 @@ impl Outcome {
         )
     }
 
-    /// A status with no proposal-id / optimization changes.
+    /// A status with no proposal-id changes and no optimization changes.
     fn transient(state: RebalanceState, reason: &str, message: String, requeue: Time) -> Self {
         Self {
             state,
@@ -286,8 +290,9 @@ pub fn optimization_result_from(p: &RebalancerProposal) -> OptimizationResult {
     }
 }
 
-/// Current state derived from the active (`status: "True"`) condition.
-/// Defaults to `New` when there's no recognized condition yet.
+/// Current state derived from the active condition, which has
+/// `status: "True"`. Defaults to `New` when there is no recognized condition
+/// yet.
 #[must_use]
 pub fn current_state(obj: &KafkaRebalance) -> RebalanceState {
     obj.status
@@ -311,32 +316,34 @@ pub fn read_command(obj: &KafkaRebalance) -> Option<RebalanceCommand> {
         .and_then(|v| RebalanceCommand::parse(v))
 }
 
-/// Cluster-internal DNS suffixes a rebalancer endpoint host may end with.
-/// Anything else is rejected to prevent the operator from being pointed at
-/// arbitrary in-cluster addresses (the K8s API, cloud metadata, internal
-/// admin endpoints) via a user-supplied `spec.endpoint` — a blind SSRF
-/// using the operator's network position (finding L-5).
+/// Cluster-internal DNS suffixes that a rebalancer endpoint host can end
+/// with. The operator rejects any other suffix. This prevents a user-supplied
+/// `spec.endpoint` from pointing the operator at arbitrary in-cluster
+/// addresses such as the K8s API, cloud metadata, and internal admin
+/// endpoints. Such a value is a blind SSRF that uses the operator's network
+/// position. See finding L-5.
 const CLUSTER_INTERNAL_SUFFIXES: [&str; 3] = [".svc", ".svc.cluster.local", ".cluster.local"];
 
-/// Reason why a user-supplied `spec.endpoint` was rejected. Surfaces into
-/// the CR status as a terminal `NotReady` condition.
+/// Reason why the operator rejected a user-supplied `spec.endpoint`. It
+/// appears in the CR status as a terminal `NotReady` condition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidEndpoint {
     pub message: String,
 }
 
-/// Validate a user-supplied `spec.endpoint` before it is used to build a
-/// request URL. The operator issues authenticated-by-network POSTs to this
-/// base URL, so an unrestricted value is a server-side request forgery
-/// (SSRF) vector. We require:
+/// Validate a user-supplied `spec.endpoint` before the operator uses it to
+/// build a request URL. The operator issues authenticated-by-network POSTs to
+/// this base URL, so an unrestricted value is a server-side request forgery
+/// (SSRF) vector. This function requires:
 ///
-/// - scheme `http` or `https`;
-/// - a hostname (not an IP literal) ending in a cluster-internal DNS suffix
-///   (`.svc`, `.svc.cluster.local`, `.cluster.local`).
+/// - a scheme of `http` or `https`;
+/// - a hostname, not an IP literal, that ends in a cluster-internal DNS
+///   suffix: `.svc`, `.svc.cluster.local`, or `.cluster.local`.
 ///
-/// `reqwest`/`url` is not a dependency here, so we parse conservatively by
-/// hand: split off the scheme, strip any userinfo, then isolate the host
-/// from the `host[:port]` authority (handling bracketed IPv6 literals).
+/// `reqwest` and `url` are not dependencies here, so this function parses by
+/// hand and stays conservative. It splits off the scheme, removes any
+/// userinfo, and then isolates the host from the `host[:port]` authority. It
+/// also handles bracketed IPv6 literals.
 fn validate_endpoint(endpoint: &str) -> Result<(), InvalidEndpoint> {
     let reject = |msg: String| Err(InvalidEndpoint { message: msg });
 
@@ -400,16 +407,18 @@ fn validate_endpoint(endpoint: &str) -> Result<(), InvalidEndpoint> {
     }
 }
 
-/// Resolve the rebalancer Connect base URL: `spec.endpoint` wins (after
-/// SSRF validation); else derive
+/// Resolve the rebalancer Connect base URL. `spec.endpoint` wins after SSRF
+/// validation. If it is absent, this function derives
 /// `http://<cluster>-rebalancer.<ns>.svc.cluster.local:9300` from the
 /// `crabka.io/cluster` label.
 ///
-/// Returns `Ok(None)` when neither a (valid) `spec.endpoint` nor a cluster
-/// label is present, and `Err(InvalidEndpoint)` when a user-supplied
-/// `spec.endpoint` fails validation. The derived (default) endpoint is
-/// always trusted and never validated.
+/// Returns `Ok(None)` when there is no valid `spec.endpoint` and no cluster
+/// label. Returns `Err(InvalidEndpoint)` when a user-supplied `spec.endpoint`
+/// fails validation. The operator always trusts the derived default endpoint
+/// and never validates it.
+///
 /// # Errors
+///
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub fn resolve_endpoint(
     obj: &KafkaRebalance,
@@ -434,7 +443,9 @@ pub fn resolve_endpoint(
 }
 
 /// Run the controller forever.
+///
 /// # Errors
+///
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let api: Api<KafkaRebalance> = Api::all(ctx.client.clone());
@@ -455,8 +466,9 @@ pub fn error_policy(_obj: Arc<KafkaRebalance>, err: &ReconcileError, ctx: Arc<Co
     common::error_requeue(ctx)
 }
 
-/// Reconcile entry point. Times the pass and records the reconcile
-/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
+/// Reconcile entry point. This function times the pass, records the reconcile
+/// counter and histogram, and then delegates to the internal `reconcile_inner`
+/// operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -468,6 +480,7 @@ pub fn error_policy(_obj: Arc<KafkaRebalance>, err: &ReconcileError, ctx: Arc<Co
     )
 )]
 /// # Errors
+///
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn reconcile(
     obj: Arc<KafkaRebalance>,
@@ -609,9 +622,9 @@ async fn reconcile_inner(
     Ok(common::requeue(requeue))
 }
 
-/// Merge-patch the status. Carries forward `sessionId` /
-/// `optimizationResult` / `observedGeneration` when the outcome doesn't
-/// set new values, so a poll pass never wipes the computed result.
+/// Merge-patch the status. This function carries forward `sessionId`,
+/// `optimizationResult`, and `observedGeneration` when the outcome sets no new
+/// values, so a poll pass never wipes the computed result.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -662,8 +675,9 @@ async fn write_status(
     Ok(())
 }
 
-/// Remove the `crabka.io/rebalance` annotation (JSON-merge null deletes
-/// the key) so a one-shot command isn't re-applied on the next reconcile.
+/// Remove the `crabka.io/rebalance` annotation. A JSON-merge null deletes the
+/// key, so the operator does not apply a one-shot command again on the next
+/// reconcile.
 async fn remove_command_annotation(
     api: &Api<KafkaRebalance>,
     name: &str,

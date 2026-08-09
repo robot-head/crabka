@@ -1,34 +1,39 @@
-//! Time windows + the `Windowed<K>` output key + a windowed output serde.
+//! Time windows, the `Windowed<K>` output key, and a windowed output serde.
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_units::prelude::*;
 
 use crate::processor::serde::{Serde, SerdeAssociate, SerdeError};
 
-/// A time window (epoch millis). Time windows ([`TimeWindows`]) are half-open
-/// `[start, end)`; session windows ([`SessionWindows`]) are inclusive `[start,
-/// end]` (both bounds are observed record timestamps). The interpretation is
-/// carried by the producing operator, not encoded in this struct.
+/// A time window in epoch milliseconds.
+///
+/// Time windows ([`TimeWindows`]) are half-open `[start, end)`. Session windows
+/// ([`SessionWindows`]) are inclusive `[start, end]`, and both bounds are
+/// observed record timestamps. The producing operator carries the
+/// interpretation. This struct does not encode it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Window {
     pub start: i64,
     pub end: i64,
 }
 
-/// An aggregation key tagged with its window — the output key of a windowed
-/// aggregation (`KTable<Windowed<K>, V>`).
+/// An aggregation key tagged with its window. This is the output key of a
+/// windowed aggregation (`KTable<Windowed<K>, V>`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Windowed<K> {
     pub key: K,
     pub window: Window,
 }
 
-/// Tumbling / hopping time windows (epoch-aligned). `advance == size` is
-/// tumbling; `advance < size` is hopping. `grace` contributes to changelog
-/// retention and to [`Suppressed::until_window_closes`] timing when the resulting
-/// table is suppressed.
+/// Tumbling and hopping time windows, which are epoch-aligned.
 ///
-/// The window bounds these produce are epoch-millisecond *instants* and stay
-/// `i64`; the size, hop, and grace are *extents* and are [`Time`] quantities.
+/// `advance == size` is tumbling, and `advance < size` is hopping. `grace` adds
+/// to the changelog retention and to the
+/// [`Suppressed::until_window_closes`] timing when the resulting table is
+/// suppressed.
+///
+/// The window bounds these windows produce are epoch-millisecond *instants* and
+/// stay `i64`. The size, the hop, and the grace are *extents* and are [`Time`]
+/// quantities.
 ///
 /// [`Suppressed::until_window_closes`]: crate::dsl::Suppressed::until_window_closes
 #[derive(Debug, Clone, Copy)]
@@ -41,13 +46,13 @@ pub struct TimeWindows {
 /// The finest window a millisecond timeline can express.
 ///
 /// `windows_for` works in epoch milliseconds and divides by the hop, so a
-/// sub-millisecond size or advance would round to zero and divide by zero. The
-/// former `i64`-millisecond API could not express such a value; the quantity can,
-/// so the constructors have to reject it.
+/// sub-millisecond size or advance would round to zero and cause a division by
+/// zero. A [`Time`] quantity can express such a value, so the constructors must
+/// reject it.
 const MIN_RESOLUTION: Time = millis(1);
 
 impl TimeWindows {
-    /// Tumbling window of `size` (advance == size, grace 0).
+    /// Tumbling window of `size`, with `advance == size` and grace 0.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -59,7 +64,8 @@ impl TimeWindows {
             grace: Time::ZERO,
         }
     }
-    /// Hopping: advance by `advance` (`0 < advance <= size`).
+    /// Hopping window that advances by `advance`, where
+    /// `0 < advance <= size`.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -71,7 +77,7 @@ impl TimeWindows {
         self.advance = advance;
         self
     }
-    /// Set the grace period (only affects changelog retention here).
+    /// Set the grace period. Here it affects only the changelog retention.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -80,10 +86,11 @@ impl TimeWindows {
         self.grace = grace;
         self
     }
-    /// The window starts a timestamp `t` falls into (JVM `TimeWindows.windowsFor`).
+    /// The window starts that a timestamp `t` falls into, as in the JVM
+    /// `TimeWindows.windowsFor`.
     ///
-    /// `t` and the returned starts are epoch-millisecond instants; the size and
-    /// hop cross into that coordinate space here.
+    /// `t` and the returned starts are epoch-millisecond instants. The size and
+    /// the hop cross into that coordinate space here.
     #[must_use]
     pub fn windows_for(&self, t: i64) -> Vec<i64> {
         let size_ms = self.size.millis_i64();
@@ -98,9 +105,11 @@ impl TimeWindows {
     }
 }
 
-/// Symmetric-or-asymmetric join window: a record at `t` matches the other side's
-/// records with timestamp in `[t - before, t + after]`. `JoinWindows::of` is
-/// symmetric (before == after); `.before`/`.after` make it asymmetric.
+/// A symmetric or asymmetric join window. A record at `t` matches the other
+/// side's records with a timestamp in `[t - before, t + after]`.
+///
+/// `JoinWindows::of` is symmetric, so `before == after`. `.before` and `.after`
+/// make the window asymmetric.
 ///
 /// `before` and `after` are extents measured from the joining record, not
 /// absolute bounds, so both are [`Time`].
@@ -112,7 +121,7 @@ pub struct JoinWindows {
 }
 
 impl JoinWindows {
-    /// Symmetric window of `time_difference` before and after (grace 0).
+    /// Symmetric window of `time_difference` before and after, with grace 0.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -151,17 +160,20 @@ impl JoinWindows {
         self.grace = grace;
         self
     }
-    /// Window size (= `before + after`) — the store retention basis.
+    /// Window size, which is `before + after`. It is the store retention
+    /// basis.
     #[must_use]
     pub fn size(&self) -> Time {
         self.before + self.after
     }
 }
 
-/// Session windows: records for a key form one session while they stay within
-/// `gap` of each other (inactivity gap). A session window `[start, end]` is
-/// defined by data, not epoch-aligned. `grace` contributes to changelog retention
-/// and to [`Suppressed::until_window_closes`] timing when the resulting table is
+/// Session windows. The records for a key form one session while they stay
+/// within `gap` of each other. `gap` is the inactivity gap.
+///
+/// A session window `[start, end]` is defined by the data and is not
+/// epoch-aligned. `grace` adds to the changelog retention and to the
+/// [`Suppressed::until_window_closes`] timing when the resulting table is
 /// suppressed.
 ///
 /// [`Suppressed::until_window_closes`]: crate::dsl::Suppressed::until_window_closes
@@ -172,7 +184,8 @@ pub struct SessionWindows {
 }
 
 impl SessionWindows {
-    /// Inactivity gap of `gap` (grace 0). `gap > 0`.
+    /// Inactivity gap of `gap`, with grace 0. `gap` must be greater than
+    /// zero.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -183,7 +196,7 @@ impl SessionWindows {
             grace: Time::ZERO,
         }
     }
-    /// Set the grace period (only affects changelog retention here).
+    /// Set the grace period. Here it affects only the changelog retention.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -194,16 +207,19 @@ impl SessionWindows {
     }
 }
 
-/// Sliding windows (KIP-450). A record at time `t` belongs to every window of
-/// fixed size `time_difference` (`W`) that contains it — i.e. windows
+/// Sliding windows (KIP-450).
+///
+/// A record at time `t` belongs to every window of the fixed size
+/// `time_difference` (`W`) that contains it, that is to the windows
 /// `[ws, ws + W]` with `ws ∈ [t - W, t]`. Windows are **inclusive on both ends**
-/// and **data-defined** (not epoch-aligned), so there is no `windows_for`: the
-/// affected windows are discovered by scanning the window store. `grace` allows
-/// out-of-order records up to `W + grace` behind stream time and feeds changelog
+/// and **data-defined**, not epoch-aligned, so there is no `windows_for`. A scan
+/// of the window store finds the affected windows. `grace` allows out-of-order
+/// records up to `W + grace` behind stream time, and it feeds the changelog
 /// retention.
 #[derive(Debug, Clone, Copy)]
 pub struct SlidingWindows {
-    /// Window size `W`; window `[start, start + time_difference]` (inclusive).
+    /// Window size `W`. The window is `[start, start + time_difference]`,
+    /// inclusive on both ends.
     pub time_difference: Time,
     pub grace: Time,
 }
@@ -223,7 +239,7 @@ impl SlidingWindows {
             grace: Time::ZERO,
         }
     }
-    /// Time difference + grace period.
+    /// Time difference and grace period.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -240,9 +256,11 @@ impl SlidingWindows {
     }
 }
 
-/// `Serde<Windowed<K>>` producing the JVM session **output-topic** format:
-/// `inner_key_bytes ‖ end:8B BE ‖ start:8B BE` (both bounds in the bytes; distinct
-/// from `TimeWindowedSerde`, which encodes only the start and derives `end`).
+/// `Serde<Windowed<K>>` that produces the JVM session **output-topic** format
+/// `inner_key_bytes ‖ end:8B BE ‖ start:8B BE`.
+///
+/// The bytes hold both bounds. This differs from `TimeWindowedSerde`, which
+/// encodes only the start and derives `end`.
 #[derive(Debug, Clone, Copy)]
 pub struct SessionWindowedSerde<KS> {
     inner: KS,
@@ -289,9 +307,11 @@ impl<KS: SerdeAssociate> SerdeAssociate for SessionWindowedSerde<KS> {
     type Target = Windowed<KS::Target>;
 }
 
-/// `Serde<Windowed<K>>` producing the JVM **output-topic** format:
-/// `inner_key_bytes ‖ windowStart : 8-byte BE` (no end, no seqnum). Carries the
-/// window `size` so `deserialize` can reconstruct `end = start + size`.
+/// `Serde<Windowed<K>>` that produces the JVM **output-topic** format
+/// `inner_key_bytes ‖ windowStart : 8-byte BE`, with no end and no seqnum.
+///
+/// The serde carries the window `size`, so `deserialize` can rebuild
+/// `end = start + size`.
 #[derive(Debug, Clone, Copy)]
 pub struct TimeWindowedSerde<KS> {
     inner: KS,

@@ -1,16 +1,16 @@
-//! Mocked-client integration tests for the `KafkaNodePool`
-//! reconciler.
+//! Integration tests for the `KafkaNodePool` reconciler with a mocked
+//! client.
 //!
-//! Happy-path request sequence on a fresh pool:
-//!   1. GET   kafkas/<parent>                  (-> 200 parent Kafka)
-//!   2. GET   statefulsets/<parent>-<pool>     (pre-apply; monotonic-storage check)
-//!   3. PATCH statefulsets/<parent>-<pool>     (SSA)
-//!   4. GET   statefulsets/<parent>-<pool>     (post-apply status read)
-//!   5. PATCH kafkanodepools/<pool>/status     (merge)
+//! The request sequence of the happy path on a new pool:
+//!   1. GET   kafkas/<parent>                  gives 200 and the parent Kafka
+//!   2. GET   statefulsets/<parent>-<pool>     before the apply, for the monotonic-storage check
+//!   3. PATCH statefulsets/<parent>-<pool>     SSA
+//!   4. GET   statefulsets/<parent>-<pool>     after the apply, to read the status
+//!   5. PATCH kafkanodepools/<pool>/status     merge
 //!
-//! Validation-failure paths short-circuit to step 5 (or skip step 1
-//! entirely when the cluster label is missing). Monotonic-
-//! storage failures short-circuit after step 2.
+//! A validation failure stops early and goes to step 5. When the cluster
+//! label is absent, it skips step 1 as well. A monotonic-storage failure
+//! stops after step 2.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -54,9 +54,11 @@ fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> 
     p
 }
 
-/// A parent Kafka whose version model has NOT cleared: the Kafka
-/// controller published `KafkaVersionValid=False` and finalized no
-/// metadata version (the fresh-cluster, invalid-`kafkaVersion` case).
+/// A parent Kafka whose version model has NOT cleared.
+///
+/// The Kafka controller published `KafkaVersionValid=False` and finalized
+/// no metadata version. This is the case of a new cluster with an invalid
+/// `kafkaVersion`.
 fn fake_parent_kafka_body_version_invalid(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -75,16 +77,19 @@ fn fake_parent_kafka_body_version_invalid(name: &str, namespace: &str) -> serde_
     })
 }
 
-/// Happy-path rules: parent Kafka exists, STS apply succeeds, STS status
-/// read returns `ready_replicas`, pool status patch echoes the pool.
+/// The rules of the happy path. The parent Kafka exists, the STS apply
+/// succeeds, the STS status read returns `ready_replicas`, and the pool
+/// status patch echoes the pool.
 ///
-/// The reconcile flow includes a pre-apply STS GET (for
-/// monotonic-storage validation), so the rule sequence is:
-///   1. GET parent Kafka.
-///   2. GET STS (pre-apply): 404 → first-reconcile, validation accepts any spec.
-///   3. PATCH STS (SSA).
-///   4. GET STS (post-apply): returns `ready_replicas` for the status mirror.
-///   5. PATCH pool status.
+/// The reconcile flow has one STS GET before the apply, for the
+/// monotonic-storage validation. The rule sequence is therefore:
+///   1. GET the parent Kafka.
+///   2. GET the STS before the apply. A 404 means the first reconcile, and
+///      the validation accepts any spec.
+///   3. PATCH the STS with SSA.
+///   4. GET the STS after the apply. It returns `ready_replicas` for the
+///      status mirror.
+///   5. PATCH the pool status.
 fn happy_path_rules(
     parent: &str,
     pool: &str,
@@ -532,9 +537,10 @@ async fn pool_storage_shrink_is_rejected() {
     assert!(state.remaining_rules() == 0);
 }
 
-/// A JBOD pool renders one `volumeClaimTemplate` per disk
-/// (`data` + `data-{id}`), a set-wide retention policy, and the broker
-/// container's `CRABKA_EXTRA_LOG_DIRS` env listing every non-primary disk.
+/// A JBOD pool renders one `volumeClaimTemplate` for each disk, which are
+/// `data` and `data-{id}`, one retention policy for the whole set, and the
+/// `CRABKA_EXTRA_LOG_DIRS` env on the broker container with every
+/// non-primary disk.
 #[tokio::test]
 async fn pool_jbod_renders_multiple_volume_claim_templates() {
     use crabka_operator::crd::{JbodSpec, JbodVolume, Storage};
@@ -668,10 +674,13 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
 }
 
 /// The rendered `StatefulSet` must:
-///   1. Include a `broker-config` `ConfigMap` volume in the pod template.
-///   2. Pass `--config-file=/run/crabka/broker.toml` in the broker container args.
-///   3. Mount the `ConfigMap` at `/etc/crabka/config` (readOnly) in the broker container.
-///   4. NOT include `CRABKA_ADVERTISED_LISTENER` in the broker container env.
+///   1. hold a `broker-config` `ConfigMap` volume in the pod template.
+///   2. pass `--config-file=/run/crabka/broker.toml` in the args of the
+///      broker container.
+///   3. mount the `ConfigMap` read-only at `/etc/crabka/config` in the
+///      broker container.
+///   4. NOT hold `CRABKA_ADVERTISED_LISTENER` in the env of the broker
+///      container.
 #[tokio::test]
 async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
     let parent = "demo";
@@ -810,11 +819,14 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
     assert!(state.remaining_rules() == 0);
 }
 
-/// A fresh cluster whose parent Kafka has an invalid `kafkaVersion` must
-/// NOT bring up broker pods. The pool reconciler reads the parent's
-/// `KafkaVersionValid=False` verdict and short-circuits to a `Ready=False`
-/// status patch — no `StatefulSet` GET/PATCH — so the error surfaces as a CR
-/// condition rather than a crash-looping (or silently-clamped) cluster.
+/// A new cluster whose parent Kafka has an invalid `kafkaVersion` must
+/// NOT bring broker pods up.
+///
+/// The pool reconciler reads the `KafkaVersionValid=False` verdict of the
+/// parent and stops early with a `Ready=False` status patch. It sends no
+/// `StatefulSet` GET and no `StatefulSet` PATCH. The error therefore
+/// appears as a CR condition, and the cluster does not crash-loop or run
+/// with a silently clamped version.
 #[tokio::test]
 async fn pool_blocks_pod_creation_when_parent_version_invalid() {
     let parent = "demo";

@@ -1,23 +1,24 @@
 //! External-cluster mode: benchmark any pgwire-speaking SQL system.
 //!
-//! Instead of launching a crabka cluster, `run --external` points the
-//! unchanged workload/measurement/reporting pipeline at a set of existing
-//! `host:port` SQL endpoints (`CockroachDB`, `YugabyteDB`, `PostgreSQL`, a remote
-//! crabka cluster). This module holds everything specific to that mode:
+//! `run --external` launches no crabka cluster. It points the unchanged
+//! workload, measurement, and reporting pipeline at a set of existing
+//! `host:port` SQL endpoints, such as `CockroachDB`, `YugabyteDB`,
+//! `PostgreSQL`, or a remote crabka cluster. This module holds everything
+//! specific to that mode:
 //!
-//! - [`HostPort`] / [`parse_endpoint_list`] — the `--external` flag's
-//!   `host:port[,host:port...]` list and its resolution to [`SqlEndpoint`]s.
-//! - [`validate_scenario`] — external-mode scenario constraints (no faults:
-//!   no chaos proxies front an external system).
-//! - [`pids_for_ports`] — local-process discovery for resource sampling:
-//!   `/proc/net/tcp{,6}` maps a listening port to its socket inode, and a
-//!   `/proc/<pid>/fd` scan maps the inode to the owning pid, labeled
-//!   `ext:<port>`. Purely best-effort: on non-Linux hosts, for remote
-//!   endpoints, or under restrictive permissions it finds nothing and the
-//!   run proceeds with an empty resource roster.
-//! - [`parse_pid_overrides`] — the `--external-pids "label=pid,..."` manual
-//!   override for multi-process systems (e.g. a `YugabyteDB` master +
-//!   tserver) or when `/proc` discovery is not permitted.
+//! - [`HostPort`] and [`parse_endpoint_list`] — the `host:port[,host:port...]`
+//!   list of the `--external` flag, and its resolution to [`SqlEndpoint`]s.
+//! - [`validate_scenario`] — the external-mode scenario constraints. There are
+//!   no faults, because no chaos proxy fronts an external system.
+//! - [`pids_for_ports`] — local-process discovery for resource sampling.
+//!   `/proc/net/tcp{,6}` maps a listening port to its socket inode, and a scan
+//!   of `/proc/<pid>/fd` maps the inode to the owning pid, under the label
+//!   `ext:<port>`. This is best-effort only. On a non-Linux host, for a remote
+//!   endpoint, or under restrictive permissions it finds nothing, and the run
+//!   continues with an empty resource roster.
+//! - [`parse_pid_overrides`] — the manual `--external-pids "label=pid,..."`
+//!   override. Use it for a multi-process system, such as a `YugabyteDB`
+//!   master and tserver, or when `/proc` discovery is not permitted.
 
 use std::{
     collections::BTreeMap,
@@ -33,11 +34,11 @@ use crate::{
     scenario::Scenario,
 };
 
-/// One `host:port` endpoint from the `--external` flag, kept unresolved so
-/// hostnames survive until connect time.
+/// One `host:port` endpoint from the `--external` flag. It stays unresolved,
+/// so hostnames survive until connect time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostPort {
-    /// Hostname or IP literal (IPv6 literals keep their brackets).
+    /// Hostname or IP literal. An IPv6 literal keeps its brackets.
     pub host: String,
     /// TCP port.
     pub port: u16,
@@ -75,8 +76,8 @@ impl FromStr for HostPort {
     }
 }
 
-/// Parses the `--external` flag: a non-empty comma-separated `host:port`
-/// list (whitespace around entries is ignored).
+/// Parses the `--external` flag, a non-empty comma-separated `host:port`
+/// list. The parser ignores whitespace around an entry.
 ///
 /// # Errors
 ///
@@ -95,8 +96,8 @@ pub fn parse_endpoint_list(list: &str) -> anyhow::Result<Vec<HostPort>> {
     Ok(endpoints)
 }
 
-/// Parses the `--external-pids` flag: a comma-separated `label=pid` list
-/// (whitespace around entries is ignored).
+/// Parses the `--external-pids` flag, a comma-separated `label=pid` list. The
+/// parser ignores whitespace around an entry.
 ///
 /// # Errors
 ///
@@ -128,27 +129,27 @@ pub fn parse_pid_overrides(list: &str) -> anyhow::Result<Vec<ProcessInfo>> {
     Ok(processes)
 }
 
-/// Everything the `--external` flag family describes: the endpoints to
-/// drive, the credentials to present, and an optional manual resource
-/// roster.
+/// Everything the `--external` flag family describes: the endpoints to drive,
+/// the credentials to present, and an optional manual resource roster.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalTarget {
     /// SQL endpoints to spread the workload over.
     pub endpoints: Vec<HostPort>,
-    /// SQL user (`--external-user`).
+    /// SQL user, from `--external-user`.
     pub user: String,
-    /// SQL password (`--external-password`; empty means no password).
+    /// SQL password, from `--external-password`. An empty value means no
+    /// password.
     pub password: String,
-    /// Database name (`--external-database`).
+    /// Database name, from `--external-database`.
     pub database: String,
-    /// Manual resource roster (`--external-pids`); `None` means discover
-    /// via [`pids_for_ports`].
+    /// Manual resource roster, from `--external-pids`. `None` means that
+    /// [`pids_for_ports`] discovers the roster.
     pub pids_override: Option<Vec<ProcessInfo>>,
 }
 
 impl ExternalTarget {
-    /// Resolves every endpoint to a connectable [`SqlEndpoint`] (first
-    /// resolved address wins).
+    /// Resolves every endpoint to a connectable [`SqlEndpoint`]. The first
+    /// resolved address wins.
     ///
     /// # Errors
     ///
@@ -179,10 +180,10 @@ fn resolve(endpoint: &HostPort) -> anyhow::Result<SocketAddr> {
         .with_context(|| format!("external endpoint {endpoint} resolved to no address"))
 }
 
-/// The ports worth attempting local `/proc` discovery for: endpoints that
-/// resolved to a loopback address. A remote system's processes cannot be
-/// sampled via the local `/proc`, and probing its port number locally could
-/// mis-attribute an unrelated local listener.
+/// The ports worth a local `/proc` discovery attempt: the endpoints that
+/// resolved to a loopback address. The local `/proc` cannot sample a remote
+/// system's processes, and a local probe of its port number could attribute an
+/// unrelated local listener to it.
 #[must_use]
 pub fn loopback_ports(endpoints: &[SqlEndpoint]) -> Vec<u16> {
     endpoints
@@ -194,10 +195,10 @@ pub fn loopback_ports(endpoints: &[SqlEndpoint]) -> Vec<u16> {
 
 /// Checks external-mode scenario constraints beyond [`Scenario::validate`].
 ///
-/// The topology is still meaningful — `topology.ranges` is the number of
-/// `t{i * 1_000_000}` workload tables created (the external system spreads
-/// them by its own sharding) — but faults are not: no chaos proxies front
-/// an external system.
+/// The topology still has meaning. `topology.ranges` is the number of
+/// `t{i * 1_000_000}` workload tables that the harness creates, and the
+/// external system spreads them by its own sharding. Faults have no meaning
+/// here, because no chaos proxy fronts an external system.
 ///
 /// # Errors
 ///
@@ -217,16 +218,16 @@ pub fn validate_scenario(scenario: &Scenario) -> anyhow::Result<()> {
 /// Discovers the local processes listening on the given TCP ports via
 /// `/proc`, labeled `ext:<port>`.
 ///
-/// `/proc/net/tcp` and `/proc/net/tcp6` map each listening port to its
-/// socket inode; a scan of every readable `/proc/<pid>/fd` then maps the
-/// inode to the owning pid. A pid serving several of the ports appears
-/// once (under the first port, ascending), so the resource sampler never
-/// double-counts a process. Results are ordered by port then pid.
+/// `/proc/net/tcp` and `/proc/net/tcp6` map each listening port to its socket
+/// inode. A scan of every readable `/proc/<pid>/fd` then maps the inode to the
+/// owning pid. A pid that serves several of the ports appears once, under the
+/// first port in ascending order, so the resource sampler never counts a
+/// process twice. The results are ordered by port and then by pid.
 ///
-/// Best-effort by design: on non-Linux hosts, or when `/proc` entries are
-/// unreadable (other users' processes without elevated privileges), the
-/// result is empty or partial — the caller warns and proceeds, and
-/// `--external-pids` exists as the manual override.
+/// This function is best-effort by design. On a non-Linux host, or when
+/// `/proc` entries are unreadable, such as other users' processes without
+/// elevated privileges, the result is empty or partial. The caller warns and
+/// continues, and `--external-pids` exists as the manual override.
 #[must_use]
 pub fn pids_for_ports(ports: &[u16]) -> Vec<ProcessInfo> {
     let mut inode_to_port: BTreeMap<u64, u16> = BTreeMap::new();
@@ -289,11 +290,12 @@ struct TcpListener {
 /// TCP state code for `LISTEN` in `/proc/net/tcp{,6}`.
 const TCP_LISTEN: &str = "0A";
 
-/// Parses one `/proc/net/tcp{,6}` line, keeping only `LISTEN` sockets.
+/// Parses one `/proc/net/tcp{,6}` line and keeps only `LISTEN` sockets.
 ///
-/// Line shape (header lines fail the parse):
+/// The line shape is
 /// `sl local_address rem_address st tx:rx tr:tm retrnsmt uid timeout inode ...`
-/// where `local_address` is `HEXIP:HEXPORT` and `st` is the hex state.
+/// where `local_address` is `HEXIP:HEXPORT` and `st` is the hex state. A
+/// header line fails the parse.
 fn parse_tcp_listener_line(line: &str) -> Option<TcpListener> {
     let mut fields = line.split_ascii_whitespace();
     let _slot = fields.next()?;

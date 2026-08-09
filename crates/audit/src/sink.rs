@@ -9,9 +9,9 @@ use crate::{
     ocsf::{ProductInfo, to_ocsf},
 };
 
-/// Record-header key carrying the per-broker chain sequence number (decimal ASCII).
+/// Record-header key for the per-broker chain sequence number in decimal ASCII.
 pub const HEADER_SEQ: &str = "seq";
-/// Record-header key carrying the previous chain head (lowercase hex of 32 bytes).
+/// Record-header key for the previous chain head, as lowercase hex of 32 bytes.
 pub const HEADER_PREV_HASH: &str = "prev_hash";
 
 /// A serialized, sink-ready audit record.
@@ -23,8 +23,10 @@ pub struct AuditRecord {
 }
 
 impl AuditRecord {
-    /// Stamp the hash-chain headers (`seq` decimal, `prev_hash` lowercase hex)
-    /// onto this record. Called by the writer, which owns the chain.
+    /// Stamp the hash-chain headers onto this record.
+    ///
+    /// The `seq` header is decimal and the `prev_hash` header is lowercase
+    /// hex. The writer calls this method, and the writer owns the chain.
     pub fn push_chain_headers(&mut self, seq: u64, prev_head: &[u8; 32]) {
         self.headers
             .push((HEADER_SEQ.to_string(), seq.to_string().into_bytes()));
@@ -34,7 +36,7 @@ impl AuditRecord {
         ));
     }
 
-    /// Serialize an event to OCSF JSON and attach SIEM-filterable headers.
+    /// Serialize an event to OCSF JSON and attach the SIEM-filterable headers.
     #[must_use]
     #[tracing::instrument(
         level = "debug",
@@ -83,7 +85,7 @@ fn status_str(outcome: AuditOutcome) -> &'static str {
     }
 }
 
-/// Errors a sink may report.
+/// Errors that a sink can report.
 #[derive(Debug, thiserror::Error)]
 pub enum AuditError {
     #[error("audit sink: {0}")]
@@ -109,7 +111,7 @@ pub struct MemorySink {
 impl MemorySink {
     #[must_use]
     /// # Panics
-    /// Panics if synchronized state is poisoned or validated input is missing a field required to produce the output.
+    /// Panics if the mutex that holds the records is poisoned.
     pub fn records(&self) -> Vec<AuditRecord> {
         self.records
             .lock()

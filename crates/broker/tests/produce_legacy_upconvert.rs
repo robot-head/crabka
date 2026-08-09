@@ -1,13 +1,14 @@
 //! Produce up-conversion from v0/v1 `MessageSet` to v2.
 //!
-//! The broker's Produce handler now accepts a `RecordsPayload::Legacy`
-//! arm: incoming v0/v1 `MessageSet` bytes are passed through
-//! `crabka_records_legacy::legacy_to_v2` and the resulting v2 batch is
-//! handed to the existing log-append path. These tests exercise the
-//! conversion without going through the wire protocol's version
-//! negotiation — they construct a Legacy payload directly and assert
-//! the broker stores the up-converted records, then fetches them back
-//! in the modern v2 form.
+//! The broker's Produce handler accepts a `RecordsPayload::Legacy` arm. It
+//! passes incoming v0/v1 `MessageSet` bytes through
+//! `crabka_records_legacy::legacy_to_v2`, and gives the resulting v2 batch to
+//! the existing log-append path.
+//!
+//! These tests exercise the conversion without the wire protocol's version
+//! negotiation. They build a Legacy payload directly, assert that the broker
+//! stores the up-converted records, and then fetch those records back in the
+//! modern v2 form.
 
 use assert2::assert;
 mod support;
@@ -63,8 +64,8 @@ async fn topic_id_for(p: &support::InProcess, name: &str) -> Uuid {
         .expect("topic in Metadata response")
 }
 
-/// Build a flat (uncompressed) v1 `MessageSet` carrying `values` as
-/// successive records at offsets 0..N-1.
+/// Builds a flat, uncompressed v1 `MessageSet` that carries `values` as
+/// successive records at offsets 0 to N-1.
 fn build_v1_message_set(values: &[&[u8]]) -> Bytes {
     let recs: Vec<ParsedRecord> = values
         .iter()

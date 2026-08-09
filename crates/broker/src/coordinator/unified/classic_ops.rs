@@ -1,8 +1,9 @@
-//! Classic-protocol Join/Sync/Heartbeat/Leave/offset-validate logic against
-//! [`ClassicState`]. Pure transitions that return a *disposition* the actor
-//! turns into either an immediate reply or a parked `oneshot`. Ported verbatim
-//! from the old `handlers/{join_group,sync_group,heartbeat,leave_group}.rs`
-//! and `offset_commit::validate`; the actor (`super::actor`) owns the
+//! Classic-protocol Join, Sync, Heartbeat, Leave, and offset-validate logic
+//! against [`ClassicState`]. These are pure transitions that return a
+//! *disposition*, which the actor turns into either an immediate reply or a
+//! parked `oneshot`. They come verbatim from the old
+//! `handlers/{join_group,sync_group,heartbeat,leave_group}.rs`
+//! and `offset_commit::validate`. The actor (`super::actor`) owns the
 //! park/wake plumbing and the rebalance-deadline timer that drives completion.
 
 use std::time::{Duration, Instant};
@@ -29,20 +30,20 @@ const DEFAULT_REBALANCE_TIMEOUT_MS: u64 = 60_000;
 
 /// What the actor should do with a `ClassicJoin`.
 pub(super) enum JoinAction {
-    /// Reply right away (fast paths: `MEMBER_ID_REQUIRED`, validation errors,
-    /// static-rejoin into a `Stable` group).
+    /// Reply right away. The fast paths are `MEMBER_ID_REQUIRED`, validation
+    /// errors, and a static rejoin into a `Stable` group.
     Immediate(JoinResult),
-    /// Park the reply; `state.rebalance_deadline` has been set (the actor
-    /// completes the rebalance when it fires).
+    /// Park the reply. `state.rebalance_deadline` is set, and the actor
+    /// completes the rebalance when that deadline fires.
     Park,
-    /// Every still-live member has joined this round and the round was
-    /// triggered by a membership change in a group that still had members
-    /// (not a start-from-`Empty` herd): complete the rebalance now and drain
-    /// all parked joiners (mirrors the old `wake_other_joiners` path).
+    /// Every still-live member has joined this round, and a membership change
+    /// in a group that still had members triggered the round. This is not a
+    /// start-from-`Empty` herd. Complete the rebalance now and drain
+    /// all parked joiners. This mirrors the old `wake_other_joiners` path.
     CompleteNow,
 }
 
-/// Port of `handlers/join_group.rs` steps 1–6, operating on `ClassicState`.
+/// Port of `handlers/join_group.rs` steps 1–6. It operates on `ClassicState`.
 pub(super) fn handle_join(
     state: &mut ClassicState,
     req: &JoinGroupRequest,
@@ -176,8 +177,8 @@ pub(super) fn handle_join(
     }
 }
 
-/// Build a successful `JoinResult` from post-rebalance state (leader gets the
-/// member list; followers get an empty list).
+/// Build a successful `JoinResult` from post-rebalance state. The leader gets
+/// the member list, and followers get an empty list.
 pub(super) fn build_join_result(state: &ClassicState, member_id: &str) -> JoinResult {
     let is_leader = state.leader_id.as_deref() == Some(member_id);
     let members = if is_leader {
@@ -204,9 +205,10 @@ pub(super) fn build_join_result(state: &ClassicState, member_id: &str) -> JoinRe
     }
 }
 
-/// Run the rebalance-completion vote. `Ok(())` if the round completed (or there
-/// was nothing to complete), `Err(())` if the protocol intersection was empty
-/// (`INCONSISTENT_GROUP_PROTOCOL`). Mirrors `join_group.rs` block 5.
+/// Run the rebalance-completion vote. It returns `Ok(())` if the round
+/// completed, or if there was nothing to complete. It returns `Err(())` if the
+/// protocol intersection was empty, which is `INCONSISTENT_GROUP_PROTOCOL`.
+/// Mirrors `join_group.rs` block 5.
 pub(super) fn try_complete(state: &mut ClassicState) -> Result<(), ()> {
     if matches!(state.state, GroupState::PreparingRebalance) && !state.members.is_empty() {
         if let Some(chosen) = select_protocol(&state.members) {
@@ -225,16 +227,17 @@ pub(super) fn try_complete(state: &mut ClassicState) -> Result<(), ()> {
 
 /// What the actor should do with a `ClassicSync`.
 pub(super) enum SyncAction {
-    /// Reply right away (validation error, or a follower while `Stable`).
+    /// Reply right away, after a validation error or for a follower while the
+    /// group is `Stable`.
     Immediate(SyncResult),
     /// Park the follower until the leader's `SyncGroup` installs assignments.
     Park,
-    /// The leader installed assignments: reply this result to the leader and
-    /// drain the parked followers.
+    /// The leader installed assignments. Reply with this result to the leader
+    /// and drain the parked followers.
     LeaderInstalled(SyncResult),
 }
 
-/// Port of `handlers/sync_group.rs`, operating on `ClassicState`.
+/// Port of `handlers/sync_group.rs`. It operates on `ClassicState`.
 pub(super) fn handle_sync(state: &mut ClassicState, req: &SyncGroupRequest) -> SyncAction {
     let protocol_type = state.protocol_type.clone();
     let protocol_name = state.protocol_name.clone();
@@ -292,8 +295,8 @@ pub(super) fn handle_sync(state: &mut ClassicState, req: &SyncGroupRequest) -> S
     }
 }
 
-/// Read back one member's installed assignment. Mirrors `sync_group.rs` step 3:
-/// `REBALANCE_IN_PROGRESS` if the group is not `Stable`.
+/// Read back one member's installed assignment. Mirrors `sync_group.rs` step 3.
+/// It returns `REBALANCE_IN_PROGRESS` if the group is not `Stable`.
 pub(super) fn read_sync_result(
     state: &ClassicState,
     member_id: &str,
@@ -327,7 +330,7 @@ fn sync_err(code: i16, protocol_type: Option<String>, protocol_name: Option<Stri
 
 // ── Heartbeat ───────────────────────────────────────────────────────────────
 
-/// Port of `handlers/heartbeat.rs`. Returns the error code; refreshes
+/// Port of `handlers/heartbeat.rs`. It returns the error code, and it refreshes
 /// `last_heartbeat` on success.
 pub(super) fn handle_heartbeat(state: &mut ClassicState, req: &HeartbeatRequest) -> i16 {
     let instance_fenced = req.group_instance_id.as_deref().is_some_and(|iid| {
@@ -360,9 +363,9 @@ struct MemberIdentityIn {
     group_instance_id: Option<String>,
 }
 
-/// Port of `handlers/leave_group.rs`. Removes the resolved members and, if the
-/// group was `Stable` with survivors, reopens a rebalance (sets the deadline).
-/// Returns the per-member responses.
+/// Port of `handlers/leave_group.rs`. It removes the resolved members. If the
+/// group was `Stable` and members survive, it reopens a rebalance and sets the
+/// deadline. It returns the per-member responses.
 pub(super) fn handle_leave(
     state: &mut ClassicState,
     req: &LeaveGroupRequest,
@@ -436,7 +439,7 @@ pub(super) fn handle_leave(
 
 // ── OffsetCommit validation ───────────────────────────────────────────────
 
-/// Port of `offset_commit::validate`. Returns `Some(code)` to reject.
+/// Port of `offset_commit::validate`. It returns `Some(code)` to reject.
 pub(super) fn validate_commit(
     state: &ClassicState,
     member_id: &str,

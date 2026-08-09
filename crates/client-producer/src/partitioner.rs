@@ -1,6 +1,6 @@
-//! `UniformStickyPartitioner` — Java 3.0+ default. Hash-on-key for keyed
-//! records; sticky-per-topic for null-key records, rotating only when the
-//! current accumulator drains.
+//! `UniformStickyPartitioner`, the Java 3.0+ default. It hashes on the key for
+//! keyed records. For null-key records it is sticky per topic, and it rotates
+//! only when the current accumulator drains.
 
 use std::{collections::HashMap, sync::Mutex};
 
@@ -37,10 +37,10 @@ impl UniformStickyPartitioner {
         }
     }
 
-    /// Rotate the sticky partition for `topic` to a new one (called by the
-    /// sender after a batch flushes). Not yet wired in — the sender will
-    /// invoke this on linger expiry in a follow-up; documented and
-    /// tested already.
+    /// Rotate the sticky partition for `topic` to a new one. The sender calls
+    /// this after a batch flushes. It is not yet wired in: the sender will
+    /// invoke it on linger expiry in a follow-up. It is already documented and
+    /// tested.
     #[allow(dead_code)]
     pub fn rotate(&self, topic: &str, num_partitions: i32) {
         if num_partitions <= 0 {
@@ -52,8 +52,10 @@ impl UniformStickyPartitioner {
     }
 }
 
-/// `MurmurHash2` — Kafka's `DefaultPartitioner` key hash.
-/// Reference implementation; length cast to u32 matches the canonical spec.
+/// `MurmurHash2`, the key hash of Kafka's `DefaultPartitioner`.
+///
+/// This is the reference implementation. The length cast to u32 matches the
+/// canonical spec.
 fn murmur2(data: &[u8]) -> i32 {
     const SEED: u32 = 0x9747_b28c;
     const M: u32 = 0x5bd1_e995;

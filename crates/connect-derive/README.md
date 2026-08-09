@@ -11,9 +11,9 @@ of Apache Kafka-compatible infrastructure and clients.
 
 ## Overview
 
-`crabka-connect-derive` provides `#[derive(ConnectorConfig)]`, the procedural
-macro used by connector authors to declare ConfigDef-style schemas from Rust
-structs. It generates both `ConnectorConfig::config_def()` and
+`crabka-connect-derive` supplies `#[derive(ConnectorConfig)]`. Connector authors
+use this procedural macro to declare ConfigDef-style schemas from Rust structs.
+It generates both `ConnectorConfig::config_def()` and
 `ConnectorConfig::from_resolved()` implementations for `crabka-connect`.
 
 Most users get this macro through `crabka-connect`'s default `derive` feature:
@@ -82,8 +82,8 @@ keys in a `ConfigDef`, then extracts typed values from a resolved config map.
 
 ## Boundaries
 
-- Only structs with named fields are supported.
-- Generic structs, tuple structs, and enums are rejected.
+- The derive supports only structs with named fields.
+- The derive rejects generic structs, tuple structs, and enums.
 - `SecretString` and `Option<SecretString>` fields must use
   `#[config(secret)]`.
 - Secret fields cannot declare defaults.

@@ -1,12 +1,14 @@
-//! D5: the read gate (`Linearizer`) rejects reads on a deposed leader and admits
-//! them on a healthy one; writes are never gated (they go through the committer).
+//! D5: the read gate, `Linearizer`, rejects reads on a deposed leader and
+//! admits them on a healthy one. Writes are never gated, because they go
+//! through the committer.
 use std::sync::Arc;
 
 use crabka_pgexec::{Committer, ExecError, Linearizer, SqlEngine};
 use crabka_pgkv::{Kv, MemKv, WriteOp};
 use crabka_pgwire::engine::{Engine, QueryResult, Session};
 
-/// Commits straight to a shared in-memory KV (stands in for `RaftCommitter`).
+/// Commits directly to a shared in-memory KV. It stands in for
+/// `RaftCommitter`.
 struct MemCommitter {
     kv: Arc<dyn Kv>,
 }
@@ -18,7 +20,8 @@ impl Committer for MemCommitter {
     }
 }
 
-/// A read gate that always rejects — a deposed/partitioned leader.
+/// A read gate that always rejects, which is a deposed or partitioned
+/// leader.
 struct DeposedLeader;
 #[async_trait::async_trait]
 impl Linearizer for DeposedLeader {
@@ -27,7 +30,7 @@ impl Linearizer for DeposedLeader {
     }
 }
 
-/// A read gate that always admits — a healthy leader.
+/// A read gate that always admits, which is a healthy leader.
 struct HealthyLeader;
 #[async_trait::async_trait]
 impl Linearizer for HealthyLeader {

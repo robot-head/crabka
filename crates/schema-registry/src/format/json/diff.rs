@@ -1,6 +1,7 @@
-//! Structural diff between two JSON Schema documents (`serde_json::Value`),
-//! mirroring Confluent's json.diff. Classified by `compat.rs`. No direction
-//! logic — the engine swaps (reader, writer) per level.
+//! Structural diff between two JSON Schema documents, each a
+//! `serde_json::Value`, which mirrors Confluent's json.diff. `compat.rs`
+//! classifies the result. This module has no direction logic. The engine swaps
+//! (reader, writer) per level.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -112,9 +113,9 @@ fn d(kind: Kind, path: &str) -> Difference {
 /// `$ref` target string a referring schema uses to point at that document.
 type RefMap = [(String, Value)];
 
-/// Context for $ref resolution — carries each side's document root and registry
-/// ref-map, plus a cycle-guard set of `(orig_ptr, upd_ptr)` pairs already
-/// visited.
+/// Context for $ref resolution. It carries each side's document root and
+/// registry ref-map, and a cycle-guard set of the `(orig_ptr, upd_ptr)` pairs
+/// already visited.
 struct Ctx<'a> {
     orig_root: &'a Value,
     upd_root: &'a Value,
@@ -676,10 +677,11 @@ fn compare_combinators(
 // $ref resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve a `$ref`. An intra-document `#/...` pointer resolves against `root`
-/// (unchanged). A non-`#` ref resolves against `refs` if its string matches a
-/// registered reference's `name`; otherwise it stays permissive (`None`). Both
-/// branches borrow for the same lifetime, so the result is a plain `&Value`.
+/// Resolve a `$ref`. An intra-document `#/...` pointer resolves against `root`,
+/// which does not change. A non-`#` ref resolves against `refs` if its string
+/// matches a registered reference's `name`. Otherwise it stays permissive and
+/// gives `None`. Both branches borrow for the same lifetime, so the result is a
+/// plain `&Value`.
 fn resolve_ref<'a>(schema: &Value, root: &'a Value, refs: &'a RefMap) -> Option<&'a Value> {
     let ref_str = schema.get("$ref").and_then(Value::as_str)?;
     if let Some(ptr) = ref_str.strip_prefix('#') {

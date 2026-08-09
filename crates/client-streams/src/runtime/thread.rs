@@ -17,42 +17,49 @@ use crate::{
 
 pub(crate) struct StreamThread {
     tasks: HashMap<(String, i32), StreamTask>,
-    /// Shared fetcher reference kept for restore (replaying changelog on task creation).
+    /// Shared fetcher reference kept for restore. It replays the changelog when
+    /// the thread creates a task.
     fetcher: Arc<dyn RecordFetcher>,
     /// Storage backend to use when instantiating new task graphs.
     backend: crate::store::backend::StoreBackend,
     /// Application ID passed to `instantiate` for changelog-name derivation and
     /// backend path construction.
     application_id: String,
-    /// The shared, fully-replicated global stores for this app. Built + bootstrapped
-    /// once from the topology's global store factories (on the first assignment that
-    /// has work), then lent by `Arc` clone into every task's graph so a
-    /// stream-globaltable join reads the same global state. Empty (default) when the
-    /// topology declares no `GlobalKTable`.
+    /// The shared, fully-replicated global stores for this app. The thread
+    /// builds and bootstraps them once from the topology's global store
+    /// factories, on the first assignment that has work. It then lends them by
+    /// `Arc` clone into every task's graph, so a stream-globaltable join reads
+    /// the same global state. This field is empty by default when the topology
+    /// declares no `GlobalKTable`.
     globals: crate::runtime::global::GlobalStateManager,
-    /// Whether `globals` has been built + bootstrapped yet. Guards the one-time
-    /// lazy build at the top of `apply_assignment`.
+    /// Whether the thread has built and bootstrapped `globals` yet. This flag
+    /// guards the one-time lazy build at the top of `apply_assignment`.
     globals_ready: bool,
-    /// Per-`(global topic, partition)` next-offset, seeded by the bootstrap read and
-    /// advanced by each `poll_all` live-update pass. Empty when the topology declares
-    /// no `GlobalKTable`.
+    /// Per-`(global topic, partition)` next-offset. The bootstrap read seeds it,
+    /// and each `poll_all` live-update pass advances it. This field is empty
+    /// when the topology declares no `GlobalKTable`.
     global_offsets: std::collections::HashMap<(String, i32), i64>,
-    /// Wall-clock source driving wall-clock punctuation between polls. Defaults to
-    /// `SystemClock`; tests inject a `ManualClock` via `with_clock` for determinism.
+    /// Wall-clock source that drives wall-clock punctuation between polls. The
+    /// default is `SystemClock`. Tests inject a `ManualClock` with `with_clock`
+    /// to keep the result deterministic.
     clock: Arc<dyn crate::runtime::clock::Clock>,
-    /// Delivery guarantee for this thread. Set by `apply_assignment`; defaults to
-    /// at-least-once until the first assignment arrives.
+    /// Delivery guarantee for this thread. `apply_assignment` sets it. Until the
+    /// first assignment arrives, the default is at-least-once.
     guarantee: ProcessingGuarantee,
-    /// The EOS-v2 transactional producer (the same object the tasks `send`
-    /// through, viewed as a `TransactionalProducer`). `None` under at-least-once.
+    /// The EOS-v2 transactional producer. This is the same object the tasks
+    /// `send` through, seen as a `TransactionalProducer`. It is `None` under
+    /// at-least-once.
     txn: Option<Arc<dyn TransactionalProducer>>,
-    /// Whether `init_transactions` has run (one-time, on the first EOS assignment).
+    /// Whether `init_transactions` has run. It runs once, on the first EOS
+    /// assignment.
     initialized: bool,
-    /// Whether a transaction is currently open (`begin_transaction` called, not yet
-    /// committed/aborted). Drives the begin-on-first-poll / commit barrier.
+    /// Whether a transaction is currently open. The thread has called
+    /// `begin_transaction` and has not yet committed or aborted. This flag
+    /// drives the begin-on-first-poll and commit barrier.
     in_txn: bool,
-    /// Record-cache budget (JVM `statestore.cache.max.bytes`) threaded into each
-    /// task graph at `instantiate`. A zero budget disables caching.
+    /// Record-cache budget, the JVM `statestore.cache.max.bytes`. The thread
+    /// threads it into each task graph at `instantiate`. A zero budget disables
+    /// caching.
     cache_max_bytes: ByteSize,
 }
 
@@ -80,8 +87,8 @@ impl StreamThread {
         }
     }
 
-    /// Test-only: swap in a deterministic clock (e.g. `ManualClock`) so wall-clock
-    /// punctuation can be driven without real time passing.
+    /// Test-only: swaps in a deterministic clock, for example `ManualClock`.
+    /// The test can then drive wall-clock punctuation without real time passing.
     #[cfg(test)]
     #[must_use]
     pub fn with_clock(mut self, clock: Arc<dyn crate::runtime::clock::Clock>) -> Self {
@@ -106,7 +113,7 @@ impl StreamThread {
         self.tasks.get_mut(task)?.store_get_i64(store, k).await
     }
 
-    /// Test-only: whether the task at `key` has pending (uncommitted) offsets.
+    /// Test-only: whether the task at `key` has pending, uncommitted offsets.
     #[cfg(test)]
     fn task_has_pending(&self, task: &(String, i32)) -> bool {
         self.tasks
@@ -116,10 +123,10 @@ impl StreamThread {
 
     /// Reconcile tasks to `assignment`. Reconciles active, standby, and warmup tasks.
     ///
-    /// `guarantee` + `txn` configure the EOS commit path: under
-    /// [`ProcessingGuarantee::ExactlyOnceV2`] the same producer object is also
-    /// passed as `txn` (a [`TransactionalProducer`] view), and the first EOS
-    /// assignment runs `init_transactions` once (fencing any zombie).
+    /// `guarantee` and `txn` configure the EOS commit path. Under
+    /// [`ProcessingGuarantee::ExactlyOnceV2`] the caller also passes the same
+    /// producer object as `txn`, seen as a [`TransactionalProducer`]. The first
+    /// EOS assignment runs `init_transactions` once, which fences any zombie.
     #[tracing::instrument(
         name = "streams.thread.apply_assignment",
         level = "info",
@@ -267,9 +274,12 @@ impl StreamThread {
         Ok(())
     }
 
-    /// Abort the in-flight txn and roll back every task to the last committed
-    /// state (rewind source offsets, wipe stores, re-restore from the committed
-    /// changelog). Called on any error during an EOS process/commit cycle.
+    /// Aborts the in-flight txn and rolls back every task to the last committed
+    /// state.
+    ///
+    /// The rollback rewinds source offsets, wipes stores, and re-restores from
+    /// the committed changelog. The thread calls this method on any error
+    /// during an EOS process or commit cycle.
     //
     // All EOS-cycle errors are treated as retryable abort+rollback here; the
     // fenced-fatal distinction (a `ProducerFenced` must shut the thread down, not
@@ -364,14 +374,14 @@ impl StreamThread {
         Ok(())
     }
 
-    /// EOS begin-on-first-record + per-task process, captured so `poll_all` can
-    /// turn any `Err` into an abort + rollback.
+    /// EOS begin-on-first-record and per-task process, captured so `poll_all`
+    /// can turn any `Err` into an abort and rollback.
     ///
-    /// The transaction is NOT begun up front. Instead each task is handed an
-    /// [`EosBeginGate`] that begins the transaction lazily, right before the
+    /// This method does NOT begin the transaction up front. It hands each task
+    /// an [`EosBeginGate`] that begins the transaction lazily, right before the
     /// task's first produced record of the interval. If no task fetches any
-    /// records the gate is never tripped, so the interval opens no transaction
-    /// (and `commit_all` becomes a no-op) — matching the JVM's "gate on records
+    /// records, nothing trips the gate, so the interval opens no transaction
+    /// and `commit_all` does nothing. This matches the JVM's "gate on records
     /// processed since last commit" behaviour.
     #[tracing::instrument(
         name = "streams.thread.eos_begin_and_process",
@@ -406,10 +416,12 @@ impl StreamThread {
         res
     }
 
-    /// EOS commit barrier: fold every task's pending source offsets into a single
-    /// `send_offsets_to_transaction`, then `commit_transaction`. Captured so
-    /// `commit_all` can turn any `Err` into an abort + rollback. Does NOT clear
-    /// pending (the caller does that only on success).
+    /// EOS commit barrier: folds every task's pending source offsets into one
+    /// `send_offsets_to_transaction`, then calls `commit_transaction`.
+    ///
+    /// This method is captured so `commit_all` can turn any `Err` into an abort
+    /// and rollback. It does NOT clear pending offsets. The caller clears them
+    /// only on success.
     #[tracing::instrument(
         name = "streams.thread.eos_send_offsets_and_commit",
         level = "debug",
@@ -432,14 +444,16 @@ impl StreamThread {
         Ok(())
     }
 
-    /// Commit advanced offsets.
+    /// Commits advanced offsets.
     ///
-    /// At-least-once: per-task `flush` + offset commit (`meta` ignored).
-    /// Exactly-once-v2: fold every task's pending source offsets into a single
-    /// `send_offsets_to_transaction`, then `commit_transaction` atomically, and
-    /// clear the tasks' pending offsets. Requires `meta` (the streams group
-    /// metadata). A no-op when no transaction is open (nothing produced since the
-    /// last commit).
+    /// At-least-once: this method runs a per-task `flush` and an offset commit.
+    /// It ignores `meta`.
+    ///
+    /// Exactly-once-v2: this method folds every task's pending source offsets
+    /// into one `send_offsets_to_transaction`, then calls `commit_transaction`
+    /// atomically, then clears the tasks' pending offsets. It needs `meta`, the
+    /// streams group metadata. It does nothing when no transaction is open,
+    /// because nothing produced records since the last commit.
     #[tracing::instrument(
         name = "streams.thread.commit_all",
         level = "info",
@@ -494,15 +508,18 @@ impl StreamThread {
         Ok(())
     }
 
-    /// Serve one interactive query against this thread's local tasks. Composite
-    /// across every task whose registry hosts the named store.
+    /// Serves one interactive query against this thread's local tasks.
     ///
-    /// Takes `&mut self` (not `&self`): the query borrows `&dyn IqQueryable`
-    /// views out of the task graphs and holds them across `answer_iq`'s awaits.
-    /// A `&self` body would capture `&StreamThread` across the await, requiring
-    /// `StreamThread: Sync` — but the graph holds `Box<dyn StateStore>` /
-    /// `Box<dyn ErasedNode>` which are `Send` but not `Sync`, so the supervisor's
-    /// spawned future would not be `Send`. `&mut self` only needs `Send`.
+    /// The answer is composite across every task whose registry hosts the named
+    /// store.
+    ///
+    /// This method takes `&mut self`, not `&self`. The query borrows
+    /// `&dyn IqQueryable` views out of the task graphs and holds them across
+    /// `answer_iq`'s awaits. A `&self` body would capture `&StreamThread`
+    /// across the await, which needs `StreamThread: Sync`. The graph holds
+    /// `Box<dyn StateStore>` and `Box<dyn ErasedNode>`, which are `Send` but
+    /// not `Sync`, so the supervisor's spawned future would not be `Send`.
+    /// `&mut self` only needs `Send`.
     #[tracing::instrument(
         name = "streams.thread.serve_iq",
         level = "debug",
@@ -526,9 +543,11 @@ impl StreamThread {
         let _ = req.reply.send(result);
     }
 
-    /// Serve one `IQv2` query: per-partition (no merge). Filters tasks by the
-    /// requested partition set, applies the active-only and position-bound
-    /// gates, and tags each store's typed result with its partition + position.
+    /// Serves one `IQv2` query per partition, with no merge.
+    ///
+    /// This method filters tasks by the requested partition set. It applies the
+    /// active-only gate and the position-bound gate. It then tags each store's
+    /// typed result with its partition and its position.
     #[tracing::instrument(
         name = "streams.thread.serve_iq2",
         level = "debug",
@@ -602,10 +621,11 @@ impl StreamThread {
         let _ = req.reply.send(Iq2Outcome { per_partition });
     }
 
-    /// Commit + drop all tasks (on Fenced / shutdown).
+    /// Commits and drops all tasks, on Fenced or on shutdown.
     ///
-    /// Under EOS, an open transaction is aborted (best-effort) rather than
-    /// committed — a fence/shutdown mid-cycle must not leak a half-written txn.
+    /// Under EOS, this method aborts an open transaction as a best effort. It
+    /// does not commit it. A fence or shutdown mid-cycle must not leak a
+    /// half-written txn.
     #[tracing::instrument(
         name = "streams.thread.close_all",
         level = "info",
@@ -638,15 +658,18 @@ impl StreamThread {
 }
 
 /// Lazy begin-transaction gate handed to each task's `process_once` under
-/// EOS-v2. The first task to produce a record this interval calls
-/// [`BeginTxnGate::ensure_begun`], which begins the transaction exactly once;
-/// subsequent calls (further records / partitions / tasks) are no-ops. When no
-/// task produces anything the gate is never tripped and no transaction opens.
+/// EOS-v2.
+///
+/// The first task to produce a record in this interval calls
+/// [`BeginTxnGate::ensure_begun`], which begins the transaction exactly once.
+/// Later calls, for more records, partitions, or tasks, do nothing. When no
+/// task produces anything, nothing trips the gate and no transaction opens.
 struct EosBeginGate {
     txn: Arc<dyn TransactionalProducer>,
-    /// Whether a transaction is currently open. Seeded from the thread's
-    /// `in_txn` (so a re-poll within an already-open interval doesn't re-begin)
-    /// and read back into it after processing.
+    /// Whether a transaction is currently open. The thread's `in_txn` seeds
+    /// this field, so a re-poll inside an already-open interval does not begin
+    /// a second transaction. The thread reads the field back into `in_txn`
+    /// after processing.
     begun: bool,
 }
 
@@ -745,8 +768,9 @@ mod tests {
         }
     }
 
-    /// Schedules a `WALL_CLOCK_TIME` punctuator (interval 100ms) in `init`; no-op on
-    /// records (so any sink output is from the wall-clock punctuator).
+    /// Schedules a `WALL_CLOCK_TIME` punctuator with a 100ms interval in
+    /// `init`. It does nothing on records, so all sink output comes from the
+    /// wall-clock punctuator.
     struct WallClockScheduler;
     #[async_trait::async_trait]
     impl Processor<String, String, String, i64> for WallClockScheduler {
@@ -919,8 +943,9 @@ mod tests {
         Arc::new(ScriptedFetcher::new(vec![])) as Arc<dyn RecordFetcher>
     }
 
-    /// Dispatch one `Iq2Request` (built from the supplied reply sender) through
-    /// `serve_iq2` and return the assembled `Iq2Outcome`.
+    /// Dispatches one `Iq2Request` through `serve_iq2` and returns the
+    /// assembled `Iq2Outcome`. `build` makes the request from the supplied
+    /// reply sender.
     async fn serve_iq2_outcome(
         thread: &mut StreamThread,
         build: impl FnOnce(
@@ -946,13 +971,13 @@ mod tests {
 
     // ─── tests ────────────────────────────────────────────────────────────────
 
-    /// `poll_all` must fire due `WALL_CLOCK_TIME` punctuators between polls, driven
-    /// by the injected `Clock`. We use a `ManualClock` over a shared atomic so we
-    /// can advance wall time deterministically:
+    /// `poll_all` must fire due `WALL_CLOCK_TIME` punctuators between polls. The
+    /// injected `Clock` drives them. This test uses a `ManualClock` over a
+    /// shared atomic, so it can advance wall time deterministically:
     ///   - `init` schedules the punctuator at base `wall_clock`=0 → next fire = 100.
     ///   - clock=0: first `poll_all` → now=0 < 100, no fire.
-    ///   - advance clock to 150: second `poll_all` → now=150 >= 100, fires ONCE,
-    ///     emitting value = now = 150 to the "out" sink.
+    ///   - advance clock to 150: second `poll_all` → now=150 >= 100, fires ONCE
+    ///     and emits value = now = 150 to the "out" sink.
     #[tokio::test]
     async fn poll_all_fires_wall_clock_punctuation_via_manual_clock() {
         use std::sync::atomic::AtomicI64;
@@ -1086,9 +1111,9 @@ mod tests {
         check!(thread.task_count() == 0);
     }
 
-    /// Verify that `apply_assignment` replays changelog records into the task's
-    /// store during restore, so that the first `process_once` continues from the
-    /// restored count rather than from zero.
+    /// Verifies that `apply_assignment` replays changelog records into the
+    /// task's store during restore. The first `process_once` must then continue
+    /// from the restored count, not from zero.
     #[tokio::test]
     async fn stateful_apply_assignment_restores_store_from_changelog() {
         // Changelog: key="a", value=i64 BE 7 at offset 0 on "app-counts-changelog".
@@ -1156,11 +1181,13 @@ mod tests {
         );
     }
 
-    /// `serve_iq` must resolve a `KvGet` against the live, restored task store:
-    /// after restoring `counts` with `a=7` from the changelog (same setup as
-    /// `stateful_apply_assignment_restores_store_from_changelog`), a `KvGet` for
-    /// "a" returns the i64-BE bytes for 7. A thread with no tasks (rebalancing)
-    /// returns `RebalanceInProgress`.
+    /// `serve_iq` must resolve a `KvGet` against the live, restored task store.
+    ///
+    /// This test restores `counts` with `a=7` from the changelog, with the same
+    /// setup as `stateful_apply_assignment_restores_store_from_changelog`. A
+    /// `KvGet` for "a" then returns the i64-BE bytes for 7. A thread with no
+    /// tasks, which means a rebalance is in progress, returns
+    /// `RebalanceInProgress`.
     #[tokio::test]
     async fn serve_iq_reads_restored_kv_store() {
         use crate::{
@@ -1252,10 +1279,12 @@ mod tests {
         ));
     }
 
-    /// `serve_iq2` per-partition gating: an active task over the `counts`
-    /// `KeyValue` store yields a `Success` (empty store → `Ok(Box<None>)`),
-    /// while the partition-set, active-only, and position-bound gates each
-    /// suppress or fail the matching partition.
+    /// `serve_iq2` per-partition gating.
+    ///
+    /// An active task over the `counts` `KeyValue` store yields a `Success`. An
+    /// empty store gives `Ok(Box<None>)`. The partition-set gate, the
+    /// active-only gate, and the position-bound gate each suppress or fail the
+    /// matching partition.
     #[tokio::test]
     async fn serve_iq2_gates_partition_active_and_bound() {
         use crate::{
@@ -1373,17 +1402,20 @@ mod tests {
         assert_eq!(r.as_ref().err(), Some(&FailureReason::NotUpToBound));
     }
 
-    /// End-to-end of the real runtime global-store path: `StreamThread` builds +
-    /// bootstraps the shared `GlobalStateManager` from the broker BEFORE any task
-    /// processes, then a stream-globaltable join reads the bootstrapped value.
+    /// End-to-end test of the real runtime global-store path.
     ///
-    /// Topology: a `GlobalKTable` over topic "global" (store "g-store"), and a
-    /// stream "in" that joins it with `key_mapper = |_k, v| v.clone()` (lookup key
-    /// = the record value) and `joiner = |sv, gv| sv + gv`. The global store is
-    /// seeded on the broker at (global, 0, 0) = ("gk", "GV"); the stream record is
-    /// (key "k", value "gk"). The derived lookup key "gk" hits "GV", so the join
-    /// emits key "k", value "gkGV". Proves bootstrap-before-process wires the
-    /// shared manager into the task graph in the real runtime.
+    /// `StreamThread` builds and bootstraps the shared `GlobalStateManager`
+    /// from the broker BEFORE any task processes. A stream-globaltable join
+    /// then reads the bootstrapped value.
+    ///
+    /// Topology: a `GlobalKTable` over topic "global", with store "g-store",
+    /// and a stream "in" that joins it with `key_mapper = |_k, v| v.clone()`
+    /// and `joiner = |sv, gv| sv + gv`. The lookup key is the record value. The
+    /// test seeds the global store on the broker at (global, 0, 0) = ("gk",
+    /// "GV"). The stream record is (key "k", value "gk"). The derived lookup
+    /// key "gk" hits "GV", so the join emits key "k", value "gkGV". This proves
+    /// that bootstrap-before-process wires the shared manager into the task
+    /// graph in the real runtime.
     #[tokio::test]
     async fn global_apply_assignment_bootstraps_store_before_join() {
         use crate::dsl::{GlobalKTable, StreamsBuilder};
@@ -1596,15 +1628,18 @@ mod tests {
         check!(thread.tasks.get(&("0".to_string(), 3)).map(|t| t.role) == Some(TaskRole::Warmup));
     }
 
-    /// EOS-v2 happy path: the thread runs the full transactional commit lifecycle
-    /// over a stateless `source → up → sink` topology. The single
-    /// `MockTransactionalProducer` is shared as BOTH the task `RecordProducer`
-    /// (for the sink `send`) AND the thread's `TransactionalProducer`, so the
-    /// recorded call sequence is the cross-product of both views.
+    /// EOS-v2 happy path: the thread runs the full transactional commit
+    /// lifecycle over a stateless `source → up → sink` topology.
     ///
-    /// Expected sequence: `Init` (`apply_assignment`), `Begin` (first `poll_all`),
-    /// `Send` (the sink emit during process), then `SendOffsets` + `Commit`
-    /// (`commit_all`). The sink record must also be logged in `.sent`.
+    /// The test shares one `MockTransactionalProducer` as BOTH the task
+    /// `RecordProducer`, which the sink `send` uses, AND the thread's
+    /// `TransactionalProducer`. The recorded call sequence is therefore the
+    /// cross-product of both views.
+    ///
+    /// Expected sequence: `Init` from `apply_assignment`, `Begin` from the
+    /// first `poll_all`, `Send` from the sink emit during process, then
+    /// `SendOffsets` and `Commit` from `commit_all`. The sink record must also
+    /// appear in `.sent`.
     #[tokio::test]
     async fn eos_happy_path_runs_begin_send_offsets_commit() {
         use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
@@ -1680,11 +1715,15 @@ mod tests {
     }
 
     /// EOS-v2 idle interval: when a `poll_all` fetches NO records, the runtime
-    /// must NOT begin a transaction, and the following `commit_all` must be a
-    /// no-op — no `Begin`, no `Send`, no `SendOffsets`, no `Commit`. (Regression
-    /// guard for the empty-transaction churn the begin-on-first-record gate
-    /// fixes: the old eager begin opened + committed an empty txn every interval
-    /// on an idle app.) Only `Init` (from `apply_assignment`) is recorded.
+    /// must NOT begin a transaction.
+    ///
+    /// The `commit_all` that follows must do nothing. There must be no `Begin`,
+    /// no `Send`, no `SendOffsets`, and no `Commit`. Only `Init`, from
+    /// `apply_assignment`, is recorded.
+    ///
+    /// This test guards against the empty-transaction churn that the
+    /// begin-on-first-record gate fixes. The old eager begin opened and
+    /// committed an empty txn every interval on an idle app.
     #[tokio::test]
     async fn eos_idle_interval_opens_no_transaction() {
         use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
@@ -1736,24 +1775,28 @@ mod tests {
         check!(mock.sent.lock().unwrap().is_empty());
     }
 
-    /// EOS-v2 abort + rollback: a `commit_transaction` failure mid-cycle must
-    /// abort the txn and roll every task back to its last committed state —
-    /// rewinding source offsets, wiping the stores, and re-restoring from the
-    /// (here empty) changelog. A subsequent successful cycle then reprocesses the
-    /// re-fetched batch without double-counting.
+    /// EOS-v2 abort and rollback: a `commit_transaction` failure mid-cycle must
+    /// abort the txn and roll every task back to its last committed state.
+    ///
+    /// The rollback rewinds source offsets, wipes the stores, and re-restores
+    /// from the changelog, which is empty here. A later successful cycle then
+    /// reprocesses the re-fetched batch without double-counting.
     ///
     /// Topology: stateful `source → counter (counts store) → sink`. The fetcher
-    /// returns the SAME "a" record for `("in", 0, 0)` on every fetch (so the
-    /// rewound cycle re-reads it) and an empty changelog (so re-restore yields an
-    /// empty store).
+    /// returns the SAME "a" record for `("in", 0, 0)` on every fetch, so the
+    /// rewound cycle re-reads it. The fetcher also returns an empty changelog,
+    /// so the re-restore yields an empty store.
     #[tokio::test]
     async fn eos_commit_failure_aborts_and_rolls_back() {
         use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
 
-        /// A fetcher that ALWAYS returns the "a" record at `("in", 0, 0)`
-        /// regardless of how many times it's fetched (it never consumes the
-        /// script), and an empty changelog. Re-fetching after a rewind re-reads
-        /// the same input — proving the rollback rewound the source offset.
+        /// A fetcher that ALWAYS returns the "a" record at `("in", 0, 0)` and
+        /// an empty changelog.
+        ///
+        /// The fetcher never consumes the script, so it returns the same record
+        /// no matter how many fetches happen. A fetch after a rewind re-reads
+        /// the same input. This proves that the rollback rewound the source
+        /// offset.
         struct ReplayFetcher;
         #[async_trait::async_trait]
         impl RecordFetcher for ReplayFetcher {
@@ -1872,8 +1915,10 @@ mod tests {
     // ─── Bug A: EOS commit flushes record caches into the transaction ─────────
 
     /// A `Change<i64>` serde so a cached-materialized topology can wire a
-    /// `Change<i64>` sink. Encodes the `new` side (8 bytes BE) so the sink (and,
-    /// crucially, the flush-forwarded deduped change) has bytes to emit.
+    /// `Change<i64>` sink.
+    ///
+    /// This serde encodes the `new` side as 8 bytes BE. The sink then has bytes
+    /// to emit, and so does the flush-forwarded deduped change.
     #[derive(Clone)]
     struct ChangeI64Serde;
     impl crate::processor::serde::Serde<crate::dsl::processors::change::Change<i64>>
@@ -1897,10 +1942,13 @@ mod tests {
     }
 
     /// A materializing count processor that uses the real `TupleForwarder`
-    /// suppression seam: when its "counts" store is cached it does NOT forward
-    /// immediately (the cache flush forwards the deduped change), mirroring the
-    /// DSL aggregate processors. Used to prove that the EOS commit path flushes
-    /// the cache so the deduped change + changelog reach the transaction.
+    /// suppression seam.
+    ///
+    /// When its "counts" store is cached, this processor does NOT forward
+    /// immediately. The cache flush forwards the deduped change instead, the
+    /// same way the DSL aggregate processors work. The test uses this processor
+    /// to prove that the EOS commit path flushes the cache, so the deduped
+    /// change and the changelog reach the transaction.
     struct SuppressingCounter {
         forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder,
     }
@@ -1959,11 +2007,15 @@ mod tests {
         t.build("app").unwrap()
     }
 
-    /// EOS-v2 + a CACHED materialized store: a record buffered in the cache (its
-    /// immediate forward suppressed) must have its deduped `Change` + changelog
-    /// produced INTO the transaction at commit — the `commit_all` EOS branch must
-    /// flush caches before `send_offsets`/`commit`. Regression guard for the bug
-    /// where the EOS commit never flushed caches (dropping cached output).
+    /// EOS-v2 with a CACHED materialized store.
+    ///
+    /// The cache buffers a record and suppresses its immediate forward. The
+    /// commit must still produce that record's deduped `Change` and changelog
+    /// INTO the transaction. The `commit_all` EOS branch must flush caches
+    /// before `send_offsets` and `commit`.
+    ///
+    /// This test guards against the bug where the EOS commit never flushed
+    /// caches and dropped cached output.
     #[tokio::test]
     async fn eos_commit_flushes_record_caches_into_transaction() {
         use crate::runtime::eos::mock::{MockTransactionalProducer, Step};

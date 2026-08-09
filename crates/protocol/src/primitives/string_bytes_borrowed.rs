@@ -6,9 +6,13 @@ use crate::{
     },
 };
 
-/// Decode a `STRING` (non-flexible) borrowing from the input buffer.
-/// Wire: INT16 length (≥0), then `length` UTF-8 bytes. Length −1 = null (error here).
+/// Decode a non-flexible `STRING` that borrows from the input buffer.
+///
+/// The wire format is an INT16 length of 0 or more, then `length` UTF-8 bytes.
+/// A length of −1 means null, which is an error here.
+///
 /// # Errors
+///
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
@@ -28,8 +32,10 @@ pub fn get_string_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de str, Protoco
     std::str::from_utf8(head).map_err(ProtocolError::InvalidUtf8)
 }
 
-/// Decode a nullable `STRING` (non-flexible) borrowing from the input buffer.
+/// Decode a nullable, non-flexible `STRING` that borrows from the input buffer.
+///
 /// # Errors
+///
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
@@ -53,9 +59,12 @@ pub fn get_nullable_string_borrowed<'de>(
     ))
 }
 
-/// Decode a `COMPACT_STRING` borrowing from the input buffer.
-/// Requires a contiguous buffer (i.e. `&[u8]`).
+/// Decode a `COMPACT_STRING` that borrows from the input buffer.
+///
+/// This function needs a contiguous buffer, that is, a `&[u8]`.
+///
 /// # Errors
+///
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_string_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de str, ProtocolError> {
     let raw = get_uvarint(buf)?;
@@ -97,9 +106,13 @@ pub fn get_compact_nullable_string_borrowed<'de>(
     ))
 }
 
-/// Decode `BYTES` (non-flexible) borrowing from the input buffer.
-/// Wire: INT32 length, then `length` bytes. Length −1 = null (error here).
+/// Decode non-flexible `BYTES` that borrow from the input buffer.
+///
+/// The wire format is an INT32 length, then `length` bytes. A length of −1 means
+/// null, which is an error here.
+///
 /// # Errors
+///
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
@@ -119,8 +132,10 @@ pub fn get_bytes_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de [u8], Protoco
     Ok(head)
 }
 
-/// Decode nullable `BYTES` (non-flexible) borrowing from the input buffer.
+/// Decode nullable, non-flexible `BYTES` that borrow from the input buffer.
+///
 /// # Errors
+///
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
@@ -142,8 +157,10 @@ pub fn get_nullable_bytes_borrowed<'de>(
     Ok(Some(head))
 }
 
-/// Decode `COMPACT_BYTES` (flexible) borrowing from the input buffer.
+/// Decode flexible `COMPACT_BYTES` that borrow from the input buffer.
+///
 /// # Errors
+///
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_bytes_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de [u8], ProtocolError> {
     let raw = get_uvarint(buf)?;
@@ -163,8 +180,10 @@ pub fn get_compact_bytes_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de [u8],
     Ok(head)
 }
 
-/// Decode nullable `COMPACT_BYTES` (flexible) borrowing from the input buffer.
+/// Decode nullable, flexible `COMPACT_BYTES` that borrow from the input buffer.
+///
 /// # Errors
+///
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_compact_nullable_bytes_borrowed<'de>(
     buf: &mut &'de [u8],

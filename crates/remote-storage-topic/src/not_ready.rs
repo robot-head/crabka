@@ -1,18 +1,18 @@
-//! [`NotReadyRlmm`] — fail-closed [`RemoteLogMetadataManager`] placeholder.
+//! [`NotReadyRlmm`]: a fail-closed [`RemoteLogMetadataManager`] placeholder.
 //!
-//! Used as the [`SwappableRlmm`](crate::SwappableRlmm) placeholder during the
-//! topic-backed bootstrap window. Every method returns
+//! This type is the [`SwappableRlmm`](crate::SwappableRlmm) placeholder during
+//! the topic-backed bootstrap window. Every method returns
 //! [`RemoteStorageError::NotReady`] immediately:
 //!
-//! - The copy task's first call (`add_remote_log_segment_metadata`) fails with
-//!   `NotReady` before any data is copied, so nothing is tiered with
-//!   non-durable metadata — no orphaned RSM objects accumulate in the remote
-//!   store while the real manager is still initialising.
+//! - The copy task's first call, `add_remote_log_segment_metadata`, fails with
+//!   `NotReady` before it copies any data. Nothing is therefore tiered with
+//!   non-durable metadata, and no orphaned RSM objects accumulate in the
+//!   remote store while the real manager still initialises.
 //! - Remote reads return a retryable `NotReady` error rather than a definitive
 //!   `Ok(None)`, so callers retry until the real manager swaps in and catches
 //!   up to the high-water mark.
 //!
-//! This is a stricter placeholder than
+//! This placeholder is stricter than
 //! [`crabka_remote_storage::InmemoryRemoteLogMetadataManager`], which silently
 //! accepts writes that are then lost when the real manager replaces it.
 
@@ -25,8 +25,8 @@ use crabka_remote_storage::{
 /// A [`RemoteLogMetadataManager`] that returns
 /// [`RemoteStorageError::NotReady`] for every method.
 ///
-/// Construct via [`NotReadyRlmm::new`] and pass it as the initial placeholder
-/// to [`crate::SwappableRlmm::new`].
+/// Construct it with [`NotReadyRlmm::new`] and pass it as the initial
+/// placeholder to [`crate::SwappableRlmm::new`].
 pub struct NotReadyRlmm;
 
 impl NotReadyRlmm {

@@ -1,6 +1,6 @@
-//! Lazy crash recovery: versions written by a transaction that never recorded a
-//! clog commit are invisible after the store is reopened (the `ProcArray` starts
-//! empty, so the in-progress xid is in no snapshot).
+//! Lazy crash recovery. Versions written by a transaction that never recorded a
+//! clog commit are invisible after the store is reopened. The `ProcArray` starts
+//! empty, so the in-progress xid is in no snapshot.
 
 use std::sync::Arc;
 

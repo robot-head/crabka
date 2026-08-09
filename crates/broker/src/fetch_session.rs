@@ -1,14 +1,15 @@
 //! KIP-227 incremental-fetch-session cache.
 //!
-//! A `FetchSession` lets a Kafka consumer or replicator send the broker
-//! its subscription set once and then issue tiny "delta" fetch requests
-//! that only carry the partitions whose desired state has changed
-//! (new offset, new max-bytes) plus a `forgotten_topics_data` list of
-//! partitions to drop. The broker responds with only the partitions
-//! whose state has changed since the previous response. For a
-//! caught-up consumer with hundreds of partitions, this collapses a
-//! continuous stream of identical-looking fetches into near-zero wire
-//! traffic until something changes.
+//! A `FetchSession` lets a Kafka consumer or replicator send the broker its
+//! subscription set once. After that it sends small "delta" fetch requests.
+//! Each delta carries only the partitions whose desired state has changed (new
+//! offset, new max-bytes), plus a `forgotten_topics_data` list of partitions
+//! to drop. The broker answers with only the partitions whose state has
+//! changed since the previous response.
+//!
+//! For a caught-up consumer with hundreds of partitions, this reduces a
+//! continuous stream of identical fetches to almost no wire traffic until
+//! something changes.
 //!
 //! ## Wire-level state machine
 //!
@@ -22,19 +23,21 @@
 //! | N>0          | E (== expected) | Incremental fetch on existing session. |
 //! | N>0          | -1 (FINAL)      | Close the existing session.            |
 //!
-//! Mismatched epochs return `INVALID_FETCH_SESSION_EPOCH` at the top
-//! level of the response; unknown ids return `FETCH_SESSION_ID_NOT_FOUND`.
+//! A mismatched epoch returns `INVALID_FETCH_SESSION_EPOCH` at the top level
+//! of the response. An unknown id returns `FETCH_SESSION_ID_NOT_FOUND`.
 //!
 //! ## Cache & eviction
 //!
-//! Sessions are held in a single bounded map keyed by allocated id;
+//! The cache holds sessions in one bounded map, keyed by allocated id. Its
 //! capacity is `BrokerConfig::max_incremental_fetch_session_cache_slots`.
-//! When full, allocation evicts the LRU **non-privileged** session;
-//! privileged (follower-fetch, `replica_id >= 0`) sessions are only
-//! evicted by other privileged sessions. If no eligible victim exists
-//! (cache full of privileged sessions and the caller is non-privileged),
-//! `try_allocate` returns `INVALID_SESSION_ID` and the caller falls back
-//! to a sessionless response — matching Apache Kafka's behavior.
+//! When the map is full, an allocation evicts the LRU **non-privileged**
+//! session. Only another privileged session evicts a privileged session, which
+//! is a follower fetch with `replica_id >= 0`.
+//!
+//! When there is no eligible victim, `try_allocate` returns
+//! `INVALID_SESSION_ID` and the caller falls back to a sessionless response.
+//! This matches Apache Kafka. That case arises when the cache is full of
+//! privileged sessions and the caller is non-privileged.
 
 use std::{
     collections::HashMap,
@@ -52,39 +55,39 @@ use qubit_clock::{NanoClock, NanoMonotonicClock};
 
 use crate::codes;
 
-/// A KIP-227 fetch session id as carried on the wire (`FetchRequest.session_id`).
-/// `0` ([`INVALID_SESSION_ID`]) means "no session"; valid ids are strictly
-/// positive.
+/// A KIP-227 fetch session id as carried on the wire
+/// (`FetchRequest.session_id`). `0` ([`INVALID_SESSION_ID`]) means "no
+/// session". Valid ids are strictly positive.
 pub type FetchSessionId = i32;
 
 /// A KIP-227 fetch session epoch as carried on the wire
-/// (`FetchRequest.session_epoch`). `0` ([`INITIAL_EPOCH`]) opens a session,
-/// `-1` ([`FINAL_EPOCH`]) closes one; valid incremental epochs are strictly
+/// (`FetchRequest.session_epoch`). `0` ([`INITIAL_EPOCH`]) opens a session and
+/// `-1` ([`FINAL_EPOCH`]) closes one. Valid incremental epochs are strictly
 /// positive.
 pub type FetchSessionEpoch = i32;
 
 /// Wire sentinel: "no session". A request with `session_id == 0` and
-/// `session_epoch == -1` is a sessionless full fetch; a response with
-/// `session_id == 0` tells the client that no session was allocated.
+/// `session_epoch == -1` is a sessionless full fetch. A response with
+/// `session_id == 0` tells the client that the broker allocated no session.
 pub const INVALID_SESSION_ID: FetchSessionId = 0;
 
 /// Wire sentinel: "open a new session". A request with `session_id == 0`
 /// and `session_epoch == 0` asks the broker to allocate a new session.
 pub const INITIAL_EPOCH: FetchSessionEpoch = 0;
 
-/// Wire sentinel: "no session" / "close session". On a request with
-/// `session_id == 0`, `FINAL_EPOCH` means a sessionless full fetch. On
-/// a request with `session_id != 0`, it means close the named session.
+/// Wire sentinel for "no session" and for "close session". On a request with
+/// `session_id == 0`, `FINAL_EPOCH` means a sessionless full fetch. On a
+/// request with `session_id != 0`, it means close the named session.
 pub const FINAL_EPOCH: FetchSessionEpoch = -1;
 
-/// The first id the allocator hands out. Ids count up from here: `0` is
-/// reserved as [`INVALID_SESSION_ID`] and negative ids never go on the wire
-/// (clients reject them).
+/// The first id the allocator gives out. Ids count up from here. `0` is
+/// reserved as [`INVALID_SESSION_ID`], and negative ids never go on the wire
+/// because clients reject them.
 const FIRST_SESSION_ID: FetchSessionId = 1;
 
-/// Compute the epoch the broker expects on the next request after a
-/// successful incremental fetch. Wraps from `i32::MAX` back to `1`,
-/// skipping the two reserved sentinels (`0` = INITIAL, `-1` = FINAL).
+/// Computes the epoch the broker expects on the next request after a
+/// successful incremental fetch. The value wraps from `i32::MAX` back to `1`
+/// and skips the two reserved sentinels: `0` for INITIAL and `-1` for FINAL.
 #[must_use]
 pub fn next_epoch(prev: FetchSessionEpoch) -> FetchSessionEpoch {
     let n = prev.wrapping_add(1);
@@ -95,9 +98,9 @@ fn session_id_is_reserved(candidate: FetchSessionId) -> bool {
     candidate <= 0
 }
 
-/// (`topic_name`, `topic_id`, partition) — both name and id are kept because
-/// Fetch v ≤ 12 sends only the name, v ≥ 13 sends only the id, and the
-/// cache must resolve regardless of which version the client uses.
+/// (`topic_name`, `topic_id`, partition). The cache keeps both the name and
+/// the id, because Fetch v 12 and below sends only the name and v 13 and above
+/// sends only the id. The cache must resolve the key for either version.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FetchSessionKey {
     pub topic_name: String,
@@ -105,11 +108,12 @@ pub struct FetchSessionKey {
     pub partition: i32,
 }
 
-/// Per-partition cached state. The first block (`fetch_offset` etc.) tracks
-/// what the client wants on the next read. The `last_*` block tracks what
-/// we sent in the previous response — used to decide whether the next
-/// response should include this partition (KIP-227 omits a partition
-/// when nothing has changed since the previous response).
+/// Per-partition cached state. The first block (`fetch_offset` and the fields
+/// after it) records what the client wants on the next read. The `last_*`
+/// block records what the broker sent in the previous response. The broker
+/// compares the two blocks to decide whether the next response includes this
+/// partition, because KIP-227 omits a partition when nothing has changed since
+/// the previous response.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CachedPartitionState {
     pub fetch_offset: i64,
@@ -127,48 +131,48 @@ pub struct CachedPartitionState {
 
 pub struct FetchSession {
     pub id: FetchSessionId,
-    /// The epoch the *next* incremental request must carry. Initialized
-    /// to `1` on allocation and bumped after each successful incremental
+    /// The epoch the *next* incremental request must carry. The cache sets it
+    /// to `1` on allocation and raises it after each successful incremental
     /// fetch.
     pub next_epoch: FetchSessionEpoch,
     pub privileged: bool,
     pub creator_principal: String,
     pub partitions: HashMap<FetchSessionKey, CachedPartitionState>,
-    /// Monotonic epoch-nanosecond timestamp of the last time this session was
-    /// touched, read from the cache's injected [`NanoClock`]. Ordering of these
-    /// values selects the LRU eviction victim; only their relative order matters.
+    /// Monotonic epoch-nanosecond timestamp of the last use of this session,
+    /// read from the cache's injected [`NanoClock`]. The order of these values
+    /// selects the LRU eviction victim. Only their relative order matters.
     pub last_used_nanos: i128,
 }
 
-/// Outcome of `FetchSessionCache::classify`. The handler dispatches on
-/// this before doing any reads.
+/// Outcome of `FetchSessionCache::classify`. The handler dispatches on this
+/// value before it does any read.
 #[derive(Debug)]
 pub enum SessionDecision {
-    /// `(session_id=0, epoch=-1)` — serve from `req.topics`, no caching,
-    /// response `session_id = 0`.
+    /// `(session_id=0, epoch=-1)`: serve from `req.topics`, with no caching,
+    /// and a response `session_id = 0`.
     Sessionless,
-    /// `(session_id=0, epoch=0)` — serve from `req.topics`, then ask the
-    /// cache to allocate a new session for the result. The allocation may
-    /// refuse if the cache is full of privileged sessions; in that case
-    /// the response `session_id` is `0` and the client falls back to
-    /// sessionless fetches next time.
+    /// `(session_id=0, epoch=0)`: serve from `req.topics`, then ask the cache
+    /// to allocate a new session for the result. The cache can refuse the
+    /// allocation when it is full of privileged sessions. The response
+    /// `session_id` is then `0`, and the client falls back to sessionless
+    /// fetches next time.
     NewSession,
-    /// `(session_id!=0, epoch>=0)` matching the cached epoch — serve from
-    /// the cached subscription set (with `req.topics` merged in as
-    /// updates/new entries and `forgotten_topics_data` removed). Response
-    /// only contains partitions whose state has changed.
+    /// `(session_id!=0, epoch>=0)` that matches the cached epoch: serve from
+    /// the cached subscription set. The cache merges `req.topics` in as
+    /// updates and new entries, and removes `forgotten_topics_data`. The
+    /// response holds only the partitions whose state has changed.
     Incremental {
         session_id: FetchSessionId,
-        /// Already-incremented; goes nowhere on the wire (response has no
-        /// epoch field) — but the cache uses it as the *next* expected
-        /// epoch for the following request.
+        /// This value is already incremented. It goes nowhere on the wire,
+        /// because the response has no epoch field. The cache uses it as the
+        /// *next* expected epoch for the following request.
         new_epoch: FetchSessionEpoch,
         partitions: Vec<(FetchSessionKey, CachedPartitionState)>,
     },
-    /// `(session_id!=0, epoch=-1)` — serve from `req.topics` like a
-    /// sessionless fetch, then drop the cached session.
+    /// `(session_id!=0, epoch=-1)`: serve from `req.topics` like a sessionless
+    /// fetch, then drop the cached session.
     Close { session_id: FetchSessionId },
-    /// Protocol violation — emit an empty response with this top-level
+    /// Protocol violation. Emit an empty response with this top-level
     /// `error_code` and `session_id = 0`.
     Error { code: i16 },
 }
@@ -182,33 +186,38 @@ pub struct FetchSessionCache {
     next_id: AtomicI32,
     max_slots: usize,
     evictions: AtomicU64,
-    /// Live session count, maintained under `inner`'s lock on every
-    /// insert/evict/close. Exposed lock-free via `len()` so the metrics
-    /// gauge refresh on the hot fetch path never touches the cache mutex.
+    /// Live session count. The cache maintains it under `inner`'s lock on
+    /// every insert, evict, and close. `len()` exposes it lock-free, so the
+    /// metrics gauge refresh on the hot fetch path never touches the cache
+    /// mutex.
     num_sessions: AtomicUsize,
-    /// Sum of `session.partitions.len()` across every live session, kept
-    /// in sync as partitions are added (merge / allocate) and dropped
-    /// (forget / evict / close). Read lock-free via
-    /// `total_partitions_cached()`.
+    /// Sum of `session.partitions.len()` across every live session. The cache
+    /// keeps it in step as it adds partitions on merge and allocate, and drops
+    /// them on forget, evict, and close. `total_partitions_cached()` reads it
+    /// lock-free.
     num_partitions: AtomicUsize,
-    /// Monotonic time source stamped onto `FetchSession::last_used_nanos` for
-    /// LRU eviction. Injectable so tests drive eviction order with a
-    /// [`qubit_clock::MockClock`] instead of `thread::sleep`.
+    /// Monotonic time source that the cache stamps onto
+    /// `FetchSession::last_used_nanos` for LRU eviction. It is injectable, so
+    /// tests drive the eviction order with a [`qubit_clock::MockClock`]
+    /// instead of `thread::sleep`.
     clock: Arc<dyn NanoClock>,
 }
 
-/// Pure core of the incremental-fetch session update (KIP-227): drop forgotten
-/// partitions, then merge the requested topics into a session's partition map.
+/// Pure core of the incremental-fetch session update (KIP-227). It drops
+/// forgotten partitions, then merges the requested topics into a session's
+/// partition map.
 ///
-/// - **forget**: a `ForgottenTopic` matches a cached key by either `topic_name`
-///   (Fetch v ≤ 12) **or** `topic_id` (v ≥ 13), plus partition.
-/// - **merge**: for each requested partition, find a cached key by either-half
-///   identity + partition and update its desired state in place; only insert a
-///   brand-new default-state key when the partition truly isn't cached (avoids
-///   shadowing a fully-resolved key with a partial-identity copy).
+/// - **forget**: a `ForgottenTopic` matches a cached key by either
+///   `topic_name` (Fetch v 12 and below) **or** `topic_id` (v 13 and above),
+///   plus the partition.
+/// - **merge**: for each requested partition, this function finds a cached key
+///   by either identity half plus the partition, and updates its desired state
+///   in place. It inserts a new default-state key only when the partition is
+///   truly not cached. That rule stops a partial-identity copy from shadowing
+///   a fully resolved key.
 ///
-/// The asymmetry between the OR-match forget and the either-half-match merge is
-/// exercised exhaustively by `fetch_session_model`.
+/// `fetch_session_model` exercises the asymmetry between the OR-match forget
+/// and the either-half-match merge exhaustively.
 pub(crate) fn apply_incremental(
     partitions: &mut HashMap<FetchSessionKey, CachedPartitionState>,
     forgotten: &[ForgottenTopic],
@@ -258,9 +267,10 @@ impl FetchSessionCache {
 
     /// Constructs a cache with a caller-supplied monotonic [`NanoClock`].
     ///
-    /// Production uses [`FetchSessionCache::new`] (a [`NanoMonotonicClock`]);
-    /// tests pass a [`qubit_clock::MockClock`] so successive allocations get
-    /// distinct, deterministic `last_used_nanos` without sleeping between them.
+    /// Production uses [`FetchSessionCache::new`], which supplies a
+    /// [`NanoMonotonicClock`]. Tests pass a [`qubit_clock::MockClock`], so
+    /// that successive allocations get distinct, deterministic
+    /// `last_used_nanos` without a sleep between them.
     #[must_use]
     pub fn with_clock(max_slots: usize, clock: Arc<dyn NanoClock>) -> Self {
         Self {
@@ -278,8 +288,8 @@ impl FetchSessionCache {
         }
     }
 
-    /// Number of live sessions in the cache. Lock-free read of an atomic
-    /// counter — does not touch the cache mutex.
+    /// Number of live sessions in the cache. This is a lock-free read of an
+    /// atomic counter and does not touch the cache mutex.
     #[must_use]
     pub fn len(&self) -> usize {
         self.num_sessions.load(Ordering::Relaxed)
@@ -290,24 +300,24 @@ impl FetchSessionCache {
         self.len() == 0
     }
 
-    /// Sum of `session.partitions.len()` across every live session. Used
-    /// by the metrics sampler. Lock-free read of an atomic counter — does
-    /// not touch the cache mutex or scan the session map.
+    /// Sum of `session.partitions.len()` across every live session. The
+    /// metrics sampler reads it. This is a lock-free read of an atomic counter
+    /// and does not touch the cache mutex or scan the session map.
     #[must_use]
     pub fn total_partitions_cached(&self) -> usize {
         self.num_partitions.load(Ordering::Relaxed)
     }
 
-    /// Cumulative count of eviction events since `new()`. One increment
-    /// per session displaced by an allocation; does *not* count refused
-    /// allocations (those don't displace anything).
+    /// Cumulative count of eviction events since `new()`. There is one
+    /// increment for each session that an allocation displaces. It does *not*
+    /// count refused allocations, because those displace nothing.
     #[must_use]
     pub fn evictions_total(&self) -> u64 {
         self.evictions.load(Ordering::Relaxed)
     }
 
-    /// Inspect the request and decide which of the four branches the
-    /// fetch handler should take. On `Incremental`, atomically:
+    /// Inspects the request and decides which of the four branches the fetch
+    /// handler should take. On `Incremental` it does the following atomically:
     /// - validates the epoch,
     /// - removes `forgotten_topics_data` from the cached partition set,
     /// - merges `req.topics` into the cached set (updates `fetch_offset` etc.
@@ -316,9 +326,9 @@ impl FetchSessionCache {
     /// - and returns the full effective partition set for the handler to
     ///   read.
     ///
-    /// The handler must call `finalize_incremental` after assembling the
-    /// response so the "last_*" comparison fields stay in sync with what
-    /// was actually sent.
+    /// The handler must call `finalize_incremental` after it assembles the
+    /// response, so that the `last_*` comparison fields stay in step with what
+    /// the broker sent.
     /// # Panics
     /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn classify(&self, req: &FetchRequest) -> SessionDecision {
@@ -400,15 +410,16 @@ impl FetchSessionCache {
         }
     }
 
-    /// Allocate a fresh session for a `NewSession` decision. `partitions`
-    /// must capture both the desired state (`fetch_offset`, `max_bytes`, ...)
-    /// and the response-side `last_*` values for what was just sent — the
-    /// next incremental fetch will compare new response state to these.
+    /// Allocates a fresh session for a `NewSession` decision. `partitions`
+    /// must carry both the desired state (`fetch_offset`, `max_bytes`, and the
+    /// rest) and the response-side `last_*` values for what the broker just
+    /// sent. The next incremental fetch compares the new response state to
+    /// those values.
     ///
-    /// Returns the assigned id, or `INVALID_SESSION_ID` (0) if the cache
-    /// is full and no eligible victim could be evicted. On a refused
-    /// allocation the caller emits `response.session_id = 0` and the
-    /// client transparently falls back to sessionless full fetches.
+    /// Returns the assigned id, or `INVALID_SESSION_ID` (0) when the cache is
+    /// full and it can evict no eligible victim. On a refused allocation the
+    /// caller emits `response.session_id = 0`, and the client falls back to
+    /// sessionless full fetches without further signalling.
     /// # Panics
     /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn try_allocate(
@@ -490,11 +501,10 @@ impl FetchSessionCache {
         id
     }
 
-    /// Update the `last_*` fields on cached partitions to reflect what
-    /// the handler emitted in the just-finished response. Only the
-    /// partitions actually included in the response need updating —
-    /// filtered-out partitions already match the cache (that's why they
-    /// were filtered).
+    /// Updates the `last_*` fields on cached partitions to match what the
+    /// handler emitted in the response that just finished. Only the partitions
+    /// that the response included need an update. A filtered-out partition
+    /// already matches the cache, which is why the broker filtered it.
     /// # Panics
     /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn finalize_incremental(
@@ -518,9 +528,9 @@ impl FetchSessionCache {
         }
     }
 
-    /// Drop the session. Called when the request is `Close` (existing
-    /// session, epoch=-1) or after the handler decides to forcibly
-    /// invalidate the session.
+    /// Drops the session. The handler calls it when the request is `Close`,
+    /// which is an existing session with epoch -1, or after the handler
+    /// decides to invalidate the session by force.
     /// # Panics
     /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn close(&self, session_id: FetchSessionId) {
@@ -546,9 +556,9 @@ mod tests {
     use super::*;
 
     /// Builds a cache whose LRU clock is a mock timeline anchored at the Unix
-    /// epoch. Returns the [`MockTime`] handle so a test can make successive
-    /// allocations land on distinct `last_used_nanos` by advancing logical time
-    /// (`mock.advance(..)`) instead of sleeping between them.
+    /// epoch. It returns the [`MockTime`] handle, so a test can put successive
+    /// allocations on distinct `last_used_nanos`. The test advances logical
+    /// time with `mock.advance(..)` instead of a sleep between allocations.
     fn mock_cache(max_slots: usize) -> (FetchSessionCache, MockTime) {
         let mock = MockTime::unix_epoch();
         let cache = FetchSessionCache::with_clock(max_slots, Arc::new(mock.clock()));
@@ -1256,11 +1266,11 @@ mod tests {
     }
 }
 
-/// Large-N random fuzzing of `apply_incremental` (KIP-227 forget+merge),
-/// complementing the exhaustive `fetch_session_model`. Random sequences of
-/// incremental fetches over a tiny topic/id/partition universe (random identity
-/// halves) must preserve no-shadow, subscription fidelity, and no-orphan-default
-/// after every step.
+/// Large-N random fuzzing of `apply_incremental`, the KIP-227 forget and merge
+/// path. It complements the exhaustive `fetch_session_model`. Random sequences
+/// of incremental fetches over a small topic, id, and partition universe, with
+/// random identity halves, must keep no-shadow, subscription fidelity, and
+/// no-orphan-default after every step.
 #[cfg(test)]
 mod fuzz {
     use std::collections::HashMap;

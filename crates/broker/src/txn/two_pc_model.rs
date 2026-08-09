@@ -1,29 +1,32 @@
 //! Exhaustive stateright model of the KIP-939 2PC timeout-safety property.
 //!
-//! Drives the real [`should_abort_idle_txn`] (the idle-transaction reaper's
-//! decision core) and [`decide_phase1_transition`] / `TxnState::can_transition_to`
-//! over one transactional-id, interleaving the timeout **reaper** with the full
-//! transaction lifecycle (`InitProducerId` / `AddPartitionsToTxn` / `EndTxn`) and
-//! with the 2PC-vs-classic distinction.
+//! The model drives the real [`should_abort_idle_txn`], which is the
+//! idle-transaction reaper's decision core, plus [`decide_phase1_transition`]
+//! and `TxnState::can_transition_to`, over one transactional-id. It interleaves
+//! the timeout **reaper** with the full transaction lifecycle
+//! (`InitProducerId`, `AddPartitionsToTxn`, `EndTxn`) and with the
+//! 2PC-vs-classic distinction.
 //!
-//! Headline safety (KIP-939): **a two-phase-commit transaction is never aborted
-//! by the timeout reaper.** A 2PC transaction is the one a producer opened after
-//! `InitProducerId(enable2Pc=true)`; in the coordinator it is encoded by the
-//! [`NO_TIMEOUT_MS`] sentinel and the reaper's decision core skips it. Only an
-//! *explicit* `InitProducerId` (a new generation taking over) or an `EndTxn`
-//! may end such a transaction — never a wall-clock timeout.
+//! Main safety property (KIP-939): **a two-phase-commit transaction is never
+//! aborted by the timeout reaper.** A 2PC transaction is one that a producer
+//! opened after `InitProducerId(enable2Pc=true)`. The coordinator encodes it
+//! with the [`NO_TIMEOUT_MS`] sentinel, and the reaper's decision core skips
+//! it. Only an *explicit* `InitProducerId`, from a new generation that takes
+//! over, or an `EndTxn` may end such a transaction. A wall-clock timeout never
+//! ends it.
 //!
-//! Secondary safety (composition): a given producer-epoch generation is
-//! finalized at most once and never both committed and aborted, even with the
-//! reaper interleaved into the lifecycle.
+//! Secondary safety property (composition): a given producer-epoch generation
+//! is finalized at most once and never both committed and aborted, even with
+//! the reaper interleaved into the lifecycle.
 //!
-//! This is the timeout-dimension companion to the `decision_model` (which
-//! covers the `EndTxn` Phase1/Phase3 fencing window). Terminal outcomes are
-//! tracked as ghost per-epoch sets so a tid that legitimately commits one
+//! This is the timeout-dimension companion to the `decision_model`, which
+//! covers the `EndTxn` Phase1/Phase3 fencing window. The model tracks terminal
+//! outcomes as ghost per-epoch sets, so a tid that legitimately commits one
 //! generation and aborts the next is not a false violation.
 //!
 //! Memory safety: stateright BFS keeps every visited unique state resident, so
-//! each run is fenced with `within_boundary` + `target_state_count` + `timeout`.
+//! each run is fenced with `within_boundary`, `target_state_count`, and
+//! `timeout`.
 
 use std::time::Duration;
 
@@ -40,7 +43,8 @@ const MAX_DEPTH: usize = 80;
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 const PID: i64 = 1000; // fixed; epoch is the fencing dimension
 const CLASSIC_TIMEOUT_MS: i32 = 60_000;
-/// The transaction's notional start; the reaper measures elapsed time from here.
+/// The transaction's notional start. The reaper measures elapsed time from
+/// this instant.
 const START_MS: i64 = 0;
 
 struct TwoPcModel {
@@ -54,32 +58,36 @@ struct TwoPcProj {
     /// Did the current producer generation enable 2PC? An `Ongoing` txn started
     /// by such a generation carries the [`NO_TIMEOUT_MS`] sentinel.
     two_pc: bool,
-    /// Ghost: producer epochs whose transaction finalized as commit / abort.
-    /// Sorted, distinct. Invariants assert these never overlap (atomicity) and
-    /// never record the same epoch twice (single-finalize per generation).
+    /// Ghost: producer epochs whose transaction finalized as a commit or an
+    /// abort. Sorted and distinct. The invariants assert that these sets never
+    /// overlap, which is atomicity, and that they never record the same epoch
+    /// twice, which is a single finalize per generation.
     committed: Vec<i16>,
     aborted: Vec<i16>,
-    /// Ghost — THE KIP-939 violation flag: set if the timeout reaper ever
-    /// aborted a 2PC transaction. The `two_pc_never_reaped` property asserts it
-    /// stays `false`; it can only stay false if [`should_abort_idle_txn`] is
-    /// correct.
+    /// Ghost: the KIP-939 violation flag. It is set if the timeout reaper ever
+    /// aborted a 2PC transaction. The `two_pc_never_reaped` property asserts
+    /// that it stays `false`. It can stay false only if
+    /// [`should_abort_idle_txn`] is correct.
     reaped_2pc: bool,
-    /// Ghost (non-vacuity): the reaper aborted a classic (non-2PC) txn at least
-    /// once, proving the reaper is not vacuously inert.
+    /// Ghost for non-vacuity: the reaper aborted a classic, non-2PC txn at
+    /// least once. That proves the reaper is not vacuously inert.
     reaped_non_2pc: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum TwoPcAction {
-    /// `InitProducerId`: bump epoch, choose whether this generation is 2PC.
-    /// Explicitly aborts an in-flight transaction (allowed even for 2PC).
+    /// `InitProducerId`: bump the epoch and choose whether this generation is
+    /// 2PC. It explicitly aborts an in-flight transaction, which is allowed
+    /// even for 2PC.
     Init(bool),
-    /// `AddPartitionsToTxn`: → Ongoing (a 2PC generation opens a 2PC txn).
+    /// `AddPartitionsToTxn`: → Ongoing. A 2PC generation opens a 2PC txn.
     BeginTxn,
-    /// `EndTxn`: the external/normal commit or abort path (committed?).
+    /// `EndTxn`: the external, normal commit or abort path. The payload says
+    /// whether the transaction committed.
     EndTxn(bool),
     /// The idle-transaction reaper fires. `elapsed_long` picks whether enough
-    /// wall-time has passed (`now = i64::MAX`) or not (`now = START_MS`).
+    /// wall-time has passed. `true` gives `now = i64::MAX`, and `false` gives
+    /// `now = START_MS`.
     TimeoutSweep(bool),
 }
 
@@ -87,8 +95,8 @@ fn st(id: i8) -> TxnState {
     TxnState::from_kafka_status(id).expect("valid TxnState id in model")
 }
 
-/// The persisted timeout for the current generation's transaction: the 2PC
-/// sentinel for a 2PC generation, else a classic finite timeout.
+/// The persisted timeout for the current generation's transaction. It is the
+/// 2PC sentinel for a 2PC generation, and a classic finite timeout otherwise.
 fn timeout_for(two_pc: bool) -> i32 {
     if two_pc {
         NO_TIMEOUT_MS
@@ -97,8 +105,8 @@ fn timeout_for(two_pc: bool) -> i32 {
     }
 }
 
-/// Reconstruct a real `TxnEntry` so the real decision fns behave exactly as in
-/// a live run. Partitions are irrelevant to these decisions.
+/// Reconstruct a real `TxnEntry` so that the real decision functions behave
+/// exactly as in a live run. Partitions do not change these decisions.
 fn rebuild(s: &TwoPcProj) -> TxnEntry {
     let mut e = TxnEntry::new_empty(
         "tid".to_string(),
@@ -111,8 +119,9 @@ fn rebuild(s: &TwoPcProj) -> TxnEntry {
     e
 }
 
-/// Record a terminal outcome for `epoch`, asserting it has not already
-/// finalized either way (single-finalize + no commit-and-abort per generation).
+/// Record a terminal outcome for `epoch`, and assert that it has not already
+/// finalized either way. Each generation finalizes once, and it never both
+/// commits and aborts.
 fn record(committed: &mut Vec<i16>, aborted: &mut Vec<i16>, epoch: i16, is_commit: bool) {
     assert!(
         !committed.contains(&epoch) && !aborted.contains(&epoch),

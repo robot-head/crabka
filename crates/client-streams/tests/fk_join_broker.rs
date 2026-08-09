@@ -1,18 +1,18 @@
-//! Broker integration test: KIP-213 foreign-key KTable-KTable join over a live
-//! in-process broker.
+//! Broker integration test for the KIP-213 foreign-key KTable-KTable join over a
+//! live in-process broker.
 //!
-//! Mirrors `dsl_integration.rs` (the DSL counting + restart-restore broker test):
-//! boots a single in-process broker (rf=1, no Docker), drives a real
-//! `KafkaStreams` app, and reads the join output back off the sink topic via a
-//! direct fetch.
+//! It mirrors `dsl_integration.rs`, the DSL counting and restart-restore broker
+//! test. It boots a single in-process broker with rf=1 and no Docker, drives a
+//! real `KafkaStreams` app, and reads the join output back off the sink topic
+//! with a direct fetch.
 //!
-//! The FK-join topology is the most demanding DSL lowering exercised over a real
-//! broker: it spans **two subtopologies** wired by **two internal repartition
-//! topics** (subscription registration, keyed by foreign key; subscription
-//! response, keyed by primary key) plus a subscription state store backed by its
-//! own changelog. The broker's KIP-1071 group coordinator auto-creates and
-//! copartitions those internal topics from the submitted topology, exactly as it
-//! does for the simpler DSL count app.
+//! The FK-join topology is the most demanding DSL lowering that any test drives
+//! over a real broker. It spans **two subtopologies** wired by **two internal
+//! repartition topics**: the subscription registration, keyed by foreign key,
+//! and the subscription response, keyed by primary key. It also holds a
+//! subscription state store backed by its own changelog. The broker's KIP-1071
+//! group coordinator auto-creates and copartitions those internal topics from
+//! the submitted topology, exactly as it does for the simpler DSL count app.
 //!
 //! Coverage:
 //!  - inner FK join: produce `a:(k1,"A")` + `b:(A,"X")` → join emits `k1="AX"`.
@@ -21,9 +21,9 @@
 //!    restores the subscription store + both table changelogs and resolves a new
 //!    left record against the already-known foreign row without re-producing `b`.
 //!
-//! Known limitation (per the FK slice): the runtime has no null-valued
-//! source-record path, so source-row tombstones (deleting an `a`/`b` row via a
-//! null produce) are not exercised here.
+//! Known limitation, per the FK slice: the runtime has no null-valued
+//! source-record path. This test therefore does not cover source-row tombstones,
+//! which delete an `a` row or a `b` row with a null produce.
 
 use std::time::Duration;
 
@@ -102,12 +102,15 @@ async fn produce(producer: &crabka_client_producer::Producer, topic: &str, key: 
 
 // ─── FK-join topology ──────────────────────────────────────────────────────────
 
-/// Build the inner foreign-key join topology:
-/// `a` (primary key → foreign key string) FK-joins `b` (foreign key → value),
-/// emitting `va ‖ vb` keyed by `a`'s primary key, streamed out to `fk-out`.
+/// Build the inner foreign-key join topology.
 ///
-/// Both input tables are materialized **source** tables (`builder.table`) as the
-/// FK join requires; the foreign-key extractor is identity on `a`'s value.
+/// Table `a` maps a primary key to a foreign-key string, and it FK-joins table
+/// `b`, which maps a foreign key to a value. The join emits `va ‖ vb` keyed by
+/// `a`'s primary key, and `to_stream` sends the result to `fk-out`.
+///
+/// Both input tables are materialized **source** tables built with
+/// `builder.table`, as the FK join needs. The foreign-key extractor is the
+/// identity on `a`'s value.
 fn fk_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
     let ta = b.table::<String, String>("fk-a", "fk-sa");
@@ -138,15 +141,15 @@ fn fk_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
 // ─── output collector (mirrors dsl_integration.rs) ─────────────────────────────
 
 /// Poll `fk-out` partition 0 from offset 0 until the **latest** value observed
-/// for `key` equals `want_value` (or panic via the caller's `timeout`). Returns
-/// every `(key, value)` pair read, in arrival order.
+/// for `key` equals `want_value`. The caller's `timeout` panics instead. The
+/// helper returns every `(key, value)` pair it read, in arrival order.
 ///
-/// FK joins are eventually-consistent: a single logical match can surface as the
-/// same result emitted more than once (the subscription registration→response
-/// round-trip re-evaluates the join), and updates land as a fresh changelog
-/// record. So we assert on the **converged** latest value for the key rather
-/// than on a specific offset, which makes the test robust to those legitimate
-/// intermediate re-emissions.
+/// FK joins are eventually consistent. One logical match can surface as the same
+/// result more than once, because the subscription registration and response
+/// round-trip re-evaluates the join, and an update lands as a fresh changelog
+/// record. The helper therefore asserts on the **converged** latest value for
+/// the key and not on a specific offset. That keeps the test robust against
+/// those legitimate intermediate re-emissions.
 async fn poll_until_latest(
     admin: &Client,
     bootstrap: &str,
@@ -229,8 +232,9 @@ async fn poll_until_latest(
     collected
 }
 
-/// Read every record currently on `topic_name` partition 0 (one fetch pass, no
-/// polling). Used only to surface the topic's contents in a failure message.
+/// Read every record now on `topic_name` partition 0, in one fetch pass and with
+/// no polling. The helper only shows the topic's contents in a failure
+/// message.
 async fn read_all(admin: &Client, bootstrap: &str, topic_name: &str) -> Vec<(String, String)> {
     let meta = admin.refresh_metadata().await.expect("metadata");
     let topic_id = meta

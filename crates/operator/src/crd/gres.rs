@@ -1,6 +1,8 @@
-//! `Gres` CRD. Represents one PgDog-backed Gres front door for a Kafka
-//! cluster. Tenant CRs point at a `Gres` fleet by name; the controller that
-//! renders `PgDog` is added in a later batch.
+//! `Gres` CRD.
+//!
+//! One `Gres` is one PgDog-backed Gres front door for a Kafka cluster.
+//! Tenant CRs point at a `Gres` fleet by name. A later batch adds the
+//! controller that renders `PgDog`.
 
 use std::time::Duration;
 
@@ -123,32 +125,34 @@ pub struct GresSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<GresComputeSpec>,
 
-    /// Default tenant runtime settings inherited by `GresTenant`s unless
-    /// they set `spec.overrides`.
+    /// Default tenant runtime settings. Each `GresTenant` inherits them
+    /// unless it sets `spec.overrides`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<TenantDefaults>,
 
-    /// Dry-run Gres balancer planning knobs. Live execution is intentionally
-    /// not performed by the operator yet.
+    /// Dry-run Gres balancer planning knobs. The operator does not yet do
+    /// live execution, and this is on purpose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balancer: Option<GresBalancerSpec>,
 
     /// Distributed-tracing wiring for this fleet's tenant compute pods.
     ///
-    /// When set, the `GresTenant` reconciler renders the `CRABKA_OTLP_*` /
-    /// `OTEL_SERVICE_NAME` env contract on every compute container and
-    /// `crabka-gres` installs the OTLP exporter at startup. When absent no
-    /// OTLP env var is emitted at all, which is what leaves tracing off: an
-    /// empty endpoint would still switch the exporter on and then fail to
+    /// When this field is set, the `GresTenant` reconciler renders the
+    /// `CRABKA_OTLP_*` and `OTEL_SERVICE_NAME` env contract on every
+    /// compute container, and `crabka-gres` installs the OTLP exporter at
+    /// startup. When the field is absent, the reconciler writes no OTLP env
+    /// var at all. That is what keeps tracing off. An empty endpoint would
+    /// still switch the exporter on, and the exporter would then fail to
     /// reach a collector.
     ///
-    /// The schema is the one `Kafka.spec.tracing` uses, so the two fleets have
-    /// one shape, one validation path, and the field names an operator already
-    /// knows.
+    /// This field uses the schema of `Kafka.spec.tracing`. The two fleets
+    /// therefore have one shape, one validation path, and the field names
+    /// that an operator already knows.
     ///
-    /// Deliberately fleet-scoped rather than per-`GresTenant`: the collector
-    /// endpoint, protocol and export timeout are cluster infrastructure, and a
-    /// tenant-writable copy would make telemetry routing a tenant decision.
+    /// The field is fleet-scoped and not per-`GresTenant`, and this is on
+    /// purpose. The collector endpoint, the protocol, and the export
+    /// timeout are cluster infrastructure. A tenant-writable copy would
+    /// make telemetry routing a tenant decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracing: Option<Tracing>,
 }
@@ -157,8 +161,8 @@ pub struct GresSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GresActivatorSpec {
-    /// Container image override. When absent the operator uses its global
-    /// activator image override or compiled default.
+    /// Container image override. When absent, the operator uses its global
+    /// activator image override or its compiled default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1))]
     pub image: Option<String>,
@@ -1414,7 +1418,7 @@ pub struct GresBalancerSpec {
 
     /// Explicit capability declaration for Kafka's transactional registry
     /// protocol. This protocol does not make any physical Move, Split, or
-    /// Merge operation executable; the operator reports plans only.
+    /// Merge operation executable. The operator reports plans only.
     #[serde(default)]
     pub registry_layout: GresBalancerRegistryLayout,
 
@@ -1543,7 +1547,7 @@ const fn default_true() -> bool {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PgdogSpec {
-    /// Container image override. When absent the operator uses
+    /// Container image override. When absent, the operator uses
     /// `--default-pgdog-image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -1723,7 +1727,8 @@ pub struct TenantDefaults {
     #[schemars(with = "Option<String>")]
     pub suspend_max_checkpoint_size: Option<ByteSize>,
 
-    /// Idle timeout in seconds; unset means never suspend by idleness.
+    /// Idle timeout in seconds. When unset, the tenant never suspends
+    /// because it is idle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_seconds: Option<u64>,
 }
@@ -1760,7 +1765,8 @@ pub struct GresStatus {
 pub struct GresBalancerStatus {
     /// Whether planner status is enabled by spec.
     pub enabled: bool,
-    /// True while the operator reports planner status without executing live changes.
+    /// True while the operator reports planner status and does not execute
+    /// live changes.
     pub dry_run_only: bool,
     /// Whether Kafka's transactional registry protocol was explicitly
     /// configured as available for metadata transactions. It does not enable
@@ -1778,7 +1784,7 @@ pub struct GresBalancerStatus {
     /// the transactional registry protocol cannot execute physical operations.
     pub executable_operations: usize,
     /// Distinct planned operation kinds executable by the operator. Empty
-    /// until physical orchestration is implemented.
+    /// until the operator implements physical orchestration.
     pub executable_operation_kinds: Vec<String>,
     /// Number of planned operations the operator intentionally will not execute.
     pub unsupported_operations: usize,
@@ -1918,10 +1924,11 @@ mod tests {
         assert!(back == spec);
     }
 
-    /// `Gres.spec.tracing` reuses `Kafka`'s [`Tracing`] rather than declaring a
-    /// parallel set of types, so the two CRDs must present the same field
-    /// shape, the same enum values and the same required set. Only the
-    /// top-level `description` may differ — each field documents its own fleet.
+    /// `Gres.spec.tracing` uses the [`Tracing`] type of `Kafka` and does
+    /// not declare a parallel set of types. The two CRDs must therefore
+    /// show the same field shape, the same enum values, and the same
+    /// required set. Only the top-level `description` may differ, because
+    /// each field documents its own fleet.
     #[test]
     fn tracing_schema_is_shared_with_the_kafka_crd() {
         let gres = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");

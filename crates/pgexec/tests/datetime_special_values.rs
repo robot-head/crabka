@@ -1,5 +1,5 @@
 //! Non-finite date/time values, `timetz`, interval field ranges and the
-//! `extract` result scales — end-to-end over the wire.
+//! `extract` result scales, end to end over the wire.
 //!
 //! Every expectation is `PostgreSQL` 18.4's, taken from a live oracle with
 //! `DateStyle = 'ISO, MDY'` and `TimeZone = 'UTC'`.
@@ -36,8 +36,8 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
-/// Every column of the first row, as text, through the simple query protocol so
-/// the engine's own output functions are what get compared.
+/// Every column of the first row, as text, through the simple query protocol,
+/// so that the comparison uses the engine's own output functions.
 async fn row(client: &tokio_postgres::Client, sql: &str) -> Vec<Option<String>> {
     use tokio_postgres::SimpleQueryMessage;
     for m in client.simple_query(sql).await.expect("query") {
@@ -70,7 +70,7 @@ async fn column(client: &tokio_postgres::Client, sql: &str) -> Vec<Option<String
         .collect()
 }
 
-/// The SQLSTATE of a statement expected to error.
+/// The SQLSTATE of a statement that is expected to error.
 async fn err_code(client: &tokio_postgres::Client, sql: &str) -> String {
     client
         .simple_query(sql)

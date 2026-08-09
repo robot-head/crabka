@@ -6,12 +6,12 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
 
-/// Current `KRaft` metadata frame version. Kafka writes 1 (verified against
-/// mirror.gcr.io/apache/kafka:4.0.0 `__cluster_metadata` record values — the leading byte is
-/// `0x01`).
+/// Current `KRaft` metadata frame version. Kafka writes 1. This is verified
+/// against the `__cluster_metadata` record values of
+/// mirror.gcr.io/apache/kafka:4.0.0, where the leading byte is `0x01`.
 pub const FRAME_VERSION: u32 = 1;
 
-/// Decoded envelope header (everything before the message body).
+/// Decoded envelope header, which is everything before the message body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValueHeader {
     pub frame_version: u32,
@@ -26,7 +26,8 @@ pub enum EnvelopeError {
     Truncated,
 }
 
-/// Encode a record value: envelope header + the already-encoded `body` bytes.
+/// Encodes a record value: the envelope header plus the already-encoded `body`
+/// bytes.
 #[must_use]
 pub fn encode_value(api_key: u32, api_version: u32, body: &[u8]) -> Bytes {
     let mut out = BytesMut::with_capacity(
@@ -39,7 +40,7 @@ pub fn encode_value(api_key: u32, api_version: u32, body: &[u8]) -> Bytes {
     out.freeze()
 }
 
-/// Decode the envelope header, leaving `buf` positioned at the message body.
+/// Decodes the envelope header and leaves `buf` positioned at the message body.
 ///
 /// # Errors
 /// Returns [`EnvelopeError::Truncated`] if any varint cannot be read.

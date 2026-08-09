@@ -1,18 +1,18 @@
 //! `FetchSnapshot` (`api_key=59`, KIP-630). Serves a byte range of the
 //! controller's `__cluster_metadata` snapshot to a replica catching up.
 //!
-//! Crabka runs a single raft log (the controller quorum) and snapshots its
-//! `MetadataImage`. A replica fetches the snapshot one page at a time by
-//! advancing `position`; each response carries the requested byte range
-//! verbatim plus the snapshot's `(end_offset, epoch)` id and total `size`.
+//! Crabka runs a single raft log, the controller quorum, and snapshots its
+//! `MetadataImage`. A replica fetches the snapshot one page at a time as it
+//! advances `position`. Each response carries the requested byte range
+//! verbatim, plus the snapshot's `(end_offset, epoch)` id and total `size`.
 //!
-//! The returned bytes are *unaligned*: a snapshot is many concatenated
-//! record batches and a paged byte range is by design not batch-aligned,
-//! so the range is shipped as `RecordsPayload::Legacy` (written verbatim)
-//! rather than decoded into a single `RecordBatch`.
+//! The returned bytes are *unaligned*. A snapshot is many concatenated
+//! record batches, and a paged byte range is by design not batch-aligned.
+//! The handler therefore ships the range as `RecordsPayload::Legacy`, written
+//! verbatim, and does not decode it into a single `RecordBatch`.
 //!
-//! Any topic other than `__cluster_metadata` / partition 0 gets
-//! `INVALID_TOPIC_EXCEPTION` (17). A request whose `cluster_id` doesn't
+//! Any topic other than `__cluster_metadata` partition 0 gets
+//! `INVALID_TOPIC_EXCEPTION` (17). A request whose `cluster_id` does not
 //! match this cluster gets a top-level `INCONSISTENT_CLUSTER_ID` (104).
 
 use bytes::Bytes;
@@ -32,10 +32,11 @@ use futures_util::future::BoxFuture;
 use crate::{broker::Broker, codes, error::BrokerError};
 
 /// The single Kafka-side topic name that represents the `KRaft` metadata
-/// log. Mirrors `org.apache.kafka.common.Topic.CLUSTER_METADATA_TOPIC_NAME`.
+/// log. It mirrors
+/// `org.apache.kafka.common.Topic.CLUSTER_METADATA_TOPIC_NAME`.
 const CLUSTER_METADATA_TOPIC: &str = "__cluster_metadata";
 
-/// An error-carrying partition entry: every field zeroed except `index`
+/// An error-carrying partition entry. Every field is zeroed except `index`
 /// and `error_code`.
 fn err_partition(index: i32, error_code: i16) -> PartitionSnapshot {
     PartitionSnapshot {
@@ -70,9 +71,9 @@ pub(crate) fn handle(
     })
 }
 
-/// Build the response from a decoded request. Pure — testable without a
-/// live `Broker` by passing a `resolve` closure that stands in for
-/// [`crabka_raft::ControllerHandle::read_snapshot_range`].
+/// Build the response from a decoded request. The function is pure, so a test
+/// can call it without a live `Broker` and pass a `resolve` closure that stands
+/// in for [`crabka_raft::ControllerHandle::read_snapshot_range`].
 fn build_response(
     local_cluster_id: uuid::Uuid,
     req: &FetchSnapshotRequest,

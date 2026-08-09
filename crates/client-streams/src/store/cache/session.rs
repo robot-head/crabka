@@ -1,39 +1,45 @@
-//! `CachingSessionStore`: session-schema-keyed write-back caching wrapper over a
-//! session byte store. Ports Kafka `CachingSessionStore`.
+//! `CachingSessionStore`: a write-back cache over a session byte store.
 //!
-//! The cache key is the full `SessionKeySchema` composite (`inner_key ‖ end ‖
-//! start`) — the exact bytes the underlying [`SessionBytesStore`] persists — so
-//! the cache and the inner store share one key space. Writes are write-back:
-//! [`put`](CachingSessionStore::put) only stages a dirty entry in the cache; it
-//! is pushed THROUGH to the inner store on [`flush`](CachingSessionStore::flush).
-//! Reads via [`find_sessions`](CachingSessionStore::find_sessions) merge the
-//! cache over the inner store: cache entries win on key collision and a cached
-//! tombstone (dirty `None`) hides the inner value.
+//! This module ports Kafka `CachingSessionStore`. The cache key is the full
+//! `SessionKeySchema` composite `inner_key ‖ end ‖ start`. Those are the exact
+//! bytes the underlying [`SessionBytesStore`] persists, so the cache and the
+//! inner store share one key space.
+//!
+//! Writes are write-back. [`put`](CachingSessionStore::put) only stages a dirty
+//! entry in the cache. [`flush`](CachingSessionStore::flush) pushes that entry
+//! THROUGH to the inner store. Reads through
+//! [`find_sessions`](CachingSessionStore::find_sessions) merge the cache over the
+//! inner store. Cache entries win on key collision, and a cached tombstone, a
+//! dirty `None`, hides the inner value.
 //!
 //! ## Key reuse
 //!
-//! Cache keys are produced/decoded exclusively through
-//! [`session_schema`](crate::store::session_schema): callers pass the composite
-//! bytes (built with `session_key`), and `find_sessions` decodes the inner key,
-//! `end`, and `start` back out with `session_key_bytes_of` / `session_end_of` /
-//! `session_start_of`. No bespoke key layout is introduced here.
+//! This module makes and decodes cache keys only through
+//! [`session_schema`](crate::store::session_schema). Callers pass the composite
+//! bytes, which they build with `session_key`. `find_sessions` decodes the inner
+//! key, `end`, and `start` back out with `session_key_bytes_of`,
+//! `session_end_of`, and `session_start_of`. This module adds no key layout of
+//! its own.
 //!
 //! ## Inner mutability / locking
 //!
-//! [`ByteKeyValueStore`]'s `put`/`delete` take `&mut self`, so `inner` is held
-//! behind a `tokio::sync::Mutex` — its async methods are awaited while the guard
-//! is held, which a `std::sync::Mutex` guard cannot do (`await_holding_lock`).
-//! The cache, whose ops are synchronous, uses a plain `std::sync::Mutex` whose
-//! guard is always dropped before any `.await`. All public methods take `&self`
-//! so the store can be shared. This mirrors the sibling `CachingKeyValueStore`.
+//! The `put` and `delete` methods of [`ByteKeyValueStore`] take `&mut self`, so
+//! this module holds `inner` behind a `tokio::sync::Mutex`. The code awaits the
+//! async methods of `inner` while it holds the guard. A `std::sync::Mutex` guard
+//! cannot do that, because of `await_holding_lock`.
+//!
+//! The cache operations are synchronous, so the cache uses a plain
+//! `std::sync::Mutex`. The code always drops that guard before any `.await`. All
+//! public methods take `&self` so callers can share the store. This mirrors the
+//! sibling `CachingKeyValueStore`.
 //!
 //! ## Merged `find_sessions`
 //!
-//! [`NamedCache::range`] yields the staged entries whose composite key falls in
-//! the session-key range in ascending memcmp order, so the merge enumerates cache
-//! candidates directly off the cache (no shadow key set). Cache entries win on key
-//! collision and a cached tombstone hides the inner value. Same approach as
-//! `CachingKeyValueStore`.
+//! [`NamedCache::range`] gives the staged entries whose composite key falls in
+//! the session-key range, in ascending memcmp order. So the merge reads the cache
+//! candidates straight off the cache and needs no shadow key set. Cache entries
+//! win on key collision, and a cached tombstone hides the inner value.
+//! `CachingKeyValueStore` uses the same approach.
 
 use std::{
     collections::BTreeMap,
@@ -55,8 +61,8 @@ use crate::{
 pub(crate) struct CachingSessionStore {
     cache: Arc<Mutex<NamedCache>>,
     inner: AsyncMutex<Box<dyn ByteKeyValueStore>>,
-    /// Cache name, captured so `clear` can rebuild an empty [`NamedCache`]
-    /// under the same identity (mirrors `CachingKeyValueStore`).
+    /// Cache name. `clear` uses it to rebuild an empty [`NamedCache`] under the
+    /// same identity. This mirrors `CachingKeyValueStore`.
     name: String,
 }
 
@@ -82,8 +88,10 @@ impl CachingSessionStore {
         }
     }
 
-    /// Cache-first single session-key read: a cache hit (including a dirty `None`
-    /// tombstone) wins; otherwise fall through to the inner store.
+    /// Reads one session key, cache first.
+    ///
+    /// A cache hit wins, including a dirty `None` tombstone. On a miss the read
+    /// falls through to the inner store.
     pub async fn get(&self, key: &[u8]) -> Option<Bytes> {
         let key = Bytes::copy_from_slice(key);
         let cached = {
@@ -96,9 +104,11 @@ impl CachingSessionStore {
         }
     }
 
-    /// Merged raw session-key range `[lo, hi)`: inner overlaid with the cache.
-    /// Cache wins on key collision; a cached tombstone hides the inner value.
-    /// Returns key-sorted `(session_key, value)`.
+    /// Returns the merged raw session-key range `[lo, hi)`.
+    ///
+    /// The cache overlays the inner store. The cache wins on key collision. A
+    /// cached tombstone hides the inner value. The result is key-sorted
+    /// `(session_key, value)`.
     pub async fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, Bytes)> {
         let mut merged: BTreeMap<Bytes, Bytes> = {
             let inner = self.inner.lock().await;
@@ -121,9 +131,11 @@ impl CachingSessionStore {
         merged.into_iter().collect()
     }
 
-    /// Merged unbounded scan: every inner entry overlaid with the cache. Cache
-    /// wins on key collision; a cached tombstone hides the inner value. Returns
-    /// key-sorted `(session_key, value)`. Backs `find_closed_sessions`.
+    /// Returns every inner entry, with the cache over it.
+    ///
+    /// The cache wins on key collision. A cached tombstone hides the inner value.
+    /// The result is key-sorted `(session_key, value)`. `find_closed_sessions`
+    /// uses this method.
     pub async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
         let mut merged: BTreeMap<Bytes, Bytes> = {
             let inner = self.inner.lock().await;
@@ -146,18 +158,24 @@ impl CachingSessionStore {
         merged.into_iter().collect()
     }
 
-    /// Write straight through to the inner store, bypassing the cache (restore
-    /// path; mirrors `CachingKeyValueStore::put_inner`).
+    /// Writes straight through to the inner store and skips the cache.
+    ///
+    /// The restore path uses this method. It mirrors
+    /// `CachingKeyValueStore::put_inner`.
     pub async fn put_inner(&self, key: Bytes, value: Bytes) {
         self.inner.lock().await.put(key, value).await;
     }
 
-    /// Delete straight through to the inner store, bypassing the cache (restore).
+    /// Deletes straight through to the inner store and skips the cache.
+    ///
+    /// The restore path uses this method.
     pub async fn delete_inner(&self, key: &[u8]) {
         self.inner.lock().await.delete(key).await;
     }
 
-    /// Clear both the cache layer and the inner store (EOS rollback reset).
+    /// Clears both the cache layer and the inner store.
+    ///
+    /// The EOS rollback reset uses this method.
     pub async fn clear(&self) {
         {
             let mut cache = self.cache.lock().unwrap();
@@ -166,10 +184,13 @@ impl CachingSessionStore {
         self.inner.lock().await.clear().await;
     }
 
-    /// Write-back put: stage a dirty entry in the cache keyed by the full session
-    /// composite bytes (`inner_key ‖ end ‖ start`, built via
-    /// [`session_key`](crate::store::session_schema::session_key)). The inner
-    /// store is not touched until [`flush`](Self::flush).
+    /// Stages a dirty entry in the cache, as a write-back put.
+    ///
+    /// The cache key is the full session composite bytes
+    /// `inner_key ‖ end ‖ start`, built with
+    /// [`session_key`](crate::store::session_schema::session_key). This method
+    /// does not touch the inner store. [`flush`](Self::flush) writes the entry
+    /// through.
     pub fn put(
         &self,
         session_key_bytes: Bytes,
@@ -184,21 +205,24 @@ impl CachingSessionStore {
         std::future::ready(())
     }
 
-    /// Write-back remove: stage a dirty tombstone (`None`) for the session.
+    /// Stages a dirty tombstone `None` for the session, as a write-back remove.
     pub fn remove(&self, session_key_bytes: Bytes, ctx: RecordContext) -> std::future::Ready<()> {
         let mut cache = self.cache.lock().unwrap();
         cache.delete(session_key_bytes, ctx);
         std::future::ready(())
     }
 
-    /// Cache-first session merge fetch: sessions for `key` whose
-    /// `end >= earliest_end && start <= latest_start`, returned as
-    /// `(start, end, value)` in store order (end asc, then start asc).
+    /// Returns the session merge candidates for `key`, cache first.
     ///
-    /// The cache is overlaid on the inner store: a cached live value wins over
-    /// the inner value on key collision, and a cached tombstone hides the inner
-    /// value entirely. Only entries whose decoded inner-key bytes equal `key` are
-    /// considered, guarding against prefix collisions with a different key.
+    /// The result holds every session whose
+    /// `end >= earliest_end && start <= latest_start`, as `(start, end, value)`
+    /// in store order. Store order is end ascending, then start ascending.
+    ///
+    /// The cache overlays the inner store. A cached live value wins over the
+    /// inner value on key collision, and a cached tombstone hides the inner value
+    /// completely. This method reads only the entries whose decoded inner-key
+    /// bytes equal `key`. That guards against prefix collisions with a different
+    /// key.
     pub async fn find_sessions(
         &self,
         key: &[u8],
@@ -260,10 +284,12 @@ impl CachingSessionStore {
             .collect()
     }
 
-    /// Flush: drain dirty entries in insertion order, write each THROUGH to the
-    /// inner store (`put` the value, `delete` on a tombstone — keyed by the
-    /// session composite bytes), clear dirty, and return the drained entries so
-    /// the caller can forward them downstream.
+    /// Drains the dirty entries and writes each one THROUGH to the inner store.
+    ///
+    /// This method drains in insertion order. It calls `put` for a value and
+    /// `delete` for a tombstone, keyed by the session composite bytes. It then
+    /// clears the dirty flags and returns the drained entries, so the caller can
+    /// forward them downstream.
     pub async fn flush(&self) -> Vec<(Bytes, LruCacheEntry)> {
         let mut collected: Vec<(Bytes, LruCacheEntry)> = Vec::new();
         {
@@ -286,14 +312,17 @@ impl CachingSessionStore {
         collected
     }
 
-    /// Flush dirty entries in insertion order, capturing the inner OLD value
-    /// BEFORE each write-through. For each entry: read `old = inner.get(&k)`,
-    /// write the new value through (`put` / `delete` on a tombstone), and return
-    /// `(session_store_key, old, new, context)`. `old`/`new` are the raw aggregate
-    /// value bytes (`None` = absent / tombstone). Mirrors
-    /// `CachingKeyValueStore::flush_with_old`; the typed `SessionBytesStore` decodes
-    /// the session key + deserializes the values to build the deduped downstream
-    /// `Change`.
+    /// Flushes the dirty entries and reads each inner OLD value first.
+    ///
+    /// This method flushes in insertion order and reads the inner OLD value
+    /// BEFORE each write-through. For each entry it reads `old = inner.get(&k)`,
+    /// writes the new value through with `put`, or with `delete` for a tombstone,
+    /// and returns `(session_store_key, old, new, context)`. `old` and `new` are
+    /// the raw aggregate value bytes. A `None` means absent or a tombstone.
+    ///
+    /// This mirrors `CachingKeyValueStore::flush_with_old`. The typed
+    /// `SessionBytesStore` decodes the session key and deserializes the values to
+    /// build the deduped downstream `Change`.
     pub async fn flush_with_old(
         &self,
     ) -> Vec<(Bytes, Option<Bytes>, Option<Bytes>, RecordContext)> {
@@ -347,8 +376,8 @@ mod tests {
         Bytes::from_static(v)
     }
 
-    /// A session put into the cache only (inner empty) is returned by
-    /// `find_sessions`.
+    /// `find_sessions` returns a session staged only in the cache while the inner
+    /// store is empty.
     #[tokio::test]
     async fn find_sessions_returns_cached() {
         let store = CachingSessionStore::new(cache(), Box::new(InMemoryBytes::default()));
@@ -362,7 +391,7 @@ mod tests {
     }
 
     /// `flush` returns the drained dirty entry and writes it through to the inner
-    /// store (verified by re-reading the now-clean store).
+    /// store. The test re-reads the now-clean store to check this.
     #[tokio::test]
     async fn flush_writes_through_and_returns_entries() {
         let store = CachingSessionStore::new(cache(), Box::new(InMemoryBytes::default()));
@@ -381,9 +410,9 @@ mod tests {
         assert_eq!(found, vec![(0, 10, b(b"v"))]);
     }
 
-    /// `find_sessions` merges cache + inner over the session-key range: results
-    /// come back in session-key (end-then-start) order and the cache wins on a
-    /// colliding session key.
+    /// `find_sessions` merges the cache and the inner store over the session-key
+    /// range. Results come back in session-key order, which is end then start,
+    /// and the cache wins on a colliding session key.
     #[tokio::test]
     async fn find_sessions_merges_cache_and_underlying() {
         // Seed the inner store with two sessions for "k":
@@ -428,7 +457,8 @@ mod tests {
         assert!(store.find_sessions(b"k", 0, 100).await.is_empty());
     }
 
-    /// Sessions belonging to a different key sharing a byte prefix are excluded.
+    /// `find_sessions` excludes sessions that belong to a different key with the
+    /// same byte prefix.
     #[tokio::test]
     async fn other_key_prefix_is_not_returned() {
         let store = CachingSessionStore::new(cache(), Box::new(InMemoryBytes::default()));
@@ -439,8 +469,8 @@ mod tests {
         assert_eq!(found, vec![(0, 10, b(b"a"))]);
     }
 
-    /// `get` is cache-first: a staged value wins, and a miss falls through to the
-    /// inner store.
+    /// `get` reads the cache first. A staged value wins, and a miss falls through
+    /// to the inner store.
     #[tokio::test]
     async fn get_is_cache_first_then_falls_through() {
         let mut inner = InMemoryBytes::default();
@@ -459,8 +489,8 @@ mod tests {
         assert_eq!(store.get(&session_key(b"k", 0, 99)).await, None);
     }
 
-    /// `range` overlays the cache on the inner store over a raw key range: cache
-    /// wins on collision and a cached tombstone hides the inner value.
+    /// `range` overlays the cache on the inner store over a raw key range. The
+    /// cache wins on collision, and a cached tombstone hides the inner value.
     #[tokio::test]
     async fn range_merges_cache_over_inner_with_tombstone() {
         let mut inner = InMemoryBytes::default();
@@ -481,9 +511,9 @@ mod tests {
         assert_eq!(r, vec![(k0, b(b"i0")), (k1, b(b"c1"))]);
     }
 
-    /// `scan_all` overlays the full cache on the full inner store: cache wins on
-    /// collision, a cache-only entry is added, and a cached tombstone hides the
-    /// inner value.
+    /// `scan_all` overlays the full cache on the full inner store. The cache wins
+    /// on collision, the merge adds a cache-only entry, and a cached tombstone
+    /// hides the inner value.
     #[tokio::test]
     async fn scan_all_merges_cache_and_underlying() {
         let mut inner = InMemoryBytes::default();
@@ -504,7 +534,7 @@ mod tests {
         assert_eq!(r, vec![(k0, b(b"i0")), (k1, b(b"c1")), (k2, b(b"c2"))]);
     }
 
-    /// `put_inner` / `delete_inner` bypass the cache (no dirty entry staged).
+    /// `put_inner` and `delete_inner` skip the cache and stage no dirty entry.
     #[tokio::test]
     async fn put_and_delete_inner_bypass_the_cache() {
         let store = CachingSessionStore::new(cache(), Box::new(InMemoryBytes::default()));
@@ -551,8 +581,8 @@ mod tests {
         assert_eq!(store.get(&sk).await, None);
     }
 
-    /// `flush_with_old` captures the inner OLD value before writing the staged new
-    /// value through.
+    /// `flush_with_old` captures the inner OLD value before it writes the staged
+    /// new value through.
     #[tokio::test]
     async fn flush_with_old_returns_inner_old_then_writes_through() {
         let mut inner = InMemoryBytes::default();

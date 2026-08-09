@@ -1,8 +1,8 @@
-//! KIP-584 supported-feature surface for the broker. Re-exports the
-//! `crabka_metadata` feature registry and derives the `ApiVersions`
-//! advertisement rows from it, so the advertised and validated feature sets
-//! can never disagree. Behavioral gating helpers (`require_feature`) live here
-//! because they return broker error codes.
+//! KIP-584 supported-feature surface for the broker. This module re-exports
+//! the `crabka_metadata` feature registry and derives the `ApiVersions`
+//! advertisement rows from it, so the advertised and the validated feature
+//! sets can never disagree. The behavioral gating helper `require_feature`
+//! lives here because it returns broker error codes.
 
 use crabka_metadata::MetadataImage;
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_FEATURE as METADATA_VERSION;
@@ -12,12 +12,13 @@ pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_FEATURE as ME
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MAX;
 #[allow(unused_imports)]
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MIN;
-/// The `share.version` feature name (KIP-932). Consumed only from the
-/// `#[cfg(test)]` module that asserts share.version is advertised.
+/// The `share.version` feature name (KIP-932). Only the `#[cfg(test)]`
+/// module that asserts share.version is advertised uses it.
 #[allow(unused_imports)]
 pub(crate) use crabka_metadata::metadata_version::SHARE_VERSION_FEATURE as SHARE_VERSION;
-/// The `streams.version` feature name (KIP-1071). Gates `StreamsGroupHeartbeat`
-/// / `StreamsGroupDescribe`; read by those handlers via `feature_enabled`.
+/// The `streams.version` feature name (KIP-1071). It gates
+/// `StreamsGroupHeartbeat` and `StreamsGroupDescribe`. Those handlers read it
+/// with `feature_enabled`.
 pub(crate) use crabka_metadata::metadata_version::STREAMS_VERSION_FEATURE as STREAMS_VERSION;
 
 /// One row of the `ApiVersions.supported_features` advertisement.
@@ -28,8 +29,8 @@ pub(crate) struct SupportedFeature {
     pub max_version: i16,
 }
 
-/// The features this broker supports finalizing, derived from the
-/// `crabka_metadata` registry (single source of truth).
+/// The features this broker supports finalizing. They come from the
+/// `crabka_metadata` registry, the single source of truth.
 pub(crate) fn supported_features() -> Vec<SupportedFeature> {
     crabka_metadata::feature_registry()
         .iter()
@@ -44,8 +45,8 @@ pub(crate) fn supported_features() -> Vec<SupportedFeature> {
         .collect()
 }
 
-/// Look up a supported feature by name. Pairs with `supported_features` as the
-/// module's feature-surface API; the `UpdateFeatures` handler now resolves the
+/// Look up a supported feature by name. It pairs with `supported_features` as
+/// the module's feature-surface API. The `UpdateFeatures` handler resolves the
 /// registry feature directly, so the non-test lib target sees this as unused.
 #[allow(dead_code)]
 pub(crate) fn lookup(name: &str) -> Option<SupportedFeature> {
@@ -59,9 +60,10 @@ pub(crate) fn lookup(name: &str) -> Option<SupportedFeature> {
     })
 }
 
-/// KIP-584 admission gate. `Err(UNSUPPORTED_VERSION)` when `name` is finalized
-/// below `required_level`. Permissive when the feature is unfinalized (no level
-/// to gate against) — matching the range guard's treatment of a missing level.
+/// KIP-584 admission gate. Returns `Err(UNSUPPORTED_VERSION)` when `name` is
+/// finalized below `required_level`. It is permissive when the feature is
+/// unfinalized, because there is no level to gate against. This matches how
+/// the range guard treats a missing level.
 pub(crate) fn require_feature(
     image: &MetadataImage,
     name: &str,
@@ -75,10 +77,11 @@ pub(crate) fn require_feature(
     }
 }
 
-/// True when `name` is finalized at >= `level`, treating an UNFINALIZED feature
-/// as level 0 (disabled). Use for features where absence means "off" (e.g.
-/// `group.version` → next-gen disabled), unlike `require_feature` which is
-/// permissive on absence (used for metadata.version-gated RPCs on legacy images).
+/// True when `name` is finalized at >= `level`. It treats an UNFINALIZED
+/// feature as level 0, which is disabled. Use it for features where absence
+/// means "off", for example `group.version` → next-gen disabled. This differs
+/// from `require_feature`, which is permissive on absence and serves
+/// metadata.version-gated RPCs on legacy images.
 pub(crate) fn feature_enabled(
     image: &crabka_metadata::MetadataImage,
     name: &str,

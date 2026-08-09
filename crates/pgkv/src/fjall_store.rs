@@ -1,7 +1,8 @@
-//! Durable Kv over a fjall LSM partition. Crash recovery is fjall's journal
-//! replay on open; durability is one fsync per commit group — concurrent
-//! `write_batch` callers coalesce into a single fjall transaction and share
-//! its trailing fsync.
+//! Durable Kv over a fjall LSM partition.
+//!
+//! Crash recovery is fjall's journal replay on open. Durability is one fsync
+//! per commit group. Concurrent `write_batch` callers coalesce into a single
+//! fjall transaction and share its trailing fsync.
 
 use std::{
     collections::VecDeque,
@@ -23,25 +24,28 @@ use refined_type::rule::GreaterU64;
 
 use crate::{Kv, KvError, KvPair, KvSnapshot, RestoreKv, SnapshotKv, WriteOp, store::KvScan};
 
-/// A `Kv` over one fjall keyspace within a (possibly shared) transactional
-/// database. Mutations are group-committed: concurrent `write_batch` callers
-/// coalesce into one fjall transaction whose tail is a single whole-database
-/// fsync, so a returned `Ok` is power-loss durable and N concurrent writers
-/// share one fsync instead of paying one each. Multiple `KeyspaceKv`s over the
-/// same transactional database also share that fsync (a single `persist`
-/// flushes all pending writes).
+/// A `Kv` over one fjall keyspace within a transactional database, which other
+/// keyspaces can share.
 ///
-/// Sustained writes rotate the active memtable every [`KeyspaceKv::rotate_after`]
-/// committed ops (on top of fjall's byte-based trigger), so fjall's worker
-/// pool keeps flushing sstables and compacting instead of letting shadowed
-/// entries pile up on hot key prefixes.
+/// Mutations are group-committed. Concurrent `write_batch` callers coalesce
+/// into one fjall transaction whose tail is a single whole-database fsync, so
+/// a returned `Ok` is power-loss durable and N concurrent writers share one
+/// fsync instead of one each. Multiple `KeyspaceKv`s over the same
+/// transactional database also share that fsync, because a single `persist`
+/// flushes all pending writes.
+///
+/// Sustained writes rotate the active memtable every
+/// [`KeyspaceKv::rotate_after`] committed ops, on top of fjall's byte-based
+/// trigger, so fjall's worker pool keeps flushing sstables and compacting,
+/// and shadowed entries do not pile up on hot key prefixes.
 pub struct KeyspaceKv {
     db: Arc<SingleWriterTxDatabase>,
     ks: SingleWriterTxKeyspace,
     persist_mode: LocalPersistMode,
     group: GroupCommit,
-    /// Ops committed since the last memtable rotation this handle requested;
-    /// crossing [`Self::rotate_after`] resets it and rotates.
+    /// Ops committed since the last memtable rotation that this handle
+    /// requested. A crossing of [`Self::rotate_after`] resets the count and
+    /// rotates.
     ops_since_rotate: AtomicU64,
     /// Committed-op rotation threshold for this handle (see
     /// [`DEFAULT_ROTATE_AFTER_OPS`]).
@@ -56,18 +60,19 @@ enum LocalPersistMode {
 
 /// Leader/follower group-commit coordinator for one `KeyspaceKv`.
 ///
-/// A `write_batch` caller that finds no leader running becomes the leader: it
-/// drains the queue, applies every queued batch plus its own in one fjall
+/// A `write_batch` caller that finds no leader running becomes the leader. It
+/// drains the queue, applies every queued batch and its own in one fjall
 /// transaction, commits, fsyncs once, and completes every drained slot. A
-/// caller that finds a leader running enqueues its batch and waits; batches
+/// caller that finds a leader running enqueues its batch and waits. Batches
 /// that arrive during the leader's fsync form the next group. The leader never
 /// holds `state` while it touches fjall's single-writer transaction, so the
 /// coordinator cannot deadlock with fjall's own write serialization.
 #[derive(Default)]
 struct GroupCommit {
     state: Mutex<GroupState>,
-    /// Signalled by a finishing leader; wakes completed followers to return
-    /// and still-queued followers to elect the next leader.
+    /// A leader signals this when it finishes. It wakes completed followers so
+    /// they return, and still-queued followers so they elect the next
+    /// leader.
     wake: Condvar,
 }
 
@@ -88,21 +93,22 @@ struct Pending {
 /// Rotate the active memtable after this many committed write ops.
 ///
 /// Fjall's only automatic rotation trigger is byte-based
-/// ([`MAX_MEMTABLE_SIZE_BYTES`]), but the cost of scanning a hot key prefix is
-/// per *entry*: every rewrite of a key leaves another shadowed version in the
-/// active memtable's skiplist until rotation, and each MVCC prefix read skims
-/// all of them. Small values accumulate tens of thousands of entries — a
-/// measured 0.05ms -> 13ms hot-row read collapse — before the byte cap fires.
-/// Counting ops bounds that skim directly; rotation seals the memtable and
-/// fjall's worker pool flushes it to an sstable (dropping shadowed versions at
-/// flush) and then compacts.
+/// ([`MAX_MEMTABLE_SIZE_BYTES`]), but the cost of a scan over a hot key prefix
+/// is per *entry*. Every rewrite of a key leaves another shadowed version in
+/// the active memtable's skiplist until rotation, and each MVCC prefix read
+/// skims all of them. Small values accumulate tens of thousands of entries
+/// before the byte cap fires. The measured effect is a hot-row read collapse
+/// from 0.05ms to 13ms. A count of ops bounds that skim directly. Rotation
+/// seals the memtable, fjall's worker pool flushes it to an sstable and drops
+/// shadowed versions at flush, and then it compacts.
 ///
-/// The default is deliberately high: write-path MVCC pruning bounds hot-key
-/// version chains independently, so the rotation cap no longer has to fire
-/// early to keep hot-row reads fast, and a low cap under distinct-key insert
-/// load flushes tiny sstables every few tens of milliseconds — a compaction
-/// storm that halves sustained insert throughput. Callers can override it
-/// through [`FjallOptions`]; the byte cap still bounds absolute memtable size.
+/// The default is deliberately high. Write-path MVCC pruning bounds hot-key
+/// version chains on its own, so the rotation cap does not have to fire early
+/// to keep hot-row reads fast. A low cap under distinct-key insert load
+/// flushes tiny sstables every few tens of milliseconds, and that compaction
+/// storm halves sustained insert throughput. Callers can override the default
+/// through [`FjallOptions`], and the byte cap still bounds absolute memtable
+/// size.
 const DEFAULT_ROTATE_AFTER_OPS: u64 = 262_144;
 
 /// Positive committed-operation count between requested memtable rotations.
@@ -110,7 +116,7 @@ const DEFAULT_ROTATE_AFTER_OPS: u64 = 262_144;
 pub struct RotateAfterOps(u64);
 
 impl RotateAfterOps {
-    /// Validate a rotation threshold.
+    /// Validates a rotation threshold.
     ///
     /// # Errors
     /// Returns an error when `value` is zero.
@@ -120,7 +126,7 @@ impl RotateAfterOps {
             .map_err(|error| error.to_string())
     }
 
-    /// Return the validated operation count.
+    /// Returns the validated operation count.
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
@@ -146,7 +152,7 @@ pub struct FjallOptions {
 }
 
 impl FjallOptions {
-    /// Validate Fjall keyspace policy.
+    /// Validates the Fjall keyspace policy.
     ///
     /// # Errors
     /// Returns an error unless the memtable cap is a positive whole-byte value
@@ -162,13 +168,13 @@ impl FjallOptions {
         })
     }
 
-    /// Return the maximum active memtable size.
+    /// Returns the maximum active memtable size.
     #[must_use]
     pub const fn max_memtable_size(self) -> ByteSize {
         self.max_memtable_size
     }
 
-    /// Return the committed-operation rotation threshold.
+    /// Returns the committed-operation rotation threshold.
     #[must_use]
     pub const fn rotate_after_ops(self) -> RotateAfterOps {
         self.rotate_after_ops
@@ -184,13 +190,14 @@ impl Default for FjallOptions {
     }
 }
 
-/// Hands leadership off when a leader finishes — including by unwinding.
+/// Hands leadership off when a leader finishes, including when it unwinds.
 ///
-/// A leader panicking inside fjall must not leave `leader_active` set (every
-/// later writer would block forever) or its drained batches uncompleted
-/// (their callers would block forever, and re-electing a leader cannot help
-/// because the drained batches are no longer queued). Completing on `Drop`
-/// turns a leader panic into propagated errors instead of a stalled store.
+/// A leader that panics inside fjall must not leave `leader_active` set,
+/// because every later writer would then block forever. It must not leave its
+/// drained batches uncompleted either, because their callers would block
+/// forever, and a new leader election cannot help: the drained batches are no
+/// longer queued. Completion on `Drop` turns a leader panic into propagated
+/// errors instead of a stalled store.
 struct LeaderHandoff<'a> {
     coordinator: &'a GroupCommit,
     group: &'a [Pending],
@@ -214,7 +221,7 @@ impl Drop for LeaderHandoff<'_> {
 }
 
 impl KeyspaceKv {
-    /// Wrap an already-open keyspace `ks` belonging to `db`.
+    /// Wraps an already-open keyspace `ks` that belongs to `db`.
     #[must_use]
     pub fn new(db: Arc<SingleWriterTxDatabase>, ks: SingleWriterTxKeyspace) -> Self {
         Self::with_options(db, ks, LocalPersistMode::SyncAll, FjallOptions::default())
@@ -236,7 +243,7 @@ impl KeyspaceKv {
         }
     }
 
-    /// Wrap an already-open keyspace without fsyncing each mutation.
+    /// Wraps an already-open keyspace and does not fsync each mutation.
     #[must_use]
     pub fn new_cache(db: Arc<SingleWriterTxDatabase>, ks: SingleWriterTxKeyspace) -> Self {
         Self::with_options(db, ks, LocalPersistMode::Buffer, FjallOptions::default())
@@ -253,8 +260,9 @@ impl KeyspaceKv {
         self.db.read_tx().is_empty(&self.ks).map_err(io)
     }
 
-    /// Group-commit a batch: lead a group if no leader is running, otherwise
-    /// enqueue and wait for a leader to commit it.
+    /// Group-commits a batch. It leads a group if no leader is running. If a
+    /// leader is running, it enqueues the batch and waits for that leader to
+    /// commit it.
     fn write_batch_grouped(&self, ops: &[WriteOp]) -> Result<(), KvError> {
         let mut state = self.group.state.lock().expect("group commit lock");
         if !state.leader_active {
@@ -288,9 +296,9 @@ impl KeyspaceKv {
         self.lead(&group, None)
     }
 
-    /// Commit `group` (plus the leader's own trailing batch, when it is not
-    /// already queued) as one transaction with one fsync, then complete every
-    /// slot and hand off leadership.
+    /// Commits `group` as one transaction with one fsync, then completes every
+    /// slot and hands off leadership. The group also holds the leader's own
+    /// trailing batch when that batch is not already queued.
     fn lead(&self, group: &[Pending], trailing_ops: Option<&[WriteOp]>) -> Result<(), KvError> {
         let handoff = LeaderHandoff {
             coordinator: &self.group,
@@ -316,9 +324,10 @@ impl KeyspaceKv {
         result
     }
 
-    /// Apply `batches` in order inside one fjall transaction and persist once
-    /// via [`Self::sync`]. Equivalent to committing each batch sequentially:
-    /// a batch's conditional reads observe earlier batches' staged writes.
+    /// Applies `batches` in order inside one fjall transaction and persists
+    /// once with [`Self::sync`]. The result is the same as a sequential commit
+    /// of each batch: a batch's conditional reads observe the staged writes of
+    /// earlier batches.
     fn commit_group<'ops, I>(&self, batches: I) -> Result<(), KvError>
     where
         I: IntoIterator<Item = &'ops [WriteOp]>,
@@ -375,15 +384,17 @@ impl KeyspaceKv {
         Ok(())
     }
 
-    /// Credit `staged_ops` toward [`DEFAULT_ROTATE_AFTER_OPS`] and rotate the active
-    /// memtable once the threshold is crossed. Runs strictly after the group's
-    /// commit and persist, when the group is already durable — so a rotation
-    /// failure must not fail the write: the leader clones its result to every
-    /// batch in the group, and an `Err` would tell every caller their durable
-    /// batch failed. Dropping the error hides no durability fault: fjall
-    /// poisons the database on fsync failure, which fails the next commit's
-    /// persist, and the next threshold crossing (or fjall's byte cap, or
-    /// [`Kv::maintain`]) retries the rotation.
+    /// Credits `staged_ops` toward [`DEFAULT_ROTATE_AFTER_OPS`] and rotates
+    /// the active memtable once the count crosses the threshold.
+    ///
+    /// This runs strictly after the group's commit and persist, when the group
+    /// is already durable, so a rotation failure must not fail the write. The
+    /// leader clones its result to every batch in the group, and an
+    /// `Err` would tell every caller that their durable batch failed. The
+    /// dropped error hides no durability fault: fjall poisons the database on
+    /// an fsync failure, which fails the next commit's persist. The next
+    /// threshold crossing retries the rotation, and so do fjall's byte cap and
+    /// [`Kv::maintain`].
     fn rotate_after_ops(&self, staged_ops: u64) {
         let before = self
             .ops_since_rotate
@@ -530,20 +541,24 @@ impl RestoreKv for KeyspaceKv {
     }
 }
 
-/// Durable single-keyspace `Kv`: opens (or recovers) a one-keyspace `Database`.
+/// Durable single-keyspace `Kv`. It opens, or recovers, a one-keyspace
+/// `Database`.
 ///
-/// Opening an existing directory recovers via fjall's journal replay — no
-/// bespoke recovery code required. Every write is fsynced before returning.
+/// An open of an existing directory recovers through fjall's journal replay,
+/// and it needs no bespoke recovery code. Every write is fsynced before the
+/// call returns.
 pub struct FjallKv {
     inner: KeyspaceKv,
 }
 
-/// Memtable cap for crabka keyspaces. Fjall's 64 MiB default means MVCC
-/// churn (distinct version keys plus GC tombstones on the same row prefix)
-/// accumulates in the active memtable for a very long time, and every prefix
-/// scan walks all of it — measured as a hot-row throughput collapse. A small
-/// cap rotates the memtable early so flush + compaction retire shadowed
-/// entries and tombstones.
+/// Memtable cap for crabka keyspaces.
+///
+/// With fjall's 64 MiB default, MVCC churn accumulates in the active memtable
+/// for a very long time. That churn is the distinct version keys plus the GC
+/// tombstones on the same row prefix. Every prefix scan walks all of it, and
+/// the measured effect is a hot-row throughput collapse. A small cap rotates
+/// the memtable early, so flush and compaction retire shadowed entries and
+/// tombstones.
 const MAX_MEMTABLE_SIZE_BYTES: u64 = 8 * 1024 * 1024;
 
 fn crabka_keyspace_options(options: FjallOptions) -> KeyspaceCreateOptions {
@@ -567,10 +582,10 @@ fn crabka_keyspace_options(options: FjallOptions) -> KeyspaceCreateOptions {
 }
 
 impl FjallKv {
-    /// Opens (or creates) a `FjallKv` at the given path.
+    /// Opens, or creates, a `FjallKv` at the given path.
     ///
-    /// If the directory already contains a database, it is recovered via fjall's
-    /// journal replay.
+    /// If the directory already contains a database, fjall's journal replay
+    /// recovers it.
     ///
     /// # Errors
     ///
@@ -596,11 +611,12 @@ impl FjallKv {
         })
     }
 
-    /// Opens (or creates) a `FjallKv` cache at the given path.
+    /// Opens, or creates, a `FjallKv` cache at the given path.
     ///
-    /// Mutations are visible to this process immediately but are not fsynced per
-    /// operation. This mode is for the Gres substrate read model, where the WAL
-    /// topic is the durable truth and this local store is disposable.
+    /// Mutations are visible to this process immediately, but they are not
+    /// fsynced per operation. This mode is for the Gres substrate read model,
+    /// where the WAL topic is the durable truth and this local store is
+    /// disposable.
     ///
     /// # Errors
     ///

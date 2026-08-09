@@ -96,9 +96,10 @@ struct QueryFrontendState {
     cache: Arc<dyn RangeQueryCache>,
 }
 
-/// RAII guard that keeps `active_queries` incremented while an in-flight query
-/// is executing, decrementing it on drop (covering early returns and panics).
-/// A no-op when no metrics bundle is configured.
+/// RAII guard that holds the `active_queries` increment while a query runs.
+///
+/// The guard decrements `active_queries` on drop, which covers early returns
+/// and panics. The guard does nothing when no metrics bundle is configured.
 struct ActiveQueryGuard {
     metrics: Option<ServiceMetrics>,
 }
@@ -156,7 +157,7 @@ impl<S: MetricStore> PrometheusApiState<S> {
         self
     }
 
-    /// Set the compressed and decompressed body cap for remote reads.
+    /// Sets the compressed and decompressed body cap for remote reads.
     #[must_use]
     pub fn with_remote_read_max_body(mut self, max_body: ByteSize) -> Self {
         self.remote_read_max_body = max_body;
@@ -169,26 +170,30 @@ impl<S: MetricStore> PrometheusApiState<S> {
         self
     }
 
-    /// Record one query request outcome on `route`, if a metrics bundle is
-    /// configured. No-op otherwise.
+    /// Records one query request outcome on `route`.
+    ///
+    /// This method does nothing when no metrics bundle is configured.
     fn record_query(&self, route: &str, ok: bool, latency: Time) {
         if let Some(metrics) = &self.metrics {
             metrics.record_query(route, ok, latency);
         }
     }
 
-    /// Record one `PromQL` engine evaluation (`query_type` = `"instant"` /
-    /// `"range"`) — its latency and, when `!ok`, an error increment. No-op when
-    /// no metrics bundle is configured.
+    /// Records one `PromQL` engine evaluation and its latency.
+    ///
+    /// `query_type` is `"instant"` or `"range"`. When `ok` is false, this method
+    /// also increments the error count. The method does nothing when no metrics
+    /// bundle is configured.
     fn record_eval(&self, query_type: &str, ok: bool, latency: Time) {
         if let Some(metrics) = &self.metrics {
             metrics.record_eval(query_type, ok, latency);
         }
     }
 
-    /// Bump the in-flight-query gauge for the lifetime of `guard`, decrementing
-    /// on drop. Returns a guard that is a no-op when no metrics bundle is
-    /// configured.
+    /// Increments the in-flight-query gauge for the lifetime of the returned guard.
+    ///
+    /// The guard decrements the gauge on drop. The guard does nothing when no
+    /// metrics bundle is configured.
     fn active_query_guard(&self) -> ActiveQueryGuard {
         if let Some(metrics) = &self.metrics {
             metrics.query_started();
@@ -219,7 +224,7 @@ impl<S: MetricStore> PrometheusApiState<S> {
         self
     }
 
-    /// Return the `PromQL` engine backing this HTTP API state.
+    /// Returns the `PromQL` engine that backs this HTTP API state.
     #[must_use]
     pub fn engine(&self) -> &PromqlEngine<S> {
         &self.engine
@@ -237,7 +242,7 @@ impl<S: MetricStore> PrometheusApiState<S> {
         PromqlEngine::new(Arc::clone(&self.store), opts)
     }
 
-    /// Snapshot ruler rules for one tenant.
+    /// Returns a snapshot of the ruler rules for one tenant.
     #[must_use]
     pub fn ruler_rule_set(
         &self,
@@ -250,14 +255,14 @@ impl<S: MetricStore> PrometheusApiState<S> {
             .unwrap_or_default()
     }
 
-    /// Apply replayed ruler group state for HTTP rule rendering.
+    /// Applies replayed ruler group state for HTTP rule rendering.
     pub fn apply_ruler_group_state(&self, record: RulerGroupStateRecord) {
         if let Ok(mut group_state) = self.ruler_group_state.write() {
             group_state.apply_record(record);
         }
     }
 
-    /// Apply replayed ruler alert state for HTTP alert rendering.
+    /// Applies replayed ruler alert state for HTTP alert rendering.
     pub fn apply_ruler_alert_state(&self, record: RulerAlertStateRecord) {
         if let Ok(mut alert_states) = self.ruler_alerts.write() {
             let key = AlertStateKey {
@@ -276,10 +281,10 @@ impl<S: MetricStore> PrometheusApiState<S> {
         }
     }
 
-    /// Set the timestamp used when rendering ruler evaluations through the HTTP API.
+    /// Sets the timestamp for the ruler evaluations that the HTTP API renders.
     ///
-    /// A production ruler loop will advance this from its injected clock; tests use it
-    /// to exercise `for:` alert state transitions deterministically.
+    /// A production ruler loop advances this timestamp from its injected clock.
+    /// Tests set it to exercise `for:` alert state transitions deterministically.
     pub fn set_ruler_evaluation_time_ms(&self, time_ms: i64) {
         if let Ok(mut eval_time) = self.ruler_evaluation_time_ms.write() {
             *eval_time = time_ms;
@@ -314,7 +319,7 @@ async fn acquire_query_permit<S: MetricStore>(
     }
 }
 
-/// Build routes for the Prometheus API and Mimir's `/prometheus` prefix.
+/// Builds the routes for the Prometheus API and the `/prometheus` prefix of Mimir.
 pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState<S>>) -> Router {
     let remote_read_max_body = state.remote_read_max_body.bytes_usize();
     Router::new()
@@ -466,8 +471,10 @@ struct RulesParams {
     exclude_alerts: Option<bool>,
 }
 
-/// Record a query handler outcome from its final response status. A response
-/// with a client/server error status (`>= 400`) counts as `status="error"`.
+/// Records a query handler outcome from its final response status.
+///
+/// A response with a client or server error status, which is `>= 400`, counts
+/// as `status="error"`.
 fn record_query_response<S: MetricStore>(
     state: &Arc<PrometheusApiState<S>>,
     route: &str,

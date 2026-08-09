@@ -1,5 +1,8 @@
-//! Turso-backed `ByteKeyValueStore`. One table `kv(k BLOB PRIMARY KEY, v BLOB)`
-//! per store; UPSERT on put; half-open ordered range scan. Async-native (no `block_on`).
+//! Turso-backed `ByteKeyValueStore`.
+//!
+//! Each store gets one table `kv(k BLOB PRIMARY KEY, v BLOB)`. A put does an
+//! UPSERT. A range scan is half-open and ordered. The code is async-native and
+//! never calls `block_on`.
 use async_trait::async_trait;
 use bytes::Bytes;
 use turso::Connection;
@@ -27,8 +30,10 @@ pub(crate) struct TursoBytes {
 }
 
 impl TursoBytes {
-    /// Open (or create) the store DB at `path`. Clean-slate: the changelog is the
-    /// source of truth, so restore replays into an empty table.
+    /// Opens the store DB at `path`, or creates it.
+    ///
+    /// The table starts from a clean slate. The changelog is the source of truth,
+    /// so restore replays into an empty table.
     pub(crate) async fn open(path: &str) -> Self {
         let db = turso::Builder::new_local(path)
             .build()

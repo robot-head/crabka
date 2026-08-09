@@ -1,6 +1,7 @@
-//! A `StreamTask` = one active task `(subtopology_id, partition)`. Owns the
-//! instantiated graph + per-partition fetch offsets. At-least-once: produce →
-//! flush → commit.
+//! A `StreamTask` is one active task `(subtopology_id, partition)`.
+//!
+//! The task owns the instantiated graph and the per-partition fetch offsets.
+//! The at-least-once order is produce → flush → commit.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -29,20 +30,22 @@ pub(crate) struct StreamTask {
     #[allow(dead_code)]
     pub(crate) subtopology_id: String,
     pub(crate) graph: Graph,
-    /// The co-partitioned partition index for all source + changelog topics.
+    /// The co-partitioned partition index for all source and changelog topics.
     pub(crate) partition: i32,
     positions: HashMap<(String, i32), i64>,
-    /// The source topics this task consumes. A store whose changelog topic is one
-    /// of these is a `REUSE_KTABLE_SOURCE_TOPICS` reuse-source store, whose
-    /// changelog write-back is suppressed (it would loop back onto the source).
+    /// The source topics this task consumes. A store whose changelog topic is
+    /// one of these is a `REUSE_KTABLE_SOURCE_TOPICS` reuse-source store. Its
+    /// changelog write-back is suppressed, because it would loop back onto the
+    /// source.
     source_topics: HashSet<String>,
     pending: HashMap<(String, i32), i64>,
     producer: Arc<dyn RecordProducer>,
     pub(crate) store: Arc<dyn OffsetStore>,
     pub(crate) role: TaskRole,
     pub(crate) changelog_offsets: HashMap<String, i64>,
-    /// Delivery guarantee for this task. Under [`ProcessingGuarantee::ExactlyOnceV2`]
-    /// the changelog restore reads `READ_COMMITTED` so aborted writes are excluded.
+    /// Delivery guarantee for this task. Under
+    /// [`ProcessingGuarantee::ExactlyOnceV2`] the changelog restore reads
+    /// `READ_COMMITTED`, so it excludes aborted writes.
     pub(crate) guarantee: ProcessingGuarantee,
 }
 
@@ -77,13 +80,14 @@ impl StreamTask {
         }
     }
 
-    /// Read-only access to this task's store registry (for interactive queries).
+    /// Read-only access to this task's store registry, for interactive queries.
     pub(crate) fn registry(&self) -> &crate::store::registry::StoreRegistry {
         &self.graph.stores
     }
 
-    /// Snapshot the task's consumed source offsets as an `IQv2` `Position`
-    /// (topic → partition → next-offset). Used to tag query results.
+    /// Snapshot the task's consumed source offsets as an `IQv2` `Position`,
+    /// which maps topic → partition → next-offset. The caller uses it to tag
+    /// query results.
     pub(crate) fn position(&self) -> crate::runtime::iqv2::request::Position {
         use std::collections::BTreeMap;
         let mut m: BTreeMap<String, BTreeMap<i32, i64>> = BTreeMap::new();
@@ -108,15 +112,19 @@ impl StreamTask {
             .map_err(|e| StreamsClientError::Runtime(e.to_string()))
     }
 
-    /// Clean close: flush record caches (emitting their buffered deduped changes +
-    /// changelog through the still-live processor chain) BEFORE calling
-    /// `Processor::close` on every node — mirrors the JVM `StreamTask.closeClean`
-    /// (flush state stores → close processors). The flush must precede the processor
-    /// close because forwarding routes through child `process` calls.
+    /// Close the task cleanly.
     ///
-    /// Close is infallible, so a flush error is logged and swallowed (the partition
-    /// is being revoked anyway; the thread still commits offsets afterwards). After
-    /// this, the cache is clean, so the subsequent `commit()` flush is a no-op.
+    /// This method flushes the record caches BEFORE it calls `Processor::close`
+    /// on every node. The flush emits the buffered deduped changes and the
+    /// changelog through the still-live processor chain. It mirrors the JVM
+    /// `StreamTask.closeClean`, which flushes the state stores and then closes
+    /// the processors. The flush must come before the processor close, because
+    /// forwarding routes through child `process` calls.
+    ///
+    /// Close is infallible, so this method logs a flush error and drops it. The
+    /// partition is under revocation anyway, and the thread still commits the
+    /// offsets afterwards. After this call the cache is clean, so the next
+    /// `commit()` flush does nothing.
     #[tracing::instrument(
         name = "streams.task.close_processors",
         level = "info",
@@ -130,13 +138,16 @@ impl StreamTask {
         self.graph.close_processors().await;
     }
 
-    /// Restore each store from its changelog topic (reads from offset 0 until
-    /// an empty batch). Changelog logging is disabled for the duration.
+    /// Restore each store from its changelog topic.
+    ///
+    /// The restore reads from offset 0 until it gets an empty batch. Changelog
+    /// logging is off for the whole restore.
     ///
     /// Under [`ProcessingGuarantee::ExactlyOnceV2`] the changelog is read at
-    /// `READ_COMMITTED` so aborted writes (records from a transaction that later
-    /// aborted) are excluded — the restored store reflects only committed state.
-    /// At-least-once reads `READ_UNCOMMITTED` (behaviour unchanged).
+    /// `READ_COMMITTED`, so it excludes aborted writes, which are records from a
+    /// transaction that later aborted. The restored store then holds only
+    /// committed state. At-least-once reads `READ_UNCOMMITTED`, and that
+    /// behaviour is unchanged.
     #[tracing::instrument(
         name = "streams.task.restore",
         level = "info",
@@ -195,8 +206,8 @@ impl StreamTask {
         Ok(())
     }
 
-    /// Incrementally restore standby/warmup task by fetching a single batch
-    /// from each store's changelog topic.
+    /// Restore a standby or warmup task one step at a time. Each call fetches a
+    /// single batch from each store's changelog topic.
     #[tracing::instrument(
         name = "streams.task.restore_step",
         level = "debug",
@@ -247,7 +258,8 @@ impl StreamTask {
         Ok(())
     }
 
-    /// Compute cumulative restored and end offsets across all stores' changelog partitions.
+    /// Compute the cumulative restored offsets and end offsets over the
+    /// changelog partitions of all stores.
     #[tracing::instrument(
         name = "streams.task.compute_changelog_offsets",
         level = "debug",
@@ -279,9 +291,11 @@ impl StreamTask {
         Ok((current_sum, end_sum))
     }
 
-    /// Roll back to the last committed state after a txn abort: rewind source
-    /// positions to committed offsets, wipe stores, re-restore from the committed
-    /// changelog. Reuses [`seek_to_start`](Self::seek_to_start) + [`restore`](Self::restore).
+    /// Roll back to the last committed state after a txn abort.
+    ///
+    /// This method rewinds the source positions to the committed offsets, wipes
+    /// the stores, and restores again from the committed changelog. It reuses
+    /// [`seek_to_start`](Self::seek_to_start) and [`restore`](Self::restore).
     #[tracing::instrument(
         name = "streams.task.rollback",
         level = "info",
@@ -299,8 +313,9 @@ impl StreamTask {
         self.restore(fetcher).await?; // replay committed changelog
         Ok(())
     }
-    /// Seek each assigned partition to its committed offset, or `earliest` if
-    /// none (auto.offset.reset = earliest).
+    /// Seek each assigned partition to its committed offset. Without a committed
+    /// offset, seek to `earliest`, which matches
+    /// `auto.offset.reset = earliest`.
     #[tracing::instrument(
         name = "streams.task.seek_to_start",
         level = "debug",
@@ -320,16 +335,18 @@ impl StreamTask {
         Ok(())
     }
 
-    /// Fetch one batch per assigned partition; pipe through the graph; produce
-    /// sink outputs AND changelog entries; then flush + commit on the next
-    /// `commit()` call. At-least-once ordering: sink produce → changelog
-    /// produce → flush → commit.
+    /// Fetch one batch per assigned partition and pipe it through the graph.
     ///
-    /// `begin_gate` is `Some` only under EOS-v2: the task calls
-    /// [`BeginTxnGate::ensure_begun`] right before its first produced record so
-    /// the thread opens a transaction lazily — an interval that fetches no
-    /// records produces nothing and opens no transaction (no empty-txn churn).
-    /// Under at-least-once `begin_gate` is `None` and this is a no-op gate.
+    /// The method produces the sink outputs AND the changelog entries. The next
+    /// `commit()` call then flushes and commits. The at-least-once order is
+    /// sink produce → changelog produce → flush → commit.
+    ///
+    /// `begin_gate` is `Some` only under EOS-v2. The task calls
+    /// [`BeginTxnGate::ensure_begun`] right before its first produced record, so
+    /// the thread opens a transaction lazily. An interval that fetches no
+    /// records then produces nothing and opens no transaction, which avoids
+    /// empty-txn churn. Under at-least-once `begin_gate` is `None` and the gate
+    /// does nothing.
     #[tracing::instrument(
         name = "streams.task.process_once",
         level = "debug",
@@ -396,9 +413,9 @@ impl StreamTask {
         Ok(())
     }
 
-    /// Fire all due `STREAM_TIME` punctuators at the graph's current stream-time,
-    /// producing any forwarded sink output + changelog entries. Driven at the end
-    /// of each `process_once` batch.
+    /// Fire all due `STREAM_TIME` punctuators at the graph's current
+    /// stream-time. The method produces any forwarded sink output and changelog
+    /// entries. Each `process_once` batch drives it at the end.
     #[tracing::instrument(
         name = "streams.task.punctuate_stream_time",
         level = "debug",
@@ -414,9 +431,9 @@ impl StreamTask {
         self.drain_punctuation_output().await
     }
 
-    /// Fire all due `WALL_CLOCK_TIME` punctuators at `now_ms`, producing any
-    /// forwarded sink output + changelog entries. Driven between polls by the
-    /// `StreamThread` wall-clock tick.
+    /// Fire all due `WALL_CLOCK_TIME` punctuators at `now_ms`. The method
+    /// produces any forwarded sink output and changelog entries. The
+    /// `StreamThread` wall-clock tick drives it between polls.
     #[tracing::instrument(
         name = "streams.task.punctuate_wall_clock",
         level = "debug",
@@ -433,8 +450,9 @@ impl StreamTask {
     }
 
     /// Route punctuator-forwarded records through the same producer plumbing
-    /// that `process_once` uses for record output: sink sends use key-hash
-    /// routing (partition None); changelog sends pin the task partition.
+    /// that `process_once` uses for record output. Sink sends use key-hash
+    /// routing, so the partition is `None`. Changelog sends pin the task
+    /// partition.
     async fn drain_punctuation_output(&mut self) -> Result<(), StreamsClientError> {
         for out in self.graph.take_output() {
             self.producer
@@ -449,10 +467,12 @@ impl StreamTask {
         Ok(())
     }
 
-    /// The source offsets advanced since the last commit (for the thread's txn).
-    /// The thread (not the task) drives the EOS commit, so it reads pending
+    /// The source offsets that advanced since the last commit, for the thread's
+    /// txn.
+    ///
+    /// The thread drives the EOS commit, not the task. It reads the pending
     /// offsets here, folds them into `send_offsets_to_transaction`, and clears
-    /// them via [`clear_pending`](Self::clear_pending) once the txn commits.
+    /// them with [`clear_pending`](Self::clear_pending) once the txn commits.
     pub fn pending_offsets(&self) -> Vec<(String, i32, i64)> {
         self.pending
             .iter()
@@ -460,19 +480,22 @@ impl StreamTask {
             .collect()
     }
 
-    /// Clear pending after the thread's EOS txn commit succeeds.
+    /// Clear the pending offsets after the thread's EOS txn commit succeeds.
     pub fn clear_pending(&mut self) {
         self.pending.clear();
     }
 
-    /// Flush every cached materialized store: write dirty entries through to the
-    /// underlying store, buffer their changelog records, and forward the deduped
-    /// `Change`s downstream — then route the resulting sink output + changelog
-    /// entries to the producer (same plumbing the punctuation path uses).
+    /// Flush every cached materialized store.
     ///
-    /// A no-op when no store is cached (`cache_owner` empty, e.g. the
-    /// `cache_max_bytes = 0` test-driver path): `flush_caches` forwards nothing,
-    /// so the drain produces nothing.
+    /// The method writes the dirty entries through to the underlying store,
+    /// buffers their changelog records, and forwards the deduped `Change`s
+    /// downstream. It then routes the resulting sink output and changelog
+    /// entries to the producer, with the same plumbing the punctuation path
+    /// uses.
+    ///
+    /// The method does nothing when no store is cached, that is when
+    /// `cache_owner` is empty, as on the `cache_max_bytes = 0` test-driver path.
+    /// `flush_caches` then forwards nothing, so the drain produces nothing.
     #[tracing::instrument(
         name = "streams.task.flush_caches",
         level = "debug",
@@ -488,11 +511,14 @@ impl StreamTask {
         self.drain_punctuation_output().await
     }
 
-    /// At-least-once commit: flush record caches (emitting their deduped changes +
-    /// changelog) → flush producer → commit advanced source offsets. The cache
-    /// flush + its sink/changelog drain happen BEFORE the producer flush/commit so
-    /// the forwarded records are part of the committed batch (under EOS-v2, part of
-    /// the transaction the thread commits after this call).
+    /// Commit under at-least-once.
+    ///
+    /// The order is: flush the record caches, which emits their deduped changes
+    /// and changelog, then flush the producer, then commit the advanced source
+    /// offsets. The cache flush and its sink and changelog drain happen BEFORE
+    /// the producer flush and commit, so the forwarded records are part of the
+    /// committed batch. Under EOS-v2 they are part of the transaction that the
+    /// thread commits after this call.
     #[tracing::instrument(
         name = "streams.task.commit",
         level = "info",
@@ -516,7 +542,7 @@ impl StreamTask {
         Ok(())
     }
 
-    /// Test-only: typed read from a KV store by name.
+    /// Typed read from a KV store by name. Test only.
     #[cfg(test)]
     pub(crate) async fn store_get_i64(&mut self, name: &str, key: &String) -> Option<i64> {
         match self.graph.stores.get_kv::<String, i64>(name) {
@@ -576,8 +602,8 @@ mod tests {
         t.build("app").unwrap()
     }
 
-    /// A fetcher that returns different batches per (topic, offset) key.
-    /// Unscripted combinations return an empty batch.
+    /// A fetcher that returns a different batch for each (topic, offset) key.
+    /// An unscripted combination returns an empty batch.
     struct ScriptedFetcher {
         scripts: StdMutex<HashMap<(String, i32, i64), FetchBatch>>,
     }
@@ -912,8 +938,9 @@ mod tests {
         }
     }
 
-    /// Schedules a `STREAM_TIME` punctuator (interval 10ms) in `init`; no-op on
-    /// records (so any sink output is from the punctuator, not the record).
+    /// Schedules a `STREAM_TIME` punctuator with a 10ms interval in `init`. It
+    /// does nothing on records, so any sink output comes from the punctuator and
+    /// not from the record.
     struct StreamTimeScheduler;
     #[async_trait::async_trait]
     impl Processor<String, String, String, i64> for StreamTimeScheduler {
@@ -940,10 +967,13 @@ mod tests {
         t.build("app").unwrap()
     }
 
-    /// `process_once` must fire due `STREAM_TIME` punctuators after the batch, at
-    /// the graph's current stream-time, and produce their forwarded output. We
-    /// feed one record at ts=25 (> the 10ms interval base of `i64::MIN`+10), so the
-    /// punctuator fires once with value = stream-time (25) and the sink emits it.
+    /// `process_once` must fire the due `STREAM_TIME` punctuators after the
+    /// batch, at the graph's current stream-time, and produce their forwarded
+    /// output.
+    ///
+    /// The test feeds one record at ts=25, which is above the 10ms interval base
+    /// of `i64::MIN`+10. The punctuator fires once with value = stream-time, so
+    /// 25, and the sink emits it.
     #[tokio::test]
     async fn process_once_fires_stream_time_punctuation() {
         let producer = std::sync::Arc::new(CollectProducer::default());
@@ -990,13 +1020,13 @@ mod tests {
         );
     }
 
-    /// Regression test: changelog sends must be pinned to the task partition
-    /// (matching the JVM `RecordCollector` behaviour). Sink sends must keep
-    /// key-hash routing (partition == None).
+    /// Regression test. Changelog sends must be pinned to the task partition,
+    /// which matches the JVM `RecordCollector` behaviour. Sink sends must keep
+    /// key-hash routing, so `partition == None`.
     ///
-    /// Uses a non-zero task partition (2) so the test is discriminating:
-    /// a bug that passes `None` will fail the changelog assertion, and
-    /// a bug that passes `Some(2)` for sink output will fail the sink assertion.
+    /// The test uses a non-zero task partition, 2, so it discriminates. A bug
+    /// that passes `None` fails the changelog assertion, and a bug that passes
+    /// `Some(2)` for the sink output fails the sink assertion.
     #[tokio::test]
     async fn changelog_sends_pin_task_partition() {
         const TASK_PARTITION: i32 = 2;
@@ -1219,9 +1249,9 @@ mod tests {
         }
     }
 
-    /// Build a stateful `Counter`-topology task with the given guarantee, restore
-    /// it from the [`IsolationFetcher`] changelog, and return the task so the
-    /// caller can inspect the restored `counts` store.
+    /// Build a stateful `Counter`-topology task with the given guarantee,
+    /// restore it from the [`IsolationFetcher`] changelog, and return the task so
+    /// the caller can inspect the restored `counts` store.
     async fn restore_counter_task(guarantee: ProcessingGuarantee) -> StreamTask {
         let producer = std::sync::Arc::new(CollectProducer::default());
         let store = std::sync::Arc::new(MemStore::default());
@@ -1248,8 +1278,8 @@ mod tests {
         task
     }
 
-    /// EOS-v2 restore reads the changelog at `READ_COMMITTED`, so the aborted
-    /// write ("b"→99) is excluded — only the committed record ("a"→5) seeds the
+    /// EOS-v2 restore reads the changelog at `READ_COMMITTED`, so it excludes
+    /// the aborted write ("b"→99). Only the committed record ("a"→5) seeds the
     /// store.
     #[tokio::test]
     async fn eos_restore_reads_committed_only() {
@@ -1264,9 +1294,9 @@ mod tests {
         );
     }
 
-    /// At-least-once restore reads the changelog at `READ_UNCOMMITTED`, so it sees
-    /// BOTH records (the committed "a"→5 and the "aborted" "b"→99). This pins the
-    /// non-EOS behaviour as unchanged.
+    /// At-least-once restore reads the changelog at `READ_UNCOMMITTED`, so it
+    /// sees BOTH records: the committed "a"→5 and the "aborted" "b"→99. This
+    /// pins the non-EOS behaviour as unchanged.
     #[tokio::test]
     async fn alo_restore_reads_uncommitted_sees_both() {
         let mut task = restore_counter_task(ProcessingGuarantee::AtLeastOnce).await;
@@ -1280,8 +1310,9 @@ mod tests {
         );
     }
 
-    /// Build a minimal task seeded with the given source partitions (all starting
-    /// at offset 0). Uses the stateless `Upper` topology so no stores are needed.
+    /// Build a minimal task seeded with the given source partitions, all
+    /// starting at offset 0. It uses the stateless `Upper` topology, so it needs
+    /// no stores.
     async fn make_test_task(sources: Vec<TopicPartition>) -> StreamTask {
         let producer = std::sync::Arc::new(CollectProducer::default());
         let store = std::sync::Arc::new(MemStore::default());
@@ -1320,8 +1351,9 @@ mod tests {
 
     use crate::dsl::processors::change::Change;
 
-    /// A `Change<i64>` serde encoding just the `new` side (8 bytes BE) so the
-    /// downstream sink has bytes to emit. Never deserialized in these tests.
+    /// A `Change<i64>` serde that encodes only the `new` side as 8 bytes BE, so
+    /// the downstream sink has bytes to emit. These tests never deserialize
+    /// it.
     #[derive(Clone)]
     struct ChangeI64Serde;
     impl crate::processor::serde::Serde<Change<i64>> for ChangeI64Serde {
@@ -1338,10 +1370,11 @@ mod tests {
     }
 
     /// A materializing processor that writes the cached "counts" store on every
-    /// record but forwards NOTHING on `process` — so the ONLY path a `Change`
-    /// reaches the downstream sink is `Graph::flush_caches` (the deduped emit on
-    /// commit). This mirrors a cached `KTable` aggregate whose emit-on-update is
-    /// suppressed: the sink sees one deduped change per flush, not one per record.
+    /// record but forwards NOTHING on `process`. The ONLY path by which a
+    /// `Change` reaches the downstream sink is `Graph::flush_caches`, the
+    /// deduped emit on commit. This mirrors a cached `KTable` aggregate whose
+    /// emit-on-update is suppressed. The sink then sees one deduped change per
+    /// flush, not one per record.
     struct StoreWriterNoForward;
     #[async_trait::async_trait]
     impl Processor<String, String, String, Change<i64>> for StoreWriterNoForward {
@@ -1358,9 +1391,9 @@ mod tests {
     }
 
     /// `source "in" → StoreWriterNoForward(materializes cached "counts") → sink "out"`.
-    /// The "counts" store is marked cache-eligible; with `cache_max_bytes > 0` the
-    /// store buffers writes and defers both its changelog AND the downstream
-    /// `Change` emit to `flush_caches`.
+    /// The "counts" store is marked cache-eligible. With `cache_max_bytes > 0`
+    /// the store buffers its writes and defers both its changelog AND the
+    /// downstream `Change` emit to `flush_caches`.
     fn cached_writer_built() -> crate::topology::BuiltTopology {
         use crate::processor::serde::{I64Serde, Produced};
         let mut t = Topology::new();
@@ -1377,10 +1410,11 @@ mod tests {
         t.build("app").unwrap()
     }
 
-    /// An [`OffsetStore`] + [`RecordProducer`] pair that share one ordered event
-    /// log, so a test can assert the relative order of producer sends vs offset
-    /// commits across the two trait objects. `send`/`send_with_timestamp` push a
-    /// `produce:<topic>` event; `commit` pushes `commit-offsets`.
+    /// An [`OffsetStore`] and [`RecordProducer`] pair that share one ordered
+    /// event log. A test can then assert the relative order of producer sends
+    /// and offset commits across the two trait objects. `send` and
+    /// `send_with_timestamp` push a `produce:<topic>` event, and `commit` pushes
+    /// `commit-offsets`.
     #[derive(Clone, Default)]
     struct OrderLog(std::sync::Arc<StdMutex<Vec<String>>>);
 
@@ -1447,10 +1481,11 @@ mod tests {
         }
     }
 
-    /// A cached materialized store must buffer its writes (no sink output / no
-    /// changelog) until commit, then `commit()` must flush the cache — emitting
-    /// exactly ONE deduped sink record + ONE changelog record — BEFORE committing
-    /// source offsets (so under EOS the forwarded records join the committed txn).
+    /// A cached materialized store must buffer its writes until commit, with no
+    /// sink output and no changelog. `commit()` must then flush the cache and
+    /// emit exactly ONE deduped sink record and ONE changelog record. That flush
+    /// must happen BEFORE the source-offset commit, so that under EOS the
+    /// forwarded records join the committed txn.
     #[tokio::test]
     async fn commit_flushes_record_cache_before_offset_commit() {
         let log = OrderLog::default();

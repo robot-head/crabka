@@ -1,9 +1,9 @@
 //! `CodSpeed` microbenchmarks for `crabka-security`.
 //!
-//! Covers the security primitives we hit on every authenticated connection:
-//! SASL/PLAIN verification (constant-time compare), SCRAM password hashing
-//! (PBKDF2), and `derive_keys_from_salted` (broker-side key derivation per
-//! KIP-554).
+//! These benchmarks cover the security primitives that every authenticated
+//! connection hits: SASL/PLAIN verification with a constant-time compare, SCRAM
+//! password hashing with PBKDF2, and `derive_keys_from_salted`, the broker-side
+//! key derivation from KIP-554.
 
 use std::collections::HashMap;
 

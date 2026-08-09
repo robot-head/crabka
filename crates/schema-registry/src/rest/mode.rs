@@ -36,7 +36,7 @@ pub async fn put_global(State(st): State<AppState>, body: String) -> Result<Resp
     Ok(ok_json(&serde_json::json!({ "mode": req.mode })))
 }
 
-/// `GET /mode/{subject} -> {"mode": "<M>"} | 404 if no override`
+/// `GET /mode/{subject} -> {"mode": "<M>"}`, or 404 when there is no override.
 #[tracing::instrument(level = "debug", name = "sr.get_subject_mode", skip_all, fields(subject = %subject), err)]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.

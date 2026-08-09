@@ -157,24 +157,30 @@ fn parse_payload_ledger(body: &str) -> Result<PayloadLedger, String> {
 }
 
 /// Client-side time the workload's ambiguity protocol may spend on top of
-/// engine recovery before an acknowledgement can land: a 3s healthy-empty-read
-/// streak plus polling and psql round trips. Added to the observed-safe engine
-/// ack-gap bounds. A 4s allowance was overshot by 425ms on a CI runner in the
-/// sibling nemesis suite, so this carries a wider margin.
+/// engine recovery before an acknowledgement can land. It covers a 3s
+/// healthy-empty-read streak plus polling and psql round trips, and it is added
+/// to the observed-safe engine ack-gap bounds. A 4s allowance was overshot by
+/// 425ms on a CI runner in the sibling nemesis suite, so this carries a wider
+/// margin.
 const WORKLOAD_AMBIGUITY_RESOLUTION_MS: u128 = 6_000;
 
-/// Client-side INSERT timeout for the live workload. Must exceed every
-/// observed-safe ack-gap bound ([`SplitKillPoint::pause_bound_ms`] plus
-/// [`WORKLOAD_AMBIGUITY_RESOLUTION_MS`]): abandoning a statement the server
-/// may still commit is what creates unresolvable ambiguity, so a statement is
-/// only abandoned once the run has already blown its liveness bound.
+/// Client-side INSERT timeout for the live workload.
+///
+/// It must exceed every observed-safe ack-gap bound, that is
+/// [`SplitKillPoint::pause_bound_ms`] plus
+/// [`WORKLOAD_AMBIGUITY_RESOLUTION_MS`]. A statement that the client abandons
+/// while the server may still commit it creates unresolvable ambiguity. The
+/// client therefore abandons a statement only once the run has already blown
+/// its liveness bound.
 const WORKLOAD_INSERT_TIMEOUT: &str = "40s";
 
-/// Explains a terminal rows-vs-ledger mismatch per offending (table, seq),
-/// using the client attempt and ambiguity-retry records to distinguish engine
-/// double-apply (extra physical rows without any client retry) from a workload
-/// grace-window breach (extra rows after the client concluded absence and
-/// re-attempted).
+/// Explains a terminal rows-vs-ledger mismatch for each offending (table, seq).
+///
+/// It reads the client attempt records and the ambiguity-retry records to tell
+/// an engine double-apply from a workload grace-window breach. An engine
+/// double-apply gives extra physical rows without any client retry. A
+/// grace-window breach gives extra rows after the client concluded absence and
+/// re-attempted.
 fn describe_payload_mismatch(
     observed: &BTreeSet<PhysicalPayloadRow>,
     expected: &BTreeSet<PhysicalPayloadRow>,
@@ -248,12 +254,14 @@ fn append_payload_event(file: &mut tempfile::NamedTempFile, event: &PayloadEvent
 ///
 /// Hidden rowids are minted from the timestamp domain, so ledger rows are
 /// keyed by the client-chosen `id` column. Seed rows whose minted rowid fell
-/// below the static `(50, 10)` coordinator boundary stay on r0; that set is
-/// timestamp-dependent, so it is captured empirically before the workload
-/// starts and threaded through as `r0_table50_ids`. Everything else follows
-/// the seed-versus-workload split: table 50 flows to the left successor, and
-/// table 51 seeds (`id < 16`) stay left of the runtime split boundary while
-/// workload rows (`id >= 16`) land on the right successor.
+/// below the static `(50, 10)` coordinator boundary stay on r0. That set
+/// depends on the timestamps, so the fixture captures it empirically before the
+/// workload starts and threads it through as `r0_table50_ids`.
+///
+/// Everything else follows the seed-versus-workload split. Table 50 flows to
+/// the left successor. Table 51 seeds, with `id < 16`, stay left of the runtime
+/// split boundary, and workload rows, with `id >= 16`, land on the right
+/// successor.
 fn successor_partition(
     table_id: u64,
     id: u64,
@@ -2185,19 +2193,19 @@ struct PreSplitLayout {
     /// `(50, 10)` coordinator boundary and therefore live on r0 for the whole
     /// run.
     r0_table50_ids: BTreeSet<u64>,
-    /// Runtime split boundary: strictly above every hidden rowid minted so
-    /// far, so every seed row stays left of it and every workload row (minted
-    /// later from the monotone timestamp domain) lands right of it.
+    /// Runtime split boundary. It is strictly above every hidden rowid minted
+    /// so far, so every seed row stays left of it. Every workload row is minted
+    /// later from the monotone timestamp domain and lands right of it.
     split_boundary_rowid: u64,
 }
 
 /// Capture where the seeds physically landed and derive the split boundary.
 ///
 /// Hidden rowids are timestamps, so the exact rowid of each seed depends on
-/// how many stamps earlier transactions burned; only the structure is
-/// deterministic: each table's seeds are complete, live exactly once across
-/// r0 and r1, table 51 never reaches r0, and rowids grow monotonically with
-/// insertion order.
+/// how many stamps earlier transactions burned. Only the structure is
+/// deterministic: each table's seeds are complete, they live exactly once
+/// across r0 and r1, table 51 never reaches r0, and rowids grow monotonically
+/// with insertion order.
 async fn capture_pre_split_layout(system: &ProcessHarness) -> PreSplitLayout {
     use assert2::assert;
     let mut r0_table50_ids = BTreeSet::new();
@@ -2248,8 +2256,8 @@ async fn capture_pre_split_layout(system: &ProcessHarness) -> PreSplitLayout {
     }
 }
 
-/// Assert the live ordinary workload's acknowledged rows are visible via
-/// direct scans of the coordinator and predecessor ranges.
+/// Assert that direct scans of the coordinator and predecessor ranges see the
+/// live ordinary workload's acknowledged rows.
 async fn assert_ordinary_acks_visible(system: &ProcessHarness, ledger_path: &Path) {
     use assert2::assert;
     let acknowledged = parse_closed_payload_ledger(ledger_path)
@@ -2754,7 +2762,7 @@ struct JournalReceiptExpectation {
 }
 
 /// One ordinary-mode row as physically stored: the timestamp-domain hidden
-/// rowid alongside the client-chosen logical columns.
+/// rowid, alongside the client-chosen logical columns.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct OrdinaryPhysicalRow {
     table_id: u64,
@@ -2767,8 +2775,9 @@ struct OrdinaryPhysicalRow {
 /// Scan one range directly, bypassing the gateway.
 ///
 /// `routing_table_id` is the suffix the fixture bakes into the relation name to
-/// pin its routing slot; the scan RPC addresses the relation by *catalog* id, so
-/// the two are resolved against each other here rather than assumed equal.
+/// pin its routing slot. The scan RPC addresses the relation by *catalog* id,
+/// so this function resolves the two against each other rather than assume they
+/// are equal.
 async fn direct_ordinary_physical_rows(
     system: &ProcessHarness,
     range_id: u32,
@@ -2836,10 +2845,12 @@ async fn direct_ordinary_physical_rows(
 }
 
 /// Scan one range's ordinary-mode table and project it into the logical row
-/// domain the payload ledger records. A logical id appearing at two distinct
-/// hidden rowids is a duplicate-applied write (a re-INSERT of the same id
-/// mints a fresh timestamp rowid), so uniqueness is asserted before the
-/// physical coordinate is dropped.
+/// domain the payload ledger records.
+///
+/// A logical id that appears at two distinct hidden rowids is a
+/// duplicate-applied write, because a re-INSERT of the same id mints a fresh
+/// timestamp rowid. The function therefore asserts uniqueness before it drops
+/// the physical coordinate.
 async fn direct_payload_rows(
     system: &ProcessHarness,
     range_id: u32,
@@ -2872,8 +2883,8 @@ async fn direct_payload_rows(
         .collect()
 }
 
-/// Scan one hash-sharded range directly. See [`direct_ordinary_physical_rows`]
-/// for why the routing suffix and the catalog id are resolved separately.
+/// Scan one hash-sharded range directly. [`direct_ordinary_physical_rows`]
+/// explains why the routing suffix and the catalog id resolve separately.
 async fn direct_hash_payload_rows(
     system: &ProcessHarness,
     range_id: u32,
@@ -3015,12 +3026,12 @@ struct SplitCrashEvidence {
     terminal_operation_evidence: TerminalOperationEvidence,
     completed_phase: String,
     terminal_layout: Vec<TerminalRangeEvidence>,
-    /// Ordinary mode: the runtime split boundary in hidden-rowid (timestamp)
-    /// space; zero in hash mode, whose boundary is the pinned bucket
-    /// coordinate.
+    /// Ordinary mode: the runtime split boundary in hidden-rowid, that is
+    /// timestamp, space. It is zero in hash mode, whose boundary is the pinned
+    /// bucket coordinate.
     split_boundary_rowid: u64,
     /// Ordinary mode: `(table_id, id)` seed rows whose minted rowid landed
-    /// left of the static `(50, 10)` coordinator boundary; empty in hash
+    /// left of the static `(50, 10)` coordinator boundary. It is empty in hash
     /// mode.
     r0_static_ids: Vec<(u64, u64)>,
     pre_kill_predicate: SplitPredicateState,
@@ -3919,9 +3930,10 @@ async fn verify_completed_split_case(input: VerifyCompletedSplitCase<'_>) -> Spl
     }
 }
 
-/// Assert the sealed left-successor boundary equals the runtime split
-/// boundary captured before the workload started (ordinary mode only; the
-/// hash boundary is pinned and checked via [`HashBoundaryEvidence`]).
+/// Assert that the sealed left-successor boundary equals the runtime split
+/// boundary captured before the workload started. This covers ordinary mode
+/// only. The hash boundary is pinned, and [`HashBoundaryEvidence`] checks
+/// it.
 fn assert_sealed_ordinary_boundary(
     workload_mode: SplitWorkload,
     layout: &PreSplitLayout,

@@ -1,5 +1,6 @@
-//! `IQv2` supervisor channel message and per-partition result assembly. This is
-//! the bridge between the public envelope and the byte-level store hook.
+//! `IQv2` supervisor channel message and per-partition result assembly.
+//!
+//! This module connects the public envelope to the byte-level store hook.
 
 use std::{any::Any, collections::BTreeMap};
 
@@ -11,8 +12,10 @@ use super::{
 };
 use crate::store::iq::{Iq2Query, StoreKind};
 
-/// One `IQv2` query addressed to the supervisor (sent on the dedicated `iq2`
-/// channel; the v1 byte channel is untouched).
+/// One `IQv2` query addressed to the supervisor.
+///
+/// The caller sends this query on the dedicated `iq2` channel. The v1 byte
+/// channel does not change.
 pub(crate) struct Iq2Request {
     pub store: String,
     pub kind: StoreKind,
@@ -32,9 +35,11 @@ pub(crate) struct Iq2Outcome {
     pub per_partition: Vec<PartitionEntry>,
 }
 
-/// Downcast each partition's boxed result into `R` and build the typed
-/// [`StateQueryResult`]. A box that does not downcast to `R` becomes a
-/// `StoreException` failure for that partition.
+/// Downcasts each partition's boxed result into `R` and builds the typed
+/// [`StateQueryResult`].
+///
+/// A box that does not downcast to `R` becomes a `StoreException` failure for
+/// that partition.
 pub(crate) fn assemble<R: 'static>(outcome: Iq2Outcome) -> StateQueryResult<R> {
     let mut map: BTreeMap<i32, QueryResult<R>> = BTreeMap::new();
     for (partition, position, res) in outcome.per_partition {

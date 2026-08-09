@@ -1,8 +1,10 @@
-//! Order-preserving encoders for key components. Unsigned big-endian fixed
-//! width is already order-preserving, which is all the local engine needs
-//! (table ids, index ids, and a monotonic hidden rowid). Sortable encodings for
-//! arbitrary PRIMARY KEY column types are deferred; the key layout reserves the
-//! slot, so adding them is additive.
+//! Order-preserving encoders for key components.
+//!
+//! Unsigned big-endian fixed width is already order-preserving, and that is
+//! all the local engine needs for table ids, index ids, and a monotonic
+//! hidden rowid. Sortable encodings for arbitrary PRIMARY KEY column types
+//! are deferred. The key layout reserves the slot, so a later addition is
+//! additive.
 
 use zerocopy::{
     FromBytes, IntoBytes,
@@ -19,7 +21,7 @@ pub fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(U64::new(v).as_bytes());
 }
 
-/// Decode and consume one big-endian `u32` key component.
+/// Decodes and consumes one big-endian `u32` key component.
 ///
 /// # Errors
 ///
@@ -31,7 +33,7 @@ pub fn take_u32(cur: &mut &[u8]) -> Result<u32, KvError> {
     Ok(v.get())
 }
 
-/// Decode and consume one big-endian `u64` key component.
+/// Decodes and consumes one big-endian `u64` key component.
 ///
 /// # Errors
 ///

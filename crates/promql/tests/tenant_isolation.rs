@@ -2,11 +2,12 @@
 
 //! Slice 8 hardening: multi-tenant read isolation over a real TCP socket.
 //!
-//! Boots the Prometheus query HTTP API on an ephemeral `127.0.0.1:0` socket and
-//! drives every read surface with a real HTTP client. Two tenants (`org-a` and
-//! `org-b`) are seeded with disjoint series. Each assertion proves that a tenant
-//! NEVER observes the other tenant's label values / series identifiers, and that
-//! a request without `X-Scope-OrgID` is rejected as `bad_data`.
+//! This test boots the Prometheus query HTTP API on an ephemeral `127.0.0.1:0`
+//! socket and drives every read surface with a real HTTP client. It seeds two
+//! tenants, `org-a` and `org-b`, with disjoint series. Each assertion proves
+//! that a tenant NEVER observes the other tenant's label values or series
+//! identifiers, and that the API rejects a request without `X-Scope-OrgID` as
+//! `bad_data`.
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -36,7 +37,7 @@ fn labels(pairs: &[(&str, &str)]) -> Labels {
     labels
 }
 
-/// Seed disjoint series for the two tenants and boot the API on a real socket.
+/// Seeds disjoint series for the two tenants and boots the API on a real socket.
 async fn boot_isolated_api() -> SocketAddr {
     let mut store = InMemoryMetricStore::new();
 
@@ -118,7 +119,8 @@ async fn boot_isolated_api() -> SocketAddr {
     addr
 }
 
-/// GET `path` with the given tenant header; returns (status, raw body text).
+/// Sends a GET for `path` with the given tenant header. Returns the status and
+/// the raw body text.
 async fn get_with_tenant(
     client: &reqwest::Client,
     addr: SocketAddr,
@@ -154,8 +156,8 @@ fn own_sentinels(tenant: &str) -> &'static [&'static str] {
     }
 }
 
-/// Assert a successful read for `tenant` contains its own data and none of the
-/// foreign tenant's sentinel values.
+/// Asserts that a successful read for `tenant` contains its own data and none of
+/// the foreign tenant's sentinel values.
 fn assert_isolated(tenant: &str, _surface: &str, status: reqwest::StatusCode, body: &str) {
     assert2::assert!(status.is_success());
     let parsed: Value = serde_json::from_str(body).expect("json body");
@@ -165,9 +167,11 @@ fn assert_isolated(tenant: &str, _surface: &str, status: reqwest::StatusCode, bo
     }
 }
 
-/// Like [`assert_isolated`] but for Grafana Mimir cardinality surfaces, which
-/// return a bare cardinality object without the Prometheus `{status,data}`
-/// envelope. Verifies HTTP success and that no foreign sentinel leaks through.
+/// Like [`assert_isolated`], but for Grafana Mimir cardinality surfaces.
+///
+/// Those surfaces return a bare cardinality object without the Prometheus
+/// `{status,data}` envelope. This function checks HTTP success and that no
+/// foreign sentinel leaks through.
 fn assert_cardinality_isolated(
     tenant: &str,
     _surface: &str,

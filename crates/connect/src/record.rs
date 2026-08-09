@@ -29,11 +29,11 @@ pub struct ConnectRecord<K, V> {
     /// The record value, or `None` for a tombstone.
     pub value: Option<V>,
     /// The record timestamp in epoch milliseconds, or `None` when the source
-    /// cannot surface one (the producer fills wall-clock time, matching
-    /// `RecordProducer::send` in the streams runtime).
+    /// cannot supply one. The producer then fills in wall-clock time, which
+    /// matches `RecordProducer::send` in the streams runtime.
     pub timestamp: Option<i64>,
-    /// Per-record headers, in declaration order. Header keys may repeat, so
-    /// this is a `Vec`, not a map (matching Kafka's `RecordHeaders`).
+    /// Per-record headers, in declaration order. Header keys may repeat, so this
+    /// is a `Vec` and not a map, which matches Kafka's `RecordHeaders`.
     pub headers: Vec<Header>,
 }
 
@@ -84,8 +84,8 @@ impl<K, V> ConnectRecord<K, V> {
 
 /// A single Kafka record header: a string key and an opaque optional value.
 ///
-/// Mirrors `crabka_protocol::records::RecordHeader` and the producer's `Header`;
-/// kept here so the connector SPI does not pull in the wire-record crates.
+/// Mirrors `crabka_protocol::records::RecordHeader` and the producer's `Header`.
+/// It stays here so the connector SPI does not pull in the wire-record crates.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Header {
     /// The header key. Not required to be unique within a record.
@@ -96,17 +96,18 @@ pub struct Header {
 
 /// A connector-defined source position: *which* stream, and *where* in it.
 ///
-/// The framework treats both maps as opaque — it persists a checkpoint verbatim
-/// and hands it back to [`Source::seek`](crate::Source::seek) on restart; only
-/// the connector interprets the contents. Mirrors Kafka Connect's split of a
-/// `SourceRecord` into a `sourcePartition` and a `sourceOffset`.
+/// The framework treats both maps as opaque. It persists a checkpoint verbatim
+/// and hands it back to [`Source::seek`](crate::Source::seek) on restart. Only
+/// the connector interprets the contents. This mirrors Kafka Connect's split of
+/// a `SourceRecord` into a `sourcePartition` and a `sourceOffset`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SourceOffset {
-    /// Identifies the stream this position belongs to — e.g. a database table,
-    /// a file path, a log shard. Mirrors Kafka Connect's `sourcePartition`.
+    /// Identifies the stream this position belongs to, for example a database
+    /// table, a file path, or a log shard. Mirrors Kafka Connect's
+    /// `sourcePartition`.
     pub partition: PartitionMap,
-    /// The position within that stream — e.g. a log sequence number, a byte
-    /// offset, a row id. Mirrors Kafka Connect's `sourceOffset`.
+    /// The position within that stream, for example a log sequence number, a
+    /// byte offset, or a row id. Mirrors Kafka Connect's `sourceOffset`.
     pub position: PositionMap,
 }
 
@@ -114,8 +115,8 @@ impl SourceOffset {
     /// A source offset from a stream-identifying `partition` and a `position`
     /// within it.
     ///
-    /// The two halves are distinct types ([`PartitionMap`] / [`PositionMap`])
-    /// so the compiler rejects a transposed call — both are the same underlying
+    /// The two halves are distinct types, [`PartitionMap`] and [`PositionMap`],
+    /// so the compiler rejects a transposed call. Both are the same underlying
     /// [`OffsetMap`], and a swap here would silently corrupt every checkpoint.
     #[must_use]
     pub fn new(partition: PartitionMap, position: PositionMap) -> Self {
@@ -126,17 +127,17 @@ impl SourceOffset {
     }
 }
 
-/// A connector offset map: structured, JSON-serialisable key/value pairs.
-/// Ordered (`BTreeMap`) so a serialised checkpoint is byte-stable.
+/// A connector offset map: structured, JSON-serialisable key and value pairs.
+/// It is ordered, a `BTreeMap`, so a serialised checkpoint is byte-stable.
 pub type OffsetMap = BTreeMap<String, OffsetValue>;
 
 /// A scalar value in an [`OffsetMap`]. The variants cover the JSON-compatible
-/// primitives Kafka Connect offsets are built from, so a checkpoint round-trips
+/// primitives that Kafka Connect offsets use, so a checkpoint round-trips
 /// through any JSON-based offset store.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OffsetValue {
-    /// A missing / explicitly-null position component.
+    /// A missing or explicitly-null position component.
     Null,
     /// A boolean flag.
     Bool(bool),

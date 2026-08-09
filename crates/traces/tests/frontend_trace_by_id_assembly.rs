@@ -1,6 +1,8 @@
-//! Trace-by-id assembly: a trace whose recent spans live in different queriers'
-//! live-stores reassembles into one v2 trace, deduped by `spanId`, with
-//! COMPLETE/PARTIAL by size. Driven through the public `frontend` API with a
+//! Trace-by-id assembly.
+//!
+//! A trace whose recent spans live in different queriers' live-stores
+//! reassembles into one v2 trace, deduped by `spanId`. The size decides
+//! COMPLETE or PARTIAL. The tests drive the public `frontend` API with a
 //! multi-querier `MockQuerier`.
 
 use std::sync::Arc;

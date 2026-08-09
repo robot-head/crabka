@@ -1,14 +1,14 @@
-//! `ApiVersions` (`api_key=18`). Returns the (min, max) supported version
+//! `ApiVersions` (`api_key=18`). It returns the (min, max) supported version
 //! range for every API key this broker handles.
 //!
-//! KIP-511 (v3+): the request carries `client_software_name` and
+//! From v3, KIP-511 makes the request carry `client_software_name` and
 //! `client_software_version`. The broker validates both against
-//! `[a-zA-Z0-9](?:[a-zA-Z0-9\-.]*[a-zA-Z0-9])?` and rejects the call with
-//! `INVALID_REQUEST` if either is empty or malformed (mirrors
-//! `ApiVersionsRequest.isValid` on the JVM). Accepted v3+ handshakes
-//! bump a per-(name, version) Prometheus counter
-//! (`crabka_broker_client_software_versions_total`) so operators can see
-//! which client libraries are connecting.
+//! `[a-zA-Z0-9](?:[a-zA-Z0-9\-.]*[a-zA-Z0-9])?`, and rejects the call with
+//! `INVALID_REQUEST` if either one is empty or malformed. This mirrors
+//! `ApiVersionsRequest.isValid` on the JVM. Each accepted v3+ handshake
+//! increments a Prometheus counter for that (name, version) pair,
+//! `crabka_broker_client_software_versions_total`, so operators can see which
+//! client libraries connect.
 
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::{
@@ -23,7 +23,7 @@ use futures_util::future::BoxFuture;
 use crate::{broker::Broker, codes, error::BrokerError};
 
 /// First `ApiVersions` request version that carries the KIP-511
-/// `client_software_name` / `client_software_version` fields.
+/// `client_software_name` and `client_software_version` fields.
 const CLIENT_INFO_MIN_VERSION: i16 = 3;
 
 // KIP-584 feature surface. `supported_features` advertises `metadata.version`
@@ -80,10 +80,12 @@ fn finalized_feature_keys(image: &crabka_metadata::MetadataImage) -> Vec<Finaliz
 /// - first and last chars are `[a-zA-Z0-9]`
 /// - interior chars are `[a-zA-Z0-9\-.]`
 ///
-/// A single alphanumeric char is valid (the optional middle group lets the
-/// first and last char coincide). Implemented as a byte scan rather than
-/// a `regex` dependency — every Kafka-client name in the wild stays within
-/// ASCII so we don't need full UTF-8 char-class semantics.
+/// A single alphanumeric char is valid, because the optional middle group lets
+/// the first and last char coincide.
+///
+/// The check is a byte scan instead of a `regex` dependency. Every Kafka-client
+/// name in use stays within ASCII, so full UTF-8 char-class semantics are not
+/// needed.
 #[must_use]
 pub(crate) fn is_valid_client_info(s: &str) -> bool {
     let bytes = s.as_bytes();

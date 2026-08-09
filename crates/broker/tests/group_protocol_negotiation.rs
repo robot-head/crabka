@@ -21,12 +21,13 @@ const ERR_NONE: i16 = 0;
 const ERR_INCONSISTENT_GROUP_PROTOCOL: i16 = 23;
 const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 
-/// Boot a single-broker no-auth test cluster. Returns the handle, a
-/// shared bootstrap address string, and the tempdir guard. Tests construct
-/// per-member clients via `connect_client` because the broker processes
-/// requests on a single TCP connection serially — racing concurrent
-/// `JoinGroup` waits over one `Client` would deadlock the second member
-/// behind the first member's `INITIAL_REBALANCE_DELAY` wait.
+/// Boots a single-broker no-auth test cluster. It returns the handle, a shared
+/// bootstrap address string, and the tempdir guard.
+///
+/// Tests build a client per member with `connect_client`, because the broker
+/// processes the requests on one TCP connection in sequence. Two concurrent
+/// `JoinGroup` waits over one `Client` would deadlock the second member behind
+/// the first member's `INITIAL_REBALANCE_DELAY` wait.
 async fn start_broker() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let config = BrokerConfig::for_tests(tempdir.path().to_path_buf());
@@ -35,8 +36,8 @@ async fn start_broker() -> (crabka_broker::BrokerHandle, String, tempfile::TempD
     (handle, bootstrap, tempdir)
 }
 
-/// Build a fresh `Client` (and therefore a fresh TCP connection) against
-/// `bootstrap`. Each member in a racing test gets its own client.
+/// Builds a fresh `Client`, and therefore a fresh TCP connection, against
+/// `bootstrap`. Each member in a concurrent test gets its own client.
 async fn connect_client(bootstrap: &str, client_id: &str) -> Client {
     Client::builder()
         .bootstrap(bootstrap)
@@ -46,10 +47,10 @@ async fn connect_client(bootstrap: &str, client_id: &str) -> Client {
         .expect("client build")
 }
 
-/// Construct a `JoinGroup` request proposing `protocols` (in caller order)
-/// with `protocol_type` and `member_id`. `session_timeout` / `rebalance_timeout`
-/// are short enough that a stuck rebalance fails the test quickly rather
-/// than holding the runtime.
+/// Builds a `JoinGroup` request that proposes `protocols` in caller order,
+/// with `protocol_type` and `member_id`. `session_timeout` and
+/// `rebalance_timeout` are short, so a stuck rebalance fails the test quickly
+/// instead of holding the runtime.
 fn join_group_request(
     group_id: &str,
     member_id: &str,
@@ -75,9 +76,10 @@ fn join_group_request(
     }
 }
 
-/// First-round `JoinGroup` with empty `member_id`: the broker replies
-/// `MEMBER_ID_REQUIRED (79)` and the broker-generated member id (KIP-394).
-/// Asserts both and returns the member id for use in the second round.
+/// First-round `JoinGroup` with an empty `member_id`. The broker replies with
+/// `MEMBER_ID_REQUIRED (79)` and the member id that it generated (KIP-394).
+/// This function asserts both, and returns the member id for the second
+/// round.
 async fn bootstrap_member_id(
     client: &Client,
     group_id: &str,
@@ -100,8 +102,9 @@ async fn bootstrap_member_id(
     resp.member_id
 }
 
-/// Second-round `JoinGroup` with the broker-supplied member id. Returns the
-/// raw response so the caller can assert on `error_code` / `protocol_name`.
+/// Second-round `JoinGroup` with the member id that the broker supplied. It
+/// returns the raw response, so the caller can assert on `error_code` and
+/// `protocol_name`.
 async fn second_join(
     client: &Client,
     group_id: &str,
@@ -116,10 +119,12 @@ async fn second_join(
         .expect("second JoinGroup must round-trip")
 }
 
-/// Two-step `JoinGroup` against an already-stable group (or single member):
-/// bootstrap a member id then immediately join again. The second call
-/// blocks for up to `INITIAL_REBALANCE_DELAY` (~3 s) before the broker
-/// completes the rebalance and returns NONE. Returns the full response.
+/// Two-step `JoinGroup` against a group that is already stable, or that has a
+/// single member. It bootstraps a member id, then joins again at once.
+///
+/// The second call blocks for up to `INITIAL_REBALANCE_DELAY`, about 3 s,
+/// before the broker completes the rebalance and returns NONE. It returns the
+/// full response.
 async fn full_join(
     client: &Client,
     group_id: &str,
@@ -130,10 +135,10 @@ async fn full_join(
     second_join(client, group_id, &member_id, protocol_type, protocols).await
 }
 
-/// Members A and B propose disjoint protocol lists (`range` only vs.
-/// `cooperative-sticky` only). The intersection is empty, so the broker
-/// must surface `INCONSISTENT_GROUP_PROTOCOL (23)` to at least one (and
-/// in this implementation, both) racing members.
+/// Members A and B propose disjoint protocol lists: `range` only against
+/// `cooperative-sticky` only. The intersection is empty, so the broker must
+/// return `INCONSISTENT_GROUP_PROTOCOL (23)` to at least one of the two
+/// concurrent members. This implementation returns it to both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_intersection_returns_inconsistent_group_protocol() {
     let (handle, bootstrap, _tempdir) = start_broker().await;
@@ -205,9 +210,10 @@ async fn empty_intersection_returns_inconsistent_group_protocol() {
     );
 }
 
-/// Three members. A and B vote first for `cooperative-sticky`, C votes
-/// first for `range`. Both names are in every member's list (intersection
-/// is `{cooperative-sticky, range}`). `cooperative-sticky` wins 2-1.
+/// Three members. A and B vote first for `cooperative-sticky`, and C votes
+/// first for `range`. Both names are in every member's list, so the
+/// intersection is `{cooperative-sticky, range}`. `cooperative-sticky` wins by
+/// 2 votes to 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vote_picks_cooperative_when_majority() {
     let (handle, bootstrap, _tempdir) = start_broker().await;
@@ -308,8 +314,8 @@ async fn vote_picks_cooperative_when_majority() {
     }
 }
 
-/// Two members, one vote each, both names in the intersection. The tie
-/// must break lexicographically — `'c' < 'r'`, so `cooperative-sticky`
+/// Two members, with one vote each, and both names in the intersection. The
+/// tie must break lexicographically. `'c' < 'r'`, so `cooperative-sticky`
 /// wins.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn vote_ties_broken_lexicographically() {
@@ -382,9 +388,9 @@ async fn vote_ties_broken_lexicographically() {
     }
 }
 
-/// A single member proposing `[range]` lands on `range` — the trivial
-/// sanity check that the negotiation primitive doesn't somehow break
-/// the simplest case.
+/// A single member that proposes `[range]` lands on `range`. This is the
+/// simple check that the negotiation primitive still handles the simplest
+/// case.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn single_member_picks_its_first_protocol() {
     let (handle, bootstrap, _tempdir) = start_broker().await;
@@ -402,10 +408,10 @@ async fn single_member_picks_its_first_protocol() {
     );
 }
 
-/// Member A establishes the group with `protocol_type = "consumer"`.
-/// Member B then joins with `protocol_type = "stream"`. The broker must
-/// reject B with `INCONSISTENT_GROUP_PROTOCOL` before it ever enters the
-/// rebalance — the type mismatch check fires on the second-round join.
+/// Member A establishes the group with `protocol_type = "consumer"`. Member B
+/// then joins with `protocol_type = "stream"`. The broker must reject B with
+/// `INCONSISTENT_GROUP_PROTOCOL` before B enters the rebalance. The
+/// type-mismatch check runs on the second-round join.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn protocol_type_mismatch_rejected() {
     let (handle, bootstrap, _tempdir) = start_broker().await;

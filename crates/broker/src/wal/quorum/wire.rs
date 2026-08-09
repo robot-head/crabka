@@ -41,11 +41,12 @@ impl QuorumGroup {
     }
 }
 
-/// Decode the KIP-595 `Fetch` body enough to choose the target quorum group.
+/// Decodes enough of the KIP-595 `Fetch` body to choose the target quorum
+/// group.
 ///
-/// Kafka's metadata quorum is identified by the fixed `__cluster_metadata` topic
-/// id. Diskless WAL shards reuse the same KIP-595 Fetch envelope but use the
-/// data topic id and partition as the shard address.
+/// The fixed `__cluster_metadata` topic id identifies Kafka's metadata quorum.
+/// Diskless WAL shards reuse the same KIP-595 Fetch envelope, but they use the
+/// data topic id and the partition as the shard address.
 #[allow(dead_code)]
 pub(crate) fn classify_fetch(body: &[u8]) -> Option<QuorumGroup> {
     decode_fetch(body).map(|request| request.group)

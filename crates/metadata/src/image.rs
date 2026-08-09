@@ -1,6 +1,6 @@
-//! Immutable snapshot of the cluster's metadata state. Mutated only by
-//! [`MetadataImage::apply`] (called from the Raft state machine), and
-//! read everywhere else via shared references / `Arc` clones.
+//! Immutable snapshot of the cluster's metadata state. Only
+//! [`MetadataImage::apply`] mutates it, and the Raft state machine calls that
+//! method. Everywhere else reads it through shared references and `Arc` clones.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -22,8 +22,8 @@ use crate::{
 pub type EntityKey = Vec<(String, Option<String>)>;
 
 /// In-memory image type for a single delegation
-/// token (KIP-48). Mirrors [`DelegationTokenRecord`] minus any tombstone
-/// concerns — tombstones are handled as removals on the apply path.
+/// token (KIP-48). Mirrors [`DelegationTokenRecord`] without any tombstone
+/// concerns. The apply path handles tombstones as removals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegationToken {
     pub token_id: String,
@@ -57,7 +57,8 @@ pub fn canonicalize_entity(mut tuple: Vec<(String, Option<String>)>) -> EntityKe
 }
 
 /// Static discriminant name for a [`MetadataRecord`], used as tracing span
-/// context (the record itself is skipped to keep spans cheap and PII-free).
+/// context. The span skips the record itself to keep spans cheap and free of
+/// PII.
 fn record_variant(rec: &MetadataRecord) -> &'static str {
     match rec {
         MetadataRecord::V1Topic(_) => "V1Topic",
@@ -88,16 +89,17 @@ fn record_variant(rec: &MetadataRecord) -> &'static str {
 pub struct MetadataImage {
     cluster_id: Uuid,
     topics: HashMap<String, TopicRecord>,
-    /// KIP-516 reverse index: topic UUID -> topic name. Maintained in
-    /// `apply()` alongside `topics`; rebuilt on snapshot replay because
-    /// every record (including snapshot installs) flows through `apply()`.
+    /// KIP-516 reverse index: topic UUID -> topic name. `apply()` maintains it
+    /// next to `topics`. A snapshot replay rebuilds it, because every record
+    /// flows through `apply()`, including snapshot installs.
     topic_ids: HashMap<Uuid, String>,
     /// Partition records grouped by owning topic. The by-topic grouping is
     /// the scaling-critical index: [`Self::partitions_of`] resolves a topic
-    /// in O(1) and touches only that topic's partitions, keeping per-topic
-    /// hot paths (Metadata responses, reconcile loops) O(total partitions)
-    /// rather than O(topics × partitions). The inner `BTreeMap` keys by
-    /// partition index, so per-topic iteration is ascending-index order.
+    /// in O(1) and touches only that topic's partitions. Per-topic hot paths
+    /// such as Metadata responses and reconcile loops therefore stay
+    /// O(total partitions) and not O(topics × partitions). The inner
+    /// `BTreeMap` keys by partition index, so per-topic iteration runs in
+    /// ascending-index order.
     partitions: HashMap<String, BTreeMap<i32, PartitionRecord>>,
     partition_next_offsets: HashMap<(String, i32), i64>,
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
@@ -112,10 +114,10 @@ pub struct MetadataImage {
     kraft_version: u16,
     voters: crate::voters::VoterSet,
     feature_levels: BTreeMap<String, i16>,
-    /// KIP-584 finalized-features epoch. `-1` until the first
-    /// `V1FeatureLevel` record applies, then monotonically increasing
-    /// (one bump per applied record). Deterministic across replicas
-    /// because records apply in committed-log order on every node.
+    /// KIP-584 finalized-features epoch. It is `-1` until the first
+    /// `V1FeatureLevel` record applies, and it then increases monotonically,
+    /// once per applied record. It is deterministic across replicas, because
+    /// records apply in committed-log order on every node.
     features_epoch: i64,
 }
 
@@ -166,7 +168,7 @@ impl MetadataImage {
         self.topics.get(name)
     }
 
-    /// KIP-516: resolve a topic by its UUID. O(1) via the `topic_ids` index.
+    /// KIP-516: resolve a topic by its UUID. O(1) through the `topic_ids` index.
     #[tracing::instrument(level = "debug", skip_all, fields(topic_id = %id))]
     #[must_use]
     pub fn topic_by_id(&self, id: &Uuid) -> Option<&TopicRecord> {
@@ -187,10 +189,10 @@ impl MetadataImage {
     }
 
     /// All partitions of `topic`, in ascending partition-index order.
-    /// O(1) topic lookup + O(own partitions) iteration via the by-topic
-    /// index — never scans other topics' partitions, so per-topic callers
-    /// stay proportional to the topic they ask about even in images with
-    /// tens of thousands of topics.
+    /// The by-topic index gives an O(1) topic lookup and an
+    /// O(own partitions) iteration. The method never scans the partitions of
+    /// other topics, so a per-topic caller stays proportional to the topic it
+    /// asks about, even in images with tens of thousands of topics.
     pub fn partitions_of(&self, topic: &str) -> impl Iterator<Item = &PartitionRecord> {
         self.partitions
             .get(topic)
@@ -208,11 +210,12 @@ impl MetadataImage {
     }
 
     /// The live partition count for `topic`, derived from the partitions
-    /// map rather than the stored `TopicRecord.partitions` field. This is
-    /// the authoritative count for the KIP-631 round-trip (the KIP-631
-    /// `TopicRecord` carries no partition count) and for the `validate`
-    /// partition-count-grew check. Returns 0 for an unknown topic or one
-    /// with no partition records yet applied. O(1).
+    /// map and not from the stored `TopicRecord.partitions` field. This is
+    /// the authoritative count for the KIP-631 round-trip, because the
+    /// KIP-631 `TopicRecord` carries no partition count. It is also the
+    /// authoritative count for the `validate` partition-count-grew check.
+    /// Returns 0 for an unknown topic, or for a topic with no applied
+    /// partition records. O(1).
     #[must_use]
     pub fn topic_partition_count(&self, topic: &str) -> i32 {
         self.partitions
@@ -225,26 +228,26 @@ impl MetadataImage {
         self.partitions.values().map(BTreeMap::len).sum()
     }
 
-    /// Single-pass iterator over every partition in the image (each record
-    /// carries its own `topic` / `partition` fields). Topic order is
-    /// unspecified; within a topic, ascending partition-index order.
-    /// O(P) in total partition count — the cluster-wide maintenance loops
-    /// (failover, rebalance, reassignment, metrics) use this instead of
-    /// a per-topic loop.
+    /// Single-pass iterator over every partition in the image. Each record
+    /// carries its own `topic` and `partition` fields. Topic order is
+    /// unspecified. Within a topic the order is ascending partition index.
+    /// The iterator is O(P) in total partition count. The cluster-wide
+    /// maintenance loops for failover, rebalance, reassignment, and metrics
+    /// use this instead of a per-topic loop.
     pub fn all_partitions(&self) -> impl Iterator<Item = &PartitionRecord> {
         self.partitions.values().flat_map(BTreeMap::values)
     }
 
-    /// All partitions where a reassignment is currently in flight
-    /// (`adding_replicas` or `removing_replicas` non-empty).
+    /// All partitions where a reassignment is currently in flight, that is,
+    /// where `adding_replicas` or `removing_replicas` is non-empty.
     pub fn reassignments_in_flight(&self) -> impl Iterator<Item = &PartitionRecord> + '_ {
         self.all_partitions()
             .filter(|p| !p.adding_replicas.is_empty() || !p.removing_replicas.is_empty())
     }
 
     /// Currently-effective config overrides for `topic`, or `None` if no
-    /// `V1TopicConfig` record has been applied for this topic since the last
-    /// `V1DeleteTopic` (or since image creation).
+    /// `V1TopicConfig` record has applied for this topic since the last
+    /// `V1DeleteTopic`, or since image creation.
     #[must_use]
     pub fn topic_config(&self, topic: &str) -> Option<&BTreeMap<String, String>> {
         self.topic_configs.get(topic)
@@ -258,8 +261,8 @@ impl MetadataImage {
     }
 
     /// Returns the KIP-73 throttle rate for `node_id` and `kind`.
-    /// Returns `None` if the config key is absent, unparseable, or negative —
-    /// `-1` is Kafka's convention for "disabled / unlimited".
+    /// Returns `None` if the config key is absent, unparseable, or negative.
+    /// `-1` is Kafka's convention for "disabled" or "unlimited".
     #[must_use]
     pub fn broker_throttle_rate(&self, node_id: NodeId, kind: ThrottleKind) -> Option<ByteRate> {
         let key = match kind {
@@ -349,9 +352,9 @@ impl MetadataImage {
 
     /// Iterate every ACL that could possibly match `(rt, rn)`:
     /// - all literal entries at `(rt, rn)`
-    /// - all literal entries at `(rt, "*")` — the `WILDCARD_RESOURCE`, which
-    ///   matches every resource of that type (see Kafka's `AclAuthorizer` /
-    ///   `StandardAuthorizer`; this is what `kafka-acls --topic '*'` produces)
+    /// - all literal entries at `(rt, "*")`, the `WILDCARD_RESOURCE`, which
+    ///   matches every resource of that type. See Kafka's `AclAuthorizer` and
+    ///   `StandardAuthorizer`. This is what `kafka-acls --topic '*'` produces.
     /// - all prefixed entries whose `resource_name` is a prefix of `rn`
     pub fn matching_acls<'a>(
         &'a self,
@@ -380,8 +383,8 @@ impl MetadataImage {
         literal_iter.chain(wildcard_iter).chain(prefixed_iter)
     }
 
-    /// All ACL entries (literal + prefixed across all resource types).
-    /// Used by `DescribeAcls`.
+    /// All ACL entries, both literal and prefixed, across all resource types.
+    /// `DescribeAcls` uses this.
     pub fn all_acls(&self) -> impl Iterator<Item = &AclEntry> {
         self.acls_literal
             .values()
@@ -395,8 +398,8 @@ impl MetadataImage {
         self.delegation_tokens.get(token_id)
     }
 
-    /// All tokens owned by `owner` (KIP-48; exact match on
-    /// the owning [`KafkaPrincipal`]). Order is unspecified.
+    /// All tokens owned by `owner` (KIP-48). The match on the owning
+    /// [`KafkaPrincipal`] is exact. Order is unspecified.
     #[must_use]
     pub fn delegation_tokens_by_owner(&self, owner: &KafkaPrincipal) -> Vec<&DelegationToken> {
         self.delegation_tokens
@@ -405,10 +408,9 @@ impl MetadataImage {
             .collect()
     }
 
-    /// Tokens that `principal` is allowed to see via
-    /// `DescribeDelegationToken` without `DescribeToken` permission —
-    /// either as the owner or as a listed renewer (KIP-48). Order is
-    /// unspecified.
+    /// Tokens that `principal` may see through `DescribeDelegationToken`
+    /// without `DescribeToken` permission, either as the owner or as a listed
+    /// renewer (KIP-48). Order is unspecified.
     #[must_use]
     pub fn delegation_tokens_visible_to(
         &self,
@@ -421,19 +423,19 @@ impl MetadataImage {
     }
 
     /// Every delegation token currently in the
-    /// image (KIP-48). Used by `DescribeDelegationToken` for callers with
+    /// image (KIP-48). `DescribeDelegationToken` uses this for callers with
     /// `DescribeToken` permission on the cluster.
     pub fn all_delegation_tokens(&self) -> impl Iterator<Item = &DelegationToken> {
         self.delegation_tokens.values()
     }
 
     /// KIP-48: lookup a delegation token by its HMAC bytes.
-    /// `RenewDelegationToken` / `ExpireDelegationToken` identify a token
-    /// by HMAC on the wire (not by `token_id`), and the SCRAM
+    /// `RenewDelegationToken` and `ExpireDelegationToken` identify a token
+    /// by HMAC on the wire and not by `token_id`, and the SCRAM
     /// delegation-token fallback needs the same lookup at
-    /// the auth path. Implementation is a linear scan over the small
-    /// (per-broker, in-memory) token map — clarity over an explicit
-    /// `HMAC→token_id` index until cardinality justifies it.
+    /// the auth path. The implementation is a linear scan over the small
+    /// per-broker, in-memory token map. It keeps clarity over an explicit
+    /// `HMAC→token_id` index until cardinality justifies one.
     #[must_use]
     pub fn delegation_token_by_hmac(&self, hmac: &[u8]) -> Option<&DelegationToken> {
         self.delegation_tokens.values().find(|t| t.hmac == hmac)
@@ -454,8 +456,8 @@ impl MetadataImage {
     }
 
     /// The finalized `metadata.version` level, or `None` if no
-    /// `V1FeatureLevel` for `metadata.version` has been applied
-    /// (a pre-bootstrap / legacy image — `MetadataVersion.UNKNOWN`).
+    /// `V1FeatureLevel` for `metadata.version` has applied. That is a
+    /// pre-bootstrap or legacy image, which is `MetadataVersion.UNKNOWN`.
     #[must_use]
     pub fn finalized_metadata_version(&self) -> Option<i16> {
         self.feature_levels
@@ -471,10 +473,10 @@ impl MetadataImage {
         self.feature_levels.get(name).copied()
     }
 
-    /// The minimum `metadata.version` level the live image requires: the
-    /// floor a downgrade must not drop below. Rises with feature-gated
-    /// state present in the image (`KRaft` SCRAM creds, delegation tokens).
-    /// Baseline is `METADATA_VERSION_MIN`.
+    /// The minimum `metadata.version` level that the live image needs: the
+    /// floor that a downgrade must not drop below. It rises with feature-gated
+    /// state present in the image, such as `KRaft` SCRAM creds and delegation
+    /// tokens. The baseline is `METADATA_VERSION_MIN`.
     #[must_use]
     pub fn min_required_metadata_version(&self) -> i16 {
         use crate::metadata_version::{
@@ -490,11 +492,11 @@ impl MetadataImage {
         floor
     }
 
-    /// Apply one record. Returns the previous record (for `V1Topic` /
-    /// `V1BrokerRegistration`) so the caller can observe overwrite cases.
-    /// Infallible — pre-validation against the current image happens
-    /// in the controller before submitting to Raft. Apply must never
-    /// fail on a committed entry.
+    /// Apply one record. Returns the previous record, for `V1Topic` and
+    /// `V1BrokerRegistration`, so the caller can observe overwrite cases.
+    /// The method is infallible. The controller pre-validates against the
+    /// current image before it submits to Raft. Apply must never fail on a
+    /// committed entry.
     #[tracing::instrument(level = "info", skip_all, fields(record = record_variant(rec)))]
     // exhaustive match over MetadataRecord
     pub fn apply(&mut self, rec: &MetadataRecord) {
@@ -706,15 +708,16 @@ impl MetadataImage {
     /// This is the inverse of `apply` over a sequence of non-tombstone
     /// records: each stored entry maps to the record that would create it.
     ///
-    /// Tombstone / removal records (`V1DeleteTopic`,
-    /// `V1DeleteScramCredential`, `V1DeleteAccessControlEntry`,
-    /// `V1DeleteDelegationToken`, `V1UnregisterBroker`) are intentionally
-    /// never emitted: a snapshot captures resulting *state*, not deletion
-    /// history. `V1BrokerConfig` deletes likewise vanish — only the
-    /// surviving key/value pairs are emitted as `Some(value)` sets.
+    /// The method deliberately never emits tombstone or removal records:
+    /// `V1DeleteTopic`, `V1DeleteScramCredential`,
+    /// `V1DeleteAccessControlEntry`, `V1DeleteDelegationToken`, and
+    /// `V1UnregisterBroker`. A snapshot captures resulting *state*, not
+    /// deletion history. `V1BrokerConfig` deletes vanish in the same way. The
+    /// method emits only the surviving key and value pairs, as `Some(value)`
+    /// sets.
     ///
-    /// Records are emitted in dependency order so that a fresh image
-    /// `apply`ing them never sees a dangling reference: brokers,
+    /// The method emits records in dependency order, so a fresh image that
+    /// `apply`s them never sees a dangling reference: brokers,
     /// broker-configs, topics, partitions, topic-configs, SCRAM creds,
     /// ACLs, client quotas, delegation tokens.
     #[tracing::instrument(
@@ -880,9 +883,9 @@ impl MetadataImage {
         }
     }
 
-    /// Reconstruct an image from a `cluster_id` and a record sequence
-    /// (typically [`Self::to_records`] output read back from a snapshot):
-    /// `new` an empty image and `apply` each record in order.
+    /// Reconstruct an image from a `cluster_id` and a record sequence,
+    /// typically the output of [`Self::to_records`] read back from a snapshot.
+    /// The method `new`s an empty image and `apply`s each record in order.
     #[tracing::instrument(level = "info", skip_all, fields(records = records.len()))]
     #[must_use]
     pub fn from_records(cluster_id: Uuid, records: &[MetadataRecord]) -> Self {
@@ -894,8 +897,8 @@ impl MetadataImage {
     }
 
     /// Synchronous pre-validation: returns `Ok` if the record would be a
-    /// no-conflict apply, otherwise the appropriate error. Used by
-    /// `Controller::submit_change` before forwarding to openraft.
+    /// no-conflict apply, otherwise the appropriate error.
+    /// `Controller::submit_change` uses this before it forwards to openraft.
     ///
     /// # Errors
     /// Returns the conflict that would prevent the record from being applied.
@@ -1002,8 +1005,8 @@ mod tests {
     use super::*;
 
     /// `record_variant` maps each enum variant to its exact discriminant
-    /// name; asserting concrete mappings kills whole-fn replacements (e.g.
-    /// returning `""` or a constant).
+    /// name. Assertions on concrete mappings kill whole-fn replacements, for
+    /// example a return of `""` or of a constant.
     #[test]
     fn record_variant_returns_exact_discriminant_names() {
         let topic = MetadataRecord::V1Topic(TopicRecord {
@@ -1193,10 +1196,10 @@ mod tests {
         }
     }
 
-    /// Exercises every stored variant the image can hold (the 9
-    /// state-producing records), plus tombstones whose effects must NOT
-    /// leak into the snapshot. The round-trip must reproduce the image
-    /// exactly.
+    /// Exercises every stored variant that the image can hold, that is, the 9
+    /// state-producing records. It also exercises tombstones whose effects
+    /// must NOT leak into the snapshot. The round-trip must reproduce the
+    /// image exactly.
     #[test]
     // exhaustive fixture over every stored variant
     fn to_records_round_trips_all_variants() {
@@ -1414,13 +1417,13 @@ mod tests {
         assert2::assert!(rebuilt == image);
     }
 
-    /// Finalized features and their epoch must survive a `to_records` /
-    /// `from_records` round-trip exactly. The epoch is carried verbatim by a
-    /// trailing snapshot-only record, NOT recomputed by apply-bumping — so an
-    /// image whose epoch (history of `UpdateFeatures` applies) exceeds its live
-    /// feature count still reproduces exactly. Regression guard for the bug
-    /// where `to_records` emitted no feature records at all and the snapshot
-    /// path silently dropped every finalized feature.
+    /// Finalized features and their epoch must survive a `to_records` and
+    /// `from_records` round-trip exactly. A trailing snapshot-only record
+    /// carries the epoch verbatim, and apply does NOT recompute it by a bump.
+    /// That epoch is the history of `UpdateFeatures` applies, so an image whose
+    /// epoch exceeds its live feature count still reproduces exactly. This test
+    /// guards the regression where `to_records` emitted no feature records at
+    /// all and the snapshot path silently dropped every finalized feature.
     #[test]
     fn to_records_round_trips_features_and_epoch() {
         let cid = Uuid::new_v4();
@@ -1458,13 +1461,13 @@ mod tests {
         );
     }
 
-    /// KIP-853 voter set + finalized cluster `kraft.version` must survive
-    /// `to_records` / `from_records`. Before the fix `to_records` dropped
-    /// both, so a snapshot recovery / learner install rebuilt the image with
-    /// an EMPTY voter set and `kraft_version = 0` — breaking `DescribeQuorum`
-    /// and KIP-853 auto-join. The cluster `kraft_version` has no other
-    /// persistence source (it is not part of openraft's membership), so it
-    /// can only round-trip through a `V1KRaftVersion` record.
+    /// The KIP-853 voter set and the finalized cluster `kraft.version` must
+    /// survive `to_records` and `from_records`. If `to_records` drops both, a
+    /// snapshot recovery or a learner install rebuilds the image with an EMPTY
+    /// voter set and `kraft_version = 0`. That breaks `DescribeQuorum` and
+    /// KIP-853 auto-join. The cluster `kraft_version` has no other persistence
+    /// source, because it is not part of openraft's membership, so it can only
+    /// round-trip through a `V1KRaftVersion` record.
     #[test]
     fn to_records_preserves_voters_and_kraft_version() {
         use crate::{
@@ -1615,10 +1618,10 @@ mod tests {
         assert2::assert!(matches!(err, MetadataError::TopicExists(_)));
     }
 
-    /// Apply `count` partition records (indices `0..count`) for `topic` so
-    /// the image's derived partition count reflects a realistic topic. The
-    /// `validate` partition-count check reads this derived count, not the
-    /// stored `TopicRecord.partitions`.
+    /// Apply `count` partition records, with indices `0..count`, for `topic`,
+    /// so the derived partition count of the image matches a realistic topic.
+    /// The `validate` partition-count check reads this derived count and not
+    /// the stored `TopicRecord.partitions`.
     fn apply_partitions(m: &mut MetadataImage, topic: &str, count: i32) {
         for p in 0..count {
             m.apply(&MetadataRecord::V1Partition(PartitionRecord {
@@ -2045,9 +2048,10 @@ mod tests {
     }
 
     /// `total_partitions` sums the by-topic index across every topic. It backs
-    /// the `to_records` snapshot tracing field (whose span is inert under the
-    /// test subscriber), so pin its value directly here — otherwise a
-    /// constant-return mutant survives with no behavioral test to catch it.
+    /// the `to_records` snapshot tracing field, whose span is inert under the
+    /// test subscriber. This test therefore pins its value directly. Without
+    /// that pin, a constant-return mutant survives and no behavioral test
+    /// catches it.
     #[test]
     fn total_partitions_sums_across_topics() {
         let mut m = img();
@@ -2077,8 +2081,9 @@ mod tests {
     }
 
     /// Pins the `partitions_of` ordering contract: ascending partition-index
-    /// order regardless of apply order. `Metadata` / `DescribeTopicPartitions`
-    /// rows and the cursor-based pagination rely on it.
+    /// order regardless of apply order. The `Metadata` and
+    /// `DescribeTopicPartitions` rows and the cursor-based pagination rely on
+    /// it.
     #[test]
     fn partitions_of_yields_ascending_partition_index_order() {
         let mut m = img();
@@ -2101,9 +2106,9 @@ mod tests {
         assert2::assert!(idxs == vec![0, 1, 2]);
     }
 
-    /// Deleting one topic must not disturb another topic's partitions in
-    /// the by-topic index, and `partitions_of` for the deleted topic goes
-    /// empty while its sibling stays intact.
+    /// A delete of one topic must not disturb the partitions of another topic
+    /// in the by-topic index. `partitions_of` for the deleted topic goes
+    /// empty, and its sibling stays intact.
     #[test]
     fn delete_topic_leaves_other_topics_partitions_intact() {
         let mut m = img();
@@ -2293,8 +2298,9 @@ mod tests {
 
     /// The config value is a `String` holding Kafka's `int64` quota, and the
     /// quantity stores `f64`. Every magnitude below 2^53 round-trips exactly,
-    /// which covers the whole range the config key can express in practice —
-    /// pinned here so the accessor is not quietly lossy at the top end.
+    /// which covers the whole range the config key can express in practice.
+    /// This test pins that, so the accessor is not quietly lossy at the top
+    /// end.
     #[test]
     fn broker_throttle_rate_round_trips_large_quotas_exactly() {
         for raw in ["0", "1", "1073741824", "9007199254740992"] {

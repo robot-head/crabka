@@ -1,11 +1,12 @@
-//! `crabka-object-store` — unified object-store construction shared by Crabka's
-//! KIP-405 tiered storage (`crabka-remote-storage`) and observability blockstore
-//! (`crabka-blockstore`).
+//! Unified object-store construction for Crabka.
 //!
-//! Scope is the object-store access/plumbing layer only: turning a typed
-//! `ObjectStoreConfig` into an `object_store::ObjectStore` handle. Data
-//! representation (verbatim Kafka segment bytes vs Parquet blocks) stays in the
-//! respective consumer crates.
+//! Crabka's KIP-405 tiered storage, `crabka-remote-storage`, and the
+//! observability blockstore, `crabka-blockstore`, share `crabka-object-store`.
+//!
+//! The scope is the object-store access and plumbing layer only. The crate
+//! turns a typed `ObjectStoreConfig` into an `object_store::ObjectStore`
+//! handle. The data representation stays in the respective consumer crates.
+//! That representation is verbatim Kafka segment bytes or Parquet blocks.
 
 mod build;
 mod config;

@@ -69,11 +69,11 @@ fn consume_configured_quota(
 
 /// A quota delay as Kafka's `throttle_time_ms` wire field.
 ///
-/// Truncates toward zero rather than rounding to nearest: the previous
-/// integer-millisecond pipeline reported a 1.6 ms delay as `1`, and
-/// `throttle_time_ms` is a value a client reads back and sleeps on, so the
-/// byte on the wire must not move because the delay is now carried as a
-/// [`Time`]. A delay beyond `i32::MAX` milliseconds saturates.
+/// The conversion truncates toward zero and does not round to the nearest
+/// value. It reports a 1.6 ms delay as `1`. A client reads `throttle_time_ms`
+/// back and sleeps on it, so the byte on the wire must not change because the
+/// code carries the delay as a [`Time`]. A delay beyond `i32::MAX`
+/// milliseconds saturates.
 #[must_use]
 pub(crate) fn throttle_time_ms(delay: Time) -> i32 {
     i32::try_from(delay.millis_i64_trunc()).unwrap_or(i32::MAX)
@@ -84,16 +84,17 @@ pub(crate) fn throttle_time_ms(delay: Time) -> i32 {
 ///
 /// The bucket is byte-dimensioned, but Kafka drives `request_percentage` and
 /// `controller_mutation_rate` through the same token arithmetic, and those are
-/// not byte throughputs. Their raw magnitudes therefore cross into the bucket's
-/// dimension here, in one place, rather than at each call site.
+/// not byte throughputs. Their raw magnitudes therefore cross into the
+/// bucket's dimension here, in one place, instead of at each call site.
 pub(crate) fn bucket_rate(raw: u64) -> ByteRate {
     ByteRate::from_bytes_per_sec(i64::try_from(raw).unwrap_or(i64::MAX))
 }
 
 /// A configured rate as a whole token count, truncated toward zero.
 ///
-/// Negative and non-finite rates are not throughputs and collapse to `0`, the
-/// bucket's "no limit configured" sentinel; anything past `u64::MAX` saturates.
+/// Negative and non-finite rates are not throughputs, so they collapse to `0`,
+/// the bucket's "no limit configured" sentinel. Anything past `u64::MAX`
+/// saturates.
 pub(crate) fn positive_f64_to_u64(value: f64) -> u64 {
     if !value.is_finite() || value <= 0.0 {
         return 0;
@@ -103,9 +104,10 @@ pub(crate) fn positive_f64_to_u64(value: f64) -> u64 {
 
 /// A token count widened for the overage-over-rate division.
 ///
-/// Exact below 2^53, which covers every quota magnitude Kafka can express.
-/// `NumCast` never fails for `u64` into `f64`; the fallback keeps the quota path
-/// total rather than panicking on a value that cannot occur.
+/// The conversion is exact below 2^53, which covers every quota magnitude
+/// Kafka can express. `NumCast` never fails for `u64` into `f64`. The fallback
+/// keeps the quota path total instead of panicking on a value that cannot
+/// occur.
 pub(crate) fn u64_to_f64(value: u64) -> f64 {
     NumCast::from(value).unwrap_or(f64::INFINITY)
 }
@@ -161,9 +163,8 @@ mod tests {
 
     use super::{test_support::image_with_quota, *};
 
-    /// `throttle_time_ms` truncates, matching the integer-millisecond
-    /// pipeline it replaced: a sub-millisecond delay reports `0`, and a
-    /// 1.6 ms delay reports `1`, not `2`.
+    /// `throttle_time_ms` truncates: a sub-millisecond delay reports `0`, and
+    /// a 1.6 ms delay reports `1`, not `2`.
     #[test]
     fn throttle_time_ms_truncates_toward_zero() {
         let cases = [
@@ -197,9 +198,10 @@ mod tests {
         assert!(u64_to_f64(u64::MAX).is_finite());
     }
 
-    /// The producer path carried its own copy of this widening until the two
-    /// were merged. They agreed on every input, and this pins that they still
-    /// would — bit patterns rather than `==`, so the comparison is exact.
+    /// The producer path once carried its own copy of this widening. The two
+    /// agreed on every input, and this test pins that they still would. It
+    /// compares bit patterns instead of using `==`, so the comparison is
+    /// exact.
     #[test]
     fn widening_agrees_with_the_former_producer_copy() {
         for value in [0_u64, 1, 1024, 1 << 52, (1_u64 << 53) - 1, u64::MAX] {
@@ -209,7 +211,7 @@ mod tests {
     }
 
     /// Truncating a configured rate agrees with the producer path's former
-    /// floor-and-parse, including the sub-one rates it rejects.
+    /// floor-and-parse, and also on the sub-one rates that it rejects.
     #[test]
     fn rate_truncation_agrees_with_the_former_producer_copy() {
         for rate in [1.0_f64, 1.9, 1024.0, 9.007_199_254_740_99e15, f64::MAX] {

@@ -10,12 +10,12 @@ pub use overrides::{OverridesError, OverridesProvider};
 /// Mimir-style per-tenant limits used by metrics ingest and query paths.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
-    /// Accepted sample rate; a zero rate disables ingestion rate limiting.
+    /// Accepted sample rate. A zero rate turns the ingestion rate limit off.
     #[serde(with = "serde_units::human::frequency")]
     pub ingestion_rate: Frequency,
     /// Samples the token bucket may hand out in one burst.
     pub ingestion_burst_size: u64,
-    /// Active series per tenant; `0` disables the cap.
+    /// Active series per tenant. `0` turns the cap off.
     pub max_global_series_per_user: u64,
     #[serde(with = "serde_units::human::byte_size")]
     pub max_label_name_length: ByteSize,
@@ -23,13 +23,15 @@ pub struct Limits {
     pub max_label_value_length: ByteSize,
     pub max_samples_per_query: u64,
     pub max_fetched_series_per_query: u64,
-    /// How far back a query may reach; a zero extent disables the cap.
+    /// How far back a query may reach. A zero extent turns the cap off.
     #[serde(with = "non_negative_time")]
     pub max_query_lookback: Time,
-    /// The widest span a range query may cover; a zero extent disables the cap.
+    /// The widest span a range query may cover. A zero extent turns the cap
+    /// off.
     #[serde(with = "non_negative_time")]
     pub max_query_length: Time,
-    /// Accepted out-of-order ingest window; a negative extent disables the cap.
+    /// Accepted out-of-order ingest window. A negative extent turns the cap
+    /// off.
     #[serde(with = "serde_units::human::time")]
     pub out_of_order_time_window: Time,
 }
@@ -37,10 +39,9 @@ pub struct Limits {
 /// A configured extent that must not be negative.
 ///
 /// `human::time` accepts a signed magnitude, and `QueryEnforcer::check_range`
-/// only applies a cap that is greater than zero — so a runtime override of
-/// `"-1s"` would load cleanly and silently mean *unlimited*, when zero is the
-/// documented way to disable a cap. Rejecting it at parse time keeps the
-/// sentinel single.
+/// applies only a cap greater than zero. A runtime override of `"-1s"` would
+/// therefore load cleanly and mean *unlimited*, but zero is the documented way
+/// to turn a cap off. A rejection at parse time keeps one sentinel.
 pub mod non_negative_time {
     use serde::{Deserializer, Serializer, de::Error as _};
 
@@ -55,7 +56,7 @@ pub mod non_negative_time {
         serde_units::human::time::serialize(value, serializer)
     }
 
-    /// Reads the extent, rejecting a negative one.
+    /// Reads the extent and rejects a negative one.
     ///
     /// # Errors
     ///
@@ -73,15 +74,15 @@ pub mod non_negative_time {
 
 /// The `Option` form of [`non_negative_time`], for the sparse override struct.
 ///
-/// The override path deserializes through `PartialLimits`, not `Limits`, so the
-/// guard has to exist on both or a per-tenant override slips past it.
-/// Deserialize-only: `PartialLimits` is never serialized.
+/// The override path deserializes through `PartialLimits` and not `Limits`, so
+/// the guard must exist on both or a per-tenant override slips past it. This
+/// module is deserialize-only, because nothing serializes `PartialLimits`.
 pub(crate) mod option_non_negative_time {
     use serde::{Deserializer, de::Error as _};
 
     use crate::limits::{Time, serde_units};
 
-    /// Reads the optional extent, rejecting a negative one.
+    /// Reads the optional extent and rejects a negative one.
     ///
     /// # Errors
     ///
@@ -116,7 +117,7 @@ impl Default for Limits {
     }
 }
 
-/// Per-surface limit failures with Prometheus/Mimir status metadata.
+/// Per-surface limit failures with Prometheus and Mimir status metadata.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum LimitError {
     #[error("ingestion rate exceeded: observed {observed} samples/sec above limit {rate}")]

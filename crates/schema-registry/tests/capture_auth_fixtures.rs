@@ -1,21 +1,23 @@
 //! Golden HTTP-Basic-auth capture harness for Crabka Schema Registry slice 6.
 //!
 //! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container with
-//! `authentication.method=BASIC` against an in-process Crabka broker (same
-//! networking as `capture_admin_fixtures.rs` / `capture_references_fixtures.rs`:
-//! the broker binds `0.0.0.0:9092` and advertises `host.docker.internal:9092`,
-//! while the host connects directly on `127.0.0.1:9092`), then drives the
-//! Basic-auth `401` lifecycle against cp's REST API. cp's Jetty
-//! `PropertyFileLoginModule` is wired via a JAAS file + a property password
-//! file written to a host tempdir and mounted at `/etc/sr`.
+//! `authentication.method=BASIC` against an in-process Crabka broker, with the
+//! same networking as `capture_admin_fixtures.rs` and
+//! `capture_references_fixtures.rs`. The broker binds `0.0.0.0:9092` and
+//! advertises `host.docker.internal:9092`, while the host connects directly on
+//! `127.0.0.1:9092`. The harness then drives the Basic-auth `401` lifecycle
+//! against cp's REST API. cp's Jetty `PropertyFileLoginModule` is wired through
+//! a JAAS file and a property password file written to a host tempdir and
+//! mounted at `/etc/sr`.
 //!
 //! One fixture is produced:
 //!
-//!   * `tests/fixtures/auth/basic.json` — for each of three credential cases
-//!     (no `Authorization`, `alice:wrongpw`, `alice:pw`) the HTTP status, the
-//!     exact `WWW-Authenticate` response header (the realm cp emits!), and the
-//!     parsed-or-raw body that cp returns for `GET /subjects`. This is the cp
-//!     oracle for the `401` + `WWW-Authenticate` calibration of slice 6.
+//!   * `tests/fixtures/auth/basic.json`: for each of three credential cases,
+//!     which are no `Authorization`, `alice:wrongpw`, and `alice:pw`, the HTTP
+//!     status, the exact `WWW-Authenticate` response header with the realm cp
+//!     emits, and the parsed-or-raw body that cp returns for `GET /subjects`.
+//!     This is the cp oracle for the `401` and `WWW-Authenticate` calibration
+//!     of slice 6.
 //!
 //! ```text
 //! cargo test -p crabka-schema-registry --test capture_auth_fixtures -- --ignored --nocapture
@@ -103,16 +105,16 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
 
 // ── JAAS / password file plumbing ───────────────────────────────────────────────
 
-/// Write `jaas.conf` + `password.properties` into a fresh tempdir, returning the
-/// dir (kept alive by the caller for the container's lifetime). The dir is
-/// bind-mounted at `/etc/sr` and referenced by `SCHEMA_REGISTRY_OPTS`.
+/// Write `jaas.conf` and `password.properties` into a fresh tempdir and return
+/// the dir. The caller keeps the dir alive for the container's lifetime. The
+/// dir is bind-mounted at `/etc/sr` and referenced by `SCHEMA_REGISTRY_OPTS`.
 ///
 /// `jaas.conf` declares one `SchemaRegistry-Props` entry backed by Jetty's
-/// `org.eclipse.jetty.jaas.spi.PropertyFileLoginModule` (the `LoginModule` cp
-/// 7.4.0 ships for `authentication.method=BASIC`). Its `file=` points at the
-/// mounted `password.properties`, whose Jetty format is
-/// `username: password[,role...]` — here `alice: pw,admin` (role `admin` matches
-/// `SCHEMA_REGISTRY_AUTHENTICATION_ROLES`).
+/// `org.eclipse.jetty.jaas.spi.PropertyFileLoginModule`, which is the
+/// `LoginModule` that cp 7.4.0 ships for `authentication.method=BASIC`. Its
+/// `file=` points at the mounted `password.properties`, whose Jetty format is
+/// `username: password[,role...]`. Here that is `alice: pw,admin`, and the role
+/// `admin` matches `SCHEMA_REGISTRY_AUTHENTICATION_ROLES`.
 fn write_auth_config_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("auth config tempdir");
     let jaas = format!(
@@ -254,7 +256,7 @@ impl Drop for ContainerGuard {
 // ── REST helpers ──────────────────────────────────────────────────────────────
 
 /// Wait until cp answers `GET /subjects` with `200`. Because BASIC auth is on,
-/// the readiness probe MUST present a valid credential (`alice:pw`); a
+/// the readiness probe MUST present a valid credential, which is `alice:pw`. A
 /// credential-less probe would loop on `401` forever.
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str) {
     let deadline = Instant::now() + Duration::from_mins(2);
@@ -283,9 +285,9 @@ async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &st
 }
 
 /// Issue `GET /subjects` with the given optional `(user, pass)` credential and
-/// capture the verdict: HTTP status, the `WWW-Authenticate` response header (the
-/// realm cp emits, if any), and the parsed-or-raw body — one entry for
-/// `basic.json`.
+/// capture the verdict. The verdict holds the HTTP status, the
+/// `WWW-Authenticate` response header with the realm cp emits, if any, and the
+/// parsed-or-raw body. It is one entry for `basic.json`.
 async fn capture_case(
     http: &reqwest::Client,
     base: &str,

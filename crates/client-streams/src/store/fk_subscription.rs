@@ -1,6 +1,8 @@
-//! KIP-213 subscription store: `CombinedKey<KO,K>` → `ValueAndTimestamp<SubscriptionWrapper>`,
-//! over the pluggable byte backend. Prefix-range by foreign key drives the
-//! right-table-change re-emit. Changelog-backed (compact); restore = replay.
+//! KIP-213 subscription store: `CombinedKey<KO,K>` to
+//! `ValueAndTimestamp<SubscriptionWrapper>`, over the pluggable byte backend.
+//!
+//! A prefix range by foreign key drives the right-table-change re-emit. The store
+//! is changelog-backed with a compact policy, and restore is a replay.
 use std::any::Any;
 
 use async_trait::async_trait;
@@ -20,9 +22,10 @@ use crate::{
     },
 };
 
-/// Subscription store keyed by `combined_key(fk, pk)` → `ValueAndTimestamp`
-/// wrapped `SubscriptionWrapper` bytes. `range_by_foreign` scans every primary
-/// key subscribed to a given foreign key (drives the right-table re-emit).
+/// Subscription store keyed by `combined_key(fk, pk)`, holding
+/// `SubscriptionWrapper` bytes wrapped in a `ValueAndTimestamp`.
+/// `range_by_foreign` scans every primary key subscribed to a given foreign key,
+/// and that scan drives the right-table re-emit.
 pub(crate) struct SubscriptionBytesStore {
     name: String,
     changelog_topic: String,
@@ -67,7 +70,8 @@ impl SubscriptionBytesStore {
     }
 
     /// Point lookup of a single `(fk, pk)` subscription. The processors drive the
-    /// store via `put`/`delete`/`range_by_foreign` only; `get` backs the unit test.
+    /// store only with `put`, `delete`, and `range_by_foreign`. `get` backs the
+    /// unit test.
     #[cfg(test)]
     pub(crate) async fn get(&self, fk: &[u8], pk: &[u8]) -> Option<SubscriptionWrapper> {
         let raw = self.backend.get(&combined_key(fk, pk)).await?;

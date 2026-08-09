@@ -1,6 +1,7 @@
-//! The durable-write seam. SP6 wrote one batch via `Kv::write_batch`; SP7 routes
-//! those batches through a `Committer` so a replicated engine can propose them
-//! through Raft instead. The local impl is byte-for-byte the SP6 write.
+//! The durable-write seam. SP6 wrote one batch through `Kv::write_batch`. SP7
+//! routes those batches through a `Committer`, so a replicated engine can
+//! propose them through Raft instead. The local impl is byte-for-byte the SP6
+//! write.
 
 use std::sync::Arc;
 
@@ -10,12 +11,13 @@ use crate::error::ExecError;
 
 #[async_trait::async_trait]
 pub trait Committer: Send + Sync {
-    /// Durably apply one atomic batch. Returns only once the batch is durable
-    /// (local: written; replicated: committed to a majority AND applied).
+    /// Durably apply one atomic batch. This returns only once the batch is
+    /// durable. Locally that means written. In a replicated engine it means
+    /// committed to a majority AND applied.
     async fn commit(&self, ops: Vec<WriteOp>) -> Result<(), ExecError>;
 }
 
-/// Single-node committer: writes straight to the local KV (SP6 behavior).
+/// Single-node committer. It writes straight to the local KV, the SP6 behavior.
 pub struct LocalCommitter {
     pub(crate) kv: Arc<dyn Kv>,
 }

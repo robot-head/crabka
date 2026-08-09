@@ -1,6 +1,7 @@
-//! `KafkaUser` CRD. Strimzi-shaped — SCRAM-SHA-512 + mTLS
-//! authentication, simple ACL authorization, and
-//! optional per-user quotas.
+//! `KafkaUser` CRD.
+//!
+//! The CRD is Strimzi-shaped. It supports SCRAM-SHA-512 and mTLS
+//! authentication, simple ACL authorization, and optional per-user quotas.
 
 use crabka_units::Time;
 use kube::CustomResource;
@@ -23,24 +24,25 @@ use serde::{Deserialize, Serialize};
 pub struct KafkaUserSpec {
     pub authentication: Authentication,
 
-    /// Authorization is optional — a user with no ACLs can still
-    /// authenticate. When absent, ACL reconciliation is skipped.
+    /// Authorization is optional. A user with no ACLs can still
+    /// authenticate. When this field is absent, the operator skips ACL
+    /// reconciliation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authorization>,
 
-    /// Optional per-user client quotas (KIP-13/124/257).
-    /// Maps onto Kafka's `(user)` quota entity via `AlterClientQuotas`
-    /// (`api_key` 49). Absent → operator does not touch the broker's
-    /// quota state; present → the operator drives the broker's quota
-    /// keys for `User:<name>` toward the spec (sets configured fields,
-    /// tombstones omitted ones).
+    /// Optional per-user client quotas (KIP-13/124/257). This field maps
+    /// onto Kafka's `(user)` quota entity through `AlterClientQuotas`, which
+    /// is `api_key` 49. When the field is absent, the operator does not touch
+    /// the broker's quota state. When the field is present, the operator
+    /// drives the broker's quota keys for `User:<name>` toward the spec. It
+    /// sets the configured fields and tombstones the omitted ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quotas: Option<KafkaUserQuotas>,
 }
 
-/// Strimzi-shaped `KafkaUserQuotas`. Field names + JSON types match
-/// `kafka.strimzi.io/v1beta2`; values flow to the broker as `f64`
-/// (Kafka's wire type for client-quota values).
+/// Strimzi-shaped `KafkaUserQuotas`. The field names and the JSON types match
+/// `kafka.strimzi.io/v1beta2`. The values flow to the broker as `f64`, which
+/// is Kafka's wire type for client-quota values.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaUserQuotas {
@@ -54,49 +56,51 @@ pub struct KafkaUserQuotas {
     #[schemars(range(min = 0))]
     pub consumer_byte_rate: Option<i32>,
 
-    /// Maximum percentage of a request-handler thread's time the user
-    /// may consume (0..=100). Backed by `request_percentage`.
+    /// Maximum percentage of a request-handler thread's time that the user
+    /// can consume, in the range `0..=100`. Backed by `request_percentage`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 100))]
     pub request_percentage: Option<i32>,
 
-    /// KIP-599 controller-mutation rate (creates/deletes/sec).
+    /// KIP-599 controller-mutation rate in creates and deletes per second.
     /// Backed by `controller_mutation_rate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_mutation_rate: Option<f64>,
 }
 
-/// Tagged enum on `type`, mirroring Strimzi.
+/// Tagged enum on `type`, in the same shape as Strimzi.
 ///
-/// The wire shape is flat (Strimzi-compatible): `type` is the
-/// discriminator and per-variant config fields are siblings of `type`.
-/// The custom `schema_with` hand-rolls a structural schema because
-/// kube-rs 3.x's `StructuralSchemaRewriter` panics when `oneOf`
-/// branches share a `type` property with differing `enum` values (the
-/// default schemars output for tagged-union enums). Same workaround as
-/// `Storage` in `kafka_node_pool.rs`. Cross-variant constraints (e.g.
-/// "`iterations` only valid when `type=scram-sha-512`") are enforced
-/// by the operator at reconcile time, not by the apiserver.
+/// The wire shape is flat and Strimzi-compatible. `type` is the discriminator,
+/// and the per-variant config fields are siblings of `type`. The custom
+/// `schema_with` writes a structural schema by hand, because the
+/// `StructuralSchemaRewriter` of kube-rs 3.x panics when `oneOf` branches
+/// share a `type` property with different `enum` values. That is the default
+/// schemars output for tagged-union enums. This is the same workaround as
+/// `Storage` in `kafka_node_pool.rs`.
+///
+/// The operator enforces the cross-variant constraints at reconcile time, and
+/// the apiserver does not. One such constraint is that `iterations` is valid
+/// only when `type=scram-sha-512`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 #[schemars(schema_with = "authentication_schema")]
 pub enum Authentication {
     #[serde(rename = "scram-sha-512")]
     ScramSha512(ScramSha512Auth),
-    /// SCRAM-SHA-256 sibling of `ScramSha512`. The operator
-    /// provisions the password Secret + ACLs + quotas exactly as for
-    /// SHA-512; the only differences on the wire are the mechanism
-    /// byte (1 vs 2) and the HMAC algorithm. Pair with broker-side
-    /// `enabled_sasl_mechanisms` covering `ScramSha256`.
+    /// SCRAM-SHA-256 sibling of `ScramSha512`. The operator provisions the
+    /// password Secret, the ACLs, and the quotas exactly as for SHA-512. The
+    /// only differences on the wire are the mechanism byte, 1 against 2, and
+    /// the HMAC algorithm. Pair this variant with a broker-side
+    /// `enabled_sasl_mechanisms` that covers `ScramSha256`.
     #[serde(rename = "scram-sha-256")]
     ScramSha256(ScramSha256Auth),
     #[serde(rename = "tls")]
     Tls(TlsAuth),
-    /// Credential-less user. The operator provisions ACLs +
-    /// quotas under `User:<metadata.name>` but does not create a Secret
-    /// or issue a cert — credentials are managed out-of-band (e.g. an
-    /// OIDC provider for SASL/OAUTHBEARER, or a CA outside Crabka for
-    /// mTLS). Mirrors Strimzi's `tls-external`.
+    /// Credential-less user. The operator provisions ACLs and quotas under
+    /// `User:<metadata.name>`, but it does not create a Secret and does not
+    /// issue a cert. Something out-of-band manages the credentials, for
+    /// example an OIDC provider for SASL/OAUTHBEARER, or a CA outside Crabka
+    /// for mTLS. This is the same as Strimzi's `tls-external`.
     #[serde(rename = "tls-external")]
     TlsExternal,
     /// KIP-48 delegation-token authentication. The operator
@@ -107,22 +111,22 @@ pub enum Authentication {
     DelegationToken(DelegationTokenAuth),
 }
 
-/// Per-user knobs that flow into `CreateDelegationToken` and
-/// the operator's renew loop. The reconciler mints the token via the
-/// admin client (operator acts-as a super-user), persists
-/// `(token-id, hmac)` into the user's Secret, and renews ahead of
+/// Per-user knobs that flow into `CreateDelegationToken` and into the
+/// operator's renew loop. The reconciler mints the token with the admin
+/// client, and the operator acts-as a super-user. The reconciler persists
+/// `(token-id, hmac)` into the user's Secret and renews ahead of
 /// `expiry_timestamp_ms`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DelegationTokenAuth {
-    /// Principal strings (e.g. `"User:bob"`) allowed to renew/expire
-    /// this token in addition to the owner. Default empty.
+    /// Principal strings, for example `"User:bob"`, that can renew or expire
+    /// this token in addition to the owner. Default: empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub renewers: Vec<String>,
 
-    /// Hard upper bound on token lifetime. `None` →
-    /// broker's `delegation_token_max_lifetime` (7d default). Capped
-    /// by the broker even when explicitly set.
+    /// Hard upper bound on token lifetime. `None` gives the broker's
+    /// `delegation_token_max_lifetime`, which defaults to 7d. The broker caps
+    /// this value even when you set it explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
@@ -168,16 +172,18 @@ macro_rules! scram_auth {
         #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
         #[serde(rename_all = "camelCase")]
         pub struct $name {
-            /// PBKDF2 iteration count. Defaults to 8192 on the controller side
-            /// (matches `crabka_client_admin::DEFAULT_SCRAM_ITERATIONS`); the
-            /// broker rejects values < 4096.
+            /// PBKDF2 iteration count. Defaults to 8192 on the controller
+            /// side, which matches
+            /// `crabka_client_admin::DEFAULT_SCRAM_ITERATIONS`. The broker
+            /// rejects values < 4096.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             #[schemars(range(min = 4096, max = 1_000_000))]
             pub iterations: Option<i32>,
 
-            /// Raw-password length (bytes) for the operator-generated secret.
-            /// Defaults to 32 bytes (44 base64 chars). Ignored on reconcile if
-            /// a Secret with key `password` already exists.
+            /// Raw-password length in bytes for the operator-generated
+            /// secret. Defaults to 32 bytes, which is 44 base64 chars. The
+            /// reconcile ignores it if a Secret with the key `password`
+            /// already exists.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             #[schemars(range(min = 16, max = 256))]
             pub password_length: Option<u16>,
@@ -188,22 +194,23 @@ macro_rules! scram_auth {
 scram_auth!(ScramSha512Auth);
 
 scram_auth!(
-    /// SCRAM-SHA-256 sibling of [`ScramSha512Auth`]. Same field
-    /// shape; the only semantic difference is the wire mechanism + HMAC
-    /// algorithm picked up by the reconciler's match arm.
+    /// SCRAM-SHA-256 sibling of [`ScramSha512Auth`]. The field shape is the
+    /// same. The only semantic difference is the wire mechanism and the HMAC
+    /// algorithm that the reconciler's match arm selects.
     ScramSha256Auth
 );
 
-/// mTLS authentication config. The operator generates an X.509 client
-/// cert signed by the per-cluster clients CA, stored in the
-/// per-user Secret under keys `user.crt`, `user.key`, `ca.crt`. The
-/// cert's Subject is the bare RDN `CN=<KafkaUser name>`; that DN is
-/// the ACL / quota principal.
+/// mTLS authentication config. The operator generates an X.509 client cert
+/// that the per-cluster clients CA signs. The operator stores the cert in the
+/// per-user Secret under the keys `user.crt`, `user.key`, and `ca.crt`. The
+/// cert's Subject is the bare RDN `CN=<KafkaUser name>`, and that DN is the
+/// ACL and quota principal.
 ///
-/// **Validity & renewal.** The cert lives for `validity_days` (default
-/// 365). The reconciler reissues iff `not_after - now <= renewal_days`
-/// (default 30). Reissue replaces `user.crt` and `user.key`; consumers
-/// must reload their TLS client config to pick the new material up.
+/// **Validity & renewal.** The cert lives for `validity_days`, which defaults
+/// to 365. The reconciler reissues the cert if and only if
+/// `not_after - now <= renewal_days`, which defaults to 30. A reissue replaces
+/// `user.crt` and `user.key`. Consumers must reload their TLS client config to
+/// get the new material.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TlsAuth {
@@ -221,9 +228,9 @@ pub struct TlsAuth {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Authorization {
-    /// Mirrors Strimzi's `KafkaUserAuthorizationSimple` — drives the
-    /// `SimpleAclAuthorizer` (which Crabka implements as the only
-    /// authorizer today).
+    /// The same shape as Strimzi's `KafkaUserAuthorizationSimple`. It drives
+    /// the `SimpleAclAuthorizer`, which is the only authorizer that Crabka
+    /// implements today.
     Simple(SimpleAuthorization),
 }
 
@@ -234,18 +241,18 @@ pub struct SimpleAuthorization {
     pub acls: Vec<AclRule>,
 }
 
-/// One rule from `spec.authorization.acls`. Expanded into one
-/// `(resource, operation, host, type)` tuple per `operations` entry
-/// at reconcile time.
+/// One rule from `spec.authorization.acls`. The operator expands it into one
+/// `(resource, operation, host, type)` tuple per `operations` entry at
+/// reconcile time.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AclRule {
     pub resource: AclResource,
-    /// Non-empty list — the reconciler refuses an empty `operations`
-    /// with `Ready=False reason=InvalidSpec`.
+    /// Non-empty list. The reconciler refuses an empty `operations` with
+    /// `Ready=False reason=InvalidSpec`.
     pub operations: Vec<AclOp>,
-    /// Source-address pattern; `"*"` is the wildcard. Defaults to
-    /// `"*"` when omitted.
+    /// Source-address pattern. `"*"` is the wildcard. Defaults to `"*"` when
+    /// omitted.
     #[serde(default = "default_host", skip_serializing_if = "is_default_host")]
     pub host: String,
     /// `allow` or `deny`; defaults to `allow`.
@@ -266,8 +273,8 @@ pub struct AclResource {
     #[serde(rename = "type")]
     pub kind: AclResourceKind,
     pub name: String,
-    /// `literal` (exact match) or `prefixed` (resources whose name
-    /// starts with `name`). Defaults to `literal`.
+    /// `literal` for an exact match, or `prefixed` for resources whose name
+    /// starts with `name`. Defaults to `literal`.
     #[serde(default)]
     pub pattern_type: AclPatternType,
 }
@@ -321,7 +328,7 @@ pub struct StatusFlag(pub bool);
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaUserStatus {
-    /// Standard Kubernetes-style condition list. Surfaces `Ready`.
+    /// Standard Kubernetes-style condition list. It shows `Ready`.
     #[serde(default)]
     pub conditions: Vec<crate::crd::KafkaCondition>,
 
@@ -329,7 +336,7 @@ pub struct KafkaUserStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
 
-    /// Effective Kafka principal name (matches `metadata.name`).
+    /// Effective Kafka principal name. It matches `metadata.name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
 
@@ -345,21 +352,21 @@ pub struct KafkaUserStatus {
     #[serde(default)]
     pub scram_sha256: StatusFlag,
 
-    /// True once the spec's `quotas` (if any) have been reflected in the
-    /// broker's `(user)` client-quota state. False when `spec.quotas`
-    /// is `None` (the operator does not touch broker quotas).
+    /// True once the operator has reflected the spec's `quotas`, if any, in
+    /// the broker's `(user)` client-quota state. False when `spec.quotas` is
+    /// `None`, because the operator then does not touch broker quotas.
     #[serde(default)]
     pub quotas_in_sync: bool,
 
-    /// `true` once a TLS user has a current cert Secret. Mirrors
-    /// `scram_sha512`.
+    /// `true` once a TLS user has a current cert Secret. It has the same
+    /// shape as `scram_sha512`.
     #[serde(default)]
     pub tls: bool,
 
-    /// `true` once a credential-less user
-    /// (`type: tls-external`) has been reconciled. Surfaces in
-    /// `kubectl describe ku` so operators can tell at a glance that
-    /// the operator does not own this user's credentials.
+    /// `true` once the operator has reconciled a credential-less user with
+    /// `type: tls-external`. It appears in `kubectl describe ku`, so that
+    /// operators can see that the operator does not own this user's
+    /// credentials.
     #[serde(default)]
     pub external: StatusFlag,
 
@@ -368,42 +375,40 @@ pub struct KafkaUserStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_cert_not_after: Option<String>,
 
-    /// The principal string the operator pinned in ACLs (e.g.
-    /// `User:CN=alice` for TLS users, `User:alice` for SCRAM and
-    /// `tls-external` users). Always populated when the user is
-    /// provisioned. Load-bearing for debugging "why isn't my ACL
-    /// matching" issues.
+    /// The principal string that the operator pinned in ACLs. It is
+    /// `User:CN=alice` for TLS users, and `User:alice` for SCRAM and
+    /// `tls-external` users. It is always filled in when the user is
+    /// provisioned. It is load-bearing for the debug of ACL-match problems.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_principal: Option<String>,
 
-    /// Persisted `token_id` (UUID) of the operator-managed
-    /// delegation token for this user. Used across reconciles to find
-    /// the same token via `DescribeDelegationToken`. Present once the
-    /// operator has successfully issued a token via
-    /// `CreateDelegationToken`.
+    /// Persisted `token_id`, a UUID, of the operator-managed delegation
+    /// token for this user. The operator uses it across reconciles to find the
+    /// same token with `DescribeDelegationToken`. It is present once the
+    /// operator has issued a token with `CreateDelegationToken`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_token_id: Option<String>,
 
-    /// Current `expiry_timestamp_ms` of the operator-managed
-    /// delegation token (extended on each successful renew). Compared
-    /// against `now` to decide when to renew per
-    /// `spec.authentication.renewBeforeExpiry`.
+    /// Current `expiry_timestamp_ms` of the operator-managed delegation
+    /// token. Each successful renew extends it. The operator compares it
+    /// against `now` to decide when to renew, as
+    /// `spec.authentication.renewBeforeExpiry` specifies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_token_expiry_timestamp_ms: Option<i64>,
 
-    /// Token's absolute upper bound (`max_timestamp_ms`).
-    /// Renew can never push `expiry_timestamp_ms` past this — the
-    /// operator stops renewing and surfaces `TokenExpiring` once
-    /// further extension is impossible.
+    /// Token's absolute upper bound, which is `max_timestamp_ms`. A renew can
+    /// never push `expiry_timestamp_ms` past this bound. The operator stops
+    /// the renews and surfaces `TokenExpiring` once no more extension is
+    /// possible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_token_max_timestamp_ms: Option<i64>,
 }
 
 impl KafkaUserQuotas {
-    /// Project the typed spec onto the wire key→value map the admin
-    /// client consumes. `producerByteRate=null` etc. are skipped — the
-    /// reconciler's diff then tombstones any broker key not present
-    /// here.
+    /// Project the typed spec onto the wire key-to-value map that the admin
+    /// client uses. This function skips null values such as
+    /// `producerByteRate=null`. The reconciler's diff then tombstones any
+    /// broker key that is not present here.
     #[must_use]
     pub fn to_quota_map(&self) -> std::collections::BTreeMap<String, f64> {
         let mut out = std::collections::BTreeMap::new();

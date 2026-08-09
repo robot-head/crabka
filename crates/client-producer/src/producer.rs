@@ -1,5 +1,5 @@
-//! `Producer` — public type. Builder lives in `builder.rs`. Sender task
-//! lives in `sender.rs`.
+//! The public `Producer` type. The builder lives in `builder.rs`, and the
+//! sender task lives in `sender.rs`.
 
 use std::{
     collections::HashMap,
@@ -71,10 +71,10 @@ pub(crate) const UNRESOLVED_TOPIC_PARTITION_COUNT: i32 = 1;
 #[derive(Debug, Clone)]
 pub(crate) struct TopicMetadata {
     pub num_partitions: i32,
-    /// Topic UUID. Needed for Produce v13+, which encodes only the
-    /// `topic_id` on the wire. Zero (`Uuid::ZERO`) is a valid sentinel
-    /// meaning "not yet known" — the broker falls back to the `name`
-    /// field for older wire versions.
+    /// Topic UUID. Produce v13+ needs it, because that version encodes only
+    /// the `topic_id` on the wire. Zero, `Uuid::ZERO`, is a valid sentinel that
+    /// means "not yet known". For older wire versions the broker falls back to
+    /// the `name` field.
     pub topic_id: crabka_protocol::primitives::uuid::Uuid,
 }
 
@@ -100,12 +100,14 @@ fn wake_sender_after_append(
 pub struct Producer {
     pub(crate) client: Client,
     pub(crate) client_id: String,
-    /// TLS/SASL security policy used for the bootstrap connection. Retained
-    /// so every secondary connection the producer opens after construction
-    /// (transaction-coordinator and group-coordinator dials in the
-    /// transactional path) carries the same credentials. Without this, those
-    /// connections would be plaintext/unauthenticated and a secured listener
-    /// drops them, failing the transactional flow with `Client(Disconnected)`.
+    /// TLS and SASL security policy used for the bootstrap connection.
+    ///
+    /// The producer retains it so that every secondary connection it opens
+    /// after construction carries the same credentials. Those are the
+    /// transaction-coordinator and group-coordinator dials in the transactional
+    /// path. Without it, those connections would be plaintext and
+    /// unauthenticated, a secured listener would drop them, and the
+    /// transactional flow would fail with `Client(Disconnected)`.
     pub(crate) security: Option<ClientSecurity>,
     pub(crate) dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
     pub(crate) frame_max: ClientFrameMax,
@@ -127,12 +129,13 @@ pub struct Producer {
     #[allow(dead_code)]
     pub(crate) max_in_flight: usize,
     pub(crate) metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
-    /// Per-`(topic, partition)` leader-id cache used by the sender to route
-    /// each Produce to the broker that actually leads the partition. Populated
-    /// from `Metadata` alongside the partition count (see `partitions_for`); a
-    /// missing entry means "leader unknown → fall back to the bootstrap
-    /// connection". A leader id `< 0` is also treated as unknown. Shared with
-    /// the sender task via `Arc`.
+    /// Per-`(topic, partition)` leader-id cache. The sender uses it to route
+    /// each Produce to the broker that actually leads the partition.
+    ///
+    /// `Metadata` fills it alongside the partition count; see `partitions_for`.
+    /// A missing entry means the leader is unknown, and the sender falls back
+    /// to the bootstrap connection. A leader id `< 0` also counts as unknown.
+    /// An `Arc` shares the cache with the sender task.
     pub(crate) partition_leaders: Arc<DashMap<(String, i32), i32>>,
     pub(crate) accumulators: AccumulatorMap,
     #[allow(dead_code)]
@@ -141,12 +144,15 @@ pub struct Producer {
     pub(crate) state: Arc<AtomicU8>,
     pub(crate) wake_tx: tokio::sync::mpsc::Sender<DrainIntent>,
     pub(crate) flush_notify: Arc<Notify>,
-    /// Count of batches the sender has popped from an accumulator but not yet
-    /// finished sending (Produce in-flight, awaiting the broker ack). A batch
-    /// that has left the accumulator but is still in-flight is invisible to
-    /// `all_empty`, so `flush` must also wait for this to reach zero — otherwise
-    /// `commit_transaction` can race ahead of the Produce that drives the txn to
-    /// `Ongoing` and the coordinator rejects `EndTxn` with `INVALID_TXN_STATE`.
+    /// Count of batches the sender has popped from an accumulator but has not
+    /// yet finished sending, that is, the Produce is in flight and awaits the
+    /// broker ack.
+    ///
+    /// A batch that has left the accumulator but is still in flight is
+    /// invisible to `all_empty`, so `flush` must also wait for this count to
+    /// reach zero. Otherwise `commit_transaction` can race ahead of the Produce
+    /// that drives the txn to `Ongoing`, and the coordinator rejects `EndTxn`
+    /// with `INVALID_TXN_STATE`.
     pub(crate) in_flight: Arc<AtomicUsize>,
     pub(crate) sender_shutdown: CancellationToken,
     pub(crate) sender_handle: Option<JoinHandle<()>>,
@@ -155,20 +161,20 @@ pub struct Producer {
     pub(crate) init_retry_timeout: Time,
     pub(crate) init_retry_backoff: Time,
     pub(crate) init_max_backoff: Time,
-    /// Arc-wrapped so the sender task can share the same state without
-    /// additional synchronization structures.
+    /// An `Arc` wraps it, so the sender task can share the same state without
+    /// more synchronization structures.
     pub(crate) txn_state: Arc<Mutex<TxnState>>,
-    /// Set synchronously when an unresolved transaction guard is dropped or
-    /// `EndTxn` loses its response. This is separate from `txn_state` because
-    /// `Drop` cannot await its async mutex.
+    /// Set synchronously when an unresolved transaction guard is dropped, or
+    /// when `EndTxn` loses its response. This is separate from `txn_state`,
+    /// because `Drop` cannot await its async mutex.
     pub(crate) txn_recovery_required: Arc<AtomicBool>,
     pub(crate) txn_recovery_generation: Arc<AtomicU64>,
     /// Cached connection to the transaction coordinator broker.
-    /// Populated by `init_transactions`; reused by begin/commit/abort.
+    /// `init_transactions` fills it, and begin, commit and abort reuse it.
     pub(crate) txn_coord_client: Mutex<Option<Client>>,
     /// Authoritative `(producer_id, producer_epoch)` for the transactional
-    /// flow. Set by `init_transactions`; read by the sender when building
-    /// transactional `ProduceRequest`s.
+    /// flow. `init_transactions` sets it, and the sender reads it when it
+    /// builds transactional `ProduceRequest`s.
     pub(crate) txn_pid_epoch: Arc<Mutex<(i64, i16)>>,
 }
 
@@ -238,16 +244,16 @@ impl Producer {
     /// Begin a new transaction, returning a borrowed guard that must be
     /// finished with [`Transaction::commit`] or [`Transaction::abort`].
     ///
-    /// Must be called after [`init_transactions`] has completed and before
-    /// any transactional [`send`] calls. Transitions the producer from
-    /// `Ready` → `InTransaction`.
+    /// The caller must call this after [`init_transactions`] has completed,
+    /// and before any transactional [`send`] call. It transitions the producer
+    /// from `Ready` to `InTransaction`.
     ///
     /// # Errors
     ///
     /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
-    /// - [`ProducerError::InvalidTransactionState`] — producer is not in the
-    ///   `Ready` state (e.g. `init_transactions` not yet called, or a
-    ///   transaction is already in flight).
+    /// - [`ProducerError::InvalidTransactionState`] — the producer is not in
+    ///   the `Ready` state. For example, the caller has not yet called
+    ///   `init_transactions`, or a transaction is already in flight.
     ///
     /// [`init_transactions`]: Self::init_transactions
     /// [`send`]: Self::send
@@ -269,11 +275,12 @@ impl Producer {
     /// finished with [`OwnedTransaction::commit`] or
     /// [`OwnedTransaction::abort`].
     ///
-    /// Identical semantics to [`begin_transaction`](Self::begin_transaction),
-    /// but the returned guard owns an `Arc<Producer>` instead of borrowing
-    /// `&self`. Use this when the guard must survive across an owned/`'static`
-    /// boundary a borrow can't — e.g. stored behind a `dyn Trait` object.
-    /// Mirrors `tokio::sync::Mutex::lock_owned`.
+    /// The semantics are identical to
+    /// [`begin_transaction`](Self::begin_transaction), but the returned guard
+    /// owns an `Arc<Producer>` instead of borrowing `&self`. Use it when the
+    /// guard must survive across an owned or `'static` boundary that a borrow
+    /// cannot, for example when it is stored behind a `dyn Trait` object. It
+    /// mirrors `tokio::sync::Mutex::lock_owned`.
     ///
     /// # Errors
     ///
@@ -313,21 +320,21 @@ impl Producer {
         }
     }
 
-    /// Finish the current transaction: flushes all in-flight records, then
-    /// sends `EndTxn(committed)` to the transaction coordinator. Transitions
-    /// the producer from `InTransaction` → `Ready` on success.
+    /// Finish the current transaction. This flushes all in-flight records,
+    /// then sends `EndTxn(committed)` to the transaction coordinator. On
+    /// success it transitions the producer from `InTransaction` to `Ready`.
     ///
-    /// Called by [`Transaction::commit`]/[`Transaction::abort`] and
-    /// [`OwnedTransaction::commit`]/[`OwnedTransaction::abort`] — the only
-    /// ways to finish a transaction opened via `begin_transaction`/
-    /// `begin_transaction_owned`.
+    /// [`Transaction::commit`], [`Transaction::abort`],
+    /// [`OwnedTransaction::commit`] and [`OwnedTransaction::abort`] call it.
+    /// They are the only ways to finish a transaction opened with
+    /// `begin_transaction` or `begin_transaction_owned`.
     ///
     /// # Errors
     ///
     /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
     /// - [`ProducerError::InvalidTransactionState`] — not currently in a transaction.
     /// - [`ProducerError::FencedProducer`] — broker returned `INVALID_PRODUCER_EPOCH (47)`.
-    /// - [`ProducerError::ConcurrentTransactions`] — broker returned `CONCURRENT_TRANSACTIONS (49)`; caller may retry.
+    /// - [`ProducerError::ConcurrentTransactions`] — broker returned `CONCURRENT_TRANSACTIONS (49)`. The caller may retry.
     /// - [`ProducerError::Server`] — any other broker error code.
     #[tracing::instrument(
         level = "info",
@@ -420,9 +427,9 @@ impl Producer {
 
     /// Initialize the transactional producer.
     ///
-    /// Must be called before any transactional operations. Discovers the
-    /// transaction coordinator via `FindCoordinator`, opens a dedicated
-    /// connection to it, and calls `InitProducerId` to obtain a fenced
+    /// The caller must call this before any transactional operation. It
+    /// discovers the transaction coordinator with `FindCoordinator`, opens a
+    /// dedicated connection to it, and calls `InitProducerId` to get a fenced
     /// `(producer_id, producer_epoch)` pair.
     ///
     /// # Errors
@@ -510,10 +517,10 @@ impl Producer {
         }
     }
 
-    /// Discover the transaction coordinator for `tid` via `FindCoordinator`.
+    /// Discover the transaction coordinator for `tid` with `FindCoordinator`.
     ///
-    /// Handles both the legacy top-level response (versions 0–3) and the
-    /// `coordinators` array introduced in version 4.
+    /// It handles both the legacy top-level response, versions 0–3, and the
+    /// `coordinators` array that version 4 introduced.
     #[tracing::instrument(level = "debug", skip_all, fields(transactional_id = %tid), err)]
     async fn find_txn_coordinator(&self, tid: &str) -> Result<String, ProducerError> {
         self.find_coordinator(tid, 1).await
@@ -547,24 +554,27 @@ impl Producer {
         Ok(format!("{}:{}", resp.host, resp.port))
     }
 
-    /// Enroll a consumer group's offsets in the current transaction, fencing
-    /// zombie producers via the supplied [`ConsumerGroupMetadata`] (KIP-447).
+    /// Enroll a consumer group's offsets in the current transaction, and fence
+    /// zombie producers with the supplied [`ConsumerGroupMetadata`], as
+    /// KIP-447 defines.
     ///
-    /// Performs two broker round-trips:
+    /// This does two broker round-trips:
     ///
-    /// 1. `AddOffsetsToTxn` → transaction coordinator (registers the group
-    ///    offset commit as part of the ongoing transaction).
-    /// 2. `TxnOffsetCommit` → group coordinator (commits the actual offsets
-    ///    transactionally, carrying `group_meta`'s generation/member/instance
-    ///    so the coordinator can fence stale producers).
+    /// 1. `AddOffsetsToTxn` to the transaction coordinator. This registers the
+    ///    group offset commit as part of the ongoing transaction.
+    /// 2. `TxnOffsetCommit` to the group coordinator. This commits the actual
+    ///    offsets transactionally. It carries the generation, member and
+    ///    instance of `group_meta`, so the coordinator can fence stale
+    ///    producers.
     ///
     /// # Errors
     ///
     /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
-    /// - [`ProducerError::InvalidTransactionState`] — no cached transaction
-    ///   coordinator (call [`init_transactions`] first).
-    /// - [`ProducerError::Server`] — any broker error code (checked at the
-    ///   `AddOffsetsToTxn` level and per-partition for `TxnOffsetCommit`).
+    /// - [`ProducerError::InvalidTransactionState`] — there is no cached
+    ///   transaction coordinator. Call [`init_transactions`] first.
+    /// - [`ProducerError::Server`] — any broker error code. This is checked at
+    ///   the `AddOffsetsToTxn` level, and per partition for
+    ///   `TxnOffsetCommit`.
     /// - [`ProducerError::Client`] — transport-level failure.
     ///
     /// [`init_transactions`]: Self::init_transactions
@@ -657,11 +667,12 @@ impl Producer {
         Ok(())
     }
 
-    /// Discover the group coordinator for `group_id` via `FindCoordinator`
-    /// with `key_type = 0` (GROUP).
+    /// Discover the group coordinator for `group_id` with `FindCoordinator`
+    /// and `key_type = 0`, which is GROUP.
     ///
-    /// Mirrors [`find_txn_coordinator`] but uses `key_type = 0` and looks up
-    /// the group coordinator rather than the transaction coordinator.
+    /// This mirrors [`find_txn_coordinator`], but it uses `key_type = 0` and
+    /// looks up the group coordinator rather than the transaction
+    /// coordinator.
     ///
     /// [`find_txn_coordinator`]: Self::find_txn_coordinator
     #[tracing::instrument(level = "debug", skip_all, fields(group_id = %group_id), err)]
@@ -703,9 +714,9 @@ impl Producer {
     }
 
     /// Enqueue a record and return a future that resolves when the broker
-    /// acks (or the producer fences / closes).
+    /// acks, or when the producer fences or closes.
     ///
-    /// Returns a `oneshot::Receiver`. The outer call is `async` because
+    /// This returns a `oneshot::Receiver`. The outer call is `async` because
     /// partition resolution may need to fetch metadata over the wire.
     pub async fn send(
         &self,
@@ -823,9 +834,9 @@ impl Producer {
         Ok(Some(self.txn_recovery_generation.load(Ordering::Acquire)))
     }
 
-    /// Resolve the destination partition for a record. Hashes the key when
-    /// present, otherwise consults the sticky partitioner. Fetches and
-    /// caches topic metadata on first reference.
+    /// Resolve the destination partition for a record. It hashes the key when
+    /// the record has one, and otherwise consults the sticky partitioner. It
+    /// fetches and caches topic metadata on the first reference.
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -836,18 +847,17 @@ impl Producer {
         self.partitioner.pick(topic, key, num_partitions)
     }
 
-    /// Return the partition count for `topic`, fetching metadata on cache
-    /// miss. Falls back to `1` if the broker reports an error or the
-    /// topic is absent — production code can revisit retry
-    /// policy here.
+    /// Return the partition count for `topic`, and fetch metadata on a cache
+    /// miss. It falls back to `1` if the broker reports an error, or if the
+    /// topic is absent. Production code can revisit the retry policy here.
     ///
     /// On a cache miss this uses [`Client::refresh_metadata`] rather than a
-    /// bare `send(MetadataRequest)`: `refresh_metadata` also teaches the
-    /// client's `BrokerPool` each broker's `(id → addr)` mapping, which is what
-    /// lets the sender route a Produce to the partition *leader* via
+    /// bare `send(MetadataRequest)`. `refresh_metadata` also teaches the
+    /// client's `BrokerPool` each broker's `(id → addr)` mapping, and that is
+    /// what lets the sender route a Produce to the partition *leader* with
     /// `Client::broker(id)` instead of always hitting the bootstrap connection.
-    /// We then record each partition's `leader_id` in `partition_leaders` for
-    /// the sender to consult.
+    /// The producer then records each partition's `leader_id` in
+    /// `partition_leaders` for the sender to consult.
     #[tracing::instrument(
         level = "debug",
         skip_all,

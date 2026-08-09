@@ -1,12 +1,15 @@
-//! Shared outer-join store codecs + the stream-time tracker (KIP-633 left/outer
-//! window-close emission). The shared store is a KV store keyed by
-//! `(timestamp, side, key)` (sorts by time) holding the unmatched left-or-right
-//! value; the `TimeTracker` is shared across both side processors.
+//! Shared outer-join store codecs and the stream-time tracker.
+//!
+//! They back the KIP-633 left and outer window-close emission. The shared store
+//! is a KV store keyed by `(timestamp, side, key)`, so it sorts by time. It holds
+//! the unmatched left value or right value. Both side processors share the
+//! `TimeTracker`.
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-/// Composite key `ts:8B BE ‖ side:1 ‖ key_bytes` (sorts by timestamp, then side).
-/// `side_left == true` → a buffered left-side (stream-A) record.
+/// Composite key `ts:8B BE ‖ side:1 ‖ key_bytes`. It sorts by timestamp, then by
+/// side. `side_left == true` marks a buffered left-side record, that is, a
+/// stream-A record.
 pub(crate) fn outer_key(ts: i64, side_left: bool, key_bytes: &[u8]) -> Bytes {
     let mut b = BytesMut::with_capacity(9 + key_bytes.len());
     b.put_i64(ts);
@@ -47,10 +50,11 @@ pub(crate) fn outer_value_decode(v: &[u8]) -> (bool, &[u8]) {
     (v[0] == 0, &v[1..])
 }
 
-/// Shared per-join stream-time tracker (the JVM `sharedTimeTracker`). We track
-/// only `stream_time`; the window-close test is per-buffered-entry (`entry_ts +
-/// lookback + grace < stream_time`), so the JVM's `minTime` early-exit optimization
-/// isn't needed.
+/// Shared per-join stream-time tracker, the JVM `sharedTimeTracker`.
+///
+/// This tracker holds only `stream_time`. The window-close test runs per buffered
+/// entry, as `entry_ts + lookback + grace < stream_time`. The JVM's `minTime`
+/// early-exit optimization is therefore not needed.
 #[derive(Debug, Default)]
 pub(crate) struct TimeTracker {
     pub stream_time: i64,

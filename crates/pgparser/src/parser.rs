@@ -9,28 +9,34 @@ use crate::{
     token::{Keyword, Token},
 };
 
-/// Maximum nesting depth the parser will build before returning `54001`
-/// (`statement_too_complex`). This bounds BOTH crash modes:
-///   * mode 1 — deep parse recursion (nested parens / subqueries / CASE / NOT /
+/// Maximum nesting depth the parser builds before it returns `54001`
+/// (`statement_too_complex`).
+///
+/// This bounds BOTH crash modes:
+///   * mode 1: deep parse recursion (nested parens / subqueries / CASE / NOT /
 ///     unary minus, all of which funnel through `expr`/`query_expr`), and
-///   * mode 2 — a flat left-associative chain (`1+1+1+…`) whose Pratt loop is
+///   * mode 2: a flat left-associative chain (`1+1+1+…`) whose Pratt loop is
 ///     iterative but builds an N-deep left-nested AST that would overflow later
-///     in eval AND on recursive `Box` `Drop`; capping the loop iteration count
+///     in eval AND on recursive `Box` `Drop`. A cap on the loop iteration count
 ///     stops the over-deep tree from ever being built.
 ///
-/// Chosen empirically (see the `at_limit_*` crash-safety tests): the server runs
-/// on tokio's default ~2 MiB worker stack, and a query nested at `MAX_DEPTH` must
-/// parse AND evaluate without overflowing while a deeper one returns a clean
-/// error. Measured on that 2 MiB stack (both plain-debug AND llvm-cov-
-/// instrumented builds, since CI runs `cargo llvm-cov nextest`), a deeply-nested
-/// `(((…)))` paren parse — the heaviest recursion, an `expr`→`prefix`→`expr`
-/// round-trip per level — overflows the stack at a nesting depth of ~133. `50`
-/// leaves ~2.6x headroom below that ceiling; the executor's eval recursion
-/// (ceiling >12 000 on the same stack) and the AST's recursive `Box` `Drop` are
-/// nowhere near it. Real queries nest well under ~50 levels. This cap is
-/// deliberately MUCH more conservative than `PostgreSQL`'s own (far higher)
-/// `max_stack_depth` — both return `54001` for sufficiently deep input, which is
-/// what matters for closing the `DoS`.
+/// The value is chosen empirically. See the `at_limit_*` crash-safety tests.
+/// The server runs on tokio's default ~2 MiB worker stack. A query nested at
+/// `MAX_DEPTH` must parse AND evaluate without an overflow, while a deeper one
+/// must return a clean error.
+///
+/// A deeply-nested `(((…)))` paren parse is the heaviest recursion, with an
+/// `expr`→`prefix`→`expr` round-trip per level. On that 2 MiB stack it
+/// overflows at a nesting depth of ~133. The measurement covers both
+/// plain-debug AND llvm-cov-instrumented builds, because CI runs
+/// `cargo llvm-cov nextest`. `50` leaves ~2.6x headroom below that ceiling.
+/// The executor's eval recursion (ceiling >12 000 on the same stack) and the
+/// AST's recursive `Box` `Drop` are nowhere near it.
+///
+/// Real queries nest well under ~50 levels. This cap is deliberately MUCH more
+/// conservative than `PostgreSQL`'s own (far higher) `max_stack_depth`. Both
+/// return `54001` for sufficiently deep input, which is what matters for
+/// closing the `DoS`.
 pub(crate) const MAX_DEPTH: usize = 50;
 
 /// The result-level tail of a query expression: `ORDER BY` plus the row-count
@@ -49,7 +55,7 @@ struct SetTail {
 const MAX_GROUPING_SETS: usize = 4096;
 
 /// `PostgreSQL`'s cap on `CUBE`'s element list (`parse_clause.c`), reported as
-/// `54011`. `ROLLUP` has no such limit — its expansion is linear.
+/// `54011`. `ROLLUP` has no such limit. Its expansion is linear.
 const MAX_CUBE_ELEMENTS: usize = 12;
 
 /// A parsed `GROUP BY` clause: the flattened grouping expressions, and the set
@@ -64,7 +70,7 @@ enum GroupingKeyword {
     Sets,
 }
 
-/// Intern one grouping expression into the flattened list, returning its index.
+/// Intern one grouping expression into the flattened list and return its index.
 /// Repeating an expression in a `GROUP BY` clause repeats one grouping column,
 /// which is why `GROUP BY ROLLUP(a), ROLLUP(a)` groups by `{a}` and not `{a, a}`.
 fn intern_group_expr(exprs: &mut Vec<crate::ast::Expr>, expr: crate::ast::Expr) -> usize {
@@ -109,8 +115,8 @@ pub(crate) struct Parser {
     pos: usize,
     /// Current recursion depth of the recursive productions (`expr`,
     /// `select_core`). Held behind an `Rc<Cell<…>>` so the RAII [`DepthGuard`]
-    /// can hold an OWNED clone of the handle rather than a borrow of `self` —
-    /// that lets the guarded method keep calling `&mut self` methods freely while
+    /// can hold an OWNED clone of the handle rather than a borrow of `self`.
+    /// That lets the guarded method keep calling `&mut self` methods freely while
     /// the guard is alive (a `&self.depth` borrow would conflict with `&mut self`
     /// for the guard's whole lifetime). The guard's `Drop` decrements on EVERY
     /// exit path, including a `?` early-return, so the depth is always restored.
@@ -324,7 +330,7 @@ impl Parser {
         }
     }
 
-    /// `PostgreSQL`'s `ColLabel` — the label after `AS`, which may be an
+    /// `PostgreSQL`'s `ColLabel`: the label after `AS`, which may be an
     /// identifier or **any** keyword (`SELECT 1 AS true`, `AS select`, `AS from`).
     fn expect_col_label(&mut self) -> Result<String, ParseError> {
         if matches!(self.peek(), Token::Keyword(_)) {
@@ -335,7 +341,7 @@ impl Parser {
         self.expect_ident()
     }
 
-    /// `PostgreSQL`'s `BareColLabel` — the no-`AS` alias, which is an identifier
+    /// `PostgreSQL`'s `BareColLabel`: the no-`AS` alias, which is an identifier
     /// or a keyword from the `bare_label_keyword` list. Consumes nothing and
     /// returns `None` when the cursor is on anything else (a clause keyword, an
     /// operator, the end of the statement).
@@ -390,7 +396,7 @@ impl Parser {
         }
     }
 
-    /// Consume a `ColId`, reporting `PostgreSQL`'s own syntax error when the
+    /// Consume a `ColId`. Reports `PostgreSQL`'s own syntax error when the
     /// word at the cursor is reserved or a type/function-name keyword.
     fn expect_col_id(&mut self) -> Result<String, ParseError> {
         if let Some(name) = self.peek_col_id() {
@@ -422,8 +428,8 @@ impl Parser {
         }
     }
 
-    /// The source spelling of the keyword at the cursor, lowercased — the column
-    /// name a keyword used as a label produces. A keyword token is never quoted
+    /// The source spelling of the keyword at the cursor, lowercased. This is the
+    /// column name a keyword used as a label produces. A keyword token is never quoted
     /// (a quoted `"select"` lexes as an identifier), so its word is exactly the
     /// run of identifier characters at the token's byte offset.
     fn keyword_label(&self) -> String {
@@ -472,7 +478,7 @@ impl Parser {
         }
     }
 
-    /// Parse a SQL type name into a [`ColumnType`] — shared by `CREATE TABLE`
+    /// Parse a SQL type name into a [`ColumnType`], shared by `CREATE TABLE`
     /// column definitions and the SP31 cast target (`CAST(_ AS ty)` / `_::ty`).
     /// Folds the two-word `double precision` (SP30) into one normalized name; an
     /// unknown type name is 42704 (`undefined_object`) with `PostgreSQL`'s
@@ -551,7 +557,7 @@ impl Parser {
         self.parse_array_type_suffix(base, &type_word, type_pos)
     }
 
-    /// Consume an optional array suffix after a base type name — `[]`, `[N]`,
+    /// Consume an optional array suffix after a base type name: `[]`, `[N]`,
     /// any number of them (`int[][][]`), or the `ARRAY`/`ARRAY[N]` spelling.
     ///
     /// `PostgreSQL` ignores both the declared size and the declared *number* of
@@ -893,12 +899,12 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// Consume one tight-binding postfix operator — `::`, `COLLATE`, an array
-    /// subscript chain, or `AT TIME ZONE` — if the next tokens spell one.
+    /// Consume one tight-binding postfix operator if the next tokens spell one.
     ///
-    /// All four bind tighter than every binary operator, so none takes a
-    /// `min_bp` gate. The flag reports whether anything was consumed; when it
-    /// is false the operand is returned untouched.
+    /// The operators are `::`, `COLLATE`, an array subscript chain, and
+    /// `AT TIME ZONE`. All four bind tighter than every binary operator, so none
+    /// takes a `min_bp` gate. The flag reports whether the parser consumed
+    /// anything. When it is false, the function returns the operand untouched.
     /// `PostgreSQL`'s `opt_indirection` after a parenthesised expression:
     /// `(expr).field` selects one attribute of a composite value, and the chain
     /// may repeat (`(expr).a.b`). This production is reachable ONLY after a
@@ -1006,11 +1012,11 @@ impl Parser {
     }
 
     /// The collation named after `COLLATE`. `PostgreSQL` writes it as `any_name`
-    /// — a possibly schema-qualified identifier — and reports `42704` when no
+    /// as a possibly schema-qualified identifier, and reports `42704` when no
     /// such collation exists. This engine's `pg_collation` holds exactly
-    /// `default`, `C` and `POSIX`, all of which order text by byte value, so
-    /// those three are accepted (and are then semantically a no-op) and every
-    /// other name gets `PostgreSQL`'s own undefined-object error.
+    /// `default`, `C` and `POSIX`, all of which order text by byte value. The
+    /// parser accepts those three, where they are semantically a no-op, and
+    /// every other name gets `PostgreSQL`'s own undefined-object error.
     fn expect_collation_name(&mut self) -> Result<String, ParseError> {
         let pos = self.peek_pos();
         let mut name = self.expect_col_id()?;
@@ -1317,7 +1323,7 @@ impl Parser {
     /// A whole `[…][…]…` subscript chain, positioned at the first `[`.
     ///
     /// Each entry is an index or a slice; a slice bound may be omitted on either
-    /// side (`a[:2]`, `a[2:]`), and `a[:]` — both omitted — is a whole-dimension
+    /// side (`a[:2]`, `a[2:]`), and `a[:]`, with both bounds omitted, is a whole-dimension
     /// slice, exactly as in `PostgreSQL`.
     fn subscript_chain(&mut self) -> Result<Vec<ArraySubscript>, ParseError> {
         let mut subscripts = Vec::new();
@@ -1358,7 +1364,7 @@ impl Parser {
         Ok(subscripts)
     }
 
-    /// `ARRAY[e1, e2, …]` or `ARRAY(subquery)` — positioned at the `ARRAY`
+    /// `ARRAY[e1, e2, …]` or `ARRAY(subquery)`, positioned at the `ARRAY`
     /// keyword. The element list may be empty, and an element may itself be a
     /// braceless nested constructor (`ARRAY[[1,2],[3,4]]`), which adds a
     /// dimension exactly as a spelled-out `ARRAY[ARRAY[1,2],ARRAY[3,4]]` does.
@@ -1395,7 +1401,7 @@ impl Parser {
         Ok(Expr::ArrayLiteral(elements))
     }
 
-    /// `ROW(e1, e2, …)` — positioned at `(`, after the `ROW` word. The element
+    /// `ROW(e1, e2, …)`, positioned at `(`, after the `ROW` word. The element
     /// list may be empty, and a single element is still a row (unlike the bare
     /// parenthesised form, where `(x)` is grouping).
     fn row_constructor(&mut self) -> Result<Expr, ParseError> {
@@ -1414,16 +1420,16 @@ impl Parser {
         Ok(Expr::Row(elements))
     }
 
-    /// `typename 'string'` — `PostgreSQL`'s constant-of-a-given-type syntax
-    /// (`bool 't'`, `int4 '0'`, `numeric '1.5'`, `timestamp with time zone '…'`),
-    /// which is defined to mean exactly `'string'::typename` and therefore lowers
-    /// onto the same [`Expr::Cast`] — errors included.
+    /// `typename 'string'`: `PostgreSQL`'s constant-of-a-given-type syntax
+    /// (`bool 't'`, `int4 '0'`, `numeric '1.5'`, `timestamp with time zone '…'`).
+    /// It is defined to mean exactly `'string'::typename`, so it lowers onto the
+    /// same [`Expr::Cast`], errors included.
     ///
     /// Returns `Ok(None)`, with the token cursor restored, when the tokens ahead
     /// are not a type name followed by a string literal; the caller then takes
     /// the ordinary column / function-call path. A *bare* name that is not a type
     /// but is directly followed by a string literal can only have been meant as
-    /// this syntax, so it reports `PostgreSQL`'s own 42704 rather than degrading
+    /// this syntax, so it reports `PostgreSQL`'s own 42704 and does not degrade
     /// into a generic syntax error.
     fn typed_literal(&mut self) -> Result<Option<Expr>, ParseError> {
         let start = self.pos;
@@ -1494,8 +1500,8 @@ impl Parser {
     }
 
     /// The single-word interval field qualifier at the cursor, if any. Keyword-
-    /// free (the words are ordinary identifiers to this lexer), and singular only
-    /// — as in `PostgreSQL`'s grammar.
+    /// free (the words are ordinary identifiers to this lexer), and singular
+    /// only, as in `PostgreSQL`'s grammar.
     fn interval_field(&self) -> Option<&'static str> {
         let Token::Ident(word) = self.peek() else {
             return None;
@@ -1603,9 +1609,9 @@ impl Parser {
     }
 
     /// `ORDER BY <sort item> [, …]` inside an aggregate's argument list, which
-    /// orders the values fed to the aggregate. Consumed and discarded — the
-    /// caller refuses the call — so a malformed sort list is still a syntax
-    /// error at the right place.
+    /// orders the values fed to the aggregate. The parser consumes and discards
+    /// it, because the caller refuses the call. So a malformed sort list is
+    /// still a syntax error at the right place.
     fn eat_aggregate_order_by(&mut self) -> Result<bool, ParseError> {
         if !self.eat_keyword(Keyword::Order) {
             return Ok(false);
@@ -2220,7 +2226,7 @@ impl Parser {
         unique
     }
 
-    /// `FORMAT JSON [ENCODING name]` — accepted and ignored: crabka has one JSON
+    /// `FORMAT JSON [ENCODING name]`, accepted and ignored. Crabka has one JSON
     /// representation and one server encoding.
     fn opt_format_json(&mut self) {
         if self.peek_word_eq("format") && self.peek2_word_eq("json") {
@@ -2254,7 +2260,7 @@ impl Parser {
             || self.peek_word_eq("null") && self.peek2_word_eq("on")
     }
 
-    /// `EXTRACT(field FROM source)` — positioned at `(`, after the `extract` ident.
+    /// `EXTRACT(field FROM source)`, positioned at `(`, after the `extract` ident.
     /// Lowers onto `PostgreSQL`'s internal `extract('<field>', source)` form: the
     /// field is an identifier (lowercased to a string literal), the source is a
     /// full expression. The executor resolves the field at runtime.
@@ -2276,7 +2282,7 @@ impl Parser {
     /// The SQL-standard call forms that separate their arguments with keywords
     /// rather than commas, positioned at `(`. `None` means this name has no such
     /// form and the caller should fall through to the ordinary comma-argument
-    /// `func_call` — including for the comma spellings of these same functions,
+    /// `func_call`. That includes the comma spellings of these same functions,
     /// which `PostgreSQL` also accepts.
     ///
     /// Every form lowers onto the ordinary function of the same name, so the
@@ -2337,9 +2343,9 @@ impl Parser {
     }
 
     /// `TRIM([BOTH|LEADING|TRAILING] [characters] FROM source)`, plus the comma
-    /// spelling `TRIM(BOTH characters, source)`. The side chooses the function —
-    /// `btrim`/`ltrim`/`rtrim` — and defaults to `BOTH`; omitted characters mean
-    /// spaces, which is the one-argument form of each.
+    /// spelling `TRIM(BOTH characters, source)`. The side chooses the function
+    /// `btrim`, `ltrim` or `rtrim`, and defaults to `BOTH`. Omitted characters
+    /// mean spaces, which is the one-argument form of each.
     fn trim_expr(&mut self) -> Result<Option<Expr>, ParseError> {
         self.expect(&Token::LParen)?;
         // A side keyword only counts when something follows it: `trim(leading)`
@@ -2382,7 +2388,7 @@ impl Parser {
         Ok(Some(Self::call(name, args)))
     }
 
-    /// `POSITION(substring IN string)` — `strpos` with the arguments swapped, as
+    /// `POSITION(substring IN string)`: `strpos` with the arguments swapped, as
     /// `PostgreSQL`'s grammar swaps them.
     fn position_expr(&mut self) -> Result<Option<Expr>, ParseError> {
         self.expect(&Token::LParen)?;
@@ -2427,8 +2433,8 @@ impl Parser {
     /// `PostgreSQL` calls the first such subquery `unnamed_subquery` and makes it
     /// un-referenceable, so no query can name it and several may appear in one
     /// FROM. Crabka cannot mark a range-table entry un-referenceable, so each
-    /// gets a distinct name instead — which keeps two unnamed subqueries in one
-    /// FROM from colliding. The divergence is that these names *can* be written
+    /// gets a distinct name instead. That keeps two unnamed subqueries in one
+    /// FROM apart. The divergence is that these names *can* be written
     /// in a query, where `PostgreSQL` rejects them.
     fn unnamed_subquery_alias(&mut self) -> String {
         let n = self.unnamed_subqueries;
@@ -2442,10 +2448,11 @@ impl Parser {
 
     /// Turn labeled arguments into the positional tail the call needs.
     ///
-    /// Only the functions whose parameter names are known here can take them —
-    /// crabka's built-ins are a positional table with no `pg_proc` parameter names
-    /// to resolve against, so a name this does not know is 42883 rather than being
-    /// silently dropped. `make_interval` is the one the corpus exercises.
+    /// Only the functions whose parameter names are known here can take them.
+    /// Crabka's built-ins are a positional table with no `pg_proc` parameter
+    /// names to resolve against, so a name this function does not know is 42883.
+    /// The function never drops it without a message. `make_interval` is the one
+    /// the corpus exercises.
     fn positional_from_named(
         name: &str,
         positional: &[Expr],
@@ -2509,7 +2516,7 @@ impl Parser {
         })
     }
 
-    /// Is the token after the current one the end of an argument — `)` or `,`?
+    /// Is the token after the current one the end of an argument, `)` or `,`?
     /// Used to tell a `TRIM` side keyword from a column of the same name.
     fn peek2_is_arg_end(&self) -> bool {
         matches!(self.peek2(), Token::RParen | Token::Comma)
@@ -2686,7 +2693,7 @@ impl Parser {
     }
 
     /// Is the token `offset` positions ahead the start of a `SIMILAR TO`
-    /// operator? Keyword-free — `similar` is an ordinary identifier to this
+    /// operator? Keyword-free: `similar` is an ordinary identifier to this
     /// lexer, so only the two-word sequence is the operator.
     fn peek_is_similar_to(&self, offset: usize) -> bool {
         matches!(self.peek_n(offset), Token::Ident(w) if w.eq_ignore_ascii_case("similar"))
@@ -2729,9 +2736,9 @@ impl Parser {
         })
     }
 
-    /// `CAST(expr AS type)` — positioned at `CAST`. The functional spelling of
-    /// the `::` operator; the inner expression is parsed at the lowest precedence
-    /// (it is delimited by the surrounding parens).
+    /// `CAST(expr AS type)`, positioned at `CAST`. This is the functional
+    /// spelling of the `::` operator. The parser parses the inner expression at
+    /// the lowest precedence, because the surrounding parens delimit it.
     fn cast_expr(&mut self) -> Result<Expr, ParseError> {
         self.expect(&Token::Keyword(Keyword::Cast))?;
         self.expect(&Token::LParen)?;
@@ -2746,7 +2753,7 @@ impl Parser {
     }
 
     /// Pairs each statement with the byte range of its source in
-    /// the original input — from its first token's offset up to the trailing `;`
+    /// the original input, from its first token's offset up to the trailing `;`
     /// (or end of input). Powers [`parse_with_source`].
     fn program_spanned(
         &mut self,
@@ -3401,7 +3408,7 @@ impl Parser {
         Ok(AlterTableAction::Unsupported(label))
     }
 
-    /// `TYPE <type> [COLLATE c] [USING <expr>]` — the `TYPE` (or `SET DATA
+    /// `TYPE <type> [COLLATE c] [USING <expr>]`. The `TYPE` (or `SET DATA
     /// TYPE`) lead-in is already consumed.
     fn alter_column_type(
         &mut self,
@@ -3421,7 +3428,7 @@ impl Parser {
     }
 
     /// Consume the rest of one `ALTER TABLE` subcommand that Crabka's storage
-    /// model has no counterpart for, returning the source text so the executor
+    /// model has no counterpart for. Returns the source text so the executor
     /// can name it in its `0A000`. Stops at the subcommand separator (a
     /// top-level comma) or the end of the statement.
     fn consume_unsupported_subcommand(&mut self, prefix: &str) -> String {
@@ -3561,17 +3568,17 @@ impl Parser {
 
     /// A relation reference, with an optional schema qualifier: `t` or `s.t`.
     ///
-    /// This is the one policy for a dotted relation name — every statement that
+    /// This is the one policy for a dotted relation name. Every statement that
     /// names a relation comes through here, so `SELECT * FROM s.t` and
     /// `INSERT INTO s.t` can no longer disagree about what the dot meant.
     ///
-    /// The qualifier is carried verbatim rather than interpreted: the parser
-    /// has no catalog, and whether a missing schema is `3F000 schema "s" does
-    /// not exist` or `42P01 relation "s.t" does not exist` depends on what the
-    /// statement was going to do with it, which only the executor knows.
+    /// The parser carries the qualifier verbatim and does not interpret it. It
+    /// has no catalog. A missing schema is `3F000 schema "s" does not exist` or
+    /// `42P01 relation "s.t" does not exist` depending on what the statement was
+    /// going to do with it, which only the executor knows.
     ///
-    /// A three-part name is refused here because the engine has one database,
-    /// so `a.b.c` can only ever be the cross-database refusal.
+    /// The parser refuses a three-part name here, because the engine has one
+    /// database. So `a.b.c` can only ever be the cross-database refusal.
     fn relation_ref(&mut self) -> Result<crate::ast::RelationRef, ParseError> {
         use crate::ast::RelationRef;
         let start = self.peek_pos();
@@ -3595,7 +3602,7 @@ impl Parser {
         Ok(RelationRef::qualified(first, second))
     }
 
-    /// A possibly-qualified name that is *not* a relation — a collation, an
+    /// A possibly-qualified name that is *not* a relation: a collation, an
     /// operator class, a set-returning function in `FROM` position, or a
     /// co-location group. These keep the flattened `a.b` spelling because
     /// nothing resolves them against a schema.
@@ -3625,10 +3632,10 @@ impl Parser {
     }
 
     /// SP37: `SET [LOCAL] <name> (= | TO) <value>` / `SET [LOCAL] TIME ZONE <value>`.
-    /// Keyword-free for `LOCAL`/`TO`/`TIME ZONE`/`DEFAULT`/`LOCAL` (the value) —
-    /// they are matched as lowercased idents, so none becomes a reserved keyword.
-    /// The GUC name is normalized to lowercase; `TIME ZONE` normalizes to
-    /// `"timezone"`.
+    /// Keyword-free for `LOCAL`/`TO`/`TIME ZONE`/`DEFAULT`/`LOCAL` (the value).
+    /// The parser matches them as lowercased idents, so none becomes a reserved
+    /// keyword. The parser normalizes the GUC name to lowercase, and `TIME ZONE`
+    /// normalizes to `"timezone"`.
     fn set_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Set))?;
@@ -5364,7 +5371,7 @@ impl Parser {
     }
 
     /// True when a top-level (paren-depth zero) `AS` appears before the end of
-    /// this statement — the token that tells `CREATE TABLE … AS <query>` apart
+    /// this statement. That `AS` tells `CREATE TABLE … AS <query>` apart
     /// from an ordinary `CREATE TABLE`, whose only `AS` spellings sit inside the
     /// column-definition parentheses.
     fn statement_has_top_level_as(&self) -> bool {
@@ -5666,7 +5673,7 @@ impl Parser {
         Ok(PartitionBound::Hash { modulus, remainder })
     }
 
-    /// `( {MINVALUE | MAXVALUE | <expr>}, … )` — one side of a range bound.
+    /// `( {MINVALUE | MAXVALUE | <expr>}, … )`: one side of a range bound.
     fn partition_range_bound_list(
         &mut self,
     ) -> Result<Vec<crate::ast::RangeBoundValue>, ParseError> {
@@ -5690,7 +5697,7 @@ impl Parser {
         Ok(bounds)
     }
 
-    /// `PostgreSQL`'s `Iconst` — an unsigned integer literal. `MODULUS -1` is a
+    /// `PostgreSQL`'s `Iconst`: an unsigned integer literal. `MODULUS -1` is a
     /// syntax error there because the grammar has no place for the sign, and it
     /// is one here for the same reason.
     fn expect_unsigned_integer_literal(&mut self) -> Result<i64, ParseError> {
@@ -5810,7 +5817,7 @@ impl Parser {
         Ok(Some(OnCommitAction::PreserveRows))
     }
 
-    /// `(LIKE source [ {INCLUDING | EXCLUDING} <option> …])` — the `LIKE` itself
+    /// `(LIKE source [ {INCLUDING | EXCLUDING} <option> …])`. The `LIKE` itself
     /// is already consumed.
     fn like_clause(&mut self) -> Result<crate::ast::LikeClause, ParseError> {
         use crate::ast::LikeOption;
@@ -6018,7 +6025,7 @@ impl Parser {
     /// `MATCH { FULL | PARTIAL | SIMPLE }`, absent meaning `SIMPLE`.
     ///
     /// `MATCH PARTIAL` is `PostgreSQL`'s own `0A000` refusal, reported at the
-    /// `MATCH` keyword; keep it rather than inventing semantics for a clause
+    /// `MATCH` keyword. Keep it, and do not invent semantics for a clause
     /// `PostgreSQL` has never implemented.
     fn foreign_key_match(&mut self) -> Result<crate::ast::MatchType, ParseError> {
         use crate::ast::MatchType;
@@ -6105,16 +6112,16 @@ impl Parser {
     /// `[NOT] DEFERRABLE`, `INITIALLY {DEFERRED|IMMEDIATE}`, `NOT VALID`,
     /// `NO INHERIT`, `ENFORCED`/`NOT ENFORCED`, in any order.
     ///
-    /// `NO INHERIT` and the `ENFORCED` spellings are accepted and discarded; the
-    /// rest reach the AST. Each of the two mutually exclusive pairs may be
-    /// written at most once, and `INITIALLY DEFERRED` alone implies
-    /// `DEFERRABLE` — all three of `PostgreSQL`'s `42601` refusals here are
-    /// reproduced verbatim, so the returned struct can never claim a
+    /// The parser accepts and discards `NO INHERIT` and the `ENFORCED`
+    /// spellings. The rest reach the AST. Each of the two mutually exclusive
+    /// pairs may be written at most once, and `INITIALLY DEFERRED` alone implies
+    /// `DEFERRABLE`. This parser reproduces all three of `PostgreSQL`'s `42601`
+    /// refusals here word for word, so the returned struct can never claim a
     /// combination `PostgreSQL` rejects.
     ///
     /// `NOT VALID` belongs to `PostgreSQL`'s *table* constraint grammar only, so
-    /// `allow_not_valid` is false for a column constraint and writing it there
-    /// is a syntax error rather than a silently accepted no-op.
+    /// `allow_not_valid` is false for a column constraint. `NOT VALID` there is
+    /// a syntax error, not a no-op the parser accepts without a message.
     fn eat_constraint_attributes(
         &mut self,
         allow_not_valid: bool,
@@ -6216,7 +6223,7 @@ impl Parser {
         Ok(attributes)
     }
 
-    /// `( key [= value] [, …] )` — a storage-parameter list, accepted and
+    /// `( key [= value] [, …] )`: a storage-parameter list, accepted and
     /// discarded.
     fn storage_parameter_list(&mut self) -> Result<Vec<(String, Option<String>)>, ParseError> {
         self.expect(&Token::LParen)?;
@@ -6330,7 +6337,7 @@ impl Parser {
     }
 
     /// `GENERATED { ALWAYS | BY DEFAULT } AS { IDENTITY [(opts)] | (expr) STORED }`
-    /// — the `GENERATED` keyword is already consumed.
+    /// The `GENERATED` keyword is already consumed.
     fn generated_column_constraint(
         &mut self,
     ) -> Result<crate::ast::ColumnConstraintKind, ParseError> {
@@ -7090,8 +7097,8 @@ impl Parser {
     }
 
     /// One `DROP SEQUENCE` name, tagged so the shared `DROP TABLE` arm knows a
-    /// sequence was meant. The tag rides the relation's own name, leaving any
-    /// schema qualifier where the resolver can still see it.
+    /// sequence was meant. The tag sits in the relation's own name, so any
+    /// schema qualifier stays where the resolver can still see it.
     fn sequence_drop_ref(&mut self) -> Result<crate::ast::RelationRef, ParseError> {
         let mut reference = self.relation_ref()?;
         reference.name = format!("__crabka_sequence__:{}", reference.name);
@@ -7177,7 +7184,7 @@ impl Parser {
         })
     }
 
-    /// `('a', 'b', …)` — an enum's labels, possibly empty.
+    /// `('a', 'b', …)`: an enum's labels, possibly empty.
     fn enum_label_list(&mut self) -> Result<Vec<String>, ParseError> {
         self.expect(&Token::LParen)?;
         let mut labels = Vec::new();
@@ -7193,8 +7200,9 @@ impl Parser {
         Ok(labels)
     }
 
-    /// Consume a parenthesised group without interpreting it, for a production
-    /// that is recognised only so the executor can refuse it as a whole.
+    /// Consume a parenthesised group and do not interpret it. This serves a
+    /// production the parser recognises only so the executor can refuse it as a
+    /// whole.
     fn skip_balanced_parens(&mut self) -> Result<(), ParseError> {
         self.expect(&Token::LParen)?;
         let mut depth = 1usize;
@@ -7454,8 +7462,8 @@ impl Parser {
         false
     }
 
-    /// Parse an expression and return its source text — what a domain default
-    /// stores, since the executor re-parses and evaluates it per use.
+    /// Parse an expression and return its source text. A domain default stores
+    /// that text, because the executor re-parses and evaluates it per use.
     fn expression_source(&mut self) -> Result<String, ParseError> {
         let start = self.peek_pos();
         let _ = self.expr(0)?;
@@ -7507,8 +7515,8 @@ impl Parser {
     }
 
     /// `VACUUM [ ( option [value] [, ...] ) ] [FULL] [FREEZE] [VERBOSE]
-    /// [ANALYZE] [name [, ...]]` — the whole tail is validated for shape and
-    /// discarded: reclamation is autonomous, so the command is a hint.
+    /// [ANALYZE] [name [, ...]]`. The parser validates the whole tail for shape
+    /// and discards it. Reclamation is autonomous, so the command is a hint.
     fn vacuum(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("vacuum")?;
         if *self.peek() == Token::LParen {
@@ -7794,7 +7802,7 @@ impl Parser {
     /// clause would start (immediately after the VALUES list).
     ///
     /// `conflict`, `do`, `nothing` and `constraint` are matched as soft
-    /// identifiers, so all four remain usable as column and table names — they
+    /// identifiers, so all four remain usable as column and table names. They
     /// are unreserved in `PostgreSQL` too.
     fn on_conflict_clause(&mut self) -> Result<Option<crate::ast::OnConflict>, ParseError> {
         use crate::ast::{OnConflict, OnConflictAction, OnConflictTarget};
@@ -8207,9 +8215,10 @@ impl Parser {
 
     /// `GROUP BY [ALL | DISTINCT] <group_by_item> [, …]`.
     ///
-    /// Returns the flattened, deduplicated grouping expressions and — only when
-    /// the clause needs expanding into more than the one grouping set a plain
-    /// `GROUP BY` produces — the set structure over their indices.
+    /// Returns the flattened, deduplicated grouping expressions. It also
+    /// returns the set structure over their indices, but only when the clause
+    /// needs expansion into more than the one grouping set a plain `GROUP BY`
+    /// produces.
     fn parse_group_by(&mut self) -> Result<GroupByClause, ParseError> {
         use crate::ast::GroupingClause;
         if !self.eat_keyword(Keyword::Group) {
@@ -8269,8 +8278,8 @@ impl Parser {
 
     /// The `ROLLUP` / `CUBE` / `GROUPING SETS` construct at the cursor, if any.
     /// All three are unreserved in `PostgreSQL` and lex as identifiers here, so
-    /// they are recognized by the token that must follow them — which keeps a
-    /// column named `rollup` usable as a grouping expression.
+    /// the parser recognizes them by the token that must follow them. That
+    /// keeps a column named `rollup` usable as a grouping expression.
     fn peek_grouping_keyword(&self) -> Option<GroupingKeyword> {
         match self.peek() {
             Token::Ident(w)
@@ -8683,7 +8692,7 @@ impl Parser {
         }
     }
 
-    /// `SELECT … INTO <table>` — record the target so [`Parser::query_statement`]
+    /// `SELECT … INTO <table>`: record the target so [`Parser::query_statement`]
     /// can hand back a `CREATE TABLE … AS`. `TEMP`/`TEMPORARY`/`UNLOGGED` are
     /// accepted and ignored: there is one storage class here.
     fn opt_select_into(&mut self) -> Result<(), ParseError> {
@@ -9113,7 +9122,7 @@ impl Parser {
 
     /// A set-op primary: a parenthesized sub-query (precedence grouping, or a
     /// parenthesized single SELECT that keeps its own ORDER BY / LIMIT), or a bare
-    /// SELECT branch (`select_core`, no tail — the query owns the tail).
+    /// SELECT branch (`select_core`, no tail, because the query owns the tail).
     fn parenthesized_query_expr(&mut self) -> Result<crate::ast::QueryExpr, ParseError> {
         self.expect(&Token::LParen)?;
         self.query_expr_after_open_paren()
@@ -9295,7 +9304,7 @@ impl Parser {
         )
     }
 
-    /// True when the cursor sits on a data-modifying statement — the four
+    /// True when the cursor sits on a data-modifying statement, one of the four
     /// spellings `PostgreSQL` allows inside a `WITH` list.
     fn starts_dml_statement(&self) -> bool {
         matches!(
@@ -9476,8 +9485,9 @@ impl Parser {
     }
 
     /// The shared tail of every FROM-position function item: `WITH ORDINALITY`,
-    /// then the alias clause — which for a bare call may be a column-*definition*
-    /// list (`AS t(a int)`) rather than a column-alias list (`AS t(a)`).
+    /// then the alias clause. For a bare call the alias clause may be a
+    /// column-*definition* list (`AS t(a int)`) and not a column-alias list
+    /// (`AS t(a)`).
     fn finish_function_item(
         &mut self,
         mut functions: Vec<crate::ast::TableFuncCall>,
@@ -9931,8 +9941,8 @@ impl Parser {
         })
     }
 
-    /// Parse `( ident, ident, … )` — used by `IMPORT FOREIGN SCHEMA` and by
-    /// `CREATE INDEX … INCLUDE`, neither of which names a relation.
+    /// Parse `( ident, ident, … )`. `IMPORT FOREIGN SCHEMA` and
+    /// `CREATE INDEX … INCLUDE` use it, and neither names a relation.
     fn parse_ident_list(&mut self) -> Result<Vec<String>, ParseError> {
         self.expect(&Token::LParen)?;
         let mut names = vec![self.expect_ident()?];
@@ -9943,7 +9953,7 @@ impl Parser {
         Ok(names)
     }
 
-    /// Parse `( relation, relation, … )` — the `INHERITS` parent list.
+    /// Parse `( relation, relation, … )`: the `INHERITS` parent list.
     fn parse_relation_ref_list(&mut self) -> Result<Vec<crate::ast::RelationRef>, ParseError> {
         self.expect(&Token::LParen)?;
         let mut names = vec![self.relation_ref()?];
@@ -9954,11 +9964,11 @@ impl Parser {
         Ok(names)
     }
 
-    /// Consume `IF EXISTS` if present, returning whether it was seen.
+    /// Consume `IF EXISTS` if present and return whether it was seen.
     ///
     /// Returns `Ok(true)` when `IF EXISTS` is consumed, `Ok(false)` when `IF`
     /// is absent, and `Err` (SQLSTATE 42601) when `IF` is present but `EXISTS`
-    /// does not follow — a malformed clause like `DROP SERVER IF NOTEXIST s`.
+    /// does not follow, as in a malformed clause like `DROP SERVER IF NOTEXIST s`.
     fn eat_if_exists(&mut self) -> Result<bool, ParseError> {
         if self.eat_keyword(Keyword::If) {
             // `EXISTS` is always a keyword (Keyword::Exists) in the lexer.
@@ -10143,9 +10153,10 @@ impl Parser {
         })
     }
 
-    /// An `IN`/`OUT`/`INOUT`/`VARIADIC` prefix, defaulting to `IN`. A mode word
-    /// that is the whole parameter (`f(out)`, a parameter of type `out`) is left
-    /// alone, matching `PostgreSQL`'s own resolution.
+    /// An `IN`/`OUT`/`INOUT`/`VARIADIC` prefix, with `IN` as the default. The
+    /// parser leaves a mode word that is the whole parameter (`f(out)`, a
+    /// parameter of type `out`) alone, the same as `PostgreSQL`'s own
+    /// resolution.
     fn routine_arg_mode(&mut self) -> crate::ast::RoutineArgMode {
         use crate::ast::RoutineArgMode;
         if *self.peek() == Token::Keyword(Keyword::In) {
@@ -10790,7 +10801,7 @@ fn operator_spelling(token: &Token) -> Option<&'static str> {
 }
 
 /// The words `PostgreSQL` 18 classifies `reserved_keyword` or
-/// `type_func_name_keyword` — exactly the two categories `ColId` excludes.
+/// `type_func_name_keyword`, exactly the two categories `ColId` excludes.
 /// Every other word (`unreserved_keyword`, `col_name_keyword`, and anything
 /// that is not a keyword at all) is a `ColId`, so it may be a table alias or a
 /// column-alias-list entry: `FROM w AS between` is accepted and `FROM w AS
@@ -10799,7 +10810,7 @@ fn operator_spelling(token: &Token) -> Option<&'static str> {
 /// Transcribed from `SELECT word FROM pg_get_keywords() WHERE catcode IN
 /// ('R','T')` on `PostgreSQL` 18.4, and kept sorted for [`str::binary_search`].
 /// Some of these words reach this parser as [`Token::Keyword`] and the rest as
-/// [`Token::Ident`]; classifying by the word covers both.
+/// [`Token::Ident`]. A classification by the word covers both.
 const NOT_COL_ID_WORDS: &[&str] = &[
     "all",
     "analyse",
@@ -10904,7 +10915,7 @@ const NOT_COL_ID_WORDS: &[&str] = &[
     "with",
 ];
 
-/// The words `PostgreSQL` 18 marks `barelabel = false` — the ones that may NOT
+/// The words `PostgreSQL` 18 marks `barelabel = false`, the ones that may NOT
 /// be a column alias written without `AS`, so `SELECT id over` is a syntax error
 /// while `SELECT id is` names the column `is`. Independent of the `ColId`
 /// categories: reserved words such as `in` and type/function-name words such as
@@ -10955,7 +10966,7 @@ const NOT_BARE_LABEL_WORDS: &[&str] = &[
     "year",
 ];
 
-/// May `word` be spelled as a `ColId` — a table alias, or a name in a column
+/// May `word` be spelled as a `ColId`: a table alias, or a name in a column
 /// alias list?
 fn is_col_id_word(word: &str) -> bool {
     NOT_COL_ID_WORDS
@@ -10990,7 +11001,7 @@ pub fn parse_expr_for_test(sql: &str) -> Result<Expr, ParseError> {
     Ok(e)
 }
 
-/// Public statement entry — implemented in Task 12.
+/// Public statement entry, implemented in Task 12.
 ///
 /// # Errors
 ///
@@ -11006,7 +11017,7 @@ pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
         .collect())
 }
 
-/// Parse a standalone scalar expression — the stored source text of a `CHECK`
+/// Parse a standalone scalar expression: the stored source text of a `CHECK`
 /// predicate, a generated-column expression, or a partial-index predicate.
 ///
 /// # Errors
@@ -11064,11 +11075,13 @@ pub fn parse_with_command_identities(
         .collect()
 }
 
-/// Parse `sql` into statements, each paired with its EXACT source text — the byte
-/// slice of `sql` spanning that statement, trimmed of surrounding whitespace. The
-/// multi-range gateway uses this to forward an INDIVIDUAL statement (not the whole
-/// `;`-separated simple-query frame) to a remote range's leader, so a frame mixing a
-/// local and a remote range never re-runs the local statement on the remote node.
+/// Parse `sql` into statements, each paired with its EXACT source text.
+///
+/// The source text is the byte slice of `sql` that spans that statement,
+/// trimmed of surrounding whitespace. The multi-range gateway uses this to
+/// forward an INDIVIDUAL statement (not the whole `;`-separated simple-query
+/// frame) to a remote range's leader. A frame that holds both a local and a
+/// remote range then never re-runs the local statement on the remote node.
 ///
 /// # Errors
 ///
@@ -11156,8 +11169,8 @@ fn refusal_tokens_match(candidate: &[(Token, usize)], representative: &str) -> b
 /// `NOT DEFERRABLE` clauses, or two `INITIALLY …` ones.
 ///
 /// These are `42601` like an ordinary syntax error, but `PostgreSQL` words them
-/// itself rather than reporting a token, so they skip the "syntax error at
-/// position N" framing `ParseError::new` adds.
+/// itself and does not report a token. So they skip the "syntax error at
+/// position N" frame `ParseError::new` adds.
 fn multiple_constraint_attribute(clause: &'static str, position: usize) -> ParseError {
     ParseError::new_sqlstate(
         "42601",
@@ -11248,8 +11261,8 @@ mod tests {
     };
 
     /// The [`RelationRef`](crate::ast::RelationRef) a name is expected to parse
-    /// to, written the way the SQL spells it. Splitting here is a test-writing
-    /// convenience only — the parser splits on the token stream, never on a
+    /// to, written the way the SQL spells it. The split here is a test-writing
+    /// convenience only. The parser splits on the token stream, never on a
     /// string.
     fn written_relation(spelling: &str) -> crate::ast::RelationRef {
         match spelling.split_once('.') {
@@ -11855,7 +11868,7 @@ mod tests {
 
     #[test]
     /// An unrecognised type name is `42704 type "widget" does not exist`, the
-    /// same SQLSTATE and message `PostgreSQL` 18.4 gives — not a generic syntax
+    /// same SQLSTATE and message `PostgreSQL` 18.4 gives, not a generic syntax
     /// error. Verified against the oracle.
     fn unknown_column_type_is_error() {
         let e = parse("CREATE TABLE t (x widget)").expect_err("bad type");
@@ -14686,7 +14699,7 @@ mod tests {
     /// and must be lowered. Each `(` adds one `expr` frame (one `DepthGuard`
     /// level); `select_core` + the outermost projection `expr` add 2 guard
     /// levels on top, so `MAX_DEPTH - 2` is the deepest paren query the parser
-    /// admits — this test uses `MAX_DEPTH - 3` for one extra level of headroom.
+    /// admits. This test uses `MAX_DEPTH - 3` for one extra level of headroom.
     #[test]
     fn at_limit_parens_parse_ok() {
         let n = MAX_DEPTH - 3;
@@ -14696,7 +14709,7 @@ mod tests {
 
     /// The guard actually fires near the limit (not merely far away): a paren
     /// nest a few levels OVER `MAX_DEPTH` returns 54001, while the `at_limit`
-    /// test above proves a nest just UNDER it still parses — so the boundary is
+    /// test above proves a nest just UNDER it still parses. So the boundary is
     /// where it is intended to be.
     #[test]
     fn parens_just_over_limit_returns_54001() {
@@ -14710,8 +14723,8 @@ mod tests {
         );
     }
 
-    /// A modest real-world nesting depth (well under the limit) parses fine —
-    /// the guard does not reject ordinary queries.
+    /// A modest real-world nesting depth (well under the limit) parses fine.
+    /// The guard does not reject ordinary queries.
     #[test]
     fn modest_nesting_parses_fine() {
         let sql = format!("SELECT {}1{}", "(".repeat(20), ")".repeat(20));
@@ -14720,10 +14733,10 @@ mod tests {
         parse(&format!("SELECT {}1", "1+".repeat(20))).expect("modest chain must parse");
     }
 
-    /// Mode 2 (set ops): a long flat `… UNION ALL …` chain is parsed by the
-    /// `set_expr` LOOP, building an N-deep left-nested `SetExpr` that would overflow
-    /// the executor's `fold`/`resolve_set_columns` AND recursive `Drop`. The loop
-    /// iteration cap returns a clean 54001.
+    /// Mode 2 (set ops): the `set_expr` LOOP parses a long flat
+    /// `… UNION ALL …` chain. The loop builds an N-deep left-nested `SetExpr`
+    /// that would overflow the executor's `fold`/`resolve_set_columns` AND
+    /// recursive `Drop`. The loop iteration cap returns a clean 54001.
     #[test]
     fn long_union_chain_returns_54001() {
         let n = MAX_DEPTH * 4;
@@ -14743,8 +14756,8 @@ mod tests {
         assert_eq!(err.sqlstate(), "54001", "got {err:?}");
     }
 
-    /// A modest `UNION` chain (well under the limit) parses fine — the cap does not
-    /// reject ordinary set-op queries.
+    /// A modest `UNION` chain (well under the limit) parses fine. The cap does
+    /// not reject ordinary set-op queries.
     #[test]
     fn modest_union_chain_parses_fine() {
         let sql = format!("SELECT 1{}", " UNION ALL SELECT 1".repeat(20));
@@ -15577,7 +15590,7 @@ mod tests {
     }
 
     /// `ALTER TABLE` subcommands with no counterpart in Crabka's storage model
-    /// still parse, carrying their source text so the executor can name them.
+    /// still parse and carry their source text, so the executor can name them.
     #[test]
     fn alter_table_records_unsupported_subcommands_with_their_text() {
         use assert2::assert;

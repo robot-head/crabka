@@ -1,10 +1,10 @@
 //! KIP-932 share-group assignor.
 //!
-//! Reuses the consumer next-gen assignor types
-//! ([`MemberSubscription`], [`TopicMetadata`], [`Assignment`]). Unlike the
-//! consumer assignors, share-group assignment is **non-exclusive**: when there
-//! are fewer partitions than members, members are allowed to share partitions
-//! so that every member still receives at least one.
+//! This module reuses the consumer next-gen assignor types
+//! [`MemberSubscription`], [`TopicMetadata`], and [`Assignment`]. Unlike the
+//! consumer assignors, share-group assignment is **non-exclusive**. When there
+//! are fewer partitions than members, members can share partitions, so that
+//! every member still gets at least one.
 
 use std::collections::HashMap;
 
@@ -22,7 +22,9 @@ impl ShareGroupAssignor {
 
     #[must_use]
     /// # Panics
-    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
+    /// Panics if synchronized log state is poisoned. Also panics if a segment
+    /// that was validated as nonempty is missing its required batch or index
+    /// entry.
     pub fn assign(&self, members: &[MemberSubscription], topics: &TopicMetadata) -> Assignment {
         let mut out: Assignment = members
             .iter()

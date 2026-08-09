@@ -1,5 +1,5 @@
-//! Coverage for `serve::serve` — the plaintext arm and the TLS handshake-reject
-//! branch — using a minimal health-only app.
+//! Coverage for `serve::serve`, over the plaintext arm and the TLS
+//! handshake-reject branch, with a minimal health-only app.
 
 use std::time::Duration;
 
@@ -14,9 +14,9 @@ fn install_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-/// Covers `serve()`'s `None` (plaintext) arm: bind a listener, serve the
-/// health router over plain HTTP, verify `/healthz` returns 200, then shut
-/// down via cancellation token.
+/// Covers `serve()`'s `None` arm, which is plaintext. Bind a listener, serve
+/// the health router over plain HTTP, verify that `/healthz` returns 200, then
+/// shut down with the cancellation token.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plaintext_serve_serves_healthz() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -44,10 +44,10 @@ async fn plaintext_serve_serves_healthz() {
     let _ = h.await;
 }
 
-/// Covers `serve_tls`'s handshake-failure branch: start the server over TLS,
-/// send a PLAINTEXT http request to the TLS port — rustls handshake fails
-/// server-side (the client sends a raw HTTP request, not a TLS `ClientHello`) —
-/// and the reqwest client errors out.
+/// Covers `serve_tls`'s handshake-failure branch. Start the server over TLS,
+/// then send a PLAINTEXT http request to the TLS port. The client sends a raw
+/// HTTP request and not a TLS `ClientHello`, so the rustls handshake fails on
+/// the server side and the reqwest client errors out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tls_listener_rejects_plaintext_connection() {
     use std::net::{IpAddr, Ipv4Addr};

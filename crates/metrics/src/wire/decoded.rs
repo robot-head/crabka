@@ -78,7 +78,7 @@ pub enum WireFormat {
     RemoteWriteV2,
 }
 
-/// `remote_write` ingest edge errors.
+/// Errors raised at the `remote_write` ingest edge.
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
     #[error("unsupported content type `{0}`")]
@@ -109,8 +109,8 @@ impl WireError {
     }
 }
 
-/// Dispatch on the `Content-Type` `proto=` param. Bare
-/// `application/x-protobuf` remains the v1 default.
+/// Dispatches on the `proto=` parameter of the `Content-Type` header. A bare
+/// `application/x-protobuf` stays the v1 default.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn negotiate(content_type: Option<&str>) -> Result<WireFormat, WireError> {
@@ -138,12 +138,13 @@ fn proto_param_value(param: &str) -> Option<String> {
         .then(|| value.trim().trim_matches('"').to_string())
 }
 
-/// Decode a plain snappy block. Prometheus `remote_write` does not use the Xerial
-/// framed snappy format used by Kafka.
+/// Decodes a plain snappy block. Prometheus `remote_write` does not use the
+/// Xerial framed snappy format that Kafka uses.
 ///
-/// The block's stored uncompressed length is checked against `max_output`
-/// *before* decompressing, so a decompression bomb (tiny payload declaring a
-/// huge length) is rejected without `snap` pre-allocating the declared buffer.
+/// This function checks the block's stored uncompressed length against
+/// `max_output` *before* it decompresses, so it rejects a decompression bomb
+/// before `snap` pre-allocates the declared buffer. Such a bomb is a tiny
+/// payload that declares a huge length.
 // cargo-mutants: covered by remote-write snappy round-trip and limit tests.
 #[cfg_attr(test, mutants::skip)]
 /// # Errors
@@ -242,8 +243,8 @@ mod tests {
         assert!(err.status_code() == 400);
     }
 
-    /// A snappy block whose varint header *declares* a huge uncompressed length
-    /// but carries a tiny payload must be rejected on the declared-length
+    /// A snappy block whose varint header *declares* a huge uncompressed
+    /// length but carries a tiny payload must fail the declared-length
     /// pre-check, before `snap` allocates the declared buffer.
     #[test]
     fn snappy_block_rejects_declared_length_bomb() {

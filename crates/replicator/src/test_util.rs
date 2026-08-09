@@ -1,6 +1,6 @@
 //! Crate-internal test helpers.
 //!
-//! These functions panic on error — they are designed for use in tests only.
+//! These functions panic on error. They are for use in tests only.
 
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
@@ -12,14 +12,14 @@ const POLL_TIMEOUT: Time = millis(500);
 /// Gap between successive count probes in [`await_topic_count`].
 const PROBE_INTERVAL: Time = millis(100);
 
-/// Create a topic via [`crate::admin_util::ensure_topic`].
+/// Create a topic with [`crate::admin_util::ensure_topic`].
 pub async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
     crate::admin_util::ensure_topic(bootstrap, name, partitions, None)
         .await
         .unwrap_or_else(|e| panic!("create_topic({name}): {e}"));
 }
 
-/// Produce a single record (key + value) to `topic` and flush.
+/// Produce a single record, key and value, to `topic` and flush.
 pub async fn produce(bootstrap: &str, topic: &str, key: &[u8], value: &[u8]) {
     let producer = Producer::builder()
         .bootstrap(bootstrap)

@@ -1,7 +1,7 @@
 //! `regclassout`: a `regclass` renders as the relation's name, not as its oid.
 //!
-//! The oid stays the value's identity — it is what `regclass` compares, hashes,
-//! casts to `oid`/`int` and sends in binary — so only the *text* output changes
+//! The oid stays the value's identity. It is what `regclass` compares, hashes,
+//! casts to `oid`/`int` and sends in binary. Only the *text* output changes
 //! shape. Every expectation here is `PostgreSQL` 18.4's.
 
 use assert2::assert;

@@ -1,9 +1,11 @@
-//! `CreatePartitions` (`api_key=37`). `kafka-topics --alter --partitions
-//! N`. Round-robin replica placement matches the `CreateTopics`
-//! path when the caller omits `assignments`; an explicit, validated
-//! `assignments` list (one entry per *new* partition) overrides round-robin
-//! and gets used verbatim — matching the JVM `kafka-topics
-//! --alter --partitions N --replica-assignment 0:1,1:2,...` flow.
+//! `CreatePartitions` (`api_key=37`), which serves
+//! `kafka-topics --alter --partitions N`.
+//!
+//! When the caller omits `assignments`, the round-robin replica placement
+//! matches the `CreateTopics` path. An explicit, validated `assignments` list,
+//! with one entry per *new* partition, overrides round-robin, and the handler
+//! uses it verbatim. That matches the JVM flow
+//! `kafka-topics --alter --partitions N --replica-assignment 0:1,1:2,...`.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord};
@@ -28,18 +30,23 @@ use crate::{
 
 /// Resolve the replica list for each newly-added partition.
 ///
-/// `provided` is the caller's `assignments` field (`None` ≙ round-robin,
-/// `Some(...)` ≙ honor verbatim after validating against `known_brokers` and
-/// `rf`). `existing` is the current partition count; `new_partition_count`
-/// is `new_count - existing` (always > 0 by the time this helper runs; the
-/// `INVALID_PARTITIONS` check fires earlier). On the round-robin path the
-/// helper computes the full `0..new_count` assignment and returns only the
-/// tail so the new partitions keep rotating from where the existing ones
-/// left off — matching JVM behavior on `kafka-topics --alter --partitions`.
+/// `provided` is the caller's `assignments` field. `None` selects
+/// round-robin. `Some(...)` is used verbatim, after this function validates it
+/// against `known_brokers` and `rf`.
 ///
-/// Returns one replica list per new partition (in `existing..new_count`
-/// order), or an `(error_code, error_message)` pair the caller stamps into
-/// the per-topic result.
+/// `existing` is the current partition count. `new_partition_count` is
+/// `new_count - existing`. It is always above 0 by the time this helper runs,
+/// because the `INVALID_PARTITIONS` check runs earlier.
+///
+/// On the round-robin path the helper computes the full `0..new_count`
+/// assignment and returns only the tail, so the new partitions keep rotating
+/// from where the existing ones stopped. That matches the JVM behavior of
+/// `kafka-topics --alter --partitions`.
+///
+/// It returns one replica list per new partition, in `existing..new_count`
+/// order. It returns an `(error_code, error_message)` pair instead when the
+/// request is invalid, and the caller stamps that pair into the per-topic
+/// result.
 fn resolve_new_partition_assignments(
     provided: Option<&Vec<CreatePartitionsAssignment>>,
     known_brokers: &[NodeId],

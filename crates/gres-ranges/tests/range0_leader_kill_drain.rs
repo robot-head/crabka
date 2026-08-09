@@ -168,9 +168,9 @@ async fn real_range0_readiness_waits_for_in_doubt_recovery_prologue() {
     system.shutdown().await;
 }
 
-/// After a range-0 host restart, timestamp grants must resume strictly before
-/// the assembled SQL topology serves: the warming transport activates the
-/// oracle as soon as range 0 itself recovers, while SQL stays gated behind the
+/// After a restart of the range-0 host, timestamp grants must resume strictly
+/// before the assembled SQL topology serves. The warming transport activates the
+/// oracle as soon as range 0 itself recovers, and SQL stays gated behind the
 /// full prologue.
 #[tokio::test]
 async fn real_range0_restart_serves_timestamp_grants_before_sql_topology() {
@@ -252,9 +252,9 @@ async fn real_range0_restart_serves_timestamp_grants_before_sql_topology() {
 
 /// Extract the early-bound range transport address from a child's log.
 ///
-/// The child logs through a piped `tracing` writer that keeps ANSI color
-/// codes, so scan for the loopback address digits rather than splitting on a
-/// `field=` boundary that may carry escape sequences.
+/// The child logs through a piped `tracing` writer that keeps the ANSI color
+/// codes. This function therefore scans for the loopback address digits, and
+/// does not split on a `field=` boundary that can carry escape sequences.
 fn range_listen_endpoint(log: &str) -> Option<String> {
     log.lines()
         .filter(|line| line.contains("range compute listening"))

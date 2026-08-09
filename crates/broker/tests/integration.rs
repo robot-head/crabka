@@ -18,7 +18,7 @@ use crabka_protocol::{
 };
 
 /// Build a `RecordBatch` with one entry per provided value. Codegen's
-/// `PartitionProduceData.records` is `Option<RecordsPayload>`; callers
+/// `PartitionProduceData.records` is `Option<RecordsPayload>`. Callers
 /// pass the batch by value and `.into()` it at the assignment site.
 fn record_batch_with_values(values: &[&str]) -> RecordBatch {
     let len_i32 = i32::try_from(values.len()).expect("test fixture small enough for i32");
@@ -39,8 +39,9 @@ fn record_batch_with_values(values: &[&str]) -> RecordBatch {
 }
 
 /// One record per `(value, timestamp)` pair. `base_timestamp` is the
-/// first timestamp; each record's `timestamp_delta` reconstructs the
-/// requested absolute timestamp. `max_timestamp` is the largest.
+/// first timestamp. Each record's `timestamp_delta` reconstructs the
+/// requested absolute timestamp. `max_timestamp` is the largest
+/// timestamp.
 fn timestamped_batch(entries: &[(&str, i64)]) -> RecordBatch {
     let base_ts = entries.first().map_or(0, |(_, ts)| *ts);
     let max_ts = entries.iter().map(|(_, ts)| *ts).max().unwrap_or(0);
@@ -64,7 +65,7 @@ fn timestamped_batch(entries: &[(&str, i64)]) -> RecordBatch {
 
 /// Round-trip a Metadata request to learn the topic's assigned UUID.
 /// Produce / Fetch at v ≥ 13 carry only `topic_id` on the wire, so the
-/// caller must plumb the real UUID through.
+/// caller must pass the real UUID through.
 async fn topic_id_for(
     client: &crabka_client_core::Client,
     name: &str,

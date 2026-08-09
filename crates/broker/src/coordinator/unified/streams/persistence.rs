@@ -1,20 +1,24 @@
 //! KIP-1071 streams-group record types persisted in `__consumer_offsets`.
 //!
-//! Wire encoding mirrors [`persistence_next_gen`](crate::coordinator::unified::persistence_next_gen)
-//! (the KIP-848 consumer next-gen codecs) and the KIP-932 share analog
-//! ([`super::super::share::persistence`]): a leading `i16` key-version
-//! discriminator on keys and an `i16(0)` version preamble on values. Streams
-//! records reuse the same length-prefixed array / nullable-string / uuid leaf
-//! encoders but model *tasks* — `(subtopology, partition)` grouped by
-//! active/standby/warmup role — rather than topic partitions.
+//! The wire encoding mirrors
+//! [`persistence_next_gen`](crate::coordinator::unified::persistence_next_gen),
+//! the KIP-848 consumer next-gen codecs, and the KIP-932 share equivalent
+//! ([`super::super::share::persistence`]). Keys carry a leading `i16`
+//! key-version discriminator, and values carry an `i16(0)` version preamble.
 //!
-//! Key versions 15–21 are allocated to streams. The earlier ranges are taken:
-//! 0,1 offset-commit; 2 classic group; 3,5,6,7,8 consumer next-gen; 9–14 share.
+//! Streams records reuse the same length-prefixed array, nullable-string, and
+//! uuid leaf encoders. They model *tasks* rather than topic partitions. A task
+//! is a `(subtopology, partition)` pair, grouped by the active, standby, or
+//! warmup role.
 //!
-//! This module is intentionally self-contained: it defines its own value
-//! structs and represents the assignment-by-role as
-//! `BTreeMap<String, Vec<i32>>` (subtopology id → partitions) rather than
-//! importing the in-memory state model.
+//! Key versions 15 to 21 belong to streams. The earlier ranges are taken: 0
+//! and 1 for offset-commit, 2 for the classic group, 3, 5, 6, 7, and 8 for
+//! consumer next-gen, and 9 to 14 for share.
+//!
+//! This module is deliberately self-contained. It defines its own value
+//! structs, and it represents the assignment by role as
+//! `BTreeMap<String, Vec<i32>>`, which maps a subtopology id to partitions,
+//! instead of importing the in-memory state model.
 
 use std::collections::BTreeMap;
 
@@ -114,7 +118,8 @@ pub fn encode_current_member_assignment_key(group_id: &str, member_id: &str) -> 
     buf.freeze()
 }
 
-/// Encode a [`StreamsGroupKey`] (leading `i16` key version) for dispatch.
+/// Encodes a [`StreamsGroupKey`] for dispatch, with a leading `i16` key
+/// version.
 #[must_use]
 pub fn encode_streams_key(key: &StreamsGroupKey) -> Bytes {
     match key {
@@ -204,7 +209,8 @@ impl StreamsGroupMetadataValue {
     }
 }
 
-/// A member's advertised host/port endpoint for interactive-query routing.
+/// A member's advertised host and port endpoint, for interactive-query
+/// routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamsEndpoint {
     pub host: String,
@@ -298,9 +304,9 @@ impl StreamsGroupMemberMetadataValue {
     }
 }
 
-/// An internal/changelog/repartition topic referenced by a subtopology, with
-/// the partition count, replication factor, and per-topic config overrides
-/// the coordinator should materialize.
+/// An internal, changelog, or repartition topic that a subtopology refers to.
+/// It carries the partition count, the replication factor, and the per-topic
+/// config overrides that the coordinator should materialize.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredTopicInfo {
     pub name: String,
@@ -342,8 +348,8 @@ impl StoredTopicInfo {
     }
 }
 
-/// A copartition group: indices (into the enclosing subtopology's topic lists)
-/// of topics that must be copartitioned with one another.
+/// A copartition group. It holds the indices, into the enclosing subtopology's
+/// topic lists, of the topics that must be copartitioned with one another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredCopartitionGroup {
     pub source_topics: Vec<i16>,
@@ -366,9 +372,10 @@ impl StoredCopartitionGroup {
     }
 }
 
-/// One subtopology of a streams topology: its source topics (exact + regex),
-/// the repartition sinks/sources it produces/consumes, its changelog topics,
-/// and any copartition constraints.
+/// One subtopology of a streams topology. It holds the source topics, both
+/// exact and regex, the repartition sinks it produces and the repartition
+/// sources it consumes, its changelog topics, and any copartition
+/// constraints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSubtopology {
     pub subtopology_id: String,
@@ -435,7 +442,8 @@ impl StoredSubtopology {
     }
 }
 
-/// Key v17 value: the group's resolved topology (epoch + subtopologies).
+/// Key v17 value: the group's resolved topology, that is the epoch and the
+/// subtopologies.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamsGroupTopologyValue {
     pub epoch: i32,
@@ -477,8 +485,9 @@ impl StreamsGroupTopologyValue {
     }
 }
 
-/// A topic the group consumes/produces, paired with its uuid and partition
-/// count as seen in the metadata image when the assignment was computed.
+/// A topic that the group consumes or produces, with its uuid and its
+/// partition count as the metadata image held them when the broker computed
+/// the assignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamsTopicMeta {
     pub topic_name: String,
@@ -564,7 +573,7 @@ impl StreamsGroupTargetAssignmentMetadataValue {
 }
 
 /// Key v20 value: a member's target task assignment, by role. Each role maps a
-/// subtopology id to the partitions of that subtopology assigned to the member.
+/// subtopology id to the partitions of that subtopology that the member holds.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamsGroupTargetAssignmentMemberValue {
     pub active: BTreeMap<String, Vec<i32>>,
@@ -597,8 +606,8 @@ impl StreamsGroupTargetAssignmentMemberValue {
     }
 }
 
-/// Key v21 value: a member's current (in-flight) task assignment plus the
-/// reconciliation epochs/state and any active tasks pending revocation.
+/// Key v21 value: a member's current in-flight task assignment, with the
+/// reconciliation epochs and state, and any active task pending revocation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamsGroupCurrentMemberAssignmentValue {
     pub member_epoch: i32,
@@ -651,9 +660,9 @@ impl StreamsGroupCurrentMemberAssignmentValue {
 // Leaf encode/decode helpers
 // ---------------------------------------------------------------------------
 
-/// Encode a role's task assignment: `i32` count of subtopologies, then per
-/// entry `string subtopology_id` + `i32` partition count + that many `i32`
-/// partitions. Decoded symmetrically by [`decode_task_map`].
+/// Encodes a role's task assignment: an `i32` count of subtopologies, then for
+/// each entry a `string subtopology_id`, an `i32` partition count, and that
+/// many `i32` partitions. [`decode_task_map`] decodes the same layout.
 fn encode_task_map(buf: &mut BytesMut, map: &BTreeMap<String, Vec<i32>>) {
     let n = i32::try_from(map.len()).expect("fits");
     buf.put_i32(n);
@@ -745,7 +754,8 @@ fn get_u32(buf: &mut &[u8]) -> Result<u32, BrokerError> {
 #[derive(Debug, Default)]
 pub struct PendingStreamsRecords {
     pub group_metadata: Option<StreamsGroupMetadataValue>,
-    /// `Some(value)` writes the record; `None` writes a tombstone (null value).
+    /// `Some(value)` writes the record. `None` writes a tombstone (null
+    /// value).
     pub member_metadata: Vec<(String, Option<StreamsGroupMemberMetadataValue>)>,
     pub topology: Option<StreamsGroupTopologyValue>,
     pub partition_metadata: Option<StreamsGroupPartitionMetadataValue>,
@@ -814,9 +824,9 @@ mod tests {
 
     use super::*;
 
-    /// Split a freshly encoded key into its leading version and the remaining
-    /// body, mirroring how `__consumer_offsets` keys are dispatched on the
-    /// leading `i16`.
+    /// Splits a newly encoded key into its leading version and the remaining
+    /// body. This mirrors how the broker dispatches `__consumer_offsets` keys
+    /// on the leading `i16`.
     fn peek_version(buf: &[u8]) -> (i16, &[u8]) {
         let mut r = buf;
         let v = bytes::Buf::get_i16(&mut r);

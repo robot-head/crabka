@@ -1,6 +1,8 @@
-//! Controllers (reconcilers) for Crabka CRDs. Each kind lives in its own
-//! submodule and shares helpers via `common` (cluster-level rendering,
-//! SSA helpers, label / owner-ref builders, status derivation).
+//! Controllers, also called reconcilers, for Crabka CRDs.
+//!
+//! Each kind is in its own submodule. The submodules share helpers from
+//! `common`: cluster-level rendering, SSA helpers, label and owner-ref
+//! builders, and status derivation.
 
 pub mod cluster_ca;
 pub mod common;

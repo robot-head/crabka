@@ -27,7 +27,7 @@ pub trait CheckpointStore: Send + Sync {
     async fn get(&self, key: &str) -> Result<Vec<u8>, SubstrateError>;
     /// List objects whose key starts with `prefix`, in deterministic key order.
     async fn list(&self, prefix: &str) -> Result<Vec<CheckpointObject>, SubstrateError>;
-    /// Delete one object. Missing objects are tolerated by implementations.
+    /// Delete one object. Implementations tolerate missing objects.
     async fn delete(&self, key: &str) -> Result<(), SubstrateError>;
 }
 

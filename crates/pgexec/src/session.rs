@@ -1,12 +1,15 @@
-//! Per-connection session: runs SQL against the shared KV store. SP6 uses
-//! PostgreSQL's xid/clog/snapshot MVCC with concurrent writers: writes go
-//! through to disk tagged with the transaction's xid (read-your-writes via
-//! `satisfies_mvcc` + own xid), commit/rollback record the outcome in the clog,
-//! row-level conflicts serialize through the `RowLockManager` (held until
-//! COMMIT/ROLLBACK and freed by `release_all`), and DDL serializes among DDLs
-//! behind a small `catalog_lock`, whose hold spans the commit because the
-//! duplicate-name check reads the keyspace. The table-id counter has its own
-//! lock: a session claims a block of ids under it and hands them out locally.
+//! Per-connection session: runs SQL against the shared KV store.
+//!
+//! SP6 uses PostgreSQL's xid/clog/snapshot MVCC with concurrent writers. Writes
+//! go through to disk tagged with the transaction's xid, and read-your-writes
+//! works through `satisfies_mvcc` and the own xid. Commit and rollback record
+//! the outcome in the clog. Row-level conflicts serialize through the
+//! `RowLockManager`, which holds a lock until COMMIT/ROLLBACK and frees it with
+//! `release_all`. DDL serializes among DDLs behind a small `catalog_lock`, whose
+//! hold spans the commit because the duplicate-name check reads the keyspace.
+//!
+//! The table-id counter has its own lock. A session claims a block of ids under
+//! it and hands them out locally.
 
 use std::{
     cell::RefCell,
@@ -61,7 +64,7 @@ pub(crate) struct TxnCtx {
     pub(crate) _snapshot_pin: crabka_pgmvcc::gc::SnapshotPin,
     pub(crate) repeatable_read: bool,
     /// The level `SHOW transaction_isolation` reports for this block, which is
-    /// the requested spelling — `READ UNCOMMITTED` runs as `READ COMMITTED`
+    /// the requested spelling. `READ UNCOMMITTED` runs as `READ COMMITTED`
     /// but still reports itself, exactly as in `PostgreSQL`.
     pub(crate) isolation: IsolationLevel,
     /// A `READ ONLY` block refuses every statement that would change rows or
@@ -71,7 +74,7 @@ pub(crate) struct TxnCtx {
     /// The GLOBAL snapshot the cross-range resolver (`exec::global_status`) gates
     /// `Prepared(-> g)` rows against. Captured at BEGIN for REPEATABLE READ (fixed
     /// for the txn's life), re-captured per statement for READ COMMITTED. `None`
-    /// on a non-GTM (single-range) engine — reads then use `NO_GLOBAL_SNAPSHOT()`
+    /// on a non-GTM (single-range) engine. Reads then use `NO_GLOBAL_SNAPSHOT()`
     /// and the `Prepared` branch is unreachable.
     pub(crate) global_snapshot: Option<Snapshot>,
     /// Finite range-0 read timestamp fixed at BEGIN for REPEATABLE READ.
@@ -83,23 +86,24 @@ pub(crate) struct TxnCtx {
     /// version the fixed REPEATABLE READ timestamp can still see.
     pub(crate) _timestamp_read_pin: Option<crabka_pgmvcc::gc::SnapshotPin>,
     /// The `(table_id, rowid)` set this transaction's local xid has written, in
-    /// write order (deduped is unnecessary — the abort-atomicity fence only scans
-    /// these rows' versions, and a repeated entry just re-scans). Used by the
-    /// cross-range re-stage fence (`effective_global_xid`): when a participant
-    /// re-stage lands on a row that already carries an in-doubt `Prepared(-> g_old)`
-    /// marker (a prior attempt staged it then its leader died), the `Prepared`
-    /// marker this write/`join_global` stamps must ADOPT `g_old` rather than mint a
-    /// SECOND version under a fresh `g'` that could commit independently — so each
-    /// cross-range row resolves under EXACTLY ONE global decision (abort atomicity).
+    /// write order. Deduplication is unnecessary, because the abort-atomicity
+    /// fence only scans these rows' versions and a repeated entry just re-scans.
+    /// The cross-range re-stage fence (`effective_global_xid`) uses the set.
+    /// When a participant re-stage lands on a row that already carries an
+    /// in-doubt `Prepared(-> g_old)` marker, a prior attempt staged the row and
+    /// then its leader died. The `Prepared` marker this write or `join_global`
+    /// stamps must ADOPT `g_old`, and must not mint a SECOND version under a
+    /// fresh `g'` that could commit independently. Each cross-range row
+    /// therefore resolves under EXACTLY ONE global decision (abort atomicity).
     pub(crate) written_rows: Vec<(u32, u64)>,
     /// SP37: the transaction-start instant (captured from the session clock at
     /// BEGIN). `now()`/`current_timestamp` are PG transaction-stable, so every
     /// statement in this block evaluates them against this single instant.
     pub(crate) txn_now: jiff::Timestamp,
     /// Held (SHARED) by explicit transactions that have written local tables,
-    /// until COMMIT/ROLLBACK. Never blocks other DML — it lets unique-index
-    /// DDL (which takes the same lock exclusively) wait out this transaction's
-    /// writes before backfilling. Same-key unique conflicts serialize through
+    /// until COMMIT/ROLLBACK. It never blocks other DML. It lets unique-index
+    /// DDL, which takes the same lock exclusively, wait for this transaction's
+    /// writes before it backfills. Same-key unique conflicts serialize through
     /// per-key locks in the `RowLockManager` instead.
     pub(crate) unique_index_guard: Option<UniqueIndexGuard>,
     /// Held after the first ordinary write until COMMIT/ROLLBACK so conversion
@@ -235,8 +239,8 @@ impl GucValue {
 
     /// The value a range check compares, in base units. `None` for the types
     /// that carry no range, and for a whole-number value too large for the C
-    /// `int` every `integer` parameter is stored in — which `parse_guc_value`
-    /// has already rejected.
+    /// `int` every `integer` parameter is stored in. `parse_guc_value` has
+    /// already rejected such a value.
     fn magnitude(&self) -> Option<f64> {
         match self {
             Self::Real(value) | Self::RealMillis(value) => Some(*value),
@@ -262,9 +266,10 @@ impl GucValue {
 
 /// One row of `PostgreSQL`'s unit-conversion tables: a unit spelling paired
 /// with its size in the parameter's base unit, held as the exact rational
-/// `base_units / parts` so that a unit smaller than the base — `B` against a
-/// kB base, `us` against a millisecond base — stays exact. Every table is
-/// ordered largest unit first, which both conversion directions rely on.
+/// `base_units / parts`, so that a unit smaller than the base stays exact. `B`
+/// against a kB base and `us` against a millisecond base are such units. Every
+/// table is ordered largest unit first, which both conversion directions rely
+/// on.
 #[derive(Debug, Clone, Copy)]
 struct UnitConversion {
     /// The spelling `SET` accepts and `SHOW` prints. `PostgreSQL` compares it
@@ -278,7 +283,7 @@ struct UnitConversion {
 }
 
 impl UnitConversion {
-    /// Base units per unit — the multiplier `PostgreSQL`'s own table stores.
+    /// Base units per unit: the multiplier `PostgreSQL`'s own table stores.
     fn multiplier(self) -> f64 {
         f64::from(self.base_units) / f64::from(self.parts)
     }
@@ -425,10 +430,10 @@ fn render_real_with_unit(base: f64, table: &[UnitConversion]) -> String {
     format!("{}{}", format_g(chosen.0), chosen.1)
 }
 
-/// `PostgreSQL`'s `convert_to_base_unit`: scale a value by the named unit,
-/// then — when the table has a smaller unit — round a fractional result off to
-/// the nearest multiple of that smaller unit. `None` for a unit the table does
-/// not list, which includes every miscased spelling.
+/// `PostgreSQL`'s `convert_to_base_unit`: scale a value by the named unit. When
+/// the table has a smaller unit, then round a fractional result off to the
+/// nearest multiple of that smaller unit. `None` for a unit the table does not
+/// list, which includes every miscased spelling.
 fn convert_to_base_unit(value: f64, unit: &str, table: &[UnitConversion]) -> Option<f64> {
     let index = table.iter().position(|entry| entry.unit == unit)?;
     let mut converted = value * table[index].multiplier();
@@ -498,9 +503,9 @@ fn exponent_length(rest: &str, marker: u8) -> Option<usize> {
 
 /// C's `strtol` at base 0: an optional sign, then `0x`/`0b` digits, a
 /// leading-zero octal run, or decimal digits, paired with the text after the
-/// number. `None` when no digit was consumed at all — `PostgreSQL` rejects
-/// that outright rather than falling back to `strtod`. `0o` is deliberately
-/// not a prefix, because C's `strtol` does not know it.
+/// number. `None` when no digit was consumed at all. `PostgreSQL` rejects that
+/// outright and does not fall back to `strtod`. `0o` is deliberately not a
+/// prefix, because C's `strtol` does not know it.
 fn scan_c_integer(value: &str) -> Option<(f64, &str)> {
     let (negative, unsigned) = split_sign(value.trim_start());
     for (prefix, radix) in [("0x", 16), ("0b", 2)] {
@@ -523,7 +528,7 @@ fn scan_c_integer(value: &str) -> Option<(f64, &str)> {
 /// C's `strtod`: an optional sign, then either a decimal significand with an
 /// optional `e` exponent or C99's hexadecimal `0x` form with an optional `p`
 /// exponent, paired with the text after the number. `None` when nothing
-/// numeric was consumed, or when the value overflows to infinity — C's
+/// numeric was consumed, or when the value overflows to infinity. That is C's
 /// `ERANGE`, which `PostgreSQL` rejects.
 fn scan_c_double(value: &str) -> Option<(f64, &str)> {
     let (negative, unsigned) = split_sign(value.trim_start());
@@ -619,8 +624,8 @@ fn scan_hex_double(value: &str) -> Option<(f64, &str)> {
 ///
 /// C leaves the scan position at the *start* of the value when `strtol`
 /// consumes nothing, so the "stopped at a decimal point?" test still fires for
-/// `.5MB` — but not for ` .5MB` or `+.5MB`, where the scan position is the
-/// space or the sign and `PostgreSQL` rejects the whole spelling.
+/// `.5MB`. It does not fire for ` .5MB` or `+.5MB`, where the scan position is
+/// the space or the sign and `PostgreSQL` rejects the whole spelling.
 fn scan_integer_input(value: &str) -> Option<(f64, &str)> {
     let scanned = scan_c_integer(value);
     let rest = scanned.map_or(value, |(_, rest)| rest);
@@ -643,10 +648,10 @@ fn apply_unit(number: f64, rest: &str, table: Option<&[UnitConversion]>) -> Opti
     convert_to_base_unit(number, unit, table?)
 }
 
-/// `PostgreSQL`'s `parse_int`: scan, apply the unit, then `rint` — round half
-/// to even, not half away from zero. `None` for a whole number no `i64` can
-/// hold; the narrower C `int` bound every integer parameter carries is applied
-/// by [`parse_guc_value`], which needs the base-unit value to report it.
+/// `PostgreSQL`'s `parse_int`: scan, apply the unit, then `rint`, which rounds
+/// half to even and not half away from zero. `None` for a whole number no `i64`
+/// can hold. [`parse_guc_value`] applies the narrower C `int` bound every
+/// integer parameter carries, because it needs the base-unit value to report it.
 fn round_to_base_units(number: f64) -> Option<i64> {
     let rounded = number.round_ties_even();
     if !rounded.is_finite() {
@@ -665,9 +670,9 @@ fn parse_integer_input(value: &str, table: Option<&[UnitConversion]>) -> Result<
 }
 
 /// Parse a `real` parameter's value the way `PostgreSQL`'s `parse_real` does:
-/// C's `strtod` only — no `0b` prefix and no leading-zero octal — then the
-/// unit, if the parameter has one. There is no rounding: a `real` keeps its
-/// fraction.
+/// C's `strtod` only, with no `0b` prefix and no leading-zero octal, and then
+/// the unit if the parameter has one. There is no rounding, so a `real` keeps
+/// its fraction.
 fn parse_real_input(value: &str, table: Option<&[UnitConversion]>) -> Result<f64, ExecError> {
     let invalid = || ExecError::InvalidParameterValue(value.to_string());
     let (number, rest) = scan_c_double(value).ok_or_else(invalid)?;
@@ -769,7 +774,7 @@ impl IntervalStyle {
     }
 }
 
-/// `pg_settings.context` — which of them `SET` may change from a session.
+/// `pg_settings.context`: which of them `SET` may change from a session.
 /// `PostgreSQL` refuses the rest with 55P02 and a message that names the reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GucContext {
@@ -830,8 +835,8 @@ struct GucDefinition {
     allowed: &'static [&'static str],
     context: GucContext,
     /// `pg_settings.boot_val` when it differs from the value this registry
-    /// starts the parameter at — `PostgreSQL`'s compiled-in default, which its
-    /// own configuration file may then raise.
+    /// starts the parameter at. This is `PostgreSQL`'s compiled-in default,
+    /// which its own configuration file may then raise.
     boot_val: Option<&'static str>,
     /// `pg_settings.unit`, which is also the suffix `PostgreSQL` prints after
     /// every number in a range error. `None` for a unitless parameter.
@@ -843,8 +848,8 @@ struct GucDefinition {
     /// identifiers, so each item written by a `SET` is re-quoted on the way in
     /// and `SHOW` reports the quoted form. `SET search_path = "MySchema",
     /// public` reports back as `"MySchema", public`, where a plain join would
-    /// lose the quoting — and an item holding a comma would lose its
-    /// boundaries entirely.
+    /// lose the quoting. An item that holds a comma would lose its boundaries
+    /// completely.
     list_quote: bool,
 }
 
@@ -874,10 +879,10 @@ impl GucDefinition {
         self
     }
 
-    /// Flatten a written `SET` value into the string this parameter stores —
-    /// the form `SHOW` reports. A list parameter re-quotes each item the way
-    /// `PostgreSQL`'s `quote_identifier` does; every other parameter joins the
-    /// items back with `", "` untouched.
+    /// Flatten a written `SET` value into the string this parameter stores,
+    /// which is the form `SHOW` reports. A list parameter re-quotes each item
+    /// the way `PostgreSQL`'s `quote_identifier` does. Every other parameter
+    /// joins the items back with `", "` untouched.
     fn flatten(&self, value: &crabka_pgparser::ast::SetValue) -> String {
         match value {
             crabka_pgparser::ast::SetValue::Value(items) if self.list_quote => {
@@ -1449,8 +1454,8 @@ impl GucState {
 
     /// Overwrite one parameter from the transaction machinery rather than from
     /// a `SET`. The level a block runs at is not an assignment the block's own
-    /// `ROLLBACK` undoes — it simply ceases to exist with the block — so this
-    /// bypasses the transactional staging entirely.
+    /// `ROLLBACK` undoes. It simply ceases to exist with the block, so this
+    /// method bypasses the transactional staging completely.
     fn force(&mut self, name: &str, value: GucValue) {
         if let Some(slot) = self.slots.get_mut(name) {
             slot.committed = value;
@@ -1460,7 +1465,7 @@ impl GucState {
     }
 
     /// `RESET ALL`, which `PostgreSQL` applies only to the parameters a session
-    /// may assign — the non-assignable ones are skipped, not refused.
+    /// may assign. The non-assignable ones are skipped, not refused.
     pub(crate) fn reset_all(&mut self) {
         for (name, slot) in &mut self.slots {
             if guc_definition(name)
@@ -1924,7 +1929,7 @@ fn session_lock_runtime<T>(
 ///
 /// Returns an error when no statement context is installed, or when a
 /// conflicting hold belongs to another session and the caller is the waiting
-/// (non-`try`) spelling — Gres does not queue advisory waiters.
+/// (non-`try`) spelling. Gres does not queue advisory waiters.
 pub(crate) fn advisory_lock_runtime(
     key: i64,
     shared: bool,
@@ -2044,9 +2049,9 @@ fn with_guc_runtime<T>(
 /// Fold a statement's outcome onto its span: `ERROR` plus the SQLSTATE on
 /// failure, the row counts on success.
 ///
-/// Only `ERROR` is ever recorded — a successful statement leaves the span
+/// Only `ERROR` is ever recorded. A successful statement leaves the span
 /// `Unset`, as the OpenTelemetry specification asks. `span.is_none()` is the
-/// cheap early out that keeps this free when the target is disabled; the
+/// cheap early out that keeps this free when the target is disabled. The
 /// `ExecError` clone below only happens on a traced failure.
 fn record_statement_status(span: &tracing::Span, result: &Result<QueryResult, ExecError>) {
     if span.is_none() {
@@ -2230,10 +2235,11 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
     }
 }
 
-/// Reconstruct the global visibility snapshot from range 0's DURABLE state (never
-/// an in-memory running set — correction C2). xmax = next_global_xid; xip = [] (a
-/// g < xmax is resolved by reading range 0's global clog directly). Caller must
-/// have barriered range 0's replica current first.
+/// Reconstruct the global visibility snapshot from range 0's DURABLE state,
+/// never from an in-memory running set (correction C2). xmax = next_global_xid
+/// and xip = [], because a read of range 0's global clog resolves a
+/// g < xmax directly. The caller must have barriered range 0's replica current
+/// first.
 pub(crate) fn durable_global_snapshot(range0: &dyn Kv) -> Result<Snapshot, ExecError> {
     use crabka_pgmvcc::xid::GLOBAL_XID_BASE;
     Ok(Snapshot {
@@ -2245,9 +2251,9 @@ pub(crate) fn durable_global_snapshot(range0: &dyn Kv) -> Result<Snapshot, ExecE
 
 /// One subscription change staged by the current transaction.
 ///
-/// `LISTEN`/`UNLISTEN` are transactional in PostgreSQL — they take effect at
-/// COMMIT and vanish at ROLLBACK — so they are queued here rather than applied
-/// to the bus as the statement runs.
+/// `LISTEN`/`UNLISTEN` are transactional in PostgreSQL. They take effect at
+/// COMMIT and vanish at ROLLBACK, so they are queued here and not applied to
+/// the bus as the statement runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ListenAction {
     Listen(String),
@@ -2301,9 +2307,9 @@ impl NotifyPending {
 
     /// Stage one notification.
     ///
-    /// Validation happens here — at the statement that wrote the notification,
-    /// not at commit — because that is where PostgreSQL reports an empty channel
-    /// or an oversized payload.
+    /// Validation happens here, at the statement that wrote the notification,
+    /// and not at commit. That is where PostgreSQL reports an empty channel or
+    /// an oversized payload.
     ///
     /// # Errors
     ///
@@ -2366,7 +2372,7 @@ pub(crate) fn notify_queue_error(error: notify::NotifyError) -> ExecError {
 struct OnCommitEntry {
     relation: crabka_pgcatalog::RelationName,
     /// The relation the disposition was armed for. An entry whose name now
-    /// holds a different id — or no relation at all — has nothing left to
+    /// holds a different id, or no relation at all, has nothing left to
     /// dispose of.
     table: crabka_pgcatalog::TableId,
     action: crabka_pgparser::ast::OnCommitAction,
@@ -2393,9 +2399,9 @@ pub struct SqlSession {
     ///
     /// Behind a lock rather than a plain field because
     /// [`crate::exec::ForeignCtx`] borrows it while `execute_ddl` runs, and one
-    /// statement may create more than one relation. The lock is uncontended —
-    /// a session executes one statement at a time — but the session is held
-    /// across `.await` points and so has to be `Sync`.
+    /// statement may create more than one relation. The lock is uncontended,
+    /// because a session executes one statement at a time. But the session is
+    /// held across `.await` points and so must be `Sync`.
     reserved_table_ids: Mutex<Vec<crabka_pgcatalog::TableId>>,
     /// Set once this session has purged and re-created its own temporary
     /// namespace, which happens on the first statement that creates a temporary
@@ -2408,9 +2414,9 @@ pub struct SqlSession {
     /// The temporary relations whose contents or existence a `COMMIT` disposes
     /// of, in creation order.
     ///
-    /// `ON COMMIT` is session-scoped by definition — the relation cannot outlive
-    /// the session that created it — so the disposition lives beside the session
-    /// rather than in the shared catalog.
+    /// `ON COMMIT` is session-scoped by definition, because the relation cannot
+    /// outlive the session that created it. The disposition therefore lives
+    /// beside the session and not in the shared catalog.
     on_commit: Vec<OnCommitEntry>,
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<crate::WriterFence>,
@@ -2438,11 +2444,11 @@ pub struct SqlSession {
     global_xid: Option<u64>,
     /// Bound on every lock wait this session performs (`None` waits
     /// indefinitely under the engine-local deadlock detector). Set by owners
-    /// that can enlist this session in a cross-range transaction — a gateway
-    /// escalating an explicit transaction past one range, or a range service
-    /// hosting the session for a remote gateway — because a deadlock cycle
-    /// spanning engines is invisible to any one engine's wait-for graph and
-    /// only a capped wait resolves it.
+    /// that can enlist this session in a cross-range transaction. Such an owner
+    /// is a gateway that escalates an explicit transaction past one range, or a
+    /// range service that hosts the session for a remote gateway. A deadlock
+    /// cycle across engines is invisible to any one engine's wait-for graph,
+    /// and only a capped wait resolves it.
     lock_wait_cap: Option<std::time::Duration>,
     /// SP37: the injectable clock (shared from the engine). Backs the per-statement
     /// `EvalCtx`'s `now`/`stmt_now` and `clock_timestamp()`. `SystemClock` in
@@ -2491,11 +2497,11 @@ pub struct SqlSession {
     /// inside synchronous expression evaluation, so the advance is staged here
     /// and folded into the next batch this session commits.
     ///
-    /// Every statement that can advance a sequence commits before it returns —
-    /// a write statement through its own batch, a read-only `SELECT
-    /// nextval('s')` through [`SqlSession::flush_pending_sequences`] — so a
-    /// value never reaches the client before the op recording it is durable.
-    /// That is what makes re-seeding safe for the next writer.
+    /// Every statement that can advance a sequence commits before it returns. A
+    /// write statement commits through its own batch, and a read-only `SELECT
+    /// nextval('s')` commits through [`SqlSession::flush_pending_sequences`]. A
+    /// value therefore never reaches the client before the op that records it
+    /// is durable. That is what makes re-seeding safe for the next writer.
     pending_sequences: Arc<Mutex<crate::seq::PendingSequences>>,
     /// This connection's registration on the engine's `LISTEN`/`NOTIFY` bus.
     /// `None` until an owner calls [`SqlSession::register_notify`] or
@@ -2532,8 +2538,8 @@ pub struct SqlSession {
     event_trigger: Option<Arc<crate::clock::EventTriggerContext>>,
     /// Cross-node notification replication (shared from the engine): the origin
     /// stamp and record sequence of the WAL records a committing transaction
-    /// appends for its notifications. Inert — and the commit batch unchanged —
-    /// until an owner calls `SqlEngine::set_notify_origin`.
+    /// appends for its notifications. It stays inert, and the commit batch
+    /// stays unchanged, until an owner calls `SqlEngine::set_notify_origin`.
     notify_replication: Arc<crate::NotifyReplication>,
     /// This connection's backend process id: the value the wire layer announced
     /// in `BackendKeyData` and stamps on the notifications this session
@@ -2578,7 +2584,7 @@ struct SqlCursor {
     /// every other spelling sets it, because a materialized result always
     /// supports a backward scan.
     scrollable: bool,
-    /// `WITH HOLD` — the cursor survives the transaction that declared it.
+    /// `WITH HOLD`: the cursor survives the transaction that declared it.
     hold: bool,
     /// Whether the cursor has already outlived its declaring transaction, which
     /// makes it session state rather than transaction state: a later
@@ -2588,8 +2594,8 @@ struct SqlCursor {
     /// The savepoint depth `DECLARE` ran at: the number of open savepoints, so
     /// 0 for the top level of the block. A `ROLLBACK TO` that unwinds a level
     /// at or below this one destroys the sub-transaction the cursor was
-    /// created in, and `PostgreSQL` drops the cursor with it — holdability
-    /// only decides what survives a *commit*, so it does not save one here.
+    /// created in, and `PostgreSQL` drops the cursor with it. Holdability only
+    /// decides what survives a *commit*, so it does not save one here.
     declared_depth: usize,
 }
 
@@ -2617,7 +2623,7 @@ struct SavepointFrame {
     /// Transactional LISTEN/NOTIFY work as of `SAVEPOINT`.
     notify_pending: NotifyPending,
     /// Whether the transaction block was already aborted when the savepoint was
-    /// taken — a `ROLLBACK TO` restores the block to that state.
+    /// taken. A `ROLLBACK TO` restores the block to that state.
     failed: bool,
 }
 
@@ -2669,10 +2675,11 @@ pub(crate) struct SqlSessionConfig {
 /// is using it.
 ///
 /// The scope is the process rather than the engine because that is the scope
-/// the hazard has. A cluster's DDL all executes on the node hosting range 0 —
-/// locally for the gateway that hosts it, on a session that node opens under
-/// the originating backend id for every other gateway — so two connections
-/// whose backend ids collide meet there as two sessions of one process.
+/// the hazard has. A cluster's DDL all executes on the node that hosts range 0.
+/// It executes locally for the gateway that hosts range 0, and on a session
+/// that node opens under the originating backend id for every other gateway.
+/// Two connections whose backend ids collide therefore meet there as two
+/// sessions of one process.
 /// Entries are keyed by catalog store as well as by name so that two engines
 /// in one process, which is every test that opens more than one, do not see
 /// each other's namespaces.
@@ -2686,8 +2693,9 @@ struct TempNamespaceClaim {
 }
 
 impl TempNamespaceClaim {
-    /// Claim `schema` in `store`, answering with the claim and whether this
-    /// session is its only holder — the condition for emptying the namespace.
+    /// Claim `schema` in `store`, and answer with the claim and whether this
+    /// session is its only holder. That is the condition for an empty of the
+    /// namespace.
     fn acquire(store: usize, schema: &str) -> (Self, bool) {
         let claim = Self {
             store,
@@ -2751,11 +2759,11 @@ struct SqlPrepared {
 /// The part of a result descriptor that *is* a statement's result type: the
 /// column names, their types and their type modifiers.
 ///
-/// Deliberately not the whole [`FieldDescription`]. Where a column came from —
-/// its table oid and attribute number — is not part of the type, and comparing
-/// it would refuse a statement that resolved to a same-shaped relation in
-/// another schema, which `postgres:18.4` accepts. The format code is not part
-/// of it either: it belongs to the portal, not the statement.
+/// Deliberately not the whole [`FieldDescription`]. Where a column came from,
+/// which is its table oid and attribute number, is not part of the type. A
+/// comparison of it would refuse a statement that resolved to a same-shaped
+/// relation in another schema, which `postgres:18.4` accepts. The format code
+/// is not part of it either. It belongs to the portal, not the statement.
 fn result_type(fields: &[FieldDescription]) -> Vec<(&str, u32, i32)> {
     fields
         .iter()
@@ -2776,8 +2784,8 @@ fn cached_plan_result_type_changed() -> PgError {
 /// What a statement describes as under one resolution scope.
 struct PreparedShape {
     parameter_types: Vec<u32>,
-    /// The result columns, or why they could not be described — SQL `PREPARE`
-    /// records a statement it could not describe and Parse refuses one.
+    /// The result columns, or why they could not be described. SQL `PREPARE`
+    /// records a statement it could not describe, and Parse refuses one.
     fields: Result<Vec<FieldDescription>, PgError>,
     /// The scope the description was taken under.
     scope: crate::relname::ResolutionScope,
@@ -2807,7 +2815,7 @@ enum SqlPortalExecution {
     Empty,
 }
 
-/// The per-statement half of a [`crate::exec::WriteContext`] — everything the
+/// The per-statement half of a [`crate::exec::WriteContext`]: everything the
 /// session establishes fresh for each write (snapshots, xid, isolation, eval
 /// context, prune horizon, and the statement's CTE scope). The session-lifetime
 /// half comes straight off `self`.
@@ -3199,13 +3207,13 @@ impl SqlSession {
 
     /// The garbage horizon UPDATE/DELETE may prune dead row versions at.
     ///
-    /// Sound on every engine kind — unlike [`SqlEngine::vacuum`], whose local
+    /// Sound on every engine kind, unlike [`SqlEngine::vacuum`], whose local
     /// sweeps are why it stays confined to single-range local engines:
     ///
     /// - The prune deletes ride the statement's own commit batch through the
     ///   engine committer, so on replicated engines they replicate through
     ///   the WAL and replay deterministically on followers, in recovery, and
-    ///   in committed folds — never a local delete outside batch ordering.
+    ///   in committed folds, never as a local delete outside batch ordering.
     /// - The horizon is capped by this engine's oldest running writer and
     ///   lowest registered snapshot pin, which covers every reader of this
     ///   store: plain-table reads are always served by owner-local sessions
@@ -3239,8 +3247,8 @@ impl SqlSession {
     ///
     /// Owners set a cap when this session can be enlisted in a cross-range
     /// transaction: a deadlock cycle spanning engines never appears in any one
-    /// engine's wait-for graph, so an expired cap — surfaced as a 40P01 the
-    /// client retries — is the only detector such a cycle has. Purely local
+    /// engine's wait-for graph. An expired cap, reported as a 40P01 the client
+    /// retries, is therefore the only detector such a cycle has. Purely local
     /// waits should keep the default `None` and rely on the exact
     /// engine-local cycle check.
     pub fn set_lock_wait_cap(&mut self, cap: Option<std::time::Duration>) {
@@ -3459,11 +3467,11 @@ impl SqlSession {
     /// Remove the sequence advances staged during this statement, as write ops
     /// to fold into the batch about to be committed.
     ///
-    /// Taking them unconditionally — on the abort path as much as the commit
-    /// path — is what gives `PostgreSQL`'s non-transactional `nextval`: a
-    /// rolled-back transaction leaves the gap it burned, verified against
-    /// `postgres:18.4`, where advancing, rolling back and advancing again
-    /// yields 1 then 3.
+    /// This method takes them unconditionally, on the abort path as much as the
+    /// commit path. That is what gives `PostgreSQL`'s non-transactional
+    /// `nextval`: a rolled-back transaction leaves the gap it burned. Verified
+    /// against `postgres:18.4`, where an advance, a rollback and a second
+    /// advance give 1 and then 3.
     fn take_pending_sequence_ops(&self) -> Vec<crabka_pgkv::WriteOp> {
         self.pending_sequences
             .lock()
@@ -3473,10 +3481,10 @@ impl SqlSession {
 
     /// Commit the staged sequence advances on their own.
     ///
-    /// Only a statement with no batch of its own needs this — `SELECT
+    /// Only a statement with no batch of its own needs this. `SELECT
     /// nextval('s')` reaches the committer nowhere else, and its value must be
-    /// durable before it is returned, or a writer that died here would let its
-    /// successor hand the same value out again.
+    /// durable before it is returned. If it were not, a writer that died here
+    /// would let its successor hand the same value out again.
     async fn flush_pending_sequences(&self) -> Result<(), ExecError> {
         let ops = self.take_pending_sequence_ops();
         if ops.is_empty() {
@@ -3487,8 +3495,8 @@ impl SqlSession {
 
     /// Drop the transaction's deferred checks and its `SET CONSTRAINTS`
     /// overrides. Both are transaction-scoped, so every path that ends a
-    /// transaction — commit, abort, and the autocommit statement epilogue —
-    /// runs this, exactly as it runs [`Self::discard_pending_notifications`].
+    /// transaction runs this: commit, abort, and the autocommit statement
+    /// epilogue. Each path also runs [`Self::discard_pending_notifications`].
     fn discard_deferred_constraints(&mut self) {
         self.deferred_constraints().clear();
         self.deferred_after_triggers.clear();
@@ -3534,14 +3542,14 @@ impl SqlSession {
     /// anything is committed, never lose a notification and never disconnect the
     /// listener.
     ///
-    /// The transaction's queued `LISTEN`/`UNLISTEN` are *not* applied here —
-    /// they reach the bus only once the commit is durable
+    /// The transaction's queued `LISTEN`/`UNLISTEN` are *not* applied here.
+    /// They reach the bus only once the commit is durable
     /// ([`Self::commit_pending_notifications`]). They are instead folded into
     /// the subscription set this session is addressed by, so `LISTEN a; NOTIFY
-    /// a;` in one transaction still delivers to itself (PostgreSQL applies
-    /// pending listens before queueing the transaction's notifications) while a
-    /// concurrent publisher keeps seeing only committed subscriptions — a
-    /// `LISTEN` that rolls back can then never have been delivered to.
+    /// a;` in one transaction still delivers to itself. PostgreSQL applies
+    /// pending listens before it queues the transaction's notifications. A
+    /// concurrent publisher keeps seeing only committed subscriptions, so a
+    /// `LISTEN` that rolls back can never have been delivered to.
     fn reserve_pending_notifications(&self) -> Result<ReservedNotifications, ExecError> {
         let pending = self.pending_notify().clone();
         if pending.notifies.is_empty() {
@@ -3577,9 +3585,9 @@ impl SqlSession {
     ///
     /// A statement whose expressions called `pg_notify()` has already queued
     /// everything it will queue by the time its write batch is built, so the
-    /// reservation can be taken here — while the statement can still be
-    /// aborted. Without it a full listener queue would report 54000 for a row
-    /// that is already committed, and a client retrying the "failed" statement
+    /// reservation can be taken here, while the statement can still be aborted.
+    /// Without it a full listener queue would report 54000 for a row that is
+    /// already committed, and a client that retried the "failed" statement
     /// would duplicate its own write.
     ///
     /// The reservation is parked on the session and consumed by
@@ -3604,9 +3612,9 @@ impl SqlSession {
     /// *originating* backend pid so a remote listener sees the pid PostgreSQL
     /// would report.
     ///
-    /// Empty — and every commit batch byte-for-byte what it was — unless an
-    /// owner opted this engine into replication with
-    /// `SqlEngine::set_notify_origin`. The records never reach a KV: every apply
+    /// The list is empty, and every commit batch is byte-for-byte what it was,
+    /// unless an owner opted this engine into replication with
+    /// `SqlEngine::set_notify_origin`. The records never reach a KV. Every apply
     /// site drops them (`crabka_pgkv::is_notify_op`), so they are WAL bytes a
     /// tailing node re-injects into its own bus and nothing more.
     fn notify_wal_ops(&self, notifies: &[(String, String)], pid: i32) -> Vec<WriteOp> {
@@ -3629,9 +3637,9 @@ impl SqlSession {
     }
 
     /// Append notify records that could not ride a batch the transaction was
-    /// already committing — an autocommit statement (whose writes committed
-    /// inside the statement), a block that wrote no data, or a cross-range
-    /// transaction whose decision is already durable.
+    /// already committing. That covers an autocommit statement, whose writes
+    /// committed inside the statement, a block that wrote no data, and a
+    /// cross-range transaction whose decision is already durable.
     ///
     /// Called only once the transaction's outcome is settled as committed, so
     /// no record can describe a transaction that did not happen. The append
@@ -3689,7 +3697,7 @@ impl SqlSession {
         self.discard_pending_notifications();
     }
 
-    /// Drop everything queued — the staged `LISTEN`/`UNLISTEN`, the queued
+    /// Drop everything queued: the staged `LISTEN`/`UNLISTEN`, the queued
     /// notifications, and any permits an autocommit write reserved ahead of its
     /// commit. Live subscriptions are untouched, because nothing queued has
     /// reached the bus.
@@ -3702,13 +3710,15 @@ impl SqlSession {
     ///
     /// A statement that wrote data reserved its permits before that write became
     /// durable (see [`Self::reserve_autocommit_notifications`]) and parked them
-    /// on the session; this consumes them. A statement that wrote nothing —
-    /// standalone `LISTEN`/`NOTIFY`/`UNLISTEN`, or a `SELECT pg_notify(…)` —
-    /// reserves here, which is still before anything of its own is durable.
+    /// on the session, and this method consumes them. A statement that wrote
+    /// nothing reserves here, which is still before anything of its own is
+    /// durable. Such a statement is a standalone `LISTEN`/`NOTIFY`/`UNLISTEN`
+    /// or a `SELECT pg_notify(…)`.
     ///
-    /// The notify records cannot ride the statement's own batch (it is already
-    /// durable by now), so they are appended here, between the reservation and
-    /// the send, and are the whole batch when the statement wrote nothing else.
+    /// The notify records cannot ride the statement's own batch, because that
+    /// batch is already durable by now. They are appended here, between the
+    /// reservation and the send, and they are the whole batch when the
+    /// statement wrote nothing else.
     async fn flush_autocommit_notifications(&self) -> Result<(), ExecError> {
         let parked = self.reserved_notify().take();
         if parked.is_none() && self.pending_notify().is_empty() {
@@ -3910,7 +3920,7 @@ impl SqlSession {
         Ok(QueryResult::Command { tag: "SET".into() })
     }
 
-    /// `SET transaction_isolation = <level>` — the GUC spelling of
+    /// `SET transaction_isolation = <level>`: the GUC spelling of
     /// `SET TRANSACTION ISOLATION LEVEL`, which `PostgreSQL` routes to exactly
     /// the same place. `DEFAULT` means `default_transaction_isolation`.
     async fn set_transaction_isolation_guc(
@@ -3969,7 +3979,8 @@ impl SqlSession {
         Ok(())
     }
 
-    /// Execute one already-parsed statement (the router parses once, then routes).
+    /// Execute one already-parsed statement. The router parses once, then routes.
+    ///
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -3989,7 +4000,7 @@ impl SqlSession {
         )))
     }
 
-    /// `SAVEPOINT <name>` — push a level. Reusing a name is legal: the new level
+    /// `SAVEPOINT <name>`: push a level. A reused name is legal. The new level
     /// hides the older one until it is released or rolled back to.
     pub(crate) fn savepoint(&mut self, name: &str) -> Result<QueryResult, ExecError> {
         self.require_transaction_block("SAVEPOINT")?;
@@ -4065,7 +4076,7 @@ impl SqlSession {
         Ok(())
     }
 
-    /// `ROLLBACK TO [SAVEPOINT] <name>` — undo the sub-transaction and keep the
+    /// `ROLLBACK TO [SAVEPOINT] <name>`: undo the sub-transaction and keep the
     /// savepoint itself, exactly as `PostgreSQL` does. A failed block becomes
     /// usable again.
     pub(crate) async fn rollback_to_savepoint(
@@ -4190,8 +4201,8 @@ impl SqlSession {
         })
     }
 
-    /// `RELEASE [SAVEPOINT] <name>` — drop the level and everything inside it,
-    /// keeping its effects.
+    /// `RELEASE [SAVEPOINT] <name>`: drop the level and everything inside it,
+    /// and keep its effects.
     pub(crate) fn release_savepoint(&mut self, name: &str) -> Result<QueryResult, ExecError> {
         self.require_transaction_block("RELEASE SAVEPOINT")?;
         let index = self.savepoint_index(name)?;
@@ -4218,7 +4229,7 @@ impl SqlSession {
 
     // ---- S2: cursors ----------------------------------------------------
 
-    /// `DECLARE … CURSOR FOR <query>` — materialize the result now and open a
+    /// `DECLARE … CURSOR FOR <query>`: materialize the result now and open a
     /// cursor over it.
     pub(crate) async fn declare_cursor(
         &mut self,
@@ -4380,11 +4391,11 @@ impl SqlSession {
     /// ones already described to the client.
     ///
     /// A statement is re-analysed under the scope in force when it runs, not
-    /// the one it was prepared under — `SET search_path` between `PREPARE` and
+    /// the one it was prepared under. `SET search_path` between `PREPARE` and
     /// `EXECUTE` can therefore point an unqualified name at a different
     /// relation, and `PostgreSQL` does the same. What `PostgreSQL` will not do
     /// is hand back a result of a shape it has already announced a different
-    /// one for, and neither will this: the descriptor the client holds fixes
+    /// one for, and neither will this. The descriptor the client holds fixes
     /// the field count and type oids its decoder is using, so a wider relation
     /// would be truncated to the announced count and a narrower one would put
     /// fewer fields on the wire than the `RowDescription` promised.
@@ -4445,7 +4456,7 @@ impl SqlSession {
         })
     }
 
-    /// `EXECUTE <name> [(args)]` — bind the argument expressions and run the
+    /// `EXECUTE <name> [(args)]`: bind the argument expressions and run the
     /// prepared statement.
     async fn execute_sql(&mut self, name: &str, args: &[Expr]) -> Result<QueryResult, ExecError> {
         let prepared = self
@@ -4482,7 +4493,7 @@ impl SqlSession {
         Ok(result)
     }
 
-    /// `CALL <procedure>(args)` — run the procedure's body statements in order.
+    /// `CALL <procedure>(args)`: run the procedure's body statements in order.
     ///
     /// `PostgreSQL` reports `CALL` regardless of what the body did. A procedure
     /// with `OUT`/`INOUT` parameters returns their final values as one row.
@@ -4765,9 +4776,10 @@ impl SqlSession {
     /// `SET CONSTRAINTS { ALL | name [, …] } { DEFERRED | IMMEDIATE }`.
     ///
     /// `ALL` resets every per-constraint setting, as `PostgreSQL` does.
-    /// `IMMEDIATE` then drains whatever stopped being deferred — every pending
-    /// check under `ALL`, and only the named constraint's under a name — so the
-    /// violation is reported *here*, mid-transaction, rather than at `COMMIT`.
+    /// `IMMEDIATE` then drains whatever stopped being deferred: every pending
+    /// check under `ALL`, and only the named constraint's under a name. The
+    /// violation is therefore reported *here*, inside the transaction, and not
+    /// at `COMMIT`.
     ///
     /// A named constraint is resolved by scanning the foreign-key catalog.
     /// `PostgreSQL` resolves the name through the search path; this engine has
@@ -4777,9 +4789,9 @@ impl SqlSession {
     /// `WARNING: 25P01 SET CONSTRAINTS can only be used in transaction blocks`
     /// and still validates the names. The wire layer here has no
     /// `NoticeResponse`/`WarningResponse` path, so that warning is not emitted.
-    /// The validation still runs, and the settings still die with the statement
-    /// — an autocommit statement is its own transaction — so the only
-    /// observable difference is the missing warning.
+    /// The validation still runs, and the settings still die with the
+    /// statement, because an autocommit statement is its own transaction. The
+    /// only observable difference is the missing warning.
     async fn set_constraints(
         &mut self,
         names: Option<&[String]>,
@@ -5108,7 +5120,7 @@ impl SqlSession {
     /// - A statement carrying its own sqlcommenter skips the GUC outright.
     ///   pgwire has already parented this statement into the comment's trace,
     ///   and a stale session GUC must not pull it back out. Detecting that
-    ///   needs no signal from pgwire — the SQL text is right here, and
+    ///   needs no signal from pgwire. The SQL text is right here, and
     ///   `extract_sqlcommenter` answers from it directly.
     /// - A GUC naming the trace the session is already in is a no-op, which
     ///   covers the case where both channels agree.
@@ -5117,7 +5129,7 @@ impl SqlSession {
     /// statement text; there the GUC is the only per-execution channel and
     /// correctly applies.
     ///
-    /// A malformed value is silently ignored — a bad trace header must never
+    /// A malformed value is silently ignored. A bad trace header must never
     /// fail the query it rode in on.
     fn apply_guc_trace_context(&self, span: &tracing::Span, sql: Option<&str>) {
         let Ok(traceparent) = self.guc.effective(crate::telemetry::TRACEPARENT_GUC) else {
@@ -5368,8 +5380,8 @@ impl SqlSession {
     }
 
     /// Stamp the statement span with the transaction identity the statement
-    /// ended up running under. Both xids are assigned lazily — at the first
-    /// write, and at the first sharded write — so neither is known when the
+    /// ended up running under. Both xids are assigned lazily, at the first
+    /// write and at the first sharded write, so neither is known when the
     /// span opens.
     ///
     /// An autocommit write is the one case this cannot reach: its implicit
@@ -5501,9 +5513,9 @@ impl SqlSession {
         })
     }
 
-    /// The level `SHOW transaction_isolation` reports: the open block's, or —
-    /// outside a block, where each statement runs in its own transaction —
-    /// whatever the next one would start at.
+    /// The level `SHOW transaction_isolation` reports: the open block's level.
+    /// Outside a block, where each statement runs in its own transaction, it is
+    /// whatever level the next statement would start at.
     fn current_transaction_isolation(&self) -> Result<IsolationLevel, ExecError> {
         match &self.state {
             TxnState::InTransaction(ctx) | TxnState::Failed(ctx) | TxnState::Prepared(ctx) => {
@@ -5966,8 +5978,8 @@ impl SqlSession {
     ///
     /// The global timestamp source grants it in the common case, unchanged. When
     /// a single-shard bypass commit has lifted the durable horizon past the
-    /// global source's position — so the source can no longer grant above the
-    /// floor — the read falls back to this range's local sequence, which folds
+    /// global source's position, so the source can no longer grant above the
+    /// floor, the read falls back to this range's local sequence, which folds
     /// the horizon in and sits strictly above it. Genuine source unavailability
     /// (not a below-horizon grant) still propagates as an error.
     async fn allocate_statement_read_timestamp(
@@ -6581,8 +6593,8 @@ impl SqlSession {
     }
 
     /// Apply a catalog batch through whichever seam this session's stores make
-    /// authoritative — the commit seam when catalog and data share a store, the
-    /// catalog store's own batch when they do not.
+    /// authoritative: the commit seam when catalog and data share a store, and
+    /// the catalog store's own batch when they do not.
     async fn commit_catalog(&self, ops: Vec<crabka_pgkv::WriteOp>) -> Result<(), ExecError> {
         if ops.is_empty() {
             return Ok(());
@@ -6652,8 +6664,8 @@ impl SqlSession {
                 }))
     }
 
-    /// Drop every relation in this session's temporary namespace, leaving the
-    /// namespace itself in place — which is what `PostgreSQL` does, where
+    /// Drop every relation in this session's temporary namespace, and leave the
+    /// namespace itself in place. That is what `PostgreSQL` does, where
     /// `current_schemas(true)` still reports `pg_temp_<n>` after a
     /// `DISCARD TEMP`.
     ///
@@ -6740,11 +6752,11 @@ impl SqlSession {
     /// Whether the relation an entry was armed for is still the one standing
     /// under its name.
     ///
-    /// A relation dropped since — by `DROP TABLE`, by the `DROP SCHEMA` a
-    /// `DISCARD TEMP` amounts to, or by anything else that empties the
-    /// namespace — has no rows to delete and nothing to drop, and a name since
-    /// re-used by a different relation carries that relation's own disposition
-    /// rather than this one.
+    /// A relation dropped since then has no rows to delete and nothing to drop.
+    /// `DROP TABLE`, the `DROP SCHEMA` a `DISCARD TEMP` amounts to, and
+    /// anything else that empties the namespace all drop it. A name re-used
+    /// since then by a different relation carries that relation's own
+    /// disposition and not this one.
     fn on_commit_relation_is_live(&self, entry: &OnCommitEntry) -> Result<bool, ExecError> {
         match crabka_pgcatalog::get_table(&*self.catalog_kv, &entry.relation) {
             Ok(table) => Ok(table.id == entry.table),
@@ -6753,7 +6765,7 @@ impl SqlSession {
         }
     }
 
-    /// Discharge every `ON COMMIT` disposition at the end of a transaction —
+    /// Discharge every `ON COMMIT` disposition at the end of a transaction:
     /// the explicit one a `COMMIT` closes, and the implicit one an autocommit
     /// statement is.
     ///
@@ -6836,7 +6848,8 @@ impl SqlSession {
     /// commit: the duplicate-name check reads the catalog keyspace, so releasing
     /// the lock before the batch lands would let two concurrent
     /// `CREATE TABLE t` both see an empty slot and both win. Holding a `tokio`
-    /// mutex across an `.await` is deliberate and sound — it is an async mutex.
+    /// mutex across an `.await` is deliberate and sound, because it is an async
+    /// mutex.
     ///
     /// The table-id counter is NOT covered by that lock. It has its own, taken
     /// and released before this one, so a `CREATE TABLE` that draws on an
@@ -7364,7 +7377,7 @@ impl SqlSession {
 
     /// The xid a write ran under, whichever kind of transaction owned it.
     /// Assigned lazily at the first write, so it is only known once the write
-    /// has run — and, for an autocommit write, only until its implicit
+    /// has run. For an autocommit write it is known only until its implicit
     /// transaction is torn down.
     fn record_write_xid(&self) {
         let xid = match &self.state {
@@ -7930,7 +7943,8 @@ impl SqlSession {
     }
 
     /// On a transaction's first write: allocate the xid (idempotent on later
-    /// writes). No lock — concurrency is row-level via the RowLockManager.
+    /// writes). There is no lock. Concurrency is row-level through the
+    /// RowLockManager.
     fn ensure_write_xid(&mut self) -> Result<(), ExecError> {
         let needs = matches!(&self.state, TxnState::InTransaction(c) if c.xid.is_none());
         if !needs {
@@ -7958,10 +7972,13 @@ impl SqlSession {
     }
 
     /// Begin a held txn on this session if it is Idle, so a participant's first
-    /// DML is HELD (never autocommitted): the coordinator can then drive its
-    /// COMMIT/ROLLBACK and the `Prepared` marker is written before any of its rows
-    /// become eligible to commit on their own. Idempotent (no-op if already in a
-    /// txn). Reuses `begin`.
+    /// DML is HELD and never autocommitted.
+    ///
+    /// The coordinator can then drive its COMMIT/ROLLBACK, and the `Prepared`
+    /// marker is written before any of its rows become eligible to commit on
+    /// their own. The method is idempotent and is a no-op if a txn is already
+    /// open. It reuses `begin`.
+    ///
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -7972,23 +7989,28 @@ impl SqlSession {
         Ok(())
     }
 
-    /// The global xid the `Prepared(Li -> ·)` marker for THIS participant write must
-    /// carry — the **abort-atomicity fence**. Normally `g` (the txn's own global xid),
-    /// but if any row this txn's local xid `Li` has written already carries a SIBLING
-    /// version under an in-doubt `Prepared(-> g_old)` marker for a DIFFERENT global
-    /// txn `g_old`, the marker ADOPTS `g_old` instead.
+    /// The global xid the `Prepared(Li -> ·)` marker for THIS participant write
+    /// must carry. This is the **abort-atomicity fence**.
     ///
-    /// Why: a participant whose leader is killed mid-cross-range-txn loses its in-memory
-    /// held session; the coordinator/worker retries the WHOLE transfer under a FRESH
-    /// global `g'`, re-staging the same row on the NEW leader. Without this fence the
-    /// re-stage mints a SECOND live version of the row stamped `Prepared(-> g')`, so the
-    /// row is governed by TWO independent global decisions (`g_old` and `g'`); if
-    /// `g_old` aborts but `g'` commits the `g'`-version stays visible — money created or
-    /// destroyed (the SP24 abort-atomicity half-leak). Adopting `g_old` keeps the row
-    /// under EXACTLY ONE global decision: when `g_old` is later aborted by the recovery
-    /// abort-race, every version of the row resolves invisible (the pre-txn value
-    /// re-surfaces); when `g_old` commits, exactly one version is live. The retry's `g'`
-    /// then governs no version of this row — which is correct, since the row was already
+    /// The value is normally `g`, the txn's own global xid. But if any row this
+    /// txn's local xid `Li` has written already carries a SIBLING version under
+    /// an in-doubt `Prepared(-> g_old)` marker for a DIFFERENT global txn
+    /// `g_old`, the marker ADOPTS `g_old` instead.
+    ///
+    /// The reason: a participant whose leader is killed mid-cross-range-txn
+    /// loses its in-memory held session. The coordinator or worker retries the
+    /// WHOLE transfer under a FRESH global `g'`, and re-stages the same row on
+    /// the NEW leader. Without this fence the re-stage mints a SECOND live
+    /// version of the row stamped `Prepared(-> g')`, so TWO independent global
+    /// decisions govern the row (`g_old` and `g'`). If `g_old` aborts but `g'`
+    /// commits, the `g'`-version stays visible, and money is created or
+    /// destroyed (the SP24 abort-atomicity half-leak).
+    ///
+    /// An adoption of `g_old` keeps the row under EXACTLY ONE global decision.
+    /// When the recovery abort-race later aborts `g_old`, every version of the
+    /// row resolves invisible and the pre-txn value re-surfaces. When `g_old`
+    /// commits, exactly one version is live. The retry's `g'` then governs no
+    /// version of this row, which is correct, because the row was already
     /// enlisted in `g_old`.
     ///
     /// Only an IN-DOUBT `g_old` is adopted (read range 0's global clog via `catalog_kv`,
@@ -8163,18 +8185,21 @@ impl SqlSession {
         )))
     }
 
-    /// Enlist this session as a participant of global txn `g`. If it has already
-    /// done a write (local xid `Li` allocated), write the `Prepared(Li -> g)`
-    /// marker durably AND deregister `Li` from the ProcArray running-set so the
-    /// local snapshot no longer gates its rows — range 0's global clog becomes the
-    /// sole arbiter, which is what makes both ranges flip visible atomically at
-    /// the single `Committed(g)` instant (the deregister-at-PREPARE linchpin). If
-    /// no write has happened yet there is nothing to backfill: the first write's
-    /// commit batch (see `run_write`) carries the marker and deregisters then.
-    /// Idempotent. The stamped marker is FENCED to any in-doubt global decision
-    /// already governing this txn's written rows (`effective_global_xid` — SP24
-    /// abort atomicity), so a failover re-stage never mints a second version under a
-    /// competing decision.
+    /// Enlist this session as a participant of global txn `g`.
+    ///
+    /// If it has already done a write, so a local xid `Li` is allocated, this
+    /// writes the `Prepared(Li -> g)` marker durably AND deregisters `Li` from
+    /// the ProcArray running-set. The local snapshot then no longer gates its
+    /// rows, and range 0's global clog becomes the sole arbiter. That is what
+    /// makes both ranges flip visible atomically at the single `Committed(g)`
+    /// instant (the deregister-at-PREPARE linchpin).
+    ///
+    /// If no write has happened yet there is nothing to backfill. The first
+    /// write's commit batch (see `run_write`) carries the marker and
+    /// deregisters then. The method is idempotent. The stamped marker is FENCED
+    /// to any in-doubt global decision already governing this txn's written
+    /// rows (`effective_global_xid`, SP24 abort atomicity), so a failover
+    /// re-stage never mints a second version under a competing decision.
     pub(crate) async fn join_global(&mut self, g: u64) -> Result<u64, ExecError> {
         self.global_xid = Some(g);
         if let Some(local) = self.local_xid() {
@@ -8198,10 +8223,10 @@ impl SqlSession {
     /// Session state every transaction end resets: the savepoint stack, the
     /// non-`WITH HOLD` cursors, and the transaction-scoped advisory locks.
     /// Drop everything scoped to the transaction that is ending. Only a
-    /// committed transaction leaves its `WITH HOLD` cursors behind — an abort
-    /// takes them with it, exactly as `PostgreSQL` does — and a surviving
-    /// cursor belongs to the session from here on, so it re-anchors at the top
-    /// level of whatever block opens next.
+    /// committed transaction leaves its `WITH HOLD` cursors behind. An abort
+    /// takes them with it, exactly as `PostgreSQL` does. A surviving cursor
+    /// belongs to the session from here on, so it re-anchors at the top level
+    /// of whatever block opens next.
     fn finish_transaction_scoped_state(&mut self, keep_holdable: bool) {
         self.savepoints.clear();
         self.cursors
@@ -8230,9 +8255,10 @@ impl SqlSession {
     }
 
     /// Deregister the current txn's xid from the ProcArray and free its row locks,
-    /// then reset to Idle. Writes NO clog entry — used by `Drop` (presumed-abort
-    /// on disconnect) and by the global participant `commit_release`/`abort_release`
-    /// (the decision was recorded once, globally, by the coordinator).
+    /// then reset to Idle. This writes NO clog entry. `Drop` uses it for
+    /// presumed-abort on disconnect, and the global participant
+    /// `commit_release`/`abort_release` uses it, because the coordinator
+    /// recorded the decision once, globally.
     fn finish_current_txn(&mut self, keep_holdable: bool) {
         let implicit_xid = self.implicit_xid.take();
         if let Some(xid) = self.local_xid().or(implicit_xid) {
@@ -9167,8 +9193,8 @@ fn binary_param_type(
     }
 }
 
-/// The element type of an array-typed expression — how `$1 = ANY(tags)` types
-/// its left operand.
+/// The element type of an array-typed expression. This is how `$1 = ANY(tags)`
+/// types its left operand.
 fn array_element_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<ColumnType> {
     match infer_param_context_type(expr, scope) {
         Some(ColumnType::Array(elem)) => Some(elem.column_type()),
@@ -9176,8 +9202,8 @@ fn array_element_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Optio
     }
 }
 
-/// The array type over an expression's type — how `id = ANY($1)` types its
-/// array operand. `None` for element types crabka has no array type for.
+/// The array type over an expression's type. This is how `id = ANY($1)` types
+/// its array operand. `None` for element types crabka has no array type for.
 fn array_of_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<ColumnType> {
     infer_param_context_type(expr, scope)
         .and_then(ElemType::from_column_type)
@@ -9742,7 +9768,8 @@ const JSON_TEXT_MIN_FIRST_BYTE: u8 = b'\t';
 /// `jsonb_recv`: a version byte followed by the JSON text.
 ///
 /// A `json` (OID 114) parameter is the same document with no version byte, and
-/// the two forms are unambiguous — no JSON document can begin with byte 0x01.
+/// the two forms are unambiguous, because no JSON document can begin with byte
+/// 0x01.
 fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
     let json = match value.first() {
         Some(&crabka_pgtypes::encoding::JSONB_BINARY_VERSION) => &value[1..],
@@ -9761,7 +9788,7 @@ fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
         .map_err(ExecError::into_pg)
 }
 
-/// `array_recv` for a one-dimensional array — the layout
+/// `array_recv` for a one-dimensional array: the layout
 /// `crabka_pgtypes::encoding` writes, read back exactly.
 ///
 /// Both spellings of the empty array must land on the zero-dimensional value:
@@ -10395,10 +10422,11 @@ impl Session for SqlSession {
 
     /// A session's temporary relations die with it.
     ///
-    /// A failure here is not the client's to hear — the connection is already
-    /// over — and it is not fatal either: the next session to draw this backend
-    /// id purges the namespace before it uses it, which is the same remedy that
-    /// covers a backend that died without reaching this point at all.
+    /// A failure here is not the client's to hear, because the connection is
+    /// already over. It is not fatal either. The next session to draw this
+    /// backend id purges the namespace before it uses it, which is the same
+    /// remedy that covers a backend that died without reaching this point at
+    /// all.
     async fn terminate(&mut self) {
         if let Err(error) = self.drop_temp_relations().await {
             tracing::warn!(?error, "could not drop this session's temporary relations");
@@ -11278,8 +11306,9 @@ mod tests {
         }
     }
 
-    /// SP37: the GUC transactional state machine — PostgreSQL's commit-keeps,
-    /// rollback-reverts, and SET-LOCAL-always-reverts semantics for `timezone`.
+    /// SP37: the GUC transactional state machine, which is PostgreSQL's
+    /// commit-keeps, rollback-reverts, and SET-LOCAL-always-reverts semantics
+    /// for `timezone`.
     #[test]
     fn guc_timezone_transactional_semantics() {
         use crate::session::GucState;
@@ -12417,7 +12446,7 @@ mod tests {
     ///
     /// The drain runs at the end of *every* transaction, so an entry kept after
     /// failing is re-attempted by the next statement and by every statement
-    /// after it — one fault becomes the answer to everything the session is
+    /// after it, so one fault becomes the answer to everything the session is
     /// asked. `PostgreSQL` leaves a session usable after a failed `COMMIT`, and
     /// the second statement here is what pins that.
     #[tokio::test]
@@ -14428,7 +14457,7 @@ mod notify_and_binary_parameter_tests {
     /// `array_recv`: a header that yields no elements is the zero-dimensional
     /// empty array, whichever form the driver wrote. crabka's own encoder emits
     /// the 12-byte `ndim = 0` header, but `postgres-types` always writes exactly
-    /// one dimension — an empty slice arrives as `ndim = 1, len = 0` — and
+    /// one dimension, so an empty slice arrives as `ndim = 1, len = 0`.
     /// PostgreSQL has no zero-length dimension to keep, so `array_ndims` of the
     /// result is NULL either way.
     #[test]
@@ -14714,8 +14743,8 @@ mod listen_notify_session_tests {
     use super::SqlSession;
     use crate::{ExecError, SqlEngine, notify::NotifyBus};
 
-    /// A session registered on the engine's bus under `pid` — the wiring
-    /// `Engine::connect_with_pid` performs for a real connection.
+    /// A session registered on the engine's bus under `pid`. This is the wiring
+    /// `Engine::connect_with_pid` does for a real connection.
     fn session(engine: &SqlEngine, pid: i32) -> SqlSession {
         let mut session = engine.connect();
         session.register_notify(engine.notify_bus(), pid);
@@ -14876,8 +14905,8 @@ mod listen_notify_session_tests {
         tag.clone()
     }
 
-    /// Number of rows one query returns — how a test checks whether a failed
-    /// statement's write is there.
+    /// Number of rows one query returns. This is how a test checks whether a
+    /// failed statement's write is there.
     async fn row_count(session: &mut SqlSession, sql: &str) -> usize {
         let results = session.simple_query(sql).await.expect(sql);
         let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
@@ -15020,7 +15049,7 @@ mod listen_notify_session_tests {
 
     /// A pending `LISTEN` stays private to its own transaction until the commit
     /// is durable. A publisher racing that commit addresses only committed
-    /// subscriptions — otherwise a commit that failed afterwards could not
+    /// subscriptions. Otherwise a commit that failed afterwards could not
     /// un-deliver what the racing publisher had already queued.
     #[tokio::test]
     async fn a_concurrent_publisher_cannot_reach_a_listen_that_is_still_committing() {
@@ -15249,7 +15278,7 @@ mod listen_notify_session_tests {
         }
     }
 
-    /// An engine nobody opted into replication appends nothing anywhere — and a
+    /// An engine nobody opted into replication appends nothing anywhere, and a
     /// transaction that only notified still commits no batch at all.
     #[tokio::test]
     async fn without_an_origin_a_committed_notify_appends_nothing() {
@@ -15347,7 +15376,7 @@ mod listen_notify_session_tests {
     }
 
     /// A standalone `NOTIFY` commits nothing today, so with replication on its
-    /// records are the whole batch — without one, no other node could see it.
+    /// records are the whole batch. Without one, no other node could see it.
     #[tokio::test]
     async fn a_standalone_notify_appends_a_batch_of_its_own() {
         let (engine, committer) = recording_engine();
@@ -15473,11 +15502,11 @@ mod session_conformance_tests {
         value.clone()
     }
 
-    /// A query parameter written inside a FROM-clause subquery — lateral or not
-    /// — is bound like any other. Describing a FROM item walks into its derived
-    /// tables, so the binder has to replace the placeholder BEFORE that describe
-    /// runs; binding the projection first would describe `(SELECT $1) d` with the
-    /// parameter still in place and report `0A000`.
+    /// A query parameter written inside a FROM-clause subquery, lateral or not,
+    /// is bound like any other. A describe of a FROM item walks into its
+    /// derived tables, so the binder must replace the placeholder BEFORE that
+    /// describe runs. A bind of the projection first would describe
+    /// `(SELECT $1) d` with the parameter still in place and report `0A000`.
     #[tokio::test]
     async fn a_parameter_inside_a_from_subquery_binds_like_any_other() {
         let engine = SqlEngine::new();

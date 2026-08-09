@@ -1,5 +1,6 @@
 //! Idempotent creation of the internal compacted dedup-claim topic.
-//! `cleanup.policy=compact,delete` + `retention.ms=window` bounds both the
+//!
+//! `cleanup.policy=compact,delete` with `retention.ms=window` bounds both the
 //! topic size and the dedup horizon.
 
 use std::collections::BTreeMap;
@@ -81,9 +82,9 @@ pub async fn ensure_dedup_topic_with_policy(
     create_with_rf(&mut admin, name, partitions, policy, &configs).await
 }
 
-/// Kafka's topic configs are raw strings in fixed units: `retention.ms` and
-/// `segment.ms` are millisecond integers, `min.cleanable.dirty.ratio` a bare
-/// fraction. This is where the gateway's quantities become those strings.
+/// Kafka's topic configs are raw strings in fixed units. `retention.ms` and
+/// `segment.ms` are millisecond integers, and `min.cleanable.dirty.ratio` is a
+/// bare fraction. This is where the gateway's quantities become those strings.
 fn dedup_topic_configs(window: Time, policy: &InternalTopicPolicy) -> BTreeMap<String, String> {
     let mut configs = compaction_configs(policy);
     configs.insert("cleanup.policy".to_string(), "compact,delete".to_string());
@@ -107,9 +108,10 @@ fn compaction_configs(policy: &InternalTopicPolicy) -> BTreeMap<String, String> 
 }
 
 /// Idempotently create the compacted, single-partition membership topic.
-/// `cleanup.policy=compact` (no delete) keeps one live record per node until a
-/// tombstone supersedes it. Single partition ⇒ all publishes are totally
-/// ordered, so the routing table's offset tiebreak is exact.
+///
+/// `cleanup.policy=compact`, with no delete, keeps one live record per node
+/// until a tombstone replaces it. A single partition ⇒ all publishes are
+/// totally ordered, so the routing table's offset tiebreak is exact.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn ensure_membership_topic(
@@ -241,9 +243,9 @@ mod tests {
         assert!(internal_topic_policy(&runtime) == policy());
     }
 
-    /// Each quantity reaches Kafka in the unit its topic config is defined in:
-    /// `retention.ms` / `segment.ms` as millisecond integers, the dirty ratio
-    /// as a bare fraction.
+    /// Each quantity reaches Kafka in the unit that its topic config uses.
+    /// `retention.ms` and `segment.ms` are millisecond integers, and the dirty
+    /// ratio is a bare fraction.
     #[test]
     fn topic_configs_render_quantities_in_kafka_units() {
         let dedup = dedup_topic_configs(hours(1), &policy());

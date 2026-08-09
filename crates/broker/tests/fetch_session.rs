@@ -1,7 +1,9 @@
-//! KIP-227 incremental fetch session round-trip tests against an
-//! in-process broker. Drives the wire protocol directly through the
-//! shared `Client` so the exact `session_id` / `session_epoch` paths
-//! are exercised end-to-end.
+//! KIP-227 incremental fetch session round-trip tests against an in-process
+//! broker.
+//!
+//! These tests drive the wire protocol directly through the shared `Client`,
+//! so they exercise the exact `session_id` / `session_epoch` paths
+//! end-to-end.
 
 use assert2::{assert, check};
 mod support;
@@ -113,8 +115,8 @@ fn fetch_topic(name: &str, topic_id: WireUuid, partitions: Vec<FetchPartition>) 
     }
 }
 
-/// (1) New session opens, (2) immediate incremental is empty, (3) one
-/// produced batch shows up on the next incremental as only-that-partition.
+/// A new session opens, the immediate incremental is empty, and one produced
+/// batch appears on the next incremental as the only partition.
 #[tokio::test]
 async fn new_session_then_incremental_filters_unchanged_partitions() {
     let p = support::start().await;
@@ -201,8 +203,8 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
     p.broker.shutdown().await;
 }
 
-/// Forgotten partitions are dropped from the cached subscription and
-/// never reappear on subsequent fetches, even after produce.
+/// The broker drops forgotten partitions from the cached subscription, and
+/// they never reappear on later fetches, even after a produce.
 #[tokio::test]
 async fn forgotten_topics_drop_partitions_from_subscription() {
     let p = support::start().await;
@@ -288,8 +290,8 @@ async fn forgotten_topics_drop_partitions_from_subscription() {
     p.broker.shutdown().await;
 }
 
-/// Wrong `session_id` → `FETCH_SESSION_ID_NOT_FOUND` at the top level,
-/// no per-partition rows.
+/// A wrong `session_id` gives `FETCH_SESSION_ID_NOT_FOUND` at the top level
+/// with no per-partition rows.
 #[tokio::test]
 async fn unknown_session_id_returns_not_found() {
     let p = support::start().await;
@@ -311,7 +313,7 @@ async fn unknown_session_id_returns_not_found() {
     p.broker.shutdown().await;
 }
 
-/// Stale epoch on a valid session → `INVALID_FETCH_SESSION_EPOCH`.
+/// A stale epoch on a valid session gives `INVALID_FETCH_SESSION_EPOCH`.
 #[tokio::test]
 async fn stale_session_epoch_returns_invalid_epoch() {
     let p = support::start().await;
@@ -348,8 +350,8 @@ async fn stale_session_epoch_returns_invalid_epoch() {
     p.broker.shutdown().await;
 }
 
-/// Closing a session (epoch=-1) returns a full response and drops the
-/// cache entry. A subsequent request with the same id is `NOT_FOUND`.
+/// A close request with epoch=-1 returns a full response and drops the cache
+/// entry. A later request with the same id is `NOT_FOUND`.
 #[tokio::test]
 async fn close_session_drops_cache_entry() {
     let p = support::start().await;
@@ -399,7 +401,8 @@ async fn close_session_drops_cache_entry() {
     p.broker.shutdown().await;
 }
 
-/// `session_id=0` with a stray epoch (not 0 and not -1) is a wire error.
+/// `session_id=0` with a stray epoch, that is, not 0 and not -1, is a wire
+/// error.
 #[tokio::test]
 async fn sessionless_zero_id_with_stray_epoch_is_invalid() {
     let p = support::start().await;
@@ -418,8 +421,8 @@ async fn sessionless_zero_id_with_stray_epoch_is_invalid() {
     p.broker.shutdown().await;
 }
 
-/// Sessionless (`session_id=0`, session_epoch=-1) returns a full
-/// response with `session_id=0` — the legacy path is unchanged.
+/// A sessionless request, `session_id=0` with session_epoch=-1, returns a
+/// full response with `session_id=0`. This is the legacy path.
 #[tokio::test]
 async fn sessionless_full_fetch_round_trip() {
     let p = support::start().await;

@@ -1,11 +1,11 @@
 //! Control-record construction. A commit/abort marker is a single-
-//! record `RecordBatch` with `is_control_batch=true` +
+//! record `RecordBatch` with `is_control_batch=true` and
 //! `is_transactional=true` in attributes.
 //!
-//! Record key layout (matches Apache Kafka `EndTransactionMarker`):
+//! The record key layout matches Apache Kafka `EndTransactionMarker`:
 //!   version: i16 (big-endian) = 0
-//!   type:    i16 (big-endian) — 0 = ABORT, 1 = COMMIT
-//! Record value is empty.
+//!   type:    i16 (big-endian), 0 = ABORT, 1 = COMMIT
+//! The record value is empty.
 
 use bytes::Bytes;
 use crabka_log::{Offset, ProducerId};

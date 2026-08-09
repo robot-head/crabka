@@ -1,4 +1,4 @@
-//! Gzip (RFC-1952), via `flate2` with the pure-Rust `miniz_oxide` backend.
+//! Gzip (RFC-1952), through `flate2` with the pure-Rust `miniz_oxide` backend.
 
 use std::io::{Read, Write};
 

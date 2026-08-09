@@ -1,6 +1,6 @@
-//! Wire-format isolation for state-topic records. Today this is
-//! `serde_json::to_vec` over `InFlightFile`; swapping to bincode
-//! or protobuf is a one-function change behind these helpers.
+//! Wire-format isolation for state-topic records. Today the format is
+//! `serde_json::to_vec` over `InFlightFile`. A move to bincode or protobuf is
+//! a one-function change behind these helpers.
 
 use bytes::Bytes;
 

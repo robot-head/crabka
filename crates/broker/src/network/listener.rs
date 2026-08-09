@@ -3,11 +3,12 @@ use crabka_security::SaslMechanism;
 
 use crate::config::ListenerSpec;
 
-/// Return the SASL mechanisms enabled for `spec`.
+/// Returns the SASL mechanisms enabled for `spec`.
 ///
-/// Preference order:
-/// 1. `spec.sasl_mechanisms` (per-listener override)
-/// 2. `broker_default` (broker-wide `BrokerConfig::enabled_sasl_mechanisms`)
+/// The preference order is:
+/// 1. `spec.sasl_mechanisms`, the per-listener override
+/// 2. `broker_default`, the broker-wide
+///    `BrokerConfig::enabled_sasl_mechanisms`
 pub(crate) fn resolve_sasl_mechanisms_for_listener<'a>(
     spec: &'a ListenerSpec,
     broker_default: &'a [SaslMechanism],

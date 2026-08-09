@@ -1,10 +1,13 @@
-//! Pure decision core of the transaction coordinator's `EndTxn` path, extracted
-//! so the KIP-98/EOS state machine is independently model-checkable. No I/O.
+//! Pure decision core of the transaction coordinator's `EndTxn` path.
 //!
-//! The Phase-3 primitives (`validate_complete_reacquire`, `next_producer_identity`)
-//! live in `handlers::end_txn` next to the handler that also persists; this module
-//! wraps them into a single decision the handler — and the stateright model — can
-//! drive. See `decision_model.rs` and the design:
+//! It is separate from the handler so that a model checker can drive the
+//! KIP-98 and EOS state machine on its own. This module does no I/O.
+//!
+//! The phase-3 primitives `validate_complete_reacquire` and
+//! `next_producer_identity` live in `handlers::end_txn`, next to the handler
+//! that also persists. This module wraps them into one decision that both the
+//! handler and the stateright model can drive. See `decision_model.rs` and the
+//! design at
 //! `docs/superpowers/specs/2026-06-14-crabka-txn-coordinator-model-design.md`.
 
 use crabka_log::ProducerId;
@@ -16,9 +19,12 @@ use super::{
 };
 use crate::{codes, producer_id_manager::ProducerIdManager};
 
-/// Phase 1 of `EndTxn`: validate the `Ongoing → Prepare{Commit,Abort}` transition
-/// and apply it to `entry`. Returns `(prepare, complete)` states on success, or
-/// the Kafka error code to return. Pure; the caller persists `entry` afterwards.
+/// Phase 1 of `EndTxn`: validates the `Ongoing → Prepare{Commit,Abort}`
+/// transition and applies it to `entry`.
+///
+/// It returns the `(prepare, complete)` states on success, or the Kafka error
+/// code to return. The function is pure, and the caller persists `entry`
+/// afterwards.
 pub(crate) fn decide_phase1_transition(
     entry: &mut TxnEntry,
     committed: bool,
@@ -43,28 +49,32 @@ pub(crate) fn decide_phase1_transition(
 /// Outcome of [`decide_end_txn_completion`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompletionDecision {
-    /// Finalise: write `next_state`, and return the (possibly epoch-bumped)
-    /// identity to the producer.
+    /// Finalise the transaction: write `next_state`, and return the identity
+    /// to the producer. That identity may carry a bumped epoch.
     Proceed {
         next_state: TxnState,
         response_pid: ProducerId,
         response_epoch: i16,
     },
-    /// The entry already reached the intended Complete state (idempotent retry /
-    /// lost race) — report success without re-finalising.
+    /// The entry already reached the intended Complete state, from an
+    /// idempotent retry or a lost race. Report success and do not finalise it
+    /// again.
     AlreadyComplete {
         response_pid: ProducerId,
         response_epoch: i16,
     },
-    /// The producer was fenced (epoch bumped) or the state advanced underneath
-    /// the marker fan-out — do NOT finalise; return this Kafka error code.
+    /// The broker fenced the producer with an epoch bump, or the state
+    /// advanced during the marker fan-out. Do NOT finalise, and return this
+    /// Kafka error code.
     Reject(i16),
 }
 
-/// Phase 3 of `EndTxn`: after the marker fan-out, re-validate the re-acquired
-/// `entry` and decide whether to finalise. Pure wrapper over
-/// `validate_complete_reacquire` + `next_producer_identity` — the latter bumps
-/// the producer epoch at `TV_2` so a zombie holding the old epoch is fenced.
+/// Phase 3 of `EndTxn`: after the marker fan-out, it re-validates the
+/// re-acquired `entry` and decides whether to finalise.
+///
+/// The function is a pure wrapper over `validate_complete_reacquire` and
+/// `next_producer_identity`. `next_producer_identity` bumps the producer epoch
+/// at `TV_2`, so the broker fences a zombie that still holds the old epoch.
 pub(crate) fn decide_end_txn_completion(
     entry: &TxnEntry,
     expected_pid: ProducerId,

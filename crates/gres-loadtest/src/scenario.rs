@@ -1,12 +1,14 @@
-//! The YAML scenario schema: topology, timestamp mode, workload, fault timeline.
+//! The YAML scenario schema: topology, timestamp mode, workload, and fault
+//! timeline.
 //!
-//! A scenario is the single input to a harness run. [`Scenario::from_yaml_file`]
-//! parses and validates it; every other module consumes the parsed types.
+//! A scenario is the single input to a harness run.
+//! [`Scenario::from_yaml_file`] parses and validates it. Every other module
+//! consumes the parsed types.
 //!
 //! Every dimensioned field is a [`crabka_units`] quantity and carries its unit
-//! in the YAML — `duration: 60s`, `rate: { fixed: { target_rate: 500/s } }`,
-//! `throttle: { rate: 128KiB/s }`. A bare number is rejected rather than
-//! guessed at, which is the whole point of the types.
+//! in the YAML: `duration: 60s`, `rate: { fixed: { target_rate: 500/s } }`,
+//! and `throttle: { rate: 128KiB/s }`. The parser rejects a bare number
+//! instead of a guess at its unit, which is the whole point of the types.
 
 use std::{collections::BTreeMap, fmt, path::Path, str::FromStr};
 
@@ -41,45 +43,47 @@ pub struct Scenario {
 
 /// Cluster shape: how many compute nodes and ranges to launch.
 ///
-/// Ranges are assigned to nodes round-robin: range `r` is hosted by node
-/// `r % nodes`, so range 0 (catalog + coordinator + timestamp authority)
-/// always lives on node 0.
+/// Ranges go to nodes round-robin. Node `r % nodes` hosts range `r`, so range
+/// 0 always lives on node 0. Range 0 holds the catalog, the coordinator, and
+/// the timestamp authority.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TopologySpec {
     /// Number of `crabka-gres` compute processes.
     pub nodes: u16,
-    /// Number of ranges (r0..rN-1). Range 0 is the coordinator range.
+    /// Number of ranges, r0..rN-1. Range 0 is the coordinator range.
     pub ranges: u16,
-    /// Per-node HLC wall-clock skew (node index → signed offset), passed to
-    /// `--hlc-wall-offset`. Only meaningful in HLC mode; today only the
-    /// skew of the node hosting range 0 (the single HLC authority) is
-    /// observable.
+    /// Per-node HLC wall-clock skew, as node index to signed offset. The
+    /// harness passes it to `--hlc-wall-offset`. It has meaning only in HLC
+    /// mode. Today only the skew of the node that hosts range 0 is
+    /// observable, because that node is the single HLC authority.
     #[serde(default, with = "skew_map")]
     pub clock_skew: BTreeMap<u16, Time>,
-    /// Pin each node to this many dedicated CPUs (the broker gets its own
-    /// slice first — see `broker_cpus` — and nodes get disjoint slices
-    /// after it). On a single machine this makes each node behave like a
-    /// fixed-capacity host, so adding nodes adds real compute and scaling
-    /// curves measure the architecture rather than one box being
-    /// partitioned N ways. Launch fails if the machine has fewer CPUs than
-    /// `broker_cpus + nodes * cpus_per_node`. For full isolation run the
+    /// Pin each node to this many dedicated CPUs. The broker gets its own
+    /// slice first, as `broker_cpus` sets, and the nodes get disjoint slices
+    /// after it.
+    ///
+    /// On a single machine this makes each node behave like a fixed-capacity
+    /// host. Each new node then adds real compute, and the scaling curves
+    /// measure the architecture instead of one box split N ways. The launch
+    /// fails if the machine has fewer CPUs than
+    /// `broker_cpus + nodes * cpus_per_node`. For full isolation, run the
     /// harness binary itself under `taskset` on the leftover CPUs.
     #[serde(default)]
     pub cpus_per_node: Option<u32>,
-    /// CPUs pinned to the broker when `cpus_per_node` pinning is active
-    /// (default 2). Raise it to test whether the shared WAL broker is the
-    /// scaling ceiling. Only meaningful together with `cpus_per_node`.
+    /// CPUs pinned to the broker when `cpus_per_node` pinning is active.
+    /// Default 2. Raise it to test whether the shared WAL broker is the
+    /// scaling ceiling. It has meaning only together with `cpus_per_node`.
     #[serde(default)]
     pub broker_cpus: Option<u32>,
 }
 
-/// A node-indexed map of clock-skew extents, written as human time strings
-/// (`clock_skew: { 0: 400ms, 2: -100ms }`).
+/// A node-indexed map of clock-skew extents, written as human time strings,
+/// for example `clock_skew: { 0: 400ms, 2: -100ms }`.
 ///
 /// The per-quantity `#[serde(with = ...)]` modules cover a single value, not a
-/// map of them, so the map's own adapter lives here and reuses the same
-/// parse/render pair.
+/// map of them. The map's own adapter therefore lives here and reuses the same
+/// parse and render pair.
 mod skew_map {
     use std::collections::BTreeMap;
 
@@ -137,7 +141,7 @@ pub enum ModeSpec {
     LogicalTso,
     /// Hybrid logical clock.
     Hlc {
-        /// Uncertainty window (`max_offset`).
+        /// Uncertainty window, which is `max_offset`.
         #[serde(default = "default_hlc_max_offset", with = "time")]
         max_offset: Time,
     },
@@ -168,7 +172,7 @@ pub struct WorkloadSpec {
     /// Concurrent client connections, spread round-robin over the nodes'
     /// SQL front doors.
     pub connections: u32,
-    /// Pacing: saturate or a fixed aggregate transaction rate.
+    /// Pacing: either saturate, or a fixed aggregate transaction rate.
     #[serde(default, with = "serde_yaml::with::singleton_map")]
     pub rate: RateSpec,
     /// Load driven before measurement starts.
@@ -182,8 +186,8 @@ pub struct WorkloadSpec {
     /// Number of rows in the contended-update hot table.
     #[serde(default = "default_hot_rows")]
     pub hot_rows: u32,
-    /// Zipf exponent for hot-row selection (1.0 = classic Zipf; larger is
-    /// more skewed).
+    /// Zipf exponent for hot-row selection. 1.0 is classic Zipf, and a
+    /// larger value is more skewed.
     #[serde(default = "default_zipf_exponent")]
     pub zipf_exponent: f64,
 }
@@ -215,23 +219,24 @@ pub enum RateSpec {
     },
 }
 
-/// Relative weights of workload operation classes. Weights need not sum to
-/// any particular value; classes with weight 0 are never issued.
+/// Relative weights of the workload operation classes. The weights do not
+/// have to sum to any particular value. The driver never issues a class with
+/// weight 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MixSpec {
     /// Autocommit single-row insert into a table owned by one range.
     #[serde(default)]
     pub single_shard_insert: u32,
-    /// Explicit transaction writing tables on two different ranges (2PC +
-    /// global timestamp).
+    /// Explicit transaction that writes tables on two different ranges. It
+    /// uses 2PC and a global timestamp.
     #[serde(default)]
     pub cross_shard_txn: u32,
     /// Snapshot read touching one range.
     #[serde(default)]
     pub read_only: u32,
-    /// Zipf-distributed update of a small hot table (serialization
-    /// conflicts and retries).
+    /// Zipf-distributed update of a small hot table. It causes serialization
+    /// conflicts and retries.
     #[serde(default)]
     pub contended_update: u32,
 }
@@ -302,7 +307,7 @@ pub enum FaultAction {
     KillNode {
         /// Node index to kill.
         node: u16,
-        /// How long to wait before restarting the node. `null` leaves it
+        /// How long to wait before the node restarts. `null` leaves it
         /// down.
         #[serde(default, with = "option_time")]
         restart_after: Option<Time>,
@@ -314,7 +319,7 @@ pub enum FaultAction {
         /// Length of one on/off half-cycle.
         #[serde(with = "time")]
         period: Time,
-        /// How long the link keeps flapping (ends healed).
+        /// How long the link keeps flapping. It ends healed.
         #[serde(with = "time")]
         duration: Time,
     },
@@ -324,25 +329,27 @@ pub enum FaultAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PartitionStyle {
-    /// Packets vanish: live connections stall (no bytes flow, no FIN/RST)
-    /// and new connections hang. Models a real network partition; peers see
-    /// timeouts. Connections survive if the partition heals before the
-    /// application gives up.
+    /// Packets vanish. Live connections stall, with no bytes and no FIN or
+    /// RST, and new connections hang. This models a real network partition,
+    /// and peers see timeouts. Connections survive if the partition heals
+    /// before the application gives up.
     #[default]
     Blackhole,
-    /// Live connections are closed and new ones refused. Models an
-    /// administratively-down endpoint; peers see immediate errors.
+    /// The proxy closes live connections and refuses new ones. This models an
+    /// administratively-down endpoint, and peers see immediate errors.
     Reset,
 }
 
 /// Which proxied endpoint a fault applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultTarget {
-    /// The range-RPC endpoint of one range (inter-node traffic to it).
+    /// The range-RPC endpoint of one range, which carries inter-node traffic
+    /// to that range.
     Range(u16),
     /// Every range-RPC endpoint.
     AllRanges,
-    /// The SQL front door of one node (client traffic to it).
+    /// The SQL front door of one node, which carries client traffic to that
+    /// node.
     Sql(u16),
     /// Every node's SQL front door.
     AllSql,
@@ -449,9 +456,9 @@ impl Scenario {
         Ok(scenario)
     }
 
-    /// Checks internal consistency: non-empty topology and workload, fault
-    /// targets within topology bounds, cross-shard weight requiring at
-    /// least two ranges.
+    /// Checks internal consistency. The topology and the workload must not be
+    /// empty, the fault targets must lie within the topology bounds, and a
+    /// cross-shard weight needs at least two ranges.
     ///
     /// # Errors
     ///

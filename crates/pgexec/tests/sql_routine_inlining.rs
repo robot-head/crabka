@@ -1,11 +1,12 @@
-//! The two ways inlining a `LANGUAGE sql` routine can differ from running it.
+//! The two ways Gres can differ when it inlines a `LANGUAGE sql` routine.
 //!
-//! Gres reaches a SQL routine only by inlining its final query into the calling
-//! query. That is faithful for the shapes `PostgreSQL` itself inlines, and wrong
-//! in two specific ways it has to refuse rather than answer:
+//! Gres reaches a SQL routine only when it inlines the final query of the
+//! routine into the calling query. That is faithful for the shapes
+//! `PostgreSQL` itself inlines. It is wrong in two specific ways that Gres has
+//! to refuse rather than answer:
 //!
-//! - a body with several statements would run only its last, silently dropping
-//!   the writes the earlier ones perform;
+//! - a body with several statements would run only its last statement, and
+//!   would silently drop the writes that the earlier ones do;
 //! - an argument substituted at several parameter references would be evaluated
 //!   once per reference rather than once per call.
 
@@ -31,8 +32,10 @@ async fn scalar(s: &mut SqlSession, sql: &str) -> Option<String> {
     }
 }
 
-/// A multi-statement body is refused, because running only the last statement
-/// would return the right answer while dropping the earlier writes.
+/// Gres refuses a multi-statement body.
+///
+/// If it ran only the last statement, it would return the right answer but
+/// drop the earlier writes.
 #[tokio::test]
 async fn a_sql_body_with_several_statements_is_refused_rather_than_partly_run() {
     use assert2::assert;
@@ -59,8 +62,10 @@ async fn a_sql_body_with_several_statements_is_refused_rather_than_partly_run() 
     assert!(scalar(&mut s, "SELECT count(*) FROM audit").await == Some("0".to_string()));
 }
 
-/// An argument that may not be constant is refused when the body uses it more
-/// than once; the cases where duplicating it cannot change the answer still run.
+/// Gres refuses an argument that may not be constant when the body uses it
+/// more than once.
+///
+/// The cases where a duplicate use cannot change the answer still run.
 #[tokio::test]
 async fn an_argument_used_twice_is_refused_only_when_duplicating_it_could_matter() {
     use assert2::assert;

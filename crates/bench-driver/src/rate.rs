@@ -1,24 +1,24 @@
 //! Token-bucket pacer for `FixedRate` scenarios. `saturate` mode never
-//! calls this — it just `await`s the producer's natural backpressure.
+//! calls this. It only `await`s the producer's natural backpressure.
 
 use crabka_units::prelude::*;
 use tokio::time::{Instant, interval_at};
 
-/// The slowest rate the pacer will run at. A scenario asking for less (or for
-/// nothing at all) is clamped here rather than sleeping for an unbounded
+/// The slowest rate the pacer runs at. A scenario that asks for less, or for
+/// nothing at all, clamps to this rate and does not sleep for an unbounded
 /// period.
 const MIN_RATE: Frequency = per_sec(1);
 
-/// A simple steady-rate pacer: every `await_token().await` returns once
-/// the bucket has accumulated one whole token, on a schedule pinned to
-/// the pacer's creation time so per-call drift can't accumulate.
+/// A simple steady-rate pacer. Every `await_token().await` returns after
+/// the bucket has accumulated one whole token. The schedule is pinned to
+/// the pacer's creation time, so per-call drift cannot accumulate.
 pub struct Pacer {
     inner: tokio::time::Interval,
 }
 
 impl Pacer {
-    /// Paces at `rate`, clamped up to [`MIN_RATE`] when the scenario asks for
-    /// less than one message a second.
+    /// Paces at `rate`. This clamps up to [`MIN_RATE`] when the scenario asks
+    /// for less than one message a second.
     #[must_use]
     pub fn new(rate: Frequency) -> Self {
         let period = if rate < MIN_RATE { MIN_RATE } else { rate }.period();
@@ -31,7 +31,7 @@ impl Pacer {
         Self { inner }
     }
 
-    /// Sleep until the next token is available.
+    /// Sleeps until the next token is available.
     pub async fn await_token(&mut self) {
         self.inner.tick().await;
     }

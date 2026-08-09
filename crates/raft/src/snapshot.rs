@@ -1,10 +1,11 @@
 //! KIP-630 metadata snapshot artifact: `<offset>-<epoch>.checkpoint`.
 //!
-//! The format layer: image ⇄ record sequence, the `.checkpoint` filename
-//! grammar, and the canonical on-disk bytes (header/data/footer Kafka
-//! `RecordBatch`es). The engine ([`crate::kraft::KraftController`]) writes the
-//! `.checkpoint` directly (no `.meta` sidecar) and recovers from it via
-//! [`SnapshotReader::read_records`].
+//! This is the format layer: the mapping between an image and a record
+//! sequence in both directions, the `.checkpoint` filename grammar, and the
+//! canonical on-disk bytes, which are header, data, and footer Kafka
+//! `RecordBatch`es. The engine ([`crate::kraft::KraftController`]) writes the
+//! `.checkpoint` directly, with no `.meta` sidecar, and recovers from it
+//! through [`SnapshotReader::read_records`].
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_metadata::{MetadataImage, MetadataRecord, from_kraft_value, to_kraft_values};
@@ -24,26 +25,28 @@ use crate::error::RaftError;
 
 const SNAPSHOT_HEADER_BASE_OFFSET: i64 = 0;
 const SNAPSHOT_DATA_BASE_OFFSET: i64 = 1;
-/// Message version of the KIP-630 `SnapshotHeaderRecord` / `SnapshotFooterRecord`
-/// bodies written into the checkpoint's control batches (Kafka writes v0).
+/// Message version of the KIP-630 `SnapshotHeaderRecord` and
+/// `SnapshotFooterRecord` bodies written into the checkpoint's control batches.
+/// Kafka writes v0.
 const SNAPSHOT_CONTROL_RECORD_VERSION: i16 = 0;
 
-/// Identifies a snapshot by the log position it covers: `end_offset` is
-/// the offset of the last record contained in the snapshot, and `epoch`
-/// is the leader epoch at that offset. The engine names the on-disk artifact
-/// `<end_offset>-<epoch>.checkpoint` (both fields zero-padded so lexical sort
-/// matches numeric sort) and parses it back directly.
+/// Identifies a snapshot by the log position it covers. `end_offset` is the
+/// offset of the last record contained in the snapshot, and `epoch` is the
+/// leader epoch at that offset. The engine names the on-disk artifact
+/// `<end_offset>-<epoch>.checkpoint` and parses it back directly. Both fields
+/// are zero-padded, so the lexical sort matches the numeric sort.
 ///
-/// Serializes a [`MetadataImage`] into the canonical KIP-630
-/// `.checkpoint` byte layout: a header control batch, one data batch of
-/// `MetadataRecord` values, then a footer control batch — concatenated
-/// encoded Kafka `RecordBatch`es.
+/// Serializes a [`MetadataImage`] into the canonical KIP-630 `.checkpoint`
+/// byte layout: a header control batch, one data batch of `MetadataRecord`
+/// values, then a footer control batch, all as concatenated encoded Kafka
+/// `RecordBatch`es.
 pub(crate) struct SnapshotWriter;
 
 impl SnapshotWriter {
-    /// Produce the full `.checkpoint` bytes for `image`.
-    /// `last_contained_log_timestamp` is the create-time of the last log
-    /// record folded into this snapshot (recorded in the header).
+    /// Produces the full `.checkpoint` bytes for `image`.
+    ///
+    /// `last_contained_log_timestamp` is the create-time of the last log record
+    /// folded into this snapshot. The header records that timestamp.
     pub(crate) fn serialize(
         image: &MetadataImage,
         last_contained_log_timestamp: i64,
@@ -145,13 +148,14 @@ fn snapshot_control_batch<R: Encode>(
 }
 
 /// Reads a canonical `.checkpoint` byte stream back into the sequence of
-/// `MetadataRecord`s it contains (skipping the header/footer control
-/// batches), plus a raw byte-range accessor for `FetchSnapshot` serving.
+/// `MetadataRecord`s it contains, and skips the header and footer control
+/// batches. It also gives a raw byte-range accessor for `FetchSnapshot`
+/// serving.
 pub(crate) struct SnapshotReader;
 
 impl SnapshotReader {
-    /// Decode all `MetadataRecord`s from a `.checkpoint` byte stream.
-    /// Control batches (header/footer) are skipped.
+    /// Decodes all `MetadataRecord`s from a `.checkpoint` byte stream. This
+    /// function skips the header and footer control batches.
     pub(crate) fn read_records(bytes: &[u8]) -> Result<Vec<MetadataRecord>, RaftError> {
         let mut cursor: &[u8] = bytes;
         let mut records = Vec::new();
@@ -178,9 +182,9 @@ impl SnapshotReader {
         Ok(records)
     }
 
-    /// Return the `[position, position + max)` slice of `bytes`, clamped
-    /// to the buffer length. A `position` at or past EOF yields an empty
-    /// slice. Used to serve `FetchSnapshot` byte-range requests (KIP-595
+    /// Returns the `[position, position + max)` slice of `bytes`, clamped to
+    /// the buffer length. A `position` at or past EOF gives an empty slice.
+    /// This serves `FetchSnapshot` byte-range requests (KIP-595
     /// §`FetchSnapshot`).
     pub(crate) fn byte_range(bytes: &[u8], position: usize, max: usize) -> &[u8] {
         let start = position.min(bytes.len());
@@ -320,14 +324,18 @@ mod tests {
         check!(cur.is_empty());
     }
 
-    /// A snapshot of an image carrying finalized KIP-584 features must
+    /// A snapshot of an image that carries finalized KIP-584 features must
     /// reproduce both the feature levels AND the finalized-features epoch
-    /// exactly on read-back. Regression guard for the bug where `to_records`
-    /// emitted no `V1FeatureLevel` records: `metadata.version` (range guard /
-    /// SCRAM + delegation-token gates) and `group.version` (next-gen consumer
-    /// groups) silently vanished after any compaction or learner snapshot
-    /// install. The epoch (3 here, from a re-finalize) exceeds the live feature
-    /// count (2), so a naive "replay one record per feature" fix would
+    /// exactly on read-back.
+    ///
+    /// This is a regression guard for the bug where `to_records` emitted no
+    /// `V1FeatureLevel` records. In that bug `metadata.version`, which is the
+    /// range guard and the SCRAM and delegation-token gate, and
+    /// `group.version`, which gates next-gen consumer groups, silently
+    /// vanished after any compaction or learner snapshot install.
+    ///
+    /// The epoch here is 3, from a re-finalize, and it exceeds the live feature
+    /// count of 2. A naive "replay one record per feature" fix would therefore
     /// reconstruct epoch=1 and fail this assertion.
     #[test]
     fn writer_reader_round_trips_image_with_features() {
@@ -418,12 +426,13 @@ mod tests {
         check!(cur.is_empty());
     }
 
-    /// Docker-gated: a Crabka engine-produced KIP-630 snapshot (built by
-    /// `SnapshotWriter` from a real `MetadataImage` through the KIP-631
-    /// translation boundary) is parsed cleanly by the JVM
-    /// `kafka-dump-log --cluster-metadata-decoder`, proving the on-checkpoint
-    /// bytes are genuine KIP-631 records (`RegisterBroker` / `Topic` /
-    /// `Partition` / `Config`), not Crabka-private wincode.
+    /// Docker-gated: the JVM `kafka-dump-log --cluster-metadata-decoder`
+    /// parses a Crabka engine-produced KIP-630 snapshot cleanly.
+    ///
+    /// `SnapshotWriter` builds that snapshot from a real `MetadataImage`
+    /// through the KIP-631 translation boundary. A clean parse proves that the
+    /// on-checkpoint bytes are genuine KIP-631 records (`RegisterBroker`,
+    /// `Topic`, `Partition`, `Config`) and not Crabka-private wincode.
     ///
     /// ```text
     /// cargo test -p crabka-raft --lib snapshot -- --ignored --nocapture

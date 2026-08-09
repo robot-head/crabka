@@ -1,14 +1,15 @@
 //! SP33: joins over `Relation`s. A `Relation` is a `Scope` (ordered schema) plus
-//! its materialized rows; base tables, joins, and derived subqueries all produce
-//! one. This module is pure relational algebra over already-fetched rows — no
-//! kv/catalog access — so it is unit-testable with hand-built relations.
-//! (See the SP33 design doc for why this single-range pure fold warrants no model.)
+//! its materialized rows. Base tables, joins, and derived subqueries all produce
+//! one. This module is pure relational algebra over already-fetched rows, with
+//! no kv or catalog access, so hand-built relations can unit-test it. See the
+//! SP33 design doc for why this single-range pure fold warrants no model.
 //!
-//! An equality-constrained join (`USING`/`NATURAL`, or an `ON` whose top-level
-//! conjuncts include `left.col = right.col`) probes a hash index over the right
-//! relation instead of walking it per left row, so a 10k-row self-join costs
-//! 10k predicate evaluations rather than 100M. Everything else — and any key
-//! whose values are not exactly hash-comparable — still folds as a nested loop.
+//! An equality-constrained join probes a hash index over the right relation
+//! instead of a walk of it per left row, so a 10k-row self-join costs 10k
+//! predicate evaluations and not 100M. Such a join is `USING`/`NATURAL`, or an
+//! `ON` whose top-level conjuncts include `left.col = right.col`. Everything
+//! else still folds as a nested loop, as does any key whose values are not
+//! exactly hash-comparable.
 
 use std::collections::HashMap;
 
@@ -21,7 +22,7 @@ use crate::{
 };
 
 /// A materialized relation: an ordered `Scope` (the schema) plus its rows, each
-/// row positionally aligned to `scope.columns`. Base tables, joins, and (later)
+/// row positionally aligned to `scope.columns`. Base tables, joins, and, later,
 /// derived subqueries all produce one.
 #[derive(Debug, Clone)]
 pub(crate) struct Relation {
@@ -29,10 +30,10 @@ pub(crate) struct Relation {
     pub rows: Vec<Vec<Datum>>,
 }
 
-/// Join two relations under `kind` + `constraint`, returning the combined
-/// relation. `ctx` carries the session zone + clock used to evaluate an `ON`
-/// predicate that contains temporal expressions (a USING/NATURAL/CROSS join, or a
-/// rows-free schema join, never touches it).
+/// Join two relations under `kind` and `constraint`, and return the combined
+/// relation. `ctx` carries the session zone and clock that evaluate an `ON`
+/// predicate with temporal expressions in it. A USING/NATURAL/CROSS join, or a
+/// rows-free schema join, never touches `ctx`.
 pub(crate) fn join_relations(
     left: Relation,
     right: Relation,
@@ -212,7 +213,7 @@ pub(crate) fn join_relations(
 }
 
 /// The right rows a left row could possibly join with: the index's bucket for
-/// its key, or — with no usable index — every right row.
+/// its key, or every right row when no usable index exists.
 fn candidate_rows<'a>(
     index: Option<&'a EquiIndex>,
     all_right: &'a [usize],
@@ -229,10 +230,10 @@ fn candidate_rows<'a>(
 /// each bucket so a probe visits candidates in the order the nested loop would.
 ///
 /// `Datum`'s hash equality agrees with `ops::compare` only for values of the
-/// SAME variant — `Int2(1)` and `Int4(1)` compare Equal but hash apart, and so
-/// do `Int4(1)` and `Numeric(1)` — so the index exists only when every non-NULL
-/// value of a key column, on BOTH sides, carries one variant. Anything else
-/// leaves the join folding as a nested loop, which is always correct.
+/// SAME variant. `Int2(1)` and `Int4(1)` compare Equal but hash apart, and so do
+/// `Int4(1)` and `Numeric(1)`. So the index exists only when every non-NULL
+/// value of a key column, on BOTH sides, carries one variant. Anything
+/// else leaves the join as a nested-loop fold, which is always correct.
 struct EquiIndex {
     /// Key columns, as indices into a left row.
     left_key: Vec<usize>,
@@ -243,8 +244,8 @@ struct EquiIndex {
 enum KeyVariant<'a> {
     /// Every non-NULL value carries the variant of this sample.
     Uniform(&'a Datum),
-    /// No non-NULL value at all — nothing can match through this column, which
-    /// the index represents faithfully (a NULL key is never bucketed).
+    /// No non-NULL value at all. Nothing can match through this column, and the
+    /// index represents that faithfully, because a NULL key is never bucketed.
     AllNull,
     /// Values of differing variants, whose hash equality would not agree with
     /// `ops::compare`.
@@ -253,7 +254,7 @@ enum KeyVariant<'a> {
 
 impl EquiIndex {
     /// Below this many left×right pairs the nested loop is already cheap enough
-    /// that building buckets would cost more than probing them saves.
+    /// that the buckets would cost more to build than the probes save.
     const MIN_PAIRS: usize = 4096;
 
     /// `keys` are `(left_column, right_column)` pairs the predicate requires to
@@ -327,11 +328,12 @@ fn key_variant(rows: &[Vec<Datum>], column: usize) -> KeyVariant<'_> {
 /// Whether `Datum`'s `Eq`/`Hash` decide this variant exactly as `ops::compare`
 /// does, which is what lets a hash bucket stand in for the comparison.
 ///
-/// The scalar types agree by construction (`Eq` and `Hash` both canonicalize
-/// NaN, signed zero, and numeric scale the way `compare` orders them). The
-/// composite types do not: `array_cmp` ignores the element type, so `int4[]`
-/// `{1}` and `int8[]` `{1}` compare Equal while `Eq` calls them different — and
-/// `interval` compares by a canonical estimate. Those keys keep the nested loop.
+/// The scalar types agree by construction, because `Eq` and `Hash` both
+/// canonicalize NaN, signed zero, and numeric scale the way `compare` orders
+/// them. The composite types do not agree. `array_cmp` ignores the element type,
+/// so `int4[]` `{1}` and `int8[]` `{1}` compare Equal while `Eq` calls them
+/// different, and `interval` compares by a canonical estimate. Those keys keep
+/// the nested loop.
 fn hashes_like_it_compares(sample: &Datum) -> bool {
     matches!(
         sample,
@@ -356,9 +358,9 @@ fn hashes_like_it_compares(sample: &Datum) -> bool {
 /// side resolving into the left relation and the other into the right.
 ///
 /// These are necessary conditions for the predicate to hold, which is what makes
-/// them safe as a pre-filter — the full predicate still decides every candidate.
-/// Conjuncts of any other shape (including `OR`, which is not a necessary
-/// condition) contribute no key.
+/// them safe as a pre-filter. The full predicate still decides every candidate.
+/// Conjuncts of any other shape contribute no key, including `OR`, which is not
+/// a necessary condition.
 fn equi_key_columns(pred: &Expr, combined: &Scope, lw: usize) -> Vec<(usize, usize)> {
     let mut keys = Vec::new();
     collect_equi_key_columns(pred, combined, lw, &mut keys);
@@ -402,8 +404,9 @@ fn collect_equi_key_columns(
 }
 
 /// The combined-scope position of a bare column reference, or `None` for any
-/// other expression (including one that does not resolve, or resolves
-/// ambiguously — `matches` reports that error when it evaluates the predicate).
+/// other expression. That includes an expression that does not resolve, or that
+/// resolves ambiguously. `matches` reports that error when it evaluates the
+/// predicate.
 fn combined_column_index(expr: &Expr, combined: &Scope) -> Option<usize> {
     let Expr::Column { table, name } = expr else {
         return None;
@@ -426,9 +429,9 @@ fn push_bounded_join_row(
     Ok(())
 }
 
-/// The column names common to both scopes (matched by name), in left order,
-/// deduplicated. Drives `NATURAL JOIN`'s join-column set (empty => degenerates to
-/// a cross join, per PostgreSQL).
+/// The column names common to both scopes, matched by name, in left order, and
+/// deduplicated. This drives `NATURAL JOIN`'s join-column set. An empty set
+/// degenerates to a cross join, as PostgreSQL does.
 fn natural_common_columns(left: &Scope, right: &Scope) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for c in &left.columns {
@@ -440,9 +443,10 @@ fn natural_common_columns(left: &Scope, right: &Scope) -> Vec<String> {
 }
 
 /// Reshape a `left ++ right` combined relation into PostgreSQL's USING/NATURAL
-/// output: each join column appears ONCE (coalesced — the present side wins, which
-/// matters for outer joins), unqualified, positioned FIRST in `join` order; then
-/// the remaining left columns, then the remaining right columns.
+/// output. Each join column appears ONCE, coalesced so that the present side
+/// wins, which matters for outer joins. Each join column is unqualified and sits
+/// FIRST in `join` order. The remaining left columns follow, and then the
+/// remaining right columns.
 fn coalesce_join_columns(
     left_scope: &Scope,
     right_scope: &Scope,
@@ -518,8 +522,8 @@ mod tests {
 
     use super::*;
 
-    /// A default (UTC/epoch) eval context — these pure relational-algebra tests use
-    /// no temporal ON predicate, so the zone never affects the result.
+    /// A default (UTC/epoch) eval context. These pure relational-algebra tests
+    /// use no temporal ON predicate, so the zone never affects the result.
     fn tctx() -> crate::clock::EvalCtx {
         crate::clock::EvalCtx::test_default()
     }
@@ -740,8 +744,8 @@ mod tests {
         }
     }
 
-    /// An independent double loop over the same inputs: the answer the indexed
-    /// probe has to reproduce exactly, rows and order alike.
+    /// An independent double loop over the same inputs. This is the answer the
+    /// indexed probe has to reproduce exactly, in rows and in order.
     fn reference_join(left: &Relation, right: &Relation, kind: JoinKind) -> Vec<Vec<Datum>> {
         let matches = |l: &Datum, r: &Datum| !l.is_null() && !r.is_null() && l == r;
         let mut rows: Vec<Vec<Datum>> = Vec::new();
@@ -769,9 +773,9 @@ mod tests {
         rows
     }
 
-    /// The indexed probe is an optimization, not a semantic change: over a
-    /// relation pair big enough to take it (duplicate keys, NULLs, and
-    /// unmatched rows on both sides) every join kind returns exactly what the
+    /// The indexed probe is an optimization, not a semantic change. Over a
+    /// relation pair big enough to take it, with duplicate keys, NULLs, and
+    /// unmatched rows on both sides, every join kind returns exactly what the
     /// double loop returns, in the same order.
     #[test]
     fn indexed_equi_join_agrees_with_the_nested_loop() {
@@ -831,8 +835,8 @@ mod tests {
 
     /// The point of the index: an equi-join on a unique key visits ONE right row
     /// per left row instead of the whole right relation. Without it a 10k-row
-    /// self-join — `pg_regress`'s `join` corpus does exactly this — evaluates the
-    /// ON predicate 100 million times and never answers.
+    /// self-join evaluates the ON predicate 100 million times and never answers.
+    /// `pg_regress`'s `join` corpus does exactly that self-join.
     #[test]
     fn indexed_equi_join_visits_one_candidate_per_left_row() {
         let keys: Vec<Option<i32>> = (0..10_000i32).map(Some).collect();

@@ -1,9 +1,11 @@
-//! Per-(topic, partition) replication task. Issues standard Kafka `Fetch`
-//! requests against the partition's leader (with `replica_id` set to the
-//! local broker's `node_id`), appending each returned batch to the local
-//! `crabka-log`. Handles `OFFSET_OUT_OF_RANGE` by truncating local log to
-//! 0 and restarting; `NOT_LEADER_FOR_PARTITION` by returning so the
-//! supervisor's next reconcile re-evaluates.
+//! Per-(topic, partition) replication task.
+//!
+//! The task issues standard Kafka `Fetch` requests against the leader of the
+//! partition, with `replica_id` set to the `node_id` of the local broker. It
+//! appends each returned batch to the local `crabka-log`. On
+//! `OFFSET_OUT_OF_RANGE` it truncates the local log to 0 and restarts. On
+//! `NOT_LEADER_FOR_PARTITION` it returns, so that the next reconcile of the
+//! supervisor evaluates the partition again.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -41,8 +43,8 @@ use crate::{
 
 /// Whether this round may fetch, and with how large a per-partition budget.
 ///
-/// Not `Eq`: the budget is a [`ByteSize`], whose `f64` storage is only
-/// `PartialEq`.
+/// This enum is not `Eq`. The budget is a [`ByteSize`], and its `f64` storage
+/// is only `PartialEq`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FetchThrottleDecision {
     Fetch(ByteSize),
@@ -53,17 +55,20 @@ enum FetchThrottleDecision {
 pub(crate) struct Config {
     pub node_id: NodeId,
     pub topic: String,
-    /// Wire-format `topic_id` for the partition. Required so the
-    /// `Fetch` request can populate the v13+ wire field — at v ≥ 13
-    /// Kafka drops `FetchTopic.topic` in favour of `topic_id` (KIP-516),
-    /// and the leader's handler resolves topic-name purely via
-    /// `topic_id`. If we send `WireUuid::ZERO` here the leader returns
-    /// `UNKNOWN_TOPIC_OR_PARTITION` for every fetch.
+    /// Wire-format `topic_id` for the partition.
+    ///
+    /// The `Fetch` request needs this value to fill the v13+ wire field. At
+    /// v ≥ 13 Kafka drops `FetchTopic.topic` in favour of `topic_id`
+    /// (KIP-516), and the handler of the leader resolves the topic name from
+    /// `topic_id` only. If the replicator sends `WireUuid::ZERO` here, the
+    /// leader returns `UNKNOWN_TOPIC_OR_PARTITION` for every fetch.
     pub topic_id: WireUuid,
     pub partition: PartitionIndex,
     pub leader_node_id: NodeId,
-    /// Leader's `host` portion from the metadata image (the inter-broker
-    /// endpoint when available, otherwise the legacy broker host).
+    /// The `host` portion of the leader from the metadata image.
+    ///
+    /// This is the inter-broker endpoint when one is available, and the legacy
+    /// broker host if not.
     pub leader_host: String,
     pub leader_port: u16,
     pub partitions: Arc<PartitionRegistry>,
@@ -71,36 +76,47 @@ pub(crate) struct Config {
     pub log_settings: LogConfig,
     pub client_id: String,
     pub shutdown: CancellationToken,
-    /// Shared outbound dialer. Connects through TLS + SASL when the
-    /// inter-broker listener requires them; falls back to raw TCP for
-    /// PLAINTEXT.
+    /// Shared outbound dialer.
+    ///
+    /// The dialer connects through TLS and SASL when the inter-broker listener
+    /// needs them. It falls back to raw TCP for PLAINTEXT.
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     pub inter_broker_listener_protocol: ListenerProtocol,
     pub inter_broker_server_name: String,
     pub replication: ReplicationRuntimeConfig,
-    /// KIP-73: broker-wide throttle state. The follower-in bucket gates
-    /// outbound Fetch bytes when this partition is throttled.
+    /// KIP-73 broker-wide throttle state.
+    ///
+    /// The follower-in bucket gates the outbound Fetch bytes while this
+    /// partition is throttled.
     pub throttle_state: Arc<ThrottleState>,
-    /// Controller handle used to read the current metadata image each
-    /// Fetch round (for `follower.replication.throttled.replicas` lookup).
+    /// Controller handle that reads the current metadata image each Fetch
+    /// round.
+    ///
+    /// The replicator uses the image to look up
+    /// `follower.replication.throttled.replicas`.
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
-    /// KIP-113 runtime offline-dir registry. Forwarded into
-    /// `spawn_partition` so the per-partition writer can flip the
-    /// owning dir offline on a segment-write / fsync failure.
+    /// KIP-113 runtime offline-dir registry.
+    ///
+    /// The replicator forwards this registry into `spawn_partition`. The
+    /// per-partition writer can then set the owning dir offline after a
+    /// segment-write failure or an fsync failure.
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
-    /// Broker-wide idempotent/transactional producer-sequence tracker.
-    /// Forwarded into `spawn_partition` (via `ensure_local_partition`)
-    /// so the per-partition writer's `Compact` handler can snapshot
-    /// active producers for KIP-534 `RETAIN_EMPTY`.
+    /// Broker-wide producer-sequence tracker for idempotent and transactional
+    /// producers.
+    ///
+    /// The replicator forwards this tracker into `spawn_partition` through
+    /// `ensure_local_partition`. The `Compact` handler of the per-partition
+    /// writer can then snapshot the active producers for KIP-534
+    /// `RETAIN_EMPTY`.
     pub producer_state: Arc<crate::producer_state::ProducerState>,
-    /// Broker-wide metrics handle so the replicator can
-    /// increment `replication_bytes_in` after a successful follower-
-    /// side append.
+    /// Broker-wide metrics handle.
+    ///
+    /// The replicator increments `replication_bytes_in` after a successful
+    /// follower-side append.
     pub metrics: crate::metrics::BrokerMetrics,
 }
 
-/// Entry point: drive a single (topic, partition) replication loop until
-/// cancelled.
+/// Entry point. Drives one (topic, partition) replication loop until cancelled.
 pub(crate) async fn run(cfg: Config) {
     info!(
         topic = %cfg.topic,
@@ -124,8 +140,10 @@ pub(crate) async fn run(cfg: Config) {
     info!(topic = %cfg.topic, partition = cfg.partition.get(), "replicator.stopped");
 }
 
-/// Build (or recover) the on-disk `Partition` for this follower, inserting
-/// it into the broker's shared `partitions` map. Idempotent.
+/// Builds or recovers the on-disk `Partition` for this follower.
+///
+/// The function inserts the partition into the shared `partitions` map of the
+/// broker. The function is idempotent.
 fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
     // `materialize_if_vacant` runs the build under the per-key lock, so two
     // concurrent replicators for the same partition can never both build it.
@@ -255,17 +273,20 @@ fn follower_partition_fetch_cap(cfg: &Config) -> FetchThrottleDecision {
     }
 }
 
-/// Build a single-partition Fetch request for the (topic, partition) this
-/// replicator is responsible for. `replica_id` is set to the local broker
-/// so the leader treats this as a follower fetch rather than a consumer
-/// fetch (Kafka's high-watermark semantics differ between the two).
+/// Builds a single-partition Fetch request for the partition of this
+/// replicator.
 ///
-/// KIP-101: `current_leader_epoch` is included so the leader can detect
-/// stale or fenced replicas and return `FENCED_LEADER_EPOCH` or
-/// `UNKNOWN_LEADER_EPOCH` when appropriate.
+/// `replica_id` holds the local broker, so the leader treats the request as a
+/// follower fetch and not as a consumer fetch. The high-watermark semantics of
+/// Kafka differ between the two.
+///
+/// KIP-101: the request includes `current_leader_epoch`, so the leader can
+/// detect a stale or fenced replica and return `FENCED_LEADER_EPOCH` or
+/// `UNKNOWN_LEADER_EPOCH`.
 ///
 /// `partition_max_cap` is the KIP-73 follower-throttle cap for
-/// `partition_max_bytes`. Pass the configured fetch maximum when unthrottled.
+/// `partition_max_bytes`. Pass the configured fetch maximum when the partition
+/// is not throttled.
 fn build_fetch_request(
     cfg: &Config,
     fetch_offset: Offset,
@@ -337,13 +358,15 @@ enum LoopAction {
 /// `true` if the committed metadata image now lists THIS broker as the leader of
 /// the partition this replicator follows.
 ///
-/// A follower-replicator's cancellation on a leadership change is cooperative —
-/// the run loop only checks the shutdown token between fetches — so an in-flight
-/// Fetch response can still be processed after this broker has been promoted to
-/// leader. Truncating/resetting our own log from such a stale response would
-/// drop the new leader's freshly-appended (possibly acknowledged) data, both
-/// stalling `acks=all` produces and silently losing records. Callers consult
-/// this immediately before any truncation and stop the replicator instead.
+/// The cancellation of a follower-replicator on a leadership change is
+/// cooperative. The run loop checks the shutdown token only between fetches.
+/// The replicator can thus process an in-flight Fetch response after the
+/// cluster has promoted this broker to leader. A truncation or a reset of the
+/// local log from such a stale response would drop data that the new leader
+/// appended, and the cluster can already have acknowledged that data. This
+/// would stall `acks=all` produces and lose records silently. Each caller reads
+/// this value immediately before any truncation and stops the replicator
+/// instead.
 fn became_partition_leader(cfg: &Config) -> bool {
     cfg.controller
         .current_image()
@@ -547,14 +570,16 @@ async fn handle_offset_out_of_range(
     LoopAction::Continue
 }
 
-/// On `FENCED_LEADER_EPOCH` or `UNKNOWN_LEADER_EPOCH`, call
-/// `OffsetForLeaderEpoch` against the leader to find the truncation
-/// point, then truncate our local log to align with the leader's epoch
-/// history.
+/// Aligns the local log with the epoch history of the leader after an epoch
+/// fence.
 ///
-/// KIP-101: the follower sends our current `leader_epoch`; the leader
-/// replies with `end_offset` = the first offset of the next epoch,
-/// which is the safe truncation point.
+/// On `FENCED_LEADER_EPOCH` or `UNKNOWN_LEADER_EPOCH`, this function calls
+/// `OffsetForLeaderEpoch` against the leader to find the truncation point. It
+/// then truncates the local log to that point.
+///
+/// KIP-101: the follower sends its current `leader_epoch`. The leader replies
+/// with `end_offset`, the first offset of the next epoch, which is the safe
+/// truncation point.
 // The `end_offset >= 0` truncate-vs-reset branch is only reachable after a live
 // leader connection returns an `OffsetForLeaderEpoch` response; the whole
 // function is inter-broker IO (connect, send, then `part.truncate_to` /
@@ -693,13 +718,15 @@ fn build_offset_for_leader_epoch_request(
     }
 }
 
-/// Open a [`Connection`] against the partition's leader, retrying with
-/// exponential backoff capped by the configured reconnect policy. Returns `Err`
-/// only if shutdown is requested while we were waiting.
+/// Opens a [`Connection`] against the leader of the partition.
 ///
-/// Routes through the shared [`InterBrokerClient`] so TLS + SASL are run
-/// when the inter-broker listener demands them, and falls back to plain
-/// TCP for `ListenerProtocol::Plaintext`.
+/// The function retries with exponential backoff, with a cap from the
+/// configured reconnect policy. It returns `Err` only if a shutdown starts
+/// during the wait.
+///
+/// The connection routes through the shared [`InterBrokerClient`], which runs
+/// TLS and SASL when the inter-broker listener needs them. It falls back to
+/// plain TCP for `ListenerProtocol::Plaintext`.
 async fn connect_with_backoff(cfg: &Config) -> Result<Connection, String> {
     let mut delay = reconnect_delay(cfg, None);
     loop {

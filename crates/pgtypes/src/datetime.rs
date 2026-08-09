@@ -1,4 +1,4 @@
-//! SP37: date/time *values* — the `Interval` type plus parsing, formatting,
+//! SP37: date/time *values*: the `Interval` type plus parsing, formatting,
 //! binary encodings, and value arithmetic. PostgreSQL semantics; `jiff` does the
 //! calendar/timezone math. This is the single source of truth for date/time
 //! values (the SP32 `numeric` module pattern).
@@ -145,7 +145,7 @@ pub fn timestamptz_infinity_of_sign(sign: i32) -> Timestamp {
 // Value-level arithmetic helpers (called from crabka_pgtypes::ops)
 // ---------------------------------------------------------------------------
 
-/// `interval out of range` — the 22008 PostgreSQL raises when two opposite
+/// `interval out of range`: the 22008 PostgreSQL raises when two opposite
 /// infinities would have to cancel.
 fn interval_out_of_range() -> TypeError {
     TypeError::DatetimeOutOfRange {
@@ -153,7 +153,7 @@ fn interval_out_of_range() -> TypeError {
     }
 }
 
-/// `timestamp out of range` — the 22008 for the timestamp equivalent.
+/// `timestamp out of range`: the 22008 for the timestamp equivalent.
 fn timestamp_out_of_range() -> TypeError {
     TypeError::DatetimeOutOfRange {
         message: "timestamp out of range".to_string(),
@@ -202,8 +202,8 @@ pub fn add_interval(a: Interval, b: Interval) -> Result<Interval, TypeError> {
 
 /// A computed interval, refusing the encoding reserved for the non-finite pair.
 ///
-/// Two finite operands that land exactly on it have not produced an infinity —
-/// they have run out of range, which is what PostgreSQL reports.
+/// Two finite operands that land exactly on it have not produced an infinity.
+/// They have run out of range, which is what PostgreSQL reports.
 fn finite_interval(value: Interval) -> Result<Interval, TypeError> {
     if value.is_infinite() {
         return Err(interval_out_of_range());
@@ -319,9 +319,9 @@ pub fn date_to_midnight(d: Date) -> DateTime {
     d.to_datetime(Time::midnight())
 }
 
-/// Add an `Interval` to a `Date` (PG: promotes date→midnight timestamp first),
-/// returning a `DateTime`.  Applies months, then days, then micros in order
-/// (calendar-aware via jiff `Span`).
+/// Add an `Interval` to a `Date` (PG: promotes date→midnight timestamp first)
+/// and return a `DateTime`. This function applies months, then days, then micros
+/// in order (calendar-aware, with a jiff `Span`).
 pub fn date_plus_interval(d: Date, iv: Interval) -> Result<DateTime, TypeError> {
     match date_infinite_sign(d) {
         0 => timestamp_plus_interval(date_to_midnight(d), iv),
@@ -365,9 +365,10 @@ pub fn timestamp_plus_interval(ts: DateTime, iv: Interval) -> Result<DateTime, T
     Ok(result)
 }
 
-/// Compute `a - b` for two `DateTime` values, returning an `Interval` with
+/// Compute `a - b` for two `DateTime` values and return an `Interval` with
 /// months = 0 (PG's `timestamp - timestamp` result: total micros, stored in
-/// the days + micros fields — days for full 86400 µs days, remainder in micros).
+/// the days + micros fields, days for full 86400 µs days and the remainder in
+/// micros).
 pub fn timestamp_diff(a: DateTime, b: DateTime) -> Result<Interval, TypeError> {
     // Two infinities of the same sign cancel to nothing definable; one infinite
     // operand gives the infinite interval of the difference's sign.
@@ -391,11 +392,11 @@ pub fn timestamp_diff(a: DateTime, b: DateTime) -> Result<Interval, TypeError> {
     })
 }
 
-/// Add an `Interval` to a `Time`, returning the new `Time`. PostgreSQL's
-/// `time + interval` uses ONLY the interval's microseconds component — a `time`
-/// has no date, so the interval's `months`/`days` are ignored — and wraps the
-/// result modulo 24 h (`time '23:00' + interval '2 hours'` → `01:00:00`,
-/// `time '12:00' + interval '1 day'` → `12:00:00`).
+/// Add an `Interval` to a `Time` and return the new `Time`. PostgreSQL's
+/// `time + interval` uses ONLY the interval's microseconds component, because a
+/// `time` has no date, so it ignores the interval's `months`/`days`. It also
+/// wraps the result modulo 24 h (`time '23:00' + interval '2 hours'` →
+/// `01:00:00`, `time '12:00' + interval '1 day'` → `12:00:00`).
 pub fn time_plus_interval(t: Time, iv: Interval) -> Time {
     // Micros-of-day of the input time.
     let base = i64::from(t.hour()) * 3_600_000_000
@@ -491,7 +492,8 @@ pub fn timestamptz_diff(a: Timestamp, b: Timestamp) -> Result<Interval, TypeErro
 }
 
 /// A PostgreSQL `interval`: months, days, and microseconds kept SEPARATE (PG does
-/// not fold `1 month` into `30 days` for storage/arithmetic — only for ordering).
+/// not fold `1 month` into `30 days` for storage/arithmetic, only for
+/// ordering).
 #[derive(Debug, Clone, Copy)]
 pub struct Interval {
     pub months: i32,
@@ -502,8 +504,8 @@ pub struct Interval {
 const USECS_PER_DAY: i128 = 86_400_000_000;
 
 impl Interval {
-    /// `interval 'infinity'`. PostgreSQL reserves the triple of field extremes —
-    /// ALL THREE at once — for the non-finite values, which is what leaves
+    /// `interval 'infinity'`. PostgreSQL reserves the triple of field extremes,
+    /// ALL THREE at once, for the non-finite values, which is what leaves
     /// `2562047788:00:54.775807` (`i64::MAX` microseconds on its own) a perfectly
     /// ordinary finite interval, and makes infinity sort outside every finite one
     /// for free.
@@ -599,7 +601,7 @@ fn pg_epoch_datetime() -> DateTime {
 /// Seconds from the Unix epoch (1970-01-01) to the PostgreSQL epoch (2000-01-01).
 const PG_EPOCH_UNIX_SECS: i64 = 946_684_800;
 
-/// Microseconds in one calendar day (24h estimate — civil days are always 24h).
+/// Microseconds in one calendar day (24h estimate; civil days are always 24h).
 const USECS_PER_DAY_I64: i64 = 86_400_000_000;
 
 // ---------------------------------------------------------------------------
@@ -740,11 +742,11 @@ fn check_finite_date(d: Date, s: &str) -> Result<(), TypeError> {
 
 /// The *output-format* half of PostgreSQL's `DateStyle` GUC, which decides how
 /// `date_out`, `timestamp_out` and `timestamptz_out` spell a value. The other
-/// half — the field ordering — is [`DateOrder`], and the two are independent:
+/// half, the field ordering, is [`DateOrder`], and the two are independent:
 /// `SQL, DMY` prints `11/07/2001` while `SQL, MDY` prints `07/11/2001`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DateStyle {
-    /// `2001-07-11 10:51:14.123+00` — the default, and the only style the field
+    /// `2001-07-11 10:51:14.123+00`: the default, and the only style the field
     /// ordering does not reach.
     #[default]
     Iso,
@@ -752,7 +754,7 @@ pub enum DateStyle {
     Postgres,
     /// `07/11/2001 10:51:14.123 UTC`.
     Sql,
-    /// `11.07.2001 10:51:14.123 UTC` — always day-first, whatever the ordering.
+    /// `11.07.2001 10:51:14.123 UTC`: always day-first, whatever the ordering.
     German,
 }
 
@@ -985,7 +987,7 @@ pub fn date_from_binary(b: &[u8]) -> Result<Date, TypeError> {
 
 /// Parse a `time` literal. `PostgreSQL` accepts a leading date and a trailing
 /// zone here and discards both, so `'2003-03-07 15:36:39 America/New_York'` is a
-/// legal `time` — but a zone *name* still has to be resolvable, which is why the
+/// legal `time`. A zone *name* still has to be resolvable, which is why the
 /// same text without its date is a syntax error.
 pub fn parse_time(s: &str) -> Result<Time, TypeError> {
     parse_time_in(s, DateOrder::default(), &TimeZone::UTC)
@@ -1031,8 +1033,8 @@ pub fn parse_time_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<Time, T
 /// A PostgreSQL `time with time zone`: a clock reading plus the UTC offset it
 /// was read at.
 ///
-/// The two parts are kept separate because both are observable — the value
-/// prints as `15:36:39-05`, not as its UTC equivalent — but *ordering* is by the
+/// The two parts stay separate because both are observable: the value prints as
+/// `15:36:39-05`, not as its UTC equivalent. But *ordering* is by the
 /// UTC-equivalent instant, which is what [`TimeTz::utc_micros`] computes and what
 /// the `Ord` impl compares. Equality follows ordering, so `12:00-05` and
 /// `17:00+00` are the same value even though they print differently, exactly as
@@ -1084,7 +1086,7 @@ impl Ord for TimeTz {
     }
 }
 
-/// Parse a `timetz` literal. A zone is required — with none in the text the
+/// Parse a `timetz` literal. A zone is required. With none in the text the
 /// session zone supplies one, but that needs a date to resolve a *named* zone,
 /// which is why `'15:36:39 America/New_York'` is a syntax error while
 /// `'2003-03-07 15:36:39 America/New_York'` is not.
@@ -1153,7 +1155,7 @@ pub fn timetz_to_text(value: TimeTz) -> String {
 }
 
 /// `timetz_send`: i64 big-endian microseconds since midnight, then i32
-/// big-endian seconds *west* of UTC — the sign PostgreSQL stores, which is the
+/// big-endian seconds *west* of UTC, the sign PostgreSQL stores, which is the
 /// negation of the offset the value prints.
 #[must_use]
 pub fn timetz_to_binary(value: TimeTz) -> [u8; 12] {
@@ -1302,7 +1304,7 @@ pub fn time_from_binary(b: &[u8]) -> Result<Time, TypeError> {
 
 /// Parse a `timestamp` literal in every spelling `PostgreSQL` accepts. A zone in
 /// the text is decoded (so an unresolvable one is still an error) and then
-/// discarded — this type has no zone.
+/// discarded, because this type has no zone.
 pub fn parse_timestamp(s: &str) -> Result<DateTime, TypeError> {
     parse_timestamp_in(s, DateOrder::default(), &TimeZone::UTC)
 }
@@ -1348,7 +1350,7 @@ fn check_finite_timestamp(ts: DateTime, s: &str) -> Result<(), TypeError> {
     Ok(())
 }
 
-/// Render a `timestamp` as `YYYY-MM-DD HH:MM:SS[.ffffff]` (SPACE separator —
+/// Render a `timestamp` as `YYYY-MM-DD HH:MM:SS[.ffffff]` (SPACE separator,
 /// PostgreSQL `timestamp_out`, ISO datestyle), with the `BC` era suffix.
 pub fn timestamp_to_text(ts: DateTime) -> String {
     if ts == TIMESTAMP_INFINITY {
@@ -1422,9 +1424,10 @@ pub fn timestamp_from_binary(b: &[u8]) -> Result<DateTime, TypeError> {
 // timestamp with time zone
 // ---------------------------------------------------------------------------
 
-/// Parse a `timestamptz` literal into an absolute instant. A zone in the text —
-/// an offset, an abbreviation or a zone-database name — fixes the instant;
-/// otherwise the wall clock is read as local to the session `tz`.
+/// Parse a `timestamptz` literal into an absolute instant. A zone in the text
+/// fixes the instant, whether it is an offset, an abbreviation or a
+/// zone-database name. Otherwise the wall clock reads as local to the session
+/// `tz`.
 pub fn parse_timestamptz(s: &str, tz: &TimeZone) -> Result<Timestamp, TypeError> {
     parse_timestamptz_in(s, DateOrder::default(), tz)
 }
@@ -1638,9 +1641,9 @@ impl IntervalField {
 
     /// The unit the bare quantity to the LEFT of one just consumed takes.
     ///
-    /// PostgreSQL keeps the current unit for the next bare quantity — which is
+    /// PostgreSQL keeps the current unit for the next bare quantity, which is
     /// why `'1 2' MINUTE` is a duplicate-field error rather than an hour and a
-    /// minute — and steps to `DAY` in exactly one place, after an hour.
+    /// minute. It steps to `DAY` in exactly one place, after an hour.
     fn next_bare_unit(self) -> Self {
         match self {
             IntervalField::Hour => IntervalField::Day,
@@ -1656,7 +1659,7 @@ const SUBSECOND_FIELDS: u32 = IntervalField::Second.mask_bit()
     | IntervalField::Millisecond.mask_bit()
     | IntervalField::Microsecond.mask_bit();
 
-/// Everything a `HH:MM:SS.ffffff` clock term supplies — PostgreSQL's
+/// Everything a `HH:MM:SS.ffffff` clock term supplies: PostgreSQL's
 /// `DTK_TIME_M`, which is why `'1:20:05 5 microseconds'` is rejected.
 const CLOCK_FIELDS: u32 =
     IntervalField::Hour.mask_bit() | IntervalField::Minute.mask_bit() | SUBSECOND_FIELDS;
@@ -1984,9 +1987,9 @@ fn add_months(months: &mut i64, whole: i64, frac: f64, per_unit: i64) -> Option<
 /// One interval quantity, split the way PostgreSQL's decoder reads it: the whole
 /// part exactly, the fraction as a `double`.
 ///
-/// Reading the whole token as an `f64` instead costs microseconds at the top of
-/// the range — `2562047788.01521550194 hours` has more significant digits than a
-/// `double` carries, and the rounding lands on a different microsecond.
+/// A read of the whole token as an `f64` instead costs microseconds at the top
+/// of the range. `2562047788.01521550194 hours` has more significant digits than
+/// a `double` carries, and the rounding lands on a different microsecond.
 #[derive(Clone, Copy)]
 struct Quantity {
     whole: i64,
@@ -1994,7 +1997,7 @@ struct Quantity {
 }
 
 impl Quantity {
-    /// Parse a signed decimal quantity. `None` for anything that is not one —
+    /// Parse a signed decimal quantity. `None` for anything that is not one,
     /// including the exponent forms `f64::from_str` would otherwise accept,
     /// which PostgreSQL's interval decoder rejects.
     fn parse(text: &str) -> Option<Quantity> {
@@ -2115,20 +2118,20 @@ fn accumulate_unit(
 /// different ways.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IntervalStyle {
-    /// `1 year 2 mons 3 days 04:05:06` — the default.
+    /// `1 year 2 mons 3 days 04:05:06`: the default.
     #[default]
     Postgres,
     /// `@ 1 year 2 mons 3 days 4 hours 5 mins 6 secs [ago]`.
     PostgresVerbose,
-    /// `+1-2 +3 +4:05:06` — SQL's year-month / day-time split.
+    /// `+1-2 +3 +4:05:06`: SQL's year-month / day-time split.
     SqlStandard,
     /// `P1Y2M3DT4H5M6S`.
     Iso8601,
 }
 
 impl IntervalStyle {
-    /// Read the style out of an `IntervalStyle` GUC value, falling back to the
-    /// default for anything unrecognized — the GUC layer rejects those, so this
+    /// Read the style out of an `IntervalStyle` GUC value, and fall back to the
+    /// default for anything unrecognized. The GUC layer rejects those, so this
     /// only guards a caller with no session behind it.
     #[must_use]
     pub fn from_setting(value: &str) -> Self {
@@ -2254,7 +2257,7 @@ pub fn interval_to_text_in(iv: Interval, style: IntervalStyle) -> String {
 ///
 /// The sign of the *first* non-zero component decides the `ago` suffix; when it
 /// is negative every component is negated before printing, so a mixed-sign value
-/// keeps inner minus signs — `@ 10 mons 3 days -3 hours -55 mins -6 secs ago`.
+/// keeps inner minus signs: `@ 10 mons 3 days -3 hours -55 mins -6 secs ago`.
 fn interval_postgres_verbose(parts: IntervalParts) -> String {
     let is_before = parts
         .all()
@@ -2388,7 +2391,7 @@ fn interval_iso_8601(parts: IntervalParts) -> String {
 ///
 /// The sign placement is PostgreSQL's: each field carries its own sign, and a
 /// *positive* field gets an explicit `+` when the last non-zero field before it
-/// was negative — hence `-3 days +04:05:06`.
+/// was negative, hence `-3 days +04:05:06`.
 pub fn interval_to_text(iv: Interval) -> String {
     match iv.infinite_sign() {
         1 => return "infinity".to_string(),
@@ -2606,9 +2609,9 @@ trait FieldSource {
 
     /// Index into the 12-entry month-name/Roman tables. A datetime's `month` is
     /// always `1..=12`; an interval's `months % 12` can be `0..=11` (or negative),
-    /// so this maps the raw value into `0..=11` rather than panicking on an
-    /// out-of-range subscript. (Month NAMES on an interval are not a corpus case;
-    /// this just keeps the shared renderer total — see Task 9.)
+    /// so this maps the raw value into `0..=11` rather than a panic on an
+    /// out-of-range subscript. (Month NAMES on an interval are not a corpus
+    /// case; this only keeps the shared renderer total. See Task 9.)
     fn month_name_index(&self) -> usize {
         (self.month().rem_euclid(12)) as usize
     }
@@ -2679,8 +2682,8 @@ impl FieldSource for DateTimeFields {
 }
 
 /// The interval field-set for the `to_char(interval, fmt)` renderer, mirroring
-/// PostgreSQL `interval2tm`: the stored `months`/`days`/`micros` are read
-/// component-wise WITHOUT normalizing across the day/month boundary —
+/// PostgreSQL `interval2tm`: this code reads the stored `months`/`days`/`micros`
+/// component-wise and does NOT normalize across the day/month boundary.
 /// `year = months / 12`, `month = months % 12`, `day = days`, and from `micros`
 /// `hour = micros / 3_600_000_000` (which may be `≥ 24` or negative), then
 /// minute/second/sub-second from the remainder.
@@ -2764,7 +2767,7 @@ const ROMAN_MONTHS: [&str; 12] = [
     "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII",
 ];
 
-/// Full English month names (1-indexed). C/English locale only — `TM` (locale
+/// Full English month names (1-indexed). C/English locale only; `TM` (locale
 /// translation) is out of scope for this slice.
 const MONTH_NAMES: [&str; 12] = [
     "January",
@@ -2801,10 +2804,10 @@ pub fn format_datetime(template: &str, fields: &DateTimeFields) -> Result<String
 }
 
 /// The `to_char(interval, fmt)` engine: render `template` from an interval's
-/// STORED `months`/`days`/`micros` (PG `interval2tm` — clock fields are NOT
+/// STORED `months`/`days`/`micros` (PG `interval2tm`; clock fields are NOT
 /// normalized across the day/month boundary, so e.g. `HH24` of a `36 hour`
-/// interval is `36`). Shares the exact tokenizer/renderer as `format_datetime`
-/// via the `FieldSource` indirection.
+/// interval is `36`). It shares the exact tokenizer/renderer with
+/// `format_datetime` through the `FieldSource` indirection.
 pub fn format_interval(iv: Interval, template: &str) -> Result<String, TypeError> {
     render_tokens(template, &IntervalFields::new(iv))
 }
@@ -2884,7 +2887,7 @@ fn render_tokens(template: &str, src: &dyn FieldSource) -> Result<String, TypeEr
 /// Does `chars[i..]` start with the ASCII keyword `kw`, ignoring case?
 ///
 /// PostgreSQL's template lexer is case-insensitive for every pattern whose case
-/// does not decide the output — so `yyyy`, `hh24`, `of` and `ff3` all work. The
+/// does not decide the output, so `yyyy`, `hh24`, `of` and `ff3` all work. The
 /// patterns that DO carry their casing into the result (`MONTH`/`Month`/`month`,
 /// `DY`/`Dy`/`dy`, `RM`/`rm`, `AM`/`am`, `TH`/`th`, the era words) keep using
 /// [`matches_at`] so each spelling stays a distinct keyword.
@@ -2953,7 +2956,7 @@ fn pad_name(name: &str, width: usize, fm: bool) -> String {
 }
 
 /// Blank-pad a Roman-numeral month on the RIGHT to width 4 (PG LEFT-justifies
-/// `RM`/`rm` in a field as wide as the widest numeral, "VIII" — oracle-confirmed,
+/// `RM`/`rm` in a field as wide as the widest numeral, "VIII"; oracle-confirmed,
 /// PG 18: `RM` for January → `'I   '`, for March → `'III '`); `fm` strips it.
 fn pad_roman(numeral: &str, fm: bool) -> String {
     if fm {
@@ -2965,7 +2968,7 @@ fn pad_roman(numeral: &str, fm: bool) -> String {
 
 /// Render the meridiem string variants. `lower` lowercases; `dotted` inserts the
 /// dots (`A.M.`/`P.M.`). `hour` is `i64` so the shared renderer also serves an
-/// interval source (where AM/PM has no clock meaning — not a corpus case); for a
+/// interval source (where AM/PM has no clock meaning, not a corpus case); for a
 /// civil `0..=23` hour the `>= 12` test is unchanged.
 fn meridiem(hour: i64, lower: bool, dotted: bool) -> String {
     let pm = hour >= 12;
@@ -3018,7 +3021,7 @@ fn cased(name: &str, case: NameCase) -> String {
 
 /// 12-hour clock hour for `HH`/`HH12`: `((h + 11) % 12) + 1` (so 0→12, 13→1).
 /// `hour` is `i64` so the shared renderer also serves an interval source (where
-/// `HH`/`HH12` has no clock meaning — not a corpus case); `rem_euclid` keeps the
+/// `HH`/`HH12` has no clock meaning, not a corpus case); `rem_euclid` keeps the
 /// result in `1..=12` for any input, matching the civil `0..=23` mapping exactly.
 fn hour12(hour: i64) -> i64 {
     (hour + 11).rem_euclid(12) + 1
@@ -3365,7 +3368,7 @@ enum Meridiem {
 /// for each pattern consumes the corresponding piece of `input`: a numeric pattern
 /// consumes up to its max width of leading ASCII digits; a name pattern
 /// (`Mon`/`Month`) matches a month name case-insensitively; literal template chars
-/// are matched leniently (PostgreSQL largely ignores separators — a non-alphanumeric
+/// are matched leniently (PostgreSQL largely ignores separators, so a non-alphanumeric
 /// template char skips a run of non-alphanumeric input chars). Returns a
 /// `ParsedDateTime` with PG defaults for absent fields (year 1, month/day 1, time 0).
 /// Bad shape (a non-digit where a number is required, an unrecognized name) → 22007
@@ -3587,9 +3590,9 @@ fn match_parse_pattern(tchars: &[char], ti: usize) -> Option<(usize, ParseField)
     None
 }
 
-/// Consume up to `max` leading ASCII digits from `chars` at `*i`, returning the
-/// value. Requires at least one digit (PG: a number-expecting pattern with a
-/// non-digit there is an error) — returns `None` otherwise.
+/// Consume up to `max` leading ASCII digits from `chars` at `*i` and return the
+/// value. This function needs at least one digit (PG: a number-expecting pattern
+/// with a non-digit there is an error), and it returns `None` otherwise.
 fn consume_number(chars: &[char], i: &mut usize, max: usize) -> Option<i64> {
     let start = *i;
     let mut v: i64 = 0;
@@ -3604,8 +3607,8 @@ fn consume_number(chars: &[char], i: &mut usize, max: usize) -> Option<i64> {
 
 /// Consume a month name from `chars` at `*i`, case-insensitively. When `abbrev`,
 /// match a 3-letter abbreviation (the first 3 chars of a `MONTH_NAMES` entry);
-/// otherwise match a full month name (longest match — the input must begin with the
-/// full name). Returns the 1-based month, or `None` if no name matches.
+/// otherwise match a full month name (longest match; the input must begin with
+/// the full name). Returns the 1-based month, or `None` if no name matches.
 fn consume_month_name(chars: &[char], i: &mut usize, abbrev: bool) -> Option<u32> {
     for (idx, name) in MONTH_NAMES.iter().enumerate() {
         let needle: Vec<char> = if abbrev {
@@ -3686,10 +3689,10 @@ fn skip_separators(chars: &[char], i: &mut usize) {
 
 /// Match a single literal template char `lit` against the input at `*i`. An
 /// alphanumeric literal consumes one matching input char (case-insensitive; a
-/// mismatch is tolerated — PG does not hard-fail a literal mismatch — leaving the
-/// cursor in place). A separator/punctuation literal matches leniently: it skips a
-/// run of leading separator chars in the input (PG largely ignores separators, so
-/// e.g. an input `-` matches a template `/`).
+/// mismatch is tolerated, because PG does not hard-fail a literal mismatch, and
+/// the cursor stays in place). A separator/punctuation literal matches
+/// leniently: it skips a run of leading separator chars in the input (PG largely
+/// ignores separators, so e.g. an input `-` matches a template `/`).
 fn match_literal(lit: char, chars: &[char], i: &mut usize) {
     if lit.is_alphanumeric() {
         if *i < chars.len() && chars[*i].eq_ignore_ascii_case(&lit) {
@@ -4427,9 +4430,9 @@ mod io_tests {
     }
 
     /// PostgreSQL's interval decoder records which fields a literal has already
-    /// supplied and rejects a second one outright — `'1 day 1 day'` is a syntax
-    /// error, not two days. A decoder that simply adds each term instead answers
-    /// a plausible-looking wrong interval with nothing to signal it.
+    /// supplied and rejects a second one outright, so `'1 day 1 day'` is a
+    /// syntax error, not two days. A decoder that only adds each term instead
+    /// answers a plausible-looking wrong interval with nothing to signal it.
     #[test]
     fn a_repeated_interval_field_is_rejected() {
         use assert2::assert;
@@ -4502,7 +4505,7 @@ mod io_tests {
     }
 
     /// A bare quantity takes the unit of the quantity to its right, and steps to
-    /// DAY in exactly one place — after an hour. `'1 2' MINUTE` is therefore a
+    /// DAY in exactly one place, after an hour. `'1 2' MINUTE` is therefore a
     /// repeated field rather than an hour and a minute.
     #[test]
     fn a_bare_quantity_keeps_its_neighbours_unit_except_after_an_hour() {
@@ -4692,7 +4695,7 @@ mod io_tests {
     }
 
     /// Fractional seconds beyond the sixth digit round the way PostgreSQL's
-    /// `rint` on the microsecond value does — half to even, not truncated and
+    /// `rint` on the microsecond value does: half to even, not truncated and
     /// not half-up. Every row was measured against PostgreSQL 18.4.
     #[test]
     fn fractional_seconds_round_half_to_even_like_postgres() {
@@ -4743,7 +4746,7 @@ mod io_tests {
     /// closed at `24:00:00` and its `timestamp` range reaches 294276 AD, so it
     /// carries in both cases; crabka's representations stop one value earlier, so
     /// a timestamp carries the date and a `time` fails. Neither may wrap back to
-    /// midnight of the day it started in — that is a different instant.
+    /// midnight of the day it started in, because that is a different instant.
     #[test]
     fn rounding_across_midnight_carries_the_date_and_never_wraps() {
         use assert2::assert;

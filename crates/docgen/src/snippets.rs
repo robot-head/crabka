@@ -1,10 +1,14 @@
 //! Sync fenced code blocks in website markdown from anchored regions of source
-//! files, so published docs contain exactly the tested example code.
+//! files.
+//!
+//! The published docs thus contain exactly the tested example code.
 
 use std::path::Path;
 
 /// Extract the lines between `// docs:begin <anchor>` and `// docs:end <anchor>`
-/// in `source`, stripping the markers and trimming common leading indentation.
+/// in `source`.
+///
+/// The function removes the markers and trims the common leading indentation.
 ///
 /// # Errors
 /// Returns an error string if either marker is missing.
@@ -49,7 +53,8 @@ pub fn extract(source: &str, anchor: &str) -> Result<String, String> {
 
 /// Rewrite every `<!-- snippet: <relpath>#<anchor> --> ... <!-- /snippet -->`
 /// block in `markdown` with the current code from `crates_dir/<relpath>`.
-/// Returns the new markdown. Idempotent.
+///
+/// The function returns the new markdown. It is idempotent.
 ///
 /// # Errors
 /// Returns an error if a referenced source file or anchor cannot be read.

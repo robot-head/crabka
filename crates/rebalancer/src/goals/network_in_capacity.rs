@@ -1,6 +1,6 @@
-//! Hard goal: enforce a per-broker `network_in_bytes_per_sec` limit
-//! using the scraped `UsageStore::bytes_in_rate` summed across the
-//! broker's hosted partitions (all replica roles).
+//! Hard goal: enforce a per-broker `network_in_bytes_per_sec` limit. It uses
+//! the scraped `UsageStore::bytes_in_rate`, summed across the broker's hosted
+//! partitions in all replica roles.
 
 use std::collections::HashMap;
 

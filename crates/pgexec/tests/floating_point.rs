@@ -1,7 +1,9 @@
-//! SP30: `double precision` (float8) + `AVG` — end-to-end over the wire.
-//! Float8 column round-trip and result type (OID 701), float arithmetic and
-//! comparison/ordering, `avg`/`sum`/`min`/`max`/`abs` over floats, `GROUP BY` /
-//! `DISTINCT` over float keys, text rendering, and the error SQLSTATEs.
+//! SP30: `double precision` (float8) and `AVG`, end-to-end over the wire.
+//!
+//! Covers the float8 column round-trip and result type (OID 701), float
+//! arithmetic and comparison/ordering, `avg`/`sum`/`min`/`max`/`abs` over
+//! floats, `GROUP BY` / `DISTINCT` over float keys, text rendering, and the
+//! error SQLSTATEs.
 
 use std::sync::Arc;
 
@@ -45,8 +47,9 @@ async fn seed(client: &tokio_postgres::Client) {
         .expect("insert");
 }
 
-/// The first column of the first row as text (simple query protocol → exercises the
-/// engine's own float8 text encoding).
+/// The first column of the first row as text.
+///
+/// The simple query protocol exercises the engine's own float8 text encoding.
 async fn text(client: &tokio_postgres::Client, sql: &str) -> Option<String> {
     use tokio_postgres::SimpleQueryMessage;
     for m in client.simple_query(sql).await.expect("query") {

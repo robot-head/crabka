@@ -1,7 +1,9 @@
 //! Slice-1 WAL medium: a single-node, `fsync`-durable WAL that reuses the
-//! partition's existing local `Log`. Offsets are assigned locally (Slice 2
-//! moves them to `KRaft`); durability is a local `fsync` (Slice 6 upgrades to a
-//! cross-AZ quorum). Survives crash-restart, NOT node/disk loss.
+//! partition's existing local `Log`.
+//!
+//! It assigns offsets locally; slice 2 moves that to `KRaft`. Its durability
+//! is a local `fsync`; slice 6 upgrades that to a cross-AZ quorum. This medium
+//! survives a crash and restart, but NOT the loss of a node or a disk.
 
 use std::sync::{Arc, Mutex};
 
@@ -13,8 +15,8 @@ use tokio::runtime::RuntimeFlavor;
 use super::WalStore;
 use crate::{error::BrokerError, partition::ProduceData};
 
-/// A [`WalStore`] backed by the partition's local `Log` plus an explicit
-/// `fsync` (`Log::sync`).
+/// A [`WalStore`] backed by the partition's local `Log` and an explicit
+/// `fsync`, that is `Log::sync`.
 #[allow(dead_code)] // Staged diskless WAL seam; later slices wire this into topics.
 pub struct LocalFsyncWal {
     log: Arc<Mutex<Log>>,

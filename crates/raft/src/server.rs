@@ -1,6 +1,6 @@
-//! Accept loop for the controller TCP listener. Receives inbound KIP-595 RPCs
-//! (Fetch=1, Vote=52, BeginQuorumEpoch=53, EndQuorumEpoch=54) plus the
-//! Crabka-private observer/forward RPCs and feeds them into the local
+//! Accept loop for the controller TCP listener. It receives inbound KIP-595
+//! RPCs (Fetch=1, Vote=52, BeginQuorumEpoch=53, EndQuorumEpoch=54) and the
+//! Crabka-private observer and forward RPCs, and it feeds them into the local
 //! [`KraftController`] engine.
 //!
 //! Wire shape matches `crabka_client_core::Connection::raw_request`:
@@ -9,9 +9,9 @@
 //! - Response: `len(i32) | correlation_id(i32) | tagged_fields(0u8) | body`
 //!
 //! `RequestHeader` v2 = `api_key(i16) api_version(i16) correlation_id(i32)
-//! client_id(NULLABLE_STRING) tagged_fields(varint=0)`. We parse and discard
-//! everything but `api_key`/`correlation_id` (the body is decoded by the
-//! engine's transport codec / the Crabka-private wire types).
+//! client_id(NULLABLE_STRING) tagged_fields(varint=0)`. This module parses and
+//! discards everything but `api_key` and `correlation_id`. The engine's
+//! transport codec and the Crabka-private wire types decode the body.
 
 use std::sync::Arc;
 
@@ -46,23 +46,24 @@ type CorrelationId = i32;
 /// handshake before any other request.
 const API_KEY_API_VERSIONS: i16 = 18;
 
-/// Highest `ApiVersions` request version this listener speaks: the advertised
-/// max in the `api_keys` table and the clamp applied to the response body codec
-/// (JVM controllers dial at v4; Crabka's own client at v0).
+/// Highest `ApiVersions` request version this listener speaks. It is the
+/// advertised max in the `api_keys` table and the clamp on the response body
+/// codec. JVM controllers dial at v4, and Crabka's own client dials at v0.
 const API_VERSIONS_MAX_VERSION: i16 = 4;
 
-/// `DescribeCluster` (KIP-919) — served on the controller listener so an
+/// `DescribeCluster` (KIP-919). The controller listener serves it, so an
 /// `AdminClient` bootstrapped with `--bootstrap-controller` can discover the
-/// quorum's controller (or broker) endpoints directly from the leader.
+/// quorum's controller endpoints, or its broker endpoints, directly from the
+/// leader.
 const API_KEY_DESCRIBE_CLUSTER: i16 = 60;
 
 /// `CrabkaSubmitChangeResponse::error_code`: the change was applied.
 const SUBMIT_CHANGE_APPLIED: i16 = 0;
-/// `CrabkaSubmitChangeResponse::error_code`: this node is not the leader;
-/// consult `leader_hint`.
+/// `CrabkaSubmitChangeResponse::error_code`: this node is not the leader, so
+/// read `leader_hint`.
 const SUBMIT_CHANGE_NOT_LEADER: i16 = 1;
 /// `CrabkaSubmitChangeResponse::error_code`: metadata validation rejected the
-/// records (also returned when the wincode body fails to decode).
+/// records. This code also comes back when the wincode body fails to decode.
 const SUBMIT_CHANGE_REJECTED: i16 = 2;
 /// `CrabkaSubmitChangeResponse::error_code`: any other engine failure.
 const SUBMIT_CHANGE_FAILED: i16 = 3;
@@ -251,8 +252,9 @@ where
     write_response_frame(stream, correlation_id, body, true).await
 }
 
-/// Write a response without the leading tagged-fields byte. Used only by the
-/// `ApiVersions` v0 path, which decodes a `ResponseHeader v0`.
+/// Writes a response without the leading tagged-fields byte. Only the
+/// `ApiVersions` v0 path uses it, because that path decodes a
+/// `ResponseHeader v0`.
 async fn write_response_no_tagged_fields<S>(
     stream: &mut S,
     correlation_id: CorrelationId,
@@ -290,18 +292,20 @@ where
 
 /// `ApiVersionsResponse` advertising the controller-listener APIs.
 ///
-/// A real `mirror.gcr.io/apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
-/// flexible (v2) request header, then consults the returned table to decide
-/// which version of `Vote`/`Fetch`/etc. to send. An EMPTY `api_keys` list made
-/// the JVM treat every raft RPC as `UNSUPPORTED_VERSION` and refuse to send
-/// `Vote` on the wire. Advertising the KIP-595 APIs at the versions Crabka's
-/// engine speaks lets compatible peers proceed to real `Vote`/`Fetch`.
+/// A real `mirror.gcr.io/apache/kafka:4.0.0` controller dials peers with
+/// `ApiVersions v4` over a flexible (v2) request header. It then reads the
+/// returned table to choose which version of `Vote`, `Fetch`, and the other
+/// RPCs to send. An EMPTY `api_keys` list makes the JVM treat every raft RPC as
+/// `UNSUPPORTED_VERSION` and refuse to send `Vote` on the wire. This listener
+/// therefore advertises the KIP-595 APIs at the versions Crabka's engine
+/// speaks, which lets compatible peers proceed to a real `Vote` and `Fetch`.
 ///
-/// Body is the flexible (v3+) `ApiVersionsResponse` shape: `error_code(i16)`,
-/// `api_keys` compact-array of `{api_key(i16), min(i16), max(i16), tagged(0)}`,
-/// `throttle_time_ms(i32)`, response-level `tagged(0)`. Per the documented Kafka
-/// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
-/// so this is written via [`write_response_no_tagged_fields`].
+/// The body is the flexible (v3+) `ApiVersionsResponse` shape: `error_code(i16)`,
+/// an `api_keys` compact-array of `{api_key(i16), min(i16), max(i16),
+/// tagged(0)}`, `throttle_time_ms(i32)`, and a response-level `tagged(0)`. The
+/// response header stays at v0, with no leading tagged-fields byte, which is
+/// the documented Kafka asymmetry. This function therefore writes the response
+/// through [`write_response_no_tagged_fields`].
 fn api_versions_response_body(req_version: i16) -> Bytes {
     use crabka_protocol::{
         Encode,
@@ -341,12 +345,12 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
     buf.freeze()
 }
 
-/// Route an inbound RPC body to the engine and produce the response body.
+/// Routes an inbound RPC body to the engine and produces the response body.
 ///
-/// The KIP-595 engine RPCs (1/52/53/54) go through [`KraftController::deliver`],
-/// which decodes the body, runs the core, and replies on a oneshot with the
-/// encoded response body. The Crabka-private 1003/1004 keep their bespoke
-/// request/response wire types.
+/// The KIP-595 engine RPCs (1, 52, 53, 54) go through
+/// [`KraftController::deliver`]. That method decodes the body, runs the core,
+/// and replies on a oneshot with the encoded response body. The Crabka-private
+/// RPCs 1003 and 1004 keep their own request and response wire types.
 #[cfg(test)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id().0, api_key = api_key_n.get()), err)]
 async fn dispatch(
@@ -396,7 +400,7 @@ async fn dispatch_with_router(
     }
 }
 
-/// Deliver an [`Inbound`] to the engine and await the encoded response body.
+/// Delivers an [`Inbound`] to the engine and awaits the encoded response body.
 async fn deliver_inbound<F>(engine: &KraftController, make: F) -> Result<Bytes, RaftError>
 where
     F: FnOnce(oneshot::Sender<Bytes>) -> Inbound,
@@ -406,10 +410,12 @@ where
     rx.await.map_err(|_| RaftError::Shutdown)
 }
 
-/// Handle a follower-forwarded `submit_change` (1003). The forwarder wrapped a
-/// wincode-encoded `Vec<MetadataRecord>`; we submit it to the local engine
-/// (presumably the leader) and translate the result into the `error_code` enum:
-/// `0` applied, `1` not leader (with `leader_hint`), `2` metadata-rejected.
+/// Handles a follower-forwarded `submit_change` (1003).
+///
+/// The forwarder wrapped a wincode-encoded `Vec<MetadataRecord>`. This function
+/// submits it to the local engine, which is normally the leader, and translates
+/// the result into the `error_code` enum: `0` for applied, `1` for not leader,
+/// together with `leader_hint`, and `2` for metadata-rejected.
 async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result<Bytes, RaftError> {
     let mut cur = body;
     let req = CrabkaSubmitChangeRequest::decode_v0(&mut cur)?;
@@ -465,8 +471,8 @@ async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result
     Ok(Bytes::from(out))
 }
 
-/// Serve a committed `__cluster_metadata` slice to a broker-only observer (1004)
-/// from the engine's `KraftLog`.
+/// Serves a committed `__cluster_metadata` slice to a broker-only observer
+/// (1004) from the engine's `KraftLog`.
 async fn dispatch_metadata_fetch(
     body: &[u8],
     engine: &KraftController,
@@ -498,12 +504,14 @@ async fn dispatch_metadata_fetch(
     Ok(Bytes::from(out))
 }
 
-/// Serve `DescribeCluster` (60, KIP-919) on the controller listener from the
-/// controller's metadata image. `endpoint_type=2` (CONTROLLERS) projects the
-/// voter set so a `--bootstrap-controller` `AdminClient` can discover the
-/// quorum; otherwise the registered brokers are returned. The controller
-/// listener carries no principal/ACL context (it is the inter-node trust
-/// boundary, like `metadata_fetch`), so there is no auth gate.
+/// Serves `DescribeCluster` (60, KIP-919) on the controller listener from the
+/// controller's metadata image.
+///
+/// `endpoint_type=2`, which is CONTROLLERS, projects the voter set, so a
+/// `--bootstrap-controller` `AdminClient` can discover the quorum. Any other
+/// value returns the registered brokers. The controller listener carries no
+/// principal or ACL context, because it is the inter-node trust boundary, the
+/// same as `metadata_fetch`. There is therefore no auth gate.
 // The broker-id `i32::try_from(node_id).unwrap_or(-1)` overflow fallback is
 // unreachable: the metadata layer rejects registering a `node_id` exceeding
 // `i32::MAX` (BrokerRegistrationRecord encode validation), so the `-1` sentinel
@@ -570,8 +578,9 @@ async fn describe_cluster_response_body(
     )?)
 }
 
-/// Encode a `DescribeClusterResponse` body for `version` from already-projected
-/// node tuples. Pure (no engine), so the projection-and-encode is unit-testable.
+/// Encodes a `DescribeClusterResponse` body for `version` from already-projected
+/// node tuples. The function is pure and touches no engine, so a unit test can
+/// cover the projection and the encode.
 fn build_describe_cluster_body(
     version: i16,
     endpoint_type: i8,
@@ -637,8 +646,8 @@ mod tests {
 
     use super::*;
 
-    /// Election timeout for the in-test engines: short, so a single voter wins
-    /// immediately.
+    /// Election timeout for the in-test engines. It is short, so a single
+    /// voter wins immediately.
     const TEST_ELECTION_TIMEOUT: Time = millis(50);
 
     /// How long a test waits for a leader to appear.

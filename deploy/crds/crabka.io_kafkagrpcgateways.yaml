@@ -22,15 +22,17 @@ spec:
               allowedTargets:
                 description: |-
                   Explicit SSRF allowlist for outbound HTTP targets. The controller
-                  derives entries automatically from each subscription's
-                  `targetUrl`; use this field to add extra allowed hosts.
+                  derives the entries from the `targetUrl` of each subscription. Use
+                  this field to add more allowed hosts.
                 items:
                   description: |-
-                    One entry in the gateway's SSRF allowlist. An outbound HTTP request
-                    is allowed only when `scheme` and `host` match.
+                    One entry in the SSRF allowlist of the gateway.
+
+                    The gateway permits an outbound HTTP request only when `scheme` and
+                    `host` match.
                   properties:
                     host:
-                      description: Hostname (and optional port) of the allowed target.
+                      description: Hostname of the allowed target, with an optional port.
                       type: string
                     scheme:
                       description: URL scheme. One of `http` or `https`.
@@ -42,8 +44,8 @@ spec:
                 type: array
               authz:
                 description: |-
-                  Authorization configuration. When absent, simple ACL-based authz
-                  is used (mode = `simple`).
+                  Authorization configuration. When absent, the gateway uses simple
+                  ACL-based authorization, which is mode `simple`.
                 nullable: true
                 properties:
                   aclRefresh:
@@ -60,8 +62,8 @@ spec:
                     properties:
                       allowableClockSkew:
                         description: |-
-                          Allowable clock skew for bearer-token timestamps, as a unit-carrying
-                          duration (`30s`, `500ms`).
+                          Allowable clock skew for bearer-token timestamps, as a
+                          unit-carrying duration such as `30s` or `500ms`.
                         nullable: true
                         type: string
                       mode:
@@ -75,20 +77,23 @@ spec:
                     type: object
                   mode:
                     description: |-
-                      Authorization mode. One of `off` or `simple`. Default `simple`
-                      (ACL-based, reading `KafkaUser` ACLs from the broker).
+                      Authorization mode. One of `off` or `simple`. Default `simple`,
+                      which is ACL-based and reads the `KafkaUser` ACLs from the broker.
                     nullable: true
                     type: string
                   superUsers:
-                    description: Principal strings (e.g. `User:admin`) that bypass all ACL checks.
+                    description: |-
+                      Principal strings, for example `User:admin`, that bypass all ACL
+                      checks.
                     items:
                       type: string
                     type: array
                 type: object
               dedup:
                 description: |-
-                  Configuration for the deduplication topic that backs idempotent
-                  produce (exactly-once delivery). When absent, controller defaults apply.
+                  Configuration for the deduplication topic below the idempotent
+                  produce, which gives exactly-once delivery. When absent, the
+                  controller defaults apply.
                 nullable: true
                 properties:
                   ownershipGroup:
@@ -118,8 +123,9 @@ spec:
                     type: string
                   window:
                     description: |-
-                      Dedup window, as a unit-carrying duration (`24h`, `30m`). Records with
-                      the same idempotency key within this window are dropped. Default `24h`.
+                      Dedup window, as a unit-carrying duration such as `24h` or `30m`.
+                      The gateway drops records with the same idempotency key inside this
+                      window. Default `24h`.
                     nullable: true
                     type: string
                 type: object
@@ -150,7 +156,7 @@ spec:
                 type: object
               image:
                 description: |-
-                  Container image override. When absent the operator uses its
+                  Container image override. When absent, the operator uses its
                   `--default-gateway-image` flag.
                 nullable: true
                 type: string
@@ -164,8 +170,10 @@ spec:
                   `sourceTopics` and HTTP-POSTs records to `targetUrl`.
                 items:
                   description: |-
-                    One outbound webhook subscription. Reads from `sourceTopics` and
-                    HTTP-POSTs each record to `targetUrl`.
+                    One outbound webhook subscription.
+
+                    The gateway reads from `sourceTopics` and sends each record to
+                    `targetUrl` with an HTTP POST.
                   properties:
                     baseBackoff:
                       description: |-
@@ -175,8 +183,8 @@ spec:
                       type: string
                     deadLetterTopic:
                       description: |-
-                        Kafka topic for records that exhausted all delivery attempts.
-                        When absent, failed records are logged and discarded.
+                        Kafka topic for the records that used all their delivery attempts.
+                        When absent, the gateway logs a failed record and discards it.
                       nullable: true
                       type: string
                     decodeToJson:
@@ -212,8 +220,8 @@ spec:
                       type: string
                     name:
                       description: |-
-                        Unique name for this subscription. Used as the consumer group id
-                        suffix.
+                        Unique name for this subscription. It is the suffix of the
+                        consumer group id.
                       type: string
                     requestTimeout:
                       description: HTTP request timeout, as a unit-carrying duration. Default `10s`.
@@ -221,12 +229,12 @@ spec:
                       type: string
                     signingSecretRef:
                       description: |-
-                        Secret key reference for the outbound request HMAC signing secret.
-                        Resolved by the controller at render time.
+                        Secret key reference for the HMAC signing secret of the outbound
+                        request. The controller resolves it at render time.
                       nullable: true
                       properties:
                         key:
-                          description: Key within the Secret's `data` map.
+                          description: Key inside the `data` map of the Secret.
                           type: string
                         name:
                           description: Name of the Kubernetes Secret.
@@ -313,7 +321,7 @@ spec:
                 properties:
                   otlpEndpoint:
                     description: |-
-                      OTLP exporter endpoint URL. E.g.
+                      OTLP exporter endpoint URL, for example
                       `http://otel-collector.observability.svc:4317`.
                     nullable: true
                     type: string
@@ -323,8 +331,8 @@ spec:
                     type: string
                   sampleRatio:
                     description: |-
-                      Fraction of traces to sample in the range `[0.0, 1.0]`.
-                      Default 1.0 (sample everything).
+                      Fraction of traces to sample, in the range `[0.0, 1.0]`. Default
+                      1.0, which samples all traces.
                     format: double
                     maximum: 1.0
                     minimum: 0.0
@@ -333,8 +341,8 @@ spec:
                 type: object
               tls:
                 description: |-
-                  TLS serving configuration. When absent, TLS defaults apply
-                  (`clientAuth: required`, `validityDays: 365`).
+                  TLS serving configuration. When absent, the TLS defaults apply:
+                  `clientAuth: required` and `validityDays: 365`.
                 nullable: true
                 properties:
                   clientAuth:
@@ -411,18 +419,20 @@ spec:
                   `targetTopic`.
                 items:
                   description: |-
-                    One inbound HTTP-webhook endpoint. Records a produce call against
-                    `targetTopic` for every verified POST to `/<name>`.
+                    One inbound HTTP-webhook endpoint.
+
+                    The gateway does one produce call against `targetTopic` for every
+                    verified POST to `/<name>`.
                   properties:
                     idempotencySource:
                       description: |-
-                        How to derive the idempotency key for deduplication. E.g.
+                        How to derive the idempotency key for deduplication, for example
                         `header:X-Idempotency-Key` or `body_hash`.
                       nullable: true
                       type: string
                     keySource:
                       description: |-
-                        How to derive the Kafka record key from the request. E.g.
+                        How to derive the Kafka record key from the request, for example
                         `header:X-Record-Key` or `body_path:.id`.
                       nullable: true
                       type: string
@@ -431,7 +441,7 @@ spec:
                       nullable: true
                       type: string
                     name:
-                      description: Unique name for this webhook route. Used as the URL path segment.
+                      description: Unique name for this webhook route. It is the URL path segment.
                       type: string
                     principal:
                       description: |-
@@ -449,14 +459,13 @@ spec:
                       type: string
                     secretRef:
                       description: |-
-                        Kubernetes Secret key reference for the HMAC signing secret.
-                        The controller resolves this at render time and injects the
-                        raw secret value into the config Secret — it is never stored
-                        in the CRD.
+                        Kubernetes Secret key reference for the HMAC signing secret. The
+                        controller resolves it at render time and puts the raw secret value
+                        into the config Secret. The CRD never stores that value.
                       nullable: true
                       properties:
                         key:
-                          description: Key within the Secret's `data` map.
+                          description: Key inside the `data` map of the Secret.
                           type: string
                         name:
                           description: Name of the Kubernetes Secret.
@@ -471,23 +480,23 @@ spec:
                       type: string
                     signatureHeader:
                       description: |-
-                        HTTP header carrying the HMAC signature. E.g.
+                        HTTP header that carries the HMAC signature, for example
                         `X-Hub-Signature-256`.
                       nullable: true
                       type: string
                     signaturePrefix:
                       description: |-
-                        Prefix to strip from the signature header value before
-                        verifying. E.g. `sha256=`.
+                        Prefix to remove from the signature header value before the
+                        gateway verifies it, for example `sha256=`.
                       nullable: true
                       type: string
                     targetTopic:
-                      description: Kafka topic that records are produced to.
+                      description: Kafka topic that the gateway produces the records to.
                       type: string
                     timestampHeader:
                       description: |-
-                        HTTP header carrying the request timestamp. Used with
-                        `timestampTolerance` to reject replayed requests.
+                        HTTP header that carries the request timestamp. The gateway uses
+                        it with `timestampTolerance` to reject replayed requests.
                       nullable: true
                       type: string
                     timestampTolerance:
@@ -509,8 +518,8 @@ spec:
               conditions:
                 default: []
                 description: |-
-                  Standard Kubernetes-style condition list. Surfaces
-                  `Ready`, `KafkaVersionValid`, `CertReady`, `Degraded`.
+                  Standard Kubernetes-style condition list. It reports `Ready`,
+                  `KafkaVersionValid`, `CertReady`, and `Degraded`.
                 items:
                   properties:
                     lastTransitionTime:
@@ -526,7 +535,7 @@ spec:
                       description: '`True`, `False`, or `Unknown`.'
                       type: string
                     type:
-                      description: e.g. `Ready`.
+                      description: For example, `Ready`.
                       type: string
                   required:
                   - lastTransitionTime
@@ -542,7 +551,7 @@ spec:
                 nullable: true
                 type: integer
               readyReplicas:
-                description: Number of gateway replicas currently reporting Ready.
+                description: Number of gateway replicas that report Ready now.
                 format: int32
                 nullable: true
                 type: integer

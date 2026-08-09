@@ -3,9 +3,10 @@
 
 //! KIP-112 runtime log-dir failure path.
 //!
-//! Boots a single broker with two log dirs (primary + extra), creates a
-//! 6-partition topic so JBOD placement spreads partitions across both dirs,
-//! flips the `extra` dir offline via the test seam, then asserts:
+//! The test boots a single broker with two log dirs, `primary` and `extra`,
+//! and creates a 6-partition topic so that JBOD placement spreads the
+//! partitions across both dirs. It then flips the `extra` dir offline through
+//! the test seam and asserts that:
 //!
 //!   1. A Produce to a partition that lives on the now-offline `extra` dir
 //!      returns `KAFKA_STORAGE_ERROR` (error code 56).
@@ -44,8 +45,8 @@ use tokio::{
 const CLIENT_ID: &str = "crabka-jbod-disk-failure-test";
 const PRODUCE_VERSION: i16 = 9; // flexible, acks=1
 
-/// Raw wire round-trip: send a framed request, read the response, strip
-/// the correlation-id + tagged-fields header prefix, and return the body.
+/// Raw wire round trip. It sends a framed request, reads the response, strips
+/// the correlation-id and tagged-fields header prefix, and returns the body.
 async fn round_trip(
     stream: &mut TcpStream,
     api_key: i16,
@@ -118,7 +119,8 @@ async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
     }
 }
 
-/// List partition indices for `topic` whose data dir lives directly under `dir`.
+/// Lists the partition indices of `topic` whose data dir lives directly under
+/// `dir`.
 fn partitions_in_dir(dir: &std::path::Path, topic: &str) -> Vec<i32> {
     let prefix = format!("{topic}-");
     std::fs::read_dir(dir)
@@ -134,7 +136,7 @@ fn partitions_in_dir(dir: &std::path::Path, topic: &str) -> Vec<i32> {
         .collect()
 }
 
-/// Produce one record to `(topic, partition)` and return the per-partition
+/// Produces one record to `(topic, partition)` and returns the per-partition
 /// `error_code` from the response.
 async fn produce_and_get_error(addr: SocketAddr, topic: &str, partition: i32) -> i16 {
     let batch = RecordBatch {
@@ -230,13 +232,13 @@ async fn produce_to_partition_on_offline_dir_returns_storage_error() {
     handle.shutdown().await;
 }
 
-/// KIP-112: when ALL configured log dirs go offline the broker must
-/// self-shutdown (latch `should_shutdown` to `true`).  This test uses a
-/// single-dir broker so flipping that one dir offline immediately
-/// satisfies the all-dirs condition.
+/// KIP-112: when ALL configured log dirs go offline, the broker must shut
+/// itself down and latch `should_shutdown` to `true`. This test uses a
+/// single-dir broker, so flipping that one dir offline immediately satisfies
+/// the all-dirs condition.
 ///
 /// The `for_tests` heartbeat interval is 200 ms, so the check fires well
-/// within the 15-second timeout below.
+/// inside the 15-second timeout below.
 #[tokio::test]
 async fn all_log_dirs_offline_triggers_self_shutdown() {
     let primary = tempfile::tempdir().unwrap();
@@ -281,12 +283,12 @@ async fn all_log_dirs_offline_triggers_self_shutdown() {
     handle.shutdown().await;
 }
 
-/// KIP-112 / KIP-858: `AssignReplicasToDirs` (`api_key=73`) is accepted by the
-/// controller-leader broker, records the assignment, and echoes the request
-/// back with `error_code=0` on every partition.
+/// KIP-112 and KIP-858: the controller-leader broker accepts
+/// `AssignReplicasToDirs` (`api_key=73`), records the assignment, and echoes
+/// the request back with `error_code=0` on every partition.
 ///
-/// This exercises the real async `handle` path: decode → leader gate →
-/// `collect_assignment_changes` → `submit_change` → `build_echo_response` →
+/// This exercises the real async `handle` path: decode, the leader gate,
+/// `collect_assignment_changes`, `submit_change`, `build_echo_response`, and
 /// encode.
 #[tokio::test]
 async fn assign_replicas_to_dirs_reports_and_echoes() {
@@ -359,13 +361,14 @@ async fn assign_replicas_to_dirs_reports_and_echoes() {
     handle.shutdown().await;
 }
 
-/// KIP-112: a `BrokerHeartbeat` (`api_key=63`) with `offline_log_dirs` set is
-/// accepted by the controller. For a single-broker cluster with no ISR peers
-/// the failover scan finds no alive ISR alternative → plan.changes is empty →
-/// `submit_change` is skipped → response `error_code=0`.
+/// KIP-112: the controller accepts a `BrokerHeartbeat` (`api_key=63`) that
+/// sets `offline_log_dirs`. In a single-broker cluster with no ISR peers, the
+/// failover scan finds no live ISR alternative, so `plan.changes` is empty,
+/// the handler skips `submit_change`, and the response carries
+/// `error_code=0`.
 ///
-/// This exercises the heartbeat handler's offline-dir failover block end-to-end
-/// (the no-change path).
+/// This exercises the heartbeat handler's offline-dir failover block end to
+/// end, on the no-change path.
 #[tokio::test]
 async fn heartbeat_with_offline_log_dirs_is_accepted() {
     use crabka_protocol::owned::broker_heartbeat_request::MAX_VERSION as HB_MAX_VERSION;

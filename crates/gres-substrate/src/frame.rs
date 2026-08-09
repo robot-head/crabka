@@ -3,8 +3,8 @@
 //! Layout (all integers big-endian):
 //! `[version: u8][journal_seq: u64][op_count: u32]` then per op
 //! `[tag: u8]` (0 = Put, 1 = Delete) `[klen: u32][key][vlen: u32][value]`
-//! (`vlen`/`value` present only for Put). Wire lengths are bounds-checked
-//! against the remaining buffer before any allocation.
+//! (`vlen`/`value` present only for Put). The parser bounds-checks every wire
+//! length against the remaining buffer before any allocation.
 
 use crabka_pgkv::WriteOp;
 
@@ -19,7 +19,7 @@ pub const BARRIER_SEQ: u64 = u64::MAX;
 /// One journaled `Committer` batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalFrame {
-    /// Monotone per-generation sequence; a replay tripwire, not a protocol.
+    /// Monotone per-generation sequence. It is a replay tripwire, not a protocol.
     pub journal_seq: u64,
     /// The batch, in engine order.
     pub ops: Vec<WriteOp>,
@@ -72,7 +72,7 @@ impl WalFrame {
         out
     }
 
-    /// Parse a `GRW1` frame; every length is validated before use.
+    /// Parse a `GRW1` frame. This function validates every length before use.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.

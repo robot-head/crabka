@@ -1,18 +1,19 @@
 //! The array function family, the array operator semantics, and `ANY`/`ALL`
 //! over an array.
 //!
-//! Mirrors the existing scalar families (`func.rs`, `datetime_fn.rs`,
-//! `format_fn.rs`): an `array_func(name)` classifier, an `is_array_func`
-//! dispatch predicate, an `array_func_result_type` static resolver for
-//! RowDescription, and an `eval_array` value evaluator that takes the caller's
-//! child-evaluation closure (so scalar `eval` and the grouped evaluator share
-//! the math).
+//! This module follows the existing scalar families `func.rs`, `datetime_fn.rs`
+//! and `format_fn.rs`. It holds an `array_func(name)` classifier, an
+//! `is_array_func` dispatch predicate, an `array_func_result_type` static
+//! resolver for RowDescription, and an `eval_array` value evaluator that takes
+//! the caller's child-evaluation closure. So scalar `eval` and the grouped
+//! evaluator share the math.
 //!
-//! The operator helpers (`||`, `@>`, `<@`, `&&`, subscripting, `= ANY(...)`)
-//! live here too rather than in `eval.rs`, so all one-dimensional array
-//! semantics — and their PostgreSQL corner cases — sit in one file. Everything
-//! here is a pure, deterministic transform over a single row's already-resolved
-//! `Datum`s, so it introduces no lock, visibility, or interleaving rule.
+//! The operator helpers for `||`, `@>`, `<@`, `&&`, subscripting and
+//! `= ANY(...)` live here too rather than in `eval.rs`. So all one-dimensional
+//! array semantics, and their PostgreSQL corner cases, sit in one file.
+//! Everything here is a pure, deterministic transform over a single row's
+//! already-resolved `Datum`s, so it introduces no lock, visibility, or
+//! interleaving rule.
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, TypeError, cast};
@@ -22,9 +23,9 @@ use crate::{clock::EvalCtx, error::ExecError, eval::ArgType, scope::Scope};
 /// The array functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArrayFunc {
-    /// `array_length(anyarray, int)` — length of dimension `n` (only 1 exists).
+    /// `array_length(anyarray, int)`: length of dimension `n` (only 1 exists).
     Length,
-    /// `cardinality(anyarray)` — total element count (0, not NULL, when empty).
+    /// `cardinality(anyarray)`: total element count (0, not NULL, when empty).
     Cardinality,
     /// `array_append(anyarray, anyelement)`.
     Append,
@@ -36,9 +37,9 @@ enum ArrayFunc {
     ToString,
     /// `string_to_array(text, delimiter [, null_string])`.
     StringTo,
-    /// `array_ndims(anyarray)` — NULL for the empty array.
+    /// `array_ndims(anyarray)`: NULL for the empty array.
     Ndims,
-    /// `array_dims(anyarray)` — the `[l:u][l:u]` text, NULL for the empty array.
+    /// `array_dims(anyarray)`: the `[l:u][l:u]` text, NULL for the empty array.
     Dims,
     /// `array_lower(anyarray, int)`.
     Lower,
@@ -66,7 +67,7 @@ enum ArrayFunc {
     Reverse,
 }
 
-/// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
+/// Classify a lowercased function name. The lexer lowercases unquoted idents.
 /// `None` means "not an array function".
 fn array_func(name: &str) -> Option<ArrayFunc> {
     Some(match name {
@@ -95,29 +96,29 @@ fn array_func(name: &str) -> Option<ArrayFunc> {
     })
 }
 
-/// Is `name` an array function? (The dispatch point for the eval guard chains.)
+/// Is `name` an array function? This is the dispatch point for the eval guard
+/// chains.
 pub(crate) fn is_array_func(name: &str) -> bool {
     array_func(name).is_some()
 }
 
 // ---- argument-type resolution ----
 
-/// The type an `unknown` literal argument adopts, per position — the ONE place
-/// the array family's parameter types are written down.
+/// The type an `unknown` literal argument adopts, per position. This is the ONE
+/// place the array family's parameter types are written down.
 ///
 /// PostgreSQL leaves a bare `'…'` / `NULL` literal `unknown` and resolves it
-/// against the parameter it is passed to. For the polymorphic pairs
-/// (`array_append(anyarray, anyelement)` and friends) that means the side which
-/// *does* carry a type resolves both, so `array_append('{1,2}', 3)` is
-/// `int4[]`; when neither side carries one, PostgreSQL falls back to `text`, so
-/// `array_cat('{1,2}', '{3}')` is `text[]`. For `array_length`, `cardinality`
-/// and `array_to_string` nothing can resolve the `anyarray` parameter, so an
-/// `unknown` literal there is 42804 rather than a guess.
+/// against the parameter it is passed to. For the polymorphic pairs, such as
+/// `array_append(anyarray, anyelement)`, the side which *does* carry a type
+/// resolves both, so `array_append('{1,2}', 3)` is `int4[]`. When neither side
+/// carries one, PostgreSQL falls back to `text`, so `array_cat('{1,2}', '{3}')`
+/// is `text[]`. For `array_length`, `cardinality` and `array_to_string` nothing
+/// can resolve the `anyarray` parameter, so an `unknown` literal there is 42804
+/// rather than a guess.
 ///
-/// Both [`array_func_result_type`] (plan time, over statically inferred
-/// argument types) and [`eval_array`] (run time, over the evaluated values'
-/// types) drive this one rule, so a literal is typed and converted by the same
-/// decision.
+/// Two callers drive this one rule: [`array_func_result_type`] at plan time,
+/// over statically inferred argument types, and [`eval_array`] at run time, over
+/// the evaluated values' types. So one decision types and converts a literal.
 fn param_types(f: ArrayFunc, given: &[ArgType]) -> Result<Vec<Option<ColumnType>>, ExecError> {
     let at = |i: usize| given.get(i).copied().unwrap_or(ArgType::Opaque);
     let text = Some(ColumnType::Text);
@@ -198,9 +199,9 @@ fn param_types(f: ArrayFunc, given: &[ArgType]) -> Result<Vec<Option<ColumnType>
     })
 }
 
-/// The element type an `anyarray`/`anyelement` pair resolves to: from the array
-/// side when it carries one, else from the element side, else `text` (which is
-/// what PostgreSQL settles on when every polymorphic input is `unknown`).
+/// The element type an `anyarray`/`anyelement` pair resolves to. It comes from
+/// the array side when it carries one, else from the element side, else `text`.
+/// PostgreSQL settles on `text` when every polymorphic input is `unknown`.
 fn pair_element(array_side: ArgType, elem_side: ArgType) -> ElemType {
     array_side
         .known()
@@ -224,9 +225,9 @@ fn require_resolvable(arg: ArgType) -> Result<(), ExecError> {
 ///
 /// PostgreSQL resolves `anyarray`/`anyelement` from the *static* argument types,
 /// so `array_append(NULL::int4[], NULL::int4)` is `{NULL}` typed `int4[]` even
-/// though neither operand carries a type once evaluated. [`ArgType::Opaque`] —
-/// "a run-time NULL, type unknown here" — is exactly the case where the syntax
-/// still knows, so the cast target is recovered from it.
+/// though neither operand carries a type once evaluated. [`ArgType::Opaque`]
+/// means "a run-time NULL, type unknown here". That is exactly the case where
+/// the syntax still knows, so this function recovers the cast target from it.
 fn runtime_arg_types(args: &[Expr], vals: &[Datum]) -> Vec<ArgType> {
     let mut given = crate::eval::value_arg_types(args, vals);
     for (arg, expr) in given.iter_mut().zip(args) {
@@ -250,8 +251,8 @@ fn stated_type(e: &Expr) -> Option<ColumnType> {
 }
 
 /// The element type [`param_types`] resolved for the `anyarray` parameter at
-/// position `i` — what `array_append`/`array_prepend` build a singleton with
-/// when their array operand is a run-time NULL.
+/// position `i`. This is what `array_append`/`array_prepend` build a singleton
+/// with when their array operand is a run-time NULL.
 fn resolved_element(params: &[Option<ColumnType>], i: usize) -> ElemType {
     params
         .get(i)
@@ -365,7 +366,8 @@ pub(crate) fn array_func_result_type(
     })
 }
 
-/// The element type of an array-typed argument (42883 when it is not an array).
+/// The element type of an array-typed argument. Reports 42883 when it is not an
+/// array.
 fn require_array_type(fc: &FuncCall, t: ColumnType) -> Result<ElemType, ExecError> {
     t.array_element()
         .ok_or_else(|| undefined_function(&fc.name))
@@ -375,11 +377,11 @@ fn require_array_type(fc: &FuncCall, t: ColumnType) -> Result<ElemType, ExecErro
 
 /// Evaluate an array function call.
 ///
-/// `array_length`/`cardinality`/`array_to_string`/`string_to_array` are STRICT
-/// (any NULL argument yields NULL). `array_append`/`array_prepend`/`array_cat`
-/// are deliberately **not** strict, matching PostgreSQL: a NULL array behaves
-/// like an empty array of the other operand's type, and a NULL element appends
-/// a NULL element.
+/// `array_length`/`cardinality`/`array_to_string`/`string_to_array` are STRICT,
+/// so any NULL argument yields NULL. `array_append`/`array_prepend`/`array_cat`
+/// are deliberately **not** strict, which matches PostgreSQL. A NULL array
+/// behaves like an empty array of the other operand's type, and a NULL element
+/// appends a NULL element.
 pub(crate) fn eval_array(
     fc: &FuncCall,
     ctx: &EvalCtx,
@@ -544,13 +546,14 @@ pub(crate) fn eval_array(
     }
 }
 
-/// `cardinality`/`array_length` report an `int4`; a longer array is 22003.
+/// `cardinality`/`array_length` report an `int4`. A longer array is 22003.
 fn element_count(array: &ArrayValue) -> Result<i32, ExecError> {
     i32::try_from(array.elems.len()).map_err(|_| ExecError::Type(TypeError::Overflow))
 }
 
-/// `array_to_string`: render each element with its own output function, joining
-/// with `sep`. NULL elements are omitted unless `null_text` is supplied.
+/// `array_to_string`: render each element with its own output function, and join
+/// with `sep`. This function omits NULL elements unless the caller supplies
+/// `null_text`.
 fn array_to_string(
     array: &ArrayValue,
     sep: &str,
@@ -571,8 +574,8 @@ fn array_to_string(
 }
 
 /// `string_to_array`: split `input` on `sep` into a `text[]`. A NULL separator
-/// splits into single characters; an empty separator yields the whole string as
-/// one element; an empty input yields an empty array. Elements equal to
+/// splits into single characters. An empty separator yields the whole string as
+/// one element. An empty input yields an empty array. Elements equal to
 /// `null_text` become NULL elements.
 fn string_to_array(input: &str, sep: Option<&str>, null_text: Option<&str>) -> Datum {
     let parts: Vec<String> = match sep {
@@ -609,9 +612,9 @@ fn string_to_array(input: &str, sep: Option<&str>, null_text: Option<&str>) -> D
 
 /// `array_append(anyarray, anyelement)`: a NULL array behaves like the EMPTY
 /// array of the resolved element type, so the result is always a one-element
-/// array — `array_append(NULL::int4[], NULL::int4)` is `{NULL}`, not SQL NULL.
+/// array. `array_append(NULL::int4[], NULL::int4)` is `{NULL}`, not SQL NULL.
 /// `into` is the element type the call's `anyarray`/`anyelement` pair resolved
-/// to; it is used only when neither operand carries one at run time.
+/// to. This function uses it only when neither operand carries one at run time.
 pub(crate) fn array_append(
     array: &Datum,
     elem: &Datum,
@@ -639,7 +642,8 @@ pub(crate) fn array_append(
 }
 
 /// `array_append`/`array_prepend` and the element `||` forms only accept an
-/// empty or one-dimensional array — 22000, exactly as PostgreSQL reports it.
+/// empty or one-dimensional array. Anything else is 22000, exactly as
+/// PostgreSQL reports it.
 fn require_flat(a: &ArrayValue) -> Result<(), ExecError> {
     if a.ndims() > 1 {
         return Err(ExecError::Type(TypeError::Coded {
@@ -650,7 +654,7 @@ fn require_flat(a: &ArrayValue) -> Result<(), ExecError> {
     Ok(())
 }
 
-/// `array_prepend(anyelement, anyarray)` — the mirror of [`array_append`].
+/// `array_prepend(anyelement, anyarray)`: the mirror of [`array_append`].
 pub(crate) fn array_prepend(
     elem: &Datum,
     array: &Datum,
@@ -678,8 +682,8 @@ pub(crate) fn array_prepend(
     }
 }
 
-/// `array_cat(anyarray, anyarray)`: a NULL array is treated as the empty array
-/// of the other side's type (PostgreSQL's non-strict `array_cat`).
+/// `array_cat(anyarray, anyarray)`: a NULL array behaves like the empty array of
+/// the other side's type. This is PostgreSQL's non-strict `array_cat`.
 pub(crate) fn array_cat(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     match (left, right) {
         (Datum::Null, Datum::Null) => Ok(Datum::Null),
@@ -743,28 +747,29 @@ fn incompatible_arrays() -> ExecError {
 
 /// Which of PostgreSQL's three `||` array operators a call resolves to.
 ///
-/// The choice is made from the operands' **static** types, exactly as
-/// PostgreSQL's operator resolution does — it cannot be made from the runtime
-/// values, because `int[] || NULL::int[]` (concatenation, `{1,2}`) and
-/// `int[] || NULL::int` (append, `{1,2,NULL}`) are indistinguishable once both
-/// right-hand sides have evaluated to SQL NULL.
+/// This function makes the choice from the operands' **static** types, exactly
+/// as PostgreSQL's operator resolution does. It cannot make the choice from the
+/// runtime values, because `int[] || NULL::int[]` concatenates to `{1,2}` and
+/// `int[] || NULL::int` appends to `{1,2,NULL}`, and the two are
+/// indistinguishable once both right-hand sides have evaluated to SQL NULL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConcatForm {
     /// `anyarray || anyarray`.
     ArrayArray,
-    /// `anyarray || anyelement`, carrying the element type the pair resolved to
-    /// (so `NULL::int4[] || NULL::int4` still builds an `int4[]` `{NULL}`).
+    /// `anyarray || anyelement`, carrying the element type the pair resolved to.
+    /// So `NULL::int4[] || NULL::int4` still builds an `int4[]` `{NULL}`.
     ArrayElement(ElemType),
-    /// `anyelement || anyarray` — the mirror of [`ConcatForm::ArrayElement`].
+    /// `anyelement || anyarray`: the mirror of [`ConcatForm::ArrayElement`].
     ElementArray(ElemType),
 }
 
 /// Resolve `left || right` from the operand types, or `None` when no array `||`
-/// applies (the caller falls through to the text/jsonb `||` or reports 42883).
+/// applies. The caller then falls through to the text/jsonb `||`, or reports
+/// 42883.
 ///
 /// A bare `NULL` literal types as `text` here, so a caller with the syntactic
-/// expression in hand should resolve `x || NULL` to [`ConcatForm::ArrayArray`]
-/// — that is what PostgreSQL's `unknown` resolution picks, and it makes
+/// expression in hand should resolve `x || NULL` to [`ConcatForm::ArrayArray`].
+/// That is what PostgreSQL's `unknown` resolution picks, and it makes
 /// `ARRAY[1,2] || NULL` yield `{1,2}` rather than `{1,2,NULL}`.
 pub(crate) fn concat_form(left: ColumnType, right: ColumnType) -> Option<ConcatForm> {
     match (left.array_element(), right.array_element()) {
@@ -804,9 +809,9 @@ pub(crate) fn array_concat(
 
 /// `left @> right`: every element of `right` appears in `left`.
 ///
-/// PostgreSQL's `array_contain_compare` assumes a strict equality operator, so a
-/// NULL element on the *contained* side can never be matched and makes the whole
-/// test false; a NULL element on the containing side is simply never a match.
+/// PostgreSQL's `array_contain_compare` assumes a strict equality operator. So a
+/// NULL element on the *contained* side can never be matched, and it makes the
+/// whole test false. A NULL element on the containing side is never a match.
 pub(crate) fn array_contains(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let (Some(l), Some(r)) = (array_or_null(left, "@>")?, array_or_null(right, "@>")?) else {
         return Ok(Datum::Null);
@@ -817,7 +822,7 @@ pub(crate) fn array_contains(left: &Datum, right: &Datum) -> Result<Datum, ExecE
     })))
 }
 
-/// `left <@ right` — [`array_contains`] with the operands swapped.
+/// `left <@ right`: [`array_contains`] with the operands swapped.
 pub(crate) fn array_contained_by(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let (Some(l), Some(r)) = (array_or_null(left, "<@")?, array_or_null(right, "<@")?) else {
         return Ok(Datum::Null);
@@ -829,7 +834,7 @@ pub(crate) fn array_contained_by(left: &Datum, right: &Datum) -> Result<Datum, E
 }
 
 /// `left && right`: the arrays share at least one element. NULL elements never
-/// overlap (they are skipped, not falsified).
+/// overlap. This operator skips them, and does not falsify the test.
 pub(crate) fn array_overlap(left: &Datum, right: &Datum) -> Result<Datum, ExecError> {
     let (Some(l), Some(r)) = (array_or_null(left, "&&")?, array_or_null(right, "&&")?) else {
         return Ok(Datum::Null);
@@ -840,9 +845,8 @@ pub(crate) fn array_overlap(left: &Datum, right: &Datum) -> Result<Datum, ExecEr
     })))
 }
 
-/// `array[index]`: 1-based subscripting. A NULL array or NULL index yields NULL,
-/// and — unlike most languages — an out-of-range subscript is NULL, not an
-/// error.
+/// `array[index]`: 1-based subscripting. A NULL array or NULL index yields NULL.
+/// An out-of-range subscript is also NULL, not an error, unlike most languages.
 pub(crate) fn array_subscript(base: &Datum, index: &Datum) -> Result<Datum, ExecError> {
     let array = match base {
         Datum::Null => return Ok(Datum::Null),
@@ -879,10 +883,10 @@ pub(crate) fn array_subscript(base: &Datum, index: &Datum) -> Result<Datum, Exec
     Ok(array.elems.get(idx).cloned().unwrap_or(Datum::Null))
 }
 
-/// `ARRAY[…]` — assemble one constructor level from its already-evaluated
+/// `ARRAY[…]`: assemble one constructor level from its already-evaluated
 /// items, where an item that is itself an array came from a nested constructor.
 ///
-/// Mixing arrays and scalars, or sub-arrays of differing shape, is
+/// A mix of arrays and scalars, or sub-arrays of different shape, is
 /// `PostgreSQL`'s 2202E "multidimensional arrays must have array expressions
 /// with matching dimensions".
 pub(crate) fn build_constructor(elem: ElemType, items: Vec<Datum>) -> Result<Datum, ExecError> {
@@ -933,7 +937,7 @@ fn mismatched_constructor_dims() -> ExecError {
     ))
 }
 
-/// `ARRAY(subquery)` — one array over the subquery's single column, in the order
+/// `ARRAY(subquery)`: one array over the subquery's single column, in the order
 /// the subquery produced its rows.
 pub(crate) fn array_from_rows(elem: ElemType, rows: Vec<Datum>) -> Datum {
     Datum::Array(ArrayValue::new(elem, rows))
@@ -941,13 +945,14 @@ pub(crate) fn array_from_rows(elem: ElemType, rows: Vec<Datum>) -> Datum {
 
 // ---- multi-subscript references and slices ----
 
-/// One evaluated entry of a subscript chain — [`crabka_pgparser::ast::ArraySubscript`]
-/// with its bound expressions already reduced to values.
+/// One evaluated entry of a subscript chain. This is
+/// [`crabka_pgparser::ast::ArraySubscript`] with its bound expressions already
+/// reduced to values.
 #[derive(Debug, Clone)]
 pub(crate) enum SubscriptArg {
     /// `a[i]`.
     Index(Datum),
-    /// `a[lo:hi]`; an omitted bound takes the array's own bound for that
+    /// `a[lo:hi]`. An omitted bound takes the array's own bound for that
     /// dimension.
     Slice {
         lower: Option<Datum>,
@@ -961,14 +966,14 @@ impl SubscriptArg {
     }
 }
 
-/// `base[s1][s2]…` — `PostgreSQL`'s array reference over a whole subscript chain.
+/// `base[s1][s2]…`: `PostgreSQL`'s array reference over a whole subscript chain.
 ///
-/// A chain with no slice selects one element: it yields NULL unless the chain is
+/// A chain with no slice selects one element. It yields NULL unless the chain is
 /// exactly as long as the array has dimensions and every subscript is in range.
-/// A chain with at least one slice yields an **array**: unsupplied trailing
+/// A chain with at least one slice yields an **array**. Unsupplied trailing
 /// dimensions are whole slices, a plain index in a slice chain means `[i:i]`,
 /// every range is clipped to the array's own bounds, and the result is
-/// renumbered from lower bound 1 — exactly as `array_get_slice` does.
+/// renumbered from lower bound 1, exactly as `array_get_slice` does.
 pub(crate) fn array_ref(base: &Datum, subscripts: &[SubscriptArg]) -> Result<Datum, ExecError> {
     let array = match base {
         Datum::Null => return Ok(Datum::Null),
@@ -1066,7 +1071,7 @@ fn array_ref_slice(array: &ArrayValue, subscripts: &[SubscriptArg]) -> Result<Da
     Ok(Datum::Array(ArrayValue::with_dims(array.elem, elems, dims)))
 }
 
-/// Walk the selected sub-box in row-major order, appending its elements.
+/// Walk the selected sub-box in row-major order, and append its elements.
 fn collect_slice(
     array: &ArrayValue,
     ranges: &[(usize, usize)],
@@ -1086,7 +1091,7 @@ fn collect_slice(
     }
 }
 
-/// One subscript value as an integer; `None` is a NULL subscript.
+/// One subscript value as an integer. `None` is a NULL subscript.
 fn subscript_int(value: &Datum) -> Result<Option<i64>, ExecError> {
     Ok(match value {
         Datum::Null => None,
@@ -1107,8 +1112,8 @@ fn clamp_i32(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
-/// The `PostgreSQL` dimension `n` of `array` (1-based), or `None` when the array
-/// has no such dimension — which is what makes `array_length('{}', 1)` NULL.
+/// The `PostgreSQL` dimension `n` of `array`, counted from 1, or `None` when the
+/// array has no such dimension. That is what makes `array_length('{}', 1)` NULL.
 fn dimension(array: &ArrayValue, n: i32) -> Option<crabka_pgtypes::ArrayDim> {
     usize::try_from(n)
         .ok()
@@ -1119,12 +1124,12 @@ fn dimension(array: &ArrayValue, n: i32) -> Option<crabka_pgtypes::ArrayDim> {
 
 // ---- subscripted assignment ----
 
-/// `SET a[i] = v` / `SET a[lo:hi] = v` — `PostgreSQL`'s `array_set_element` and
+/// `SET a[i] = v` / `SET a[lo:hi] = v`: `PostgreSQL`'s `array_set_element` and
 /// `array_set_slice` over the column's current value.
 ///
 /// A NULL target starts from the empty array of `into`. A one-dimensional array
-/// **extends** to cover a subscript past either end, filling the gap with NULLs;
-/// a multidimensional one does not, and reports 2202E instead.
+/// **extends** to cover a subscript past either end, and fills the gap with
+/// NULLs. A multidimensional one does not, and reports 2202E instead.
 pub(crate) fn array_assign(
     current: &Datum,
     subscripts: &[SubscriptArg],
@@ -1175,7 +1180,7 @@ fn resolved_bounds(
     Ok(out)
 }
 
-/// A subscript in an assignment may not be NULL — 22004, unlike a read.
+/// A subscript in an assignment must not be NULL. That is 22004, unlike a read.
 fn assignment_subscript(value: &Datum) -> Result<i64, ExecError> {
     subscript_int(value)?.ok_or_else(|| {
         ExecError::Type(TypeError::Coded {
@@ -1185,7 +1190,7 @@ fn assignment_subscript(value: &Datum) -> Result<i64, ExecError> {
     })
 }
 
-/// `array_set_element`: write one element, extending a one-dimensional array.
+/// `array_set_element`: write one element, and extend a one-dimensional array.
 fn assign_element(
     mut array: ArrayValue,
     bounds: &[(i32, i32)],
@@ -1225,7 +1230,7 @@ fn assign_element(
     Ok(Datum::Array(array))
 }
 
-/// `array_set_slice`: write a whole sub-box, extending a one-dimensional array.
+/// `array_set_slice`: write a whole sub-box, and extend a one-dimensional array.
 fn assign_slice(
     mut array: ArrayValue,
     bounds: &[(i32, i32)],
@@ -1317,8 +1322,8 @@ fn slot_count(bounds: &[(i32, i32)]) -> Result<usize, ExecError> {
     Ok(total)
 }
 
-/// `PostgreSQL`'s `MaxArraySize` — `MaxAllocSize / sizeof(Datum)`. An array
-/// larger than this is 54000 rather than an out-of-memory failure.
+/// `PostgreSQL`'s `MaxArraySize`, that is `MaxAllocSize / sizeof(Datum)`. An
+/// array larger than this is 54000 rather than an out-of-memory failure.
 const MAX_ARRAY_SIZE: usize = 134_217_727;
 
 /// Reject an element count `PostgreSQL` would refuse to allocate.
@@ -1332,9 +1337,9 @@ fn check_array_size(elements: usize) -> Result<(), ExecError> {
     Ok(())
 }
 
-/// Grow a one-dimensional array so `[lower, upper]` is inside it, filling the
-/// new slots with NULL and moving the lower bound down when the write is below
-/// the array's start (`UPDATE t SET a[0] = …`).
+/// Grow a one-dimensional array so `[lower, upper]` is inside it. This function
+/// fills the new slots with NULL. It moves the lower bound down when the write
+/// is below the array's start, as in `UPDATE t SET a[0] = …`.
 fn extend_to_cover(array: &mut ArrayValue, lower: i32, upper: i32) -> Result<(), ExecError> {
     let Some(dim) = array.dims.first().copied() else {
         return Ok(());
@@ -1380,15 +1385,17 @@ pub(crate) enum Quantifier {
 
 /// Evaluate `x <op> ANY/ALL (array)` with SQL three-valued logic.
 ///
-/// `compare` applies the operator to one element and returns `Bool` or NULL (the
+/// `compare` applies the operator to one element and returns `Bool` or NULL. The
 /// caller passes the ordinary binary-operator evaluator, so every operator gets
-/// the same quantified semantics).
+/// the same quantified semantics.
 ///
-/// - `ANY`: true as soon as one element compares true; otherwise NULL if any
-///   comparison was NULL (a false-with-NULL result is **unknown**, not false);
-///   otherwise false. An empty array is false — even for a NULL left operand.
-/// - `ALL`: false as soon as one element compares false; otherwise NULL if any
-///   comparison was NULL; otherwise true. An empty array is true.
+/// - `ANY`: true as soon as one element compares true. If no element compares
+///   true, the result is NULL when any comparison was NULL, because a
+///   false-with-NULL result is **unknown**, not false. Otherwise the result is
+///   false. An empty array is false, even for a NULL left operand.
+/// - `ALL`: false as soon as one element compares false. If no element compares
+///   false, the result is NULL when any comparison was NULL. Otherwise the
+///   result is true. An empty array is true.
 /// - A NULL array is NULL for both.
 pub(crate) fn eval_quantified(
     array: &Datum,
@@ -1476,8 +1483,8 @@ fn array_value<'a>(d: &'a Datum, name: &str) -> Result<&'a ArrayValue, ExecError
     }
 }
 
-/// An array operand of a binary operator: `Ok(None)` for SQL NULL (the operator
-/// is strict), an error for a non-array operand.
+/// An array operand of a binary operator. Returns `Ok(None)` for SQL NULL,
+/// because the operator is strict, and an error for a non-array operand.
 fn array_or_null<'a>(d: &'a Datum, op: &str) -> Result<Option<&'a ArrayValue>, ExecError> {
     match d {
         Datum::Null => Ok(None),
@@ -1518,10 +1525,10 @@ fn int_arg(d: &Datum, name: &str) -> Result<i32, ExecError> {
     }
 }
 
-/// A single-element array — the `array_append`/`array_prepend` path where the
-/// array operand is NULL and so behaves like the empty array. The element's own
-/// type wins when it has one; a NULL element falls back to `into`, the type the
-/// call's polymorphic pair resolved to.
+/// A single-element array. This is the `array_append`/`array_prepend` path where
+/// the array operand is NULL and so behaves like the empty array. The element's
+/// own type wins when it has one. A NULL element falls back to `into`, the type
+/// the call's polymorphic pair resolved to.
 fn singleton_from_element(elem: &Datum, into: ElemType) -> Datum {
     let t = elem
         .column_type()
@@ -1530,8 +1537,9 @@ fn singleton_from_element(elem: &Datum, into: ElemType) -> Datum {
     Datum::Array(ArrayValue::new(t, vec![elem.clone()]))
 }
 
-/// Coerce an element into an array's element type (`array_append(bigint[], 1)`
-/// stores an `int8`). An undefined conversion is 42804.
+/// Coerce an element into an array's element type. For example,
+/// `array_append(bigint[], 1)` stores an `int8`. An undefined conversion is
+/// 42804.
 fn coerce_element(elem: &Datum, to: ElemType, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     if elem.is_null() || elem.column_type() == Some(to.column_type()) {
         return Ok(elem.clone());
@@ -1556,8 +1564,8 @@ fn coerce_element(elem: &Datum, to: ElemType, ctx: &EvalCtx) -> Result<Datum, Ex
 const SEARCH_ACTION: &str = "searching for elements in";
 const REMOVE_ACTION: &str = "removing elements from";
 
-/// The element type `array_fill` builds with: the value's own type when it has
-/// one, else what its `anyelement` parameter resolved to.
+/// The element type `array_fill` builds with. It is the value's own type when it
+/// has one, else what its `anyelement` parameter resolved to.
 fn resolved_fill_element(value: &Datum, params: &[Option<ColumnType>]) -> ElemType {
     value
         .column_type()
@@ -1572,9 +1580,9 @@ fn resolved_fill_element(value: &Datum, params: &[Option<ColumnType>]) -> ElemTy
         .unwrap_or(ElemType::Text)
 }
 
-/// `array_fill(value, dims [, lower_bounds])` — an array of `value` repeated
+/// `array_fill(value, dims [, lower_bounds])`: an array of `value` repeated
 /// over the given shape. Both shape arguments must be non-NULL `int[]`s of the
-/// same length; a zero-length dimension yields the empty array.
+/// same length. A zero-length dimension yields the empty array.
 fn array_fill(
     value: &Datum,
     dims: &Datum,
@@ -1639,8 +1647,8 @@ fn array_fill(
     )))
 }
 
-/// The `int[]` shape arguments of `array_fill`; `None` for a NULL argument or a
-/// NULL element (both of which PostgreSQL rejects the same way).
+/// The `int[]` shape arguments of `array_fill`. Returns `None` for a NULL
+/// argument or a NULL element. PostgreSQL rejects both the same way.
 fn int_array_arg(d: &Datum) -> Option<Vec<i32>> {
     let Datum::Array(a) = d else {
         return None;
@@ -1656,7 +1664,7 @@ fn int_array_arg(d: &Datum) -> Option<Vec<i32>> {
         .collect()
 }
 
-/// `array_position(array, value [, start])` — the 1-based offset of the first
+/// `array_position(array, value [, start])`: the 1-based offset of the first
 /// occurrence at or after `start`, or NULL when there is none.
 fn array_position(
     array: &Datum,
@@ -1682,7 +1690,7 @@ fn array_position(
     Ok(Datum::Null)
 }
 
-/// `array_positions(array, value)` — every 1-based offset, as an `int[]`.
+/// `array_positions(array, value)`: every 1-based offset, as an `int[]`.
 fn array_positions(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, ExecError> {
     if array.is_null() {
         return Ok(Datum::Null);
@@ -1698,9 +1706,9 @@ fn array_positions(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, E
     Ok(Datum::Array(ArrayValue::new(ElemType::Int4, found)))
 }
 
-/// `array_remove(array, value)` — every matching element dropped. A NULL
-/// `value` removes the NULL elements, matching PostgreSQL's `IS NOT DISTINCT
-/// FROM` treatment here.
+/// `array_remove(array, value)`: every matching element dropped. A NULL `value`
+/// removes the NULL elements, which matches PostgreSQL's `IS NOT DISTINCT FROM`
+/// treatment here.
 fn array_remove(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, ExecError> {
     if array.is_null() {
         return Ok(Datum::Null);
@@ -1715,8 +1723,8 @@ fn array_remove(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, Exec
     Ok(Datum::Array(ArrayValue::new(a.elem, kept)))
 }
 
-/// `array_replace(array, from, to)` — every matching element replaced, over any
-/// number of dimensions (unlike `array_remove`, the shape does not change).
+/// `array_replace(array, from, to)`: every matching element replaced, over any
+/// number of dimensions. The shape does not change, unlike `array_remove`.
 fn array_replace(array: &Datum, from: &Datum, to: &Datum, name: &str) -> Result<Datum, ExecError> {
     if array.is_null() {
         return Ok(Datum::Null);
@@ -1740,7 +1748,7 @@ fn array_replace(array: &Datum, from: &Datum, to: &Datum, name: &str) -> Result<
     )))
 }
 
-/// `trim_array(array, n)` — the array without its last `n` elements. `n` outside
+/// `trim_array(array, n)`: the array without its last `n` elements. `n` outside
 /// `0..=cardinality` is 2202E.
 fn trim_array(array: &Datum, count: &Datum, name: &str) -> Result<Datum, ExecError> {
     if array.is_null() || count.is_null() {
@@ -1761,7 +1769,7 @@ fn trim_array(array: &Datum, count: &Datum, name: &str) -> Result<Datum, ExecErr
     )))
 }
 
-/// `array_sample(array, n)` — `n` of the outermost slices, chosen at random.
+/// `array_sample(array, n)`: `n` of the outermost slices, chosen at random.
 fn array_sample(array: &Datum, count: &Datum, name: &str) -> Result<Datum, ExecError> {
     if array.is_null() || count.is_null() {
         return Ok(Datum::Null);
@@ -1782,7 +1790,7 @@ fn array_sample(array: &Datum, count: &Datum, name: &str) -> Result<Datum, ExecE
     Ok(rebuild_from_slices(a, &order, &slices))
 }
 
-/// `array_shuffle(array)` — the outermost slices in a random order.
+/// `array_shuffle(array)`: the outermost slices in a random order.
 fn array_shuffle(array: &Datum, name: &str) -> Result<Datum, ExecError> {
     if array.is_null() {
         return Ok(Datum::Null);
@@ -1794,7 +1802,7 @@ fn array_shuffle(array: &Datum, name: &str) -> Result<Datum, ExecError> {
     Ok(rebuild_from_slices(a, &order, &slices))
 }
 
-/// `array_reverse(array)` — the outermost slices in the opposite order.
+/// `array_reverse(array)`: the outermost slices in the opposite order.
 fn array_reverse(array: &Datum, name: &str) -> Result<Datum, ExecError> {
     if array.is_null() {
         return Ok(Datum::Null);
@@ -1805,7 +1813,7 @@ fn array_reverse(array: &Datum, name: &str) -> Result<Datum, ExecError> {
     Ok(rebuild_from_slices(a, &order, &slices))
 }
 
-/// `array_sort(array [, descending [, nulls_first]])` — the outermost slices in
+/// `array_sort(array [, descending [, nulls_first]])`: the outermost slices in
 /// btree order. `nulls_first` defaults to `descending`, as `PostgreSQL` 18 does.
 fn array_sort(
     array: &Datum,
@@ -1844,9 +1852,9 @@ fn array_sort(
     Ok(rebuild_from_slices(a, &order, &slices))
 }
 
-/// The outermost slices of an array as flat element runs — one per index of
-/// dimension 1, each holding the whole sub-box beneath it. A one-dimensional
-/// array therefore yields one single-element run per element.
+/// The outermost slices of an array as flat element runs. There is one run per
+/// index of dimension 1, and each run holds the whole sub-box beneath it. So a
+/// one-dimensional array yields one single-element run per element.
 fn outer_slices(array: &ArrayValue) -> Vec<Vec<Datum>> {
     let Some(first) = array.dims.first() else {
         return Vec::new();
@@ -1862,8 +1870,8 @@ fn outer_slices(array: &ArrayValue) -> Vec<Vec<Datum>> {
         .collect()
 }
 
-/// Reassemble an array from a permutation (or subset) of its outermost slices,
-/// keeping every inner dimension and lower bound.
+/// Reassemble an array from a permutation or a subset of its outermost slices.
+/// This function keeps every inner dimension and lower bound.
 fn rebuild_from_slices(array: &ArrayValue, order: &[usize], slices: &[Vec<Datum>]) -> Datum {
     let mut elems = Vec::new();
     for i in order {
@@ -1881,8 +1889,8 @@ fn rebuild_from_slices(array: &ArrayValue, order: &[usize], slices: &[Vec<Datum>
     Datum::Array(ArrayValue::with_dims(array.elem, elems, dims))
 }
 
-/// Compare two outermost slices element-wise, recording the first comparison
-/// failure rather than propagating it out of the sort comparator.
+/// Compare two outermost slices element-wise. This function records the first
+/// comparison failure, and does not propagate it out of the sort comparator.
 fn compare_slices(
     left: &[Datum],
     right: &[Datum],
@@ -1924,7 +1932,7 @@ fn compare_slices(
 
 /// A deterministic-per-process Fisher-Yates shuffle. `array_shuffle` and
 /// `array_sample` are volatile in PostgreSQL, so only the *set* of elements is
-/// observable; nothing in the corpus depends on a particular permutation.
+/// observable. Nothing in the corpus depends on a particular permutation.
 fn shuffle_in_place(order: &mut [usize]) {
     use std::{
         cell::Cell,
@@ -1957,8 +1965,8 @@ fn shuffle_in_place(order: &mut [usize]) {
     SEED.with(|seed| seed.set(state | 1));
 }
 
-/// `array_position`/`array_positions`/`array_remove` are one-dimensional only;
-/// `PostgreSQL` reports 0A000 with the verb the caller is performing.
+/// `array_position`/`array_positions`/`array_remove` are one-dimensional only.
+/// `PostgreSQL` reports 0A000 with the verb the caller is running.
 fn require_at_most_one_dimension<'a>(
     a: &'a ArrayValue,
     action: &str,
@@ -1972,8 +1980,8 @@ fn require_at_most_one_dimension<'a>(
     Ok(a)
 }
 
-/// Element identity for the search functions: `IS NOT DISTINCT FROM`, so a NULL
-/// needle finds the NULL elements.
+/// Element identity for the search functions is `IS NOT DISTINCT FROM`, so a
+/// NULL needle finds the NULL elements.
 fn element_matches(element: &Datum, needle: &Datum) -> bool {
     match (element.is_null(), needle.is_null()) {
         (true, true) => true,
@@ -2014,7 +2022,7 @@ mod tests {
         }
     }
 
-    /// A `NULL::T` expression — a run-time SQL NULL that still states its type.
+    /// A `NULL::T` expression: a run-time SQL NULL that still states its type.
     fn null_expr(ty: ColumnType) -> Expr {
         Expr::Cast {
             expr: Box::new(Expr::NullLiteral),
@@ -2124,7 +2132,7 @@ mod tests {
 
     /// `array_length`, `cardinality` and `array_to_string` have nothing that can
     /// resolve their `anyarray` parameter, so an `unknown` literal there is
-    /// `PostgreSQL`'s 42804 — not a guess, and not the 42883 a plain
+    /// `PostgreSQL`'s 42804. It is not a guess, and it is not the 42883 a plain
     /// "that is not an array" check would report.
     #[test]
     fn an_unknown_literal_array_argument_that_resolves_to_nothing_is_rejected() {
@@ -2267,10 +2275,11 @@ mod tests {
         );
     }
 
-    /// A typed NULL array is the EMPTY array of its element type, so appending
-    /// to it always builds a one-element array — even when the element is a
-    /// typed NULL too and nothing carries a type at run time. `array_cat` is the
-    /// one that stays NULL, because two empty arrays concatenate to nothing.
+    /// A typed NULL array is the EMPTY array of its element type, so an append
+    /// to it always builds a one-element array. That holds even when the element
+    /// is a typed NULL too and nothing carries a type at run time. `array_cat`
+    /// is the one that stays NULL, because two empty arrays concatenate to
+    /// nothing.
     /// Type and value on each row were taken from `PostgreSQL` 18.4.
     #[test]
     fn a_typed_null_array_keeps_its_element_type() {

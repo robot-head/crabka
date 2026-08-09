@@ -1,10 +1,13 @@
 //! `SessionWindowedKGroupedStream<K,V>`: the handle between
 //! `KGroupedStream::windowed_by_session(SessionWindows)` and a terminal session
-//! aggregation (`count`/`reduce`/`aggregate`). The session analogue of
-//! [`crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream`]: same grouped
-//! lineage + the [`SessionWindows`] spec; terminal ops emit `Windowed<K>` keys and
-//! materialize a **session store** (`add_session_store`). The result is a
-//! `KTable<Windowed<K>, _>` with a changelog-backed session store.
+//! aggregation (`count`/`reduce`/`aggregate`).
+//!
+//! This type is the session analogue of
+//! [`crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream`]. It holds the
+//! same grouped lineage plus the [`SessionWindows`] spec. Its terminal ops emit
+//! `Windowed<K>` keys and materialize a **session store** with
+//! `add_session_store`. The result is a `KTable<Windowed<K>, _>` with a
+//! changelog-backed session store.
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
 use crate::{
@@ -67,18 +70,18 @@ where
 
     /// Emit on every update (default) or only on window close (KIP-825).
     ///
-    /// For `on_window_close`, configure the session grace `>=` the inactivity
-    /// gap. With `grace < gap` a late, in-gap record can re-open and re-merge a
-    /// session that already emitted its final result, producing a duplicate
-    /// final — the processor does not yet drop such late records (exact
-    /// late-record semantics are pinned by the JVM golden).
+    /// For `on_window_close`, set the session grace `>=` the inactivity gap. With
+    /// `grace < gap` a late, in-gap record can re-open and re-merge a session
+    /// that already emitted its final result, which produces a duplicate final.
+    /// The processor does not yet drop such late records. The JVM golden pins the
+    /// exact late-record semantics.
     #[must_use]
     pub fn emit_strategy(mut self, emit: EmitStrategy) -> Self {
         self.emit = emit;
         self
     }
 
-    /// `count`: count records per session → `KTable<Windowed<K>, i64>`.
+    /// `count`: count records per session into a `KTable<Windowed<K>, i64>`.
     pub fn count_explicit<KS, VS>(
         self,
         materialized: impl Into<Materialized<KS, VS>>,
@@ -104,8 +107,8 @@ where
         )
     }
 
-    /// `aggregate`: general session aggregation with `init` + `agg` + the session
-    /// `merger` (combines two session aggregates on merge).
+    /// `aggregate`: general session aggregation with `init`, `agg`, and the
+    /// session `merger`. The merger combines two session aggregates on a merge.
     pub fn aggregate_explicit<KS, VS, VA, I, A, M>(
         self,
         init: I,
@@ -126,7 +129,8 @@ where
         self.lower_aggregate::<KS, VS, VA, I, A, M>(materialized, store_name, init, agg, merger)
     }
 
-    /// `reduce`: combine values per session with `reducer` → `KTable<Windowed<K>, V>`.
+    /// `reduce`: combine values per session with `reducer` into a
+    /// `KTable<Windowed<K>, V>`.
     pub fn reduce_explicit<KS, VS, R>(
         self,
         reducer: R,
@@ -425,9 +429,11 @@ where
 }
 
 /// Build the suppress-store factory for a session-aggregation result table.
-/// Captures the session key serde ([`SessionWindowedSerde`]) + the aggregate value
-/// serde so a downstream `suppress` registers a `SuppressBytesStore<Windowed<K>, VA>`
-/// with the session-windowed key serde + the matching changelog config.
+///
+/// The factory captures the session key serde ([`SessionWindowedSerde`]) and the
+/// aggregate value serde. A downstream `suppress` then registers a
+/// `SuppressBytesStore<Windowed<K>, VA>` with the session-windowed key serde and
+/// the matching changelog config.
 fn session_suppress_factory<K, VA, KS, VS>(key_serde: KS, value_serde: VS) -> SuppressStoreFactory
 where
     K: Any + Send + Sync + Clone,
@@ -467,8 +473,8 @@ mod tests {
         test_driver::TopologyTestDriver,
     };
 
-    /// Sub-task 3d-ii: an emit-on-update (default) session aggregate store is
-    /// marked caching, so with a positive cache budget it lands in `cache_owner`.
+    /// Sub-task 3d-ii: an emit-on-update session aggregate store, the default, is
+    /// marked caching. With a positive cache budget it lands in `cache_owner`.
     #[test]
     fn emit_on_update_session_store_is_cached() {
         let b = StreamsBuilder::new();
@@ -490,9 +496,9 @@ mod tests {
         );
     }
 
-    /// Sub-task 3d-ii: an emit-FINAL session aggregate store must stay UNCACHED —
-    /// a cache flush would emit the per-update tombstones+updates emit-final
-    /// suppresses. The `emit.is_on_update()` mark guard enforces this.
+    /// Sub-task 3d-ii: an emit-FINAL session aggregate store must stay UNCACHED.
+    /// A cache flush would emit the per-update tombstones and updates that
+    /// emit-final suppresses. The `emit.is_on_update()` mark guard enforces this.
     #[test]
     fn emit_final_session_store_is_not_cached() {
         let b = StreamsBuilder::new();
@@ -515,14 +521,15 @@ mod tests {
         );
     }
 
-    /// `windowedBy(SessionWindows).emit_strategy(on_window_close).count`: emit-final
-    /// (KIP-825) suppresses per-update + merge-tombstone emits and forwards a single
-    /// final count for each session only once stream-time advances past its close.
-    /// Records a@1 and a@4 (within gap 60) form session `[1,4]` (count 2) silently;
-    /// the a@1000 record opens session `[1000,1000]` and closes `[1,4]` (end 4 <=
-    /// `window_close_time` = 1000 - grace 10 = 990), emitting exactly one record:
+    /// `windowedBy(SessionWindows).emit_strategy(on_window_close).count`:
+    /// emit-final (KIP-825) suppresses the per-update and merge-tombstone emits.
+    /// It forwards a single final count for each session only after stream-time
+    /// advances past that session's close. Records a@1 and a@4 fall within gap 60
+    /// and form session `[1,4]` with count 2, silently. The a@1000 record opens
+    /// session `[1000,1000]` and closes `[1,4]`, because end 4 <=
+    /// `window_close_time` = 1000 - grace 10 = 990. It emits exactly one record:
     /// session `[1,4]` with value 2. A grace of 10 keeps the data-defined session
-    /// open at its own (inclusive) end until stream-time jumps ahead.
+    /// open at its own inclusive end until stream-time jumps ahead.
     #[test]
     fn dsl_session_count_emit_final_emits_once_on_close() {
         let b = StreamsBuilder::new();

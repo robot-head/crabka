@@ -44,7 +44,7 @@ impl RulerShard {
     }
 }
 
-/// Return the rule groups owned by one ruler shard for a tenant.
+/// Returns the rule groups one ruler shard owns for a tenant.
 #[must_use]
 pub fn filter_ruler_rule_set_for_shard(
     tenant: &str,
@@ -65,7 +65,7 @@ pub fn filter_ruler_rule_set_for_shard(
     filtered
 }
 
-/// Return rule groups whose configured interval has elapsed.
+/// Returns the rule groups whose configured interval has elapsed.
 #[must_use]
 pub fn filter_ruler_rule_set_due_for_eval(
     tenant: &str,
@@ -96,7 +96,7 @@ pub fn filter_ruler_rule_set_due_for_eval(
     filtered
 }
 
-/// Return rule groups owned by one shard whose configured interval has elapsed.
+/// Returns the rule groups one shard owns whose configured interval has elapsed.
 #[must_use]
 pub fn filter_ruler_rule_set_for_shard_due_for_eval(
     tenant: &str,

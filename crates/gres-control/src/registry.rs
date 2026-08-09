@@ -46,7 +46,7 @@ const REGISTRY_TRANSACTIONAL_ID: &str = "__gres_tenants.writer";
 pub struct RegistryReplicationFactor(i32);
 
 impl RegistryReplicationFactor {
-    /// Validate a replication factor.
+    /// Validates a replication factor.
     ///
     /// # Errors
     ///
@@ -57,7 +57,7 @@ impl RegistryReplicationFactor {
             .map_err(|error| error.to_string())
     }
 
-    /// Return the validated value.
+    /// Returns the validated value.
     #[must_use]
     pub const fn into_value(self) -> i32 {
         self.0
@@ -80,7 +80,7 @@ impl FromStr for RegistryReplicationFactor {
 pub struct PositiveI32(i32);
 
 impl PositiveI32 {
-    /// Validate a positive protocol value.
+    /// Validates a positive protocol value.
     ///
     /// # Errors
     ///
@@ -91,7 +91,7 @@ impl PositiveI32 {
             .map_err(|error| error.to_string())
     }
 
-    /// Return the validated value.
+    /// Returns the validated value.
     #[must_use]
     pub const fn into_value(self) -> i32 {
         self.0
@@ -114,7 +114,7 @@ impl FromStr for PositiveI32 {
 pub struct PositiveMillis(u64);
 
 impl PositiveMillis {
-    /// Validate a positive millisecond count.
+    /// Validates a positive millisecond count.
     ///
     /// # Errors
     ///
@@ -125,7 +125,7 @@ impl PositiveMillis {
             .map_err(|error| error.to_string())
     }
 
-    /// Return the validated value.
+    /// Returns the validated value.
     #[must_use]
     pub const fn into_value(self) -> u64 {
         self.0
@@ -145,7 +145,8 @@ impl FromStr for PositiveMillis {
 
 /// Shared creation and reader policy for the Gres tenant registry topic.
 ///
-/// Not `Eq`: the timeout and size fields are `f64`-backed quantities.
+/// This type is not `Eq`, because the timeout and size fields are `f64`-backed
+/// quantities.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegistryPolicy {
     replication_factor: i32,
@@ -161,7 +162,7 @@ pub struct RegistryPolicy {
 }
 
 impl RegistryPolicy {
-    /// Validate and construct a registry policy.
+    /// Validates and constructs a registry policy.
     ///
     /// # Errors
     ///
@@ -223,7 +224,7 @@ impl RegistryPolicy {
         self.producer_dns_timeout
     }
 
-    /// Validate and replace the registry producer DNS lookup deadline.
+    /// Validates and replaces the registry producer DNS lookup deadline.
     ///
     /// # Errors
     ///
@@ -241,7 +242,7 @@ impl RegistryPolicy {
         self.reader_admin_dns_timeout
     }
 
-    /// Validate and replace the registry reader/admin DNS lookup deadline.
+    /// Validates and replaces the registry reader/admin DNS lookup deadline.
     ///
     /// # Errors
     ///
@@ -253,7 +254,7 @@ impl RegistryPolicy {
         Ok(self)
     }
 
-    /// Override registry client connection and reader fetch policy.
+    /// Overrides the registry client connection and reader fetch policy.
     #[must_use]
     pub fn with_client_resource_policy(
         mut self,
@@ -331,13 +332,14 @@ fn whole_millis_i32(name: &str, value: Time) -> Result<Time, String> {
 
 /// Pure tenant-registry store seam for operator and CLI code.
 pub trait TenantRegistryStore {
-    /// Upsert one whole tenant snapshot.
+    /// Upserts one whole tenant snapshot.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
     fn upsert(&mut self, record: TenantRecord) -> Result<(), ControlError>;
-    /// Create a tenant when absent or replace its whole snapshot only when the
-    /// observed version still matches. `None` is the create-only precondition.
+    /// Creates a tenant when it is absent, or replaces its whole snapshot only
+    /// when the observed version still matches. `None` is the create-only
+    /// precondition.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -379,16 +381,17 @@ pub trait TenantRegistryStore {
             }),
         }
     }
-    /// Tombstone one tenant by name. Idempotent when the tenant is already absent.
+    /// Tombstones one tenant by name. This is idempotent when the tenant is
+    /// already absent.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
     fn delete(&mut self, tenant: &TenantName) -> Result<(), ControlError>;
-    /// Return one tenant by name.
+    /// Returns one tenant by name.
     fn get(&self, tenant: &TenantName) -> Option<TenantRecord>;
-    /// Return all tenants ordered by name.
+    /// Returns all tenants ordered by name.
     fn list(&self) -> Vec<TenantRecord>;
-    /// Apply a versioned split/merge mutation without overwriting concurrent changes.
+    /// Applies a versioned split/merge mutation without overwriting concurrent changes.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -398,7 +401,7 @@ pub trait TenantRegistryStore {
         expected_record_version: u64,
         mutation: RangeLayoutMutation,
     ) -> Result<Option<TenantRecord>, ControlError>;
-    /// Split one tenant range layout when the tenant is still at `expected_record_version`.
+    /// Splits one tenant range layout when the tenant is still at `expected_record_version`.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -414,7 +417,7 @@ pub trait TenantRegistryStore {
             RangeLayoutMutation::Split(Box::new(split)),
         )
     }
-    /// Merge two adjacent tenant ranges when the tenant is still at `expected_record_version`.
+    /// Merges two adjacent tenant ranges when the tenant is still at `expected_record_version`.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -431,7 +434,7 @@ pub trait TenantRegistryStore {
         )
     }
 
-    /// Idempotently create a durable split-operation initiation record.
+    /// Idempotently creates a durable split-operation initiation record.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -445,7 +448,7 @@ pub trait TenantRegistryStore {
         })
     }
 
-    /// Load one split operation by tenant and operation id.
+    /// Loads one split operation by tenant and operation id.
     fn load_split_operation(
         &self,
         _tenant: &TenantName,
@@ -454,12 +457,12 @@ pub trait TenantRegistryStore {
         None
     }
 
-    /// List one tenant's split operations in operation-id order.
+    /// Lists one tenant's split operations in operation-id order.
     fn list_split_operations(&self, _tenant: &TenantName) -> Vec<SplitOperationRecord> {
         Vec::new()
     }
 
-    /// Persist one exact monotone split-operation revision with CAS semantics.
+    /// Persists one exact monotone split-operation revision with CAS semantics.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -475,7 +478,8 @@ pub trait TenantRegistryStore {
     }
 }
 
-/// In-memory implementation of [`TenantRegistryStore`] used by tests and future fakes.
+/// In-memory implementation of [`TenantRegistryStore`] for tests and future
+/// fakes.
 #[derive(Debug, Default)]
 pub struct InMemoryRegistryStore {
     tenants: Arc<StdMutex<BTreeMap<String, TenantRecord>>>,
@@ -502,7 +506,7 @@ impl Clone for InMemoryRegistryStore {
 }
 
 impl InMemoryRegistryStore {
-    /// Build an empty in-memory registry store.
+    /// Builds an empty in-memory registry store.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -736,7 +740,7 @@ fn split_operation_conflict(
     }
 }
 
-/// Fold raw compacted-topic records into the latest tenant image.
+/// Folds raw compacted-topic records into the latest tenant image.
 #[must_use]
 pub fn fold(
     records: impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
@@ -758,10 +762,10 @@ pub struct Registry {
     applied_rx: watch::Receiver<i64>,
     applied_tx: watch::Sender<i64>,
     write_gate: Mutex<()>,
-    /// Background reader task keeping `tenants`/`split_operations` fresh.
-    /// Aborted when the registry is dropped so short-lived holders (CLI
-    /// provisioning, test harnesses) do not leak a poll loop that retries
-    /// against a broker that may already be gone.
+    /// Background reader task that keeps `tenants` and `split_operations`
+    /// fresh. It aborts when the registry drops, so a short-lived holder such
+    /// as CLI provisioning or a test harness does not leak a poll loop that
+    /// retries against a broker that may already be gone.
     reader: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -774,7 +778,7 @@ impl Drop for Registry {
 }
 
 impl Registry {
-    /// Connect producer-side registry resources. Call [`Self::ensure_topic`] before writes.
+    /// Connects producer-side registry resources. Call [`Self::ensure_topic`] before writes.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -782,7 +786,7 @@ impl Registry {
         Self::connect_with_policy(bootstrap, RegistryPolicy::default()).await
     }
 
-    /// Connect registry resources using an explicit shared topic policy.
+    /// Connects registry resources using an explicit shared topic policy.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -815,13 +819,13 @@ impl Registry {
         })
     }
 
-    /// Return the effective shared registry policy.
+    /// Returns the effective shared registry policy.
     #[must_use]
     pub const fn policy(&self) -> &RegistryPolicy {
         &self.policy
     }
 
-    /// Ensure `__gres_tenants` exists as a compacted, one-partition topic.
+    /// Makes sure `__gres_tenants` exists as a compacted, one-partition topic.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -841,10 +845,10 @@ impl Registry {
         Ok(())
     }
 
-    /// Create a tenant snapshot, or accept an exact idempotent retry.
+    /// Creates a tenant snapshot, or accepts an exact idempotent retry.
     ///
-    /// Replacing an existing snapshot through this unversioned API is rejected:
-    /// callers must use a semantic mutation so the writer can derive the next
+    /// This unversioned API rejects a replacement of an existing snapshot.
+    /// Callers must use a semantic mutation, so the writer can derive the next
     /// version from its fenced, read-committed image.
     /// # Errors
     ///
@@ -866,9 +870,9 @@ impl Registry {
         .map(|_| ())
     }
 
-    /// Create a tenant when absent or replace its snapshot only when the
-    /// caller's observed version still matches the fenced, read-committed
-    /// image. Exact retries are no-ops.
+    /// Creates a tenant when it is absent, or replaces its snapshot only when
+    /// the caller's observed version still matches the fenced, read-committed
+    /// image. An exact retry does nothing.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -915,7 +919,8 @@ impl Registry {
         ))
     }
 
-    /// Request resume for a suspended tenant. No-op unless the current state is `Suspended`.
+    /// Requests resume for a suspended tenant. This does nothing unless the
+    /// current state is `Suspended`.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -924,7 +929,7 @@ impl Registry {
             .await
     }
 
-    /// Mark a tenant active and publish the endpoint activators should dial.
+    /// Marks a tenant active and publishes the endpoint that activators dial.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -938,7 +943,7 @@ impl Registry {
             .await
     }
 
-    /// Mark a tenant suspended after its final checkpoint is durable.
+    /// Marks a tenant suspended after its final checkpoint is durable.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -947,7 +952,8 @@ impl Registry {
             .await
     }
 
-    /// Mark a tenant suspended after recording the durable final checkpoint that permits parking.
+    /// Marks a tenant suspended after it records the durable final checkpoint
+    /// that permits parking.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -962,7 +968,7 @@ impl Registry {
         .await
     }
 
-    /// Monotonically advance the WAL generation for a tenant.
+    /// Monotonically advances the WAL generation for a tenant.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -975,7 +981,7 @@ impl Registry {
             .await
     }
 
-    /// Apply a versioned range-layout mutation through the fenced registry writer.
+    /// Applies a versioned range-layout mutation through the fenced registry writer.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1032,7 +1038,7 @@ impl Registry {
         .await
     }
 
-    /// Produce the per-tenant runtime snapshot consumed by substrate computes.
+    /// Produces the per-tenant runtime snapshot consumed by substrate computes.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1058,7 +1064,7 @@ impl Registry {
         Ok(())
     }
 
-    /// Produce a tombstone for one tenant and wait until it is locally applied.
+    /// Produces a tombstone for one tenant and wait until it is locally applied.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1067,7 +1073,7 @@ impl Registry {
         self.delete_after_fencing(&tenant).await
     }
 
-    /// Return the locally applied image for one tenant.
+    /// Returns the locally applied image for one tenant.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1077,7 +1083,7 @@ impl Registry {
         Ok(read_tenants(&self.tenants).get(tenant.as_str()).cloned())
     }
 
-    /// Return all locally applied tenants ordered by tenant name.
+    /// Returns all locally applied tenants ordered by tenant name.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1086,7 +1092,7 @@ impl Registry {
         Ok(read_tenants(&self.tenants).values().cloned().collect())
     }
 
-    /// Idempotently persist one immutable split-operation intent.
+    /// Idempotently persists one immutable split-operation intent.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1128,7 +1134,7 @@ impl Registry {
         .await
     }
 
-    /// Load one durable split operation after refreshing the committed registry image.
+    /// Loads one durable split operation after refreshing the committed registry image.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1144,7 +1150,7 @@ impl Registry {
             .cloned())
     }
 
-    /// List one tenant's durable split operations in operation-id order.
+    /// Lists one tenant's durable split operations in operation-id order.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1161,7 +1167,7 @@ impl Registry {
             .collect())
     }
 
-    /// Persist one exact monotone split-operation revision with fenced CAS semantics.
+    /// Persists one exact monotone split-operation revision with fenced CAS semantics.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1194,7 +1200,7 @@ impl Registry {
         .await
     }
 
-    /// Watch the last offset applied by the registry reader.
+    /// Watches the last offset applied by the registry reader.
     #[must_use]
     pub fn watch(&self) -> watch::Receiver<i64> {
         self.applied_rx.clone()
@@ -1241,9 +1247,9 @@ impl Registry {
         .map(|_| ())
     }
 
-    /// Fence every other registry writer, then read, transform, and commit one
-    /// snapshot.  The shared transactional id makes the producer epoch a
-    /// cross-process write lease; a compacted-topic version alone is not CAS.
+    /// Fences every other registry writer, then reads, transforms, and commits
+    /// one snapshot. The shared transactional id makes the producer epoch a
+    /// cross-process write lease. A compacted-topic version alone is not CAS.
     async fn mutate_after_fencing(
         &mut self,
         tenant: &TenantName,
@@ -1415,18 +1421,18 @@ impl Registry {
         }
     }
 
-    /// Establish the transactional writer lease before every registry mutation.
-    /// A successful initialization publishes the coordinator-issued epoch before
-    /// the caller can begin and produce a mutation.
+    /// Establishes the transactional writer lease before every registry
+    /// mutation. A successful initialization publishes the coordinator-issued
+    /// epoch before the caller can begin and produce a mutation.
     async fn initialize_transactional_writer(&self) -> Result<(), ControlError> {
         self.producer.init_transactions().await?;
         Ok(())
     }
 
-    /// Begin only after initialization. A recovery marker can be installed by a
-    /// concurrently dropped transaction guard between initialization and begin;
-    /// reinitialize once in that case rather than producing with an uncertain
-    /// epoch.
+    /// Begins only after initialization. A transaction guard that drops
+    /// concurrently can install a recovery marker between initialization and
+    /// begin. In that case this function reinitializes once and does not
+    /// produce with an uncertain epoch.
     async fn begin_registry_transaction(&self) -> Result<Transaction<'_>, ControlError> {
         match self.producer.begin_transaction().await {
             Ok(transaction) => Ok(transaction),
@@ -1439,10 +1445,10 @@ impl Registry {
     }
 }
 
-/// Finish a registry transaction without discarding the guard while Kafka says
-/// the same transaction can be retried. Terminal and transport errors are
-/// surfaced unchanged after the producer has moved to its terminal/ready state;
-/// the next mutation reinitializes the transactional producer.
+/// Finishes a registry transaction and keeps the guard while Kafka says the same
+/// transaction can be retried. Terminal and transport errors reach the caller
+/// unchanged after the producer has moved to its terminal or ready state. The
+/// next mutation reinitializes the transactional producer.
 async fn commit_registry_transaction(mut transaction: Transaction<'_>) -> Result<(), ControlError> {
     loop {
         match transaction.commit().await {
@@ -1455,9 +1461,9 @@ async fn commit_registry_transaction(mut transaction: Transaction<'_>) -> Result
     }
 }
 
-/// Abort after a produce failure. Retryable `EndTxn` errors retain their guard;
-/// terminal errors remain visible to the caller rather than leaving a producer
-/// silently wedged in `InTransaction`.
+/// Aborts after a produce failure. A retryable `EndTxn` error keeps its guard.
+/// A terminal error stays visible to the caller and does not leave a producer
+/// wedged in `InTransaction`.
 async fn abort_registry_transaction(mut transaction: Transaction<'_>) -> Result<(), ControlError> {
     loop {
         match transaction.abort().await {

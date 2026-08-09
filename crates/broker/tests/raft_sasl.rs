@@ -1,9 +1,9 @@
 //! Inbound raft listener auth tests.
 //!
-//! These exercise the controller listener under `SaslPlaintext` and prove
-//! both inbound (broker A accepts auth'd raft frames from broker B) and
-//! outbound (`InterBrokerDialer` dials with SASL credentials) paths
-//! work together.
+//! These tests exercise the controller listener under `SaslPlaintext`.
+//! They prove that the inbound and the outbound path work together. On
+//! the inbound path, broker A accepts auth'd raft frames from broker B.
+//! On the outbound path, `InterBrokerDialer` dials with SASL credentials.
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -70,15 +70,16 @@ fn sasl_broker_config(
 }
 
 /// Bind two ephemeral loopback controller listeners and return them
-/// alongside their addresses. The live listeners are handed to
+/// alongside their addresses. The caller hands the live listeners to
 /// `Broker::start_with_controller_listener`, which adopts them directly
 /// instead of re-binding the address.
 ///
-/// This defeats the bind-and-drop TOCTOU race: the classic pattern reads
-/// an ephemeral port then *drops* the probe socket before the broker
-/// re-binds it, leaving a window in which another process on the runner
-/// can claim the port — surfacing as `AddrInUse` from `Broker::start`.
-/// Keeping the socket bound and handing it over removes that window.
+/// This defeats the bind-and-drop TOCTOU race. The classic pattern reads
+/// an ephemeral port, then *drops* the probe socket before the broker
+/// re-binds it. That leaves a window in which another process on the
+/// runner can claim the port, and `Broker::start` then fails with
+/// `AddrInUse`. This helper keeps the socket bound and hands it over,
+/// which removes that window.
 async fn reserve_ctrl_listeners() -> ([SocketAddr; 2], [tokio::net::TcpListener; 2]) {
     let l0 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -89,17 +90,17 @@ async fn reserve_ctrl_listeners() -> ([SocketAddr; 2], [tokio::net::TcpListener;
 
 /// Data-plane bind address for these tests: `127.0.0.1:0` lets the OS
 /// assign an ephemeral port at `Broker::start`, so there's no probe/drop
-/// gap to race on. Convergence here rides the controller listener; the
-/// data plane is never dialed, so the bound port is never read back.
+/// gap to race on. Convergence here uses the controller listener. No
+/// test dials the data plane, so nothing reads the bound port back.
 fn data_listen_addr() -> SocketAddr {
     "127.0.0.1:0".parse().unwrap()
 }
 
-/// Boot two brokers with the supplied data-plane + controller listener
-/// configurations using the deterministic bootstrap-then-join pattern.
-/// Used by the two "converging" tests; the mismatched-creds test below
-/// inlines its own setup because it must spawn the joiner asynchronously
-/// (it never gets a leader).
+/// Boot two brokers with the supplied data-plane and controller listener
+/// configurations. This helper uses the deterministic bootstrap-then-join
+/// pattern. The two "converging" tests call it. The mismatched-creds test
+/// below inlines its own setup because it must spawn the joiner
+/// asynchronously. That test never gets a leader.
 async fn start_two_brokers_with_controller_protocol(
     ctrl: ListenerProtocol,
     plain_user: &str,

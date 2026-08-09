@@ -1,15 +1,14 @@
-//! `ListOffsets` (`api_key=2`). Resolves the EARLIEST / LATEST sentinels
-//! using each partition's log. For tiered topics (KIP-405),
+//! `ListOffsets` (`api_key=2`). The handler resolves the EARLIEST / LATEST
+//! sentinels with each partition's log. For tiered topics (KIP-405),
 //! EARLIEST and by-timestamp lookups consult the
-//! [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-//! so offsets that have been deleted locally by local-retention but
-//! still live in the remote tier are visible.
+//! [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
+//! Local-retention deletes some offsets locally, but they still live in the
+//! remote tier, and this keeps them visible.
 //!
-//! Positive-timestamp lookups resolve against the remote tier first
-//! (it holds the oldest records) and fall back to the local log's
-//! time index (KIP-405/734). The `MAX_TIMESTAMP` (-3) and
-//! `EARLIEST_LOCAL_TIMESTAMP` (-4) sentinels are resolved against the
-//! local log.
+//! Positive-timestamp lookups resolve against the remote tier first, because
+//! it holds the oldest records. They then fall back to the local log's
+//! time index (KIP-405/734). The handler resolves the `MAX_TIMESTAMP` (-3) and
+//! `EARLIEST_LOCAL_TIMESTAMP` (-4) sentinels against the local log.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};

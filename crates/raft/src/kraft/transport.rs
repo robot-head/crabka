@@ -1,21 +1,23 @@
-//! Transport seam for the [`KraftController`](crate::kraft::controller::KraftController):
-//! outbound peer RPCs go through [`PeerSender`] (real TCP in prod, in-memory in
-//! tests); inbound KIP-595 RPCs arrive as [`Inbound`] carrying a oneshot reply
-//! channel; handle-facing requests arrive as [`Command`].
+//! Transport seam for the [`KraftController`](crate::kraft::controller::KraftController).
+//!
+//! Outbound peer RPCs go through [`PeerSender`], which is real TCP in
+//! production and in-memory in tests. Inbound KIP-595 RPCs arrive as
+//! [`Inbound`], which carries a oneshot reply channel. Handle-facing requests
+//! arrive as [`Command`].
 //!
 //! This module is the wire-agnostic boundary: the event loop never touches
 //! sockets directly. In-memory tests and real TCP both implement `PeerSender`
-//! against the same command/inbound plumbing.
+//! against the same command and inbound plumbing.
 //!
 //! ## Peer codec
 //!
 //! Peer RPC request and response bodies are encoded with the generated KIP-595
-//! message codecs in [`wire`]. The engine encodes a `PeerRequest` into the
-//! body it hands [`PeerSender::send`]; the receiving transport drives the peer
+//! message codecs in [`wire`]. The engine encodes a `PeerRequest` into the body
+//! it hands to [`PeerSender::send`]. The receiving transport drives the peer
 //! engine and returns a `PeerResponse`. The sending engine then decodes that
-//! response into the matching core [`Event`] (`ReceiveVoteResponse` /
-//! `ReceiveFetchResponse`). This keeps the send path fire-and-forget: the
-//! engine never `.await`s a peer RPC inline.
+//! response into the matching core [`Event`], which is `ReceiveVoteResponse` or
+//! `ReceiveFetchResponse`. This keeps the send path fire-and-forget: the engine
+//! never `.await`s a peer RPC inline.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::sync::oneshot;
@@ -28,9 +30,10 @@ use crate::{
     },
 };
 
-/// A decoded inbound KIP-595 RPC plus a oneshot to reply on. The event loop
-/// decodes the body into a core [`Event`], runs it, and encodes the produced
-/// response (e.g. `ReplyVote`) back onto `reply`.
+/// A decoded inbound KIP-595 RPC plus a oneshot to reply on.
+///
+/// The event loop decodes the body into a core [`Event`], runs it, and encodes
+/// the produced response, for example `ReplyVote`, back onto `reply`.
 #[derive(Debug)]
 pub enum Inbound {
     Vote {
@@ -60,31 +63,35 @@ pub enum Inbound {
 pub enum Command {
     /// An inbound peer RPC with a oneshot to reply on.
     Inbound(Inbound),
-    /// Inject a core [`Event`] directly (test/driver entrypoint; also how the
-    /// loop feeds peer-RPC responses back to itself as the matching
-    /// `Receive*Response` event — the fire-and-forget feedback path).
+    /// Injects a core [`Event`] directly. This is the test and driver entry
+    /// point. The loop also uses it to feed peer-RPC responses back to itself
+    /// as the matching `Receive*Response` event, which is the fire-and-forget
+    /// feedback path.
     Event(Event),
-    /// A Fetch RESPONSE the follower received from the leader. Unlike other peer
-    /// responses (which decode to a pure core event), a Fetch response carries
-    /// log records the follower must truncate/append/apply BEFORE feeding the
-    /// `ReceiveFetchResponse` event to the core — so it gets its own command
-    /// rather than going through the pure `Event` feedback path.
+    /// A Fetch RESPONSE the follower received from the leader. Other peer
+    /// responses decode to a pure core event, but a Fetch response carries log
+    /// records. The follower must truncate, append, and apply those records
+    /// BEFORE it feeds the `ReceiveFetchResponse` event to the core. This
+    /// response therefore gets its own command instead of the pure `Event`
+    /// feedback path.
     FetchResponse {
-        /// The leader that answered (the responder peer).
+        /// The leader that answered, which is the responder peer.
         from: NodeId,
         /// The raw encoded [`wire::PeerResponse::Fetch`] body.
         body: Bytes,
     },
-    /// A `FetchSnapshot` RESPONSE the follower received from the leader (carries
-    /// snapshot bytes the follower reassembles before resuming). Mirrors
-    /// `FetchResponse`'s dedicated command path.
+    /// A `FetchSnapshot` RESPONSE the follower received from the leader. It
+    /// carries snapshot bytes that the follower reassembles before it resumes.
+    /// This mirrors the dedicated command path of `FetchResponse`.
     FetchSnapshotResponse { from: NodeId, body: Bytes },
-    /// A timer (election / fetch / heartbeat) fired. The loop maps it to the
-    /// right core event after consulting liveness state (a fetch tick re-polls
-    /// rather than electing unless the leader has been missed enough times).
+    /// An election, fetch, or heartbeat timer fired. The loop maps it to the
+    /// right core event after it reads the liveness state. A fetch tick
+    /// re-polls instead of electing, unless the leader has been missed enough
+    /// times.
     Timer(TimerTick),
-    /// Handle op: append + commit a metadata batch as the leader, replying once
-    /// it is committed and applied (or with a rejection).
+    /// Handle op: append and commit a metadata batch as the leader. It replies
+    /// once the batch is committed and applied, or it replies with a
+    /// rejection.
     SubmitChange {
         records: Vec<crabka_metadata::MetadataRecord>,
         reply: oneshot::Sender<Result<crate::SubmitChangeResult, RaftError>>,
@@ -105,9 +112,9 @@ pub enum Command {
         max_size: crabka_units::ByteSize,
         reply: oneshot::Sender<MetadataFetchSlice>,
     },
-    /// Test-only: append a metadata batch to the log (as the leader's
-    /// `submit_change` will) and drive commit through the real apply pipeline.
-    /// Replies with the appended base offset.
+    /// Test-only: append a metadata batch to the log, the same way the
+    /// leader's `submit_change` does, and drive the commit through the real
+    /// apply pipeline. Replies with the appended base offset.
     #[cfg(test)]
     TestAppendAndCommit {
         records: Vec<crabka_metadata::MetadataRecord>,
@@ -118,8 +125,10 @@ pub enum Command {
 }
 
 /// A committed-range read result for the observer metadata-fetch path (1004).
-/// `records` is concatenated Kafka `RecordBatch`es (one per committed log batch
-/// in `[fetch_offset, high_watermark)`); the offsets are `KraftLog` offsets.
+///
+/// `records` is concatenated Kafka `RecordBatch`es, one for each committed log
+/// batch in `[fetch_offset, high_watermark)`. The offsets are `KraftLog`
+/// offsets.
 #[derive(Debug, Clone)]
 pub struct MetadataFetchSlice {
     pub records: bytes::Bytes,
@@ -127,44 +136,49 @@ pub struct MetadataFetchSlice {
     pub high_watermark: i64,
 }
 
-/// Which timer fired. The loop interprets the tick against current role/liveness
-/// state rather than mapping 1:1 to a core event.
+/// Which timer fired. The loop interprets the tick against the current role
+/// and liveness state, and does not map it one-to-one to a core event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerTick {
     /// The election timer's deadline passed.
     Election,
-    /// The fetch timer's deadline passed (follower/observer poll watchdog).
+    /// The fetch timer's deadline passed. This is the follower and observer
+    /// poll watchdog.
     Fetch,
     /// The leader heartbeat interval ticked.
     Heartbeat,
 }
 
-/// A structured, node-local snapshot of consensus state surfaced to the handle
-/// for the broker's `DescribeQuorum` admin view. This is the engine's own view;
-/// the handle maps it into the public `crate::controller::QuorumState`.
+/// A structured, node-local snapshot of consensus state for the handle, which
+/// serves the broker's `DescribeQuorum` admin view.
+///
+/// This is the engine's own view. The handle maps it into the public
+/// `crate::controller::QuorumState`.
 #[derive(Debug, Clone)]
 pub struct QuorumStateSnapshot {
     pub leader_id: Option<NodeId>,
     pub leader_epoch: Epoch,
     pub high_watermark: i64,
     pub log_end_offset: i64,
-    /// Log-start offset (rises past 0 once the log has been pruned below a
-    /// snapshot under KIP-630).
+    /// Log-start offset. It rises past 0 once the log has been pruned below a
+    /// snapshot under KIP-630.
     pub log_start_offset: i64,
     pub voters: Vec<NodeId>,
     /// Per-follower fetch offset, populated only on the leader.
     pub per_voter_fetch_offset: std::collections::BTreeMap<NodeId, i64>,
 }
 
-/// Outbound peer RPC sender. Encodes nothing itself — the event loop hands it
-/// the already-encoded request body (see [`wire`]) and the destination peer;
-/// the impl dials/sends and returns the raw response body.
+/// Outbound peer RPC sender.
 ///
-/// Matches the `async_trait` mechanism used by
-/// [`OutboundDialer`](crate::network::OutboundDialer).
+/// It encodes nothing itself. The event loop hands it the already-encoded
+/// request body (see [`wire`]) and the destination peer. The impl then dials
+/// the peer, sends the body, and returns the raw response body.
+///
+/// This matches the `async_trait` mechanism that
+/// [`OutboundDialer`](crate::network::OutboundDialer) uses.
 #[async_trait::async_trait]
 pub trait PeerSender: Send + Sync {
-    /// Send `body` (a request for `api_key`) to `peer` and return the raw
+    /// Sends `body`, a request for `api_key`, to `peer` and returns the raw
     /// response body.
     ///
     /// # Errors
@@ -172,9 +186,11 @@ pub trait PeerSender: Send + Sync {
     async fn send(&self, peer: NodeId, api_key: i16, body: Bytes) -> Result<Bytes, RaftError>;
 }
 
-/// A no-op `PeerSender` for single-voter / no-network tests: every send fails
-/// as unreachable. A single voter never sends peer RPCs (it wins its own
-/// election immediately), so this lets the contract tests run without wiring a
+/// A no-op `PeerSender` for single-voter and no-network tests. Every send fails
+/// as unreachable.
+///
+/// A single voter never sends peer RPCs, because it wins its own election
+/// immediately. This sender therefore lets the contract tests run without a
 /// real transport.
 pub struct NullPeerSender;
 
@@ -218,19 +234,22 @@ pub mod api_key {
     pub const FETCH_SNAPSHOT: i16 = 59;
 }
 
-/// Real KIP-595 peer-RPC body codec. The engine's loop reasons in terms of
-/// the flat `PeerRequest`/`PeerResponse` enums; this module maps each
-/// variant to/from the genuine generated
-/// KIP-595 message **bodies** (header-less — the framing layer in `server.rs` /
-/// `network.rs` adds the request/response header). Captured wire versions:
-/// Vote v2, Begin/End `QuorumEpoch` v1, Fetch v17. Crabka-to-Crabka replication
-/// rides these exact bytes.
+/// Real KIP-595 peer-RPC body codec.
+///
+/// The engine's loop reasons in terms of the flat `PeerRequest` and
+/// `PeerResponse` enums. This module maps each variant to and from the genuine
+/// generated KIP-595 message bodies. Those bodies are header-less, because the
+/// framing layer in `server.rs` and `network.rs` adds the request header and
+/// the response header. The captured wire versions are Vote v2,
+/// `BeginQuorumEpoch` v1, `EndQuorumEpoch` v1, and Fetch v17. Crabka-to-Crabka
+/// replication rides these exact bytes.
 ///
 /// The metadata log is the single `KRaft` topic `__cluster_metadata`, partition
-/// 0; every RPC body therefore carries exactly one topic / one partition.
-/// Kafka's `VoteResponse` carries no pre-vote field: a candidate matches a reply
-/// to its round from its own `Prospective`/`Candidate` role, so Crabka encodes a
-/// byte-faithful `VoteResponse` and the core infers the round itself (KIP-996).
+/// 0, so every RPC body carries exactly one topic and exactly one partition.
+/// Kafka's `VoteResponse` carries no pre-vote field. A candidate matches a
+/// reply to its round from its own `Prospective` or `Candidate` role, so Crabka
+/// encodes a byte-faithful `VoteResponse` and the core infers the round itself
+/// (KIP-996).
 pub mod wire {
     use bytes::{Buf, Bytes, BytesMut};
     use crabka_protocol::{
@@ -257,8 +276,8 @@ pub mod wire {
     const METADATA_TOPIC: &str = "__cluster_metadata";
     /// The single metadata partition.
     const METADATA_PARTITION: i32 = 0;
-    /// The fixed `KRaft` `__cluster_metadata` topic id (KIP-595). Fetch v13+ keys
-    /// the topic by this id, not by name.
+    /// The fixed `KRaft` `__cluster_metadata` topic id (KIP-595). Fetch v13 and
+    /// above key the topic by this id, not by name.
     const METADATA_TOPIC_ID: MetaUuid = MetaUuid([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
     /// Captured flexible wire versions, byte-validated against fixture frames.
@@ -283,11 +302,11 @@ pub mod wire {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum PeerRequest {
         Vote {
-            /// The recipient voter this request is addressed to (the wire
-            /// top-level `voterId`). The JVM validates that an incoming Vote is
-            /// addressed to it before considering the grant; a stale/`-1`
-            /// `voterId` is silently rejected. Built per-recipient in
-            /// `broadcast_vote`.
+            /// The recipient voter this request is addressed to. This is the
+            /// wire top-level `voterId`. The JVM validates that an incoming
+            /// Vote is addressed to it before it considers the grant, and it
+            /// silently rejects a stale `voterId` or a `voterId` of `-1`.
+            /// `broadcast_vote` builds this field for each recipient.
             voter_id: NodeId,
             candidate_epoch: Epoch,
             candidate: NodeId,
@@ -316,15 +335,16 @@ pub mod wire {
         },
     }
 
-    /// A peer RPC response body, decoded by the sending engine back into the
-    /// matching `Receive*Response` event (or applied directly, for Fetch).
+    /// A peer RPC response body. The sending engine decodes it back into the
+    /// matching `Receive*Response` event, or applies it directly for Fetch.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum PeerResponse {
         Vote {
             epoch: Epoch,
             granted: bool,
         },
-        /// Begin/End acks carry the responder's epoch; no core event is produced.
+        /// `BeginQuorumEpoch` and `EndQuorumEpoch` acks carry the responder's
+        /// epoch. They produce no core event.
         Ack {
             epoch: Epoch,
         },
@@ -332,8 +352,9 @@ pub mod wire {
             leader_id: NodeId,
             leader_epoch: Epoch,
             diverging: Option<LogOffsetMetadata>,
-            /// When set, the follower's fetch offset is below the leader's pruned
-            /// log-start; it must `FetchSnapshot` this snapshot instead. `(end_offset, epoch)`.
+            /// When set, the follower's fetch offset is below the leader's
+            /// pruned log-start, and the follower must `FetchSnapshot` this
+            /// snapshot instead. The tuple is `(end_offset, epoch)`.
             snapshot_id: Option<(i64, i32)>,
             /// Leader's high watermark at serve time.
             hwm: i64,
@@ -349,16 +370,17 @@ pub mod wire {
         },
     }
 
-    /// Consensus `Epoch` (u32) <-> wire `i32` (`KRaft` uses an i32 `leaderEpoch`).
-    /// The KIP-595 wire carries the leader epoch as a raw `int32` and stays raw
-    /// here; the consensus epoch is always non-negative.
+    /// Converts between the consensus `Epoch` (u32) and the wire `i32`.
+    /// `KRaft` uses an i32 `leaderEpoch`. The KIP-595 wire carries the leader
+    /// epoch as a raw `int32` and stays raw here. The consensus epoch is always
+    /// non-negative.
     fn epoch_to_wire(e: Epoch) -> i32 {
         i32::try_from(e).unwrap_or(i32::MAX)
     }
     fn epoch_from_wire(e: i32) -> Epoch {
         u32::try_from(e).unwrap_or(0)
     }
-    /// `NodeId` (u64) <-> wire `i32` replica id.
+    /// Converts between the `NodeId` (u64) and the wire `i32` replica id.
     fn node_to_wire(n: NodeId) -> i32 {
         i32::try_from(n.0).unwrap_or(i32::MAX)
     }
@@ -481,7 +503,7 @@ pub mod wire {
             }
         }
 
-        /// Decode a request body. Returns `None` on a malformed frame.
+        /// Decodes a request body. Returns `None` on a malformed frame.
         #[must_use]
         pub fn decode(buf: &[u8]) -> Option<Self> {
             // Probe each api by attempting the decode at its captured version.
@@ -506,7 +528,7 @@ pub mod wire {
         }
     }
 
-    /// Decode a Vote request body (api 52).
+    /// Decodes a Vote request body (api 52).
     #[must_use]
     pub fn decode_vote(buf: &[u8]) -> Option<PeerRequest> {
         let mut cur = buf;
@@ -522,7 +544,7 @@ pub mod wire {
         })
     }
 
-    /// Decode a `BeginQuorumEpoch` request body (api 53).
+    /// Decodes a `BeginQuorumEpoch` request body (api 53).
     #[must_use]
     pub fn decode_begin(buf: &[u8]) -> Option<PeerRequest> {
         let mut cur = buf;
@@ -534,7 +556,7 @@ pub mod wire {
         })
     }
 
-    /// Decode an `EndQuorumEpoch` request body (api 54).
+    /// Decodes an `EndQuorumEpoch` request body (api 54).
     #[must_use]
     pub fn decode_end(buf: &[u8]) -> Option<PeerRequest> {
         let mut cur = buf;
@@ -546,7 +568,7 @@ pub mod wire {
         })
     }
 
-    /// Decode a Fetch request body (api 1).
+    /// Decodes a Fetch request body (api 1).
     #[must_use]
     pub fn decode_fetch(buf: &[u8]) -> Option<PeerRequest> {
         let mut cur = buf;
@@ -560,7 +582,7 @@ pub mod wire {
         })
     }
 
-    /// Encode a `FetchSnapshot` request body (api 59).
+    /// Encodes a `FetchSnapshot` request body (api 59).
     fn encode_fetch_snapshot_request(
         from: NodeId,
         snapshot_id: (i64, i32),
@@ -591,7 +613,7 @@ pub mod wire {
         encode_body(&req, FETCH_SNAPSHOT_VERSION)
     }
 
-    /// Encode a `FetchSnapshot` response body (api 59).
+    /// Encodes a `FetchSnapshot` response body (api 59).
     fn encode_fetch_snapshot_response(
         snapshot_id: (i64, i32),
         size: i64,
@@ -623,7 +645,7 @@ pub mod wire {
         encode_body(&resp, FETCH_SNAPSHOT_VERSION)
     }
 
-    /// Decode a `FetchSnapshot` request body (api 59).
+    /// Decodes a `FetchSnapshot` request body (api 59).
     #[must_use]
     pub fn decode_fetch_snapshot(buf: &[u8]) -> Option<PeerRequest> {
         let mut cur = buf;
@@ -741,8 +763,9 @@ pub mod wire {
             }
         }
 
-        /// Decode a Vote response body (api 52). The round (pre-vote vs real) is
-        /// not on the wire — the engine infers it from the candidate's role.
+        /// Decodes a Vote response body (api 52). The round, pre-vote or
+        /// real, is not on the wire. The engine infers it from the candidate's
+        /// role.
         #[must_use]
         pub fn decode_vote(buf: &[u8]) -> Option<Self> {
             let mut cur = buf;
@@ -754,7 +777,8 @@ pub mod wire {
             })
         }
 
-        /// Decode a Begin/End-quorum-epoch ack body (api 53/54).
+        /// Decodes a `BeginQuorumEpoch` or `EndQuorumEpoch` ack body
+        /// (api 53 and api 54).
         #[must_use]
         pub fn decode_ack(buf: &[u8]) -> Option<Self> {
             let mut cur = buf;
@@ -765,7 +789,7 @@ pub mod wire {
             })
         }
 
-        /// Decode a Fetch response body (api 1).
+        /// Decodes a Fetch response body (api 1).
         #[must_use]
         pub fn decode_fetch(buf: &[u8]) -> Option<Self> {
             let mut cur = buf;
@@ -802,7 +826,7 @@ pub mod wire {
             })
         }
 
-        /// Decode a `FetchSnapshot` response body (api 59).
+        /// Decodes a `FetchSnapshot` response body (api 59).
         #[must_use]
         pub fn decode_fetch_snapshot(buf: &[u8]) -> Option<Self> {
             let mut cur = buf;

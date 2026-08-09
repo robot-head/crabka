@@ -1,5 +1,8 @@
-//! `KeyValueBytesStore<K,V>`: the single typed store the registry holds and
-//! downcasts to. Serde + changelog-buffer logic over a pluggable `ByteKeyValueStore`.
+//! `KeyValueBytesStore<K,V>`, the single typed store that the registry holds and
+//! downcasts to.
+//!
+//! It adds the serde logic and the changelog-buffer logic over a pluggable
+//! `ByteKeyValueStore`.
 use std::{
     any::Any,
     sync::{Arc, Mutex},
@@ -17,9 +20,11 @@ use crate::{
     },
 };
 
-/// The store's backing: either a plain boxed byte store or a record-cache
-/// wrapper over it. `Cached` is opted into via [`KeyValueBytesStore::enable_cache`];
-/// uncached stores keep today's behavior exactly.
+/// The store's backing, which is either a plain boxed byte store or a
+/// record-cache wrapper over one.
+///
+/// [`KeyValueBytesStore::enable_cache`] opts into `Cached`. An uncached store
+/// keeps its behavior unchanged.
 enum Backing {
     Plain(Box<dyn ByteKeyValueStore>),
     // Constructed via `enable_cache`, which build-time cache wiring
@@ -28,7 +33,8 @@ enum Backing {
 }
 
 impl Backing {
-    /// Cache-first when `Cached` (read-your-writes); direct otherwise.
+    /// Cache-first when the backing is `Cached`, which gives read-your-writes.
+    /// Otherwise the read goes direct.
     async fn get(&self, key: &[u8]) -> Option<Bytes> {
         match self {
             Backing::Plain(b) => b.get(key).await,
@@ -55,8 +61,9 @@ impl Backing {
         }
     }
 
-    /// Processing-path write. Plain: direct put. Cached: write-back put carrying
-    /// the record context (changelog deferred to flush).
+    /// Processing-path write. A plain backing does a direct put. A cached
+    /// backing does a write-back put that carries the record context, and it
+    /// defers the changelog to the flush.
     async fn put(&mut self, key: Bytes, value: Bytes, ctx: RecordContext) {
         match self {
             Backing::Plain(b) => b.put(key, value).await,
@@ -64,9 +71,10 @@ impl Backing {
         }
     }
 
-    /// Processing-path delete. Plain: returns the previous value. Cached:
-    /// write-back tombstone; the previous value (for the typed return) is read
-    /// cache-first before staging the tombstone.
+    /// Processing-path delete. A plain backing returns the previous value. A
+    /// cached backing stages a write-back tombstone, and it reads the previous
+    /// value cache-first for the typed return before it stages that
+    /// tombstone.
     async fn delete(&mut self, key: Bytes, ctx: RecordContext) -> Option<Bytes> {
         match self {
             Backing::Plain(b) => b.delete(&key).await,
@@ -78,7 +86,8 @@ impl Backing {
         }
     }
 
-    /// Restore-path write (below the cache; never stages a dirty entry).
+    /// Restore-path write. It writes below the cache and never stages a dirty
+    /// entry.
     async fn apply(&mut self, key: Bytes, value: Option<Bytes>) {
         match (self, value) {
             (Backing::Plain(b), Some(v)) => b.put(key, v).await,
@@ -106,9 +115,9 @@ pub struct KeyValueBytesStore<K, V> {
     value_serde: Box<dyn Serde<V>>,
     changelog: Vec<(Bytes, Option<Bytes>)>,
     logging: bool,
-    /// Set via [`StateStore::set_record_context`]; attached to the next cached
-    /// write so the deduped `Change` can be forwarded with the right context on
-    /// flush. Only meaningful when `backing` is `Cached`.
+    /// [`StateStore::set_record_context`] sets this field. The store attaches it
+    /// to the next cached write, so the flush can forward the deduped `Change`
+    /// with the right context. It matters only when `backing` is `Cached`.
     pending_ctx: Option<RecordContext>,
 }
 
@@ -133,10 +142,11 @@ impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
         }
     }
 
-    /// Wrap this store's backend in a record cache (moves the backend into a
-    /// [`CachingKeyValueStore`]). The caller supplies the [`NamedCache`]
-    /// registered in the task's `ThreadCache`. Idempotent-ish: re-wrapping an
-    /// already-cached store is a no-op.
+    /// Wrap this store's backend in a record cache, which moves the backend into
+    /// a [`CachingKeyValueStore`].
+    ///
+    /// The caller supplies the [`NamedCache`] registered in the task's
+    /// `ThreadCache`. A second call on an already-cached store does nothing.
     pub(crate) fn enable_cache(&mut self, cache: Arc<Mutex<NamedCache>>) {
         if !matches!(self.backing, Backing::Plain(_)) {
             return; // already cached
@@ -154,16 +164,18 @@ impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
         ));
     }
 
-    /// Whether this store's backend has been wrapped in a record cache via
-    /// [`enable_cache`](Self::enable_cache). Used by the erased
-    /// [`StateStore::is_cached_erased`] hook (so a materializing processor can
-    /// suppress its immediate forward) and by build-time wiring tests.
+    /// Whether [`enable_cache`](Self::enable_cache) has wrapped this store's
+    /// backend in a record cache.
+    ///
+    /// The erased [`StateStore::is_cached_erased`] hook uses this method, so a
+    /// materializing processor can suppress its immediate forward. The
+    /// build-time wiring tests also use it.
     #[must_use]
     pub(crate) fn is_cached(&self) -> bool {
         matches!(self.backing, Backing::Cached(_))
     }
 
-    /// Convenience constructor for tests: an in-memory-backed store.
+    /// Convenience constructor for tests. It gives an in-memory-backed store.
     #[must_use]
     pub fn in_memory(
         name: String,
@@ -180,10 +192,13 @@ impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
         )
     }
 
-    /// The context to stamp on the next cached write: the stashed
-    /// [`set_record_context`](StateStore::set_record_context) if present, else a
-    /// default rooted at the changelog topic. Processing always sets context
-    /// first, so the fallback is only hit in tests that put without one.
+    /// The context to stamp on the next cached write.
+    ///
+    /// It is the stashed
+    /// [`set_record_context`](StateStore::set_record_context) when one is
+    /// present, and otherwise a default rooted at the changelog topic.
+    /// Processing always sets the context first, so only a test that puts
+    /// without a context reaches the fallback.
     fn write_ctx(&self) -> RecordContext {
         self.pending_ctx.clone().unwrap_or(RecordContext {
             topic: self.changelog_topic.clone(),
@@ -654,8 +669,9 @@ mod tests {
         check!(s.get(&"a".to_string()).await == Some(3));
     }
 
-    /// Cached routing for `range` / `scan_all` / `approx_len` / IQ reads serves
-    /// read-your-writes through the cache overlay before any flush.
+    /// The cached routing for `range`, `scan_all`, `approx_len`, and the IQ
+    /// reads serves read-your-writes through the cache overlay before any
+    /// flush.
     #[tokio::test]
     async fn cached_store_range_scan_and_count_overlay() {
         use crate::store::iq::IqQueryable;
@@ -676,8 +692,8 @@ mod tests {
         check!(s.iq_kv_get(b"b").await == Some(I64Serde.serialize("s-changelog", &2)));
     }
 
-    /// On a cached store, typed `delete` returns the prior cached value (read
-    /// cache-first before staging the tombstone).
+    /// On a cached store, a typed `delete` returns the earlier cached value. It
+    /// reads cache-first before it stages the tombstone.
     #[tokio::test]
     async fn cached_store_delete_returns_prev_and_stages_tombstone() {
         let mut s = cached_store();
@@ -698,8 +714,8 @@ mod tests {
         check!(cl[0].1.is_none());
     }
 
-    /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry
-    /// staged → nothing forwarded on the next cache flush), and a `None` value
+    /// `apply_changelog` on a cached store writes BELOW the cache. It stages no
+    /// dirty entry, so the next cache flush forwards nothing. A `None` value
     /// deletes through the inner store.
     #[tokio::test]
     async fn cached_store_apply_changelog_goes_below_cache() {
@@ -737,8 +753,8 @@ mod tests {
         check!(buffer.is_empty());
     }
 
-    /// `enable_cache` is idempotent: re-wrapping an already-cached store is a
-    /// no-op (the guard returns early).
+    /// `enable_cache` is idempotent. A second call on an already-cached store
+    /// does nothing, because the guard returns early.
     #[tokio::test]
     async fn enable_cache_is_idempotent() {
         let mut s = store();

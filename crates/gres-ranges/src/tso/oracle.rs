@@ -1,20 +1,22 @@
 //! Range-0 monotone timestamp oracle with stride-ahead durability.
 //!
 //! One oracle serves both timestamp domains: the dense logical counter of
-//! `LogicalTso` mode and the wall-anchored packed-HLC stamps of `Hlc` mode.
-//! The durable machinery — persisting `max_ts` a stride ahead of grants so a
-//! restarted range 0 never re-mints below granted stamps, the successor grace
-//! period, liveness certificates, and epoch fencing — is mode-independent
-//! because both domains are plain `u64`s reserved in contiguous runs; only
-//! how a run's first stamp is chosen differs. In the wall-anchored mode the
-//! stride is expressed in the packed domain (whole milliseconds of headroom),
-//! so the persist rate is bounded by wall time rather than by grant volume.
-//! The dense logical counter has no such intrinsic bound — a fixed count
-//! stride would persist once per that many grants, so its durable-write rate
-//! would climb with load — so it paces its stride against wall time instead,
-//! widening it under grant pressure and narrowing it when idle to hold the
-//! persist rate near a handful per second regardless of grant volume (see
-//! [`TsoOracle::persist_stride`]).
+//! `LogicalTso` mode, and the wall-anchored packed-HLC stamps of `Hlc` mode.
+//! The durable machinery is mode-independent. It persists `max_ts` a stride
+//! ahead of the grants, so a restarted range 0 never re-mints below granted
+//! stamps, and it supplies the successor grace period, the liveness
+//! certificates, and the epoch fencing. It is mode-independent because both
+//! domains are plain `u64`s reserved in contiguous runs. Only the choice of a
+//! run's first stamp differs.
+//!
+//! In the wall-anchored mode the stride is expressed in the packed domain, as
+//! whole milliseconds of headroom, so wall time bounds the persist rate rather
+//! than grant volume. The dense logical counter has no such intrinsic bound: a
+//! fixed count stride would persist once per that many grants, so its
+//! durable-write rate would climb with load. The logical counter therefore paces
+//! its stride against wall time instead. It widens the stride under grant
+//! pressure and narrows it when idle, which holds the persist rate near a
+//! handful per second at any grant volume. See [`TsoOracle::persist_stride`].
 
 use std::{
     num::NonZeroU64,
@@ -133,34 +135,39 @@ pub enum HeartbeatVerdict {
 /// State touched only on the slow path, guarded by the slow-path mutex.
 struct SlowState {
     has_granted: bool,
-    /// Logical mode only: the current horizon stride, widened under grant
-    /// pressure and narrowed when idle so the durable persist rate stays
-    /// bounded by wall time (see [`TsoOracle::advance_horizon`]). Seeded at the
-    /// configured base stride; unused by the wall-anchored arm, whose packed
-    /// stride is already wall-bounded.
+    /// The current horizon stride, in logical mode only.
+    ///
+    /// The oracle widens it under grant pressure and narrows it when idle, so
+    /// wall time keeps the durable persist rate bounded. See
+    /// [`TsoOracle::advance_horizon`]. The field starts at the configured base
+    /// stride. The wall-anchored arm does not use it, because its packed stride
+    /// is already wall-bounded.
     persist_stride: u64,
-    /// Monotone-clock reading (ms) of the last horizon persist, or `u64::MAX`
-    /// before the first, used to measure the interval between persists.
+    /// Monotone-clock reading, in milliseconds, of the last horizon persist, or
+    /// `u64::MAX` before the first persist. The oracle uses it to measure the
+    /// interval between persists.
     last_persist_ms: u64,
 }
 
 /// How the oracle carves each contiguous reservation out of the timestamp
 /// space.
 ///
-/// Both arms share every other oracle obligation — the successor grace period,
-/// liveness certificates, stride-ahead horizon persistence, and epoch fencing —
-/// which is why the wall-anchored variant lives inside [`TsoOracle`] rather
-/// than beside it: only the choice of a run's first stamp differs.
+/// Both arms share every other oracle obligation: the successor grace period,
+/// the liveness certificates, the stride-ahead horizon persistence, and the
+/// epoch fencing. That is why the wall-anchored variant lives inside
+/// [`TsoOracle`] rather than beside it. Only the choice of a run's first stamp
+/// differs.
 enum GrantReservation {
-    /// Dense logical counter: each run starts immediately after the previous
-    /// one, so timestamps are small consecutive integers (`LogicalTso` mode).
+    /// Dense logical counter, used by `LogicalTso` mode. Each run starts
+    /// immediately after the previous one, so timestamps are small consecutive
+    /// integers.
     Logical(AtomicU64),
-    /// Wall-anchored Hybrid Logical Clock over the packed stamp domain: each
-    /// run starts at the current wall reading when the wall has moved past the
-    /// last stamp, and packs densely behind the previous run otherwise (`Hlc`
-    /// mode). Logical-counter overflow carries into the physical field by
-    /// plain integer arithmetic — bounded drift ahead of the wall, the same
-    /// budget a stalled wall clock already spends.
+    /// Wall-anchored Hybrid Logical Clock over the packed stamp domain, used by
+    /// `Hlc` mode. Each run starts at the current wall reading when the wall has
+    /// moved past the last stamp. Otherwise the run packs densely behind the
+    /// previous run. Logical-counter overflow carries into the physical field by
+    /// plain integer arithmetic. That gives bounded drift ahead of the wall, the
+    /// same budget a stalled wall clock already spends.
     WallAnchored {
         clock: HybridLogicalClock,
         wall: Arc<dyn WallClock>,
@@ -168,7 +175,7 @@ enum GrantReservation {
 }
 
 impl GrantReservation {
-    /// Reserve `count` contiguous timestamps, returning `(first, last)`.
+    /// Reserve `count` contiguous timestamps and return `(first, last)`.
     fn reserve(&self, count: NonZeroU64) -> Result<(u64, u64), TsoError> {
         match self {
             // Compare-exchange over `fetch_add` so overflow fails the grant
@@ -210,8 +217,8 @@ trait TsoClock: Send + Sync {
 }
 
 /// Monotone clock backed by [`tokio::time::Instant`], so paused-time tests
-/// advance it together with the timer wheel; in production it is identical
-/// to the standard monotonic clock.
+/// advance it together with the timer wheel. In production it is identical to
+/// the standard monotonic clock.
 struct SystemTsoClock(Instant);
 
 impl TsoClock for SystemTsoClock {
@@ -222,20 +229,21 @@ impl TsoClock for SystemTsoClock {
 
 /// Target minimum wall interval between logical-mode horizon persists.
 ///
-/// The dense logical counter advances with grant volume, so a fixed-count
-/// stride would persist more frequently as load rises — a synchronous durable
+/// The dense logical counter advances with grant volume, so a fixed-count stride
+/// would persist more frequently as load rises. That is one synchronous durable
 /// range-0 write on the serialized grant path every `stride` timestamps. When
-/// persists arrive faster than this interval the stride is widened (halving the
-/// persist rate) until they space out to roughly this cadence, so a busy
-/// logical oracle persists a handful of times per second regardless of grant
-/// volume — the same wall-time bound the wall-anchored arm gets from its packed
-/// stride, and comparable to that arm's own cadence.
+/// persists arrive faster than this interval, the oracle widens the stride,
+/// which halves the persist rate, until the persists space out to about this
+/// cadence. A busy logical oracle therefore persists a handful of times per
+/// second at any grant volume. That is the same wall-time bound the packed
+/// stride gives the wall-anchored arm, and a comparable cadence.
 const LOGICAL_MIN_PERSIST_INTERVAL: Time = millis(100);
 
-/// Ceiling on the widened logical stride. Caps how far ahead the durable
-/// horizon runs, and therefore how many otherwise-unused timestamps a crash
-/// burns — trivial for the dense `u64` counter, whose space this never
-/// meaningfully dents.
+/// Ceiling on the widened logical stride.
+///
+/// It caps how far ahead the durable horizon runs, and therefore how many
+/// otherwise-unused timestamps a crash burns. That count is trivial for the
+/// dense `u64` counter, whose space this never meaningfully dents.
 const LOGICAL_MAX_PERSIST_STRIDE: u64 = 1 << 24;
 
 /// Recovery-time parameters shared by both reservation modes.
@@ -251,22 +259,22 @@ struct RecoverySettings {
 
 /// Range-0 timestamp oracle.
 ///
-/// Within-stride grants are served lock-free: the reservation state,
-/// `durable_max_ts`, and `certified_until_ms` are atomics read on the hot
-/// path, and only horizon advancement and certificate renewal serialize
-/// through the slow-path mutex.
+/// The oracle serves within-stride grants lock-free. The reservation state,
+/// `durable_max_ts`, and `certified_until_ms` are atomics that the hot path
+/// reads. Only horizon advancement and certificate renewal serialize through the
+/// slow-path mutex.
 ///
-/// Ordering: `durable_max_ts` and `certified_until_ms` are stored with
-/// `Release` only after the epoch-gated persist or heartbeat succeeded and
-/// loaded with `Acquire`, so a fast path that observes a horizon or
-/// certificate also observes the liveness check that produced it. The
-/// reservation state is a pure counter/clock — no other data is published
-/// through it — so `AcqRel` on its compare-exchange is already stronger than
-/// it needs.
+/// The memory ordering is this. The oracle stores `durable_max_ts` and
+/// `certified_until_ms` with `Release`, and only after the epoch-gated persist
+/// or heartbeat succeeded, and it loads them with `Acquire`. A fast path that
+/// observes a horizon or a certificate therefore also observes the liveness
+/// check that produced it. The reservation state is a pure counter and clock,
+/// and no other data is published through it, so `AcqRel` on its
+/// compare-exchange is already stronger than it needs to be.
 ///
-/// The [`GrantReservation`] arm decides the timestamp *domain* — dense
-/// logical integers or wall-anchored packed HLC stamps — while everything
-/// durable and fencing-related is identical across both.
+/// The [`GrantReservation`] arm decides the timestamp *domain*, which is either
+/// dense logical integers or wall-anchored packed HLC stamps. Everything durable
+/// and everything related to fencing is identical across both arms.
 pub struct TsoOracle<C, H> {
     committer: C,
     heartbeat: H,
@@ -404,11 +412,11 @@ where
     /// Recover a wall-anchored HLC oracle from an already-replayed durable
     /// horizon.
     ///
-    /// The reservation clock is seeded at `persisted_max_ts`, so the first —
-    /// and, by monotonicity, every — grant strictly dominates everything any
-    /// predecessor oracle could have granted, even when `wall` reads behind
-    /// the predecessor's wall clock. `stride` is in the packed stamp domain;
-    /// see the horizon-persistence notes on [`TsoOracle`].
+    /// The reservation clock starts at `persisted_max_ts`. The first grant
+    /// therefore strictly dominates everything any predecessor oracle could have
+    /// granted, and by monotonicity so does every later grant. This holds even
+    /// when `wall` reads behind the predecessor's wall clock. `stride` is in the
+    /// packed stamp domain. See the horizon-persistence notes on [`TsoOracle`].
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -556,16 +564,16 @@ where
 
     /// Wait out the successor grace period before the first grants.
     ///
-    /// Invariant: a fenced-but-alive predecessor keeps serving within-stride
-    /// grants from memory until its liveness certificate lapses, and that
-    /// certificate was anchored before the fence — so it expires no later
-    /// than one `heartbeat_interval` past the fence, which itself precedes
-    /// this successor's recovery. Waiting one full interval after recovery
-    /// therefore outlasts every possible predecessor certificate: this
-    /// oracle acknowledges no grant while the predecessor may still serve,
-    /// so no granted read timestamp can precede a commit acknowledged before
-    /// the grant. Assumes `heartbeat_interval` is identical across writer
-    /// generations (today it is a compile-time constant).
+    /// The invariant is this. A fenced but live predecessor keeps serving
+    /// within-stride grants from memory until its liveness certificate lapses.
+    /// That certificate was anchored before the fence, so it expires no later
+    /// than one `heartbeat_interval` past the fence, and the fence itself
+    /// precedes this successor's recovery. A wait of one full interval after
+    /// recovery therefore outlasts every possible predecessor certificate. This
+    /// oracle acknowledges no grant while the predecessor can still serve, so no
+    /// granted read timestamp can precede a commit acknowledged before the
+    /// grant. This assumes `heartbeat_interval` is identical across writer
+    /// generations. Today it is a compile-time constant.
     async fn wait_until_ready(&self) {
         if self.ready.load(Ordering::Acquire) {
             return;
@@ -611,8 +619,8 @@ where
     /// Persist a stride-advanced horizon covering the reserved range, then
     /// publish the horizon and a fresh certificate.
     ///
-    /// On failure the reserved timestamps are burned, never granted: gaps
-    /// are harmless, monotonicity is the requirement.
+    /// On a failure this method burns the reserved timestamps and never grants
+    /// them. Gaps are harmless. Monotonicity is the requirement.
     async fn advance_horizon(&self, first: u64, last: u64) -> Result<(), TsoError> {
         self.stats.record_horizon_wait();
         let mut slow = self.slow.lock().await;
@@ -646,19 +654,22 @@ where
         Ok(())
     }
 
-    /// Choose the horizon stride for this persist, pacing the logical arm
+    /// Choose the horizon stride for this persist, and pace the logical arm
     /// against wall time.
     ///
-    /// The wall-anchored arm keeps its fixed packed stride — already whole
-    /// milliseconds of wall headroom, so its persist cadence is wall-bounded.
-    /// The dense logical arm advances with grant volume, so a fixed count
-    /// stride would persist more often as load rises, flooding the serialized
-    /// grant path with synchronous durable writes. Pace it against wall time
-    /// instead: widen the stride (halving the persist rate) whenever persists
-    /// arrive closer together than [`LOGICAL_MIN_PERSIST_INTERVAL`], and
-    /// narrow it back toward the base once they space out, so the persist rate
-    /// settles at a handful per second under any grant volume while a light or
-    /// idle oracle keeps a tight horizon. Called under the slow-path mutex.
+    /// The wall-anchored arm keeps its fixed packed stride. That stride is
+    /// already whole milliseconds of wall headroom, so wall time bounds its
+    /// persist cadence. The dense logical arm advances with grant volume, so a
+    /// fixed count stride would persist more often as load rises and would flood
+    /// the serialized grant path with synchronous durable writes.
+    ///
+    /// This method paces the logical arm against wall time instead. It widens
+    /// the stride, which halves the persist rate, whenever persists arrive
+    /// closer together than [`LOGICAL_MIN_PERSIST_INTERVAL`]. It narrows the
+    /// stride back toward the base after the persists space out. The persist
+    /// rate therefore settles at a handful per second under any grant volume,
+    /// and a light or idle oracle keeps a tight horizon. The caller holds the
+    /// slow-path mutex.
     fn persist_stride(&self, slow: &mut SlowState, now_ms: u64) -> u64 {
         match &self.reservation {
             GrantReservation::WallAnchored { .. } => self.stride.get(),
@@ -782,9 +793,9 @@ pub(crate) fn parse_count(count: u64) -> Result<NonZeroU64, TsoError> {
 /// An interval in whole milliseconds, for comparison against the oracle's own
 /// monotone millisecond clock.
 ///
-/// Rounds to nearest: the result is internal only — it never reaches a wire
-/// field, durable record, or any external system — so nearest is the honest
-/// reading of the configured extent.
+/// This function rounds to nearest. The result is internal only: it never
+/// reaches a wire field, a durable record, or any external system. Nearest is
+/// therefore the honest reading of the configured extent.
 fn interval_ms(interval: Time) -> u64 {
     u64::try_from(interval.millis_i64()).unwrap_or(u64::MAX)
 }
@@ -814,9 +825,9 @@ mod tests {
         NonZeroU64::new(value).expect("test count is non-zero")
     }
 
-    /// Grant with a hang bound: any regression that turns a grant into an
-    /// unbounded wait must fail the suite promptly rather than stalling it
-    /// past the mutation-testing budget.
+    /// Grant with a hang bound. Any regression that turns a grant into an
+    /// unbounded wait must fail the suite quickly, and must not stall it past
+    /// the mutation-testing budget.
     async fn grant_within<C, H>(
         oracle: &TsoOracle<C, H>,
         count: NonZeroU64,

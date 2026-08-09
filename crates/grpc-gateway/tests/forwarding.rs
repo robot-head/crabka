@@ -1,7 +1,9 @@
-//! Active-active forwarding: two gateway replicas split the dedup partitions and
-//! each tails membership. A keyed record whose partition is owned by B, when
-//! submitted to A, is forwarded to B over HTTP and produced exactly once;
-//! re-submitting the same key dedups. A record with no known owner is Unavailable.
+//! Active-active forwarding.
+//!
+//! Two gateway replicas split the dedup partitions, and each one tails
+//! membership. A keyed record whose partition B owns, submitted to A, goes to B
+//! over HTTP and is produced exactly once. A resubmission of the same key
+//! dedups. A record with no known owner is Unavailable.
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -52,8 +54,9 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
-/// Bind a listener first (to learn the advertised addr), install the membership
-/// publisher, start ownership + membership, then serve Connect + forward routes.
+/// Bind a listener first, to learn the advertised addr. Then install the
+/// membership publisher, start ownership and membership, and serve the Connect
+/// and forward routes.
 async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();

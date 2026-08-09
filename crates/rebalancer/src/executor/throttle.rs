@@ -1,9 +1,8 @@
-//! Pure-logic KIP-73 throttle target computation. Given a slice of
-//! `Movement`s, returns the per-broker rate targets and per-topic
-//! replica-list targets that `ApplyThrottle` will write via
-//! `IncrementalAlterConfigs`.
+//! Pure-logic KIP-73 throttle target computation. For a slice of `Movement`s,
+//! it returns the per-broker rate targets and the per-topic replica-list
+//! targets that `ApplyThrottle` writes through `IncrementalAlterConfigs`.
 //!
-//! The computation is deterministic and side-effect-free so the
+//! The computation is deterministic and free of side effects, so the
 //! executor's state machine can test it in isolation.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,15 +12,15 @@ use crate::model::Movement;
 /// All four KIP-73 target families for a single proposal.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ThrottleTargets {
-    /// Brokers that will act as leaders for moving replicas.
-    /// `leader.replication.throttled.rate` is set on each.
+    /// Brokers that act as leaders for moving replicas. Each one gets
+    /// `leader.replication.throttled.rate`.
     pub leader_brokers: BTreeSet<i32>,
-    /// Brokers that will act as new followers (catching up).
-    /// `follower.replication.throttled.rate` is set on each.
+    /// Brokers that act as new followers and catch up. Each one gets
+    /// `follower.replication.throttled.rate`.
     pub follower_brokers: BTreeSet<i32>,
-    /// Per-topic value for `leader.replication.throttled.replicas`.
-    /// Map value is the canonical `partition:broker,partition:broker,...`
-    /// string ready for `IncrementalAlterConfigs`.
+    /// Per-topic value for `leader.replication.throttled.replicas`. The map
+    /// value is the canonical `partition:broker,partition:broker,...` string,
+    /// ready for `IncrementalAlterConfigs`.
     pub leader_replicas_per_topic: BTreeMap<String, String>,
     /// Per-topic value for `follower.replication.throttled.replicas`.
     pub follower_replicas_per_topic: BTreeMap<String, String>,

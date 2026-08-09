@@ -1,27 +1,29 @@
-//! KIP-213 foreign-key join: the five processors, ported from Apache Kafka 4.1
+//! KIP-213 foreign-key join: the five processors.
+//!
+//! This module is ported from Apache Kafka 4.1
 //! (`org.apache.kafka.streams.kstream.internals.foreignkeyjoin`). The byte
-//! formats are JVM-exact (pinned by `tests/testdata/fk_join/behavior.json`); the
-//! retraction/tombstone logic is ported verbatim from the 4.1 source and
-//! validated against the `inner_sequence` / `left_sequence` execution oracle.
+//! formats are JVM-exact, and `tests/testdata/fk_join/behavior.json` pins them.
+//! The retraction and tombstone logic is ported verbatim from the 4.1 source and
+//! validated against the `inner_sequence` and `left_sequence` execution oracle.
 //!
 //! ## Pipeline
 //!
-//! Left table `a` (`KTable<K,VA>`) → `SubscriptionSend` (keyed by the foreign
-//! key `KO`) → registration repartition topic → `SubscriptionReceive` (writes
-//! the subscription store) → `SubscriptionJoin` (reads `sb`, the right table)
-//! → response repartition topic. Independently, right table `b`
-//! (`KTable<KO,VB>`) → `ForeignTableJoin` (prefix-scans the subscription
-//! store, re-emits for every subscribed primary key on a right-side change) →
-//! response repartition topic. The response topic → `SubscriptionResolver`
-//! (reads `sa`, staleness-checks the hash, applies the joiner) → `OUTPUT`
-//! (the result `KTable<K,VR>`).
+//! Left table `a` (`KTable<K,VA>`) → `SubscriptionSend`, keyed by the foreign
+//! key `KO` → registration repartition topic → `SubscriptionReceive`, which
+//! writes the subscription store → `SubscriptionJoin`, which reads `sb`, the
+//! right table → response repartition topic. Independently, right table `b`
+//! (`KTable<KO,VB>`) → `ForeignTableJoin`, which prefix-scans the subscription
+//! store and re-emits for every subscribed primary key on a right-side change →
+//! response repartition topic. The response topic → `SubscriptionResolver`,
+//! which reads `sa`, staleness-checks the hash, and applies the joiner →
+//! `OUTPUT`, the result `KTable<K,VR>`.
 //!
 //! ## fk extractor and the hash
 //! The foreign key is `fk_extractor(&VA)`. The subscription wrapper carries
-//! `hash = murmur3(va_serde.serialize(newVA))` (`None` when the new value is
-//! null). The resolver re-hashes the *current* `sa` value and drops the response
-//! if it disagrees with the wrapper's hash — discarding results made stale by a
-//! rapid foreign-key change on the same primary key.
+//! `hash = murmur3(va_serde.serialize(newVA))`. The hash is `None` when the new
+//! value is null. The resolver re-hashes the *current* `sa` value and drops the
+//! response if it disagrees with the wrapper's hash. This discards results that a
+//! rapid foreign-key change on the same primary key made stale.
 
 use std::marker::PhantomData;
 
@@ -48,10 +50,13 @@ type Marker<T> = PhantomData<fn() -> T>;
 
 // ── 1. SubscriptionSend ──────────────────────────────────────────────────────
 
-/// `SubscriptionSendProcessorSupplier`: on each left-table `Change<VA>`, emit
-/// subscription wrapper(s) keyed by the foreign key `KO`. The instruction (and
-/// whether a delete is propagated) follows the JVM `defaultJoinInstructions` /
-/// `leftJoinInstructions` exactly.
+/// `SubscriptionSendProcessorSupplier`: emit subscription wrappers per left
+/// change.
+///
+/// On each left-table `Change<VA>`, this processor emits one or more
+/// subscription wrappers keyed by the foreign key `KO`. The instruction, and
+/// whether the processor propagates a delete, follows the JVM
+/// `defaultJoinInstructions` or `leftJoinInstructions` exactly.
 pub(crate) struct SubscriptionSendProcessor<K, VA, KO, FKE> {
     pub fk_extractor: FKE,
     pub va_serde: Box<dyn Serde<VA>>,
@@ -68,8 +73,8 @@ where
     KO: Send + Clone + 'static,
     FKE: Fn(&VA) -> KO + Send + 'static,
 {
-    /// Build + forward one subscription wrapper keyed by `fk`. `hash` is the
-    /// (cached) hash of the new left value (None on a delete).
+    /// Build and forward one subscription wrapper keyed by `fk`. `hash` is the
+    /// cached hash of the new left value, and it is `None` on a delete.
     fn forward(
         &self,
         ctx: &mut ProcessorContext<'_, '_, KO, SubscriptionWrapper>,
@@ -144,8 +149,9 @@ where
     KO: Send + Clone + 'static,
     FKE: Fn(&VA) -> KO + Send + 'static,
 {
-    /// True iff `serialize(a) != serialize(b)` (the JVM compares FKs by their
-    /// serialized bytes, not by `Eq`). `a`/`b` here are both `Some`.
+    /// True if and only if `serialize(a) != serialize(b)`. The JVM compares
+    /// foreign keys by their serialized bytes and not by `Eq`. Here `a` and `b`
+    /// are both `Some`.
     fn fk_differs(&self, a: &KO, b: &KO) -> bool {
         self.ko_serde.serialize("", a) != self.ko_serde.serialize("", b)
     }
@@ -200,7 +206,7 @@ where
         }
     }
 
-    /// JVM `defaultJoinInstructions` (inner).
+    /// JVM `defaultJoinInstructions`, the inner form.
     // mirrors the JVM signature + the cached hash
     fn default_join_instructions(
         &self,
@@ -245,9 +251,11 @@ where
 
 // ── 2. SubscriptionReceive ───────────────────────────────────────────────────
 
-/// `SubscriptionReceiveProcessorSupplier`: write/delete the subscription store
-/// keyed by `combined_key(fk, pk)`, then forward the wrapper downstream (keyed
-/// by `KO`) so `SubscriptionJoin` can read the right table.
+/// `SubscriptionReceiveProcessorSupplier`: update the subscription store.
+///
+/// This processor writes to or deletes from the subscription store, keyed by
+/// `combined_key(fk, pk)`. It then forwards the wrapper downstream keyed by
+/// `KO`, so `SubscriptionJoin` can read the right table.
 pub(crate) struct SubscriptionReceiveProcessor<KO> {
     pub store_name: String,
     pub ko_serde: Box<dyn Serde<KO>>,
@@ -291,9 +299,11 @@ where
 
 // ── 3. SubscriptionJoin ──────────────────────────────────────────────────────
 
-/// `SubscriptionJoinProcessorSupplier`: read the foreign value `VB` from the
-/// right table store (`sb`), build a `SubscriptionResponseWrapper` per the
-/// wrapper's instruction, and forward it keyed by the primary key `K`.
+/// `SubscriptionJoinProcessorSupplier`: read the foreign value and respond.
+///
+/// This processor reads the foreign value `VB` from the right table store `sb`.
+/// It builds a `SubscriptionResponseWrapper` that follows the wrapper's
+/// instruction, then forwards it keyed by the primary key `K`.
 pub(crate) struct SubscriptionJoinProcessor<KO, K, VB> {
     pub b_store: String,
     pub k_serde: Box<dyn Serde<K>>,
@@ -351,10 +361,12 @@ where
 
 // ── 4. ForeignTableJoin ──────────────────────────────────────────────────────
 
-/// `ForeignTableJoinProcessorSupplier`: on a right-table `Change<VB>` for `KO`,
-/// prefix-scan the subscription store for every primary key subscribed to that
-/// foreign key, and re-emit a response (the new VB value, or null on a right
-/// tombstone) keyed by each primary key `K`.
+/// `ForeignTableJoinProcessorSupplier`: re-emit on a right-table change.
+///
+/// On a right-table `Change<VB>` for `KO`, this processor prefix-scans the
+/// subscription store for every primary key subscribed to that foreign key. It
+/// then re-emits a response keyed by each primary key `K`. The response carries
+/// the new VB value, or null on a right tombstone.
 pub(crate) struct ForeignTableJoinProcessor<KO, K, VB> {
     pub store_name: String,
     pub ko_serde: Box<dyn Serde<KO>>,
@@ -411,11 +423,13 @@ where
 
 // ── 5. SubscriptionResolver ──────────────────────────────────────────────────
 
-/// `ResponseJoinProcessorSupplier`: read the current left value `VA` from `sa`,
-/// drop the response if its hash disagrees with the current value's hash
-/// (staleness), else apply the joiner and forward a `Change<VR>` (a tombstone
-/// when the foreign value is null under INNER, or under LEFT when the left value
-/// is also gone).
+/// `ResponseJoinProcessorSupplier`: resolve a response against the left value.
+///
+/// This processor reads the current left value `VA` from `sa`. It drops the
+/// response when its hash disagrees with the current value's hash, because the
+/// response is then stale. Otherwise it applies the joiner and forwards a
+/// `Change<VR>`. It forwards a tombstone when the foreign value is null under
+/// INNER, and under LEFT when the left value is also gone.
 pub(crate) struct SubscriptionResolverProcessor<K, VA, VB, VR, J> {
     pub a_store: String,
     pub va_serde: Box<dyn Serde<VA>>,
@@ -489,11 +503,12 @@ where
 
 // ── 6. FK-join OUTPUT ────────────────────────────────────────────────────────
 
-/// `KTABLE-FK-JOIN-OUTPUT-`: the result `KTable<K, VR>` node. The JVM uses a
-/// store-less `KTableSource`; here it is a passthrough that forwards the
-/// resolver's `Change<VR>` unchanged (the resolver already produced the correct
-/// value / tombstone), so downstream `to_stream` / materialization sees a normal
-/// table change-stream.
+/// `KTABLE-FK-JOIN-OUTPUT-`: the result `KTable<K, VR>` node.
+///
+/// The JVM uses a store-less `KTableSource`. Here the node is a passthrough that
+/// forwards the resolver's `Change<VR>` unchanged, because the resolver already
+/// produced the correct value or tombstone. A downstream `to_stream` or
+/// materialization therefore sees a normal table change-stream.
 pub(crate) struct FkJoinOutputProcessor<K, VR> {
     pub _pd: Marker<(K, VR)>,
 }
@@ -515,14 +530,17 @@ where
 
 // ── Test-only change collector ───────────────────────────────────────────────
 
-/// Shared buffer of collected `(key, new-value)` pairs (tombstone → `None`).
+/// Shared buffer of collected `(key, new-value)` pairs. A tombstone becomes
+/// `None`.
 #[cfg(test)]
 pub(crate) type ChangeBuffer<K, V> = std::sync::Arc<std::sync::Mutex<Vec<(Option<K>, Option<V>)>>>;
 
-/// Terminal processor (test-only): records each `Change<V>`'s key + **new** value
-/// (tombstone → `None`) into a shared buffer, in arrival order, and forwards
-/// nothing. Backs [`KTable::collect_changes`], used by the FK-join exec tests to
-/// observe a table's full change-stream including `None` tombstones.
+/// Test-only terminal processor that records the change-stream.
+///
+/// It records each `Change<V>`'s key and **new** value into a shared buffer in
+/// arrival order, and it forwards nothing. A tombstone becomes `None`. It backs
+/// [`KTable::collect_changes`], which the FK-join exec tests use to observe a
+/// table's full change-stream, `None` tombstones included.
 ///
 /// [`KTable::collect_changes`]: crate::dsl::ktable::KTable::collect_changes
 #[cfg(test)]

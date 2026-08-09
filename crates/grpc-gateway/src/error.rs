@@ -1,5 +1,7 @@
-//! Gateway error type. Wraps native-client errors so handlers can map to
-//! Connect status without leaking client internals.
+//! Gateway error type.
+//!
+//! [`GatewayError`] wraps native-client errors so handlers can map to Connect
+//! status without leaking client internals.
 
 use crabka_client_consumer::ConsumerError;
 use crabka_client_producer::ProducerError;

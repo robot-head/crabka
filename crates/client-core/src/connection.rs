@@ -1,4 +1,6 @@
-//! Single-broker `Connection`: TCP socket + reader/writer tasks +
+//! Single-broker `Connection`.
+//!
+//! A `Connection` holds a TCP socket, reader and writer tasks, and
 //! correlation-ID multiplexing.
 
 use std::{
@@ -28,9 +30,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{error::ClientError, request::ProtocolRequest, version::ApiVersionTable};
 
-/// Trait alias for the duplex stream types `Connection::from_stream`
-/// accepts (`TcpStream`, `tokio_rustls::client::TlsStream`, etc.). Boxed
-/// so callers can hand in heterogeneous stream types via one path.
+/// Trait alias for the duplex stream types `Connection::from_stream` accepts,
+/// such as `TcpStream` and `tokio_rustls::client::TlsStream`.
+///
+/// The trait is boxed so callers can hand in different stream types through
+/// one path.
 pub trait ClientDuplex: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin + ?Sized> ClientDuplex for T {}
 
@@ -38,9 +42,9 @@ type Pending = Arc<DashMap<i32, oneshot::Sender<Result<Bytes, ClientError>>>>;
 
 /// Kafka API key for `ApiVersionsRequest` / `ApiVersionsResponse`.
 ///
-/// Used to apply the response-header quirk: `ApiVersionsResponse` always
-/// uses `ResponseHeader v0` (no tagged-fields byte) even when the request
-/// version is flexible (v3+).
+/// `Connection` uses this key to apply the response-header quirk:
+/// `ApiVersionsResponse` always uses `ResponseHeader v0` (no tagged-fields
+/// byte) even when the request version is flexible (v3+).
 const API_VERSIONS_KEY: i16 = 18;
 
 /// Default deadline for one client DNS lookup.
@@ -185,10 +189,10 @@ pub struct ConnectionOptions {
     pub frame_max: ClientFrameMax,
     /// Client-side TLS/SASL policy. `None` = plaintext (default).
     ///
-    /// Boxed so `ConnectionOptions` stays small: it is cloned widely and
-    /// embedded in many connection-building futures, and `ClientSecurity`
-    /// carries several `String`/`PathBuf` fields that would otherwise
-    /// bloat every such future.
+    /// This field is boxed so `ConnectionOptions` stays small. Many call
+    /// sites clone `ConnectionOptions` and embed it in connection-building
+    /// futures, and `ClientSecurity` carries several `String`/`PathBuf`
+    /// fields that would otherwise make every such future large.
     pub security: Option<Box<crate::security::ClientSecurity>>,
 }
 
@@ -247,13 +251,13 @@ impl Connection {
         Self::from_stream(Box::new(stream), options).await
     }
 
-    /// Connect to `addr` honouring `options.security`: a secured (TLS/SASL)
-    /// dial when a policy is set, plaintext otherwise.
+    /// Connect to `addr` and honour `options.security`.
     ///
-    /// This is the single connect entry point for every metadata-client
-    /// site (pool, admin, RLMM fetch loop) so the plaintext-vs-secured
-    /// branch can't drift between them. The plaintext (`None`) path is
-    /// byte-identical to [`Self::connect`].
+    /// This method makes a secured (TLS/SASL) dial when a policy is set, and
+    /// a plaintext dial otherwise. It is the single connect entry point for
+    /// every metadata-client site (pool, admin, RLMM fetch loop), so the
+    /// plaintext-versus-secured branch cannot drift between them. The
+    /// plaintext (`None`) path is byte-identical to [`Self::connect`].
     ///
     /// # Errors
     /// Propagates [`Self::connect`] / [`Self::connect_secured`] failures.
@@ -273,8 +277,10 @@ impl Connection {
         }
     }
 
-    /// Connect to `addr`, applying `security` (TLS then SASL) before the
-    /// API-versions bootstrap. `Plaintext` is identical to [`Self::connect`].
+    /// Connect to `addr` and apply `security` (TLS then SASL) before the
+    /// API-versions bootstrap.
+    ///
+    /// `Plaintext` is identical to [`Self::connect`].
     ///
     /// # Errors
     ///
@@ -347,13 +353,13 @@ impl Connection {
     }
 
     /// Build a `Connection` over a pre-established, optionally
-    /// pre-authenticated stream. Negotiates API versions over the stream
-    /// and returns a usable `Connection`.
+    /// pre-authenticated stream.
     ///
-    /// Used by the broker's `InterBrokerClient` integration: TLS + SASL
-    /// handshake run before this call, so the stream is already
-    /// authenticated. From here on the connection's normal request /
-    /// response framing applies.
+    /// This method negotiates API versions over the stream and returns a
+    /// usable `Connection`. The broker's `InterBrokerClient` integration
+    /// calls it: the TLS + SASL handshake runs before this call, so the
+    /// stream is already authenticated. From here on the connection's normal
+    /// request / response framing applies.
     #[tracing::instrument(level = "debug", skip_all, err)]
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
@@ -398,9 +404,9 @@ impl Connection {
 
     /// Send a typed request and await the typed response.
     ///
-    /// The version is negotiated from the broker-advertised table populated
-    /// during `connect`. The request and response headers are encoded and
-    /// decoded automatically.
+    /// This method negotiates the version from the broker-advertised table
+    /// that `connect` populated. It encodes and decodes the request and
+    /// response headers automatically.
     ///
     /// # Errors
     ///
@@ -466,18 +472,19 @@ impl Connection {
 
     /// Send a hand-framed request and await the raw response body.
     ///
-    /// This bypasses the typed [`ProtocolRequest`] codegen path so callers
-    /// can speak Crabka-private APIs (e.g., the controller's Raft RPCs at
-    /// api keys 1000+) whose wire types live outside `crabka-protocol`.
+    /// This method bypasses the typed [`ProtocolRequest`] codegen path so
+    /// callers can speak Crabka-private APIs whose wire types live outside
+    /// `crabka-protocol`, for example the controller's Raft RPCs at api keys
+    /// 1000+.
     ///
-    /// The header is always written as `RequestHeader v2` (flexible) with
-    /// an empty trailing tagged-fields byte. The response is assumed to
-    /// use `ResponseHeader v1` (flexible): the I/O loop strips the 4-byte
-    /// correlation id, and this method strips the leading tagged-fields
-    /// byte before returning. Callers receive the raw body bytes only.
+    /// This method always writes the header as `RequestHeader v2` (flexible)
+    /// with an empty trailing tagged-fields byte. It assumes the response
+    /// uses `ResponseHeader v1` (flexible): the I/O loop strips the 4-byte
+    /// correlation id, and this method strips the leading tagged-fields byte
+    /// before it returns. Callers receive the raw body bytes only.
     ///
-    /// `body` is the encoded request body (everything after the request
-    /// header), exactly as it should appear on the wire.
+    /// `body` is the encoded request body, which is everything after the
+    /// request header, exactly as it should appear on the wire.
     ///
     /// # Errors
     ///
@@ -561,25 +568,27 @@ impl Connection {
 
 /// Spawn independent reader and writer tasks over the split socket.
 ///
-/// The socket is split into a read half and a write half, each driven by its
-/// own task, rather than multiplexing both directions through one `select!`
-/// over a single shared `Framed`. A combined task has to `await` the
-/// `framed.send(...)` flush *inside* a `select!` arm, during which the read
-/// arm is not polled — so for a request/response connection where the broker
-/// stays silent until it receives the next request, a write that does not
-/// complete in one poll wedges the whole connection: the frame sits buffered,
-/// no inbound traffic ever re-drives the loop, and the caller's request never
-/// reaches the wire. (This is what made `crabka-client-consumer`'s group
-/// rejoin hang under the jemalloc heap-profiling allocator, whose per-alloc
-/// sampling latency widened that window enough to trip it deterministically.)
-/// Independent halves make an inbound frame always pollable while an outbound
-/// write is in flight, and vice versa.
+/// This function splits the socket into a read half and a write half, and one
+/// task drives each half. It does not multiplex both directions through one
+/// `select!` over a single shared `Framed`. A combined task must `await` the
+/// `framed.send(...)` flush *inside* a `select!` arm, and it does not poll the
+/// read arm during that time. On a request/response connection the broker
+/// stays silent until it receives the next request. A write that does not
+/// complete in one poll therefore wedges the whole connection: the frame sits
+/// buffered, no inbound traffic ever re-drives the loop, and the caller's
+/// request never reaches the wire.
 ///
-/// Liveness on teardown: either task exiting (EOF, I/O error, dropped
-/// `Connection`, or `close()`) cancels the shared `shutdown` token so the
-/// other task also stops, and the reader fails every outstanding request with
-/// `Disconnected` — so a write-half failure surfaces to callers promptly
-/// instead of stalling them until the request timeout.
+/// This is what made `crabka-client-consumer`'s group rejoin hang under the
+/// jemalloc heap-profiling allocator. Its per-alloc sampling latency widened
+/// that window enough to trip the hang deterministically. Independent halves
+/// keep an inbound frame pollable while an outbound write is in flight, and
+/// the reverse.
+///
+/// Liveness on teardown: when either task exits on EOF, an I/O error, a
+/// dropped `Connection`, or `close()`, it cancels the shared `shutdown` token
+/// so the other task also stops. The reader then fails every outstanding
+/// request with `Disconnected`. A write-half failure therefore reaches
+/// callers promptly instead of stalling them until the request timeout.
 fn spawn_io_tasks(
     stream: Box<dyn ClientDuplex>,
     mut writer_rx: mpsc::Receiver<DispatchItem>,
@@ -658,10 +667,10 @@ fn spawn_io_tasks(
 ///   (`0x00` when empty).
 ///
 /// Note that `client_id` is `NULLABLE_STRING` (i16 length) in **both**
-/// versions — the upstream `RequestHeader.json` schema marks the field as
+/// versions. The upstream `RequestHeader.json` schema marks the field as
 /// `"flexibleVersions": "none"`, so even a v2 header keeps the i16-length
-/// encoding. Using UVARINT here causes the broker to misread the length and
-/// throw `InvalidRequestException` during header parsing.
+/// encoding. A UVARINT here makes the broker misread the length and throw
+/// `InvalidRequestException` during header parsing.
 ///
 /// Pass `with_tagged_fields = true` iff the request body is flexible
 /// (`version >= R::FLEXIBLE_MIN`).
@@ -687,9 +696,9 @@ fn build_request_header(
 
 /// Send an `ApiVersionsRequest` at version 0 and return the negotiated table.
 ///
-/// This is the bootstrap step inside `connect`: no version table exists yet,
-/// so we cannot use `Connection::send`. Version 0 is guaranteed to be
-/// supported by every broker.
+/// This is the bootstrap step inside `connect`. No version table exists yet,
+/// so this function cannot use `Connection::send`. Every broker supports
+/// version 0.
 #[tracing::instrument(level = "debug", skip_all, err)]
 async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, ClientError> {
     use crabka_protocol::{

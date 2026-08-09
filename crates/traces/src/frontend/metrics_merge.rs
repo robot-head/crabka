@@ -1,26 +1,34 @@
-//! Typed merge of `TraceQL`-metrics series across shards: union series by their
-//! label set, sum samples at equal timestamps, concatenate exemplars, and apply
-//! exemplar limiting. The serde structs are shaped to the querier's
-//! `trace_metrics_json` body — Tempo's protojson `QueryRangeResponse`: `labels`
-//! is a `KeyValue` array, `samples` carry `timestampMs` (milliseconds, int64
-//! rendered as a string) + `value`, plus `promLabels` and exemplars. This is the
-//! same shape Grafana's Tempo backend unmarshals, so the frontend both decodes
-//! per-shard querier responses and re-serializes the merged result correctly.
+//! Typed merge of `TraceQL`-metrics series across shards.
+//!
+//! The merge unions series by their label set, sums samples at equal
+//! timestamps, concatenates exemplars, and applies exemplar limiting.
+//!
+//! The serde structs are shaped to the querier's `trace_metrics_json` body,
+//! which is Tempo's protojson `QueryRangeResponse`. `labels` is a `KeyValue`
+//! array. Each entry in `samples` carries a `timestampMs`, an int64 count of
+//! milliseconds rendered as a string, plus a `value`. The body also carries
+//! `promLabels` and exemplars.
+//!
+//! This is the same shape Grafana's Tempo backend unmarshals. The frontend
+//! therefore both decodes per-shard querier responses and re-serializes the
+//! merged result correctly.
 
 use serde::{Deserialize, Serialize};
 
 /// One label as Tempo's `commonv1.KeyValue`: `{"key": k, "value": <AnyValue>}`.
-/// The value (e.g. `{"stringValue": "api"}`) is kept as raw JSON since merging
-/// only needs to compare label sets, not interpret values.
+///
+/// The value, such as `{"stringValue": "api"}`, stays raw JSON. The merge only
+/// compares label sets, and never interprets values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct KeyValue {
     pub key: String,
     pub value: serde_json::Value,
 }
 
-/// One metric sample: `{"timestampMs": "<ms>", "value": <f64>}`. Tempo renders
-/// the int64 millisecond timestamp as a string (protojson), so it stays a string
-/// here; merging compares/orders it numerically.
+/// One metric sample: `{"timestampMs": "<ms>", "value": <f64>}`.
+///
+/// Tempo's protojson renders the int64 millisecond timestamp as a string, so it
+/// stays a string here. The merge compares and orders it numerically.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MetricSample {
     #[serde(rename = "timestampMs")]
@@ -52,17 +60,20 @@ pub struct MetricSeries {
     pub exemplars: Vec<Exemplar>,
 }
 
-/// The `/api/metrics/query_range` + `/api/metrics/query` response body.
+/// The response body for `/api/metrics/query_range` and
+/// `/api/metrics/query`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MetricsResponseJson {
     #[serde(default)]
     pub series: Vec<MetricSeries>,
 }
 
-/// Merge a series into the accumulator: union by label set, summing samples at
-/// equal timestamps and concatenating exemplars. The querier emits a series'
-/// labels in a deterministic order for a given group, so equal label sets across
-/// shards compare equal as vectors.
+/// Merge a series into the accumulator.
+///
+/// This unions by label set, sums samples at equal timestamps, and
+/// concatenates exemplars. The querier emits a series' labels in a
+/// deterministic order for a given group, so equal label sets across shards
+/// compare equal as vectors.
 pub fn merge_metric_series(acc: &mut Vec<MetricSeries>, incoming: MetricSeries) {
     let Some(existing) = acc.iter_mut().find(|s| s.labels == incoming.labels) else {
         acc.push(incoming);

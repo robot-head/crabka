@@ -7,15 +7,17 @@
 //! wins every divergence:
 //!
 //!   * `SchemaRegistryIdentity` JSON key order is `host, port,
-//!     master_eligibility, scheme, version` (the eligibility field is
-//!     `master_eligibility` even in 7.4.0 — the master→leader rename touched
-//!     REST/config, not this wire JSON; `version` is LAST, not first).
-//!   * `SchemaRegistryGroupAssignment` (cp's `Assignment`) is `{error, master,
-//!     master_identity, version}` where `master` is the elected master's Kafka
-//!     MEMBER-ID string and `master_identity` is its `SchemaRegistryIdentity`.
-//!   * the `JoinGroup` protocol NAME is `"v0"` (the identity/assignment
-//!     `"version":1` is cp's internal SR-protocol *version* field, a different
-//!     thing from the protocol name).
+//!     master_eligibility, scheme, version`. The eligibility field is
+//!     `master_eligibility` even in 7.4.0, because the master→leader rename
+//!     touched REST and config, not this wire JSON. `version` is LAST, not
+//!     first.
+//!   * `SchemaRegistryGroupAssignment`, which is cp's `Assignment`, is
+//!     `{error, master, master_identity, version}`. `master` is the elected
+//!     master's Kafka MEMBER-ID string, and `master_identity` is its
+//!     `SchemaRegistryIdentity`.
+//!   * the `JoinGroup` protocol NAME is `"v0"`. The identity and assignment
+//!     `"version":1` is cp's internal SR-protocol *version* field, which is a
+//!     different thing from the protocol name.
 
 use serde::{Deserialize, Serialize};
 
@@ -49,10 +51,11 @@ impl SchemaRegistryIdentity {
     }
 }
 
-/// cp's `SchemaRegistryProtocol$Assignment`: the `SyncGroup` payload the leader
-/// broadcasts to every member. `master` is the elected master's Kafka member-id
-/// string; `master_identity` is that master's identity (absent only on error).
-/// JSON key order matches cp: `error, master, master_identity, version`.
+/// cp's `SchemaRegistryProtocol$Assignment`. It is the `SyncGroup` payload the
+/// leader broadcasts to every member. `master` is the elected master's Kafka
+/// member-id string. `master_identity` is that master's identity, and it is
+/// absent only on error. JSON key order matches cp:
+/// `error, master, master_identity, version`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaRegistryGroupAssignment {
     pub error: i32,
@@ -64,9 +67,9 @@ pub struct SchemaRegistryGroupAssignment {
 }
 
 /// The leader's deterministic master selection among the eligible members, as
-/// cp's `SchemaRegistryCoordinator` performs it: filter to `master_eligibility`
-/// members, then pick the one whose `url()` sorts first (cp collects the
-/// eligible members' `getUrl()`s and takes the minimum). Returns
+/// cp's `SchemaRegistryCoordinator` does it. It filters to `master_eligibility`
+/// members, then picks the one whose `url()` sorts first. cp collects the
+/// eligible members' `getUrl()`s and takes the minimum. Returns
 /// `(member_id, identity)` of the elected master.
 #[must_use]
 pub fn select_master(
@@ -164,8 +167,8 @@ mod tests {
     // via DescribeGroups. These run WITHOUT Docker — the durable regression
     // proof that our encoders reproduce cp's wire JSON byte-for-byte.
 
-    /// cp's elected master identity (the `master_identity` from the captured
-    /// assignment): `sr-node-1:8081`, http, eligible, version 1.
+    /// cp's elected master identity, which is the `master_identity` from the
+    /// captured assignment: `sr-node-1:8081`, http, eligible, version 1.
     fn cp_master_identity() -> SchemaRegistryIdentity {
         SchemaRegistryIdentity {
             host: "sr-node-1".into(),

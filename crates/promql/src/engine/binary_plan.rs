@@ -9,28 +9,32 @@ use super::{
 use crate::{error::Result, result::QueryResult, store::MetricStore};
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Plan an `Expr::Binary` (arithmetic / comparison / set operator) onto the
-    /// operator path: recurse both operands through the planner, assemble each to
-    /// an [`InstantValue`], then apply the **shared** combine routine
-    /// ([`combine_instant_binary`]) in pure Rust. The result is returned as a
-    /// [`PlannedInstant::Precomputed`] vector (or, for a scalar∘scalar fold, a
-    /// precomputed single-element scalar carried inside the vector shape — see
-    /// below). Because the same combine routine backs the interpreter
-    /// ([`Self::eval_instant_binary`]), the operator path matches Prometheus by
-    /// construction for every supported form: vector∘scalar, scalar∘vector,
-    /// one-to-one vector∘vector (with `on`/`ignoring` and `bool`), `group_left` /
-    /// `group_right` (with copied labels), and the `and`/`or`/`unless` set ops.
+    /// Plans an `Expr::Binary` onto the operator path.
     ///
-    /// Both operands must be planner-supported. A scalar operand
-    /// (`value_type() == Scalar`) folds via the interpreter's pure scalar
-    /// evaluation — scalars carry no NaN-staleness subtlety, so this is
+    /// The binary expression is an arithmetic, comparison, or set operator. This
+    /// method recurses both operands through the planner, assembles each one to
+    /// an [`InstantValue`], then applies the shared combine routine
+    /// [`combine_instant_binary`] in pure Rust. This method returns the result as
+    /// a [`PlannedInstant::Precomputed`] vector. For a scalar∘scalar fold it
+    /// returns a precomputed single-element scalar inside the vector shape, as
+    /// described below.
+    ///
+    /// The same combine routine backs the interpreter
+    /// [`Self::eval_instant_binary`], so the operator path matches Prometheus by
+    /// construction for every supported form: vector∘scalar, scalar∘vector,
+    /// one-to-one vector∘vector with `on`/`ignoring` and `bool`, `group_left` and
+    /// `group_right` with copied labels, and the `and`/`or`/`unless` set ops.
+    ///
+    /// Both operands must be planner-supported. A scalar operand, one whose
+    /// `value_type() == Scalar`, folds through the interpreter's pure scalar
+    /// evaluation. Scalars carry no NaN-staleness subtlety, so that fold is
     /// parity-exact. A vector operand recurses [`Self::plan_instant_expr`] and is
-    /// assembled (applying that shape's own drop semantics). If either operand is
-    /// not planner-supported (the recurse returns `None`), histogram-bearing, or a
-    /// non-instant type (matrix / string), the whole binary returns `None`
-    /// (interpreter fallback). A scalar∘scalar fold yields a `Scalar` result,
-    /// carried through [`PlannedInstant::PrecomputedScalar`] — both operands are
-    /// folded via the interpreter's pure scalar path, so it is parity-exact.
+    /// assembled with that shape's own drop semantics. The whole binary returns
+    /// `None`, and the interpreter takes over, if either operand is not
+    /// planner-supported, is histogram-bearing, or has a non-instant type: matrix
+    /// or string. A scalar∘scalar fold returns a `Scalar` result through
+    /// [`PlannedInstant::PrecomputedScalar`]. Both operands fold through the
+    /// interpreter's pure scalar path, so that fold is parity-exact.
     pub(super) async fn plan_binary_expr(
         &self,
         tenant: &str,
@@ -64,14 +68,14 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
     }
 
-    /// Evaluate one binary operand into an [`InstantValue`] via the planner.
+    /// Evaluates one binary operand into an [`InstantValue`] with the planner.
     ///
-    /// A scalar-typed operand is folded via the interpreter's pure scalar path
-    /// (parity-exact — scalars have no staleness/NaN-window subtlety). A
-    /// vector-typed operand recurses [`Self::plan_instant_expr`] and is assembled
-    /// to an instant vector. Returns `None` (caller falls back) for a
-    /// non-planner-supported vector operand or a non-instant operand type
-    /// (matrix / string).
+    /// A scalar-typed operand folds through the interpreter's pure scalar path.
+    /// That path is parity-exact, because scalars have no staleness or NaN-window
+    /// subtlety. A vector-typed operand recurses [`Self::plan_instant_expr`] and
+    /// is assembled to an instant vector. This method returns `None`, and the
+    /// caller falls back, for a vector operand the planner does not support and
+    /// for a non-instant operand type: matrix or string.
     fn plan_binary_operand<'a>(
         &'a self,
         tenant: &'a str,

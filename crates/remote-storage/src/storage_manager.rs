@@ -26,15 +26,15 @@ pub enum IndexType {
     ProducerSnapshot,
     /// Leader-epoch checkpoint (`leader-epoch-checkpoint`).
     LeaderEpoch,
-    /// Aborted-transaction index (`.txnindex`). Optional — a segment with
-    /// no aborted transactions has none.
+    /// Aborted-transaction index (`.txnindex`). It is optional. A segment
+    /// with no aborted transactions has none.
     Transaction,
 }
 
 impl IndexType {
-    /// The conventional Kafka filename suffix for this index type, used by
-    /// filesystem-backed stores. `LeaderEpoch` has no dotted suffix in
-    /// Kafka; the reference store uses `.leader-epoch-checkpoint`.
+    /// The conventional Kafka filename suffix for this index type.
+    /// Filesystem-backed stores use it. `LeaderEpoch` has no dotted suffix in
+    /// Kafka, so the reference store uses `.leader-epoch-checkpoint`.
     #[must_use]
     pub fn suffix(self) -> &'static str {
         match self {
@@ -47,15 +47,15 @@ impl IndexType {
     }
 }
 
-/// The local files (and in-memory leader-epoch bytes) that make up one log
-/// segment to be copied to the remote tier.
+/// The local files, and the in-memory leader-epoch bytes, that make up one
+/// log segment for copy to the remote tier.
 ///
 /// Mirrors Kafka's `LogSegmentData`. `transaction_index` is optional; a
 /// segment with no aborted transactions has no `.txnindex` file.
-/// `producer_snapshot_index` is optional too — Crabka does not yet write
-/// producer-id snapshots, so it is typically `None` (Kafka always has one).
-/// The leader-epoch index is passed as bytes (rather than a path) because
-/// the broker holds the relevant slice in memory at copy time.
+/// `producer_snapshot_index` is optional too. Crabka does not yet write
+/// producer-id snapshots, so it is usually `None`, while Kafka always has
+/// one. The broker passes the leader-epoch index as bytes and not as a path,
+/// because it holds the relevant slice in memory at copy time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogSegmentData {
     /// Path to the `.log` data file.
@@ -74,16 +74,17 @@ pub struct LogSegmentData {
 
 /// SPI for the remote object store that holds offloaded segment data.
 ///
-/// Implementations are **synchronous and blocking** — they mirror Kafka's
+/// Implementations are **synchronous and blocking**. They mirror Kafka's
 /// `RemoteStorageManager`, which the broker drives from a dedicated thread
-/// pool (the broker wraps these calls in `spawn_blocking`). Implementations
-/// must be `Send + Sync` so the broker can share one instance across tasks.
+/// pool, and the broker wraps these calls in `spawn_blocking`.
+/// Implementations must be `Send + Sync` so the broker can share one instance
+/// across tasks.
 pub trait RemoteStorageManager: Send + Sync {
-    /// Copy a segment's data and all of its indexes to the remote tier.
+    /// Copies a segment's data and all of its indexes to the remote tier.
     ///
-    /// Returns optional [`CustomMetadata`] (e.g. an object-store key or
-    /// version id) that the broker records on the segment and passes back
-    /// on every later fetch/delete for it.
+    /// Returns optional [`CustomMetadata`], for example an object-store key
+    /// or a version id. The broker records it on the segment and passes it
+    /// back on every later fetch or delete for that segment.
     ///
     /// # Errors
     ///
@@ -95,7 +96,7 @@ pub trait RemoteStorageManager: Send + Sync {
         data: &LogSegmentData,
     ) -> Result<Option<CustomMetadata>, RemoteStorageError>;
 
-    /// Fetch a byte range of a segment's `.log` data.
+    /// Fetches a byte range of a segment's `.log` data.
     ///
     /// `start_position` is the inclusive starting byte offset within the
     /// segment. `end_position`, when `Some`, is the inclusive last byte
@@ -112,21 +113,22 @@ pub trait RemoteStorageManager: Send + Sync {
         end_position: Option<u32>,
     ) -> Result<Vec<u8>, RemoteStorageError>;
 
-    /// Fetch one of a segment's indexes in full.
+    /// Fetches one of a segment's indexes in full.
     ///
     /// # Errors
     ///
-    /// Returns [`RemoteStorageError::SegmentNotFound`] if the segment (or
-    /// the requested index) is not present, or [`RemoteStorageError::Io`]
-    /// on a store failure.
+    /// Returns [`RemoteStorageError::SegmentNotFound`] if the segment or the
+    /// requested index is not present, or [`RemoteStorageError::Io`] on a
+    /// store failure.
     fn fetch_index(
         &self,
         metadata: &RemoteLogSegmentMetadata,
         index_type: IndexType,
     ) -> Result<Vec<u8>, RemoteStorageError>;
 
-    /// Delete a segment's data and all of its indexes from the remote tier.
-    /// Implementations must be idempotent: deleting an absent segment
+    /// Deletes a segment's data and all of its indexes from the remote tier.
+    ///
+    /// Implementations must be idempotent: a delete of an absent segment
     /// succeeds.
     ///
     /// # Errors

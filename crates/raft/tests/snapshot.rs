@@ -1,14 +1,17 @@
-//! End-to-end snapshot generation + restart recovery for a single-voter
-//! controller. Proves a committed metadata change survives a manual snapshot
-//! and a full process-style restart that rebuilds the image from the on-disk
-//! checkpoint (not from in-memory state).
+//! End-to-end snapshot generation and restart recovery for a single-voter
+//! controller.
 //!
-//! Slice 3c reimplements `trigger_snapshot` (image → KIP-630 checkpoint) and
-//! restart recovery. The auto-snapshot background pump (byte/interval triggers)
-//! and cross-node `InstallSnapshot` learner catch-up that the openraft
-//! controller carried are deferred — auto-snapshot heuristics and Slice-4
-//! `FetchSnapshot` catch-up respectively — so the tests that exercised them are
-//! gone with openraft.
+//! The test proves that a committed metadata change survives a manual snapshot
+//! and a full process-style restart. That restart rebuilds the image from the
+//! on-disk checkpoint, and not from in-memory state.
+//!
+//! Slice 3c reimplements `trigger_snapshot`, which turns the image into a
+//! KIP-630 checkpoint, and it reimplements restart recovery. Two features that
+//! the openraft controller carried are deferred: the auto-snapshot background
+//! pump, with its byte and interval triggers, waits on the auto-snapshot
+//! heuristics, and the cross-node `InstallSnapshot` learner catch-up waits on
+//! the Slice-4 `FetchSnapshot` catch-up. The tests that exercised them went
+//! away with openraft.
 
 use std::time::Duration;
 
@@ -19,7 +22,7 @@ use crabka_units::prelude::{Time, millis};
 use tempfile::TempDir;
 use uuid::Uuid;
 
-/// Single-voter elections are instant; a short timeout keeps each boot well
+/// Single-voter elections are instant, and a short timeout keeps each boot well
 /// inside the 30-second leader deadline.
 const FAST_ELECTION_TIMEOUT: Time = millis(200);
 

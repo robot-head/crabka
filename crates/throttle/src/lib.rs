@@ -13,9 +13,11 @@ pub use ids::{
 #[cfg(not(creusot))]
 pub use runtime::{ThrottleState, TokenBucket};
 
-/// `min(available + refill, burst)` in unbounded integers. Equal to the
-/// executable `available.saturating_add(refill).min(burst)` whenever the
-/// saturating sum would exceed `burst`, which is the only case that matters.
+/// `min(available + refill, burst)` in unbounded integers.
+///
+/// This is equal to the executable
+/// `available.saturating_add(refill).min(burst)` when the saturating sum would
+/// exceed `burst`, which is the only case that matters.
 #[cfg(creusot)]
 #[logic]
 pub fn capped(available: Int, refill: Int, burst: Int) -> Int {
@@ -26,13 +28,15 @@ pub fn capped(available: Int, refill: Int, burst: Int) -> Int {
     }
 }
 
-/// Pure token-bucket consume arithmetic. Given the current `available`, the
-/// `refill` claimed for this call, the `burst` cap, and `requested` tokens,
-/// return `(grant, new_available)` where `capped = (available + refill).min(burst)`,
+/// Pure token-bucket consume arithmetic.
+///
+/// The inputs are the current `available`, the `refill` claimed for this call,
+/// the `burst` cap, and the `requested` tokens. The function returns
+/// `(grant, new_available)`, where `capped = (available + refill).min(burst)`,
 /// `grant = requested.min(capped)`, and `new_available = capped - grant`.
 ///
-/// The four inputs are distinct newtypes so a transposed call site — the
-/// textbook swap bug for four adjacent `u64`s — no longer compiles.
+/// The four inputs are distinct newtypes, so a transposed call site no longer
+/// compiles. That is the textbook swap bug for four adjacent `u64`s.
 #[ensures(result.0.0@ <= requested.0@)]
 #[ensures(result.1.0@ <= burst.0@)]
 #[ensures(result.0.0@ + result.1.0@ == capped(available.0@, refill.0@, burst.0@))]

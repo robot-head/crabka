@@ -9,8 +9,9 @@ use crate::throttle::TokenBucket;
 
 #[derive(Debug, Default)]
 pub struct QuotaBuckets {
-    /// Keyed by (`quota_key`, canonical entity key). One bucket per
-    /// (`quota_type`, entity) pair, lazy-allocated on first lookup.
+    /// Keyed by (`quota_key`, canonical entity key). There is one bucket for
+    /// each (`quota_type`, entity) pair, allocated lazily on the first
+    /// lookup.
     buckets: DashMap<(String, EntityKey), Arc<TokenBucket>>,
 }
 
@@ -22,8 +23,8 @@ impl QuotaBuckets {
         }
     }
 
-    /// Get or lazily create a bucket for `(quota_key, entity_key)`,
-    /// initializing it to `initial_rate` if newly created.
+    /// Returns the bucket for `(quota_key, entity_key)`, and creates it
+    /// lazily if it does not exist. A new bucket starts at `initial_rate`.
     #[must_use]
     pub fn get_or_create(
         &self,
@@ -46,8 +47,8 @@ impl QuotaBuckets {
         entry.clone()
     }
 
-    /// Iterate every (`quota_key`, `entity_key`, bucket) — used by the
-    /// refresh task to push new rates after an image change.
+    /// Iterates over every (`quota_key`, `entity_key`, bucket) triple. The
+    /// refresh task uses it to push new rates after an image change.
     pub fn iter(&self) -> impl Iterator<Item = ((String, EntityKey), Arc<TokenBucket>)> + '_ {
         self.buckets
             .iter()

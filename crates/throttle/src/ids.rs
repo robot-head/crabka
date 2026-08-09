@@ -1,16 +1,17 @@
 //! Newtypes for the token-bucket domain values.
 //!
-//! The consume arithmetic threads four same-typed `u64` token counts —
-//! `available`, `refill`, `burst`, and `requested` — plus returns a
-//! `(grant, new_available)` pair of the same type. Bare `u64`s let a caller
-//! transpose them and still compile (the textbook swap bug). These wrappers
-//! make the compiler reject a mixed-up call site.
+//! The consume arithmetic threads four `u64` token counts of the same type:
+//! `available`, `refill`, `burst`, and `requested`. It also returns a
+//! `(grant, new_available)` pair of the same type. With bare `u64`s, a caller
+//! can transpose them and the code still compiles. This is the textbook swap
+//! bug. These wrappers make the compiler reject a mixed-up call site.
 //!
-//! The values are pure in-memory counts (never serialised), so no
-//! `#[serde(transparent)]` is needed. Arithmetic is done on the inner `u64`
-//! (`.0`) inside [`crate::plan_consume`], since the operations cross newtype
-//! boundaries (`available + refill`, `capped - grant`) — deriving `Add`/`Sub`
-//! would not type-check across distinct wrappers, so they are omitted.
+//! The values are pure in-memory counts that are never serialised, so they do
+//! not need `#[serde(transparent)]`. [`crate::plan_consume`] does the
+//! arithmetic on the inner `u64` (`.0`), because the operations cross newtype
+//! boundaries: `available + refill` and `capped - grant`. A derived `Add` or
+//! `Sub` would not type-check across distinct wrappers, so this module omits
+//! them.
 
 #[cfg(creusot)]
 use creusot_std::prelude::DeepModel;

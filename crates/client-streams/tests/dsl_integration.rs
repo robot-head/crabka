@@ -1,9 +1,11 @@
-//! Broker integration test: DSL counting topology + restart-restore.
+//! Broker integration test for the DSL counting topology and the
+//! restart-restore.
 //!
-//! Proves that a `StreamsBuilder`-based counting app (DSL path) works
-//! end-to-end against a real broker and that a fresh `KafkaStreams` instance
-//! restores its `counts` store from the changelog so that counts continue from
-//! where the previous instance left off rather than resetting to zero.
+//! It proves that a counting app built on `StreamsBuilder`, which is the DSL
+//! path, works end to end against a real broker. It also proves that a fresh
+//! `KafkaStreams` instance restores its `counts` store from the changelog, so
+//! the counts continue from where the previous instance stopped and do not reset
+//! to zero.
 
 use std::time::Duration;
 
@@ -68,10 +70,11 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 
 // ─── DSL counting topology ────────────────────────────────────────────────────
 
-/// Build the DSL counting topology:
-/// `dsl-in` → `group_by_key` → `count` → `to_stream` → `dsl-out`
-/// No repartition needed because `group_by_key` is used directly on the source
-/// stream (key is not changed upstream).
+/// Build the DSL counting topology
+/// `dsl-in` → `group_by_key` → `count` → `to_stream` → `dsl-out`.
+///
+/// It needs no repartition, because it calls `group_by_key` directly on the
+/// source stream and nothing upstream changes the key.
 fn dsl_counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["dsl-in"])
@@ -84,8 +87,8 @@ fn dsl_counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
 
 // ─── output collector ────────────────────────────────────────────────────────
 
-/// Poll `dsl-out` partition 0 until `want` records arrive.
-/// Returns `(key, i64_value)` pairs in arrival order.
+/// Poll `dsl-out` partition 0 until `want` records arrive. The helper returns
+/// the `(key, i64_value)` pairs in arrival order.
 async fn collect_output_keyed(
     admin: &Client,
     bootstrap: &str,
@@ -160,9 +163,11 @@ async fn collect_output_keyed(
     collected
 }
 
-/// Open the local `counts` KV store for interactive queries, retrying while the
-/// app is still joining/rebalancing (the store isn't assigned the instant
-/// `build()` returns). Panics if it never becomes available within 30s.
+/// Open the local `counts` KV store for interactive queries.
+///
+/// The helper retries while the app still joins or rebalances, because the store
+/// is not assigned the instant `build()` returns. It panics when the store does
+/// not become available within 30s.
 async fn open_counts_store(
     streams: &KafkaStreams,
 ) -> crabka_client_streams::ReadOnlyKeyValueStore<String, i64> {
@@ -200,11 +205,14 @@ async fn produce_one(producer: &crabka_client_producer::Producer, val: &str) {
 
 // ─── tests ────────────────────────────────────────────────────────────────────
 
-/// **Cache-OFF path** (`cache_max_bytes(0)`): the count store emits *per record*
-/// and logs every update to the changelog immediately (JVM emit-on-update). With
-/// caching disabled there is no buffering/dedup, so `a,a,b` yields three outputs
-/// `a→1, a→2, b→1`. After restart the store restores from the changelog, so the
-/// next `a` is `a→3` (durability guard for the original restore bug).
+/// The **cache-OFF path** with `cache_max_bytes(0)`. The count store emits *per
+/// record* and logs every update to the changelog at once, which is the JVM
+/// emit-on-update behaviour.
+///
+/// With caching off there is no buffering and no dedup, so `a,a,b` gives the
+/// three outputs `a→1, a→2, b→1`. After a restart the store restores from the
+/// changelog, so the next `a` is `a→3`. This is the durability guard for the
+/// original restore bug.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dsl_count_restart_restore_emit_on_update() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -324,33 +332,38 @@ async fn dsl_count_restart_restore_emit_on_update() {
     broker.shutdown().await;
 }
 
-/// **Cache-ON path** (default 10 MiB record cache): the count store buffers its
-/// writes and only emits downstream + logs the changelog on a *cache flush*
-/// (commit tick or close). The semantics are **emit-on-commit, deduped**:
+/// The **cache-ON path** with the default 10 MiB record cache. The count store
+/// buffers its writes. It emits downstream and logs the changelog only on a
+/// *cache flush*, which is a commit tick or a close. The semantics are
+/// **emit-on-commit, deduped**:
 ///
-/// - `a,a,b` is processed in a single poll batch, buffering `counts: a→2, b→1`
-///   in the cache (NO per-record `a→1` emit).
-/// - On the next flush the cache emits the deduped `a→2`, `b→1` to `dsl-out`
-///   AND writes the same to the changelog — exactly **2** records, vs the **3**
-///   per-record updates the cache-off path emits.
-/// - After restart (same `app_id`) + one more `a`: restore from the changelog →
-///   `a` resumes at 2 → next count is `a→3`.
+/// - `a,a,b` is processed in a single poll batch and buffers `counts: a→2, b→1`
+///   in the cache, with NO per-record `a→1` emit.
+/// - On the next flush the cache emits the deduped `a→2` and `b→1` to `dsl-out`
+///   AND writes the same records to the changelog. That is exactly **2**
+///   records, against the **3** per-record updates that the cache-off path
+///   emits.
+/// - After a restart on the same `app_id` and one more `a`, the store restores
+///   from the changelog, so `a` resumes at 2 and the next count is `a→3`.
 ///
-/// This is the real end-to-end proof of the record cache over a broker, and is
-/// distinct from the cache-off variant which emits the 3 per-record updates.
+/// This is the real end-to-end proof of the record cache over a broker, and it
+/// differs from the cache-off variant, which emits the 3 per-record updates.
 ///
-/// **Determinism.** I do NOT rely on "only flush on close": `tokio::time::interval`
-/// fires its first tick immediately, so even a 60 s `commit_interval` produces an
-/// early commit-flush (verified empirically — the first commit tick lands ~0.5–3.5 s
-/// in, NOT at 60 s). That is *correct* emit-on-commit behaviour, not a bug. What
-/// makes the deduped 2-record emit deterministic is that all three records are
-/// produced+flushed BEFORE the app starts, so a single poll batch fetches and
-/// processes `a,a,b` back-to-back into the cache before ANY flush — no commit tick
-/// can interleave between `a→1` and `a→2`. We use a 60 s `commit_interval` so at
-/// most one commit-flush fires (the immediate first tick), and we drive the
-/// "records processed" signal off the live `counts` store via interactive queries
-/// (which read through the cache, seeing the buffered values) rather than a blind
-/// sleep. We then assert the deduped output is EXACTLY `a→2, b→1`.
+/// **Determinism.** This test does NOT rely on a flush at close only.
+/// `tokio::time::interval` fires its first tick at once, so even a 60 s
+/// `commit_interval` produces an early commit-flush. Empirically the first
+/// commit tick lands about 0.5 s to 3.5 s in, NOT at 60 s. That is *correct*
+/// emit-on-commit behaviour and not a bug.
+///
+/// The deduped 2-record emit is deterministic for a different reason: all three
+/// records are produced and flushed BEFORE the app starts. A single poll batch
+/// therefore fetches and processes `a,a,b` back to back into the cache before
+/// ANY flush, so no commit tick can interleave between `a→1` and `a→2`. The test
+/// uses a 60 s `commit_interval`, so at most one commit-flush fires, the
+/// immediate first tick. It drives the "records processed" signal off the live
+/// `counts` store through interactive queries, which read through the cache and
+/// see the buffered values, rather than off a blind sleep. It then asserts that
+/// the deduped output is EXACTLY `a→2, b→1`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // one self-contained end-to-end scenario:
 // produce → cache-buffer → deduped emit → restart → restore → re-emit.

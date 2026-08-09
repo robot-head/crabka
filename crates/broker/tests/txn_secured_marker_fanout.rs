@@ -1,33 +1,33 @@
 //! Cross-broker transaction-marker fan-out over a *secured* inter-broker
 //! listener.
 //!
-//! `EndTxn` fans `WriteTxnMarkers` out to every partition leader involved in
-//! the transaction. When a partition is led by a *remote* broker the marker
-//! travels over the inter-broker listener, so the fan-out must run the same
-//! TLS / SASL handshakes that listener demands. It dials through the shared
-//! `InterBrokerClient` (which carries the inter-broker TLS connector + SASL
-//! credentials), not a bare one-shot `crabka_client_core::Client` (which
-//! carries neither, and so could only ever reach a PLAINTEXT inter-broker
-//! listener).
+//! `EndTxn` fans `WriteTxnMarkers` out to every partition leader in the
+//! transaction. When a *remote* broker leads a partition, the marker travels
+//! over the inter-broker listener. The fan-out must run the same TLS and SASL
+//! handshakes that the listener demands. It dials through the shared
+//! `InterBrokerClient`, which carries the inter-broker TLS connector and the
+//! SASL credentials. It does not use a bare one-shot
+//! `crabka_client_core::Client`, which carries neither and can only reach a
+//! PLAINTEXT inter-broker listener.
 //!
 //! The test boots a two-broker cluster whose inter-broker listener is
-//! `SASL_PLAINTEXT`, creates a topic whose two partitions round-robin onto
-//! different brokers (P0 → node 1, P1 → node 2), then drives the transaction
+//! `SASL_PLAINTEXT`. It creates a topic whose two partitions round-robin onto
+//! different brokers: P0 → node 1, P1 → node 2. It then drives the transaction
 //! control plane *directly* with SASL-authenticated low-level clients:
 //! `FindCoordinator → InitProducerId → AddPartitionsToTxn → EndTxn`. The
-//! partition added to the transaction is deliberately the one led by the
-//! broker that is *not* the coordinator, so `EndTxn` must fan a marker to a
-//! remote leader over the SASL listener. With the pre-fix one-shot dial that
-//! handshake fails and `EndTxn` returns a retriable error; with the pooled
+//! partition added to the transaction is deliberately the one led by the broker
+//! that is *not* the coordinator, so `EndTxn` must fan a marker to a remote
+//! leader over the SASL listener. With the earlier one-shot dial that handshake
+//! fails and `EndTxn` returns a retriable error. With the pooled
 //! `InterBrokerClient` it returns `NONE`.
 //!
-//! Driving the control plane by hand (rather than via the high-level
-//! `Producer`) sidesteps a separate, pre-existing gap where the producer's
-//! transaction-coordinator connection ignores client security — keeping this
-//! test focused on the broker→broker fan-out that this change fixes.
+//! The test drives the control plane by hand and not with the high-level
+//! `Producer`. This avoids a separate, earlier gap where the producer's
+//! transaction-coordinator connection ignores client security. The test stays
+//! focused on the broker-to-broker fan-out that this change fixes.
 //!
-//! Windows-gated like the other multi-node transactional tests (openraft +
-//! tokio scheduling races on the hosted Windows runner).
+//! Windows-gated like the other multi-node transactional tests, because
+//! openraft and tokio scheduling race on the hosted Windows runner.
 
 use std::{
     net::SocketAddr,
@@ -63,8 +63,9 @@ const IB_LISTENER: &str = "SASL_PLAINTEXT";
 const TID: &str = "remote-fanout-tid";
 const TOPIC: &str = "t";
 
-/// A single `SASL_PLAINTEXT` data listener (also the inter-broker listener),
-/// bound + advertised at the concrete `addr`. The advertised port must be
+/// A single `SASL_PLAINTEXT` data listener, bound and advertised at `addr`.
+///
+/// This listener is also the inter-broker listener. The advertised port must be
 /// concrete: self-registration records `ListenerSpec::advertised` *before* the
 /// listener is bound, so a `:0` would register port 0 and break the
 /// inter-broker dial.
@@ -79,8 +80,8 @@ fn sasl_listener(addr: SocketAddr) -> Vec<ListenerSpec> {
     }]
 }
 
-/// Layer the `SASL_PLAINTEXT` inter-broker listener + matching `SASL/PLAIN`
-/// credentials onto a base config whose listener binds `addr`.
+/// Add the `SASL_PLAINTEXT` inter-broker listener and its `SASL/PLAIN`
+/// credentials to a base config whose listener binds `addr`.
 fn apply_sasl(cfg: &mut BrokerConfig, addr: SocketAddr) {
     cfg.listen_addr = addr;
     cfg.advertised_listener = addr.to_string();
@@ -120,10 +121,12 @@ async fn sasl_client(addr: &str) -> Client {
         .expect("sasl client connect")
 }
 
-/// Boot a two-broker cluster (KIP-853 auto-join) whose data / inter-broker
-/// listener is `SASL_PLAINTEXT`. Mirrors `support::start_n_node`'s concrete-port
-/// handling — the marker fan-out resolves the leader's advertised inter-broker
-/// endpoint, which must be a real reachable port.
+/// Boot a two-broker KIP-853 auto-join cluster on a `SASL_PLAINTEXT` listener.
+///
+/// The same listener carries data and inter-broker traffic. This function
+/// mirrors the concrete-port handling in `support::start_n_node`. The marker
+/// fan-out resolves the leader's advertised inter-broker endpoint, which must be
+/// a real reachable port.
 async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, BrokerError> {
     support::init_tracing();
 
@@ -200,8 +203,10 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
     Ok(vec![(broker0, cfg0, dir0), (broker1, cfg1, dir1)])
 }
 
-/// Retry cluster boot a few times — short raft timings occasionally split-vote
-/// on busy runners. Mirrors `support::start_n_node_with_retry`.
+/// Retry the cluster boot a few times.
+///
+/// Short raft timings sometimes split-vote on busy runners. This function
+/// mirrors `support::start_n_node_with_retry`.
 async fn start_two_sasl_with_retry() -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
     let mut last = None;
     for attempt in 1..=3 {
@@ -231,9 +236,11 @@ async fn wait_both_registered(cluster: &[(BrokerHandle, BrokerConfig, TempDir)])
     }
 }
 
-/// Resolve `TOPIC`'s partition → leader-node map via Metadata, once both
-/// partitions have an elected leader in `handle`'s metadata image — the same
-/// image the admin client (connected to that broker) is served Metadata from.
+/// Resolve `TOPIC`'s partition → leader-node map with Metadata.
+///
+/// The function waits until both partitions have an elected leader in
+/// `handle`'s metadata image. The broker serves Metadata to the connected admin
+/// client from that same image.
 async fn partition_leaders(client: &Client, handle: &BrokerHandle) -> Vec<(i32, i32)> {
     // A non-zero `leader` in the image is exactly the wire condition the old
     // loop polled for (`leader_id >= 0`); await both partitions' elections

@@ -1,11 +1,10 @@
 //! Render Crabka's own deterministic consensus simulator into a Mermaid
 //! sequence-diagram "slideshow" markdown page.
 //!
-//! The diagrams here are not hand-drawn: [`failure_scenarios_md`] runs
+//! The diagrams here are not hand-drawn. [`failure_scenarios_md`] runs
 //! [`crabka_raft::scenarios::scenarios`] in process and turns each recorded
-//! [`ScenarioTrace`] into a Zola
-//! `{% mermaid() %}` paired shortcode, so what the reader sees is exactly what
-//! the real KIP-595/996 algorithm did.
+//! [`ScenarioTrace`] into a Zola `{% mermaid() %}` paired shortcode. The reader
+//! thus sees exactly what the real KIP-595/996 algorithm did.
 
 use std::fmt::Write as _;
 
@@ -20,7 +19,8 @@ message, timeout, partition, and leader election it takes. Because the \
 simulator is deterministic, the diagrams below reflect the *real* algorithm, \
 step for step, rather than an idealized cartoon of it.\n";
 
-/// Render the complete failure-scenarios slideshow page body (no front matter).
+/// Render the complete failure-scenarios slideshow page body, without front
+/// matter.
 #[must_use]
 pub fn failure_scenarios_md() -> String {
     let mut out = String::new();
@@ -32,7 +32,8 @@ pub fn failure_scenarios_md() -> String {
     out
 }
 
-/// Append one scenario (heading, summary, invariant, diagram(s), outcome).
+/// Append one scenario: the heading, the summary, the invariant, the diagrams,
+/// and the outcome.
 fn render_scenario(out: &mut String, trace: &ScenarioTrace) {
     let _ = writeln!(out, "## {}\n", trace.title);
     let _ = writeln!(out, "{}\n", trace.summary);
@@ -89,11 +90,12 @@ fn render_diagram(out: &mut String, trace: &ScenarioTrace) {
     out.push_str("{% end %}\n\n");
 }
 
-/// Hand-authored illustrative contrast for the split-brain scenario: what a
-/// *naive* leader election WITHOUT a quorum requirement would look like — two
-/// nodes both believing they are leader and their logs diverging. This is the
-/// only non-generated diagram on the page; it exists to make the generated,
-/// code-backed diagram below it legible by contrast.
+/// Hand-authored illustrative contrast for the split-brain scenario.
+///
+/// It shows a *naive* leader election WITHOUT a quorum requirement. Two nodes
+/// both believe that they are leader, and their logs diverge. This is the only
+/// non-generated diagram on the page. The contrast makes the generated,
+/// code-backed diagram below it easier to read.
 const SPLIT_BRAIN_CONTRAST: &str = "\
 **❌ Without quorum — what split-brain looks like:**
 

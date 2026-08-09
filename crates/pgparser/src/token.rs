@@ -5,8 +5,9 @@ pub enum Token {
     Ident(String),
     Keyword(Keyword),
     IntLit(String),
-    /// SP30: a decimal/exponent numeric literal (`1.5`, `.5`, `2.`, `1e10`), typed
-    /// `float8` by the executor (crabgresql has no `numeric`).
+    /// SP30: a decimal/exponent numeric literal (`1.5`, `.5`, `2.`, `1e10`).
+    ///
+    /// The executor types it `float8`, because crabgresql has no `numeric`.
     FloatLit(String),
     StringLit(String),
     LParen,
@@ -21,11 +22,13 @@ pub enum Token {
     Concat,
     /// SP31: the `::` cast operator (`expr::type`).
     TypeCast,
-    /// A lone `:`. Only ever appears inside an array slice (`a[1:2]`), which the
-    /// parser refuses with a clear "array slices are not supported" error; the
-    /// two-byte `::` is claimed first by maximal munch.
+    /// A lone `:`.
+    ///
+    /// It appears only inside an array slice (`a[1:2]`). The parser refuses that
+    /// slice with a clear "array slices are not supported" error. Maximal munch
+    /// claims the two-byte `::` first.
     Colon,
-    /// `[` — array literal / subscript opener, and the `int[]` type suffix.
+    /// `[`: array literal / subscript opener, and the `int[]` type suffix.
     LBracket,
     /// `]`
     RBracket,
@@ -49,47 +52,53 @@ pub enum Token {
     KeyExistsAll,
     /// The array `&&` overlap operator.
     Overlaps,
-    /// `<->` — adjacent-lexeme phrase query composition.
+    /// `<->`: adjacent-lexeme phrase query composition.
     Phrase,
-    /// `!!` — prefix tsquery negation.
+    /// `!!`: prefix tsquery negation.
     TsNot,
-    /// `~` — POSIX regex match when infix, bitwise NOT when prefix. One token for
-    /// both: `PostgreSQL` spells them identically and only position tells them
-    /// apart, so the parser (not the lexer) picks the reading.
+    /// `~`: POSIX regex match when infix, bitwise NOT when prefix.
+    ///
+    /// One token covers both. `PostgreSQL` spells them identically and only the
+    /// position tells them apart, so the parser picks the reading, not the
+    /// lexer.
     Tilde,
-    /// `~*` — case-insensitive POSIX regex match.
+    /// `~*`: case-insensitive POSIX regex match.
     TildeCi,
-    /// `!~` — negated POSIX regex match.
+    /// `!~`: negated POSIX regex match.
     NotTilde,
-    /// `!~*` — negated case-insensitive POSIX regex match.
+    /// `!~*`: negated case-insensitive POSIX regex match.
     NotTildeCi,
-    /// `&` — bitwise AND on integers.
+    /// `&`: bitwise AND on integers.
     Amp,
-    /// `|` — bitwise OR on integers.
+    /// `|`: bitwise OR on integers.
     Pipe,
-    /// `#` — bitwise XOR on integers (NOT exponentiation; `PostgreSQL` spells
-    /// XOR `#` and exponentiation `^`).
+    /// `#`: bitwise XOR on integers.
+    ///
+    /// This is NOT exponentiation. `PostgreSQL` spells XOR `#` and
+    /// exponentiation `^`.
     Hash,
-    /// `<<` — bitwise left shift.
+    /// `<<`: bitwise left shift.
     Shl,
-    /// `>>` — bitwise right shift.
+    /// `>>`: bitwise right shift.
     Shr,
-    /// `^` — exponentiation (`2^3` is 8). Left-associative in `PostgreSQL`.
+    /// `^`: exponentiation (`2^3` is 8). Left-associative in `PostgreSQL`.
     Caret,
-    /// `%` — modulo (integer/numeric remainder).
+    /// `%`: modulo (integer/numeric remainder).
     Percent,
-    /// `@` — prefix absolute value.
+    /// `@`: prefix absolute value.
     At,
-    /// `@?` — does the jsonpath on the right find any item in the jsonb on the left?
+    /// `@?`: tests if the jsonpath on the right finds any item in the jsonb on the left.
     JsonPathExists,
-    /// `@@` — the jsonpath predicate on the right, checked against the jsonb on the left.
+    /// `@@`: the jsonpath predicate on the right, checked against the jsonb on the left.
     JsonPathMatch,
-    /// `|/` — prefix square root (`float8`).
+    /// `|/`: prefix square root (`float8`).
     SquareRoot,
-    /// `||/` — prefix cube root (`float8`).
+    /// `||/`: prefix cube root (`float8`).
     CubeRoot,
-    /// SP33: the `.` qualified-name separator (`a.col`). Only lexed when it does
-    /// NOT begin a number lexeme — `.5` / `2.` stay a single `FloatLit`.
+    /// SP33: the `.` qualified-name separator (`a.col`).
+    ///
+    /// The lexer makes this token only when the `.` does NOT begin a number
+    /// lexeme. `.5` and `2.` stay a single `FloatLit`.
     Dot,
     Eq,
     Ne,
@@ -203,8 +212,10 @@ pub enum Keyword {
     CurrentUser,
     Public,
     Returning,
-    /// The `ARRAY[...]` constructor. Reserved in `PostgreSQL`, so it is a keyword
-    /// rather than a soft identifier.
+    /// The `ARRAY[...]` constructor.
+    ///
+    /// `PostgreSQL` reserves this word, so it is a keyword and not a soft
+    /// identifier.
     Array,
 }
 

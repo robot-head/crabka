@@ -1,9 +1,11 @@
 //! Per-`log.dir` stable UUIDs (KIP-858 directory ids).
 //!
 //! Each configured `log.dir` carries a `directory_id` in its
-//! `meta.properties.json`. The primary/metadata dir's id is minted by
-//! `crabka format`; extra JBOD dirs are minted + persisted here on first
-//! boot. The resulting `path -> uuid` map lets the broker stamp
+//! `meta.properties.json`. `crabka format` creates the id for the primary
+//! metadata dir. This module creates and persists the id for each extra JBOD
+//! dir on the first boot.
+//!
+//! The resulting map from path to uuid lets the broker stamp
 //! `AssignReplicasToDirs` and `offline_log_dirs` with stable ids that the
 //! controller can map back to partitions.
 
@@ -21,10 +23,11 @@ pub struct LogDirIds {
 }
 
 impl LogDirIds {
-    /// Resolve (reading or minting) a stable UUID for every dir in
-    /// `log_dirs`. A dir whose `meta.properties.json` already carries a
-    /// `directory_id` keeps it; a dir without one (fresh JBOD disk) gets a
-    /// new v4 UUID persisted into a `meta.properties.json` in that dir.
+    /// Resolves a stable UUID for every dir in `log_dirs`, by a read or by a
+    /// new id. A dir whose `meta.properties.json` already carries a
+    /// `directory_id` keeps it. A dir without one, such as a fresh JBOD disk,
+    /// gets a new v4 UUID, which this method persists into a
+    /// `meta.properties.json` in that dir.
     #[must_use]
     pub fn resolve(log_dirs: &[PathBuf]) -> Self {
         let mut by_path = HashMap::new();
@@ -48,17 +51,20 @@ impl LogDirIds {
         v
     }
 
-    /// UUIDs of the supplied dirs, skipping any not in the table.
+    /// The UUIDs of the supplied dirs. It skips a dir that the table does not
+    /// hold.
     #[must_use]
     pub fn ids_for(&self, dirs: &[PathBuf]) -> Vec<Uuid> {
         dirs.iter().filter_map(|d| self.id_for(d)).collect()
     }
 }
 
-/// Read `<dir>/meta.properties.json`'s `directory_id`, or mint + persist a
-/// fresh one. On any IO/parse failure minting still returns a stable
-/// in-memory id (best-effort: the partition stays usable; only the
-/// faithful-wire reporting degrades).
+/// Reads the `directory_id` from `<dir>/meta.properties.json`, or creates and
+/// persists a fresh one.
+///
+/// On any I/O or parse failure, this function still returns a stable in-memory
+/// id. The partition therefore stays usable, and only the faithful-wire
+/// reporting degrades.
 fn read_or_mint(dir: &Path) -> Uuid {
     let path = dir.join("meta.properties.json");
     if let Ok(bytes) = std::fs::read(&path)

@@ -1074,11 +1074,12 @@ async fn run_query_frontend(
 
 /// Map the role CLI onto the new query-frontend [`FrontendConfig`].
 ///
-/// `--querier-url` is a comma-separated list of querier URLs (with scheme); the
-/// new [`HttpQuerier`] pool takes bare `host:port`, so the scheme/path are
-/// stripped here. `--live-frontier` (and its legacy `--live-frontier-ns`
-/// alias) maps to `hot_frontier_ns` (`None` => `0`, i.e. the live tier is
-/// always probed).
+/// `--querier-url` is a comma-separated list of querier URLs that carry a
+/// scheme. The new [`HttpQuerier`] pool takes a bare `host:port`, so this
+/// function strips the scheme and the path.
+///
+/// `--live-frontier`, and its legacy `--live-frontier-ns` alias, maps to
+/// `hot_frontier_ns`. `None` becomes `0`, so the live tier is always probed.
 fn frontend_config_from_cli(
     cli: &Cli,
     listen_addr: SocketAddr,
@@ -1096,8 +1097,10 @@ fn frontend_config_from_cli(
 }
 
 /// Build the production block catalog from the trace index when row-group
-/// sharding is enabled (`--target-bytes-per-job > 0`); otherwise an empty
-/// catalog (whole-tier search, no per-block fan-out).
+/// sharding is enabled, that is when `--target-bytes-per-job > 0`.
+///
+/// Otherwise this returns an empty catalog, which gives a whole-tier search
+/// with no per-block fan-out.
 async fn build_trace_index_catalog(
     cli: &Cli,
 ) -> Result<TraceIndexCatalog, Box<dyn std::error::Error + Send + Sync>> {
@@ -1120,8 +1123,9 @@ async fn build_trace_index_catalog(
         .unwrap_or_else(|_| TraceIndexCatalog::new(std::collections::BTreeMap::new())))
 }
 
-/// Parse `--querier-url` (comma-separated querier URLs, scheme allowed) into the
-/// bare `host:port` addresses the [`HttpQuerier`] pool dials.
+/// Parse `--querier-url` into the bare `host:port` addresses the
+/// [`HttpQuerier`] pool dials. The flag holds comma-separated querier URLs, and
+/// a scheme is allowed.
 fn parse_querier_addrs(
     value: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1272,7 +1276,7 @@ async fn run_metrics_generator(
     Ok(())
 }
 
-/// `usize::MAX` is the CLI's "no limit" spelling; a zero rate is how the shared
+/// `usize::MAX` is the CLI's "no limit" spelling. A zero rate is how the shared
 /// limits express unlimited.
 fn ingest_rate_from_cli(spans_per_sec: usize) -> Frequency {
     if spans_per_sec == usize::MAX {
@@ -1286,7 +1290,7 @@ fn f64_from_usize(value: usize) -> f64 {
     value.to_f64().unwrap_or(f64::MAX)
 }
 
-/// The assembled-trace ceiling, budgeting ~64KiB of OTLP JSON per span.
+/// The assembled-trace ceiling. It budgets about 64KiB of OTLP JSON per span.
 fn max_trace_size(spans: usize) -> ByteSize {
     kibibytes(64) * f64_from_usize(spans)
 }

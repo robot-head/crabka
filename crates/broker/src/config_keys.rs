@@ -1,23 +1,27 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Fifteen keys are recognized. Five propagate live to `Log.config`
-//! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`,
-//! `compression.type`), plus the tiered-storage local-retention
-//! pair (`local.retention.ms`, `local.retention.bytes`) and the KIP-534
-//! delete-horizon grace window (`delete.retention.ms`). One is read by
-//! the produce hot path's pre-flight gate: `min.insync.replicas`
-//! (integers >= 1) — `acks=-1` produces against a partition whose ISR is
-//! already smaller fail fast with `NOT_ENOUGH_REPLICAS` (19). Two are
-//! KIP-73 throttle keys (`leader.replication.throttled.replicas`,
-//! `follower.replication.throttled.replicas`) validated via
-//! `ThrottledReplicas::parse`. One is the KIP-841 unclean-recovery toggle
-//! (`unclean.leader.election.enable`) read by the controller's automatic
-//! failover path on ISR-empty. One is the KIP-966 offset-aware recovery
-//! strategy (`unclean.recovery.strategy`) which supersedes it.
-//! One is Crabka's `QoS` routing key (`qos.tier`), used by producer quota
-//! enforcement to partition runtime buckets by topic tier.
+//! The broker recognizes fifteen keys. Five propagate live to `Log.config`:
+//! `retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`, and
+//! `compression.type`. The tiered-storage local-retention pair
+//! (`local.retention.ms`, `local.retention.bytes`) and the KIP-534
+//! delete-horizon grace window (`delete.retention.ms`) propagate live too.
 //!
-//! Unknown keys are rejected with `INVALID_CONFIG`.
+//! The produce hot path's pre-flight gate reads one key,
+//! `min.insync.replicas`, which takes integers >= 1. An `acks=-1` produce
+//! against a partition whose ISR is already smaller fails fast with
+//! `NOT_ENOUGH_REPLICAS` (19).
+//!
+//! Two keys are KIP-73 throttle keys:
+//! `leader.replication.throttled.replicas` and
+//! `follower.replication.throttled.replicas`. `ThrottledReplicas::parse`
+//! validates both. One key is the KIP-841 unclean-recovery toggle,
+//! `unclean.leader.election.enable`. The controller's automatic failover
+//! path reads it on ISR-empty. One key is the KIP-966 offset-aware recovery
+//! strategy, `unclean.recovery.strategy`, which supersedes that toggle. One
+//! key is Crabka's `QoS` routing key, `qos.tier`. Producer quota enforcement
+//! uses it to partition runtime buckets by topic tier.
+//!
+//! The broker rejects unknown keys with `INVALID_CONFIG`.
 
 // Items are `pub(crate)` for downstream handlers (Tasks 7-10); until those
 // modules land they appear unused to the compiler.
@@ -41,20 +45,19 @@ pub(crate) const CLEANUP_POLICY: &str = "cleanup.policy";
 pub(crate) const COMPRESSION_TYPE: &str = "compression.type";
 pub(crate) const MIN_INSYNC_REPLICAS: &str = "min.insync.replicas";
 /// KIP-841: gates whether the controller may auto-elect an out-of-ISR
-/// replica as leader on ISR-empty failover. Default `false` matches
-/// Apache Kafka — partition stays unavailable until a former ISR member
-/// returns. `true` accepts possible data loss in exchange for
-/// availability. Consumed at runtime by
-/// `crate::leader_election::on_broker_dead` via
-/// [`MetadataImage::topic_config`].
+/// replica as leader on ISR-empty failover. Default: `false`, which matches
+/// Apache Kafka. The partition then stays unavailable until a former ISR
+/// member returns. `true` accepts possible data loss in exchange for
+/// availability. `crate::leader_election::on_broker_dead` reads this key at
+/// runtime through [`MetadataImage::topic_config`].
 pub(crate) const UNCLEAN_LEADER_ELECTION_ENABLE: &str = "unclean.leader.election.enable";
-/// KIP-966: per-topic unclean-recovery strategy. Supersedes
-/// `unclean.leader.election.enable`: when set to `Balanced` or
-/// `Aggressive` the controller runs offset-aware recovery (polls
-/// surviving replicas for their log offsets and elects the most complete
-/// log). `None` (the default) falls back to the legacy enable-flag
-/// behavior. Consumed by `crate::unclean_recovery` and the failover /
-/// `ElectLeaders` paths.
+/// KIP-966: per-topic unclean-recovery strategy. It supersedes
+/// `unclean.leader.election.enable`. At `Balanced` or `Aggressive` the
+/// controller runs offset-aware recovery: it polls surviving replicas for
+/// their log offsets and elects the most complete log. Default: `None`,
+/// which falls back to the legacy enable-flag behavior.
+/// `crate::unclean_recovery` and the failover / `ElectLeaders` paths read
+/// this key.
 pub(crate) const UNCLEAN_RECOVERY_STRATEGY: &str = "unclean.recovery.strategy";
 
 /// Resolved value of `unclean.recovery.strategy` for a topic.
@@ -62,11 +65,11 @@ pub(crate) const UNCLEAN_RECOVERY_STRATEGY: &str = "unclean.recovery.strategy";
 pub(crate) enum RecoveryStrategy {
     /// No offset-aware recovery. Defer to `unclean.leader.election.enable`.
     None,
-    /// Wait for all currently-alive replicas (ELR is not tracked in
-    /// crabka), then elect the most complete log.
+    /// Wait for all currently-alive replicas, then elect the most complete
+    /// log. Crabka does not track ELR.
     Balanced,
     /// Elect the most complete log among the replicas that respond within
-    /// a short deadline; optimize availability.
+    /// a short deadline. This optimizes availability.
     Aggressive,
 }
 
@@ -86,8 +89,9 @@ pub(crate) const REMOTE_STORAGE_ENABLE: &str = "remote.storage.enable";
 pub(crate) const LOCAL_RETENTION_MS: &str = "local.retention.ms";
 /// KIP-405: per-topic local-retention size budget for tiered partitions.
 pub(crate) const LOCAL_RETENTION_BYTES: &str = "local.retention.bytes";
-/// KIP-534: how long tombstones and transaction markers are retained after
-/// they first become compaction-eligible (the delete-horizon grace window).
+/// KIP-534: how long the broker keeps tombstones and transaction markers
+/// after they first become compaction-eligible. This is the delete-horizon
+/// grace window.
 pub(crate) const DELETE_RETENTION_MS: &str = "delete.retention.ms";
 /// Crabka extension: per-topic `QoS` tier used to partition producer quota
 /// buckets. Unset topics resolve to [`DEFAULT_QOS_TIER`].
@@ -151,9 +155,10 @@ pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String
 }
 
 /// Map the wire-side `compression.type` value to the matching
-/// [`LogConfig::compression_type`]. Returns `Ok(None)` for the special
-/// `producer` value (the Kafka default; no broker-side re-encoding).
-/// `Ok(Some(_))` for any concrete codec. `Err` for an unknown name.
+/// [`LogConfig::compression_type`]. This function returns `Ok(None)` for the
+/// special `producer` value, which is the Kafka default and does no
+/// broker-side re-encoding. It returns `Ok(Some(_))` for any concrete codec.
+/// It returns `Err` for an unknown name.
 pub(crate) fn parse_compression_type(
     value: &str,
 ) -> Result<Option<crabka_compression::CompressionType>, String> {
@@ -209,8 +214,8 @@ fn validate_qos_tier(value: &str) -> Result<(), String> {
 }
 
 /// Returns `true` if `key` is one of the recognized topic-config keys.
-/// Useful for `IncrementalAlterConfigs` DELETE-op validation without
-/// requiring a sentinel probe value.
+/// This helps `IncrementalAlterConfigs` DELETE-op validation, which then
+/// needs no sentinel probe value.
 pub(crate) fn is_recognized(key: &str) -> bool {
     matches!(
         key,
@@ -232,8 +237,8 @@ pub(crate) fn is_recognized(key: &str) -> bool {
     )
 }
 
-/// Resolve a topic's `QoS` tier for producer quota bucket partitioning.
-/// Missing or corrupt values fall back to `default`, matching the
+/// Resolve a topic's `QoS` tier, which partitions producer quota buckets.
+/// Missing or corrupt values fall back to `default`. This matches the
 /// permissive runtime behavior of other Produce-side topic config reads.
 #[must_use]
 pub(crate) fn resolve_qos_tier<'a>(
@@ -247,10 +252,11 @@ pub(crate) fn resolve_qos_tier<'a>(
         .map_or(DEFAULT_QOS_TIER, String::as_str)
 }
 
-/// Resolve `unclean.recovery.strategy` for `topic`, defaulting to
-/// `RecoveryStrategy::None` when unset or unparseable. Per-topic only
-/// for now (mirrors `unclean.leader.election.enable`); a cluster default
-/// can layer in later via the same `topic_config` lookup precedence.
+/// Resolve `unclean.recovery.strategy` for `topic`. The default is
+/// `RecoveryStrategy::None` when the key is unset or unparseable. The lookup
+/// is per-topic only for now, which mirrors
+/// `unclean.leader.election.enable`. A cluster default can layer in later
+/// through the same `topic_config` lookup precedence.
 pub(crate) fn resolve_recovery_strategy(
     image: &crabka_metadata::MetadataImage,
     topic: &str,
@@ -263,9 +269,9 @@ pub(crate) fn resolve_recovery_strategy(
 }
 
 /// Merge `overrides` over `base` and return a fresh `LogConfig` to push
-/// into `Log::set_config`. Unknown keys are silently dropped because
-/// `validate_topic_config` should have rejected them at `AlterConfigs` time
-/// before the record reached the metadata image; this function is the
+/// into `Log::set_config`. This function drops unknown keys silently.
+/// `validate_topic_config` should have rejected them at `AlterConfigs` time,
+/// before the record reached the metadata image. This function is the
 /// applier and treats the input as already-validated.
 #[must_use]
 pub(crate) fn apply_to_log_config(

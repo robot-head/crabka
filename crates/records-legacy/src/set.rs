@@ -1,14 +1,16 @@
-//! v0/v1 `MessageSet`: a sequence of `(offset, size, message)` frames laid
-//! out back-to-back, with no overall length prefix.
+//! v0/v1 `MessageSet`: a sequence of `(offset, size, message)` frames.
+//!
+//! The frames lie back-to-back. The set has no overall length prefix.
 //!
 //! ```text
 //! [ offset:i64 | size:i32 | <Message bytes for `size` bytes> ]*
 //! ```
 //!
-//! Compression in v0/v1 is encoded as a *wrapper* message whose value is
-//! itself a compressed inner `MessageSet`. We handle that here: encoding
-//! optionally wraps a flat `MessageSet` in a single compressed outer
-//! message; decoding transparently unwraps a single layer.
+//! v0/v1 encodes compression as a *wrapper* message whose value is itself
+//! a compressed inner `MessageSet`. This module handles that layout.
+//! `encode_compressed_message_set` optionally wraps a flat `MessageSet` in
+//! a single compressed outer message. `decode_message_set` unwraps a
+//! single layer for the caller.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_compression::{CompressionType, RecordDecompressionPolicy};
@@ -22,30 +24,38 @@ use crate::{
 
 /// The length of a wire slice as a byte count.
 ///
-/// Saturates rather than wrapping; a `usize` above `u64::MAX` cannot occur on
-/// any target Crabka builds for.
+/// This function saturates and does not wrap. A `usize` above `u64::MAX`
+/// cannot occur on any target Crabka builds for.
 fn size_of_slice(slice: &[u8]) -> ByteSize {
     ByteSize::from_bytes(u64::try_from(slice.len()).unwrap_or(u64::MAX))
 }
 
-/// A single decoded `MessageSet` entry: the offset-tagged payload of one
-/// logical record after compression unwrapping.
+/// A single decoded `MessageSet` entry.
+///
+/// The entry holds the offset-tagged payload of one logical record, after
+/// the codec unwraps compression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRecord {
     pub offset: Offset,
-    /// Always `Some` when source magic is v1; `None` when v0.
+    /// Always `Some` when the source magic is v1. `None` when it is v0.
     pub timestamp: Option<i64>,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
 }
 
-/// Decode a flat (uncompressed) `MessageSet` from `buf`, expecting it to
-/// consume exactly `set_size_bytes` bytes from the buffer. Compressed
-/// wrapper messages encountered at top level are unwrapped recursively
-/// once — nested compression (a compressed wrapper inside a compressed
-/// wrapper) is rejected.
+/// Decode a flat, uncompressed `MessageSet` from `buf`.
+///
+/// This function consumes exactly `set_size_bytes` bytes from the buffer.
+/// It unwraps a compressed wrapper message at the top level one time. It
+/// rejects nested compression, that is, a compressed wrapper inside a
+/// compressed wrapper.
 /// # Errors
-/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// Returns `Truncated` if `buf` holds fewer than `set_size_bytes` bytes.
+/// Returns `Truncated` if an entry header or an entry body stops early.
+/// Returns `NegativeLength` if an entry carries a negative `message_size`.
+/// Returns `NestedCompression` if a compressed wrapper holds another compressed wrapper.
+/// Returns the error from `Message::decode_from` for a malformed or corrupt message frame.
+/// Returns a compression error if the wrapper value does not decompress within the default policy.
 pub fn decode_message_set<B: Buf>(
     buf: &mut B,
     set_size_bytes: usize,
@@ -57,8 +67,9 @@ pub fn decode_message_set<B: Buf>(
 ///
 /// # Errors
 ///
-/// Returns the underlying legacy records error for malformed, truncated,
-/// corrupt, nested-compression, or over-limit input.
+/// Returns the legacy records error for malformed input, for truncated
+/// input, for corrupt input, for nested compression, or for input above
+/// the limits in `policy`.
 pub fn decode_message_set_with_policy<B: Buf>(
     buf: &mut B,
     set_size_bytes: usize,
@@ -150,8 +161,10 @@ fn decode_into(
     Ok(())
 }
 
-/// Encode a flat `MessageSet` (one outer message per record) of magic
-/// `magic` into `buf`. Useful when emitting an uncompressed batch.
+/// Encode a flat `MessageSet` of magic `magic` into `buf`.
+///
+/// This function writes one outer message per record. Use it to emit an
+/// uncompressed batch.
 pub fn encode_flat_message_set<B: BufMut, I: IntoIterator<Item = ParsedRecord>>(
     records: I,
     magic: Magic,
@@ -178,10 +191,13 @@ pub fn encode_flat_message_set<B: BufMut, I: IntoIterator<Item = ParsedRecord>>(
 }
 
 /// Encode a `MessageSet` wrapped in a single compressed outer message.
-/// The inner set is uncompressed and contains one message per record,
-/// laid out per KIP-32 conventions (v1 inner offsets relative 0..N-1).
+///
+/// The inner set is uncompressed and contains one message per record. It
+/// follows the KIP-32 conventions: v1 inner offsets are relative,
+/// `0..N-1`.
 /// # Errors
-/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// Returns `Malformed` if `codec` is `CompressionType::Zstd`, which v0/v1 cannot represent.
+/// Returns a compression error if the codec cannot compress the inner set.
 pub fn encode_compressed_message_set<B: BufMut>(
     records: &[ParsedRecord],
     magic: Magic,

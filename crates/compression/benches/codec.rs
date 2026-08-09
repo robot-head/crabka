@@ -1,14 +1,16 @@
 //! `CodSpeed` microbenchmarks for `crabka-compression`.
 //!
-//! For each supported codec, we measure compress + decompress over three
-//! payload sizes (1 KiB, 64 KiB, 1 MiB) and three payload shapes:
+//! For each supported codec, we measure compress and decompress over three
+//! payload sizes and three payload shapes. The sizes are 1 KiB, 64 KiB, and
+//! 1 MiB. The shapes are:
 //!
-//! - **alternating runs** — mildly compressible, the original fixture.
-//! - **random** — incompressible, exercises the codec's worst case.
-//! - **text-like** — repeated English-ish bytes, exercises typical user data.
+//! - **alternating runs**: mildly compressible, the original fixture.
+//! - **random**: incompressible. This shape exercises the codec's worst case.
+//! - **text-like**: repeated English-like bytes. This shape exercises typical
+//!   user data.
 //!
-//! Round-trip (compress→decompress) is also measured per codec so codspeed
-//! tracks net work directly comparable across codecs.
+//! We also measure the round trip, compress then decompress, for each codec.
+//! codspeed thus tracks net work that is directly comparable across codecs.
 
 use bytes::Bytes;
 use crabka_compression::{CompressionType, compress, decompress};

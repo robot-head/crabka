@@ -1,35 +1,37 @@
-//! Background sender task. Drains ready batches from every accumulator
-//! and ships them as `ProduceRequest`s through `crabka-client-core`.
+//! Background sender task. It drains ready batches from every accumulator and
+//! ships them as `ProduceRequest`s through `crabka-client-core`.
 //!
-//! The sender is `tokio::spawn`'d by the builder. It owns the `wake_rx`
-//! `Receiver` end of the wake channel (the `Producer` holds the
-//! `wake_tx` `Sender`), the `flush_notify`, the `accumulators` map, and
-//! the `next_seq` map. Per-batch deadlines seal only expired current batches,
-//! ready wakes drain completed rollover batches, and forced wakes stay active
-//! until zero-linger, flush, or shutdown work settles. Drained batches become v2
-//! `RecordBatch`es (allocating their `base_sequence`). Each batch becomes its own
-//! single-partition `ProduceRequest`, sent via `Client::broker(id)` — falling
-//! back to the bootstrap `Client::send` when the leader is unknown — with all
-//! of a cycle's requests sent **concurrently** to keep every broker busy.
+//! The builder `tokio::spawn`s the sender. The sender owns the `wake_rx`
+//! `Receiver` end of the wake channel, while the `Producer` holds the `wake_tx`
+//! `Sender`. It also owns the `flush_notify`, the `accumulators` map, and the
+//! `next_seq` map. Per-batch deadlines seal only expired current batches, ready
+//! wakes drain completed rollover batches, and forced wakes stay active until
+//! zero-linger, flush, or shutdown work settles. Drained batches become v2
+//! `RecordBatch`es, which allocates their `base_sequence`. Each batch becomes
+//! its own single-partition `ProduceRequest`, sent through `Client::broker(id)`,
+//! and it falls back to the bootstrap `Client::send` when the leader is
+//! unknown. All of a cycle's requests are sent **concurrently**, to keep every
+//! broker busy.
 //!
 //! ## Per-partition pipelining (idempotence-critical)
 //!
-//! Brokers stay busy because independent partitions send **concurrently** — up
+//! Brokers stay busy because independent partitions send **concurrently**. Up
 //! to [`SenderConfig::max_in_flight`] Produce requests overlap on the wire per
 //! drain cycle. But each *single* partition keeps **at most one** request in
-//! flight ([`MAX_IN_FLIGHT_PER_PARTITION`]): its next batch is not drained until
-//! the previous one is acked. That makes per-partition idempotent
-//! `base_sequence` ordering hold **by construction** — the broker never sees two
-//! outstanding sequences for one partition, so concurrently-issued requests
-//! cannot reach it out of `base_sequence` order and trip
+//! flight, which is [`MAX_IN_FLIGHT_PER_PARTITION`]. Its next batch is not
+//! drained until the previous one is acked. Per-partition idempotent
+//! `base_sequence` ordering therefore holds **by construction**. The broker
+//! never sees two outstanding sequences for one partition, so requests issued
+//! concurrently cannot reach it out of `base_sequence` order and trip
 //! `OUT_OF_ORDER_SEQUENCE_NUMBER`.
 //!
-//! Recovery is correspondingly simple: a batch that fails (transport error,
-//! routing miss, or a defensive `OUT_OF_ORDER`) is parked in its partition's
-//! single **retry slot** and resent verbatim — same allocated `base_sequence`,
-//! same bytes, so a re-landed write is deduped by the broker via
-//! `DUPLICATE_SEQUENCE_NUMBER` — ahead of any new batch for that partition, on
-//! the next cycle. The retry slots persist across cycles (owned by [`run`]).
+//! Recovery is correspondingly simple. A batch that fails, through a transport
+//! error, a routing miss, or a defensive `OUT_OF_ORDER`, is parked in its
+//! partition's single **retry slot**. On the next cycle the sender resends it
+//! verbatim, with the same allocated `base_sequence` and the same bytes, and
+//! ahead of any new batch for that partition. The broker dedups a re-landed
+//! write with `DUPLICATE_SEQUENCE_NUMBER`. The retry slots persist across
+//! cycles, and [`run`] owns them.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -73,12 +75,14 @@ use crate::{
 /// Wire error codes referenced when interpreting `PartitionProduceResponse`.
 mod codes {
     pub const NONE: i16 = 0;
-    /// The Produce reached a broker that does not lead the partition (stale
-    /// routing). Refresh metadata, re-resolve the leader, and retry.
+    /// The Produce reached a broker that does not lead the partition, which
+    /// means the routing is stale. Refresh metadata, re-resolve the leader, and
+    /// retry.
     pub const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
     /// The Produce reached a broker that does not lead the partition. With
     /// rf=1 a misroute to a non-hosting broker surfaces as
-    /// `UNKNOWN_TOPIC_OR_PARTITION`; a misroute to a follower surfaces here.
+    /// `UNKNOWN_TOPIC_OR_PARTITION`, and a misroute to a follower surfaces
+    /// here.
     pub const NOT_LEADER_OR_FOLLOWER: i16 = 6;
     pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
     pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
@@ -86,42 +90,44 @@ mod codes {
     pub const INVALID_PRODUCER_EPOCH: i16 = 47;
 }
 
-/// Synthetic leader id meaning "leader unknown → use the bootstrap connection".
-/// Matches the consumer's convention (`poll.rs`): a partition whose leader id is
-/// `< 0` or whose advertised address the pool can't dial falls back to the
-/// bootstrap `Client::send` rather than `Client::broker(id)`.
+/// Synthetic leader id that means the leader is unknown, so the sender uses the
+/// bootstrap connection.
+///
+/// It matches the consumer's convention in `poll.rs`. A partition whose leader
+/// id is `< 0`, or whose advertised address the pool cannot dial, falls back to
+/// the bootstrap `Client::send` rather than `Client::broker(id)`.
 const BOOTSTRAP_LEADER: i32 = -1;
 
 /// Maximum Produce requests in flight **per partition** at once.
 ///
-/// Pinned to `1`: a partition's next batch is not sent until its previous batch
-/// is acked. This preserves idempotent per-partition `base_sequence` ordering
-/// *by construction* — the broker only ever sees one sequence outstanding for a
-/// partition, so there is no window in which concurrently-issued requests can
-/// reach the broker out of `base_sequence` order and trip
-/// `OUT_OF_ORDER_SEQUENCE_NUMBER`.
+/// This is pinned to `1`: a partition's next batch is not sent until its
+/// previous batch is acked. That preserves idempotent per-partition
+/// `base_sequence` ordering *by construction*. The broker only ever sees one
+/// sequence outstanding for a partition, so there is no window in which
+/// requests issued concurrently can reach the broker out of `base_sequence`
+/// order and trip `OUT_OF_ORDER_SEQUENCE_NUMBER`.
 ///
 /// ## Why not `> 1` (same-partition pipelining)?
 ///
 /// The previous design drained up to `max_in_flight` batches per partition and
-/// fired them via `futures::future::join_all`. But [`crabka_client_core::Client`]'s
-/// `send` writes the request frame **and** awaits its response in a single
-/// future; when several same-partition futures are polled concurrently their
-/// frame writes race on the connection's writer channel, so the broker can
-/// receive `base_sequence` 16 before 0. The broker rejects the gap with
-/// `OUT_OF_ORDER_SEQUENCE_NUMBER`, the producer resends — concurrently again —
-/// re-triggering the reorder. Under sustained load this livelocks: some batch
-/// never converges, its records' ack-oneshots never resolve, and the caller
-/// hangs.
+/// fired them through `futures::future::join_all`. But the `send` of
+/// [`crabka_client_core::Client`] writes the request frame **and** awaits its
+/// response in a single future. When several same-partition futures are polled
+/// concurrently, their frame writes race on the connection's writer channel, so
+/// the broker can receive `base_sequence` 16 before 0. The broker rejects the
+/// gap with `OUT_OF_ORDER_SEQUENCE_NUMBER`, and the producer resends
+/// concurrently again, which re-triggers the reorder. Under sustained load this
+/// livelocks: some batch never converges, its records' ack-oneshots never
+/// resolve, and the caller hangs.
 ///
-/// True same-partition pipelining (`> 1`) requires a client-core API that
-/// guarantees **ordered frame writes** for a partition's in-flight requests
-/// (write 0, 1, 2 to the wire in order, then await their responses
-/// concurrently) — e.g. a pipelined `Connection::send_batch` or a write-then-await
-/// split. That is deferred; until it exists, one-in-flight-per-partition is the
-/// only ordering-safe option. Cross-partition pipelining is unaffected:
-/// independent partitions still send concurrently, bounded by
-/// [`SenderConfig::max_in_flight`].
+/// True same-partition pipelining, with `> 1`, needs a client-core API that
+/// guarantees **ordered frame writes** for a partition's in-flight requests.
+/// Such an API writes 0, 1 and 2 to the wire in order, and then awaits their
+/// responses concurrently. A pipelined `Connection::send_batch`, or a
+/// write-then-await split, would do it. That work is deferred. Until it exists,
+/// one in flight per partition is the only ordering-safe option.
+/// Cross-partition pipelining is unaffected: independent partitions still send
+/// concurrently, bounded by [`SenderConfig::max_in_flight`].
 const MAX_IN_FLIGHT_PER_PARTITION: usize = 1;
 
 // The one-slot-per-partition pipeline (a single retry slot per partition, no
@@ -143,12 +149,12 @@ pub(crate) enum DrainIntent {
     Force,
 }
 
-/// All the bits of state the sender task needs. The builder constructs
-/// one of these, hands it to [`run`], and drops it.
+/// All the state the sender task needs. The builder constructs one, hands it to
+/// [`run`], and drops it.
 // accumulators map mirrors the Producer field; alias deferred.
 pub(crate) struct SenderConfig {
-    /// Broker-facing transport (real `Client` in production, a deterministic
-    /// in-process broker model in tests). See [`crate::transport`].
+    /// Broker-facing transport. Production uses a real `Client`, and tests use
+    /// a deterministic in-process broker model. See [`crate::transport`].
     pub transport: Box<dyn ProduceTransport>,
     pub producer_id: i64,
     pub producer_epoch: i16,
@@ -160,39 +166,43 @@ pub(crate) struct SenderConfig {
     pub retry_backoff: Time,
     pub routing_retry_budget: Time,
     /// Maximum number of Produce requests fired **concurrently per drain
-    /// cycle**, across all partitions — the cross-partition / per-connection
-    /// pipelining bound (Kafka's `max.in.flight.requests.per.connection`).
-    /// Per-partition in-flight is separately pinned to
-    /// [`MAX_IN_FLIGHT_PER_PARTITION`] (`1`) for ordering; this bounds how many
-    /// *distinct partitions'* requests overlap on the wire at once.
+    /// cycle**, across all partitions. This is the cross-partition, or
+    /// per-connection, pipelining bound, which Kafka calls
+    /// `max.in.flight.requests.per.connection`.
+    ///
+    /// Per-partition in-flight is pinned separately to
+    /// [`MAX_IN_FLIGHT_PER_PARTITION`], which is `1`, for ordering. This field
+    /// bounds how many *distinct partitions'* requests overlap on the wire at
+    /// once.
     pub max_in_flight: usize,
     pub metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
     /// Per-`(topic, partition)` leader-id cache, shared with the `Producer`.
-    /// Populated from `Metadata` (see `Producer::partitions_for`); the sender
-    /// consults it to route each Produce to the partition leader and refreshes
-    /// it on `NOT_LEADER_OR_FOLLOWER` / `UNKNOWN_TOPIC_OR_PARTITION`.
+    /// `Metadata` fills it; see `Producer::partitions_for`. The sender reads it
+    /// to route each Produce to the partition leader, and refreshes it on
+    /// `NOT_LEADER_OR_FOLLOWER` and on `UNKNOWN_TOPIC_OR_PARTITION`.
     pub partition_leaders: Arc<DashMap<(String, i32), i32>>,
-    /// Shared null-key sticky partitioner. Rotated when the sender seals a
-    /// topic batch so subsequent keyless records fan out across partitions.
+    /// Shared null-key sticky partitioner. The sender rotates it when it seals
+    /// a topic batch, so later keyless records fan out across partitions.
     pub partitioner: Arc<UniformStickyPartitioner>,
     pub accumulators: AccumulatorMap,
     pub next_seq: Arc<DashMap<(String, i32), i32>>,
     pub state: Arc<AtomicU8>,
     pub wake_rx: tokio::sync::mpsc::Receiver<DrainIntent>,
     pub flush_notify: Arc<Notify>,
-    /// Shared with `Producer`; tracks batches popped from an accumulator that
-    /// are still being sent so `flush` can wait for them. See the field doc on
-    /// [`crate::producer::Producer`].
+    /// Shared with `Producer`. It tracks batches popped from an accumulator
+    /// that are still being sent, so `flush` can wait for them. See the field
+    /// doc on [`crate::producer::Producer`].
     pub in_flight: Arc<AtomicUsize>,
     pub shutdown: CancellationToken,
-    /// `transactional_id` from the producer config; `None` for non-transactional producers.
+    /// `transactional_id` from the producer config. It is `None` for a
+    /// non-transactional producer.
     pub transactional_id: Option<String>,
-    /// Shared with `Producer`; the sender snapshots this at send time to decide
+    /// Shared with `Producer`. The sender snapshots it at send time, to decide
     /// whether to stamp batches as transactional.
     pub txn_state: Arc<Mutex<TxnState>>,
-    /// Shared with `Producer`; holds the `(producer_id, producer_epoch)` assigned
-    /// by the transaction coordinator via `InitProducerId`. The sender reads this
-    /// when stamping transactional batches.
+    /// Shared with `Producer`. It holds the `(producer_id, producer_epoch)`
+    /// that the transaction coordinator assigned through `InitProducerId`. The
+    /// sender reads it when it stamps transactional batches.
     pub txn_pid_epoch: Arc<Mutex<(i64, i16)>>,
     pub txn_recovery_required: Arc<AtomicBool>,
     pub txn_recovery_generation: Arc<AtomicU64>,
@@ -202,17 +212,19 @@ pub(crate) struct SenderConfig {
 /// every [`drain_once`] so it persists across drain cycles.
 ///
 /// With [`MAX_IN_FLIGHT_PER_PARTITION`] pinned to `1`, the only state a
-/// partition can carry between cycles is a single failed batch awaiting a
-/// verbatim resend — there is never more than one request outstanding, so there
-/// is nothing to "drain" and no resend *set* to order. Hence exactly one slot
-/// per partition.
+/// partition can carry between cycles is a single failed batch that awaits a
+/// verbatim resend. There is never more than one request outstanding, so there
+/// is nothing to "drain" and no resend *set* to order. Each partition therefore
+/// has exactly one slot.
 #[derive(Default)]
 struct PipelineState {
-    /// Per-`(topic, partition)` retry slot: a batch that failed its last send
-    /// and must be resent verbatim (same `base_sequence`, same bytes) ahead of
-    /// any new batch for that partition. Already counted in `in_flight` (counted
-    /// when first drained from the accumulator), so it is NOT re-counted on
-    /// resend. Presence means the partition's single in-flight slot is occupied.
+    /// Per-`(topic, partition)` retry slot. It holds a batch that failed its
+    /// last send and must be resent verbatim, with the same `base_sequence` and
+    /// the same bytes, ahead of any new batch for that partition.
+    ///
+    /// `in_flight` already counts the batch, from when it was first drained
+    /// from the accumulator, so a resend does NOT count it again. A batch in
+    /// this slot means the partition's single in-flight slot is occupied.
     retry: HashMap<(String, i32), PreparedBatch>,
 }
 
@@ -391,28 +403,30 @@ pub(crate) async fn run(mut cfg: SenderConfig) {
     }
 }
 
-/// One drained partition's batch, prepared for sending: the encoded v2
-/// `RecordBatch` (with its `base_sequence` already allocated), the topic id, and
+/// One drained partition's batch, prepared for sending. It holds the encoded v2
+/// `RecordBatch`, with its `base_sequence` already allocated, the topic id, and
 /// the `PendingRecord`s whose oneshot acks the response resolves.
 ///
-/// The `record_batch` is built **once** (sequence allocated once) so a
-/// re-route or resend ships the identical bytes — preserving per-partition
-/// idempotent sequencing: the leader sees each partition's `base_sequence`
-/// exactly once, in increasing order, regardless of which broker it reaches.
+/// The `record_batch` is built **once**, which allocates the sequence once, so
+/// a re-route or a resend ships the identical bytes. That preserves
+/// per-partition idempotent sequencing: the leader sees each partition's
+/// `base_sequence` exactly once, in increasing order, whichever broker it
+/// reaches.
 struct PreparedBatch {
     topic: String,
     partition: i32,
     topic_id: Uuid,
-    /// The allocated base sequence for this batch. Cached here (rather than
-    /// re-read from `record_batch.base_sequence`) so it is unambiguous for a
-    /// transactional batch and so debug logging can name the batch.
+    /// The allocated base sequence for this batch. It is cached here, rather
+    /// than re-read from `record_batch.base_sequence`, so that it is
+    /// unambiguous for a transactional batch, and so that debug logging can
+    /// name the batch.
     base_sequence: i32,
     record_batch: RecordBatch,
     records: Vec<PendingRecord>,
-    /// Wall-clock time the batch was first handed to the transport. Set on the
-    /// first send and preserved across resends so the routing retry budget is
-    /// measured from the first attempt, not the
-    /// most recent — a batch that keeps failing to route gives up by ~30s.
+    /// Wall-clock time the batch was first handed to the transport. The sender
+    /// sets it on the first send and keeps it across resends, so it measures
+    /// the routing retry budget from the first attempt, not from the most
+    /// recent one. A batch that keeps failing to route gives up by about 30s.
     first_sent: Option<Instant>,
     /// When `Some`, the batch must not be resent until this instant after a
     /// transport failure, missing response, or retriable/routing broker
@@ -424,26 +438,29 @@ struct PreparedBatch {
     transaction_generation: Option<u64>,
 }
 
-/// One drain cycle. Builds the send list — each partition's pending resend
-/// first, then one newly-drained batch for each *idle* partition — sends every
-/// batch as its own single-partition `ProduceRequest` **concurrently**, then
-/// dispatches each [`BatchVerdict`] (ack / park-for-resend / terminal-fail /
-/// fence).
+/// One drain cycle.
+///
+/// It builds the send list: each partition's pending resend first, then one
+/// newly drained batch for each *idle* partition. It sends every batch as its
+/// own single-partition `ProduceRequest` **concurrently**. It then dispatches
+/// each [`BatchVerdict`]: ack, park for resend, terminal fail, or fence.
 ///
 /// **Per-partition ordering / idempotence.** A partition contributes at most one
-/// batch per cycle: either its pending resend (held in [`PipelineState::retry`])
-/// *or* one new batch when idle, never both — the `occupied` set enforces the
-/// "never both". So the broker never sees two outstanding sequences for a
-/// partition, and a failing partition can never interleave a fresh batch ahead
-/// of its pending resend. Each batch's `record_batch` (hence `base_sequence`) is
-/// built once and resent verbatim, so the leader sees each sequence exactly
-/// once, in order — ordering preserved by construction.
+/// batch per cycle. It contributes either its pending resend, held in
+/// [`PipelineState::retry`], *or* one new batch when idle, and never both. The
+/// `occupied` set enforces the "never both". The broker therefore never sees
+/// two outstanding sequences for a partition, and a failing partition can never
+/// interleave a fresh batch ahead of its pending resend. Each batch's
+/// `record_batch`, and therefore its `base_sequence`, is built once and resent
+/// verbatim, so the leader sees each sequence exactly once, in order. Ordering
+/// is preserved by construction.
 ///
-/// `in_flight` accounting: `fetch_add` only when a NEW batch is drained from an
-/// accumulator (resends were counted when first drained); `fetch_sub` only when
-/// a batch reaches a terminal outcome (ack, terminal failure, fence, or routing
-/// budget exhausted). `flush_notify` is woken when `in_flight` hits zero and
-/// when there is nothing to send.
+/// `in_flight` accounting works like this. `fetch_add` runs only when a NEW
+/// batch is drained from an accumulator, because resends were counted when they
+/// were first drained. `fetch_sub` runs only when a batch reaches a terminal
+/// outcome: an ack, a terminal failure, a fence, or an exhausted routing budget.
+/// `flush_notify` wakes when `in_flight` hits zero, and when there is nothing to
+/// send.
 #[tracing::instrument(
     level = "debug",
     skip_all,
@@ -561,16 +578,18 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState, intent: D
     send_batches(cfg, state, to_send).await;
 }
 
-/// Drain the per-partition retry slots into an ordered send list (one-slot
-/// model). Each partition holds **at most one** failed batch awaiting a verbatim
-/// resend; a batch whose routing budget (measured from
-/// its first send) has elapsed is split off into `expired` for the caller to
-/// fail instead of resending. Every resent batch keeps its allocated
-/// `base_sequence` and bytes (the broker dedups a re-landed write via
-/// `DUPLICATE_SEQUENCE_NUMBER`); `first_sent` is initialized defensively if unset.
+/// Drain the per-partition retry slots into an ordered send list, in the
+/// one-slot model.
 ///
-/// Pure over the retry map (no `Client`, no I/O) so the budget-expiry logic is
-/// unit-testable without a broker.
+/// Each partition holds **at most one** failed batch that awaits a verbatim
+/// resend. A batch whose routing budget has elapsed, measured from its first
+/// send, goes into `expired`, and the caller fails it instead of resending it.
+/// Every resent batch keeps its allocated `base_sequence` and its bytes, and the
+/// broker dedups a re-landed write with `DUPLICATE_SEQUENCE_NUMBER`. If
+/// `first_sent` is unset, this function initializes it defensively.
+///
+/// The function is pure over the retry map, with no `Client` and no I/O, so the
+/// budget-expiry logic is unit-testable without a broker.
 fn collect_retries(
     retry: &mut HashMap<(String, i32), PreparedBatch>,
     now: Instant,
@@ -617,37 +636,43 @@ fn collect_retries(
     (to_send, expired)
 }
 
-/// Per-batch verdict consumed by [`send_batches`] in the one-slot model: the
-/// broker durably accepted it, it must be resent verbatim, it failed terminally
-/// with a server code, or it fatally fenced the producer.
+/// Per-batch verdict that [`send_batches`] consumes in the one-slot model. The
+/// broker durably accepted the batch, or the batch must be resent verbatim, or
+/// it failed terminally with a server code, or it fatally fenced the
+/// producer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum BatchVerdict {
-    /// Durably written (`NONE`) or already present (`DUPLICATE_SEQUENCE_NUMBER`).
+    /// Durably written, with `NONE`, or already present, with
+    /// `DUPLICATE_SEQUENCE_NUMBER`.
     Acked {
         base_offset: i64,
     },
-    /// Resend verbatim next cycle (transport failure, `OUT_OF_ORDER`, or routing).
+    /// Resend verbatim on the next cycle, after a transport failure, an
+    /// `OUT_OF_ORDER`, or a routing error.
     Retry,
-    /// Terminal but non-fatal server error — fail the records with `Server(code)`.
+    /// Terminal but non-fatal server error. Fail the records with
+    /// `Server(code)`.
     Terminal(i16),
-    /// Fatal idempotence failure (`INVALID_PRODUCER_EPOCH`) — fence the producer.
+    /// Fatal idempotence failure, `INVALID_PRODUCER_EPOCH`. Fence the
+    /// producer.
     Fence,
     RecoveryRequired,
 }
 
-/// Classification of a per-partition `error_code`: either a direct
-/// [`BatchVerdict`], or [`Classification::Routing`] (`NOT_LEADER`/`UNKNOWN` — a
-/// retry, plus the leader-hint adoption / metadata refresh side effects applied
-/// by [`interpret_response`]). Kept separate so the pure code→verdict mapping is
-/// unit-testable without a `Client`.
+/// Classification of a per-partition `error_code`. It is either a direct
+/// [`BatchVerdict`], or [`Classification::Routing`] for `NOT_LEADER` and
+/// `UNKNOWN`. Routing means a retry, plus the leader-hint adoption and metadata
+/// refresh side effects that [`interpret_response`] applies. The classification
+/// is kept separate so the pure code-to-verdict mapping is unit-testable
+/// without a `Client`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Classification {
     Verdict(BatchVerdict),
     Routing,
 }
 
-/// Map a per-partition `error_code` (and the broker's `base_offset`) to its
-/// [`Classification`]. Pure (no I/O).
+/// Map a per-partition `error_code`, and the broker's `base_offset`, to its
+/// [`Classification`]. The function is pure and does no I/O.
 fn classify_verdict(error_code: i16, base_offset: i64) -> Classification {
     match error_code {
         // The broker durably wrote the batch (NONE) or already had it
@@ -670,10 +695,12 @@ fn classify_verdict(error_code: i16, base_offset: i64) -> Classification {
     }
 }
 
-/// Resolve a partition's leader id from the cache. Returns [`BOOTSTRAP_LEADER`]
-/// when the leader is unknown (`< 0`), uncached, or the pool has no dialable
-/// address for it (e.g. a port-0 in-process test broker) — those cases fall
-/// back to the bootstrap connection.
+/// Resolve a partition's leader id from the cache.
+///
+/// It returns [`BOOTSTRAP_LEADER`] when the leader is unknown, that is `< 0`,
+/// when the leader is uncached, or when the pool has no dialable address for
+/// it, such as a port-0 in-process test broker. Those cases fall back to the
+/// bootstrap connection.
 fn resolve_leader(cfg: &SenderConfig, topic: &str, partition: i32) -> i32 {
     match cfg
         .partition_leaders
@@ -697,9 +724,10 @@ fn positive_partition_count(count: i32) -> Option<i32> {
     (count > 0).then_some(count)
 }
 
-/// Build the v2 `RecordBatch` for a drained partition batch, allocating its
-/// `base_sequence` range from `next_seq`. The result is sent (and any retry
-/// resent) verbatim, so the sequence is allocated exactly once per batch.
+/// Build the v2 `RecordBatch` for a drained partition batch, and allocate its
+/// `base_sequence` range from `next_seq`. The sender sends the result verbatim,
+/// and resends it verbatim on a retry, so it allocates the sequence exactly
+/// once per batch.
 #[tracing::instrument(
     level = "debug",
     skip_all,
@@ -762,23 +790,24 @@ async fn prepare_batch(
 struct BatchSendResult {
     pb: PreparedBatch,
     verdict: BatchVerdict,
-    /// A metadata refresh is required before a resend can route correctly (the
+    /// A metadata refresh is required before a resend can route correctly. The
     /// partition came back mis-routed with no usable inline leader hint, or the
-    /// hinted leader's address is unknown).
+    /// hinted leader's address is unknown.
     refresh_needed: bool,
 }
 
 /// Send every batch in `to_send` as its own single-partition `ProduceRequest`,
 /// **concurrently**, then dispatch each [`BatchVerdict`]: ack the records, fail
 /// them terminally, park the batch in its partition's retry slot for a verbatim
-/// resend next cycle, or fence the producer.
+/// resend on the next cycle, or fence the producer.
 ///
-/// Concurrency is cross-partition request pipelining: every batch in `to_send`
-/// is for a *distinct* partition ([`drain_once`]'s `occupied` set guarantees it),
-/// and the brokers are independent — so overlapping the round-trips keeps every
-/// broker busy without ever putting two same-partition requests on the wire, and
-/// per-partition ordering is undisturbed. Futures are polled on this one task
-/// (no spawn), so they share `&cfg` safely.
+/// The concurrency is cross-partition request pipelining. Every batch in
+/// `to_send` is for a *distinct* partition, which the `occupied` set of
+/// [`drain_once`] guarantees, and the brokers are independent. Overlapping the
+/// round-trips therefore keeps every broker busy, never puts two same-partition
+/// requests on the wire, and leaves per-partition ordering undisturbed. The
+/// futures are polled on this one task, with no spawn, so they share `&cfg`
+/// safely.
 #[tracing::instrument(level = "debug", skip_all, fields(batches = to_send.len()))]
 async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Vec<PreparedBatch>) {
     let mut to_send = to_send;
@@ -864,8 +893,8 @@ fn take_retry(batch: &mut PreparedBatch, retries: i32) -> bool {
     }
 }
 
-/// Ack a batch's records with their broker-assigned offsets and release its
-/// in-flight slot. `base_offset + offset_delta` is the per-record offset.
+/// Ack a batch's records with their broker-assigned offsets, and release its
+/// in-flight slot. The per-record offset is `base_offset + offset_delta`.
 fn ack_batch(cfg: &SenderConfig, pb: PreparedBatch, base_offset: i64) {
     let partition = pb.partition;
     for r in pb.records {
@@ -879,18 +908,20 @@ fn ack_batch(cfg: &SenderConfig, pb: PreparedBatch, base_offset: i64) {
     finish_in_flight(cfg);
 }
 
-/// Terminally fail a batch the broker rejected with an unmodeled error code,
-/// resolving its records with `Server(code)` and releasing the in-flight slot.
-/// This is the single owner of the slot release for the batch.
+/// Terminally fail a batch that the broker rejected with an unmodeled error
+/// code. It resolves the batch's records with `Server(code)` and releases the
+/// in-flight slot. It is the single owner of the slot release for the batch.
 fn terminal_fail_batch(cfg: &SenderConfig, pb: PreparedBatch, code: i16) {
     fail_batch(pb.records, ProducerError::Server(code));
     finish_in_flight(cfg);
 }
 
-/// Fence the producer: mark `STATE_FENCED`, fail `to_fail` (this cycle's still-
-/// live batches), every batch parked in a retry slot, and everything in the
-/// accumulators with `FencedProducer`, releasing each in-flight slot. Called on
-/// a fatal idempotence failure (`INVALID_PRODUCER_EPOCH`).
+/// Fence the producer.
+///
+/// This marks `STATE_FENCED` and fails, with `FencedProducer`, `to_fail`, which
+/// holds this cycle's still-live batches, every batch parked in a retry slot,
+/// and everything in the accumulators. It releases each in-flight slot. The
+/// sender calls it on a fatal idempotence failure, `INVALID_PRODUCER_EPOCH`.
 fn fence(cfg: &SenderConfig, state: &mut PipelineState, to_fail: Vec<PreparedBatch>) {
     cfg.state
         .compare_exchange(
@@ -927,17 +958,20 @@ fn fence(cfg: &SenderConfig, state: &mut PipelineState, to_fail: Vec<PreparedBat
     }
 }
 
-/// The instant a transport-failed batch becomes eligible to resend: `now` plus
-/// the configured `retry_backoff`. Pulled out so the offset direction (the
-/// deadline must be in the *future*) is unit-testable.
+/// The instant a transport-failed batch becomes eligible to resend, that is
+/// `now` plus the configured `retry_backoff`. It is a separate function so that
+/// the offset direction is unit-testable: the deadline must be in the
+/// *future*.
 fn backoff_deadline(now: Instant, retry_backoff: Time) -> Instant {
     now.checked_add(retry_backoff.to_std()).unwrap_or(now)
 }
 
-/// Send a single batch as its own single-partition `ProduceRequest`, resolving
-/// its transport/broker result to a [`BatchVerdict`]. The batch is returned
-/// alongside the verdict (the caller still owns its records). On a connection
-/// error the broker is evicted so a reconnect targets its current address.
+/// Send a single batch as its own single-partition `ProduceRequest`, and
+/// resolve its transport or broker result to a [`BatchVerdict`].
+///
+/// The function returns the batch alongside the verdict, because the caller
+/// still owns its records. On a connection error it evicts the broker, so a
+/// reconnect targets that broker's current address.
 #[tracing::instrument(
     level = "debug",
     skip_all,
@@ -1016,8 +1050,8 @@ async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendR
 }
 
 /// Interpret a single-partition `ProduceResponse` into a [`BatchSendResult`].
-/// Applies the routing case's leader-hint side effects; the pure code→verdict
-/// mapping lives in [`classify_verdict`].
+/// It applies the leader-hint side effects of the routing case. The pure
+/// code-to-verdict mapping lives in [`classify_verdict`].
 fn interpret_response(
     cfg: &SenderConfig,
     mut pb: PreparedBatch,
@@ -1110,9 +1144,9 @@ fn interpret_response(
     }
 }
 
-/// Build a single-partition, single-batch `ProduceRequest`. Transactional state
-/// is read from the batch's own attributes (set at build time), so the
-/// request-level `transactional_id` matches the batch exactly.
+/// Build a single-partition, single-batch `ProduceRequest`. The transactional
+/// state comes from the batch's own attributes, which are set at build time, so
+/// the request-level `transactional_id` matches the batch exactly.
 fn build_single_batch_request(cfg: &SenderConfig, pb: &PreparedBatch) -> ProduceRequest {
     let is_txn = pb.record_batch.attributes.is_transactional();
     let req_txn_id = if is_txn {
@@ -1139,9 +1173,9 @@ fn build_single_batch_request(cfg: &SenderConfig, pb: &PreparedBatch) -> Produce
     }
 }
 
-/// Refresh cluster metadata and adopt the fresh partition→leader map. The
-/// refresh also re-populates the pool's broker-address registry, so a leader
-/// re-elected onto a broker the pool hadn't dialed becomes routable.
+/// Refresh cluster metadata and adopt the fresh partition-to-leader map. The
+/// refresh also refills the pool's broker-address registry, so a leader
+/// re-elected onto a broker the pool had not dialed becomes routable.
 #[tracing::instrument(level = "debug", skip_all)]
 async fn update_leaders_from_metadata(cfg: &SenderConfig) {
     if let Ok(md) = cfg.transport.refresh_metadata().await {
@@ -1248,8 +1282,8 @@ async fn fail_recovered_accumulator_batches(cfg: &SenderConfig) {
     }
 }
 
-/// Decrement `in_flight` for a completed batch, waking any `flush` waiter when
-/// it was the last one outstanding.
+/// Decrement `in_flight` for a completed batch, and wake any `flush` waiter
+/// when that batch was the last one outstanding.
 fn finish_in_flight(cfg: &SenderConfig) {
     if cfg.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
         cfg.flush_notify.notify_waiters();
@@ -1259,8 +1293,9 @@ fn finish_in_flight(cfg: &SenderConfig) {
 /// Snapshot the transactional `(producer_id, producer_epoch)` if and only if
 /// the producer is currently inside an active transaction.
 ///
-/// Returns `Some((pid, epoch))` when a transactional batch should be emitted,
-/// `None` for non-transactional or out-of-transaction sends.
+/// It returns `Some((pid, epoch))` when the sender should emit a transactional
+/// batch, and `None` for a non-transactional send or a send outside a
+/// transaction.
 async fn txn_pid_snapshot(cfg: &SenderConfig) -> Option<(i64, i16)> {
     cfg.transactional_id.as_ref()?;
     let state = *cfg.txn_state.lock().await;
@@ -1271,14 +1306,14 @@ async fn txn_pid_snapshot(cfg: &SenderConfig) -> Option<(i64, i16)> {
     }
 }
 
-/// Build a v2 `RecordBatch` from a sealed `InProgressBatch`. Compression
-/// is encoded into the batch attributes; the actual compress step runs
-/// inside `RecordBatch::encode`.
+/// Build a v2 `RecordBatch` from a sealed `InProgressBatch`. The batch
+/// attributes encode the compression, and the actual compress step runs inside
+/// `RecordBatch::encode`.
 ///
-/// `txn_snapshot` is `Some((pid, epoch))` when the batch is being sent
-/// inside an active transaction. In that case the `is_transactional`
-/// attribute bit is set and the txn-coordinator-assigned pid/epoch are
-/// used instead of the idempotence pid/epoch.
+/// `txn_snapshot` is `Some((pid, epoch))` when the sender sends the batch inside
+/// an active transaction. In that case the function sets the `is_transactional`
+/// attribute bit, and it uses the pid and epoch the txn coordinator assigned
+/// instead of the idempotence pid and epoch.
 fn build_record_batch(
     cfg: &SenderConfig,
     batch: &InProgressBatch,
@@ -1341,10 +1376,10 @@ fn build_record_batch(
 
 /// Resolve every record in `records` with an error.
 ///
-/// `ClientError`, `Protocol`, and `Compression` are not `Clone`, so only
-/// the first record receives the real error for those variants. Trivially
-/// cloneable variants (`Server`, `FencedProducer`, `Closed`, etc.) are
-/// propagated to every record so callers see the true error code.
+/// `ClientError`, `Protocol`, and `Compression` are not `Clone`, so for those
+/// variants only the first record receives the real error. Variants that clone
+/// trivially, such as `Server`, `FencedProducer` and `Closed`, reach every
+/// record, so callers see the true error code.
 fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
     fn clone_if_possible(e: &ProducerError) -> Option<ProducerError> {
         match e {
@@ -1632,10 +1667,10 @@ mod tests {
 
 /// Deterministic in-process integration harness.
 ///
-/// Drives the real [`run`] sender loop against a [`MockTransport`] that models a
-/// broker's per-partition idempotent sequencing — no socket, no real `Client`.
-/// Used to reproduce (and then guard against) the same-partition pipelining hang
-/// described in the module docs.
+/// It drives the real [`run`] sender loop against a [`MockTransport`] that
+/// models a broker's per-partition idempotent sequencing, with no socket and no
+/// real `Client`. It reproduces, and then guards against, the same-partition
+/// pipelining hang the module docs describe.
 #[cfg(test)]
 mod harness {
     use std::{
@@ -1670,8 +1705,8 @@ mod harness {
         transactional::TxnState,
     };
 
-    /// Adapter so a sender can own a `Box<dyn ProduceTransport>` while the test
-    /// keeps a clone of the same `Arc<MockTransport>` to inspect.
+    /// Adapter that lets a sender own a `Box<dyn ProduceTransport>` while the
+    /// test keeps a clone of the same `Arc<MockTransport>` to inspect.
     struct ArcTransport(Arc<MockTransport>);
 
     #[async_trait::async_trait]
@@ -1697,59 +1732,68 @@ mod harness {
     /// Per-partition broker sequencing state.
     #[derive(Default)]
     struct PartitionState {
-        /// Next `base_sequence` the broker will accept (strictly increasing, no
-        /// gaps), à la Kafka idempotent producer.
+        /// Next `base_sequence` the broker accepts. It is strictly increasing
+        /// with no gaps, as in the Kafka idempotent producer.
         expected: i32,
-        /// Running log-end offset; each accepted batch is assigned the current
-        /// value as its `base_offset`, then advanced by the record count.
+        /// Running log-end offset. Each accepted batch takes the current value
+        /// as its `base_offset`, and then the offset advances by the record
+        /// count.
         next_offset: i64,
-        /// `base_sequence -> base_offset` for sequences already accepted, so a
-        /// resend of a written batch can be answered `DUPLICATE_SEQUENCE_NUMBER`
-        /// with its original offset (the broker dedups; the sender maps to ack).
+        /// `base_sequence -> base_offset` for sequences already accepted. A
+        /// resend of a written batch can then be answered with
+        /// `DUPLICATE_SEQUENCE_NUMBER` and its original offset. The broker
+        /// dedups, and the sender maps that answer to an ack.
         accepted: HashMap<i32, i64>,
     }
 
     /// A broker model with faithful per-partition idempotent sequencing.
     ///
-    /// `reorder_delay`: when non-zero, `send_produce` sleeps for
+    /// When `reorder_delay` is non-zero, `send_produce` sleeps for
     /// `reorder_delay * (REORDER_SPREAD - min(base_sequence, REORDER_SPREAD))`
-    /// before applying the broker logic, so that several *concurrently issued*
-    /// same-partition requests complete **higher-`base_sequence`-first** — a
-    /// lower sequence waits longer. This deterministically models the
-    /// on-the-wire write race the old `join_all` same-partition pipelining
-    /// suffered. With at most one same-partition request in flight (the fix),
-    /// only one request is ever outstanding per partition, so the staggered
-    /// delay cannot reorder anything and the broker sees a clean increasing
+    /// before it applies the broker logic. Several same-partition requests
+    /// issued *concurrently* then complete **higher-`base_sequence`-first**,
+    /// because a lower sequence waits longer. This models the on-the-wire write
+    /// race of the old `join_all` same-partition pipelining deterministically.
+    ///
+    /// With the fix, at most one same-partition request is in flight, so only
+    /// one request is ever outstanding per partition. The staggered delay then
+    /// cannot reorder anything, and the broker sees a clean increasing
     /// sequence.
     struct MockTransport {
         partitions: StdMutex<HashMap<(String, i32), PartitionState>>,
         /// Arrival order of `(topic, partition, base_sequence)` as the broker
-        /// *applied* them (post-delay), for assertions / debugging.
+        /// *applied* them, after the delay. It serves assertions and
+        /// debugging.
         arrivals: StdMutex<Vec<(String, i32, i32)>>,
         reorder_delay: Duration,
-        /// Total Produce requests applied (lets a test bound livelock churn).
+        /// Total Produce requests applied. A test uses it to bound livelock
+        /// churn.
         applied: AtomicUsize,
-        /// One-shot transport error: the next send to this `base_sequence`
-        /// returns `Err(Disconnected)` exactly once, then is cleared.
+        /// One-shot transport error. The next send to this `base_sequence`
+        /// returns `Err(Disconnected)` exactly once, and then the flag
+        /// clears.
         fail_once_seq: StdMutex<Option<i32>>,
         /// One-shot transport error for the next send to a specific broker id.
         fail_once_leader: StdMutex<Option<i32>>,
         /// Artificial per-leader delay before producing a response/error.
         leader_delay: StdMutex<HashMap<i32, Duration>>,
-        /// One-shot injected broker response, keyed by `base_sequence`. The next
-        /// send to that sequence returns a synthesized `ProduceResponse` (custom
-        /// name / `topic_id` / error code / offset / leader hint) once, then is
-        /// cleared. Drives terminal, routing, and topic-correlation paths.
+        /// One-shot injected broker response, keyed by `base_sequence`. The
+        /// next send to that sequence returns a synthesized `ProduceResponse`
+        /// once, with a custom name, `topic_id`, error code, offset and leader
+        /// hint, and then the entry clears. It drives the terminal, routing and
+        /// topic-correlation paths.
         inject_once: StdMutex<Option<Inject>>,
         /// `broker_id`s passed to `evict_broker`, in order.
         evicted: StdMutex<Vec<i32>>,
         /// `timeout_ms` of the most recent Produce request the broker received.
         last_timeout_ms: AtomicI64,
-        /// Response `refresh_metadata` returns (default empty).
+        /// Response that `refresh_metadata` returns. It is empty by
+        /// default.
         refresh_response: StdMutex<MetadataResponse>,
-        /// Broker ids the transport claims to have a dialable address for
-        /// (drives [`resolve_leader`]). Empty by default → every send falls back
-        /// to the bootstrap connection, as the original harness assumed.
+        /// Broker ids the transport claims to have a dialable address for.
+        /// This drives [`resolve_leader`]. The set is empty by default, so
+        /// every send falls back to the bootstrap connection, as the original
+        /// harness assumed.
         known_brokers: StdMutex<HashSet<i32>>,
         /// The `leader` argument of every `send_produce` call, in order, so a
         /// test can assert how a batch was routed.
@@ -1766,9 +1810,9 @@ mod harness {
         offsets_seen: AtomicI64,
     }
 
-    /// A one-shot synthesized broker response, keyed by `base_sequence`.
-    /// `name`/`topic_id` of `None` echo the request's; `leader_hint >= 0` sets
-    /// the partition response's `current_leader`.
+    /// A one-shot synthesized broker response, keyed by `base_sequence`. A
+    /// `name` or `topic_id` of `None` echoes the request's value. A
+    /// `leader_hint >= 0` sets the partition response's `current_leader`.
     #[derive(Clone)]
     struct Inject {
         seq: i32,
@@ -1779,10 +1823,11 @@ mod harness {
         leader_hint: i32,
     }
 
-    /// Caps the per-request reorder stagger to a bounded number of delay units
-    /// so the total sleep stays small (`reorder_delay * REORDER_SPREAD` worst
-    /// case) while still completing higher sequences ahead of lower ones within
-    /// a single concurrent `join_all` poll.
+    /// Caps the per-request reorder stagger to a bounded number of delay
+    /// units, so the total sleep stays small, at
+    /// `reorder_delay * REORDER_SPREAD` in the worst case. Higher sequences
+    /// still complete ahead of lower ones within a single concurrent `join_all`
+    /// poll.
     const REORDER_SPREAD: i32 = 32;
 
     impl MockTransport {
@@ -1830,8 +1875,9 @@ mod harness {
             self.leader_delay.lock().unwrap().insert(leader, delay);
         }
 
-        /// Make the next send to `seq` return a `ProduceResponse` carrying
-        /// `error_code` (echoing the request's topic, no leader hint), once.
+        /// Make the next send to `seq` return, once, a `ProduceResponse` that
+        /// carries `error_code`. It echoes the request's topic and gives no
+        /// leader hint.
         fn inject_code_once(self: &Arc<Self>, seq: i32, error_code: i16) {
             self.inject(Inject {
                 seq,
@@ -1863,8 +1909,8 @@ mod harness {
             *self.refresh_response.lock().unwrap() = md;
         }
 
-        /// Mark `id` as a broker the transport can dial (so `resolve_leader`
-        /// routes to it instead of the bootstrap connection).
+        /// Mark `id` as a broker the transport can dial, so `resolve_leader`
+        /// routes to it instead of to the bootstrap connection.
         fn add_known_broker(self: &Arc<Self>, id: i32) {
             self.known_brokers.lock().unwrap().insert(id);
         }
@@ -2097,13 +2143,13 @@ mod harness {
     }
 
     /// Spawn a sender backed by `transport`, with `max_in_flight` and a 1ms
-    /// linger so batch deadlines expire quickly.
+    /// linger, so batch deadlines expire quickly.
     fn spawn_sender(transport: Arc<MockTransport>, max_in_flight: usize) -> Harness {
         spawn_sender_with(transport, max_in_flight, millis(1))
     }
 
     /// Spawn a sender with an explicit `linger`. A long linger keeps the batch
-    /// deadline in the future so a test can observe wake-triggered drains in
+    /// deadline in the future, so a test can observe wake-triggered drains in
     /// isolation.
     fn spawn_sender_with(
         transport: Arc<MockTransport>,
@@ -2193,10 +2239,10 @@ mod harness {
         }
     }
 
-    /// Append `n` records to `(topic, partition)`, each in its own batch (so the
-    /// sender allocates distinct `base_sequence`s and may pipeline them),
-    /// returning the ack receivers. We force one-record-per-batch by sealing
-    /// after each append.
+    /// Append `n` records to `(topic, partition)`, each in its own batch, and
+    /// return the ack receivers. The sender then allocates distinct
+    /// `base_sequence`s and may pipeline them. A seal after each append forces
+    /// one record per batch.
     async fn produce_burst(
         h: &Harness,
         topic: &str,
@@ -2228,11 +2274,11 @@ mod harness {
         rxs
     }
 
-    /// Append `n` records to `(topic, partition)` as a SINGLE batch (no seal
-    /// between appends), returning the ack receivers in append order. The sender
-    /// seals the batch on its next drain, so the records share one
-    /// `base_sequence` with `offset_delta` 0..n-1 — exercising the per-record
-    /// offset arithmetic (`base_offset + offset_delta`).
+    /// Append `n` records to `(topic, partition)` as a SINGLE batch, with no
+    /// seal between the appends, and return the ack receivers in append order.
+    /// The sender seals the batch on its next drain, so the records share one
+    /// `base_sequence` with `offset_delta` 0..n-1. This exercises the per-record
+    /// offset arithmetic, `base_offset + offset_delta`.
     async fn produce_single_batch(
         h: &Harness,
         topic: &str,
@@ -2666,22 +2712,24 @@ mod harness {
 
     /// THE REGRESSION TEST for the same-partition pipelining hang.
     ///
-    /// Burst many single-record batches at ONE partition through the real sender
-    /// loop, against a broker that enforces strict per-partition sequencing AND a
-    /// reorder model that completes *concurrently issued* same-partition requests
-    /// higher-`base_sequence`-first (modeling the on-the-wire write race the old
-    /// `join_all` same-partition pipelining suffered).
+    /// The test bursts many single-record batches at ONE partition through the
+    /// real sender loop. The broker enforces strict per-partition sequencing AND
+    /// a reorder model that completes same-partition requests issued
+    /// *concurrently* higher-`base_sequence`-first. That models the on-the-wire
+    /// write race of the old `join_all` same-partition pipelining.
     ///
-    /// With one-in-flight-per-partition (the fix) a partition only ever has one
+    /// With the fix, one in flight per partition, a partition only ever has one
     /// request outstanding, so the staggered transport delay cannot reorder
-    /// anything: the broker sees `base_sequence` 0,1,2,… exactly once each, every
-    /// record acks `Ok` with offsets in order, and there is **zero retry churn**
-    /// (exactly `N` broker applies). The `applied == N` assertion is the teeth:
-    /// the old multi-in-flight design fed reordered concurrent requests to the
-    /// broker, drew `OUT_OF_ORDER_SEQUENCE_NUMBER`, drained, and resent — so it
-    /// applied strictly more than `N` (and, under sustained load on a cluster,
-    /// churned long enough that the caller's time-boxed window saw a record's
-    /// ack-oneshot still unresolved — the reported hang).
+    /// anything. The broker sees `base_sequence` 0,1,2,… exactly once each,
+    /// every record acks `Ok` with offsets in order, and there is **zero retry
+    /// churn**, that is exactly `N` broker applies.
+    ///
+    /// The `applied == N` assertion is the teeth. The old multi-in-flight design
+    /// fed reordered concurrent requests to the broker, drew
+    /// `OUT_OF_ORDER_SEQUENCE_NUMBER`, drained, and resent, so it applied
+    /// strictly more than `N`. Under sustained load on a cluster it churned long
+    /// enough that the caller's time-boxed window saw a record's ack-oneshot
+    /// still unresolved. That was the reported hang.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn single_partition_burst_all_acks_resolve_in_order() {
         const N: usize = 40;
@@ -2770,9 +2818,10 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// A one-shot transport error mid-stream must NOT drop or reorder: the failed
-    /// batch is resent (broker dedups via DUPLICATE if it had landed, or accepts
-    /// it fresh), all acks resolve, offsets stay a clean increasing run.
+    /// A one-shot transport error mid-stream must NOT drop or reorder. The
+    /// sender resends the failed batch. The broker dedups it with DUPLICATE if
+    /// it had landed, or accepts it fresh. All acks resolve, and the offsets
+    /// stay a clean increasing run.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn transport_error_mid_stream_recovers_in_order() {
         const N: usize = 12;
@@ -2937,16 +2986,17 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// Mechanism proof: issuing several same-partition requests CONCURRENTLY (as
-    /// the old `send_batches` did via `join_all`) against the staggered-reorder
-    /// broker makes the broker apply them higher-`base_sequence`-first, so every
-    /// request except the lowest draws `OUT_OF_ORDER_SEQUENCE_NUMBER`. This is
-    /// the gap-and-resend trigger the fix eliminates by never issuing more than
-    /// one same-partition request at a time. (Pure transport-level check; no
-    /// sender loop — it isolates the reorder mechanism.)
+    /// Mechanism proof. Several same-partition requests issued CONCURRENTLY,
+    /// as the old `send_batches` did through `join_all`, against the
+    /// staggered-reorder broker, make the broker apply them
+    /// higher-`base_sequence`-first. Every request except the lowest then draws
+    /// `OUT_OF_ORDER_SEQUENCE_NUMBER`. That is the gap-and-resend trigger the
+    /// fix removes, because the fix never issues more than one same-partition
+    /// request at a time. This is a pure transport-level check with no sender
+    /// loop, so it isolates the reorder mechanism.
     ///
-    /// Uses paused virtual time so the staggered sleeps order the arrivals
-    /// deterministically (no reliance on the OS scheduler).
+    /// The test uses paused virtual time, so the staggered sleeps order the
+    /// arrivals deterministically and do not rely on the OS scheduler.
     #[tokio::test(start_paused = true)]
     async fn concurrent_same_partition_sends_reorder_and_trip_out_of_order() {
         let transport = MockTransport::new(Duration::from_millis(5));
@@ -3008,14 +3058,16 @@ mod harness {
         assert2::assert!(arrivals == vec![4, 3, 2, 1, 0]);
     }
 
-    /// A partition with a batch pending resend must NOT also send its next batch
-    /// in the same cycle — otherwise, under a broker that reorders concurrent
-    /// same-partition requests, the new batch could overtake the resend and trip
-    /// `OUT_OF_ORDER_SEQUENCE_NUMBER` churn. A one-shot transport error parks one
-    /// batch for resend mid-stream; with the reorder model active we still expect
-    /// each batch applied exactly once (no churn) and offsets in a clean run.
-    /// This guards the "ordering preserved by construction" property of the
-    /// one-slot-per-partition pipeline against a same-partition send race.
+    /// A partition with a batch pending resend must NOT also send its next
+    /// batch in the same cycle. Under a broker that reorders concurrent
+    /// same-partition requests, the new batch could otherwise overtake the
+    /// resend and trip `OUT_OF_ORDER_SEQUENCE_NUMBER` churn.
+    ///
+    /// A one-shot transport error parks one batch for resend mid-stream. With
+    /// the reorder model active, the test still expects each batch applied
+    /// exactly once, with no churn, and offsets in a clean run. This guards the
+    /// "ordering preserved by construction" property of the one-slot-per-
+    /// partition pipeline against a same-partition send race.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn retry_does_not_race_new_batch_under_reorder() {
         const N: usize = 16;
@@ -3045,11 +3097,11 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// Routing decision (`resolve_leader`): a partition whose cached leader is a
-    /// known (dialable) broker is sent to that broker; a partition whose leader
-    /// is unknown (or whose address the pool can't dial) falls back to the
-    /// bootstrap connection. Drives the real sender so the `leader` argument
-    /// handed to the transport is observed directly.
+    /// Routing decision in `resolve_leader`. A partition whose cached leader is
+    /// a known, dialable broker goes to that broker. A partition whose leader is
+    /// unknown, or whose address the pool cannot dial, falls back to the
+    /// bootstrap connection. The test drives the real sender, so it observes the
+    /// `leader` argument handed to the transport directly.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn routes_to_known_leader_else_bootstrap() {
         let transport = MockTransport::new(Duration::ZERO);
@@ -3084,9 +3136,9 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// A terminal-but-not-fatal server error (an unmodeled code) fails the record
-    /// with `Server(code)` and releases its in-flight slot — it must not fence,
-    /// hang, or be retried forever.
+    /// A terminal but non-fatal server error, that is an unmodeled code, fails
+    /// the record with `Server(code)` and releases its in-flight slot. It must
+    /// not fence, it must not hang, and it must not be retried forever.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn terminal_server_error_fails_record() {
         const MESSAGE_TOO_LARGE: i16 = 10;
@@ -3196,9 +3248,10 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// A batch with several records assigns each record `base_offset +
-    /// offset_delta`. The other tests use one record per batch, where
-    /// `offset_delta` is always 0; this pins the per-record offset arithmetic.
+    /// A batch with several records gives each record
+    /// `base_offset + offset_delta`. The other tests use one record per batch,
+    /// where `offset_delta` is always 0. This test pins the per-record offset
+    /// arithmetic.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn multi_record_batch_offsets_use_base_plus_delta() {
         const N: usize = 4;
@@ -3224,8 +3277,8 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// A fatal `INVALID_PRODUCER_EPOCH` fences the producer: the record fails with
-    /// `FencedProducer` and the shared state flips to `STATE_FENCED`.
+    /// A fatal `INVALID_PRODUCER_EPOCH` fences the producer. The record fails
+    /// with `FencedProducer`, and the shared state flips to `STATE_FENCED`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn invalid_producer_epoch_fences_producer() {
         const INVALID_PRODUCER_EPOCH: i16 = 47;
@@ -3245,8 +3298,9 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// A transport failure to a *known* leader evicts that broker's connection so
-    /// a reconnect targets its current address; the batch then resends and acks.
+    /// A transport failure to a *known* leader evicts that broker's connection,
+    /// so a reconnect targets its current address. The batch then resends and
+    /// acks.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transport_error_evicts_known_leader() {
         let transport = MockTransport::new(Duration::ZERO);
@@ -3268,8 +3322,8 @@ mod harness {
     }
 
     /// On `NOT_LEADER_OR_FOLLOWER` with an inline `current_leader` hint to a
-    /// *known* broker, the sender adopts the hint — routes the resend there and
-    /// updates its leader cache — WITHOUT a metadata refresh.
+    /// *known* broker, the sender adopts the hint WITHOUT a metadata refresh. It
+    /// routes the resend there and updates its leader cache.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn not_leader_adopts_known_inline_hint_without_refresh() {
         const NOT_LEADER_OR_FOLLOWER: i16 = 6;
@@ -3311,8 +3365,9 @@ mod harness {
     }
 
     /// The sender correlates a Produce response to its batch by `topic_id` when
-    /// the response's topic NAME differs (Kafka v13+ omits the name). The injected
-    /// response carries the matching `topic_id` and a distinctive offset.
+    /// the response's topic NAME differs, because Kafka v13+ omits the name. The
+    /// injected response carries the matching `topic_id` and a distinctive
+    /// offset.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn correlates_response_by_topic_id_when_name_differs() {
         let topic_id = Uuid([7u8; 16]);
@@ -3348,11 +3403,10 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// `&&` (not `||`) gates the `topic_id` fallback: a response whose name does
-    /// NOT match and whose `topic_id` is ZERO must NOT be (mis)correlated. The
-    /// batch has no `topic_id` (ZERO), so only an exact name match binds a
-    /// response — a
-    /// wrong-name response forces a resend.
+    /// `&&`, not `||`, gates the `topic_id` fallback. A response whose name
+    /// does NOT match, and whose `topic_id` is ZERO, must NOT be correlated. The
+    /// batch has no `topic_id`, that is ZERO, so only an exact name match binds
+    /// a response, and a wrong-name response forces a resend.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn does_not_correlate_mismatched_name_with_zero_topic_id() {
         let transport = MockTransport::new(Duration::ZERO);
@@ -3380,9 +3434,10 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// `update_leaders_from_metadata` adopts leaders only from HEALTHY topics
-    /// (`error_code == 0`). A transport error triggers a refresh whose response
-    /// advertises a new leader for a healthy topic; the cache picks it up.
+    /// `update_leaders_from_metadata` adopts leaders only from HEALTHY topics,
+    /// that is `error_code == 0`. A transport error triggers a refresh whose
+    /// response advertises a new leader for a healthy topic, and the cache picks
+    /// it up.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn refresh_adopts_leader_for_healthy_topic() {
         let transport = MockTransport::new(Duration::ZERO);
@@ -3422,7 +3477,7 @@ mod harness {
     }
 
     /// The Produce request carries the configured `request_timeout` as
-    /// `timeout_ms` (5s → 5000ms on the wire).
+    /// `timeout_ms`, so 5s becomes 5000ms on the wire.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn request_carries_configured_timeout() {
         let transport = MockTransport::new(Duration::ZERO);
@@ -3561,7 +3616,7 @@ mod harness {
 
     /// A transport-failed transactional batch occupies the retry slot. Once
     /// reinitialization advances the recovery generation, that slot must fail
-    /// locally rather than resend a batch from the prior transaction epoch.
+    /// locally instead of resending a batch from the prior transaction epoch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn retry_slot_transactional_batch_is_failed_after_recovery_without_resend() {
         let transport = MockTransport::new(Duration::ZERO);
@@ -3622,9 +3677,9 @@ mod harness {
         shutdown(h).await;
     }
 
-    /// `finish_in_flight` notifies flush waiters exactly when `in_flight` reaches
-    /// zero. With a long linger the only early drains are wake-triggered, so this
-    /// notify is the only one a registered waiter can receive.
+    /// `finish_in_flight` notifies flush waiters exactly when `in_flight`
+    /// reaches zero. With a long linger, wakes trigger the only early drains, so
+    /// this notify is the only one a registered waiter can receive.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn finish_in_flight_notifies_when_drained() {
         let transport = MockTransport::new(Duration::ZERO);

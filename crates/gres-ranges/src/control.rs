@@ -196,7 +196,7 @@ pub(crate) fn authorized_test_fixture() -> AuthorizedSplitIntent {
     AuthorizedSplitIntent::from_record(record).unwrap()
 }
 
-/// Dispatcher-derived receipt state; callers cannot claim replay status on the wire.
+/// Dispatcher-derived receipt state. A caller cannot claim replay status on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntentAuthorizationContext {
     New,
@@ -204,7 +204,7 @@ pub enum IntentAuthorizationContext {
     CompletedReplay,
 }
 
-/// Immutable registry/config snapshot suitable for compute-side authorization.
+/// Immutable registry and config snapshot for compute-side authorization.
 #[derive(Debug, Default)]
 pub struct RegistrySplitIntentView {
     operations: BTreeMap<(String, String), crabka_gres_control::SplitOperationRecord>,
@@ -386,10 +386,10 @@ pub trait RangeControlExecutor: Send + Sync {
         }
     }
 
-    /// Reconcile a step whose durable completion evidence may be widened after restart.
+    /// Reconcile a step whose durable completion evidence a restart may widen.
     ///
-    /// Implementations may advance only evidence intrinsic to the same immutable request. The
-    /// dispatcher validates the permitted response shape and persists it with a revision CAS.
+    /// An implementation may advance only the evidence intrinsic to the same immutable request.
+    /// The dispatcher validates the permitted response shape and persists it with a revision CAS.
     async fn reconcile_completed(
         &self,
         request: &RangeControlReq,
@@ -522,7 +522,8 @@ impl RangeControlReceiptStore for RangeZeroReceiptStore {
     }
 }
 
-/// Service-side dispatcher that fences tenant/generation and replays completed operation IDs.
+/// Service-side dispatcher that fences the tenant and the generation, and replays completed
+/// operation IDs.
 pub struct GenerationFencedRangeControl {
     tenant: String,
     generations: BTreeMap<crate::RangeId, std::collections::BTreeSet<u64>>,

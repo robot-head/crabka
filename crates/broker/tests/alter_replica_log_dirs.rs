@@ -1,15 +1,15 @@
 // rustc 1.95 clippy ICEs on annotate-snippets in pedantic lints on these
 // raw-wire test files; match the opt-out used by `jbod.rs`.
 
-//! KIP-113 — `AlterReplicaLogDirs` (`api_key` 34) end-to-end.
+//! KIP-113: `AlterReplicaLogDirs` (`api_key` 34) end-to-end.
 //!
-//! Spins up a single broker with two `log.dirs`, creates a 2-partition
-//! topic, then issues `AlterReplicaLogDirs` to move both partitions
-//! into the second directory. Asserts:
+//! The test starts a single broker with two `log.dirs`, creates a
+//! 2-partition topic, then sends `AlterReplicaLogDirs` to move both
+//! partitions into the second directory. It asserts that:
 //!   1. the partition directories migrate on disk to the target dir,
 //!   2. `DescribeLogDirs` polls converge with `is_future_key = false`
 //!      in the target dir for both partitions,
-//!   3. invalid target / missing replica return the right Kafka
+//!   3. an invalid target and a missing replica return the correct Kafka
 //!      error codes.
 
 use std::{
@@ -333,8 +333,8 @@ async fn alter_replica_log_dirs_rejects_unknown_replica() {
     handle.shutdown().await;
 }
 
-/// Boot a two-dir broker with `SimpleAclAuthorizer` + no super-users +
-/// no ACL grants — every `authorize()` returns Deny. Cluster.Alter on
+/// Boot a two-dir broker with `SimpleAclAuthorizer`, no super-users, and
+/// no ACL grants, so every `authorize()` returns Deny. Cluster.Alter on
 /// `AlterReplicaLogDirs` (`api_key` 34) must come back as
 /// `CLUSTER_AUTHORIZATION_FAILED` for every listed partition.
 #[tokio::test]
@@ -378,9 +378,10 @@ async fn alter_replica_log_dirs_denied_without_cluster_alter() {
 }
 
 /// Produce a few batches, move the partition to the other dir, then
-/// consume and verify every produced record survives. Exercises the
-/// `catch_up` batch-copy path in `future_log.rs` (the empty-log move
-/// hits zero-batch catch-up, which doesn't run the `append_at` loop).
+/// consume and verify that every produced record survives. This test
+/// exercises the `catch_up` batch-copy path in `future_log.rs`. The
+/// empty-log move hits zero-batch catch-up, which does not run the
+/// `append_at` loop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_replica_log_dirs_preserves_records_across_move() {
     use bytes::Bytes;
@@ -464,10 +465,10 @@ async fn alter_replica_log_dirs_preserves_records_across_move() {
 
 /// Boot a broker, create a topic, produce records, shut down, then
 /// plant a `<topic>-<partition>-future/` directory in the OTHER log
-/// dir before restarting. The restart must (a) re-discover the
-/// stranded future log via `log_dir::scan_future`, (b) call
+/// dir before the restart. The restart must (a) re-discover the
+/// stranded future log with `log_dir::scan_future`, (b) call
 /// `future_log::resume_move` for the real partition, and (c) drive
-/// the move to completion so `DescribeLogDirs` ends up reporting the
+/// the move to completion, so that `DescribeLogDirs` reports the
 /// partition in the target dir with `is_future_key=false`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_resumes_move_for_existing_partition() {
@@ -545,9 +546,9 @@ async fn startup_resumes_move_for_existing_partition() {
 }
 
 /// Plant a `<topic>-<partition>-future` directory in one of the
-/// configured log.dirs for a topic that doesn't exist, then start the
+/// configured log.dirs for a topic that does not exist, then start the
 /// broker. The startup scan in `Broker::start` must remove the
-/// stranded future dir; `DescribeLogDirs` reports no future entries.
+/// stranded future dir. `DescribeLogDirs` then reports no future entries.
 #[tokio::test]
 async fn startup_cleans_up_stranded_future_dir() {
     let primary = tempfile::tempdir().unwrap();

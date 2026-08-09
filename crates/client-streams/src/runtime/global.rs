@@ -1,8 +1,10 @@
-//! `GlobalStateManager`: the shared, fully-replicated global stores for a
-//! `KafkaStreams` instance. Built once from the topology's global store factories;
-//! populated by the global consumer (reading all partitions of each global source
-//! topic) and read by stream-globaltable join processors. One per app, shared via
-//! `Arc` into every task's dispatch.
+//! `GlobalStateManager`, the shared and fully-replicated global stores for a
+//! `KafkaStreams` instance.
+//!
+//! The manager is built once from the topology's global store factories. The
+//! global consumer fills it and reads all partitions of each global source
+//! topic. The stream-globaltable join processors read it. There is one manager
+//! per app, shared into every task's dispatch through an `Arc`.
 use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
@@ -17,13 +19,16 @@ use crate::{
 #[derive(Clone, Default)]
 pub(crate) struct GlobalStateManager {
     stores: Arc<Mutex<StoreRegistry>>,
-    /// `store_name -> source_topic`, so the consumer knows which topic feeds each store.
+    /// `store_name -> source_topic`, so the consumer knows which topic feeds
+    /// each store.
     topics: Arc<HashMap<String, String>>,
 }
 
 impl GlobalStateManager {
     /// Build the global stores from the topology's global factories.
-    /// `topic_for` maps each global store name to its source topic (the consumer reads it).
+    ///
+    /// `topic_for` maps each global store name to its source topic, and the
+    /// consumer reads that map.
     #[tracing::instrument(
         name = "streams.global.build",
         level = "info",
@@ -48,8 +53,9 @@ impl GlobalStateManager {
         }
     }
 
-    /// Apply one consumed record into the named global store (raw bytes — the
-    /// consumer's path). `value = None` deletes (tombstone).
+    /// Apply one consumed record into the named global store. This is the
+    /// consumer's path and it takes raw bytes. A `value` of `None` is a
+    /// tombstone and deletes the entry.
     pub(crate) async fn apply(&self, store: &str, key: Bytes, value: Option<Bytes>) {
         let mut g = self.stores.lock().await;
         if let Some(s) = g.get_mut(store) {
@@ -57,9 +63,9 @@ impl GlobalStateManager {
         }
     }
 
-    /// Typed write (test/driver path). Mirrors `apply` but takes typed K/V — the
-    /// `TopologyTestDriver`'s `pipe_global` injects values straight into the
-    /// shared store this way.
+    /// Typed write, for the test and driver path. It mirrors `apply` but takes a
+    /// typed K and V. The `TopologyTestDriver`'s `pipe_global` injects values
+    /// straight into the shared store this way.
     pub(crate) async fn put<K: Send + Sync + 'static, V: Send + 'static>(
         &self,
         store: &str,
@@ -72,8 +78,8 @@ impl GlobalStateManager {
         }
     }
 
-    /// Typed read for a join lookup. Returns an owned value (clones out from under
-    /// the lock) so no borrow escapes the guard.
+    /// Typed read for a join lookup. It returns an owned value, cloned out from
+    /// under the lock, so no borrow escapes the guard.
     pub(crate) async fn get<K: Send + Sync + 'static, V: Send + 'static>(
         &self,
         store: &str,
@@ -84,7 +90,8 @@ impl GlobalStateManager {
         s.get(key).await
     }
 
-    /// The `(store_name, source_topic)` pairs the consumer must bootstrap.
+    /// The `(store_name, source_topic)` pairs that the consumer must
+    /// bootstrap.
     // `bootstrap`/`poll_once` iterate `self.topics` directly; this accessor exists
     // for the unit test only.
     #[allow(dead_code)]
@@ -92,17 +99,20 @@ impl GlobalStateManager {
         &self.topics
     }
 
-    /// Whether there are no global stores (the common case — skip the consumer).
+    /// Whether there are no global stores. This is the common case, and the
+    /// caller then skips the consumer.
     // The thread guards live-poll on `global_offsets.is_empty()`, not this; test-only.
     #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.topics.is_empty()
     }
 
-    /// Bootstrap every global store: for each (store, source topic), read all
-    /// partitions from offset 0 to end-of-log and apply each record. Returns the
-    /// per-`(topic, partition)` next-offset map so a live poll can resume. Blocks
-    /// until every partition is drained.
+    /// Bootstrap every global store.
+    ///
+    /// For each (store, source topic) pair the method reads all partitions from
+    /// offset 0 to the end of the log and applies each record. It returns the
+    /// per-`(topic, partition)` next-offset map, so a live poll can resume. It
+    /// blocks until it drains every partition.
     #[tracing::instrument(
         name = "streams.global.bootstrap",
         level = "info",
@@ -158,9 +168,12 @@ impl GlobalStateManager {
         Ok(offsets)
     }
 
-    /// One live-update pass from the given resume offsets: fetch new records on
-    /// each `(topic, partition)` and apply them, advancing the offsets in place.
-    /// Fetches one batch per partition (not to end-of-log); the caller repeats.
+    /// One live-update pass from the given resume offsets.
+    ///
+    /// The method fetches the new records on each `(topic, partition)`, applies
+    /// them, and advances the offsets in place. It fetches one batch per
+    /// partition and does not read to the end of the log, so the caller must
+    /// repeat the call.
     #[tracing::instrument(
         name = "streams.global.poll_once",
         level = "debug",
@@ -218,10 +231,12 @@ mod tests {
         topology::{NodeHandle, Topology},
     };
 
-    /// Build a one-entry `GlobalStateManager` over a `KeyValueBytesStore<String,String>`
-    /// named "g", fed by source topic "gtopic", using the real `add_global_store`
-    /// build path. Returns the manager (factories + store->topic map come straight
-    /// from `BuiltTopology`).
+    /// Build a one-entry `GlobalStateManager` over a
+    /// `KeyValueBytesStore<String,String>` named "g", fed by the source topic
+    /// "gtopic", through the real `add_global_store` build path.
+    ///
+    /// The helper returns the manager. The factories and the store-to-topic map
+    /// come straight from `BuiltTopology`.
     async fn one_store_manager() -> GlobalStateManager {
         let mut t = Topology::new();
         t.add_global_store::<String, String, _, _>(
@@ -276,9 +291,9 @@ mod tests {
 
     // ─── global-consumer fakes ──────────────────────────────────────────────
 
-    /// A multi-partition fetcher: returns the scripted batch for a given
-    /// `(topic, partition, offset)` once, then an empty batch. `partitions`
-    /// is overridden so `bootstrap` reads every partition.
+    /// A multi-partition fetcher. It returns the scripted batch for a given
+    /// `(topic, partition, offset)` once and then an empty batch. It overrides
+    /// `partitions`, so `bootstrap` reads every partition.
     struct ScriptedFetcher {
         scripts: StdMutex<HashMap<(String, i32, i64), FetchBatch>>,
         partitions: HashMap<String, Vec<i32>>,
@@ -298,7 +313,8 @@ mod tests {
             }
         }
 
-        /// Add (or replace) a scripted batch after construction (for `poll_once`).
+        /// Add a scripted batch after construction, or replace one, for
+        /// `poll_once`.
         fn script(&self, key: (String, i32, i64), batch: FetchBatch) {
             self.scripts.lock().unwrap().insert(key, batch);
         }
@@ -342,8 +358,9 @@ mod tests {
         }
     }
 
-    /// Build a `GlobalStateManager` with one global store "g" fed by topic
-    /// "global" (used by the consumer tests, which script topic "global").
+    /// Build a `GlobalStateManager` with one global store "g" fed by the topic
+    /// "global". The consumer tests use it, and they script the topic
+    /// "global".
     async fn global_topic_manager() -> GlobalStateManager {
         let mut t = Topology::new();
         t.add_global_store::<String, String, _, _>(

@@ -1,6 +1,7 @@
-//! Group-less reader: tails `_schemas` partition 0 over a dedicated connection,
-//! folds records into the shared store, and publishes the last-applied offset
-//! (for read-your-writes). Mirrors remote-storage-topic's `partition_fetch_loop`.
+//! Group-less reader. It tails `_schemas` partition 0 over a dedicated
+//! connection, folds records into the shared store, and publishes the
+//! last-applied offset for read-your-writes. It mirrors
+//! remote-storage-topic's `partition_fetch_loop`.
 
 use std::{
     net::{SocketAddr, ToSocketAddrs},
@@ -28,7 +29,7 @@ pub struct StoreReader {
     pub applied_rx: watch::Receiver<i64>,
 }
 
-/// `PartialEq` but not `Eq`: the quantities store `f64`.
+/// `PartialEq` but not `Eq`, because the quantities store `f64`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ReaderPolicy {
     retry_backoff: Time,
@@ -75,8 +76,9 @@ async fn sleep_or_cancel(cancel: &CancellationToken, duration: Time) -> bool {
     }
 }
 
-/// Apply one decoded record to the store. Returns nothing; idempotent for
-/// SCHEMA records. Extracted for unit testing.
+/// Apply one decoded record to the store. It returns nothing and is idempotent
+/// for SCHEMA records. It is a separate function so that a unit test can call
+/// it.
 pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
     match rec {
         SchemaRecord::Schema(k, v) => store.write().apply_schema(&k, &v),
@@ -123,8 +125,8 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
     }
 }
 
-/// Spawn the reader. Returns the shared store + an offset watch immediately; the
-/// background task runs until `cancel` fires.
+/// Spawn the reader. It returns the shared store and an offset watch
+/// immediately. The background task runs until `cancel` fires.
 #[must_use]
 pub fn spawn(
     cfg: &RegistryConfig,

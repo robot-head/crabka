@@ -225,7 +225,8 @@ pub enum Delivery {
     /// At-least-once delivery (supported from Slice 1).
     #[default]
     AtLeastOnce,
-    /// Exactly-once delivery (planned for Slice 3; rejected by Slice 1 validation).
+    /// Exactly-once delivery, planned for Slice 3. Slice 1 validation rejects
+    /// it.
     ExactlyOnce,
 }
 
@@ -245,7 +246,7 @@ pub struct PolicyConfig {
 /// Zone-based data-residency constraints.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Residency {
-    /// Zones to which data is permitted to flow.
+    /// Zones that data may flow to.
     #[serde(default)]
     pub allow_zones: Vec<String>,
     /// Zones to which data must not flow.

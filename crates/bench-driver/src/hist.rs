@@ -1,9 +1,9 @@
-//! HDR histogram helpers. Latencies are recorded in microseconds with
-//! `(min=1us, max=60s, sigfig=3)` — plenty of resolution from sub-ms up to
-//! degraded-broker timeouts, without blowing memory.
+//! HDR histogram helpers. The driver records latencies in microseconds with
+//! `(min=1us, max=60s, sigfig=3)`. That gives enough resolution from sub-ms up
+//! to degraded-broker timeouts, and it keeps memory use low.
 //!
 //! `hdrhistogram` counts raw `u64`s, so microseconds are the histogram's own
-//! unit; [`record`] and [`percentiles`] are the seam that converts to and from
+//! unit. [`record`] and [`percentiles`] are the seam that converts to and from
 //! the [`Time`] extents the rest of the driver passes around.
 
 use crabka_units::prelude::*;
@@ -11,8 +11,8 @@ use hdrhistogram::Histogram;
 
 use crate::scenario::LatencyPercentiles;
 
-/// One per-task latency histogram. Recommended way to construct, since
-/// the bounds matter for accuracy.
+/// One per-task latency histogram. Use this constructor, because the
+/// bounds matter for accuracy.
 #[must_use]
 /// # Panics
 /// Panics if synchronized state is poisoned or validated input is missing a field required to produce the output.
@@ -20,14 +20,14 @@ pub fn new() -> Histogram<u64> {
     Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("histogram bounds are valid")
 }
 
-/// Record one measured latency, clamping to the histogram's microsecond range
-/// so individual outliers don't blow the recorder up.
+/// Records one measured latency. This clamps to the histogram's microsecond
+/// range, so a single outlier cannot break the recorder.
 pub fn record(h: &mut Histogram<u64>, latency: Time) {
     let micros = u64::try_from(latency.micros_i64()).unwrap_or_default();
     let _ = h.record(micros.clamp(1, h.high()));
 }
 
-/// Project a histogram into the public percentile shape.
+/// Projects a histogram into the public percentile shape.
 #[must_use]
 pub fn percentiles(h: &Histogram<u64>) -> LatencyPercentiles {
     let at = |quantile: f64| Time::from_micros(saturating_micros(h.value_at_quantile(quantile)));

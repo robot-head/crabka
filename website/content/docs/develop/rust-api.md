@@ -6,7 +6,7 @@ template = "docs/page.html"
 +++
 
 The website publishes generated rustdoc for the workspace under `/api/rust/`.
-Use it when you are building against Crabka crates directly instead of operating
+Use it when you build against Crabka crates directly instead of when you operate
 the broker through Kafka-compatible tools.
 
 Common entry points:
@@ -27,5 +27,5 @@ Common entry points:
 - [`crabka_operator`](/api/rust/crabka_operator/index.html) for operator
   internals.
 
-These are built with `cargo doc --no-deps --workspace` and published under
-`/api/rust/`.
+The docs build creates these pages with `cargo doc --no-deps --workspace` and
+publishes them under `/api/rust/`.

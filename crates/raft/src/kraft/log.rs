@@ -1,7 +1,7 @@
 //! `KraftLog`: the replicated metadata log behind the `LogView` seam.
-//! A thin facade over `crabka_log::Log` that adds high-watermark tracking,
-//! committed-read filtering for KIP-595 `Fetch`, and divergence lookup. Wired
-//! into the controller as the metadata log.
+//! It is a thin facade over `crabka_log::Log` that adds high-watermark
+//! tracking, committed-read filtering for KIP-595 `Fetch`, and divergence
+//! lookup. The controller uses it as the metadata log.
 
 use std::path::Path;
 
@@ -17,12 +17,13 @@ use crate::{
 
 pub struct KraftLog {
     log: Log,
-    /// Highest committed offset (consensus state; crabka-log does not track it).
+    /// Highest committed offset. This is consensus state, and crabka-log does
+    /// not track it.
     hwm: Offset,
 }
 
 impl KraftLog {
-    /// Open or create the metadata log under `dir/@metadata-0`.
+    /// Opens or creates the metadata log under `dir/@metadata-0`.
     ///
     /// # Errors
     /// Returns [`RaftError`] if the log directory cannot be created or the
@@ -48,8 +49,8 @@ impl KraftLog {
         self.hwm
     }
 
-    /// Leader path: append a batch; crabka-log assigns the offset and records the
-    /// batch's `partition_leader_epoch`. Returns the assigned base offset.
+    /// Leader path: appends a batch. crabka-log assigns the offset and records
+    /// the batch's `partition_leader_epoch`. Returns the assigned base offset.
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying append fails.
@@ -57,17 +58,18 @@ impl KraftLog {
         Ok(self.log.append(batch)?)
     }
 
-    /// Follower path: append a batch at the leader-assigned `offset`.
+    /// Follower path: appends a batch at the leader-assigned `offset`.
     ///
     /// # Errors
-    /// Returns [`RaftError`] if the underlying append fails (e.g. `offset` does
-    /// not equal the current log end offset).
+    /// Returns [`RaftError`] if the underlying append fails, for example when
+    /// `offset` does not equal the current log end offset.
     pub fn append_at(&mut self, batch: &mut RecordBatch, offset: Offset) -> Result<(), RaftError> {
         self.log.append_at(batch, offset)?;
         Ok(())
     }
 
-    /// Decoded read (used by tests + replication apply). Reads from `offset`.
+    /// Decoded read from `offset`. The tests and the replication apply path
+    /// use it.
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying read fails.
@@ -102,7 +104,8 @@ impl KraftLog {
         }
     }
 
-    /// Serve KIP-595 `Fetch`: verbatim batch bytes in `[offset, min(hwm, log_end))`.
+    /// Serves KIP-595 `Fetch`: verbatim batch bytes in
+    /// `[offset, min(hwm, log_end))`.
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying raw read fails.
@@ -111,14 +114,16 @@ impl KraftLog {
         Ok(self.log.read_raw(offset, limit, max_size)?)
     }
 
-    /// Advance the high watermark (monotonic; never past the log end).
+    /// Advances the high watermark. The move is monotonic, and it never goes
+    /// past the log end.
     pub fn advance_hwm(&mut self, new_hwm: Offset) {
         let clamped = new_hwm.min(self.log.log_end_offset());
         self.hwm = self.hwm.max(clamped);
         debug_assert!(self.hwm <= self.log.log_end_offset());
     }
 
-    /// Truncate the log so no record at offset `>= offset` remains; clamp HWM down.
+    /// Truncates the log so that no record at offset `>= offset` remains, and
+    /// clamps the HWM down.
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying truncation fails.
@@ -129,9 +134,10 @@ impl KraftLog {
         Ok(())
     }
 
-    /// Prune the committed prefix below `end_offset`: advance the log-start
-    /// pointer and trim now-dead segments. No-op when `end_offset` is at or
-    /// below the current log start. Used by the leader after writing a snapshot.
+    /// Prunes the committed prefix below `end_offset`: it advances the
+    /// log-start pointer and trims the now-dead segments. This is a no-op when
+    /// `end_offset` is at or below the current log start. The leader calls it
+    /// after it writes a snapshot.
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying log operations fail.
@@ -144,9 +150,10 @@ impl KraftLog {
         Ok(())
     }
 
-    /// Replace the log with an empty log starting at `end_offset` (drops every
-    /// segment), and set the high watermark to `end_offset`. Used by a follower
-    /// installing a fetched snapshot whose `end_offset` is ahead of its log.
+    /// Replaces the log with an empty log that starts at `end_offset`, which
+    /// drops every segment, and sets the high watermark to `end_offset`. A
+    /// follower calls it when it installs a fetched snapshot whose `end_offset`
+    /// is ahead of its own log.
     ///
     /// # Errors
     /// Returns [`RaftError`] if the underlying reset fails.
@@ -198,8 +205,8 @@ mod tests {
 
     use super::*;
 
-    /// Read budget the log tests use: larger than any batch they append, so a
-    /// read returns everything written.
+    /// Read budget the log tests use. It is larger than any batch they append,
+    /// so a read returns everything written.
     const TEST_READ_BUDGET: ByteSize = mebibytes(1);
 
     fn open_tmp() -> (KraftLog, tempfile::TempDir) {

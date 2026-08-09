@@ -1,10 +1,10 @@
-//! `DescribeShareGroupOffsets` (`api_key` 90) — KIP-932. Returns the
+//! `DescribeShareGroupOffsets` (`api_key` 90), from KIP-932. It returns the
 //! share-partition start offset (SPSO), leader epoch, and best-effort lag for
 //! each requested `(group, topic, partition)`, read from the share-state
 //! persister.
 //!
-//! Intercepted inline in `network::dispatch` so the handler receives the
-//! per-connection principal + peer `SocketAddr` for the per-group `Describe`
+//! `network::dispatch` intercepts it inline, so the handler receives the
+//! per-connection principal and peer `SocketAddr` for the per-group `Describe`
 //! ACL gate.
 
 use bytes::Bytes;
@@ -134,9 +134,10 @@ pub(crate) async fn handle(
     crate::handlers::encode_response(&resp, version)
 }
 
-/// Build one response topic: resolve `name → id` (unknown ⇒ per-partition
-/// `UNKNOWN_TOPIC_OR_PARTITION`); enumerate initialized partitions when the
-/// request omits an explicit list; then build a row per partition.
+/// Build one response topic. It resolves `name → id`, and an unknown name
+/// gives per-partition `UNKNOWN_TOPIC_OR_PARTITION`. It enumerates the
+/// initialized partitions when the request omits an explicit list. It then
+/// builds one row per partition.
 async fn describe_topic(
     broker: &Broker,
     persister: &crate::share_coordinator::persister_client::SharePersister,
@@ -198,9 +199,10 @@ async fn describe_topic(
     }
 }
 
-/// Build one response partition: read SPSO from the persister, then compute
-/// best-effort lag (HWM − SPSO) and leader epoch from the local data partition
-/// when it's materialized here, else `-1`.
+/// Build one response partition. It reads the SPSO from the persister. It then
+/// computes the best-effort lag (HWM − SPSO) and the leader epoch from the
+/// local data partition when that partition is materialized here, and returns
+/// `-1` for both otherwise.
 async fn describe_partition(
     broker: &Broker,
     persister: &crate::share_coordinator::persister_client::SharePersister,

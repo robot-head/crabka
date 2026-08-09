@@ -9,7 +9,7 @@ use crate::{
     lexer::{Token, lex},
 };
 
-/// Default `topN` for `compare()` when the argument is omitted, matching Tempo.
+/// Default `topN` for `compare()` when the query omits the argument, as in Tempo.
 const DEFAULT_COMPARE_TOP_N: usize = 10;
 
 /// # Errors
@@ -169,10 +169,11 @@ impl Parser {
     /// Parses Tempo's attribute-comparison metric:
     /// `compare({selection}, topN [, start_ns, end_ns])`.
     ///
-    /// The selection is a full spanset (`{...}`, `And`, `Or`), reusing
-    /// `parse_spanset_or`. `topN` is an optional positive integer (default 10).
-    /// `start_ns`/`end_ns` are optional signed nanosecond bounds; both must be
-    /// supplied together (Grafana sends none or both).
+    /// The selection is a full spanset: `{...}`, `And`, or `Or`. This method
+    /// reuses `parse_spanset_or` to parse it. `topN` is an optional positive
+    /// integer, and defaults to 10. `start_ns` and `end_ns` are optional signed
+    /// nanosecond bounds. The query must give both bounds or neither one.
+    /// Grafana sends none or both.
     fn parse_compare(&mut self) -> Result<Pipeline> {
         self.expect(&Token::LParen)?;
         let selection = self.parse_spanset_or()?;
@@ -206,9 +207,11 @@ impl Parser {
         usize::try_from(value).map_err(|e| TraceqlError::Parse(e.to_string()))
     }
 
-    /// Parses a signed integer literal (optionally negated), used for compare's
-    /// nanosecond bounds. `-5` lexes as `Minus Int`, so the leading `-` is
-    /// consumed here rather than relying on value folding.
+    /// Parses a signed integer literal, with an optional minus sign.
+    ///
+    /// The compare nanosecond bounds use this method. `-5` lexes as
+    /// `Minus Int`, so this method consumes the leading `-` here. The parser
+    /// does not fold the value later.
     fn parse_signed_int(&mut self) -> Result<i64> {
         let negative = eat!(self, &Token::Minus);
         let Token::Int(value) = self.advance() else {
@@ -664,11 +667,13 @@ fn intrinsic(scope: &str, key: &str) -> Result<Intrinsic> {
     }
 }
 
-/// Resolves a bare (scopeless) identifier to a `TraceQL` intrinsic, matching the
-/// reserved intrinsic field names Tempo recognizes without a scope. A name not
-/// in this set is a span/resource attribute (`Scope::Both`). `parentID`, `id`,
-/// `traceID`, and the event/link/instrumentation intrinsics are intentionally
-/// excluded — Tempo requires an explicit scope (`span:`, `trace:`, …) for those.
+/// Resolves a bare identifier with no scope to a `TraceQL` intrinsic.
+///
+/// The set matches the reserved intrinsic field names that Tempo recognizes
+/// without a scope. A name outside this set is a span or resource attribute,
+/// that is, `Scope::Both`. This function excludes `parentID`, `id`, `traceID`,
+/// and the event, link, and instrumentation intrinsics on purpose. Tempo needs
+/// an explicit scope such as `span:` or `trace:` for those names.
 fn scopeless_intrinsic(name: &str) -> Option<Intrinsic> {
     Some(match name {
         "duration" => Intrinsic::Duration,

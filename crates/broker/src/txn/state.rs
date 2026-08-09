@@ -5,8 +5,8 @@ use std::collections::HashSet;
 use crabka_ids::PartitionIndex;
 use crabka_log::ProducerId;
 
-/// Tx state machine, mirroring Apache Kafka's classic transaction
-/// states (KIP-98) extended for KIP-1319 v2.
+/// Transaction state machine. It mirrors Apache Kafka's classic transaction
+/// states (KIP-98), extended for KIP-1319 v2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxnState {
     Empty,
@@ -19,7 +19,7 @@ pub enum TxnState {
 }
 
 impl TxnState {
-    /// Can transition from `self` to `other`?
+    /// Can the machine move from `self` to `other`?
     pub fn can_transition_to(self, other: TxnState) -> bool {
         use TxnState::{
             CompleteAbort, CompleteCommit, Dead, Empty, Ongoing, PrepareAbort, PrepareCommit,
@@ -42,11 +42,14 @@ impl TxnState {
         )
     }
 
-    /// Kafka `TransactionState` byte id (TransactionLogValue.TransactionStatus,
-    /// int8). Matches org.apache.kafka.coordinator.transaction.TransactionState
+    /// Kafka `TransactionState` byte id, that is
+    /// `TransactionLogValue.TransactionStatus` as an int8.
+    ///
+    /// It matches `org.apache.kafka.coordinator.transaction.TransactionState`
     /// exactly: Empty=0, Ongoing=1, PrepareCommit=2, PrepareAbort=3,
-    /// CompleteCommit=4, CompleteAbort=5, Dead=6. (Kafka also has
-    /// `PrepareEpochFence`=7, a transient fencing state Crabka does not model.)
+    /// CompleteCommit=4, CompleteAbort=5, and Dead=6. Kafka also has
+    /// `PrepareEpochFence`=7, a transient fencing state that Crabka does not
+    /// model.
     #[must_use]
     pub fn to_kafka_status(self) -> i8 {
         match self {
@@ -60,8 +63,9 @@ impl TxnState {
         }
     }
 
-    /// Inverse of [`Self::to_kafka_status`]. Returns `None` for an id Crabka
-    /// does not model (e.g. 7 = `PrepareEpochFence`) or an out-of-range id.
+    /// The inverse of [`Self::to_kafka_status`]. It returns `None` for an id
+    /// that Crabka does not model, such as 7 for `PrepareEpochFence`, and for
+    /// an id outside the range.
     #[must_use]
     pub fn from_kafka_status(id: i8) -> Option<TxnState> {
         Some(match id {
@@ -91,9 +95,10 @@ pub struct TxnEntry {
     pub state: TxnState,
     pub txn_timeout_ms: i32,
     pub partitions: HashSet<TopicPartition>,
-    /// KIP-890 epoch bookkeeping (Kafka's `TransactionLogValue.PreviousProducerId`
-    /// / `NextProducerId` tagged fields). `ProducerId(-1)` means "none", matching
-    /// Kafka's tagged-field default.
+    /// KIP-890 epoch bookkeeping, that is Kafka's
+    /// `TransactionLogValue.PreviousProducerId` and `NextProducerId` tagged
+    /// fields. `ProducerId(-1)` means "none", which matches Kafka's
+    /// tagged-field default.
     pub prev_producer_id: ProducerId,
     pub next_producer_id: ProducerId,
     pub last_update_ms: i64,
@@ -101,7 +106,7 @@ pub struct TxnEntry {
 }
 
 impl TxnEntry {
-    /// Fresh entry for a tid that's never been seen.
+    /// A fresh entry for a tid that the coordinator has never seen.
     pub fn new_empty(
         transactional_id: String,
         producer_id: ProducerId,

@@ -1,21 +1,25 @@
-//! Leaf source and `LogicalPlan` assembly for the per-row scalar-math operator
-//! path (`abs`, `ceil`, …, the trig/hyperbolic family, `sgn`, `round`, and the
-//! `clamp` family).
+//! Leaf source and `LogicalPlan` assembly for the per-row scalar-math operator path.
 //!
-//! Unlike the selector / rate / `*_over_time` paths, this module is handed the
-//! *already-evaluated* inner instant vector — one float value per matched series,
-//! with genuine NaN preserved. (The engine sources those samples either from a
-//! NaN-preserving bare-selector selection or by assembling a nested plannable
-//! inner expression.) It materializes those samples as a one-row-per-series leaf
-//! table carrying the series' label columns plus a `value` column, then projects
+//! The path covers `abs`, `ceil`, …, the trig and hyperbolic family, `sgn`,
+//! `round`, and the `clamp` family.
+//!
+//! The selector, rate, and `*_over_time` paths are not handed an evaluated input.
+//! This module is handed the already-evaluated inner instant vector: one float
+//! value per matched series, with genuine NaN preserved. The engine sources those
+//! samples from a NaN-preserving bare-selector selection, or it assembles a
+//! nested plannable inner expression. This module materializes the samples as a
+//! leaf table with one row per series. The table carries the label columns of the
+//! series plus a `value` column. The module then projects
 //!
 //! `Projection(labels-without-__name__..., prom_<fn>([bounds...,] value) AS value)`
 //!
-//! over it. The metric name (`__name__`) and the result-metadata labels
-//! (`__type__`, `__unit__`) are dropped — every scalar-math function drops them,
-//! matching the interpreter's `labels_without_metric_name`. Every result row is
-//! kept (no NaN suppression): `f(NaN)` / `sqrt(-1)` render as `NaN`, exactly as
-//! the interpreter keeps every float sample.
+//! over that table.
+//!
+//! The projection drops the metric name `__name__` and the result-metadata labels
+//! `__type__` and `__unit__`. Every scalar-math function drops them, as the
+//! interpreter function `labels_without_metric_name` does. The module keeps every
+//! result row and suppresses no NaN. `f(NaN)` and `sqrt(-1)` render as `NaN`,
+//! exactly as the interpreter keeps every float sample.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -36,55 +40,62 @@ use crate::{
     PromqlError, error::Result, extension::planner::prom_session_context, functions::ScalarMathOp,
 };
 
-/// Leaf-batch / projection column carrying the per-series float value.
+/// Leaf-batch and projection column that carries the per-series float value.
 pub const VALUE_COLUMN: &str = "value";
-/// Leaf-batch / projection column carrying the per-series sample timestamp. The
-/// scalar-math functions report the *inner sample's* timestamp unchanged (the
-/// interpreter's `eval_unary_float_call` keeps `sample.ts_ms`), so it is carried
-/// through the projection alongside the value.
+/// Leaf-batch and projection column that carries the per-series sample timestamp.
+///
+/// The scalar-math functions report the timestamp of the inner sample unchanged,
+/// because the interpreter function `eval_unary_float_call` keeps `sample.ts_ms`.
+/// The projection therefore carries the timestamp with the value.
 pub const SAMPLE_TIME_COLUMN: &str = "sample_timestamp";
 
-/// Result-metadata labels dropped by every scalar-math function (mirrors the
-/// interpreter's `is_result_metadata_label`). They are never carried into the
-/// leaf, so the projection drops them implicitly.
+/// Result-metadata labels that every scalar-math function drops.
+///
+/// This list mirrors the interpreter function `is_result_metadata_label`. These
+/// labels never reach the leaf, so the projection drops them implicitly.
 const METADATA_LABELS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
 fn is_metadata_label(name: &str) -> bool {
     METADATA_LABELS.contains(&name)
 }
 
-/// One already-evaluated inner instant-vector sample: the full label set
-/// (metadata labels are dropped during leaf assembly), the inner sample's
-/// reported timestamp (preserved through the projection), and the float value
-/// `f` will be applied to. The result labelset is read straight from the
-/// projected batch, so no fingerprint is carried.
+/// One already-evaluated inner instant-vector sample.
+///
+/// The sample holds the full label set, the reported timestamp of the inner
+/// sample, and the float value that `f` is applied to. Leaf assembly drops the
+/// metadata labels, and the projection keeps the timestamp. This type carries no
+/// fingerprint, because the code reads the result label set straight from the
+/// projected batch.
 pub struct LabeledValue {
     pub labels: Labels,
     pub ts_ms: i64,
     pub value: f64,
 }
 
-/// The assembled scalar-math operator plan. The result labelset is read directly
-/// from the projected output batch (the metric name is already dropped at the
-/// leaf), so no fingerprint→labels map is needed.
+/// The assembled scalar-math operator plan.
+///
+/// The leaf already drops the metric name, so the code reads the result label set
+/// directly from the projected output batch. The plan needs no map from
+/// fingerprint to labels.
 pub struct ScalarMathPlan {
-    /// Session context whose registry holds the scalar-math UDFs, with the leaf
-    /// table registered.
+    /// Session context whose registry holds the scalar-math UDFs. The context
+    /// also holds the registered leaf table.
     pub ctx: SessionContext,
     /// The `Projection(labels..., prom_<fn>([bounds...,] value) AS value)` plan.
     pub plan: LogicalPlan,
 }
 
-/// Build the leaf table and projection that evaluates `op([bounds...,] value)`
-/// over the already-evaluated inner instant vector `samples`. `bounds` are the
-/// leading scalar args in call order: `[]` for the unary fns, `[to_nearest]` for
-/// `round`, `[min]`/`[max]` for `clamp_min`/`clamp_max`, `[min, max]` for
-/// `clamp`.
+/// Builds the leaf table and projection that evaluates `op([bounds...,] value)`.
+///
+/// This function evaluates the operator over the already-evaluated inner instant
+/// vector `samples`. `bounds` holds the leading scalar arguments in call order:
+/// `[]` for the unary functions, `[to_nearest]` for `round`, `[min]` for
+/// `clamp_min`, `[max]` for `clamp_max`, and `[min, max]` for `clamp`.
 ///
 /// # Errors
 ///
-/// Returns an error if the Arrow batch, table, or projection plan cannot be
-/// constructed.
+/// This function returns an error if it cannot build the Arrow batch, the table,
+/// or the projection plan.
 pub async fn plan_scalar_math(
     samples: Vec<LabeledValue>,
     op: ScalarMathOp,

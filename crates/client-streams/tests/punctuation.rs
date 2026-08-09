@@ -1,18 +1,20 @@
-//! Execution-level tests for stream-time punctuation through the
-//! [`TopologyTestDriver`]. After each `pipe_input`, the driver fires due
-//! `STREAM_TIME` punctuators at the current stream-time (at most once each).
+//! Execution-level tests for stream-time punctuation.
+//!
+//! After each `pipe_input`, the [`TopologyTestDriver`] fires due `STREAM_TIME`
+//! punctuators at the current stream-time, at most once each.
 //!
 //! Ground truth is the captured JVM firing model in
-//! `tests/testdata/punctuation/behavior.json`: piping records at stream-times
+//! `tests/testdata/punctuation/behavior.json`. Piping records at stream-times
 //! `{0, 5, 9, 10, 11, 100}` with a 10ms interval fires the punctuator at
-//! `{0, 10, 100}` — the *current* stream-time at each fire, with no per-boundary
-//! catch-up (sub-interval steps 5/9/11 do not fire; the 100ms jump fires once).
+//! `{0, 10, 100}`, the *current* stream-time at each fire, with no per-boundary
+//! catch-up. The sub-interval steps 5/9/11 do not fire, and the 100ms jump fires
+//! once.
 //!
 //! Each test shares a fired-timestamp log between a processor and its punctuator
-//! via `Arc<Mutex<_>>` (the same pattern as `dsl/processors/stream_join.rs`), so
-//! assertions can inspect the firing sequence directly — and the punctuator also
-//! forwards each fired timestamp downstream so it is independently observable via
-//! `read_output`.
+//! with `Arc<Mutex<_>>`, the same pattern as `dsl/processors/stream_join.rs`, so
+//! assertions can inspect the firing sequence directly. The punctuator also
+//! forwards each fired timestamp downstream, so `read_output` observes it
+//! independently.
 
 use std::{
     sync::{Arc, Mutex},
@@ -25,9 +27,11 @@ use crabka_client_streams::{
     PunctuationType, Punctuator, Record, StringSerde, Topology, TopologyTestDriver,
 };
 
-/// A stream-time punctuator that, on each fire, records the fired timestamp into
-/// a shared log and forwards a record carrying that timestamp downstream (so the
-/// fire is observable both via the shared `Arc<Mutex<…>>` and `read_output`).
+/// A stream-time punctuator that logs and forwards each fired timestamp.
+///
+/// On each fire it records the fired timestamp into a shared log and forwards a
+/// record that carries that timestamp downstream. So the fire is observable both
+/// through the shared `Arc<Mutex<…>>` and through `read_output`.
 struct LoggingPunctuator {
     fired: Arc<Mutex<Vec<i64>>>,
 }
@@ -40,10 +44,12 @@ impl Punctuator<String, i64> for LoggingPunctuator {
     }
 }
 
-/// A processor that, in `init`, schedules `LoggingPunctuator` on `STREAM_TIME` with
-/// the given interval and stashes the returned [`Cancellable`] into a shared slot
-/// the test can reach. Records pass straight through (forwarded unchanged) so the
-/// stream-time clock advances per record without affecting the punctuator output.
+/// A processor that schedules `LoggingPunctuator` on `STREAM_TIME`.
+///
+/// In `init` it schedules the punctuator with the given interval and stashes the
+/// returned [`Cancellable`] into a shared slot the test can reach. Records pass
+/// straight through unchanged, so the stream-time clock advances per record and
+/// the punctuator output stays unaffected.
 struct SchedulingProc {
     fired: Arc<Mutex<Vec<i64>>>,
     handle: Arc<Mutex<Option<Cancellable>>>,
@@ -73,18 +79,22 @@ impl Processor<String, i64, String, i64> for SchedulingProc {
     }
 }
 
-/// What [`build_driver`] returns: the driver, the shared fired-timestamp log, and
-/// the shared slot holding the schedule's [`Cancellable`].
+/// What [`build_driver`] returns.
+///
+/// The tuple holds the driver, the shared fired-timestamp log, and the shared
+/// slot for the schedule's [`Cancellable`].
 type DriverRig = (
     TopologyTestDriver,
     Arc<Mutex<Vec<i64>>>,
     Arc<Mutex<Option<Cancellable>>>,
 );
 
-/// Build `source("in") -> proc -> sink("out")` with `proc` scheduling a
-/// stream-time punctuator. Returns the driver plus the shared fired-log and the
-/// shared cancellable slot. K/V = `String`/`i64`; the sink uses `I64Serde` so
-/// fired timestamps surface through `read_output`.
+/// Builds `source("in") -> proc -> sink("out")` with a punctuator on `proc`.
+///
+/// The `proc` node schedules a stream-time punctuator. This function returns the
+/// driver plus the shared fired-log and the shared cancellable slot. The key and
+/// value types are `String` and `i64`. The sink uses `I64Serde`, so fired
+/// timestamps surface through `read_output`.
 fn build_driver(interval_ms: u64) -> DriverRig {
     let fired = Arc::new(Mutex::new(Vec::new()));
     let handle: Arc<Mutex<Option<Cancellable>>> = Arc::new(Mutex::new(None));
@@ -108,13 +118,17 @@ fn build_driver(interval_ms: u64) -> DriverRig {
     (driver, fired, handle)
 }
 
-/// Sentinel value carried by every piped (pass-through) record, distinct from
-/// any fired stream-time so the two are separable in the output stream. All test
-/// stream-times are `>= 0`, so `-1` can only be a pass-through.
+/// Sentinel value that every piped pass-through record carries.
+///
+/// The value differs from any fired stream-time, so the output stream keeps the
+/// two separable. All test stream-times are `>= 0`, so `-1` can only be a
+/// pass-through.
 const PASS_THROUGH: i64 = -1;
 
-/// Pipe one `String`/`i64` record on `"in"` at the given stream-time. The value
-/// is the [`PASS_THROUGH`] sentinel so it is distinguishable from fired timestamps.
+/// Pipes one `String`/`i64` record on `"in"` at the given stream-time.
+///
+/// The value is the [`PASS_THROUGH`] sentinel, so it stays distinct from fired
+/// timestamps.
 fn pipe_at(driver: &mut TopologyTestDriver, ts: i64) {
     driver.pipe_input(
         "in",
@@ -125,8 +139,9 @@ fn pipe_at(driver: &mut TopologyTestDriver, ts: i64) {
     );
 }
 
-/// Drain `"out"` and return only the forwarded *fired* timestamps (i.e. the
-/// non-[`PASS_THROUGH`] values).
+/// Drains `"out"` and returns only the forwarded *fired* timestamps.
+///
+/// These are the values that are not [`PASS_THROUGH`].
 fn drain_fires(driver: &mut TopologyTestDriver) -> Vec<i64> {
     let mut out = Vec::new();
     while let Some((_, v)) = driver.read_output("out", Produced::with(StringSerde, I64Serde)) {
@@ -246,9 +261,11 @@ fn punctuator_reads_and_writes_store() {
 // advances wall-time only.
 // ---------------------------------------------------------------------------
 
-/// A processor that, in `init`, schedules `LoggingPunctuator` on `WALL_CLOCK_TIME`
-/// with the given interval, logging fired timestamps into a shared slot. Records
-/// pass through unchanged (they advance stream-time, never the wall clock).
+/// A processor that schedules `LoggingPunctuator` on `WALL_CLOCK_TIME`.
+///
+/// In `init` it schedules the punctuator with the given interval and logs fired
+/// timestamps into a shared slot. Records pass through unchanged. They advance
+/// stream-time and never the wall clock.
 struct WallSchedulingProc {
     fired: Arc<Mutex<Vec<i64>>>,
     interval_ms: u64,
@@ -275,10 +292,11 @@ impl Processor<String, i64, String, i64> for WallSchedulingProc {
     }
 }
 
-/// Build `source("in") -> proc -> sink("out")` with `proc` scheduling a
-/// wall-clock punctuator (interval `interval_ms`). Returns the driver plus the
-/// shared fired-log. The wall fired-log is populated by `advance_wall_clock_time`,
-/// not by `pipe_input`.
+/// Builds `source("in") -> proc -> sink("out")` with a wall-clock punctuator.
+///
+/// The `proc` node schedules the punctuator with interval `interval_ms`. This
+/// function returns the driver plus the shared fired-log.
+/// `advance_wall_clock_time` fills the wall fired-log, and `pipe_input` does not.
 fn build_wall_driver(interval_ms: u64) -> (TopologyTestDriver, Arc<Mutex<Vec<i64>>>) {
     let fired = Arc::new(Mutex::new(Vec::new()));
 

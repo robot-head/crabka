@@ -1,4 +1,4 @@
-//! Errors from the type layer, each carrying the PostgreSQL SQLSTATE the
+//! Errors from the type layer, each with the PostgreSQL SQLSTATE that the
 //! executor maps onto a wire ErrorResponse.
 
 #![expect(
@@ -25,19 +25,19 @@ pub enum TypeError {
     #[error("LIKE pattern must not end with escape character")]
     InvalidEscape,
     /// An `ESCAPE` clause whose string is neither empty nor a single character
-    /// (22025) — `LIKE 'x' ESCAPE 'ab'`.
+    /// (22025), for example `LIKE 'x' ESCAPE 'ab'`.
     #[error("invalid escape string")]
     InvalidEscapeString,
     /// SP31: an explicit `CAST`/`::` between two types with no defined cast
-    /// (42846) — e.g. `double precision` → `boolean`.
+    /// (42846), for example `double precision` → `boolean`.
     #[error("cannot cast type {from} to {to}")]
     CannotCast {
         from: &'static str,
         to: &'static str,
     },
-    /// a math/string domain error carrying its own PostgreSQL SQLSTATE —
-    /// e.g. `ln(0)` (2201E), `sqrt(-1)` (2201F), `chr(0)` (54000). One
-    /// code-carrying variant rather than one per domain.
+    /// A math or string domain error that carries its own PostgreSQL SQLSTATE,
+    /// for example `ln(0)` (2201E), `sqrt(-1)` (2201F), or `chr(0)` (54000).
+    /// There is one code-carrying variant instead of one variant per domain.
     #[error("{message}")]
     Domain {
         sqlstate: &'static str,
@@ -52,9 +52,9 @@ pub enum TypeError {
     /// SP37: a date/time field out of range (e.g. month 13) (22008).
     #[error("date/time field value out of range: \"{value}\"")]
     DatetimeFieldOverflow { value: String },
-    /// A date/time value that leaves its type's range, carrying PostgreSQL's
-    /// exact message for the context — `timestamp out of range`, `interval out
-    /// of range`, `cannot subtract infinite dates` (22008).
+    /// A date/time value that leaves its type's range. It carries PostgreSQL's
+    /// exact message for the context: `timestamp out of range`, `interval out
+    /// of range`, or `cannot subtract infinite dates` (22008).
     #[error("{message}")]
     DatetimeOutOfRange { message: String },
     /// A date/time literal whose UTC offset is outside ±15:59:59 (22009).
@@ -64,21 +64,21 @@ pub enum TypeError {
     /// (22023).
     #[error("time zone \"{name}\" not recognized")]
     UnknownTimeZone { name: String },
-    /// A type-layer feature crabka deliberately does not implement (0A000) —
-    /// e.g. an array of an unsupported element type, or a multidimensional
-    /// array literal.
+    /// A type-layer feature crabka deliberately does not implement (0A000),
+    /// for example an array of an unsupported element type, or a
+    /// multidimensional array literal.
     #[error("{message}")]
     FeatureNotSupported { message: String },
-    /// Out of range (22003) like [`TypeError::Overflow`], but carrying the exact
-    /// message PostgreSQL uses for that type and context — `smallint out of
+    /// Out of range (22003) like [`TypeError::Overflow`], but with the exact
+    /// message PostgreSQL uses for that type and context: `smallint out of
     /// range`, `value out of range: overflow`, `value "99999" is out of range
     /// for type smallint`, `"1e39" is out of range for type real`. The bare
-    /// `Overflow` variant hard-codes `integer out of range`, which is right only
-    /// for `int4`.
+    /// `Overflow` variant hard-codes `integer out of range`, which is correct
+    /// only for `int4`.
     #[error("{message}")]
     OutOfRange { message: String },
-    /// A condition the named variants do not cover, carrying `PostgreSQL`'s own
-    /// SQLSTATE and message. Used by the array layer for `array_in`'s
+    /// A condition the named variants do not cover. It carries `PostgreSQL`'s
+    /// own SQLSTATE and message. The array layer uses it for `array_in`'s
     /// `malformed array literal` (22P02), the subscript/dimension errors
     /// (2202E), and the dimension limit (54000).
     #[error("{message}")]
@@ -121,7 +121,7 @@ impl TypeError {
         }
     }
 
-    /// `smallint out of range` / `real out of range` — PostgreSQL's message for
+    /// `smallint out of range` or `real out of range`: PostgreSQL's message for
     /// an arithmetic or narrowing result that leaves `type_name`'s range.
     #[must_use]
     pub fn out_of_range_for(type_name: &str) -> TypeError {
@@ -130,7 +130,7 @@ impl TypeError {
         }
     }
 
-    /// `value "32768" is out of range for type smallint` — PostgreSQL's message
+    /// `value "32768" is out of range for type smallint`: PostgreSQL's message
     /// when an integer *input string* parses but does not fit.
     #[must_use]
     pub fn value_out_of_range(value: &str, type_name: &str) -> TypeError {
@@ -139,7 +139,7 @@ impl TypeError {
         }
     }
 
-    /// `"1e39" is out of range for type real` — PostgreSQL's message when a
+    /// `"1e39" is out of range for type real`: PostgreSQL's message when a
     /// float *input string* parses but overflows or underflows the type.
     #[must_use]
     pub fn float_text_out_of_range(value: &str, type_name: &str) -> TypeError {
@@ -148,8 +148,8 @@ impl TypeError {
         }
     }
 
-    /// `value out of range: overflow` / `: underflow` — PostgreSQL's message for
-    /// a float *computation or cast* that leaves the target's range.
+    /// `value out of range: overflow` or `: underflow`: PostgreSQL's message
+    /// for a float *computation or cast* that leaves the target's range.
     #[must_use]
     pub fn float_overflow() -> TypeError {
         TypeError::OutOfRange {

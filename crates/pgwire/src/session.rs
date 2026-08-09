@@ -29,10 +29,10 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum AuthMode {
     Trust,
-    /// SCRAM-SHA-256 against stored verifiers (no plaintext at rest). A server
-    /// mock secret derives a deterministic fake verifier for unknown users so
-    /// the message sequence and timing match a real user — closing the
-    /// username-enumeration oracle (RFC 5802 mock authentication).
+    /// SCRAM-SHA-256 against stored verifiers, with no plaintext at rest. A
+    /// server mock secret derives a deterministic fake verifier for unknown
+    /// users, so the message sequence and timing match a real user. This
+    /// closes the username-enumeration oracle (RFC 5802 mock authentication).
     ScramSha256 {
         verifiers: std::collections::HashMap<String, crate::scram::ScramVerifier>,
         mock_secret: [u8; 32],
@@ -45,7 +45,7 @@ pub struct SessionConfig {
     pub auth: AuthMode,
     pub max_message_len: usize,
     /// `ParameterStatus` values announced at session start. Clients parse
-    /// `server_version` and rely on `client_encoding=UTF8`.
+    /// `server_version` and depend on `client_encoding=UTF8`.
     pub server_params: Vec<(String, String)>,
     /// How much of a client-supplied W3C trace context statements on this
     /// connection may inherit. See [`IngressTracePolicy`].
@@ -89,28 +89,29 @@ struct ExtendedState {
     /// Client trace context read from the sqlcommenter tag on the most recent
     /// `Parse`, which is the only extended-protocol message carrying SQL.
     ///
-    /// Cleared at `Sync` alongside [`ExtendedState::failed`], and that lifetime
-    /// is the point: an *unnamed* prepared statement is a one-shot pipelined
-    /// batch — what every ORM emits — so its Parse-time trace is exactly the
-    /// trace its `Execute` belongs to. A *named* statement that survives a
-    /// `Sync` is genuinely being reused, and the trace it was prepared under is
-    /// stale by the time it runs again.
+    /// The session clears this at `Sync`, together with
+    /// [`ExtendedState::failed`], and that lifetime is the point. An *unnamed*
+    /// prepared statement is a one-shot pipelined batch, which is what every
+    /// ORM emits, so its Parse-time trace is exactly the trace its `Execute`
+    /// belongs to. A *named* statement that survives a `Sync` is genuinely
+    /// reused, and the trace it was prepared under is stale by the time it
+    /// runs again.
     trace: TraceCarrier,
 }
 
 /// The trace context an `Execute`-raised `gres.statement` span hangs from.
 ///
-/// `Bind` and `Execute` carry no SQL, so there is no sqlcommenter tag to read at
-/// execution time. The precedence is:
+/// `Bind` and `Execute` carry no SQL, so there is no sqlcommenter tag to read
+/// at execution time. The precedence is:
 ///
-/// 1. a `crabka.traceparent` GUC — the only genuinely per-execution channel, and
-///    the one an application can set once per request. Reading it needs an
-///    engine-side seam that lands with the pgexec statement tier; **this
+/// 1. a `crabka.traceparent` GUC, the only genuinely per-execution channel, and
+///    the one an application can set once per request. A read of it needs an
+///    engine-side seam that lands with the pgexec statement tier. **This
 ///    function does not consult it yet** and is the single place that changes
 ///    when it does.
 /// 2. the carrier captured from the `Parse` that prepared the statement, held on
 ///    [`ExtendedState`] until the next `Sync`.
-/// 3. nothing, leaving the statement span a trace root.
+/// 3. nothing, which leaves the statement span a trace root.
 fn resolve_execute_parent(ext: &ExtendedState) -> &TraceCarrier {
     &ext.trace
 }
@@ -126,9 +127,9 @@ struct CopyInState {
 /// (simple protocol) or must wait for the client's Sync (extended protocol).
 #[derive(Debug)]
 enum CopyInTarget {
-    /// Simple-protocol Query: complete via [`Session::copy_in`] with the SQL text.
+    /// Simple-protocol Query: complete with [`Session::copy_in`] and the SQL text.
     Statement { sql: String },
-    /// Extended-protocol Execute: complete via [`Session::copy_in_portal`].
+    /// Extended-protocol Execute: complete with [`Session::copy_in_portal`].
     Portal { name: String },
 }
 
@@ -257,12 +258,12 @@ fn fail_extended(ext: &mut ExtendedState, out: &mut BytesMut, e: &PgError) {
     backend::error_response(out, e);
 }
 
-/// Prepare a statement, returning the client trace context its SQL carried so
+/// Prepare a statement and return the client trace context its SQL carried, so
 /// the matching `Execute` can join the same trace.
 ///
-/// `Parse` earns a span of its own because it is not always local: for a sharded
-/// table the gateway forwards the prepare to the range owner, a real network hop
-/// that is otherwise invisible.
+/// `Parse` earns a span of its own because it is not always local. For a
+/// sharded table the gateway forwards the prepare to the range owner, a real
+/// network hop that is otherwise invisible.
 async fn handle_parse<Sess: Session>(
     session: &mut Sess,
     name: String,
@@ -368,8 +369,9 @@ async fn handle_describe<Sess: Session>(
     described
 }
 
-/// Returns `Some(CopyInState)` when the portal is a COPY FROM STDIN: the
-/// `CopyInResponse` has been written and the caller must enter copy-in mode.
+/// Returns `Some(CopyInState)` when the portal is a COPY FROM STDIN. This
+/// function has then written the `CopyInResponse`, and the caller must enter
+/// copy-in mode.
 async fn handle_execute<Sess: Session>(
     session: &mut Sess,
     portal_name: &str,
@@ -456,7 +458,7 @@ fn write_copy_in_response(out: &mut BytesMut, response: &CopyInResponse) {
 // ── Authentication helpers ──────────────────────────────────────────────────
 
 /// Runs the authentication exchange. Returns Ok(false) if the client failed
-/// authentication (error already written to the stream).
+/// authentication. The error is then already written to the stream.
 async fn authenticate<S>(
     stream: &mut S,
     startup_params: &[(String, String)],
@@ -559,7 +561,8 @@ fn server_nonce() -> String {
         .collect()
 }
 
-/// Reads the next frontend message, expecting Password ('p'); returns its body.
+/// Reads the next frontend message, which must be Password ('p'), and returns
+/// its body.
 async fn read_password<S>(
     stream: &mut S,
     inbuf: &mut BytesMut,
@@ -595,9 +598,9 @@ fn write_notices(out: &mut BytesMut, notices: Option<&mut mpsc::Receiver<PgError
 /// Write the `ReadyForQuery` that closes an exchange, preceded by any pending
 /// `NoticeResponse` and `NotificationResponse` messages.
 ///
-/// Postgres delivers notifications only between transactions: a session that
+/// Postgres delivers notifications only between transactions. A session that
 /// is idle *in* a transaction block accumulates them until the block ends, so
-/// the queue is drained only when the reported status is `Idle`.
+/// this function drains the queue only when the reported status is `Idle`.
 fn write_ready<Sess: Session>(
     out: &mut BytesMut,
     session: &Sess,
@@ -621,13 +624,14 @@ fn write_ready<Sess: Session>(
     backend::ready_for_query(out, status);
 }
 
-/// Wait for more frontend bytes, pushing notifications that arrive meanwhile.
+/// Wait for more frontend bytes and push notifications that arrive meanwhile.
 ///
-/// Returns `false` when the client went away. Notifications are only awaited
-/// between transactions (see [`write_ready`]); inside a transaction block this
-/// is a plain read and the queue drains at the next `ReadyForQuery`. `status`
-/// is passed by value rather than read from the session so the returned future
-/// borrows nothing shared and stays `Send` for a non-`Sync` session.
+/// Returns `false` when the client went away. This function awaits
+/// notifications only between transactions. See [`write_ready`]. Inside a
+/// transaction block it is a plain read, and the queue drains at the next
+/// `ReadyForQuery`. The caller passes `status` by value rather than read it
+/// from the session, so the returned future borrows nothing shared and stays
+/// `Send` for a non-`Sync` session.
 async fn read_or_notify<S>(
     stream: &mut S,
     inbuf: &mut BytesMut,
@@ -667,18 +671,18 @@ where
 
 // ── Main session loop ───────────────────────────────────────────────────────
 
-/// Drive a single connection from the point immediately after the `StartupMessage`
-/// has been decoded.
+/// Drive a single connection from the point immediately after the decode of
+/// the `StartupMessage`.
 ///
-/// `inbuf` is the residual buffer from the pre-startup negotiation phase (owned
-/// by `server::handle_conn`). Any bytes the client pipelined immediately after
-/// the startup packet are already in `inbuf`; passing it here avoids silently
-/// dropping those bytes.
+/// `inbuf` is the residual buffer from the pre-startup negotiation phase, which
+/// `server::handle_conn` owns. Any bytes the client pipelined immediately after
+/// the startup packet are already in `inbuf`. The caller passes `inbuf` here so
+/// that the session does not silently drop those bytes.
 ///
 /// # Errors
 ///
-/// Returns an I/O error when reading, writing, authenticating, or processing a
-/// protocol message fails.
+/// Returns an I/O error when a read, a write, an authentication step, or the
+/// processing of a protocol message fails.
 ///
 /// # Panics
 ///
@@ -1136,9 +1140,10 @@ where
 struct WireResultSink<'a> {
     out: &'a mut BytesMut,
     notices: Option<&'a mut mpsc::Receiver<PgError>>,
-    /// Rows written to the wire so far, folded onto `gres.statement` once the
-    /// statement finishes. The sink itself raises no spans: a 100k-row result
-    /// would emit a hundred page spans that the exporter throws away.
+    /// Rows written to the wire so far. The session folds this onto
+    /// `gres.statement` once the statement finishes. The sink itself raises no
+    /// spans, because a 100k-row result would emit a hundred page spans that
+    /// the exporter discards.
     rows: usize,
     /// Row pages written so far, the companion to [`WireResultSink::rows`].
     pages: usize,

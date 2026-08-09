@@ -1,4 +1,4 @@
-//! `EndTxn` (`api_key=26`). Finalises a transaction — the producer calls
+//! `EndTxn` (`api_key=26`). Finalises a transaction. The producer calls
 //! `commitTransaction()` or `abortTransaction()`, which drives two state
 //! transitions with a `WriteTxnMarkers` fan-out in between.
 //!
@@ -58,7 +58,7 @@ const NO_PRODUCER_ID: i64 = -1;
 const NO_PRODUCER_EPOCH: i16 = -1;
 
 /// Coordinator epoch stamped on outgoing `WriteTxnMarkers`. Apache Kafka
-/// increments it on each coordinator leadership change; coordinator failover
+/// increments it on each coordinator leadership change. Coordinator failover
 /// tracking is not implemented yet, so every marker carries the initial epoch.
 const INITIAL_COORDINATOR_EPOCH: i32 = 0;
 
@@ -346,14 +346,15 @@ async fn dispatch_transaction_markers(
 
 /// Apply (on COMMIT) or drop (on ABORT) the transactional consumer offsets
 /// buffered for `producer_id` under each consumer `group_id`. On COMMIT the
-/// offsets are written into the owning group's in-memory `committed_offsets`
-/// via the group actor's `UpdateCommitted` message — the same path a normal
-/// `OffsetCommit` uses and the same map `OffsetFetch` reads — so they become
-/// visible to `OffsetFetch` only now, after the commit marker. The buffer is
-/// always drained (even on abort) so a producer's pending offsets can't leak.
+/// handler writes the offsets into the owning group's in-memory
+/// `committed_offsets` through the group actor's `UpdateCommitted` message.
+/// That is the same path a normal `OffsetCommit` uses and the same map
+/// `OffsetFetch` reads, so the offsets become visible to `OffsetFetch` only
+/// now, after the commit marker. The handler always drains the buffer, even on
+/// abort, so a producer's pending offsets cannot leak.
 ///
-/// Single-broker MVP: every consumer group is local, so the owning group's
-/// actor is found (or created) on this broker. A multi-broker future would
+/// In the single-broker MVP every consumer group is local, so this broker
+/// finds or creates the owning group's actor. A multi-broker future would
 /// route each group's offsets to its `__consumer_offsets`-partition leader.
 async fn materialize_txn_offsets(broker: &Broker, producer_id: ProducerId, committed: bool) {
     let pending = broker.txn_coordinator.take_txn_offsets(producer_id);
@@ -391,11 +392,13 @@ async fn materialize_txn_offsets(broker: &Broker, producer_id: ProducerId, commi
 /// KIP-890: the `(producer_id, producer_epoch)` a producer continues with after
 /// a transaction completes.
 ///
-/// - Below `TV_2`: unchanged — the epoch only moves on `InitProducerId` reuse.
-/// - `TV_2`, normal: same `producer_id`, `epoch + 1` — bumping on completion
-///   fences a zombie holding the old epoch without a fresh `InitProducerId`.
-/// - `TV_2`, epoch exhaustion (`epoch == i16::MAX`): the epoch can't bump, so a
-///   *new* `producer_id` is allocated (`epoch` reset to 0). The caller records
+/// - Below `TV_2`: unchanged. The epoch only moves on `InitProducerId` reuse.
+/// - `TV_2`, normal: same `producer_id`, `epoch + 1`. A bump on completion
+///   fences a zombie that holds the old epoch, without a fresh
+///   `InitProducerId`.
+/// - `TV_2`, epoch exhaustion (`epoch == i16::MAX`): the epoch cannot bump, so
+///   the coordinator allocates a *new* `producer_id` and resets `epoch` to 0.
+///   The caller records
 ///   the old id as the entry's `prev_producer_id` so the transition is
 ///   traceable. The `EndTxn` v5 response returns the new pair and the producer
 ///   adopts it for its next transaction.
@@ -419,10 +422,11 @@ pub(crate) fn next_producer_identity(
 /// [`validate_complete_reacquire`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReacquireDecision {
-    /// State is exactly as this handler left it after Prepare; write Complete.
+    /// State is exactly as this handler left it after Prepare. Write Complete.
     Proceed,
-    /// The entry already advanced to the Complete state this handler intended
-    /// (idempotent retry / lost race). Report success without re-writing.
+    /// The entry already advanced to the Complete state this handler intended,
+    /// after an idempotent retry or a lost race. Report success and do not
+    /// write again.
     AlreadyComplete,
     /// The entry changed in a way that means this handler must NOT write
     /// Complete. Return this Kafka error code to the producer.
@@ -432,23 +436,26 @@ pub(crate) enum ReacquireDecision {
 /// Re-validate, after re-acquiring the coordinator's *current* entry for a
 /// transactional-id, that it is safe to finalise the transaction.
 ///
-/// `expected_epoch` / `expected_pid` are the producer identity this `EndTxn`
+/// `expected_epoch` and `expected_pid` are the producer identity this `EndTxn`
 /// handler validated and acted on. `prepare` is the state this handler wrote
-/// in Phase 1; `complete` is the state it is about to write.
+/// in Phase 1. `complete` is the state it is about to write.
 ///
 /// Returns:
 /// - [`ReacquireDecision::Reject`] with `INVALID_PRODUCER_EPOCH` if the pid or
-///   epoch no longer matches (a concurrent `InitProducerId` fenced us). Apache
-///   Kafka maps a stale producer epoch on `EndTxn` to `INVALID_PRODUCER_EPOCH`
-///   (a.k.a. `PRODUCER_FENCED` for the newer producer client).
+///   epoch no longer matches, which means a concurrent `InitProducerId` fenced
+///   this handler. Apache Kafka maps a stale producer epoch on `EndTxn` to
+///   `INVALID_PRODUCER_EPOCH`, also known as `PRODUCER_FENCED` for the newer
+///   producer client.
 /// - [`ReacquireDecision::AlreadyComplete`] if the entry is already in the
-///   exact `complete` state we intended — another caller (or an `EndTxn` retry)
-///   finished the transition; finalising again would be a redundant overwrite.
+///   exact `complete` state this handler intended. Another caller, or an
+///   `EndTxn` retry, finished the transition, so a second finalise would be a
+///   redundant overwrite.
 /// - [`ReacquireDecision::Reject`] with `INVALID_TXN_STATE` if the state is
-///   anything other than the `prepare` we left it in (e.g. advanced to
-///   `Ongoing` by a concurrent `AddPartitionsToTxn`, or into the *opposite*
-///   prepare/complete kind), meaning our marker fan-out no longer reflects the
-///   live transaction and we must not finalise.
+///   anything other than the `prepare` this handler left in place. For
+///   example, a concurrent `AddPartitionsToTxn` advanced it to `Ongoing`, or
+///   it moved into the *opposite* prepare/complete kind. The marker fan-out
+///   then no longer reflects the live transaction, and this handler must not
+///   finalise.
 /// - [`ReacquireDecision::Proceed`] only when the epoch matches and the state
 ///   is still exactly `prepare`.
 pub(crate) fn validate_complete_reacquire(
@@ -473,7 +480,7 @@ pub(crate) fn validate_complete_reacquire(
 // ── marker fan-out ────────────────────────────────────────────────────────────
 
 /// Dispatch `WriteTxnMarkers` to every partition leader involved in the
-/// transaction. Groups partitions by leader node:
+/// transaction. The function groups partitions by leader node:
 ///
 /// - **local** (leader == `node_id`): directly calls
 ///   [`Partition::produce_batch`] on the in-memory handle.
@@ -481,9 +488,9 @@ pub(crate) fn validate_complete_reacquire(
 ///   [`InterBrokerClient`], which runs TLS / SASL when the inter-broker
 ///   listener demands them.
 ///
-/// Any `__consumer_offsets` partitions registered via `AddOffsetsToTxn` live
-/// in `entry.partitions` (Kafka's model has no separate group list), so they
-/// are fanned out by the same loop as data partitions.
+/// Any `__consumer_offsets` partitions registered through `AddOffsetsToTxn`
+/// live in `entry.partitions`, because Kafka's model has no separate group
+/// list. The same loop therefore fans them out with the data partitions.
 #[derive(Clone, Copy)]
 struct MarkerDispatchContext<'a> {
     node_id: NodeId,
@@ -546,18 +553,19 @@ async fn dispatch_markers(
 ///
 /// Dials through the shared [`InterBrokerClient`] so the connection
 /// terminates TLS and runs the SASL client handshake whenever the
-/// inter-broker listener demands them. The previous implementation opened a
-/// one-shot `crabka_client_core::Client` per call, which carried no TLS
-/// connector and no inter-broker credentials — marker fan-out therefore only
-/// succeeded against a PLAINTEXT inter-broker listener and silently broke
-/// transactions spanning remote-led partitions on any secured cluster.
+/// inter-broker listener demands them. A one-shot
+/// `crabka_client_core::Client` per call would carry no TLS
+/// connector and no inter-broker credentials. Marker fan-out would then
+/// succeed only against a PLAINTEXT inter-broker listener, and it would
+/// silently break transactions that span remote-led partitions on any
+/// secured cluster.
 ///
 /// ## Coordinator epoch
 ///
 /// Apache Kafka tracks a per-coordinator epoch that increments on each
-/// leadership change. Leader-election-on-failure is not yet implemented, so we
-/// hard-code `coordinator_epoch = 0` here. Once coordinator failover is
-/// implemented the caller must supply the real epoch.
+/// leadership change. Leader-election-on-failure is not yet implemented, so
+/// this code hard-codes `coordinator_epoch = 0`. Once coordinator failover is
+/// implemented, the caller must supply the real epoch.
 // The `WriteTxnMarkersRequest` is built inline and immediately dispatched over a
 // live inter-broker connection; the `markers` field never surfaces as a return
 // value, so dropping it (→ empty Default vec) is only observable through the
@@ -665,12 +673,12 @@ fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
     encode_response(version, error_code, NO_PRODUCER_ID, NO_PRODUCER_EPOCH)
 }
 
-/// Encode a successful `EndTxn` response. `producer_id` / `producer_epoch` are
-/// the post-completion identity (the epoch is bumped at `TV_2`, or rolls to a
-/// new `producer_id` on epoch exhaustion; see [`next_producer_identity`]). They
-/// are only on the wire at v5 (KIP-890); at
-/// lower versions the producer never observes them, and the persisted bump
-/// fences a stale-epoch producer on its next coordinator call instead.
+/// Encode a successful `EndTxn` response. `producer_id` and `producer_epoch`
+/// are the post-completion identity. The epoch bumps at `TV_2`, or rolls to a
+/// new `producer_id` on epoch exhaustion; see [`next_producer_identity`]. They
+/// are only on the wire at v5 (KIP-890). At lower versions the producer never
+/// observes them, and the persisted bump instead fences a stale-epoch producer
+/// on its next coordinator call.
 fn encode_ok(version: i16, producer_id: i64, producer_epoch: i16) -> Result<Bytes, BrokerError> {
     encode_response(version, codes::NONE, producer_id, producer_epoch)
 }
@@ -783,7 +791,7 @@ mod tests {
     // ── Phase-3 re-validation: validate_complete_reacquire ──────────────────
 
     /// Build a `TxnEntry` in a given (pid, epoch, state) for the re-validation
-    /// tests. Partition sets are irrelevant to the decision, so leave empty.
+    /// tests. Partition sets do not change the decision, so leave them empty.
     fn entry(pid: i64, epoch: i16, state: TxnState) -> TxnEntry {
         let mut e = TxnEntry::new_empty("tid-x".into(), ProducerId(pid), epoch, 60_000, 1);
         e.state = state;
@@ -898,9 +906,9 @@ mod tests {
         }]
     }
 
-    /// A client with no TLS connector and no SASL creds — fine here, every
-    /// case fails at the TCP connect (unreachable address) before any
-    /// handshake would run.
+    /// A client with no TLS connector and no SASL creds. That is correct here,
+    /// because every case fails at the TCP connect on an unreachable address,
+    /// before any handshake would run.
     fn plaintext_client() -> InterBrokerClient {
         InterBrokerClient::new(None, None)
     }
@@ -931,7 +939,7 @@ mod tests {
     }
 
     /// Leader node absent from the metadata image → descriptive `Txn` error,
-    /// no dial attempted.
+    /// and no dial.
     #[tokio::test]
     async fn errors_when_leader_node_missing_from_image() {
         let image = MetadataImage::default();

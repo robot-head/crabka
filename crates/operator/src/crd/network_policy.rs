@@ -1,25 +1,31 @@
-//! `Kafka.spec.networkPolicy` — operator-side surface for
-//! generating a cluster-level `networking.k8s.io/v1.NetworkPolicy`.
+//! `Kafka.spec.networkPolicy`.
+//!
+//! This is the operator-side surface that generates a cluster-level
+//! `networking.k8s.io/v1.NetworkPolicy`.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Cluster-level opt-in for operator-managed `NetworkPolicy` generation.
-/// Setting `Kafka.spec.networkPolicy` (including `{}`) enables generation;
-/// `None` disables and triggers a one-shot orphan cleanup gated on the
-/// previous `NetworkPolicyReady=Available` condition.
+/// Cluster-level opt-in for the `NetworkPolicy` generation that the
+/// operator manages.
 ///
-/// The struct intentionally carries no fields today — future work can
-/// add `metrics_peers`, `controller_peers`, etc. without a breaking schema
-/// change.
+/// A value in `Kafka.spec.networkPolicy`, also `{}`, enables the
+/// generation. `None` disables it and starts a one-shot orphan cleanup.
+/// That cleanup runs only after a previous
+/// `NetworkPolicyReady=Available` condition.
+///
+/// The struct carries no fields today, and this is on purpose. Future work
+/// can add `metrics_peers`, `controller_peers`, and more without a
+/// breaking schema change.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkPolicySpec {}
 
-/// Subset of `networking.k8s.io/v1.NetworkPolicyPeer`. `ipBlock` is
-/// intentionally omitted; it can be added later if external CIDR
-/// allow-lists become a real need.
+/// Subset of `networking.k8s.io/v1.NetworkPolicyPeer`.
+///
+/// This struct omits `ipBlock` on purpose. Someone can add it later if
+/// external CIDR allow-lists become a real need.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkPolicyPeer {

@@ -137,11 +137,11 @@ weight = 15
 +++
 
 Crabka is a Rust reimplementation of Apache Kafka. It speaks the Kafka wire
-protocol byte-for-byte, stores records in Kafka-compatible logs, runs metadata
-through KRaft, and ships the surrounding operational pieces in the same
-workspace: native Rust clients, Schema Registry, a gRPC / Connect-RPC gateway,
-a Kubernetes operator, and a Cruise-Control-equivalent rebalancer.
+protocol byte-for-byte, stores records in Kafka-compatible logs, and runs
+metadata through KRaft. The same workspace holds the operational pieces: native
+Rust clients, Schema Registry, a gRPC / Connect-RPC gateway, a Kubernetes
+operator, and a Cruise-Control-equivalent rebalancer.
 
-With Kafka parity now broad and validated against the JVM, Crabka is in
-**beta**: greenfield and pre-1.0, ready for evaluation and non-critical
-workloads, not yet hardened by production deployment.
+Crabka is in **beta**: greenfield and pre-1.0. Kafka parity is broad and
+validated against the JVM. Use Crabka for evaluation and non-critical workloads.
+Production deployment has not hardened it yet.

@@ -1,6 +1,6 @@
-//! Broker-side heartbeat client. Sends `BrokerHeartbeat` to the
-//! controller leader every configured `heartbeat_interval`. Discovers the
-//! current controller via the metadata image; retries on transient
+//! Broker-side heartbeat client. It sends `BrokerHeartbeat` to the
+//! controller leader at every configured `heartbeat_interval`. It finds the
+//! current controller in the metadata image, and it retries after transient
 //! errors.
 
 #![allow(dead_code)]
@@ -19,30 +19,30 @@ pub(crate) struct Config {
     pub interval: Time,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub shutdown: CancellationToken,
-    /// Shared inter-broker dialer used to reach the controller leader.
-    /// Runs TLS / SASL when the inter-broker listener requires them,
-    /// otherwise falls back to plain TCP.
+    /// Shared inter-broker dialer that reaches the controller leader.
+    /// It runs TLS / SASL when the inter-broker listener needs them.
+    /// If not, it uses plain TCP.
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     pub inter_broker_listener_protocol: ListenerProtocol,
     pub inter_broker_listener_name: String,
-    /// When `true`, stamp `want_shut_down=true` on outbound
-    /// `BrokerHeartbeat` requests. Driven by
-    /// [`crate::BrokerHandle::controlled_shutdown`].
+    /// When `true`, the client stamps `want_shut_down=true` on outbound
+    /// `BrokerHeartbeat` requests.
+    /// [`crate::BrokerHandle::controlled_shutdown`] drives this flag.
     pub want_shutdown: tokio::sync::watch::Receiver<bool>,
-    /// Set to `true` when the controller responds with
+    /// The client sets this to `true` when the controller responds with
     /// `should_shut_down=true`. The caller of `controlled_shutdown`
     /// awaits this flag.
     pub should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
-    /// Per-log-dir health registry; offline dirs are reported to the
-    /// controller as `offline_log_dirs` UUIDs each heartbeat (KIP-858).
+    /// Per-log-dir health registry. Each heartbeat reports the offline dirs
+    /// to the controller as `offline_log_dirs` UUIDs (KIP-858).
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
-    /// Stable per-log-dir UUIDs, to translate offline dir paths → ids.
+    /// Stable per-log-dir UUIDs, to translate offline dir paths to ids.
     pub log_dir_ids: crate::log_dir_id::LogDirIds,
-    /// All configured log dirs; when every one is offline the broker
-    /// self-shuts-down (KIP-112).
+    /// All configured log dirs. When every one of them is offline, the
+    /// broker shuts itself down (KIP-112).
     pub all_log_dirs: Vec<std::path::PathBuf>,
-    /// Cancelled on all-dirs-offline to stop replication/materialization
-    /// against dead disks before teardown.
+    /// The broker cancels this when all dirs go offline. This stops
+    /// replication and materialization against dead disks before teardown.
     pub supervisor_shutdown: tokio_util::sync::CancellationToken,
 }
 
@@ -59,7 +59,8 @@ fn offline_dir_uuids(
         .collect()
 }
 
-/// True when every configured log dir is offline (→ broker self-shutdown).
+/// True when every configured log dir is offline. The broker then shuts itself
+/// down.
 fn all_dirs_offline(
     all_log_dirs: &[std::path::PathBuf],
     status: &crate::log_dir_status::LogDirRegistry,
@@ -86,8 +87,8 @@ fn heartbeat_connection_options(broker_id: i32, interval: Time) -> ConnectionOpt
     }
 }
 
-/// Trigger the KIP-112 self-shutdown: latch `should_shutdown` and cancel
-/// the supervisor. Called from every early-exit path so the check is not
+/// Triggers the KIP-112 self-shutdown. It latches `should_shutdown` and
+/// cancels the supervisor. Every early-exit path calls it, so the check is not
 /// accidentally skipped when the controller is temporarily unreachable.
 fn trigger_all_dirs_offline_shutdown(cfg: &mut Config, reason: &str) {
     tracing::error!(

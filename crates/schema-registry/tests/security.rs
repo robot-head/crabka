@@ -1,10 +1,10 @@
 //! In-process integration of the registry security stack against a real broker.
 //!
-//! Boots a Crabka `Broker`, seeds Kafka ACLs (`User:alice` Allow Write/Read on
-//! `Topic:s`), then starts secure registry node(s) wired with the full middleware
-//! stack — `auth_layer` (require Basic) → `authz_layer` (enabled, refreshed from
-//! the broker's `DescribeAcls`) → `forward_layer`. It asserts the end-to-end
-//! HTTP contract:
+//! Boots a Crabka `Broker` and seeds Kafka ACLs that Allow `User:alice` Write
+//! and Read on `Topic:s`. It then starts secure registry nodes wired with the
+//! full middleware stack: `auth_layer` with require Basic, then `authz_layer`
+//! enabled and refreshed from the broker's `DescribeAcls`, then
+//! `forward_layer`. It asserts the end-to-end HTTP contract:
 //!
 //! - `401` with no / bad credentials (and `WWW-Authenticate: basic`),
 //! - `403` for an authenticated principal lacking an ACL,
@@ -14,9 +14,9 @@
 //!   primary (forward-authz across two nodes),
 //! - an HTTPS round-trip (`serve_https`) with auth enforced over TLS.
 //!
-//! The ACL cache populates a few hundred ms after start (the `run_acl_refresh`
-//! timer), so the authorized assertions poll to a deadline rather than asserting
-//! once.
+//! The ACL cache populates a few hundred ms after start, on the
+//! `run_acl_refresh` timer. The authorized assertions therefore poll to a
+//! deadline instead of a single assertion.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -57,8 +57,8 @@ fn alice_users() -> HashMap<String, String> {
         .collect()
 }
 
-/// A secure-node config: require Basic auth + enabled authz with a fast ACL
-/// refresh, plain HTTP (TLS is layered separately via [`tls_config`]).
+/// A secure-node config. It requires Basic auth and enables authz with a fast
+/// ACL refresh over plain HTTP. [`tls_config`] layers TLS separately.
 fn secure_cfg_with_scheme(
     bootstrap: &str,
     port: i32,
@@ -111,8 +111,9 @@ fn principal_acl(principal: &str, op: AclOperation) -> AclEntry {
 }
 
 /// Seed `User:alice` Allow Write AND Read on `Topic:s`. `register` maps to
-/// `Write`, `GET /subjects/s/versions` to `Read` (see `authz::authz_target`);
-/// `SimpleAclAuthorizer` does not imply Read←Write, so both are required.
+/// `Write`, and `GET /subjects/s/versions` maps to `Read`, as
+/// `authz::authz_target` shows. `SimpleAclAuthorizer` does not imply Read from
+/// Write, so both are required.
 async fn seed_acls(bootstrap: &str) {
     seed_acls_for(bootstrap, "User:alice").await;
 }
@@ -141,10 +142,11 @@ struct Node {
     cancel: CancellationToken,
 }
 
-/// Boot a secure registry node: `KafkaStore` + `Election` + the full security
-/// middleware stack (`auth_layer` → `authz_layer` → `forward_layer`) served over
-/// `serve_http`. Binds the listener FIRST so `advertised_url` carries the real
-/// port. Models `ha.rs::start_node`, adding the auth + authz layers.
+/// Boot a secure registry node with `KafkaStore`, `Election`, and the full
+/// security middleware stack `auth_layer` → `authz_layer` → `forward_layer`,
+/// served over `serve_http`. It binds the listener FIRST, so `advertised_url`
+/// carries the real port. It models `ha.rs::start_node` and adds the auth and
+/// authz layers.
 async fn start_secure_node(bootstrap: &str) -> Node {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -241,9 +243,10 @@ async fn register_as_alice(
     .status()
 }
 
-/// Poll `register` on `subject` as `alice:pw` until it returns `200` (the ACL
-/// cache populates ~300ms after start) or `secs` elapses. Registering the same
-/// schema repeatedly is idempotent (returns the same id), so re-POSTing is safe.
+/// Poll `register` on `subject` as `alice:pw` until it returns `200`, or until
+/// `secs` elapses. The ACL cache populates about 300ms after start. A repeated
+/// registration of the same schema is idempotent and returns the same id, so a
+/// repeated POST is safe.
 async fn await_register_200(http: &reqwest::Client, port: i32, subject: &str, secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
@@ -256,9 +259,9 @@ async fn await_register_200(http: &reqwest::Client, port: i32, subject: &str, se
     }
 }
 
-/// Poll `GET url` (as `alice:pw`) until the body equals `expected` or `secs`
-/// elapses. A non-writing node reflects a forwarded write only once it consumes
-/// the `_schemas` record (eventually consistent).
+/// Poll `GET url` as `alice:pw` until the body equals `expected`, or until
+/// `secs` elapses. A non-writing node reflects a forwarded write only after it
+/// consumes the `_schemas` record, so the view is eventually consistent.
 async fn await_get_body_as_alice(http: &reqwest::Client, url: &str, expected: &str, secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
@@ -673,8 +676,8 @@ async fn two_nodes_authorize_then_forward_to_primary() {
 // ── JWKS test helpers ────────────────────────────────────────────────────────
 
 /// Static RSA-2048 PKCS#8 private key used for JWT signing in tests.
-/// This is the same constant as in `crates/security/src/jwks.rs` tests —
-/// reproduced here because those helpers are `pub(crate)` and not accessible
+/// This is the same constant as in the `crates/security/src/jwks.rs` tests. It
+/// is reproduced here because those helpers are `pub(crate)` and not accessible
 /// from outside the security crate.
 const RSA_PKCS8_B64: &str = "MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC1Ekoc++7sSsH55QXBCq/aj71helk6ZCTkzYxfLRZXbox0FcV7vOkLNodetJLY7nAUekZLltQ7Q6FJ42geqGV+vgttF63Ue9OP24mPmn/OiFqVYhBaJDRI5BMBLCqZbUfpNBDh7ZOCczwlX8Z5FQS0QJBA4F26H9AKzFRvofwHFk1wxqiGdgwDyClgi+eDnhEGGhBEHuTl1edvTRif88rLDfPHKG1TRqKC6LMXCZQdNy7lrDEGPKHqfW4mb2mq7Vj6h2Jjv+1SpsSxdqX8Tsua4/LrAKvFIXfoZAnjzhACbhXqf1DdSdInZ0i1adY8JpgJQ+WtJ0i9aIOnnmDYwgMvAgMBAAECggEAHqBqUr62Kdd3Odpn/7/cAL7hTHSSVRMNPnoZ7RtGNSGothXcolJQpKnjebxXPkQORxhrfWuUmDWXOVUyjkTzbd2dNyWTLGaJYULD4LtENN3RXIUKuQR4p3+US1V6Gxtl12cMF/rEQYNWQAgUHPTWJ9rny2Fn2Qx6dukauwsOAvCU47fL873sm06SYgPJsLm7MKVeifl8dDudgpURxeC9z37cm9kjjE6n6aiBTNAuBEkMaAbcfgJ0RZfzaMo7IpsOeyOwp932JDlKROpQWKA+lz08YzhkU81qHJYOS/js2F0jxzFz31D9IN+OLu7vRCANFLJl/qnin1JEgVPh7gxSKQKBgQDfrQEsutvH1746ytfE+4jUXyv7Fuaz9MML8uaJbC4hMFdCJuMuLBY07bDE23+4byuWY7JHrgsLRaZ+qpNGWs3LH2x6xsHiK8Ivpuy8TVUJ6hgkPK1cr8yUJxaDcyV8tJAZ+mFmyyWx7wUdlgJFCa2MQF1HnrlBKZvSLWV4CjctZQKBgQDPPR2wLwyk6JlyapsVnCpNBGcXqbJxPh1TM7uPqlODxTzegUK+TMJDZ840u2aBNXf2D5WIJMl+/ohYefOOqK9z2OJUGObnJMgGusH04rdbBoDCdBwfwjiluU7vxbuQKBu8JNXzeb7HJhmgxtXWdJuFYcYbmGu8leFvmUxZTPRfAwKBgQCm6Gpf/m/SiGMjbAnmq+xGzV38V/J/hr2lRPRSx68EhRYX/vy3j55ikJu/yitcbViROIPoiS8kkizTiGWtskSuthw04ev74btd46n0OaCjbVPmdoDHEUgPpbtfC6WFkReWyweztRPD2yBuG2pGKhqe9cilkQOcZHgqNkXpdXYHIQKBgQCO0BQkdNfm0O/l3DdRdhPkjVMqCGSTC3YT/0OS5pK07PhccYF4ONdqsh91UWt7QUiRBf5LGubMoEV/i1LfjbmTQPP/dkWxJjS+Bndg9dfbX6jd2DwFWsfE1OXj8ESoPCuYxV23cr+Y59WjaUK1jhgam9106N3d0P/Q8zidFZ4V1wKBgQDFvIqMLnpaInWhb7kP+X6o0tPQSg+6odMWPnjhwnpSIiUjPUTZV4ijc/d1tPsUemFQxDe+ZreQXDMVGcAVldFnoEMyL8iAtMAHtsSmq2E80RNZfc6nUgy5esQ9rJeX2pH9aZCVvKv6iVTeUtAxS+ltjmEG9BSEI2WQI1WDzPbKiA==";
 
@@ -760,10 +763,11 @@ fn split_pkcs1_for_jwks(der: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (n, e)
 }
 
-/// Start an SR node with JWKS Bearer auth. Routes through `build_security()` so
-/// the production CLI code path (and its coverage) is exercised. The caller
-/// provides a pre-built `Jwks` that is stored in the handle immediately,
-/// bypassing the HTTP refresher (no real JWKS endpoint needed in tests).
+/// Start an SR node with JWKS Bearer auth. It routes through
+/// `build_security()`, so the test exercises the production CLI code path and
+/// its coverage. The caller provides a pre-built `Jwks`, which is stored in the
+/// handle immediately. This bypasses the HTTP refresher, so tests need no real
+/// JWKS endpoint.
 async fn start_jwks_node(
     bootstrap: &str,
     initial_jwks: Jwks,

@@ -13,24 +13,30 @@ pub struct LogEnd {
 pub enum Event {
     /// The election timer fired.
     ElectionTimeout,
-    /// The fetch timer fired (follower/observer lost contact with the leader).
+    /// The fetch timer fired.
+    ///
+    /// The follower or observer lost contact with the leader.
     FetchTimeout,
     /// A peer asks us for our vote.
     ReceiveVoteRequest {
         from: NodeId,
-        /// The recipient this Vote is addressed to (the wire top-level
-        /// `voterId`). KIP-595 / Kafka's `KafkaRaftClient` validates that an
-        /// incoming Vote targets this node before considering the grant; a
-        /// request addressed to a different voter is rejected.
+        /// The recipient of this Vote, that is, the wire top-level `voterId`.
+        ///
+        /// KIP-595 and Kafka's `KafkaRaftClient` check that an incoming Vote
+        /// targets this node before they consider the grant. They reject a
+        /// request that is addressed to a different voter.
         voter_id: NodeId,
         candidate_epoch: Epoch,
         candidate: NodeId,
         candidate_log_end: LogEnd,
         pre_vote: bool,
     },
-    /// A peer answered our Vote. The round (pre-vote vs real vote) is NOT on the
-    /// wire — the candidate infers it from its own `Prospective`/`Candidate`
-    /// role + epoch (KIP-996; mirrors Kafka's field-less `VoteResponse`).
+    /// A peer answered our Vote.
+    ///
+    /// The wire does NOT carry the round, that is, pre-vote against real vote.
+    /// The candidate infers the round from its own `Prospective` or `Candidate`
+    /// role and epoch (KIP-996). This matches Kafka's field-less
+    /// `VoteResponse`.
     ReceiveVoteResponse {
         from: NodeId,
         epoch: Epoch,
@@ -46,17 +52,17 @@ pub enum Event {
         leader_id: NodeId,
         leader_epoch: Epoch,
     },
-    /// (Leader side) a follower fetched at this position.
+    /// Leader side: a follower fetched at this position.
     ReceiveFetch {
         from: NodeId,
         fetch_epoch: Epoch,
         fetch_offset: i64,
     },
-    /// (Follower side) the leader answered our Fetch.
+    /// Follower side: the leader answered our Fetch.
     ReceiveFetchResponse {
         leader_id: NodeId,
         leader_epoch: Epoch,
-        /// Set when the leader signalled log divergence.
+        /// Holds a value when the leader signalled log divergence.
         diverging: Option<crate::types::LogOffsetMetadata>,
     },
 }

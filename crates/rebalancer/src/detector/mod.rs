@@ -1,10 +1,10 @@
 //! Anomaly detector.
 //!
-//! The detector watches `SharedSnapshot` + `UsageStore` for trouble
-//! (broker death, sustained under-replicated partitions, disk pressure,
-//! slow broker) and auto-triggers self-healing proposals via the
-//! existing optimizer path. Anomaly history is persisted to
-//! `{data_dir}/anomalies.json` and surfaced via `GetAnomalies`.
+//! The detector watches `SharedSnapshot` and `UsageStore` for broker death,
+//! sustained under-replicated partitions, disk pressure, and slow brokers. It
+//! auto-triggers self-healing proposals through the existing optimizer path.
+//! It persists the anomaly history to `{data_dir}/anomalies.json` and surfaces
+//! it through `GetAnomalies`.
 
 pub mod anomaly;
 pub mod auto_trigger;
@@ -39,8 +39,8 @@ pub struct DetectorConfig {
     pub under_replicated_threshold: Time,
     pub disk_pressure_threshold: Ratio,
     pub disk_critical_threshold: Ratio,
-    /// Multiple of the cluster median CPU-core usage above which a broker is
-    /// "slow". Dimensionless.
+    /// Multiple of the cluster median CPU-core usage above which a broker
+    /// counts as "slow". The value is dimensionless.
     pub slow_broker_multiplier: f64,
     /// Absolute CPU-core floor below which `SlowBroker` never fires.
     pub slow_broker_min_cores: f64,
@@ -66,10 +66,12 @@ impl Default for DetectorConfig {
     }
 }
 
-/// Compact snapshot fingerprint used by rules that need to verify a
-/// condition is sustained across multiple ticks. NOT persisted —
-/// restart resets sustained-condition timers, briefly delaying
-/// re-detection. Acceptable trade-off; anomalies are derived signals.
+/// Compact snapshot fingerprint used by rules that must verify that a
+/// condition is sustained across multiple ticks.
+///
+/// The fingerprint is NOT persisted. A restart resets the sustained-condition
+/// timers and briefly delays re-detection. That is an acceptable trade-off,
+/// because anomalies are derived signals.
 #[derive(Debug, Clone)]
 pub struct SnapshotMemo {
     pub snapshot_at_ms: i64,
@@ -114,9 +116,9 @@ impl SnapshotHistory {
         self.inner.push_back(memo);
     }
 
-    /// Returns the oldest memo with `snapshot_at_ms >= cutoff_ms`, or
-    /// the oldest memo we have. Rules use this to ask "has condition X
-    /// held since `cutoff_ms`?".
+    /// Returns the oldest memo with `snapshot_at_ms >= cutoff_ms`, or the
+    /// oldest memo the history holds. Rules use it to ask whether condition X
+    /// has held since `cutoff_ms`.
     #[must_use]
     pub fn oldest_since(&self, cutoff_ms: i64) -> Option<&SnapshotMemo> {
         self.inner.iter().find(|m| m.snapshot_at_ms >= cutoff_ms)
@@ -218,10 +220,12 @@ impl Detector {
         }
     }
 
-    /// One detector pass over the current snapshot. Pushes the current
-    /// snapshot to history, runs all four rules, reconciles open
-    /// anomalies (mark resolved + upsert new), updates per-kind open
-    /// gauges, and fires auto-trigger on freshly-detected anomalies.
+    /// One detector pass over the current snapshot.
+    ///
+    /// The pass pushes the current snapshot to history and runs all four
+    /// rules. It then reconciles the open anomalies: it marks resolved ones and
+    /// upserts new ones. Last, it updates the per-kind open gauges and fires
+    /// auto-trigger on freshly detected anomalies.
     pub async fn tick_once(&self, now_ms: i64) {
         use std::collections::HashMap;
 

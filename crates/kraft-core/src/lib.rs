@@ -1,17 +1,18 @@
 //! Deterministic, sans-IO `KRaft` consensus core (KIP-595 + KIP-996).
 //!
-//! This is Crabka's metadata-quorum engine reduced to its pure essence: a
-//! synchronous `on_event(event, log, now) -> Vec<Action>` state machine
+//! This crate is Crabka's metadata-quorum engine: a synchronous
+//! `on_event(event, log, now) -> Vec<Action>` state machine
 //! ([`core::QuorumStateMachine`]) over the `QuorumState`/[`Role`] model. It
-//! never reads the clock, touches a socket, or writes a byte to disk — time is
-//! injected as a [`SimInstant`], the log is read through the [`LogView`] seam,
-//! and every effect is returned as an [`Action`] for the caller to execute.
+//! never reads the clock, touches a socket, or writes a byte to disk. The
+//! caller injects the time as a [`SimInstant`], the state machine reads the log
+//! through the [`LogView`] seam, and it returns every effect as an [`Action`]
+//! for the caller to execute.
 //!
 //! `crabka-raft` wraps this core with the async engine, the real KIP-595 wire,
-//! and the on-disk `crabka-log`, re-exporting these modules under
-//! `crabka_raft::kraft`. Because the core itself is a clean leaf — no tokio, no
-//! filesystem, no crypto — it compiles for `wasm32-unknown-unknown`, which is
-//! what lets the [`sim`] module (behind the `sim` feature) drive an interactive
+//! and the on-disk `crabka-log`. It re-exports these modules under
+//! `crabka_raft::kraft`. The core is a leaf crate with no tokio, no filesystem,
+//! and no crypto, so it compiles for `wasm32-unknown-unknown`. The [`sim`]
+//! module, behind the `sim` feature, uses this to drive an interactive
 //! consensus simulation in the browser playground.
 
 #![doc(html_root_url = "https://docs.rs/crabka-kraft-core/0.3.9")]

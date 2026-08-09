@@ -236,8 +236,9 @@ async fn vacuum_reclaims_deleted_rows_the_write_path_never_revisits() {
 
 // ── (d) replicated engines never prune locally ───────────────────────────────
 
-/// Test committer applying batches straight to the shared applied store, so a
-/// Replicated-mode engine is exercisable without a raft runtime.
+/// Test committer that applies batches straight to the shared applied store.
+///
+/// A Replicated-mode engine is then testable without a raft runtime.
 struct ApplyCommitter(Arc<dyn Kv>);
 
 #[async_trait::async_trait]
@@ -297,8 +298,10 @@ async fn replicated_mode_prunes_in_commit_batches_and_vacuum_is_a_no_op() {
 
 // ── (e) pruning does not change UPDATE/DELETE results ────────────────────────
 
-/// Run one DML script against a LOCAL engine and a replicated engine (both
-/// prune on the write path); the visible table contents must be identical.
+/// Run one DML script against a LOCAL engine and a replicated engine.
+///
+/// Both engines prune on the write path. The visible table contents must be
+/// identical.
 #[tokio::test]
 async fn update_and_delete_results_are_unchanged_with_pruning_active() {
     let script: Vec<String> = {
@@ -428,7 +431,7 @@ async fn vacuum_freezes_survivors_truncates_the_clog_and_updates_still_work() {
 
 // ── bounded incremental sweeps (vacuum_step) ─────────────────────────────────
 
-/// Run bounded sweep steps until a cycle completes, returning the aggregated
+/// Run bounded sweep steps until a cycle completes, then return the aggregated
 /// stats and the number of steps the cycle took.
 async fn run_steps_to_cycle_end(engine: &SqlEngine) -> (crabka_pgexec::VacuumStats, u32) {
     let mut total = crabka_pgexec::VacuumStats::default();

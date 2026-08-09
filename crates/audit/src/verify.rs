@@ -1,8 +1,9 @@
-//! Offline verification of an audit partition's hash-chain + signed checkpoints.
+//! Offline verification of an audit partition's hash-chain and signed checkpoints.
 //!
-//! Reads `<dir>/*.log` segment files directly (NO recovery/truncation, so tail
-//! corruption is visible) and recomputes the chain with the same primitives the
-//! writer used, validating each checkpoint signature against a trusted key.
+//! The verifier reads `<dir>/*.log` segment files directly. It does NO recovery
+//! and NO truncation, so tail corruption stays visible. It recomputes the chain
+//! with the same primitives the writer used, and it validates each checkpoint
+//! signature against a trusted key.
 
 use std::{collections::HashMap, path::Path};
 
@@ -43,21 +44,21 @@ pub struct VerifyBreak {
     pub reason: String,
 }
 
-/// Result of verifying a partition.
+/// Result of a partition verification.
 ///
-/// `unanchored_records` is only meaningful when `ok` is `true`. It counts
-/// records whose seq is greater than the highest seq covered by the last valid
-/// signed checkpoint. When `ok` is `false` this field is 0 (the walk stopped
-/// at the break before a reliable count could be established).
+/// `unanchored_records` is only meaningful when `ok` is `true`. It counts the
+/// records with a seq greater than the highest seq that the last valid signed
+/// checkpoint covers. When `ok` is `false`, this field is 0: the walk stopped
+/// at the break, before it could establish a reliable count.
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
     pub records: RecordCount,
     pub checkpoints: CheckpointCount,
     pub ok: bool,
     pub first_break: Option<VerifyBreak>,
-    /// Number of records that are NOT covered by a signed checkpoint (i.e. the
-    /// unsigned tail). Zero means the chain is fully attested. Only meaningful
-    /// when `ok` is `true`.
+    /// Number of records that a signed checkpoint does NOT cover, that is, the
+    /// unsigned tail. Zero means the chain is fully attested. This field is
+    /// only meaningful when `ok` is `true`.
     pub unanchored_records: RecordCount,
 }
 
@@ -91,7 +92,7 @@ fn broke(
     }
 }
 
-/// Mutable per-record walk state threaded through helpers.
+/// Mutable per-record walk state that the helper functions share.
 struct WalkState {
     head: [u8; 32],
     expected_seq: Seq,
@@ -114,6 +115,7 @@ impl WalkState {
 }
 
 /// Validate a checkpoint record against the running chain and trusted keys.
+///
 /// Returns `Err(VerifyReport)` on the first detected break.
 fn check_checkpoint(
     rec: &Record,
@@ -182,6 +184,7 @@ fn check_checkpoint(
 }
 
 /// Validate a chained data record and advance the chain head.
+///
 /// Returns `Err(VerifyReport)` on the first detected break.
 fn check_chained(rec: &Record, offset: i64, state: &mut WalkState) -> Result<(), VerifyReport> {
     let value = rec.value.as_deref().unwrap_or_default();
@@ -227,10 +230,11 @@ fn check_chained(rec: &Record, offset: i64, state: &mut WalkState) -> Result<(),
 
 /// Verify the audit partition under `dir`.
 ///
-/// Reads all `*.log` segment files in base-offset (filename) order, decodes
-/// each `RecordBatch` directly (not via `Log::open` — that path runs
-/// recovery/truncation which would silently mask tail corruption), recomputes
-/// the hash-chain, and validates every checkpoint signature against `trusted`.
+/// This function reads all `*.log` segment files in base-offset order, which is
+/// the filename order. It decodes each `RecordBatch` directly and not through
+/// `Log::open`: that path runs recovery and truncation, which would silently
+/// mask tail corruption. The function then recomputes the hash-chain, and it
+/// validates every checkpoint signature against `trusted`.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -238,7 +242,10 @@ fn check_chained(rec: &Record, offset: i64, state: &mut WalkState) -> Result<(),
     err
 )]
 /// # Errors
-/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
+/// Returns an error if the verifier cannot read `dir`. Returns an error if the
+/// verifier cannot read one of the segment files. A detected break in the chain
+/// or in a signature is not an error: it is an `Ok` report with `ok` set to
+/// `false`.
 pub fn verify_partition_dir(dir: &Path, trusted: &TrustedKeys) -> Result<VerifyReport, AuditError> {
     let mut segments: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| AuditError::Sink(format!("read dir {}: {e}", dir.display())))?
@@ -345,7 +352,8 @@ mod tests {
         batch
     }
 
-    /// Build a valid chained+checkpointed partition on disk; return pubkey.
+    /// Build a valid chained and checkpointed partition on disk, and return the
+    /// public key.
     fn build_partition(tmp: &std::path::Path) -> Vec<u8> {
         let (s, pubkey) = signer();
         let mut log = Log::open(tmp, LogConfig::default()).unwrap();
@@ -466,7 +474,8 @@ mod tests {
         );
     }
 
-    /// Chain-only partition (no signing key, no checkpoints) — all records are unanchored.
+    /// Chain-only partition with no signing key and no checkpoints. All records
+    /// are unanchored.
     #[test]
     fn chain_only_partition_all_records_unanchored() {
         let tmp = tempfile::tempdir().unwrap();
@@ -537,7 +546,7 @@ mod tests {
         );
     }
 
-    /// A record stamped with the wrong `prev_hash` is detected as a chain break.
+    /// The verifier detects a record with the wrong `prev_hash` as a chain break.
     #[test]
     fn wrong_prev_hash_detected() {
         let tmp = tempfile::tempdir().unwrap();
@@ -578,7 +587,8 @@ mod tests {
     }
 
     /// A checkpoint signed over the original chain head does not match after
-    /// records are replaced with different values (re-stamped chain head differs).
+    /// records are replaced with different values, because the re-stamped chain
+    /// head differs.
     #[test]
     fn stale_checkpoint_chain_head_mismatch_detected() {
         let tmp_orig = tempfile::tempdir().unwrap();

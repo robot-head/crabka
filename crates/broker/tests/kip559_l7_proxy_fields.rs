@@ -1,12 +1,12 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
 
-//! KIP-559 — `JoinGroup` v7+ and `SyncGroup` v5+ responses carry
-//! `protocol_type` / `protocol_name` so an L7 proxy can identify the
-//! group-coordination dialog without remembering the prior exchange.
+//! KIP-559: the `JoinGroup` v7+ and `SyncGroup` v5+ responses carry
+//! `protocol_type` and `protocol_name`, so an L7 proxy can identify the
+//! group-coordination exchange without remembering the earlier one.
 //!
-//! `Client::send` negotiates to broker `MAX_VERSION`, which is v9 for
-//! `JoinGroup` and v5 for `SyncGroup`, so the KIP-559 fields are always
-//! exercised on these tests.
+//! `Client::send` negotiates to the broker `MAX_VERSION`, which is v9 for
+//! `JoinGroup` and v5 for `SyncGroup`, so these tests always exercise the
+//! KIP-559 fields.
 
 use assert2::{assert, check};
 mod support;

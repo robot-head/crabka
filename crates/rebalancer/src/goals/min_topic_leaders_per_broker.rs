@@ -1,13 +1,12 @@
-//! Soft goal: ensure every (broker, topic) pair where the broker
-//! holds at least one replica also leads at least
+//! Soft goal: make sure that every (broker, topic) pair where the broker holds
+//! at least one replica also leads at least
 //! `ctx.min_topic_leaders_per_broker` of that topic's partitions.
 //!
-//! Default `ctx.min_topic_leaders_per_broker == 0` makes the goal a
-//! no-op. Operators opt in via the `--min-topic-leaders-per-broker`
-//! CLI flag.
+//! The default `ctx.min_topic_leaders_per_broker == 0` makes the goal a no-op.
+//! Operators opt in with the `--min-topic-leaders-per-broker` CLI flag.
 //!
-//! Emits leader-only movements (replicas unchanged); the broker
-//! receiving the leadership must already be in the partition's
+//! The goal emits leader-only movements and leaves the replicas unchanged. The
+//! broker that receives the leadership must already be in the partition's
 //! replica set AND in ISR.
 
 use std::collections::{BTreeSet, HashMap, HashSet};

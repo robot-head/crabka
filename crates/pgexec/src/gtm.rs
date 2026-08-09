@@ -1,8 +1,9 @@
-//! Range 0's Global Transaction Manager: allocates monotonic GLOBAL xids
-//! (>= GLOBAL_XID_BASE, disjoint from every range's local xids), tracks the
-//! in-flight global set, and builds the global snapshot a cross-range reader
-//! resolves Prepared(->G) tuples against. Backed by range 0's store; the counter
-//! is max-merged by the state machine exactly like ProcArray's next_xid.
+//! Range 0's Global Transaction Manager. It allocates monotonic GLOBAL xids,
+//! which are `>= GLOBAL_XID_BASE` and disjoint from every range's local xids. It
+//! tracks the in-flight global set. It builds the global snapshot a cross-range
+//! reader resolves Prepared(->G) tuples against. Range 0's store backs it, and
+//! the state machine max-merges the counter exactly as it does ProcArray's
+//! next_xid.
 
 use std::{
     collections::BTreeSet,
@@ -53,13 +54,14 @@ pub(crate) struct Gtm {
     kv: Arc<dyn Kv>,
 }
 
-/// Decode range 0's durable `next_global_xid` counter. It is written BIG-ENDIAN
-/// (`next_global_xid_op` writes `U64::new(next).as_bytes()`), so it MUST be read
-/// big-endian here — a native-/little-endian decode mis-reads the real allocator's
-/// bytes and clamps every reader's global horizon to `GLOBAL_XID_BASE`, hiding
-/// every committed cross-range row in the wired path (correction C1). ONE decode
-/// site, shared by `Gtm::open` and `session::durable_global_snapshot`. Absent →
-/// `GLOBAL_XID_BASE`; never regresses below the base.
+/// Decode range 0's durable `next_global_xid` counter. `next_global_xid_op`
+/// writes it BIG-ENDIAN, as `U64::new(next).as_bytes()`, so this function MUST
+/// read it big-endian. A native-endian or little-endian decode mis-reads the
+/// real allocator's bytes and clamps every reader's global horizon to
+/// `GLOBAL_XID_BASE`, which hides every committed cross-range row in the wired
+/// path. That is correction C1. There is ONE decode site, shared by `Gtm::open`
+/// and `session::durable_global_snapshot`. An absent counter reads as
+/// `GLOBAL_XID_BASE`, and the value never regresses below the base.
 pub(crate) fn read_next_global(kv: &dyn Kv) -> Result<u64, ExecError> {
     let next = match kv.get(&crabka_pgkv::key::meta_next_global_xid_key())? {
         Some(b) => {
@@ -130,8 +132,9 @@ impl Gtm {
         Ok(())
     }
 
-    /// Consumed ONLY by `global_status` (never handed to satisfies_mvcc): xip is
-    /// BTreeSet-sorted for the resolver's binary_search; xmin is unused.
+    /// ONLY `global_status` consumes this. Nothing ever hands it to
+    /// satisfies_mvcc. `xip` is BTreeSet-sorted for the resolver's
+    /// binary_search, and `xmin` is unused.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn global_snapshot(&self) -> Snapshot {
         let g = self.inner.lock().expect("gtm");

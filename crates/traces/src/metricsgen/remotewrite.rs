@@ -9,7 +9,7 @@ use crate::metricsgen::{
     sink::{RemoteWriteSink, SinkError},
 };
 
-/// Encoder-neutral flat `remote_write` row.
+/// Flat `remote_write` row, neutral to the encoder.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WireTimeSeries {
     pub labels: Vec<(String, String)>,

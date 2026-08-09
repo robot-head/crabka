@@ -63,15 +63,15 @@ pub struct RegistryConfig {
     /// Service-owned runtime policy.
     pub runtime: RegistryRuntimeConfig,
     /// Authentication / authorization / TLS / SR-to-broker client security.
-    /// The [`Default`] is fully permissive (open HTTP, anonymous, plaintext
-    /// broker client) — every field opts in independently.
+    /// The [`Default`] is fully permissive, with open HTTP, anonymous requests,
+    /// and a plaintext broker client. Every field opts in independently.
     pub security: SecurityConfig,
 }
 
 /// Runtime policy for Schema Registry's broker interactions and defaults.
 ///
-/// The extents and sizes are quantities, so this is `PartialEq` but not `Eq`
-/// (both store `f64`); nothing keys a map or set on a runtime config.
+/// The extents and sizes are quantities that store `f64`, so this type is
+/// `PartialEq` but not `Eq`. Nothing keys a map or set on a runtime config.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegistryRuntimeConfig {
     pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
@@ -148,9 +148,9 @@ impl Default for RegistryRuntimeConfig {
     }
 }
 
-/// Opt-in security knobs. The [`Default`] (all `None`/`false`) reproduces the
-/// pre-security behaviour exactly: open HTTP, anonymous requests, a plaintext
-/// Kafka client to the broker.
+/// Opt-in security settings. The [`Default`], which is all `None` and `false`,
+/// reproduces the pre-security behaviour exactly: open HTTP, anonymous
+/// requests, and a plaintext Kafka client to the broker.
 #[derive(Debug, Clone, Default)]
 pub struct SecurityConfig {
     /// When true, an unauthenticated (Anonymous) request is rejected with 401.
@@ -166,8 +166,9 @@ pub struct SecurityConfig {
     pub client: Option<crabka_client_core::ClientSecurity>,
 }
 
-/// Inline `user -> credential` (plaintext per cp `PropertyFileLoginModule`, or a
-/// `$2...` bcrypt hash). `file` is an htpasswd-style `user:cred` path.
+/// Inline `user -> credential`. The credential is plaintext, as cp's
+/// `PropertyFileLoginModule` expects, or a `$2...` bcrypt hash. `file` is an
+/// htpasswd-style `user:cred` path.
 #[derive(Debug, Clone, Default)]
 pub struct BasicAuthConfig {
     pub users: HashMap<String, String>,
@@ -185,7 +186,7 @@ impl std::fmt::Debug for BearerAuthConfig {
     }
 }
 
-/// `PartialEq` but not `Eq`: [`Time`] stores `f64`.
+/// `PartialEq` but not `Eq`, because [`Time`] stores `f64`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuthzConfig {
     pub enabled: bool,

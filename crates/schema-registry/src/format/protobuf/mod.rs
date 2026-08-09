@@ -1,15 +1,17 @@
-//! Protobuf: parse a single `.proto` source into a `FileDescriptorProto`; dedup
-//! key = deterministic prost encoding of the descriptor (source-info cleared so
-//! formatting doesn't change the bytes). The implementation does not attempt
-//! Confluent's full canonicalization rules.
+//! Protobuf support.
+//!
+//! This module parses a single `.proto` source into a `FileDescriptorProto`.
+//! The dedup key is the deterministic prost encoding of the descriptor, with
+//! source-info cleared so that formatting does not change the bytes. The
+//! implementation does not attempt Confluent's full canonicalization rules.
 //!
 //! `normalized_form()` reproduces the pretty-printed text that
-//! cp-schema-registry normalises to (verified against the golden fixtures):
+//! cp-schema-registry normalises to, verified against the golden fixtures:
 //!
 //!   `syntax = "proto3";\n\n<messages>\n`
 //!
-//! where each message is formatted with 2-space indentation.  This is stored
-//! in `by_id` so that the REST echo-back matches what cp-schema-registry
+//! Each message is formatted with 2-space indentation. The store keeps this
+//! text in `by_id` so that the REST echo-back matches what cp-schema-registry
 //! would return.
 
 mod compat;
@@ -50,8 +52,8 @@ pub struct ProtobufSchema {
 ///   m.Money price = 1;
 /// }
 /// ```
-/// The `package` line (when present) follows the `syntax` line with no blank
-/// line between them; each `import` and each top-level `message` is then a
+/// The `package` line, when present, follows the `syntax` line with no blank
+/// line between them. Each `import` and each top-level `message` is then a
 /// blank-line-separated block.
 #[must_use]
 pub fn normalize(fdp: &FileDescriptorProto) -> String {
@@ -235,9 +237,10 @@ impl ProtobufSchema {
     }
 }
 
-/// Confluent Protobuf compatibility: can a reader using `reader` read data
-/// written with `writer`? Computes the structural diff (original = writer,
-/// update = reader) and rejects if any difference is backward-incompatible.
+/// Confluent Protobuf compatibility. It answers whether a reader that uses
+/// `reader` can read data written with `writer`. It computes the structural
+/// diff, with `writer` as the original and `reader` as the update, and rejects
+/// the pair if any difference is backward-incompatible.
 #[tracing::instrument(level = "debug", name = "protobuf.check", skip_all, fields(reader_refs = reader_refs.len(), writer_refs = writer_refs.len(), diffs = tracing::field::Empty))]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.

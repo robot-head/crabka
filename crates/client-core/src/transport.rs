@@ -37,10 +37,12 @@ pub fn frame(stream: TcpStream) -> Framed<TcpStream, LengthDelimitedCodec> {
     Framed::new(stream, codec())
 }
 
-/// Generic wrapper: wrap any `AsyncRead + AsyncWrite` stream with the
-/// Kafka length-delimited codec. Used by [`crate::Connection::from_stream`]
-/// so callers can hand in a pre-authenticated stream (e.g., the output of
-/// the broker's `InterBrokerClient` after TLS + SASL).
+/// Wrap any `AsyncRead + AsyncWrite` stream with the Kafka length-delimited
+/// codec.
+///
+/// [`crate::Connection::from_stream`] calls this so callers can hand in a
+/// pre-authenticated stream, for example the output of the broker's
+/// `InterBrokerClient` after TLS + SASL.
 pub fn frame_generic<S>(stream: S) -> Framed<S, LengthDelimitedCodec>
 where
     S: AsyncRead + AsyncWrite,

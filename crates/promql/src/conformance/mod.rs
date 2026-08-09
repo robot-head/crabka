@@ -31,7 +31,7 @@ pub mod testkit {
     };
 
     const TENANT: &str = "test";
-    /// Prometheus promqltest's default relative error for sample values.
+    /// Default relative error for sample values in Prometheus promqltest.
     const FLOAT_TOLERANCE: f64 = 1e-6;
     const STALE_NAN_BITS: u64 = 0x7ff0_0000_0000_0002;
 
@@ -52,11 +52,12 @@ pub mod testkit {
     }
 
     impl Report {
-        /// Write a stable text report to `path`.
+        /// Writes a stable text report to `path`.
         ///
         /// # Errors
         ///
-        /// Returns any filesystem error from creating the parent directory or file.
+        /// Returns any filesystem error raised when this method creates the parent
+        /// directory or the file.
         pub fn write_to(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
             let path = path.as_ref();
             if let Some(parent) = path.parent() {
@@ -85,7 +86,7 @@ pub mod testkit {
         }
     }
 
-    /// Run a parsed Prometheus `.test` file through an [`InMemoryMetricStore`].
+    /// Runs a parsed Prometheus `.test` file through an [`InMemoryMetricStore`].
     ///
     /// # Errors
     ///
@@ -206,7 +207,7 @@ pub mod testkit {
         }
     }
 
-    /// Read, parse, and run a Prometheus `.test` file.
+    /// Reads, parses, and runs a Prometheus `.test` file.
     ///
     /// # Errors
     ///
@@ -218,7 +219,7 @@ pub mod testkit {
         run_test_file(&file).await
     }
 
-    /// Run every `.test` file in `dir` and return a per-file report.
+    /// Runs every `.test` file in `dir` and returns a per-file report.
     pub async fn run_corpus_dir(dir: impl AsRef<Path>) -> Report {
         let dir = dir.as_ref();
         let mut paths = match corpus_paths(dir) {
@@ -394,12 +395,12 @@ pub mod testkit {
         }
     }
 
-    /// Assert the raised annotations satisfy every directive.
+    /// Asserts that the raised annotations satisfy every directive.
     ///
-    /// Mirrors Prometheus promqltest: `warn`/`info` require at least one of that
-    /// kind, `no_warn`/`no_info` require none, and `msg:` directives require an
-    /// exact-text match. A mismatch is a hard test failure naming the expected
-    /// and actual annotation sets.
+    /// This function mirrors Prometheus promqltest. `warn` and `info` require at
+    /// least one annotation of that kind. `no_warn` and `no_info` require none.
+    /// A `msg:` directive requires an exact-text match. A mismatch is a hard test
+    /// failure that names the expected and the actual annotation sets.
     fn compare_annotations(expects: &[AnnotationExpect], raised: &Annotations) -> Result<()> {
         for expect in expects {
             let ok = match expect {
@@ -763,14 +764,14 @@ pub struct TestFile {
 /// A top-level Prometheus `.test` statement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
-    /// Load one or more series at a fixed step.
+    /// Loads one or more series at a fixed step.
     Load {
         /// Step between loaded samples.
         step: Time,
         /// Series loaded by this statement.
         series: Vec<LoadSeries>,
     },
-    /// Evaluate an instant query.
+    /// Evaluates an instant query.
     EvalInstant {
         /// Evaluation timestamp in milliseconds.
         at_ms: i64,
@@ -778,14 +779,14 @@ pub enum Statement {
         expr: String,
         /// Expected output lines.
         expect: Vec<ExpectLine>,
-        /// Expected annotation directives (`warn`/`info`/`no_warn`/`no_info`).
+        /// Expected annotation directives: `warn`, `info`, `no_warn`, and `no_info`.
         annotations: Vec<AnnotationExpect>,
         /// Optional matrix expectation metadata for instant range-vector results.
         range_expect: Option<RangeExpect>,
-        /// Expected failure message; empty means any failure.
+        /// Expected failure message. An empty message matches any failure.
         fail_message: Option<String>,
     },
-    /// Evaluate a range query.
+    /// Evaluates a range query.
     EvalRange {
         /// Range start timestamp in milliseconds.
         start_ms: i64,
@@ -797,19 +798,19 @@ pub enum Statement {
         expr: String,
         /// Expected output lines.
         expect: Vec<ExpectLine>,
-        /// Expected annotation directives (`warn`/`info`/`no_warn`/`no_info`).
+        /// Expected annotation directives: `warn`, `info`, `no_warn`, and `no_info`.
         annotations: Vec<AnnotationExpect>,
-        /// Expected failure message; empty means any failure.
+        /// Expected failure message. An empty message matches any failure.
         fail_message: Option<String>,
     },
-    /// Clear loaded series.
+    /// Clears the loaded series.
     Clear,
 }
 
 /// One series in a `load` statement.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadSeries {
-    /// Metric selector text, including labels when present.
+    /// Metric selector text, which includes the labels when they are present.
     pub metric: String,
     /// Expanded sample values.
     pub values: Vec<SampleSpec>,
@@ -824,26 +825,28 @@ pub enum SampleSpec {
     Histogram(NativeHistogram),
     /// A concrete string result.
     String(String),
-    /// Missing sample (`_`).
+    /// Missing sample, written `_`.
     Missing,
-    /// Prometheus stale marker (`stale`).
+    /// Prometheus stale marker, written `stale`.
     Stale,
 }
 
 /// One expected output line.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExpectLine {
-    /// Metric selector text, including labels when present.
+    /// Metric selector text, which includes the labels when they are present.
     pub metric: String,
-    /// Expected sample slots. Instant evaluations must contain one float value;
-    /// range evaluations use one slot per step.
+    /// Expected sample slots.
+    ///
+    /// An instant evaluation must contain one float value. A range evaluation
+    /// uses one slot per step.
     pub values: Vec<SampleSpec>,
 }
 
-/// An expected (or forbidden) annotation on an eval result.
+/// An expected or forbidden annotation on an eval result.
 ///
-/// Mirrors Prometheus promqltest `expect warn`/`expect info`/`expect no_warn`/
-/// `expect no_info` directives.
+/// This enum mirrors the Prometheus promqltest directives `expect warn`,
+/// `expect info`, `expect no_warn`, and `expect no_info`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnotationExpect {
     /// `expect warn`: at least one warning must be raised.
@@ -858,7 +861,7 @@ pub enum AnnotationExpect {
     WarnMsg(String),
     /// `expect info msg:<text>`: an info exactly equal to `<text>` must exist.
     InfoMsg(String),
-    /// `expect ordered`: result ordering directive, no annotation semantics.
+    /// `expect ordered`: a result-ordering directive with no annotation semantics.
     Ordered,
 }
 
@@ -871,7 +874,7 @@ pub struct RangeExpect {
     pub step: Time,
 }
 
-/// Parse the legacy Prometheus `.test` DSL subset used by the conformance harness.
+/// Parses the legacy Prometheus `.test` DSL subset that the conformance harness uses.
 ///
 /// # Errors
 ///

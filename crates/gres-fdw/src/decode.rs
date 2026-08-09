@@ -27,10 +27,11 @@ impl Default for FdwDecodePolicy {
 }
 
 impl FdwDecodePolicy {
-    /// Validate positive whole-millisecond values and their ordering.
+    /// Validates positive whole-millisecond values and their order.
     ///
     /// # Errors
-    /// Returns an error when a value is invalid or polling exceeds the deadline.
+    /// Returns an error when a value is invalid, or when the poll interval
+    /// exceeds the deadline.
     pub fn validate(self) -> Result<Self, String> {
         for (name, value) in [
             ("schema fetch timeout", self.schema_fetch_timeout),
@@ -48,14 +49,14 @@ impl FdwDecodePolicy {
     }
 }
 
-/// Resolve a writer schema by id, awaiting the cache's background fetch.
+/// Resolves a writer schema by id and waits for the cache's background fetch.
 ///
-/// [`SchemaCache::writer_schema`] is a *synchronous hot-path read*: on a cold
+/// [`SchemaCache::writer_schema`] is a *synchronous hot-path read*. On a cold
 /// miss it spawns a background fetch and immediately returns
 /// [`SchemaSerdeError::WriterSchemaPending`]. The FDW decode path runs inside
-/// an async scan, so we retry with a bounded backoff until the background
-/// fetch populates the cache (or the configured deadline elapses). Any other
-/// error is returned immediately.
+/// an async scan, so this function retries with a bounded backoff until the
+/// background fetch fills the cache, or until the configured deadline
+/// elapses. It returns any other error immediately.
 async fn resolve_writer_schema(
     cache: &Arc<SchemaCache>,
     schema_id: u32,
@@ -104,26 +105,27 @@ pub enum DecodedValue {
     Protobuf(prost_reflect::DynamicMessage),
 }
 
-/// Decode a Kafka message payload according to `fmt`.
+/// Decodes a Kafka message payload according to `fmt`.
 ///
-/// Returns the decoded value alongside the writer [`apache_avro::Schema`] that
-/// was used to decode it (Avro only) — the schema is `None` for the JSON,
-/// Raw, and Protobuf paths. The scanner threads this schema into
-/// [`crate::types::project`] so that decimal `scale` is applied during
-/// projection (the parse already happens here, so returning it avoids
-/// fetching/parsing the schema a second time).
+/// Returns the decoded value with the writer [`apache_avro::Schema`] that
+/// decoded it. Only the Avro path supplies a schema; the JSON, Raw, and
+/// Protobuf paths return `None`. The scanner passes this schema into
+/// [`crate::types::project`], which applies the decimal `scale` during
+/// projection. The parse already happens here, so the returned schema saves a
+/// second fetch and parse.
 ///
-/// * `Wire::Raw`      — wraps the bytes verbatim; no registry access.
-/// * `Wire::Avro`     — strips the Confluent 5-byte header, fetches the writer
+/// * `Wire::Raw` wraps the bytes verbatim and makes no registry access.
+/// * `Wire::Avro` strips the Confluent 5-byte header, fetches the writer
 ///   schema from `cache` by id, then decodes the body with
 ///   `apache_avro::from_avro_datum`.
-/// * `Wire::Json`     — strips the header, fetches the schema text (used only
-///   for validation today), then deserialises the body as JSON.
-/// * `Wire::Protobuf` — strips the Confluent protobuf envelope (magic byte +
-///   schema-id + message-index varint), fetches the `FileDescriptorSet` proto
-///   from the registry by schema id, builds a `prost_reflect::MessageDescriptor`
-///   for the indexed message, and decodes the body via
-///   `prost_reflect::DynamicMessage::decode`.
+/// * `Wire::Json` strips the header, fetches the schema text, then
+///   deserialises the body as JSON. The schema text is used only for
+///   validation today.
+/// * `Wire::Protobuf` strips the Confluent protobuf envelope (magic byte,
+///   schema-id, and message-index varint), fetches the `FileDescriptorSet`
+///   proto from the registry by schema id, builds a
+///   `prost_reflect::MessageDescriptor` for the indexed message, and decodes
+///   the body with `prost_reflect::DynamicMessage::decode`.
 ///
 /// # Errors
 ///
@@ -137,7 +139,7 @@ pub async fn decode_value(
     decode_value_with_policy(cache, fmt, topic, bytes, FdwDecodePolicy::default()).await
 }
 
-/// Decode under explicit cold-cache schema resolution policy.
+/// Decodes under an explicit cold-cache schema resolution policy.
 ///
 /// # Errors
 /// Returns an error when the envelope, schema or payload cannot be decoded.
@@ -207,12 +209,13 @@ pub async fn decode_value_with_policy(
     }
 }
 
-/// Build a [`prost_reflect::MessageDescriptor`] from Confluent Schema Registry
-/// Protobuf schema text (`.proto` source).
+/// Builds a [`prost_reflect::MessageDescriptor`] from Confluent Schema
+/// Registry Protobuf schema text (`.proto` source).
 ///
-/// When Schema Registry supplies `messageType`, that fully-qualified name is
-/// selected exactly. Otherwise the descriptor for the schema's first top-level
-/// message is selected, matching Confluent's single-message convention.
+/// When Schema Registry supplies `messageType`, this function selects exactly
+/// that fully-qualified name. If it does not, the function selects the
+/// descriptor for the schema's first top-level message, which matches
+/// Confluent's single-message convention.
 ///
 /// # Errors
 ///
@@ -224,11 +227,11 @@ pub fn build_message_descriptor(
     build_message_descriptor_with_references(schema_text, &HashMap::new(), message_type)
 }
 
-/// Build the descriptor selected by a Confluent Protobuf message-index path.
+/// Builds the descriptor that a Confluent Protobuf message-index path selects.
 ///
 /// The frame's index is authoritative. Registry `messageType` metadata, when
-/// present, is constrained to identify that same message rather than overriding
-/// the producer-selected path.
+/// present, must identify that same message. It does not override the
+/// producer-selected path.
 ///
 /// # Errors
 ///
@@ -259,9 +262,11 @@ pub fn build_message_descriptor_for_index_with_references<S: std::hash::BuildHas
     Ok(descriptor)
 }
 
-/// Build a descriptor from a root source and the exact import-name-to-source
-/// mapping returned by Schema Registry. The resolver has no filesystem or
-/// network fallback: imports absent from `references` fail at compile time.
+/// Builds a descriptor from a root source and the exact import-name-to-source
+/// map that Schema Registry returns.
+///
+/// The resolver has no filesystem or network fallback. An import that is
+/// absent from `references` fails at compile time.
 ///
 /// # Errors
 ///

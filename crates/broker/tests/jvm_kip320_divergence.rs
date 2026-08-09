@@ -1,7 +1,9 @@
-//! KIP-320 (in-band log-truncation detection) JVM mixed-cluster acceptance
-//! scenarios — Docker-gated (`#[ignore]`), Linux-bound (see the project
-//! benchmark/JVM memory: the hosted-Mac Docker bridge does not reliably share
-//! the host loopback, so these run on the Linux harness/CI, not on a dev Mac).
+//! KIP-320 JVM mixed-cluster acceptance scenarios.
+//!
+//! KIP-320 is in-band log-truncation detection. These scenarios are
+//! Docker-gated (`#[ignore]`) and Linux-bound. See the project benchmark/JVM
+//! memory. The hosted-Mac Docker bridge does not reliably share the host
+//! loopback, so these run on the Linux harness/CI, not on a dev Mac.
 //!
 //! Run on Linux/CI:
 //! ```text
@@ -10,47 +12,51 @@
 //!
 //! Three scenarios, each independently `#[ignore]`d:
 //!
-//! 1. [`kip320_wire_conformance_offset_for_leader_epoch`] — wire-conformance.
-//!    A single Crabka broker; produce across two leader epochs; a small Java
-//!    helper (compiled in-container with the cp-kafka JDK's `javac`) drives the
-//!    official `org.apache.kafka.clients.consumer.KafkaConsumer` against Crabka.
+//! 1. [`kip320_wire_conformance_offset_for_leader_epoch`][]: wire-conformance.
+//!    The test starts a single Crabka broker and produces across two leader
+//!    epochs. A small Java helper drives the official
+//!    `org.apache.kafka.clients.consumer.KafkaConsumer` against Crabka. The
+//!    test compiles that helper in-container with the cp-kafka JDK's `javac`.
 //!    The consumer's offset/position-validation pass issues a real
-//!    `OffsetForLeaderEpoch` (`api_key` 23) under the hood (KIP-320) and consumes
+//!    `OffsetForLeaderEpoch` (`api_key` 23) for KIP-320, and it consumes
 //!    at Fetch v12+, so the JVM `Fetcher` decodes Crabka's tagged
-//!    `diverging_epoch` / `current_leader` fields. A clean drain across both
-//!    epochs (no deserialization / truncation fault) plus the observed
-//!    end-offset framing the old-epoch boundary is the byte-exactness signal.
-//!    The Rust side independently cross-checks the same `OffsetForLeaderEpoch`
-//!    answer over the wire via the Task-2 client helper.
+//!    `diverging_epoch` / `current_leader` fields. The byte-exactness signal
+//!    is a clean drain across both epochs with no deserialization or
+//!    truncation fault, plus the observed end-offset that frames the
+//!    old-epoch boundary. The Rust side independently cross-checks the same
+//!    `OffsetForLeaderEpoch` answer over the wire with the Task-2 client
+//!    helper.
 //!
-//! 2. [`kip320_jvm_follower_truncates_from_crabka_leader`] — induced divergence.
-//!    A mixed JVM+Crabka cluster (one `mirror.gcr.io/apache/kafka:4.0.0` broker + a Crabka
-//!    broker, sharing a Crabka-led `KRaft` metadata quorum per the Slice-6
-//!    mixed-quorum work in `jvm_static_quorum_spike.rs`). We force a real
-//!    divergent suffix: produce a committed prefix, take the partition offline
-//!    via a forged `PartitionRecord` (dead phantom leader, which also parks the
-//!    replication fetchers), diverge the two replicas' logs so the survivor that
-//!    becomes leader has a *shorter* log at a *new* epoch, then rejoin the old
-//!    leader as a follower. We assert the JVM follower truncates its divergent
-//!    suffix to converge on the Crabka leader (its on-disk log, dumped via
-//!    `kafka-dump-log`, matches the Crabka leader's), and that a
-//!    `kafka-console-consumer` recovers (continues without a fatal
-//!    deserialization/`LogTruncationException`).
+//! 2. [`kip320_jvm_follower_truncates_from_crabka_leader`][]: induced divergence.
+//!    The test runs a mixed JVM+Crabka cluster: one
+//!    `mirror.gcr.io/apache/kafka:4.0.0` broker and a Crabka broker that share
+//!    a Crabka-led `KRaft` metadata quorum, per the Slice-6 mixed-quorum work
+//!    in `jvm_static_quorum_spike.rs`. The test forces a real divergent
+//!    suffix. It produces a committed prefix, takes the partition offline with
+//!    a forged `PartitionRecord` that names a dead phantom leader and so also
+//!    parks the replication fetchers, diverges the two replicas' logs so the
+//!    survivor that becomes leader has a *shorter* log at a *new* epoch, then
+//!    rejoins the old leader as a follower. The test asserts that the JVM
+//!    follower truncates its divergent suffix to converge on the Crabka
+//!    leader. Its on-disk log, dumped with `kafka-dump-log`, matches the
+//!    Crabka leader's log. The test also asserts that a
+//!    `kafka-console-consumer` recovers and continues without a fatal
+//!    deserialization/`LogTruncationException`.
 //!
-//! 3. [`kip320_crabka_follower_truncates_from_jvm_leader`] — the reverse
-//!    direction, where the harness allows: a Crabka follower truncates a
+//! 3. [`kip320_crabka_follower_truncates_from_jvm_leader`][]: the reverse
+//!    direction, where the harness allows it. A Crabka follower truncates a
 //!    divergent suffix to converge on a JVM leader.
 //!
 //! ## Topology & networking
 //!
-//! Same as the rest of the JVM harness: Crabka brokers bind `0.0.0.0:<port>`
-//! on the host and advertise `host.docker.internal:<port>`; the cp-kafka /
-//! apache-kafka tool containers get `--add-host=host.docker.internal:
-//! host-gateway`. Controller (`KRaft` metadata-quorum) traffic uses host
-//! loopback between the Crabka voters and the JVM voter's published port. We
-//! deliberately do NOT use `--network host` (it silently fails to share the
-//! host loopback on hosted ubuntu runners — see the `jvm_acceptance.rs`
-//! module docs).
+//! The topology is the same as the rest of the JVM harness. Crabka brokers
+//! bind `0.0.0.0:<port>` on the host and advertise
+//! `host.docker.internal:<port>`. The cp-kafka / apache-kafka tool containers
+//! get `--add-host=host.docker.internal:host-gateway`. Controller (`KRaft`
+//! metadata-quorum) traffic uses host loopback between the Crabka voters and
+//! the JVM voter's published port. These tests deliberately do NOT use
+//! `--network host`. It silently fails to share the host loopback on hosted
+//! ubuntu runners. See the `jvm_acceptance.rs` module docs.
 
 // rustc 1.95 clippy ICEs on pedantic lints for files that build wire frames
 // with `.expect()` inside Result-returning helpers — same upstream
@@ -76,14 +82,14 @@ mod support;
 /// cp-kafka 6.1.1 (Kafka 2.7) ships the standard Apache Kafka CLI tools used
 /// for produce / topic admin / `kafka-dump-log`. NOTE: its bundled consumer
 /// only negotiates Fetch up to v11 and predates client-side KIP-320 position
-/// validation, so it is NOT used for the Fetch-v12+ wire-conformance probe —
-/// that needs [`KAFKA_IMAGE_MODERN`].
+/// validation, so these tests do NOT use it for the Fetch-v12+
+/// wire-conformance probe. That probe needs [`KAFKA_IMAGE_MODERN`].
 const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:6.1.1";
-/// cp-kafka 7.5.0 (Kafka 3.5) — the modern client image. Its consumer
+/// cp-kafka 7.5.0 (Kafka 3.5) is the modern client image. Its consumer
 /// negotiates Fetch v12+ and runs the full KIP-320 client path
 /// (`OffsetForLeaderEpoch` position validation + tagged `diverging_epoch` /
-/// `current_leader` decode), and it ships a JDK with `javac`. Used to compile
-/// and run the wire-conformance Java helper.
+/// `current_leader` decode), and it ships a JDK with `javac`. These tests use
+/// it to compile and run the wire-conformance Java helper.
 const KAFKA_IMAGE_MODERN: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.5.0";
 /// mirror.gcr.io/apache/kafka:4.0.0 is the `KRaft`-native broker used as the JVM member of the
 /// mixed metadata quorum (same image as `jvm_static_quorum_spike.rs`).
@@ -92,7 +98,7 @@ const KAFKA_IMAGE_KRAFT: &str = "mirror.gcr.io/apache/kafka:4.0.0";
 /// Kafka encodes a 16-byte UUID cluster id as URL-safe base64 with no
 /// padding. The JVM `--cluster-id` string and Crabka's `uuid::Uuid` must wrap
 /// the *same* 16 bytes or the two sides reject each other on cluster-id
-/// mismatch. (Lifted verbatim from `jvm_static_quorum_spike.rs`.)
+/// mismatch. This helper is lifted verbatim from `jvm_static_quorum_spike.rs`.
 fn kafka_cluster_id_string(id: Uuid) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(id.as_bytes())
 }
@@ -159,18 +165,20 @@ async fn start_host_broker_on(client_port: u16, controller_port: u16) -> (Broker
 ///
 /// It builds an official `org.apache.kafka.clients.consumer.KafkaConsumer`,
 /// assigns the partition, and drains both leader epochs. The JVM `Fetcher`'s
-/// offset/position-validation pass issues `OffsetForLeaderEpoch` under the
-/// hood (KIP-320) and decodes the tagged `diverging_epoch` / `current_leader`
-/// fields the Crabka leader stamps into Fetch v12+ responses. A clean drain —
-/// no `LogTruncationException`, no `RecordDeserializationException` — plus the
-/// observed `beginningOffsets`/`endOffsets` framing the old-epoch boundary is
-/// the byte-exactness signal. The helper prints `KIP320PROBE OK` on success
-/// and exits non-zero (printing `KIP320PROBE FAIL ...`) otherwise, so the Rust
-/// side can assert on stdout.
+/// offset/position-validation pass issues `OffsetForLeaderEpoch` for KIP-320.
+/// It decodes the tagged `diverging_epoch` / `current_leader` fields the
+/// Crabka leader stamps into Fetch v12+ responses. The byte-exactness signal
+/// is a clean drain with no `LogTruncationException` and no
+/// `RecordDeserializationException`, plus the observed
+/// `beginningOffsets`/`endOffsets` that frame the old-epoch boundary. The
+/// helper prints `KIP320PROBE OK` on success. Otherwise it prints
+/// `KIP320PROBE FAIL ...` and exits non-zero, so the Rust side can assert on
+/// stdout.
 ///
-/// Source string is written to a host tempdir, mounted into the cp-kafka
-/// container, compiled in-container with the bundled JDK's `javac` against the
-/// container's Kafka client jars, and run.
+/// The test writes the source string to a host tempdir and mounts it into the
+/// cp-kafka container. It then compiles the source in-container with the
+/// bundled JDK's `javac` against the container's Kafka client jars, and runs
+/// it.
 const OFFSET_FOR_LEADER_EPOCH_HELPER_JAVA: &str = r#"
 import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.common.*;
@@ -232,12 +240,13 @@ public class Kip320Probe {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Step 1 of Task 11: a JVM client and a Crabka broker exchange
-/// `OffsetForLeaderEpoch` + Fetch v12+. Produce across two epochs on the
-/// Crabka leader, then run the official Java consumer (which issues
-/// `OffsetForLeaderEpoch` during position validation and decodes the tagged
-/// `diverging_epoch` / `current_leader` Fetch fields). Assert the consumer
-/// drains both epochs without a deserialization / truncation fault and that
-/// the old epoch's boundary matches the broker's view.
+/// `OffsetForLeaderEpoch` + Fetch v12+. The test produces across two epochs on
+/// the Crabka leader, then runs the official Java consumer. That consumer
+/// issues `OffsetForLeaderEpoch` during position validation and decodes the
+/// tagged `diverging_epoch` / `current_leader` Fetch fields. The test asserts
+/// that the consumer drains both epochs without a deserialization or
+/// truncation fault, and that the old epoch's boundary matches the broker's
+/// view.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker; Linux-bound (host.docker.internal bridge)"]
 async fn kip320_wire_conformance_offset_for_leader_epoch() {
@@ -376,8 +385,8 @@ async fn kip320_wire_conformance_offset_for_leader_epoch() {
     broker.shutdown().await;
 }
 
-/// Produce `lines` to `topic` partition 0 via the JVM `kafka-console-producer`
-/// with `acks=all`, one record per line. Panics on producer failure.
+/// Produce `lines` to `topic` partition 0 with the JVM `kafka-console-producer`
+/// at `acks=all`, one record per line. Panics on producer failure.
 fn produce_lines_via_jvm(bootstrap: &str, topic: &str, lines: &[String]) {
     let mut child = Command::new("docker")
         .args([
@@ -423,7 +432,7 @@ fn produce_lines_via_jvm(bootstrap: &str, topic: &str, lines: &[String]) {
 
 /// A running mixed cluster: two Crabka brokers (ids 1, 2) that hold the
 /// metadata-quorum majority, plus one JVM broker (id 3) joined over the real
-/// `KRaft` wire. `jvm_container` is the docker container name (already started).
+/// `KRaft` wire. `jvm_container` is the docker container name, already started.
 struct MixedCluster {
     crabka: Vec<(BrokerHandle, TempDir)>,
     jvm_container: String,
@@ -434,13 +443,14 @@ struct MixedCluster {
 }
 
 impl MixedCluster {
-    /// Block (bounded) until the Crabka leader's broker view includes `n`
-    /// registered brokers — i.e., the JVM data-plane broker (id 3) has finished
-    /// its `KRaft` join and registered. `CreateTopics(RF=3)` rejects with
-    /// `InvalidReplicationFactorException` if it runs before the JVM broker
-    /// registers, so every mixed-cluster scenario must gate on this first.
-    /// Returns `true` if the view converged, `false` on timeout (the JVM broker
-    /// never joined — the dominant Linux-vs-Mac difference for this harness).
+    /// Block, with a bound, until the Crabka leader's broker view includes `n`
+    /// registered brokers. That is, the JVM data-plane broker (id 3) has
+    /// finished its `KRaft` join and registered. `CreateTopics(RF=3)` rejects
+    /// with `InvalidReplicationFactorException` if it runs before the JVM
+    /// broker registers, so every mixed-cluster scenario must gate on this
+    /// first. This method returns `true` if the view converged and `false` on
+    /// timeout. A timeout means the JVM broker never joined, which is the
+    /// dominant Linux-vs-Mac difference for this harness.
     async fn wait_for_brokers(&self, n: usize, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -511,8 +521,8 @@ fn crabka_mixed_config(
 
 /// Stand up two Crabka brokers (the metadata-quorum majority + data plane) and
 /// one mirror.gcr.io/apache/kafka:4.0.0 broker joined to the same static `KRaft` quorum.
-/// Returns once the Crabka voters have elected a shared leader; the JVM broker
-/// is started detached and the caller polls for it to register.
+/// Returns once the Crabka voters have elected a shared leader. The JVM broker
+/// starts detached and the caller polls for it to register.
 async fn start_mixed_cluster(container: &str) -> MixedCluster {
     support::init_tracing();
     docker_rm(container);
@@ -631,8 +641,8 @@ async fn start_mixed_cluster(container: &str) -> MixedCluster {
 /// Steps 2-3 of Task 11. Force a real divergent suffix in a mixed cluster and
 /// assert:
 ///  (a) the JVM follower truncates to converge on the Crabka leader, and
-///  (b) a kafka-console-consumer recovers (continues without a fatal
-///      truncation/deserialization error after the suffix is rewritten).
+///  (b) a kafka-console-consumer recovers. It continues without a fatal
+///      truncation/deserialization error after the suffix is rewritten.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker + a published controller/data port; Linux-bound"]
 async fn kip320_jvm_follower_truncates_from_crabka_leader() {
@@ -866,12 +876,13 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Step 2 of Task 11, reverse direction. A Crabka follower replicates from a
-/// JVM leader; we force the JVM leader's log to diverge from the Crabka
-/// follower (via an unclean leadership change on the JVM side) and assert the
-/// Crabka follower truncates its divergent suffix to converge on the JVM
-/// leader. This direction is the harder one (it depends on Crabka's follower
-/// fetch path detecting the JVM leader's `diverging_epoch`), so it is kept as a
-/// best-effort scenario and asserts on the Crabka follower's converged LEO.
+/// JVM leader. The test forces the JVM leader's log to diverge from the Crabka
+/// follower with an unclean leadership change on the JVM side. It then asserts
+/// that the Crabka follower truncates its divergent suffix to converge on the
+/// JVM leader. This direction is the harder one, because it depends on Crabka's
+/// follower fetch path detecting the JVM leader's `diverging_epoch`. So the
+/// test is kept as a best-effort scenario and asserts on the Crabka follower's
+/// converged LEO.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker + a published controller/data port; Linux-bound; reverse-direction best-effort"]
 async fn kip320_crabka_follower_truncates_from_jvm_leader() {
@@ -1021,8 +1032,9 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
 // kafka-dump-log helpers (mirror three_node_replication_byte_compare).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Dump a host-side partition directory's first segment via `kafka-dump-log`
-/// in a throwaway cp-kafka container (mounts the dir read-only at /data).
+/// Dump a host-side partition directory's first segment with `kafka-dump-log`
+/// in a throwaway cp-kafka container. The container mounts the directory
+/// read-only at /data.
 fn dump_log_host(partition_dir: &std::path::Path) -> String {
     let log_file = partition_dir.join("00000000000000000000.log");
     if !log_file.exists() {
@@ -1047,7 +1059,7 @@ fn dump_log_host(partition_dir: &std::path::Path) -> String {
 }
 
 /// Dump a partition segment that lives INSIDE the running JVM broker container
-/// via `docker exec` + the container's bundled `kafka-dump-log`.
+/// with `docker exec` and the container's bundled `kafka-dump-log`.
 fn dump_log_in_container(container: &str, partition_dir: &str) -> String {
     let out = Command::new("docker")
         .args([

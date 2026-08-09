@@ -15,7 +15,8 @@
 //! cargo test -p crabka-schema-registry --test interop -- --ignored --nocapture
 //! ```
 //!
-//! The test tears down the container on both success and failure (via `ContainerGuard`).
+//! The test tears down the container on both success and failure, through
+//! `ContainerGuard`.
 
 use std::{
     net::SocketAddr,

@@ -1,4 +1,4 @@
-//! `crabka-rebalancer` — Cruise-Control-equivalent partition
+//! `crabka-rebalancer`: a Cruise-Control-equivalent partition
 //! rebalancer for Crabka clusters.
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
@@ -51,8 +51,8 @@ fn detector_enabled(tick_interval: Time) -> bool {
 /// A `--…-secs` CLI argument as a [`Time`] extent.
 ///
 /// The flag names carry the unit because they are the operator-facing
-/// contract; the quantity carries it from here on. A value too large for
-/// `i64` seconds saturates rather than wrapping.
+/// contract. The quantity carries the unit from here on. A value too large
+/// for `i64` seconds saturates; it does not wrap.
 fn arg_secs(value: u64) -> Time {
     Time::from_secs(i64::try_from(value).unwrap_or(i64::MAX))
 }
@@ -167,25 +167,25 @@ struct Args {
     )]
     data_dir: PathBuf,
 
-    /// Optional path to a per-broker capacity YAML file. When unset,
-    /// all five capacity goals are no-ops.
+    /// Optional path to a per-broker capacity YAML file. When unset, all five
+    /// capacity goals are no-ops.
     #[arg(long, env = "CRABKA_BROKER_CAPACITY_FILE", default_value = "")]
     broker_capacity_file: String,
 
     /// Per-broker metric scrape targets. Format: "id:host:port,id:host:port,…".
     /// When set, overrides `--metrics-port` and uses these static targets
     /// instead of live discovery from the ingester's `Metadata` snapshot.
-    /// Empty = fall back to discovered targets via `--metrics-port`.
+    /// An empty value falls back to targets discovered with `--metrics-port`.
     #[arg(long, env = "CRABKA_METRICS_SCRAPE_TARGETS", default_value = "")]
     metrics_scrape_targets: String,
 
     /// Broker metrics-endpoint port used by live scrape-target discovery.
     ///
     /// When `--metrics-scrape-targets` is unset, the scraper derives its
-    /// target list from the ingester's `Metadata` snapshot, addressing
-    /// each broker at `host:METRICS_PORT`. Ignored when
-    /// `--metrics-scrape-targets` is set. Defaults to `crabka-broker`'s
-    /// metrics port (`9404`).
+    /// target list from the ingester's `Metadata` snapshot and addresses
+    /// each broker at `host:METRICS_PORT`. The scraper ignores this port
+    /// when `--metrics-scrape-targets` is set. Default: `crabka-broker`'s
+    /// metrics port `9404`.
     #[arg(long, env = "CRABKA_REBALANCER_METRICS_PORT", default_value_t = 9404)]
     metrics_port: u16,
 
@@ -197,13 +197,13 @@ struct Args {
     )]
     metrics_scrape_interval_secs: u64,
 
-    /// How long to retain scraped samples in the rolling window
-    /// store. Default 12h matches the longest window (`TwelveHour`).
+    /// How long to retain scraped samples in the rolling window store. The
+    /// default of 12h matches the longest window, `TwelveHour`.
     #[arg(long, env = "CRABKA_METRICS_RETENTION_SECS", default_value_t = 43_200)]
     metrics_retention_secs: u64,
 
-    /// How often the detector evaluates anomaly rules. `0` disables
-    /// the detector entirely (no anomaly recording, no auto-trigger).
+    /// How often the detector evaluates anomaly rules. `0` disables the
+    /// detector entirely: it records no anomaly and runs no auto-trigger.
     #[arg(long, env = "CRABKA_DETECTOR_TICK_INTERVAL_SECS", default_value_t = 30)]
     detector_tick_interval_secs: u64,
 
@@ -224,7 +224,8 @@ struct Args {
     )]
     detector_under_replicated_threshold_secs: u64,
 
-    /// Disk usage fraction (0.0..1.0) above which `DiskPressure` fires Warning.
+    /// Disk usage fraction in the range 0.0..1.0 above which `DiskPressure`
+    /// fires Warning.
     #[arg(
         long,
         env = "CRABKA_DETECTOR_DISK_PRESSURE_PCT",
@@ -248,7 +249,7 @@ struct Args {
     )]
     detector_slow_broker_multiplier: f64,
 
-    /// `SlowBroker` absolute minimum cores floor. Prevents false-positives
+    /// `SlowBroker` absolute minimum cores floor. It prevents false positives
     /// on idle clusters where the multiplier threshold is near zero.
     #[arg(
         long,
@@ -262,8 +263,8 @@ struct Args {
     detector_mute_window_secs: u64,
 
     /// Master switch on auto-trigger. When false, the detector still
-    /// records + surfaces anomalies but never creates a proposal.
-    /// Default false — operators must opt in.
+    /// records and surfaces anomalies, but it never creates a proposal.
+    /// Default: false. Operators must opt in.
     #[arg(
         long,
         env = "CRABKA_DETECTOR_AUTO_TRIGGER_ENABLED",
@@ -271,14 +272,14 @@ struct Args {
     )]
     detector_auto_trigger_enabled: bool,
 
-    /// In-memory + on-disk ring buffer size for anomaly history at
+    /// In-memory and on-disk ring buffer size for anomaly history at
     /// `{data_dir}/anomalies.json`.
     #[arg(long, env = "CRABKA_ANOMALY_RING_BUFFER_SIZE", default_value_t = 200)]
     anomaly_ring_buffer_size: usize,
 
-    /// Name of the internal compacted topic the rebalancer uses to
-    /// persist executor state. Survives pod restart. Created on first
-    /// startup with `cleanup.policy=compact`, single partition.
+    /// Name of the internal compacted topic the rebalancer uses to persist
+    /// executor state. The topic survives a pod restart. The binary creates it
+    /// on first startup with `cleanup.policy=compact` and a single partition.
     #[arg(
         long,
         env = "CRABKA_REBALANCER_STATE_TOPIC",
@@ -288,7 +289,7 @@ struct Args {
 
     /// Replication factor for the state topic at create time. On
     /// `INVALID_REPLICATION_FACTOR` the binary retries topic creation
-    /// with RF=1 to support single-broker dev clusters.
+    /// with RF=1, to support single-broker dev clusters.
     #[arg(
         long,
         env = "CRABKA_REBALANCER_STATE_TOPIC_REPLICATION",
@@ -296,9 +297,9 @@ struct Args {
     )]
     state_topic_replication: i16,
 
-    /// Soft deadline for state-topic load at startup; the loader emits
-    /// a WARN and keeps retrying past this. `/readyz` stays 503 until
-    /// the load completes successfully.
+    /// Soft deadline for state-topic load at startup. The loader emits a WARN
+    /// and keeps retrying past this deadline. `/readyz` stays 503 until the
+    /// load completes successfully.
     #[arg(
         long,
         env = "CRABKA_REBALANCER_STATE_LOAD_TIMEOUT_SECS",
@@ -306,7 +307,7 @@ struct Args {
     )]
     state_load_timeout_secs: u64,
 
-    /// Default KIP-73 throttle (bytes/sec, per broker direction) when
+    /// Default KIP-73 throttle in bytes/sec, per broker direction, used when
     /// `ExecuteProposalRequest.throttle_bytes_per_sec` is unset.
     #[arg(
         long,

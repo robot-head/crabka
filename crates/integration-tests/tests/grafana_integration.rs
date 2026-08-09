@@ -1,8 +1,8 @@
 //! Grafana integration coverage for Crabka's Loki-compatible logs API.
 //!
-//! The test provisions Grafana's built-in Loki datasource against a real
-//! Crabka querier listener, then queries through Grafana's datasource proxy and
-//! backend datasource execution path.
+//! The test provisions Grafana's built-in Loki datasource against a real Crabka
+//! querier listener. It then queries through Grafana's datasource proxy and
+//! through the backend datasource execution path.
 
 use std::{
     net::SocketAddr,

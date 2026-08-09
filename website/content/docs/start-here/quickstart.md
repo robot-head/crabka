@@ -9,7 +9,7 @@ This quickstart runs one local Crabka broker and verifies it with standard Kafka
 tooling. It is the smallest useful loop: format a data directory, start the
 broker, create a topic, then produce and consume one record.
 
-For a Kubernetes cluster, skip to [Operator Deployment](/docs/deploy/operator/).
+To run a Kubernetes cluster, go to [Operator Deployment](/docs/deploy/operator/).
 
 ## Prerequisites
 
@@ -46,8 +46,8 @@ cargo run -p crabka-broker --bin crabka-broker -- \
   --listen-addr 127.0.0.1:9092
 ```
 
-The Kafka listener is now `127.0.0.1:9092`. Prometheus metrics are exposed on
-`:9404`.
+The Kafka listener is now `127.0.0.1:9092`. The broker exposes Prometheus
+metrics on `:9404`.
 
 ## 3. Use Kafka tools unmodified
 

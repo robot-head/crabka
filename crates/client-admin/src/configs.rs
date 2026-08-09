@@ -1,9 +1,9 @@
 //! Topic-config wrappers.
 //!
-//! `DescribeConfigs` filters to the subset of entries the user/operator
-//! has explicitly set (i.e. dynamic topic config, `ConfigSource =
-//! DYNAMIC_TOPIC_CONFIG = 1`), so the diff against `spec.config` is
-//! against overrides only — never broker defaults.
+//! `DescribeConfigs` filters to the subset of entries the user or the
+//! operator has explicitly set, that is the dynamic topic config with
+//! `ConfigSource = DYNAMIC_TOPIC_CONFIG = 1`. The diff against `spec.config`
+//! is against overrides only, never against broker defaults.
 
 use std::collections::BTreeMap;
 
@@ -24,7 +24,7 @@ const DYNAMIC_TOPIC_CONFIG_SOURCE: i8 = 1;
 /// Kafka's `ConfigResource.type` for topic resources.
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 
-/// Per-topic dynamic config overrides (broker defaults are filtered out).
+/// Per-topic dynamic config overrides. The filter removes broker defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TopicConfigOverrides {
     pub topic: String,
@@ -50,14 +50,14 @@ pub struct AlterConfigsOutcome {
     pub error: Option<KafkaError>,
 }
 
-/// Filter a `DescribeConfigsResult`'s entries down to dynamic-topic
-/// overrides only. Pure function, unit-tested in isolation.
+/// Filters a `DescribeConfigsResult`'s entries down to dynamic-topic
+/// overrides only. This is a pure function with its own unit tests.
 ///
-/// Per KIP-226 / Kafka's `DescribeConfigs` semantics, only entries
-/// whose `config_source == DYNAMIC_TOPIC_CONFIG (1)` represent values
-/// the user has explicitly set on the topic; everything else (broker
-/// defaults, static config, etc.) is filtered out so the operator
-/// diffs `spec.config` against overrides only.
+/// Per KIP-226 and Kafka's `DescribeConfigs` semantics, only entries whose
+/// `config_source == DYNAMIC_TOPIC_CONFIG (1)` represent values the user has
+/// explicitly set on the topic. The function drops everything else, such as
+/// broker defaults and static config, so the operator diffs `spec.config`
+/// against overrides only.
 pub(crate) fn filter_dynamic_overrides(
     topic: String,
     entries: impl IntoIterator<Item = DescribeConfigsResourceResult>,
@@ -73,10 +73,10 @@ pub(crate) fn filter_dynamic_overrides(
     TopicConfigOverrides { topic, overrides }
 }
 
-/// Pure helper: take one `DescribeConfigsResult` (one resource's slice
-/// of the response) and either return its dynamic-topic-config
-/// overrides or surface its broker error. Extracted so both the success
-/// and error branches can be unit-tested without standing up a broker.
+/// Pure helper. It takes one `DescribeConfigsResult`, which is one resource's
+/// slice of the response, and returns either its dynamic-topic-config
+/// overrides or its broker error. It is a separate function so unit tests can
+/// cover both the success branch and the error branch with no broker.
 pub(crate) fn parse_describe_configs_resource(
     r: crabka_protocol::owned::describe_configs_response::DescribeConfigsResult,
 ) -> Result<TopicConfigOverrides, AdminError> {
@@ -91,8 +91,8 @@ pub(crate) fn parse_describe_configs_resource(
     Ok(filter_dynamic_overrides(r.resource_name, r.configs))
 }
 
-/// Pure helper: project an `IncrementalAlterConfigsResponse` into the
-/// per-topic outcome list the operator consumes.
+/// Pure helper. It projects an `IncrementalAlterConfigsResponse` into the
+/// per-topic outcome list that the operator consumes.
 pub(crate) fn parse_incremental_alter_outcomes(
     resp: <IncrementalAlterConfigsRequest as crabka_protocol::ProtocolRequest>::Response,
 ) -> Vec<AlterConfigsOutcome> {
@@ -206,9 +206,9 @@ mod tests {
 
     /// Spec test name: `describe_configs_filters_to_dynamic_topic`.
     ///
-    /// Mixed `config_source` values: only entries with
-    /// `DYNAMIC_TOPIC_CONFIG (1)` survive; `STATIC_BROKER_CONFIG (4)`
-    /// and other sources are dropped. Also verifies entries with
+    /// The input has mixed `config_source` values. Only entries with
+    /// `DYNAMIC_TOPIC_CONFIG (1)` survive. `STATIC_BROKER_CONFIG (4)` and
+    /// other sources are dropped. The test also verifies that entries with
     /// `value: None` are filtered out.
     #[test]
     fn describe_configs_filters_to_dynamic_topic() {

@@ -1,5 +1,5 @@
-//! A single segment: `.log` + `.index` + `.timeindex` files sharing a
-//! base offset.
+//! A single segment: the `.log`, `.index`, and `.timeindex` files that share
+//! a base offset.
 
 use std::{
     fs::{File, OpenOptions},
@@ -24,11 +24,13 @@ use crate::{
     name,
 };
 
-/// Positioned read: fill `buf` from `offset` in `file` without moving the
-/// file's cursor, looping over short reads until `buf` is full or EOF.
-/// Returns the number of bytes read. Lets readers share the writer's
-/// `File` handle (`&self`) with no `dup(2)`/`lseek(2)` per call — the
-/// hot fetch path runs this for every read.
+/// Positioned read: fill `buf` from `offset` in `file` without a move of the
+/// file's cursor.
+///
+/// This function loops over short reads until `buf` is full or it reaches EOF,
+/// then returns the number of bytes read. Readers can therefore share the
+/// writer's `File` handle through `&self`, with no `dup(2)` or `lseek(2)` per
+/// call. The hot fetch path runs this function for every read.
 fn read_full_at(file: &File, mut offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut total = 0;
     while total < buf.len() {
@@ -75,28 +77,30 @@ fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
 /// `.index` (offset → byte position) and `.timeindex` (timestamp →
 /// relative offset) sidecars.
 ///
-/// A segment is identified by its `base_offset`: the absolute offset of
-/// its first record, encoded into the segment's 20-digit zero-padded
-/// filename. Segments are created via [`Segment::create`] (new active
-/// segment) or opened via [`Segment::open`] (read-only sealed segment)
-/// or [`Segment::open_active`] (active segment with tail recovery).
+/// The `base_offset` identifies a segment. It is the absolute offset of the
+/// segment's first record, encoded into the segment's 20-digit zero-padded
+/// filename. [`Segment::create`] makes a new active segment.
+/// [`Segment::open`] opens a read-only sealed segment, and
+/// [`Segment::open_active`] opens an active segment with tail recovery.
 #[derive(Debug)]
 pub struct Segment {
     #[allow(dead_code)] // used by later phases (Log retention, recovery).
     dir: PathBuf,
     base_offset: Offset,
-    /// The `.log` data file. Wrapped in `Arc` so the zero-copy fetch path
-    /// (Increment D) can hand a `FileRegion { file: Arc<File>, .. }` to the
-    /// connection's async `sendfile` loop; the `Arc` pins the inode through the
-    /// send even if retention rolls/removes this segment in the meantime (the
-    /// open fd keeps the inode alive on Unix). Writes go through `&*log_file`
-    /// (`std::fs::File` implements `Write`/`Seek` for `&File`).
+    /// The `.log` data file, wrapped in `Arc`.
+    ///
+    /// The `Arc` lets the zero-copy fetch path (Increment D) hand a
+    /// `FileRegion { file: Arc<File>, .. }` to the connection's async
+    /// `sendfile` loop. The `Arc` pins the inode through the send even when
+    /// retention rolls or removes this segment in the meantime, because the
+    /// open fd keeps the inode alive on Unix. Writes go through `&*log_file`,
+    /// because `std::fs::File` implements `Write` and `Seek` for `&File`.
     log_file: Arc<File>,
     log_size: u64,
     offset_index: OffsetIndex,
     time_index: TimeIndex,
-    /// `true` once a new segment has been started after this one. Sealed
-    /// segments don't accept appends.
+    /// `true` once a new segment has started after this one. Sealed segments
+    /// do not accept appends.
     sealed: bool,
     /// Highest timestamp observed across all batches written here.
     max_timestamp: i64,
@@ -111,25 +115,28 @@ pub struct RawSegmentRead {
     pub start_offset: Offset,
     /// Last absolute offset covered by `bytes` (`start_offset - 1` if empty).
     pub last_offset: Offset,
-    /// Verbatim `.log` bytes — one or more complete v2 batches.
+    /// Verbatim `.log` bytes: one or more complete v2 batches.
     pub bytes: Bytes,
 }
 
 crate::sendfile_cfg! {
-    /// Descriptor form of [`Segment::read_raw`] for the zero-copy fetch path
-    /// (Increments D + E): the same offset/boundary metadata, but the records
-    /// run is a [`crabka_protocol::records::FileRegion`] (an `(Arc<File>, offset, len)` descriptor) instead
-    /// of an owned `Bytes` slice — so the broker can `sendfile(2)` it straight
-    /// from the page cache without a userspace copy. Compiled on the SENDFILE
-    /// alias (Linux + Apple + FreeBSD/DragonFly).
+    /// Descriptor form of [`Segment::read_raw`] for the zero-copy fetch path,
+    /// Increments D + E.
+    ///
+    /// This type carries the same offset and boundary metadata, but the
+    /// records run is a [`crabka_protocol::records::FileRegion`] descriptor of
+    /// the form `(Arc<File>, offset, len)`, not an owned `Bytes` slice. The
+    /// broker can therefore `sendfile(2)` the run straight from the page cache
+    /// with no userspace copy. This type is compiled on the SENDFILE alias:
+    /// Linux, Apple, and FreeBSD/DragonFly.
     #[derive(Debug, Clone)]
     pub struct RawSegmentDesc {
         /// `base_offset` of the first included batch (≤ requested offset).
         pub start_offset: Offset,
         /// Last absolute offset covered by the region (`start_offset - 1` if empty).
         pub last_offset: Offset,
-        /// The records run, as a file-backed descriptor. `None` when no complete
-        /// batch was found in range.
+        /// The records run, as a file-backed descriptor. `None` when the walk
+        /// found no complete batch in range.
         pub region: Option<crabka_protocol::records::FileRegion>,
     }
 
@@ -142,7 +149,7 @@ crate::sendfile_cfg! {
             }
         }
 
-        /// Byte length of the region (0 when empty).
+        /// Byte length of the region. It is 0 when the region is empty.
         #[must_use]
         pub fn len(&self) -> usize {
             self.region.as_ref().map_or(0, |r| r.len)
@@ -177,7 +184,7 @@ impl RawSegmentRead {
 }
 
 impl Segment {
-    /// Create a fresh active segment at the given base offset. Fails if
+    /// Create a fresh active segment at the given base offset. This fails if
     /// the `.log` file already exists.
     #[instrument(
         level = "debug",
@@ -209,9 +216,11 @@ impl Segment {
         })
     }
 
-    /// Open as the active segment, scanning from the last-indexed position
-    /// to EOF when `validate` is true. A partial trailing batch (or one
-    /// that fails to decode) is truncated; cleanly decoded batches update
+    /// Open as the active segment.
+    ///
+    /// When `validate` is true, this method scans from the last-indexed
+    /// position to EOF. It truncates a partial trailing batch, and also a
+    /// batch that fails to decode. Cleanly decoded batches update
     /// `last_offset` and `max_timestamp`.
     #[instrument(
         level = "info",
@@ -280,11 +289,12 @@ impl Segment {
         Ok(())
     }
 
-    /// Open an existing segment for reading. Lightweight — no full scan.
-    /// Open an existing segment for reading. The log and index files
-    /// must already exist on disk; the segment is initialized with
-    /// `last_offset = base_offset - 1` and `max_timestamp = i64::MIN`
-    /// until tail recovery (via [`Segment::open_active`]) populates them.
+    /// Open an existing segment for reading. This is lightweight and does no
+    /// full scan.
+    ///
+    /// The log and index files must already exist on disk. The segment starts
+    /// with `last_offset = base_offset - 1` and `max_timestamp = i64::MIN`
+    /// until tail recovery through [`Segment::open_active`] fills them in.
     #[instrument(
         level = "debug",
         skip_all,
@@ -332,8 +342,8 @@ impl Segment {
     }
 
     /// Path to the per-partition `.leader-epoch-checkpoint` file in this
-    /// segment's directory. The checkpoint is shared across all segments
-    /// in a partition — epoch history accumulates over the log's lifetime.
+    /// segment's directory. All segments in a partition share the checkpoint,
+    /// and epoch history accumulates over the log's lifetime.
     #[must_use]
     pub fn leader_epoch_checkpoint_path(&self) -> std::path::PathBuf {
         crate::name::leader_epoch_checkpoint_path(&self.dir)
@@ -348,9 +358,10 @@ impl Segment {
 
     /// Current `.log` file size.
     ///
-    /// The field itself stays a raw `u64` — it is a file position, used
-    /// directly as a `pread`/`seek` argument — and converts here, where the
-    /// value becomes a magnitude the roll and retention policies compare.
+    /// The field itself stays a raw `u64`, because it is a file position and
+    /// goes directly into a `pread` or `seek` argument. It converts here,
+    /// where the value becomes a magnitude that the roll and retention
+    /// policies compare.
     #[must_use]
     pub fn size(&self) -> ByteSize {
         ByteSize::from_bytes(self.log_size)
@@ -364,11 +375,13 @@ impl Segment {
     }
 
     /// Absolute offset and record timestamp of the first record in this
-    /// segment whose timestamp is `>= target_ts`. Uses the sparse time
-    /// index for a floor position, then scans `.log` batches forward
-    /// (the index is sparse, so an exact answer needs the post-index
-    /// scan — matching Kafka's `LogSegment.findOffsetByTimestamp`).
-    /// Returns `None` when no record in this segment qualifies.
+    /// segment whose timestamp is `>= target_ts`.
+    ///
+    /// This method takes a floor position from the sparse time index, then
+    /// scans `.log` batches forward. The index is sparse, so an exact answer
+    /// needs that scan after the index lookup. This matches Kafka's
+    /// `LogSegment.findOffsetByTimestamp`. The result is `None` when no
+    /// record in this segment qualifies.
     #[must_use]
     pub fn offset_for_timestamp(&self, target_ts: i64) -> Option<(Offset, i64)> {
         self.offset_for_timestamp_with_window(target_ts, DEFAULT_TIMESTAMP_SCAN_WINDOW)
@@ -384,11 +397,13 @@ impl Segment {
         self.scan_from_floor_windowed(scan_from, scan_window, |ts| ts >= target_ts)
     }
 
-    /// Absolute offset and timestamp of the record carrying this
-    /// segment's `max_timestamp`. Ties resolve to the earliest offset
-    /// (Kafka). Returns `None` for an empty segment. Uses the time
-    /// index's floor for the max to start the scan, then scans forward
-    /// for the first record whose timestamp equals the segment max.
+    /// Absolute offset and timestamp of the record that carries this
+    /// segment's `max_timestamp`.
+    ///
+    /// Ties resolve to the earliest offset, as in Kafka. The result is `None`
+    /// for an empty segment. This method starts the scan at the time index's
+    /// floor for the maximum, then scans forward for the first record whose
+    /// timestamp equals the segment maximum.
     #[must_use]
     pub fn offset_of_max_timestamp(&self) -> Option<(Offset, i64)> {
         self.offset_of_max_timestamp_with_window(DEFAULT_TIMESTAMP_SCAN_WINDOW)
@@ -410,17 +425,19 @@ impl Segment {
         self.scan_from_floor_windowed(scan_from, scan_window, |ts| ts == self.max_timestamp)
     }
 
-    /// Window-size-parameterized core of [`Segment::scan_from_floor`].
-    /// Split out so tests can force multi-window scans with a tiny window.
+    /// Window-size-parameterized core of [`Segment::scan_from_floor`]. It is
+    /// a separate function so that tests can force multi-window scans with a
+    /// tiny window.
     ///
-    /// Termination: each iteration either (a) returns a match, (b) returns
-    /// `None` because `cursor > last_offset`, or (c) decodes at least one
-    /// full batch and advances `cursor` strictly past it. `read` caps
-    /// reads at `max_bytes` and (unlike `read_raw`) has no anti-stall
-    /// guarantee, so a single batch larger than the window decodes to an
-    /// empty `Vec`; we detect that (empty result while `cursor` is still
-    /// within the segment) and double the window before retrying, so the
-    /// window is bounded by the largest batch rather than the whole tail.
+    /// Termination: each iteration does one of three things. It returns a
+    /// match. It returns `None` because `cursor > last_offset`. Or it decodes
+    /// at least one full batch and advances `cursor` strictly past that batch.
+    /// `read` caps reads at `max_bytes` and, unlike `read_raw`, gives no
+    /// anti-stall guarantee. A single batch larger than the window therefore
+    /// decodes to an empty `Vec`. This function detects that case, an empty
+    /// result while `cursor` is still within the segment, and doubles the
+    /// window before it tries again. The window is therefore bounded by the
+    /// largest batch, not by the whole tail.
     fn scan_from_floor_windowed(
         &self,
         floor_offset: Offset,
@@ -458,16 +475,16 @@ impl Segment {
         }
     }
 
-    /// `true` once the segment has been sealed via [`Segment::seal`];
-    /// sealed segments reject appends.
+    /// `true` once [`Segment::seal`] has sealed the segment. Sealed segments
+    /// reject appends.
     #[must_use]
     pub fn is_sealed(&self) -> bool {
         self.sealed
     }
 
-    /// Read batches starting at or just before `offset`, up to roughly
-    /// `max_bytes` of `.log` data. Returns an empty `Vec` when `offset`
-    /// is past `last_offset`.
+    /// Read batches from `offset` or just before it, up to about `max_bytes`
+    /// of `.log` data. The result is an empty `Vec` when `offset` is past
+    /// `last_offset`.
     #[instrument(
         level = "debug",
         skip(self),
@@ -522,11 +539,13 @@ impl Segment {
         Ok(out)
     }
 
-    /// Read a contiguous run of **complete, verbatim** record-batch bytes
-    /// beginning at the batch containing `fetch_offset`, including only
-    /// batches whose `base_offset < limit_offset`, up to roughly `max_bytes`
-    /// (always at least one batch — Kafka's anti-stall rule). No record
-    /// decoding: only fixed batch headers are read to find boundaries.
+    /// Read a contiguous run of **complete, verbatim** record-batch bytes.
+    ///
+    /// The run starts at the batch that contains `fetch_offset`. It includes
+    /// only batches whose `base_offset < limit_offset`, up to about
+    /// `max_bytes`, and always at least one batch. That last rule is Kafka's
+    /// anti-stall rule. This method decodes no records. It reads only the
+    /// fixed batch headers to find the boundaries.
     #[instrument(
         level = "debug",
         skip(self),
@@ -642,15 +661,18 @@ impl Segment {
 
     crate::sendfile_cfg! {
     /// Descriptor variant of [`Segment::read_raw`] for the zero-copy
-    /// (`sendfile`) fetch path: runs the **same** boundary walk — selecting the
-    /// identical `[start_pos+range_start, start_pos+range_end)` byte range that
-    /// `read_raw` would have sliced — but returns a [`crabka_protocol::records::FileRegion`] descriptor
-    /// instead of `pread`ing the payload into an owned `Bytes`.
+    /// `sendfile` fetch path.
     ///
-    /// The walk is header-only: it `pread`s just the fixed v2 batch headers to
-    /// find batch boundaries (using the header's `batch_length`), never the
-    /// record payloads. The resulting region is byte-identical to `read_raw`'s
-    /// `bytes` for the same `(fetch_offset, limit_offset, max_bytes)`.
+    /// This method runs the **same** boundary walk and selects the identical
+    /// `[start_pos+range_start, start_pos+range_end)` byte range that
+    /// `read_raw` would have sliced. It returns a [`crabka_protocol::records::FileRegion`] descriptor
+    /// instead of a `pread` of the payload into an owned `Bytes`.
+    ///
+    /// The walk is header-only. It `pread`s only the fixed v2 batch headers to
+    /// find batch boundaries, and it uses the header's `batch_length`. It
+    /// never reads the record payloads. The region is byte-identical to the
+    /// `bytes` of `read_raw` for the same
+    /// `(fetch_offset, limit_offset, max_bytes)`.
     #[instrument(
         level = "debug",
         skip(self),
@@ -794,13 +816,13 @@ impl Segment {
         Ok(())
     }
 
-    /// Append a record batch. Returns the byte position where the batch
+    /// Append a record batch and return the byte position where the batch
     /// starts.
     ///
     /// Side effects:
-    /// - Updates `log_size`, `max_timestamp`, `last_offset`.
-    /// - Adds sparse index entries when bytes-since-last-entry exceeds
-    ///   `index_interval` (or for the first batch).
+    /// - Updates `log_size`, `max_timestamp`, and `last_offset`.
+    /// - Adds sparse index entries when the byte count since the last entry
+    ///   exceeds `index_interval`, and for the first batch.
     #[instrument(
         level = "debug",
         skip(self, batch),
@@ -858,23 +880,24 @@ impl Segment {
         Ok(position)
     }
 
-    /// Append a batch **verbatim**, writing the producer's exact wire
-    /// bytes without decode/re-encode/recompress/CRC-recompute.
+    /// Append a batch **verbatim** and write the producer's exact wire bytes.
     ///
-    /// `bytes` is the producer's verbatim v2 batch (already CRC-validated
-    /// by the caller via the borrowed header-only path). This patches only
-    /// `base_offset` (bytes 0..8) and `partition_leader_epoch`
-    /// (bytes 12..16) — both outside the CRC-covered region — into a
-    /// writable copy, then writes those bytes. The stored CRC stays
-    /// byte-identical to the producer's, because no CRC-covered byte
-    /// changes.
+    /// This method does not decode, re-encode, recompress, or recompute the
+    /// CRC. `bytes` is the producer's verbatim v2 batch, which the caller has
+    /// already CRC-validated through the borrowed header-only path. This
+    /// method patches only `base_offset`, bytes 0..8, and
+    /// `partition_leader_epoch`, bytes 12..16, into a writable copy, then
+    /// writes those bytes. Both fields sit outside the CRC-covered region. The
+    /// stored CRC stays byte-identical to the producer's CRC, because no
+    /// CRC-covered byte changes.
     ///
     /// `base_offset`, `last_offset_delta`, `max_timestamp`, and
-    /// `leader_epoch` come from the caller's borrowed header read; the
-    /// segment side effects (`log_size`, `last_offset`, `max_timestamp`,
-    /// sparse index) are updated identically to [`Segment::append`].
+    /// `leader_epoch` come from the caller's borrowed header read. This method
+    /// updates the segment side effects, `log_size`, `last_offset`,
+    /// `max_timestamp`, and the sparse index, exactly as [`Segment::append`]
+    /// does.
     ///
-    /// Returns the byte position where the batch starts.
+    /// It returns the byte position where the batch starts.
     #[instrument(
         level = "debug",
         skip(self, bytes),
@@ -962,27 +985,29 @@ impl Segment {
         self.sealed = true;
     }
 
-    /// Seal a segment loaded via the no-scan [`Segment::open`] path, fixing its
-    /// `last_offset` to `last` (callers pass `next_segment.base_offset - 1`, the
-    /// highest offset this sealed segment can hold).
+    /// Seal a segment loaded through the no-scan [`Segment::open`] path and
+    /// set its `last_offset` to `last`.
     ///
-    /// `Segment::open` leaves `last_offset = base_offset - 1` because it does
-    /// not scan the `.log`. Without this fix a sealed segment recovered on
-    /// [`Log::open`](crate::Log) reports that stale `last_offset`, and
-    /// `Log::read_raw` — which skips any segment whose `last_offset() <
-    /// fetch_offset` — would skip the first sealed segment after a restart and
-    /// serve a later segment's base offset, manufacturing an offset gap (a
-    /// follower fetching at 0 then loops on the resulting append mismatch).
+    /// Callers pass `next_segment.base_offset - 1`, the highest offset this
+    /// sealed segment can hold. `Segment::open` leaves
+    /// `last_offset = base_offset - 1` because it does not scan the `.log`.
+    /// Without this fix, a sealed segment recovered on
+    /// [`Log::open`](crate::Log) reports that stale `last_offset`.
+    /// `Log::read_raw` skips any segment whose
+    /// `last_offset() < fetch_offset`, so it would skip the first sealed
+    /// segment after a restart and serve a later segment's base offset. That
+    /// creates an offset gap, and a follower that fetches at 0 then loops on
+    /// the resulting append mismatch.
     pub fn seal_at(&mut self, last: Offset) {
         self.sealed = true;
         self.last_offset = last;
     }
 
-    /// Directory holding this segment's `.log`/`.index`/`.timeindex` files.
-    /// Used by the compactor to read the underlying `.log` file directly,
-    /// bypassing the `Segment::read` path which depends on the in-memory
-    /// `last_offset` (which is stale for sealed segments loaded via
-    /// `Segment::open`).
+    /// Directory that holds this segment's `.log`, `.index`, and `.timeindex`
+    /// files. The compactor uses it to read the `.log` file directly and to
+    /// avoid the `Segment::read` path. That path depends on the in-memory
+    /// `last_offset`, which is stale for sealed segments loaded through
+    /// `Segment::open`.
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -1004,8 +1029,9 @@ impl Segment {
         Ok(())
     }
 
-    /// Truncate `.log` and indexes so no batches at `relative_offset` `>= rel`
-    /// remain. Used by `Log::truncate_to`. Leaves the segment unsealed.
+    /// Truncate the `.log` file and the indexes so that no batch at
+    /// `relative_offset` `>= rel` remains. `Log::truncate_to` uses this
+    /// method. The segment stays unsealed.
     #[instrument(
         level = "info",
         skip(self),
@@ -1075,7 +1101,7 @@ mod tests {
 
     use super::*;
 
-    /// Index every batch: no batch is ever `0` bytes past the last entry.
+    /// Index every batch. No batch is ever `0` bytes past the last entry.
     const DENSE_INDEX: ByteSize = ByteSize::ZERO;
 
     /// A read budget larger than anything these tests write, so the byte
@@ -1267,11 +1293,12 @@ mod tests {
         );
     }
 
-    /// Tail recovery must PHYSICALLY truncate a partial/garbage trailing tail,
-    /// using `consumed += before - cur.len()` (the exact bytes each valid batch
-    /// decode advanced) to locate the valid end. Mutating `-`→`+` inflates
-    /// `consumed`, pushing `valid_end` past `log_size` so the garbage is never
-    /// truncated: the file would keep its trailing bytes.
+    /// Tail recovery must PHYSICALLY truncate a partial or garbage trailing
+    /// tail. It finds the valid end with `consumed += before - cur.len()`,
+    /// which is the exact number of bytes each valid batch decode advanced. A
+    /// mutation of `-` to `+` inflates `consumed` and pushes `valid_end` past
+    /// `log_size`, so the garbage is never truncated and the file keeps its
+    /// trailing bytes.
     #[test]
     fn recover_active_tail_truncates_trailing_garbage() {
         let dir = tempdir().unwrap();
@@ -1333,11 +1360,12 @@ mod tests {
         assert2::assert!(r.start_offset == Offset(103));
     }
 
-    /// `Segment::read` accumulates consumed bytes as `before - cursor.len()`
-    /// (the exact bytes each batch decode advanced) to enforce the `max_bytes`
-    /// budget. With `max_bytes` set to the segment's full size, all three
-    /// batches fit and are returned. Mutating `-`→`+` inflates `consumed` on
-    /// the first batch past `max_bytes`, breaking after one batch.
+    /// `Segment::read` accumulates consumed bytes as `before - cursor.len()`,
+    /// the exact number of bytes each batch decode advanced, to enforce the
+    /// `max_bytes` budget. With `max_bytes` set to the segment's full size,
+    /// all three batches fit and the read returns them. A mutation of `-` to
+    /// `+` inflates `consumed` on the first batch past `max_bytes`, so the
+    /// read stops after one batch.
     #[test]
     fn read_consumed_bytes_gates_max_bytes_budget() {
         let dir = tempdir().unwrap();
@@ -1376,13 +1404,14 @@ mod tests {
         assert2::assert!(read == vec![sample_batch(0, 1, 100), sample_batch(1, 1, 300)]);
     }
 
-    /// `truncate_to_relative` decides which batches to drop by each batch's last
-    /// offset, `batch.base_offset + last_offset_delta`, compared against
-    /// `target_abs`. Using MULTI-record batches makes the `+` load-bearing:
-    /// batch A spans 0..=2, batch B spans 3..=5, and truncating to rel 3
-    /// (`target_abs = 3`) must keep A (last 2 < 3) and drop B (last 5 >= 3).
-    /// Mutating `+`→`-` computes A's last as -2 and B's as 1, so B is wrongly
-    /// kept and the read still returns batch B.
+    /// `truncate_to_relative` decides which batches to drop by each batch's
+    /// last offset, `batch.base_offset + last_offset_delta`, compared against
+    /// `target_abs`. MULTI-record batches make the `+` load-bearing. Batch A
+    /// spans 0..=2 and batch B spans 3..=5, so a truncate to rel 3, where
+    /// `target_abs = 3`, must keep A, whose last offset 2 is < 3, and drop B,
+    /// whose last offset 5 is >= 3. A mutation of `+` to `-` computes A's last
+    /// offset as -2 and B's as 1, so it wrongly keeps B and the read still
+    /// returns batch B.
     #[test]
     fn truncate_to_relative_uses_batch_last_offset() {
         let dir = tempdir().unwrap();
@@ -1518,8 +1547,9 @@ mod tests {
     // ---- read_raw_desc (zero-copy descriptor) tests (SENDFILE-alias only) ----
 
     crate::sendfile_cfg! {
-    /// `pread` a `FileRegion` into a fresh `Vec` (the bytes the broker's
-    /// sendfile would transmit / its TLS pread-fallback would copy).
+    /// `pread` a `FileRegion` into a fresh `Vec`. These are the bytes that the
+    /// broker's sendfile would transmit, and that its TLS pread-fallback would
+    /// copy.
     fn region_bytes(region: &crabka_protocol::records::FileRegion) -> Vec<u8> {
         use std::os::unix::fs::FileExt;
         let mut buf = vec![0u8; region.len];
@@ -1534,11 +1564,11 @@ mod tests {
         buf
     }
 
-    /// The load-bearing Increment-D/E invariant: the `read_raw_desc` region maps
-    /// to exactly the bytes `read_raw` would have returned, for the same
-    /// `(fetch_offset, limit_offset, max_bytes)`. Covers single-batch,
-    /// multi-batch, mid-stream start offsets, the limit clamp, and the
-    /// one-batch-over-budget anti-stall rule.
+    /// The load-bearing Increment-D/E invariant: the `read_raw_desc` region
+    /// maps to exactly the bytes that `read_raw` would have returned, for the
+    /// same `(fetch_offset, limit_offset, max_bytes)`. This test covers
+    /// single-batch reads, multi-batch reads, mid-stream start offsets, the
+    /// limit clamp, and the one-batch-over-budget anti-stall rule.
     #[test]
     fn read_raw_desc_region_equals_read_raw_bytes() {
         let (dir, mut seg) = test_segment();
@@ -1568,9 +1598,10 @@ mod tests {
         drop(dir);
     }
 
-    /// A truncated trailing batch (byte budget cuts mid-batch) must produce a
-    /// region whose bytes equal `read_raw`'s clipped output — sendfile of a
-    /// clipped range is wire-valid (the consumer drops the partial batch).
+    /// A truncated trailing batch, where the byte budget cuts mid-batch, must
+    /// produce a region whose bytes equal the clipped output of `read_raw`. A
+    /// sendfile of a clipped range is wire-valid, because the consumer drops
+    /// the partial batch.
     #[test]
     fn read_raw_desc_matches_read_raw_when_budget_clips_run() {
         let (dir, mut seg) = test_segment();

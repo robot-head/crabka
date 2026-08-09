@@ -965,8 +965,8 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
     assert_eq!(rows[0][0].as_ref().expect("cell").text, "7");
 }
 
-/// The rN-only gateway's replica shares range 0's store `Arc`, so it is always
-/// current and its barrier needs no committed frames beyond offset -1.
+/// The rN-only gateway's replica shares range 0's store `Arc`. It is therefore
+/// always current, and its barrier needs no committed frames beyond offset -1.
 struct AlwaysCurrentRange0End;
 
 #[async_trait]
@@ -976,9 +976,10 @@ impl Range0EndSampler for AlwaysCurrentRange0End {
     }
 }
 
-/// Catalog-follower barrier for fixture nodes whose catalog is kept current
-/// out of band (a shared range-0 store `Arc` or manual mirroring), so the
-/// post-DDL `Range0Barrier` fan-out is covered immediately.
+/// Catalog-follower barrier for the fixture nodes whose catalog stays current
+/// out of band, through a shared range-0 store `Arc` or through manual
+/// mirroring. The post-DDL `Range0Barrier` fan-out is therefore covered
+/// immediately.
 fn shared_catalog_follower() -> Arc<Range0Barrier> {
     Arc::new(Range0Barrier::new(
         Range0Tail::new(Arc::new(MemKv::new())),

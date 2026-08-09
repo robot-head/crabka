@@ -1,19 +1,21 @@
 # Rustdoc Style Guide
 
-This guide defines conventions for rustdoc comments across Crabka crates. It is based on patterns already established in `crabka-protocol`, `crabka-raft`, `crabka-broker`, and `crabka-metadata`. It complements the general [code style guide](code_style_guide.md).
+This guide defines conventions for rustdoc comments across Crabka crates. It follows the patterns that `crabka-protocol`, `crabka-raft`, `crabka-broker`, and `crabka-metadata` already use. It complements the general [code style guide](code_style_guide.md).
+
+This guide defines **structure**. The [prose style guide](prose_style_guide.md) defines **wording**, and it applies to every doc comment: Simplified Technical English, one short summary sentence on the first line, and `must` only where the code enforces the rule.
 
 ## Crate-Level Documentation
 
 Every library crate must have a crate-level doc comment at the top of `lib.rs`. Binary crates (`main.rs`) do not need one.
 
-Crabka uses `//!` line comments for crate-level docs (not `/*! … */` blocks), matching the existing crates and sidestepping the pitfall that `/* */` blocks cannot contain a `*/` sequence — which matters here because doc text routinely mentions glob patterns, regexes, and byte sequences.
+Crabka uses `//!` line comments for crate-level docs, not `/*! … */` blocks. This matches the existing crates. It also avoids a limit of `/* */` blocks: they cannot contain a `*/` sequence. That limit matters here, because doc text often mentions glob patterns, regexes, and byte sequences.
 
 The crate-level doc should include:
 
 1. **One-line summary** — what the crate does.
-2. **Overview paragraph** — context, relationship to other Crabka crates, and the Kafka standard(s) / KIP(s) it implements.
-3. **Key modules or types** — a brief list linking to the main entry points.
-4. **Feature flags** — if any, with descriptions and which are on by default.
+2. **Overview paragraph** — context, the relationship to other Crabka crates, and the Kafka standards and KIPs it implements.
+3. **Key modules or types** — a short list with links to the main entry points.
+4. **Feature flags** — if the crate has any, with a description of each and which ones are on by default.
 
 ```rust
 //! Kafka wire-protocol codec.
@@ -34,17 +36,17 @@ The crate-level doc should include:
 //! - `snappy`, `zstd`, `gzip`, `lz4` — record-batch compression codecs (all on by default).
 ```
 
-Where a crate is published to docs.rs, set `#![doc(html_root_url = "https://docs.rs/<crate>/<version>")]` as the existing crates do.
+If Crabka publishes a crate to docs.rs, set `#![doc(html_root_url = "https://docs.rs/<crate>/<version>")]` as the existing crates do.
 
 ## Public Item Documentation
 
-Every public item (`pub fn`, `pub struct`, `pub enum`, `pub trait`, `pub type`) that is part of the crate's published API should have a doc comment. Items that are not part of the published API do not need rustdoc:
+Every public item that is part of the crate's published API should have a doc comment. This covers `pub fn`, `pub struct`, `pub enum`, `pub trait`, and `pub type`. Items that are not part of the published API do not need rustdoc:
 
 - Private items (`fn`, `struct`, etc. without `pub`).
 - `pub(crate)` items — visible within the crate but not to consumers.
 - `pub` items inside private modules (`mod foo`, not `pub mod foo`).
 
-Use `//` comments on these if the logic needs explaining. Confirm that public types are actually exposed via a public module path before adding rustdoc. (Crabka does not force the `missing_docs` lint, so this is a review expectation, not a compiler error — hold the line at review.)
+Use `//` comments on these if the logic needs an explanation. Before you add rustdoc, confirm that a public module path exposes the public type. Crabka does not force the `missing_docs` lint, so this is a review expectation and not a compiler error. Enforce it at review.
 
 ### One-Liner Items
 
@@ -57,7 +59,7 @@ pub log_end_offset: i64,
 
 ### Functions and Methods
 
-Document what the function does, not how. Include parameters only when their purpose is not obvious from name and type.
+Document what the function does, not how. Include parameters only when their purpose is not obvious from the name and the type.
 
 ```rust
 /// Applies a controller record to the image, returning the mutated topics.
@@ -99,19 +101,23 @@ Use only these standard sections, in this order:
 |---------|-------------|
 | `# Examples` | Complex APIs where usage is not obvious |
 | `# Panics` | When the function can panic in normal use |
-| `# Errors` | When returning `Result` and the error conditions are worth calling out |
+| `# Errors` | When the function returns `Result` and the error conditions are worth a note |
 
 There is no `# Safety` section: Crabka forbids `unsafe` (`unsafe_code = "forbid"`), so there are no `unsafe fn` to document.
 
-`missing_errors_doc` and `missing_panics_doc` are relaxed in the workspace lints, so `# Errors` / `# Panics` are **not** lint-forced. Add them where they genuinely help the caller; omit them when the error or panic condition is already obvious from the signature. Do not add sections that merely repeat the summary.
+The workspace lints relax `missing_errors_doc` and `missing_panics_doc`, so the lints do **not** force a `# Errors` or `# Panics` section. Add them where they genuinely help the caller. Omit them when the error or panic condition is already obvious from the signature. Do not add sections that only repeat the summary.
+
+**State the real conditions for the item the section sits on. Never paste a generic sentence across a crate.** A section that does not describe its own item is worse than no section, because a reader trusts it. If you cannot state the real condition, delete the section. Do not leave a placeholder.
+
+A prose audit of this workspace found eight such boilerplate strings and hundreds of copies. Many were false. One `# Panics` body named a poisoned mutex on a file with no mutex. One `# Errors` body named Kubernetes in a crate with no Kubernetes dependency. Doc comments said that encode functions fail on truncated input. One `# Errors` section sat on a function whose `Result` error type is not an error.
 
 ## Examples
 
 - Doc examples compile **and run** in CI (`cargo test --workspace --doc`). Keep them correct against the current API.
-- Use ```` ```no_run ```` for examples that need a runtime, a network, or a live broker — they compile but are not executed.
+- Use ```` ```no_run ```` for examples that need a runtime, a network, or a live broker. These examples compile, but CI does not run them.
 - Use ```` ```ignore ```` only for genuinely incomplete snippets, and sparingly.
-- Keep examples minimal — show the API call, not the setup. Use `#`-hidden lines for boilerplate the reader doesn't need to see.
-- Because `rustfmt.toml` sets `format_code_in_doc_comments = true`, `cargo +nightly fmt` formats the code inside your examples — keep them fmt-clean so the format check passes.
+- Keep examples minimal. Show the API call, not the setup. Use `#`-hidden lines for boilerplate the reader does not need to see.
+- `rustfmt.toml` sets `format_code_in_doc_comments = true`, so `cargo +nightly fmt` formats the code inside your examples. Keep them fmt-clean so the format check passes.
 
 ## KIP and Standard References
 
@@ -127,7 +133,7 @@ Use reference-style links at the bottom of the doc comment. Do not inline long c
 
 ## Cross-References
 
-Link to other types and modules using rustdoc syntax:
+Use rustdoc syntax to link to other types and modules:
 
 ```rust
 /// Returns the [`RecordBatch`] decoded from the given bytes.
@@ -135,7 +141,7 @@ Link to other types and modules using rustdoc syntax:
 /// See [`RecordBatchBuilder`] for constructing batches programmatically.
 ```
 
-Use full paths when referencing items in other crates:
+Use full paths when you reference an item in another crate:
 
 ```rust
 /// Uses [`crabka_protocol::records`] for record-batch decoding.
@@ -143,7 +149,7 @@ Use full paths when referencing items in other crates:
 
 ## Configuration Structs
 
-All `Config` structs with a `serde` derive must document every field, including its default value where one exists:
+All `Config` structs with a `serde` derive must document every field. A field with a default value must also document that default:
 
 ```rust
 /// Broker listener configuration.
@@ -156,7 +162,7 @@ pub struct Config {
 }
 ```
 
-These fields surface in the generated configuration reference, so the doc line is the operator-facing documentation — keep it accurate and name the default.
+These fields surface in the generated configuration reference, so the doc line is the operator-facing documentation. Keep it accurate and name the default.
 
 ## Traits
 
@@ -164,7 +170,7 @@ Trait documentation should describe the contract, not the implementation. Includ
 
 1. What implementors must provide.
 2. What callers can expect.
-3. Lifecycle (if registration / handles / shutdown are involved).
+3. Lifecycle, if the trait involves registration, handles, or shutdown.
 
 ```rust
 /// A pluggable remote-storage backend for tiered log segments (KIP-405).
@@ -177,7 +183,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
 
 ## Trait Implementations
 
-Trait impl methods do not need `///` doc comments unless the implementation behaviour is surprising or deviates from the trait documentation. A normal `//` comment explaining the approach is useful:
+Trait impl methods do not need `///` doc comments, unless the implementation behaviour is surprising or it deviates from the trait documentation. A normal `//` comment that explains the approach is useful:
 
 ```rust
 impl Encode for RecordBatch {
@@ -189,9 +195,9 @@ impl Encode for RecordBatch {
 
 - Re-exports (document at the source).
 - `impl` blocks for derived traits (`Debug`, `Clone`, etc.).
-- Trait impl methods (unless behaviour is surprising — use `//` comments instead).
+- Trait impl methods, unless the behaviour is surprising. Use `//` comments instead.
 - Test modules and test helper functions.
-- Items behind `#[doc(hidden)]` and generated code (the protocol codec is generated; document the generator's output shape at the module level, not per generated field).
+- Items behind `#[doc(hidden)]` and generated code. Crabka generates the protocol codec. Document the generator's output shape at the module level, not for each generated field.
 
 ## Checking Documentation
 
@@ -208,15 +214,15 @@ cargo test --package <crate> --doc
 
 ## Correctness Pass
 
-After adding or updating doc comments, always perform a correctness pass against the actual code. Documentation that describes wrong behaviour is worse than no documentation.
+After you add or update doc comments, always do a correctness pass against the code. Documentation that describes wrong behaviour is worse than no documentation.
 
 Check for:
 
 1. **Signature mismatches** — do parameter types and return types in docs match the code?
 2. **Stale defaults** — do documented default values match the `Default` impl and the config generator?
-3. **Renamed or removed items** — do cross-references point to types/methods that still exist?
+3. **Renamed or removed items** — do cross-references point to types and methods that still exist?
 4. **Example code** — would the examples compile and run against the current API?
 5. **Feature flag references** — are conditional compilation features still valid?
-6. **Behavioural and KIP claims** — does the code actually do what the doc says, and does the referenced KIP still describe that behaviour?
+6. **Behavioural and KIP claims** — does the code do what the doc says, and does the referenced KIP still describe that behaviour?
 
-This pass should be performed whenever docs are written or code is refactored. The weekly `docs-freshness` CI job re-derives the generated reference from live code and flags drift — but that catches the generated docs, not your hand-written rustdoc; the correctness pass is how the latter stays true.
+You should do this pass whenever you write docs or refactor code. The weekly `docs-freshness` CI job re-derives the generated reference from live code and flags drift. But that job catches the generated docs, not your hand-written rustdoc. The correctness pass is how your hand-written rustdoc stays true.

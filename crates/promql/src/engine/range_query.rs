@@ -22,7 +22,7 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Evaluate a range query over `[start_ms, end_ms]`.
+    /// Evaluates a range query over `[start_ms, end_ms]`.
     ///
     /// # Errors
     ///
@@ -40,8 +40,10 @@ impl<S: MetricStore> PromqlEngine<S> {
             .map(|(result, _)| result)
     }
 
-    /// Evaluate a range query over `[start_ms, end_ms]`, returning any
-    /// warnings/infos raised during evaluation alongside the result.
+    /// Evaluates a range query over `[start_ms, end_ms]` with its annotations.
+    ///
+    /// The annotations are the warnings and infos raised during the evaluation.
+    /// This method returns them with the result.
     ///
     /// # Errors
     ///
@@ -151,11 +153,13 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
     }
 
-    /// Per-step planner range driver, scoped in `QUERY_RANGE_CONTEXT` so any
-    /// nested duration-helper scalar folds (`step()`/`start()`/…, experimental)
-    /// resolve to the query's range grid, AND in `AT_MODIFIER_BOUNDS` so a bare
-    /// top-level selector's `@ start()` / `@ end()` resolves to the query's range
-    /// bounds.
+    /// Per-step planner range driver with both evaluation scopes applied.
+    ///
+    /// The driver runs in `QUERY_RANGE_CONTEXT`, so any nested duration-helper
+    /// scalar fold (`step()`, `start()`, and the other experimental forms)
+    /// resolves to the query's range grid. It also runs in `AT_MODIFIER_BOUNDS`,
+    /// so a bare top-level selector's `@ start()` / `@ end()` resolves to the
+    /// query's range bounds.
     #[cfg(feature = "experimental-functions")]
     async fn eval_range_via_planner_scoped(
         &self,
@@ -180,9 +184,10 @@ impl<S: MetricStore> PromqlEngine<S> {
             .await
     }
 
-    /// Per-step planner range driver, scoped in `AT_MODIFIER_BOUNDS` so a bare
-    /// top-level selector's `@ start()` / `@ end()` resolves to the query's range
-    /// bounds.
+    /// Per-step planner range driver with the `AT_MODIFIER_BOUNDS` scope applied.
+    ///
+    /// The driver runs in `AT_MODIFIER_BOUNDS`, so a bare top-level selector's
+    /// `@ start()` / `@ end()` resolves to the query's range bounds.
     #[cfg(not(feature = "experimental-functions"))]
     async fn eval_range_via_planner_scoped(
         &self,
@@ -200,21 +205,22 @@ impl<S: MetricStore> PromqlEngine<S> {
             .await
     }
 
-    /// Evaluate a plannable instant `expr` over the step grid through the
-    /// operator planner, stitching the per-step instant vectors / scalars into a
-    /// [`RangeMatrix`](QueryResult::RangeMatrix).
+    /// Evaluates a plannable instant `expr` over the step grid through the planner.
     ///
-    /// Walks the step grid — from `start_ms` to `end_ms` inclusive, advancing
-    /// by `step` with saturating add — and stitches: samples are
-    /// grouped by labelset fingerprint into one series each, points appended in
-    /// step order, gaps left implicit (a step where a series has no value
-    /// produces no point), and a scalar expr folded into a single empty-labelset
-    /// series. The output is iterated in fingerprint order (`BTreeMap` keys),
-    /// matching Prometheus byte-for-byte.
+    /// This method stitches the per-step instant vectors and scalars into a
+    /// [`RangeMatrix`](QueryResult::RangeMatrix). It walks the step grid from
+    /// `start_ms` to `end_ms` inclusive and advances by `step` with a saturating
+    /// add.
+    ///
+    /// The method groups samples by label-set fingerprint into one series each
+    /// and appends the points in step order. Gaps stay implicit: a step where a
+    /// series has no value produces no point. A scalar expr folds into a single
+    /// empty-label-set series. The output iterates in fingerprint order, the
+    /// `BTreeMap` keys, which matches Prometheus byte-for-byte.
     ///
     /// Returns `Ok(None)` only if some step's [`Self::plan_instant_expr`] returns
-    /// `None`. The planner is total, so for a plannable `expr` this never
-    /// happens; the caller treats an `Ok(None)` as an internal planner bug.
+    /// `None`. The planner is total, so this never happens for a plannable
+    /// `expr`. The caller treats an `Ok(None)` as an internal planner bug.
     #[tracing::instrument(
         name = "promql.range_planner",
         level = "debug",
@@ -301,12 +307,14 @@ impl<S: MetricStore> PromqlEngine<S> {
             .await
     }
 
-    /// Force the per-step planner range driver, bypassing the
-    /// [`range_expr_routes_through_planner`] production gate. The parity-test
-    /// seam: it lets the differential test drive *every* range case (including a
-    /// bare top-level selector, which the production gate keeps on the
-    /// interpreter) through the operator path and compare it to the interpreter's
-    /// `query_range`, proving parity before the gate is trusted.
+    /// Forces the per-step planner range driver past the production gate.
+    ///
+    /// This method bypasses [`range_expr_routes_through_planner`] and is the
+    /// parity-test seam. It lets the differential test drive every range case
+    /// through the operator path and compare the output to the interpreter's
+    /// `query_range`, which proves parity before the gate is trusted. The cases
+    /// include a bare top-level selector, which the production gate keeps on the
+    /// interpreter.
     #[cfg(test)]
     pub(super) async fn eval_range_via_planner_forced(
         &self,

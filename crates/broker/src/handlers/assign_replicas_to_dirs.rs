@@ -1,10 +1,13 @@
-//! `AssignReplicasToDirs` (`api_key=73`, KIP-858). A broker reports, for each
-//! of its replicas, which log-directory UUID currently hosts it. The
-//! controller records this in `PartitionRecord.directories[broker_slot]` so a
-//! later `offline_log_dirs` heartbeat can be mapped back to exactly the
-//! affected partitions for failover.
+//! `AssignReplicasToDirs` (`api_key=73`, KIP-858).
 //!
-//! Leader-only (`NOT_CONTROLLER` otherwise), mirroring `alter_partition`.
+//! A broker reports, for each of its replicas, which log-directory UUID hosts
+//! it. The controller records that in
+//! `PartitionRecord.directories[broker_slot]`, so it can later map an
+//! `offline_log_dirs` heartbeat back to exactly the affected partitions for
+//! failover.
+//!
+//! Only the leader serves this RPC, and any other broker returns
+//! `NOT_CONTROLLER`. This mirrors `alter_partition`.
 
 use bytes::Bytes;
 use crabka_metadata::{MetadataImage, MetadataRecord, PartitionDirAssignmentRecord};
@@ -70,9 +73,9 @@ fn not_controller_response() -> AssignReplicasToDirsResponse {
     }
 }
 
-/// Collect all `MetadataRecord` changes from the directories/topics/partitions
-/// in `req`, calling `assignment_changes` for each partition entry. Pure; no
-/// I/O.
+/// Collects every `MetadataRecord` change from the directories, topics, and
+/// partitions in `req`. It calls `assignment_changes` for each partition
+/// entry. The function is pure and does no I/O.
 pub(crate) fn collect_assignment_changes(
     image: &MetadataImage,
     broker_id: u64,
@@ -97,9 +100,9 @@ pub(crate) fn collect_assignment_changes(
     changes
 }
 
-/// Build the success-path echo response from `req`: mirrors the request
-/// directory/topic/partition structure, filling every partition's
-/// `error_code` with `NONE`. Pure; no I/O.
+/// Builds the success-path echo response from `req`. It mirrors the request's
+/// directory, topic, and partition structure, and fills every partition's
+/// `error_code` with `NONE`. The function is pure and does no I/O.
 pub(crate) fn build_echo_response(
     req: &AssignReplicasToDirsRequest,
 ) -> AssignReplicasToDirsResponse {
@@ -133,17 +136,20 @@ pub(crate) fn build_echo_response(
     }
 }
 
-/// Pure: compute the (0 or 1) directory-assignment delta that records
-/// `broker_id`'s replica of `(topic_id, partition)` living on `dir_uuid`.
-/// Empty when the topic/partition is unknown, the broker isn't a replica,
-/// or the slot already holds `dir_uuid` (idempotent — avoids churn).
+/// Computes the directory-assignment delta, of 0 or 1 records, that records
+/// the replica of `(topic_id, partition)` on `broker_id` as living on
+/// `dir_uuid`. This function is pure.
 ///
-/// Emits a [`MetadataRecord::V1PartitionDirAssignment`] DELTA rather than a
-/// full `V1Partition`: on apply it merges ONLY the one replica's slot in
-/// `directories`, never touching leader/isr/replicas/adding/removing. A full
-/// read-modify-write here, built from a slightly-stale image read, would race
-/// a concurrent `AlterPartitionReassignments` and revert `adding_replicas`;
-/// the delta is order-independent (KIP-858).
+/// The result is empty when the topic or partition is unknown, when the broker
+/// is not a replica, or when the slot already holds `dir_uuid`. The function
+/// is therefore idempotent and avoids churn.
+///
+/// It emits a [`MetadataRecord::V1PartitionDirAssignment`] DELTA instead of a
+/// full `V1Partition`. On apply, the delta merges ONLY the one replica's slot
+/// in `directories`, and never touches leader, isr, replicas, adding, or
+/// removing. A full read-modify-write here, built from a slightly stale image
+/// read, would race a concurrent `AlterPartitionReassignments` and revert
+/// `adding_replicas`. The delta does not depend on order (KIP-858).
 fn assignment_changes(
     image: &MetadataImage,
     broker_id: u64,
@@ -487,8 +493,9 @@ mod tests {
 
     // ── collect_assignment_changes ────────────────────────────────────────────
 
-    /// Build a minimal image with one topic + partition where broker 2 is a
-    /// replica. Return the topic UUID so callers can put it in the request.
+    /// Builds a minimal image with one topic and one partition, where broker
+    /// 2 is a replica. It returns the topic UUID, so callers can put it in the
+    /// request.
     fn make_image_with_broker2_replica() -> (MetadataImage, uuid::Uuid) {
         let topic_id = uuid::Uuid::from_u128(0x42);
         let mut image = MetadataImage::new(uuid::Uuid::nil());

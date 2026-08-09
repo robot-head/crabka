@@ -1,26 +1,27 @@
 //! Declarative partitioning: catalog metadata, bound validation, overlap
 //! detection, and row routing.
 //!
-//! A partitioned parent is a catalog relation that owns no rows: every row
-//! lives in exactly one leaf partition, chosen by comparing the row's partition
-//! key against each leaf's stored bound. This module is the single place that
-//! decides which leaf a row belongs to, so the `INSERT` routing path, the
-//! per-leaf constraint check, and `ATTACH PARTITION` validation cannot disagree
-//! about it.
+//! A partitioned parent is a catalog relation that owns no rows. Every row
+//! lives in exactly one leaf partition. A comparison of the row's partition key
+//! against each leaf's stored bound picks that leaf. This module is the single
+//! place that decides which leaf a row belongs to, so the `INSERT` routing
+//! path, the per-leaf constraint check, and `ATTACH PARTITION` validation
+//! cannot disagree about it.
 //!
 //! # Relationship to native sharding
 //!
 //! The chapter design assigns declarative partitioning to the G-8/G-9c sharding
-//! machinery. That mapping is *not* what this module does, and the reason is
-//! the program's correctness-over-coverage rule: sharding routes on a hash of a
-//! single column into a power-of-two bucket count, which cannot express a
+//! machinery. That mapping is *not* what this module does, because of the
+//! program's correctness-over-coverage rule. Sharding routes on a hash of a
+//! single column into a power-of-two bucket count. That cannot express a
 //! `LIST` bound, a `RANGE` bound, a `DEFAULT` partition, or `PostgreSQL`'s
-//! `MODULUS`/`REMAINDER` hash bucketing — and a sharded relation additionally
-//! has a narrower mutation surface (no `PRIMARY KEY`/`UNIQUE`). Routing a
-//! partitioned table through it would answer with the wrong rows for every
-//! shape but one. Partitions are therefore ordinary relations linked by catalog
-//! metadata, and `SHARDED` and `PARTITION BY` are mutually exclusive
-//! ([`reject_sharded_partitioned`]).
+//! `MODULUS`/`REMAINDER` hash bucketing. A sharded relation also has a narrower
+//! mutation surface, with no `PRIMARY KEY` and no `UNIQUE`.
+//!
+//! A partitioned table routed through the sharding machinery would answer with
+//! the wrong rows for every shape but one. Partitions are therefore ordinary
+//! relations linked by catalog metadata, and `SHARDED` and `PARTITION BY` are
+//! mutually exclusive. See [`reject_sharded_partitioned`].
 
 pub(crate) mod hash;
 
@@ -37,10 +38,10 @@ use crate::error::ExecError;
 
 /// System-key prefix for a partitioned parent's key definition.
 ///
-/// The three partition families sit *beside* the relation catalog rather than
-/// under it: a scan of `catalog/` answers "every stored relation", and a
-/// partition record living under that prefix would be handed to the relation
-/// decoder as if it were one.
+/// The three partition families sit *beside* the relation catalog and not
+/// under it. A scan of `catalog/` answers "every stored relation", and a
+/// partition record under that prefix would go to the relation decoder as if
+/// it were a relation.
 const SCHEME_PREFIX: &[u8] = b"\0\0\0\0catalog_partition/scheme/";
 /// System-key prefix for a leaf's parent link and bound.
 const CHILD_PREFIX: &[u8] = b"\0\0\0\0catalog_partition/child/";
@@ -98,10 +99,10 @@ impl Strategy {
 
 /// One partition-key column of a partitioned parent.
 ///
-/// Only plain column references are stored: an expression key is refused at
-/// `CREATE TABLE` time (see [`key_columns`]), because routing a row through an
+/// This type stores only plain column references. An expression key is refused
+/// at `CREATE TABLE` time. See [`key_columns`]. A row routed through an
 /// arbitrary expression would need the expression's result type to coerce the
-/// stored bounds against, and getting that wrong routes rows to the wrong leaf.
+/// stored bounds against, and a wrong result type routes rows to the wrong leaf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KeyColumn {
     /// Zero-based ordinal of the column in the parent's column list.
@@ -155,8 +156,8 @@ pub(crate) struct Partition {
 /// [`RelationName`] gives: `PostgreSQL` lets `"a.b"` in `public` and `b` in
 /// schema `a` be different relations, so a partition of one must not be found
 /// under the other. The length prefixes also make the parent → child index
-/// recoverable — [`partitions_of`] reads the child back out of the key suffix
-/// exactly, instead of splitting on a byte the names were assumed not to hold.
+/// recoverable. [`partitions_of`] reads the child back out of the key suffix
+/// exactly, and does not split on a byte the names were assumed not to hold.
 fn push_relation(key: &mut Vec<u8>, relation: &RelationName) {
     push_key_part(key, &relation.schema);
     push_key_part(key, &relation.name);
@@ -189,7 +190,7 @@ fn children_key(parent: &RelationName, child: &RelationName) -> Vec<u8> {
 /// Recover the relation a key suffix written by [`push_relation`] names.
 ///
 /// A suffix that is not exactly two length-prefixed parts belongs to no
-/// relation, so it is rejected structurally rather than guessed at.
+/// relation, so this function rejects it structurally and does not guess.
 fn relation_from_key_suffix(suffix: &[u8]) -> Result<RelationName, ExecError> {
     match key_parts(suffix, 2).as_deref() {
         Some([schema, name]) => Ok(RelationName::new(*schema, *name)),
@@ -273,7 +274,8 @@ fn deserialize_scheme(bytes: &[u8]) -> Result<Scheme, ExecError> {
 }
 
 /// Datum lists ride the storage row encoding, which covers the whole `Datum`
-/// space — including the date/time types a range partition is usually keyed on.
+/// space. This includes the date/time types a range partition is usually keyed
+/// on.
 fn write_datums(out: &mut Vec<u8>, values: &[Datum]) {
     let encoded = crabka_pgkv::rowenc::encode_row(values);
     let len = u32::try_from(encoded.len()).expect("an encoded bound fits in u32 bytes");
@@ -423,9 +425,9 @@ pub(crate) fn partitions_of(
         .collect()
 }
 
-/// Every partition of `parent`, and every partition of those, depth first — the
-/// set of relations that actually store `parent`'s rows plus the intermediate
-/// parents in between.
+/// Every partition of `parent`, and every partition of those, depth first. This
+/// is the set of relations that actually store `parent`'s rows, plus the
+/// intermediate parents between them.
 pub(crate) fn descendants(
     kv: &dyn Kv,
     parent: &RelationName,
@@ -474,7 +476,7 @@ pub(crate) fn leaves_of(
 
 // ── Catalog writes ───────────────────────────────────────────────────────────
 
-/// Write ops recording `parent` as partitioned by `scheme`.
+/// Write ops that record `parent` as partitioned by `scheme`.
 pub(crate) fn put_scheme_ops(parent: &RelationName, scheme: &Scheme) -> Vec<WriteOp> {
     vec![WriteOp::Put {
         key: scheme_key(parent),
@@ -482,7 +484,7 @@ pub(crate) fn put_scheme_ops(parent: &RelationName, scheme: &Scheme) -> Vec<Writ
     }]
 }
 
-/// Write ops attaching `child` to `parent` with `bound`.
+/// Write ops that attach `child` to `parent` with `bound`.
 pub(crate) fn attach_ops(
     parent: &RelationName,
     child: &RelationName,
@@ -500,7 +502,7 @@ pub(crate) fn attach_ops(
     ]
 }
 
-/// Write ops detaching `child` from `parent`.
+/// Write ops that detach `child` from `parent`.
 pub(crate) fn detach_ops(parent: &RelationName, child: &RelationName) -> Vec<WriteOp> {
     vec![
         WriteOp::Delete {
@@ -512,8 +514,8 @@ pub(crate) fn detach_ops(parent: &RelationName, child: &RelationName) -> Vec<Wri
     ]
 }
 
-/// Write ops removing `name`'s own partition metadata — its key definition if
-/// it is a parent, and its parent link if it is a partition.
+/// Write ops that remove `name`'s own partition metadata: its key definition
+/// if it is a parent, and its parent link if it is a partition.
 pub(crate) fn drop_metadata_ops(
     kv: &dyn Kv,
     name: &RelationName,
@@ -542,16 +544,15 @@ fn key_values(scheme: &Scheme, row: &[Datum]) -> Result<Vec<Datum>, ExecError> {
         .collect()
 }
 
-/// Compare two partition-key datums. `None` means the comparison had no answer
-/// — either operand was NULL, or the two types do not compare — and every
-/// caller treats that as "does not belong here" rather than guessing.
+/// Compare two partition-key datums. `None` means the comparison had no answer,
+/// because either operand was NULL or the two types do not compare. Every
+/// caller treats that as "does not belong here" and does not guess.
 fn compare(left: &Datum, right: &Datum) -> Option<Ordering> {
     crabka_pgtypes::ops::compare(left, right).ok().flatten()
 }
 
-/// Does `key` fall inside `bound`? `None` means "not decidable", which is
-/// treated as "no" by [`route`] and reported as a routing failure rather than
-/// guessed at.
+/// Does `key` fall inside `bound`? `None` means "not decidable". [`route`]
+/// treats that as "no" and reports a routing failure. It does not guess.
 fn contains(scheme: &Scheme, bound: &Bound, key: &[Datum]) -> Result<bool, ExecError> {
     match bound {
         // The default partition takes whatever no other partition took; `route`
@@ -596,7 +597,7 @@ fn contains(scheme: &Scheme, bound: &Bound, key: &[Datum]) -> Result<bool, ExecE
     }
 }
 
-/// Compare a row's key tuple against one side of a range bound, using
+/// Compare a row's key tuple against one side of a range bound, with
 /// `PostgreSQL`'s rule that the first differing column decides and an infinite
 /// bound decides immediately.
 fn compare_range_tuple(key: &[Datum], bound: &[RangeDatum]) -> Result<Ordering, ExecError> {
@@ -623,9 +624,9 @@ fn compare_range_tuple(key: &[Datum], bound: &[RangeDatum]) -> Result<Ordering, 
 /// The partition of `parent` that `row` belongs to, or `None` when no partition
 /// accepts it.
 ///
-/// `partitions` is the full direct-partition list; the default partition is
-/// only chosen once every other bound has declined the row, exactly as
-/// `PostgreSQL` does.
+/// `partitions` is the full direct-partition list. This function chooses the
+/// default partition only after every other bound has declined the row,
+/// exactly as `PostgreSQL` does.
 pub(crate) fn route<'a>(
     scheme: &Scheme,
     partitions: &'a [Partition],
@@ -643,10 +644,10 @@ pub(crate) fn route<'a>(
 }
 
 /// Does `row` satisfy `bound` under `scheme`? This is `PostgreSQL`'s implicit
-/// per-partition `CHECK`, applied when a row is written straight into a leaf.
+/// per-partition `CHECK`, applied when a row goes straight into a leaf.
 ///
 /// A `DEFAULT` partition accepts a row exactly when no sibling accepts it, so
-/// the sibling bounds have to be supplied too.
+/// the caller must supply the sibling bounds too.
 pub(crate) fn satisfies(
     scheme: &Scheme,
     bound: &Bound,
@@ -667,7 +668,7 @@ pub(crate) fn satisfies(
 
 // ── Bound validation ─────────────────────────────────────────────────────────
 
-/// Reject a bound whose spelling does not match the parent's strategy, using
+/// Reject a bound whose spelling does not match the parent's strategy, with
 /// `PostgreSQL`'s 42P16 wording.
 pub(crate) fn check_bound_shape(strategy: Strategy, bound: &Bound) -> Result<(), ExecError> {
     let matches = matches!(
@@ -711,7 +712,7 @@ pub(crate) fn check_range_not_empty(
     )))
 }
 
-/// Order one range tuple against another, comparing column by column with
+/// Order one range tuple against another, column by column, with
 /// `MINVALUE`/`MAXVALUE` as the extremes.
 fn range_side_ordering(left: &[RangeDatum], right: &[RangeDatum]) -> Result<Ordering, ExecError> {
     for (left, right) in left.iter().zip(right.iter()) {
@@ -731,7 +732,7 @@ fn range_side_ordering(left: &[RangeDatum], right: &[RangeDatum]) -> Result<Orde
 }
 
 /// Reject a bound that overlaps an existing sibling, or a second `DEFAULT`,
-/// using `PostgreSQL`'s 42P17 wording — which names both partitions with
+/// with `PostgreSQL`'s 42P17 wording. That wording names both partitions with
 /// `RelationGetRelationName`, so neither carries its schema.
 pub(crate) fn check_no_overlap(
     strategy: Strategy,
@@ -850,8 +851,8 @@ pub(crate) fn check_hash_bound(bound: &Bound) -> Result<(), ExecError> {
 // ── Definition-time rules ────────────────────────────────────────────────────
 
 /// `SHARDED` and `PARTITION BY` both claim ownership of how a relation's rows
-/// are distributed, and the two routing rules cannot both hold. Declaring both
-/// is refused rather than silently letting one win.
+/// are distributed, and the two routing rules cannot both hold. This function
+/// refuses a declaration of both, and does not silently let one win.
 pub(crate) fn reject_sharded_partitioned() -> ExecError {
     ExecError::Unsupported(
         "a SHARDED table cannot also be partitioned: sharding and declarative partitioning are \
@@ -862,9 +863,9 @@ pub(crate) fn reject_sharded_partitioned() -> ExecError {
 
 /// Resolve a `PARTITION BY` key list against the parent's columns.
 ///
-/// Every rule `PostgreSQL` enforces at parse-analysis time is applied here so
-/// the SQLSTATEs match: a missing column is 42703, a system column or a
-/// constant expression is 42P17, and `LIST` with more than one column is 42P17.
+/// This function applies every rule `PostgreSQL` enforces at parse-analysis
+/// time, so the SQLSTATEs match. A missing column is 42703. A system column or
+/// a constant expression is 42P17. `LIST` with more than one column is 42P17.
 pub(crate) fn key_columns(
     strategy: Strategy,
     keys: &[crabka_pgparser::ast::PartitionKeyElem],
@@ -907,10 +908,10 @@ fn is_system_column(name: &str) -> bool {
 
 /// The refusal for an expression partition key.
 ///
-/// A constant expression is `PostgreSQL`'s own 42P17; every other expression is
-/// a documented 0A000 rather than an approximation, because routing through an
-/// expression needs the expression's result type to coerce the stored bounds
-/// against and a wrong coercion puts rows in the wrong leaf.
+/// A constant expression is `PostgreSQL`'s own 42P17. Every other expression is
+/// a documented 0A000 and not an approximation. A route through an expression
+/// needs the expression's result type to coerce the stored bounds against, and
+/// a wrong coercion puts rows in the wrong leaf.
 fn expression_key_error(text: &str) -> ExecError {
     ExecError::Unsupported(format!(
         "expression partition keys are not supported: PARTITION BY … ({text}) needs the \
@@ -919,7 +920,7 @@ fn expression_key_error(text: &str) -> ExecError {
     ))
 }
 
-/// Type of the `ordinal`-th column, for coercing a written bound value.
+/// Type of the `ordinal`-th column, for the coercion of a written bound value.
 pub(crate) fn key_column_type(
     columns: &[crabka_pgcatalog::Column],
     key: &KeyColumn,
@@ -936,10 +937,10 @@ mod tests {
     /// A cycle in the partition metadata must not make the tree walk diverge.
     ///
     /// `ATTACH PARTITION` refuses the cycles it can see, but this walk is on the
-    /// `DROP` path and has to terminate on whatever metadata it is handed. When
-    /// it did not, a single `DROP TABLE` spun a core and allocated until the
-    /// process was killed — which read as 10,135 corpus statements failing to
-    /// connect rather than as one bad statement.
+    /// `DROP` path and must terminate on whatever metadata it is handed. When it
+    /// did not, a single `DROP TABLE` spun a core and allocated until the
+    /// process was killed. That read as 10,135 corpus statements that failed to
+    /// connect, and not as one bad statement.
     #[test]
     fn a_cycle_in_the_partition_tree_does_not_diverge() {
         use assert2::assert;
@@ -984,10 +985,10 @@ mod tests {
         kv.write_batch(&ops).expect("write");
     }
 
-    /// The relation catalog is read by scanning its prefix, so a partition
-    /// record stored under it would be handed to the relation decoder — and
-    /// `DROP SCHEMA … CASCADE`, which lists a schema's contents that way, would
-    /// try to drop it as a relation.
+    /// A scan of its prefix reads the relation catalog, so a partition record
+    /// stored under it would go to the relation decoder. `DROP SCHEMA … CASCADE`
+    /// lists a schema's contents that way, so it would try to drop the record as
+    /// a relation.
     #[test]
     fn partition_metadata_is_stored_outside_the_relation_catalog() {
         let parent = RelationName::new("sch", "p");
@@ -1003,8 +1004,9 @@ mod tests {
     }
 
     /// Both halves of every partition key are length-prefixed, so one parent's
-    /// child index cannot be read as another's — even when one relation's name
-    /// begins with the other's, which a plain concatenation would confuse.
+    /// child index cannot be read as another's. This holds even when one
+    /// relation's name begins with the other's, which a plain concatenation
+    /// would confuse.
     #[test]
     fn the_children_index_returns_one_parents_partitions_only() {
         let kv = crabka_pgkv::MemKv::default();

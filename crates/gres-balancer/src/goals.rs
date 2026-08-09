@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{BalanceOperation, OperationKind, RangeMetrics, TenantMetrics};
 
-/// Hard goals protect invariants; soft goals improve placement.
+/// Goal priority: hard goals protect invariants, and soft goals improve placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalPriority {
@@ -25,9 +25,9 @@ pub enum GoalPriority {
 
 /// Configuration and recent-operation memory used by goals.
 ///
-/// `PartialEq` but not `Eq`: the two size thresholds and the skew hysteresis are
-/// `f64`-backed quantities, so equality is not reflexive across the whole
-/// domain.
+/// This type has `PartialEq` but not `Eq`. The two size thresholds and the skew
+/// hysteresis are `f64`-backed quantities, so equality is not reflexive across
+/// the whole domain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalContext {
@@ -38,7 +38,7 @@ pub struct GoalContext {
     #[serde(with = "crabka_units::serde_units::human::byte_size")]
     pub merge_floor: ByteSize,
     pub split_stride_rows: u64,
-    /// Leave load skew alone while it stays within this margin.
+    /// Ignore load skew while it stays within this margin.
     #[serde(with = "crabka_units::serde_units::human::ratio")]
     pub load_skew_hysteresis: Ratio,
     pub max_ranges_per_compute: Option<usize>,
@@ -87,7 +87,7 @@ pub enum GoalName {
     AutoShardConversion,
 }
 
-/// Per-goal enablement knobs for dry-run planning.
+/// Per-goal controls for dry-run planning.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalToggles {
@@ -105,7 +105,8 @@ impl GoalToggles {
 
 /// Complete dry-run balancer configuration.
 ///
-/// `PartialEq` but not `Eq`, following [`GoalContext`].
+/// This type has `PartialEq` but not `Eq`, for the same reason as
+/// [`GoalContext`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BalancerConfig {
@@ -404,17 +405,18 @@ fn merge_tiny_adjacent_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<
         .collect()
 }
 
-/// Propose the boundary a range is cut at, or `None` when the range has no legal
+/// Return the boundary to cut a range at, or `None` when the range has no legal
 /// split point.
 ///
-/// A hash-sharded table is cut on the first row of a bucket it has, and nowhere
-/// else. Hash equality routing probes a bucket at rowid 0 and answers for every
-/// row of that bucket, so a boundary inside a bucket would leave the rest of its
-/// rows on a range the router never consults. The same rule is enforced by
-/// `RangeMap::plan_hash_split_at_key`, by the registry
-/// (`ensure_boundaries_match_hash_placements`), and by `gres split`; planning a
-/// mid-bucket point here would only ever produce an operation rejected at
-/// execution.
+/// The planner cuts a hash-sharded table on the first row of a bucket the table
+/// has, and nowhere else. Hash equality routing probes a bucket at rowid 0 and
+/// answers for every row of that bucket. A boundary inside a bucket would leave
+/// the other rows of that bucket on a range the router never consults.
+///
+/// `RangeMap::plan_hash_split_at_key`, the registry function
+/// `ensure_boundaries_match_hash_placements`, and `gres split` all enforce the
+/// same rule. A mid-bucket point planned here would only produce an operation
+/// that execution rejects.
 fn split_boundary(
     range: &RangeMetrics,
     hash_bucket_count: Option<u32>,
@@ -432,8 +434,9 @@ fn split_boundary(
 
 /// Halve the buckets the range owns of `range.table_id`.
 ///
-/// A range holding less than two whole buckets has no bucket start strictly
-/// inside it — a legal cut would have to fall inside a bucket — so it declines.
+/// A range that holds less than two whole buckets has no bucket start strictly
+/// inside it. A legal cut would have to fall inside a bucket, so this function
+/// returns `None`.
 fn bucket_start_boundary(range: &RangeMetrics, bucket_count: u32) -> Option<RangeBoundary> {
     let table_id = range.table_id;
     let first = first_splittable_bucket(range, table_id)?;

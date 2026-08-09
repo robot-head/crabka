@@ -1,15 +1,17 @@
 //! F-2: the `pg_catalog` functions `psql`'s `\d` family, ORM preambles and
-//! migration tools call — object definition reconstruction (`pg_get_viewdef`,
+//! migration tools call.
+//!
+//! The module covers object definition reconstruction (`pg_get_viewdef`,
 //! `pg_get_indexdef`, `pg_get_constraintdef`), identity (`pg_get_userbyid`,
 //! `current_schemas`, `pg_backend_pid`), comments (`obj_description` and
-//! friends), sizes, and the `has_*_privilege` family.
+//! related functions), sizes, and the `has_*_privilege` family.
 //!
-//! The family is dispatched from [`eval`](crate::eval) ahead of the older
-//! scalar families, exactly like `json_fn`/`array_fn`. What separates it from
-//! those is that most of these functions read the catalog: they reach it
-//! through [`EvalCtx::catalog`], which is `None` outside a SQL session (a
-//! planning context or a unit test), where they report 0A000 rather than
-//! silently answering NULL.
+//! [`eval`](crate::eval) dispatches the family ahead of the older scalar
+//! families, exactly like `json_fn`/`array_fn`. What separates it from those is
+//! that most of these functions read the catalog. They reach it through
+//! [`EvalCtx::catalog`], which is `None` outside a SQL session, for example in
+//! a planning context or a unit test. There they report 0A000 and do not
+//! silently answer NULL.
 
 use std::fmt::Write;
 
@@ -28,23 +30,28 @@ use crate::{
     scope::Scope,
 };
 
-/// `pg_class`'s own oid — the `classoid` every relation comment carries.
+/// `pg_class`'s own oid, the `classoid` every relation comment carries.
 pub(crate) const PG_CLASS_OID: i32 = 1259;
 pub(crate) const PG_CONSTRAINT_OID: i32 = 2606;
 pub(crate) const PG_TRIGGER_OID: i32 = 2620;
 /// First oid of the band reserved for roles.
 pub(crate) const ROLE_OID_BASE: i32 = 100_000;
-/// The oid of the bootstrap superuser, which owns every object — PostgreSQL's
-/// own oid for it, so `pg_get_userbyid(relowner)` needs no special casing on
-/// the caller's side.
+/// The oid of the bootstrap superuser, which owns every object.
+///
+/// This is PostgreSQL's own oid for that role, so `pg_get_userbyid(relowner)`
+/// needs no special case on the caller's side.
 pub(crate) const BOOTSTRAP_ROLE_OID: i32 = 10;
-/// The oid of `pg_database_owner`, the implicit role `public` belongs to —
-/// again PostgreSQL's own oid, so a client comparing against 6171 matches.
+/// The oid of `pg_database_owner`, the implicit role `public` belongs to.
+///
+/// This is again PostgreSQL's own oid, so a client that compares against 6171
+/// matches.
 pub(crate) const DATABASE_OWNER_ROLE_OID: i32 = 6171;
 /// PostgreSQL's encoding number for UTF-8.
 pub(crate) const UTF8_ENCODING: i32 = 6;
-/// The role every crabka object is owned by. crabka has no per-object owner
-/// column, and the bootstrap superuser is the only role that can create one.
+/// The role that owns every crabka object.
+///
+/// Crabka has no per-object owner column, and the bootstrap superuser is the
+/// only role that can create an object.
 pub(crate) const OBJECT_OWNER: &str = "postgres";
 
 /// Which member of the `pg_get_function*` family a call names.
@@ -67,14 +74,14 @@ enum CatalogFunc {
     UserById,
     SerialSequence,
     /// A definition-reconstruction function for an object kind crabka has none
-    /// of; always NULL, like PostgreSQL's answer for a missing oid.
+    /// of. It is always NULL, like PostgreSQL's answer for a missing oid.
     NullDef,
     /// P2: the `pg_get_function*` family over the routine catalog.
     RoutineDef(RoutineDefKind),
     IsVisible,
     RelationSize,
     /// A size over a whole database or tablespace, whose argument is a name or
-    /// oid of that object rather than a relation.
+    /// oid of that object and not a relation.
     ClusterSize,
     SizePretty,
     ObjDescription,
@@ -95,7 +102,7 @@ enum CatalogFunc {
     EventRewriteReason,
 }
 
-/// Classify a (lowercased) function name.
+/// Classify a lowercased function name.
 fn catalog_func(name: &str) -> Option<CatalogFunc> {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
@@ -171,13 +178,14 @@ fn is_privilege_func(name: &str) -> bool {
     )
 }
 
-/// Is `name` one of this family's functions? The dispatch point in
-/// [`eval`](crate::eval).
+/// Is `name` one of this family's functions?
+///
+/// This is the dispatch point in [`eval`](crate::eval).
 pub(crate) fn is_catalog_func(name: &str) -> bool {
     catalog_func(name).is_some()
 }
 
-/// Statically infer a catalog call's result type, validating arity.
+/// Statically infer a catalog call's result type, and validate the arity.
 ///
 /// # Errors
 ///
@@ -444,8 +452,10 @@ fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
     Ok(Datum::Text(sql))
 }
 
-/// The `pg_get_function*` family. A reference that resolves to no routine is
-/// NULL, exactly as `PostgreSQL` answers for an oid that no longer exists.
+/// The `pg_get_function*` family.
+///
+/// A reference that resolves to no routine is NULL, exactly as `PostgreSQL`
+/// answers for an oid that no longer exists.
 fn routine_def(kv: &dyn Kv, kind: RoutineDefKind, reference: &Datum) -> Result<Datum, ExecError> {
     let Some(routine) = crate::routine::routine_by_reference(kv, reference)? else {
         return Ok(Datum::Null);
@@ -466,7 +476,7 @@ fn catalog_unavailable() -> ExecError {
     ExecError::Unsupported("catalog functions require a SQL session".into())
 }
 
-/// Everything crabka exposes lives in a schema on the search path, so a
+/// Everything crabka exposes is in a schema on the search path, so a
 /// visibility test is true for any non-NULL oid and NULL for a NULL one.
 fn visibility_answer(oid: &Datum) -> Datum {
     match oid {
@@ -477,10 +487,11 @@ fn visibility_answer(oid: &Datum) -> Datum {
 
 /// When this process started, as `pg_postmaster_start_time()` reports it.
 ///
-/// Read from the kernel rather than captured on first call, because a lazily
-/// captured instant is LATER than the statement's `now()` and would make every
-/// uptime query report a negative age. Where the kernel cannot say (a non-Linux
-/// host), the first call's instant is the honest fallback.
+/// This function reads the kernel instead of a value captured on the first
+/// call. A lazily captured instant is LATER than the statement's `now()` and
+/// would make every uptime query report a negative age. On a host where the
+/// kernel cannot answer, for example a non-Linux host, the first call's instant
+/// is the fallback.
 fn process_start_time() -> jiff::Timestamp {
     static START: std::sync::OnceLock<jiff::Timestamp> = std::sync::OnceLock::new();
     *START.get_or_init(|| {
@@ -491,9 +502,11 @@ fn process_start_time() -> jiff::Timestamp {
     })
 }
 
-/// This process's start instant from `/proc`: the boot time in `/proc/stat`
-/// plus this process's start offset (field 22 of `/proc/self/stat`, in clock
-/// ticks). `None` on any host that does not publish both.
+/// This process's start instant from `/proc`.
+///
+/// The instant is the boot time in `/proc/stat` plus this process's start
+/// offset, which is field 22 of `/proc/self/stat`, in clock ticks. The result
+/// is `None` on any host that does not publish both.
 fn boot_relative_start_time() -> Option<jiff::Timestamp> {
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
     // The second field is the comm name in parentheses and may contain spaces,
@@ -511,18 +524,20 @@ fn boot_relative_start_time() -> Option<jiff::Timestamp> {
     jiff::Timestamp::from_second(btime + ticks / 100).ok()
 }
 
-/// `current_schemas(include_implicit)` — the session's search path as an array,
-/// in path order and filtered to the entries that name an existing schema.
+/// `current_schemas(include_implicit)`, the session's search path as an array.
+///
+/// The array is in path order and holds only the entries that name an existing
+/// schema.
 ///
 /// `include_implicit` adds the two entries PostgreSQL prepends when the path
 /// does not already name them: the session's temporary namespace, and then
-/// `pg_catalog`. Verified against PostgreSQL 18.4: under the default path
-/// `current_schemas(false)` is `{public}` while `current_schemas(true)` is
-/// `{pg_catalog,public}`; after a `CREATE TEMP TABLE` the latter becomes
-/// `{pg_temp_1,pg_catalog,public}`; after `SET search_path = pg_catalog, public`
-/// both are `{pg_catalog,public}`; and an entry naming no existing schema is
-/// silently skipped rather than reported. The function is strict, so a NULL
-/// argument answers NULL.
+/// `pg_catalog`. The behavior below was verified against PostgreSQL 18.4. Under
+/// the default path `current_schemas(false)` is `{public}` and
+/// `current_schemas(true)` is `{pg_catalog,public}`. After a
+/// `CREATE TEMP TABLE` the second one becomes `{pg_temp_1,pg_catalog,public}`.
+/// After `SET search_path = pg_catalog, public` both are `{pg_catalog,public}`.
+/// An entry that names no existing schema is skipped and not reported. The
+/// function is strict, so a NULL argument answers NULL.
 fn current_schemas(include_implicit: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     if matches!(include_implicit, Datum::Null) {
         return Ok(Datum::Null);
@@ -557,9 +572,10 @@ fn char_to_encoding(name: &Datum) -> Datum {
     }
 }
 
-/// `pg_size_pretty(bigint)`, byte for byte as PostgreSQL formats it: the value
-/// is shifted one unit at a time, keeping one extra bit so the final halving
-/// rounds rather than truncates.
+/// `pg_size_pretty(bigint)`, byte for byte as PostgreSQL formats it.
+///
+/// This function shifts the value one unit at a time and keeps one extra bit,
+/// so the final halving rounds instead of truncates.
 fn size_pretty(size: &Datum) -> Result<Datum, ExecError> {
     if matches!(size, Datum::Null) {
         return Ok(Datum::Null);
@@ -582,10 +598,11 @@ fn size_pretty(size: &Datum) -> Result<Datum, ExecError> {
     Ok(Datum::Text(format!("{value} bytes")))
 }
 
-/// The `has_*_privilege` family. crabka's single bootstrap role owns every
-/// object, so every recognized privilege on an existing object is held; an
-/// unrecognized privilege name is PostgreSQL's 22023, which is what callers
-/// actually depend on catching.
+/// The `has_*_privilege` family.
+///
+/// Crabka's single bootstrap role owns every object, so every recognized
+/// privilege on an existing object is held. An unrecognized privilege name is
+/// PostgreSQL's 22023, which is the error callers depend on catching.
 fn has_privilege(name: &str, vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
     let Some(Datum::Text(privilege)) = vals.last() else {
         return Ok(Datum::Null);
@@ -637,9 +654,11 @@ fn recognized_privilege(privilege: &str) -> bool {
         .any(|known| known.eq_ignore_ascii_case(privilege))
 }
 
-/// crabka has no physical storage accounting: every relation reports zero
-/// bytes rather than a fabricated page count. The functions still resolve their
-/// relation argument, so a missing relation is 42P01 as in PostgreSQL.
+/// Crabka has no physical storage accounting. Every relation reports zero
+/// bytes and not an invented page count.
+///
+/// These functions still resolve their relation argument, so a missing relation
+/// is 42P01 as in PostgreSQL.
 fn relation_size(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Datum, ExecError> {
     if matches!(object, Datum::Null) {
         return Ok(Datum::Null);
@@ -648,8 +667,10 @@ fn relation_size(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result
     Ok(Datum::Int8(0))
 }
 
-/// `pg_database_size`/`pg_tablespace_size`. crabka keeps no storage accounting,
-/// so the answer is zero bytes for any non-NULL argument.
+/// `pg_database_size`/`pg_tablespace_size`.
+///
+/// Crabka keeps no storage accounting, so the answer is zero bytes for any
+/// non-NULL argument.
 fn cluster_size(object: &Datum) -> Datum {
     match object {
         Datum::Null => Datum::Null,
@@ -657,7 +678,7 @@ fn cluster_size(object: &Datum) -> Datum {
     }
 }
 
-/// Resolve a `regclass`-shaped argument — an oid, or a relation name — to its
+/// Resolve a `regclass`-shaped argument, an oid or a relation name, to its
 /// `pg_class` oid.
 fn resolve_relation_oid(
     kv: &dyn Kv,
@@ -675,11 +696,11 @@ fn resolve_relation_oid(
 /// Resolve a written relation name across every relation kind, not just base
 /// tables.
 ///
-/// The text is a `regclass` input, read by [`parse_written_relation`] — so a
-/// quoted part keeps its case and may hold a dot, and an unquoted one downcases
-/// — and then resolved the way `scope` resolves any written name: a qualifier
-/// names the schema outright, and a bare name is looked for in each visible
-/// schema in path order.
+/// The text is a `regclass` input, read by [`parse_written_relation`]. A quoted
+/// part keeps its case and may hold a dot, and an unquoted part is downcased.
+/// The text is then resolved the way `scope` resolves any written name. A
+/// qualifier names the schema outright, and this function looks for a bare name
+/// in each visible schema in path order.
 pub(crate) fn resolve_relation_in_scope(
     kv: &dyn Kv,
     scope: &ResolutionScope,
@@ -700,10 +721,13 @@ pub(crate) fn resolve_relation_in_scope(
 }
 
 /// The catalog-aware half of a `… :: regclass` cast whose operand spells a
-/// relation *name*, which is the only shape a search path applies to: `t` under
+/// relation *name*.
+///
+/// A name is the only shape a search path applies to. `t` under
 /// `search_path = s1` is `s1.t`, exactly as `SELECT … FROM t` reads it. Every
-/// other operand — an oid in any of its spellings, `-`, a `regclass` already —
-/// names its relation outright and takes [`crate::exec::regclass_cast`].
+/// other operand names its relation outright and takes
+/// [`crate::exec::regclass_cast`]. Those operands are an oid in any of its
+/// spellings, `-`, and a value that is already a `regclass`.
 pub(crate) fn regclass_cast(
     kv: &dyn Kv,
     scope: &ResolutionScope,
@@ -718,9 +742,10 @@ pub(crate) fn regclass_cast(
         .map(Some)
 }
 
-/// The operand text that spells a relation name rather than an oid —
-/// `regclassin`'s own test, which takes `-` and an all-digit string as oids
-/// before it reads anything as a name.
+/// The operand text that spells a relation name instead of an oid.
+///
+/// This is `regclassin`'s own test. It takes `-` and an all-digit string as
+/// oids before it reads anything as a name.
 fn relation_name_operand(value: &Datum) -> Option<&str> {
     let Datum::Text(text) = value else {
         return None;
@@ -729,14 +754,16 @@ fn relation_name_operand(value: &Datum) -> Option<&str> {
     (trimmed != "-" && trimmed.parse::<i32>().is_err()).then_some(text.as_str())
 }
 
-/// The `pg_class` oid of the relation stored under exactly this catalog name —
-/// a virtual catalog relation, a table, a view, a sequence or an index — or
-/// `None` when no relation of any kind answers to it.
+/// The `pg_class` oid of the relation stored under exactly this catalog name,
+/// or `None` when no relation of any kind answers to it.
+///
+/// The relation may be a virtual catalog relation, a table, a view, a sequence
+/// or an index.
 ///
 /// [`crate::relname::resolve_relation`] resolves the three kinds the catalog
-/// keys by name; `regclass` also accepts an index and a virtual catalog
-/// relation, so the search-path walk lives in [`resolve_relation_in_scope`] and
-/// this is the per-schema probe it repeats.
+/// keys by name. `regclass` also accepts an index and a virtual catalog
+/// relation, so [`resolve_relation_in_scope`] holds the search-path walk, and
+/// this function is the per-schema probe that walk repeats.
 fn relation_oid(kv: &dyn Kv, name: &RelationName) -> Result<Option<i32>, ExecError> {
     match crate::exec::resolve_base_relation(kv, name) {
         Ok(oid) => return Ok(Some(oid)),
@@ -760,8 +787,10 @@ fn relation_oid(kv: &dyn Kv, name: &RelationName) -> Result<Option<i32>, ExecErr
 }
 
 /// The catalog name of a virtual relation, which [`crate::exec`] lists under a
-/// flat spelling: an `information_schema.` qualifier names that schema, and
-/// every unqualified spelling is a `pg_catalog` relation.
+/// flat spelling.
+///
+/// An `information_schema.` qualifier names that schema. Every unqualified
+/// spelling is a `pg_catalog` relation.
 fn virtual_relation_name(spelled: &str) -> RelationName {
     match spelled.split_once('.') {
         Some((schema, name)) => RelationName::new(schema, name),
@@ -770,8 +799,10 @@ fn virtual_relation_name(spelled: &str) -> RelationName {
 }
 
 /// The catalog name a written relation reference denotes, resolved through the
-/// one resolver. Used where the answer is a *name* rather than an oid, and where
-/// only the catalog-keyed relation kinds can be meant.
+/// one resolver.
+///
+/// Callers use this function where the answer is a *name* and not an oid, and
+/// where only the catalog-keyed relation kinds can be meant.
 fn resolve_relation_name(
     kv: &dyn Kv,
     scope: &ResolutionScope,
@@ -785,16 +816,18 @@ fn resolve_relation_name(
     )
 }
 
-/// The inverse of [`resolve_relation_in_scope`]: the name `regclassout` prints
-/// for a `pg_class` oid, or `None` when no relation has that oid.
+/// The inverse of [`resolve_relation_in_scope`].
 ///
-/// The name is spelled as PostgreSQL spells it — each identifier quoted only
-/// when `quote_ident` would, and schema-qualified only when the schema is
-/// outside the search path (`public` and `pg_catalog` print bare, so a catalog
-/// name carrying no schema prefix already has the right shape). Every spelling
-/// this produces has to read back through
-/// [`crate::relname::parse_written_relation`] as the same relation, which is
-/// the round trip `regclass_input.rs` pins.
+/// The result is the name `regclassout` prints for a `pg_class` oid, or `None`
+/// when no relation has that oid.
+///
+/// The name is spelled as PostgreSQL spells it. Each identifier is quoted only
+/// when `quote_ident` would quote it, and the name is schema-qualified only
+/// when the schema is outside the search path. `public` and `pg_catalog` print
+/// bare, so a catalog name that carries no schema prefix already has the right
+/// shape. Every spelling this function produces has to read back through
+/// [`crate::relname::parse_written_relation`] as the same relation. That is the
+/// round trip `regclass_input.rs` pins.
 pub(crate) fn relation_name_by_oid(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
     for virtual_table in crate::exec::virtual_table_names() {
         if crate::exec::virtual_relation_oid(virtual_table) == oid {
@@ -824,9 +857,10 @@ pub(crate) fn relation_name_by_oid(kv: &dyn Kv, oid: i32) -> Result<Option<Strin
     Ok(None)
 }
 
-/// Spell a catalog relation name the way `regclassout` would: `schema.relation`
-/// with each half quoted as needed, dropping the schema for the two that are
-/// always on the search path.
+/// Spell a catalog relation name the way `regclassout` would.
+///
+/// The form is `schema.relation` with each half quoted as needed. This function
+/// drops the schema for the two schemas that are always on the search path.
 fn quote_relation_name(name: &RelationName) -> String {
     if name.schema == crabka_pgcatalog::PUBLIC_SCHEMA
         || name.schema == crate::search_path::PG_CATALOG
@@ -841,9 +875,11 @@ fn quote_relation_name(name: &RelationName) -> String {
     }
 }
 
-/// `pg_get_userbyid(oid)` — the role name for a role oid. PostgreSQL answers
-/// `unknown (OID=n)` for an oid no role has, which `\dt`'s Owner column shows
-/// verbatim, so the fallback is reproduced exactly.
+/// `pg_get_userbyid(oid)`, the role name for a role oid.
+///
+/// PostgreSQL answers `unknown (OID=n)` for an oid no role has, and `\dt`'s
+/// Owner column shows that text verbatim, so this function reproduces the
+/// fallback exactly.
 fn user_by_id(kv: &dyn Kv, oid: &Datum) -> Result<Datum, ExecError> {
     if matches!(oid, Datum::Null) {
         return Ok(Datum::Null);
@@ -863,7 +899,7 @@ fn user_by_id(kv: &dyn Kv, oid: &Datum) -> Result<Datum, ExecError> {
     Ok(Datum::Text(format!("unknown (OID={wanted})")))
 }
 
-/// `pg_get_serial_sequence(table, column)` — the sequence a serial/identity
+/// `pg_get_serial_sequence(table, column)`, the sequence a serial or identity
 /// column draws from, schema-qualified, or NULL when the column has none.
 fn serial_sequence(
     kv: &dyn Kv,
@@ -887,16 +923,17 @@ fn serial_sequence(
     }
 }
 
-/// `pg_get_serial_sequence`'s answer for a stored `nextval` default: the
-/// sequence's name, always schema-qualified — PostgreSQL qualifies it even in
-/// `public` because the text is meant to be handed straight back to
-/// `nextval`/`setval`.
+/// `pg_get_serial_sequence`'s answer for a stored `nextval` default.
 ///
-/// A default stores the sequence as it is *spelled* for `nextval`, which is bare
-/// in `public` and dotted elsewhere, so the text alone cannot say which schema it
-/// names. The sequence's own catalog record can, and a sequence the catalog no
-/// longer holds falls back to its table's schema — where `PostgreSQL` puts the
-/// sequence a serial column owns.
+/// The answer is the sequence's name, always schema-qualified. PostgreSQL
+/// qualifies it even in `public`, because a caller passes the text directly
+/// back to `nextval` or `setval`.
+///
+/// A default stores the sequence as it is *spelled* for `nextval`, which is
+/// bare in `public` and dotted elsewhere, so the text alone cannot say which
+/// schema it names. The sequence's own catalog record can. For a sequence the
+/// catalog no longer holds, this function falls back to its table's schema,
+/// which is where `PostgreSQL` puts the sequence a serial column owns.
 fn qualified_sequence_name(
     kv: &dyn Kv,
     table: &RelationName,
@@ -914,7 +951,7 @@ fn qualified_sequence_name(
     ))
 }
 
-/// `obj_description`/`col_description` — the comment on an object, or on one of
+/// `obj_description`/`col_description`, the comment on an object, or on one of
 /// its columns when `subid` is non-zero.
 fn description(
     kv: &dyn Kv,
@@ -957,9 +994,11 @@ fn comment_datum(kv: &dyn Kv, kind: &str, object: CommentObject<'_>) -> Result<D
 
 // ------------------------------------------------------ definition rebuilding
 
-/// `pg_get_viewdef` in each of its overloads. The second argument is either the
-/// pretty-print flag or a wrap column; a wrap column implies pretty-printing,
-/// exactly as PostgreSQL's `pg_get_viewdef(oid, integer)` does.
+/// `pg_get_viewdef` in each of its overloads.
+///
+/// The second argument is either the pretty-print flag or a wrap column. A wrap
+/// column implies pretty-printing, exactly as PostgreSQL's
+/// `pg_get_viewdef(oid, integer)` does.
 fn view_def(kv: &dyn Kv, scope: &ResolutionScope, vals: &[Datum]) -> Result<Datum, ExecError> {
     let (pretty, wrap) = match vals.get(1) {
         None => (false, None),
@@ -979,11 +1018,11 @@ fn view_def(kv: &dyn Kv, scope: &ResolutionScope, vals: &[Datum]) -> Result<Datu
 }
 
 /// Find the view an oid or a name refers to, or `None` when the argument names
-/// something that is not a view (PostgreSQL answers the literal `Not a view`).
+/// an object that is not a view. PostgreSQL answers the literal `Not a view`.
 ///
-/// A name is resolved through the session's search path exactly as a `regclass`
-/// cast resolves one, so a view the path reaches is found under its own schema;
-/// a name no relation answers to is not a view either.
+/// This function resolves a name through the session's search path exactly as a
+/// `regclass` cast resolves one, so it finds a view the path reaches under that
+/// view's own schema. A name no relation answers to is not a view either.
 fn lookup_view(
     kv: &dyn Kv,
     scope: &ResolutionScope,
@@ -1006,17 +1045,18 @@ fn lookup_view(
 
 /// Render a stored view definition the way PostgreSQL's rule deparser does.
 ///
-/// The stored text is re-parsed and printed from the tree, so the answer is
-/// normalized rather than echoed: keyword lines carry PostgreSQL's indentation,
-/// output columns are named from the view's catalog column list, and — when
-/// `pretty` is false — operator expressions are fully parenthesized. A stored
-/// definition that no longer parses falls back to the source text, which is
-/// still a valid view definition.
+/// This function re-parses the stored text and prints it from the tree, so the
+/// answer is normalized and not echoed. Keyword lines carry PostgreSQL's
+/// indentation, and output columns are named from the view's catalog column
+/// list. When `pretty` is false, operator expressions are fully parenthesized.
+/// For a stored definition that no longer parses, this function falls back to
+/// the source text, which is still a valid view definition.
 pub(crate) fn view_definition_text(view: &View, pretty: bool) -> String {
     view_definition(view, pretty, None)
 }
 
-/// Is a view auto-updatable — PostgreSQL's `is_updatable`/`is_insertable_into`?
+/// Is a view auto-updatable, which is PostgreSQL's
+/// `is_updatable`/`is_insertable_into`?
 ///
 /// A view is auto-updatable when its body is a plain `SELECT` over exactly one
 /// relation with no `DISTINCT`, grouping, set operation, `LIMIT`/`OFFSET` or
@@ -1064,7 +1104,8 @@ fn view_definition(view: &View, pretty: bool, wrap: Option<usize>) -> String {
     out
 }
 
-/// `pg_get_indexdef(oid)` — the `CREATE INDEX` statement that rebuilds an index.
+/// `pg_get_indexdef(oid)`, the `CREATE INDEX` statement that rebuilds an
+/// index.
 fn index_def(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Datum, ExecError> {
     if matches!(object, Datum::Null) {
         return Ok(Datum::Null);
@@ -1082,10 +1123,10 @@ fn index_def(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Dat
 
 /// The `CREATE INDEX` text for one index, schema-qualified like PostgreSQL's.
 ///
-/// `pg_get_indexdef` genuinely qualifies the table it indexes — even in
-/// `public`, which is why the schema is spelled out unconditionally.
+/// `pg_get_indexdef` genuinely qualifies the table it indexes, even in
+/// `public`. That is why this function always spells out the schema.
 /// [`foreign_key_definition`] deliberately leaves its referent unqualified when
-/// it is visible — read the note there before making the two agree.
+/// it is visible. Read the note there before you make the two agree.
 pub(crate) fn index_definition(index: &Index, table: &Table) -> String {
     format!(
         "CREATE {}INDEX {} ON {}.{} USING {} ({})",
@@ -1101,7 +1142,7 @@ pub(crate) fn index_definition(index: &Index, table: &Table) -> String {
     )
 }
 
-/// `pg_get_constraintdef(oid)` — the constraint clause that rebuilds a
+/// `pg_get_constraintdef(oid)`, the constraint clause that rebuilds a
 /// constraint, in the spelling `ALTER TABLE … ADD CONSTRAINT` takes.
 fn constraint_def(kv: &dyn Kv, object: &Datum) -> Result<Datum, ExecError> {
     if matches!(object, Datum::Null) {
@@ -1145,22 +1186,24 @@ fn foreign_key_constraint_def(kv: &dyn Kv, wanted: i32) -> Result<Option<String>
 }
 
 /// The `FOREIGN KEY …` clause for one foreign key, in PostgreSQL's clause
-/// order: referencing columns, the referent, `MATCH FULL`, `ON UPDATE` before
-/// `ON DELETE`, the deferral, and `NOT VALID` last. `MATCH SIMPLE` and
-/// `NO ACTION` are the defaults and print nothing, and only `ON DELETE` can
-/// carry a `SET NULL`/`SET DEFAULT` column list.
+/// order.
+///
+/// The order is the referencing columns, the referent, `MATCH FULL`,
+/// `ON UPDATE` before `ON DELETE`, the deferral, and `NOT VALID` last.
+/// `MATCH SIMPLE` and `NO ACTION` are the defaults and print nothing. Only
+/// `ON DELETE` can carry a `SET NULL`/`SET DEFAULT` column list.
 ///
 /// `psql`'s `\d` builds both its `Foreign-key constraints:` block and the
-/// parent's `Referenced by:` block out of this text verbatim, adding only the
+/// parent's `Referenced by:` block out of this text verbatim. It adds only the
 /// indent, the quoted constraint name and the `TABLE … CONSTRAINT …` prefix.
 ///
-/// The referent is emitted **unqualified** when it is visible —
-/// `REFERENCES pp(id)`, never `public.pp(id)`. PostgreSQL renders it with
+/// This function emits the referent **unqualified** when it is visible, so
+/// `REFERENCES pp(id)` and never `public.pp(id)`. PostgreSQL renders it with
 /// `generate_relation_name`, which omits the schema of a relation the search
 /// path reaches and spells out the schema of one it does not. That is a real
-/// asymmetry with [`index_definition`], whose `ON public.t` is qualified because
-/// `pg_get_indexdef` genuinely qualifies; neither should be "fixed" to match the
-/// other.
+/// asymmetry with [`index_definition`], whose `ON public.t` is qualified
+/// because `pg_get_indexdef` genuinely qualifies. Do not "fix" either one to
+/// match the other.
 pub(crate) fn foreign_key_definition(foreign_key: &ForeignKey) -> String {
     let mut out = format!(
         "FOREIGN KEY ({}) REFERENCES {}({})",
@@ -1196,8 +1239,9 @@ pub(crate) fn foreign_key_definition(foreign_key: &ForeignKey) -> String {
     out
 }
 
-/// How a referential action spells itself in a constraint definition. `NO
-/// ACTION` is the default and PostgreSQL leaves the clause out entirely.
+/// How a referential action spells itself in a constraint definition.
+///
+/// `NO ACTION` is the default, and PostgreSQL leaves the clause out entirely.
 fn referential_action_clause(action: ReferentialAction) -> Option<&'static str> {
     match action {
         ReferentialAction::NoAction => None,
@@ -1208,9 +1252,11 @@ fn referential_action_clause(action: ReferentialAction) -> Option<&'static str> 
     }
 }
 
-/// A parenthesized-list body: each name quoted as needed, comma-separated, in
-/// the order given — never sorted, because a foreign key's columns pair
-/// positionally with the referenced ones.
+/// A parenthesized-list body.
+///
+/// Each name is quoted as needed, the names are comma-separated, and they stay
+/// in the order given. They are never sorted, because a foreign key's columns
+/// pair positionally with the referenced ones.
 fn quoted_column_list(columns: &[String]) -> String {
     columns
         .iter()
@@ -1265,8 +1311,10 @@ pub(crate) fn default_source_text(
     }
 }
 
-/// Quote an identifier the way PostgreSQL's `quote_ident` does: bare when it is
-/// a lowercase-safe identifier, double-quoted otherwise.
+/// Quote an identifier the way PostgreSQL's `quote_ident` does.
+///
+/// The result is bare when the identifier is lowercase-safe, and
+/// double-quoted in every other case.
 pub(crate) fn quote_identifier(name: &str) -> String {
     let safe = !name.is_empty()
         && !name.starts_with(|c: char| c.is_ascii_digit())

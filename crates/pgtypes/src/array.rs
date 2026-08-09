@@ -1,24 +1,24 @@
-//! The `PostgreSQL` array **text** literal format — `array_in` and `array_out`.
+//! The `PostgreSQL` array **text** literal format: `array_in` and `array_out`.
 //!
-//! Both directions are element-type agnostic: [`parse_literal`] splits a literal
+//! Both directions are element-type agnostic. [`parse_literal`] splits a literal
 //! into a dimension header plus raw element texts (`None` for an unquoted
-//! `NULL`) which the caller feeds to the element type's input function, and
-//! [`literal_text`] re-quotes already rendered element texts back into the same
-//! shape.
+//! `NULL`), and the caller feeds those texts to the element type's input
+//! function. [`literal_text`] re-quotes already rendered element texts back into
+//! the same shape.
 //!
 //! The grammar is `PostgreSQL`'s in full: nested braces give multiple
 //! dimensions, and an optional `[l:u][l:u]…=` prefix gives non-default lower
-//! bounds. Elements are stored flat in row-major order — the same layout
-//! `PostgreSQL` uses — with the extents in [`ArrayDim`]s alongside.
+//! bounds. This module stores the elements flat in row-major order, the same
+//! layout `PostgreSQL` uses, with the extents in [`ArrayDim`]s alongside.
 
 use crate::{MAX_ARRAY_DIM, TypeError, datum::ArrayDim};
 
 /// A parsed array literal: the dimension header and the flat, row-major element
 /// texts (`None` for an unquoted `NULL`).
 ///
-/// `dims` is empty exactly when `elements` is — `PostgreSQL` collapses every
-/// element-free literal (`{}`, `{{}}`, `{{},{}}`) to the same zero-dimensional
-/// empty array.
+/// `dims` is empty exactly when `elements` is empty. `PostgreSQL` collapses
+/// every element-free literal (`{}`, `{{}}`, `{{},{}}`) to the same
+/// zero-dimensional empty array.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayLiteral {
     /// One entry per dimension, outermost first.
@@ -79,7 +79,7 @@ pub fn parse_literal(input: &str) -> Result<ArrayLiteral, TypeError> {
     Ok(ArrayLiteral { dims, elements })
 }
 
-/// Read the optional `[l:u][l:u]…=` prefix, leaving `pos` just past its `=`.
+/// Read the optional `[l:u][l:u]…=` prefix and leave `pos` just past its `=`.
 /// `None` means the literal has no prefix at all.
 fn read_dim_header(
     input: &str,
@@ -154,18 +154,19 @@ fn read_bound(input: &str, bytes: &[u8], pos: &mut usize) -> Result<i32, TypeErr
 }
 
 /// The brace-scanning state: the flat elements and the extent agreed for each
-/// depth so far, so a later sub-array of a different length is rejected.
+/// depth so far, so that the scan rejects a later sub-array of a different
+/// length.
 struct Scan<'a> {
     input: &'a str,
     elements: Vec<Option<String>>,
     extents: Vec<Option<usize>>,
-    /// The depth at which scalar elements were found, once one has been.
+    /// The depth at which the scan found scalar elements, once it found one.
     leaf_depth: Option<usize>,
 }
 
 impl Scan<'_> {
-    /// Consume one `{ … }` level starting at `pos`, returning the position just
-    /// past its closing brace.
+    /// Consume one `{ … }` level that starts at `pos`, and return the position
+    /// just past its closing brace.
     fn level(&mut self, bytes: &[u8], mut pos: usize, depth: usize) -> Result<usize, TypeError> {
         if depth >= MAX_ARRAY_DIM {
             return Err(too_many_dims(depth + 1));
@@ -210,8 +211,9 @@ impl Scan<'_> {
 
     /// Agree this level's length with every sibling already seen at `depth`.
     ///
-    /// Levels close innermost-first, so `extents` is grown to reach `depth`
-    /// rather than pushed onto — the slot's index IS the dimension.
+    /// Levels close innermost-first, so this method grows `extents` to reach
+    /// `depth` instead of a push onto the end. The slot's index IS the
+    /// dimension.
     fn record(&mut self, depth: usize, count: usize) -> Result<(), TypeError> {
         if self.extents.len() <= depth {
             self.extents.resize(depth + 1, None);
@@ -227,8 +229,9 @@ impl Scan<'_> {
     }
 }
 
-/// Parse one element starting at `pos`, returning it and the position just past
-/// it (trailing whitespace of an unquoted element is trimmed, as `PostgreSQL` does).
+/// Parse one element that starts at `pos`, and return it with the position just
+/// past it. This function trims the trailing whitespace of an unquoted element,
+/// as `PostgreSQL` does.
 fn parse_element(
     input: &str,
     bytes: &[u8],
@@ -304,8 +307,8 @@ fn parse_element(
 }
 
 /// Render element texts (`None` = NULL) as an array literal with `dims`'
-/// nesting, quoting exactly when `PostgreSQL`'s `array_out` would and emitting
-/// the `[l:u]=` header exactly when some lower bound is not 1.
+/// nesting. This function quotes exactly when `PostgreSQL`'s `array_out` would,
+/// and it emits the `[l:u]=` header exactly when some lower bound is not 1.
 #[must_use]
 pub fn literal_text(dims: &[ArrayDim], elements: &[Option<String>]) -> String {
     if dims.is_empty() || elements.is_empty() {
@@ -327,7 +330,8 @@ pub fn literal_text(dims: &[ArrayDim], elements: &[Option<String>]) -> String {
 }
 
 /// Render one nesting level: the outermost dimension of `dims` over the slice
-/// `elements`, recursing into equal-sized chunks for the inner dimensions.
+/// `elements`. This function recurses into equal-sized chunks for the inner
+/// dimensions.
 fn push_level(dims: &[ArrayDim], elements: &[Option<String>], out: &mut String) {
     out.push('{');
     match dims {

@@ -1,32 +1,32 @@
 //! The in-process `LISTEN`/`NOTIFY` bus.
 //!
-//! One [`NotifyBus`] lives on the engine (shared by every handle produced by
-//! `SqlEngine::clone_handle`); every connection registers once and gets a
-//! [`NotifySessionHandle`] plus the receiving end of its own bounded queue. The
-//! wire loop owns the receiver and pushes `NotificationResponse` messages when
-//! the connection is idle.
+//! One [`NotifyBus`] lives on the engine, shared by every handle
+//! `SqlEngine::clone_handle` produces. Every connection registers once and gets
+//! a [`NotifySessionHandle`] plus the receiving end of its own bounded queue.
+//! The wire loop owns the receiver and pushes `NotificationResponse` messages
+//! when the connection is idle.
 //!
-//! Publishing is deliberately **two-phase and all-or-nothing**:
+//! Publishing is deliberately **two-phase and all-or-nothing**.
 //! [`NotifyBus::prepare_publish`] reserves one queue permit per (notification,
-//! listener) pair and hands back a [`PreparedPublish`]; [`PreparedPublish::send`]
-//! then pushes through the reserved permits and cannot fail. The session layer
-//! reserves *before* the transaction's durable commit and sends *after*, so a
-//! listener whose queue is full fails the **notifying** transaction (54000)
-//! instead of silently dropping a notification or disconnecting the listener.
-//! This is PostgreSQL's rule: the notifier pays.
+//! listener) pair and hands back a [`PreparedPublish`].
+//! [`PreparedPublish::send`] then pushes through the reserved permits and cannot
+//! fail. The session layer reserves *before* the transaction's durable commit
+//! and sends *after*. So a listener whose queue is full fails the **notifying**
+//! transaction with 54000, instead of silently dropping a notification or
+//! disconnecting the listener. This is PostgreSQL's rule: the notifier pays.
 //!
-//! Every publication funnels through the single private `address` seam, which
-//! resolves already-built [`Notification`]s to the queues of their channel's
-//! current listeners — plus, for a committing transaction, the subscriptions it
-//! has staged but not yet published
-//! ([`NotifySessionHandle::prepare_publish_with_pending`]), so its own `LISTEN`
-//! reaches its own `NOTIFY` without any other publisher being able to address a
+//! Every publication funnels through the single private `address` seam. That
+//! seam resolves already-built [`Notification`]s to the queues of their
+//! channel's current listeners. For a committing transaction it also resolves
+//! them to the subscriptions the transaction has staged but not yet published,
+//! through [`NotifySessionHandle::prepare_publish_with_pending`]. So its own
+//! `LISTEN` reaches its own `NOTIFY`, and no other publisher can address a
 //! subscription that has not committed.
 //!
-//! Local publication reserves a permit on each addressed queue; the cross-node
+//! Local publication reserves a permit on each addressed queue. The cross-node
 //! transport re-injects remote notifications through
 //! [`NotifyBus::deliver_remote`], which shares the addressing but deliberately
-//! not the reservation discipline — see its documentation.
+//! not the reservation discipline. See its documentation.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -40,32 +40,33 @@ use tokio::sync::mpsc;
 /// next notifying transaction fail rather than losing a notification.
 pub const NOTIFY_QUEUE_CAPACITY: usize = 16_384;
 
-/// Maximum `NOTIFY` payload length in bytes (PostgreSQL's
-/// `NOTIFY_PAYLOAD_MAX_LENGTH - 1`). PostgreSQL 18 accepts a 7999-byte payload
+/// Maximum `NOTIFY` payload length in bytes, that is PostgreSQL's
+/// `NOTIFY_PAYLOAD_MAX_LENGTH - 1`. PostgreSQL 18 accepts a 7999-byte payload
 /// and rejects an 8000-byte one with 22023.
 pub const MAX_PAYLOAD_BYTES: usize = 7999;
 
-/// Maximum channel-name length in bytes (PostgreSQL's `NAMEDATALEN - 1`).
-/// PostgreSQL 18 accepts a 63-byte channel name and rejects a 64-byte one.
+/// Maximum channel-name length in bytes, that is PostgreSQL's
+/// `NAMEDATALEN - 1`. PostgreSQL 18 accepts a 63-byte channel name and rejects
+/// a 64-byte one.
 pub const MAX_CHANNEL_BYTES: usize = 63;
 
 /// A `NOTIFY` that cannot be queued.
 ///
-/// The session layer maps these onto wire errors with [`NotifyError::sqlstate`];
-/// all of them are raised by the *notifying* backend, never delivered to a
+/// The session layer maps these onto wire errors with [`NotifyError::sqlstate`].
+/// The *notifying* backend raises all of them, and never delivers one to a
 /// listener.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NotifyError {
-    /// `NOTIFY ""` — PostgreSQL rejects an empty channel name (22023).
+    /// `NOTIFY ""`: PostgreSQL rejects an empty channel name (22023).
     #[error("channel name cannot be empty")]
     EmptyChannel,
-    /// A channel name at or beyond `NAMEDATALEN` (22023).
+    /// A channel name at or beyond `NAMEDATALEN`, which is 22023.
     #[error("channel name too long")]
     ChannelNameTooLong,
-    /// A payload at or beyond `NOTIFY_PAYLOAD_MAX_LENGTH` (22023).
+    /// A payload at or beyond `NOTIFY_PAYLOAD_MAX_LENGTH`, which is 22023.
     #[error("payload string too long")]
     PayloadTooLong,
-    /// A listener's queue is full; the notifying transaction fails (54000).
+    /// A listener's queue is full. The notifying transaction fails with 54000.
     #[error("too many notifications in the NOTIFY queue")]
     QueueFull,
 }
@@ -85,7 +86,7 @@ impl NotifyError {
 
 /// Validate one `NOTIFY` channel/payload pair.
 ///
-/// Callers validate at queue time (when the statement runs) so the error is
+/// Callers validate at queue time, when the statement runs, so the error is
 /// reported against the statement that wrote it, exactly as PostgreSQL does.
 ///
 /// # Errors
@@ -119,7 +120,7 @@ pub struct RemoteDelivery {
 }
 
 /// One registered connection: the sending end of its notification queue. The
-/// backend pid lives on the session's handle, since it identifies the *sender*
+/// backend pid lives on the session's handle, because it identifies the *sender*
 /// of a notification, not its recipient.
 struct SessionSlot {
     tx: mpsc::Sender<Notification>,
@@ -152,13 +153,13 @@ impl NotifyBus {
         Self::with_capacity(NOTIFY_QUEUE_CAPACITY)
     }
 
-    /// A bus with a non-default per-session queue capacity (tests drive the
-    /// queue-full path with a tiny capacity).
+    /// A bus with a non-default per-session queue capacity. Tests drive the
+    /// queue-full path with a tiny capacity.
     ///
     /// # Panics
     ///
-    /// Panics when `capacity` is zero — a zero-capacity bounded channel cannot
-    /// hold a reservation.
+    /// Panics when `capacity` is zero, because a zero-capacity bounded channel
+    /// cannot hold a reservation.
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         assert!(capacity > 0, "notify queue capacity must be positive");
@@ -170,10 +171,11 @@ impl NotifyBus {
 
     /// Register a connection with backend pid `pid`.
     ///
-    /// Returns the session's handle (dropping it deregisters the session and
-    /// removes it from every channel) and the receiving end of its queue, which
-    /// the wire loop drains. An associated function rather than a method because
-    /// the handle keeps the bus alive and `&Arc<Self>` is not a valid receiver.
+    /// Returns the session's handle and the receiving end of its queue, which
+    /// the wire loop drains. A drop of the handle deregisters the session and
+    /// removes it from every channel. This is an associated function rather than
+    /// a method because the handle keeps the bus alive, and `&Arc<Self>` is not
+    /// a valid receiver.
     ///
     /// # Panics
     ///
@@ -202,9 +204,10 @@ impl NotifyBus {
 
     /// Reserve queue space for a whole batch of notifications sent by `pid`.
     ///
-    /// Every `(channel, payload)` is validated, then fanned out to the channel's
-    /// current listeners and a permit reserved on each. Either every permit is
-    /// held by the returned [`PreparedPublish`] or nothing is reserved at all.
+    /// This method validates every `(channel, payload)`, then fans it out to the
+    /// channel's current listeners and reserves a permit on each. Either the
+    /// returned [`PreparedPublish`] holds every permit, or it reserves nothing
+    /// at all.
     ///
     /// # Errors
     ///
@@ -218,15 +221,17 @@ impl NotifyBus {
         self.prepare_publish_as(pid, batch, None)
     }
 
-    /// [`Self::prepare_publish`], but the copies of the `session` given as
-    /// `(id, subscriptions)` are addressed by that set — the channels it *will*
-    /// listen on — instead of by the set the bus currently publishes to it.
+    /// [`Self::prepare_publish`], but this method addresses the copies of the
+    /// `session` given as `(id, subscriptions)` by that set, that is the
+    /// channels it *will* listen on, instead of by the set the bus currently
+    /// publishes to it.
     ///
     /// This is how a committing transaction's own `LISTEN` reaches its own
-    /// `NOTIFY` (PostgreSQL applies pending listens before queueing the
-    /// transaction's notifications) **without** staging that subscription on the
-    /// bus: a concurrent publisher still sees only committed subscriptions, so a
-    /// `LISTEN` that later rolls back can never have been delivered to.
+    /// `NOTIFY` **without** staging that subscription on the bus. PostgreSQL
+    /// applies pending listens before it queues the transaction's
+    /// notifications. A concurrent publisher still sees only committed
+    /// subscriptions, so a `LISTEN` that later rolls back can never have been
+    /// delivered to.
     fn prepare_publish_as(
         &self,
         pid: i32,
@@ -256,21 +261,21 @@ impl NotifyBus {
     ///
     /// **Delivery is best-effort, unlike the local path.** Local publication is
     /// two-phase precisely so a full listener queue fails the notifying
-    /// transaction with 54000 — the notifier pays, as in PostgreSQL. A remote
-    /// publisher cannot hold permits on this node's queues, and by the time the
-    /// record is read off the log its transaction has long since committed on
-    /// another node; there is nothing left to fail. So each listener is treated
-    /// on its own: whoever has room receives, whoever is full loses that
-    /// notification, and the count comes back in the returned
-    /// [`RemoteDelivery`] (and a `warn!`) for the caller to meter. This never
+    /// transaction with 54000. The notifier pays, as in PostgreSQL. A remote
+    /// publisher cannot hold permits on this node's queues, and by the time this
+    /// node reads the record off the log its transaction has long since
+    /// committed on another node. There is nothing left to fail. So this method
+    /// treats each listener on its own: whoever has room receives, and whoever
+    /// is full loses that notification. The count comes back in the returned
+    /// [`RemoteDelivery`], and in a `warn!`, for the caller to meter. This never
     /// blocks and never fails.
     ///
-    /// A listener whose receiver has been dropped is skipped without counting
-    /// as a drop, exactly as on the local path: a closed queue belongs to a
-    /// connection that is already gone.
+    /// This method skips a listener whose receiver has been dropped, and does
+    /// not count it as a drop, exactly as on the local path. A closed queue
+    /// belongs to a connection that is already gone.
     ///
-    /// Self-delivery needs no special case — a session listening on this node
-    /// is an ordinary listener whatever node published to it.
+    /// Self-delivery needs no special case. A session listening on this node is
+    /// an ordinary listener whatever node published to it.
     ///
     /// # Panics
     ///
@@ -297,10 +302,11 @@ impl NotifyBus {
     /// The single publication funnel: address each notification to the current
     /// listeners of its channel and reserve one queue permit per listener.
     ///
-    /// A listener whose receiver has been dropped (its connection is gone but
-    /// its handle has not been dropped yet) is skipped: a closed queue is not
-    /// the notifier's problem. A *full* queue is, and aborts the whole batch —
-    /// permits reserved so far are released when the partial vector drops.
+    /// This method skips a listener whose receiver has been dropped, that is one
+    /// whose connection is gone but whose handle has not been dropped yet. A
+    /// closed queue is not the notifier's problem. A *full* queue is, and it
+    /// aborts the whole batch. The permits reserved so far are released when the
+    /// partial vector drops.
     fn fan_out(
         &self,
         notifications: &[Notification],
@@ -319,17 +325,18 @@ impl NotifyBus {
     }
 
     /// Pair each notification with the queue of every session listening on its
-    /// channel — the one place channel membership is resolved, shared by the
-    /// local and remote paths.
+    /// channel. This is the one place that resolves channel membership, shared
+    /// by the local and remote paths.
     ///
     /// `session` overrides one session's membership with the subscription set it
-    /// will have after its open transaction commits (see
-    /// [`Self::prepare_publish_as`]); that session is then addressed by the
-    /// override alone, never by what the bus currently holds for it.
+    /// will have after its open transaction commits. See
+    /// [`Self::prepare_publish_as`]. This method then addresses that session by
+    /// the override alone, never by what the bus currently holds for it.
     ///
-    /// Senders are collected under the lock and used outside it: `try_reserve_owned`
-    /// is non-blocking but takes an owned sender, and holding the bus mutex
-    /// across the fan-out would serialize every publisher against every LISTEN.
+    /// This method collects the senders under the lock and uses them outside it.
+    /// `try_reserve_owned` is non-blocking but takes an owned sender, and
+    /// holding the bus mutex across the fan-out would serialize every publisher
+    /// against every LISTEN.
     fn address(
         &self,
         notifications: &[Notification],
@@ -450,8 +457,9 @@ impl NotifyBus {
 
 /// One connection's registration on the bus.
 ///
-/// Dropping the handle deregisters the session and removes it from every
-/// channel, so closing a connection cleans up without an explicit `UNLISTEN`.
+/// A drop of the handle deregisters the session and removes it from every
+/// channel, so a connection that closes cleans up without an explicit
+/// `UNLISTEN`.
 pub struct NotifySessionHandle {
     bus: Arc<NotifyBus>,
     id: u64,
@@ -472,8 +480,8 @@ impl NotifySessionHandle {
         &self.bus
     }
 
-    /// Start listening on `channel`. Idempotent — `LISTEN a; LISTEN a;` leaves
-    /// exactly one registration, as in PostgreSQL.
+    /// Start listening on `channel`. This method is idempotent:
+    /// `LISTEN a; LISTEN a;` leaves exactly one registration, as in PostgreSQL.
     pub fn listen(&self, channel: &str) {
         self.bus.listen(self.id, channel);
     }
@@ -483,7 +491,7 @@ impl NotifySessionHandle {
         self.bus.unlisten(self.id, channel);
     }
 
-    /// Stop listening on every channel (`UNLISTEN *`).
+    /// Stop listening on every channel, which is `UNLISTEN *`.
     pub fn unlisten_all(&self) {
         self.bus.unlisten_all(self.id);
     }
@@ -517,15 +525,15 @@ impl NotifySessionHandle {
         self.bus.prepare_publish(self.pid, batch)
     }
 
-    /// [`Self::prepare_publish`] for a transaction that is committing: this
-    /// session's own copies are addressed by `subscriptions`, the set it will
-    /// listen on once its queued `LISTEN`/`UNLISTEN` are applied, while every
-    /// other session is addressed by its committed subscriptions.
+    /// [`Self::prepare_publish`] for a transaction that is committing. This
+    /// method addresses this session's own copies by `subscriptions`, the set it
+    /// will listen on once its queued `LISTEN`/`UNLISTEN` are applied. It
+    /// addresses every other session by its committed subscriptions.
     ///
-    /// The pending subscriptions are therefore honoured for this transaction's
-    /// own notifications without being published to the bus, so a concurrent
-    /// publisher cannot address a `LISTEN` that has not committed — and a
-    /// `LISTEN` that never commits cannot have received anything.
+    /// So this transaction's own notifications honour the pending
+    /// subscriptions, and the bus never publishes them. A concurrent publisher
+    /// cannot address a `LISTEN` that has not committed, and a `LISTEN` that
+    /// never commits cannot have received anything.
     ///
     /// # Errors
     ///
@@ -548,22 +556,23 @@ impl Drop for NotifySessionHandle {
 
 /// A batch of notifications with queue space already reserved.
 ///
-/// Holding this keeps one slot reserved in each target queue; [`Self::send`]
-/// consumes the reservations and cannot fail, and dropping it releases them
-/// without sending anything.
+/// This value keeps one slot reserved in each target queue while it lives.
+/// [`Self::send`] consumes the reservations and cannot fail. A drop releases
+/// them and sends nothing.
 #[must_use = "a prepared publish holds queue reservations until it is sent or dropped"]
 pub struct PreparedPublish {
     permits: Vec<(mpsc::OwnedPermit<Notification>, Notification)>,
 }
 
 impl PreparedPublish {
-    /// Number of reserved deliveries (one per listener per notification).
+    /// Number of reserved deliveries, one per listener per notification.
     #[must_use]
     pub fn len(&self) -> usize {
         self.permits.len()
     }
 
-    /// Whether nothing is reserved (no listener, or an empty batch).
+    /// Whether nothing is reserved, because there is no listener or the batch is
+    /// empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.permits.is_empty()
@@ -588,8 +597,9 @@ mod tests {
     }
 
     /// The error of a failed publish. `PreparedPublish` deliberately implements
-    /// neither `Debug` nor `PartialEq` (it holds live queue reservations), so the
-    /// success side is discarded here rather than unwrapped.
+    /// neither `Debug` nor `PartialEq`, because it holds live queue
+    /// reservations. So this helper discards the success side rather than
+    /// unwrapping it.
     fn publish_error(result: Result<PreparedPublish, NotifyError>) -> NotifyError {
         match result {
             Ok(_) => panic!("expected the publish to fail"),
@@ -789,9 +799,9 @@ mod tests {
         assert!(NotifyError::PayloadTooLong.sqlstate() == "22023");
     }
 
-    /// PostgreSQL 18's boundaries in absolute terms, so a constant that drifts
-    /// off by one is caught: it accepts a 7999-byte payload and a 63-byte
-    /// channel name, and rejects 8000 and 64 with 22023.
+    /// PostgreSQL 18's boundaries in absolute terms, so this test catches a
+    /// constant that drifts off by one. PostgreSQL 18 accepts a 7999-byte
+    /// payload and a 63-byte channel name, and rejects 8000 and 64 with 22023.
     #[test]
     fn the_length_limits_are_postgresqls_to_the_byte() {
         assert!(validate("c", &"x".repeat(7999)).is_ok());
@@ -800,9 +810,9 @@ mod tests {
         assert!(validate(&"c".repeat(64), "") == Err(NotifyError::ChannelNameTooLong));
     }
 
-    /// A pending subscription addresses only the session that staged it: it
-    /// receives its own notification, and the bus keeps publishing to everyone
-    /// else exactly as before.
+    /// A pending subscription addresses only the session that staged it. That
+    /// session receives its own notification, and the bus keeps publishing to
+    /// everyone else exactly as before.
     #[test]
     fn a_pending_subscription_addresses_only_its_own_session() {
         let bus = bus();
@@ -830,8 +840,8 @@ mod tests {
         assert!(bus.listener_count("c") == 1);
     }
 
-    /// A pending `UNLISTEN` is honoured the same way: the staging session is
-    /// addressed by its post-commit set, not by the bus's live membership.
+    /// A pending `UNLISTEN` is honoured the same way. The bus addresses the
+    /// staging session by its post-commit set, not by its live membership.
     #[test]
     fn a_pending_unlisten_suppresses_the_stagers_own_copy() {
         let bus = bus();

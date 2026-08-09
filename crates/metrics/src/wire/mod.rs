@@ -1,5 +1,6 @@
-//! `remote_write` wire surface: prost-generated message types, content
-//! negotiation, snappy decode, and decode to the shared `DecodedSeries`.
+//! `remote_write` wire surface. It holds the prost-generated message types,
+//! content negotiation, snappy decode, and the decode to the shared
+//! `DecodedSeries`.
 
 mod decoded;
 mod histogram;

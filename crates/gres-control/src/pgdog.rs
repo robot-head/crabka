@@ -1,8 +1,9 @@
 //! Typed `PgDog` configuration renderers for Gres fleets.
 //!
-//! The renderers intentionally serialize typed structs through `toml` instead of
-//! assembling text by hand. When the pinned `PgDog` image changes, re-run the G-4
-//! front-door e2e leg against these goldens before accepting any output change.
+//! The renderers serialize typed structs through `toml` on purpose, and do not
+//! assemble text by hand. When the pinned `PgDog` image changes, run the G-4
+//! front-door e2e leg again against these goldens before you accept any output
+//! change.
 
 use std::{collections::HashSet, str::FromStr, time::Duration};
 
@@ -16,8 +17,8 @@ const DEFAULT_LISTEN_PORT: u16 = 6_432;
 const DEFAULT_COLD_START_CEILING: Time = secs(30);
 const DEFAULT_IDLE_TIMEOUT: Time = minutes(1);
 const DEFAULT_SERVER_LIFETIME: Time = minutes(5);
-/// The shortest timeout `PgDog` is ever configured with, so a derived value
-/// cannot round down to something it would reject.
+/// The shortest timeout that anyone configures `PgDog` with, so a derived value
+/// cannot round down to a value `PgDog` would reject.
 const MINIMUM_TIMEOUT: Time = secs(1);
 // PgDog's documented way to disable proactive database healthchecks. This is
 // required for scale-to-zero routes: an ephemeral idle healthcheck must not
@@ -87,7 +88,8 @@ impl FromStr for PgdogConnectAttempts {
 
 /// Explicit timeout overrides for a `PgDog` render.
 ///
-/// Not `Eq`: a [`Time`] is `f64`-backed, so it is only `PartialEq`.
+/// This type is not `Eq`, because a [`Time`] is `f64`-backed and so only
+/// `PartialEq`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PgdogTimeouts {
     /// Backend connection attempt timeout.
@@ -97,13 +99,13 @@ pub struct PgdogTimeouts {
 }
 
 impl PgdogTimeouts {
-    /// Derive the total cold-start ceiling from one connection-attempt timeout.
+    /// Derives the total cold-start ceiling from one connection-attempt timeout.
     ///
     /// # Errors
     ///
     /// Returns an error when the attempt budget exceeds what a [`Duration`] can
-    /// represent, which is the misconfiguration this used to catch by way of
-    /// `Duration::checked_mul`.
+    /// represent. That is the misconfiguration `Duration::checked_mul` used to
+    /// catch.
     pub fn cold_start_ceiling_for_attempt_timeout(
         attempt_timeout: Time,
         connect_attempts: PgdogConnectAttempts,
@@ -123,7 +125,7 @@ impl PgdogTimeouts {
         Ok(ceiling)
     }
 
-    /// Build timeout values that can cover the supplied cold-start ceiling.
+    /// Builds timeout values that cover the supplied cold-start ceiling.
     #[must_use]
     pub fn for_cold_start_ceiling(
         cold_start_ceiling: Time,
@@ -156,20 +158,23 @@ impl PgdogTimeouts {
     }
 }
 
-/// `PgDog` user entry rendered to `users.toml` for local/dev deployments.
+/// A `PgDog` user entry rendered to `users.toml` for local and dev
+/// deployments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgdogUser {
     /// `PostgreSQL` role name.
     pub name: String,
     /// `PgDog` database route this user may access.
     pub database: String,
-    /// Optional PgDog-local password. Omit it for passthrough skeleton entries.
+    /// Optional PgDog-local password. Omit it for passthrough skeleton
+    /// entries.
     pub password: Option<String>,
 }
 
 /// General `PgDog` settings shared by the rendered fleet.
 ///
-/// Not `Eq`: the timeout fields are `f64`-backed quantities.
+/// This type is not `Eq`, because the timeout fields are `f64`-backed
+/// quantities.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgdogGeneral {
     /// `PgDog` frontend listen port.
@@ -188,7 +193,8 @@ pub struct PgdogGeneral {
     pub cold_start_ceiling: Time,
     /// Number of backend connection attempts.
     pub connect_attempts: PgdogConnectAttempts,
-    /// Optional explicit timeout knobs. Omitted values are derived from the ceiling.
+    /// Optional explicit timeout knobs. The renderer derives any omitted value
+    /// from the ceiling.
     pub timeouts: Option<PgdogTimeouts>,
     /// Idle pooled-server disconnect window.
     pub idle_timeout: Time,
@@ -229,7 +235,7 @@ pub struct PgdogRenderInput<'a> {
     pub general: PgdogGeneral,
 }
 
-/// Render `pgdog.toml` for `PgDog`.
+/// Renders `pgdog.toml` for `PgDog`.
 ///
 /// # Errors
 ///
@@ -240,7 +246,7 @@ pub fn render_pgdog_toml(input: &PgdogRenderInput<'_>) -> Result<String, Control
     toml::to_string_pretty(&config).map_err(ControlError::from)
 }
 
-/// Render `users.toml` for `PgDog`.
+/// Renders `users.toml` for `PgDog`.
 ///
 /// # Errors
 ///
@@ -293,8 +299,8 @@ impl<'a> PgdogConfig<'a> {
 
 /// The `[general]` table exactly as `PgDog` parses it.
 ///
-/// This is a wire boundary: every field holds the raw form `PgDog` reads —
-/// milliseconds for the timeouts — and the surrounding logic converts once, in
+/// This is a wire boundary. Every field holds the raw form `PgDog` reads, which
+/// is milliseconds for the timeouts. The surrounding logic converts once, in
 /// [`RenderGeneral::from_settings`].
 #[derive(Debug, Serialize)]
 struct RenderGeneral<'a> {
@@ -479,20 +485,20 @@ fn push_database<'a>(
 
 /// The larger of two extents.
 ///
-/// A [`Time`] is `f64`-backed and so only `PartialOrd`, which rules out
-/// [`Ord::max`].
+/// A [`Time`] is `f64`-backed and so only `PartialOrd`, which rules
+/// [`Ord::max`] out.
 fn at_least(extent: Time, floor: Time) -> Time {
     if extent < floor { floor } else { extent }
 }
 
-/// One extent as the whole milliseconds `PgDog` reads, never rounding a timeout
-/// down to a shorter one than was configured.
+/// One extent as the whole milliseconds `PgDog` reads. This never rounds a
+/// timeout down to a shorter one than the configured value.
 ///
-/// Truncating and then correcting is deliberate: [`TimeExt::millis_i64`] rounds
+/// The truncate-then-correct order is deliberate. [`TimeExt::millis_i64`] rounds
 /// to nearest, which would report a 1.6 ms timeout as 2 ms and a 2.4 ms timeout
 /// as 2 ms. [`TimeExt::millis_i64_trunc`] divides the exact nanosecond count, so
-/// the round-trip comparison detects a sub-millisecond remainder without ever
-/// tripping on float error in a whole-millisecond value.
+/// the round-trip comparison detects a sub-millisecond remainder and never trips
+/// on float error in a whole-millisecond value.
 fn milliseconds_rounded_up(extent: Time) -> u64 {
     let whole = extent.millis_i64_trunc();
     let millis = if Time::from_millis(whole) < extent {
@@ -709,9 +715,9 @@ mod tests {
 
     /// An attempt budget past what a `Duration` can hold is still rejected.
     ///
-    /// The ceiling became a `Time`, whose `f64` cannot overflow the way the
-    /// `Duration` it replaced did, so without an explicit check this validation
-    /// would vanish and an absurd `coldStartTimeoutMs` would reach the cluster.
+    /// The ceiling became a `Time`, and its `f64` cannot overflow the way the
+    /// `Duration` it replaced did. Without an explicit check this validation
+    /// would vanish, and an absurd `coldStartTimeoutMs` would reach the cluster.
     #[test]
     fn cold_start_ceiling_rejects_an_unrepresentable_budget() {
         let many = PgdogConnectAttempts::new(65_535).expect("positive attempts");

@@ -5,8 +5,10 @@ pub use crabka_voters::NodeId;
 use crabka_voters::VoterSet;
 use uuid::Uuid;
 
-/// A simulated/logical instant in milliseconds. Time is always injected, never
-/// read from the system clock (keeps the state machine deterministic).
+/// A simulated or logical instant in milliseconds.
+///
+/// The caller always injects the time. The state machine never reads the
+/// system clock, which keeps it deterministic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SimInstant(pub u64);
 
@@ -17,11 +19,11 @@ impl SimInstant {
     }
 }
 
-/// Consensus epoch (always non-negative); the wire leader epoch is
+/// Consensus epoch, always non-negative; the wire leader epoch is
 /// `crabka_ids::LeaderEpoch`.
 pub type Epoch = u32;
 
-/// Identifies a voter by node id + directory id (Kafka's `ReplicaKey`).
+/// Identifies a voter by node id and directory id, as Kafka's `ReplicaKey` does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReplicaKey {
     pub id: NodeId,
@@ -35,21 +37,26 @@ pub struct LogOffsetMetadata {
     pub epoch: Epoch,
 }
 
-/// Read-only view of the local replicated log the state machine reasons about.
+/// Read-only view of the local replicated log that the state machine uses.
+///
 /// Production uses the real `crabka-log`-backed implementation; tests supply a fake.
 pub trait LogView {
-    /// Offset one past the last appended record (the log end offset).
+    /// The log end offset: one offset after the last appended record.
     fn end_offset(&self) -> i64;
-    /// Leader epoch of the last appended record (0 for an empty log).
+    /// Leader epoch of the last appended record. An empty log gives 0.
     fn last_epoch(&self) -> Epoch;
     /// The end offset for `epoch`: the offset of the first record with a
-    /// strictly greater epoch, or `end_offset()` if none. Used to compute the
-    /// diverging-epoch hint. Returns `None` if `epoch` is unknown (> last).
+    /// strictly greater epoch, or `end_offset()` if there is no such record.
+    ///
+    /// The state machine uses this value to compute the diverging-epoch hint.
+    /// This method returns `None` if `epoch` is unknown, that is, greater than
+    /// the last epoch.
     fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64>;
 }
 
-/// The durable quorum state — the logical content of the `quorum-state` file.
-/// This is the in-memory model; file persistence is owned by the log layer.
+/// The durable quorum state: the logical content of the `quorum-state` file.
+///
+/// This is the in-memory model. The log layer owns the file persistence.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QuorumState {
     pub cluster_id: Uuid,
@@ -71,7 +78,7 @@ impl QuorumState {
         }
     }
 
-    /// Majority size for the current voter set (`floor(n/2) + 1`).
+    /// Majority size for the current voter set: `floor(n/2) + 1`.
     #[must_use]
     pub fn majority(&self) -> usize {
         self.voters.len() / 2 + 1

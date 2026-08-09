@@ -1,12 +1,14 @@
-//! `Produce` (`api_key=0`). Routes each partition's records to that
-//! partition's writer-actor and awaits the assigned base offset.
+//! `Produce` (`api_key=0`).
 //!
-//! One `RecordBatch` per (topic, partition) per request. The generated
-//! `PartitionProduceData.records` field is `Option<RecordsPayload>`.
-//! Versions 0-2 carry a v0/v1 `MessageSet` (legacy) which is up-converted
-//! to a v2 `RecordBatch` before append. Versions 3+ carry a native v2
-//! `RecordBatch`. Clients that send a single v2 batch per partition (the
-//! typical modern case) are fully supported.
+//! The handler routes each partition's records to that partition's
+//! writer-actor and waits for the assigned base offset.
+//!
+//! There is one `RecordBatch` per (topic, partition) per request. The
+//! generated `PartitionProduceData.records` field is `Option<RecordsPayload>`.
+//! Versions 0-2 carry a legacy v0/v1 `MessageSet`, which the handler
+//! up-converts to a v2 `RecordBatch` before the append. Versions 3+ carry a
+//! native v2 `RecordBatch`. The handler fully supports clients that send a
+//! single v2 batch per partition, which is the typical modern case.
 
 use std::{sync::Arc, time::Duration};
 
@@ -41,23 +43,26 @@ use crate::{
     partition_registry::PartitionRegistry,
 };
 
-/// Kafka `acks` sentinel `-1` (producer `acks=all`): the leader must hold
-/// the response until the high watermark covers the append, i.e. every
-/// in-sync replica has it.
+/// Kafka `acks` sentinel `-1`, which is producer `acks=all`. The leader must
+/// hold the response until the high watermark covers the append, that is,
+/// until every in-sync replica has it.
 const ACKS_ALL: i16 = -1;
 
-/// Wire sentinel: "no offset assigned" (`ProduceResponse.INVALID_OFFSET`).
-/// Stamped on partition rows that failed before any append happened.
+/// Wire sentinel "no offset assigned", which is
+/// `ProduceResponse.INVALID_OFFSET`. The handler stamps it on partition rows
+/// that failed before any append happened.
 const INVALID_OFFSET: i64 = -1;
 
-/// Wire sentinel: "leader unknown" for the KIP-951 `current_leader` hint —
-/// used when the leader's `NodeId` doesn't fit the wire's `i32`.
+/// Wire sentinel "leader unknown" for the KIP-951 `current_leader` hint. The
+/// handler uses it when the leader's `NodeId` does not fit the wire's `i32`.
 const NO_LEADER_ID: i32 = -1;
 
 /// Resolve `min.insync.replicas` for a topic from the metadata image.
-/// Silently falls back to the broker default on malformed values (the
-/// `AlterConfigs` validator already rejected invalid values, so any
-/// non-parseable string here is a corrupt metadata image).
+///
+/// On a malformed value the function falls back to the broker default without
+/// a message. The `AlterConfigs` validator already rejected the invalid
+/// values, so any string here that does not parse means a corrupt metadata
+/// image.
 fn topic_min_insync_replicas(
     image: &crabka_metadata::MetadataImage,
     topic: &str,
@@ -419,12 +424,14 @@ async fn finish_produce_response(
     Ok(encoded.freeze())
 }
 
-/// Per-partition produce handling, extracted so the call site can wrap it
-/// in `tokio_metrics::TaskMonitor` and charge only on-CPU poll time to
-/// `partition_cpu_micros_total`. Wall-time spent awaiting the writer
-/// queue, the HW gate under `acks=-1`, or the txn coordinator does not
-/// count toward CPU usage. Returns the per-partition response on every
-/// path; only `txn_coordinator.put` errors propagate via `?`.
+/// Per-partition produce input, held apart so that the call site can wrap the
+/// work in `tokio_metrics::TaskMonitor` and charge only on-CPU poll time to
+/// `partition_cpu_micros_total`.
+///
+/// Wall time spent on the writer queue, on the HW gate under `acks=-1`, or on
+/// the txn coordinator does not count toward CPU usage. The work returns the
+/// per-partition response on every path. Only `txn_coordinator.put` errors
+/// propagate with `?`.
 struct PartitionInput {
     part_data: FramedPartition,
     topic_compression: Option<crabka_compression::CompressionType>,
@@ -827,10 +834,11 @@ async fn validate_transactional_produce(
     Ok(None)
 }
 
-/// Borrowed bundle of the idempotent-producer dedup identity plus the
-/// fields needed to record a `producer_state.commit`. Groups the eight
-/// positional `commit` arguments into a single value so the commit call
-/// exists in exactly one place ([`finalize_ack`]).
+/// Borrowed bundle of the idempotent-producer dedup identity and the fields
+/// that a `producer_state.commit` record needs.
+///
+/// The struct groups the eight positional `commit` arguments into one value,
+/// so the commit call exists in exactly one place, [`finalize_ack`].
 struct CommitKey<'a> {
     topic: &'a str,
     partition: i32,
@@ -841,22 +849,23 @@ struct CommitKey<'a> {
     max_timestamp: i64,
 }
 
-/// Finalize a successful writer append: apply the `acks=-1`
-/// high-watermark durability gate, set the response `error_code` /
-/// `base_offset`, and record the idempotent-producer commit (when
-/// `pid >= 0`) exactly once.
+/// Finalize a successful writer append.
 ///
-/// Behavior matches the previous three inlined sites verbatim:
+/// The function applies the `acks=-1` high-watermark durability gate, sets the
+/// response `error_code` and `base_offset`, and records the
+/// idempotent-producer commit exactly once when `pid >= 0`.
+///
+/// The behavior per path:
 ///   * `acks != -1`: NONE, then commit.
 ///   * `acks == -1`, HW reaches target: NONE, then commit.
 ///   * `acks == -1`, HW gate times out: `NOT_ENOUGH_REPLICAS_AFTER_APPEND`,
-///     then commit (the append is durable on the leader; the
-///     idempotent tracker must advance so a retry is recognized as a
-///     duplicate rather than out-of-order).
+///     then commit. The append is durable on the leader, so the idempotent
+///     tracker must advance. A retry is then recognized as a duplicate and
+///     not as out-of-order.
 ///
-/// Note the commit happens on *both* the success and timeout `acks=-1`
-/// sub-paths — identical to the pre-refactor code — so it is performed
-/// unconditionally here once the `error_code`/`base_offset` are decided.
+/// Note that the commit happens on *both* the success and the timeout
+/// `acks=-1` sub-paths. The function therefore always commits once it has
+/// decided the `error_code` and the `base_offset`.
 async fn finalize_ack(
     out: &mut PartitionProduceResponse,
     part: &Arc<Partition>,
@@ -919,10 +928,12 @@ async fn finalize_ack(
     }
 }
 
-/// Build a topic-level error response for KIP-516 id-resolution failures
-/// (`UNKNOWN_TOPIC_ID`, `INCONSISTENT_TOPIC_ID`). Every partition row in
-/// the request receives the same error code; `base_offset` is set to -1 to
-/// signal "no offset assigned", matching Kafka's behavior on pre-append errors.
+/// Build a topic-level error response for the KIP-516 id-resolution failures
+/// `UNKNOWN_TOPIC_ID` and `INCONSISTENT_TOPIC_ID`.
+///
+/// Every partition row in the request gets the same error code. The function
+/// sets `base_offset` to -1 to signal "no offset assigned". This matches
+/// Kafka's behavior on pre-append errors.
 fn build_topic_error_response(
     topic: &FramedTopic,
     code: i16,
@@ -947,27 +958,32 @@ fn build_topic_error_response(
     }
 }
 
-/// One partition's records, as it arrived on the wire and BEFORE any owned
-/// decode/decompression. The verbatim hot path keeps the producer's exact
-/// bytes here; the owned legacy path carries an already-decoded payload.
+/// One partition's records, as they arrived on the wire and BEFORE any owned
+/// decode or decompression.
+///
+/// The verbatim hot path keeps the producer's exact bytes here. The owned
+/// legacy path carries an already-decoded payload.
 enum PartitionPayload {
-    /// v≥3 native records bytes captured zero-copy from the request frame
-    /// (a refcount view, not a copy). Not yet validated or decompressed —
-    /// the per-partition dispatch validates the header only and decides
-    /// verbatim-vs-owned, decompressing solely on the owned fallback.
+    /// v≥3 native records bytes captured zero-copy from the request frame.
+    /// The value is a refcount view and not a copy. Nothing has validated or
+    /// decompressed it yet. The per-partition dispatch validates the header
+    /// only and then decides between verbatim and owned. It decompresses on
+    /// the owned fallback only.
     Slice(Bytes),
-    /// Legacy v0-2 (and any pre-decoded) payload. Always takes the owned
-    /// path: a v0/v1 `MessageSet` is up-converted, never passed through.
+    /// Legacy v0-2 payload, or any pre-decoded payload. It always takes the
+    /// owned path. The handler up-converts a v0/v1 `MessageSet` and never
+    /// passes it through.
     Owned(RecordsPayload),
     /// Wire-null records field → `INVALID_REQUEST`.
     Null,
 }
 
 impl PartitionPayload {
-    /// Records-field wire length in bytes (matches `RecordsPayload::payload_len`
-    /// for the owned form; the slice's own length for the verbatim form). Used
-    /// for the KIP-13 bytes-in metrics + producer byte-rate quota, exactly as
-    /// the prior owned decode reported.
+    /// Records-field wire length in bytes.
+    ///
+    /// For the owned form it is `RecordsPayload::payload_len`. For the
+    /// verbatim form it is the slice's own length. The KIP-13 bytes-in metrics
+    /// and the producer byte-rate quota both use it.
     fn payload_len(&self) -> usize {
         match self {
             Self::Slice(b) => b.len(),
@@ -976,9 +992,11 @@ impl PartitionPayload {
         }
     }
 
-    /// Number of records across the field's batch(es), for `messages_in_total`.
+    /// Number of records across the field's batches, for `messages_in_total`.
+    ///
     /// Verbatim slices read each v2 batch header's `records_count` WITHOUT
-    /// decompressing; owned payloads sum `records.len()` over their v2 batches.
+    /// decompression. Owned payloads sum `records.len()` over their v2
+    /// batches.
     fn message_count(&self) -> u64 {
         match self {
             Self::Slice(b) => count_records_in_v2_batches(b),
@@ -990,8 +1008,10 @@ impl PartitionPayload {
     }
 }
 
-/// Header-only framing of a `ProduceRequest`, mirroring the owned struct's
-/// field names so the handler body is unchanged except for the records form.
+/// Header-only framing of a `ProduceRequest`.
+///
+/// The field names match the owned struct's field names, so the handler body
+/// differs only in the records form.
 struct ProduceFramed {
     transactional_id: Option<String>,
     acks: i16,
@@ -1011,8 +1031,8 @@ struct FramedPartition {
 }
 
 impl ProduceFramed {
-    /// v≥3: build from the header-only `produce_framing` walk — no record
-    /// body is decoded or decompressed here.
+    /// v≥3: build from the header-only `produce_framing` walk. This function
+    /// decodes and decompresses no record body.
     fn from_framing(f: crabka_protocol::records::ProduceFraming) -> Self {
         Self {
             transactional_id: f.transactional_id,
@@ -1040,8 +1060,9 @@ impl ProduceFramed {
         }
     }
 
-    /// v0-2: wrap the fully-decoded legacy request; every partition takes the
-    /// owned path (legacy `MessageSet` up-conversion is never passthrough).
+    /// v0-2: wrap the fully-decoded legacy request. Every partition takes the
+    /// owned path, because a legacy `MessageSet` up-conversion is never a
+    /// passthrough.
     fn from_owned(req: ProduceRequest) -> Self {
         Self {
             transactional_id: req.transactional_id,
@@ -1091,10 +1112,11 @@ fn produce_bytes_by_qos_tier(
     out
 }
 
-/// Resolve a topic's broker-side `compression.type` from the metadata
-/// image. `None` means Kafka's `producer` pass-through (no recompression);
-/// `Some(codec)` forces recompression of batches whose codec differs.
-/// Mirrors the resolution the partition writer applies via its
+/// Resolve a topic's broker-side `compression.type` from the metadata image.
+///
+/// `None` means Kafka's `producer` pass-through, with no recompression.
+/// `Some(codec)` forces recompression of the batches whose codec differs. The
+/// result matches the resolution that the partition writer applies through its
 /// `LogConfig::compression_type`.
 fn resolve_topic_compression(
     image: &crabka_metadata::MetadataImage,
@@ -1107,12 +1129,14 @@ fn resolve_topic_compression(
         .flatten()
 }
 
-/// All the per-batch HEADER fields the broker's produce gates need
-/// (leadership epoch stamp, transactional verify, idempotent dedup,
-/// `acks=-1` HW target), sourced WITHOUT materializing or decompressing
-/// the records. On the verbatim path these come from the v2 batch header
-/// (via [`validate_one_v2_batch`]); on the owned fallback they come from
-/// the decoded [`RecordBatch`] header — identical values either way.
+/// All the per-batch HEADER fields that the broker's produce gates need.
+///
+/// The gates are the leadership epoch stamp, the transactional verify, the
+/// idempotent dedup, and the `acks=-1` HW target. The struct holds these
+/// fields WITHOUT any materialization or decompression of the records. On the
+/// verbatim path they come from the v2 batch header through
+/// [`validate_one_v2_batch`]. On the owned fallback they come from the decoded
+/// [`RecordBatch`] header. The values are identical on both paths.
 #[derive(Debug)]
 struct PreparedBatch {
     attributes: Attributes,
@@ -1121,19 +1145,21 @@ struct PreparedBatch {
     producer_id: i64,
     producer_epoch: i16,
     base_sequence: i32,
-    /// The append source: producer's verbatim bytes (passthrough) or the
-    /// decoded owned batch (fallback). The leader epoch is stamped at append
-    /// time by the writer (verbatim) or onto the owned batch below.
+    /// The append source. It is either the producer's verbatim bytes on the
+    /// passthrough path, or the decoded owned batch on the fallback path. On
+    /// the verbatim path the writer stamps the leader epoch at append time. On
+    /// the owned path the code below stamps it onto the owned batch.
     source: PreparedSource,
 }
 
 #[derive(Debug)]
 enum PreparedSource {
-    /// Validated, single, CRC-checked v2 batch — append the producer's exact
-    /// bytes. No decode/decompress happened.
+    /// Validated, single, CRC-checked v2 batch. The writer appends the
+    /// producer's exact bytes. No decode and no decompression happened.
     Verbatim(Bytes),
-    /// Decoded owned batch — the complete fallback path. Decompression (if the
-    /// producer compressed) happened here, in `RecordBatch::decode`.
+    /// Decoded owned batch. This is the complete fallback path. When the
+    /// producer compressed the batch, `RecordBatch::decode` decompressed it
+    /// here.
     Owned(RecordBatch),
 }
 
@@ -1164,27 +1190,31 @@ impl PreparedBatch {
 }
 
 /// Decide the append shape for one partition's records and extract the header
-/// fields the gates need — WITHOUT decompressing on the verbatim path.
+/// fields that the gates need, WITHOUT decompression on the verbatim path.
 ///
-/// Verbatim-passthrough predicate (ALL must hold), mirroring the writer's
-/// recompression gate exactly:
-///   1. a v≥3 native-v2 records slice (not legacy, not a wire-null field);
-///   2. the slice is exactly one complete, CRC-valid v2 batch (re-validates
-///      the producer's CRC header-only — no record materialization);
-///   3. `timestamp_type == CreateTime` (no log-append-time rewrite, which
-///      would touch CRC-covered header bytes);
-///   4. the batch is **not** a control batch (its LSO bookkeeping needs the
-///      inner marker record, which the header-only path can't read);
-///   5. no broker-side recompression — the topic's `compression.type` is
-///      `producer` pass-through (`None`) OR equals the batch's own codec.
+/// The verbatim-passthrough predicate holds only when ALL of these hold. It
+/// matches the writer's recompression gate exactly:
+///   1. the records are a v≥3 native-v2 slice, not legacy and not a wire-null
+///      field;
+///   2. the slice is exactly one complete, CRC-valid v2 batch. This step
+///      re-validates the producer's CRC from the header only and materializes
+///      no record;
+///   3. `timestamp_type == CreateTime`, so there is no log-append-time
+///      rewrite, which would touch CRC-covered header bytes;
+///   4. the batch is **not** a control batch. Its LSO bookkeeping needs the
+///      inner marker record, which the header-only path cannot read;
+///   5. there is no broker-side recompression. The topic's `compression.type`
+///      is `producer` pass-through, which is `None`, OR it equals the batch's
+///      own codec.
 ///
-/// On any miss the records are decoded into an owned `RecordBatch` (the
-/// complete fallback — decompressing here only). Legacy v0-2 payloads are
-/// up-converted via [`decode_owned_batch`]. The owned arm is a complete
-/// alternative, so reverting this feature is "always take the owned path".
+/// On any miss the function decodes the records into an owned `RecordBatch`.
+/// That is the complete fallback, and it is the only place that decompresses.
+/// [`decode_owned_batch`] up-converts the legacy v0-2 payloads. The owned arm
+/// is a complete alternative, so a revert of this feature means "always take
+/// the owned path".
 ///
-/// Returns the response error *code* on a bad field (`INVALID_REQUEST` /
-/// `INVALID_RECORD`), matching the prior `decode_single_batch` behavior.
+/// The function returns the response error *code* on a bad field, either
+/// `INVALID_REQUEST` or `INVALID_RECORD`.
 fn prepare_batch(
     payload: PartitionPayload,
     topic_compression: Option<crabka_compression::CompressionType>,
@@ -1240,8 +1270,9 @@ fn prepare_batch(
     Ok(PreparedBatch::from_header(header, bytes))
 }
 
-/// The v2 batch header fields the gates need, copied out of a borrowed
-/// [`ValidatedBatch`] so the verbatim `Bytes` can be moved afterward.
+/// The v2 batch header fields that the gates need, copied out of a borrowed
+/// [`ValidatedBatch`] so that the code can move the verbatim `Bytes`
+/// afterward.
 #[derive(Debug, Clone, Copy)]
 struct ValidatedHeader {
     attributes: Attributes,
@@ -1265,10 +1296,12 @@ impl From<&ValidatedBatch<'_>> for ValidatedHeader {
     }
 }
 
-/// Decode/up-convert a legacy or pre-decoded `RecordsPayload` into a single
-/// owned `RecordBatch`. Mirrors the prior `decode_single_batch`: a v0/v1
-/// `MessageSet` is up-converted (counted once), an empty v2 sequence is
-/// `INVALID_REQUEST`, a failed up-conversion is `INVALID_RECORD`.
+/// Decode or up-convert a legacy or pre-decoded `RecordsPayload` into a single
+/// owned `RecordBatch`.
+///
+/// The function up-converts a v0/v1 `MessageSet` and counts it once. An empty
+/// v2 sequence gives `INVALID_REQUEST`. A failed up-conversion gives
+/// `INVALID_RECORD`.
 fn decode_owned_batch(
     payload: RecordsPayload,
     topic_name: &str,
@@ -1321,10 +1354,12 @@ fn decode_owned_batch(
     }
 }
 
-/// Build the writer's [`ProduceData`] from a prepared batch, stamping the
-/// leader epoch. Verbatim batches carry the producer's exact bytes; owned
-/// batches carry the decoded `RecordBatch` (with `partition_leader_epoch`
-/// already stamped by the caller).
+/// Build the writer's [`ProduceData`] from a prepared batch and stamp the
+/// leader epoch.
+///
+/// Verbatim batches carry the producer's exact bytes. Owned batches carry the
+/// decoded `RecordBatch`, whose `partition_leader_epoch` the caller has
+/// already stamped.
 fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData {
     let is_transactional = prepared.attributes.is_transactional();
     match prepared.source {
@@ -1878,13 +1913,15 @@ mod tests {
         assert!(resp == expected);
     }
 
-    /// Idempotent-retry (`Decision::Duplicate`) under `acks=all` re-waits for
-    /// the HW to reach the duplicate's *last offset + 1* before claiming
-    /// success. With the duplicate spanning offsets 0..=2 the durability
-    /// target is 3 (`base_offset 0 + last_offset_delta 2 + 1`). If the HW is
-    /// stuck at 2 the wait times out → `NOT_ENOUGH_REPLICAS_AFTER_APPEND`.
-    /// The `+ 1` matters: a mutant flipping it to `- 1` would target offset 1,
-    /// which HW 2 already satisfies, wrongly returning `NONE`.
+    /// An idempotent retry, `Decision::Duplicate`, under `acks=all` waits
+    /// again for the HW to reach the duplicate's *last offset + 1* before it
+    /// claims success.
+    ///
+    /// The duplicate spans offsets 0..=2, so the durability target is 3, which
+    /// is `base_offset 0 + last_offset_delta 2 + 1`. When the HW is stuck at
+    /// 2, the wait times out and gives `NOT_ENOUGH_REPLICAS_AFTER_APPEND`. The
+    /// `+ 1` matters. A mutant that flips it to `- 1` would target offset 1,
+    /// which HW 2 already satisfies, and would wrongly return `NONE`.
     #[tokio::test]
     async fn duplicate_acks_all_waits_for_last_offset_plus_one() {
         use crabka_protocol::owned::produce_response::PartitionProduceResponse;
@@ -2128,8 +2165,9 @@ mod tests {
             }
         }
 
-        /// Run the full dispatch over a v≥3 records slice: `prepare_batch`
-        /// then `build_produce_data` with the given leader epoch.
+        /// Run the full dispatch over a v≥3 records slice: first
+        /// `prepare_batch`, then `build_produce_data` with the given leader
+        /// epoch.
         fn dispatch_slice(
             slice: Bytes,
             topic_compression: Option<CompressionType>,
@@ -2266,13 +2304,15 @@ mod tests {
             }
         }
 
-        /// A producer-LZ4-compressed batch whose DECOMPRESSED form is huge
-        /// (100 KiB) but whose compressed wire bytes are tiny takes the
-        /// verbatim path WITHOUT decompressing: the stored `Verbatim.bytes`
-        /// equal the compressed wire bytes (far smaller than the decompressed
-        /// payload), and the header fields (`last_offset_delta`,
-        /// `max_timestamp`) are read straight from the v2 header. This pins
-        /// the "no decompress on the verbatim path" guarantee.
+        /// A producer-LZ4-compressed batch takes the verbatim path WITHOUT
+        /// decompression, even when its DECOMPRESSED form is 100 KiB and its
+        /// compressed wire bytes are tiny.
+        ///
+        /// The stored `Verbatim.bytes` equal the compressed wire bytes, which
+        /// are much smaller than the decompressed payload. The header fields
+        /// `last_offset_delta` and `max_timestamp` come straight from the v2
+        /// header. This test pins the "no decompress on the verbatim path"
+        /// guarantee.
         #[test]
         fn lz4_batch_passes_through_without_decompress() {
             // 100 KiB of highly-compressible payload across many records.
@@ -2317,10 +2357,12 @@ mod tests {
             }
         }
 
-        /// Idempotent dedup over the verbatim path is driven by HEADER fields:
-        /// `prepare_batch` exposes `producer_id`/`producer_epoch`/`base_sequence`/
-        /// `last_offset_delta` read from the v2 header (no record decode), and
-        /// they match what an owned decode of the same bytes would yield.
+        /// HEADER fields drive the idempotent dedup over the verbatim path.
+        ///
+        /// `prepare_batch` exposes `producer_id`, `producer_epoch`,
+        /// `base_sequence`, and `last_offset_delta`. It reads them from the v2
+        /// header and decodes no record. The values match what an owned decode
+        /// of the same bytes would give.
         #[test]
         fn header_fields_drive_dedup_on_verbatim_path() {
             let mut b = plain_batch();

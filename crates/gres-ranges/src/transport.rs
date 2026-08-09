@@ -32,41 +32,42 @@ use tracing::Instrument as _;
 
 use crate::{RangeId, telemetry};
 
-/// Hard limit on one encoded frame, enforced by both the encoder and the
-/// decoder.
+/// Hard limit on one encoded frame. Both the encoder and the decoder enforce it.
 const MAX_FRAME: ByteSize = mebibytes(1);
 
 /// Bytes of [`MAX_FRAME`] reserved for what [`RangeEnvelope`] adds around a
 /// request.
 ///
-/// A W3C `traceparent` is 55 bytes and `crabka-trace-context` caps `tracestate`
-/// at 512; the rest is the envelope's own JSON keys and quoting. Callers that
-/// size a payload against the frame limit — [`JoinRangeReq::fits_transport_frame`]
-/// is the one that matters — must subtract this, or a request sized to exactly
-/// one frame turns a clean domain error into a [`TransportError::FrameTooLarge`]
-/// the moment it is wrapped.
+/// A W3C `traceparent` is 55 bytes, and `crabka-trace-context` caps `tracestate`
+/// at 512. The rest is the envelope's own JSON keys and quoting. A caller that
+/// sizes a payload against the frame limit must subtract this reserve.
+/// [`JoinRangeReq::fits_transport_frame`] is the caller that matters. Without
+/// the subtraction, a request sized to exactly one frame turns a clean domain
+/// error into a [`TransportError::FrameTooLarge`] as soon as the envelope wraps
+/// it.
 const ENVELOPE_RESERVE: ByteSize = kibibytes(1);
 
-/// One request as it travels on the wire: the caller's trace context alongside
+/// One request as it travels on the wire, with the caller's trace context beside
 /// the request itself.
 ///
-/// Private on purpose, constructed where a frame is written and destructured
-/// where one is read, so neither the [`FramedTcpClient`] call sites nor any
-/// [`RangeService`] implementation knows it exists.
+/// This type is private on purpose. The code constructs it where it writes a
+/// frame and destructures it where it reads one. Neither the [`FramedTcpClient`]
+/// call sites nor any [`RangeService`] implementation knows it exists.
 ///
-/// `request` is a [`Cow`] so the write path borrows the caller's request rather
-/// than deep-cloning it — a `JoinRange` payload runs to megabytes, and this is
-/// the hot path for every cross-node scan. Decoding always yields
+/// `request` is a [`Cow`], so the write path borrows the caller's request
+/// instead of a deep clone. A `JoinRange` payload runs to megabytes, and this is
+/// the hot path for every cross-node scan. A decode always yields
 /// [`Cow::Owned`].
 ///
-/// [`PartialEq`] is deliberately not derived. `RangeRequest` equality must stay
-/// a pure function of the payload, and derived envelope equality would make two
-/// identical requests compare unequal because they were traced differently.
+/// This type deliberately does not derive [`PartialEq`]. `RangeRequest` equality
+/// must stay a pure function of the payload. A derived envelope equality would
+/// make two identical requests compare unequal after a different trace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RangeEnvelope<'a> {
-    /// Omitted entirely when nothing is being traced, which is the common case
-    /// and the hot path. A payload-size optimisation, **not** a compatibility
-    /// shim — Crabka keeps none, see `CLAUDE.md`.
+    /// The encoder omits this field entirely when nothing is traced, which is
+    /// the common case and the hot path. This is a payload-size optimization,
+    /// **not** a compatibility shim. Crabka keeps no compatibility shims. See
+    /// `CLAUDE.md`.
     #[serde(default, skip_serializing_if = "TraceCarrier::is_empty")]
     trace: TraceCarrier,
     request: Cow<'a, RangeRequest>,
@@ -75,9 +76,9 @@ struct RangeEnvelope<'a> {
 impl<'a> RangeEnvelope<'a> {
     /// Wrap `request` with the trace context of the currently active span.
     ///
-    /// The carrier is empty when nothing is being traced — no active span, an
-    /// unsampled one, or OTLP switched off — which costs two `None`s and
-    /// serialises to nothing.
+    /// The carrier is empty when nothing is traced: there is no active span, the
+    /// active span is unsampled, or OTLP is switched off. An empty carrier costs
+    /// two `None`s and serializes to nothing.
     fn outgoing(request: &'a RangeRequest) -> Self {
         Self {
             trace: TraceCarrier::capture_current(),
@@ -86,14 +87,16 @@ impl<'a> RangeEnvelope<'a> {
     }
 }
 
-/// `rpc.system` for every span this module emits. Constant, and the attribute an
-/// operator filters on to isolate range RPC from the rest of the gateway tier.
+/// `rpc.system` for every span this module emits.
+///
+/// The value is constant. It is the attribute an operator filters on to isolate
+/// range RPC from the rest of the gateway tier.
 const RPC_SYSTEM: &str = "crabka.range";
 
-/// The `rpc.method` for a request: its [`RangeRequest`] variant name.
+/// The `rpc.method` for a request, which is its [`RangeRequest`] variant name.
 ///
-/// A closed set of `&'static str`, so the attribute stays low-cardinality and
-/// costs nothing to derive on a disabled callsite.
+/// The result comes from a closed set of `&'static str`, so the attribute stays
+/// low-cardinality and costs nothing to derive on a disabled callsite.
 const fn request_method(request: &RangeRequest) -> &'static str {
     match request {
         RangeRequest::Sql { .. } => "Sql",
@@ -124,9 +127,9 @@ const fn request_method(request: &RangeRequest) -> &'static str {
 
 /// The range a request names, when it names one.
 ///
-/// `None` for the requests addressed to a node rather than to a range — the
-/// timestamp-oracle and primary-authenticated recovery RPCs, which carry a
-/// transaction identity instead.
+/// The result is `None` for the requests addressed to a node rather than to a
+/// range. Those are the timestamp-oracle RPCs and the primary-authenticated
+/// recovery RPCs, which carry a transaction identity instead.
 fn request_range_id(request: &RangeRequest) -> Option<RangeId> {
     match request {
         RangeRequest::Sql { range_id, .. }
@@ -159,12 +162,13 @@ fn request_range_id(request: &RangeRequest) -> Option<RangeId> {
     }
 }
 
-/// The `error.type` for a failed RPC: the [`TransportError`] discriminant.
+/// The `error.type` for a failed RPC, which is the [`TransportError`]
+/// discriminant.
 ///
-/// A transport failure has no SQLSTATE — `TransportError::Sql` is the one
-/// variant that carries one, and it is the peer's, already visible in the
-/// status description. The discriminant is the low-cardinality thing to group
-/// by, which is what `error.type` is for.
+/// A transport failure has no SQLSTATE. `TransportError::Sql` is the one variant
+/// that carries one, that SQLSTATE is the peer's, and the status description
+/// already shows it. The discriminant is the low-cardinality value to group by,
+/// which is what `error.type` is for.
 const fn transport_error_kind(error: &TransportError) -> &'static str {
     match error {
         TransportError::FrameTooLarge { .. } => "frame_too_large",
@@ -187,9 +191,10 @@ fn record_rpc_error(span: &tracing::Span, error: &TransportError) {
 
 /// Frame bytes moved by one client RPC.
 ///
-/// Accumulated by the framing loop and recorded once when it returns. A span per
-/// result page would emit hundreds of spans for one large scan, all of which the
-/// exporter would drop; two counters answer the same question.
+/// The framing loop accumulates these counts and records them once when it
+/// returns. One span per result page would emit hundreds of spans for one large
+/// scan, and the exporter would drop all of them. Two counters answer the same
+/// question.
 #[derive(Debug, Default)]
 struct RpcBytes {
     request: usize,
@@ -209,8 +214,8 @@ impl RpcBytes {
 /// Build the client span covering one range RPC.
 ///
 /// Every field is a constant or a field read, so the callsite needs no
-/// `enabled!` guard. Building it here rather than at the ~two dozen call sites
-/// is what keeps the change small — and what lets
+/// `enabled!` guard. The span is built here instead of at the two dozen or so
+/// call sites. That keeps the change small, and it lets
 /// [`TraceCarrier::capture_current`] inside the framing loop pick up a
 /// client-kind parent without any of those callers knowing.
 fn range_rpc_span(endpoint: &str, request: &RangeRequest) -> tracing::Span {
@@ -240,9 +245,9 @@ fn range_rpc_span(endpoint: &str, request: &RangeRequest) -> tracing::Span {
 /// The authenticated identity of one served connection, recorded on every
 /// `gres.range_serve` span it produces.
 ///
-/// The peer certificate is validated once when the connection is established,
-/// so the principal is constant for the connection's lifetime and is carried
-/// here rather than re-extracted per request.
+/// The server validates the peer certificate once when the connection is
+/// established. The principal is therefore constant for the lifetime of the
+/// connection, and this type carries it instead of an extraction per request.
 #[derive(Debug, Default)]
 struct ServePeer {
     principal: String,
@@ -279,10 +284,11 @@ fn range_serve_span(request: &RangeRequest, peer: &ServePeer) -> tracing::Span {
 
 /// A stream that counts the bytes written through it.
 ///
-/// Wrapped around the response half of one served request so `pg.response_bytes`
-/// covers the streaming SQL path too, where the service writes result pages
-/// straight to the socket. Counting here rather than at each write site is what
-/// lets `gres.range_serve` report the whole response without a span per page.
+/// The server wraps this around the response half of one served request, so
+/// `pg.response_bytes` also covers the streaming SQL path, where the service
+/// writes result pages straight to the socket. The count happens here instead of
+/// at each write site. That lets `gres.range_serve` report the whole response
+/// without one span per page.
 struct CountingStream<'a, S> {
     inner: &'a mut S,
     written: usize,
@@ -350,10 +356,10 @@ pub enum RangeRequest {
     /// Open one owner-side connection session.
     SessionOpen {
         range_id: RangeId,
-        /// The originating connection's backend pid, when it holds a seat on
-        /// its gateway's notification bus. The owner-side session adopts it so
-        /// a forwarded `NOTIFY` is stamped with the pid `PostgreSQL` would
-        /// report, not the owner session's own.
+        /// The originating connection's backend pid, when that connection holds
+        /// a seat on its gateway's notification bus. The owner-side session
+        /// adopts the pid, so a forwarded `NOTIFY` carries the pid `PostgreSQL`
+        /// would report and not the owner session's own pid.
         #[serde(default)]
         notify_pid: Option<i32>,
     },
@@ -417,8 +423,8 @@ pub enum RangeResponse {
     Sql { result: String },
     /// Complete simple-query results, including row descriptions and encoded cells.
     SqlResults { results: Vec<WireQueryResult> },
-    /// One bounded part of a SQL result stream. This is internal to the framed
-    /// transport and is reassembled by [`FramedTcpClient::call`].
+    /// One bounded part of a SQL result stream. This part is internal to the
+    /// framed transport, and [`FramedTcpClient::call`] reassembles it.
     SqlResultsChunk { chunk: WireSqlResultChunk },
     /// Terminates a bounded SQL result stream.
     SqlResultsDone,
@@ -577,7 +583,7 @@ pub enum RangeControlOperation {
     Resume,
 }
 
-/// Explicit control result; callers never infer success from connection closure.
+/// Explicit control result. Callers never infer success from a connection closure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "result")]
 pub enum RangeControlResp {
@@ -637,7 +643,7 @@ pub enum WireQueryResult {
 pub enum WireSqlResultChunk {
     Rows {
         result_index: u32,
-        /// Present only on the first chunk, avoiding metadata amplification.
+        /// Present only on the first chunk, which prevents metadata amplification.
         fields: Option<Vec<WireFieldDescription>>,
         rows: Vec<Vec<Option<WireCell>>>,
         /// Present only on the final chunk for this result.
@@ -690,11 +696,13 @@ pub enum WireGlobalStatus {
 pub enum WireSessionOperation {
     SimpleQuery {
         sql: String,
-        /// Bound, in milliseconds, on every lock wait this statement performs.
-        /// `Some` only for statements of a gateway transaction that has
-        /// escalated past one range — the only sessions a cross-engine
-        /// deadlock cycle can enlist; `None` keeps exact engine-local
-        /// blocking for single-range and autocommit forwarding.
+        /// Bound, in milliseconds, on every lock wait this statement does.
+        ///
+        /// The value is `Some` only for statements of a gateway transaction that
+        /// has escalated past one range. Those are the only sessions a
+        /// cross-engine deadlock cycle can enlist. `None` keeps exact
+        /// engine-local blocking for single-range forwarding and autocommit
+        /// forwarding.
         lock_wait_cap_ms: Option<u64>,
     },
     Parse {
@@ -809,8 +817,8 @@ pub enum ResolveTxnResp {
     Committed { commit_ts: u64 },
     /// The primary has durably aborted the transaction.
     Aborted,
-    /// The primary has no terminal decision yet; the reader must exclude the
-    /// intent or retry/push-abort via the caller's bounded-wait policy.
+    /// The primary has no terminal decision yet. The reader must exclude the
+    /// intent, or retry or push-abort under the caller's bounded-wait policy.
     Pending,
 }
 
@@ -1053,7 +1061,7 @@ pub struct ScanRangeRow {
     pub tuple: Vec<u8>,
 }
 
-/// Range-scan response. Rows are sorted by rowid by the owner.
+/// Range-scan response. The owner sorts the rows by rowid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScanRangeResp {
@@ -1139,13 +1147,13 @@ impl JoinRangeReq {
         self.to_pgexec().validate_with_policy(policy)
     }
 
-    /// Whether the fully materialized request, including enum/request JSON
-    /// overhead, fits the production bounded frame.
+    /// Whether the fully materialized request fits the production bounded frame,
+    /// with the JSON overhead of the enum and the request included.
     ///
-    /// Sized against the frame limit less a reserve, because the frame the
-    /// request actually rides in also carries the caller's trace context.
-    /// Ignoring that reserve would let a join sized to exactly one frame pass
-    /// here and then fail on the wire with a
+    /// The check sizes the request against the frame limit less a reserve,
+    /// because the frame the request rides in also carries the caller's trace
+    /// context. Without that reserve, a join sized to exactly one frame would
+    /// pass here and then fail on the wire with a
     /// [`TransportError::FrameTooLarge`] instead of the planner's
     /// `JoinValidationError`.
     #[must_use]
@@ -1317,7 +1325,7 @@ impl WireErrorKind {
 pub enum TransportError {
     /// Frame exceeded the protocol limit.
     ///
-    /// Both counts stay raw: they are measured buffer lengths, and one site
+    /// Both counts stay raw. They are measured buffer lengths, and one site
     /// reports a result-index overflow against `u32::MAX` rather than a byte
     /// magnitude. The dimensioned limit is [`MAX_FRAME`].
     #[error("range frame too large: {actual} bytes exceeds {limit}")]
@@ -1440,11 +1448,12 @@ pub trait RangeService: Send + Sync + 'static {
 
     /// Optionally consume a request while owning the live response writer.
     ///
-    /// Returning `Ok(None)` asserts the implementation wrote one complete
-    /// framed response stream (single frame, or SQL chunks ending with a
-    /// terminal [`RangeResponse::SqlResultsDone`]/[`RangeResponse::SqlError`]
-    /// frame) and left the stream at a frame boundary, so the transport keeps
-    /// the connection alive for the peer's next request.
+    /// A return of `Ok(None)` asserts two things. First, the implementation
+    /// wrote one complete framed response stream: either a single frame, or SQL
+    /// chunks that end with a terminal [`RangeResponse::SqlResultsDone`] or
+    /// [`RangeResponse::SqlError`] frame. Second, it left the stream at a frame
+    /// boundary, so the transport keeps the connection alive for the peer's next
+    /// request.
     async fn handle_connection(
         &self,
         request: RangeRequest,
@@ -1456,11 +1465,11 @@ pub trait RangeService: Send + Sync + 'static {
 
 /// Authenticated client for framed TLS range RPC.
 ///
-/// Established connections are pooled per endpoint and reused across calls;
-/// clones share one pool, so cloning this client is cheap and preserves reuse.
-/// A connection returns to the pool only after its response was fully
-/// consumed; any error, timeout, or partial read drops the connection and
-/// surfaces the error unchanged — the client never retries on its own.
+/// The client pools established connections per endpoint and reuses them across
+/// calls. Clones share one pool, so a clone of this client is cheap and keeps the
+/// reuse. A connection returns to the pool only after the caller fully consumed
+/// its response. Any error, timeout, or partial read drops the connection and
+/// surfaces the error unchanged. The client never retries on its own.
 #[derive(Debug, Clone)]
 pub struct FramedTcpClient {
     timeout: Time,
@@ -1499,15 +1508,17 @@ impl RangeStream {
 
     /// Non-blocking liveness probe on the underlying socket.
     ///
-    /// This protocol never carries unsolicited server bytes, so any pending
-    /// input while the connection is idle means the server closed the stream
-    /// (EOF or TLS `close_notify`) or an error is pending, and the caller must
-    /// discard the connection instead of reusing it. The probe uses a direct
-    /// non-blocking `try_read` rather than tokio readiness (which caches a
-    /// stale readable flag after a fully drained read): consuming a byte is
-    /// harmless because every branch that observes input discards the
-    /// connection, and `WouldBlock` — the only branch that permits reuse —
-    /// consumes nothing.
+    /// This protocol never carries unsolicited server bytes. Pending input while
+    /// the connection is idle therefore means one of two things: the server
+    /// closed the stream with an EOF or a TLS `close_notify`, or an error is
+    /// pending. In both cases the caller must discard the connection and must
+    /// not reuse it.
+    ///
+    /// The probe uses a direct non-blocking `try_read` rather than tokio
+    /// readiness, which caches a stale readable flag after a fully drained read.
+    /// The probe can consume one byte without harm, because every branch that
+    /// observes input discards the connection. `WouldBlock` is the only branch
+    /// that permits reuse, and it consumes nothing.
     fn dead_while_idle(&self) -> bool {
         let mut scratch = [0_u8; 1];
         match self.tcp().try_read(&mut scratch) {
@@ -1570,15 +1581,15 @@ struct PooledConn {
 /// Idle connections shared by every clone of one [`FramedTcpClient`],
 /// partitioned by the runtime that dialed them.
 ///
-/// Tokio sockets are registered with the IO driver of the runtime that
-/// created them and error once that runtime shuts down. Several engine paths
-/// (the blocking [`crabka_pgexec::RangeScanner`] entry points, bounded cursor
-/// collectors, timestamp-session cleanup) run range RPCs on short-lived
-/// single-call runtimes, so a connection must only ever be reused by the
-/// runtime that dialed it. Ephemeral runtimes therefore get no reuse — the
-/// same behavior as before pooling existed — while long-lived runtimes reap
-/// the full benefit. Expired entries are swept on every check-in so sockets
-/// parked by runtimes that never return cannot accumulate.
+/// Tokio registers a socket with the IO driver of the runtime that created it,
+/// and the socket errors after that runtime shuts down. Several engine paths run
+/// range RPCs on short-lived single-call runtimes: the blocking
+/// [`crabka_pgexec::RangeScanner`] entry points, the bounded cursor collectors,
+/// and timestamp-session cleanup. Only the runtime that dialed a connection may
+/// ever reuse it. Ephemeral runtimes therefore get no reuse, which is the same
+/// behavior the code had before the pool existed, and long-lived runtimes get
+/// the full benefit. Every check-in sweeps expired entries, so sockets parked by
+/// runtimes that never return cannot accumulate.
 #[derive(Default)]
 struct ConnectionPool {
     idle: Mutex<HashMap<tokio::runtime::Id, HashMap<String, Vec<PooledConn>>>>,
@@ -1603,9 +1614,9 @@ impl ConnectionPool {
     /// Pop the most recently parked healthy connection this runtime dialed
     /// for `endpoint`.
     ///
-    /// Connections idle past `idle_ttl`, and connections whose socket became
-    /// readable while parked (the server closed or reset the stream), are
-    /// dropped instead of returned.
+    /// This method drops two kinds of connection instead of a return: a
+    /// connection idle past `idle_ttl`, and a connection whose socket became
+    /// readable while parked, which means the server closed or reset the stream.
     fn take(&self, endpoint: &str, idle_ttl: Time) -> Option<RangeStream> {
         let runtime = tokio::runtime::Handle::current().id();
         let mut idle = self.lock();
@@ -1625,8 +1636,8 @@ impl ConnectionPool {
     /// Park a connection whose response was fully consumed, and sweep
     /// expired connections across every runtime partition.
     ///
-    /// When the endpoint already holds `max_idle` parked connections the
-    /// overflow connection is dropped; check-in never blocks.
+    /// When the endpoint already holds `max_idle` parked connections, this
+    /// method drops the overflow connection. Check-in never blocks.
     fn put(&self, endpoint: &str, stream: RangeStream, max_idle: usize, idle_ttl: Time) {
         let runtime = tokio::runtime::Handle::current().id();
         let mut idle = self.lock();
@@ -1653,8 +1664,8 @@ impl ConnectionPool {
 
 /// Plaintext range transport exists only inside this crate's unit tests.
 ///
-/// It is deliberately not exported from production builds: every production
-/// range RPC must present an mTLS identity and verify its peer.
+/// Production builds deliberately do not export it. Every production range RPC
+/// must present an mTLS identity and must verify its peer.
 #[cfg(test)]
 impl Default for FramedTcpClient {
     fn default() -> Self {
@@ -1699,7 +1710,7 @@ impl FramedTcpClient {
         }
     }
 
-    /// Override pool tuning knobs for unit tests.
+    /// Override the pool tuning controls for unit tests.
     #[cfg(test)]
     #[must_use]
     pub fn with_pool_tuning(mut self, idle_ttl: Time, max_idle_per_endpoint: usize) -> Self {
@@ -1708,11 +1719,12 @@ impl FramedTcpClient {
         self
     }
 
-    /// Build a TLS-only forwarding client. This path always presents a client
-    /// identity and validates the remote certificate and SNI name.
+    /// Build a TLS-only forwarding client.
     ///
-    /// The TLS connector configuration (certificate parsing included) is built
-    /// once here and shared by every subsequent dial.
+    /// This path always presents a client identity, and it validates the remote
+    /// certificate and the SNI name. This function builds the TLS connector
+    /// configuration once, including the certificate parsing, and every later
+    /// dial shares it.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1767,10 +1779,10 @@ impl FramedTcpClient {
 
     /// Send one request and await one response.
     ///
-    /// Reuses a pooled connection to `endpoint` when a healthy one is parked,
-    /// dialing (and handshaking) a fresh connection otherwise. The connection
-    /// returns to the pool only after the response was fully consumed; any
-    /// error drops it and surfaces unchanged.
+    /// This method reuses a pooled connection to `endpoint` when a healthy one is
+    /// parked. Otherwise it dials a fresh connection and handshakes it. The
+    /// connection returns to the pool only after the caller fully consumed the
+    /// response. Any error drops the connection and surfaces unchanged.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1790,9 +1802,10 @@ impl FramedTcpClient {
         outcome
     }
 
-    /// The body of [`FramedTcpClient::call`], run inside its `gres.range_rpc`
-    /// span so the trace context captured while framing names that span as the
-    /// remote parent.
+    /// The body of [`FramedTcpClient::call`].
+    ///
+    /// It runs inside the `gres.range_rpc` span of that call, so the trace
+    /// context captured during framing names that span as the remote parent.
     async fn call_traced(
         &self,
         endpoint: &str,
@@ -1808,8 +1821,8 @@ impl FramedTcpClient {
 
     /// Send one SQL request and forward bounded result pages as they arrive.
     ///
-    /// Connection reuse matches [`FramedTcpClient::call`]: the connection is
-    /// pooled only after the final SQL chunk was consumed.
+    /// Connection reuse matches [`FramedTcpClient::call`]. The connection returns
+    /// to the pool only after the caller consumed the final SQL chunk.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1830,8 +1843,8 @@ impl FramedTcpClient {
         outcome
     }
 
-    /// The body of [`FramedTcpClient::call_sql_into`], run inside its
-    /// `gres.range_rpc` span.
+    /// The body of [`FramedTcpClient::call_sql_into`]. It runs inside the
+    /// `gres.range_rpc` span of that call.
     async fn call_sql_into_traced(
         &self,
         endpoint: &str,
@@ -1848,9 +1861,10 @@ impl FramedTcpClient {
 
     /// Take a healthy pooled connection or dial and handshake a fresh one.
     ///
-    /// The flag says which happened, and becomes `pg.pooled_connection`: a
-    /// dialled connection pays a TCP and TLS handshake the pooled one does not,
-    /// which is usually the whole explanation for an outlier RPC.
+    /// The flag says which of the two happened, and it becomes
+    /// `pg.pooled_connection`. A dialed connection pays a TCP handshake and a
+    /// TLS handshake that a pooled connection does not, and that is usually the
+    /// whole explanation for an outlier RPC.
     async fn checkout(&self, endpoint: &str) -> Result<(RangeStream, bool), TransportError> {
         if let Some(stream) = self.pool.take(endpoint, self.idle_ttl) {
             return Ok((stream, true));
@@ -1984,9 +1998,9 @@ fn wire_chunk_to_result_page(chunk: WireSqlResultChunk) -> Result<ResultPage, Tr
 
 /// Serve plaintext framed requests in unit tests only.
 ///
-/// Production range listeners must use [`serve_tls`]. This symbol is omitted
-/// from non-test builds so a production binary cannot accidentally expose a
-/// [`RangeService`] without mTLS authorization.
+/// Production range listeners must use [`serve_tls`]. Non-test builds omit this
+/// symbol, so a production binary cannot expose a [`RangeService`] without mTLS
+/// authorization by accident.
 ///
 /// # Errors
 ///
@@ -2106,18 +2120,18 @@ pub async fn serve_tls_with_policy(
 /// disconnects, the idle deadline lapses, the service shuts down, or a
 /// request fails.
 ///
-/// The peer certificate was authenticated once when the connection was
-/// established; `authorize` re-checks the stored principal against every
-/// decoded request, since authorization is request-type-dependent.
+/// The server authenticated the peer certificate once when the connection was
+/// established. `authorize` then checks the stored principal again against every
+/// decoded request, because authorization depends on the request type.
 ///
-/// A peer that disconnects while the server is waiting for the next frame is
-/// a normal end of a kept-alive connection and closes without error; pooled
-/// clients drop idle connections this way as a matter of course.
+/// A peer that disconnects while the server waits for the next frame is a normal
+/// end of a kept-alive connection, and the connection closes without an error.
+/// Pooled clients drop idle connections this way as a matter of course.
 ///
-/// The connection holds only a weak service reference while parked between
-/// requests, so aborting the accept loop releases the service — and the
-/// storage handles it owns — deterministically instead of pinning them until
-/// every kept-alive peer disconnects.
+/// The connection holds only a weak service reference while it is parked between
+/// requests. An abort of the accept loop therefore releases the service, and the
+/// storage handles the service owns, deterministically. It does not pin them
+/// until every kept-alive peer disconnects.
 #[cfg(test)]
 async fn serve_frames<S, F>(
     stream: &mut S,
@@ -2355,7 +2369,7 @@ where
     serve_frames(&mut stream, &Arc::downgrade(&service), |_| Ok(())).await
 }
 
-/// Handle one decoded request, leaving the stream at a frame boundary so the
+/// Handle one decoded request and leave the stream at a frame boundary, so the
 /// caller's serve loop can read the peer's next request.
 #[cfg(test)]
 async fn handle_request_on_stream<S>(
@@ -2648,10 +2662,10 @@ where
 /// Read one length-prefixed request envelope, or `None` when the peer
 /// disconnected at a frame boundary.
 ///
-/// A clean EOF before any prefix byte, and an abrupt close reported before
-/// any prefix byte (pooled TLS clients drop idle connections without sending
-/// `close_notify`), are both normal ends of a kept-alive connection.
-/// Disconnecting inside a frame is an error.
+/// Two events are both normal ends of a kept-alive connection: a clean EOF
+/// before any prefix byte, and an abrupt close reported before any prefix byte.
+/// The second happens because pooled TLS clients drop idle connections without a
+/// `close_notify`. A disconnect inside a frame is an error.
 async fn read_request_or_eof_with_limit<R>(
     reader: &mut R,
     max_frame: ByteSize,
@@ -2919,10 +2933,10 @@ mod tests {
         assert!(matches!(error, TransportError::FrameTooLarge { .. }));
     }
 
-    /// The wire shape, pinned. Every request now rides inside a `RangeEnvelope`
-    /// under a `request` key, and an RPC made with no active span must carry no
-    /// `trace` key at all — not an empty object, and above all not a
-    /// placeholder `traceparent` a peer would then try to parse.
+    /// The wire shape, pinned. Every request rides inside a `RangeEnvelope`
+    /// under a `request` key. An RPC made with no active span must carry no
+    /// `trace` key at all: not an empty object, and above all not a placeholder
+    /// `traceparent` that a peer would then try to parse.
     #[tokio::test]
     async fn untraced_request_frames_carry_the_request_and_no_trace_context() {
         use assert2::assert;
@@ -2945,9 +2959,10 @@ mod tests {
         );
     }
 
-    /// The backstop for "we forgot to inject": with a span active, the frame's
-    /// JSON must carry *that* span's trace id and its sampled flag. Asserting a
-    /// `traceparent` merely exists survives a mutant that injects a constant.
+    /// The backstop against a missed injection. With a span active, the frame's
+    /// JSON must carry *that* span's trace id and its sampled flag. An assertion
+    /// that a `traceparent` only exists survives a mutant that injects a
+    /// constant.
     #[tokio::test]
     async fn traced_request_frames_carry_the_active_trace_id() {
         use assert2::assert;
@@ -2990,9 +3005,9 @@ mod tests {
         assert!(frame["request"] == serde_json::json!({"type": "range0_barrier"}));
     }
 
-    /// The reserve exists so a join accepted by the planner still fits once the
-    /// envelope wraps it. Sized against the worst case the carrier permits: a
-    /// 55-byte `traceparent` plus the 512-byte `tracestate` ceiling
+    /// The reserve exists so a join the planner accepted still fits after the
+    /// envelope wraps it. Its size covers the worst case the carrier permits: a
+    /// 55-byte `traceparent` plus the 512-byte `tracestate` ceiling that
     /// `crabka-trace-context` enforces.
     #[test]
     fn largest_accepted_join_still_fits_a_worst_case_traced_frame() {
@@ -3015,9 +3030,10 @@ mod tests {
         assert!(serialize_json_bounded(&envelope, MAX_FRAME).is_ok());
     }
 
-    /// The largest `broadcast_rows` payload [`JoinRangeReq::fits_transport_frame`]
-    /// still accepts, found by bisection so the test pins the real boundary
-    /// rather than a copy of the arithmetic under test.
+    /// The largest `broadcast_rows` payload that
+    /// [`JoinRangeReq::fits_transport_frame`] still accepts. A bisection finds
+    /// it, so the test pins the real boundary and not a copy of the arithmetic
+    /// under test.
     fn largest_fitting_join_payload() -> usize {
         let mut request = join_request_fixture();
         request.broadcast_rows = Some(vec![JoinRangeRow { tuple: vec![] }]);
@@ -3783,7 +3799,7 @@ mod tests {
     }
 
     /// Bind a loopback server that answers exactly one request per connection
-    /// and then closes it, imitating a server that does not keep connections.
+    /// and then closes it. It imitates a server that does not keep connections.
     async fn spawn_one_shot_loopback(
         service: Arc<dyn RangeService>,
     ) -> (SocketAddr, Arc<AtomicUsize>) {
@@ -3812,7 +3828,7 @@ mod tests {
         (addr, accepts)
     }
 
-    /// Service whose handlers block until the shared gate opens, forcing every
+    /// Service whose handlers block until the shared gate opens. It forces every
     /// concurrent call onto its own connection.
     struct GateService {
         entered: Arc<AtomicUsize>,

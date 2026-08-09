@@ -1,16 +1,18 @@
 //! Behavioral golden-replay tests for KIP-914 versioned-table joins.
 //!
-//! Each test builds the same topology the JVM capture programs build, replays
-//! the captured input records through the broker-free [`TopologyTestDriver`],
-//! and asserts the produced output matches a committed golden JSON captured
-//! from JVM Kafka Streams 4.1.0.
+//! Each test builds the same topology the JVM capture programs build. The test
+//! replays the captured input records through the broker-free
+//! [`TopologyTestDriver`] and asserts that the output matches a committed golden
+//! JSON captured from JVM Kafka Streams 4.1.0.
 //!
-//! Golden files live under `tests/testdata/versioned_joins/`. The `out` array
-//! in each golden is the JVM-produced output sequence (`key`, `value`, `ts`).
-//! The driver's `read_output` exposes key+value (not timestamp), so we assert
-//! key+value+order; the as-of *values* already encode timestamp-correctness
-//! (an as-of(150) read of the table yields 10 → 11, an as-of(250) read yields
-//! 20 → 21), so a wrong as-of timestamp would surface as a wrong value.
+//! Golden files live under `tests/testdata/versioned_joins/`. The `out` array in
+//! each golden holds the JVM-produced output sequence of `key`, `value`, and
+//! `ts`. The driver's `read_output` exposes key and value but not the timestamp,
+//! so the tests assert key, value, and order.
+//!
+//! The as-of *values* already encode timestamp correctness. An as-of(150) read of
+//! the table yields 10, so the join emits 11. An as-of(250) read yields 20, so
+//! the join emits 21. A wrong as-of timestamp gives a wrong value.
 
 use assert2::check;
 use crabka_client_streams::{
@@ -19,7 +21,7 @@ use crabka_client_streams::{
 use crabka_units::prelude::*;
 use serde::Deserialize;
 
-/// One output record in the table-table golden `out` array (String value).
+/// One String-valued output record in the table-table golden `out` array.
 #[derive(Debug, Deserialize)]
 struct GoldenOutStr {
     key: String,
@@ -28,7 +30,7 @@ struct GoldenOutStr {
     ts: i64,
 }
 
-/// The table-table golden envelope (String-valued `out`).
+/// The table-table golden envelope with a String-valued `out` array.
 #[derive(Debug, Deserialize)]
 struct TableTableGolden {
     #[allow(dead_code)]
@@ -67,7 +69,7 @@ struct Golden {
     describe: String,
 }
 
-/// Load + parse a golden JSON from the versioned-joins testdata dir.
+/// Loads and parses a golden JSON file from the versioned-joins testdata directory.
 fn load_golden(name: &str) -> Golden {
     let path = format!("tests/testdata/versioned_joins/{name}");
     let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read golden {path}: {e}"));
@@ -76,8 +78,8 @@ fn load_golden(name: &str) -> Golden {
 
 /// As-of stream-table inner join (KIP-914).
 ///
-/// A versioned table holds `(a,10)@100` then `(a,20)@200` (`history_retention` =
-/// `600_000` ms). A `KStream` inner-joins it with `|s, t| s + t`:
+/// A versioned table with `history_retention` = `600_000` ms holds `(a,10)@100`
+/// then `(a,20)@200`. A `KStream` inner-joins it with `|s, t| s + t`:
 ///   - stream `(a,1)@150` → as-of(150) = 10 → emits 11
 ///   - stream `(a,1)@250` → as-of(250) = 20 → emits 21
 ///   - stream `(a,1)@50`  → predates the first version → inner join → NO output
@@ -144,16 +146,16 @@ fn asof_stream_table_join_matches_golden() {
 
 /// As-of stream-table LEFT join (KIP-914), no grace.
 ///
-/// Routes a left join (`emit_on_miss = true`) to the as-of processor against a
-/// versioned table holding `(a,10)@100`. The joiner is
+/// The test routes a left join with `emit_on_miss = true` to the as-of processor.
+/// The versioned table holds `(a,10)@100`. The joiner is
 /// `|s, t| s + t.copied().unwrap_or(-1)`, so a hit adds the table value and a
 /// miss adds the `-1` sentinel:
 ///   - stream `(a,1)@150` → as-of(150) = 10 → hit → emits `1 + 10 = 11`
 ///   - stream `(b,1)@150` → no version for `b` → as-of miss → `None` → emits
-///     `1 + (-1) = 0` (the left branch forwards on a miss)
+///     `1 + (-1) = 0`, because the left branch forwards on a miss
 ///
-/// This exercises the `left_join_table` routing into the as-of processor and the
-/// as-of-miss → `None` path with `emit_on_miss = true`.
+/// This test exercises the `left_join_table` routing into the as-of processor and
+/// the as-of-miss → `None` path with `emit_on_miss = true`.
 #[test]
 fn asof_stream_table_left_join_emits_on_miss() {
     let b = StreamsBuilder::new();
@@ -212,20 +214,21 @@ fn asof_stream_table_left_join_emits_on_miss() {
 
 /// Grace stream-table LEFT join (KIP-923) with a table miss.
 ///
-/// Same grace wiring as [`grace_stream_table_join_matches_golden`], but a left
-/// join (`emit_on_miss = true`) lowered through the *left* branch of
-/// `build_grace_lowering`. The versioned table holds `(a,10)@100`. The joiner is
-/// `|s, t| s + t.copied().unwrap_or(-1)`. Buffered stream records drain in
-/// ascending-ts order once stream-time crosses `bufTs + 60_000`:
+/// The grace wiring is the same as [`grace_stream_table_join_matches_golden`],
+/// but this test lowers a left join with `emit_on_miss = true` through the *left*
+/// branch of `build_grace_lowering`. The versioned table holds `(a,10)@100`. The
+/// joiner is `|s, t| s + t.copied().unwrap_or(-1)`. Buffered stream records drain
+/// in ascending-ts order once stream-time crosses `bufTs + 60_000`:
 ///   - `(a,1)@150` → drained as-of(150) = 10 → hit → `1 + 10 = 11`
 ///   - `(b,1)@150` → drained as-of(150) for `b` = MISS → `None` → `1 + (-1) = 0`
 ///
 /// A flush record `(x,9)@1_000_000` advances stream-time past the
-/// `150 + 60_000 = 60_150` horizon, draining both buffered records (the flush
-/// record itself stays buffered: its horizon `1_060_000` is never reached).
+/// `150 + 60_000 = 60_150` horizon and drains both buffered records. The flush
+/// record itself stays buffered, because stream-time never reaches its horizon
+/// `1_060_000`.
 ///
-/// This is the only test exercising the grace processor's `emit_on_miss = true`
-/// drain path and the left branch of `build_grace_lowering`.
+/// This is the only test that exercises the grace processor's
+/// `emit_on_miss = true` drain path and the left branch of `build_grace_lowering`.
 #[test]
 fn grace_stream_table_left_join_emits_on_miss() {
     use crabka_client_streams::Joined;
@@ -296,8 +299,10 @@ fn grace_stream_table_left_join_emits_on_miss() {
     );
 }
 
-/// The grace-scenario golden envelope (adds the buffer-store changelog name +
-/// config that the wire assertion pins, on top of the shared `out` sequence).
+/// The grace-scenario golden envelope.
+///
+/// On top of the shared `out` sequence, it adds the buffer-store changelog name
+/// and the config that the wire assertion pins.
 #[derive(Debug, Deserialize)]
 struct GraceGolden {
     #[allow(dead_code)]
@@ -308,9 +313,9 @@ struct GraceGolden {
     history_retention_ms: i64,
     #[allow(dead_code)]
     buffer_store_name: String,
-    /// The fully-qualified buffer-store changelog topic name (`app-…-changelog`).
+    /// The fully-qualified buffer-store changelog topic name, of the form `app-…-changelog`.
     buffer_changelog_topic: String,
-    /// The buffer-store changelog topic config map (key → value).
+    /// The buffer-store changelog topic config map, from key to value.
     buffer_changelog_configs: std::collections::BTreeMap<String, String>,
     out: Vec<GoldenOut>,
     #[allow(dead_code)]
@@ -323,11 +328,12 @@ fn load_grace_golden() -> GraceGolden {
     serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse golden {path}: {e}"))
 }
 
-/// Build the grace stream-table join topology the JVM capture program builds:
-/// a versioned table ("vt", `history_retention` = `600_000`) joined by a
-/// `KStream` with a `60_000` ms grace period. The unoptimized `build("app")`
-/// reproduces the JVM's `KSTREAM-JOIN-0000000003` node/store names (the buffer
-/// store + its changelog hang off that node).
+/// Builds the grace stream-table join topology the JVM capture program builds.
+///
+/// The topology joins a versioned table "vt" with `history_retention` =
+/// `600_000` to a `KStream` with a `60_000` ms grace period. The unoptimized
+/// `build("app")` reproduces the JVM's `KSTREAM-JOIN-0000000003` node and store
+/// names. The buffer store and its changelog hang off that node.
 fn build_grace_app() -> crabka_client_streams::topology::BuiltTopology {
     use crabka_client_streams::Joined;
     let b = StreamsBuilder::new();
@@ -349,17 +355,19 @@ fn build_grace_app() -> crabka_client_streams::topology::BuiltTopology {
 
 /// Grace stream-table join behavioral replay (KIP-923).
 ///
-/// Grace is `60_000` ms; records carry tiny timestamps (100–300). A buffered
-/// stream record only drains once `stream_time - grace >= bufTs`, i.e. once
-/// stream-time reaches `bufTs + 60_000`. The JVM advances stream-time with a
-/// final flushing record `(a,9)@1_000_000`, which drains the three buffered
-/// records `@150/@250/@300` in ascending-timestamp order while the flush record
-/// itself stays buffered (its own grace horizon `1_060_000` is never reached).
+/// Grace is `60_000` ms, and records carry small timestamps from 100 to 300. A
+/// buffered stream record drains only once `stream_time - grace >= bufTs`, that
+/// is, once stream-time reaches `bufTs + 60_000`. The JVM advances stream-time
+/// with a final flush record `(a,9)@1_000_000`. That record drains the three
+/// buffered records `@150/@250/@300` in ascending-timestamp order. The flush
+/// record itself stays buffered, because stream-time never reaches its own grace
+/// horizon `1_060_000`.
 ///
 /// The out-of-order pipe order `(@300,@250,@150)` and the as-of-correct values
-/// (`@150` → table 10 → 11; `@250`/`@300` → table 20 → 21) together prove both
-/// the reorder-on-drain and as-of semantics — `read_output` exposes key+value,
-/// so the value sequence already encodes the timestamp correctness.
+/// together prove both the reorder-on-drain and as-of semantics. The `@150`
+/// record reads table 10 and emits 11. The `@250` and `@300` records read table
+/// 20 and emit 21. `read_output` exposes key and value, so the value sequence
+/// already encodes the timestamp correctness.
 #[test]
 fn grace_stream_table_join_matches_golden() {
     let golden = load_grace_golden();
@@ -436,11 +444,12 @@ fn grace_stream_table_join_matches_golden() {
 
 /// Grace buffer-store changelog wire assertion (KIP-923).
 ///
-/// The grace buffer store hangs a changelog off the join node. Pin its
-/// fully-qualified name and config against `grace.json`: the name is
-/// `app-KSTREAM-JOIN-0000000003-Buffer-changelog`, the config is a compacted
-/// KV changelog (`cleanup.policy=compact`, `message.timestamp.type=CreateTime`)
-/// with NO `retention.ms` (the buffer is a plain KV store, not a window store).
+/// The grace buffer store hangs a changelog off the join node. This test pins its
+/// fully-qualified name and config against `grace.json`. The name is
+/// `app-KSTREAM-JOIN-0000000003-Buffer-changelog`. The config is a compacted KV
+/// changelog with `cleanup.policy=compact` and
+/// `message.timestamp.type=CreateTime`, and with NO `retention.ms`, because the
+/// buffer is a plain KV store and not a window store.
 #[test]
 fn grace_buffer_changelog_matches_golden_wire() {
     let golden = load_grace_golden();
@@ -488,45 +497,49 @@ fn grace_buffer_changelog_matches_golden_wire() {
 
 /// Table-table versioned inner-join out-of-order suppression (KIP-914 / KIP-889).
 ///
-/// Two versioned tables (`va`/`vb`, `history_retention` = `600_000` ms) are
-/// inner-joined `|va, vb| "{va}|{vb}"` then `.to_stream().to("out")`. Versioned
-/// stores SUPPRESS an update whose record timestamp predates the latest version
-/// already stored for that key (the stale update never becomes the "current"
-/// value, so it yields NO new join result).
+/// The test inner-joins two versioned tables `va` and `vb`, each with
+/// `history_retention` = `600_000` ms, with `|va, vb| "{va}|{vb}"`, then calls
+/// `.to_stream().to("out")`. Versioned stores SUPPRESS an update whose record
+/// timestamp predates the latest version already stored for that key. The stale
+/// update never becomes the "current" value, so it yields NO new join result.
 ///
-/// JVM drive sequence (from `TableTableVersionedBehavior.java`), replicated
-/// exactly here:
+/// This test replicates the JVM drive sequence from
+/// `TableTableVersionedBehavior.java` exactly:
 ///   1. `a:(k,"1")@100` — a's current = "1"; b absent → inner join, NO output.
 ///   2. `b:(k,"2")@100` — in-order, both current → emit `(k,"1|2")@100`.
 ///   3. `a:(k,"3")@200` — in-order update of a → emit `(k,"3|2")@200`.
 ///   4. `a:(k,"9")@150` — OUT-OF-ORDER (150 < latest validFrom 200) → suppressed,
 ///      NO new join result.
 ///
-/// Expected `out` = `[(k,"1|2"), (k,"3|2")]` (the @150 record emits nothing).
+/// Expected `out` = `[(k,"1|2"), (k,"3|2")]`, because the @150 record emits
+/// nothing.
 ///
-/// NOTE on the `describe()` divergence (intentional, not a bug — do NOT assert
-/// the JVM store-connection list here): Crabka detects out-of-order by having
-/// the versioned join processor read its OWN store's latest `valid_from`, so its
-/// `describe()` lists the join connected to its own store in addition to the
-/// other side's. The JVM instead carries an internal `Change.isLatest` flag and
-/// connects the join only to the OTHER store. The two implementations have
-/// IDENTICAL observable behavior and NO wire impact (no extra changelog: the
-/// versioned stores' changelogs already exist from the table sources). We assert
-/// only the observable `out` sequence, plus (below) that no extra changelog was
-/// introduced.
+/// NOTE on the `describe()` divergence: it is intentional and is not a bug, so do
+/// NOT assert the JVM store-connection list here. Crabka detects out-of-order
+/// records because the versioned join processor reads its OWN store's latest
+/// `valid_from`. Its `describe()` therefore lists the join connected to its own
+/// store in addition to the other side's. The JVM instead carries an internal
+/// `Change.isLatest` flag and connects the join only to the OTHER store. The two
+/// implementations have IDENTICAL observable behavior and NO wire impact, and add
+/// no extra changelog, because the versioned stores' changelogs already exist
+/// from the table sources. We assert only the observable `out` sequence, plus the
+/// assertion below that no extra changelog appeared.
 ///
-/// IGNORED pending a Task-4 join-read fix: with BOTH sides versioned, each join
-/// processor reads the OTHER side's current value via
-/// `ctx.get_state_store::<K, V>(other_store)` (`ktable_join.rs` lines ~121/~188),
-/// which downcasts to `KeyValueBytesStore` and returns `None` for the OTHER
-/// side's `VersionedBytesStore`. So the inner join never sees both sides present
-/// and emits NOTHING — actual `out` is `[]` instead of `[(k,"1|2"),(k,"3|2")]`.
-/// The out-of-order *gate* itself (which reads the SELF versioned store) is
-/// correct and unit-tested (`ktable_join::tests::versioned_this_suppresses_out_of_order`);
-/// the missing piece is the versioned-aware OTHER-side read in the join
-/// processors. The golden expectation below is left CORRECT (not adjusted to the
-/// wrong `[]`): once the join reads the other side via the versioned store when
-/// it is versioned, remove `#[ignore]` and this passes as-is.
+/// IGNORED pending a Task-4 join-read fix. With BOTH sides versioned, each join
+/// processor reads the OTHER side's current value with
+/// `ctx.get_state_store::<K, V>(other_store)`, at `ktable_join.rs` lines
+/// ~121/~188. That call downcasts to `KeyValueBytesStore` and returns `None` for
+/// the OTHER side's `VersionedBytesStore`. So the inner join never sees both
+/// sides present and emits NOTHING. The actual `out` is `[]` instead of
+/// `[(k,"1|2"),(k,"3|2")]`.
+///
+/// The out-of-order *gate* itself reads the SELF versioned store. It is correct
+/// and unit-tested in
+/// `ktable_join::tests::versioned_this_suppresses_out_of_order`. The missing
+/// piece is the versioned-aware OTHER-side read in the join processors. The
+/// golden expectation below is left CORRECT and is not adjusted to the wrong
+/// `[]`. Once the join reads the other side through the versioned store when it
+/// is versioned, remove `#[ignore]` and this test passes as-is.
 #[test]
 fn table_table_versioned_join_matches_golden() {
     let golden = load_table_table_golden();
@@ -600,11 +613,13 @@ fn table_table_versioned_join_matches_golden() {
     );
 }
 
-/// Table-table versioned wire assertion: the out-of-order gate must NOT introduce
-/// any extra changelog topic. The only state changelogs are the two versioned
-/// table-source stores (`va`/`vb`); there is no `-Buffer` or join-specific
-/// changelog (the gate reuses the existing store, see the `describe()` note on
-/// `table_table_versioned_join_matches_golden`).
+/// Table-table versioned wire assertion for the out-of-order gate.
+///
+/// The gate must NOT introduce any extra changelog topic. The only state
+/// changelogs are the two versioned table-source stores `va` and `vb`. There is
+/// no `-Buffer` changelog and no join-specific changelog, because the gate reuses
+/// the existing store. See the `describe()` note on
+/// `table_table_versioned_join_matches_golden`.
 #[test]
 fn table_table_versioned_no_extra_changelog_wire() {
     let b = StreamsBuilder::new();

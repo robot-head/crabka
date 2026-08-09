@@ -17,7 +17,7 @@ pub struct NestedSet {
     pub parent_id: i32,
 }
 
-/// Assign nested-set intervals by DFS preorder over the trace forest.
+/// Assigns nested-set intervals by DFS preorder over the trace forest.
 #[must_use]
 pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
     enum Frame {

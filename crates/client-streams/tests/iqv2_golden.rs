@@ -1,10 +1,12 @@
-//! `IQv2` (KIP-796/806) behavioral parity, replayed through `TopologyTestDriver`.
+//! `IQv2` (KIP-796 and KIP-806) behavioral parity, replayed through
+//! `TopologyTestDriver`.
 //!
-//! Ground truth is `tests/testdata/iqv2/behavior.json`, whose values match Docker
-//! Streams 4.1 for the same inputs. Each test rebuilds the equivalent Rust DSL
-//! topology, replays the same records the JVM fed, then reads the materialized
-//! store back through the driver's `IQv2` `query` surface (`KeyQuery` /
-//! `RangeQuery` / `WindowKeyQuery` / `WindowRangeQuery`) and asserts parity.
+//! The ground truth is `tests/testdata/iqv2/behavior.json`, whose values match
+//! Docker Streams 4.1 for the same inputs. Each test rebuilds the equivalent
+//! Rust DSL topology and replays the same records that the JVM read. It then
+//! reads the materialized store back through the driver's `IQv2` `query`
+//! surface, which covers `KeyQuery`, `RangeQuery`, `WindowKeyQuery`, and
+//! `WindowRangeQuery`, and asserts parity.
 
 use crabka_client_streams::{
     Consumed, FailureReason, KeyQuery, RangeQuery, StateQueryRequest, StreamsBuilder, StringSerde,
@@ -54,7 +56,7 @@ fn pairs(v: &Value) -> Vec<(String, i64)> {
         .collect()
 }
 
-/// `KeyQuery` + `RangeQuery` over a keyed count store.
+/// `KeyQuery` and `RangeQuery` over a keyed count store.
 #[tokio::test]
 async fn iqv2_kv_key_and_range_parity() {
     let g = golden();
@@ -138,8 +140,9 @@ async fn iqv2_kv_key_and_range_parity() {
     );
 }
 
-/// Driver failure paths: an unknown store name and a wrong-kind query against
-/// an existing `KeyValue` store both surface as per-partition `Failure`s.
+/// The driver failure paths. An unknown store name and a wrong-kind query
+/// against an existing `KeyValue` store both surface as per-partition
+/// `Failure`s.
 #[tokio::test]
 async fn iqv2_failure_paths() {
     let b = StreamsBuilder::new();
@@ -184,7 +187,8 @@ async fn iqv2_failure_paths() {
     assert_eq!(r.failure_reason(), Some(FailureReason::NotPresent));
 }
 
-/// `WindowKeyQuery` + `WindowRangeQuery` over a 1000ms tumbling count store.
+/// `WindowKeyQuery` and `WindowRangeQuery` over a 1000ms tumbling count
+/// store.
 #[tokio::test]
 async fn iqv2_window_key_and_range_parity() {
     let g = golden();
@@ -264,10 +268,13 @@ async fn iqv2_window_key_and_range_parity() {
     );
 }
 
-/// `VersionedKeyQuery` (KIP-960, latest + as-of) and `MultiVersionedKeyQuery`
-/// (KIP-968, all + range × asc/desc) over a versioned `KTable`. Three in-order
-/// versions of key `k` (`10@100, 20@200, 30@300`) chain into history; the
-/// versioned source uses each record's timestamp as the version `valid_from`.
+/// `VersionedKeyQuery` (KIP-960), in its latest and as-of forms, and
+/// `MultiVersionedKeyQuery` (KIP-968), in its all and range forms with ascending
+/// and descending order, over a versioned `KTable`.
+///
+/// Three in-order versions of key `k`, which are `10@100`, `20@200`, and
+/// `30@300`, chain into the history. The versioned source uses each record's
+/// timestamp as the version `valid_from`.
 #[tokio::test]
 async fn iqv2_versioned_key_and_multi_parity() {
     use crabka_client_streams::{

@@ -21,21 +21,22 @@ pub struct Plan {
 
 /// Planner output plus diagnostic goal order.
 ///
-/// `PartialEq` but not `Eq`: [`TenantMetrics`] carries `f64`-backed quantities,
-/// so equality over `state_after` is not reflexive across the whole domain.
+/// This type has `PartialEq` but not `Eq`. [`TenantMetrics`] carries
+/// `f64`-backed quantities, so equality over `state_after` is not reflexive
+/// across the whole domain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlanOutput {
     pub plan: Plan,
     pub goals_applied: Vec<String>,
     pub state_after: Vec<TenantMetrics>,
-    /// Reason snapshot-driven planning safely abstained, if any.
+    /// Reason why snapshot-driven planning safely abstained, if any.
     pub diagnostic: Option<PlanningDiagnostic>,
 }
 
 /// Explicit freshness bound for authoritative range-statistics snapshots.
 ///
-/// `PartialEq` but not `Eq`: the bound is an `f64`-backed quantity, so equality
-/// is not reflexive across the whole domain.
+/// This type has `PartialEq` but not `Eq`. The bound is an `f64`-backed
+/// quantity, so equality is not reflexive across the whole domain.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StatsFreshness {
     max_age: Time,
@@ -68,7 +69,7 @@ pub enum PlanningDiagnostic {
     StaleSnapshot,
     /// The sample timestamp is later than the caller's planning clock.
     FutureSnapshot,
-    /// The sample version was repeated or regressed after a prior accepted sample.
+    /// The sample version repeated or regressed after an earlier accepted sample.
     NonProgressingVersion,
 }
 
@@ -84,7 +85,7 @@ impl Planner {
         Self { goals }
     }
 
-    /// Build a planner from goal enablement knobs.
+    /// Build a planner from per-goal controls.
     #[must_use]
     pub fn from_config(config: &BalancerConfig) -> Self {
         let mut goals: Vec<Box<dyn Goal>> = Vec::new();
@@ -114,11 +115,11 @@ impl Planner {
 
     /// Compute a dry-run plan using a fresh, version-progressing stats snapshot.
     ///
-    /// `freshness` is explicit so callers choose the maximum acceptable metric age.
-    /// `progress` rejects repeated and regressed versions after an accepted sample.
-    /// Invalid snapshots produce no operations and a [`PlanningDiagnostic`]. Missing
-    /// range values in an accepted snapshot stay unknown, causing metric-dependent
-    /// goals to abstain.
+    /// The `freshness` parameter is explicit, so callers choose the maximum
+    /// accepted metric age. The `progress` parameter rejects repeated and
+    /// regressed versions after an accepted sample. Invalid snapshots produce no
+    /// operations and a [`PlanningDiagnostic`]. Missing range values in an
+    /// accepted snapshot stay unknown, and metric-dependent goals then abstain.
     #[must_use]
     pub fn plan_with_snapshot(
         &self,

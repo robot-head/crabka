@@ -1,5 +1,7 @@
-//! JSON Schema serde. The local type provides its schema via `schemars`;
-//! payloads are UTF-8 JSON, optionally validated against the writer schema.
+//! JSON Schema serde.
+//!
+//! The local type gives its schema with `schemars`. Payloads are UTF-8 JSON.
+//! The serde can also validate them against the writer schema.
 
 use std::{marker::PhantomData, sync::Arc};
 
@@ -15,8 +17,10 @@ use crate::{
     wire,
 };
 
-/// JSON serializer/deserializer for `T: JsonSchema`, bound to a key/value role;
-/// the subject is derived from the topic at call time.
+/// JSON serializer and deserializer for `T: JsonSchema`, bound to a key/value
+/// role.
+///
+/// The serde takes the subject from the topic at call time.
 pub struct JsonSerde<T> {
     binding: Binding,
     validate: bool,
@@ -53,20 +57,24 @@ impl<T: JsonSchema> JsonSerde<T> {
         }
     }
 
-    /// A JSON serde for record **values** (`<topic>-value`). `validate` enables
-    /// draft validation of decoded payloads against the writer schema.
+    /// A JSON serde for record **values**: `<topic>-value`.
+    ///
+    /// `validate` turns on draft validation of decoded payloads against the
+    /// writer schema.
     pub fn value(cache: &Arc<SchemaCache>, validate: bool) -> Self {
         Self::make(cache, Role::Value, validate)
     }
 
-    /// A JSON serde for record **keys** (`<topic>-key`).
+    /// A JSON serde for record **keys**: `<topic>-key`.
     pub fn key(cache: &Arc<SchemaCache>, validate: bool) -> Self {
         Self::make(cache, Role::Key, validate)
     }
 }
 
-/// A value serde over the process [`default_registry`](crate::default_registry),
-/// with payload validation disabled (enable it via [`JsonSerde::value`]).
+/// A value serde over the process [`default_registry`](crate::default_registry).
+///
+/// This serde turns payload validation off. To turn validation on, use
+/// [`JsonSerde::value`].
 impl<T: JsonSchema> Default for JsonSerde<T> {
     fn default() -> Self {
         let cache = crate::default_registry()

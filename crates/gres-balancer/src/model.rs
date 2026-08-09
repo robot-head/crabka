@@ -5,7 +5,7 @@ use crabka_gres_substrate::RangeStatsSnapshot;
 use crabka_units::{ByteSize, Frequency};
 use serde::{Deserialize, Serialize};
 
-/// One compute endpoint capable of hosting Chapter Gres ranges.
+/// One compute endpoint that can host Chapter Gres ranges.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeNode {
@@ -14,9 +14,9 @@ pub struct ComputeNode {
 
 /// Table-level policy visible to the balancer.
 ///
-/// `PartialEq` but not `Eq`, and no `Hash`: the dimensioned thresholds are
-/// `f64`-backed quantities, so equality is not reflexive across the whole
-/// domain and no consistent hash exists.
+/// This type has `PartialEq` but not `Eq`, and no `Hash`. The dimensioned
+/// thresholds are `f64`-backed quantities, so equality is not reflexive across
+/// the whole domain. For the same reason, no consistent hash exists.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TablePolicy {
@@ -73,7 +73,8 @@ impl RangeMetrics {
 
 /// Metrics and policies for one tenant registry record.
 ///
-/// `PartialEq` but not `Eq`, and no `Hash`, following [`TablePolicy`].
+/// This type has `PartialEq` but not `Eq`, and no `Hash`, for the same reason as
+/// [`TablePolicy`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TenantMetrics {
@@ -86,9 +87,10 @@ pub struct TenantMetrics {
 impl TenantMetrics {
     /// Replace metric-dependent fields with one authoritative stats snapshot.
     ///
-    /// A range omitted from the snapshot, or a metric omitted by its provider,
-    /// remains unknown. The synthetic values on `self` are deliberately not used
-    /// as fallbacks, so stale fixtures cannot turn missing live data into zero.
+    /// A range that the snapshot omits, or a metric that its provider omits,
+    /// stays unknown. This method deliberately does not use the synthetic values
+    /// on `self` as fallbacks, so stale fixtures cannot turn missing live data
+    /// into zero.
     #[must_use]
     pub fn with_stats_snapshot(&self, snapshot: &RangeStatsSnapshot) -> Self {
         let mut tenant = self.clone();
@@ -105,7 +107,7 @@ impl TenantMetrics {
     }
 }
 
-/// Stable operation flavor names matching the range orchestration surfaces.
+/// Stable operation names that match the range orchestration surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {

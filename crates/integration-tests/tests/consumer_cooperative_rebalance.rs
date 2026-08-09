@@ -1,7 +1,7 @@
 //! KIP-429 cooperative-sticky rebalance integration tests.
 //!
-//! Boots a Crabka broker + multiple Rust consumers using
-//! `Assignor::CooperativeSticky` and exercises phase-1/phase-2 rebalances.
+//! The tests start a Crabka broker and several Rust consumers with
+//! `Assignor::CooperativeSticky`. They then run phase-1 and phase-2 rebalances.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -382,8 +382,10 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
     assert2::assert!(cr.topics[0].error_code == 0);
 }
 
-/// Produce records to a specific partition index. Mirrors `integration.rs::produce`
-/// but lets the caller choose `partition`.
+/// Produces records to a specific partition index.
+///
+/// This helper is a copy of `integration.rs::produce`, but the caller chooses
+/// the `partition`.
 async fn produce_to_partition(
     broker: &BrokerHandle,
     client: &Client,
@@ -469,9 +471,11 @@ async fn wait_for_assignment_count(consumer: &Consumer, expected: usize) {
     .unwrap_or_else(|_| panic!("assignment count did not reach {expected} within 30s"));
 }
 
-/// Wait until the union of all consumers' assignments has `expected` unique
-/// `(topic, partition)` entries. Used to confirm a cooperative rebalance has
-/// settled before introducing the next membership change.
+/// Waits until the union of all consumer assignments holds `expected` entries.
+///
+/// The entries are unique `(topic, partition)` pairs. The tests use this helper
+/// to confirm that a cooperative rebalance is complete before the next
+/// membership change.
 async fn wait_for_total_assignment(consumers: &[&Consumer], expected: usize) {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {

@@ -1,25 +1,25 @@
 //! Trace propagation across the range RPC hop, over a real mTLS connection.
 //!
-//! This is the headline behaviour of gres tracing: a statement on one node
+//! This is the headline behavior of gres tracing. A statement on one node
 //! produces spans on the node that owns the range, and both belong to one
-//! trace. Everything here is asserted from exported [`SpanData`], because
+//! trace. Every assertion here reads exported [`SpanData`], because
 //! `tracing-opentelemetry` resolves a span's parent and trace id when the span
-//! *closes* — a live `tracing::Span` handle reports a tree that does not match
-//! what an operator will see.
+//! *closes*. A live `tracing::Span` handle reports a tree that does not match
+//! what an operator sees.
 //!
 //! Three details of the harness are load-bearing:
 //!
 //! - **Install the propagator.** Without
 //!   `set_text_map_propagator(TraceContextPropagator::new())`,
-//!   `TraceCarrier::apply_to` silently does nothing and every assertion below
+//!   `TraceCarrier::apply_to` silently does nothing, and every assertion below
 //!   passes vacuously with two unrelated traces. `crabka_telemetry::init`
-//!   installs it in production; a test has to do it itself.
+//!   installs it in production. A test must do it itself.
 //! - **Install with `set_global_default`, not `with_default`.** The server half
-//!   runs on a task spawned by the TLS accept loop, where a thread-local
+//!   runs on a task the TLS accept loop spawned, where a thread-local
 //!   subscriber is invisible.
 //! - **Wait for the server span to close.** It closes on the serving task, not
-//!   on the caller's, so reading the exporter straight after the RPC returns
-//!   races it.
+//!   on the caller's task, so a read of the exporter straight after the RPC
+//!   returns races it.
 //!
 //! Each test installs its own global subscriber, which relies on the repository
 //! convention of running tests under `cargo nextest` (one process per test).
@@ -40,9 +40,9 @@ use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt as _};
 /// server config below authorizes.
 const CLIENT_PRINCIPAL: &str = "CN=test-client,OU=integration,O=crabka";
 
-/// Rendered in place of an attribute the span never recorded, so a missing
-/// attribute fails a whole-map comparison with a readable diff instead of
-/// silently matching nothing.
+/// The test renders this in place of an attribute the span never recorded. A
+/// missing attribute then fails a whole-map comparison with a readable diff, and
+/// does not silently match nothing.
 const UNSET: &str = "<unset>";
 
 struct Traces {
@@ -75,8 +75,8 @@ impl Traces {
 
     /// Poll until both halves of the hop have closed.
     ///
-    /// The server span closes on the serving task; without this the exporter is
-    /// read while that task is still unwinding and the test flakes.
+    /// The server span closes on the serving task. Without this poll, the test
+    /// reads the exporter while that task still unwinds, and the test flakes.
     async fn hop(&self) -> Hop {
         for _ in 0..500 {
             let spans = self.finished();
@@ -91,8 +91,8 @@ impl Traces {
     }
 }
 
-/// One closed client span and one closed server span, and nothing else claimed
-/// about the rest of the trace.
+/// One closed client span and one closed server span. This makes no claim about
+/// the rest of the trace.
 struct Hop {
     spans: Vec<SpanData>,
 }
@@ -109,10 +109,10 @@ impl Hop {
 
 /// Range RPC spans of one `otel.kind`.
 ///
-/// Looked up by kind rather than by name because `otel.name` renames the
-/// exported span to the request's variant (`"Txn"`), which is what an operator
-/// sees in the waterfall — nothing downstream may search for a span literally
-/// named `gres.range_rpc`.
+/// The lookup uses the kind rather than the name, because `otel.name` renames
+/// the exported span to the request's variant, such as `"Txn"`. That name is
+/// what an operator sees in the waterfall, so nothing downstream may search for
+/// a span named `gres.range_rpc`.
 fn of_kind<'a>(spans: &'a [SpanData], kind: &SpanKind) -> Vec<&'a SpanData> {
     spans
         .iter()
@@ -153,12 +153,14 @@ fn check_attributes(span: &SpanData, pairs: &[(&str, &str)]) {
     check!(actual == expected);
 }
 
-/// The value of a numeric attribute, insisting it exported as an OTLP integer.
+/// The value of a numeric attribute. This function requires that the attribute
+/// exported as an OTLP integer.
 ///
-/// OTLP has no unsigned integer type, so a `u64`/`usize` span field is
-/// stringified — and Tempo cannot compare, sort or range-filter a string, so
-/// `pg.request_bytes > 100` silently matches nothing. Asserting the attribute
-/// exists does not catch that; asserting its variant does.
+/// OTLP has no unsigned integer type, so the exporter turns a `u64` or `usize`
+/// span field into a string. Tempo cannot compare, sort, or range-filter a
+/// string, so `pg.request_bytes > 100` silently matches nothing. An assertion
+/// that the attribute exists does not catch that. An assertion on its variant
+/// does.
 fn integer_attribute(span: &SpanData, key: &str) -> i64 {
     match span
         .attributes
@@ -179,9 +181,9 @@ struct MtlsFixture {
 
 impl MtlsFixture {
     /// `authorized` is the principal set the server accepts for range RPC. It
-    /// must be non-empty — a tenant with no authorized principal fails to build
-    /// an acceptor at all — so rejecting the fixture client means naming
-    /// somebody else.
+    /// must not be empty, because a tenant with no authorized principal fails to
+    /// build an acceptor at all. To reject the fixture client, name another
+    /// principal.
     fn new(tenant: &str, authorized: BTreeSet<String>) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().expect("temporary certificate directory");
@@ -250,7 +252,7 @@ async fn spawn_tls(service: Arc<dyn RangeService>, config: RangeTlsServerConfig)
 }
 
 /// Answers every request with a barrier response, so the hop under test is the
-/// transport and nothing else.
+/// transport alone.
 struct BarrierService;
 
 #[async_trait]
@@ -268,7 +270,7 @@ fn barrier_request() -> RangeRequest {
     })
 }
 
-/// The whole point of the feature: the server's span is a child of the client's
+/// The point of the feature. The server's span is a child of the client's span
 /// across a real TLS connection, in one trace, with the parent marked remote.
 #[tokio::test]
 async fn range_serve_span_is_a_remote_child_of_the_calling_range_rpc_span() {
@@ -310,8 +312,8 @@ async fn range_serve_span_is_a_remote_child_of_the_calling_range_rpc_span() {
     assert!(rpc.parent_span_id == statement.span_context.span_id());
 }
 
-/// Both halves carry the attributes an operator filters and sorts on. Asserted
-/// as whole maps so a renamed or dropped attribute fails with a diff.
+/// Both halves carry the attributes an operator filters and sorts on. The test
+/// asserts whole maps, so a renamed or dropped attribute fails with a diff.
 #[tokio::test]
 async fn both_halves_of_the_hop_record_their_rpc_attributes() {
     let traces = Traces::install();
@@ -367,8 +369,8 @@ async fn both_halves_of_the_hop_record_their_rpc_attributes() {
     check!(serve.status == Status::Unset);
 }
 
-/// The second call to the same endpoint reuses the parked connection, and says
-/// so — the usual explanation for an outlier RPC is the handshake the first one
+/// The second call to the same endpoint reuses the parked connection and says
+/// so. The usual explanation for an outlier RPC is the handshake the first call
 /// paid.
 #[tokio::test]
 async fn a_reused_connection_is_recorded_as_pooled() {
@@ -396,9 +398,9 @@ async fn a_reused_connection_is_recorded_as_pooled() {
     check!(pooled == vec!["false".to_owned(), "true".to_owned()]);
 }
 
-/// With no caller span, the trace starts at the client span rather than at a
-/// fabricated parent — and the hop still stitches, because `gres.range_rpc` is
-/// created unconditionally and is what the carrier picks up.
+/// With no caller span, the trace starts at the client span and not at a
+/// fabricated parent. The hop still stitches, because the code creates
+/// `gres.range_rpc` unconditionally and the carrier picks that span up.
 #[tokio::test]
 async fn an_rpc_with_no_caller_span_roots_the_trace_at_the_client_span() {
     let traces = Traces::install();
@@ -428,10 +430,10 @@ async fn an_rpc_with_no_caller_span_roots_the_trace_at_the_client_span() {
     check!(serve.parent_span_is_remote);
 }
 
-/// A peer the tenant does not authorize is rejected before the service sees the
-/// request, and the rejection lands on the server span — which is the only
-/// place an operator can see it, since the client only learns the connection
-/// closed.
+/// The server rejects a peer the tenant does not authorize before the service
+/// sees the request, and the rejection lands on the server span. That span is
+/// the only place an operator can see it, because the client only learns that
+/// the connection closed.
 #[tokio::test]
 async fn an_unauthorized_peer_records_the_rejection_on_the_server_span() {
     let traces = Traces::install();

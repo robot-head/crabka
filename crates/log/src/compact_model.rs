@@ -8,47 +8,50 @@
 //! # The control-batch dedup bug
 //!
 //! The legacy `LogCleaner` built the key→latest-offset dedup map over *every*
-//! record, including the control-type key (commit/abort marker) carried by a
-//! transactional control batch. Two commit markers from different producers
-//! share the same control-key bytes, so the older marker was treated as a
-//! superseded duplicate and **deleted** — leaving a committed transaction's
-//! data with no surviving marker. A `read_committed` consumer would then either
-//! re-expose aborted data or fail to advance the last-stable-offset. The fix
-//! ([`super::should_index_key`] returns `false` for control batches) keeps
-//! control batches out of the dedup map entirely; markers age out only via the
-//! KIP-534 delete horizon once their transaction's *data* is fully compacted
-//! away.
+//! record. That included the control-type key, a commit or abort marker, that a
+//! transactional control batch carries. Two commit markers from different
+//! producers share the same control-key bytes, so the cleaner treated the older
+//! marker as a superseded duplicate and **deleted** it. A committed
+//! transaction's data was then left with no surviving marker. A
+//! `read_committed` consumer would then either re-expose aborted data or fail
+//! to advance the last-stable-offset. In the fix, [`super::should_index_key`]
+//! returns `false` for control batches, which keeps control batches out of the
+//! dedup map completely. A marker ages out only through the KIP-534 delete
+//! horizon, and only once compaction has removed all of its transaction's
+//! *data*.
 //!
 //! # The KIP-534 retention contract
 //!
-//! KIP-534 repurposes record-batch attribute bit 6 as a *delete horizon*: when
-//! a tombstone (keyed, null value) becomes the newest entry for its key, or a
-//! transaction marker's data is fully gone, the cleaner stamps the batch with
-//! `base_timestamp = now + delete.retention.ms` and bit 6 set. The record is
-//! retained until wall-clock reaches the horizon, then a later compaction drops
-//! it. The horizon is stamped exactly once and never re-stamped.
+//! KIP-534 repurposes record-batch attribute bit 6 as a *delete horizon*. The
+//! cleaner stamps the batch with `base_timestamp = now + delete.retention.ms`
+//! and bit 6 set in two cases: when a tombstone, a keyed record with a null
+//! value, becomes the newest entry for its key, and when a transaction marker's
+//! data is fully gone. The log keeps the record until the wall clock reaches
+//! the horizon, and a later compaction then drops it. The cleaner stamps the
+//! horizon exactly once and never stamps it again.
 //!
 //! # What this model checks
 //!
 //! The state is an abstract log `Vec<Entry>`. `Compact` runs the same pure
-//! cores the production rewrite path uses, builds the `next` log, and asserts
-//! the five safety invariants below directly in `next_state` (panicking on
-//! violation, which surfaces as a stateright counterexample / test failure):
+//! cores that the production rewrite path uses, builds the `next` log, and
+//! asserts the five safety invariants below directly in `next_state`. A
+//! violation panics, and that shows up as a stateright counterexample or a test
+//! failure.
 //!
-//!   1. **control-not-deduped** — every distinct input marker that is kept (or
-//!      horizon-stamped) appears exactly once in the output; two markers are
-//!      never merged or dropped against each other.
+//!   1. **control-not-deduped** — every distinct input marker that the pass
+//!      keeps or horizon-stamps appears exactly once in the output. Two markers
+//!      are never merged, and neither is ever dropped against the other.
 //!   2. **marker-data-precedence** — if a producer has surviving data in the
-//!      output, that producer's (non-aged-out) marker survives too.
+//!      output, that producer's marker survives too, unless it has aged out.
 //!   3. **tombstone-aging** — no surviving tombstone has an elapsed horizon.
-//!   4. **idempotent-stamp** — a horizon, once `Some(_)`, is never re-stamped to
-//!      a different value.
+//!   4. **idempotent-stamp** — once a horizon is `Some(_)`, nothing ever stamps
+//!      it to a different value.
 //!   5. **no-data-loss** — every key with a newest live `Data(value=Some)` in
 //!      the input has a live entry in the output.
 //!
-//! A deliberately-broken [`legacy_retain`] reproduces the old control-dedup bug
-//! and a `#[should_panic]` test proves the control-not-deduped assert fires
-//! against it (RED witness).
+//! A deliberately-broken [`legacy_retain`] reproduces the old control-dedup bug.
+//! A `#[should_panic]` test proves that the control-not-deduped assert fires
+//! against it. This is the RED witness.
 
 use std::collections::{HashMap, HashSet};
 
@@ -78,9 +81,10 @@ const MAX_UNIQUE_STATES: usize = 600_000;
 const MAX_DEPTH: usize = 40;
 const CHECK_TIMEOUT: Time = minutes(2);
 
-/// `delete.retention.ms` used throughout the model. Small so `clock` can
-/// overtake stamped horizons within the bounded clock window (a horizon stamped
-/// at clock `c` elapses once `clock >= c + 2`, reachable inside `max_clock`).
+/// `delete.retention.ms` used throughout the model. It is small so that
+/// `clock` can overtake stamped horizons inside the bounded clock window. A
+/// horizon stamped at clock `c` elapses once `clock >= c + 2`, which `clock`
+/// reaches inside `max_clock`.
 const DELETE_RETENTION_MS: i64 = 2;
 
 /// What a log entry carries downstream of the compaction decision.
@@ -88,12 +92,13 @@ const DELETE_RETENTION_MS: i64 = 2;
 enum EntryKind {
     /// A data record. `value: None` is a tombstone.
     Data { value: Option<u8> },
-    /// A transaction control marker (commit/abort) for `producer_id`.
+    /// A transaction control marker, commit or abort, for `producer_id`.
     Marker { producer_id: u8, commit: bool },
 }
 
-/// One abstract log entry. `horizon` mirrors the batch's KIP-534 delete-horizon
-/// stamp (`None` until stamped, then `Some(now + delete.retention.ms)`).
+/// One abstract log entry. `horizon` mirrors the batch's KIP-534
+/// delete-horizon stamp. It is `None` until the stamp, and then
+/// `Some(now + delete.retention.ms)`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct Entry {
     key: Option<u8>,
@@ -104,11 +109,12 @@ struct Entry {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct CompactState {
     log: Vec<Entry>,
-    /// Abstract wall clock (ms). Horizons are stored as absolute stamp values on
-    /// entries and compared against this clock. Non-vacuity witnesses are NOT
-    /// stored in the state — they are derived from `(log, clock)` in
-    /// [`Model::properties`], keeping the fingerprint free of the monotonic
-    /// witness bools that otherwise multiply the reachable state space ~32x.
+    /// Abstract wall clock in ms. Entries hold horizons as absolute stamp
+    /// values, and the model compares them against this clock. The state does
+    /// NOT hold the non-vacuity witnesses. [`Model::properties`] derives them
+    /// from `(log, clock)`. The fingerprint therefore stays free of the
+    /// monotonic witness bools, which would otherwise multiply the reachable
+    /// state space by about 32.
     clock: i64,
 }
 
@@ -129,9 +135,10 @@ struct CompactModel {
 }
 
 impl CompactModel {
-    /// Build the key→newest-index dedup map over data entries with a key,
-    /// using the production [`should_index_key`] filter (control entries are
-    /// never indexed). Later positions overwrite earlier ones (newest wins).
+    /// Build the key→newest-index dedup map over data entries that have a
+    /// key. It uses the production [`should_index_key`] filter, so control
+    /// entries are never indexed. Later positions overwrite earlier ones, so
+    /// the newest wins.
     fn offset_map(log: &[Entry]) -> HashMap<u8, usize> {
         let mut map: HashMap<u8, usize> = HashMap::new();
         for (idx, entry) in log.iter().enumerate() {
@@ -147,18 +154,21 @@ impl CompactModel {
         map
     }
 
-    /// Producers whose newest-for-key data entry would be Kept (i.e. their
-    /// transactional data survives this compaction). A data entry is attributed
-    /// to a producer only if it carries a producer id; in this abstract model
-    /// data entries are anonymous, so survival is keyed purely on whether *any*
-    /// keyed live (`value=Some`) data entry is newest-for-key. Markers reference
-    /// producers by id, and a producer's data "survives" iff there is at least
-    /// one surviving keyed live data entry whose key maps to that producer.
+    /// Producers whose newest-for-key data entry would be Kept, that is,
+    /// producers whose transactional data survives this compaction.
     ///
-    /// We model the producer→data association by key: marker `pid` is associated
-    /// with data entries under key `pid` (small alphabet, `pid ∈ {0,1}` and
-    /// `key ∈ {0,1}`). This keeps the abstraction faithful: a marker's data
-    /// survives iff key == pid has a surviving live data entry.
+    /// A data entry belongs to a producer only if it carries a producer id. In
+    /// this abstract model data entries are anonymous, so survival depends only
+    /// on whether *any* keyed live data entry, one with `value=Some`, is
+    /// newest-for-key. Markers reference producers by id, and a producer's data
+    /// "survives" if and only if at least one surviving keyed live data entry
+    /// has a key that maps to that producer.
+    ///
+    /// The model associates producers with data by key. Marker `pid` goes with
+    /// the data entries under key `pid`. The alphabet is small: `pid ∈ {0,1}`
+    /// and `key ∈ {0,1}`. The abstraction stays faithful, because a marker's
+    /// data survives if and only if key == pid has a surviving live data
+    /// entry.
     fn data_survives(log: &[Entry], offset_map: &HashMap<u8, usize>) -> HashSet<u8> {
         let mut survivors: HashSet<u8> = HashSet::new();
         for (idx, entry) in log.iter().enumerate() {
@@ -334,15 +344,17 @@ impl Model for CompactModel {
     }
 }
 
-/// The retain-decision signature, abstracted so [`compact_pass`] can run either
-/// the real [`retain_decision`] or the buggy [`legacy_retain`].
+/// The retain-decision signature. It is abstract so that [`compact_pass`] can
+/// run either the real [`retain_decision`] or the buggy [`legacy_retain`].
 type RetainFn = fn(RecordMeta, BatchMeta, bool, TxnDataState, i64, i64) -> RetainDecision;
 
-/// Run one compaction pass over `log` at `clock`, applying `retain` to each
-/// entry, asserting the five KIP-534 safety invariants, and returning the next
-/// log. Panics (with a message containing the invariant name) on any safety
-/// violation. (Non-vacuity is proven separately via state-derived `sometimes`
-/// properties, so this pass carries no witness accumulator.)
+/// Run one compaction pass over `log` at `clock`. This function applies
+/// `retain` to each entry, asserts the five KIP-534 safety invariants, and
+/// returns the next log.
+///
+/// Any safety violation panics, and the panic message holds the invariant name.
+/// State-derived `sometimes` properties prove non-vacuity separately, so this
+/// pass carries no witness accumulator.
 fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
     let offset_map = CompactModel::offset_map(log);
     let data_survives = CompactModel::data_survives(log, &offset_map);
@@ -523,14 +535,16 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
 // RED witness: the legacy control-dedup bug.
 // ---------------------------------------------------------------------------
 
-/// The OLD (buggy) retain decision: control markers ARE treated as keyed data
-/// and dedup'd by their control "key", so a marker that is not the newest for
-/// that key is `Delete`d as a "superseded duplicate". This is the control-batch
-/// data-loss bug KIP-534's fix removes. `is_newest_for_key` here is supplied by
-/// the buggy dedup (only the newest marker is "newest"); the data path is
-/// unchanged from the fixed [`retain_decision`]. Driven by
-/// [`legacy_compact_fixed`], which sets up two surviving-data markers so the
-/// dedup drops the older one and the control-not-deduped assert fires.
+/// The OLD, buggy retain decision. It treats control markers as keyed data and
+/// dedups them by their control "key", so it `Delete`s a marker that is not the
+/// newest for that key as a "superseded duplicate". This is the control-batch
+/// data-loss bug that the KIP-534 fix removes.
+///
+/// The buggy dedup supplies `is_newest_for_key` here, so only the newest marker
+/// counts as "newest". The data path is the same as in the fixed
+/// [`retain_decision`]. [`legacy_compact_fixed`] drives this function. It sets
+/// up two markers whose data survives, so the dedup drops the older one and the
+/// control-not-deduped assert fires.
 fn legacy_retain(
     rec: RecordMeta,
     batch: BatchMeta,
@@ -559,21 +573,24 @@ fn legacy_retain(
     )
 }
 
-/// Run the legacy-buggy compaction over a fixed scenario, deduping markers by
-/// the control "key". Two commit markers (pid 0 and pid 1, both with surviving
-/// data) are present; legacy dedup keeps only the newest by control key and
-/// drops the older — and `compact_pass`'s control-not-deduped assert (or the
-/// marker-data-precedence assert) fires. Returns the would-be next log.
+/// Run the legacy, buggy compaction over a fixed scenario and dedup the markers
+/// by the control "key".
+///
+/// The scenario holds two commit markers, pid 0 and pid 1, and the data of both
+/// survives. The legacy dedup keeps only the newest by control key and drops
+/// the older one. The control-not-deduped assert in `compact_pass` then fires,
+/// or the marker-data-precedence assert does. This function returns the
+/// would-be next log.
 ///
 /// COUNTEREXAMPLE recorded by `legacy_control_dedup_violates_safety`:
 ///   input log = [ Data(key=0,val=Some(0)), Marker(pid=0,commit),
 ///                 Data(key=1,val=Some(0)), Marker(pid=1,commit) ]
-///   at clock=0. Both producers' data survives, so under the FIXED core both
-///   markers must survive. Under `legacy_retain` the markers are dedup'd by the
-///   shared control key: the older marker (pid 0) is Deleted while pid 0 still
-///   has surviving data → marker-data-precedence fails, OR if both collapse to
-///   one slot the control-not-deduped count check fails. The assert message
-///   contains "control" / "marker".
+///   at clock=0. The data of both producers survives, so under the FIXED core
+///   both markers must survive. Under `legacy_retain` the shared control key
+///   dedups the markers. The older marker, pid 0, is Deleted while pid 0 still
+///   has surviving data, so marker-data-precedence fails. If both markers
+///   collapse into one slot, the control-not-deduped count check fails instead.
+///   The assert message holds "control" or "marker".
 // one self-contained, heavily-commented scenario
 fn legacy_compact_fixed() -> Vec<Entry> {
     // Two committed transactions whose data both survives. Markers carry NO

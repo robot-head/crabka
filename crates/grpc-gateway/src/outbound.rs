@@ -1,14 +1,18 @@
-//! Outbound webhook delivery: one task per subscription. Batch-at-a-time so the
-//! commit boundary == the delivered boundary (the consumer commits the whole
-//! polled position, so we deliver the whole batch before committing). Per
-//! partition: deliver in offset order, retry with exponential backoff + jitter,
-//! dead-letter on exhaustion. At-least-once; receivers dedup on X-Crabka-Event-Id.
+//! Outbound webhook delivery, with one task per subscription.
 //!
-//! Forced design (the consumer API has no commit-specific-offset, no
-//! pause/resume): the polled batch is the commit + backpressure unit. A crash
-//! mid-batch re-delivers the whole batch (never commits undelivered records);
-//! the receiver dedups. Head-of-line: a failing record blocks ONLY its own
-//! partition (partitions deliver concurrently) until 2xx or DLQ.
+//! Delivery runs one batch at a time, so the commit boundary equals the
+//! delivered boundary. The consumer commits the whole polled position, so the
+//! gateway delivers the whole batch before it commits. Within one partition,
+//! the gateway delivers in offset order, retries with exponential backoff plus
+//! jitter, and dead-letters on exhaustion. Delivery is at-least-once, so
+//! receivers dedup on X-Crabka-Event-Id.
+//!
+//! The consumer API has no commit-specific-offset and no pause/resume, so the
+//! polled batch must be the commit and backpressure unit. A crash mid-batch
+//! re-delivers the whole batch, because the gateway never commits undelivered
+//! records, and the receiver dedups. For head-of-line blocking, a failing
+//! record blocks ONLY its own partition until a 2xx or the DLQ. Partitions
+//! deliver concurrently.
 
 use std::{
     sync::Arc,
@@ -30,8 +34,8 @@ use crate::{
 };
 
 /// RAII guard that decrements the active-subscriptions gauge exactly once on
-/// drop, regardless of how `run_subscription` exits (normal shutdown, poll
-/// error, or early return).
+/// drop. It does this however `run_subscription` exits: on a normal shutdown,
+/// on a poll error, or on an early return.
 struct ActiveSubscriptionGuard;
 
 impl Drop for ActiveSubscriptionGuard {
@@ -42,19 +46,19 @@ impl Drop for ActiveSubscriptionGuard {
 
 /// Run a subscription's delivery loop until `shutdown` fires.
 ///
-/// Joins the consumer group `__crabka_grpc_wh_{name}` on the subscription's
-/// source topics, then loops batch-at-a-time: poll → group by `(topic,
-/// partition)` in offset order → deliver each partition's records sequentially
-/// (partitions concurrently) → `commit_sync` only once the WHOLE batch is
-/// delivered-or-dead-lettered. Closes the consumer on exit so the coordinator
-/// task + group member don't leak.
+/// The task joins the consumer group `__crabka_grpc_wh_{name}` on the
+/// subscription's source topics. It then loops one batch at a time: poll, group
+/// by `(topic, partition)` in offset order, deliver each partition's records in
+/// sequence with the partitions concurrent, and `commit_sync` only once the
+/// WHOLE batch is delivered or dead-lettered. The task closes the consumer on
+/// exit so the coordinator task and the group member do not leak.
 ///
 /// # Errors
 ///
-/// Returns [`GatewayError`] if the consumer cannot be built or the HTTP client
-/// cannot be constructed, or a poll error terminates the loop. A failed
-/// `commit_sync` is logged (not fatal): the uncommitted batch re-delivers,
-/// which is fine under at-least-once.
+/// Returns [`GatewayError`] if the consumer cannot be built, if the HTTP client
+/// cannot be constructed, or if a poll error stops the loop. A failed
+/// `commit_sync` is not fatal; the task logs it. The uncommitted batch
+/// re-delivers, which is correct under at-least-once.
 pub async fn run_subscription(
     sub: CompiledSubscription,
     bootstrap: String,
@@ -156,9 +160,11 @@ pub async fn run_subscription_with_policy(
     }
 }
 
-/// Deliver one polled batch: group by `(topic, partition)`, sort each partition
-/// by ascending offset, then deliver partitions CONCURRENTLY while records
-/// WITHIN a partition go SEQUENTIALLY (offset order is the ordering guarantee).
+/// Deliver one polled batch.
+///
+/// The function groups by `(topic, partition)` and sorts each partition by
+/// ascending offset. It then delivers partitions CONCURRENTLY, while records
+/// WITHIN a partition go SEQUENTIALLY. Offset order is the ordering guarantee.
 async fn deliver_batch(
     http: &reqwest::Client,
     sub: &CompiledSubscription,
@@ -193,10 +199,12 @@ async fn deliver_batch(
     futures_util::future::join_all(futures).await;
 }
 
-/// Deliver one record: filter → render → sign → POST with exponential-backoff
-/// retries → dead-letter on exhaustion. Returns once the record is delivered
-/// (2xx), skipped by the filter, or dead-lettered/dropped after `max_attempts`
-/// — i.e. once it may be committed as part of the batch.
+/// Deliver one record.
+///
+/// The steps are: filter, render, sign, POST with exponential-backoff retries,
+/// then dead-letter on exhaustion. The function returns once the record is
+/// delivered with a 2xx, skipped by the filter, or dead-lettered or dropped
+/// after `max_attempts`. At that point the batch can commit the record.
 #[tracing::instrument(skip_all)]
 async fn deliver_one(
     http: &reqwest::Client,
@@ -283,9 +291,9 @@ async fn deliver_one(
 ///
 /// Returns `None` (envelope path) when `decode_to_json` is off, the record
 /// value is empty, the codec yields no JSON view (e.g. `RawCodec`, or a record
-/// that wasn't Confluent-framed), or decode errors. A decode error is logged
-/// and treated as non-fatal — the record is still delivered (as the envelope),
-/// preserving at-least-once.
+/// that wasn't Confluent-framed), or decode errors. A decode error is not
+/// fatal. The gateway logs it and still delivers the record as the envelope,
+/// which keeps at-least-once.
 async fn decoded_body(
     codec: &dyn RecordCodec,
     sub: &CompiledSubscription,
@@ -311,10 +319,11 @@ async fn decoded_body(
     }
 }
 
-/// Render the delivery envelope as serialized JSON bytes. The value is embedded
-/// as raw JSON when the record value parses as JSON, otherwise wrapped as
-/// `{"_base64": "..."}`; the key is base64. The envelope omits record headers
-/// (`ConsumerRecord` exposes none).
+/// Render the delivery envelope as serialized JSON bytes.
+///
+/// The envelope embeds the value as raw JSON when the record value parses as
+/// JSON, and otherwise wraps it as `{"_base64": "..."}`. The key is base64. The
+/// envelope omits record headers, because `ConsumerRecord` exposes none.
 fn render_envelope(event_id: &str, rec: &ConsumerRecord) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "event_id": event_id,
@@ -328,8 +337,9 @@ fn render_envelope(event_id: &str, rec: &ConsumerRecord) -> Vec<u8> {
     .unwrap_or_default()
 }
 
-/// The `value` field of the envelope: raw JSON if the record value is valid
-/// JSON, else a `{"_base64": "..."}` wrapper; `Null` for an empty value.
+/// The `value` field of the envelope. It is raw JSON if the record value is
+/// valid JSON, a `{"_base64": "..."}` wrapper if it is not, and `Null` for an
+/// empty value.
 fn value_field(rec: &ConsumerRecord) -> Value {
     match &rec.value {
         None => Value::Null,
@@ -339,9 +349,11 @@ fn value_field(rec: &ConsumerRecord) -> Value {
     }
 }
 
-/// Whether `rec`'s JSON body matches the filter. Mirrors the broker's
-/// `evaluate_custom_claim_check`: a non-JSON body never matches; the `JSONPath`
-/// must yield a non-empty result with no element being `null` or `false`.
+/// Whether `rec`'s JSON body matches the filter.
+///
+/// This function matches the broker's `evaluate_custom_claim_check`. A non-JSON
+/// body never matches. The `JSONPath` must give a non-empty result, and no
+/// element in that result can be `null` or `false`.
 fn passes_filter(q: &JpQuery, rec: &ConsumerRecord) -> bool {
     let Some(bytes) = &rec.value else {
         return false;
@@ -364,9 +376,10 @@ fn passes_filter(q: &JpQuery, rec: &ConsumerRecord) -> bool {
     true
 }
 
-/// Full-ish jitter exponential backoff (no `rand` dep): the deterministic
-/// component is `min(base * 2^(attempt-1), max) / 2`, plus a jitter in
-/// `0..=half`. `attempt` is 1-based.
+/// Full-ish jitter exponential backoff, with no `rand` dependency.
+///
+/// The deterministic component is `min(base * 2^(attempt-1), max) / 2`, plus a
+/// jitter in `0..=half`. `attempt` is 1-based.
 fn backoff_with_jitter(attempt: u32, base: Time, max: Time) -> Time {
     // `saturating_pow` clamps the doubling so a large `attempt` cannot overflow
     // before the cap applies.
@@ -376,16 +389,18 @@ fn backoff_with_jitter(attempt: u32, base: Time, max: Time) -> Time {
     half + half * jitter().as_f64()
 }
 
-/// Pseudo-random jitter in `0..1` (no `rand` dep): the current sub-second nanos
-/// expressed as a fraction of one second.
+/// Pseudo-random jitter in `0..1`, with no `rand` dependency. It is the current
+/// sub-second nanos as a fraction of one second.
 fn jitter() -> Ratio {
     fraction(Time::from_nanos(i64::from(subsec_nanos())).secs_f64())
 }
 
-/// Dead-letter an exhausted record. When a DLQ topic is configured, produce the
-/// original key/value with `x-crabka-dlq-source` (the event id) +
-/// `x-crabka-dlq-reason` headers; otherwise log and drop (retries already
-/// satisfied at-least-once — the batch still advances either way).
+/// Dead-letter an exhausted record.
+///
+/// When a DLQ topic is configured, produce the original key and value with the
+/// `x-crabka-dlq-source` header, which holds the event id, and the
+/// `x-crabka-dlq-reason` header. Otherwise log the record and drop it. The
+/// retries already satisfied at-least-once, and the batch advances either way.
 async fn dead_letter(
     producer: &Producer,
     sub: &CompiledSubscription,
@@ -455,7 +470,7 @@ fn now_unix_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// The wall clock's current sub-second nanos — the jitter seed.
+/// The wall clock's current sub-second nanos, which is the jitter seed.
 fn subsec_nanos() -> u32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -479,10 +494,12 @@ mod tests {
     use crate::codec::{CodecError, Decoded, EncodeBody, RawCodec};
 
     /// A codec stub whose `decode` returns a fixed [`Decoded`], or a
-    /// `CodecError::Registry` when constructed with `None` — exercising the
-    /// `decode_to_json` delivery path (and its decode-error fallback) without a
-    /// registry. `encode` is unused on the outbound path. (`CodecError` is not
-    /// `Clone`, so the error case is represented as `None` and synthesized.)
+    /// `CodecError::Registry` when the caller constructs it with `None`.
+    ///
+    /// The stub exercises the `decode_to_json` delivery path and its
+    /// decode-error fallback without a registry. The outbound path never calls
+    /// `encode`. `CodecError` is not `Clone`, so the stub holds the error case
+    /// as `None` and builds the error on demand.
     struct StubCodec(Option<Decoded>);
 
     #[async_trait::async_trait]
@@ -498,7 +515,7 @@ mod tests {
         }
     }
 
-    /// A `Decoded` carrying a JSON view (the de-framed structured payload).
+    /// A `Decoded` that carries a JSON view, the de-framed structured payload.
     fn decoded_with_json(json: &[u8]) -> Decoded {
         Decoded {
             value: Bytes::from(json.to_vec()),
@@ -611,8 +628,8 @@ mod tests {
     // decoded_body: decode_to_json delivery path
     // -----------------------------------------------------------------------
 
-    /// Every decode-to-JSON outcome is checked as one named table: successful
-    /// JSON delivery, and each envelope fallback reason.
+    /// One named table checks every decode-to-JSON outcome: successful JSON
+    /// delivery, and each envelope fallback reason.
     #[tokio::test]
     async fn decode_to_json_delivery_cases() {
         type TestCase1<'a> = (

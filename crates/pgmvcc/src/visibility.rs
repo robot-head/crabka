@@ -1,8 +1,10 @@
-//! Snapshot-based visibility — Postgres' `HeapTupleSatisfiesMVCC`. A snapshot
-//! is `(xmin, xmax, xip[])`: `xmax` is one past the highest assigned xid, `xip`
-//! is the set of xids that were running when the snapshot was taken, and `xmin`
-//! is the lowest of those (a fast "everything below is settled" bound). The clog
-//! answers "did this xid commit?"; the snapshot answers "before I started?".
+//! Snapshot-based visibility, Postgres' `HeapTupleSatisfiesMVCC`.
+//!
+//! A snapshot is `(xmin, xmax, xip[])`. `xmax` is one past the highest
+//! assigned xid. `xip` is the set of xids that were running when the snapshot
+//! was taken. `xmin` is the lowest of those, a fast "everything below is
+//! settled" bound. The clog answers "did this xid commit?". The snapshot
+//! answers "before I started?".
 
 use crabka_pgkv::KvError;
 
@@ -21,7 +23,8 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Was `xid` running at (or started after) the moment this snapshot was taken?
+    /// Was `xid` running at the moment this snapshot was taken, or did it
+    /// start after that moment?
     fn is_running(&self, xid: u64) -> bool {
         // NOTE: PostgreSQL also treats `xid < self.xmin` as a fast "settled" case.
         // We omit that fast path: such xids fall through to the clog, which gives
@@ -52,9 +55,11 @@ fn committed_visible(
     Ok(matches!(status(xid)?, XidStatus::Committed)) // settled: ask the clog
 }
 
-/// Postgres `HeapTupleSatisfiesMVCC` for a tuple with header `(xmin, xmax)`:
-/// visible iff its creator is visible to the snapshot AND it has not been
-/// deleted/superseded by a transaction also visible to the snapshot.
+/// Postgres `HeapTupleSatisfiesMVCC` for a tuple with header `(xmin, xmax)`.
+///
+/// The tuple is visible iff its creator is visible to the snapshot AND no
+/// transaction that is also visible to the snapshot has deleted or superseded
+/// it.
 ///
 /// # Errors
 ///
@@ -81,9 +86,9 @@ pub fn satisfies_mvcc(
 
 /// Timestamp visibility for G-9 sharded-table versions.
 ///
-/// A committed version is visible iff `commit_ts <= read_ts`. Pending intents and
-/// aborted versions are excluded until/unless the caller resolves the intent
-/// through the primary and rewrites it as committed.
+/// A committed version is visible iff `commit_ts <= read_ts`. Pending intents
+/// and aborted versions are excluded. They stay excluded unless the caller
+/// resolves the intent through the primary and rewrites it as committed.
 #[must_use]
 pub const fn satisfies_ts(read_ts: u64, state: TsVersionState) -> bool {
     match state {
@@ -94,29 +99,31 @@ pub const fn satisfies_ts(read_ts: u64, state: TsVersionState) -> bool {
 
 /// The verdict of a timestamp read against one version under a clock-skew bound.
 ///
-/// A two-valued visible/invisible check suffices when there is a single
+/// A two-valued visible/invisible check is enough when there is a single
 /// timestamp authority. Under a distributed clock, a version committed just
-/// above the read timestamp may nevertheless have happened before the read in
-/// real time — within the skew bound — so it is neither safely visible nor
-/// safely invisible but [`Uncertain`], and the read path restarts above it.
+/// above the read timestamp may still have happened before the read in real
+/// time, within the skew bound. Such a version is neither safely visible nor
+/// safely invisible. It is [`Uncertain`], and the read path restarts above
+/// it.
 ///
 /// [`Uncertain`]: ReadVerdict::Uncertain
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadVerdict {
     /// The version is committed at or below the read timestamp.
     Visible,
-    /// The version is invisible: an intent, an abort, a delete marker, or a
-    /// commit genuinely concurrent with (beyond the uncertainty window above)
-    /// the read.
+    /// The version is invisible. It is an intent, an abort, a delete marker,
+    /// or a commit that is genuinely concurrent with the read, that is beyond
+    /// the uncertainty window above the read.
     Invisible,
     /// The version committed inside `(read_ts, read_ts + uncertainty]`: it may
     /// have preceded the read in real time, so the reader must restart above it.
     Uncertain,
 }
 
-/// Timestamp visibility with a clock-skew uncertainty window — the tri-state the
-/// distributed (HLC) read path consumes to decide between a visible version, an
-/// invisible one, and a read restart.
+/// Timestamp visibility with a clock-skew uncertainty window.
+///
+/// This is the tri-state that the distributed (HLC) read path uses to decide
+/// between a visible version, an invisible version, and a read restart.
 ///
 /// A committed version is [`Visible`] when `commit_ts <= read_ts`, [`Uncertain`]
 /// when `read_ts < commit_ts <= read_ts + uncertainty`, and [`Invisible`]
@@ -125,8 +132,8 @@ pub enum ReadVerdict {
 ///
 /// With `uncertainty == 0` the window is empty and the result matches
 /// [`satisfies_ts`] exactly: [`Visible`] where it returns `true`, [`Invisible`]
-/// where it returns `false`, and never [`Uncertain`]. Every centralized
-/// (`LogicalTso`) caller therefore sees the unchanged two-valued behavior.
+/// where it returns `false`, and never [`Uncertain`], so every centralized
+/// (`LogicalTso`) caller sees the same two-valued behavior.
 ///
 /// [`Visible`]: ReadVerdict::Visible
 /// [`Invisible`]: ReadVerdict::Invisible

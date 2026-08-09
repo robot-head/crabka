@@ -1,14 +1,15 @@
 //! Background `ShareGroupHeartbeat` loop for a [`ShareConsumer`].
 //!
-//! Mirrors the classic [`coordinator::run`](crate::coordinator::run) shape:
-//! an interval ticker plus a `tokio::select!` that races each heartbeat RPC
-//! against a shutdown token so `close()` returns promptly. Each tick sends a
-//! `ShareGroupHeartbeat` (API key 76) with the live member epoch; on success
-//! it adopts the broker-returned epoch and (when present) the new assignment.
+//! This loop mirrors the classic [`coordinator::run`](crate::coordinator::run)
+//! shape: an interval ticker plus a `tokio::select!` that races each heartbeat
+//! RPC against a shutdown token, so `close()` returns promptly. Each tick sends
+//! a `ShareGroupHeartbeat` (API key 76) with the live member epoch. On success
+//! the loop adopts the broker-returned epoch, and the new assignment when the
+//! response carries one.
 //!
-//! Share-group membership has no Join/Sync handshake — the heartbeat *is* the
-//! join. A from-scratch rejoin therefore just resets the member epoch to 0 and
-//! re-sends `subscribed_topic_names`; the broker hands back a fresh epoch and
+//! Share-group membership has no Join/Sync handshake. The heartbeat *is* the
+//! join. A from-scratch rejoin therefore only resets the member epoch to 0 and
+//! re-sends `subscribed_topic_names`. The broker hands back a fresh epoch and
 //! assignment on the next ok.
 
 use std::{collections::HashMap, sync::Arc};
@@ -25,18 +26,19 @@ use crabka_units::{Time, convert::TimeExt as _};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-/// `FENCED_MEMBER_EPOCH` — our epoch is behind the broker's; rejoin.
+/// `FENCED_MEMBER_EPOCH`. The member epoch is behind the broker's. Rejoin.
 const FENCED_MEMBER_EPOCH: i16 = 110;
-/// `UNKNOWN_MEMBER_ID` — the broker has forgotten us (session expired); rejoin.
+/// `UNKNOWN_MEMBER_ID`. The broker has forgotten this member because the
+/// session expired. Rejoin.
 const UNKNOWN_MEMBER_ID: i16 = 25;
-/// `STALE_MEMBER_EPOCH` — same family as fenced; rejoin from scratch.
+/// `STALE_MEMBER_EPOCH`. Same family as fenced. Rejoin from scratch.
 const STALE_MEMBER_EPOCH: i16 = 113;
 
 /// State owned by the share-group heartbeat task.
 ///
-/// The `Arc<Mutex<...>>` fields are shared with the parent [`ShareConsumer`]
-/// so `poll()` sees the live member epoch / assignment as the broker rebalances
-/// the group.
+/// The `Arc<Mutex<...>>` fields are shared with the parent [`ShareConsumer`],
+/// so `poll()` sees the live member epoch and assignment as the broker
+/// rebalances the group.
 pub(crate) struct ShareCoordinatorState {
     pub client: Client,
     pub group_id: String,
@@ -52,12 +54,12 @@ pub(crate) struct ShareCoordinatorState {
 
 /// Outcome of a single `ShareGroupHeartbeat` RPC.
 enum HeartbeatOutcome {
-    /// `error_code == 0` — steady state.
+    /// `error_code == 0`, the steady state.
     Ok,
-    /// Fenced / unknown-member / stale-epoch — reset to epoch 0 and re-send the
-    /// subscription on the next tick so the broker re-admits us.
+    /// Fenced, unknown-member, or stale-epoch. Reset to epoch 0 and re-send the
+    /// subscription on the next tick, so the broker re-admits this member.
     RejoinFromScratch,
-    /// Transport error or unexpected non-fatal code; retry next tick.
+    /// Transport error or unexpected non-fatal code. Retry on the next tick.
     Transient,
 }
 
@@ -153,9 +155,10 @@ async fn leave_group(state: &ShareCoordinatorState) {
 
 /// Send one `ShareGroupHeartbeat` and translate the response into a directive.
 ///
-/// When `rejoining` we re-send `subscribed_topic_names` (the broker requires
-/// the subscription on a fresh join); otherwise we send `None` (the broker
-/// remembers it across steady-state heartbeats).
+/// When `rejoining` is true, this function re-sends `subscribed_topic_names`,
+/// because the broker needs the subscription on a fresh join. Otherwise it
+/// sends `None`, because the broker remembers the subscription across
+/// steady-state heartbeats.
 #[tracing::instrument(
     name = "share_consumer.heartbeat",
     level = "debug",
@@ -209,10 +212,11 @@ async fn heartbeat_once(state: &ShareCoordinatorState, rejoining: bool) -> Heart
     }
 }
 
-/// Replace the shared assignment with the broker-returned topic/partition set,
-/// resolving topic names from the cached `topic_names` map (topic ids the map
-/// doesn't know yet fall back to the id's hex form so `poll()` still has a
-/// stable display name; a later Metadata refresh fixes it).
+/// Replace the shared assignment with the broker-returned topic/partition set.
+///
+/// This function resolves topic names from the cached `topic_names` map. A
+/// topic id that the map does not know yet falls back to the id's hex form, so
+/// `poll()` still has a stable display name. A later Metadata refresh fixes it.
 async fn update_assignment(state: &ShareCoordinatorState, assignment: Assignment) {
     let names = state.topic_names.lock().await;
     let mut next: Vec<(WireUuid, String, i32)> = Vec::new();
@@ -229,9 +233,10 @@ async fn update_assignment(state: &ShareCoordinatorState, assignment: Assignment
     *state.assignment.lock().await = next;
 }
 
-/// Hex display for a topic id whose name we haven't resolved yet. `Uuid` has no
-/// `Display`; this gives `poll()` a stable, non-empty placeholder name until a
-/// Metadata refresh fills the real one in.
+/// Hex display for a topic id whose name is not resolved yet.
+///
+/// `Uuid` has no `Display`. This function gives `poll()` a stable, non-empty
+/// placeholder name until a Metadata refresh fills the real one in.
 fn hex_topic_id(id: WireUuid) -> String {
     use std::fmt::Write as _;
     id.0.iter().fold(String::with_capacity(32), |mut s, b| {

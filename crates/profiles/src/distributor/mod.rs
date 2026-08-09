@@ -118,9 +118,9 @@ pub struct DistributorState {
     /// Maximum tenants retained in distributor accounting maps.
     pub max_tracked_tenants: usize,
     pub legacy_decode_limits: LegacyDecodeLimits,
-    /// Prometheus metrics bundle. `record_ingest` is called at each ingest
-    /// handler boundary; `record_wal_append_failure` fires at the WAL-append
-    /// error site inside [`process_raw`].
+    /// Prometheus metrics bundle. Each ingest handler boundary calls
+    /// `record_ingest`. The WAL-append error site inside [`process_raw`] calls
+    /// `record_wal_append_failure`.
     pub metrics: ServiceMetrics,
 }
 
@@ -231,8 +231,8 @@ fn enforce_ingestion_rate(
 }
 
 /// The `TokenBucket` kernel in `crabka-broker` is Creusot-verified over
-/// integers, so the configured `Frequency` is extracted to whole tokens per
-/// second right at that seam.
+/// integers. This function therefore converts the configured `Frequency` to
+/// whole tokens per second.
 fn rate_tokens_per_sec(limits: &Limits) -> u64 {
     let rate = limits
         .ingestion_rate
@@ -301,8 +301,8 @@ fn merge_ingest_limits(
     }
 }
 
-/// A Pyroscope label cap of zero means "unlimited", which here means "leave the
-/// base tenant limit alone".
+/// A Pyroscope label cap of zero means "unlimited". Here that means the
+/// function keeps the base tenant limit.
 fn positive_or(override_size: ByteSize, base: ByteSize) -> ByteSize {
     if override_size > <ByteSize as ByteSizeExt>::ZERO {
         override_size
@@ -311,21 +311,20 @@ fn positive_or(override_size: ByteSize, base: ByteSize) -> ByteSize {
     }
 }
 
-/// Atomically test the per-tenant max-series limit and reserve the new
-/// fingerprints under a single `active_series` lock hold.
+/// Tests the per-tenant max-series limit and reserves the new fingerprints.
 ///
-/// The previous implementation cloned the tenant's set, dropped the lock,
-/// tested the limit, and only inserted later under a *separate* lock — a
-/// check-then-act race where two concurrent requests could each pass the test
-/// and jointly exceed `max_series`. Holding the lock across both the test and
-/// the insertion makes the operation atomic.
+/// The function holds the `active_series` lock across both the test and the
+/// insertion, so the operation is atomic. Under two separate lock holds, two
+/// concurrent requests can each pass the test and together exceed
+/// `max_series`.
 ///
-/// On success returns the subset of `records`' fingerprints that this call
-/// actually inserted (i.e. were not already present). The caller must pass this
-/// set to [`rollback_reserved_series`] if the subsequent WAL append fails, so a
-/// rejected/failed write never permanently inflates the tenant's series count.
-/// When `max_series` is unlimited (`0`) no reservation is made and an empty set
-/// is returned (cardinality is not tracked, matching prior behaviour).
+/// On success the function returns the subset of the fingerprints of `records`
+/// that this call inserted, that is, the ones that were not already present.
+/// The caller must pass this set to [`rollback_reserved_series`] if the WAL
+/// append after it fails. A rejected or failed write then never permanently
+/// inflates the tenant's series count. When `max_series` is unlimited (`0`),
+/// the function makes no reservation and returns an empty set. It does not
+/// track cardinality in that case.
 fn enforce_and_reserve_max_series(
     state: &DistributorState,
     tenant: &str,
@@ -376,12 +375,12 @@ fn enforce_and_reserve_max_series(
     Ok(to_add.into_iter().collect())
 }
 
-/// Undo a max-series reservation made by [`enforce_and_reserve_max_series`].
+/// Undoes a max-series reservation from [`enforce_and_reserve_max_series`].
 ///
-/// Only removes fingerprints this request inserted (tracked in `reserved`), so
-/// concurrent requests that legitimately share a series are unaffected. A
-/// poisoned lock here is best-effort: we cannot recover the set, so we log and
-/// move on rather than panic.
+/// The function removes only the fingerprints that this request inserted, which
+/// `reserved` tracks. Concurrent requests that legitimately share a series stay
+/// unaffected. A poisoned lock here is best-effort. The function cannot recover
+/// the set, so it logs the fault and continues instead of a panic.
 fn rollback_reserved_series(state: &DistributorState, tenant: &str, reserved: &[u64]) {
     if reserved.is_empty() {
         return;
@@ -400,7 +399,7 @@ fn rollback_reserved_series(state: &DistributorState, tenant: &str, reserved: &[
     }
 }
 
-/// Evict one arbitrary tenant from a per-tenant map to keep its size bounded.
+/// Evicts one arbitrary tenant from a per-tenant map to keep its size bounded.
 fn evict_one_tenant<V>(map: &mut HashMap<String, V>) {
     if let Some(victim) = map.keys().next().cloned() {
         map.remove(&victim);
@@ -671,14 +670,14 @@ async fn ingest_handler(
     }
 }
 
-/// Resolve and VALIDATE the tenant from the `X-Scope-OrgID` header.
+/// Resolves and validates the tenant from the `X-Scope-OrgID` header.
 ///
-/// Absent, empty, or non-UTF-8 headers default to `"anonymous"` (via
-/// [`crate::tenant::tenant_from_header`]); a present, non-empty value is
-/// validated against the Mimir/Pyroscope charset and rejected with
-/// [`ProfilesError::Invalid`] (→ 400 / `invalid_argument`) if malformed. This
-/// is what stops a caller from minting path-unsafe or unlimited junk tenant ids
-/// at the ingest door.
+/// [`crate::tenant::tenant_from_header`] defaults absent, empty, or non-UTF-8
+/// headers to `"anonymous"`. For a present, non-empty value, this function
+/// validates the value against the Mimir/Pyroscope charset. It rejects a
+/// malformed value with [`ProfilesError::Invalid`], which maps to HTTP 400 and
+/// Connect `invalid_argument`. This check stops a caller from creating
+/// path-unsafe or unlimited tenant ids at the ingest door.
 fn tenant_from_headers(headers: &HeaderMap) -> Result<String, ProfilesError> {
     let value = headers
         .get("x-scope-orgid")
@@ -686,11 +685,12 @@ fn tenant_from_headers(headers: &HeaderMap) -> Result<String, ProfilesError> {
     crate::tenant::tenant_from_header(value)
 }
 
-/// Best-effort tenant label for the ingest tracing span, read straight from the
-/// `X-Scope-OrgID` header without validation (an unvalidated/absent header falls
-/// back to `"unknown"`). This is only used to tag the span; the actual tenant
-/// used for storage is resolved and validated separately by
-/// [`tenant_from_headers`].
+/// Gives the best-effort tenant label for the ingest tracing span.
+///
+/// This function reads the `X-Scope-OrgID` header directly and does not
+/// validate it. An absent or empty header gives `"unknown"`. The label only
+/// tags the span. [`tenant_from_headers`] separately resolves and validates the
+/// tenant that storage uses.
 fn ingest_span_tenant(headers: &HeaderMap) -> String {
     headers
         .get("x-scope-orgid")
@@ -700,19 +700,20 @@ fn ingest_span_tenant(headers: &HeaderMap) -> String {
         .to_string()
 }
 
-/// Generic, non-leaky message returned to clients for any server-side (5xx)
-/// fault. The detailed error is logged server-side via `tracing` instead of
-/// being echoed in the response body, so internal details (lock-poisoning,
-/// WAL/produce/block internals) never reach an untrusted caller.
+/// Generic message that clients get for any server-side (5xx) fault.
+///
+/// The server logs the detailed error with `tracing` and does not put it in the
+/// response body. Internal details such as lock poisoning and WAL, produce, and
+/// block internals never reach an untrusted caller.
 const INTERNAL_ERROR_MESSAGE: &str = "internal server error";
 
 /// Returns the client-facing message for `err`.
 ///
-/// For genuine client-input faults (4xx: bad format, decode/gunzip failures,
-/// invalid requests, oversized payloads) the specific message is safe and
-/// useful, so it is returned verbatim. For any 5xx/internal fault the detailed
-/// error is logged server-side and a generic message is returned. `LimitError`
-/// is handled by its own already-shaped projection at the call sites.
+/// A client-input fault is a 4xx: a bad format, a decode or gunzip failure, an
+/// invalid request, or an oversized payload. Its specific message is safe and
+/// useful, so this function returns it verbatim. For any 5xx internal fault the
+/// function logs the detailed error on the server and returns a generic
+/// message. The call sites handle `LimitError` with their own projection.
 fn client_facing_message(err: &ProfilesError) -> String {
     if err.status_code() >= 500 {
         tracing::error!(error = %err, "profiles distributor internal error");
@@ -887,9 +888,9 @@ mod tests {
 
     use super::*;
 
-    /// `ingest_span_tenant` reads the `X-Scope-OrgID` header, returning its
-    /// value verbatim when present and non-empty, and `"unknown"` when the
-    /// header is missing or empty.
+    /// `ingest_span_tenant` reads the `X-Scope-OrgID` header. It returns the
+    /// value verbatim when the header is present and non-empty. It returns
+    /// `"unknown"` when the header is missing or empty.
     #[test]
     fn ingest_span_tenant_reads_scope_orgid_header() {
         let mut present = HeaderMap::new();

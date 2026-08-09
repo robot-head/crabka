@@ -1,13 +1,15 @@
-//! Tests for the KIP-932 [`ShareConsumer`]: a membership smoke test (join +
-//! close, Task E1) and a happy-path poll test (acquire records with the broker's
-//! `delivery_count`, then implicit auto-`Accept` advances the SPSO, Task E2).
+//! Tests for the KIP-932 [`ShareConsumer`].
 //!
-//! The poll test mirrors the broker-side acquire/ack harness in
-//! `crates/broker/tests/share_consume.rs` for the share-state bootstrap +
-//! initialization waits (the share coordinator must be write-ready before the
-//! first acquire/accept persists) and the produce helper from
-//! `tests/integration.rs`. The fuller suite (explicit release/reject,
-//! two-consumer sharing, close-leaves-group) is Task E3.
+//! Task E1 is a membership smoke test: join, then close. Task E2 is a
+//! happy-path poll test: acquire records with the broker's `delivery_count`,
+//! then let the implicit auto-`Accept` advance the SPSO.
+//!
+//! The poll test copies the broker-side acquire and ack harness in
+//! `crates/broker/tests/share_consume.rs` for the share-state bootstrap and the
+//! initialization waits. The share coordinator must be write-ready before the
+//! first acquire and accept persists. The poll test also copies the produce
+//! helper from `tests/integration.rs`. Task E3 is the fuller suite: explicit
+//! release and reject, two-consumer sharing, and close-leaves-group.
 
 use std::{
     sync::{Arc, OnceLock},
@@ -106,7 +108,7 @@ async fn share_consumer_joins_and_closes() {
 
 // ───────────────────────── Task E2 poll helpers ─────────────────────────
 
-/// Create `topic` (1 partition) and wait until this broker leads partition 0.
+/// Creates `topic` with 1 partition and waits until this broker leads it.
 async fn create_topic_led(broker: &crabka_broker::BrokerHandle, client: &Client, topic: &str) {
     create_topic(client, topic).await;
     broker.wait_until_partition_present(topic, 0).await;
@@ -125,8 +127,10 @@ fn wire(tid: uuid::Uuid) -> WireUuid {
     WireUuid(*tid.as_bytes())
 }
 
-/// Bootstrap `__share_group_state` via `FindCoordinator(SHARE)` and wait until
-/// every state partition this broker should lead is local, so SPSO writes land.
+/// Bootstraps `__share_group_state` with `FindCoordinator(SHARE)`.
+///
+/// The helper then waits until every state partition that this broker should
+/// lead is local, so that SPSO writes persist.
 async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Client, key: &str) {
     let resp = client
         .send(FindCoordinatorRequest {
@@ -147,8 +151,9 @@ async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Cl
     }
 }
 
-/// Wait until the share coordinator has durably initialized state for
-/// `(group, topic, partition)` so the first accept persists.
+/// Waits for durable share-coordinator state for `(group, topic, partition)`.
+///
+/// The first accept persists only after this state exists.
 async fn wait_for_share_init(
     broker: &crabka_broker::BrokerHandle,
     group: &str,
@@ -163,7 +168,7 @@ async fn wait_for_share_init(
         .await;
 }
 
-/// Produce `n` records (values `v0..v{n-1}`) into `(topic, 0)`.
+/// Produces `n` records with the values `v0..v{n-1}` into `(topic, 0)`.
 async fn produce_n(
     broker: &crabka_broker::BrokerHandle,
     client: &Client,
@@ -222,8 +227,10 @@ async fn produce_n(
     panic!("partition never became produceable");
 }
 
-/// Create `topic` with `num_partitions` and wait until this broker leads every
-/// partition (single-broker test config leads them all).
+/// Creates `topic` with `num_partitions` partitions.
+///
+/// The helper then waits until this broker leads every partition. The
+/// single-broker test config gives all partitions to this broker.
 async fn create_multi_partition_led(
     broker: &crabka_broker::BrokerHandle,
     client: &Client,
@@ -236,7 +243,7 @@ async fn create_multi_partition_led(
     }
 }
 
-/// Produce one record with value `value` into `(topic, partition)`.
+/// Produces one record with the value `value` into `(topic, partition)`.
 async fn produce_one_to(
     broker: &crabka_broker::BrokerHandle,
     client: &Client,
@@ -292,8 +299,9 @@ async fn produce_one_to(
     panic!("partition {topic}:{partition} never became produceable");
 }
 
-/// Send a `ShareGroupDescribe` for `group` and return its row (or `None` if the
-/// group is absent).
+/// Sends a `ShareGroupDescribe` for `group` and returns the row for it.
+///
+/// Returns `None` if the group is absent.
 async fn describe_group(
     client: &Client,
     group: &str,
@@ -309,14 +317,15 @@ async fn describe_group(
     resp.groups.into_iter().find(|g| g.group_id == group)
 }
 
-/// The UTF-8 value of a record (empty if absent).
+/// The UTF-8 value of a record, or an empty string if the record has no value.
 fn val(r: &ShareConsumerRecord) -> String {
     String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned()
 }
 
-/// Happy path: a `ShareConsumer` (Implicit) polls 3 produced records with
-/// `delivery_count == 1`; the next poll returns empty because the implicit
-/// auto-Accept advanced the SPSO past them.
+/// Happy path: an Implicit `ShareConsumer` polls 3 produced records.
+///
+/// Each record has `delivery_count == 1`. The next poll returns no records,
+/// because the implicit auto-Accept moved the SPSO past them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn poll_acquires_and_implicit_accept_advances() {
     let _permit = broker_test_permit().await;
@@ -390,7 +399,7 @@ async fn poll_acquires_and_implicit_accept_advances() {
 
 // ───────────────────────── Task E3 explicit ack / sharing / close ─────────
 
-/// Poll until at least `n` records have accumulated, or the deadline passes.
+/// Polls until `n` or more records accumulate, or until the deadline passes.
 async fn poll_until(
     consumer: &mut ShareConsumer,
     n: usize,
@@ -405,8 +414,11 @@ async fn poll_until(
     acc
 }
 
-/// Explicit mode: produce N, poll → N records (`delivery_count` 1), `Release` each,
-/// poll again → the same records redelivered with `delivery_count == 2`.
+/// Explicit mode: a `Release` makes the broker deliver the records again.
+///
+/// The test produces N records and polls them, each with `delivery_count` 1. It
+/// releases every record. The next poll gets the same records again, now with
+/// `delivery_count == 2`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_release_redelivers() {
     let _permit = broker_test_permit().await;
@@ -466,9 +478,11 @@ async fn explicit_release_redelivers() {
     broker.shutdown().await;
 }
 
-/// Explicit mode: `Reject` every acquired record + `commit()`; the rejected
-/// offsets are archived and the SPSO advances past them, so a later poll of a
-/// freshly produced record returns only the new record.
+/// Explicit mode: a `Reject` and a `commit()` archive the acquired offsets.
+///
+/// The test rejects every acquired record and commits. The broker archives the
+/// rejected offsets and moves the SPSO past them. A later poll then returns
+/// only a newly produced record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_reject_not_redelivered() {
     let _permit = broker_test_permit().await;
@@ -525,10 +539,11 @@ async fn explicit_reject_not_redelivered() {
     broker.shutdown().await;
 }
 
-/// One group, a 2-partition topic, records on both partitions, two
-/// `ShareConsumer`s in the group: the `SimpleAssignor` distributes the partitions
-/// one-each, so the two members' delivered records are disjoint and together
-/// cover everything produced.
+/// Two `ShareConsumer`s in one group split a 2-partition topic.
+///
+/// The test produces records on both partitions. The `SimpleAssignor` gives one
+/// partition to each member. So the records delivered to the two members are
+/// disjoint, and together they cover every record produced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_consumers_share_topic() {
     let _permit = broker_test_permit().await;
@@ -614,8 +629,10 @@ async fn two_consumers_share_topic() {
     broker.shutdown().await;
 }
 
-/// `close()` leaves the group: after closing the sole member, a
-/// `ShareGroupDescribe` shows the group with zero members.
+/// `close()` leaves the group.
+///
+/// After the sole member closes, a `ShareGroupDescribe` shows the group with
+/// zero members.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_leaves_group() {
     let _permit = broker_test_permit().await;
@@ -679,11 +696,13 @@ async fn close_leaves_group() {
 
 // ───────────────────────── Slice F: client renew ─────────────────────────
 
-/// F1 (client renew): an explicit `ShareConsumer` polls a record, `renew()`s its
-/// lock before the (short) record-lock duration expires, then waits past the
-/// original lock. Because the renew extended the lock the record is NOT
-/// redelivered on the next poll — proving the client's renew round-trips and the
-/// broker honored it.
+/// F1 (client renew): a renewed lock stops redelivery.
+///
+/// An explicit `ShareConsumer` polls a record and calls `renew()` on its lock
+/// before the short record-lock duration expires. The consumer then waits past
+/// the original lock. The renew extended the lock, so the broker does NOT
+/// deliver the record again on the next poll. This proves that the client's
+/// renew round-trips and that the broker applied it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_renew_prevents_redelivery() {
     let _permit = broker_test_permit().await;
@@ -773,9 +792,11 @@ async fn explicit_renew_prevents_redelivery() {
     broker.shutdown().await;
 }
 
-/// F1 (client renew): `renew()` is rejected in Implicit ack mode (records are
-/// auto-accepted on the next poll/close, so renewing a lock is meaningless) —
-/// it returns `ConsumerError::IllegalState` without any wire round-trip.
+/// F1 (client renew): `renew()` is rejected in Implicit ack mode.
+///
+/// In Implicit mode the consumer auto-accepts records on the next poll or
+/// close, so a lock renew has no meaning. `renew()` returns
+/// `ConsumerError::IllegalState` and makes no wire round-trip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn renew_errors_in_implicit_mode() {
     let _permit = broker_test_permit().await;

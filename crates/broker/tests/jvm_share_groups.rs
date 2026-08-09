@@ -1,10 +1,10 @@
 //! JVM differential / interop test for KIP-932 share groups.
 //!
-//! Drives a REAL Apache Kafka 4.x `kafka-console-share-consumer.sh`
-//! (a `KafkaShareConsumer` under the hood) inside an `mirror.gcr.io/apache/kafka:4.1.0`
-//! container against an in-process Crabka broker running on the host. This
-//! exercises Crabka's share-group wire protocol end-to-end against the real
-//! JVM client:
+//! This test drives a REAL Apache Kafka 4.x
+//! `kafka-console-share-consumer.sh`, which runs a `KafkaShareConsumer`,
+//! inside a `mirror.gcr.io/apache/kafka:4.1.0` container. It runs against an
+//! in-process Crabka broker on the host. This exercises Crabka's share-group
+//! wire protocol end to end against the real JVM client:
 //!
 //! - `ApiVersions` negotiation (key 18; `share.version` advertised by Crabka),
 //! - `FindCoordinator(GROUP/SHARE)` (key 10),
@@ -13,15 +13,17 @@
 //! - `ShareAcknowledge` (key 79) implicit-ack on poll.
 //!
 //! The JVM share consumer joins a fresh share group with
-//! `group.share.auto.offset.reset=earliest` so the share-partition start
-//! offset begins at 0 and it reads every produced record. We assert its
-//! stdout carries each produced value.
+//! `group.share.auto.offset.reset=earliest`, so the share-partition start
+//! offset begins at 0 and the consumer reads every produced record. The test
+//! asserts that its stdout carries each produced value.
 //!
-//! Gated `#[ignore = "requires Docker"]`; run with `--ignored`.
+//! The test is gated with `#[ignore = "requires Docker"]`. Run it with
+//! `--ignored`.
 //!
-//! Networking mirrors `jvm_consumer_group_next_gen.rs` / `jvm_acceptance.rs`:
-//! the broker binds `0.0.0.0:9092` and advertises `host.docker.internal:9092`;
-//! the container reaches it via `--add-host=host.docker.internal:host-gateway`.
+//! The networking mirrors `jvm_consumer_group_next_gen.rs` and
+//! `jvm_acceptance.rs`. The broker binds `0.0.0.0:9092` and advertises
+//! `host.docker.internal:9092`. The container reaches it through
+//! `--add-host=host.docker.internal:host-gateway`.
 
 use std::{
     process::{Command, Stdio},
@@ -42,13 +44,14 @@ use crabka_protocol::{
     records::{Record, RecordBatch},
 };
 
-/// Port the broker binds on the host and that the container reaches via
-/// `host.docker.internal`.
+/// Port that the broker binds on the host, and that the container reaches
+/// through `host.docker.internal`.
 const HOST_PORT: u16 = 9092;
 const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
-/// Official Apache Kafka image. Ships KIP-932 share groups (GA in 4.x) plus
-/// the `kafka-console-share-consumer.sh` / `kafka-share-groups.sh` tools.
+/// Official Apache Kafka image. It ships KIP-932 share groups, which are GA in
+/// 4.x, and the `kafka-console-share-consumer.sh` and `kafka-share-groups.sh`
+/// tools.
 const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.1.0";
 const SHARE_CONSUMER: &str = "/opt/kafka/bin/kafka-console-share-consumer.sh";
 const SHARE_GROUPS: &str = "/opt/kafka/bin/kafka-share-groups.sh";
@@ -56,9 +59,10 @@ const SHARE_GROUPS: &str = "/opt/kafka/bin/kafka-share-groups.sh";
 const SHARE_STATE_TOPIC: &str = "__share_group_state";
 const SHARE_STATE_PARTITIONS: i32 = 50;
 
-/// Boot one broker bound to `0.0.0.0:9092`, advertising `host.docker.internal:
-/// 9092` so the Docker container's post-Metadata connect targets a hostname it
-/// can resolve. Mirrors `jvm_consumer_group_next_gen.rs::start_host_broker`.
+/// Boots one broker bound to `0.0.0.0:9092` that advertises
+/// `host.docker.internal:9092`. The Docker container's connect after Metadata
+/// then targets a hostname it can resolve. This mirrors
+/// `jvm_consumer_group_next_gen.rs::start_host_broker`.
 async fn start_host_broker() -> (BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -107,7 +111,8 @@ fn wire(tid: uuid::Uuid) -> WireUuid {
     WireUuid(*tid.as_bytes())
 }
 
-/// Create `topic` (1 partition) and wait until this broker leads partition 0.
+/// Creates `topic` with 1 partition and waits until this broker leads
+/// partition 0.
 async fn create_topic(broker: &BrokerHandle, client: &Client, topic: &str) -> uuid::Uuid {
     let resp = client
         .send(CreateTopicsRequest {
@@ -136,10 +141,10 @@ async fn create_topic(broker: &BrokerHandle, client: &Client, topic: &str) -> uu
         .expect("topic present in image")
 }
 
-/// Pre-create `__share_group_state` (as a KIP-932 client would, lazily via
-/// `FindCoordinator(SHARE)`) and wait until every state partition is local, so
-/// the share coordinator is write-ready before the JVM consumer drives
-/// `ShareFetch`/`ShareAcknowledge`.
+/// Creates `__share_group_state` in advance, as a KIP-932 client would create
+/// it lazily through `FindCoordinator(SHARE)`. It then waits until every state
+/// partition is local, so the share coordinator can accept writes before the
+/// JVM consumer drives `ShareFetch` and `ShareAcknowledge`.
 async fn bootstrap_share_state(broker: &BrokerHandle, client: &Client, key: &str) {
     let resp = client
         .send(FindCoordinatorRequest {
@@ -161,8 +166,8 @@ async fn bootstrap_share_state(broker: &BrokerHandle, client: &Client, key: &str
     }
 }
 
-/// Produce the supplied `values` as one batch into `(topic, 0)`, retrying while
-/// the freshly-created partition is still materializing its leader.
+/// Produces the supplied `values` as one batch into `(topic, 0)`. It retries
+/// while the new partition still materializes its leader.
 async fn produce(client: &Client, topic: &str, tid: uuid::Uuid, values: &[&str]) {
     for _ in 0..40 {
         let records: Vec<Record> = values
@@ -218,9 +223,9 @@ async fn produce(client: &Client, topic: &str, tid: uuid::Uuid, values: &[&str])
     panic!("partition never became produceable for {topic}");
 }
 
-/// Run a docker container against the host broker and return its output. The
-/// share consumer exits non-zero on idle-timeout even after consuming, so
-/// callers check stdout, not exit status.
+/// Runs a docker container against the host broker and returns its output. The
+/// share consumer exits with a non-zero status on an idle timeout, even after
+/// it consumed records, so callers check stdout and not the exit status.
 fn docker_run(args: &[&str]) -> std::process::Output {
     let out = Command::new("docker")
         .arg("run")
@@ -240,9 +245,10 @@ fn docker_run(args: &[&str]) -> std::process::Output {
     out
 }
 
-/// The headline differential test: a real JVM `KafkaShareConsumer` joins a
-/// fresh Crabka share group, reads every produced record, and implicit-acks on
-/// poll. We assert each produced value appears in its stdout.
+/// The main differential test. A real JVM `KafkaShareConsumer` joins a fresh
+/// Crabka share group, reads every produced record, and acknowledges
+/// implicitly on poll. The test asserts that each produced value appears in
+/// its stdout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_share_consumer_reads_crabka() {
@@ -286,11 +292,11 @@ async fn jvm_share_consumer_reads_crabka() {
     }
 }
 
-/// `kafka-share-groups.sh --describe --state` surfaces the share group after
-/// the JVM consumer has joined, proving Crabka serves the share-group admin
-/// path (`ShareGroupDescribe`, `api_key` 77) to the real JVM tooling: the tool
-/// resolves the share coordinator, sends `ShareGroupDescribe`, and renders the
-/// group's coordinator + state.
+/// `kafka-share-groups.sh --describe --state` reports the share group after
+/// the JVM consumer joined. That proves Crabka serves the share-group admin
+/// path (`ShareGroupDescribe`, `api_key` 77) to the real JVM tooling. The tool
+/// resolves the share coordinator, sends `ShareGroupDescribe`, and prints the
+/// group's coordinator and state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_share_groups_describe_state() {
@@ -340,11 +346,13 @@ async fn jvm_share_groups_describe_state() {
 }
 
 /// `kafka-share-groups.sh --list` drives `ListGroups` (`api_key` 16) with
-/// `types_filter = ["share"]`. After a real JVM `KafkaShareConsumer` has joined
-/// a share group on the Crabka broker, the share group id must appear in the
-/// tool's `--list` stdout. Before the `ListGroups` share pass landed, the JVM
-/// tool's `types_filter=["share"]` matched nothing and `--list` was EMPTY; this
-/// asserts the regression is closed against the real Apache Kafka 4.1.0 tool.
+/// `types_filter = ["share"]`. After a real JVM `KafkaShareConsumer` joins a
+/// share group on the Crabka broker, the share group id must appear in the
+/// tool's `--list` stdout.
+///
+/// Before the `ListGroups` share pass, the JVM tool's `types_filter=["share"]`
+/// matched nothing and `--list` was EMPTY. This test asserts that the
+/// regression is closed against the real Apache Kafka 4.1.0 tool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_share_groups_list() {

@@ -1,6 +1,6 @@
-//! `SlowBroker` rule — fires when a broker's per-broker CPU rate (cores)
+//! `SlowBroker` rule. It fires when a broker's per-broker CPU rate, in cores,
 //! exceeds `max(slow_broker_min_cores, slow_broker_multiplier × cluster
-//! median)`. Requires >=3 brokers reporting CPU for a stable median.
+//! median)`. It needs >=3 brokers reporting CPU for a stable median.
 
 use std::collections::HashMap;
 
@@ -121,9 +121,9 @@ mod tests {
         }
     }
 
-    /// `samples`: (broker, topic, partition, `v_t0`, `v_t1`) — CPU counter is
-    /// monotonic; we feed two samples 1s apart so `cpu_cores_rate` has
-    /// at least one delta to compute.
+    /// `samples`: (broker, topic, partition, `v_t0`, `v_t1`). The CPU counter
+    /// is monotonic. The test feeds two samples 1s apart, so `cpu_cores_rate`
+    /// has at least one delta to compute.
     fn store_with_cpu(samples: Vec<(i32, &str, i32, f64, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
             scrape_interval: secs(30),

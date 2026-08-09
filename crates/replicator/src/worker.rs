@@ -1,5 +1,5 @@
-//! Per-flow replication worker: drives one directional connect pipeline
-//! (`SourceConsumer` -> `TargetSink`) plus the heartbeat and checkpoint
+//! Per-flow replication worker. It drives one directional connect pipeline from
+//! `SourceConsumer` to `TargetSink`, plus the heartbeat and checkpoint
 //! background tasks, with build-retry resilience and clean shutdown.
 
 use std::{
@@ -32,24 +32,24 @@ use crate::{
 /// a concrete topic list and passes the per-flow cluster addresses, aliases,
 /// naming policy, residency policies, and security here.
 pub struct FlowWorkerParams {
-    /// Unique flow name (e.g. `"us-east__eu-west"`); seeds the consumer group id
-    /// and the checkpoint-store key.
+    /// Unique flow name, for example `"us-east__eu-west"`. It seeds the consumer
+    /// group id and the checkpoint-store key.
     pub flow_name: String,
     /// Bootstrap address of the source cluster.
     pub source_bootstrap: String,
     /// Bootstrap address of the target cluster.
     pub target_bootstrap: String,
-    /// Alias of the source cluster (stamped as provenance / used for MM2 names).
+    /// Alias of the source cluster, stamped as provenance and used for MM2 names.
     pub source_alias: String,
     /// Alias of the target cluster (written into heartbeat records).
     pub target_alias: String,
     /// How source topics are renamed on the target.
     pub naming: NamingPolicy,
-    /// Already-resolved source topic list (supervisor resolves selectors).
+    /// Already-resolved source topic list. The supervisor resolves the selectors.
     pub topics: Vec<String>,
     /// Source partition count by selected topic.
     pub source_partition_counts: BTreeMap<String, i32>,
-    /// Compliance zones of the target cluster (used for residency checks).
+    /// Compliance zones of the target cluster, used for residency checks.
     pub target_zones: Vec<String>,
     /// Residency policies to enforce on the sink.
     pub policies: Vec<PolicyConfig>,
@@ -91,11 +91,13 @@ fn next_backoff(current: Time, maximum: Time) -> Time {
 }
 
 impl FlowWorker {
-    /// Build and start the pipeline, retrying transient build failures with
-    /// bounded exponential backoff (a cluster may be briefly unreachable).
+    /// Build and start the pipeline. The method retries a transient build
+    /// failure with bounded exponential backoff, because a cluster can be
+    /// briefly unreachable.
     ///
-    /// Backoff starts at ~250ms and doubles (capped at ~8s) until the cumulative
-    /// elapsed time exceeds ~30s, after which the last build error is returned.
+    /// Backoff starts at about 250ms and doubles up to a cap of about 8s. Once
+    /// the cumulative elapsed time exceeds about 30s, the method returns the
+    /// last build error.
     ///
     /// # Errors
     ///

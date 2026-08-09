@@ -1,6 +1,7 @@
-//! D-6: `FOREIGN KEY` introspection end to end — constraints created with SQL
-//! and read back through `pg_catalog` and `information_schema` the way `psql`
-//! and ORM preambles read them.
+//! D-6: `FOREIGN KEY` introspection end to end.
+//!
+//! SQL creates the constraints, and `pg_catalog` and `information_schema` read
+//! them back the way `psql` and ORM preambles read them.
 //!
 //! Every expected value here is a capture from a live `PostgreSQL` 18.4, not a
 //! restatement of what crabka happens to produce.
@@ -60,9 +61,10 @@ fn some(values: &[&str]) -> Vec<Option<String>> {
     values.iter().map(|v| Some((*v).to_string())).collect()
 }
 
-/// One expected `pg_constraint` row, laid out the way the oracle's table is:
-/// the cells space-separated in column order, then `confdelsetcols` — the only
-/// nullable column in the projections below.
+/// One expected `pg_constraint` row, laid out the way the oracle's table is.
+///
+/// The cells are space-separated in column order, then `confdelsetcols`. That
+/// is the only nullable column in the projections below.
 fn fk_row(cells: &str, confdelsetcols: Option<&str>) -> Vec<Option<String>> {
     let mut row: Vec<Option<String>> = cells
         .split_whitespace()
@@ -101,9 +103,10 @@ async fn oracle_fixture() -> SqlEngine {
     engine
 }
 
-/// The oracle's `pg_constraint` capture for `cc`'s four foreign keys, column
-/// order `conname contype condeferrable condeferred convalidated confrelid
-/// confupdtype confdeltype confmatchtype conkey confkey`, then
+/// The oracle's `pg_constraint` capture for `cc`'s four foreign keys.
+///
+/// Column order is `conname contype condeferrable condeferred convalidated
+/// confrelid confupdtype confdeltype confmatchtype conkey confkey`, then
 /// `confdelsetcols`. Action codes are `a` `NO ACTION`, `r` `RESTRICT`, `c`
 /// `CASCADE`, `n` `SET NULL`, `d` `SET DEFAULT`; match codes `s` `SIMPLE` and
 /// `f` `FULL`.
@@ -115,9 +118,11 @@ const ORACLE_CONSTRAINT_ROWS: &[(&str, Option<&str>)] = &[
 ];
 
 /// The whole `contype = 'f'` projection the capture records, compared as
-/// complete rows. `confrelid` is joined back to `pg_class` because the oracle
-/// names the parent relation rather than an oid whose numeric value is crabka's
-/// own business.
+/// complete rows.
+///
+/// The query joins `confrelid` back to `pg_class`, because the oracle names the
+/// parent relation and not an oid whose numeric value is crabka's own
+/// business.
 #[tokio::test]
 async fn pg_constraint_foreign_key_rows_match_the_oracle() {
     let engine = oracle_fixture().await;
@@ -139,8 +144,10 @@ async fn pg_constraint_foreign_key_rows_match_the_oracle() {
 }
 
 /// `convalidated` is the one `pg_constraint` flag `ALTER TABLE … VALIDATE
-/// CONSTRAINT` moves, and `pg_get_constraintdef` drops its `NOT VALID` suffix
-/// with it. A client watching for unvalidated constraints reads exactly this.
+/// CONSTRAINT` moves.
+///
+/// `pg_get_constraintdef` drops its `NOT VALID` suffix with it. A client that
+/// watches for unvalidated constraints reads exactly this.
 #[tokio::test]
 async fn validating_a_not_valid_foreign_key_flips_convalidated_and_its_definition() {
     let engine = oracle_fixture().await;
@@ -167,9 +174,11 @@ async fn validating_a_not_valid_foreign_key_flips_convalidated_and_its_definitio
     );
 }
 
-/// `confdelsetcols` is NULL unless an `ON DELETE SET … (columns)` list was
-/// written — `PostgreSQL` does not fill it with a copy of `conkey` for the
-/// implicit all-columns case.
+/// `confdelsetcols` is NULL unless the statement wrote an
+/// `ON DELETE SET … (columns)` list.
+///
+/// `PostgreSQL` does not fill it with a copy of `conkey` for the implicit
+/// all-columns case.
 #[tokio::test]
 async fn confdelsetcols_records_only_an_explicit_set_column_list() {
     let engine = SqlEngine::new();
@@ -206,9 +215,11 @@ async fn confdelsetcols_records_only_an_explicit_set_column_list() {
 }
 
 /// A composite foreign key stores `conkey` and `confkey` in the order the FK
-/// clause wrote them, paired positionally — not sorted, and not permuted into
-/// the referenced index's order. `FOREIGN KEY (b, a) REFERENCES pperm(y, x)`
-/// over a `(x, y)` primary key is `{2,1}` on both sides.
+/// clause wrote them, paired positionally.
+///
+/// They are not sorted, and not permuted into the referenced index's order.
+/// `FOREIGN KEY (b, a) REFERENCES pperm(y, x)` over a `(x, y)` primary key is
+/// `{2,1}` on both sides.
 #[tokio::test]
 async fn composite_foreign_keys_keep_both_key_lists_in_clause_order() {
     let engine = SqlEngine::new();
@@ -343,9 +354,11 @@ async fn pg_get_constraintdef_matches_the_oracle_across_the_spelling_matrix() {
     assert2::assert!(listed == expected);
 }
 
-/// The referenced relation is emitted **unqualified** — `REFERENCES pp(id)`,
-/// never `public.pp(id)` — even though `pg_get_indexdef` on the very same
-/// relation does qualify. Neither should be "fixed" to match the other.
+/// The referenced relation is emitted **unqualified**: `REFERENCES pp(id)`,
+/// never `public.pp(id)`.
+///
+/// `pg_get_indexdef` on the very same relation does qualify. Neither should be
+/// "fixed" to match the other.
 #[tokio::test]
 async fn the_referenced_relation_is_emitted_unqualified() {
     let engine = oracle_fixture().await;
@@ -398,9 +411,11 @@ const RULE_CASES: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// `information_schema.referential_constraints` spells the SQL standard's
-/// names: `NONE` — not `SIMPLE` — for `MATCH SIMPLE`, `FULL` for `MATCH FULL`,
-/// and the referential actions written out rather than as `pg_constraint`'s
-/// one-character codes.
+/// names.
+///
+/// It reports `NONE`, not `SIMPLE`, for `MATCH SIMPLE`, and `FULL` for
+/// `MATCH FULL`. It writes the referential actions out instead of
+/// `pg_constraint`'s one-character codes.
 #[tokio::test]
 async fn referential_constraints_spell_the_match_option_and_the_rules() {
     let engine = SqlEngine::new();
@@ -437,8 +452,9 @@ async fn referential_constraints_spell_the_match_option_and_the_rules() {
     assert2::assert!(listed == expected);
 }
 
-/// `unique_constraint_name` names the constraint the foreign key targets — but
-/// a bare `CREATE UNIQUE INDEX` is not a constraint, so the whole
+/// `unique_constraint_name` names the constraint the foreign key targets.
+///
+/// But a bare `CREATE UNIQUE INDEX` is not a constraint, so the whole
 /// catalog/schema/name triple comes back NULL for a key that targets one.
 #[tokio::test]
 async fn unique_constraint_name_is_null_when_the_referent_is_a_bare_unique_index() {
@@ -532,8 +548,9 @@ async fn key_column_usage_numbers_the_referencing_columns() {
 }
 
 /// `position_in_unique_constraint` is the paired referenced column's position
-/// **within the referenced index**, not its position in the FK clause. A
-/// permuted composite makes the two disagree: `ordinal_position` 1 pairs with
+/// **within the referenced index**, not its position in the FK clause.
+///
+/// A permuted composite makes the two disagree: `ordinal_position` 1 pairs with
 /// index position 2 and vice versa.
 #[tokio::test]
 async fn position_in_unique_constraint_follows_the_referenced_index_order() {
@@ -705,9 +722,11 @@ async fn psql_backslash_d_renders_the_childs_foreign_key_block() {
     );
 }
 
-/// The parent half of `\d`. `psql` builds its `Referenced by:` section by
-/// filtering `pg_constraint` on `confrelid`, so a wrong `confrelid` makes the
-/// parent's `\d` silently empty rather than visibly wrong.
+/// The parent half of `\d`.
+///
+/// `psql` builds its `Referenced by:` section with a filter on `confrelid` in
+/// `pg_constraint`, so a wrong `confrelid` makes the parent's `\d` silently
+/// empty and not visibly wrong.
 #[tokio::test]
 async fn psql_backslash_d_finds_a_parents_children_through_confrelid() {
     let engine = SqlEngine::new();

@@ -208,7 +208,8 @@ async fn set_subject_compat(http: &reqwest::Client, base: &str, subject: &str, l
 }
 
 /// POST /subjects/{subject}/versions to register writer as v1 with JSON schema type.
-/// Returns `Ok(())` on success, `Err(error_text)` if cp rejects it (caller logs + skips).
+/// Returns `Ok(())` on success, and `Err(error_text)` if cp rejects it. The
+/// caller logs the error and skips the case.
 async fn try_register_writer(
     http: &reqwest::Client,
     base: &str,
@@ -239,8 +240,9 @@ async fn try_register_writer(
     }
 }
 
-/// POST /compatibility/subjects/{subject}/versions/latest — returns `Ok(is_compatible)` or
-/// `Err(error_text)` if cp returns a non-success status (caller logs + skips).
+/// POST /compatibility/subjects/{subject}/versions/latest. It returns
+/// `Ok(is_compatible)`, or `Err(error_text)` if cp returns a non-success
+/// status. The caller logs the error and skips the case.
 async fn try_check_compat(
     http: &reqwest::Client,
     base: &str,

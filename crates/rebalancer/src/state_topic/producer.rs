@@ -1,7 +1,7 @@
-//! Single-key produce path for the state topic. Built directly on
-//! `crabka_client_core::Client` to match the rebalancer's
-//! `ingest::admin_client` pattern; we don't pull in the high-level
-//! `crabka-client-producer` for a one-key-per-write workload.
+//! Single-key produce path for the state topic. It is built directly on
+//! `crabka_client_core::Client`, to match the rebalancer's
+//! `ingest::admin_client` pattern. A one-key-per-write workload does not need
+//! the high-level `crabka-client-producer`.
 
 use bytes::Bytes;
 use crabka_client_core::Client;
@@ -23,10 +23,11 @@ use crate::{
     state_topic::error::{StateTopicError, is_transient_topic_partition_code},
 };
 
-/// Produce a single record to `(topic, partition=0)`. `value=None` is
-/// a tombstone (null value), matching Kafka compaction semantics.
-/// Uses `acks=all`; timeout and transient-error retry policy come from the
-/// validated runtime policy.
+/// Produce a single record to `(topic, partition=0)`. `value=None` is a
+/// tombstone with a null value, which matches Kafka compaction semantics.
+///
+/// This uses `acks=all`. The timeout and the transient-error retry policy come
+/// from the validated runtime policy.
 pub(crate) async fn produce_state(
     client: &Client,
     topic: &str,
@@ -82,10 +83,10 @@ pub(crate) async fn produce_state(
     })
 }
 
-/// Resolve a topic's UUID via Metadata. Returns `Ok(None)` when the
-/// metadata response has no entry for the topic (the topic exists in
-/// the controller's metadata image but hasn't propagated to the broker
-/// we're talking to — treat as transient and retry).
+/// Resolve a topic's UUID through Metadata. Returns `Ok(None)` when the
+/// metadata response has no entry for the topic. The topic then exists in the
+/// controller's metadata image but has not propagated to the broker on the
+/// other end of this connection. Treat that case as transient and retry.
 async fn resolve_topic_id(client: &Client, topic: &str) -> Result<Option<Uuid>, StateTopicError> {
     let resp = client.send(metadata_request(topic)).await?;
     Ok(topic_id_from_metadata(&resp, topic))
@@ -197,7 +198,8 @@ mod tests {
 
     use super::*;
 
-    /// Connect/request timeout for the deliberately-unreachable test client.
+    /// Connect and request timeout for the deliberately unreachable test
+    /// client.
     const CLIENT_TIMEOUT: Time = millis(50);
 
     fn response_with_error(code: i16) -> ProduceResponse {

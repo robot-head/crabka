@@ -1,14 +1,15 @@
 //! Exhaustive stateright enumeration of the idempotent-producer dedup core
-//! (`check_pure`). One producer-id per partition; requests are serialized by the
-//! broker, so this enumerates every bounded submit-sequence and asserts — via
-//! per-transition checks — that `check_pure`'s classification keeps the
-//! accepted-append log a gap-free, duplicate-free, monotonic prefix per producer
-//! epoch, with epoch fencing. See the design spec
+//! (`check_pure`). There is one producer-id per partition, and the broker
+//! serializes requests. So this model enumerates every bounded submit-sequence
+//! and asserts, with per-transition checks, that `check_pure`'s classification
+//! keeps the accepted-append log a gap-free, duplicate-free, monotonic prefix
+//! per producer epoch, with epoch fencing. See the design spec
 //! `docs/superpowers/specs/2026-06-14-crabka-data-plane-safety-models-design.md`.
 //!
-//! Offset *values* are irrelevant to the safety properties (the `Duplicate` echo
-//! is unused here), so they are NOT in the fingerprinted state — including them
-//! explodes the space with a monotonic counter that adds no behavior.
+//! Offset *values* are irrelevant to the safety properties, because this model
+//! does not use the `Duplicate` echo. So the fingerprinted state does NOT hold
+//! them. Adding them explodes the space with a monotonic counter that adds no
+//! behavior.
 
 use std::time::Duration;
 

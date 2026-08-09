@@ -1,5 +1,6 @@
-//! Success-response helper: serialises with `serde_json` and sets the Confluent
-//! vendor content-type (axum's `Json` would force `application/json`).
+//! Success-response helper. It serialises with `serde_json` and sets the
+//! Confluent vendor content-type. axum's `Json` would force
+//! `application/json`.
 
 use axum::{
     http::StatusCode,
@@ -17,8 +18,9 @@ pub fn ok_json<T: Serialize>(value: &T) -> Response {
     }
 }
 
-/// Raw 200 with the vendor content-type (for the `/schema` raw-text endpoint,
-/// which returns the schema string verbatim — still vendor content-type per Confluent).
+/// Raw 200 with the vendor content-type. This serves the `/schema` raw-text
+/// endpoint, which returns the schema string verbatim. Confluent still uses the
+/// vendor content-type there.
 #[must_use]
 pub fn ok_raw(body: String) -> Response {
     (StatusCode::OK, [("content-type", CONTENT_TYPE)], body).into_response()

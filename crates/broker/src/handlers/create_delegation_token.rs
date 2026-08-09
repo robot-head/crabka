@@ -1,22 +1,24 @@
 //! KIP-48: `CreateDelegationToken` (`api_key` 38).
 //!
-//! Per spec §1.2 (including act-as): caller must be
-//! SASL-authenticated and NOT itself authenticated via a delegation
-//! token (KIP-48 forbids token-creating-token chains). Owner resolution:
+//! Per spec §1.2, which includes act-as, the caller must be
+//! SASL-authenticated, and the caller must NOT itself be authenticated with a
+//! delegation token. KIP-48 forbids chains where a token creates a token.
 //!
-//! - If both `owner_principal_type` and `owner_principal_name` are
-//!   empty/absent: owner = caller (self-mint).
-//! - If both are present + non-empty: caller must be a configured
-//!   super-user (per `broker.config.super_users`), and the owner becomes
-//!   the wire-specified `KafkaPrincipal`. The type is restricted
-//!   to `"User"` (mTLS-DN owners are not supported). Non-super-users get
+//! Owner resolution works as follows:
+//!
+//! - When both `owner_principal_type` and `owner_principal_name` are empty or
+//!   absent, the owner is the caller. This is a self-mint.
+//! - When both are present and non-empty, the caller must be a configured
+//!   super-user, per `broker.config.super_users`, and the owner becomes the
+//!   `KafkaPrincipal` from the wire. The type is limited to `"User"`, because
+//!   mTLS-DN owners are not supported. A caller that is not a super-user gets
 //!   `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65).
-//! - If exactly one is set: `INVALID_REQUEST` (42) — partial act-as is
-//!   never valid.
+//! - When exactly one is set, the broker returns `INVALID_REQUEST` (42). A
+//!   partial act-as is never valid.
 //!
-//! The HMAC-SHA-256 of `(secret_key, token_id)` becomes the token's
-//! "password equivalent" — clients re-authenticate with the hex
-//! `token_id` as the SCRAM username and the HMAC bytes as the password.
+//! The HMAC-SHA-256 of `(secret_key, token_id)` becomes the token's password
+//! equivalent. Clients re-authenticate with the hex `token_id` as the SCRAM
+//! username and the HMAC bytes as the password.
 
 use std::{collections::HashSet, hash::BuildHasher};
 
@@ -29,22 +31,23 @@ use crabka_security::{KafkaPrincipal, SecretBytes};
 
 use crate::{network::auth::ConnectionAuth, time_util::now_ms};
 
-/// A relative span of milliseconds (token lifetime / renew period), as
-/// distinct from an absolute epoch timestamp in milliseconds.
+/// A relative span of milliseconds, such as a token lifetime or a renew
+/// period. It is not an absolute epoch timestamp in milliseconds.
 pub(crate) type DurationMs = i64;
 
 /// Wire sentinel: `CreateDelegationToken.max_lifetime_ms == -1` defers to the
 /// broker's configured lifetime ceiling (`delegation.token.max.lifetime.ms`).
 const USE_BROKER_LIFETIME_CEILING: i64 = -1;
 
-/// The only `KafkaPrincipal` type supported as an act-as token owner
-/// (Kafka's `KafkaPrincipal.USER_TYPE`; mTLS-DN owners are not supported).
+/// The only `KafkaPrincipal` type that the broker supports as an act-as token
+/// owner. It is Kafka's `KafkaPrincipal.USER_TYPE`. mTLS-DN owners are not
+/// supported.
 const USER_PRINCIPAL_TYPE: &str = "User";
 
-/// Wire convention: the JVM admin client serialises "not act-as" by
-/// either omitting the compact-nullable string (`None`) or sending an
-/// empty string. Treat both as "absent" so the act-as branch only fires
-/// when the caller actually supplied a principal.
+/// Wire convention: the JVM admin client serializes "not act-as" in two ways.
+/// It omits the compact-nullable string, which gives `None`, or it sends an
+/// empty string. Treat both as absent, so that the act-as branch runs only
+/// when the caller supplied a principal.
 fn is_empty_owner_field(f: Option<&str>) -> bool {
     f.is_none_or(str::is_empty)
 }
@@ -219,18 +222,19 @@ mod tests {
 
     use super::*;
 
-    /// Helper: produce an empty super-users set for tests that don't
+    /// Helper that produces an empty super-users set, for tests that do not
     /// exercise the act-as path.
     fn empty_super_users() -> HashSet<String> {
         HashSet::new()
     }
 
-    /// Helper: produce a super-users set containing the given names.
+    /// Helper that produces a super-users set with the given names.
     fn super_users_with(names: &[&str]) -> HashSet<String> {
         names.iter().map(|s| (*s).to_string()).collect()
     }
 
-    /// Spin up a single-voter `Controller` for tests, wait for leader.
+    /// Starts a single-voter `Controller` for tests and waits for the
+    /// leader.
     async fn test_controller(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
         let cfg = crabka_raft::ControllerConfig {
             election_timeout: crabka_units::millis(200),
@@ -265,8 +269,9 @@ mod tests {
         authed_with_token(name, false)
     }
 
-    /// KIP-48 24h default — matches Kafka's `delegation.token.expiry.time.ms`.
-    /// Tests that don't care about renew-period clamping pass this value.
+    /// The KIP-48 24 h default. It matches Kafka's
+    /// `delegation.token.expiry.time.ms`. Tests that do not exercise
+    /// renew-period clamping pass this value.
     const RENEW_24H_MS: i64 = 24 * 60 * 60 * 1_000;
 
     #[tokio::test]
@@ -416,10 +421,11 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// KIP-48 separates `expiry_timestamp_ms` (initially `issue + min(default_renew,
-    /// chosen_lifetime)`) from `max_timestamp_ms` (`issue + chosen_lifetime`),
-    /// so `Renew` can extend the former up to the latter rather than round-tripping
-    /// exactly. This test pins both branches of the `min`.
+    /// KIP-48 separates `expiry_timestamp_ms`, which starts at
+    /// `issue + min(default_renew, chosen_lifetime)`, from `max_timestamp_ms`,
+    /// which is `issue + chosen_lifetime`. `Renew` can therefore extend the
+    /// first value up to the second, instead of an exact round trip. This test
+    /// pins both branches of the `min`.
     #[tokio::test]
     async fn initial_expiry_is_default_renew_period_clamped_by_max_lifetime() {
         let dir = TempDir::new().unwrap();
@@ -500,11 +506,11 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Spec §1.2/§1.4: a super-user caller may mint a token owned by a
-    /// different principal by setting `owner_principal_type/name`. The
-    /// response advertises the owner *and* records the original caller
-    /// in the `token_requester_*` fields so the JVM admin CLI can show
-    /// "minted by X on behalf of Y".
+    /// Spec §1.2 and §1.4: a super-user caller can create a token owned by a
+    /// different principal, by setting `owner_principal_type` and
+    /// `owner_principal_name`. The response names the owner *and* records the
+    /// original caller in the `token_requester_*` fields, so that the JVM
+    /// admin CLI can show "minted by X on behalf of Y".
     #[tokio::test]
     async fn act_as_super_user_sets_specified_owner() {
         let dir = TempDir::new().unwrap();
@@ -565,10 +571,10 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Spec §1.2: act-as is privileged. A caller who is NOT in
-    /// `super_users` attempting act-as gets `DELEGATION_TOKEN_AUTHORIZATION_FAILED`
-    /// (65) — the broker explicitly distinguishes "you are not allowed
-    /// to do this" (65) from "your request is malformed" (42).
+    /// Spec §1.2: act-as is privileged. A caller that is NOT in `super_users`
+    /// and that tries act-as gets `DELEGATION_TOKEN_AUTHORIZATION_FAILED`
+    /// (65). The broker separates "you are not allowed to do this" (65) from
+    /// "your request is malformed" (42).
     #[tokio::test]
     async fn act_as_non_super_user_rejected_with_authorization_failed() {
         let dir = TempDir::new().unwrap();
@@ -595,10 +601,10 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Spec §1.2: act-as requires BOTH `owner_principal_type` and
-    /// `owner_principal_name` to be set; partial state is never valid
-    /// even for a super-user. Returns `INVALID_REQUEST` (42) — a
-    /// malformed request, not an authorization failure.
+    /// Spec §1.2: act-as needs BOTH `owner_principal_type` and
+    /// `owner_principal_name`. A partial state is never valid, even for a
+    /// super-user. The broker returns `INVALID_REQUEST` (42), because the
+    /// request is malformed and not unauthorized.
     #[tokio::test]
     async fn act_as_with_only_one_field_set_returns_invalid_request() {
         let dir = TempDir::new().unwrap();
@@ -664,10 +670,10 @@ mod tests {
         }
     }
 
-    /// Spec §1.2: only `User` is supported as the act-as owner
-    /// type (mTLS-DN owners are not supported). Any other type from a super-user
-    /// is `INVALID_REQUEST` (42) — the request is syntactically wrong,
-    /// not unauthorized.
+    /// Spec §1.2: only `User` is valid as the act-as owner type, because
+    /// mTLS-DN owners are not supported. Any other type from a super-user
+    /// gives `INVALID_REQUEST` (42), because the request is syntactically
+    /// wrong and not unauthorized.
     #[tokio::test]
     async fn act_as_with_non_user_principal_type_returns_invalid_request() {
         let dir = TempDir::new().unwrap();

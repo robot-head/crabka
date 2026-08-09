@@ -1,7 +1,10 @@
-//! TLS / mTLS: the gateway serves the listener over rustls; mTLS `Required`
-//! rejects un-certed clients; the mTLS peer principal is extracted; and two
-//! TLS gateways forward over mutually-authenticated https. Certs are generated
-//! at runtime via `crabka_security::ca` (no fixtures). Pure 127.0.0.1 — no Docker.
+//! TLS and mTLS coverage.
+//!
+//! The gateway serves the listener over rustls. mTLS `Required` rejects a
+//! client with no cert. The gateway extracts the mTLS peer principal. Two TLS
+//! gateways forward over mutually-authenticated https. `crabka_security::ca`
+//! generates the certs at runtime, so there are no fixtures. Everything runs on
+//! 127.0.0.1, so these tests need no Docker.
 
 use std::{
     collections::BTreeMap,
@@ -64,8 +67,9 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
-/// Generate CA + a gateway server/client cert (SAN 127.0.0.1) + a standalone
-/// client cert, all chaining to one CA. Returns paths in `dir`.
+/// Generate a CA, a gateway server and client cert with SAN 127.0.0.1, and a
+/// standalone client cert. All of them chain to the one CA. Returns paths in
+/// `dir`.
 struct Certs {
     ca: PathBuf,
     gw_cert: PathBuf,
@@ -93,9 +97,10 @@ fn gen_certs(dir: &std::path::Path) -> Certs {
     }
 }
 
-/// Build the `TlsSettings` for a gateway: the shared gateway cert/key + the CA
-/// as both trust-roots (peer server cert verification) and client-CA (incoming
-/// client cert verification). `client_auth` selects Disabled/Optional/Required.
+/// Build the `TlsSettings` for a gateway: the shared gateway cert and key, plus
+/// the CA as both the trust-roots for peer server cert verification and the
+/// client-CA for incoming client cert verification. `client_auth` selects
+/// Disabled, Optional, or Required.
 fn tls_settings(certs: &Certs, client_auth: ClientAuthMode) -> TlsSettings {
     TlsSettings {
         cert_chain_path: certs.gw_cert.clone(),
@@ -115,10 +120,11 @@ struct Gw {
     token: CancellationToken,
 }
 
-/// Bind a listener first (to learn the advertised addr), serve it over TLS via
-/// `serve::build_and_watch_tls` + `serve::serve`, build the forwarder over mTLS
-/// (`Forwarder::with_tls`), and start ownership + membership. Models
-/// `tests/forwarding.rs::spawn_gateway` but with the TLS transport.
+/// Bind a listener first, to learn the advertised addr. Then serve it over TLS
+/// with `serve::build_and_watch_tls` and `serve::serve`, build the forwarder
+/// over mTLS with `Forwarder::with_tls`, and start ownership and membership.
+/// This follows `tests/forwarding.rs::spawn_gateway`, but over the TLS
+/// transport.
 async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings) -> Gw {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -252,10 +258,11 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
     }
 }
 
-/// reqwest https client that trusts the test CA. When `identity` is `Some`,
-/// presents that client cert (mTLS); otherwise anonymous. The gateway's server
-/// cert chains to this CA, so server-cert verification passes regardless of
-/// whatever built-in roots the resolved reqwest TLS backend also bundles.
+/// A reqwest https client that trusts the test CA. When `identity` is `Some`,
+/// the client presents that client cert for mTLS. Otherwise it is anonymous.
+/// The gateway's server cert chains to this CA, so server-cert verification
+/// passes whatever built-in roots the resolved reqwest TLS backend also
+/// bundles.
 fn https_client(ca_pem: &str, identity: Option<(&str, &str)>) -> reqwest::Client {
     let ca = reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap();
     let mut builder = reqwest::Client::builder().add_root_certificate(ca);
@@ -296,9 +303,10 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
     n
 }
 
-/// (1) Server-side TLS: a reqwest client trusting only the test CA completes the
-/// rustls handshake (gateway cert SAN = 127.0.0.1) and gets `/healthz` ⇒ 200.
-/// `client_auth = Optional` ⇒ a client with no identity is still accepted.
+/// (1) Server-side TLS. A reqwest client that trusts only the test CA completes
+/// the rustls handshake, because the gateway cert has SAN = 127.0.0.1, and it
+/// gets `/healthz` ⇒ 200. `client_auth = Optional` ⇒ the server still accepts a
+/// client with no identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn server_tls_handshake_and_health() {
     install_provider();
@@ -359,7 +367,7 @@ async fn server_tls_handshake_and_health() {
     broker.shutdown().await;
 }
 
-/// (2) mTLS `Required` rejects a client with no certificate: the rustls
+/// (2) mTLS `Required` rejects a client with no certificate. The rustls
 /// handshake fails, so reqwest's `.send()` returns an error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mtls_required_rejects_no_client_cert() {
@@ -418,12 +426,13 @@ async fn mtls_required_rejects_no_client_cert() {
     broker.shutdown().await;
 }
 
-/// (3) End-to-end mTLS forwarding. Two gateways A and B, each over TLS with
-/// `client_auth = Required` and a `Forwarder::with_tls` identity. A key owned by
-/// B, submitted through A, is forwarded to B over mutually-authenticated https,
-/// produced once, then deduplicated on resend — proving A's forward identity,
-/// B's server mTLS verification, and B's `/internal/forward` principal gate all
-/// line up.
+/// (3) End-to-end mTLS forwarding.
+///
+/// Two gateways A and B each run over TLS with `client_auth = Required` and a
+/// `Forwarder::with_tls` identity. A key that B owns, submitted through A, goes
+/// to B over mutually-authenticated https, is produced once, and is
+/// deduplicated on a resend. That proves A's forward identity, B's server mTLS
+/// verification, and B's `/internal/forward` principal gate all line up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_forward_between_two_gateways() {
     install_provider();

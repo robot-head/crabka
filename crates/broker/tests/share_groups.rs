@@ -1,11 +1,12 @@
-//! End-to-end integration tests for KIP-932 share-group membership,
-//! driven against an in-process Crabka broker via `crabka-client-core`.
+//! End-to-end integration tests for KIP-932 share-group membership, driven
+//! against an in-process Crabka broker through `crabka-client-core`.
 //!
-//! The typed client works because `ApiVersions` advertises `api_keys` 76/77;
-//! `ShareGroupHeartbeatRequest` / `ShareGroupDescribeRequest` impl
+//! The typed client works because `ApiVersions` advertises `api_keys` 76 and
+//! 77. `ShareGroupHeartbeatRequest` and `ShareGroupDescribeRequest` implement
 //! `ProtocolRequest`, so `client.send(req)` returns the typed response and
-//! exercises the real wire path (version negotiation through `ApiVersions` —
-//! both share RPCs are MIN=MAX=1, so the client negotiates v1).
+//! exercises the real wire path. Version negotiation goes through
+//! `ApiVersions`, and both share RPCs have MIN=MAX=1, so the client negotiates
+//! v1.
 
 use std::sync::Arc;
 
@@ -98,8 +99,8 @@ async fn describe(
         .unwrap()
 }
 
-/// Single member joins, gets a minted member id, advances to epoch 1, and is
-/// assigned every partition of the subscribed topic.
+/// A single member joins, gets a minted member id, advances to epoch 1, and
+/// receives every partition of the subscribed topic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn single_member_join_assignment() {
     let (_b, bootstrap, _d) = boot().await;
@@ -123,7 +124,7 @@ async fn single_member_join_assignment() {
     );
 }
 
-/// Two members join the same group; after both converge, `ShareGroupDescribe`
+/// Two members join the same group. After both converge, `ShareGroupDescribe`
 /// reports one group with both members and a non-trivial group epoch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_members_then_describe() {
@@ -167,8 +168,9 @@ async fn two_members_then_describe() {
     );
 }
 
-/// A member leaves via `member_epoch == -1`; the leave succeeds, the group is
-/// retained but reported with zero members (state "Empty").
+/// A member leaves by sending `member_epoch == -1`. The leave succeeds, and
+/// the broker keeps the group but reports it with zero members, in state
+/// "Empty".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn member_leave_epoch_minus_one() {
     let (_b, bootstrap, _d) = boot().await;
@@ -204,9 +206,9 @@ async fn member_leave_epoch_minus_one() {
     );
 }
 
-/// Share-group state persists to `__consumer_offsets`; after a broker restart
-/// (Rejoin on the same data dir) the group + member are reconstructed via
-/// replay and visible through `ShareGroupDescribe`.
+/// Share-group state persists to `__consumer_offsets`. After a broker restart,
+/// a Rejoin on the same data dir, replay reconstructs the group and the member,
+/// and `ShareGroupDescribe` reports them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn state_survives_restart() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -259,7 +261,7 @@ async fn state_survives_restart() {
     }
 }
 
-/// Resolve a created topic's id from this broker's metadata image.
+/// Resolves the id of a created topic from this broker's metadata image.
 fn topic_id(broker: &crabka_broker::BrokerHandle, topic: &str) -> uuid::Uuid {
     let image = broker.controller_image_for_test();
     image
@@ -269,10 +271,11 @@ fn topic_id(broker: &crabka_broker::BrokerHandle, topic: &str) -> uuid::Uuid {
         .expect("topic present in image")
 }
 
-/// KIP-932 group-coordinator lifecycle: a share group joining a topic with `P`
-/// partitions drives the coordinator to Initialize per-partition share state in
-/// the `__share_group_state` persister (`start_offset` 0, state present — not the
-/// missing-key sentinel). The heartbeat hook runs after reconcile.
+/// KIP-932 group-coordinator lifecycle. When a share group joins a topic with
+/// `P` partitions, the coordinator initializes the per-partition share state in
+/// the `__share_group_state` persister. Each entry has `start_offset` 0 and a
+/// present state, not the missing-key sentinel. The heartbeat hook runs after
+/// the reconcile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lifecycle_initializes_share_state() {
     let (broker, bootstrap, _d) = boot().await;
@@ -330,10 +333,11 @@ async fn lifecycle_initializes_share_state() {
     }
 }
 
-/// After a restart, the group's `ShareGroupStatePartitionMetadata` is recovered
-/// so re-joining does not re-initialize: a stale (non-zero) `start_offset` written
-/// directly to the persister survives because the coordinator skips already-
-/// initialized partitions on the post-restart heartbeat.
+/// After a restart, the broker recovers the group's
+/// `ShareGroupStatePartitionMetadata`, so a rejoin does not initialize the
+/// state again. A stale, non-zero `start_offset` written straight to the
+/// persister survives, because the coordinator skips already-initialized
+/// partitions on the post-restart heartbeat.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lifecycle_metadata_survives_restart() {
     let dir = tempfile::TempDir::new().unwrap();

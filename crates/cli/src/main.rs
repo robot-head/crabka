@@ -15,7 +15,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Format a fresh log directory, optionally seeding SCRAM credentials.
+    /// Format a fresh log directory, with optional seed SCRAM credentials.
     Format(format::FormatArgs),
     /// Manage Chapter Gres tenants.
     Gres(gres::GresArgs),

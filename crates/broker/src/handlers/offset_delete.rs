@@ -1,22 +1,24 @@
-//! `OffsetDelete` (`api_key=47`, KIP-496). Deletes committed offsets for
-//! specific (topic, partition) tuples within a consumer group. Used by
-//! `kafka-consumer-groups --delete-offsets`.
+//! `OffsetDelete` (`api_key=47`, KIP-496).
 //!
-//! Authorization (KIP-496):
-//!   - whole-response `Delete` on `Group(group_id)`
-//!   - per-topic `Read` on `Topic(name)` → per-partition
-//!     `TOPIC_AUTHORIZATION_FAILED` on Deny
+//! The handler deletes committed offsets for specific (topic, partition)
+//! tuples inside a consumer group. `kafka-consumer-groups --delete-offsets`
+//! calls it.
+//!
+//! Authorization, per KIP-496:
+//!   - `Delete` on `Group(group_id)` for the whole response
+//!   - `Read` on `Topic(name)` for each topic. On Deny, every partition of
+//!     that topic gets `TOPIC_AUTHORIZATION_FAILED`.
 //!
 //! Semantics:
-//!   - missing group → whole-response `GROUP_ID_NOT_FOUND`
-//!   - missing topic / partition out of range → per-partition
-//!     `UNKNOWN_TOPIC_OR_PARTITION`
-//!   - group has live members AND any member's consumer-protocol
-//!     subscription contains the topic → per-partition
-//!     `GROUP_SUBSCRIBED_TO_TOPIC` (86)
-//!   - otherwise: append a tombstone (key = `OffsetCommitKey`, value =
-//!     null) to `__consumer_offsets-0`, remove the entry from
-//!     `Group.committed_offsets`, per-partition `NONE`.
+//!   - a missing group gives `GROUP_ID_NOT_FOUND` for the whole response
+//!   - a missing topic, or a partition out of range, gives
+//!     `UNKNOWN_TOPIC_OR_PARTITION` for that partition
+//!   - a group with live members, where the consumer-protocol subscription of
+//!     any member holds the topic, gives `GROUP_SUBSCRIBED_TO_TOPIC` (86) for
+//!     each partition
+//!   - otherwise the handler appends a tombstone to `__consumer_offsets-0`,
+//!     with key = `OffsetCommitKey` and value = null, removes the entry from
+//!     `Group.committed_offsets`, and returns `NONE` for that partition.
 
 use std::collections::HashSet;
 
@@ -210,20 +212,21 @@ fn whole_error(req: &OffsetDeleteRequest, code: i16) -> OffsetDeleteResponse {
     }
 }
 
-/// Pure helper: build the per-topic / per-partition response rows for a
-/// decoded `OffsetDeleteRequest`, plus the tombstone records that need to
-/// be appended to `__consumer_offsets-0` and the `(topic, partition)`
-/// keys to remove from in-memory `Group.committed_offsets` once the
-/// append succeeds.
+/// Pure helper that builds the per-topic and per-partition response rows for a
+/// decoded `OffsetDeleteRequest`.
 ///
-/// Branching matches KIP-496:
-///   - `topic_decisions[name] == Deny` → per-partition
-///     `TOPIC_AUTHORIZATION_FAILED` for every partition in the topic.
-///   - `subscribed_topics.contains(name)` →
-///     `GROUP_SUBSCRIBED_TO_TOPIC` for every partition in the topic.
-///   - `topic_partition_counts[name]` absent or `partition_index` out of
-///     range → `UNKNOWN_TOPIC_OR_PARTITION`.
-///   - otherwise → tombstone queued, `NONE` returned.
+/// It also returns the tombstone records to append to `__consumer_offsets-0`,
+/// and the `(topic, partition)` keys to remove from the in-memory
+/// `Group.committed_offsets` once the append succeeds.
+///
+/// The branches match KIP-496:
+///   - `topic_decisions[name] == Deny` gives `TOPIC_AUTHORIZATION_FAILED` for
+///     every partition in the topic.
+///   - `subscribed_topics.contains(name)` gives `GROUP_SUBSCRIBED_TO_TOPIC`
+///     for every partition in the topic.
+///   - an absent `topic_partition_counts[name]`, or a `partition_index` out of
+///     range, gives `UNKNOWN_TOPIC_OR_PARTITION`.
+///   - otherwise the helper queues a tombstone and returns `NONE`.
 fn build_response_rows(
     group_id: &str,
     topics: &[crabka_protocol::owned::offset_delete_request::OffsetDeleteRequestTopic],
@@ -344,12 +347,16 @@ async fn append_tombstones(broker: &Broker, batch: RecordBatch) -> Result<(), i1
     }
 }
 
-/// Decode the `topics` list from a member's `protocol_metadata` blob.
-/// The blob carries a leading `i16` version (the "consumer" protocol's
-/// version negotiation, separate from the `ConsumerProtocolSubscription`
-/// schema's per-field version gates) followed by the schema body. Returns
-/// an empty list on any decode error — best-effort, since a malformed
-/// subscription would otherwise silently let stale offsets be deleted.
+/// Decodes the `topics` list from a member's `protocol_metadata` blob.
+///
+/// The blob carries a leading `i16` version, then the schema body. That
+/// version belongs to the "consumer" protocol's version negotiation, and is
+/// separate from the per-field version gates of the
+/// `ConsumerProtocolSubscription` schema.
+///
+/// The function returns an empty list on any decode error. This is a
+/// best-effort decode, because a malformed subscription would otherwise let
+/// the broker silently delete stale offsets.
 fn decode_subscribed_topics(metadata: &[u8]) -> Vec<String> {
     use bytes::Buf;
     if metadata.len() < 2 {

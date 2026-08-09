@@ -1,5 +1,7 @@
-//! `ConsumerGroupDescribe` (`api_key` 69) — returns one `DescribedGroup` per
-//! requested `group_id`. Uses the actor's `Describe` view to render.
+//! `ConsumerGroupDescribe` (`api_key` 69).
+//!
+//! This handler returns one `DescribedGroup` per requested `group_id`. It
+//! renders each group from the actor's `Describe` view.
 
 use bytes::Bytes;
 use crabka_protocol::{

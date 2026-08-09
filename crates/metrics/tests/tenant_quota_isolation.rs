@@ -1,10 +1,11 @@
 //! Slice 8 hardening: per-tenant ingestion-quota isolation in the distributor.
 //!
-//! Boots the distributor HTTP router on a real ephemeral `127.0.0.1:0` socket
-//! with an in-memory `WalSink` and per-tenant limit overrides. `org-a` gets a
-//! TIGHT ingestion-rate quota; `org-b` gets a generous one. We push `remote_write`
-//! to `org-a` until it returns HTTP 429, then push the SAME load to `org-b` and
-//! assert it still succeeds — proving the token bucket is per-tenant, not global.
+//! This test boots the distributor HTTP router on a real ephemeral
+//! `127.0.0.1:0` socket, with an in-memory `WalSink` and per-tenant limit
+//! overrides. `org-a` gets a TIGHT ingestion-rate quota, and `org-b` gets a
+//! generous one. The test pushes `remote_write` to `org-a` until it returns
+//! HTTP 429, then pushes the SAME load to `org-b` and asserts that it still
+//! succeeds. That proves the token bucket is per-tenant and not global.
 
 use std::{
     net::SocketAddr,
@@ -23,7 +24,8 @@ use prost::Message;
 const ORG_A: &str = "org-a";
 const ORG_B: &str = "org-b";
 
-/// In-memory WAL sink: records every appended `WalRecord`, never touches a broker.
+/// In-memory WAL sink. It records every appended `WalRecord` and never touches
+/// a broker.
 #[derive(Default)]
 struct RecordingSink {
     records: Mutex<Vec<WalRecord>>,
@@ -46,8 +48,9 @@ impl RecordingSink {
     }
 }
 
-/// Minimal `remote_write` v1 body: a single `up` series with one sample, snappy
-/// compressed (the distributor requires `Content-Encoding: snappy`).
+/// Minimal `remote_write` v1 body. It holds a single `up` series with one
+/// sample, snappy compressed, because the distributor requires
+/// `Content-Encoding: snappy`.
 fn remote_write_v1_body() -> Vec<u8> {
     let req = pb::v1::WriteRequest {
         timeseries: vec![pb::v1::TimeSeries {
@@ -68,8 +71,9 @@ fn remote_write_v1_body() -> Vec<u8> {
         .expect("snappy compress")
 }
 
-/// Per-tenant overrides: org-a is rate-limited to a single sample of burst;
-/// org-b is effectively unlimited. Unlisted tenants fall back to defaults.
+/// Per-tenant overrides. A rate limit holds org-a to a single sample of burst,
+/// and org-b is unlimited in practice. An unlisted tenant falls back to the
+/// defaults.
 fn tenant_overrides() -> OverridesProvider {
     let yaml = r#"
 overrides:

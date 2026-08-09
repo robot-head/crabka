@@ -1,13 +1,15 @@
 //! `OffsetForLeaderEpoch` (`api_key=23`). For each requested (topic,
-//! partition, `leader_epoch`), returns the `end_offset` of that epoch —
-//! i.e., the first offset of the *next* epoch, which is the truncation
-//! point a follower should use when recovering from `FENCED_LEADER_EPOCH`.
+//! partition, `leader_epoch`), this handler returns the `end_offset` of that
+//! epoch. That offset is the first offset of the *next* epoch, and it is the
+//! truncation point a follower should use when it recovers from
+//! `FENCED_LEADER_EPOCH`.
 //!
 //! Protocol:
 //! - `requested_epoch > current_leader_epoch` → `UNKNOWN_LEADER_EPOCH`
 //! - `requested_epoch == current_leader_epoch` → `end_offset = log_end_offset`
-//! - `requested_epoch < current_leader_epoch` → `end_offset` from checkpoint,
-//!   or `-1` (`UNDEFINED_OFFSET`) if not in checkpoint.
+//! - `requested_epoch < current_leader_epoch` → `end_offset` from the
+//!   checkpoint, or `-1` (`UNDEFINED_OFFSET`) when the checkpoint has no
+//!   entry.
 //!
 //! Reference: KIP-101 (Alter Replication Protocol to use Leader Epoch
 //! rather than High Watermark for Truncation).

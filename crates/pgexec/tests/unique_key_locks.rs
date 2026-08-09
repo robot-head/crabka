@@ -1,16 +1,17 @@
-//! Per-unique-key lock behavior. DML on tables with unique local indexes no
-//! longer serializes engine-wide: writers of the SAME key queue on that key's
-//! exclusive lock in the lock manager (probing only after the holder's
-//! terminal outcome), writers of different keys run concurrently, and unique
-//! CREATE INDEX backfill still excludes in-flight DML via the shared/exclusive
-//! `unique_index_lock` gate.
+//! Per-unique-key lock behavior.
 //!
-//! `INSERT … ON CONFLICT` rides the same key lock: arbitration takes the
-//! exclusive UNIQUE-KEY lock BEFORE probing, so a concurrent inserter of the
-//! same key serializes with it and the loser re-probes only once the winner's
+//! DML on tables with unique local indexes does not serialize engine-wide.
+//! Writers of the SAME key queue on that key's exclusive lock in the lock
+//! manager, and they probe only after the holder's terminal outcome. Writers of
+//! different keys run concurrently. Unique CREATE INDEX backfill still excludes
+//! in-flight DML through the shared/exclusive `unique_index_lock` gate.
+//!
+//! `INSERT … ON CONFLICT` uses the same key lock. Arbitration takes the
+//! exclusive UNIQUE-KEY lock BEFORE it probes, so a concurrent inserter of the
+//! same key serializes with it, and the loser re-probes only once the winner's
 //! outcome is durable. The upsert tests below cover both terminal outcomes of
-//! the winner, the row-lock/`eval_plan_qual` re-arbitration when the
-//! conflicting row is concurrently deleted, and the REPEATABLE READ guard that
+//! the winner, the row-lock and `eval_plan_qual` re-arbitration when another
+//! transaction deletes the conflicting row, and the REPEATABLE READ guard that
 //! turns an otherwise-invisible conflict into 40001.
 
 use std::{sync::Arc, time::Duration};
@@ -48,10 +49,11 @@ async fn err_code(s: &mut SqlSession, sql: &str) -> String {
     s.simple_query(sql).await.expect_err("expected error").code
 }
 
-/// (a) Two concurrent transactions INSERT the SAME primary key: the second
-/// BLOCKS on the key lock (no spurious failure while the first is uncommitted)
-/// and, once the first commits, re-probes and gets a unique violation. Exactly
-/// one row commits.
+/// (a) Two concurrent transactions INSERT the SAME primary key.
+///
+/// The second one BLOCKS on the key lock, with no spurious failure while the
+/// first is uncommitted. Once the first commits, the second re-probes and gets
+/// a unique violation. Exactly one row commits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn same_key_insert_blocks_then_fails_after_holder_commits() {
     let engine = Arc::new(SqlEngine::new());
@@ -94,9 +96,10 @@ async fn same_key_insert_blocks_then_fails_after_holder_commits() {
 }
 
 /// (b) Concurrent INSERTs of DIFFERENT keys into the same PK table do not
-/// block each other: the second transaction commits while the first is still
-/// open (under the old engine-wide exclusive gate it would deadlock-by-wait
-/// here and time out).
+/// block each other.
+///
+/// The second transaction commits while the first is still open. Under the old
+/// engine-wide exclusive gate it would wait here until it timed out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn different_key_inserts_run_concurrently() {
     let engine = Arc::new(SqlEngine::new());
@@ -131,8 +134,10 @@ async fn different_key_inserts_run_concurrently() {
     );
 }
 
-/// (c) Same-key INSERT where the first writer ROLLS BACK: the blocked second
-/// writer wakes, re-probes (the aborted version does not count), and commits.
+/// (c) Same-key INSERT where the first writer ROLLS BACK.
+///
+/// The blocked second writer wakes and re-probes. The aborted version does not
+/// count, so the second writer commits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn same_key_insert_proceeds_after_holder_rolls_back() {
     let engine = Arc::new(SqlEngine::new());
@@ -169,9 +174,11 @@ async fn same_key_insert_proceeds_after_holder_rolls_back() {
     );
 }
 
-/// (d) A deadlock cycle spanning a ROW lock and a UNIQUE-KEY lock resolves
-/// with 40P01 for exactly one transaction instead of hanging: T1 locks row 1
-/// then wants key 2; T2 locks key 2 (INSERT) then wants row 1.
+/// (d) A deadlock cycle across a ROW lock and a UNIQUE-KEY lock resolves with
+/// 40P01 for exactly one transaction, and it does not hang.
+///
+/// T1 locks row 1 and then wants key 2. T2 locks key 2 with an INSERT and then
+/// wants row 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deadlock_across_row_and_unique_key_locks_yields_one_40p01() {
     let engine = Arc::new(SqlEngine::new());
@@ -231,9 +238,11 @@ async fn deadlock_across_row_and_unique_key_locks_yields_one_40p01() {
     assert!(ok_count == 1, "expected exactly one winner: {codes:?}");
 }
 
-/// (e) Unique CREATE INDEX backfill still EXCLUDES in-flight DML: the DDL's
-/// exclusive `unique_index_lock` waits for an open transaction's shared hold,
-/// and the finished index enforces uniqueness (the in-flight row was seen).
+/// (e) Unique CREATE INDEX backfill still EXCLUDES in-flight DML.
+///
+/// The DDL's exclusive `unique_index_lock` waits for an open transaction's
+/// shared hold. The finished index then enforces uniqueness, because the
+/// backfill saw the in-flight row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unique_index_backfill_waits_for_inflight_dml() {
     let engine = Arc::new(SqlEngine::new());
@@ -268,14 +277,17 @@ async fn unique_index_backfill_waits_for_inflight_dml() {
     assert!(err_code(&mut s, "INSERT INTO t VALUES (1, 'dup')").await == "23505");
 }
 
-/// (e2) The gate excludes OTHER sessions' writes, never the DDL's own. A
-/// transaction that has already written holds the gate SHARED; running unique
-/// DDL from that same transaction must release that hold before taking the
-/// exclusive one, or the statement waits on a lock only it could ever free.
+/// (e2) The gate excludes OTHER sessions' writes, and never the DDL's own.
 ///
-/// `pg_regress`'s `join` corpus is exactly this shape — `BEGIN; CREATE TABLE
-/// fkest …; INSERT INTO fkest SELECT … generate_series(1,1000); CREATE UNIQUE
-/// INDEX ON fkest(…)` — and it must answer, not hang.
+/// A transaction that has already written holds the gate SHARED. Unique DDL run
+/// from that same transaction must release that hold before it takes the
+/// exclusive one. If it does not, the statement waits on a lock only it could
+/// ever free.
+///
+/// `pg_regress`'s `join` corpus is exactly this shape:
+/// `BEGIN; CREATE TABLE fkest …; INSERT INTO fkest SELECT …
+/// generate_series(1,1000); CREATE UNIQUE INDEX ON fkest(…)`. It must answer
+/// and must not hang.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unique_ddl_inside_its_own_writing_transaction_does_not_self_deadlock() {
     let engine = Arc::new(SqlEngine::new());
@@ -303,10 +315,12 @@ async fn unique_ddl_inside_its_own_writing_transaction_does_not_self_deadlock() 
     run(&mut t1, "ROLLBACK").await;
 }
 
-/// (e3) Waiting for the gate must not also stall unrelated DDL. The exclusive
-/// hold is taken BEFORE the catalog lock, so a backfill parked behind another
-/// session's open write leaves `CREATE TABLE` on an unrelated relation — which
-/// wants the catalog lock and nothing else — free to run.
+/// (e3) A wait for the gate must not also stall unrelated DDL.
+///
+/// The exclusive hold is taken BEFORE the catalog lock. A backfill parked
+/// behind another session's open write therefore leaves `CREATE TABLE` on an
+/// unrelated relation free to run. That statement wants the catalog lock and
+/// nothing else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_blocked_backfill_does_not_stall_unrelated_ddl() {
     let engine = Arc::new(SqlEngine::new());
@@ -342,11 +356,13 @@ async fn a_blocked_backfill_does_not_stall_unrelated_ddl() {
         .expect("ddl join");
 }
 
-/// (f) An UPDATE that leaves every unique-indexed column unchanged takes NO
-/// key lock: while such an update's transaction is open (holding only its row
-/// lock), a PK-preserving update of another row commits concurrently, and an
-/// INSERT of the open transaction's PK fails FAST with 23505 (it would block
-/// on the key until COMMIT if the update had locked its unchanged PK).
+/// (f) An UPDATE that leaves every unique-indexed column unchanged takes NO key
+/// lock.
+///
+/// While such an update's transaction is open and holds only its row lock, a
+/// PK-preserving update of another row commits concurrently. An INSERT of the
+/// open transaction's PK fails FAST with 23505. It would block on the key until
+/// COMMIT if the update had locked its unchanged PK.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pk_preserving_update_takes_no_key_lock() {
     let engine = Arc::new(SqlEngine::new());
@@ -395,8 +411,8 @@ async fn pk_preserving_update_takes_no_key_lock() {
 }
 
 /// An UPDATE that CHANGES a unique key still serializes with a concurrent
-/// insert of that key: the insert blocks on the update's new-key lock and
-/// fails only after the update commits.
+/// insert of that key. The insert blocks on the update's new-key lock and fails
+/// only after the update commits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn key_changing_update_blocks_concurrent_insert_of_new_key() {
     let engine = Arc::new(SqlEngine::new());
@@ -454,11 +470,12 @@ async fn rows_of(engine: &SqlEngine, sql: &str) -> Vec<Vec<Option<String>>> {
 }
 
 /// (g) `ON CONFLICT DO NOTHING` takes the SAME exclusive key lock before it
-/// probes, so it cannot race an uncommitted inserter of that key: it blocks,
-/// and the outcome it reports depends on whether the holder committed. When
-/// the holder COMMITs the key is taken and the row is skipped (`INSERT 0 0`);
-/// when the holder ROLLBACKs there is nothing to conflict with and the row is
-/// inserted (`INSERT 0 1`).
+/// probes, so it cannot race an uncommitted inserter of that key.
+///
+/// It blocks, and the outcome it reports depends on whether the holder
+/// committed. When the holder COMMITs, the key is taken and the row is skipped,
+/// which is `INSERT 0 0`. When the holder ROLLBACKs, there is nothing to
+/// conflict with and the row is inserted, which is `INSERT 0 1`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn do_nothing_blocks_on_the_key_then_follows_the_holders_outcome() {
     for (holder_outcome, expected_tag, expected_v) in [
@@ -500,7 +517,7 @@ async fn do_nothing_blocks_on_the_key_then_follows_the_holders_outcome() {
     }
 }
 
-/// (h) The same race with `DO UPDATE` where the holder ROLLS BACK: the blocked
+/// (h) The same race with `DO UPDATE`, where the holder ROLLS BACK. The blocked
 /// upsert wakes, re-probes, finds no conflict and inserts its own row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn do_update_blocks_then_inserts_after_the_holder_rolls_back() {
@@ -541,14 +558,16 @@ async fn do_update_blocks_then_inserts_after_the_holder_rolls_back() {
 /// raise a unique violation.
 ///
 /// When the key holder COMMITs, the blocked upsert wakes and re-probes. The
-/// probe reads all-committed visibility and finds the freshly committed row,
-/// but that row is invisible to the statement's own snapshot (taken before the
-/// holder committed), and `eval_plan_qual`'s read-committed refresh only fires
-/// on an `xmax` stamp — which a concurrent INSERT never leaves. Arbitration
-/// therefore re-reads such a holder under a fresh snapshot; without that it
-/// would treat the row as vanished, fall through to a plain INSERT, and raise
-/// 23505. `PostgreSQL` guarantees the opposite: "ON CONFLICT DO UPDATE guarantees
-/// an atomic INSERT or UPDATE outcome … even under high concurrency".
+/// probe reads all-committed visibility and finds the freshly committed row.
+/// That row is invisible to the statement's own snapshot, which was taken
+/// before the holder committed. `eval_plan_qual`'s read-committed refresh fires
+/// only on an `xmax` stamp, and a concurrent INSERT never leaves one.
+///
+/// Arbitration therefore re-reads such a holder under a fresh snapshot. Without
+/// that re-read it would treat the row as gone, fall through to a plain INSERT,
+/// and raise 23505. `PostgreSQL` guarantees the opposite: "ON CONFLICT DO
+/// UPDATE guarantees an atomic INSERT or UPDATE outcome … even under high
+/// concurrency".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn do_update_after_a_concurrently_committed_insert_updates_that_row() {
     let engine = upsert_engine().await;
@@ -585,12 +604,13 @@ async fn do_update_after_a_concurrently_committed_insert_updates_that_row() {
     );
 }
 
-/// (h″) The contrast that isolates (h′)'s cause. Here the key holder is a
-/// key-CHANGING `UPDATE` rather than an `INSERT`, so the row it moves onto the
-/// key leaves an `xmax` stamp on its previous version. That stamp is what
-/// `eval_plan_qual`'s read-committed refresh keys off, so the blocked upsert
-/// does re-read under a fresh snapshot and correctly UPDATEs the row it found —
-/// the outcome (h′) should have produced.
+/// (h″) The contrast that isolates (h′)'s cause.
+///
+/// Here the key holder is a key-CHANGING `UPDATE` and not an `INSERT`, so the
+/// row it moves onto the key leaves an `xmax` stamp on its previous version.
+/// That stamp is what `eval_plan_qual`'s read-committed refresh keys off, so
+/// the blocked upsert does re-read under a fresh snapshot and correctly UPDATEs
+/// the row it found. That is the outcome (h′) should have produced.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn do_update_racing_a_key_changing_update_upserts_correctly() {
     let engine = upsert_engine().await;
@@ -631,12 +651,13 @@ async fn do_update_racing_a_key_changing_update_upserts_correctly() {
     );
 }
 
-/// (i) `DO UPDATE` versus a concurrent DELETE of the conflicting row: the
-/// arbiter's probe (all-committed visibility) still finds the row, so the
-/// upsert takes its ROW lock and blocks on the deleter. When the DELETE
+/// (i) `DO UPDATE` against a concurrent DELETE of the conflicting row.
+///
+/// The arbiter's probe uses all-committed visibility and still finds the row,
+/// so the upsert takes its ROW lock and blocks on the deleter. When the DELETE
 /// commits, `eval_plan_qual` finds the row gone, arbitration restarts without
-/// it, and the statement falls through to a plain INSERT — leaving exactly one
-/// row carrying the upsert's proposed values.
+/// it, and the statement falls through to a plain INSERT. Exactly one row is
+/// left, and it carries the upsert's proposed values.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn do_update_re_arbitrates_into_an_insert_when_the_row_is_deleted() {
     let engine = upsert_engine().await;
@@ -680,12 +701,13 @@ async fn do_update_re_arbitrates_into_an_insert_when_the_row_is_deleted() {
     );
 }
 
-/// (j) The REPEATABLE READ guard. The arbiter probes with all-committed
-/// visibility, so it finds a row committed AFTER the RR snapshot was taken —
-/// a row the transaction cannot read. `DO UPDATE` must refuse that with 40001
-/// rather than silently updating an invisible row (or reporting a bogus
-/// 23505); `DO NOTHING` has nothing to read and simply skips the row, which is
-/// what Postgres does too.
+/// (j) The REPEATABLE READ guard.
+///
+/// The arbiter probes with all-committed visibility, so it finds a row
+/// committed AFTER the RR snapshot was taken. The transaction cannot read that
+/// row. `DO UPDATE` must refuse it with 40001. It must not silently update an
+/// invisible row, and it must not report a false 23505. `DO NOTHING` has
+/// nothing to read and skips the row, which is what Postgres does too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repeatable_read_upsert_onto_an_invisible_row_is_40001() {
     for (action, expectation) in [

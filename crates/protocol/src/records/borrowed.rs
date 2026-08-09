@@ -61,8 +61,8 @@ impl RecordBatch<'_> {
 
 impl<'a> Default for RecordBatch<'a> {
     /// Returns an empty record batch with a zeroed header and no records body.
-    /// Intended for use in generated `Default` impls and round-trip tests; not
-    /// suitable for constructing a real Kafka record batch.
+    /// Use it in generated `Default` impls and round-trip tests. It is not
+    /// suitable for a real Kafka record batch.
     fn default() -> Self {
         use zerocopy::FromZeros as _;
         // RecordBatchHeader derives zerocopy::FromZeros (via FromBytes), so zeroing is safe.
@@ -84,7 +84,7 @@ impl<'de> crate::DecodeBorrow<'de> for RecordBatch<'de> {
 }
 
 impl<'de> RecordBatch<'de> {
-    /// Decode a borrowed v2 record batch with explicit decompression limits.
+    /// Decodes a borrowed v2 record batch with explicit decompression limits.
     ///
     /// # Errors
     ///
@@ -152,35 +152,37 @@ fn decode_borrow_impl<'de>(
     Ok(RecordBatch { header: hdr, body })
 }
 
-/// A single complete v2 batch located within a larger buffer, together
-/// with its already-validated header. Returned by
-/// [`validate_one_v2_batch`].
+/// A single complete v2 batch located within a larger buffer, together with
+/// its already-validated header.
+///
+/// [`validate_one_v2_batch`] returns this type.
 #[derive(Debug)]
 pub struct ValidatedBatch<'a> {
-    /// The fixed 61-byte header, reinterpreted in place (zero-copy).
+    /// The fixed 61-byte header, reinterpreted in place, zero-copy.
     pub header: &'a RecordBatchHeader,
-    /// Total on-disk/wire length of this batch in bytes
-    /// (`12 + batch_length`), i.e. header + body.
+    /// Total on-disk and wire length of this batch in bytes, which is
+    /// `12 + batch_length`, that is the header plus the body.
     pub total_len: usize,
 }
 
-/// Validate exactly one v2 record batch at the start of `buf` **without
-/// materializing any records or decompressing the body**.
+/// Validates exactly one v2 record batch at the start of `buf`.
 ///
-/// This is the produce passthrough fast path: it reinterprets the fixed
-/// header in place (zero-copy), checks `magic == 2`, and verifies the
-/// producer's CRC over `header[21..61] ++ raw_body` (the compressed body
-/// bytes, exactly as stored). Nothing in the body is parsed or
-/// decompressed, so the cost is one CRC pass over the bytes already in
-/// cache — no allocation.
+/// This function materializes no records and decompresses no body.
 ///
-/// Returns the validated header (for offset stamping / idempotent &
-/// transactional gating) and the batch's total byte length so the caller
-/// can slice out the verbatim bytes.
+/// This is the produce passthrough fast path. It reinterprets the fixed header
+/// in place, zero-copy, checks `magic == 2`, and verifies the producer's CRC
+/// over `header[21..61] ++ raw_body`, which is the compressed body bytes
+/// exactly as stored. It parses nothing in the body and decompresses nothing,
+/// so the cost is one CRC pass over bytes that are already in cache, with no
+/// allocation.
+///
+/// Returns the validated header, which the caller needs for offset stamping
+/// and for idempotent and transactional gating, and the batch's total byte
+/// length, which lets the caller slice out the verbatim bytes.
 ///
 /// # Errors
 ///
-/// - [`RecordsError::HeaderTooShort`] / [`RecordsError::BodyTooShort`]
+/// - [`RecordsError::HeaderTooShort`] or [`RecordsError::BodyTooShort`]
 ///   when `buf` does not contain a whole batch.
 /// - [`RecordsError::UnsupportedMagic`] for a non-v2 batch.
 /// - [`RecordsError::CrcMismatch`] when the stored CRC does not match.
@@ -219,12 +221,12 @@ pub fn validate_one_v2_batch(buf: &[u8]) -> Result<ValidatedBatch<'_>, RecordsEr
     })
 }
 
-/// Sum the `records_count` header field of every concatenated v2 batch in
-/// `buf` without decompressing or parsing any record body.
+/// Sums the `records_count` header field of every concatenated v2 batch in
+/// `buf`, and decompresses or parses no record body.
 ///
-/// This is intentionally a best-effort metrics helper: non-v2 input returns
-/// 0, malformed/truncated input contributes every complete v2 batch before the
-/// first bad boundary, and negative `records_count` contributes 0. Real append
+/// This is intentionally a best-effort metrics helper. Non-v2 input returns 0.
+/// Malformed or truncated input contributes every complete v2 batch before the
+/// first bad boundary. A negative `records_count` contributes 0. Real append
 /// validation still goes through [`validate_one_v2_batch`].
 #[must_use]
 pub fn count_records_in_v2_batches(buf: &[u8]) -> u64 {
@@ -260,11 +262,11 @@ pub fn count_records_in_v2_batches(buf: &[u8]) -> u64 {
 // ── Iteration ─────────────────────────────────────────────────────────────────
 
 impl RecordBatch<'_> {
-    /// Iterate over records, parsing each lazily.
+    /// Iterates over the records and parses each one lazily.
     ///
-    /// The returned `Record<'b>` items borrow from `self` (lifetime `'b`),
+    /// The returned `Record<'b>` items borrow from `self` with lifetime `'b`,
     /// not from the original input buffer. For uncompressed batches the
-    /// backing memory is the input buffer; for compressed batches it is the
+    /// backing memory is the input buffer. For compressed batches it is the
     /// batch's internal decompressed `Bytes`.
     /// # Panics
     /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
@@ -423,8 +425,8 @@ fn read_nullable_slice<'a>(
 // ── to_owned bridge ───────────────────────────────────────────────────────────
 
 impl RecordBatch<'_> {
-    /// Materialise an owned `RecordBatch` by copying every byte slice into
-    /// `Bytes` / `String`.
+    /// Materializes an owned `RecordBatch` and copies every byte slice into
+    /// `Bytes` or `String`.
     /// # Errors
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn to_owned(&self) -> Result<super::owned::RecordBatch, RecordsError> {
@@ -477,9 +479,9 @@ impl std::fmt::Debug for RecordBatch<'_> {
 }
 
 impl Clone for RecordBatch<'_> {
-    /// Shallow clone: both `header` and `body` share the same underlying
-    /// data as `self`.  For a `Borrowed` body this is a reference copy;
-    /// for an `Owned` body, `Bytes::clone` is a cheap reference-count bump.
+    /// Shallow clone: both `header` and `body` share the same underlying data
+    /// as `self`. For a `Borrowed` body this is a reference copy. For an
+    /// `Owned` body, `Bytes::clone` is a cheap reference-count bump.
     fn clone(&self) -> Self {
         RecordBatch {
             header: self.header,
@@ -732,11 +734,11 @@ mod tests {
         }
     }
 
-    /// Build a bare 61-byte v2 batch header (magic == 2, all other fields zero)
-    /// with the given big-endian `batch_length` and `records_count`. The helper
-    /// drives `count_records_in_v2_batches`'s `total_len` boundary checks
-    /// precisely: `records_count` is read straight from the header, so the body
-    /// need not contain any real records.
+    /// Builds a bare 61-byte v2 batch header with `magic == 2` and all other
+    /// fields zero, plus the given big-endian `batch_length` and
+    /// `records_count`. The helper drives the `total_len` boundary checks of
+    /// `count_records_in_v2_batches` precisely, because `records_count` is read
+    /// straight from the header and the body needs no real records.
     fn v2_header_only(batch_length: i32, records_count: i32) -> Vec<u8> {
         let mut buf = vec![0u8; HEADER_LEN];
         buf[16] = 2; // magic == v2

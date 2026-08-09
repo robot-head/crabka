@@ -1,7 +1,6 @@
-//! Soft goal: balance per-broker total bytes-in rate, summed across
-//! every replica role (leader + followers). Counts replication
-//! ingress in addition to producer traffic -- use `LeaderBytesIn` for
-//! a leader-only view.
+//! Soft goal: balance the per-broker total bytes-in rate, summed across every
+//! replica role, leader and followers. It counts replication ingress as well as
+//! producer traffic. Use `LeaderBytesIn` for a leader-only view.
 
 use std::collections::HashMap;
 

@@ -1,14 +1,15 @@
 //! Byte-exactness proof: Crabka's [`MetadataEvent`] codec produces and
 //! consumes the *same* bytes as the real JVM `RemoteLogMetadataSerde`.
 //!
-//! The golden vectors in `tests/fixtures/rlmm_golden.json` were captured from
+//! `scripts/capture-rlmm-golden.sh` captured the golden vectors in
+//! `tests/fixtures/rlmm_golden.json` from
 //! `mirror.gcr.io/apache/kafka:4.0.0`'s
-//! `org.apache.kafka.server.log.remote.metadata.storage.serialization.RemoteLogMetadataSerde`
-//! by `scripts/capture-rlmm-golden.sh` (which compiles + runs
-//! `scripts/capture-rlmm/Capture.java`). The fixture is the committed source of
-//! truth; the script documents how to reproduce it.
+//! `org.apache.kafka.server.log.remote.metadata.storage.serialization.RemoteLogMetadataSerde`.
+//! That script compiles and runs `scripts/capture-rlmm/Capture.java`. The
+//! fixture is the committed source of truth, and the script documents how to
+//! reproduce it.
 //!
-//! For every case we assert BOTH directions:
+//! For every case these tests assert BOTH directions:
 //!   1. `event.encode() == golden`   — Crabka encodes byte-identically to the JVM.
 //!   2. `MetadataEvent::decode(golden) == event` — Crabka decodes JVM bytes.
 //!
@@ -65,7 +66,8 @@ fn epochs() -> BTreeMap<LeaderEpoch, i64> {
 }
 
 /// Base add-segment metadata shared by the three add cases:
-/// `COPY_SEGMENT_STARTED`, eventTimestampMs=123, no custom, `txnIdxEmpty`=false.
+/// `COPY_SEGMENT_STARTED`, eventTimestampMs=123, no custom metadata, and
+/// `txnIdxEmpty`=false.
 fn base_add() -> RemoteLogSegmentMetadata {
     RemoteLogSegmentMetadata::new(
         segment_id(),

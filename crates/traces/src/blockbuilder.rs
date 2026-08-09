@@ -30,16 +30,16 @@ use crate::{
     wal::SpanRecord,
 };
 
-/// W3C trace-context header key carried on WAL records by the distributor's
-/// ingest span; used to continue the same distributed trace on the consume side.
+/// W3C trace-context header key that the distributor's ingest span puts on WAL
+/// records. The consume side uses it to continue the same distributed trace.
 const TRACEPARENT_HEADER: &str = "traceparent";
 
 /// Minimal WAL-consumer poll surface the block-builder loop drives.
 ///
-/// Narrowing `run` to this trait (rather than the concrete
-/// [`crabka_client_consumer::Consumer`]) lets the offset-commit invariants be
-/// driven by a scripted fake in tests. The record type matches what
-/// [`decode_consumer_records`] consumes so the loop body is unchanged.
+/// `run` takes this trait rather than the concrete
+/// [`crabka_client_consumer::Consumer`], so a scripted fake can drive the
+/// offset-commit invariants in tests. The record type matches what
+/// [`decode_consumer_records`] consumes, so the loop body stays the same.
 #[async_trait::async_trait]
 pub trait WalConsumerPoll: Send {
     async fn poll(&mut self, window: Time) -> Result<Vec<ConsumerRecord>, TracesError>;
@@ -47,9 +47,9 @@ pub trait WalConsumerPoll: Send {
 
 /// Minimal WAL-consumer commit surface the block-builder loop drives.
 ///
-/// Kept separate from [`WalConsumerPoll`] so the commit-only invariant
-/// (commit happens strictly after a durable flush) is expressible as its own
-/// recorded call in tests.
+/// This trait stays separate from [`WalConsumerPoll`], so a test can express
+/// the commit-only invariant as its own recorded call. That invariant is that a
+/// commit happens strictly after a durable flush.
 #[async_trait::async_trait]
 pub trait WalConsumerCommit: Send {
     async fn commit_sync(&mut self) -> Result<(), TracesError>;
@@ -85,13 +85,15 @@ pub const DEFAULT_FLUSH_MAX_RECORDS: usize = 50_000;
 
 /// Default maximum age of the oldest buffered span record before a flush.
 ///
-/// In a cold-only deployment (no querier live tier, e.g. the demo) the
-/// block-builder is the only path that makes spans queryable, so this age also
-/// bounds how stale recent-trace search / trace-by-id can be. It is kept short
-/// (10s) so freshness stays close to the per-poll behaviour while the
-/// `flush_max_records` cap still batches bursty traffic into larger blocks
-/// (the proliferation case). Deployments that attach a querier live tier can
-/// raise it to batch more aggressively without a freshness cost.
+/// In a cold-only deployment, such as the demo, there is no querier live tier.
+/// The block-builder is then the only path that makes spans queryable, so this
+/// age also bounds how stale recent-trace search and trace-by-id can be.
+///
+/// The value stays short, at 10s, so freshness stays close to the per-poll
+/// behaviour. The `flush_max_records` cap still batches bursty traffic into
+/// larger blocks, which is the proliferation case. A deployment that attaches a
+/// querier live tier can raise this age to batch more aggressively at no
+/// freshness cost.
 pub const DEFAULT_FLUSH_MAX_AGE: Time = secs(10);
 
 /// Runtime settings for the block-builder loop.
@@ -106,7 +108,8 @@ pub struct BlockBuilderConfig {
     pub promoted_attrs: Vec<PromotedSpanAttr>,
     /// Flush the accumulated buffer once this many span records are buffered.
     pub flush_max_records: usize,
-    /// Flush the accumulated buffer once the oldest buffered record reaches this age.
+    /// Flush the accumulated buffer once the oldest buffered record reaches
+    /// this age.
     pub flush_max_age: Time,
     pub index_snapshot_retain: IndexSnapshotRetain,
 }
@@ -116,18 +119,19 @@ struct BlockBuildOptions<'a> {
     promoted_attrs: &'a [PromotedSpanAttr],
 }
 
-/// Accumulates decoded [`PartitionWindow`]s across multiple WAL polls so the
+/// Accumulates decoded [`PartitionWindow`]s across several WAL polls, so the
 /// block-builder can flush one larger block per partition instead of a tiny
 /// block per poll.
 ///
-/// Successive polls are merged by partition: their records are appended and the
-/// inclusive offset range is widened to span every buffered record, so the block
-/// object key is a pure function of the buffered offset range. When a
-/// crash-and-reprocess re-forms the *same* buffer (same records, same flush
-/// boundary) the key is identical and the re-run overwrites it idempotently.
-/// Flush boundaries are timing-dependent (record count / age), so this is
-/// at-least-once delivery rather than a guarantee of byte-identical keys across
-/// every recovery.
+/// The accumulator merges successive polls by partition. It appends their
+/// records and widens the inclusive offset range to span every buffered record,
+/// so the block object key is a pure function of the buffered offset range.
+///
+/// A crash-and-reprocess that re-forms the *same* buffer, with the same records
+/// and the same flush boundary, gets an identical key, and the re-run
+/// overwrites the block idempotently. Flush boundaries depend on timing,
+/// through the record count and the age, so this is at-least-once delivery. It
+/// does not guarantee byte-identical keys across every recovery.
 #[derive(Debug, Default)]
 pub struct FlushAccumulator {
     windows: BTreeMap<i32, PartitionWindow>,
@@ -156,10 +160,10 @@ impl FlushAccumulator {
 
     /// Merge one poll's decoded windows into the buffer.
     ///
-    /// Records are appended per partition and the inclusive offset range is
-    /// widened to cover both the buffered and incoming records. `now` stamps the
-    /// arrival time used for age-based flushing; it is only recorded the first
-    /// time records enter an otherwise-empty buffer so the age tracks the
+    /// This appends records per partition and widens the inclusive offset range
+    /// to cover both the buffered and the incoming records. `now` stamps the
+    /// arrival time that age-based flushing uses. It is recorded only the first
+    /// time records enter an otherwise-empty buffer, so the age tracks the
     /// *oldest* buffered record.
     pub fn merge(&mut self, windows: BTreeMap<i32, PartitionWindow>, now: Instant) {
         for (partition, incoming) in windows {
@@ -183,8 +187,9 @@ impl FlushAccumulator {
 
     /// Whether the buffered records should be flushed now.
     ///
-    /// True once either the record-count threshold is reached or the oldest
-    /// buffered record has aged past `flush_max_age`. Always false when empty.
+    /// This is true once the buffer reaches the record-count threshold, or once
+    /// the oldest buffered record ages past `flush_max_age`. It is always false
+    /// when the buffer is empty.
     #[must_use]
     pub fn should_flush(&self, config: &BlockBuilderConfig, now: Instant) -> bool {
         if self.record_count == 0 {
@@ -199,7 +204,7 @@ impl FlushAccumulator {
         }
     }
 
-    /// Drain the buffered windows, resetting the accumulator to empty.
+    /// Drain the buffered windows and reset the accumulator to empty.
     #[must_use]
     pub fn take(&mut self) -> BTreeMap<i32, PartitionWindow> {
         self.record_count = 0;
@@ -235,7 +240,8 @@ pub fn prefixed_object_key(prefix: &str, key: &str) -> String {
     }
 }
 
-/// Group records by tenant and trace id, sorting each trace for stable DFS input.
+/// Group records by tenant and trace id, and sort each trace for stable DFS
+/// input.
 #[must_use]
 pub fn group_by_trace(records: &[SpanRecord]) -> BTreeMap<(String, [u8; 16]), Vec<Span>> {
     let mut grouped: BTreeMap<(String, [u8; 16]), Vec<Span>> = BTreeMap::new();
@@ -253,8 +259,8 @@ pub fn group_by_trace(records: &[SpanRecord]) -> BTreeMap<(String, [u8; 16]), Ve
 
 /// Decode Kafka consumer records into per-partition span windows.
 ///
-/// Tombstones / records without values are ignored and do not extend the
-/// inclusive offset range.
+/// This function ignores tombstones and records without values. They do not
+/// extend the inclusive offset range.
 ///
 /// # Errors
 /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -294,7 +300,7 @@ pub async fn build_blocks(
         .await
 }
 
-/// Build and write one span block with an object-store prefix applied to its key.
+/// Build and write one span block, with an object-store prefix on its key.
 ///
 /// # Errors
 /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -425,14 +431,17 @@ async fn build_blocks_with_options(
     Ok(vec![meta])
 }
 
-/// Consume WAL records, write span blocks, save the trace index, then commit offsets.
+/// Consume WAL records, write span blocks, save the trace index, then commit
+/// offsets.
 ///
-/// To avoid block proliferation, decoded windows are accumulated across polls
-/// and merged per partition; a single larger block per partition is flushed only
-/// once [`BlockBuilderConfig::flush_max_records`] records are buffered or the
-/// oldest buffered record reaches [`BlockBuilderConfig::flush_max_age`]. WAL
-/// offsets are committed only after the merged block(s) are durably written, and
-/// the remaining buffer is drained on shutdown so no spans are lost.
+/// The loop accumulates decoded windows across polls and merges them per
+/// partition, to avoid block proliferation. It flushes a single larger block
+/// per partition only once the buffer holds
+/// [`BlockBuilderConfig::flush_max_records`] records, or the oldest buffered
+/// record reaches [`BlockBuilderConfig::flush_max_age`].
+///
+/// The loop commits WAL offsets only after it durably writes the merged blocks.
+/// It drains the remaining buffer on shutdown, so no spans are lost.
 ///
 /// # Errors
 /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -525,9 +534,12 @@ where
     Ok(())
 }
 
-/// Make `span` a child of the distributed trace carried on any consumed record's
-/// `traceparent` header. Uses the first record that carries one; a no-op when
-/// none do (e.g. records produced by an unsampled ingest request).
+/// Make `span` a child of the distributed trace carried on any consumed
+/// record's `traceparent` header.
+///
+/// This uses the first record that carries such a header. It does nothing when
+/// no record carries one, for example when an unsampled ingest request produced
+/// the records.
 fn set_remote_parent_from_records(span: &tracing::Span, records: &[ConsumerRecord]) {
     let Some(record) = records
         .iter()
@@ -546,9 +558,9 @@ fn set_remote_parent_from_records(span: &tracing::Span, records: &[ConsumerRecor
 
 /// Flush the accumulated buffer to durable blocks, then commit WAL offsets.
 ///
-/// The accumulator is drained first so a flush error leaves nothing
-/// double-counted, and `commit_sync` runs only after `flush_partition_windows`
-/// reports the block(s) and trace index are durably written.
+/// This drains the accumulator first, so a flush error leaves nothing
+/// double-counted. `commit_sync` runs only after `flush_partition_windows`
+/// reports that the blocks and the trace index are durably written.
 async fn flush_and_commit<C>(
     consumer: &mut C,
     writer: &BlockWriter,
@@ -580,10 +592,10 @@ where
     consumer.commit_sync().await
 }
 
-/// Flush decoded partition windows and durably save the trace index, returning
-/// the number of span blocks durably written.
+/// Flush decoded partition windows and durably save the trace index.
 ///
-/// The caller should commit WAL offsets only after this returns `Ok(_)`.
+/// This function returns the number of span blocks it durably wrote. The caller
+/// should commit WAL offsets only after this returns `Ok(_)`.
 ///
 /// # Errors
 /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -731,12 +743,13 @@ mod tests {
     /// `set_remote_parent_from_records` must re-parent the span into the trace
     /// carried on the FIRST record whose header key equals `TRACEPARENT_HEADER`.
     ///
-    /// Guards two mutants: replacing the whole function with `()` (the span would
-    /// keep its own fresh trace id, not the header's), and flipping the header-key
-    /// comparison from `==` to `!=` (the non-traceparent record would be matched
-    /// first and its garbage/absent context would fail to re-parent the span).
-    /// The non-traceparent record is deliberately placed BEFORE the traceparent
-    /// one so the `==`/`!=` distinction is observable.
+    /// This test guards two mutants. The first replaces the whole function with
+    /// `()`, and the span then keeps its own fresh trace id instead of the
+    /// header's. The second flips the header-key comparison from `==` to `!=`,
+    /// and the non-traceparent record then matches first, so its absent or
+    /// garbage context fails to re-parent the span. The non-traceparent record
+    /// sits BEFORE the traceparent one on purpose, so the `==`/`!=` difference
+    /// is observable.
     #[test]
     fn set_remote_parent_from_records_reparents_into_header_trace() {
         use opentelemetry::trace::{TraceContextExt as _, TraceId, TracerProvider as _};

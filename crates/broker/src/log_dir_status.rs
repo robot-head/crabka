@@ -1,29 +1,28 @@
-//! Per-log-dir online/offline status tracking — the broker-side half of
-//! KIP-113's offline-dir story.
+//! Per-log-dir online/offline status tracking: the broker-side half of
+//! KIP-113 offline dirs.
 //!
-//! When a configured log directory fails a startup writability probe
-//! (mount-point gone, filesystem remounted read-only, permission flipped
-//! on an operator typo), the broker keeps booting against the dirs that
-//! *did* probe healthy and records the failure on the
-//! [`LogDirRegistry`]. From there, three things follow:
+//! A configured log directory can fail the startup writability probe.
+//! The mount point can be gone, the filesystem can be remounted
+//! read-only, or an operator typo can flip a permission. The broker then
+//! keeps booting against the dirs that *did* probe healthy and records
+//! the failure on the [`LogDirRegistry`]. Three things follow:
 //!
-//! 1. [`crate::handlers::describe_log_dirs`] surfaces the offline dir
+//! 1. [`crate::handlers::describe_log_dirs`] reports the offline dir
 //!    with `error_code = KAFKA_STORAGE_ERROR` so `kafka-log-dirs
 //!    --describe` matches the JVM behavior.
-//! 2. JBOD placement
-//!    ([`crate::log_dir::place_partition_dir`]) is fed only the online
-//!    subset, so newly materialized partitions never land on an offline
-//!    dir.
-//! 3. Runtime write/fsync failures flip a dir online → offline mid-life:
+//! 2. The broker gives JBOD placement
+//!    ([`crate::log_dir::place_partition_dir`]) only the online subset,
+//!    so newly materialized partitions never land on an offline dir.
+//! 3. Runtime write/fsync failures flip a dir from online to offline.
 //!    `crate::partition_writer::flag_storage_failure` calls
 //!    [`LogDirRegistry::mark_offline`] on any `LogError::Io` from a
-//!    partition mutation, so a disk that dies under live traffic is
-//!    refused thereafter without restarting the broker.
+//!    partition mutation. The broker then refuses a disk that dies under
+//!    live traffic, and a broker restart is not necessary.
 //!
-//! Both startup probing and runtime offline-flips are wired; the registry
-//! is shared (`DashMap`) so a flip is visible immediately to every handler,
-//! the heartbeat client (which reports offline dir UUIDs to the
-//! controller), and JBOD placement.
+//! The broker wires up both startup probing and runtime offline flips.
+//! The registry is a shared `DashMap`, so every handler, the heartbeat
+//! client, and JBOD placement all see a flip immediately. The heartbeat
+//! client reports offline dir UUIDs to the controller.
 
 use std::{
     path::{Path, PathBuf},
@@ -33,19 +32,20 @@ use std::{
 use dashmap::DashMap;
 
 /// Sentinel filename written into each log dir at startup to verify the
-/// dir is writable. Created, fsynced, then removed; absent in steady
-/// state. Matches Apache Kafka's `meta.properties` probe in spirit
-/// without colliding with that file's role.
+/// dir is writable. The broker creates the file, fsyncs it, then removes
+/// it. The file is absent in steady state. The probe is similar to
+/// Apache Kafka's `meta.properties` probe, and it does not collide with
+/// that file's role.
 const PROBE_FILENAME: &str = ".crabka-write-probe";
 
-/// Per-dir health snapshot — `None` means online, `Some(reason)` means
+/// Per-dir health snapshot. `None` means online. `Some(reason)` means
 /// the startup probe failed with that human-readable reason.
 type Status = Option<String>;
 
 /// Shared, lock-free per-log-dir status table. Cloning the `Arc` is
-/// cheap; every consumer (handler, supervisor, placement) reads through
-/// the same table so a future runtime-offline flip is visible
-/// immediately everywhere.
+/// cheap. The handlers, the supervisor, and placement all read through
+/// the same table, so every consumer sees a runtime offline flip
+/// immediately.
 #[derive(Clone, Default)]
 pub struct LogDirRegistry {
     inner: Arc<DashMap<PathBuf, Status>>,
@@ -53,14 +53,14 @@ pub struct LogDirRegistry {
 
 impl LogDirRegistry {
     /// Probe every entry in `log_dirs` and build a registry. A dir
-    /// probes online if the broker can create the directory (when
-    /// missing), write a small sentinel, fsync it, and remove it
+    /// probes online if the broker can create the directory when it is
+    /// missing, write a small sentinel, fsync it, and remove it
     /// without error. Anything else marks the dir offline with the
     /// underlying error message attached.
     ///
-    /// Probing is intentionally synchronous: `Broker::start` runs it
-    /// before any handler accepts traffic, so blocking briefly per dir
-    /// is the right trade.
+    /// The probe is intentionally synchronous. `Broker::start` runs it
+    /// before any handler accepts traffic, so a short block per dir is
+    /// acceptable.
     #[must_use]
     pub fn probe(log_dirs: &[PathBuf]) -> Self {
         let inner: DashMap<PathBuf, Status> = DashMap::new();
@@ -85,9 +85,9 @@ impl LogDirRegistry {
     }
 
     /// True when the dir has been registered AND is currently marked
-    /// offline. An unknown dir (never probed) returns `false` so a
-    /// stale path in operator config doesn't accidentally fail every
-    /// produce.
+    /// offline. A dir that the broker never probed returns `false`, so
+    /// a stale path in operator config does not accidentally fail
+    /// every produce.
     #[must_use]
     pub fn is_offline(&self, dir: &Path) -> bool {
         self.inner
@@ -95,9 +95,10 @@ impl LogDirRegistry {
             .is_some_and(|entry| entry.value().is_some())
     }
 
-    /// Offline dirs paired with their probe-failure reason. Used by
-    /// `DescribeLogDirs` to fill `error_code = KAFKA_STORAGE_ERROR` and
-    /// (in the future) a structured offline-reason log line.
+    /// Offline dirs paired with their probe-failure reason.
+    /// `DescribeLogDirs` uses them to fill
+    /// `error_code = KAFKA_STORAGE_ERROR`. A structured offline-reason
+    /// log line will use them later.
     #[must_use]
     pub fn offline(&self) -> Vec<(PathBuf, String)> {
         let mut out: Vec<(PathBuf, String)> = self
@@ -115,11 +116,11 @@ impl LogDirRegistry {
     }
 
     /// Filter `log_dirs` down to the entries that are not currently
-    /// offline. Used by JBOD placement so new partitions never land on
-    /// a known-bad dir. Returns the unfiltered list when every entry
-    /// is offline — callers (placement) treat this as a hard failure
-    /// to materialize and the caller raises `KAFKA_STORAGE_ERROR`
-    /// rather than silently using an offline dir.
+    /// offline. JBOD placement uses this so new partitions never land
+    /// on a known-bad dir. Returns the unfiltered list when every
+    /// entry is offline. Placement treats this as a hard failure to
+    /// materialize and raises `KAFKA_STORAGE_ERROR` rather than
+    /// silently using an offline dir.
     #[must_use]
     pub fn online_subset(&self, log_dirs: &[PathBuf]) -> Vec<PathBuf> {
         log_dirs
@@ -130,16 +131,17 @@ impl LogDirRegistry {
     }
 
     /// Runtime offline-flip: mark `dir` offline with `reason` because a
-    /// live write / fsync to it just failed. Idempotent — calling this
-    /// on an already-offline dir is a no-op (the original reason
-    /// stands). Calling this on a dir that was never probed inserts a
-    /// fresh offline entry, which is the right thing for partitions
-    /// materialized on a dir the operator added after broker start
-    /// (not supported yet, but the registry shape is friendly).
+    /// live write or fsync to it just failed. This function is
+    /// idempotent. A call on an already-offline dir is a no-op, and the
+    /// original reason stands. A call on a dir that was never probed
+    /// inserts a fresh offline entry. That is correct for partitions
+    /// materialized on a dir the operator added after broker start. The
+    /// broker does not support that yet, but the registry shape allows
+    /// it.
     ///
-    /// Returns `true` when the call actually flipped the dir
-    /// (previously online or unknown) — useful for logging the
-    /// transition exactly once.
+    /// Returns `true` when the call flipped the dir, that is when the
+    /// dir was previously online or unknown. Use the return value to
+    /// log the transition exactly once.
     pub fn mark_offline(&self, dir: &Path, reason: &str) -> bool {
         // `entry()` would short-circuit on Vacant, but the existing
         // entry's value is `Option<String>`; we want to flip `None` →
@@ -180,7 +182,7 @@ impl std::fmt::Debug for LogDirRegistry {
 
 /// Single-dir probe: `create_dir_all` → write a sentinel → `sync_data`
 /// → remove. Returns the underlying error's display string on any
-/// failure so the registry can surface it to operators.
+/// failure so the registry can show it to operators.
 fn probe_one(dir: &Path) -> Result<(), String> {
     use std::io::Write;
 
@@ -230,10 +232,10 @@ mod tests {
         assert!(nested.is_dir(), "probe should have created the dir");
     }
 
-    /// Probe must leave nothing behind — the sentinel file is removed
-    /// after a successful round-trip. Catches the regression where a
-    /// stray `.crabka-write-probe` would later be misparsed as a
-    /// partition directory by `log_dir::scan`.
+    /// The probe must leave nothing behind. It removes the sentinel
+    /// file after a successful round-trip. This test catches the
+    /// regression where `log_dir::scan` later misparses a stray
+    /// `.crabka-write-probe` as a partition directory.
     #[test]
     fn probe_cleans_up_sentinel_on_success() {
         let tmp = tempdir().unwrap();
@@ -241,9 +243,10 @@ mod tests {
         assert!(!tmp.path().join(PROBE_FILENAME).exists());
     }
 
-    /// A path that can't be created (a regular file is in the way)
-    /// must be marked offline with a reason string — not panic or
-    /// kill the probe-builder for siblings.
+    /// A path that the broker cannot create must be marked offline
+    /// with a reason string. A regular file in the way is one such
+    /// case. The probe must not panic and must not kill the
+    /// probe-builder for siblings.
     #[test]
     fn probe_path_blocked_by_file_is_offline() {
         let tmp = tempdir().unwrap();
@@ -264,10 +267,10 @@ mod tests {
         );
     }
 
-    /// One bad dir must not poison a sibling-good dir's status. The
-    /// startup probe builds the registry from a list, and the JBOD
-    /// broker's whole reason for existing is that *some* dirs can
-    /// keep serving while others are gone.
+    /// One bad dir must not change a sibling-good dir's status. The
+    /// startup probe builds the registry from a list. The JBOD broker
+    /// exists because *some* dirs can keep serving while others are
+    /// gone.
     #[test]
     fn probe_one_offline_does_not_take_out_siblings() {
         let tmp = tempdir().unwrap();
@@ -280,21 +283,21 @@ mod tests {
         check!(reg.online_subset(&[good.clone(), blocker]) == vec![good]);
     }
 
-    /// Unknown dirs (never probed) report `is_offline = false`. This
-    /// matches the registry's "known offline = bad, everything else =
-    /// assume good" semantics; the alternative would block any newly-
-    /// added dir until the broker restarts.
+    /// Dirs the broker never probed report `is_offline = false`. This
+    /// matches the registry semantics: known offline is bad, and
+    /// everything else is assumed good. The alternative would block
+    /// any newly added dir until the broker restarts.
     #[test]
     fn unknown_dir_is_not_offline() {
         let reg = LogDirRegistry::default();
         assert!(!reg.is_offline(Path::new("/never/probed/anywhere")));
     }
 
-    /// Runtime flip on a previously-online dir: registry transitions
-    /// `None` → `Some(reason)`, `is_offline` returns `true`,
-    /// `offline()` includes the new entry, and `online_subset` no
-    /// longer contains the dir. `mark_offline` returns `true` to
-    /// signal the actual transition happened.
+    /// Runtime flip on a previously-online dir. The registry
+    /// transitions `None` → `Some(reason)` and `is_offline` returns
+    /// `true`. Then `offline()` includes the new entry, and
+    /// `online_subset` no longer contains the dir. `mark_offline`
+    /// returns `true` to show that the transition happened.
     #[test]
     fn mark_offline_flips_online_dir_and_returns_true() {
         let tmp = tempdir().unwrap();
@@ -311,9 +314,9 @@ mod tests {
     }
 
     /// `mark_offline` is idempotent: a second call returns `false` and
-    /// the original reason wins. Lets callers log the offline-flip
-    /// exactly once per dir even if a hundred partitions on the same
-    /// dir all hit fsync errors simultaneously.
+    /// the original reason wins. Callers can then log the offline-flip
+    /// exactly once per dir, even if a hundred partitions on the same
+    /// dir all hit fsync errors at the same time.
     #[test]
     fn mark_offline_is_idempotent() {
         let tmp = tempdir().unwrap();
@@ -329,11 +332,11 @@ mod tests {
         );
     }
 
-    /// Marking an unknown dir (never probed) offline still records
-    /// the entry — useful when a partition was materialized on a dir
-    /// that the broker hasn't probed (operator added the dir
-    /// post-start; not supported yet but the registry is
-    /// future-proofed).
+    /// `mark_offline` on a dir the broker never probed still records
+    /// the entry. This helps when a partition was materialized on an
+    /// unprobed dir, for example when the operator added the dir after
+    /// start. The broker does not support that yet, but the registry
+    /// allows it.
     #[test]
     fn mark_offline_on_unknown_dir_inserts_entry() {
         let reg = LogDirRegistry::default();

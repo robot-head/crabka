@@ -1,18 +1,18 @@
-//! The registry of user-defined types — `CREATE TYPE` composites and enums, and
+//! The registry of user-defined types: `CREATE TYPE` composites and enums, and
 //! `CREATE DOMAIN` domains.
 //!
-//! [`ColumnType`] is `Copy` and is threaded by value through every expression,
-//! catalog row and wire description in the engine, so a user type cannot be
-//! represented by an owned `String` or a boxed definition inside it. What the
-//! type carries instead is a [`UserTypeRef`] — an oid plus a name interned for
-//! the process lifetime — and the definition itself lives here, keyed by oid.
+//! [`ColumnType`] is `Copy`, and the engine passes it by value through every
+//! expression, catalog row and wire description. A user type therefore cannot
+//! hold an owned `String` or a boxed definition inside it. The type carries a
+//! [`UserTypeRef`] instead: an oid plus a name interned for the process
+//! lifetime. The definition itself lives here, keyed by oid.
 //!
 //! The registry is process-wide rather than per-session because
 //! [`ColumnType::from_sql_name`] is a pure function reached from the parser,
 //! from `CHECK`-constraint re-parsing, and from view expansion, none of which
 //! hold a catalog handle. Gres already applies DDL outside transaction control
-//! (a `CREATE TABLE` in a rolled-back block survives), so a type surviving its
-//! rolled-back `CREATE TYPE` is the same documented divergence rather than a new
+//! (a `CREATE TABLE` in a rolled-back block survives), so a type that survives
+//! its rolled-back `CREATE TYPE` is the same documented divergence, not a new
 //! one. The durable definition still lives in the catalog; [`register`] is how
 //! the catalog's contents reach the parser.
 
@@ -25,8 +25,8 @@ use crate::datum::ColumnType;
 
 /// The identity of a user-defined type: its `pg_type` oid and its name.
 ///
-/// `Copy`, and therefore usable inside [`ColumnType`], because the name is
-/// interned by [`intern`] and lives for the process lifetime.
+/// `Copy`, and therefore usable inside [`ColumnType`], because [`intern`]
+/// interns the name and the name lives for the process lifetime.
 #[derive(Debug, Clone, Copy, Eq)]
 pub struct UserTypeRef {
     /// The type's `pg_type.oid`.
@@ -59,7 +59,7 @@ pub struct DomainRef {
     pub oid: u32,
     /// The domain's `pg_type.typname`, interned.
     pub name: &'static str,
-    /// `pg_type.typbasetype` — what the value actually is.
+    /// `pg_type.typbasetype`: what the value actually is.
     pub base: &'static ColumnType,
 }
 
@@ -107,12 +107,12 @@ pub struct DomainCheck {
 /// What a user-defined type *is*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserTypeBody {
-    /// `CREATE TYPE … AS (field type, …)` — `pg_type.typtype = 'c'`.
+    /// `CREATE TYPE … AS (field type, …)`: `pg_type.typtype = 'c'`.
     Composite(Vec<CompositeField>),
-    /// `CREATE TYPE … AS ENUM (…)` — `pg_type.typtype = 'e'`. Labels are held in
+    /// `CREATE TYPE … AS ENUM (…)`: `pg_type.typtype = 'e'`. Labels are held in
     /// `pg_enum.enumsortorder` order, which is the order `<` uses.
     Enum(Vec<String>),
-    /// `CREATE DOMAIN … AS base …` — `pg_type.typtype = 'd'`.
+    /// `CREATE DOMAIN … AS base …`: `pg_type.typtype = 'd'`.
     Domain(DomainBody),
 }
 
@@ -121,7 +121,7 @@ pub enum UserTypeBody {
 pub struct DomainBody {
     /// `pg_type.typbasetype`.
     pub base: ColumnType,
-    /// `pg_type.typnotnull` — a `NOT NULL` domain constraint.
+    /// `pg_type.typnotnull`: a `NOT NULL` domain constraint.
     pub not_null: bool,
     /// `pg_type.typdefault` source text, applied where a column of the domain
     /// has no default of its own.
@@ -210,8 +210,8 @@ impl UserType {
 /// (16384) so that `oid >= 16384` "is a user object" tests behave.
 const FIRST_USER_TYPE_OID: u32 = 300_000;
 
-/// Oids are handed out in this stride so that a composite's type oid, its array
-/// type oid and its backing `pg_class` relation oid never collide.
+/// The registry hands out oids in this stride so that a composite's type oid,
+/// its array type oid and its backing `pg_class` relation oid never collide.
 const OID_STRIDE: u32 = 4;
 
 #[derive(Default)]
@@ -238,7 +238,7 @@ fn interner() -> &'static RwLock<HashMap<String, &'static str>> {
 
 /// Intern `name` so it can live inside a `Copy` [`ColumnType`].
 ///
-/// Interning is what makes `ColumnType::name() -> &'static str` work for a type
+/// [`intern`] is what makes `ColumnType::name() -> &'static str` work for a type
 /// whose name is only known at run time. The leak is bounded by the number of
 /// distinct type names a process ever sees, i.e. by DDL, not by traffic.
 ///
@@ -288,9 +288,9 @@ fn leak_column_type(ty: ColumnType) -> &'static ColumnType {
     leaked
 }
 
-/// Register `body` under `name`, allocating a fresh oid, and return the
-/// registered type. An existing registration under the same name is replaced —
-/// callers enforce `PostgreSQL`'s duplicate-name rule (42710) before getting
+/// Register `body` under `name` with a fresh oid, and return the registered
+/// type. This function replaces an existing registration under the same name.
+/// Callers enforce `PostgreSQL`'s duplicate-name rule (42710) before they get
 /// here, and DDL that legitimately replaces a definition (`ALTER TYPE`) goes
 /// through [`replace`].
 ///
@@ -317,7 +317,7 @@ pub fn register(name: &str, body: UserTypeBody) -> UserType {
     ty
 }
 
-/// Re-register a type that already has an oid — the catalog-hydration path and
+/// Re-register a type that already has an oid: the catalog-hydration path and
 /// the `ALTER TYPE` / `ALTER DOMAIN` path, both of which must preserve the oid.
 ///
 /// # Panics
@@ -422,10 +422,11 @@ pub fn user_array_oid(type_oid: u32) -> u32 {
 #[cfg(test)]
 mod tests {
 
-    /// `DROP TYPE` must make the name unresolvable without making stored rows
-    /// undecodable: a row encodes its column's type oid, so the oid has to keep
-    /// resolving after the drop. Losing it made every later read of that data a
-    /// corrupt-row error and wedged the background vacuum on every pass.
+    /// `DROP TYPE` must make the name unresolvable, but it must not make stored
+    /// rows undecodable. A row encodes its column's type oid, so the oid must
+    /// still resolve after the drop. A lost oid makes every later read of that
+    /// data a corrupt-row error, and it wedges the background vacuum on every
+    /// pass.
     #[test]
     fn dropping_a_type_frees_the_name_but_keeps_the_oid_decodable() {
         use assert2::assert;

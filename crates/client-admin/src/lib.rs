@@ -3,11 +3,11 @@
 //! The client targets the active controller and retries selected RPCs on a
 //! refreshed controller connection when the broker returns `NOT_CONTROLLER`.
 //! It supports plaintext by default and the same client-side TLS/SASL security
-//! surface as [`crabka_client_core`] via [`AdminClient::connect_secured`].
+//! surface as [`crabka_client_core`] through [`AdminClient::connect_secured`].
 //!
-//! Built on `crabka_client_core::Connection`'s typed
-//! `send::<R: ProtocolRequest>` so request-version negotiation is
-//! automatic via the `ApiVersionTable` populated at connect time. The public
+//! The client is built on `crabka_client_core::Connection`'s typed
+//! `send::<R: ProtocolRequest>`, so request-version negotiation is automatic
+//! through the `ApiVersionTable` that connect time populates. The public
 //! modules cover topic CRUD, partition expansion, config changes, SCRAM user
 //! credentials, ACLs, quotas, delegation tokens, and log-dir inspection.
 
@@ -37,13 +37,15 @@ pub use users::{
     UserScramCredential, UserScramCredentials,
 };
 
-/// Test seam for `AdminClient`. The operator's reconcile only needs
-/// dynamic dispatch via this trait; production code wraps a concrete
-/// `AdminClient`, while tests substitute a fake.
+/// Test seam for `AdminClient`.
+///
+/// The operator's reconcile only needs dynamic dispatch through this trait.
+/// Production code wraps a concrete `AdminClient`, and tests substitute a
+/// fake.
 ///
 /// Methods take `&mut self` because the underlying `AdminClient`'s
-/// `NOT_CONTROLLER` retry path reconnects the inner `Connection` in
-/// place, which requires unique access.
+/// `NOT_CONTROLLER` retry path reconnects the inner `Connection` in place,
+/// which needs unique access.
 #[async_trait::async_trait]
 pub trait AdminClientLike: Send {
     async fn metadata(&mut self, topics: &[&str]) -> Result<TopicMetadata, AdminError>;
@@ -336,8 +338,8 @@ impl AdminClientLike for AdminClient {
     }
 }
 
-/// Split `"Type:Name"` (default type `User`) into a `KafkaPrincipal`.
-/// Empty input yields `None` so the create path doesn't manufacture a
+/// Splits `"Type:Name"` into a `KafkaPrincipal`. The default type is `User`.
+/// Empty input gives `None`, so the create path does not manufacture a
 /// principal from a bare `""` renewer entry.
 fn renewer_str_to_principal(s: &str) -> Option<crabka_security::KafkaPrincipal> {
     if s.is_empty() {
@@ -413,8 +415,8 @@ where
         .ok_or_else(|| AdminError::Protocol(format!("no addresses for {host_port}")))
 }
 
-/// Short-lived admin client targeting one cluster's controller.
-/// Optionally negotiates TLS/SASL via [`AdminClient::connect_secured`].
+/// Short-lived admin client that targets one cluster's controller. It can
+/// negotiate TLS/SASL through [`AdminClient::connect_secured`].
 pub struct AdminClient {
     pub(crate) conn: Connection,
     bootstrap_addrs: Vec<String>,
@@ -424,8 +426,8 @@ pub struct AdminClient {
 }
 
 impl AdminClient {
-    /// Build the per-connect options for `client_id="crabka-operator"`,
-    /// carrying the supplied security policy.
+    /// Builds the per-connect options for `client_id="crabka-operator"` with
+    /// the supplied security policy.
     fn opts(security: Option<crabka_client_core::security::ClientSecurity>) -> ConnectionOptions {
         ConnectionOptions {
             dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -438,8 +440,8 @@ impl AdminClient {
         }
     }
 
-    /// Connect, applying optional client security. `None` = plaintext
-    /// (identical to [`AdminClient::connect`]).
+    /// Connects and applies optional client security. `None` means plaintext,
+    /// which is identical to [`AdminClient::connect`].
     ///
     /// # Errors
     /// Returns `AdminError::Connect { tried }` if no bootstrap address
@@ -451,7 +453,7 @@ impl AdminClient {
         Self::connect_with_options(bootstrap_addrs, Self::opts(security)).await
     }
 
-    /// Connect with supplied security and DNS deadline while preserving the
+    /// Connects with the supplied security and DNS deadline, and keeps the
     /// standard admin identity, TCP-connect timeout, and request timeout.
     ///
     /// # Errors
@@ -466,7 +468,8 @@ impl AdminClient {
         Self::connect_with_options(bootstrap_addrs, options).await
     }
 
-    /// Connect with the standard plaintext admin policy and a custom DNS deadline.
+    /// Connects with the standard plaintext admin policy and a custom DNS
+    /// deadline.
     ///
     /// # Errors
     /// Returns `AdminError::Connect { tried }` if no bootstrap address connects.
@@ -477,7 +480,7 @@ impl AdminClient {
         Self::connect_secured_with_dns_timeout(bootstrap_addrs, None, dns_timeout).await
     }
 
-    /// Connect using a complete connection-options template.
+    /// Connects with a complete connection-options template.
     ///
     /// # Errors
     /// Returns `AdminError::Connect { tried }` if no bootstrap address
@@ -510,10 +513,13 @@ impl AdminClient {
         })
     }
 
-    /// Try each bootstrap address in order. Each entry is `host:port`;
-    /// DNS is resolved via `tokio::net::lookup_host`. First successful
-    /// connect wins. Returns `AdminError::Connect { tried }` if none
-    /// responded. Plaintext; see [`AdminClient::connect_secured`].
+    /// Tries each bootstrap address in order.
+    ///
+    /// Each entry is `host:port`. `tokio::net::lookup_host` resolves the DNS.
+    /// The first successful connect wins. Returns
+    /// `AdminError::Connect { tried }` if none responded. The connection is
+    /// plaintext. See [`AdminClient::connect_secured`].
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn connect(bootstrap_addrs: &[String]) -> Result<Self, AdminError> {
@@ -535,8 +541,8 @@ impl AdminClient {
             .map_err(AdminError::from)
     }
 
-    /// Replace the underlying connection. Used internally by the
-    /// `NOT_CONTROLLER` retry path to reconnect to the current controller.
+    /// Replaces the underlying connection. The `NOT_CONTROLLER` retry path
+    /// uses it internally to reconnect to the current controller.
     pub(crate) async fn reconnect(&mut self, host_port: &str) -> Result<(), AdminError> {
         let opts = self.options.clone();
         self.conn = Self::connect_one(host_port, opts).await?;
@@ -578,9 +584,9 @@ impl AdminClient {
 /// admin client refreshes its controller endpoint and retries once.
 pub(crate) const NOT_CONTROLLER: i16 = 41;
 
-/// Map a Kafka error code into a static name string for human-friendly
-/// `AdminError::Broker` formatting. Only the codes we actually surface
-/// today; unknown codes serialize as `"UNKNOWN"`.
+/// Maps a Kafka error code into a static name string for human-friendly
+/// `AdminError::Broker` output. The table holds only the codes this crate
+/// surfaces today. Unknown codes serialize as `"UNKNOWN"`.
 pub(crate) fn kafka_error_name(code: i16) -> &'static str {
     match code {
         0 => "NONE",

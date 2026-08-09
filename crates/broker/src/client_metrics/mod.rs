@@ -1,5 +1,6 @@
-//! KIP-714 client metrics receiver: subscription config, client-instance
-//! registry, OTLP decode, and the Prometheus + OTLP sinks.
+//! KIP-714 client metrics receiver: the subscription config, the
+//! client-instance registry, the OTLP decode, and the Prometheus and OTLP
+//! sinks.
 
 pub(crate) mod config;
 pub(crate) mod manager;
@@ -13,8 +14,9 @@ pub(crate) use manager::ClientMetricsManager;
 
 use self::{otlp_sink::OtlpForwarder, prometheus_sink::ClientMetricsCollector};
 
-/// Broker-held bundle: the manager (instance state + matching) plus the two
-/// sinks. The Prometheus collector is shared with the metrics registry.
+/// Broker-held bundle. It holds the manager, which owns the instance state and
+/// the matching, plus the two sinks. The metrics registry shares the Prometheus
+/// collector.
 pub(crate) struct ClientMetrics {
     pub manager: ClientMetricsManager,
     pub prometheus: Arc<ClientMetricsCollector>,

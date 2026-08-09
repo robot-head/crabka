@@ -2,19 +2,21 @@
 
 //! End-to-end round-trip differential test for the Kafka FDW.
 //!
-//! Everything runs in one test process — no spawned binaries:
+//! Everything runs in one test process, with no spawned binaries:
 //!
-//! 1. an in-process crabka broker + schema registry ([`harness::KafkaStack`]),
-//! 2. an Avro schema registered + 3 known records produced to `orders`,
-//! 3. an `crabka_pgexec::SqlEngine` with [`crabka_gres_fdw::KafkaFdw`] registered, served
-//!    over pgwire on an ephemeral port,
-//! 4. a `tokio-postgres` client that runs `CREATE SERVER` + `CREATE USER
-//!    MAPPING` + `IMPORT FOREIGN SCHEMA`, then `SELECT`s the rows back.
+//! 1. an in-process crabka broker and schema registry
+//!    ([`harness::KafkaStack`]),
+//! 2. one registered Avro schema and 3 known records produced to `orders`,
+//! 3. an `crabka_pgexec::SqlEngine` with [`crabka_gres_fdw::KafkaFdw`]
+//!    registered, served over pgwire on an ephemeral port,
+//! 4. a `tokio-postgres` client that runs `CREATE SERVER`, `CREATE USER
+//!    MAPPING`, and `IMPORT FOREIGN SCHEMA`, then `SELECT`s the rows back.
 //!
-//! Assertions: the projected values + envelope offsets match what was produced;
-//! offset pushdown (`WHERE _partition = 0 AND _offset >= 1`) returns the
-//! expected subset; and a topic produced as raw bytes (no registry subject)
-//! comes back as `bytea` via the raw-fallback path.
+//! The test asserts three things. The projected values and envelope offsets
+//! match what the harness produced. Offset pushdown
+//! (`WHERE _partition = 0 AND _offset >= 1`) returns the expected subset. A
+//! topic produced as raw bytes, with no registry subject, comes back as
+//! `bytea` through the raw-fallback path.
 
 mod harness;
 
@@ -30,7 +32,7 @@ use prost_reflect::prost::Message as _;
 use tokio::net::TcpListener;
 use tokio_postgres::NoTls;
 
-/// Avro schema for `orders`: `id` (int → int4) + `total` (double → float8).
+/// Avro schema for `orders`: `id` (int → int4) and `total` (double → float8).
 const ORDERS_SCHEMA: &str = r#"{
   "type": "record",
   "name": "Order",
@@ -87,8 +89,8 @@ message ProtoOrder {
 }
 "#;
 
-/// Serve a pgwire engine (with the real `KafkaFdw` registered) on an ephemeral
-/// port and return that port.
+/// Serves a pgwire engine, with the real `KafkaFdw` registered, on an
+/// ephemeral port and returns that port.
 async fn serve_engine() -> u16 {
     serve_engine_with_default_bootstrap(None).await
 }
@@ -108,7 +110,7 @@ async fn serve_engine_with_default_bootstrap(default_bootstrap: Option<String>) 
     port
 }
 
-/// Connect a `tokio-postgres` client to the in-process pgwire server.
+/// Connects a `tokio-postgres` client to the in-process pgwire server.
 async fn connect(port: u16) -> tokio_postgres::Client {
     let (client, conn) = tokio_postgres::Config::new()
         .host("127.0.0.1")
@@ -122,7 +124,7 @@ async fn connect(port: u16) -> tokio_postgres::Client {
     client
 }
 
-/// Confluent-frame an Avro record body under `schema_id`.
+/// Confluent-frames an Avro record body under `schema_id`.
 fn avro_frame(schema: &apache_avro::Schema, schema_id: u32, id: i32, total: f64) -> Bytes {
     let mut rec = apache_avro::types::Record::new(schema).expect("avro record");
     rec.put("id", id);
@@ -167,9 +169,9 @@ fn protobuf_order_frame(schema_id: u32) -> Bytes {
     crabka_schema_serde::wire::encode_protobuf(schema_id, &[0], &message.encode_to_vec())
 }
 
-/// The whole round trip. `multi_thread` is required: the FDW scan drives async
-/// fetch via `block_in_place`, and the broker/registry tasks must run
-/// concurrently with the test body.
+/// The whole round trip. `multi_thread` is necessary: the FDW scan drives the
+/// async fetch with `block_in_place`, and the broker and registry tasks must
+/// run at the same time as the test body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn kafka_fdw_roundtrip_avro_and_raw_fallback() {
     let stack = KafkaStack::start().await;

@@ -7,8 +7,10 @@ const TS_SIZE: usize = 8;
 const SEQ_SIZE: usize = 4;
 pub(crate) const SUFFIX_SIZE: usize = TS_SIZE + SEQ_SIZE; // 12
 
-/// `WindowKeySchema.toStoreKeyBinary(key, windowStart, seqnum)`. The seqnum is the
-/// per-record value for retainDuplicates join stores, or 0 for aggregations.
+/// Builds `WindowKeySchema.toStoreKeyBinary(key, windowStart, seqnum)`.
+///
+/// The seqnum is the per-record value for retainDuplicates join stores, or 0 for
+/// aggregations.
 pub(crate) fn store_key(key_bytes: &[u8], window_start: i64, seqnum: u32) -> Bytes {
     let mut b = BytesMut::with_capacity(key_bytes.len() + SUFFIX_SIZE);
     b.extend_from_slice(key_bytes);
@@ -17,7 +19,7 @@ pub(crate) fn store_key(key_bytes: &[u8], window_start: i64, seqnum: u32) -> Byt
     b.freeze()
 }
 
-/// The windowStart encoded in a composite store key.
+/// Returns the windowStart encoded in a composite store key.
 pub(crate) fn window_start_of(store_key: &[u8]) -> i64 {
     let n = store_key.len();
     i64::from_be_bytes(
@@ -27,7 +29,7 @@ pub(crate) fn window_start_of(store_key: &[u8]) -> i64 {
     )
 }
 
-/// The serialized inner-key bytes of a composite store key.
+/// Returns the serialized inner-key bytes of a composite store key.
 pub(crate) fn key_bytes_of(store_key: &[u8]) -> &[u8] {
     &store_key[..store_key.len() - SUFFIX_SIZE]
 }
@@ -40,7 +42,7 @@ pub(crate) fn wrap_value(record_ts: i64, raw: &[u8]) -> Bytes {
     b.freeze()
 }
 
-/// Split a wrapped value into `(recordTs, raw_aggregate_bytes)`.
+/// Splits a wrapped value into `(recordTs, raw_aggregate_bytes)`.
 pub(crate) fn unwrap_value(wrapped: &[u8]) -> (i64, &[u8]) {
     let ts = i64::from_be_bytes(wrapped[..TS_SIZE].try_into().expect("8 bytes"));
     (ts, &wrapped[TS_SIZE..])

@@ -1,13 +1,13 @@
 //! In-process transactional integration tests.
 //!
-//! These tests exercise the full end-to-end transactional path:
-//! producer init → begin → send → commit/abort → consumer isolation.
+//! These tests exercise the full end-to-end transactional path: producer
+//! init, begin, send, commit or abort, then consumer isolation.
 //!
-//! Windows-gated like the other multi-node tests: openraft + tokio
-//! scheduling on Windows runners causes intermittent
+//! They are gated off Windows, like the other multi-node tests. openraft and
+//! tokio scheduling on Windows runners cause intermittent
 //! `INVALID_TXN_STATE` errors during `InitProducerId`. The transactional
-//! control plane is platform-correct; the gate avoids a flaky CI
-//! signal until the Windows scheduling work is addressed.
+//! control plane is correct on every platform. The gate avoids a flaky CI
+//! signal until the Windows scheduling work is done.
 
 use std::time::Duration;
 
@@ -58,8 +58,8 @@ async fn create_topic(bootstrap: &str, name: &str) {
     );
 }
 
-/// Boot a single-broker cluster whose only listener is `SASL_PLAINTEXT`
-/// with `PLAIN` enabled and the given users provisioned. Returns the same
+/// Boots a single-broker cluster whose only listener is `SASL_PLAINTEXT`, with
+/// `PLAIN` enabled and the given users provisioned. Returns the same
 /// `(handle, bootstrap, dir)` triple as [`boot_single`].
 fn boot_single_sasl(
     users: &[(&str, &str)],
@@ -87,7 +87,7 @@ fn boot_single_sasl(
     })
 }
 
-/// Client-side `SASL_PLAINTEXT` + `PLAIN` security for `(user, pass)`.
+/// Client-side `SASL_PLAINTEXT` and `PLAIN` security for `(user, pass)`.
 fn sasl_plain_security(user: &str, pass: &str) -> ClientSecurity {
     ClientSecurity {
         protocol: ListenerProtocol::SaslPlaintext,
@@ -100,7 +100,8 @@ fn sasl_plain_security(user: &str, pass: &str) -> ClientSecurity {
     }
 }
 
-/// Create `name` (1 partition) over a SASL-authenticated admin connection.
+/// Creates the topic `name` with 1 partition over a SASL-authenticated admin
+/// connection.
 async fn create_topic_sasl(bootstrap: &str, name: &str, security: ClientSecurity) {
     let client = crabka_client_core::Client::builder()
         .bootstrap(bootstrap)
@@ -128,7 +129,7 @@ async fn create_topic_sasl(bootstrap: &str, name: &str, security: ClientSecurity
     );
 }
 
-/// Build a `ProducerRecord` for the given topic and string value.
+/// Builds a `ProducerRecord` for the given topic and string value.
 fn rec(topic: &str, v: &str) -> ProducerRecord {
     ProducerRecord {
         topic: topic.into(),
@@ -148,7 +149,8 @@ async fn send_ok(producer: &Producer, record: ProducerRecord) {
 
 // ── test 1 ────────────────────────────────────────────────────────────────────
 
-/// Commit a transaction, then a `read_committed` consumer sees all 3 records.
+/// Commits a transaction, after which a `read_committed` consumer sees all 3
+/// records.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_then_read_committed_sees_records() {
     let (broker, bootstrap, _dir) = boot_single().await;
@@ -193,7 +195,8 @@ async fn commit_then_read_committed_sees_records() {
 
 // ── test 2 ────────────────────────────────────────────────────────────────────
 
-/// Abort a transaction: `read_committed` sees 0 records; `read_uncommitted` sees 3.
+/// Aborts a transaction. `read_committed` then sees 0 records, and
+/// `read_uncommitted` sees 3.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abort_then_read_committed_skips_records() {
     let (broker, bootstrap, _dir) = boot_single().await;
@@ -266,13 +269,13 @@ async fn abort_then_read_committed_skips_records() {
 /// commit("a","b","c"), abort("X","Y"), commit("d","e","f","g"):
 /// `read_committed` sees exactly \["a","b","c","d","e","f","g"\].
 ///
-/// Exercises rapid reuse of one `transactional_id` across three back-to-back
-/// transactions. This used to flake with `Server(24)` (`INVALID_TXN_STATE`)
-/// because `flush` returned before an in-flight Produce had transitioned the
-/// coordinator to `Ongoing`, so the following `EndTxn` arrived while the entry
-/// was still `CompleteCommit`/`CompleteAbort`. `Producer::flush` now waits for
-/// in-flight batches, so the partition-register Produce is always acked before
-/// `EndTxn` is sent.
+/// This test exercises rapid reuse of one `transactional_id` across three
+/// back-to-back transactions. `Producer::flush` waits for the in-flight
+/// batches, so the broker always acks the partition-register Produce before the
+/// producer sends `EndTxn`. Without that wait, `flush` could return before an
+/// in-flight Produce moved the coordinator to `Ongoing`, and the following
+/// `EndTxn` would arrive while the entry was still `CompleteCommit` or
+/// `CompleteAbort`, which fails with `Server(24)` (`INVALID_TXN_STATE`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interleaved_commit_and_abort() {
     let (broker, bootstrap, _dir) = boot_single().await;
@@ -333,8 +336,8 @@ async fn interleaved_commit_and_abort() {
 
 // ── test 4 ────────────────────────────────────────────────────────────────────
 
-/// Producer B with the same `transactional_id` fences Producer A.
-/// Producer A's `Transaction::commit` must return `ProducerError::FencedProducer`.
+/// Producer B with the same `transactional_id` fences Producer A. Producer A's
+/// `Transaction::commit` must return `ProducerError::FencedProducer`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fenced_producer_cannot_commit() {
     let (broker, bootstrap, _dir) = boot_single().await;
@@ -378,17 +381,18 @@ async fn fenced_producer_cannot_commit() {
 
 // ── test 5 ────────────────────────────────────────────────────────────────────
 
-/// Consume-process-produce loop using `send_offsets_to_transaction`.
-/// After commit, 5 records must appear on the output topic under `read_committed`.
+/// Consume-process-produce loop with `send_offsets_to_transaction`. After the
+/// commit, 5 records must appear on the output topic under `read_committed`.
 ///
-/// This verifies the atomic-output half of the pattern: the transactional
-/// offset commit and the output produces are flushed and committed together,
-/// and the output records become visible under `read_committed` once the commit
-/// marker advances the LSO.
+/// This test verifies the atomic-output half of the pattern. The transactional
+/// offset commit and the output produces flush and commit together, and the
+/// output records become visible under `read_committed` once the commit marker
+/// advances the LSO.
 ///
 /// Note: this test deliberately does not assert `OffsetFetch` visibility of the
-/// committed consumer offset. Materialising transactionally-committed offsets
-/// into the group coordinator on LSO advance is still tracked separately:
+/// committed consumer offset. A separate item tracks the work to materialise
+/// transactionally-committed offsets into the group coordinator on LSO
+/// advance:
 ///
 /// TODO(CRABKA-TXN-5): Wire group-manager offset materialization to LSO advance
 /// for transactional offset commits on `__consumer_offsets`.
@@ -496,15 +500,17 @@ async fn send_offsets_to_transaction_atomic_with_records() {
 
 /// Full transactional flow over a `SASL_PLAINTEXT`/`PLAIN` listener.
 ///
-/// Regression test for the producer-side coordinator-connection credential
-/// omission: `init_transactions` opens a *dedicated* connection to the
-/// transaction coordinator and `send_offsets_to_transaction` opens another to
-/// the group coordinator. If either drops the retained `ClientSecurity`, the
+/// Regression test for a producer-side coordinator-connection credential
+/// omission. `init_transactions` opens a *dedicated* connection to the
+/// transaction coordinator, and `send_offsets_to_transaction` opens another one
+/// to the group coordinator. If either drops the retained `ClientSecurity`, the
 /// secured listener rejects the connection and the call fails with
-/// `Client(Disconnected)`. Driving init → begin → send →
-/// `send_offsets_to_transaction` → commit end-to-end with a SASL-authenticated
-/// producer exercises both secondary connections; a `read_committed` consumer
-/// then confirms the records actually committed.
+/// `Client(Disconnected)`.
+///
+/// The test drives init, begin, send, `send_offsets_to_transaction`, and commit
+/// end to end with a SASL-authenticated producer, which exercises both
+/// secondary connections. A `read_committed` consumer then confirms that the
+/// records committed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_authenticated_transactional_flow_commits() {
     let (broker, bootstrap, _dir) = boot_single_sasl(&[("alice", "alice-secret")]).await;
@@ -582,10 +588,11 @@ async fn sasl_authenticated_transactional_flow_commits() {
 
 // ── KIP-447 zombie fencing ──────────────────────────────────────────────────────
 
-/// A classic-group `TxnOffsetCommit` is fenced when it carries a stale
-/// generation (`ILLEGAL_GENERATION`) or an unknown member (`UNKNOWN_MEMBER_ID`),
-/// and accepted when the metadata matches the live group. Driven with raw
-/// `TxnOffsetCommitRequest`s so we control the metadata precisely.
+/// The broker fences a classic-group `TxnOffsetCommit` when it carries a stale
+/// generation (`ILLEGAL_GENERATION`) or an unknown member
+/// (`UNKNOWN_MEMBER_ID`), and accepts it when the metadata matches the live
+/// group. The test uses raw `TxnOffsetCommitRequest` values, which give it
+/// precise control over the metadata.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn txn_offset_commit_fences_classic_generation_and_member() {
     use crabka_protocol::owned::txn_offset_commit_request::{
@@ -673,9 +680,10 @@ async fn txn_offset_commit_fences_classic_generation_and_member() {
     broker.shutdown().await;
 }
 
-/// A KIP-848 next-gen ("consumer"-protocol) `TxnOffsetCommit` is fenced when it
-/// carries a stale member epoch (`STALE_MEMBER_EPOCH`) and accepted at the
-/// current epoch. The member epoch travels in the `generation_id` field.
+/// The broker fences a KIP-848 next-gen "consumer"-protocol `TxnOffsetCommit`
+/// when it carries a stale member epoch (`STALE_MEMBER_EPOCH`), and accepts it
+/// at the current epoch. The member epoch travels in the `generation_id`
+/// field.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn txn_offset_commit_fences_next_gen_member_epoch() {
     use crabka_protocol::owned::{

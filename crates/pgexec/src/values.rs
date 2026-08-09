@@ -92,9 +92,10 @@ pub(crate) fn apply_query_order(
 
 /// Apply a FROM item's alias and optional column-alias list.
 ///
-/// `PostgreSQL` lets the list be *shorter* than the item's column list — the
-/// named columns are renamed and the rest keep their own names — and rejects
-/// only a list that names more columns than exist (`42P10`).
+/// `PostgreSQL` lets the list be *shorter* than the item's column list. It
+/// renames the columns that the list names, and the other columns keep their
+/// own names. `PostgreSQL` rejects only a list that names more columns than
+/// exist (`42P10`).
 pub(crate) fn requalify_derived(
     mut rel: crate::join::Relation,
     alias: &str,

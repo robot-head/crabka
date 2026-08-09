@@ -1,6 +1,6 @@
-//! SP28: predicate + conditional expression breadth — IS [NOT] NULL, [NOT] IN,
+//! SP28: predicate and conditional expression breadth. IS [NOT] NULL, [NOT] IN,
 //! [NOT] BETWEEN, [NOT] LIKE/ILIKE, CASE, SELECT DISTINCT and OFFSET, end-to-end
-//! over the wire (with three-valued NULL semantics and the error SQLSTATEs).
+//! over the wire, with three-valued NULL semantics and the error SQLSTATEs.
 
 use std::sync::Arc;
 

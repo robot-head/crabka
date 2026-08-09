@@ -1,13 +1,13 @@
-//! SP32: arbitrary-precision exact `numeric` / `decimal` (OID 1700). A finite
-//! value is backed by `bigdecimal::BigDecimal`; [`NumericValue`] adds the three
+//! SP32: arbitrary-precision exact `numeric` / `decimal` (OID 1700).
+//! `bigdecimal::BigDecimal` backs a finite value; [`NumericValue`] adds the three
 //! special values PostgreSQL 14+ supports (`NaN`, `Infinity`, `-Infinity`). This
 //! module is the value layer for numeric: parsing, PostgreSQL-faithful text +
 //! binary output, the arithmetic scale rules (`select_div_scale` for
 //! division/AVG), rounding, `numeric(p,s)` typmod enforcement, and the casts
 //! to/from the other types.
 //!
-//! Invariant: every finite numeric `Datum` is **canonical** — its display scale
-//! (dscale) is `>= 0`, matching PostgreSQL (a literal like `1e3` parses to scale
+//! Invariant: every finite numeric `Datum` is **canonical**. Its display scale
+//! (dscale) is `>= 0`, as in PostgreSQL (a literal like `1e3` parses to scale
 //! 0, not the negative scale `bigdecimal` would otherwise keep).
 
 #![expect(
@@ -35,9 +35,10 @@ const MAX_DISPLAY_SCALE: i64 = 1000;
 
 /// PostgreSQL's hard numeric-format limits: at most `131072` digits before the
 /// decimal point (leading-digit weight ≤ `131071`) and `16383` after it. A value
-/// outside these "overflows numeric format" — PostgreSQL rejects it, and so do we
-/// (which ALSO bounds materialization: a literal like `8e88888888` would otherwise
-/// expand to ~88M digits and OOM, as the `decode_row` fuzzer found).
+/// outside these "overflows numeric format". PostgreSQL rejects it, and this
+/// crate rejects it too. That ALSO bounds materialization: a literal like
+/// `8e88888888` would otherwise expand to ~88M digits and OOM, as the
+/// `decode_row` fuzzer found.
 const MAX_WEIGHT: i64 = 131071;
 const MAX_DSCALE: i64 = 16383;
 
@@ -59,7 +60,7 @@ pub struct Typmod {
 pub enum NumericValue {
     /// An exact decimal with a display scale.
     Finite(BigDecimal),
-    /// PostgreSQL's `NaN` — equal to itself, greater than every other numeric.
+    /// PostgreSQL's `NaN`: equal to itself, greater than every other numeric.
     NaN,
     /// `+Infinity`.
     Infinity,
@@ -101,8 +102,8 @@ impl NumericValue {
     }
 
     /// `-1` / `0` / `+1` for a finite value's sign; `+1` for `Infinity`, `-1` for
-    /// `-Infinity`, and `0` for `NaN` (whose sign is not ordered — callers that
-    /// care about `NaN` test [`NumericValue::is_nan`] first).
+    /// `-Infinity`, and `0` for `NaN`, whose sign is not ordered. Callers that
+    /// care about `NaN` test [`NumericValue::is_nan`] first.
     #[must_use]
     fn signum(&self) -> i32 {
         match self {
@@ -194,7 +195,8 @@ impl std::fmt::Display for NumericValue {
 }
 
 /// Canonicalize a `BigDecimal` to a PostgreSQL dscale (`>= 0`). A negative scale
-/// (e.g. from `1e3`) is materialized to scale 0 (exact — only appends zeros).
+/// (e.g. from `1e3`) materializes to scale 0, which is exact because it only
+/// appends zeros.
 pub fn canonical(bd: BigDecimal) -> BigDecimal {
     if bd.fractional_digit_count() < 0 {
         bd.with_scale(0)
@@ -210,7 +212,7 @@ pub fn canonical(bd: BigDecimal) -> BigDecimal {
 /// would otherwise materialize an adversarial exponent's digits and OOM.
 ///
 /// The special spellings follow `numeric_in` exactly: `NaN` (case-insensitive,
-/// with NO sign — PostgreSQL rejects `-nan`), and `Infinity` / `inf`
+/// with NO sign, because PostgreSQL rejects `-nan`), and `Infinity` / `inf`
 /// (case-insensitive) with an optional leading `+` or `-`.
 pub fn parse(s: &str) -> Option<NumericValue> {
     let t = s.trim();
@@ -251,8 +253,8 @@ fn strip_digit_separators(t: &str, radix: u32) -> Option<String> {
 
 /// The largest digit run a non-decimal numeric literal may carry. Binary is the
 /// widest radix, and a value at PostgreSQL's weight ceiling (`10^131072`) needs
-/// about 435 000 bits, so anything past this bound is out of format regardless —
-/// the cap only stops an adversarial input allocating without limit.
+/// about 435 000 bits, so anything past this bound is out of format anyway. The
+/// cap only stops an adversarial input from an unlimited allocation.
 const MAX_NONDECIMAL_DIGITS: usize = 500_000;
 
 /// PostgreSQL 16+ non-decimal integer input: a `0x` / `0o` / `0b` prefix
@@ -261,7 +263,7 @@ const MAX_NONDECIMAL_DIGITS: usize = 500_000;
 /// has to sit between two digits. There is no fraction or exponent in this form,
 /// so the result always has display scale 0.
 ///
-/// `None` means "not this form" — the caller falls through to the decimal
+/// `None` means "not this form". The caller falls through to the decimal
 /// grammar, which reports the syntax error.
 fn parse_nondecimal(t: &str) -> Option<BigDecimal> {
     let (negative, rest) = match t.as_bytes().first() {
@@ -303,9 +305,9 @@ fn parse_special(t: &str) -> Option<NumericValue> {
     None
 }
 
-/// Parse a FINITE numeric literal, rejecting the special spellings. This is the
-/// form JSON numbers use — RFC 8259 has no `NaN`/`Infinity` — and the inner half
-/// of [`parse`]. Leading/trailing whitespace is trimmed.
+/// Parse a FINITE numeric literal and reject the special spellings. This is the
+/// form JSON numbers use, because RFC 8259 has no `NaN`/`Infinity`. It is also
+/// the inner half of [`parse`]. Leading/trailing whitespace is trimmed.
 pub fn parse_finite(s: &str) -> Option<BigDecimal> {
     use std::str::FromStr;
     let t = s.trim();
@@ -475,7 +477,7 @@ pub fn binary(value: &NumericValue) -> Vec<u8> {
 ///
 /// The three reserved special sign words are accepted. `numeric_recv` still
 /// reads and range-checks `ndigits` base-10000 groups before discarding them for
-/// a special, and it ignores the rest of the header — PostgreSQL sends `dscale`
+/// a special, and it ignores the rest of the header. PostgreSQL sends `dscale`
 /// 32 with `±Infinity` and 0 with `NaN`, but accepts either.
 pub fn from_binary(input: &[u8]) -> Option<NumericValue> {
     let header: [u8; 8] = input.get(..8)?.try_into().ok()?;
@@ -564,7 +566,7 @@ fn finite_pair<'a>(a: &'a NumericValue, b: &'a NumericValue) -> (&'a BigDecimal,
     (a.as_finite().expect(REASON), b.as_finite().expect(REASON))
 }
 
-/// `a + b` (result dscale = max input dscale — `bigdecimal` matches PostgreSQL).
+/// `a + b` (result dscale = max input dscale; `bigdecimal` matches PostgreSQL).
 /// `Infinity + -Infinity` is `NaN`; any other infinity dominates.
 pub fn add(a: &NumericValue, b: &NumericValue) -> NumericValue {
     if a.is_nan() || b.is_nan() {
@@ -650,7 +652,7 @@ pub fn div(a: &NumericValue, b: &NumericValue) -> Result<NumericValue, TypeError
     ))
 }
 
-/// `div(a, b)` — PostgreSQL `numeric_div_trunc`: the quotient truncated toward
+/// `div(a, b)`, PostgreSQL `numeric_div_trunc`: the quotient truncated toward
 /// zero, at scale 0. Same special-value ordering as [`div`].
 pub fn div_trunc(a: &NumericValue, b: &NumericValue) -> Result<NumericValue, TypeError> {
     if a.is_nan() || b.is_nan() {
@@ -694,7 +696,7 @@ pub fn rem(a: &NumericValue, b: &NumericValue) -> Result<NumericValue, TypeError
     Ok(NumericValue::Finite(canonical(x % y)))
 }
 
-/// `abs(x)` — `abs(-Infinity)` is `Infinity`, `abs(NaN)` is `NaN`.
+/// `abs(x)`: `abs(-Infinity)` is `Infinity`, `abs(NaN)` is `NaN`.
 pub fn abs(value: &NumericValue) -> NumericValue {
     match value {
         NumericValue::NaN => NumericValue::NaN,
@@ -703,8 +705,8 @@ pub fn abs(value: &NumericValue) -> NumericValue {
     }
 }
 
-/// `floor(x)` — round toward −∞ (PostgreSQL `numeric_floor`); scale 0. A special
-/// is returned unchanged.
+/// `floor(x)`: round toward −∞ (PostgreSQL `numeric_floor`); scale 0. A special
+/// comes back unchanged.
 pub fn floor(value: &NumericValue) -> NumericValue {
     match value.as_finite() {
         None => value.clone(),
@@ -712,8 +714,8 @@ pub fn floor(value: &NumericValue) -> NumericValue {
     }
 }
 
-/// `ceil(x)` / `ceiling(x)` — round toward +∞ (PostgreSQL `numeric_ceil`); scale
-/// 0. A special is returned unchanged.
+/// `ceil(x)` / `ceiling(x)`: round toward +∞ (PostgreSQL `numeric_ceil`); scale
+/// 0. A special comes back unchanged.
 pub fn ceil(value: &NumericValue) -> NumericValue {
     match value.as_finite() {
         None => value.clone(),
@@ -721,12 +723,12 @@ pub fn ceil(value: &NumericValue) -> NumericValue {
     }
 }
 
-/// `round(x, n)` — round to `n` decimal places, half-away-from-zero (PostgreSQL
+/// `round(x, n)`: round to `n` decimal places, half-away-from-zero (PostgreSQL
 /// `numeric_round`). `n` may be negative (round to tens/hundreds/…). The result
-/// carries scale `max(n, 0)`. `n` is clamped to `MAX_DSCALE` so an adversarial
-/// huge scale can't materialize billions of fractional digits and OOM — the same
-/// format-limit discipline [`within_format_limits`] enforces on `parse`.
-/// A special is returned unchanged, at every `n`.
+/// carries scale `max(n, 0)`. `n` is clamped to `MAX_DSCALE`, so an adversarial
+/// huge scale cannot materialize billions of fractional digits and OOM. This is
+/// the same format-limit discipline [`within_format_limits`] enforces on
+/// `parse`. A special comes back unchanged, at every `n`.
 pub fn round(value: &NumericValue, n: i64) -> NumericValue {
     match value.as_finite() {
         None => value.clone(),
@@ -736,9 +738,9 @@ pub fn round(value: &NumericValue, n: i64) -> NumericValue {
     }
 }
 
-/// `trunc(x, n)` — truncate to `n` decimal places, toward zero (PostgreSQL
-/// `numeric_trunc`). `n` may be negative; clamped to `MAX_DSCALE` (see [`round`]).
-/// A special is returned unchanged.
+/// `trunc(x, n)`: truncate to `n` decimal places, toward zero (PostgreSQL
+/// `numeric_trunc`). `n` may be negative; clamped to `MAX_DSCALE` (see
+/// [`round`]). A special comes back unchanged.
 pub fn trunc(value: &NumericValue, n: i64) -> NumericValue {
     match value.as_finite() {
         None => value.clone(),
@@ -748,7 +750,7 @@ pub fn trunc(value: &NumericValue, n: i64) -> NumericValue {
     }
 }
 
-/// `sign(x)` — −1 / 0 / 1 as a numeric (PostgreSQL `numeric_sign`).
+/// `sign(x)`: −1 / 0 / 1 as a numeric (PostgreSQL `numeric_sign`).
 /// `sign(±Infinity)` is `±1`; `sign(NaN)` is `NaN`.
 pub fn sign(value: &NumericValue) -> NumericValue {
     match value {
@@ -778,11 +780,11 @@ fn finite_is_zero(bd: &BigDecimal) -> bool {
 /// units, `rscale = clamp(max(16 − qweight·4, s1, s2), 0, 1000)` where `qweight`
 /// is the quotient's leading-digit weight estimate.
 ///
-/// Equal leading digits still decrement `qweight` — PostgreSQL cannot tell which
-/// operand is larger from the leading digit alone and assumes the quotient is
+/// Equal leading digits still decrement `qweight`. PostgreSQL cannot tell which
+/// operand is larger from the leading digit alone, so it assumes the quotient is
 /// below one, which is what gives `70.0 / 70` twenty fractional digits rather
-/// than sixteen. And the two display scales are a floor *individually*, not
-/// summed: summing is the rule for multiplication, not division.
+/// than sixteen. The two display scales are also a floor *individually*, not a
+/// sum: the sum is the rule for multiplication, not division.
 fn select_div_scale(a: &BigDecimal, b: &BigDecimal) -> i64 {
     let (w1, f1) = nbase_weight_and_lead(a);
     let (w2, f2) = nbase_weight_and_lead(b);
@@ -799,8 +801,8 @@ fn select_div_scale(a: &BigDecimal, b: &BigDecimal) -> i64 {
 }
 
 /// The base-10000 weight of the leading digit, and that leading group's value
-/// (right-padded to four decimal digits) — the two inputs `select_div_scale`
-/// needs. Zero has weight 0 and leading group 0.
+/// (right-padded to four decimal digits). These are the two inputs
+/// `select_div_scale` needs. Zero has weight 0 and leading group 0.
 fn nbase_weight_and_lead(bd: &BigDecimal) -> (i64, u64) {
     let (mant, scale) = bd.as_bigint_and_exponent();
     let s = mant.to_string();
@@ -855,8 +857,8 @@ fn exp_rscale(arg: &BigDecimal) -> i64 {
 /// PostgreSQL `estimate_ln_dweight`: an estimate of the decimal weight of `ln(arg)`.
 ///
 /// Between 0.9 and 1.1 the logarithm is tiny and its weight is arbitrarily
-/// negative, so PostgreSQL estimates it from `ln(1 + x) ≈ x` — the weight of
-/// `arg − 1`. That branch is what gives `ln(1.0000000001)` twenty-six fractional
+/// negative, so PostgreSQL estimates it from `ln(1 + x) ≈ x`, which is the
+/// weight of `arg − 1`. That branch gives `ln(1.0000000001)` twenty-six fractional
 /// digits instead of the sixteen a non-negative estimate would allow.
 fn estimate_ln_dweight(arg: &BigDecimal) -> i64 {
     let near_one = |bound: &str| parse_finite(bound).expect("a literal bound parses");
@@ -923,7 +925,7 @@ pub fn from_i64(n: i64) -> NumericValue {
     NumericValue::Finite(BigDecimal::from(n))
 }
 
-/// `float8 → numeric` via the float's shortest round-tripping text (PostgreSQL
+/// `float8 → numeric` through the float's shortest round-tripping text (PostgreSQL
 /// `float8_numeric`), so `0.1::float8::numeric` is `0.1`, not the exact binary
 /// expansion. A non-finite float maps to the matching numeric special
 /// (PostgreSQL 14+ `float8_numeric`).
@@ -940,8 +942,8 @@ pub fn from_f64(f: f64) -> NumericValue {
 }
 
 /// `float4 → numeric` (PostgreSQL `float4_numeric`), which converts through
-/// `snprintf("%.*g", FLT_DIG, val)` — **six** significant digits, not the
-/// shortest round-tripping text `float4out` emits. That is why
+/// `snprintf("%.*g", FLT_DIG, val)`, which is **six** significant digits, not
+/// the shortest round-tripping text `float4out` emits. That is why
 /// `16777216::float4::numeric` is `16777200` and `3.4028235e38::float4::numeric`
 /// is `340282000000000000000000000000000000000`. A non-finite float maps to the
 /// matching numeric special.
@@ -996,7 +998,7 @@ pub fn to_f64(value: &NumericValue) -> f64 {
 /// an overflow is 22003 ("numeric field overflow").
 ///
 /// PostgreSQL's `apply_typmod_special` accepts `NaN` under ANY typmod (it has no
-/// digits to overflow) but rejects `±Infinity` with 22003 — so a `numeric(4,4)`
+/// digits to overflow) but rejects `±Infinity` with 22003, so a `numeric(4,4)`
 /// column stores `NaN` and refuses `Inf`.
 pub fn apply_typmod(value: &NumericValue, tm: Typmod) -> Result<NumericValue, TypeError> {
     let bd = match value {
@@ -1056,8 +1058,9 @@ enum Anchor {
 /// The sign-handling mode selected by the template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SignMode {
-    /// No explicit sign pattern: PostgreSQL reserves ONE leading column — a blank
-    /// for a non-negative value, `-` for a negative one. `FM` strips that blank.
+    /// No explicit sign pattern: PostgreSQL reserves ONE leading column, a
+    /// blank for a non-negative value and `-` for a negative one. `FM` strips
+    /// that blank.
     Default,
     /// `S`: sign ANCHORED to the number (it floats right up against the first/last
     /// printed digit, consuming a leading/trailing blank), always `-` or `+`. PG
@@ -1090,8 +1093,8 @@ struct NumDesc {
     int_zero: Vec<bool>,
     /// Group-separator positions: the index (0-based, from the LEFT of the integer
     /// digit run) AFTER which a separator is emitted. PG emits the separator
-    /// BETWEEN the digit at `idx-1` and `idx`; we store the count of digits to the
-    /// left of each separator.
+    /// BETWEEN the digit at `idx-1` and `idx`; this field holds the count of
+    /// digits to the left of each separator.
     group_before: Vec<usize>,
     /// Does the template contain a decimal point at all?
     has_point: bool,
@@ -1273,10 +1276,11 @@ fn matches_at(chars: &[char], i: usize, pat: &str) -> bool {
 /// per the PostgreSQL numeric template. See the SP38 spec §1.2 for the in-scope
 /// pattern set. Returns text; on integer-part overflow the field is `#`-filled.
 ///
-/// PostgreSQL's `to_char(numeric, text)` is extremely lenient — it never raises an
-/// error for a malformed template; an unsupported character is emitted literally
-/// and an oversized integer part is `#`-filled. So this function only returns a
-/// `Result` to match the engine signature contract; in practice it is always `Ok`.
+/// PostgreSQL's `to_char(numeric, text)` is extremely lenient. It never raises
+/// an error for a malformed template; it emits an unsupported character
+/// literally and `#`-fills an oversized integer part. This function therefore
+/// returns a `Result` only to match the engine signature contract; in practice
+/// it is always `Ok`.
 pub fn format_numeric(template: &str, value: &NumericValue) -> Result<String, TypeError> {
     let desc = parse_num_template(template);
     let value = match value.as_finite() {
@@ -1337,9 +1341,9 @@ pub fn format_numeric(template: &str, value: &NumericValue) -> Result<String, Ty
 /// like a run of integer digits: it fits (`to_char('NaN','999')` → `' NaN'`,
 /// `to_char('Infinity','99999999')` → `' Infinity'`), or it `#`-overflows
 /// (`to_char('Infinity','999')` → `' ###'`). The decimal point and the
-/// fractional positions are dropped when it fits — `numeric_out` emitted no
-/// `.` for the consumer to place (`to_char('NaN','999.99')` → `' NaN'`) — but
-/// they are `#`-filled like any other position when it overflows
+/// fractional positions drop when it fits, because `numeric_out` emitted no
+/// `.` for the consumer to place (`to_char('NaN','999.99')` → `' NaN'`). They
+/// are `#`-filled like any other position when it overflows
 /// (`to_char('Infinity','FM999.999')` → `'###.###'`). All oracle-confirmed
 /// against PostgreSQL 18.4.
 fn format_special(desc: &NumDesc, value: &NumericValue) -> Result<String, TypeError> {
@@ -1378,7 +1382,7 @@ fn format_special(desc: &NumDesc, value: &NumericValue) -> Result<String, TypeEr
     Ok(decorate(&pointless, core, negative, &unused))
 }
 
-/// The `#`-filled overflow CORE — the digit grid only. PG `#`-fills every digit
+/// The `#`-filled overflow CORE: the digit grid only. PG `#`-fills every digit
 /// position (a `9` and a `0` alike), renders each group separator as its literal
 /// char (there is always a `#` to its left), and places the decimal point; the
 /// sign / currency decoration is applied by `decorate`, NOT `#`-filled (oracle-
@@ -1502,7 +1506,7 @@ fn lay_out_digits(desc: &NumDesc, int_digits: &str, frac_digits: &str) -> String
 ///
 /// Sign placement follows PG's two distinct behaviors:
 ///  * The DEFAULT sign and `MI`/`PL`/`SG` occupy a FIXED column at the far left
-///    (or right) of the field — the digits do NOT move toward the sign.
+///    (or right) of the field, and the digits do NOT move toward the sign.
 ///    e.g. `to_char(-12,'MI9999')` → `'-  12'`.
 ///  * `S` is ANCHORED: the sign floats right up against the number, consuming the
 ///    blank immediately adjacent to the first/last significant digit.
@@ -1777,7 +1781,7 @@ fn bf_exp(x: &DBig, _prec: usize) -> DBig {
 }
 
 /// `ln(x)` at `prec` significant digits; `None` for `x <= 0`.
-/// `DBig::ln` panics on non-positive input, so we guard first.
+/// `DBig::ln` panics on non-positive input, so this function guards first.
 fn bf_ln(x: &DBig, _prec: usize) -> Option<DBig> {
     // Use comparison to DBig::ZERO: PartialOrd is implemented for DBig.
     // is_zero() is on Repr, so check sign via comparison.
@@ -1788,7 +1792,8 @@ fn bf_ln(x: &DBig, _prec: usize) -> Option<DBig> {
 }
 
 /// `sqrt(x)` at `prec` significant digits; `None` for `x < 0`.
-/// `DBig::sqrt` (via the `SquareRoot` trait) panics on negative input, so we guard first.
+/// `DBig::sqrt` (through the `SquareRoot` trait) panics on negative input, so
+/// this function guards first.
 fn bf_sqrt(x: &DBig, _prec: usize) -> Option<DBig> {
     if *x < DBig::ZERO {
         return None;
@@ -1797,7 +1802,7 @@ fn bf_sqrt(x: &DBig, _prec: usize) -> Option<DBig> {
 }
 
 /// `pow(base, exp)` at `prec` significant digits; `None` for non-positive base.
-/// `DBig::powf` panics on non-positive base, so we guard first.
+/// `DBig::powf` panics on non-positive base, so this function guards first.
 fn bf_powf(base: &DBig, exp: &DBig, _prec: usize) -> Option<DBig> {
     if *base <= DBig::ZERO {
         return None;
@@ -1811,7 +1816,7 @@ fn bf_powf(base: &DBig, exp: &DBig, _prec: usize) -> Option<DBig> {
 
 /// Significant-digit precision for the dashu computation: cover the result's
 /// integer digits + the requested fractional rscale + a guard margin. Saturating
-/// (so a degenerate caller can't panic) and capped — callers bound the magnitude
+/// (so a degenerate caller cannot panic) and capped. Callers bound the magnitude
 /// up front (`MAX_WEIGHT`), so this cap is only defense-in-depth.
 fn transc_prec(result_dweight: i64, rscale: i64) -> usize {
     result_dweight
@@ -1830,14 +1835,14 @@ fn finish_transc(value_text: &str, rscale: i64) -> BigDecimal {
     canonical(bd.with_scale_round(rscale, RoundingMode::HalfUp))
 }
 
-/// 2201F — square root of a negative number.
+/// 2201F: square root of a negative number.
 fn err_sqrt_negative() -> TypeError {
     TypeError::Domain {
         sqlstate: "2201F",
         message: "cannot take square root of a negative number",
     }
 }
-/// 2201E — logarithm of zero. PostgreSQL distinguishes this from the negative
+/// 2201E: logarithm of zero. PostgreSQL distinguishes this from the negative
 /// case: `ln(0)` is "cannot take logarithm of zero", `ln(-1)` is "cannot take
 /// logarithm of a negative number".
 fn err_log_zero() -> TypeError {
@@ -1846,21 +1851,21 @@ fn err_log_zero() -> TypeError {
         message: "cannot take logarithm of zero",
     }
 }
-/// 2201E — logarithm of a negative number.
+/// 2201E: logarithm of a negative number.
 fn err_log_negative() -> TypeError {
     TypeError::Domain {
         sqlstate: "2201E",
         message: "cannot take logarithm of a negative number",
     }
 }
-/// 2201F — zero raised to a negative power.
+/// 2201F: zero raised to a negative power.
 fn err_zero_neg_power() -> TypeError {
     TypeError::Domain {
         sqlstate: "2201F",
         message: "zero raised to a negative power is undefined",
     }
 }
-/// 2201F — a negative base raised to a non-integer power (complex result).
+/// 2201F: a negative base raised to a non-integer power (complex result).
 fn err_neg_noninteger_power() -> TypeError {
     TypeError::Domain {
         sqlstate: "2201F",
@@ -1913,7 +1918,7 @@ fn log_domain_error(arg: &NumericValue) -> Option<TypeError> {
 
 /// numeric ln; `Err(2201E)` for arg <= 0 (including `-Infinity`). `ln(NaN)` is
 /// `NaN` and `ln(Infinity)` is `Infinity`. (ln of an in-format value never
-/// overflows — its magnitude is at most ~`ln(10)·weight`.)
+/// overflows, because its magnitude is at most ~`ln(10)·weight`.)
 pub fn num_ln(arg: &NumericValue) -> Result<NumericValue, TypeError> {
     if let Some(err) = log_domain_error(arg) {
         return Err(err);
@@ -1988,7 +1993,7 @@ pub fn num_exp(arg: &NumericValue) -> Result<NumericValue, TypeError> {
 /// PostgreSQL follows POSIX `pow(3)` for the specials, which is why the two
 /// `NaN` rules below are asymmetric: `NaN ^ 0` and `1 ^ NaN` are both `1`, and
 /// every other `NaN` combination is `NaN`. An infinite operand then resolves by
-/// magnitude — `|base| > 1` diverges under `+Infinity` and vanishes under
+/// magnitude: `|base| > 1` diverges under `+Infinity` and vanishes under
 /// `-Infinity`, `|base| = 1` is `1`, and a `-Infinity` base still needs an
 /// integer exponent. All arms oracle-confirmed against PostgreSQL 18.4.
 pub fn num_power(base: &NumericValue, exp: &NumericValue) -> Result<NumericValue, TypeError> {
@@ -2150,8 +2155,8 @@ fn finite_power(base: &BigDecimal, exp: &BigDecimal) -> Result<BigDecimal, TypeE
 /// The estimate is deliberately LOW precision, because PostgreSQL's is: it takes
 /// `ln(|base|)` to about eight significant digits, multiplies by the exponent at
 /// that same scale, converts to a decimal weight, and truncates toward zero.
-/// Estimating exactly lands on the other side of an integer boundary whenever the
-/// true weight is a whole number — `0.0001 ^ 2.25` weighs exactly -9, and
+/// An exact estimate lands on the other side of an integer boundary whenever the
+/// true weight is a whole number. `0.0001 ^ 2.25` weighs exactly -9, and
 /// PostgreSQL's rounded intermediate makes that -8.999999988, one display digit
 /// fewer.
 fn estimated_power_weight(base: &BigDecimal, exp: f64) -> i64 {
@@ -2186,22 +2191,22 @@ fn power_rscale(rweight: i64, base: &BigDecimal, exp: &BigDecimal) -> i64 {
         .clamp(0, TRANSC_MAX_SCALE)
 }
 
-/// PostgreSQL `numeric_stddev_internal` — the shared finalizer behind
+/// PostgreSQL `numeric_stddev_internal`: the shared finalizer behind
 /// `var_pop`, `var_samp`, `variance`, `stddev`, `stddev_pop` and `stddev_samp`
 /// over a `numeric` input.
 ///
 /// The running state is the row count `n`, `sum` = Σx and `sum2` = Σx². The
 /// variance is `(n·Σx² − (Σx)²) / d` with `d = n²` (population) or `n·(n−1)`
 /// (sample), computed at [`select_div_scale`]'s display scale, and the standard
-/// deviation is that value's square root *at the same scale* — which is why
-/// this cannot be composed from the public `div` and `num_sqrt`, whose scales
-/// are chosen independently.
+/// deviation is that value's square root *at the same scale*. That is why this
+/// cannot be composed from the public `div` and `num_sqrt`, whose scales are
+/// chosen independently.
 ///
 /// `None` is SQL NULL: the population forms are undefined for zero rows and the
 /// sample forms for fewer than two. A numerator driven negative by rounding is
 /// clamped to zero, as PostgreSQL clamps it.
 ///
-/// A special value anywhere in the input makes the whole result `NaN` —
+/// A special value anywhere in the input makes the whole result `NaN`.
 /// PostgreSQL's `NumericAggState` counts `NaN`s and infinities separately from
 /// the running sums and short-circuits the finalizer on either.
 #[must_use]
@@ -2253,9 +2258,10 @@ mod tests {
     }
 
     /// The display scale of a quotient, a power, and a logarithm is part of the
-    /// answer — `70.0 / 70` is `1.00000000000000000000`, not `1.0000000000000000`
-    /// — so a scale that is off by even one digit is a wrong answer that returns
-    /// cleanly. Every expectation is a PostgreSQL 18.4 value.
+    /// answer. `70.0 / 70` is `1.00000000000000000000`, not
+    /// `1.0000000000000000`, so a scale that is off by even one digit is a wrong
+    /// answer that returns cleanly. Every expectation is a PostgreSQL 18.4
+    /// value.
     #[test]
     fn transcendental_and_division_display_scales_match_postgres() {
         use assert2::assert;

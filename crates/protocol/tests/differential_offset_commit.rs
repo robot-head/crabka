@@ -29,11 +29,11 @@ fn rust_decode<T: for<'a> Decode<'a>>(bytes: &[u8], version: i16) -> T {
 /// - `generationIdOrMemberEpoch`: int32 v1+, default "-1"  → Rust default -1
 /// - `memberId`: string v1+, no explicit default → ""
 /// - `groupInstanceId`: nullable string v7+, default "null" → null
-/// - `retentionTimeMs`: int64 v2-4, default "-1" → -1 (only present v2-4)
+/// - `retentionTimeMs`: int64 v2-4, default "-1" → -1, present only at v2-4
 /// - `topics`: array v0+ → []
 ///
-/// The JVM `JsonConverter` requires all fields present in the schema for that version to
-/// be explicitly included; omitting a required field causes an error.
+/// The JVM `JsonConverter` requires you to include every field that the schema
+/// has at that version. If you omit a required field, the converter fails.
 fn request_oracle_value(version: i16) -> serde_json::Value {
     match version {
         2..=4 => json!({

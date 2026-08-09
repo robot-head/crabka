@@ -1,8 +1,8 @@
 //! Protocol-level diagnostic carrying a SQLSTATE, mapped to `ErrorResponse` or
 //! `NoticeResponse` according to its severity.
 
-/// SQLSTATE codes used by the wire layer. Values must match real Postgres —
-/// the conformance harness diffs error codes against the oracle.
+/// SQLSTATE codes used by the wire layer. Values must match real Postgres,
+/// because the conformance harness diffs error codes against the oracle.
 pub mod sqlstate {
     pub const PROTOCOL_VIOLATION: &str = "08P01";
     pub const FEATURE_NOT_SUPPORTED: &str = "0A000";
@@ -30,9 +30,10 @@ pub enum Severity {
     Notice,
     /// Warning; does not abort the query.
     Warning,
-    /// Aborts the current query/transaction; session continues.
+    /// Aborts the current query or transaction. The session continues.
     Error,
-    /// Aborts the session; connection is closed after sending.
+    /// Aborts the session. The server closes the connection after it sends
+    /// the message.
     Fatal,
 }
 

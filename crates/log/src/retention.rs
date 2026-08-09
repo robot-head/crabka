@@ -1,5 +1,5 @@
-//! Retention applied by `Log::tick`. Free functions so the policy is
-//! testable in isolation from `Log`'s mutable state.
+//! Retention that `Log::tick` applies. These are free functions, so tests can
+//! check the policy apart from `Log`'s mutable state.
 
 use std::{
     path::Path,

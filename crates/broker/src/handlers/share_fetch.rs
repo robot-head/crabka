@@ -1,18 +1,23 @@
-//! `ShareFetch` (`api_key` 78) — KIP-932.
+//! `ShareFetch` (`api_key` 78), from KIP-932.
 //!
-//! Drives the per-`(group, topic, partition)` [`AcquisitionState`] machine
-//! owned by [`crate::share_partition::manager::SharePartitionLeaderManager`]:
-//! validate the share session, check membership, then for every requested
-//! partition this broker leads — apply any piggybacked acknowledgements, expire
-//! stale locks, materialize newly produced records up to the high watermark,
-//! acquire a batch of `Available` records under a lock, and read the acquired
-//! offset range's verbatim bytes from the log. If nothing was acquired and the
-//! client asked to wait, long-poll on the partitions' append/HW-advance
-//! notifies and retry the acquire pass once.
+//! This handler drives the per-`(group, topic, partition)`
+//! [`AcquisitionState`] machine that
+//! [`crate::share_partition::manager::SharePartitionLeaderManager`] owns. It
+//! validates the share session and checks membership. Then, for every
+//! requested partition that this broker leads, it applies any piggybacked
+//! acknowledgement, expires stale locks, materializes newly produced records
+//! up to the high watermark, acquires a batch of `Available` records under a
+//! lock, and reads the verbatim bytes of the acquired offset range from the
+//! log.
 //!
-//! Intercepted inline in `network::dispatch` (not the `&Broker`-only handler
-//! table) so the handler receives the per-connection principal + peer
-//! `SocketAddr` for the per-topic `Read` ACL gate.
+//! When it acquired nothing and the client asked to wait, it long-polls on the
+//! partitions' append and HW-advance notifies, and runs the acquire pass once
+//! more.
+//!
+//! `network::dispatch` intercepts this request inline, not through the
+//! `&Broker`-only handler table, so that the handler receives the
+//! per-connection principal and the peer `SocketAddr` for the per-topic `Read`
+//! ACL gate.
 
 use std::{
     sync::Arc,
@@ -47,23 +52,23 @@ use crate::{
 
 type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
-/// One piggybacked acknowledgement batch:
+/// One piggybacked acknowledgement batch, that is
 /// `(first_offset, last_offset, per-offset acknowledge_types)`.
 type AckBatch = (i64, i64, Vec<i8>);
 
-/// One resolved `(topic, partition)` request row, carried through the acquire
-/// pass(es) so the response can be assembled once at the end.
+/// One resolved `(topic, partition)` request row. It travels through the
+/// acquire passes, so the handler assembles the response once at the end.
 struct PendingPartition {
     topic_id: uuid::Uuid,
     topic_name: Option<String>,
     partition_index: i32,
     partition_max_bytes: i32,
-    /// `Some` only when this broker leads the partition and the topic was not
-    /// ACL-denied — i.e. when an acquire pass should run. `None` rows already
-    /// have their `out` fully populated (error rows).
+    /// `Some` only when this broker leads the partition and the ACL check
+    /// allowed the topic, that is when an acquire pass should run. A `None` row
+    /// already has a complete `out`, because it is an error row.
     leadable: bool,
-    /// Acknowledgement batches piggybacked on this fetch (applied before the
-    /// acquire pass).
+    /// Acknowledgement batches piggybacked on this fetch. The handler applies
+    /// them before the acquire pass.
     ack_batches: Vec<AckBatch>,
     out: PartitionData,
 }
@@ -283,8 +288,8 @@ async fn member_is_valid(broker: &Broker, group: &str, member: &str) -> bool {
     }
 }
 
-/// Collect the piggybacked acknowledgement batches off a request partition into
-/// `(first, last, acknowledge_types)` triples.
+/// Collects the piggybacked acknowledgement batches from a request partition
+/// into `(first, last, acknowledge_types)` triples.
 fn collect_ack_batches(fp: &FetchPartition) -> Vec<AckBatch> {
     fp.acknowledgement_batches
         .iter()
@@ -292,14 +297,18 @@ fn collect_ack_batches(fp: &FetchPartition) -> Vec<AckBatch> {
         .collect()
 }
 
-/// Run one acquire pass over the leadable pending partitions. When
-/// `apply_acks` is true, the piggybacked acknowledgement batches are applied
-/// first (setting `acknowledge_error_code`). When `is_renew_ack` is set, those
-/// batches RENEW the acquisition lock instead of acknowledging (KIP-932). Under
-/// a `ReadCommitted` isolation level the materialize/read window is clamped to
-/// the partition's last stable offset so uncommitted records are never
-/// acquired. Returns the total number of offsets acquired across all partitions
-/// in this pass.
+/// Runs one acquire pass over the pending partitions that this broker can
+/// lead.
+///
+/// When `apply_acks` is true, this function applies the piggybacked
+/// acknowledgement batches first, and sets `acknowledge_error_code`. When
+/// `is_renew_ack` is set, those batches RENEW the acquisition lock instead of
+/// acknowledging it, per KIP-932.
+///
+/// Under a `ReadCommitted` isolation level, this function clamps the
+/// materialize and read window to the partition's last stable offset, so it
+/// never acquires an uncommitted record. It returns the total number of
+/// offsets that it acquired across all partitions in this pass.
 #[derive(Clone, Copy)]
 struct AcquireContext<'a> {
     broker: &'a Broker,
@@ -471,11 +480,13 @@ async fn populate_acquired_response(
         .sum())
 }
 
-/// Apply a single acknowledgement batch to the state machine. Each
-/// `acknowledge_type` entry maps to one offset starting at `first`; runs of the
-/// same type are coalesced into one `acknowledge` call. An empty
-/// `acknowledge_types` falls back to applying `Accept` across `[first, last]`
-/// (KIP-932's per-batch shorthand). Returns the first error code encountered.
+/// Applies one acknowledgement batch to the state machine.
+///
+/// Each `acknowledge_type` entry maps to one offset, starting at `first`. This
+/// function merges a run of the same type into one `acknowledge` call. An
+/// empty `acknowledge_types` applies `Accept` across `[first, last]`, which is
+/// KIP-932's per-batch shorthand. It returns the first error code that it
+/// met.
 pub(crate) fn apply_one_ack(
     st: &mut crate::share_partition::state::AcquisitionState,
     member: &str,
@@ -514,9 +525,9 @@ pub(crate) fn apply_one_ack(
     result
 }
 
-/// Read the verbatim on-disk batch bytes for `[fetch_offset, limit_offset)`
-/// via `Log::read_raw`, off the reactor thread. Returns `None` when nothing was
-/// read.
+/// Reads the verbatim on-disk batch bytes for `[fetch_offset, limit_offset)`
+/// through `Log::read_raw`, off the reactor thread. It returns `None` when it
+/// read nothing.
 async fn read_acquired_bytes(
     part: &crate::partition::Partition,
     fetch_offset: Offset,
@@ -547,8 +558,9 @@ async fn read_acquired_bytes(
     }
 }
 
-/// Park on the leadable partitions' append + HW-advance notifies with a single
-/// timeout. Mirrors `fetch::long_poll_then_reread`'s wait construction.
+/// Parks on the append and HW-advance notifies of the partitions that this
+/// broker can lead, under a single timeout. It mirrors the wait construction
+/// in `fetch::long_poll_then_reread`.
 async fn long_poll(broker: &Broker, pending: &[PendingPartition], max_wait_ms: i32) {
     let mut notifies: Vec<Arc<Notify>> = Vec::new();
     for p in pending {
@@ -575,8 +587,9 @@ async fn long_poll(broker: &Broker, pending: &[PendingPartition], max_wait_ms: i
     let _ = tokio::time::timeout(max_wait, futures_util::future::select_all(waits)).await;
 }
 
-/// Group the resolved pending partitions back into per-topic response entries,
-/// preserving the order topics first appeared in the request.
+/// Groups the resolved pending partitions back into per-topic response
+/// entries. It keeps the order in which the topics first appeared in the
+/// request.
 fn group_responses(pending: Vec<PendingPartition>) -> Vec<ShareFetchableTopicResponse> {
     let mut order: Vec<uuid::Uuid> = Vec::new();
     let mut by_topic: std::collections::HashMap<uuid::Uuid, Vec<PartitionData>> =
@@ -597,8 +610,9 @@ fn group_responses(pending: Vec<PendingPartition>) -> Vec<ShareFetchableTopicRes
         .collect()
 }
 
-/// Encode a top-level-error `ShareFetchResponse` (feature-gate, session, or
-/// membership failure) with no per-partition rows.
+/// Encodes a `ShareFetchResponse` that carries a top-level error and no
+/// per-partition row. The error is a feature-gate, session, or membership
+/// failure.
 fn encode_error_response(
     version: i16,
     error_code: i16,

@@ -2,11 +2,11 @@
 //! representative request/response messages.
 //!
 //! These benches cover the low-level wire primitives (varint, fixed-width
-//! integers, strings, bytes, arrays, UUIDs, tagged fields) and a curated set
+//! integers, strings, bytes, arrays, UUIDs, tagged fields) and a selected set
 //! of the highest-traffic Kafka messages (Produce, Fetch, Metadata,
 //! `ApiVersions`). They are intentionally short and free of allocation in the
-//! hot path so codspeed's instruction-count signal is dominated by the code
-//! under test.
+//! hot path, so the code under test dominates codspeed's instruction-count
+//! signal.
 
 use bytes::{Bytes, BytesMut};
 use crabka_compression::CompressionType;

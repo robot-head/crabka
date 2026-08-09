@@ -1,10 +1,11 @@
-//! Broker integration test: Interactive Queries against a live `KafkaStreams`.
+//! Broker integration test for Interactive Queries against a live
+//! `KafkaStreams`.
 //!
-//! Boots an in-process broker, runs the stateful counting topology, produces
-//! `["a","a","b"]`, then reads the materialized `counts` KV store back through
-//! the public `KafkaStreams::key_value_store` interactive-query interface — the
-//! same path an out-of-topology caller uses. Also exercises the error surfaces
-//! (`StoreNotFound`, `WrongStoreKind`).
+//! The test boots an in-process broker, runs the stateful counting topology, and
+//! produces `["a","a","b"]`. It then reads the materialized `counts` KV store
+//! back through the public `KafkaStreams::key_value_store` interactive-query
+//! interface, which is the same path an out-of-topology caller uses. It also
+//! covers the error surfaces `StoreNotFound` and `WrongStoreKind`.
 
 use std::time::Duration;
 
@@ -71,7 +72,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 
 // ─── Counter processor (identical to state_store_integration) ──────────────────
 
-/// Counts per-value occurrences and forwards `(value_as_key, count)`.
+/// Counts the occurrences of each value and forwards `(value_as_key, count)`.
 struct Counter;
 
 #[async_trait::async_trait]

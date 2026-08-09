@@ -1,19 +1,19 @@
 //! Protobuf format: serialize / deserialize / validate.
 //!
-//! Implementation uses [`protox_parse`] for schema parsing (`.proto` text →
-//! [`prost_reflect::DescriptorPool`]) and [`prost_reflect::DynamicMessage`]
-//! for JSON↔binary transcoding.
+//! This module uses [`protox_parse`] to parse a schema, which turns `.proto`
+//! text into a [`prost_reflect::DescriptorPool`]. It uses
+//! [`prost_reflect::DynamicMessage`] to transcode between JSON and binary.
 //!
-//! After Confluent framing the wire format carries a message-index prefix
-//! (handled by [`crate::schema::wire::strip_proto_index`] /
-//! [`crate::schema::wire::prepend_proto_index`]) before the raw proto bytes.
+//! After Confluent framing, the wire format carries a message-index prefix
+//! before the raw proto bytes. [`crate::schema::wire::strip_proto_index`] and
+//! [`crate::schema::wire::prepend_proto_index`] handle that prefix.
 //!
 //! # Proto3 JSON encoding note
 //!
 //! The [proto3 JSON mapping](https://protobuf.dev/programming-guides/proto3/#json)
-//! encodes `int64`/`uint64` fields as **decimal strings** (e.g. `"1"` not `1`)
-//! to avoid JavaScript precision loss.  Callers comparing deserialized JSON
-//! output must account for this.
+//! encodes `int64` and `uint64` fields as decimal strings, for example `"1"`
+//! and not `1`, to avoid JavaScript precision loss. A caller that compares
+//! deserialized JSON output must allow for this.
 
 use bytes::Bytes;
 use prost::Message as _;
@@ -25,9 +25,9 @@ use serde::Serialize as _;
 use crate::codec::CodecError;
 
 /// Build a [`DescriptorPool`] from raw `.proto` source text and return the
-/// descriptor for the **first** message type defined in it.
+/// descriptor for the **first** message type in it.
 ///
-/// The schema is expected to be self-contained (no external imports).
+/// The schema must be self-contained, with no external imports.
 fn first_message_desc(schema: &str) -> Result<MessageDescriptor, CodecError> {
     let fdp = protox_parse::parse("schema.proto", schema)
         .map_err(|e| CodecError::Serialize(format!("protobuf parse error: {e}")))?;
@@ -40,11 +40,11 @@ fn first_message_desc(schema: &str) -> Result<MessageDescriptor, CodecError> {
         .ok_or_else(|| CodecError::Serialize("no message type defined in schema".into()))
 }
 
-/// Serialize `json` (a JSON-encoded proto value) into Protobuf binary using
-/// the `.proto` schema in `schema`.
+/// Serialize `json`, a JSON-encoded proto value, into Protobuf binary with the
+/// `.proto` schema in `schema`.
 ///
-/// Uses the first message type in the schema (message-index 0, matching the
-/// Confluent wire default of `[0]`).
+/// This function uses the first message type in the schema, message-index 0,
+/// which matches the Confluent wire default of `[0]`.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
@@ -60,10 +60,10 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
     Ok(Bytes::from(dynmsg.encode_to_vec()))
 }
 
-/// Deserialize Protobuf binary `payload` back to JSON bytes using the `.proto`
+/// Deserialize Protobuf binary `payload` back to JSON bytes with the `.proto`
 /// schema in `schema`.
 ///
-/// Uses the first message type in the schema (message-index 0).
+/// This function uses the first message type in the schema, message-index 0.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
@@ -81,10 +81,10 @@ pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
     Ok(Bytes::from(buf))
 }
 
-/// Validate that `json` round-trips cleanly through the Protobuf schema
-/// (i.e. `json -> proto bytes` succeeds without error).
+/// Validate that `json` round-trips through the Protobuf schema, that is, that
+/// `json -> proto bytes` succeeds without an error.
 ///
-/// Returns `Ok(())` when the JSON parses cleanly against the schema; returns
+/// Returns `Ok(())` when the JSON parses against the schema. Returns
 /// [`CodecError::Validate`] on any parse or encoding failure.
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.

@@ -1,14 +1,15 @@
 //! Prometheus metrics for the metrics-subsystem query (querier) role.
 //!
-//! Mirrors the broker's `metrics` pattern: a shared `Registry` wrapped in
-//! `Arc<Mutex<…>>` plus a cheaply-`Clone` bundle of metric handles that the
-//! query handlers clone and increment directly. Registry prefix is
-//! `crabka_metrics`; `prometheus-client` auto-appends `_total` to counters at
-//! encode time, so counter names are registered without the suffix.
+//! This module mirrors the `metrics` pattern of the broker: a shared `Registry`
+//! in an `Arc<Mutex<…>>`, and a bundle of metric handles that is cheap to
+//! `Clone`. The query handlers clone the bundle and increment the handles
+//! directly. The registry prefix is `crabka_metrics`. `prometheus-client`
+//! appends `_total` to counters at encode time, so this module registers counter
+//! names without the suffix.
 //!
-//! This bundle is intentionally identical in shape to the ingest crate's
-//! (`crabka_metrics::metrics`) — both processes export under the same
-//! `crabka_metrics` prefix, but live in separate binaries.
+//! This bundle has the same shape as the bundle of the ingest crate
+//! (`crabka_metrics::metrics`). Both processes export under the same
+//! `crabka_metrics` prefix, but they run in separate binaries.
 
 use std::sync::Arc;
 
@@ -20,9 +21,9 @@ use prometheus_client::{
 };
 use tokio::sync::Mutex;
 
-/// Shared registry owning every metric this process emits. Wrapped in
-/// `Arc<Mutex<…>>` because `prometheus-client` requires `&mut Registry` to
-/// register and the exporter needs shared read access at scrape time.
+/// Shared registry that owns every metric this process emits. It is in an
+/// `Arc<Mutex<…>>`, because `prometheus-client` needs `&mut Registry` to
+/// register a metric and the exporter needs shared read access at scrape time.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
 /// Request-outcome label: `status="ok"` or `status="error"`.
@@ -44,22 +45,25 @@ pub struct RouteLabel {
     pub route: String,
 }
 
-/// Query-shape label: `type="instant"` or `type="range"`. Distinguishes the
-/// engine-eval latency histogram and the eval-error counter by the kind of
-/// `PromQL` query, independent of the HTTP route (both `query` and, e.g., a
-/// remote-read fanned instant query share `type="instant"`).
+/// Query-shape label: `type="instant"` or `type="range"`.
 ///
-/// The field is the raw identifier `r#type`: the `EncodeLabelSet` derive maps
-/// keyword-raw idents back to their bare form, so this encodes as the label key
-/// `type` (this crate's derive supports only `flatten`, not a `rename` attr).
+/// The label separates the engine-eval latency histogram and the eval-error
+/// counter by the kind of `PromQL` query, and not by the HTTP route. For
+/// example, `query` and a remote-read fanned instant query both have
+/// `type="instant"`.
+///
+/// The field is the raw identifier `r#type`. The `EncodeLabelSet` derive maps a
+/// keyword-raw ident back to its bare form, so the field encodes as the label
+/// key `type`. The derive of this crate supports only `flatten`, not a `rename`
+/// attribute.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct QueryTypeLabel {
     pub r#type: String,
 }
 
-/// Cheaply-clonable bundle of metric handles. Construct once with
-/// [`ServiceMetrics::new`]; hand out clones (each a single `Arc::clone`) to the
-/// handlers that emit.
+/// Bundle of metric handles that is cheap to clone. Build it one time with
+/// [`ServiceMetrics::new`]. Give a clone, one `Arc::clone` each, to every
+/// handler that emits a metric.
 #[derive(Clone)]
 pub struct ServiceMetrics {
     pub registry: SharedRegistry,
@@ -72,9 +76,10 @@ pub struct ServiceMetrics {
     // QUERY (querier) role.
     pub query_requests: Family<RouteStatusLabel, Counter>,
     pub query_duration: Family<RouteLabel, Histogram>,
-    /// Pure PromQL-engine evaluation latency (parse + plan + execute), labelled
-    /// by query `type` (`instant`|`range`). Narrower than `query_duration`,
-    /// which spans the whole HTTP handler (param decode, permit wait, encode).
+    /// PromQL-engine evaluation latency (parse + plan + execute), labelled by
+    /// query `type` (`instant`|`range`). This scope is narrower than
+    /// `query_duration`, which covers the whole HTTP handler: param decode,
+    /// permit wait, and encode.
     pub query_eval_duration: Family<QueryTypeLabel, Histogram>,
     /// Cumulative engine-eval failures, labelled by query `type`.
     pub query_errors: Family<QueryTypeLabel, Counter>,
@@ -83,7 +88,7 @@ pub struct ServiceMetrics {
 }
 
 impl ServiceMetrics {
-    /// Build a fresh registry, register every metric, and return the bundle.
+    /// Builds a new registry, registers every metric, and returns the bundle.
     #[must_use]
     pub fn new() -> Self {
         let mut registry = Registry::with_prefix("crabka_metrics");
@@ -173,9 +178,11 @@ impl ServiceMetrics {
         }
     }
 
-    /// Record one ingest request outcome. `wal_append_failures` is NOT touched
-    /// here — increment it separately at the actual WAL/produce error site so a
-    /// 4xx client/validation error does not inflate the WAL-failure counter.
+    /// Records one ingest request outcome.
+    ///
+    /// This method does NOT touch `wal_append_failures`. Increment that counter
+    /// at the WAL or produce error site, so that a 4xx client or validation
+    /// error does not inflate the WAL-failure counter.
     pub fn record_ingest(&self, ok: bool, size: ByteSize, items: u64, latency: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
@@ -190,7 +197,7 @@ impl ServiceMetrics {
         self.ingest_duration.observe(latency.secs_f64());
     }
 
-    /// Record one query request outcome on `route` with its latency.
+    /// Records one query request outcome on `route` with its latency.
     pub fn record_query(&self, route: &str, ok: bool, latency: Time) {
         let status = if ok { "ok" } else { "error" };
         self.query_requests
@@ -206,10 +213,11 @@ impl ServiceMetrics {
             .observe(latency.secs_f64());
     }
 
-    /// Record one `PromQL` engine evaluation: its `latency` under
-    /// `query_eval_duration{type}` and, when `ok` is false, a
-    /// `query_errors{type}` increment. `query_type` is `"instant"` or
-    /// `"range"`.
+    /// Records one `PromQL` engine evaluation.
+    ///
+    /// This method observes `latency` under `query_eval_duration{type}`. When
+    /// `ok` is false, it also increments `query_errors{type}`. `query_type` is
+    /// `"instant"` or `"range"`.
     pub fn record_eval(&self, query_type: &str, ok: bool, latency: Time) {
         self.query_eval_duration
             .get_or_create(&QueryTypeLabel {
@@ -225,13 +233,14 @@ impl ServiceMetrics {
         }
     }
 
-    /// RAII-free in-flight tracking: bump `active_queries` on query entry.
+    /// Increments `active_queries` at query entry, without an RAII guard.
+    ///
     /// Pair every call with [`Self::query_finished`].
     pub fn query_started(&self) {
         self.active_queries.inc();
     }
 
-    /// Decrement `active_queries` on query exit. Pairs with
+    /// Decrements `active_queries` at query exit. Pairs with
     /// [`Self::query_started`].
     pub fn query_finished(&self) {
         self.active_queries.dec();
@@ -244,9 +253,10 @@ impl Default for ServiceMetrics {
     }
 }
 
-/// Build the `/metrics` exporter router. The admin server merges this with the
-/// pprof routes via `serve_admin_from_env_with`; do not merge `pprof_router`
-/// here.
+/// Builds the `/metrics` exporter router.
+///
+/// The admin server merges this router with the pprof routes through
+/// `serve_admin_from_env_with`. Do not merge `pprof_router` here.
 pub fn metrics_router(registry: SharedRegistry) -> axum::Router {
     axum::Router::new()
         .route("/metrics", axum::routing::get(export))

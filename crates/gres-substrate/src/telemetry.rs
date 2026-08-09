@@ -2,17 +2,17 @@
 //!
 //! Every span this crate emits carries the dedicated [`WAL_TARGET`] target, so
 //! a compute with no OTLP pipeline pays one disabled-callsite level check per
-//! commit and the stdout `fmt` layer never prints them. Only the OTLP filter
-//! (`crates/gres/src/telemetry.rs`) enables the target; the constant is
-//! duplicated there rather than shared because `crabka-gres` depends on this
-//! crate, so the dependency cannot run the other way.
+//! commit and the stdout `fmt` layer never prints them. Only the OTLP filter in
+//! `crates/gres/src/telemetry.rs` enables the target. The constant is
+//! duplicated there and not shared, because `crabka-gres` depends on this
+//! crate and the dependency cannot run the other way.
 //!
 //! # Zero cost when off
 //!
 //! A disabled callsite is a load and a branch, but the *field expressions still
 //! evaluate*. Builders here therefore take only already-available scalars and
-//! borrowed strings; anything that has to be computed (the encoded byte total
-//! on `pg.commit`, the elapsed gate wait) is guarded by
+//! borrowed strings. Any value that must be computed, such as the encoded byte
+//! total on `pg.commit` or the elapsed gate wait, is guarded by
 //! [`tracing::Span::is_disabled`] at the call site and set afterwards through
 //! [`tracing::Span::record`].
 //!
@@ -21,21 +21,21 @@
 //! `tracing-opentelemetry` maps the `otel.status_code` /
 //! `otel.status_description` fields onto the OpenTelemetry span status. Both
 //! are declared [`tracing::field::Empty`] at creation and set by
-//! [`record_error`], which is the only writer: a span that succeeds is left
-//! `Unset` rather than recorded as `"OK"`, matching the OpenTelemetry
+//! [`record_error`], which is the only writer. A span that succeeds is left
+//! `Unset` and not recorded as `"OK"`. This matches the OpenTelemetry
 //! convention that `Ok` is reserved for an explicit application-level
 //! assertion.
 //!
 //! The description field is `otel.status_description`, **not**
-//! `otel.status_message`: `tracing-opentelemetry` only recognises the former,
-//! and the latter silently lands as an ordinary span attribute with the status
-//! left message-less.
+//! `otel.status_message`. `tracing-opentelemetry` recognises only
+//! `otel.status_description`. It stores `otel.status_message` silently as an
+//! ordinary span attribute and leaves the status without a message.
 //!
 //! # Integer attributes
 //!
 //! OTLP has no unsigned integer attribute type, and `tracing-opentelemetry`
-//! renders a `u64`/`usize` field as a *string* — which a trace backend cannot
-//! compare or aggregate numerically. Every count here goes through
+//! renders a `u64`/`usize` field as a *string*. A trace backend cannot compare
+//! or aggregate a string numerically. Every count here goes through
 //! [`integer`] so it arrives as a real integer.
 
 use std::fmt::Display;
@@ -44,8 +44,10 @@ use tracing::{Span, field::Empty};
 
 use crate::writer::WriterGeneration;
 
-/// `tracing` target carrying the substrate WAL spans. Kept off the `fmt`
-/// layer's default filter so WAL spans only materialise for OTLP.
+/// `tracing` target that carries the substrate WAL spans.
+///
+/// This target stays off the `fmt` layer's default filter, so WAL spans
+/// materialise only for OTLP.
 pub const WAL_TARGET: &str = "crabka_gres_substrate::wal";
 
 /// Upper bound on the recorded `otel.status_description`, in bytes. A WAL error
@@ -56,8 +58,8 @@ const MAX_STATUS_MESSAGE_BYTES: usize = 512;
 /// Build the `pg.commit` span covering one engine commit: the group-commit
 /// gate wait, the WAL append, and the local apply.
 ///
-/// `pg.gate_wait_ms` is the wait for the commit permit alone — not the whole
-/// commit — which is what separates "the WAL is slow" from "this compute is
+/// `pg.gate_wait_ms` is the wait for the commit permit alone, not the whole
+/// commit. That field separates "the WAL is slow" from "this compute is
 /// serialising behind another writer". `pg.commit.frames`, `pg.commit.bytes`,
 /// `pg.journal_seq.first`, `pg.journal_seq.next`, and `pg.commit_ts` are only
 /// known once the batch has been chunked, so they are recorded later.
@@ -110,9 +112,9 @@ pub fn wal_append_span(topic: &str, generation: WriterGeneration, frames: usize)
 /// Build the `wal.chunk` span covering the split of one logical operation
 /// batch into monotone `GRW1` frames.
 ///
-/// `TRACE`, not `DEBUG`: chunking is pure CPU inside the enclosing
-/// `pg.commit`, and it is only interesting when a batch is being split by the
-/// frame-size limit.
+/// This span is `TRACE`, not `DEBUG`. Chunking is pure CPU inside the
+/// enclosing `pg.commit`, and it matters only when the frame-size limit splits
+/// a batch.
 #[must_use]
 pub fn chunk_span(ops: usize, first_journal_seq: u64) -> Span {
     tracing::trace_span!(
@@ -136,10 +138,12 @@ pub fn apply_span(ops: usize) -> Span {
     )
 }
 
-/// Mark `span` failed: OpenTelemetry status `Error`, with `error.type` as the
-/// low-cardinality discriminator and the rendered error as the status message.
+/// Mark `span` failed with OpenTelemetry status `Error`.
 ///
-/// There is deliberately no success counterpart — see the module docs.
+/// `error.type` carries the low-cardinality discriminator, and the rendered
+/// error becomes the status message.
+///
+/// There is deliberately no success counterpart. See the module docs.
 pub fn record_error(span: &Span, error_type: &str, message: &dyn Display) {
     if span.is_disabled() {
         return;
@@ -153,9 +157,10 @@ pub fn record_error(span: &Span, error_type: &str, message: &dyn Display) {
     );
 }
 
-/// Coerce a count into the widest integer type OTLP actually has. Saturating
-/// rather than fallible: a telemetry attribute must never be the thing that
-/// fails a commit.
+/// Coerce a count into the widest integer type that OTLP has.
+///
+/// The conversion saturates and cannot fail. A telemetry attribute must never
+/// fail a commit.
 #[must_use]
 pub fn integer<T: TryInto<i64>>(value: T) -> i64 {
     value.try_into().unwrap_or(i64::MAX)

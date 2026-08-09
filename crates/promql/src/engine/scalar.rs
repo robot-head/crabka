@@ -70,9 +70,11 @@ impl CalendarFn {
     }
 }
 
-/// Map a `PromQL` calendar-function name to its `CalendarFn` variant, mirroring
-/// the calendar arms of `PromqlEngine::eval_instant_call`. Returns `None` for
-/// any other function so the planner dispatch falls through.
+/// Maps a `PromQL` calendar-function name to its `CalendarFn` variant.
+///
+/// The mapping mirrors the calendar arms of `PromqlEngine::eval_instant_call`.
+/// This function returns `None` for any other function, so the planner dispatch
+/// falls through.
 pub(super) fn calendar_fn_from_function_name(name: &str) -> Option<CalendarFn> {
     Some(match name {
         "year" => CalendarFn::Year,
@@ -227,10 +229,11 @@ impl ScalarExtremaFn {
     }
 }
 
-/// Wrap a scalar `QueryResult` from a delegated interpreter call into a
-/// `PlannedInstant::PrecomputedScalar`. A non-scalar result is impossible for
-/// these callers but is mapped to a canonical error defensively rather than
-/// panicking.
+/// Wraps a scalar `QueryResult` from a delegated interpreter call.
+///
+/// The result becomes a `PlannedInstant::PrecomputedScalar`. A non-scalar result
+/// is impossible for these callers. This function still maps such a result to a
+/// canonical error instead of a panic.
 #[cfg(feature = "experimental-functions")]
 pub(super) fn scalar_call_to_planned(result: &QueryResult) -> Result<PlannedInstant> {
     match *result {
@@ -243,11 +246,14 @@ pub(super) fn scalar_call_to_planned(result: &QueryResult) -> Result<PlannedInst
     }
 }
 
-/// Negate an already-evaluated instant query result, mirroring the `PromQL` unary
-/// `-` operator: a scalar flips sign; an instant vector flips each sample
-/// (floats by negation, native histograms by `scaled_native_histogram(_, -1.0)`)
-/// and drops `__name__`; a range-matrix / string input is a hard error. Both the
-/// interpreter and the operator path route through this, so they cannot diverge.
+/// Negates an already-evaluated instant query result.
+///
+/// This function mirrors the `PromQL` unary `-` operator. A scalar flips sign.
+/// An instant vector flips each sample and drops `__name__`: floats flip by
+/// negation, and native histograms flip through
+/// `scaled_native_histogram(_, -1.0)`. A range-matrix or string input is a hard
+/// error. Both the interpreter and the operator path route through this
+/// function, so they cannot diverge.
 pub(super) fn negate_query_result(operand: QueryResult) -> Result<QueryResult> {
     match operand {
         QueryResult::Scalar { ts_ms, value } => Ok(QueryResult::Scalar {

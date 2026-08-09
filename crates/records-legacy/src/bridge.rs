@@ -1,16 +1,18 @@
-//! Convert between v2 `RecordBatch` (`crabka-protocol`) and v0/v1 `MessageSet`
-//! payloads.
+//! Convert between v2 `RecordBatch` and v0/v1 `MessageSet` payloads.
 //!
-//! Down-conversion (v2 → v0/v1): produce a [`ParsedRecord`] stream from a
-//! v2 batch (decompressing the v2 body once), then re-emit it as a flat
-//! or compressed `MessageSet`.
+//! The v2 types come from `crabka-protocol`.
 //!
-//! Up-conversion (v0/v1 → v2): decode a `MessageSet` into `ParsedRecord`s,
-//! then synthesize a v2 `RecordBatch` with one record per legacy message.
+//! Down-conversion goes from v2 to v0/v1. It builds a [`ParsedRecord`]
+//! stream from a v2 batch and decompresses the v2 body one time. It then
+//! re-emits that stream as a flat or compressed `MessageSet`.
 //!
-//! Control records (v2 `is_control_batch == true`) are filtered: v0/v1
-//! has no concept of them, and Kafka's reference broker behavior is to
-//! drop them on down-conversion.
+//! Up-conversion goes from v0/v1 to v2. It decodes a `MessageSet` into
+//! [`ParsedRecord`] values. It then builds a v2 `RecordBatch` with one
+//! record per legacy message.
+//!
+//! This module filters out control records, that is, v2 batches with
+//! `is_control_batch == true`. v0/v1 has no concept of them, and Kafka's
+//! reference broker drops them on down-conversion.
 
 use bytes::{Bytes, BytesMut};
 use crabka_compression::{CompressionType, RecordDecompressionPolicy};
@@ -26,11 +28,11 @@ use crate::{
     },
 };
 
-/// Iterate the v2 batch's records, dropping control batches entirely.
+/// Iterate the v2 batch's records and drop control batches entirely.
 ///
-/// Each emitted [`ParsedRecord`] has its absolute offset reconstructed as
-/// `base_offset + offset_delta`, and (for v1 target) its absolute
-/// timestamp as `base_timestamp + timestamp_delta`.
+/// Each emitted [`ParsedRecord`] gets its absolute offset as
+/// `base_offset + offset_delta`. For a v1 target, each record also gets
+/// its absolute timestamp as `base_timestamp + timestamp_delta`.
 #[must_use]
 pub fn parsed_from_v2(batch: &RecordBatch, target: Magic) -> Vec<ParsedRecord> {
     if batch.attributes.is_control_batch() {
@@ -53,14 +55,14 @@ pub fn parsed_from_v2(batch: &RecordBatch, target: Magic) -> Vec<ParsedRecord> {
 
 /// Down-convert a v2 [`RecordBatch`] to v0/v1 `MessageSet` bytes.
 ///
-/// If the v2 batch carried gzip or snappy compression, the output also
-/// uses that codec (wrapped `MessageSet`). LZ4 is preserved as well. `Zstd`
-/// — not representable in v0/v1 — is emitted as an uncompressed
-/// `MessageSet` (the records have already been decompressed in the v2
-/// decode path).
+/// If the v2 batch carried gzip or snappy compression, the output uses
+/// that codec in a wrapped `MessageSet`. The output keeps LZ4 in the same
+/// way. v0/v1 cannot represent `Zstd`, so this function emits an
+/// uncompressed `MessageSet` for a `Zstd` batch. The v2 decode path has
+/// already decompressed those records.
 ///
 /// # Errors
-/// Returns an error if the legacy message set cannot be encoded.
+/// Returns an error if this function cannot encode the legacy message set.
 pub fn v2_to_legacy(batch: &RecordBatch, target: Magic) -> Result<Bytes, LegacyRecordsError> {
     let records = parsed_from_v2(batch, target);
     let mut out = BytesMut::new();
@@ -82,15 +84,16 @@ pub fn v2_to_legacy(batch: &RecordBatch, target: Magic) -> Result<Bytes, LegacyR
     Ok(out.freeze())
 }
 
-/// Up-convert a v0/v1 `MessageSet` to a v2 [`RecordBatch`] suitable for the
-/// log write path.
+/// Up-convert a v0/v1 `MessageSet` to a v2 [`RecordBatch`].
 ///
-/// `partition_leader_epoch` is set to `-1` (Kafka's sentinel for
-/// "unknown"). The caller — typically the Produce handler — should
-/// overwrite it with the current leader epoch before append.
+/// The result is suitable for the log write path. This function sets
+/// `partition_leader_epoch` to `-1`, which is Kafka's sentinel for
+/// "unknown". The caller, usually the Produce handler, should overwrite
+/// it with the current leader epoch before append.
 ///
 /// # Errors
-/// Returns an error if the legacy message set cannot be decoded or its offsets overflow v2 fields.
+/// Returns an error if this function cannot decode the legacy message set.
+/// Returns an error if the offsets overflow the v2 delta fields.
 pub fn legacy_to_v2(set_bytes: &[u8]) -> Result<RecordBatch, LegacyRecordsError> {
     legacy_to_v2_with_policy(set_bytes, RecordDecompressionPolicy::default())
 }
@@ -99,8 +102,9 @@ pub fn legacy_to_v2(set_bytes: &[u8]) -> Result<RecordBatch, LegacyRecordsError>
 ///
 /// # Errors
 ///
-/// Returns an error if the legacy message set cannot be decoded within the
-/// policy or its offsets overflow v2 fields.
+/// Returns an error if this function cannot decode the legacy message set
+/// within the limits in `policy`. Returns an error if the offsets overflow
+/// the v2 delta fields.
 pub fn legacy_to_v2_with_policy(
     set_bytes: &[u8],
     policy: RecordDecompressionPolicy,

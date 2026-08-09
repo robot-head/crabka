@@ -1,16 +1,18 @@
-//! [`S3RemoteStorage`] — an S3-compatible object-store
-//! [`RemoteStorageManager`] (KIP-405 production backend).
+//! [`S3RemoteStorage`] is an S3-compatible object-store
+//! [`RemoteStorageManager`], the KIP-405 production backend.
 //!
-//! Built on the `object_store` crate, so it works against any `S3-API`
-//! endpoint: AWS S3, `MinIO`, and Cloudflare R2. (Google Cloud Storage has a
-//! dedicated native backend — see [`from_gcs_config`](S3RemoteStorage::from_gcs_config)
-//! in [`crate::gcs`] — which supports keyless GKE Workload Identity instead
-//! of the legacy S3-compatibility/HMAC shim.) The trait method bodies are
-//! synchronous (mirroring Kafka's
-//! blocking `RemoteStorageManager`); the broker drives them from
-//! `spawn_blocking`. Internally we block on the async `object_store` calls
-//! via the current Tokio runtime handle, which is always present inside a
-//! `spawn_blocking` worker spawned by Tokio.
+//! This backend is built on the `object_store` crate, so it works against
+//! any `S3-API` endpoint: AWS S3, `MinIO`, and Cloudflare R2. Google Cloud
+//! Storage has a dedicated native backend. See
+//! [`from_gcs_config`](S3RemoteStorage::from_gcs_config) in [`crate::gcs`],
+//! which supports keyless GKE Workload Identity instead of the legacy
+//! S3-compatibility/HMAC shim.
+//!
+//! The trait method bodies are synchronous, and they mirror Kafka's blocking
+//! `RemoteStorageManager`. The broker drives them from `spawn_blocking`.
+//! Inside them this crate blocks on the async `object_store` calls with the
+//! current Tokio runtime handle. That handle is always present inside a
+//! `spawn_blocking` worker that Tokio spawned.
 //!
 //! ## Object-key layout
 //!
@@ -44,14 +46,14 @@ use crate::{
 
 /// A [`RemoteStorageManager`] backed by any S3-compatible object store.
 ///
-/// Construct via [`S3RemoteStorage::with_store`] (any `ObjectStore` impl)
-/// for in-process tests, or [`S3RemoteStorage::from_s3_config`] for the
-/// production path that builds an `AmazonS3` client from credentials,
-/// endpoint, and bucket.
+/// Construct it with [`S3RemoteStorage::with_store`], which accepts any
+/// `ObjectStore` impl, for in-process tests. Use
+/// [`S3RemoteStorage::from_s3_config`] for the production path, which builds
+/// an `AmazonS3` client from credentials, endpoint, and bucket.
 pub struct S3RemoteStorage {
     ops: ObjectStoreClient,
-    /// Optional key prefix (joined with `/` to every object key). Lets
-    /// multiple Crabka clusters share a bucket safely.
+    /// Optional key prefix. The store joins it to every object key with
+    /// `/`. This lets multiple Crabka clusters share a bucket safely.
     prefix: Option<String>,
     /// File-size threshold above which uploads switch to S3 multipart.
     multipart_threshold: ByteSize,
@@ -59,10 +61,11 @@ pub struct S3RemoteStorage {
     multipart_chunk_size: ByteSize,
 }
 
-/// Lift a raw byte count from [`crabka_object_store`]'s config layer, which
-/// still speaks primitives, into the dimensioned domain. Saturates rather than
-/// wrapping — a `usize` above `u64::MAX` cannot occur on any target Crabka
-/// builds for.
+/// Lifts a raw byte count from [`crabka_object_store`]'s config layer into
+/// the dimensioned domain. That config layer still uses primitive types.
+///
+/// The conversion saturates and does not wrap. A `usize` above `u64::MAX`
+/// cannot occur on any target Crabka builds for.
 pub(crate) fn size_from_usize(bytes: usize) -> ByteSize {
     ByteSize::from_bytes(u64::try_from(bytes).unwrap_or(u64::MAX))
 }
@@ -76,12 +79,12 @@ impl std::fmt::Debug for S3RemoteStorage {
 }
 
 impl S3RemoteStorage {
-    /// Wrap an arbitrary `ObjectStore` (e.g.
-    /// `object_store::memory::InMemory` for tests). Use
+    /// Wraps an arbitrary `ObjectStore`, for example
+    /// `object_store::memory::InMemory` for tests. Use
     /// [`Self::from_s3_config`] for the production S3 path. Multipart
-    /// tuning falls back to the [`DEFAULT_MULTIPART_THRESHOLD`] /
-    /// [`DEFAULT_MULTIPART_CHUNK_SIZE`] constants; call
-    /// [`Self::with_multipart_tuning`] to override in tests.
+    /// tuning falls back to the [`DEFAULT_MULTIPART_THRESHOLD`] and
+    /// [`DEFAULT_MULTIPART_CHUNK_SIZE`] constants. Call
+    /// [`Self::with_multipart_tuning`] to override them in tests.
     #[must_use]
     pub fn with_store(store: Arc<dyn ObjectStore>, prefix: Option<String>) -> Self {
         Self {
@@ -92,9 +95,9 @@ impl S3RemoteStorage {
         }
     }
 
-    /// Override the multipart threshold + chunk size. Returns `self` for
-    /// chaining. Tests use this to force the multipart path on small
-    /// fixtures; production typically leaves the defaults alone.
+    /// Overrides the multipart threshold and chunk size. Returns `self` for
+    /// chained calls. Tests use this to force the multipart path on small
+    /// fixtures. Production usually keeps the defaults.
     #[must_use]
     pub fn with_multipart_tuning(mut self, threshold: ByteSize, chunk_size: ByteSize) -> Self {
         self.multipart_threshold = threshold;
@@ -102,13 +105,12 @@ impl S3RemoteStorage {
         self
     }
 
-    /// Build an `AmazonS3` client from `cfg` and wrap it.
+    /// Builds an `AmazonS3` client from `cfg` and wraps it.
     ///
     /// # Errors
     ///
-    /// Returns [`RemoteStorageError::InvalidArgument`] if the bucket /
-    /// region / endpoint combination is rejected by `object_store`'s
-    /// builder.
+    /// Returns [`RemoteStorageError::InvalidArgument`] if `object_store`'s
+    /// builder rejects the bucket, region, and endpoint combination.
     pub fn from_s3_config(cfg: &S3Config) -> Result<Self, RemoteStorageError> {
         let store = build_object_store(&ObjectStoreConfig::S3(cfg.clone()))
             .map_err(|e| RemoteStorageError::InvalidArgument(e.to_string()))?;
@@ -142,10 +144,10 @@ impl S3RemoteStorage {
         self.segment_key(metadata, index_filename(index_type))
     }
 
-    /// Run an async [`ObjectOps`] call to completion on the current Tokio
-    /// runtime. Sync trait callers reach this through `spawn_blocking`, inside
-    /// which `Handle::current()` is always available. The `block_on` bridge
-    /// lives here, never in the substrate.
+    /// Runs an async [`ObjectOps`] call to completion on the current Tokio
+    /// runtime. Sync trait callers reach this through `spawn_blocking`, where
+    /// `Handle::current()` is always available. The `block_on` bridge lives
+    /// here, never in the substrate.
     fn block_os<T, F>(fut: F) -> Result<T, ObjectStoreError>
     where
         F: std::future::Future<Output = Result<T, ObjectStoreError>>,
@@ -355,8 +357,9 @@ mod tests {
     /// The multipart tunables cross two seams: in from
     /// [`crabka_object_store`]'s primitive config, and back out to the
     /// primitive-typed `ObjectOps` substrate. Both must be lossless for every
-    /// size the config can express, so a mis-scaled conversion (a stray
-    /// `* 1024`) cannot silently change when a segment switches to multipart.
+    /// size the config can express, so a mis-scaled conversion, such as a
+    /// stray `* 1024`, cannot silently change when a segment switches to
+    /// multipart.
     #[test]
     fn multipart_tuning_round_trips_through_the_primitive_seams() {
         let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), None);
@@ -368,8 +371,8 @@ mod tests {
         check!(tuned.multipart_chunk_size.bytes_usize() == 512 * 1024);
     }
 
-    /// `usize::MAX` has no `u64` image on a hypothetical 128-bit target; the
-    /// lift saturates rather than wrapping to a tiny chunk size.
+    /// `usize::MAX` has no `u64` image on a hypothetical 128-bit target. The
+    /// lift saturates and does not wrap to a tiny chunk size.
     #[test]
     fn size_from_usize_saturates_instead_of_wrapping() {
         check!(size_from_usize(0).bytes_usize() == 0);
@@ -596,12 +599,12 @@ mod tests {
     }
 
     /// Files at or above `multipart_threshold` flow through the `ObjectOps`
-    /// multipart path. We pick a chunk size that yields multiple
-    /// non-trailing parts so the inner loop's tail-flush + finish path is
-    /// exercised. The `InMemory` backend implements `put_multipart` /
-    /// `complete` end-to-end, so a successful round-trip proves the
-    /// multipart wire calls are stitched correctly (per-part offsets and
-    /// the final concatenation).
+    /// multipart path. This test picks a chunk size that gives multiple
+    /// non-trailing parts, so it exercises the inner loop's tail-flush and
+    /// finish path. The `InMemory` backend implements `put_multipart` and
+    /// `complete` end-to-end, so a successful round-trip proves that the
+    /// multipart wire calls are correct, including the per-part offsets and
+    /// the final concatenation.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn put_path_uses_multipart_above_threshold_and_round_trips() {
         // 100 KiB segment, 8 KiB threshold → multipart, 4 KiB chunks
@@ -632,11 +635,10 @@ mod tests {
         .unwrap();
     }
 
-    /// Multipart path with a tail chunk strictly smaller than
-    /// `chunk_size`. `WriteMultipart::finish` is supposed to flush the
-    /// partially-filled buffer as the final part; this test asserts that
-    /// happens (otherwise the last `tail_len` bytes would be silently
-    /// dropped from the uploaded object).
+    /// Multipart path with a tail chunk strictly smaller than `chunk_size`.
+    /// `WriteMultipart::finish` flushes the partially-filled buffer as the
+    /// final part, and this test asserts that it does. If it did not, the
+    /// uploaded object would silently lose the last `tail_len` bytes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn multipart_flushes_partial_tail_chunk() {
         let chunk = kibibytes(4);
@@ -668,11 +670,11 @@ mod tests {
     }
 
     /// Files strictly below the threshold MUST still take the single-PUT
-    /// path even when multipart tuning is wired up. We exercise that by
-    /// raising the threshold above the fixture size; a regression that
-    /// inverted the branch would surface as a hang or multipart-specific
-    /// error against a backend without multipart support (and would also
-    /// be a latency regression in production).
+    /// path, even when multipart tuning is configured. This test raises the
+    /// threshold above the fixture size. A regression that inverted the
+    /// branch would show as a hang, or as a multipart-specific error against
+    /// a backend with no multipart support. It would also be a latency
+    /// regression in production.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn put_path_stays_on_single_put_below_threshold() {
         let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), None)

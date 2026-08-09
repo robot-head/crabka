@@ -37,7 +37,7 @@ pub(crate) struct TriggerInvocation {
 thread_local! {
     static TRIGGER_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Triggers fired on this thread since it started, so a write can report
-    /// how many its own statement fired as a difference — see [`fired_count`].
+    /// how many its own statement fired as a difference. See [`fired_count`].
     static TRIGGERS_FIRED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static AFTER_TRIGGER_QUEUE: std::cell::RefCell<Option<Vec<PendingTrigger>>> = const { std::cell::RefCell::new(None) };
     static TRANSITION_CHANGES: std::cell::RefCell<Option<Vec<TransitionChange>>> = const { std::cell::RefCell::new(None) };
@@ -68,20 +68,22 @@ pub(crate) struct PendingTrigger {
 /// Monotonic count of the triggers this thread has fired.
 ///
 /// A statement's own count is the difference between two readings, which is
-/// what `pg.execute_write` records as `pg.triggers_fired`. A running total
-/// rather than a per-statement counter because trigger firing is nested — a
-/// trigger's own DML fires further triggers — and there is no single place to
-/// reset that a nested write would not clobber.
+/// what `pg.execute_write` records as `pg.triggers_fired`. This is a running
+/// total and not a per-statement counter, because triggers fire in a nested
+/// way. A trigger's own DML fires more triggers, and there is no single place
+/// to reset the counter that a nested write would not clobber.
 ///
-/// Thread-local because the executor's whole write path runs on one blocking
-/// worker thread under a current-thread runtime, the same assumption the
-/// after-trigger queue above already makes.
+/// The counter is thread-local because the executor's whole write path runs on
+/// one blocking worker thread under a current-thread runtime. The after-trigger
+/// queue above already makes the same assumption.
 pub(crate) fn fired_count() -> u64 {
     TRIGGERS_FIRED.with(std::cell::Cell::get)
 }
 
-/// Count one trigger as fired: either invoked now, or queued to run at the end
-/// of the statement, both of which the statement caused.
+/// Count one trigger as fired.
+///
+/// The trigger is either invoked now or queued to run at the end of the
+/// statement. The statement caused both cases.
 fn note_fired() {
     TRIGGERS_FIRED.with(|fired| fired.set(fired.get().saturating_add(1)));
 }
@@ -1728,14 +1730,14 @@ pub(crate) fn fire_statement(
     Ok(())
 }
 
-/// Build the span covering the statement-level triggers one write fires for one
-/// `(event, timing)` pair.
+/// Build the span that covers the statement-level triggers one write fires for
+/// one `(event, timing)` pair.
 ///
-/// One span for the batch. Row-level triggers deliberately get no span of their
-/// own: they fire once per row, so a span each would be one per row touched —
-/// the same reason `pg.lock.row` exists only for a contended acquire. Their
-/// cost shows up instead as `pg.triggers_fired` on `pg.execute_write`, counted
-/// through [`fired_count`].
+/// There is one span for the batch. Row-level triggers deliberately get no span
+/// of their own. They fire once per row, so a span for each one would be a span
+/// per row touched. `pg.lock.row` exists only for a contended acquire for the
+/// same reason. The cost of row-level triggers shows up instead as
+/// `pg.triggers_fired` on `pg.execute_write`, which [`fired_count`] counts.
 fn statement_trigger_span(table: &Table, event: DmlEvent, timing: TriggerTiming) -> tracing::Span {
     tracing::debug_span!(
         target: crate::telemetry::EXEC_TARGET,

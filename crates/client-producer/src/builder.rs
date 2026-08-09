@@ -1,4 +1,4 @@
-//! `Producer::builder()` — `bon`-generated builder for `Producer::start`.
+//! `Producer::builder()`: the `bon`-generated builder for `Producer::start`.
 
 use std::{
     collections::HashMap,
@@ -38,9 +38,10 @@ use crate::{
 };
 
 /// Retriable cold-coordinator error codes for `InitProducerId`. The broker is
-/// loading its coordinator state (`14`), the coordinator is not yet available
-/// (`15`), or it has moved to another broker (`16`). At cluster startup a
-/// conformant client retries these with backoff rather than failing the build.
+/// loading its coordinator state, code `14`. The coordinator is not yet
+/// available, code `15`. The coordinator has moved to another broker, code
+/// `16`. At cluster startup a conformant client retries these with backoff
+/// instead of failing the build.
 const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 const NOT_COORDINATOR: i16 = 16;
@@ -379,13 +380,14 @@ fn producer_identity_from_init(init: &InitProducerIdResponse) -> Result<(i64, i1
     Ok((init.producer_id, init.producer_epoch))
 }
 
-/// Send `InitProducerId`, retrying on the
-/// cold-coordinator codes (14/15/16) and transient `Disconnected` transport
-/// errors with capped exponential backoff until the deadline elapses.
+/// Send `InitProducerId`, and retry on the cold-coordinator codes 14, 15 and
+/// 16, and on transient `Disconnected` transport errors, with capped
+/// exponential backoff until the deadline elapses.
 ///
-/// Mirrors the consumer crate's `with_coordinator_retry` shape: on deadline it
-/// returns the last response (so the caller's `error_code != 0` handling runs)
-/// or surfaces the transport error if the final attempt disconnected.
+/// This mirrors the shape of the consumer crate's `with_coordinator_retry`. On
+/// the deadline it returns the last response, so the caller's
+/// `error_code != 0` handling runs. If the final attempt disconnected, it
+/// surfaces the transport error instead.
 #[tracing::instrument(level = "info", skip_all, err)]
 pub(crate) async fn init_producer_id_with_retry(
     client: &Client,
@@ -429,7 +431,7 @@ impl Producer {
     /// Build a [`Producer`] pointed at the given bootstrap address.
     ///
     /// `enable_idempotence` defaults to `true`, which forces `acks=All`.
-    /// Setting `acks=Zero` together with idempotence is rejected with
+    /// `acks=Zero` together with idempotence is rejected with
     /// [`ProducerError::InvalidConfig`].
     #[builder(start_fn = builder, finish_fn = build)]
     // bon builder; each arg is an independent knob

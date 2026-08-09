@@ -1,7 +1,7 @@
-//! Parses the `--metrics-scrape-targets` CLI value:
-//! `id:host:port,id:host:port,...` into a list of `ScrapeTarget`s.
-//! Empty input is fine (scraper disabled). Malformed entries return
-//! a typed error rather than panicking.
+//! Parses the `--metrics-scrape-targets` CLI value,
+//! `id:host:port,id:host:port,...`, into a list of `ScrapeTarget`s. Empty
+//! input is valid and disables the scraper. Malformed entries return a typed
+//! error; they do not panic.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScrapeTarget {
@@ -99,10 +99,10 @@ use crate::model::ClusterState;
 
 /// Where the scraper finds its targets each tick.
 ///
-/// `Static` uses an explicit `id:host:port` list
-/// from `--metrics-scrape-targets`). `Discovered` reads from the
-/// ingester's `ClusterState` snapshot and synthesizes targets at
-/// `host:metrics_port` for every broker in the snapshot.
+/// `Static` uses an explicit `id:host:port` list from
+/// `--metrics-scrape-targets`. `Discovered` reads the ingester's
+/// `ClusterState` snapshot and builds targets at `host:metrics_port` for every
+/// broker in the snapshot.
 pub enum TargetSource {
     Static(Vec<ScrapeTarget>),
     Discovered {
@@ -114,10 +114,10 @@ pub enum TargetSource {
 impl TargetSource {
     /// Materialize the current set of scrape targets.
     ///
-    /// Called by the scraper's main loop each tick. Cheap: the `Static`
-    /// arm clones a small `Vec`; the `Discovered` arm reads the snapshot
-    /// guard and emits one `ScrapeTarget` per broker (skipping brokers
-    /// with empty `host`).
+    /// The scraper's main loop calls this each tick. The call is cheap: the
+    /// `Static` arm clones a small `Vec`, and the `Discovered` arm reads the
+    /// snapshot guard and emits one `ScrapeTarget` per broker. The
+    /// `Discovered` arm skips brokers with an empty `host`.
     #[must_use]
     pub fn current(&self) -> Vec<ScrapeTarget> {
         match self {

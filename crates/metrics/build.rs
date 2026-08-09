@@ -1,8 +1,9 @@
 //! Generates prost message types from the vendored `remote_write` v1/v2 protos.
 //!
-//! Drives codegen through a vendored `protoc` binary (`protoc-bin-vendored`) so
-//! the build is hermetic: no system `protoc`, no network fetch, and no
-//! platform-specific protobuf release archive naming.
+//! This script drives codegen through a vendored `protoc` binary,
+//! `protoc-bin-vendored`, so the build is hermetic. It needs no system
+//! `protoc`, no network fetch, and no platform-specific protobuf release
+//! archive naming.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [

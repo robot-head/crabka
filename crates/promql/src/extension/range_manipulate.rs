@@ -2,26 +2,28 @@
 //!
 //! # Output-schema / column contract
 //!
-//! `RangeManipulate` consumes a single series' time-sorted `(timestamp, value)`
-//! batch (as produced downstream of [`SeriesNormalize`]) and folds the samples
-//! into per-eval-step windows. The output schema produced by
-//! [`build_extended_range_schema`] is, in column order:
+//! `RangeManipulate` reads one series' time-sorted `(timestamp, value)` batch
+//! from downstream of [`SeriesNormalize`] and folds the samples into
+//! per-eval-step windows. [`build_extended_range_schema`] builds the output
+//! schema. Its columns, in order:
 //!
-//! 1. Every **label column** of the input (any column that is neither the time
-//!    index nor the value column) carried through **unchanged** in its original
-//!    relative order. For each eval step these columns repeat the series' label
-//!    values (one row per eval step).
-//! 2. The eval **`timestamp`** column (reuses the input time-index column name):
-//!    `Int64`, **scalar** — one value per aligned step on the `[start, end]`
-//!    grid with stride `interval`. This is the instant `t` each window closes
-//!    on. Downstream rate-family UDFs read this as the evaluation timestamp.
-//! 3. A **`<time_index>_range`** column (e.g. `timestamp_range`): a `RangeArray`
-//!    encoded as `Dictionary<Int64, List<Int64>>`. Cell `i` holds the *sample
-//!    timestamps* whose timestamp falls in the window that closes at eval step
+//! 1. Every label column of the input, which is any column that is neither the
+//!    time index nor the value column. Each label column passes through
+//!    unchanged and keeps its original relative order. For each eval step these
+//!    columns repeat the series' label values, one row per eval step.
+//! 2. The eval `timestamp` column, which reuses the input time-index column
+//!    name. It is `Int64` and scalar: one value for each aligned step on the
+//!    `[start, end]` grid with stride `interval`. This is the instant `t` that
+//!    each window closes on. Downstream rate-family UDFs read this column as
+//!    the evaluation timestamp.
+//! 3. A `<time_index>_range` column, for example `timestamp_range`. It is a
+//!    `RangeArray` encoded as `Dictionary<Int64, List<Int64>>`. Cell `i` holds
+//!    the sample timestamps that fall in the window that closes at eval step
 //!    `i`.
-//! 4. A **`<value>_range`** column (e.g. `value_range`): a `RangeArray` encoded
-//!    as `Dictionary<Int64, List<Float64>>`. Cell `i` holds the *sample values*
-//!    aligned 1:1 with the timestamps in `<time_index>_range` cell `i`.
+//! 4. A `<value>_range` column, for example `value_range`. It is a `RangeArray`
+//!    encoded as `Dictionary<Int64, List<Float64>>`. Cell `i` holds the sample
+//!    values that align 1:1 with the timestamps in `<time_index>_range` cell
+//!    `i`.
 //!
 //! The two `RangeArray` columns are always row-aligned with each other and with
 //! the eval `timestamp` column. Decode them with
@@ -29,12 +31,13 @@
 //!
 //! # Window semantics
 //!
-//! For eval timestamp `t` and range duration `range`, a sample at timestamp
-//! `ts` is included in the window iff `t - range < ts <= t`. The window is
-//! **left-open, right-closed** `(t - range, t]`: a sample exactly on the right
-//! boundary (`ts == t`) is **included**; a sample exactly on the left edge
-//! (`ts == t - range`) is **excluded**. This matches `PromQL` range-selector
-//! semantics. Empty windows produce empty (zero-length) `RangeArray` cells.
+//! For eval timestamp `t` and range duration `range`, the window holds a sample
+//! at timestamp `ts` if and only if `t - range < ts <= t`. The window is
+//! left-open and right-closed: `(t - range, t]`. A sample exactly on the right
+//! boundary, where `ts == t`, is included. A sample exactly on the left edge,
+//! where `ts == t - range`, is excluded. This matches `PromQL` range-selector
+//! semantics. An empty window produces an empty `RangeArray` cell with zero
+//! length.
 
 use std::{fmt, sync::Arc};
 
@@ -58,19 +61,20 @@ use futures::StreamExt;
 
 use crate::range_array::RangeArray;
 
-/// Suffix appended to the time-index and value columns to name their windowed
-/// [`RangeArray`] counterparts in the extended schema.
+/// Suffix for the windowed [`RangeArray`] column names in the extended schema.
+///
+/// The time-index column and the value column each get a windowed column with
+/// this suffix.
 pub const RANGE_SUFFIX: &str = "_range";
 
 /// The eval-step grid paired with the `(offset, len)` windows that index the
 /// sorted input rows for each step.
 type StepWindows = (Vec<i64>, Vec<(u32, u32)>);
 
-/// The Arrow `DataType` of a [`RangeArray`] column whose backing samples have
-/// `value_type`.
+/// Returns the Arrow `DataType` of a [`RangeArray`] column with `value_type` samples.
 ///
-/// A `RangeArray` is serialized as a dictionary of per-cell lists
-/// (`Dictionary<Int64, List<value_type>>`), matching
+/// A `RangeArray` uses a dictionary of per-cell lists,
+/// `Dictionary<Int64, List<value_type>>`. This matches
 /// [`RangeArray::into_dict_array`].
 #[must_use]
 fn range_array_type(value_type: DataType, nullable: bool) -> DataType {
@@ -81,12 +85,12 @@ fn range_array_type(value_type: DataType, nullable: bool) -> DataType {
     )
 }
 
-/// Build the extended range-vector schema described in the module contract.
+/// Builds the extended range-vector schema that the module contract describes.
 ///
-/// `input_schema` is the per-series scalar schema (label columns plus the
-/// `time_index` `Int64` column and the `field_column` `Float64` column). The
-/// returned schema carries the label columns through, keeps a scalar eval
-/// `time_index` column, and appends the `<time_index>_range` and
+/// `input_schema` is the per-series scalar schema. It holds the label columns,
+/// the `time_index` `Int64` column, and the `field_column` `Float64` column.
+/// The returned schema carries the label columns through, keeps a scalar eval
+/// `time_index` column, and adds the `<time_index>_range` and
 /// `<field_column>_range` [`RangeArray`] columns.
 #[must_use]
 pub fn build_extended_range_schema(
@@ -127,10 +131,10 @@ pub fn build_extended_range_schema(
 
 /// Logical node: materialize range vectors over a step grid.
 ///
-/// `output_schema` is fully determined by the other fields, so it is excluded
-/// from the manual `PartialEq`/`Eq`/`Hash`/`PartialOrd` impls (which the
-/// `UserDefinedLogicalNodeCore` machinery requires) to keep node identity tied
-/// to the logical parameters alone.
+/// The other fields fully determine `output_schema`. The manual `PartialEq`,
+/// `Eq`, `Hash`, and `PartialOrd` impls that `UserDefinedLogicalNodeCore` needs
+/// leave `output_schema` out, so node identity depends only on the logical
+/// parameters.
 #[derive(Debug, Clone)]
 pub struct RangeManipulate {
     pub start_ms: i64,
@@ -144,9 +148,13 @@ pub struct RangeManipulate {
 }
 
 impl RangeManipulate {
-    /// Construct the logical node and derive its extended output schema.
+    /// Builds the logical node and derives its extended output schema.
+    ///
     /// # Errors
-    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+    ///
+    /// Returns an error if the metric input is malformed.
+    /// Returns an error if a limit is exceeded.
+    /// Returns an error if the backing WAL, block store, or remote endpoint fails.
     pub fn new(
         start_ms: i64,
         end_ms: i64,
@@ -173,8 +181,8 @@ impl RangeManipulate {
         })
     }
 
-    /// The logical parameters that define node identity (everything but the
-    /// derived `output_schema`).
+    /// The logical parameters that define node identity: every field except the
+    /// derived `output_schema`.
     fn identity(&self) -> (i64, i64, i64, i64, &str, &str, &LogicalPlan) {
         (
             self.start_ms,
@@ -324,11 +332,12 @@ impl RangeManipulateExec {
         }
     }
 
-    /// Compute, for each eval step `t` on the grid, the half-open backing-array
-    /// window `[lo, hi)` of sample rows whose timestamp falls in `(t-range, t]`.
+    /// Computes the half-open backing-array window `[lo, hi)` for each eval step.
     ///
-    /// Returns `(eval_timestamps, ranges)` where `ranges[i] == (offset, len)`
-    /// indexes the sorted input rows for eval step `eval_timestamps[i]`.
+    /// For eval step `t` on the grid, the window holds the sample rows whose
+    /// timestamp falls in `(t-range, t]`. This method returns
+    /// `(eval_timestamps, ranges)`, where `ranges[i] == (offset, len)` indexes
+    /// the sorted input rows for eval step `eval_timestamps[i]`.
     fn windows(&self, timestamps: &Int64Array) -> DfResult<StepWindows> {
         if self.interval_ms <= 0 {
             return Err(DataFusionError::Execution(format!(
@@ -555,8 +564,9 @@ mod tests {
         (batch, schema)
     }
 
-    /// Decode a `RangeArray` dict column and return each cell as a `Vec` of i64
-    /// (timestamps) — the backing values are read generically.
+    /// Decodes a `RangeArray` dict column into one `Vec` of i64 timestamps per cell.
+    ///
+    /// This helper reads the backing values generically.
     fn timestamp_cells(batch: &RecordBatch, name: &str) -> Vec<Vec<i64>> {
         let dict = batch
             .column_by_name(name)

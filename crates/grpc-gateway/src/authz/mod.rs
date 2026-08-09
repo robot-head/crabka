@@ -1,5 +1,8 @@
-//! Gateway trusted-proxy authorization: holds the `crabka_authz::Authorizer`
-//! and an `ArcSwap`'d `AclCache` refreshed by polling the broker's `DescribeAcls`.
+//! Gateway trusted-proxy authorization.
+//!
+//! This module holds the `crabka_authz::Authorizer` and an `ArcSwap`'d
+//! `AclCache`. A background task refreshes that cache by polling the broker's
+//! `DescribeAcls`.
 
 pub mod auth_layer;
 use std::sync::Arc;
@@ -35,8 +38,8 @@ impl GatewayAuthz {
         self.cache.load()
     }
 
-    /// Poll `DescribeAcls` into the cache until `shutdown`. Logs + keeps the prior
-    /// snapshot on error.
+    /// Poll `DescribeAcls` into the cache until `shutdown`. On an error, log it
+    /// and keep the previous snapshot.
     pub async fn run_acl_refresh(
         self: Arc<Self>,
         bootstrap: String,
@@ -106,8 +109,9 @@ impl GatewayAuthz {
 }
 
 /// Convert a `crabka_client_admin::AclEntry` into a `crabka_metadata::AclEntry`.
-/// The two types have structurally identical field names and enum variant sets —
-/// the admin crate keeps local copies to avoid a broker dependency.
+///
+/// The two types have the same field names and the same enum variant sets. The
+/// admin crate keeps local copies to avoid a broker dependency.
 fn acl_entry_from_admin(e: crabka_client_admin::AclEntry) -> crabka_metadata::AclEntry {
     use crabka_client_admin::{
         AclOperation as AO, PatternType as PT, PermissionType as Perm, ResourceType as RT,

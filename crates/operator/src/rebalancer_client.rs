@@ -1,20 +1,25 @@
 //! Connect-RPC client for the standalone `crabka-rebalancer`
 //! service.
 //!
-//! The rebalancer exposes a Connect-RPC service. Connect's
-//! unary protocol is a plain `POST` to
-//! `/{package}.{Service}/{Method}` with a JSON (or protobuf) body; the
-//! response is JSON with HTTP 200 on success, or a non-2xx status with a
-//! `{"code","message"}` body on error. We speak the JSON flavor so the
-//! operator stays decoupled from the rebalancer's prost/pbjson codegen.
+//! The rebalancer gives a Connect-RPC service. The unary protocol of
+//! Connect is a plain `POST` to `/{package}.{Service}/{Method}` with a
+//! JSON or protobuf body. On success the response is JSON with HTTP 200.
+//! On an error the response has a non-2xx status and a
+//! `{"code","message"}` body. This client speaks the JSON form, so the
+//! operator stays independent of the prost and pbjson codegen of the
+//! rebalancer.
 //!
-//! JSON shape notes (proto3 JSON / pbjson):
-//! - field names are lowerCamelCase (`snapshotAtMs`, `goalsApplied`);
-//! - enums serialize as their proto value name (`PROPOSAL_STATUS_COMPUTED`);
-//! - 64-bit ints serialize as JSON *strings*; 32-bit ints as numbers;
-//! - default-valued fields are omitted entirely.
+//! The JSON shape follows proto3 JSON, which pbjson produces:
+//! - the field names are lowerCamelCase, for example `snapshotAtMs` and
+//!   `goalsApplied`.
+//! - an enum serializes as its proto value name, for example
+//!   `PROPOSAL_STATUS_COMPUTED`.
+//! - a 64-bit int serializes as a JSON *string*, and a 32-bit int as a
+//!   number.
+//! - a field with the default value is not present at all.
 //!
-//! The decode path below is deliberately tolerant of all of the above.
+//! The decode path below accepts all of these forms, and this is on
+//! purpose.
 
 use crabka_units::{
     ByteRate, Time,
@@ -24,39 +29,44 @@ use serde_json::{Value, json};
 
 use crate::ids::{LeaderMovementCount, MaxLeadersCount, MaxReplicasCount, ReplicaMovementCount};
 
-/// Test seam mirroring [`crate::context::AdminClientHandle`]. Production
-/// wraps [`ConnectRebalancerClient`]; reconcile tests substitute a fake.
+/// Test seam that follows [`crate::context::AdminClientHandle`].
 ///
-/// Methods take `&self` (not `&mut self`): the inner `reqwest::Client`
-/// is a cheap, shareable connection pool, so no exclusive access is
-/// needed and the handle can be a bare `Arc<dyn …>` with no `Mutex`.
+/// Production wraps [`ConnectRebalancerClient`]. Reconcile tests
+/// substitute a fake.
+///
+/// The methods take `&self` and not `&mut self`. The inner
+/// `reqwest::Client` is a cheap connection pool that many callers can
+/// share, so no caller needs exclusive access. The handle can therefore be
+/// a plain `Arc<dyn …>` with no `Mutex`.
 #[async_trait::async_trait]
 pub trait RebalancerClientLike: Send + Sync {
-    /// `CreateProposal` — compute a proposal for the given goals (empty =
-    /// the rebalancer's default registry). Returns a `Computed` proposal.
+    /// `CreateProposal` computes a proposal for the given goals. An empty
+    /// goal list means the default registry of the rebalancer. The method
+    /// returns a `Computed` proposal.
     async fn create_proposal(
         &self,
         goals: &[String],
     ) -> Result<RebalancerProposal, RebalancerError>;
 
-    /// `GetProposal` — fetch the current state of a proposal by id.
+    /// `GetProposal` fetches the current state of one proposal by id.
     async fn get_proposal(&self, id: &str) -> Result<RebalancerProposal, RebalancerError>;
 
-    /// `ExecuteProposal` — drive a computed proposal through KIP-455 under
-    /// an optional KIP-73 throttle. Returns the now-`Executing` proposal.
+    /// `ExecuteProposal` drives a computed proposal through KIP-455, with
+    /// an optional KIP-73 throttle. The method returns the proposal, which
+    /// is now `Executing`.
     async fn execute_proposal(
         &self,
         id: &str,
         throttle: Option<ByteRate>,
     ) -> Result<RebalancerProposal, RebalancerError>;
 
-    /// `CancelExecution` — revert pending reassignments + clear throttle,
-    /// transitioning the proposal to `Cancelled`.
+    /// `CancelExecution` reverts the pending reassignments and clears the
+    /// throttle. The proposal then moves to `Cancelled`.
     async fn cancel_execution(&self, id: &str) -> Result<RebalancerProposal, RebalancerError>;
 }
 
-/// Lifecycle state of a proposal, decoded from the rebalancer's
-/// `ProposalStatus` enum.
+/// Lifecycle state of a proposal, decoded from the `ProposalStatus` enum
+/// of the rebalancer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProposalStatus {
     Unspecified,
@@ -68,8 +78,9 @@ pub enum ProposalStatus {
 }
 
 impl ProposalStatus {
-    /// Parse from the pbjson JSON form (enum name string) or the numeric
-    /// proto ordinal. Unknown values map to [`ProposalStatus::Unspecified`].
+    /// Parses the pbjson JSON form, which is the enum name string, or the
+    /// numeric proto ordinal. An unknown value maps to
+    /// [`ProposalStatus::Unspecified`].
     #[must_use]
     pub fn from_json(v: &Value) -> Self {
         match v {
@@ -94,7 +105,7 @@ impl ProposalStatus {
     }
 }
 
-/// Summary stats from a proposal's `ProposalSummary` message.
+/// Summary statistics from the `ProposalSummary` message of a proposal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProposalSummary {
     pub replica_movements: ReplicaMovementCount,
@@ -105,7 +116,8 @@ pub struct ProposalSummary {
     pub max_leaders_after: MaxLeadersCount,
 }
 
-/// The subset of the rebalancer's `Proposal` message the operator acts on.
+/// The subset of the `Proposal` message of the rebalancer that the
+/// operator acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebalancerProposal {
     pub id: String,
@@ -118,24 +130,26 @@ pub struct RebalancerProposal {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RebalancerError {
-    /// The HTTP request never produced a usable response (connection
-    /// refused, DNS failure, timeout, …).
+    /// The HTTP request gave no usable response. The causes include a
+    /// refused connection, a DNS failure, and a timeout.
     #[error("rebalancer transport error: {0}")]
     Transport(String),
-    /// The rebalancer returned a Connect error (non-2xx with a
-    /// `{code,message}` body), e.g. `failed_precondition` /
-    /// `not_found` / `unavailable`.
+    /// The rebalancer returned a Connect error, which is a non-2xx status
+    /// with a `{code,message}` body. Examples are `failed_precondition`,
+    /// `not_found`, and `unavailable`.
     #[error("rebalancer rpc error [{code}]: {message}")]
     Rpc { code: String, message: String },
-    /// The response status was 2xx but the body didn't parse.
+    /// The response status was 2xx, but the body did not parse.
     #[error("rebalancer response decode error: {0}")]
     Decode(String),
 }
 
-/// Parse a `RebalancerProposal` out of a JSON object. For `ExecuteProposal`
-/// / `CancelExecution` the proposal is nested under `proposal`; for
-/// `CreateProposal` / `GetProposal` the body *is* the proposal. This
-/// helper handles both by unwrapping `proposal` when present.
+/// Parses a `RebalancerProposal` out of a JSON object.
+///
+/// For `ExecuteProposal` and `CancelExecution`, the proposal sits below
+/// `proposal`. For `CreateProposal` and `GetProposal`, the body *is* the
+/// proposal. This helper covers both forms. It unwraps `proposal` when
+/// that field is present.
 #[must_use]
 pub fn proposal_from_json(body: &Value) -> RebalancerProposal {
     let p = body.get("proposal").unwrap_or(body);
@@ -202,9 +216,12 @@ pub fn proposal_from_json(body: &Value) -> RebalancerProposal {
     }
 }
 
-/// Read an int32 proto field that pbjson may have emitted as a JSON
-/// number, omitted entirely (proto3 default → `0`), or — defensively —
-/// stringified. Accepts either the `camelCase` or `snake_case` key.
+/// Reads an int32 proto field.
+///
+/// pbjson can write the field as a JSON number. It can also leave the
+/// field out, which is the proto3 default `0`. As a defensive measure,
+/// this function also accepts the field as a string. It accepts the
+/// `camelCase` key and the `snake_case` key.
 fn json_i32(obj: &Value, camel: &str, snake: &str) -> i32 {
     let v = obj.get(camel).or_else(|| obj.get(snake));
     match v {
@@ -214,9 +231,10 @@ fn json_i32(obj: &Value, camel: &str, snake: &str) -> i32 {
     }
 }
 
-/// Production `RebalancerClientLike` backed by `reqwest` speaking
-/// Connect/JSON over plain HTTP (the in-cluster rebalancer terminates no
-/// TLS on its `:9300` Connect port).
+/// Production `RebalancerClientLike` on top of `reqwest`.
+///
+/// It speaks Connect and JSON over plain HTTP. The in-cluster rebalancer
+/// terminates no TLS on its `:9300` Connect port.
 pub struct ConnectRebalancerClient {
     base_url: String,
     http: reqwest::Client,
@@ -224,9 +242,11 @@ pub struct ConnectRebalancerClient {
 
 const SERVICE_PATH: &str = "crabka.rebalancer.v1.Rebalancer";
 
-/// Body of an `ExecuteProposal` request. Split out from
-/// [`RebalancerClientLike::execute_proposal`] so the exact JSON the rebalancer
-/// sees is testable without an HTTP round-trip.
+/// Body of an `ExecuteProposal` request.
+///
+/// It is a separate type from
+/// [`RebalancerClientLike::execute_proposal`], so that a test can check
+/// the exact JSON that the rebalancer sees without an HTTP round-trip.
 fn execute_body(id: &str, throttle: Option<ByteRate>) -> Value {
     let mut body = json!({ "id": id });
     if let Some(throttle) = throttle {
@@ -237,8 +257,8 @@ fn execute_body(id: &str, throttle: Option<ByteRate>) -> Value {
 }
 
 impl ConnectRebalancerClient {
-    /// Build a client for the rebalancer at `base_url` with the supplied
-    /// request timeout. A trailing slash on `base_url` is tolerated.
+    /// Builds a client for the rebalancer at `base_url` with the given
+    /// request timeout. A trailing slash on `base_url` is acceptable.
     #[must_use]
     pub fn new(base_url: &str, request_timeout: Time) -> Self {
         let http = reqwest::Client::builder()
@@ -251,7 +271,8 @@ impl ConnectRebalancerClient {
         }
     }
 
-    /// POST a Connect unary request and return the parsed JSON body.
+    /// Sends a Connect unary request with POST and returns the parsed
+    /// JSON body.
     async fn call(&self, method: &str, body: Value) -> Result<Value, RebalancerError> {
         let url = format!("{}/{SERVICE_PATH}/{method}", self.base_url);
         let resp = self
@@ -275,9 +296,11 @@ impl ConnectRebalancerClient {
     }
 }
 
-/// Map a Connect error body (`{"code","message"}`) onto
-/// [`RebalancerError::Rpc`]. Falls back to the HTTP status when the body
-/// isn't the expected shape.
+/// Maps a Connect error body, which is `{"code","message"}`, onto
+/// [`RebalancerError::Rpc`].
+///
+/// When the body does not have that shape, this function uses the HTTP
+/// status.
 fn connect_error(text: &str, http_status: u16) -> RebalancerError {
     let parsed: Option<Value> = serde_json::from_str(text).ok();
     let code = parsed

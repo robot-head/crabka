@@ -6,11 +6,13 @@ pub fn banner(schemas_version: &str) -> String {
     )
 }
 
-/// Format an integer string as a Rust literal with underscores every 3 digits from the right,
-/// satisfying `clippy::unreadable_literal` for large numbers (e.g., `-2_147_483_648i32`).
+/// Format an integer string as a Rust literal with underscores every 3 digits
+/// from the right. This satisfies `clippy::unreadable_literal` for large
+/// numbers, for example `-2_147_483_648i32`.
 ///
-/// Handles hex literals (`0x...`) by parsing them to decimal first so we emit clean decimal
-/// literals (e.g. `"0x7fffffff"` → `2_147_483_647i32`).
+/// This function handles hex literals (`0x...`). It parses them to decimal
+/// first, so the output is a clean decimal literal, for example
+/// `"0x7fffffff"` → `2_147_483_647i32`.
 #[must_use]
 pub fn format_int_literal(s: &str, suffix: &str) -> String {
     // Normalise hex literals to decimal so we don't produce malformed output
@@ -65,10 +67,10 @@ pub fn format_int_literal(s: &str, suffix: &str) -> String {
     }
 }
 
-/// Reinterpret the bits of a hex literal at the width of its Rust type suffix
-/// (e.g. `"i32"`, `"i64"`). For a signed suffix the top bit of that width sign-
-/// extends, so `0xffffffff` with `"i32"` yields `-1`. Unsigned suffixes and
-/// 64-bit widths are returned unchanged.
+/// Reinterpret the bits of a hex literal at the width of its Rust type suffix,
+/// for example `"i32"` or `"i64"`. For a signed suffix the top bit of that
+/// width sign-extends, so `0xffffffff` with `"i32"` yields `-1`. This function
+/// returns unsigned suffixes and 64-bit widths unchanged.
 fn hex_to_signed(v: u64, suffix: &str) -> i64 {
     let bits: u32 = suffix.trim_start_matches(['i', 'u']).parse().unwrap_or(64);
     if bits >= 64 {

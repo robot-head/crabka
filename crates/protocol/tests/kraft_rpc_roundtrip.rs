@@ -1,6 +1,9 @@
-//! Byte-identity: decode each captured KIP-595 RPC frame (header + body, from a
-//! real `mirror.gcr.io/apache/kafka:4.0.0` 3-node controller quorum) through the generated
-//! types and re-encode, asserting the bytes are unchanged.
+//! Byte-identity test for captured KIP-595 RPC frames.
+//!
+//! Each frame is a header and a body from a real
+//! `mirror.gcr.io/apache/kafka:4.0.0` 3-node controller quorum. This test
+//! decodes each frame through the generated types and re-encodes it. It then
+//! asserts that the bytes are unchanged.
 
 use std::path::Path;
 
@@ -19,7 +22,7 @@ use crabka_protocol::{
     },
 };
 
-/// Header version for a flexible message: `RequestHeader` v2 / `ResponseHeader` v1.
+/// Header version for a flexible message: `RequestHeader` v2, `ResponseHeader` v1.
 const FLEX_REQ_HDR: i16 = 2;
 const FLEX_RESP_HDR: i16 = 1;
 

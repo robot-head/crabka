@@ -1,11 +1,11 @@
 //! Continuous range-0 follower tailing for a node that does not host range 0.
 //!
-//! The loop keeps a local catalog store in step with the committed range-0 WAL
-//! so read barriers on this node can be released. Its one non-obvious duty is
-//! surviving a trim: the checkpointer prunes the WAL behind itself, and a
+//! The loop keeps a local catalog store in step with the committed range-0 WAL,
+//! so this node can release its read barriers. Its one non-obvious duty is to
+//! survive a trim. The checkpointer prunes the WAL behind itself, and a
 //! follower that falls behind the retained log start can never fetch its way
-//! forward again. That case rebuilds from the newest checkpoint instead of
-//! retrying a fetch that is now guaranteed to fail.
+//! forward again. In that case the loop rebuilds from the newest checkpoint,
+//! instead of retrying a fetch that is now guaranteed to fail.
 
 use std::{
     path::{Path, PathBuf},
@@ -24,15 +24,15 @@ const FOLLOWER_STORE_PREFIX: &str = "r0-follower";
 
 /// Open an empty local store for one follower generation.
 ///
-/// The store holds nothing authoritative: it is rebuilt from range 0's latest
-/// checkpoint plus the committed tail after it. It must start empty, because
-/// restoring a checkpoint into a warm cache is rejected, and a warm cache left
-/// unrestored would silently miss every record the checkpointer has already
-/// trimmed out of the WAL.
+/// The store holds nothing authoritative. The follower rebuilds it from range
+/// 0's latest checkpoint plus the committed tail after that checkpoint. It must
+/// start empty, because a restore of a checkpoint into a warm cache is
+/// rejected, and a warm cache left unrestored would silently miss every record
+/// the checkpointer has already trimmed out of the WAL.
 ///
-/// Each generation gets its own directory: a rebuild opens the next generation
-/// while the previous one is still serving reads, and only stops serving once
-/// the swap has happened.
+/// Each generation gets its own directory. A rebuild opens the next generation
+/// while the previous one still serves reads, and the previous one stops
+/// serving only after the swap.
 pub(crate) fn open_follower_store(
     cache_dir: Option<&Path>,
     generation: u64,
@@ -54,8 +54,9 @@ pub(crate) fn open_follower_store(
 
 /// Delete every follower cache generation other than `keep`.
 ///
-/// Called after a rebuild has swapped in `keep` and dropped its predecessor,
-/// so the directories removed here back stores nothing reads through any more.
+/// The follower calls this after a rebuild has swapped in `keep` and dropped
+/// its predecessor, so the directories removed here back stores that no read
+/// goes through any more.
 pub(crate) fn remove_other_follower_stores(cache_dir: Option<&Path>, keep: u64) {
     let Some(parent) = cache_dir else { return };
     let kept = follower_store_dir(parent, keep);
@@ -86,7 +87,7 @@ fn follower_store_dir(parent: &Path, generation: u64) -> PathBuf {
     parent.join(format!("{FOLLOWER_STORE_PREFIX}-{generation}"))
 }
 
-/// Everything the follower tail loop needs to keep tailing — and to rebuild
+/// Everything the follower tail loop needs to keep tailing, and to rebuild
 /// itself when the WAL is trimmed past what it has applied.
 pub(crate) struct Range0FollowerTail {
     follower: ReadOnlyRange0Follower,
@@ -170,12 +171,12 @@ impl Range0FollowerTail {
 
     /// Separate the one unrecoverable failure from every retryable one.
     ///
-    /// A trimmed WAL is the only failure retrying cannot fix: the frames the
+    /// A trimmed WAL is the only failure a retry cannot fix. The frames the
     /// follower needs are gone, so the same fetch fails forever and this node's
-    /// read barriers stall behind it. Everything else — a broker blip, a
-    /// timeout, a topic that is momentarily unresolvable — keeps retrying from
-    /// the same offset, because a needless rebuild throws away a warm store and
-    /// skips frames the observer would otherwise have seen.
+    /// read barriers stall behind it. Everything else keeps retrying from the
+    /// same offset: a broker blip, a timeout, or a topic that is momentarily
+    /// unresolvable. A needless rebuild throws away a warm store and skips
+    /// frames the observer would otherwise have seen.
     async fn handle_read_failure(
         &mut self,
         applied: i64,

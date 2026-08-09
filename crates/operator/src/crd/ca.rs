@@ -1,19 +1,19 @@
-//! `Kafka.spec.clusterCa` + `Kafka.spec.clientsCa` schema.
+//! Schema for `Kafka.spec.clusterCa` and `Kafka.spec.clientsCa`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{CertGeneration, KeyGeneration};
 
-/// Per-CA declarative config. Strimzi-shaped.
+/// Declarative configuration for one CA, in the Strimzi shape.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CertificateAuthority {
-    /// When `true` (default), the operator generates and renews this CA.
-    /// When `false`, the operator expects the CA `Secret` pair to be
-    /// pre-created by the cluster admin and refuses to overwrite them.
-    /// Renewal of BYO CAs is the admin's responsibility; the `CronJob`
-    /// skips them and emits an Event when they're nearing expiry.
+    /// When `true`, which is the default, the operator generates and
+    /// renews this CA. When `false`, the cluster admin must create the CA
+    /// `Secret` pair first, and the operator refuses to overwrite them.
+    /// The admin renews a BYO CA. The `CronJob` skips a BYO CA and emits
+    /// an Event when the CA comes near its expiry.
     #[serde(default = "default_generate")]
     pub generate_certificate_authority: bool,
 
@@ -21,8 +21,8 @@ pub struct CertificateAuthority {
     #[serde(default = "default_validity_days")]
     pub validity_days: u32,
 
-    /// Window before `notAfter` in which the renewal `CronJob` will
-    /// reissue leaf certs. Default 30.
+    /// Window in days before `notAfter` in which the renewal `CronJob`
+    /// reissues the leaf certs. Default 30.
     #[serde(default = "default_renewal_days")]
     pub renewal_days: u32,
 }
@@ -50,29 +50,31 @@ impl Default for CertificateAuthority {
     }
 }
 
-/// Status surface for a single CA. Populated by the reconciler from the
-/// parsed CA cert + the CRD spec.
+/// Status surface for one CA.
+///
+/// The reconciler fills it in from the parsed CA cert and the CRD spec.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CertificateAuthorityStatus {
-    /// RFC3339 `notAfter` of the current (signing) CA cert.
+    /// RFC3339 `notAfter` of the current CA cert, which is the signing
+    /// cert.
     pub not_after: String,
-    /// `true` when the operator generated this CA (i.e.
-    /// `generateCertificateAuthority == true`); `false` for BYO.
+    /// `true` when the operator generated this CA, that is, when
+    /// `generateCertificateAuthority == true`. `false` for a BYO CA.
     pub generated: bool,
-    /// Monotonic generation of the active signing cert (bumped on
-    /// same-key renewal and on key promotion).
+    /// Monotonic generation of the active signing cert. It increments on
+    /// a same-key renewal and on a key promotion.
     #[serde(default)]
     pub cert_generation: CertGeneration,
-    /// Monotonic generation of the active signing key (bumped only on
-    /// key replacement).
+    /// Monotonic generation of the active signing key. It increments only
+    /// on a key replacement.
     #[serde(default)]
     pub key_generation: KeyGeneration,
-    /// Staged key-replacement phase
-    /// (`idle` | `key-replace-trust` | `key-replace-promote`).
+    /// Staged key-replacement phase. One of `idle`, `key-replace-trust`,
+    /// and `key-replace-promote`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation_phase: Option<String>,
-    /// Number of CA certs currently in the trust bundle.
+    /// Number of CA certs in the trust bundle now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust_anchors: Option<usize>,
 }

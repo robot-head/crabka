@@ -1,20 +1,20 @@
 //! Reconcile-level tests for the `KafkaGrpcGateway` controller.
 //!
-//! FIFO rule order matches the exact call sequence in
+//! The FIFO rule order matches the exact call sequence in
 //! `crates/operator/src/controller/grpc_gateway.rs::reconcile`:
 //!
-//!   1. GET kafkas/<parent>                    — fetch parent, version gate
-//!   2. PATCH kafkausers/<gw>-broker           — SSA child `KafkaUser`
-//!   3. GET secrets/<gw>-broker                — cert-issued gate
-//!   4. GET secrets/<gw>-serving               — check existing serving cert
-//!   5. GET secrets/<parent>-cluster-ca        — cluster-CA key (for signing)
-//!   6. GET secrets/<parent>-cluster-ca-cert   — cluster-CA cert (for signing)
-//!   7. PATCH secrets/<gw>-serving             — issue new serving cert
-//!   8. PATCH secrets/<gw>-config              — apply rendered config Secret
-//!   9. PATCH deployments/<gw>                 — apply Deployment
-//!  10. PATCH services/<gw>                    — apply Service
-//!  11. GET deployments/<gw>                   — read back ready-replica count
-//!  12. PATCH kafkagrpcgateways/<gw>/status    — write final status
+//!   1. GET kafkas/<parent>                    fetch the parent, version gate
+//!   2. PATCH kafkausers/<gw>-broker           SSA the child `KafkaUser`
+//!   3. GET secrets/<gw>-broker                cert-issued gate
+//!   4. GET secrets/<gw>-serving               check the existing serving cert
+//!   5. GET secrets/<parent>-cluster-ca        cluster-CA key, for the signature
+//!   6. GET secrets/<parent>-cluster-ca-cert   cluster-CA cert, for the signature
+//!   7. PATCH secrets/<gw>-serving             issue a new serving cert
+//!   8. PATCH secrets/<gw>-config              apply the rendered config Secret
+//!   9. PATCH deployments/<gw>                 apply the Deployment
+//!  10. PATCH services/<gw>                    apply the Service
+//!  11. GET deployments/<gw>                   read the ready-replica count back
+//!  12. PATCH kafkagrpcgateways/<gw>/status    write the final status
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -39,8 +39,8 @@ const NS: &str = "default";
 const KAFKA: &str = "demo";
 const GW: &str = "my-gw";
 
-/// Construct a minimal `KafkaGrpcGateway` CR with the `crabka.io/cluster`
-/// label pointing at `KAFKA`.
+/// Builds a minimal `KafkaGrpcGateway` CR whose `crabka.io/cluster` label
+/// points at `KAFKA`.
 fn gw_cr(name: &str) -> KafkaGrpcGateway {
     let mut gw = KafkaGrpcGateway::new(
         name,
@@ -245,17 +245,18 @@ async fn runtime_invalid_values_stop_before_child_rendering() {
 // Happy-path reconcile
 // ---------------------------------------------------------------------------
 
-/// Full reconcile: all child objects created from scratch, broker cert
-/// already present (`KafkaUser` reconciler ran first), 1 replica ready.
+/// Full reconcile. The operator creates all child objects from nothing.
+/// The broker cert is already present, because the `KafkaUser` reconciler
+/// ran first, and 1 replica is ready.
 ///
-/// Asserts:
-/// - Returns `Action::requeue(30s)`.
-/// - Deployment PATCH body carries exactly 5 volume mounts (serving,
-///   broker-client, cluster-ca, clients-ca, config).
-/// - Deployment PATCH body includes the broker-TLS args pointing at the
+/// The test asserts that:
+/// - the reconcile returns `Action::requeue(30s)`.
+/// - the Deployment PATCH body carries exactly 5 volume mounts: serving,
+///   broker-client, cluster-ca, clients-ca, and config.
+/// - the Deployment PATCH body holds the broker-TLS args that point at the
 ///   mounted paths.
-/// - `KafkaUser` PATCH body has `authentication.type = "tls"`.
-/// - Final status carries `Ready=True reason=Available`.
+/// - the `KafkaUser` PATCH body has `authentication.type = "tls"`.
+/// - the final status carries `Ready=True reason=Available`.
 fn assert_ready_status(observed: &[http::Request<hyper::body::Bytes>]) {
     // --- Assert final status carries Ready=True / Available ---
     let status_patch = observed
@@ -517,14 +518,17 @@ async fn happy_path_all_objects_created_ready() {
 // No-TLS-listener degraded path
 // ---------------------------------------------------------------------------
 
-/// Parent Kafka exposes ONLY a plaintext `PLAIN` listener (no TLS + mTLS
-/// internal listener). The gateway requires full mTLS to the broker, so
-/// reconcile must surface `Ready=False reason=NoTlsListener`, requeue, and
-/// render NO Deployment / Service.
+/// The parent Kafka gives ONLY a plaintext `PLAIN` listener, and no
+/// internal listener with TLS and mTLS.
 ///
-/// The reconcile still walks the child-KafkaUser + serving-cert + config-Secret
-/// steps (those don't depend on the broker endpoint), then bails at step (6)
-/// when `resolve_broker_endpoint` returns `None`.
+/// The gateway needs full mTLS to the broker. The reconcile must therefore
+/// report `Ready=False reason=NoTlsListener`, requeue, and render NO
+/// Deployment and NO Service.
+///
+/// The reconcile still walks the child-KafkaUser step, the serving-cert
+/// step, and the config-Secret step, because none of them depends on the
+/// broker endpoint. It then stops at step 6, when
+/// `resolve_broker_endpoint` returns `None`.
 #[tokio::test]
 async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
     let cluster_ca =
@@ -700,10 +704,13 @@ async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
 // Version-gate early-return
 // ---------------------------------------------------------------------------
 
-/// Parent Kafka has no `KafkaVersionValid` condition and no
-/// `status.metadataVersion` → reconcile must patch `Ready=False
-/// reason=WaitingForVersionValidation` on the gateway and return without
-/// creating any child objects (Deployment, Service, `KafkaUser`, Secrets).
+/// The parent Kafka has no `KafkaVersionValid` condition and no
+/// `status.metadataVersion`.
+///
+/// The reconcile must then patch
+/// `Ready=False reason=WaitingForVersionValidation` on the gateway and
+/// return. It must create no child object: no Deployment, no Service, no
+/// `KafkaUser`, and no Secret.
 #[tokio::test]
 async fn version_gate_blocks_when_kafka_not_validated() {
     // A Kafka body with no version conditions and no metadataVersion.

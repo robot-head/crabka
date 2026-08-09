@@ -1,7 +1,7 @@
 //! Emit Rust source for the borrowed flavor of a `MessageSpec`.
 //!
-//! Mirrors the structure of `emit/owned.rs`. Strings become `&'a str`,
-//! bytes become `&'a [u8]`, the struct carries a `'a` lifetime,
+//! This module mirrors the structure of `emit/owned.rs`. Strings become
+//! `&'a str`, bytes become `&'a [u8]`, the struct carries a `'a` lifetime,
 //! `DecodeBorrow<'de>` replaces `Decode<'de>`, and `to_owned()` bridges to
 //! the matching owned type.
 
@@ -34,12 +34,13 @@ pub(crate) fn is_struct_type(t: &str) -> bool {
     t.chars().next().is_some_and(char::is_uppercase)
 }
 
-/// Returns true if ANY field in the list (recursively) would carry a borrowed
-/// lifetime in the generated Rust type — i.e., string, bytes, records, or a
-/// nested struct that itself has borrowed fields.
+/// Returns true if ANY field in the list, at any depth, would carry a borrowed
+/// lifetime in the generated Rust type. Those fields are string, bytes,
+/// records, or a nested struct that itself has borrowed fields.
 ///
-/// `res_map` is consulted for common-struct references (`PascalCase` where `f.fields.is_empty()`)
-/// to check whether that common struct was generated with `<'a>`.
+/// This function consults `res_map` for common-struct references, which are
+/// `PascalCase` types where `f.fields.is_empty()`, to check whether the
+/// generator gave that common struct a `<'a>`.
 pub(crate) fn needs_lifetime(
     fields: &[crate::ir::FieldSpec],
     res_map: &HashMap<String, Resolution>,
@@ -60,8 +61,9 @@ pub(crate) fn is_tagged(f: &FieldSpec) -> bool {
 }
 
 /// Returns true if the top-level struct needs a `'a` lifetime parameter.
-/// Only non-tagged fields contribute borrowed lifetimes; tagged fields that have
-/// string/struct content use owned types to avoid escape from the payload closure.
+/// Only non-tagged fields contribute borrowed lifetimes. Tagged fields with
+/// string or struct content use owned types, so their data cannot escape the
+/// payload closure.
 pub(crate) fn spec_needs_lifetime(
     spec: &MessageSpec,
     res_map: &HashMap<String, Resolution>,
@@ -77,8 +79,8 @@ pub(crate) fn spec_needs_lifetime(
     })
 }
 
-/// Returns true if a tagged field's content cannot be zero-copy decoded
-/// (because string/bytes data in its payload would escape the closure).
+/// Returns true if a tagged field's content cannot be zero-copy decoded,
+/// because string or bytes data in its payload would escape the closure.
 /// In that case the field must use the owned type.
 pub(crate) fn tagged_field_needs_owned(
     f: &FieldSpec,
@@ -114,7 +116,8 @@ pub(crate) fn is_nullable(f: &FieldSpec) -> bool {
 /// range is narrower than the field's own version range (on either end), the
 /// codec must switch between nullable and non-nullable per version. Returns
 /// `Some(cond)` for that boundary expression, or `None` when nullability is
-/// constant across the whole field range (use `is_nullable(f)` directly).
+/// constant across the whole field range. In that case use `is_nullable(f)`
+/// directly.
 pub(crate) fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
     let r = f.nullable_versions?;
     let need_lower = r.min > f.versions.min;
@@ -154,8 +157,8 @@ fn has_any_tagged_in_spec(spec: &MessageSpec) -> bool {
     has_tagged_fields_recursive(&spec.fields)
 }
 
-/// Returns true if any tagged field in this spec (at top level) needs to be decoded
-/// using the owned `Decode` trait rather than `DecodeBorrow`.
+/// Returns true if any top-level tagged field in this spec needs the owned
+/// `Decode` trait rather than `DecodeBorrow`.
 fn has_tagged_fields_needing_owned(
     spec: &MessageSpec,
     res_map: &HashMap<String, Resolution>,
@@ -187,8 +190,9 @@ fn uses_fixed_type(types: &[String], t: &str) -> bool {
     types.iter().any(|s| s == t)
 }
 
-/// Returns true if any field (recursively) is `float64`.
-/// Used to suppress the `Eq` derive since `f64` does not implement `Eq`.
+/// Returns true if any field, at any depth, is `float64`.
+/// The emitter uses this to suppress the `Eq` derive, because `f64` does not
+/// implement `Eq`.
 pub(crate) fn has_float64_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
@@ -228,9 +232,10 @@ fn uses_non_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
-/// True if a field needs the non-nullable codec for at least some versions:
-/// either it is never nullable, or its nullable range is narrower than its own
-/// version range (so a per-version split emits a non-nullable branch).
+/// True if a field needs the non-nullable codec for at least some versions.
+/// That happens when the field is never nullable, or when its nullable range
+/// is narrower than its own version range, so a per-version split emits a
+/// non-nullable branch.
 fn needs_non_nullable_codec(f: &FieldSpec) -> bool {
     f.nullable_versions.is_none() || nullable_split_cond(f).is_some()
 }
@@ -251,8 +256,8 @@ fn uses_non_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
-/// Returns true if any field has a non-array struct type with nullableVersions set.
-/// Such fields require `get_i8` for the nullable prefix byte in decode.
+/// Returns true if any field has a non-array struct type with nullableVersions
+/// set. Such fields need `get_i8` for the nullable prefix byte in decode.
 fn uses_nullable_struct_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let t = &f.field_type;
@@ -263,8 +268,9 @@ fn uses_nullable_struct_recursive(fields: &[FieldSpec]) -> bool {
 }
 
 /// Returns the Rust type path for a struct-typed field in borrowed flavor.
-/// Includes `<'a>` only when the nested struct actually has borrowed fields.
-/// `type_map::borrowed_type` will use the path verbatim (no automatic `<'a>` addition).
+/// The path includes `<'a>` only when the nested struct actually has borrowed
+/// fields. `type_map::borrowed_type` uses the path verbatim and adds no `<'a>`
+/// of its own.
 pub(crate) fn struct_path_for(
     f: &FieldSpec,
     res_map: &HashMap<String, Resolution>,
@@ -290,9 +296,9 @@ pub(crate) fn struct_path_for(
     }
 }
 
-/// Returns the fully-qualified owned-flavor type path for a struct-typed field,
-/// used when a tagged field must store owned data (because borrowed data would escape
-/// the `read_tagged_fields` closure).
+/// Returns the fully-qualified owned-flavor type path for a struct-typed
+/// field. The emitter uses it when a tagged field must store owned data,
+/// because borrowed data would escape the `read_tagged_fields` closure.
 pub(crate) fn owned_struct_path_for(
     f: &FieldSpec,
     parent_module: &str,
@@ -317,10 +323,10 @@ pub(crate) fn owned_struct_path_for(
 /// - Common structs from a message-level context have `rust_path` like
 ///   `"super::common::<msg>::<struct>::TypeName"` →
 ///   `"crate::owned::common::<msg>::<struct>::TypeName"`.
-/// - Common structs from a common-struct-level context (`parent_module` =
-///   `"common::<msg>::<struct>"`) have `rust_path` like `"super::<struct>::TypeName"`;
-///   the `<msg>` segment is recovered from `parent_module` →
-///   `"crate::owned::common::<msg>::<struct>::TypeName"`.
+/// - Common structs from a common-struct-level context, where `parent_module`
+///   is `"common::<msg>::<struct>"`, have `rust_path` like
+///   `"super::<struct>::TypeName"`. This function recovers the `<msg>` segment
+///   from `parent_module` → `"crate::owned::common::<msg>::<struct>::TypeName"`.
 fn resolved_to_owned_path(
     type_name: &str,
     parent_module: &str,
@@ -371,8 +377,9 @@ pub(crate) fn version_cond(r: VersionRange, version_var: &str) -> String {
 // ── imports ────────────────────────────────────────────────────────────────
 
 /// Build the fixed-type `use crate::primitives::fixed::{ ... };` import, or an
-/// empty stream when no fixed primitives are used. `force_get_i8` pulls in
-/// `get_i8` even with no int8 fields (needed for the nullable-struct prefix).
+/// empty stream when the message uses no fixed primitives. `force_get_i8`
+/// pulls in `get_i8` even with no int8 fields, which the nullable-struct
+/// prefix needs.
 fn fixed_import(types: &[String], force_get_i8: bool) -> TokenStream {
     let mut gets: Vec<&str> = Vec::new();
     let mut puts: Vec<&str> = Vec::new();
@@ -416,8 +423,8 @@ fn fixed_import(types: &[String], force_get_i8: bool) -> TokenStream {
     quote!(use crate::primitives::fixed::{ #(#items),* };)
 }
 
-/// String-field imports (the `string_bytes` len/put helpers plus the borrowed
-/// getters). `nullable` pulls in the nullable variants.
+/// String-field imports: the `string_bytes` len and put helpers, plus the
+/// borrowed getters. `nullable` pulls in the nullable variants.
 fn string_import(nullable: bool) -> TokenStream {
     if nullable {
         quote! {
@@ -443,7 +450,7 @@ fn string_import(nullable: bool) -> TokenStream {
     }
 }
 
-/// `bytes`-field imports: the `put_*` helpers plus the borrowed getters.
+/// `bytes`-field imports: the `put_*` helpers and the borrowed getters.
 fn bytes_import(use_non_nullable: bool, use_nullable: bool) -> TokenStream {
     let mut put_items: Vec<&str> = Vec::new();
     let mut get_borrowed_items: Vec<&str> = Vec::new();
@@ -471,8 +478,8 @@ fn bytes_import(use_non_nullable: bool, use_nullable: bool) -> TokenStream {
     }
 }
 
-/// The `tagged_fields` import line. `encode_to_bytes` is only pulled in when
-/// there are known tagged fields to encode.
+/// The `tagged_fields` import line. This function pulls in `encode_to_bytes`
+/// only when there are known tagged fields to encode.
 fn tagged_import(flex: bool, tagged: bool) -> TokenStream {
     if flex && tagged {
         quote!(
@@ -583,10 +590,11 @@ pub(crate) fn emit_imports(
 
 /// Build the `use` items for a borrowed common-struct file body.
 ///
-/// Replicates the import selection of the (former) `emit_common_struct_file_borrowed`:
-/// it has NO records-import block (common structs never carry `records` fields)
-/// and never pulls in the owned `Decode` trait (common structs have no top-level
-/// tagged-owned fields).
+/// This function replicates the import selection of the former
+/// `emit_common_struct_file_borrowed`. It has NO records-import block, because
+/// common structs never carry `records` fields. It also never pulls in the
+/// owned `Decode` trait, because common structs have no top-level
+/// tagged-owned fields.
 pub(crate) fn emit_common_imports(fields: &[FieldSpec], flex_min_val: i16) -> TokenStream {
     let types = used_field_types_recursive(fields);
     let has_flex = flex_min_val < i16::MAX;
@@ -808,14 +816,16 @@ pub(crate) fn to_owned_field_expr(schema_type: &str, expr: &str, nullable: bool)
     }
 }
 
-/// Returns `true` if this field has `"flexibleVersions": "none"` (per-field override),
-/// meaning it must always use the legacy (non-compact) codec even in flex message versions.
+/// Returns `true` if this field has the per-field override
+/// `"flexibleVersions": "none"`. Such a field must always use the legacy
+/// (non-compact) codec, even in flex message versions.
 pub(crate) fn field_forces_non_flex(f: &FieldSpec) -> bool {
     matches!(f.flexible_versions, Some(FlexibleVersions::None))
 }
 
-/// Encode a field whose Rust type is `Option<T>` but wire format is non-nullable.
-/// Treats None as empty/default for the underlying type.
+/// Encode a field whose Rust type is `Option<T>` but whose wire format is
+/// non-nullable. This function treats None as the empty or default value for
+/// the underlying type.
 pub(crate) fn encode_call_option_as_non_nullable(schema_type: &str, expr: &str) -> String {
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
@@ -851,7 +861,8 @@ pub(crate) fn encode_call_option_as_non_nullable(schema_type: &str, expr: &str) 
     }
 }
 
-/// Compute `encoded_len` for a field whose Rust type is `Option<T>` but wire is non-nullable.
+/// Compute `encoded_len` for a field whose Rust type is `Option<T>` but whose
+/// wire format is non-nullable.
 pub(crate) fn encoded_len_expr_option_as_non_nullable(schema_type: &str, expr: &str) -> String {
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
@@ -888,7 +899,8 @@ pub(crate) fn encoded_len_expr_option_as_non_nullable(schema_type: &str, expr: &
 }
 
 /// Returns a Rust boolean expression that is `true` when the tagged field
-/// equals its schema-specified default. Mirrors `owned::tagged_is_default_cond`.
+/// equals its schema-specified default. This mirrors
+/// `owned::tagged_is_default_cond`.
 pub(crate) fn tagged_is_default_cond(f: &FieldSpec) -> String {
     let field = name_conv::field_name(&f.name);
     let base = base_type(&f.field_type);
@@ -915,8 +927,9 @@ pub(crate) fn tagged_is_default_cond(f: &FieldSpec) -> String {
     format!("crate::codegen_helpers::is_default(&self.{field})")
 }
 
-/// Like `encoded_len_expr` but uses owned-type conventions (`.as_deref()`).
-/// Used for tagged fields stored as `String`/`Bytes` (owned) in borrowed structs.
+/// Like `encoded_len_expr`, but with owned-type conventions such as
+/// `.as_deref()`. The emitter uses it for tagged fields stored as owned
+/// `String` or `Bytes` in borrowed structs.
 pub(crate) fn owned_encoded_len_expr(schema_type: &str, expr: &str, nullable: bool) -> String {
     match (schema_type, nullable) {
         ("string", false) => {
@@ -939,9 +952,10 @@ pub(crate) fn owned_encoded_len_expr(schema_type: &str, expr: &str, nullable: bo
     }
 }
 
-/// Like `encode_call` but uses owned-type conventions (`.as_deref()`, `&expr`).
-/// Used for tagged fields that are stored as `String`/`Bytes` (owned) in the
-/// borrowed struct because their data can't borrow from the input buffer.
+/// Like `encode_call`, but with owned-type conventions such as `.as_deref()`
+/// and `&expr`. The emitter uses it for tagged fields stored as owned `String`
+/// or `Bytes` in the borrowed struct, because their data cannot borrow from
+/// the input buffer.
 pub(crate) fn owned_encode_call(schema_type: &str, expr: &str, nullable: bool) -> String {
     match (schema_type, nullable) {
         ("string", false) => format!(
@@ -1287,8 +1301,9 @@ pub(crate) fn decode_borrow_call(
     }
 }
 
-/// Generate a decode call that produces an **owned** value (using `Decode`, not `DecodeBorrow`).
-/// Used for tagged fields whose content cannot be zero-copy decoded (strings, owned structs).
+/// Generate a decode call that produces an **owned** value with `Decode`, not
+/// with `DecodeBorrow`. The emitter uses it for tagged fields whose content
+/// cannot be zero-copy decoded, such as strings and owned structs.
 pub(crate) fn decode_owned_call(
     schema_type: &str,
     nullable: bool,

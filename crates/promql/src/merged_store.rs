@@ -1,4 +1,4 @@
-//! Merge two metric stores, typically compacted cold blocks plus a hot WAL head.
+//! Merges two metric stores, usually compacted cold blocks and a hot WAL head.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -1,11 +1,11 @@
 //! Background JWKS refresher for SASL/OAUTHBEARER signed-token validation.
 //!
-//! `crates/security` is I/O-free: it parses a JWKS *string* and verifies tokens
-//! against an in-memory key set held behind a [`JwksHandle`]. This module is the
-//! one place that reaches the network — it periodically GETs the identity
+//! `crates/security` is I/O-free. It parses a JWKS *string* and verifies
+//! tokens against an in-memory key set behind a [`JwksHandle`]. This module is
+//! the one place that reaches the network. It periodically GETs the identity
 //! provider's JWKS endpoint, parses it, and atomically swaps the new key set
-//! into the shared handle so the [`SignedJwsValidator`] picks up rotated keys
-//! with no restart and no lock.
+//! into the shared handle. The [`SignedJwsValidator`] therefore picks up
+//! rotated keys with no restart and no lock.
 //!
 //! [`SignedJwsValidator`]: crabka_security::SignedJwsValidator
 
@@ -24,8 +24,8 @@ use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// A JWKS fetch failure — surfaced for logging / tests; the refresher keeps the
-/// previous key set on error.
+/// A JWKS fetch failure, reported for logging and tests. The refresher keeps
+/// the previous key set on an error.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum FetchError {
     #[error("jwks http request failed: {0}")]
@@ -34,11 +34,11 @@ pub(crate) enum FetchError {
     Parse,
 }
 
-/// Fetch and parse a JWKS document from `endpoint` (HTTP or HTTPS). The
-/// client's configured timeout caps a hung identity provider; non-2xx
-/// responses are errors.
-/// `ignore_key_use` threads through to the JWKS parser — when
-/// false, `use=enc` keys are filtered out.
+/// Fetches and parses a JWKS document from `endpoint`, over HTTP or HTTPS.
+///
+/// The client's configured timeout bounds a hung identity provider. A non-2xx
+/// response is an error. `ignore_key_use` passes through to the JWKS parser.
+/// When it is false, the parser filters out `use=enc` keys.
 pub(crate) async fn fetch_jwks(
     client: &reqwest::Client,
     endpoint: &str,
@@ -56,18 +56,19 @@ pub(crate) async fn fetch_jwks(
 
 /// Periodically refreshes a [`JwksHandle`] from a JWKS endpoint.
 ///
-/// The loop additionally serves on-demand refresh requests
-/// triggered by validators that encountered an unknown-kid or
-/// bad-signature token (received via [`signal_rx`](Self::signal_rx)).
-/// On-demand refreshes are rate-limited by
-/// [`min_on_demand_pause`](Self::min_on_demand_pause) so a verify-fail
-/// storm can't hammer the `IdP`. Successful refreshes update
-/// [`last_successful_fetch_ms`](Self::last_successful_fetch_ms) — the
-/// validator reads that to enforce hard cache expiry.
+/// The loop also serves on-demand refresh requests. A validator that met an
+/// unknown-kid or bad-signature token starts one, and the loop receives it
+/// through [`signal_rx`](Self::signal_rx).
+///
+/// [`min_on_demand_pause`](Self::min_on_demand_pause) rate-limits on-demand
+/// refreshes, so a burst of verify failures cannot overload the `IdP`. A
+/// successful refresh updates
+/// [`last_successful_fetch_ms`](Self::last_successful_fetch_ms). The validator
+/// reads that field to enforce hard cache expiry.
 pub(crate) struct JwksRefresher {
     /// JWKS endpoint URL.
     pub endpoint: String,
-    /// Shared key cell read by the validator; this task `store`s into it.
+    /// Shared key cell that the validator reads. This task stores into it.
     pub handle: JwksHandle,
     /// Re-fetch cadence (periodic).
     pub interval: Time,
@@ -75,50 +76,54 @@ pub(crate) struct JwksRefresher {
     pub http_timeout: Time,
     /// Cancels the task on broker shutdown.
     pub shutdown: CancellationToken,
-    /// Optional PEM path; when
-    /// `Some`, the rustls `ClientConfig` used by reqwest is built from
-    /// this file and replaces the default webpki-roots trust store. When
-    /// `None`, reqwest's webpki-roots default applies. The bundle is
-    /// shared with the introspection client when
-    /// configured — the operator's `tlsTrustedCertificates` flows
-    /// through `idp_tls_trust` and is used for JWKS, introspection, and
-    /// userinfo HTTPS.
+    /// Optional PEM path. When it is `Some`, this file builds the rustls
+    /// `ClientConfig` that reqwest uses, and replaces the default
+    /// webpki-roots trust store. When it is `None`, reqwest's webpki-roots
+    /// default applies.
+    ///
+    /// The introspection client shares the bundle when the operator configures
+    /// it. The operator's `tlsTrustedCertificates` arrives through
+    /// `idp_tls_trust`, and JWKS, introspection, and userinfo HTTPS all use
+    /// it.
     pub tls_trust: Option<PathBuf>,
-    /// Receives signals from validators on verify-failure to
-    /// trigger an on-demand refresh (subject to `min_on_demand_pause`).
-    /// Capacity 1 + `try_send` on the producer side ⇒ signals coalesce.
+    /// Receives a signal from a validator on a verify failure, which starts an
+    /// on-demand refresh. `min_on_demand_pause` still applies. Capacity 1 with
+    /// `try_send` on the producer side makes the signals coalesce.
     pub signal_rx: mpsc::Receiver<()>,
-    /// Minimum pause between on-demand refreshes. Strimzi
-    /// default 1 second. Periodic refresh (`interval`) is unaffected.
+    /// Minimum pause between on-demand refreshes. The Strimzi default is 1
+    /// second. This does not change the periodic refresh (`interval`).
     pub min_on_demand_pause: Time,
-    /// Shared timestamp counter. Refresher updates after each
-    /// successful fetch; validators read for cache-expiry check. Shared
-    /// (`Arc<AtomicI64>`) with the paired `JwksHandle`.
+    /// Shared timestamp counter. The refresher updates it after each
+    /// successful fetch, and validators read it for the cache-expiry check.
+    /// It is an `Arc<AtomicI64>` shared with the paired `JwksHandle`.
     pub last_successful_fetch_ms: Arc<AtomicI64>,
-    /// Tracks the last on-demand-refresh epoch ms for
-    /// rate-limiting. Independent of periodic refresh.
+    /// Holds the last on-demand-refresh epoch ms, for rate limiting. It is
+    /// independent of the periodic refresh.
     pub last_on_demand_refresh_ms: Arc<AtomicI64>,
-    /// When true, accept JWKS keys regardless of `use` field.
-    /// Default false (filter out `use=enc`). Threads to
+    /// When true, accept JWKS keys whatever their `use` field holds. Default
+    /// false, which filters out `use=enc`. This value passes to
     /// [`Jwks::from_json`].
     pub ignore_key_use: bool,
-    /// Relative sleeper driving the periodic refresh cadence. Production uses
-    /// [`qubit_clock::sleep::SystemSleeper`] (real time); tests inject a
-    /// [`qubit_clock::sleep::MockSleeper`] so the refresh interval fires on a
-    /// controlled mock timeline instead of wall-clock time.
+    /// Relative sleeper that drives the periodic refresh cadence. Production
+    /// uses [`qubit_clock::sleep::SystemSleeper`], which is real time. Tests
+    /// inject a [`qubit_clock::sleep::MockSleeper`], so the refresh interval
+    /// fires on a controlled mock timeline instead of wall-clock time.
     pub sleeper: Arc<dyn AsyncSleeper>,
 }
 
 impl JwksRefresher {
-    /// Run until cancelled. The first periodic fetch fires immediately (a
-    /// zero-duration first sleep on the injected [`AsyncSleeper`] reproduces
-    /// `tokio::time::interval`'s t=0 tick), so keys are available shortly after
-    /// startup; a failed fetch logs a warning and leaves the previous key set
-    /// in place — a transient identity-provider outage never crashes the broker.
-    /// On-demand refresh signals from validators race with the
-    /// periodic tick in the same `select!`; the on-demand arm consults
-    /// `last_on_demand_refresh_ms` against `min_on_demand_pause` and drops
-    /// the signal silently when within the window.
+    /// Runs until the caller cancels the task.
+    ///
+    /// The first periodic fetch happens immediately, because a zero-duration
+    /// first sleep on the injected [`AsyncSleeper`] reproduces the t=0 tick of
+    /// `tokio::time::interval`. Keys are therefore available soon after
+    /// startup. A failed fetch logs a warning and leaves the previous key set
+    /// in place, so a short identity-provider outage never crashes the broker.
+    ///
+    /// On-demand refresh signals from validators race with the periodic tick
+    /// in the same `select!`. The on-demand arm compares
+    /// `last_on_demand_refresh_ms` against `min_on_demand_pause`, and drops
+    /// the signal without a message when it is inside the window.
     pub(crate) async fn run(mut self) {
         let mut builder = reqwest::Client::builder().timeout(self.http_timeout.to_std());
         if let Some(path) = &self.tls_trust {
@@ -196,10 +201,10 @@ impl JwksRefresher {
         }
     }
 
-    /// Extracted from the loop so the periodic + on-demand arms
-    /// both call it. Updates `last_successful_fetch_ms` only on success
-    /// (failure leaves the timestamp untouched so the cache ages toward
-    /// expiry and validators eventually start failing closed).
+    /// This is a separate method so that both the periodic arm and the
+    /// on-demand arm can call it. It updates `last_successful_fetch_ms` only
+    /// on success. A failure leaves the timestamp unchanged, so the cache ages
+    /// toward expiry and the validators then start to fail closed.
     async fn refresh_and_swap(&self, client: &reqwest::Client) {
         match fetch_jwks(client, &self.endpoint, self.ignore_key_use).await {
             Ok(jwks) => {
@@ -221,9 +226,9 @@ impl JwksRefresher {
     }
 }
 
-/// Current Unix epoch in milliseconds, saturating on overflow
-/// or pre-epoch clock skew. Used by the refresher to populate the shared
-/// timestamp counter read by validators for cache-expiry checks.
+/// Current Unix epoch in milliseconds. It saturates on overflow and on
+/// pre-epoch clock skew. The refresher uses it to fill the shared timestamp
+/// counter that validators read for cache-expiry checks.
 fn current_epoch_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -253,8 +258,8 @@ mod tests {
         }
     }
 
-    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
-    /// stall fails the test deterministically instead of spinning forever.
+    /// Yield-polls until `cond` holds. A bounded hang-guard makes a real stall
+    /// fail the test deterministically instead of spinning forever.
     async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
         for _ in 0..200_000 {
             if cond() {
@@ -265,8 +270,8 @@ mod tests {
         panic!("condition never held: {what}");
     }
 
-    /// Serve a fixed body at `/jwks` on an ephemeral port; returns the bound
-    /// address and a shutdown token for the server task.
+    /// Serves a fixed body at `/jwks` on an ephemeral port. It returns the
+    /// bound address and a shutdown token for the server task.
     async fn serve_jwks(body: &'static str) -> (SocketAddr, CancellationToken) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -285,11 +290,10 @@ mod tests {
 
     const JWKS_BODY: &str = r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"k1","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}]}"#;
 
-    /// Pick the on-demand-refresh-relevant slots out of a
-    /// `JwksRefresher` so the simple refresher tests can stay
-    /// terse. `signal_rx` is given but never sent on in these tests;
-    /// `min_on_demand_pause` is irrelevant; the timestamps are isolated
-    /// per test.
+    /// Picks the slots that matter for on-demand refresh out of a
+    /// `JwksRefresher`, so that the simple refresher tests stay short. These
+    /// tests supply `signal_rx` but never send on it. `min_on_demand_pause`
+    /// does not apply. Each test has its own timestamps.
     fn test_refresher(
         endpoint: String,
         handle: JwksHandle,
@@ -365,10 +369,10 @@ mod tests {
         srv_shutdown.cancel();
     }
 
-    /// Serve a fixed JSON body over TLS on an ephemeral port, using a
-    /// freshly-generated self-signed cert with `127.0.0.1` as a SAN.
-    /// Returns the bound address, a shutdown token, and the PEM path
-    /// of the cert (suitable as a trust bundle for the client).
+    /// Serves a fixed JSON body over TLS on an ephemeral port, with a newly
+    /// generated self-signed cert that carries `127.0.0.1` as a SAN. It
+    /// returns the bound address, a shutdown token, and the PEM path of the
+    /// cert, which the client can use as a trust bundle.
     async fn serve_jwks_https(
         body: &'static str,
     ) -> (std::net::SocketAddr, CancellationToken, std::path::PathBuf) {
@@ -532,9 +536,9 @@ mod tests {
 
     // ---- On-demand refresh + cache-expiry timestamp -------------
 
-    /// Serve a fixed body but track how many HTTP requests have hit the
-    /// `/jwks` route. Returns a shared `AtomicUsize` so the test can assert
-    /// on call count after the refresher has been driven.
+    /// Serves a fixed body and counts how many HTTP requests reached the
+    /// `/jwks` route. It returns a shared `AtomicUsize`, so the test can
+    /// assert on the call count after it drives the refresher.
     async fn serve_jwks_counting(
         body: &'static str,
     ) -> (
@@ -567,9 +571,9 @@ mod tests {
         (addr, shutdown, counter)
     }
 
-    /// Builds a refresher with a 1-hour periodic interval (so only on-demand
-    /// signals matter for the test) and returns the shared signal sender +
-    /// the rate-limit timestamp + the success-timestamp.
+    /// Builds a refresher with a 1-hour periodic interval, so that only
+    /// on-demand signals matter for the test. It returns the shared signal
+    /// sender, the rate-limit timestamp, and the success timestamp.
     type SignalRefresher = (
         JwksRefresher,
         mpsc::Sender<()>,

@@ -1,7 +1,7 @@
 //! Prometheus `remote_read` protobuf helpers.
 //!
 //! This module implements the SAMPLES response path for the v1 read format.
-//! `STREAMED_XOR_CHUNKS` is intentionally not advertised or encoded here.
+//! It deliberately does not advertise or encode `STREAMED_XOR_CHUNKS`.
 
 use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
 use crabka_units::prelude::*;
@@ -10,8 +10,8 @@ use thiserror::Error;
 
 use crate::wire::{decoded::snappy_block_decode_raw, pb::v1};
 
-/// Default decompressed-body cap for `remote_read` requests when a caller does
-/// not supply its own. Mirrors the distributor's ingest default so a single
+/// Default decompressed-body cap for a `remote_read` request when the caller
+/// supplies no cap. It mirrors the distributor's ingest default, so a single
 /// `read` request cannot decompress to an unbounded allocation.
 pub const DEFAULT_MAX_READ_DECOMPRESSED: ByteSize = mebibytes(32);
 
@@ -162,9 +162,9 @@ mod tests {
         check!(selectors[0].value == "http_requests_total");
     }
 
-    /// A `remote_read` snappy block declaring a huge uncompressed length but
-    /// carrying a tiny payload must be rejected on the declared-length
-    /// pre-check, before `snap` allocates the declared buffer.
+    /// A `remote_read` snappy block that declares a huge uncompressed length
+    /// but carries a tiny payload must fail the declared-length pre-check,
+    /// before `snap` allocates the declared buffer.
     #[test]
     fn read_request_rejects_declared_length_bomb() {
         // Hand-roll a raw snappy block: a varint preamble declaring ~1 GiB of

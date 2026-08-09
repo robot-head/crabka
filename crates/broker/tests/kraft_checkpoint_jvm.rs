@@ -1,5 +1,5 @@
-//! Docker-gated: a Crabka-built `bootstrap.checkpoint` is parsed cleanly by the
-//! JVM `kafka-dump-log --cluster-metadata-decoder`.
+//! Docker-gated: the JVM `kafka-dump-log --cluster-metadata-decoder` parses a
+//! Crabka-built `bootstrap.checkpoint` cleanly.
 //!
 //! ```text
 //! cargo test -p crabka-broker --test kraft_checkpoint_jvm -- --ignored --nocapture

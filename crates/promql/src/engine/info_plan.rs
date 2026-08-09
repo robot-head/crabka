@@ -17,24 +17,29 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Plan an `info(v [, data_label_selector])` call onto the operator path:
-    /// parse the (store-independent) [`InfoContext`], recurse the input vector `v`
-    /// through the histogram-aware [`Self::histogram_fold_inner_vector`] (so a
-    /// histogram-valued input passes through unchanged, exactly as the interpreter
-    /// does), select the `target_info` / custom-selector series through the SAME
-    /// interpreter helper ([`Self::info_by_key`]), and apply the **shared**
-    /// [`apply_info`] join — returning the finished vector as a
-    /// [`PlannedInstant::Precomputed`]. Because the context parse, the info-series
-    /// selection, and the join all come from the interpreter's own code, the
-    /// operator path matches Prometheus by construction (incl. the latest-sample
-    /// conflict resolution, the required-matcher drop, and the `target_info` /
-    /// info-metric passthrough rules exercised by the conformance corpus).
+    /// Plans an `info(v [, data_label_selector])` call onto the operator path.
     ///
-    /// Returns `None` (interpreter fallback) only for an input vector the recursive
-    /// planner cannot evaluate. Wrong arity or a non-vector-selector data-label
-    /// argument surfaces here as `Err` (via [`parse_info_call`]), and a histogram
-    /// info-series match surfaces as `Err` (via [`info_samples_by_identifying_key`])
-    /// — both identical to the interpreter.
+    /// This method parses the store-independent [`InfoContext`]. It recurses the
+    /// input vector `v` through the histogram-aware
+    /// [`Self::histogram_fold_inner_vector`], so a histogram-valued input passes
+    /// through unchanged, exactly as the interpreter does. It selects the
+    /// `target_info` or custom-selector series through the same interpreter
+    /// helper, [`Self::info_by_key`]. It then applies the shared [`apply_info`]
+    /// join and returns the finished vector as a
+    /// [`PlannedInstant::Precomputed`].
+    ///
+    /// The context parse, the info-series selection, and the join all come from
+    /// the interpreter's own code, so the operator path matches Prometheus by
+    /// construction. This covers the latest-sample conflict resolution, the
+    /// required-matcher drop, and the `target_info` and info-metric passthrough
+    /// rules that the conformance corpus exercises.
+    ///
+    /// This method returns `None`, the interpreter fallback, only for an input
+    /// vector the recursive planner cannot evaluate. Wrong arity or a
+    /// non-vector-selector data-label argument gives `Err` here, through
+    /// [`parse_info_call`]. A histogram info-series match gives `Err` through
+    /// [`info_samples_by_identifying_key`]. Both are identical to the
+    /// interpreter.
     pub(super) async fn plan_info_call(
         &self,
         tenant: &str,
@@ -56,10 +61,11 @@ impl<S: MetricStore> PromqlEngine<S> {
         ))))
     }
 
-    /// Select the `target_info` (or custom-selector) series and fold them into the
-    /// `identifying-key -> info sample` map the [`apply_info`] join consumes. This
-    /// is the store-touching half of [`Self::eval_info_call`], shared with the
-    /// operator path's `info` dispatch.
+    /// Selects the `target_info` or custom-selector series.
+    ///
+    /// This method folds them into the `identifying-key -> info sample` map that
+    /// the [`apply_info`] join reads. It is the store-touching half of
+    /// [`Self::eval_info_call`], shared with the operator path's `info` dispatch.
     pub(super) async fn info_by_key(
         &self,
         tenant: &str,

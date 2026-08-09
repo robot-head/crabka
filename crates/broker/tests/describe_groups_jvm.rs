@@ -1,40 +1,42 @@
 //! cp/JVM cross-validation for `DescribeGroups` (`api_key=15`) metadata.
 //!
-//! Boots a single-node real Kafka (`mirror.gcr.io/confluentinc/cp-kafka:7.4.0`, `KRaft`) in
-//! Docker, forms a CLASSIC consumer group `g` with the `RangeAssignor`, then
-//! sends a `DescribeGroupsRequest` to the real broker FROM THE HOST via
+//! The test boots a single-node real Kafka in Docker, image
+//! `mirror.gcr.io/confluentinc/cp-kafka:7.4.0` in `KRaft` mode. It forms a
+//! CLASSIC consumer group `g` with the `RangeAssignor`. It then sends a
+//! `DescribeGroupsRequest` to the real broker FROM THE HOST with
 //! `crabka_client_core::Client` and captures the response. cp/JVM is the
-//! authority: this proves the spec premise that real Kafka populates the
-//! fields Crabka's handler now surfaces (see `describe_groups_metadata.rs` for
-//! the in-process byte-exact echo, and the calibration cross-check below):
+//! authority. This proves the spec premise that real Kafka populates the fields
+//! Crabka's handler now surfaces. See `describe_groups_metadata.rs` for the
+//! in-process byte-exact echo, and the calibration cross-check below:
 //!
 //!   * `protocol_type == "consumer"` for an active classic consumer group;
-//!   * `protocol_data == "range"` — the SELECTED assignor name, NON-empty;
-//!   * `member_metadata` NON-empty — the encoded `ConsumerProtocolSubscription`
+//!   * `protocol_data == "range"`, the SELECTED assignor name, NON-empty;
+//!   * `member_metadata` NON-empty: the encoded `ConsumerProtocolSubscription`
 //!     the consumer sent in its `JoinGroup`;
-//!   * a TYPELESS group (offset-commit-only, never had a protocol) reports
-//!     `protocol_type == ""`, settling the `unwrap_or_default()` projection in
-//!     `handlers/describe_groups.rs`.
+//!   * a TYPELESS group, which only commits offsets and never had a protocol,
+//!     reports `protocol_type == ""`. This settles the `unwrap_or_default()`
+//!     projection in `handlers/describe_groups.rs`.
 //!
 //! Scope: CLASSIC groups only. cp-kafka 7.4.0 is Kafka 3.4 server-side, which
-//! predates KIP-848 — a next-gen (consumer-protocol) group's `member_metadata`
-//! via classic `DescribeGroups` needs a next-gen-capable image (Kafka 3.7+) and
-//! is deferred.
+//! predates KIP-848. A next-gen consumer-protocol group's `member_metadata`
+//! through classic `DescribeGroups` needs a next-gen-capable image, Kafka 3.7+.
+//! That work is deferred.
 //!
-//! The capture is written to
-//! `tests/fixtures/describe_groups/real_kafka_classic.json` (string fields
-//! verbatim, byte fields as hex + UTF-8-lossy). Re-running regenerates it.
+//! The test writes the capture to
+//! `tests/fixtures/describe_groups/real_kafka_classic.json`. String fields are
+//! verbatim and byte fields are hex plus UTF-8-lossy. A new run regenerates the
+//! file.
 //!
 //! ```text
 //! cargo test -p crabka-broker --test describe_groups_jvm -- --ignored --nocapture
 //! ```
 //!
-//! Networking: cp-kafka publishes two PLAINTEXT listeners — `PLAINTEXT` on
-//! `9092` advertised as `localhost:9092` for the in-container admin/consumer
-//! CLI, and `EXTERNAL` on `19092` advertised as `localhost:19092`, published to
-//! host port 19092 so the host `Client` reaches it on `127.0.0.1:19092`. A
-//! single `DescribeGroups` is served by the sole broker (it is the group
-//! coordinator), so no `FindCoordinator` redirect is needed.
+//! Networking: cp-kafka publishes two PLAINTEXT listeners. `PLAINTEXT` on
+//! `9092` is advertised as `localhost:9092` for the in-container admin and
+//! consumer CLI. `EXTERNAL` on `19092` is advertised as `localhost:19092` and
+//! published to host port 19092, so the host `Client` reaches it on
+//! `127.0.0.1:19092`. The sole broker serves a single `DescribeGroups` because
+//! it is the group coordinator, so no `FindCoordinator` redirect is needed.
 
 use std::{
     path::{Path, PathBuf},
@@ -55,7 +57,7 @@ const HOST_PORT: u16 = 19092;
 const HOST_BOOTSTRAP: &str = "127.0.0.1:19092";
 /// Stable classic consumer group.
 const GROUP: &str = "g";
-/// Offset-commit-only group — never carries a protocol type.
+/// Offset-commit-only group. It never carries a protocol type.
 const TYPELESS_GROUP: &str = "simple-typeless";
 const TOPIC: &str = "t";
 
@@ -85,8 +87,10 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// JSON-ify one described group: string fields verbatim, member byte fields as
-/// hex + UTF-8-lossy so the fixture is both diffable and human-readable.
+/// Convert one described group to JSON.
+///
+/// String fields stay verbatim. Member byte fields become hex plus UTF-8-lossy,
+/// so the fixture is both diffable and readable.
 fn group_json(
     g: &crabka_protocol::owned::describe_groups_response::DescribedGroup,
 ) -> serde_json::Value {
@@ -137,9 +141,10 @@ fn docker_rm_f(name: &str) {
     let _ = Command::new("docker").args(["rm", "-f", name]).output();
 }
 
-/// Boot single-node cp-kafka in `KRaft` mode with the dual listener layout. The
-/// `EXTERNAL` listener is published to the fixed host port so the host `Client`
-/// can dial it directly.
+/// Boot single-node cp-kafka in `KRaft` mode with the dual listener layout.
+///
+/// Docker publishes the `EXTERNAL` listener to the fixed host port, so the host
+/// `Client` can dial it directly.
 fn docker_run_kafka() {
     docker_rm_f(CONTAINER);
     let out = Command::new("docker")
@@ -196,7 +201,7 @@ fn docker_run_kafka() {
     );
 }
 
-/// Run a command inside the broker container, returning its `Output`.
+/// Run a command inside the broker container and return its `Output`.
 fn exec(args: &[&str]) -> std::process::Output {
     Command::new("docker")
         .arg("exec")
@@ -206,7 +211,7 @@ fn exec(args: &[&str]) -> std::process::Output {
         .expect("spawn docker exec")
 }
 
-/// Detach a long-running command inside the container (`docker exec -d`).
+/// Detach a long-running command inside the container with `docker exec -d`.
 fn exec_detached(script: &str) {
     let out = Command::new("docker")
         .args(["exec", "-d", CONTAINER, "bash", "-c", script])
@@ -264,8 +269,10 @@ fn wait_for_broker() {
     );
 }
 
-/// Wait until classic group `g` reports `Stable` with a member, via the JVM
-/// admin tool (`kafka-consumer-groups --describe --state`).
+/// Wait until classic group `g` reports `Stable` with a member.
+///
+/// The check uses the JVM admin tool `kafka-consumer-groups --describe
+/// --state`.
 fn wait_for_group_stable() {
     let deadline = Instant::now() + Duration::from_mins(1);
     let mut last = String::new();

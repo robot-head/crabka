@@ -4,12 +4,12 @@
 //! includes this module via `#[path = "shared/mod.rs"] mod shared;`.
 //!
 //! The harness wires a `tower::Service` mock that:
-//!   - matches incoming requests against an ordered list of `MockRule`s
-//!     (FIFO: first matching rule wins, and is consumed),
-//!   - captures every observed request so the test body can assert on
-//!     methods, URIs, and bodies, and
-//!   - falls through to a 404 when no rule matches (which fails the test
-//!     by surfacing an unexpected request).
+//!   - matches incoming requests against an ordered list of `MockRule`s. The
+//!     order is FIFO: the first rule that matches wins and is consumed;
+//!   - captures every observed request, so the test body can assert on
+//!     methods, URIs, and bodies;
+//!   - falls through to a 404 when no rule matches. That 404 fails the test
+//!     and shows the unexpected request.
 
 #![allow(dead_code)]
 
@@ -35,17 +35,18 @@ use kube::Client;
 use tokio::sync::Mutex as AsyncMutex;
 use tower::{ServiceBuilder, service_fn};
 
-/// One preloaded mock response. Matched on `(method, path_substr)` against
-/// the incoming request URI. Substring match is sufficient because kube's
-/// generated paths are deterministic and unambiguous.
+/// One preloaded mock response. The mock matches on `(method, path_substr)`
+/// against the incoming request URI. A substring match is enough, because
+/// kube's generated paths are deterministic and unambiguous.
 pub struct MockRule {
     pub method: Method,
     pub path_substr: String,
     pub response: Response<Vec<u8>>,
 }
 
-/// Shared mock state: an ordered queue of rules (FIFO consumption) and the
-/// list of every request observed (regardless of whether a rule matched).
+/// Shared mock state: an ordered queue of rules with FIFO consumption, and
+/// the list of every observed request. The list holds a request whether or not
+/// a rule matched it.
 pub struct MockState {
     pub rules: Mutex<Vec<MockRule>>,
     pub observed: Mutex<Vec<Request<Bytes>>>,
@@ -68,9 +69,9 @@ impl MockState {
     }
 }
 
-/// Build a kube `Client` whose underlying transport is the FIFO rule
-/// matcher described above. Each call records the request bytes before
-/// returning the canned response.
+/// Build a kube `Client` whose underlying transport is the FIFO rule matcher
+/// described above. Each call records the request bytes before it returns the
+/// canned response.
 pub fn mock_client(state: &Arc<MockState>, default_ns: &str) -> Client {
     let state_for_svc = state.clone();
     let svc = ServiceBuilder::new().service(service_fn(move |req: Request<kube::client::Body>| {
@@ -106,8 +107,8 @@ pub fn mock_client(state: &Arc<MockState>, default_ns: &str) -> Client {
     Client::new(svc, default_ns)
 }
 
-/// Build the apimachinery `Status` body kube-rs parses to recognize a
-/// 404. The `code` field is what kube uses to construct `kube::Error::Api`.
+/// Build the apimachinery `Status` body that kube-rs parses to recognize a
+/// 404. kube uses the `code` field to construct `kube::Error::Api`.
 pub fn not_found_body(message: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "kind": "Status",
@@ -128,9 +129,9 @@ pub fn json_response(status: u16, body: &serde_json::Value) -> Response<Vec<u8>>
         .expect("response builds")
 }
 
-/// JSON body shaped like a `core/v1/Secret` containing a fake clusterId.
-/// Returned for the `POST secrets` step so kube-rs can deserialize the
-/// create response.
+/// JSON body shaped like a `core/v1/Secret` that contains a fake clusterId.
+/// The mock returns it for the `POST secrets` step, so that kube-rs can
+/// deserialize the create response.
 pub fn fake_secret_body(name: &str, namespace: &str, cluster_id: &str) -> serde_json::Value {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(cluster_id.as_bytes());
@@ -144,8 +145,7 @@ pub fn fake_secret_body(name: &str, namespace: &str, cluster_id: &str) -> serde_
 }
 
 /// JSON body shaped like an `apps/v1/StatefulSet`. `ready_replicas: None`
-/// produces a status without that field; reconcile interprets that as
-/// "0 ready".
+/// produces a status without that field. Reconcile reads that as "0 ready".
 pub fn fake_sts_body(
     name: &str,
     namespace: &str,
@@ -156,14 +156,14 @@ pub fn fake_sts_body(
 }
 
 /// JSON body shaped like an `apps/v1/StatefulSet`, with optional
-/// `volumeClaimTemplates` injected into the spec. Monotonic-
-/// storage validation reads the `data` PVC template's `size` and
-/// `storageClassName` off the pre-apply GET response, so the shrink-
-/// rejection path needs a way to seed those fields.
+/// `volumeClaimTemplates` injected into the spec. Monotonic-storage validation
+/// reads the `size` and the `storageClassName` of the `data` PVC template from
+/// the pre-apply GET response, so the shrink-rejection path needs a way to
+/// seed those fields.
 ///
-/// `storage = None` produces an STS body with no `volumeClaimTemplates`
-/// (the pod-template `emptyDir` volume is implied
-/// by the absence of a template). `Some((size, class))` embeds:
+/// `storage = None` produces an STS body with no `volumeClaimTemplates`. The
+/// absence of a template implies the pod-template `emptyDir` volume.
+/// `Some((size, class))` embeds:
 ///
 /// ```yaml
 /// volumeClaimTemplates:
@@ -235,8 +235,8 @@ pub fn fake_configmap_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Faked Kafka status PATCH response — kube only needs the body to
-/// deserialize back into a `Kafka`, so we echo a minimal valid one.
+/// Faked Kafka status PATCH response. kube needs only that the body
+/// deserializes back into a `Kafka`, so this body is a minimal valid one.
 pub fn fake_kafka_body(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -247,8 +247,8 @@ pub fn fake_kafka_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Faked `KafkaTopic` body. kube-rs requires the body deserialize back
-/// into a `KafkaTopic`, so we echo a minimal-but-complete one.
+/// Faked `KafkaTopic` body. kube-rs requires that the body deserializes back
+/// into a `KafkaTopic`, so this body is minimal but complete.
 pub fn fake_topic_body(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -271,8 +271,8 @@ pub fn fake_topic_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Faked `KafkaRebalance` body. kube-rs requires PATCH responses
-/// deserialize back into a `KafkaRebalance`, so we echo a minimal one.
+/// Faked `KafkaRebalance` body. kube-rs requires that PATCH responses
+/// deserialize back into a `KafkaRebalance`, so this body is a minimal one.
 pub fn fake_rebalance_body(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -288,9 +288,9 @@ pub fn fake_rebalance_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Faked `KafkaNodePool` body (used as the GET response for pool/status
-/// PATCH responses). kube-rs requires the body deserialize back into a
-/// `KafkaNodePool`.
+/// Faked `KafkaNodePool` body. The mock uses it as the GET response for pool
+/// and status PATCH responses. kube-rs requires that the body deserializes
+/// back into a `KafkaNodePool`.
 pub fn fake_pool_body(name: &str, namespace: &str, parent: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -310,8 +310,8 @@ pub fn fake_pool_body(name: &str, namespace: &str, parent: &str) -> serde_json::
     })
 }
 
-/// JSON body shaped like a `KafkaNodePoolList`. Used as the GET response
-/// for the list-by-label call the Kafka reconciler issues.
+/// JSON body shaped like a `KafkaNodePoolList`. The mock uses it as the GET
+/// response for the list-by-label call that the Kafka reconciler issues.
 pub fn fake_pool_list_body(items: &[serde_json::Value]) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -321,8 +321,8 @@ pub fn fake_pool_list_body(items: &[serde_json::Value]) -> serde_json::Value {
     })
 }
 
-/// One pool item to embed in a `KafkaNodePoolList`. `replicas` /
-/// `ready_replicas` set the status fields used by the rollup.
+/// One pool item to embed in a `KafkaNodePoolList`. `replicas` and
+/// `ready_replicas` set the status fields that the rollup uses.
 pub fn fake_pool_list_item(
     name: &str,
     namespace: &str,
@@ -352,8 +352,8 @@ pub fn fake_pool_list_item(
     })
 }
 
-/// JSON body shaped like the parent Kafka resource, returned by the
-/// pool reconciler's GET kafkas/<parent> step.
+/// JSON body shaped like the parent Kafka resource. The mock returns it for
+/// the pool reconciler's GET kafkas/<parent> step.
 pub fn fake_parent_kafka_body(name: &str, namespace: &str) -> serde_json::Value {
     // A parent that the Kafka controller has already reconciled carries a
     // cleared version model: `KafkaVersionValid=True` + a finalized
@@ -462,8 +462,8 @@ pub fn op_config(namespace: &str) -> OperatorConfig {
     }
 }
 
-/// Build a `Context` wired to the supplied mock client. Mirrors the
-/// fixture used by `tests/reconcile.rs`.
+/// Build a `Context` wired to the supplied mock client. It is the same
+/// fixture that `tests/reconcile.rs` uses.
 pub fn fixture_ctx(client: kube::Client, namespace: &str) -> Context {
     let (registry, metrics) = new_registry_with_metrics();
     Context::new(
@@ -479,8 +479,8 @@ pub fn fixture_ctx(client: kube::Client, namespace: &str) -> Context {
 // and reconcile_listener_auth.
 // ---------------------------------------------------------------------------
 
-/// Minimal CA Secret body (empty data). Returned by PATCH responses for both
-/// the cluster-CA and clients-CA Secret pairs.
+/// Minimal CA Secret body with empty data. The PATCH responses for both the
+/// cluster-CA and clients-CA Secret pairs return it.
 pub fn fake_ca_secret(sname: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1",
@@ -491,8 +491,8 @@ pub fn fake_ca_secret(sname: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Minimal broker keystore Secret body (empty data). Returned by PATCH
-/// responses for the `<cluster>-kafka-brokers` Secret.
+/// Minimal broker keystore Secret body with empty data. The PATCH responses
+/// for the `<cluster>-kafka-brokers` Secret return it.
 pub fn fake_keystore_secret(sname: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "v1",
@@ -504,8 +504,9 @@ pub fn fake_keystore_secret(sname: &str, namespace: &str) -> serde_json::Value {
 }
 
 /// Full happy-path FIFO rule list for a Kafka reconcile of cluster `name` in
-/// `namespace`. Covers headless-service, cluster-id, cluster-CA, clients-CA,
-/// pool-list, broker-keystore, config-map, pool owner-ref, and status PATCH.
+/// `namespace`. It covers headless-service, cluster-id, cluster-CA,
+/// clients-CA, pool-list, broker-keystore, config-map, pool owner-ref, and
+/// status PATCH.
 pub fn happy_path_rules(
     name: &str,
     namespace: &str,
@@ -647,7 +648,7 @@ pub fn happy_path_rules(
     rules
 }
 
-/// Build a `Context` + `MockState` pair wired to the FIFO mock transport.
+/// Build a `Context` and `MockState` pair wired to the FIFO mock transport.
 pub fn build_ctx(
     namespace: &str,
     rules: Vec<MockRule>,
@@ -679,7 +680,7 @@ pub fn build_ctx_with_config(
 // reconcile_oauth_trust, reconcile_listener_oauth, and reconcile_listener_auth.
 // ---------------------------------------------------------------------------
 
-/// Build a rule for `GET /secrets/<name>` returning a 404.
+/// Build a rule for `GET /secrets/<name>` that returns a 404.
 pub fn rule_get_secret_404(name: &str) -> MockRule {
     MockRule {
         method: Method::GET,
@@ -692,7 +693,7 @@ pub fn rule_get_secret_404(name: &str) -> MockRule {
     }
 }
 
-/// Build a rule for `GET /secrets/<name>` returning the supplied body.
+/// Build a rule for `GET /secrets/<name>` that returns the supplied body.
 pub fn rule_get_secret(name: &str, body: &serde_json::Value) -> MockRule {
     MockRule {
         method: Method::GET,
@@ -701,16 +702,17 @@ pub fn rule_get_secret(name: &str, body: &serde_json::Value) -> MockRule {
     }
 }
 
-/// Trim down `happy_path_rules` for the OAuth failure-path tests: when an
-/// OAuth Secret-touching step fails, the reconciler short-circuits to a
-/// status PATCH on the `Kafka` CR before upserting per-broker objects.
-/// Drop the rules that fire *after* that point — broker keystore,
-/// broker-config `ConfigMap`, and the final aggregated status PATCH — so an
-/// unconsumed rule doesn't mask the failure assertion, then add the GET +
-/// PATCH status pair that `patch_status_with_condition` issues. The pool
-/// LIST is retained: it fires *before* the Secret-touching code for
-/// CA-rotation convergence (and the empty pool-items list adds no per-pool
-/// PATCH rules anyway).
+/// Trim down `happy_path_rules` for the OAuth failure-path tests. When an
+/// OAuth Secret-touching step fails, the reconciler short-circuits to a status
+/// PATCH on the `Kafka` CR before it upserts per-broker objects.
+///
+/// This function drops the rules that fire *after* that point: the broker
+/// keystore, the broker-config `ConfigMap`, and the final aggregated status
+/// PATCH. An unconsumed rule would otherwise mask the failure assertion. The
+/// function then adds the GET and PATCH status pair that
+/// `patch_status_with_condition` issues. It keeps the pool LIST, which fires
+/// *before* the Secret-touching code for CA-rotation convergence. The empty
+/// pool-items list adds no per-pool PATCH rules.
 pub fn rules_for_failure_path(name: &str, namespace: &str) -> Vec<MockRule> {
     let mut rules = happy_path_rules(name, namespace, &[]);
     rules.retain(|r| {
@@ -733,11 +735,11 @@ pub fn rules_for_failure_path(name: &str, namespace: &str) -> Vec<MockRule> {
     rules
 }
 
-/// Find the `Ready=False` condition in the status PATCH body and assert
-/// its `reason` matches. The OAuth Secret-touching failure paths patch
-/// the `Ready` condition (not `ListenersValid` — per-listener validation
-/// already succeeded; the failure is in the Secret-touching code that
-/// runs *after* validation).
+/// Find the `Ready=False` condition in the status PATCH body and assert that
+/// its `reason` matches. The OAuth Secret-touching failure paths patch the
+/// `Ready` condition and not `ListenersValid`, because the per-listener
+/// validation already succeeded. The failure is in the Secret-touching code
+/// that runs *after* validation.
 pub fn assert_ready_false_with_reason(
     observed: &[http::Request<hyper::body::Bytes>],
     cluster: &str,
@@ -765,9 +767,9 @@ pub fn assert_ready_false_with_reason(
     assert!(ready["reason"] == expected_reason, "body = {body}");
 }
 
-/// Extract the `broker-0.toml` string from the `ConfigMap` PATCH captured
-/// in `observed`. Panics with a diagnostic message if the PATCH (or the
-/// key) is missing.
+/// Extract the `broker-0.toml` string from the `ConfigMap` PATCH captured in
+/// `observed`. Panics with a diagnostic message if the PATCH or the key is
+/// missing.
 pub fn extract_broker0_toml(
     observed: &[http::Request<hyper::body::Bytes>],
     cluster: &str,
@@ -830,7 +832,7 @@ pub fn pool_cr(name: &str, namespace: &str, parent: &str, replicas: i32) -> Kafk
     p
 }
 
-/// Build the FIFO rule sequence the pool reconciler needs:
+/// Build the FIFO rule sequence that the pool reconciler needs:
 ///   1. GET kafkas/<parent>            → `parent_body`
 ///   2. GET statefulsets/<parent>-<pool> → 404 (first reconcile)
 ///   3. PATCH statefulsets/<parent>-<pool> (SSA)
@@ -880,8 +882,8 @@ pub fn pool_reconcile_rules(
 // Gateway reconcile helpers
 // ---------------------------------------------------------------------------
 
-/// JSON body shaped like an `apps/v1/Deployment`.
-/// `ready_replicas = None` → no `readyReplicas` in status (= 0 ready).
+/// JSON body shaped like an `apps/v1/Deployment`. `ready_replicas = None`
+/// gives no `readyReplicas` in status, which means 0 ready.
 pub fn fake_deployment_body(
     name: &str,
     namespace: &str,
@@ -973,9 +975,10 @@ pub fn fake_cluster_ca_cert_secret(
     })
 }
 
-/// Build a `<gw>-broker` `KafkaUser` Secret (keys `user.crt` / `user.key` /
-/// `ca.crt`) with placeholder PEM bytes. Returned on the post-SSA GET that
-/// the gateway reconciler uses to check that the cert has been issued.
+/// Build a `<gw>-broker` `KafkaUser` Secret with the keys `user.crt`,
+/// `user.key`, and `ca.crt`, and with placeholder PEM bytes. The mock returns
+/// it on the post-SSA GET that the gateway reconciler uses to check that the
+/// cert is issued.
 pub fn fake_broker_user_secret(gw_name: &str, namespace: &str) -> serde_json::Value {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -997,8 +1000,8 @@ pub fn fake_broker_user_secret(gw_name: &str, namespace: &str) -> serde_json::Va
     })
 }
 
-/// Build a minimal `<gw>-serving` Secret body (keys `tls.crt` / `tls.key`).
-/// Returned by the PATCH apply call for the serving-cert Secret.
+/// Build a minimal `<gw>-serving` Secret body with the keys `tls.crt` and
+/// `tls.key`. The PATCH apply call for the serving-cert Secret returns it.
 pub fn fake_serving_secret(gw_name: &str, namespace: &str) -> serde_json::Value {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
@@ -1016,8 +1019,8 @@ pub fn fake_serving_secret(gw_name: &str, namespace: &str) -> serde_json::Value 
     })
 }
 
-/// Build a minimal `<gw>-config` Secret body (keys `webhooks.toml` /
-/// `outbound.toml`). Returned by the PATCH apply for the config Secret.
+/// Build a minimal `<gw>-config` Secret body with the keys `webhooks.toml`
+/// and `outbound.toml`. The PATCH apply for the config Secret returns it.
 pub fn fake_config_secret(gw_name: &str, namespace: &str) -> serde_json::Value {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;

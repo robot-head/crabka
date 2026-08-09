@@ -10,9 +10,12 @@ use super::{
 };
 use crate::{MetricStore, PromqlEngine, PromqlError, QueryResult, SampleValue};
 
-/// Evaluate one alerting rule and dispatch active alerts to Alertmanager.
+/// Evaluates one alerting rule and dispatches the active alerts to Alertmanager.
+///
 /// # Errors
-/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+///
+/// Returns an error if the metric input is malformed, if a limit is exceeded,
+/// or if the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_dispatch_alerting_rule<S, A>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -36,9 +39,12 @@ where
     .await
 }
 
-/// Evaluate one alerting rule, track pending state, and dispatch only firing alerts.
+/// Evaluates one alerting rule, tracks the pending state, and dispatches only the firing alerts.
+///
 /// # Errors
-/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+///
+/// Returns an error if the metric input is malformed, if a limit is exceeded,
+/// or if the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_dispatch_alerting_rule_with_state<S, A>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -63,9 +69,12 @@ where
     .await
 }
 
-/// Evaluate one alerting rule, persist alert state, and dispatch only firing alerts.
+/// Evaluates one alerting rule, persists the alert state, and dispatches only the firing alerts.
+///
 /// # Errors
-/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+///
+/// Returns an error if the metric input is malformed, if a limit is exceeded,
+/// or if the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_alerting_rule_with_state<S, A, R>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -261,9 +270,12 @@ where
     Ok(count)
 }
 
-/// Evaluate all alerting rules in one rule group and dispatch firing alerts.
+/// Evaluates all alerting rules in one rule group and dispatches the firing alerts.
+///
 /// # Errors
-/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+///
+/// Returns an error if the metric input is malformed, if a limit is exceeded,
+/// or if the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_dispatch_alerting_rule_group<S, A>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -300,9 +312,12 @@ where
     Ok(dispatched)
 }
 
-/// Evaluate all alerting rules in one rule group, persist alert state, and dispatch firing alerts.
+/// Evaluates all alerting rules in one rule group, persists alert state, and dispatches firing alerts.
+///
 /// # Errors
-/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+///
+/// Returns an error if the metric input is malformed, if a limit is exceeded,
+/// or if the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_alerting_rule_group<S, A, R>(
     engine: &PromqlEngine<S>,
     sink: &A,
@@ -349,9 +364,11 @@ fn labels_to_map(labels: &Labels) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Expand `{{ $value }}` / `{{ $labels.NAME }}` in every value of an alert
-/// label or annotation map, resolving `$labels` against the firing sample's
-/// series labels.
+/// Expands `{{ $value }}` and `{{ $labels.NAME }}` in every value of an alert
+/// label or annotation map.
+///
+/// This function resolves `$labels` against the series labels of the firing
+/// sample.
 fn expand_alert_label_map(
     map: &BTreeMap<String, String>,
     value: f64,

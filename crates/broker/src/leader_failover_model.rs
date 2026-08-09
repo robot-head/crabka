@@ -3,8 +3,9 @@
 //! `docs/superpowers/specs/2026-06-13-crabka-failover-recovery-model-design.md`.
 //!
 //! Memory safety: stateright BFS keeps every visited unique state resident, so
-//! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
-//! and MUST be executed under the host memory watchdog while bounds are tuned.
+//! `within_boundary` + `target_state_count` + `timeout` fence each run. You
+//! MUST run these models under the host memory watchdog while you tune the
+//! bounds.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -67,7 +68,8 @@ impl FailoverModel {
 }
 
 /// Build a minimal `PartitionRecord` from the model state to drive the real
-/// `failover_one`. The fields `failover_one` ignores are dummied.
+/// `failover_one`. This function fills the fields `failover_one` ignores with
+/// dummy values.
 fn pr_of(s: &FailoverState) -> PartitionRecord {
     PartitionRecord {
         topic: "t".to_string(),
@@ -84,7 +86,7 @@ fn pr_of(s: &FailoverState) -> PartitionRecord {
 }
 
 /// Verify a `failover_one` decision against the pre-failover state. These are
-/// the safety-critical invariants; they hold per-decision under any ordering.
+/// the safety-critical invariants. They hold per-decision under any ordering.
 fn assert_decision(pre: &FailoverState, dead: NodeId, d: &FailoverDecision, unclean_enabled: bool) {
     match d {
         FailoverDecision::Elect {
@@ -287,8 +289,8 @@ fn failover_recover() {
 
 // ============================ RecoveryModel ============================
 
-/// One replica's reported log state (a hashable mirror of `ReplicaLogInfo`,
-/// which isn't `Hash`).
+/// One replica's reported log state. This is a hashable mirror of
+/// `ReplicaLogInfo`, which isn't `Hash`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct ReplicaLog {
     last_written_leader_epoch: i32,

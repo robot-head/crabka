@@ -1,4 +1,5 @@
-//! Streams group membership: `StreamsGroupHeartbeat` lifecycle + assignments.
+//! Streams group membership: the `StreamsGroupHeartbeat` lifecycle and the
+//! assignments.
 
 mod assignment;
 mod client;

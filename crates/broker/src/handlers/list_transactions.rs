@@ -1,20 +1,20 @@
 //! `ListTransactions` (`api_key=66`, KIP-664). Admin RPC that returns
 //! a summary of every transaction the broker's coordinator is currently
-//! tracking — `(transactional_id, producer_id, state)` triples — with
-//! optional state / producer-id filters.
+//! tracking. Each summary is a `(transactional_id, producer_id, state)`
+//! triple. The request can carry optional state and producer-id filters.
 //!
 //! ## ACL
 //!
-//! Per-tid `Describe` on `TransactionalId(name)`. Entries the principal
-//! can't describe are silently filtered out (matches the JVM behavior).
-//! Cluster-wide auth isn't required — the JVM allows un-credentialed
-//! listing of "transactions you can describe."
+//! Per-tid `Describe` on `TransactionalId(name)`. The handler silently
+//! filters out entries the principal cannot describe, which matches the
+//! JVM behavior. Cluster-wide auth is not necessary. The JVM allows
+//! un-credentialed listing of "transactions you can describe."
 //!
 //! ## State strings
 //!
 //! The wire field is a string. Crabka's [`crate::txn::state::TxnState`]
-//! enum already matches the JVM names verbatim (`Empty`, `Ongoing`, ...)
-//! so the mapping is trivial.
+//! enum already matches the JVM names verbatim (`Empty`, `Ongoing`, ...),
+//! so the mapping is direct.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
@@ -34,8 +34,9 @@ use crate::{
     txn::state::TxnState,
 };
 
-/// Every transaction state the coordinator can report. Filter strings outside
-/// this set (via [`txn_state_str`]) are echoed back in the KIP-664
+/// Every transaction state the coordinator can report. The handler compares
+/// filter strings against this set with [`txn_state_str`]. It echoes any
+/// filter string outside the set back in the KIP-664
 /// `unknown_state_filters` response field.
 const ALL_TXN_STATES: [TxnState; 7] = [
     TxnState::Empty,
@@ -47,8 +48,8 @@ const ALL_TXN_STATES: [TxnState; 7] = [
     TxnState::Dead,
 ];
 
-/// JVM-canonical string form of a Crabka [`TxnState`]. Matches the names
-/// the JVM coordinator emits on `TransactionState.toString()`.
+/// JVM-canonical string form of a Crabka [`TxnState`]. These names match the
+/// names the JVM coordinator emits on `TransactionState.toString()`.
 fn txn_state_str(s: TxnState) -> &'static str {
     match s {
         TxnState::Empty => "Empty",
@@ -183,9 +184,10 @@ mod tests {
     );
 
     /// The producer-id filter keeps entries whose pid IS in the filter set.
-    /// With a single seeded txn whose pid matches the filter, the entry is
-    /// returned. Deleting the `!` in `!pid_filter.contains(..)` would invert
-    /// the guard and drop the matching entry instead.
+    /// The test seeds a single txn whose pid matches the filter, and the
+    /// handler returns that entry. A deleted `!` in
+    /// `!pid_filter.contains(..)` would invert the guard and drop the
+    /// matching entry instead.
     #[tokio::test]
     async fn producer_id_filter_keeps_matching_pid() {
         use crabka_log::ProducerId;

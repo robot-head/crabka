@@ -1,7 +1,10 @@
-//! Integration test for `Consumer::seek`: a seek issued before the first poll
-//! takes effect once the partition is assigned, so the consumer resumes from
-//! the sought offset instead of `auto.offset.reset`. Proves the seek wins over
-//! the post-assignment prime, drops no pre-seek records, and skips none above.
+//! Integration test for `Consumer::seek`.
+//!
+//! A seek issued before the first poll takes effect once the partition is
+//! assigned, so the consumer resumes from the sought offset instead of from
+//! `auto.offset.reset`. This test proves that the seek wins over the
+//! post-assignment prime, that it drops no pre-seek records, and that it skips
+//! none above the sought offset.
 
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};

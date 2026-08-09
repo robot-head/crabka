@@ -39,9 +39,10 @@ pub struct NormalizeQuery {
 }
 
 /// Normalize a schema string to its canonical form for the given type.
-/// - Avro: Parsing Canonical Form via `apache_avro::Schema::canonical_form()`
-/// - JSON Schema: round-trip through `serde_json` (strips whitespace, sorts keys)
-/// - Protobuf: no-op (Confluent SR does not define textual normalization for proto)
+///
+/// - Avro: Parsing Canonical Form through `apache_avro::Schema::canonical_form()`
+/// - JSON Schema: a round-trip through `serde_json`, which strips whitespace and sorts keys
+/// - Protobuf: no change, because Confluent SR does not define textual normalization for proto
 fn normalize_schema(ty: SchemaType, schema: &str) -> Result<String, SrError> {
     match ty {
         SchemaType::Avro => apache_avro::Schema::parse_str(schema)
@@ -240,7 +241,8 @@ pub async fn get_version_schema(
 }
 
 /// GET /subjects/{subject}/versions/{version}/referencedby -> ids of the live
-/// schemas that reference this `(subject, version)` (ascending; empty if none).
+/// schemas that reference this `(subject, version)`, in ascending order. The
+/// list is empty when nothing references it.
 #[tracing::instrument(level = "debug", name = "sr.referenced_by", skip_all, fields(subject = %subject, version = %version), err)]
 /// # Errors
 /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.

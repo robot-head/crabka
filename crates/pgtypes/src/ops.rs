@@ -1,4 +1,4 @@
-//! Operator semantics matching PostgreSQL: integer type promotion, checked
+//! Operator semantics that match PostgreSQL: integer type promotion, checked
 //! overflow (22003), division by zero (22012), NULL propagation, and
 //! three-valued boolean logic.
 
@@ -61,8 +61,9 @@ fn as_i64(d: &Datum) -> Option<i64> {
 }
 
 /// Promote a numeric Datum (int, numeric, or float) to f64 for mixed-type
-/// arithmetic. (SP32: a `numeric` operand mixed with a `float8` promotes to
-/// `float8`, since `float8` is the preferred type — `numeric ⊕ float8 → float8`.)
+/// arithmetic. SP32: a `numeric` operand mixed with a `float8` promotes to
+/// `float8`, because `float8` is the preferred type (`numeric ⊕ float8 →
+/// float8`).
 fn as_f64(d: &Datum) -> Option<f64> {
     match d {
         Datum::Int2(n) => Some(f64::from(*n)),
@@ -77,8 +78,8 @@ fn as_f64(d: &Datum) -> Option<f64> {
     }
 }
 
-/// SP32: promote an int/`numeric` Datum to a [`NumericValue`] (used when an
-/// operand is `numeric` but neither is `float8`).
+/// SP32: promote an int/`numeric` Datum to a [`NumericValue`]. This applies when
+/// an operand is `numeric` but neither is `float8`.
 fn as_numeric(d: &Datum) -> Option<NumericValue> {
     match d {
         Datum::Int2(n) => Some(NumericValue::from(*n)),
@@ -97,9 +98,9 @@ fn is_numeric(d: &Datum) -> bool {
     matches!(d, Datum::Numeric(_))
 }
 
-/// True if this Datum is a temporal (date/time/interval) value.  Used to
-/// detect temporal operands early in `add`/`sub`/`mul`/`div`/`compare` so
-/// they are handled before the numeric fast-paths.
+/// True if this Datum is a temporal (date/time/interval) value.
+/// `add`/`sub`/`mul`/`div`/`compare` use it to detect temporal operands early
+/// and handle them before the numeric fast-paths.
 fn is_temporal(d: &Datum) -> bool {
     matches!(
         d,
@@ -119,7 +120,7 @@ fn numeric_as_f64(d: &Datum) -> Option<f64> {
 
 /// Apply a float op with PostgreSQL's finite-overflow rule: a `finite ⊕ finite`
 /// result that becomes infinite is out of range (22003); an infinite *operand*
-/// just propagates Infinity (no error). Underflow to 0 is silent, as in PG.
+/// propagates Infinity (no error). Underflow to 0 is silent, as in PG.
 fn float_arith(x: f64, y: f64, op: fn(f64, f64) -> f64) -> Result<Datum, TypeError> {
     let r = op(x, y);
     if r.is_infinite() && x.is_finite() && y.is_finite() {
@@ -212,9 +213,9 @@ enum TimeShift {
     Subtract,
 }
 
-/// `time` and `timetz` have no representation for infinity, and shifting them by
-/// an infinite interval would silently wrap the clock instead, so PostgreSQL
-/// refuses with 22008 rather than answering.
+/// `time` and `timetz` have no representation for infinity. A shift by an
+/// infinite interval would silently wrap the clock instead, so PostgreSQL
+/// refuses with 22008 instead of an answer.
 fn reject_infinite_interval_on_time(
     iv: crate::datetime::Interval,
     shift: TimeShift,
@@ -230,8 +231,8 @@ fn reject_infinite_interval_on_time(
     })
 }
 
-/// `add` for temporal operand pairs. Called when at least one operand is
-/// temporal. `Timestamptz` operands fall through to `TypeMismatch` (deferred;
+/// `add` for temporal operand pairs. The dispatcher calls it when at least one
+/// operand is temporal. `Timestamptz` operands fall through to `TypeMismatch` (
 /// needs the session tz, which is only available in the executor).
 fn temporal_add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     use crate::datetime::{
@@ -380,9 +381,9 @@ fn temporal_div(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     }
 }
 
-/// `int2` widens to `int4` before the temporal matrix is consulted: PostgreSQL
-/// resolves `date + int2` through the implicit `int2 → int4` cast, so the
-/// matrix itself only carries `int4`/`int8` arms.
+/// `int2` widens to `int4` before this code consults the temporal matrix.
+/// PostgreSQL resolves `date + int2` through the implicit `int2 → int4` cast, so
+/// the matrix itself only carries `int4`/`int8` arms.
 fn temporal_operand(d: &Datum) -> std::borrow::Cow<'_, Datum> {
     match d {
         Datum::Int2(n) => std::borrow::Cow::Owned(Datum::Int4(i32::from(*n))),
@@ -545,12 +546,13 @@ pub fn rem(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     }
 }
 
-/// SQL `||` string concatenation (SP29). A NULL operand yields NULL; otherwise
-/// each operand is rendered via its canonical text encoding (the same encoding
-/// the wire layer uses — `true`→`t`, `5`→`5`) and the two are joined into a
+/// SQL `||` string concatenation (SP29). A NULL operand yields NULL. Otherwise
+/// this function renders each operand with its canonical text encoding, the same
+/// encoding the wire layer uses (`true`→`t`, `5`→`5`), and joins the two into a
 /// `text`. The "at least one operand must be text" operator-resolution rule is a
-/// static (plan-time) concern enforced by the executor's `infer_type`; this
-/// value-level op is permissive so a `||` reached at runtime always has a result.
+/// static (plan-time) concern that the executor's `infer_type` enforces. This
+/// value-level op is permissive, so a `||` reached at runtime always has a
+/// result.
 ///
 /// `style` carries the session zone plus the `DateStyle`/`IntervalStyle` GUCs
 /// the temporal output functions read; every other type ignores it.
@@ -567,8 +569,8 @@ pub fn concat(
     Ok(Datum::Text(s))
 }
 
-/// The text `||` renders a non-NULL Datum as, reusing the wire text encoder so
-/// the operator and the DataRow encoding never disagree.
+/// The text that `||` renders a non-NULL Datum as. This function reuses the wire
+/// text encoder, so the operator and the DataRow encoding never disagree.
 ///
 /// `boolean` is the one exception, and it is PostgreSQL's own: `||` resolves
 /// through the `text` cast (`booltext`, which spells `true`/`false`) rather than
@@ -646,7 +648,7 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
 /// prefix, then the shorter array first, then fewer dimensions first, then the
 /// dimension lengths, then the lower bounds. A NULL element sorts greater than
 /// any non-NULL one (PostgreSQL's `btarraycmp` treats NULLs as largest), and two
-/// NULLs are equal — the *comparison* is never NULL, unlike a scalar `=`.
+/// NULLs are equal. The *comparison* is never NULL, unlike a scalar `=`.
 fn compare_arrays(
     a: &crate::datum::ArrayValue,
     b: &crate::datum::ArrayValue,
@@ -684,11 +686,11 @@ fn compare_arrays(
 
 /// PostgreSQL's `record_cmp`: field by field, left to right, with a NULL field
 /// sorting after every non-NULL one and two NULLs equal. Unlike the *row
-/// comparison operator* (`ROW(1,NULL) < ROW(1,2)`, which is NULL), comparing two
-/// composite **values** never yields NULL — `ROW(1,NULL)::t < ROW(1,'a')::t` is
-/// `false` on PostgreSQL 18.4, and `ORDER BY` over a composite column puts the
-/// NULL-field row last. A record with fewer fields sorts first on a common
-/// prefix.
+/// comparison operator* (`ROW(1,NULL) < ROW(1,2)`, which is NULL), a comparison
+/// of two composite **values** never yields NULL. `ROW(1,NULL)::t <
+/// ROW(1,'a')::t` is `false` on PostgreSQL 18.4, and `ORDER BY` over a composite
+/// column puts the NULL-field row last. A record with fewer fields sorts first
+/// on a common prefix.
 fn compare_records(
     a: &crate::datum::RecordValue,
     b: &crate::datum::RecordValue,
@@ -809,9 +811,8 @@ pub fn cmp_to_bool(op_holds: bool, ord: Option<Ordering>) -> Datum {
 #[cfg(test)]
 mod tests {
     /// `time` and `timetz` have no infinity, so PostgreSQL refuses to shift one
-    /// by an infinite interval (22008) rather than wrapping the clock by the
-    /// sentinel's microseconds — which is what silently produced a wrong
-    /// time-of-day before.
+    /// by an infinite interval (22008). The alternative is a silent wrap of the
+    /// clock by the sentinel's microseconds, which gives a wrong time-of-day.
     #[test]
     fn shifting_a_time_by_an_infinite_interval_is_22008() {
         use assert2::assert;
@@ -931,7 +932,7 @@ mod tests {
         );
     }
 
-    /// SP37 §8 GAP A: `time ± interval → time` — uses ONLY the interval micros,
+    /// SP37 §8 GAP A: `time ± interval → time` uses ONLY the interval micros,
     /// ignores days/months, and wraps mod 24 h.
     #[test]
     fn time_plus_interval_wraps_and_ignores_days() {
@@ -969,7 +970,7 @@ mod tests {
         );
     }
 
-    /// SP37 §8 GAP B: `date + time` / `time + date → timestamp` — combine the
+    /// SP37 §8 GAP B: `date + time` / `time + date → timestamp` combines the
     /// calendar date and the wall-clock time.
     #[test]
     fn date_plus_time_makes_timestamp() {
@@ -1004,10 +1005,11 @@ mod tests {
     }
 
     /// SP37: `Timestamptz` comparison orders by absolute instant (UTC µs), so
-    /// two values with the same wall-clock time but different offsets are NOT equal
-    /// — the one with the larger (more-negative) offset is a LATER instant.
+    /// two values with the same wall-clock time but different offsets are NOT
+    /// equal. The one with the larger (more-negative) offset is a LATER instant.
     /// This test covers the `(Datum::Timestamptz, Datum::Timestamptz)` arm in
-    /// `compare`, ensuring that arm exists and is mutation-baseline covered.
+    /// `compare`, and it makes sure that arm exists and is mutation-baseline
+    /// covered.
     #[test]
     fn timestamptz_compare_orders_by_absolute_instant() {
         use std::cmp::Ordering;

@@ -16,7 +16,7 @@ use crate::{
     wal,
 };
 
-/// Errors crossing the metrics-generator source/sink boundaries.
+/// Errors that cross the metrics-generator source and sink boundaries.
 #[derive(Debug, thiserror::Error)]
 pub enum SinkError {
     #[error("transport error: {0}")]

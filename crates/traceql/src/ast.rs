@@ -11,9 +11,11 @@ pub struct Query {
 pub struct QueryHints {
     pub most_recent: bool,
     pub exemplars: Option<bool>,
-    /// `with(sample=...)` — Tempo's probabilistic metrics-sampling hint. Grafana's
-    /// Traces Drilldown sends `sample=true`. Accepted and recorded; Crabka computes
-    /// exact metrics (sampling is a performance hint, so ignoring it is sound).
+    /// `with(sample=...)`: Tempo's probabilistic metrics-sampling hint.
+    ///
+    /// Grafana's Traces Drilldown sends `sample=true`. The parser accepts the
+    /// hint and records it here, but Crabka computes exact metrics. Sampling is
+    /// a performance hint, so Crabka stays correct when it ignores the hint.
     pub sample: Option<bool>,
 }
 
@@ -40,10 +42,12 @@ pub enum FieldExpr {
     Or(Box<FieldExpr>, Box<FieldExpr>),
     Not(Box<FieldExpr>),
     Field(Field),
-    /// A constant boolean filter. The empty spanset `{}` and the scalar-boolean
-    /// spanset `{ true }` lower to `Const(true)` (match every span); `{ false }`
-    /// lowers to `Const(false)` (match no span). Mirrors Grafana Tempo, whose
-    /// Explore "Search" tab and TraceQL-metrics default to `{}`.
+    /// A constant boolean filter.
+    ///
+    /// The empty spanset `{}` and the scalar-boolean spanset `{ true }` lower
+    /// to `Const(true)`, which matches every span. The spanset `{ false }`
+    /// lowers to `Const(false)`, which matches no span. This mirrors Grafana
+    /// Tempo, whose Explore "Search" tab and TraceQL-metrics default to `{}`.
     Const(bool),
 }
 
@@ -141,11 +145,14 @@ pub enum Pipeline {
     TopK(usize),
     BottomK(usize),
     /// Tempo attribute-comparison metric: `compare({selection}, topN [, start_ns,
-    /// end_ns])`. Partitions the spans matching the outer spanset into a
-    /// `selection` group (also matching `selection`) and a `baseline` group (the
-    /// rest), then emits per-attribute value-distribution series for each group.
-    /// `top_n` keeps the most frequent values per attribute (default 10). The
-    /// optional `start`/`end` nanosecond bounds narrow the selection sub-window.
+    /// end_ns])`.
+    ///
+    /// This metric splits the spans that match the outer spanset into two
+    /// groups. The `selection` group holds the spans that also match
+    /// `selection`. The `baseline` group holds the rest. The metric then emits
+    /// per-attribute value-distribution series for each group. `top_n` keeps
+    /// the most frequent values per attribute, and defaults to 10. The optional
+    /// `start` and `end` nanosecond bounds narrow the selection sub-window.
     Compare {
         selection: Box<SpansetExpr>,
         top_n: usize,

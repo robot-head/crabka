@@ -1,34 +1,36 @@
-//! COMPOSITIONAL model of consumer-group offset-commit FENCING through rebalances
-//! — the third compositional model (after data-path #539, txn/EOS #541). It
-//! reuses the proven driving machinery of `reconciler_model.rs` (#521) —
-//! rebuilding a real `GroupState` and driving the REAL `step_heartbeat` /
-//! `reconcile_member` over join / leave / heartbeat / faithful-client moves — and
-//! composes it with the REAL `OffsetCommit` epoch-fence.
+//! COMPOSITIONAL model of consumer-group offset-commit FENCING through
+//! rebalances. This is the third compositional model, after data-path #539 and
+//! txn/EOS #541. It reuses the proven driving machinery of
+//! `reconciler_model.rs` (#521): it rebuilds a real `GroupState` and drives the
+//! REAL `step_heartbeat` / `reconcile_member` over join / leave / heartbeat /
+//! faithful-client moves. It then composes that machinery with the REAL
+//! `OffsetCommit` epoch-fence.
 //!
-//! Verifies the genuine consumer-group offset-integrity guarantee: through any
-//! rebalance interleaving, (a) no two members ever own the same partition
-//! (exclusivity — the real reconciliation's withholding, re-verified in the
-//! composed context), and (b) a member may commit ONLY with its CURRENT member
-//! epoch — a zombie from before a rebalance (whose epoch the reconciliation has
-//! since bumped) is fenced — so a stale/forward commit can never corrupt the
-//! committed offset.
+//! The model verifies the genuine consumer-group offset-integrity guarantee.
+//! Through any rebalance interleaving, (a) no two members ever own the same
+//! partition, and (b) a member may commit ONLY with its CURRENT member epoch.
+//! Point (a) is exclusivity: the real reconciliation's withholding, re-verified
+//! in the composed context. Under point (b) the fence stops a zombie from
+//! before a rebalance, whose epoch the reconciliation has since bumped. So a
+//! stale or forward commit can never corrupt the committed offset.
 //!
-//! Scope — DRIVEN vs MODELED (stated up front, per the txn/EOS review which found
-//! the first draft over-claimed):
-//!   - DRIVEN (real code): the KIP-848 reconciliation engine via `step_heartbeat`,
-//!     AND the real `OffsetCommit` fence `GroupState::validate_commit_decision`
-//!     (extracted from the actor's `ValidateCommit`). The model drives the real
-//!     fence and cross-checks it against an INDEPENDENT oracle (the expected
-//!     epoch comparison + error codes) — a divergence is a real fence/regression
-//!     bug.
-//!   - NOT verified here (deliberately): NO-DUPLICATE / NO-GAP delivery — plain
-//!     consumer groups are AT-LEAST-ONCE (a zombie reprocesses until fenced);
-//!     exactly-once is the txn/EOS path (#541). The committed offset is a small
-//!     bounded counter, present only to witness accepted commits. The
-//!     `__consumer_offsets` log persistence (#539) and the classic protocol
-//!     (`classic_state_model` #534) are out of scope.
+//! Scope, DRIVEN vs MODELED. The txn/EOS review found that the first draft
+//! over-claimed, so this doc states the scope up front:
+//!   - DRIVEN (real code): the KIP-848 reconciliation engine through
+//!     `step_heartbeat`, AND the real `OffsetCommit` fence
+//!     `GroupState::validate_commit_decision`, which is extracted from the
+//!     actor's `ValidateCommit`. The model drives the real fence and
+//!     cross-checks it against an INDEPENDENT oracle, the expected epoch
+//!     comparison and the error codes. A divergence is a real fence or
+//!     regression bug.
+//!   - NOT verified here (deliberately): NO-DUPLICATE / NO-GAP delivery. Plain
+//!     consumer groups are AT-LEAST-ONCE, and a zombie reprocesses until the
+//!     fence stops it. Exactly-once is the txn/EOS path (#541). The committed
+//!     offset is a small bounded counter, present only to witness accepted
+//!     commits. The `__consumer_offsets` log persistence (#539) and the classic
+//!     protocol (`classic_state_model` #534) are out of scope.
 //!
-//! Memory safety: run under the host memory watchdog while bounds are tuned.
+//! Memory safety: run under the host memory watchdog while you tune the bounds.
 
 use std::{
     cmp::Ordering,
@@ -275,9 +277,10 @@ fn committed_of(s: &CgcState, part: i32) -> Offset {
         .map_or(Offset(0), |(_, o)| *o)
 }
 /// INDEPENDENT oracle for the `OffsetCommit` fence: the expected decision for a
-/// member presenting `epoch`. Deliberately a different structure (`Ordering`)
-/// from the real `validate_commit_decision`'s if-guards, so driving the real fn
-/// and asserting equality is a genuine cross-check (a fence regression diverges).
+/// member that presents `epoch`. It deliberately uses a different structure
+/// (`Ordering`) from the real `validate_commit_decision`'s if-guards. The model
+/// therefore drives the real fn and asserts equality as a genuine cross-check.
+/// A fence regression diverges.
 fn oracle_commit(g: &GroupState, id: &str, epoch: i32) -> Result<(), i16> {
     match g.members.get(id) {
         None => Err(crate::codes::UNKNOWN_MEMBER_ID),
@@ -340,12 +343,13 @@ fn assert_epoch_monotonic(pre: &CgcState, post: &GroupState) {
     }
 }
 
-/// Drive the REAL `OffsetCommit` epoch fence (`validate_commit_decision`) for the
-/// epoch `kind` the member presents, cross-check it against the independent
-/// oracle, and — only on accept (a current-epoch member) — advance the bounded
-/// committed offset. The member's CURRENT epoch is whatever the real
-/// reconciliation last set, so a `Stale` commit after a rebalance is a zombie and
-/// is fenced. Kafka does NOT check partition ownership here (at-least-once).
+/// Drive the REAL `OffsetCommit` epoch fence (`validate_commit_decision`) for
+/// the epoch `kind` the member presents, and cross-check it against the
+/// independent oracle. Only on accept, that is a current-epoch member, this
+/// function advances the bounded committed offset. The member's CURRENT epoch is
+/// whatever the real reconciliation last set, so a `Stale` commit after a
+/// rebalance is a zombie and the fence stops it. Kafka does NOT check partition
+/// ownership here (at-least-once).
 fn do_commit(last: &CgcState, id: &str, part: i32, kind: EpochKind) -> Option<CgcState> {
     let g = rebuild_group(last);
     let cur = member(last, id).map(|m| m.member_epoch);

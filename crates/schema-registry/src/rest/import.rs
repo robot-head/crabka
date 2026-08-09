@@ -18,9 +18,10 @@ use crate::{
 
 /// POST /schemas/import
 ///
-/// Body is a binary-encoded [`FileDescriptorSet`]. Each file is registered as a
-/// PROTOBUF schema under subject `<file.name>`. Imports become Schema Registry
-/// references using Confluent's default reference subject policy:
+/// The body is a binary-encoded [`FileDescriptorSet`]. This handler registers
+/// each file as a PROTOBUF schema under subject `<file.name>`. Imports become
+/// Schema Registry references under Confluent's default reference subject
+/// policy:
 /// `{ name: import_path, subject: import_path, version: dependency_version }`.
 #[tracing::instrument(
     level = "info",

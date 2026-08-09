@@ -3,8 +3,8 @@
 //! Hash equality routing probes a bucket at rowid 0 and answers for the whole
 //! bucket, so a boundary between two rows of one bucket leaves the rest of that
 //! bucket on a range the router never consults. Every layout that reaches the
-//! registry passes through [`TenantRecord::ensure_valid`], so that is where the
-//! alignment is enforced.
+//! registry passes through [`TenantRecord::ensure_valid`], so that function
+//! enforces the alignment.
 
 use assert2::assert;
 use crabka_gres_control::{

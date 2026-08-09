@@ -1,14 +1,17 @@
-//! KIP-595 Slice 6 ACCEPTANCE TEST (Docker-gated, `#[ignore]`) — one
-//! `mirror.gcr.io/apache/kafka:4.0.0` controller plus two Crabka controllers form a single
-//! STATIC (`controller.quorum.voters`, kraft.version=0) metadata quorum that
-//! elects a cross-impl leader AND replicates committed metadata: the JVM joins
-//! as a follower of the Crabka leader, never fatal-faults, catches its
-//! high-watermark up to the leader's, and builds a `FeaturesImage` carrying
-//! `metadata.version=25` from the Crabka-committed log. This is the program's
-//! end goal for the leader→follower direction (the static-quorum spike of
-//! Slice 5 grew into this acceptance test; KIP-853 dynamic voters proved
-//! unnecessary). Not a default-CI gate (needs Docker + a published controller
-//! port); run it explicitly.
+//! KIP-595 Slice 6 ACCEPTANCE TEST, Docker-gated and `#[ignore]`.
+//!
+//! One `mirror.gcr.io/apache/kafka:4.0.0` controller and two Crabka
+//! controllers form one STATIC metadata quorum, with
+//! `controller.quorum.voters` and kraft.version=0. The quorum elects a
+//! cross-implementation leader AND replicates committed metadata. The JVM
+//! joins as a follower of the Crabka leader, never fatal-faults, catches its
+//! high-watermark up to the leader's, and builds a `FeaturesImage` that
+//! carries `metadata.version=25` from the Crabka-committed log. This is the
+//! program's end goal for the leader-to-follower direction. KIP-853 dynamic
+//! voters are not needed for it.
+//!
+//! This test is not a default-CI gate, because it needs Docker and a published
+//! controller port. Run it explicitly.
 //!
 //! Run:
 //! ```text
@@ -41,13 +44,15 @@ const CONTAINER: &str = "crabka-kip595-slice5-spike";
 
 /// Kafka encodes a 16-byte UUID as URL-safe base64 with no padding. The JVM
 /// `--cluster-id` string and Crabka's `uuid::Uuid` must wrap the *same* 16
-/// bytes or the two sides reject each other on cluster-id mismatch.
+/// bytes. Otherwise the two sides reject each other on a cluster-id
+/// mismatch.
 fn kafka_cluster_id_string(id: Uuid) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(id.as_bytes())
 }
 
-/// Build a Crabka controller `BrokerConfig` for voter `i` (0-indexed; id = i+1)
-/// in the shared static 3-voter set, with the shared cluster id.
+/// Builds a Crabka controller `BrokerConfig` for voter `i` in the shared static
+/// 3-voter set, with the shared cluster id. `i` is 0-indexed, and the id is
+/// `i+1`.
 fn crabka_controller_config(
     i: usize,
     own_client_addr: SocketAddr,
@@ -306,16 +311,20 @@ async fn static_mixed_jvm_crabka_quorum() {
 
 const CONTESTED_CONTAINER: &str = "crabka-kip996-contested";
 
-/// KIP-996 CONTESTED-ELECTION ACCEPTANCE TEST (Docker-gated, `#[ignore]`).
+/// KIP-996 CONTESTED-ELECTION ACCEPTANCE TEST, Docker-gated and `#[ignore]`.
 ///
-/// 2 Crabka voters (ids 1,2) + 1 `mirror.gcr.io/apache/kafka:4.0.0` voter (id 3) form a static
-/// 3-voter quorum. After the Crabka leader is killed, only 1 Crabka voter + the
-/// JVM voter survive, so the surviving Crabka candidate can only reach majority
-/// if the JVM grants its PRE-VOTE and real vote. This is the path the old
-/// `PRE_VOTE_ECHO_TAG` shortcut broke (a JVM pre-vote grant was dropped). The JVM
-/// is tuned to release the dead leader fast but self-nominate slowly so the
-/// surviving Crabka node wins; recovery to a new Crabka leader at a higher epoch
-/// is the proof.
+/// Two Crabka voters, ids 1 and 2, and one `mirror.gcr.io/apache/kafka:4.0.0`
+/// voter, id 3, form a static 3-voter quorum. After the test kills the Crabka
+/// leader, only one Crabka voter and the JVM voter survive. The surviving
+/// Crabka candidate can then reach a majority only if the JVM grants both its
+/// PRE-VOTE and its real vote.
+///
+/// The old `PRE_VOTE_ECHO_TAG` shortcut broke this path, because it dropped a
+/// JVM pre-vote grant.
+///
+/// The JVM is tuned to release the dead leader quickly but to self-nominate
+/// slowly, so the surviving Crabka node wins. Recovery to a new Crabka leader
+/// at a higher epoch is the proof.
 ///
 /// Run:
 /// ```text

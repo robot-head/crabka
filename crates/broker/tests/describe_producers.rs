@@ -1,15 +1,15 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
 
-//! KIP-664 `DescribeProducers` admin RPC (`api_key` 61) — surfaces the
+//! KIP-664 `DescribeProducers` admin RPC (`api_key` 61). It reports the
 //! broker's in-memory producer-state snapshot.
 //!
 //! Tests:
-//!   * empty partition returns an empty `active_producers` list
-//!   * after an idempotent `Produce`, the producer's id / epoch /
-//!     `last_sequence` / `last_timestamp` ride out on the response
-//!   * multiple producers on the same partition all show
-//!   * unknown topic / out-of-range partition → per-partition
-//!     `UNKNOWN_TOPIC_OR_PARTITION (3)`
+//!   * an empty partition returns an empty `active_producers` list
+//!   * after an idempotent `Produce`, the response carries the producer's id,
+//!     epoch, `last_sequence`, and `last_timestamp`
+//!   * several producers on the same partition all appear
+//!   * an unknown topic, or a partition out of range, gives
+//!     `UNKNOWN_TOPIC_OR_PARTITION (3)` for that partition
 
 use assert2::{assert, check};
 mod support;

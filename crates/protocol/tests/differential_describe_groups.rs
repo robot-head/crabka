@@ -23,7 +23,8 @@ fn rust_decode<T: for<'a> Decode<'a>>(bytes: &[u8], version: i16) -> T {
     v
 }
 
-/// Assemble the oracle JSON value for a default `DescribeGroupsRequest` at the given version.
+/// Assembles the oracle JSON value for a default `DescribeGroupsRequest` at
+/// the given version.
 ///
 /// Schema defaults:
 /// - `groups`: array v0+, no explicit default → []
@@ -41,7 +42,8 @@ fn request_oracle_value(version: i16) -> serde_json::Value {
     }
 }
 
-/// Assemble the oracle JSON value for a default `DescribeGroupsResponse` at the given version.
+/// Assembles the oracle JSON value for a default `DescribeGroupsResponse` at
+/// the given version.
 ///
 /// Schema defaults:
 /// - `throttleTimeMs`: int32 v1+, ignorable, no explicit default → 0

@@ -1,6 +1,6 @@
-//! Per-leader-partition ISR maintenance. Compares each follower's
-//! last-fetch time vs `replica_lag_time_max` and proposes
-//! `AlterPartition` shrink/expand to the controller leader.
+//! Per-leader-partition ISR maintenance. It compares each follower's
+//! last-fetch time against `replica_lag_time_max` and proposes an
+//! `AlterPartition` shrink or expand to the controller leader.
 
 #![allow(dead_code)]
 
@@ -18,9 +18,9 @@ use tracing::{debug, warn};
 
 use crate::{partition::Partition, partition_registry::PartitionRegistry};
 
-/// KIP-903 sentinel for an unknown broker epoch. Stamped when the metadata
-/// image has no epoch for a broker; tells the controller to skip the
-/// stale-replica epoch fence for that entry.
+/// KIP-903 sentinel for an unknown broker epoch. The broker stamps it when the
+/// metadata image has no epoch for a broker. It tells the controller to skip
+/// the stale-replica epoch fence for that entry.
 const UNKNOWN_BROKER_EPOCH: i64 = -1;
 
 pub(crate) struct Config {
@@ -33,7 +33,7 @@ pub(crate) struct Config {
     pub replica_lag_time_max: Time,
     pub broker_id: i32,
     pub shutdown: CancellationToken,
-    /// Bumped on each proposed shrink / expand.
+    /// Bumped on each proposed shrink or expand.
     pub metrics: crate::metrics::BrokerMetrics,
 }
 
@@ -99,16 +99,17 @@ pub(crate) async fn run(cfg: Config) {
     }
 }
 
-/// A computed ISR change proposal. All fields are captured within
-/// `compute_proposal`'s single `replica_state` lock scope so the caller
-/// can classify shrink/expand and submit the proposal without re-locking
-/// (and without a TOCTOU window where the ISR shifts between locks).
+/// A computed ISR change proposal. `compute_proposal` captures all fields
+/// within its single `replica_state` lock scope, so the caller
+/// can classify the shrink or expand and submit the proposal without a second
+/// lock. That also removes the TOCTOU window in which the ISR could shift
+/// between two locks.
 #[derive(Debug, PartialEq)]
 struct Proposal {
-    /// The pre-proposal ISR (sorted), used by the caller for shrink/expand
-    /// metric classification.
+    /// The pre-proposal ISR, sorted. The caller uses it to classify the
+    /// shrink or expand metric.
     prev_isr: Vec<NodeId>,
-    /// The proposed new ISR (sorted). Guaranteed `!= prev_isr`.
+    /// The proposed new ISR, sorted. It is always `!= prev_isr`.
     new_isr: Vec<NodeId>,
     /// Leader epoch to stamp on the `AlterPartition` request.
     leader_epoch: LeaderEpoch,

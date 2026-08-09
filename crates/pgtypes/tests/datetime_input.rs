@@ -1,6 +1,6 @@
 //! Date/time literal decoding, checked against `PostgreSQL` 18.4's accepted set.
 //!
-//! Every expectation here was taken from a live `PostgreSQL` 18.4 oracle with
+//! Every expectation here comes from a live `PostgreSQL` 18.4 oracle with
 //! `DateStyle = 'ISO, MDY'` and `TimeZone = 'Etc/UTC'`.
 
 use assert2::assert;

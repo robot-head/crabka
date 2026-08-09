@@ -1,7 +1,9 @@
-//! Prometheus sink for KIP-714 client metrics. Client metric *names* are
-//! dynamic, so we register a custom `Collector` (rather than static
-//! `Family`s) that renders a live, staleness-pruned snapshot at scrape time
-//! as `crabka_client_*` series.
+//! Prometheus sink for KIP-714 client metrics.
+//!
+//! Client metric *names* are dynamic, so this module registers a custom
+//! `Collector` instead of static `Family` values. That collector renders a
+//! live snapshot at scrape time, with stale points removed, as
+//! `crabka_client_*` series.
 
 use std::{
     collections::HashMap,
@@ -46,7 +48,8 @@ impl ClientMetricsCollector {
         }
     }
 
-    /// Record/replace the latest value for each point and prune stale ones.
+    /// Records the latest value for each point, replaces any earlier value,
+    /// and removes stale points.
     pub(crate) fn ingest(&self, points: &[DataPoint]) {
         let now = Instant::now();
         let mut guard = self.points.lock().expect("prom sink mutex poisoned");
@@ -66,7 +69,8 @@ impl ClientMetricsCollector {
         guard.retain(|_, sp| now.duration_since(sp.at) < self.ttl);
     }
 
-    /// Count of non-stale points (also prunes stale entries in place).
+    /// The count of points that are not stale. This method also removes the
+    /// stale entries in place.
     #[allow(dead_code)] // diagnostic helper; used in tests and future scrape-metrics endpoint
     pub(crate) fn live_point_count(&self) -> usize {
         let now = Instant::now();
@@ -116,8 +120,8 @@ impl Collector for ClientMetricsCollector {
 }
 
 /// Newtype wrapper around `Arc<ClientMetricsCollector>` that implements
-/// `prometheus_client::collector::Collector`, allowing the shared collector to
-/// be registered into a `Registry` via `register_collector`.
+/// `prometheus_client::collector::Collector`. It lets `register_collector` add
+/// the shared collector to a `Registry`.
 #[derive(Debug)]
 pub(crate) struct SharedClientMetricsCollector(pub std::sync::Arc<ClientMetricsCollector>);
 
@@ -130,8 +134,8 @@ impl prometheus_client::collector::Collector for SharedClientMetricsCollector {
     }
 }
 
-/// Prometheus metric names allow `[a-zA-Z0-9_:]`; map everything else to `_`
-/// and prefix with `crabka_client_`.
+/// Prometheus metric names allow `[a-zA-Z0-9_:]`. This function maps every
+/// other character to `_`, and adds the prefix `crabka_client_`.
 fn sanitize(metric: &str) -> String {
     let body: String = metric
         .chars()

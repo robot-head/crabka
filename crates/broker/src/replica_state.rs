@@ -1,10 +1,10 @@
 //! Per-partition replica progress tracking, lives on the partition leader.
 //!
-//! `ReplicaState` records each follower's last-fetched offset (= the
-//! follower's persisted LEO from the leader's perspective) and caches
+//! `ReplicaState` records each follower's last-fetched offset, which is the
+//! follower's persisted LEO from the leader's perspective, and it caches
 //! the High Watermark = min LEO over the ISR. ISR-lag
-//! tracking via `FollowerStats` (`last_fetch`, `last_caught_up`) lets
-//! the `isr_maintenance` task can shrink/expand the ISR.
+//! tracking in `FollowerStats` (`last_fetch`, `last_caught_up`) lets
+//! the `isr_maintenance` task shrink and expand the ISR.
 
 #![allow(dead_code)] // wired in by the ISR-maintenance path
 
@@ -43,19 +43,20 @@ impl ReplicaState {
     }
 
     /// Install (or reinstall) the ISR membership and seed non-leader
-    /// `per_follower` entries to zero. Idempotent: re-installing the same
-    /// `(isr, replicas, leader)` preserves existing follower progress.
+    /// `per_follower` entries to zero. The call is idempotent, so a
+    /// re-install of the same `(isr, replicas, leader)` keeps existing
+    /// follower progress.
     ///
-    /// `isr` is the committed in-sync set; `replicas` is the full replica
-    /// assignment. `per_follower` is keyed by the **replica set** (minus
-    /// the leader), not the ISR: a replica that has been shrunk out of the
-    /// ISR — or hasn't yet rejoined after a restart — is still catching up
-    /// via follower-fetch, and its fetch-driven `last_caught_up` is exactly
-    /// what `isr_maintenance` reads to expand it back in. Keying retention
-    /// on the ISR instead would discard that progress on every
+    /// `isr` is the committed in-sync set. `replicas` is the full replica
+    /// assignment. `per_follower` is keyed by the **replica set** without
+    /// the leader, and not by the ISR. A replica that the ISR shrank out,
+    /// or that has not yet rejoined after a restart, still catches up
+    /// through follower-fetch, and `isr_maintenance` reads exactly its
+    /// fetch-driven `last_caught_up` to expand it back in. A key on the
+    /// ISR instead would discard that progress on every
     /// metadata-image reconcile and starve ISR re-admission under image
-    /// churn. Only nodes no longer in the replica set (e.g. removed by a
-    /// reassignment) are dropped.
+    /// churn. This method drops only nodes that are no longer in the
+    /// replica set, for example after a reassignment removed them.
     pub(crate) fn install_isr(
         &mut self,
         isr: &[NodeId],
@@ -130,9 +131,9 @@ impl ReplicaState {
 
     /// Recompute the high watermark after the WAL has made records durable up
     /// to `durable_leo`. Identical HW arithmetic to
-    /// [`Self::recompute_hw_for_leader_append`], but named separately because
-    /// the diskless path advances the HW only AFTER an `fsync` -- durability,
-    /// not mere append, is what the `acks=all` gate then observes.
+    /// [`Self::recompute_hw_for_leader_append`], but it has its own name
+    /// because the diskless path advances the HW only AFTER an `fsync`. The
+    /// `acks=all` gate then observes durability, not just an append.
     pub(crate) fn recompute_hw_for_wal_durable(&mut self, durable_leo: Offset) -> Offset {
         self.hw = self.compute_hw(durable_leo);
         self.hw

@@ -1,27 +1,27 @@
 //! KDC-backed contract test for the sspi-rs GSSAPI providers.
 //!
-//! This test requires the MIT KDC fixture and real network access to the KDC,
-//! so it is `#[ignore]`d. Bring the fixture up first:
+//! This test needs the MIT KDC fixture and real network access to the KDC, so
+//! it is `#[ignore]`d. Bring the fixture up first:
 //!
 //! ```text
 //! cd crates/security/tests/fixtures/kdc && docker compose up --build -d
 //! docker compose logs | grep -m1 KDC_READY   # wait until ready
 //! ```
 //!
-//! Then run (the workspace forbids `unsafe`, so the env vars must be exported on
-//! the command line — the test cannot set them itself):
+//! Then run. The workspace forbids `unsafe`, so you must export the env vars on
+//! the command line. The test cannot set them itself.
 //!
 //! ```text
 //! KRB5_CONFIG=crates/security/tests/fixtures/kdc/krb5.conf SSPI_KDC_URL=tcp://localhost:88 \
 //!   cargo test -p crabka-security --test gssapi_provider -- --ignored
 //! ```
 //!
-//! It drives the full GSSAPI loop against the fixture: `alice@CRABKA.TEST`
-//! initiates *from a keytab* (`alice.keytab`, no password) to the
-//! `kafka/localhost@CRABKA.TEST` service whose key lives in `kafka.keytab`,
-//! asserts the recovered source principal, then round-trips a wrapped RFC 4752
-//! security-layer message. This exercises the released sspi keytab-client-auth
-//! path end-to-end against a real KDC.
+//! The test drives the full GSSAPI loop against the fixture. `alice@CRABKA.TEST`
+//! initiates *from a keytab*, `alice.keytab`, with no password, to the
+//! `kafka/localhost@CRABKA.TEST` service whose key lives in `kafka.keytab`. The
+//! test then asserts the recovered source principal and round-trips a wrapped
+//! RFC 4752 security-layer message. This drives the released sspi
+//! keytab-client-auth path end-to-end against a real KDC.
 
 use crabka_security::gssapi::{
     AcceptStep, DEFAULT_GSSAPI_MAX_TIME_SKEW, GssAcceptor, GssInitiator, InitStep,
@@ -113,8 +113,9 @@ fn full_gssapi_handshake_and_wrap_roundtrip() {
     assert2::assert!(unwrapped == plaintext);
 }
 
-/// Feed a client token into the acceptor, recording any reply token and whether
-/// the acceptor reached Established.
+/// Feed a client token into the acceptor and record any reply token.
+///
+/// This helper also records whether the acceptor reached Established.
 fn feed_acceptor(
     acceptor: &mut SspiAcceptor,
     token: &[u8],

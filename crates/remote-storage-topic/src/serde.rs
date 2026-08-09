@@ -1,11 +1,11 @@
 //! Binary wire format for `__remote_log_metadata` events.
 //!
-//! Records are encoded through
-//! [`crabka_protocol::RemoteLogMetadataRecord`], which produces
-//! bytes byte-identical to the JVM `RemoteLogMetadataSerde`
-//! (`AbstractApiMessageSerde` envelope, all three header fields written
-//! as unsigned varints: `frameVersion(uvarint)=1 | apiKey(uvarint) |
-//! apiVersion(uvarint) | flexible-message-body`).
+//! This module encodes records through
+//! [`crabka_protocol::RemoteLogMetadataRecord`], which produces bytes that are
+//! byte-identical to the JVM `RemoteLogMetadataSerde`. That is the
+//! `AbstractApiMessageSerde` envelope, with all three header fields written as
+//! unsigned varints: `frameVersion(uvarint)=1 | apiKey(uvarint) |
+//! apiVersion(uvarint) | flexible-message-body`.
 //!
 //! apiKey mapping:
 //! - 0 = `RemoteLogSegmentMetadataRecord`  → [`MetadataEvent::AddSegment`]
@@ -44,7 +44,7 @@ use crate::error::CodecError;
 /// One of the three event variants the topic carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataEvent {
-    /// A new segment is starting to copy (`CopySegmentStarted`).
+    /// A new segment starts to copy (`CopySegmentStarted`).
     AddSegment(RemoteLogSegmentMetadata),
     /// Lifecycle transition for an existing segment.
     UpdateSegment(RemoteLogSegmentMetadataUpdate),
@@ -53,13 +53,13 @@ pub enum MetadataEvent {
 }
 
 impl MetadataEvent {
-    /// Encode this event into freshly-allocated [`Bytes`] using the JVM
+    /// Encode this event into freshly-allocated [`Bytes`] with the JVM
     /// `RemoteLogMetadataSerde` wire format.
     ///
     /// # Panics
     ///
-    /// Only panics if the generated codec rejects the version (impossible
-    /// for version 0, which every record uses).
+    /// Panics only if the generated codec rejects the version. That is
+    /// impossible for version 0, which every record uses.
     #[must_use]
     pub fn encode(&self) -> Bytes {
         let record = match self {
@@ -80,10 +80,11 @@ impl MetadataEvent {
     ///
     /// # Errors
     ///
-    /// Returns [`CodecError`] for any malformed input: truncated envelope,
-    /// unknown or unsupported apiKey (apiKey 3 = `SegmentMetadataSnapshot`
-    /// never appears on the topic), out-of-range state byte, or domain
-    /// invariant violations reported by [`RemoteLogSegmentMetadata::new`].
+    /// Returns [`CodecError`] for any malformed input: a truncated envelope,
+    /// an unknown or unsupported apiKey, an out-of-range state byte, or a
+    /// domain invariant violation that [`RemoteLogSegmentMetadata::new`]
+    /// reports. apiKey 3, `SegmentMetadataSnapshot`, never appears on the
+    /// topic.
     pub fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
         let record = RemoteLogMetadataRecord::decode_value(bytes)
             .map_err(|e| CodecError::Protocol(e.to_string()))?;
@@ -361,8 +362,8 @@ fn from_proto_partition_delete(
 // envelope framing (format-version, committed-offsets, entry-length prefixes).
 // They are NOT part of the MetadataEvent wire format.
 
-/// Unsigned LEB128 — 7 data bits per byte, MSB is the continuation flag.
-/// Encodes 1 byte for values < 128.
+/// Unsigned LEB128: 7 data bits per byte, and the MSB is the continuation
+/// flag. It encodes 1 byte for values < 128.
 pub(crate) fn write_uvarint(mut v: u64, buf: &mut BytesMut) {
     while v >= 0x80 {
         let byte = u8::try_from(v & 0x7F).expect("varint payload is seven bits");

@@ -1,20 +1,20 @@
 //! A [`Kv`] whose backing store can be replaced under its holders.
 //!
-//! Consumers of a range-0 follower capture its catalog store handle exactly
-//! once, at construction, and keep it forever. A follower that has to rebuild
+//! A consumer of a range-0 follower captures its catalog store handle exactly
+//! once, at construction, and keeps it forever. A follower that has to rebuild
 //! itself from a checkpoint must therefore be able to swap the store *behind*
-//! that handle: replacing the handle is not an option, because nobody would
-//! ever read the replacement.
+//! that handle. A replacement of the handle is not an option, because nothing
+//! would ever read the replacement.
 
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use crabka_pgkv::{Kv, KvError, KvScan, WriteOp};
 
-/// A `Kv` that forwards every call to whichever store is currently installed.
+/// A `Kv` that forwards every call to the store that is currently installed.
 ///
-/// The indirection is a pointer load per call. Holders keep one stable
-/// `Arc<SwappableKv>`; [`SwappableKv::swap`] exchanges the store they reach
+/// The indirection costs one pointer load per call. Holders keep one stable
+/// `Arc<SwappableKv>`, and [`SwappableKv::swap`] exchanges the store they reach
 /// through it.
 pub struct SwappableKv {
     // `Arc<Arc<dyn Kv>>`: `arc_swap` can only swap sized payloads, so the
@@ -33,8 +33,8 @@ impl SwappableKv {
 
     /// Install `store` for every later call through this handle.
     ///
-    /// Calls already in flight finish against the store they loaded; the
-    /// previous store stays alive until the last of them returns.
+    /// A call already in flight finishes against the store it loaded. The
+    /// previous store stays alive until the last such call returns.
     pub fn swap(&self, store: Arc<dyn Kv>) {
         self.inner.store(Arc::new(store));
     }

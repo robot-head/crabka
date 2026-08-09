@@ -1,31 +1,38 @@
 //! `KafkaGrpcGateway` reconciler.
 //!
-//! Reconciles one `KafkaGrpcGateway` CR into the full runtime surface for a
-//! `crabka-grpc-gateway` Deployment:
+//! This reconciler turns one `KafkaGrpcGateway` CR into the full runtime
+//! surface for a `crabka-grpc-gateway` Deployment:
 //!
-//! - a **Deployment** (the gateway pods) with the downward-API env, the gateway
-//!   CLI flags, and the five TLS / config volume mounts from the Design;
-//! - a **Service** (`ClusterIP`, port 9500) selecting the gateway pods;
-//! - an operator-issued **serving cert** Secret (`<gw>-serving`), signed by the
-//!   parent's **cluster CA** (so peers / clients that trust the cluster CA
-//!   accept the gateway's Connect / webhook / metrics TLS);
-//! - a rendered **config Secret** (`<gw>-config`) holding `webhooks.toml` +
-//!   `outbound.toml`, with HMAC secrets resolved from same-namespace Secrets at
-//!   render time (never persisted in the CR);
-//! - a child **`KafkaUser`** (`<gw>-broker`, `authentication: tls`) so the
-//!   existing `KafkaUser` reconciler issues the gateway's **clients-CA-signed**
-//!   broker-mTLS client cert + provisions its ACLs.
+//! - a **Deployment** with the gateway pods. It carries the downward-API
+//!   env, the gateway CLI flags, and the five TLS and config volume mounts
+//!   from the Design.
+//! - a **Service**, `ClusterIP` on port 9500, that selects the gateway
+//!   pods.
+//! - an operator-issued **serving cert** Secret, `<gw>-serving`, that the
+//!   **cluster CA** of the parent signs. Peers and clients that trust the
+//!   cluster CA therefore accept the Connect, webhook, and metrics TLS of
+//!   the gateway.
+//! - a rendered **config Secret**, `<gw>-config`, that holds
+//!   `webhooks.toml` and `outbound.toml`. The operator resolves the HMAC
+//!   secrets from same-namespace Secrets at render time and never writes
+//!   them to the CR.
+//! - a child **`KafkaUser`**, `<gw>-broker` with `authentication: tls`.
+//!   The existing `KafkaUser` reconciler then issues the
+//!   **clients-CA-signed** broker-mTLS client cert of the gateway and
+//!   provisions its ACLs.
 //!
-//! The parent `Kafka` is discovered from the `crabka.io/cluster` label (the same
-//! convention as `KafkaTopic` / `KafkaUser`). The reconcile is gated on the
-//! parent's version model (mirrors `kafka_node_pool::version_gate`) so the
-//! gateway never deploys against an unvalidated cluster.
+//! The reconciler finds the parent `Kafka` from the `crabka.io/cluster`
+//! label. `KafkaTopic` and `KafkaUser` use the same convention. The
+//! version model of the parent gates the reconcile, as
+//! `kafka_node_pool::version_gate` does, so the gateway never deploys
+//! against a cluster that nobody validated.
 //!
-//! **Trust topology** (the load-bearing detail — see the P9 Design): the serving
-//! cert is **cluster-CA-signed** (issued here), while the broker-client cert is
-//! **clients-CA-signed** (delegated to the child `KafkaUser`). Signing the
-//! broker-client cert with the cluster CA would be rejected by the broker's
-//! `client_ca_path`; the child-KafkaUser path sidesteps that by construction.
+//! **Trust topology** is the load-bearing detail. The P9 Design has more.
+//! The **cluster CA** signs the serving cert, and this module issues it.
+//! The **clients CA** signs the broker-client cert, and the child
+//! `KafkaUser` issues it. The broker `client_ca_path` would reject a
+//! broker-client cert that the cluster CA signed. The child-KafkaUser path
+//! avoids that problem by construction.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -74,19 +81,22 @@ use crate::{
     },
 };
 
-/// Container / Service port the gateway binds for Connect-RPC + health +
-/// webhooks + metrics. Matches the gateway binary's `--listen-addr` default
-/// (`0.0.0.0:9500`).
+/// Container and Service port that the gateway binds for Connect-RPC,
+/// health, webhooks, and metrics.
+///
+/// It matches the `--listen-addr` default of the gateway binary,
+/// `0.0.0.0:9500`.
 const GATEWAY_PORT: i32 = 9500;
 
 /// Default replica count when `spec.replicas` is absent.
 const DEFAULT_REPLICAS: i32 = 1;
 
-/// Default serving-cert validity (days) when `spec.tls.validityDays` is absent.
+/// Default serving-cert validity in days, used when
+/// `spec.tls.validityDays` is absent.
 const DEFAULT_VALIDITY_DAYS: u32 = 365;
 
-/// Built-in gateway image, used when neither `spec.image` nor the operator's
-/// `--default-gateway-image` is set.
+/// Built-in gateway image. The operator uses it when neither `spec.image`
+/// nor `--default-gateway-image` is set.
 const DEFAULT_GATEWAY_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-grpc-gateway:",
     env!("CARGO_PKG_VERSION")
@@ -111,8 +121,9 @@ const DEFAULT_DEDUP_WINDOW: Time = hours(24);
 /// ACL refresh cadence the gateway assumes when `aclRefresh` is unset.
 const DEFAULT_ACL_REFRESH: Time = minutes(1);
 
-/// Outbound-subscription retry backoff bounds the gateway assumes when the CR
-/// leaves them unset; only used to check `maxBackoffMs >= baseBackoffMs`.
+/// Outbound-subscription retry backoff bounds that the gateway assumes
+/// when the CR leaves them unset. The operator uses them only to check
+/// that `maxBackoffMs >= baseBackoffMs`.
 const DEFAULT_BASE_BACKOFF: Time = millis(500);
 const DEFAULT_MAX_BACKOFF: Time = secs(30);
 
@@ -120,8 +131,10 @@ fn serving_secret_name(gw_name: &str) -> String {
     format!("{gw_name}-serving")
 }
 
-/// The child `KafkaUser` (and therefore its issued client-cert Secret):
-/// `<gw>-broker`. The `KafkaUser` reconciler names the Secret after the user.
+/// Returns the name of the child `KafkaUser`, `<gw>-broker`.
+///
+/// The `KafkaUser` reconciler gives the issued client-cert Secret the same
+/// name as the user, so this is also the Secret name.
 fn broker_user_name(gw_name: &str) -> String {
     format!("{gw_name}-broker")
 }
@@ -131,10 +144,12 @@ fn config_secret_name(gw_name: &str) -> String {
     format!("{gw_name}-config")
 }
 
-/// Common labels for the gateway's owned objects. Mirrors
-/// [`common::common_labels`] but with the gateway's own `app` value and
-/// `instance = parent Kafka name` (so the objects group under the cluster).
-/// These labels are also the Deployment pod-selector + Service selector.
+/// Returns the common labels for the objects that the gateway owns.
+///
+/// These labels follow [`common::common_labels`], but they use the `app`
+/// value of the gateway and set `instance` to the name of the parent
+/// Kafka. The objects therefore group under the cluster. The Deployment
+/// pod-selector and the Service selector also use these labels.
 fn gateway_labels(parent_name: &str, gw_name: &str) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     m.insert(
@@ -154,26 +169,30 @@ fn gateway_labels(parent_name: &str, gw_name: &str) -> BTreeMap<String, String> 
 // Pure render helpers
 // ---------------------------------------------------------------------------
 
-/// Build a downward-API env entry (`valueFrom.fieldRef`).
+/// Builds a downward-API env entry with `valueFrom.fieldRef`.
 fn field_ref_env(name: &str, field_path: &str) -> serde_json::Value {
     json!({ "name": name, "valueFrom": { "fieldRef": { "fieldPath": field_path } } })
 }
 
-/// Build a literal env entry.
+/// Builds a literal env entry.
 fn value_env(name: &str, value: impl Into<String>) -> serde_json::Value {
     json!({ "name": name, "value": value.into() })
 }
 
-/// Render the gateway Deployment. Pure function of the CR + resolved inputs
-/// (image, broker bootstrap, broker SNI). Owner-ref → the gateway CR.
+/// Renders the gateway Deployment.
+///
+/// This is a pure function of the CR and the resolved inputs: the image,
+/// the broker bootstrap, and the broker SNI. The owner reference points to
+/// the gateway CR.
 ///
 /// The pod template carries:
-/// - the gateway container (image, the `CRABKA_GATEWAY_*` env per Design
-///   §"Config rendering", including `$(POD_NAME)` / `$(POD_IP)` downward-API
-///   refs), the broker-TLS + serving-TLS CLI flags pointing at the mounted
-///   paths, the webhook/outbound config paths, and telemetry env;
-/// - the five volumes + mounts from the Design mount-set table;
-/// - `/healthz` + `/readyz` httpGet probes on the gateway port;
+/// - the gateway container. It holds the image and the
+///   `CRABKA_GATEWAY_*` env from Design §"Config rendering", with the
+///   `$(POD_NAME)` and `$(POD_IP)` downward-API refs. It also holds the
+///   broker-TLS and serving-TLS CLI flags that point at the mounted paths,
+///   the webhook and outbound config paths, and the telemetry env.
+/// - the five volumes and mounts from the Design mount-set table.
+/// - the `/healthz` and `/readyz` httpGet probes on the gateway port.
 /// - `containerPort` 9500.
 // linear render pipeline: env + flags + mounts are independent segments
 fn deployment(
@@ -509,8 +528,10 @@ fn gateway_args(
     args
 }
 
-/// Render the gateway Service: `ClusterIP`, port 9500, selector = the gateway
-/// labels, owner-ref → the gateway CR.
+/// Renders the gateway Service.
+///
+/// The Service is a `ClusterIP` on port 9500. Its selector is the gateway
+/// labels, and its owner reference points to the gateway CR.
 fn service(gw: &KafkaGrpcGateway, parent_name: &str) -> Result<Service, ReconcileError> {
     let gw_name = gw.name_any();
     let labels = gateway_labels(parent_name, &gw_name);
@@ -535,17 +556,20 @@ fn service(gw: &KafkaGrpcGateway, parent_name: &str) -> Result<Service, Reconcil
     Ok(svc)
 }
 
-/// Render the `<gw>-config` Secret holding `webhooks.toml` + `outbound.toml`.
+/// Renders the `<gw>-config` Secret that holds `webhooks.toml` and
+/// `outbound.toml`.
 ///
-/// HMAC secrets are passed in already resolved (keyed by webhook / subscription
-/// name) — the controller resolves the `secretRef`s from same-namespace Secrets
-/// before calling this, so no secret material is ever read from the CR.
+/// The caller passes the HMAC secrets in as resolved values, keyed by
+/// webhook name and by subscription name. The controller resolves the
+/// `secretRef`s from same-namespace Secrets before it calls this function,
+/// so the operator never reads secret material from the CR.
 ///
-/// The TOML is serialized into the **exact** gateway schemas
-/// (`crabka_grpc_gateway::webhook_config::WebhooksFile` /
-/// `outbound_config::OutboundFile`) so it round-trips through the gateway's
-/// loader. `allowed_targets` is the union of each subscription's `targetUrl`
-/// host and any explicit `spec.allowedTargets`.
+/// This function serializes the TOML into the **exact** gateway schemas
+/// `crabka_grpc_gateway::webhook_config::WebhooksFile` and
+/// `outbound_config::OutboundFile`, so the TOML round-trips through the
+/// loader of the gateway. `allowed_targets` is the union of the
+/// `targetUrl` host of each subscription and any explicit
+/// `spec.allowedTargets`.
 fn config_secret(
     gw: &KafkaGrpcGateway,
     resolved_webhook_secrets: &BTreeMap<String, String>,
@@ -586,7 +610,8 @@ fn config_secret(
     })
 }
 
-/// Serialize `spec.webhooks` into the gateway's `WebhooksFile` TOML.
+/// Serializes `spec.webhooks` into the `WebhooksFile` TOML of the
+/// gateway.
 fn render_webhooks_toml(
     gw: &KafkaGrpcGateway,
     resolved: &BTreeMap<String, String>,
@@ -645,8 +670,8 @@ fn render_webhooks_toml(
     toml::to_string(&doc).map_err(|e| ReconcileError::Malformed(format!("webhooks.toml: {e}")))
 }
 
-/// Serialize `spec.outboundSubscriptions` + derived `allowed_targets` into the
-/// gateway's `OutboundFile` TOML.
+/// Serializes `spec.outboundSubscriptions` and the derived
+/// `allowed_targets` into the `OutboundFile` TOML of the gateway.
 fn render_outbound_toml(
     gw: &KafkaGrpcGateway,
     resolved: &BTreeMap<String, String>,
@@ -703,8 +728,11 @@ fn render_outbound_toml(
     toml::to_string(&doc).map_err(|e| ReconcileError::Malformed(format!("outbound.toml: {e}")))
 }
 
-/// Build the SSRF allow-list: every subscription `targetUrl`'s `(scheme, host)`
-/// plus any explicit `spec.allowedTargets`. Deduped, order-stable.
+/// Builds the SSRF allow-list.
+///
+/// The list holds the `(scheme, host)` of the `targetUrl` of every
+/// subscription, and any explicit `spec.allowedTargets`. The function
+/// removes duplicates and keeps a stable order.
 fn derive_allowed_targets(gw: &KafkaGrpcGateway) -> Vec<serde_json::Value> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut push = |scheme: String, host: String| {
@@ -727,13 +755,17 @@ fn derive_allowed_targets(gw: &KafkaGrpcGateway) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Render the child `KafkaUser` (`<gw>-broker`): `authentication: tls`, broad
-/// ALLOW ACLs (all operations on `Topic:*`, `Group:*`, `TransactionalId:*`, and
-/// `Cluster`), `crabka.io/cluster` label, owner-ref → the gateway CR.
+/// Renders the child `KafkaUser` `<gw>-broker`.
 ///
-/// The existing `KafkaUser` reconciler issues a **clients-CA-signed** client cert
-/// (Secret `<gw>-broker`, keys `user.crt` / `user.key` / `ca.crt`) and
-/// provisions the ACLs — exactly the gateway's broker-mTLS identity.
+/// The user has `authentication: tls` and broad ALLOW ACLs: all operations
+/// on `Topic:*`, `Group:*`, `TransactionalId:*`, and `Cluster`. It carries
+/// the `crabka.io/cluster` label, and its owner reference points to the
+/// gateway CR.
+///
+/// The existing `KafkaUser` reconciler then issues a
+/// **clients-CA-signed** client cert in the Secret `<gw>-broker`, with the
+/// keys `user.crt`, `user.key`, and `ca.crt`, and provisions the ACLs.
+/// This is the broker-mTLS identity of the gateway.
 fn child_kafkauser(gw: &KafkaGrpcGateway, parent_name: &str) -> Result<KafkaUser, ReconcileError> {
     let gw_name = gw.name_any();
     let user_name = broker_user_name(&gw_name);
@@ -762,7 +794,8 @@ fn child_kafkauser(gw: &KafkaGrpcGateway, parent_name: &str) -> Result<KafkaUser
     Ok(user)
 }
 
-/// One `All`-operation ALLOW rule on a `literal` resource named `name`.
+/// Returns one `All`-operation ALLOW rule on a `literal` resource with
+/// the name `name`.
 fn broad_acl(kind: AclResourceKind, name: &str) -> AclRule {
     AclRule {
         resource: AclResource {
@@ -780,14 +813,16 @@ fn broad_acl(kind: AclResourceKind, name: &str) -> AclRule {
 // Serving cert
 // ---------------------------------------------------------------------------
 
-/// Ensure the `<gw>-serving` Secret holds a current cluster-CA-signed serving
-/// cert for the gateway Service DNS.
+/// Makes sure that the `<gw>-serving` Secret holds a current
+/// cluster-CA-signed serving cert for the gateway Service DNS.
 ///
-/// Loads the parent's cluster CA (`<parent>-cluster-ca` key `ca.key` +
-/// `<parent>-cluster-ca-cert` key `ca.crt`), issues a serving cert via
-/// [`issue_broker_cert`] with `base_sans` = the Service DNS names, and SSA's the
-/// Opaque Secret (`tls.crt` / `tls.key`), owner-ref → the gateway. Re-issues
-/// when the stored cert is within its renewal window.
+/// This function loads the cluster CA of the parent from
+/// `<parent>-cluster-ca` key `ca.key` and `<parent>-cluster-ca-cert` key
+/// `ca.crt`. It issues a serving cert with [`issue_broker_cert`], where
+/// `base_sans` is the set of Service DNS names. It then applies the Opaque
+/// Secret with `tls.crt` and `tls.key` from the server side, with an owner
+/// reference to the gateway. It issues a new cert when the stored cert is
+/// inside its renewal window.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -880,9 +915,11 @@ async fn ensure_serving_cert(
 // SecretRef resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve a `(secret-name, key)` reference from a same-namespace Secret,
-/// returning the value as a UTF-8 string. `Secret.data` is base64-decoded by
-/// kube-rs into `ByteString`, so we just read the bytes.
+/// Resolves a `(secret-name, key)` reference from a same-namespace Secret
+/// and returns the value as a UTF-8 string.
+///
+/// kube-rs decodes `Secret.data` from base64 into `ByteString`, so this
+/// function only reads the bytes.
 async fn resolve_secret_ref(
     secret_api: &Api<Secret>,
     secret_name: &str,
@@ -906,9 +943,10 @@ async fn resolve_secret_ref(
     })
 }
 
-/// Resolve every webhook `secretRef` + outbound `signingSecretRef` from
-/// same-namespace Secrets. Returns `(webhook name → secret, subscription name →
-/// secret)`.
+/// Resolves every webhook `secretRef` and every outbound
+/// `signingSecretRef` from same-namespace Secrets.
+///
+/// The result is `(webhook name → secret, subscription name → secret)`.
 async fn resolve_all_secret_refs(
     secret_api: &Api<Secret>,
     gw: &KafkaGrpcGateway,
@@ -934,9 +972,12 @@ async fn resolve_all_secret_refs(
 // Version gate (copied from kafka_node_pool::version_gate)
 // ---------------------------------------------------------------------------
 
-/// Whether the parent's version model clears the gateway to deploy. Same logic
-/// as `kafka_node_pool::version_gate`: cleared when the parent carries
-/// `KafkaVersionValid=True` OR a finalized `status.metadataVersion`.
+/// Reports whether the version model of the parent clears the gateway to
+/// deploy.
+///
+/// The logic is the same as in `kafka_node_pool::version_gate`. The
+/// gateway clears when the parent carries `KafkaVersionValid=True`, or
+/// when it carries a finalized `status.metadataVersion`.
 fn version_gate(parent: &Kafka) -> Option<KafkaCondition> {
     let cond = match parent_version_gate(parent) {
         common::ParentVersionGate::Cleared => return None,
@@ -969,28 +1010,32 @@ fn version_gate(parent: &Kafka) -> Option<KafkaCondition> {
 // Broker endpoint resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve the broker `(bootstrap, sni)` the gateway should dial.
+/// Resolves the broker `(bootstrap, sni)` that the gateway should dial.
 ///
 /// The gateway authenticates to the broker with its **clients-CA-signed**
-/// client cert (issued by the child `KafkaUser`) and is recognised as
-/// `User:CN=<gw>-broker`. That only works against a broker listener that is
-/// (a) **internal** (in-cluster headless DNS), (b) **TLS** (the transport the
-/// gateway's `--broker-tls-*` flags speak), and (c) **`authentication: tls`**
-/// (mTLS — the broker maps the client cert subject to a Kafka principal). A
-/// plaintext `PLAIN` listener on 9092 is none of these, so the gateway must
-/// never be pointed at it.
+/// client cert, which the child `KafkaUser` issues, and the broker knows
+/// it as `User:CN=<gw>-broker`. That works only against a broker listener
+/// with three properties. The listener must be **internal**, on in-cluster
+/// headless DNS. It must be **TLS**, which is the transport that the
+/// `--broker-tls-*` flags of the gateway speak. It must be
+/// **`authentication: tls`**, which is mTLS, where the broker maps the
+/// subject of the client cert to a Kafka principal. A plaintext `PLAIN`
+/// listener on 9092 has none of these properties, so the gateway must
+/// never point at it.
 ///
-/// The predicate (internal + `tls` + `authentication == tls`) lives on
-/// `spec.listeners`; the resolved in-cluster `host:port` lives on
-/// `status.listeners[name].bootstrap_servers` (populated once
-/// `ListenersReady`). We correlate the two by listener `name`. The SNI is the
-/// broker serving-cert SAN at that listener — the shared headless-svc DNS
-/// `<kafka>-broker-headless.<ns>.svc.cluster.local` (see the broker keystore
-/// SANs in `controller::kafka`), which is stable across every internal
-/// listener regardless of port.
+/// The predicate, internal and `tls` and `authentication == tls`, lives on
+/// `spec.listeners`. The resolved in-cluster `host:port` lives on
+/// `status.listeners[name].bootstrap_servers`, which the operator fills in
+/// after `ListenersReady`. This function correlates the two by listener
+/// `name`. The SNI is the SAN of the broker serving cert at that listener.
+/// That SAN is the shared headless-svc DNS
+/// `<kafka>-broker-headless.<ns>.svc.cluster.local`. See the broker
+/// keystore SANs in `controller::kafka`. It is stable across every
+/// internal listener, whatever the port is.
 ///
-/// Returns `None` when no internal TLS+mTLS listener exists *or* its bootstrap
-/// has not yet resolved into `status.listeners` — the caller surfaces that as a
+/// This function returns `None` when no internal TLS and mTLS listener
+/// exists, *or* when its bootstrap has not yet resolved into
+/// `status.listeners`. The caller then reports a
 /// `Ready=False reason=NoTlsListener` degraded condition and renders no
 /// Deployment.
 fn resolve_broker_endpoint(parent: &Kafka, namespace: &str) -> Option<(String, String)> {
@@ -1429,8 +1474,8 @@ fn validate_outbound_config(
     Ok(())
 }
 
-/// Patch a single-condition status onto the gateway (preserving the
-/// observed-generation echo).
+/// Patches a single-condition status onto the gateway and keeps the
+/// observed-generation echo.
 #[tracing::instrument(level = "info", skip_all, fields(name = %name, conditions = conditions.len()), err)]
 async fn patch_conditions(
     gw_api: &Api<KafkaGrpcGateway>,
@@ -1450,11 +1495,14 @@ async fn patch_conditions(
 // Reconcile
 // ---------------------------------------------------------------------------
 
-/// Reconcile one `KafkaGrpcGateway`. Orchestrates the Design §"Controller flow":
-/// label → parent, version gate, child `KafkaUser` + its client Secret, serving
-/// cert, config Secret (secretRefs resolved), Deployment + Service, status.
-/// Reconcile entry point. Times the pass and records the reconcile
-/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
+/// Reconciles one `KafkaGrpcGateway`.
+///
+/// This function runs the Design §"Controller flow" in order: label to
+/// parent, version gate, child `KafkaUser` and its client Secret, serving
+/// cert, config Secret with the resolved secretRefs, Deployment and
+/// Service, then status. It is also the reconcile entry point. It times
+/// the pass, records the reconcile counter and histogram, then calls the
+/// internal `reconcile_inner` operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -1661,7 +1709,7 @@ async fn reconcile_inner(
     Ok(common::requeue(ctx.config.controller_dependency_requeue))
 }
 
-/// Requeue on transient error.
+/// Requeues after a transient error.
 pub fn error_policy(
     _obj: Arc<KafkaGrpcGateway>,
     err: &ReconcileError,
@@ -1671,9 +1719,12 @@ pub fn error_policy(
     common::error_requeue(ctx)
 }
 
-/// Run the `KafkaGrpcGateway` controller forever. Owns the Deployment, Service,
-/// the serving + config Secrets, and the child `KafkaUser`; watches the parent
-/// `Kafka` so a version-validity flip re-triggers gateways.
+/// Runs the `KafkaGrpcGateway` controller forever.
+///
+/// The controller owns the Deployment, the Service, the serving Secret,
+/// the config Secret, and the child `KafkaUser`. It watches the parent
+/// `Kafka`, so that a change of the version validity triggers the gateways
+/// again.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
@@ -2463,9 +2514,9 @@ mod tests {
         assert!(outbound.contains("decode_to_json = true"));
     }
 
-    /// The gateway's own CLI parsers require an explicit unit and reject a bare
-    /// number, so every dimensioned argument the operator emits has to read back
-    /// as the exact quantity that went in.
+    /// The CLI parsers of the gateway need an explicit unit and reject a
+    /// bare number. Every dimensioned argument that the operator writes
+    /// must therefore read back as the exact quantity that went in.
     #[test]
     fn dimensioned_args_round_trip_through_the_unit_parsers() {
         let mut gw = gateway_fixture("gw", "demo");
@@ -2614,8 +2665,8 @@ mod tests {
         KafkaSpec, KafkaStatus, Listener, ListenerAuthentication, ListenerStatus, ListenerType,
     };
 
-    /// Build a parent `Kafka` named `demo` in `default` with the given
-    /// `spec.listeners` + `status.listeners`.
+    /// Builds a parent `Kafka` with the name `demo` in `default`, with the
+    /// given `spec.listeners` and `status.listeners`.
     fn parent_with_listeners(
         spec_listeners: Vec<Listener>,
         status_listeners: Vec<ListenerStatus>,

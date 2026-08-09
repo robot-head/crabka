@@ -1,8 +1,10 @@
-//! Validation + parsing for KIP-714 `CLIENT_METRICS` config resources.
+//! Validation and parsing for KIP-714 `CLIENT_METRICS` config resources.
 //!
-//! Three keys only (matching `org.apache.kafka.server.metrics.ClientMetricsConfigs`):
-//! `metrics` (CSV prefix list; the single token `"*"` = all), `interval.ms`
-//! (int, `100..=3_600_000`, default 300000), and `match` (CSV of `selector=regex`).
+//! There are three keys only, which match
+//! `org.apache.kafka.server.metrics.ClientMetricsConfigs`. `metrics` is a CSV
+//! prefix list, where the single token `"*"` means all. `interval.ms` is an
+//! int in `100..=3_600_000` with default 300000. `match` is a CSV of
+//! `selector=regex`.
 
 use std::collections::BTreeMap;
 
@@ -46,8 +48,10 @@ pub(crate) struct MatchRule {
     pub pattern: Regex,
 }
 
-/// Validate a single `(key, value)` against KIP-714 rules. Returns a
-/// human-readable reason on failure (surfaced as `INVALID_CONFIG`).
+/// Validate a single `(key, value)` against KIP-714 rules.
+///
+/// On failure this function returns a readable reason, which the broker
+/// returns as `INVALID_CONFIG`.
 pub(crate) fn validate(key: &str, value: &str) -> Result<(), String> {
     match key {
         KEY_METRICS => Ok(()),
@@ -68,12 +72,13 @@ pub(crate) fn validate(key: &str, value: &str) -> Result<(), String> {
     }
 }
 
-/// True if `key` is one of the three recognized client-metrics keys.
+/// True if `key` is one of the three known client-metrics keys.
 pub(crate) fn is_recognized(key: &str) -> bool {
     matches!(key, KEY_METRICS | KEY_INTERVAL_MS | KEY_MATCH)
 }
 
-/// Effective push interval for a subscription's override map (default when unset).
+/// Effective push interval for a subscription's override map. The function
+/// returns the default when the key is unset.
 pub(crate) fn effective_interval_ms(
     configs: &BTreeMap<String, String>,
     default_interval_ms: i32,
@@ -84,8 +89,8 @@ pub(crate) fn effective_interval_ms(
         .unwrap_or(default_interval_ms)
 }
 
-/// Parse the `metrics` value into prefixes. `"*"` collapses to `["*"]`;
-/// empty string yields an empty list (no metrics).
+/// Parse the `metrics` value into prefixes. `"*"` collapses to `["*"]`. An
+/// empty string gives an empty list, which means no metrics.
 pub(crate) fn parse_metrics(value: &str) -> Vec<String> {
     if value.trim().is_empty() {
         return Vec::new();
@@ -97,7 +102,8 @@ pub(crate) fn parse_metrics(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse the `match` value into compiled selector rules. Empty = match-all.
+/// Parse the `match` value into compiled selector rules. An empty value
+/// matches all.
 pub(crate) fn parse_match_rules(value: &str) -> Result<Vec<MatchRule>, String> {
     if value.trim().is_empty() {
         return Ok(Vec::new());

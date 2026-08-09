@@ -1,4 +1,5 @@
-//! Windowed aggregation processors: emit-on-update (default) or emit-on-window-close (KIP-825).
+//! Windowed aggregation processors, with emit-on-update as the default or
+//! emit-on-window-close (KIP-825).
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
@@ -20,30 +21,35 @@ type Marker<T> = PhantomData<fn() -> T>;
 
 /// Aggregate records into a windowed accumulator stored in a `WindowStore`.
 ///
-/// Behavior depends on the [`EmitStrategy`](crate::dsl::emit::EmitStrategy)
-/// field: in `on_window_update` (default) it emits a `Change<VA>` per window the
-/// record falls into (tumbling: one window; hopping: multiple) immediately; in
-/// `on_window_close` (KIP-825) it suppresses those per-update emits and instead
-/// forwards each window's final result once stream-time passes its close.
+/// The behavior depends on the
+/// [`EmitStrategy`](crate::dsl::emit::EmitStrategy) field. In
+/// `on_window_update`, which is the default, the processor emits a `Change<VA>`
+/// at once for every window the record falls into. A tumbling window gives one
+/// window, and a hopping window gives several. In `on_window_close` (KIP-825)
+/// the processor suppresses those per-update emits and forwards each window's
+/// final result once stream-time passes the window's close.
 ///
-/// Records with a null key are panicked (aggregations require non-null keys,
-/// enforced by the repartition step preceding this node in the DSL lowering).
+/// The processor panics on a record with a null key. Aggregations need non-null
+/// keys, and the repartition step before this node in the DSL lowering enforces
+/// that.
 #[allow(dead_code)]
 pub(crate) struct KStreamWindowAggregateProcessor<K, V, VA, I, A> {
     pub store_name: String,
     pub windows: TimeWindows,
     pub init: I,
     pub agg: A,
-    /// Emit on every update (default) or only on window close (KIP-825).
+    /// Emit on every update, which is the default, or only on window close
+    /// (KIP-825).
     pub emit: crate::dsl::emit::EmitStrategy,
-    /// Observed max record timestamp (per task instance) — drives window-close.
+    /// The maximum record timestamp observed by this task instance. It drives
+    /// the window close.
     pub stream_time: i64,
-    /// Highest `window_close_time` already emitted; prevents re-emit.
+    /// The highest `window_close_time` already emitted. It prevents a re-emit.
     pub last_emitted_close: i64,
-    /// Forward-suppression seam: when the window store is record-cached the
-    /// per-update forward is suppressed (the cache flush forwards the deduped
-    /// `Change`). Resolved in `init`. Only used on the emit-on-update path —
-    /// emit-final stores are never cached.
+    /// Forward-suppression seam. When the window store is record-cached, the
+    /// per-update forward is suppressed, because the cache flush forwards the
+    /// deduped `Change`. `init` resolves this field. Only the emit-on-update
+    /// path uses it, because an emit-final store is never cached.
     pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V, VA)>,
 }
@@ -174,31 +180,38 @@ where
 
 /// Reduce records into a windowed accumulator stored in a `WindowStore`.
 ///
-/// The windowed analogue of [`KStreamReduceProcessor`]: the **first** value in a
-/// window seeds the accumulator (no separate `init`), later values fold via
-/// `reducer(&acc, &value)`. Keeps the public value type `V` (no `Option`/sentinel
-/// leaks into the `KTable`); the "first value" check is the windowed store lookup
-/// returning `None`.
+/// This is the windowed analogue of [`KStreamReduceProcessor`]. The **first**
+/// value in a window seeds the accumulator, so there is no separate `init`, and
+/// later values fold in through `reducer(&acc, &value)`.
 ///
-/// Like [`KStreamWindowAggregateProcessor`], the
-/// [`EmitStrategy`](crate::dsl::emit::EmitStrategy) field selects emit-on-update
-/// (default, a `Change<V>` per touched window) or emit-on-window-close (KIP-825,
-/// final result only once a window closes).
+/// The processor keeps the public value type `V`, so no `Option` and no sentinel
+/// leaks into the `KTable`. The check for the first value is the windowed store
+/// lookup that returns `None`.
 ///
-/// Records with a null key are panicked (aggregations require non-null keys,
-/// enforced by the repartition step preceding this node in the DSL lowering).
+/// As in [`KStreamWindowAggregateProcessor`], the
+/// [`EmitStrategy`](crate::dsl::emit::EmitStrategy) field selects
+/// emit-on-update, the default, which gives a `Change<V>` per touched window, or
+/// emit-on-window-close (KIP-825), which gives the final result only once a
+/// window closes.
+///
+/// The processor panics on a record with a null key. Aggregations need non-null
+/// keys, and the repartition step before this node in the DSL lowering enforces
+/// that.
 #[allow(dead_code)]
 pub(crate) struct KStreamWindowReduceProcessor<K, V, R> {
     pub store_name: String,
     pub windows: TimeWindows,
     pub reducer: R,
-    /// Emit on every update (default) or only on window close (KIP-825).
+    /// Emit on every update, which is the default, or only on window close
+    /// (KIP-825).
     pub emit: crate::dsl::emit::EmitStrategy,
-    /// Observed max record timestamp (per task instance) — drives window-close.
+    /// The maximum record timestamp observed by this task instance. It drives
+    /// the window close.
     pub stream_time: i64,
-    /// Highest `window_close_time` already emitted; prevents re-emit.
+    /// The highest `window_close_time` already emitted. It prevents a re-emit.
     pub last_emitted_close: i64,
-    /// Forward-suppression seam (see [`KStreamWindowAggregateProcessor::forwarder`]).
+    /// Forward-suppression seam. See
+    /// [`KStreamWindowAggregateProcessor::forwarder`].
     pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V)>,
 }
@@ -603,8 +616,9 @@ mod tests {
         stores
     }
 
-    /// Run `init` then two same-window+key records (count) through the windowed
-    /// aggregate, returning how many records reached the downstream buffer.
+    /// Run `init`, then two count records with the same window and key, through
+    /// the windowed aggregate. The helper returns how many records reached the
+    /// downstream buffer.
     async fn run_two_same_window(stores: &mut StoreRegistry) -> usize {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -652,17 +666,17 @@ mod tests {
         buffer.len()
     }
 
-    /// Uncached → the windowed aggregate forwards each record immediately: two
-    /// records into the same window → two forwards.
+    /// When the store is uncached, the windowed aggregate forwards each record
+    /// at once, so two records into the same window give two forwards.
     #[tokio::test]
     async fn uncached_windowed_aggregate_forwards_each_record() {
         let mut stores = window_registry(false);
         assert_eq!(run_two_same_window(&mut stores).await, 2);
     }
 
-    /// Cached → the immediate forwards are suppressed; the cache flush forwards
-    /// exactly ONE deduped `Change` keyed by the correct `Windowed<String>` for
-    /// window [0,10) with the final count 2.
+    /// When the store is cached, the immediate forwards are suppressed. The
+    /// cache flush then forwards exactly ONE deduped `Change`, keyed by the
+    /// correct `Windowed<String>` for window [0,10), with the final count 2.
     #[tokio::test]
     async fn cached_windowed_aggregate_suppresses_then_flushes_one() {
         let mut stores = window_registry(true);

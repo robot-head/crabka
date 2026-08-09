@@ -1,5 +1,7 @@
-//! Which storage engine backs the state stores. `InMemory` is the test default
-//! and a valid production option; `Turso` persists under a state dir.
+//! Which storage engine backs the state stores.
+//!
+//! `InMemory` is the test default and is also a valid production option. `Turso`
+//! persists the state under a state directory.
 use crate::store::{
     byte::{ByteKeyValueStore, InMemoryBytes},
     turso::TursoBytes,
@@ -15,7 +17,8 @@ pub enum StoreBackend {
 }
 
 impl StoreBackend {
-    /// Open a byte backend for one store. `app_id`/`store` form the Turso file path.
+    /// Open a byte backend for one store. `app_id` and `store` form the Turso
+    /// file path.
     #[tracing::instrument(
         name = "streams.store.backend_open",
         level = "info",

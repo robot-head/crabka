@@ -1,25 +1,26 @@
 //! Throwaway de-risking spike for SASL/GSSAPI (Kerberos) support.
 //!
-//! This binary proves — empirically, against a real MIT KDC — that the `sspi`
-//! crate can perform the four operations the whole GSSAPI feature depends on:
+//! This binary proves empirically, against a real MIT KDC, that the `sspi`
+//! crate can do the four operations that the whole GSSAPI feature depends on:
 //!
 //!   1. Load the broker service key from a keytab and build server credentials.
 //!   2. Client `initialize_security_context` (AS+TGS+AP-REQ) as `alice`.
-//!   3. Server `accept_security_context` of that AP-REQ, recovering the
+//!   3. Server `accept_security_context` of that AP-REQ, which recovers the
 //!      authenticated source principal.
-//!   4. `encrypt_message` / `decrypt_message` (GSS wrap/unwrap) round-trip with
-//!      confidentiality disabled (what RFC 4752 security-layer framing needs).
+//!   4. `encrypt_message` / `decrypt_message` GSS wrap/unwrap round-trip with
+//!      confidentiality disabled, which is what RFC 4752 security-layer
+//!      framing needs.
 //!
-//! It is NOT production code; the exact API sequences it exercises are
-//! transcribed into `docs/superpowers/specs/2026-05-28-gssapi-sspi-findings.md`
-//! for the real provider task (Task 5) to reference.
+//! It is NOT production code. The exact API sequences it exercises appear in
+//! `docs/superpowers/specs/2026-05-28-gssapi-sspi-findings.md` for the real
+//! provider task, Task 5, to reference.
 //!
-//! Prereqs (see crates/security/tests/fixtures/kdc/):
+//! Prerequisites (see crates/security/tests/fixtures/kdc/):
 //!   cd crates/security/tests/fixtures/kdc && docker compose up --build -d
 //! Then:
 //!   cargo run -p crabka-security --example `gssapi_spike`
 //!
-//! Env overrides (all have sane defaults pointing at the fixture realm):
+//! Env overrides, all with defaults that point at the fixture realm:
 //!   `SSPI_KDC_URL=tcp://localhost:88`
 //!   `GSSAPI_SPIKE_KEYTAB=crates/security/tests/fixtures/kdc/kafka.keytab`
 //!   `KRB5_CONFIG=crates/security/tests/fixtures/kdc/krb5.conf`
@@ -248,8 +249,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Build a Kerberos acceptor (server) from a KDC URL and the raw aes256 service
-/// key extracted from the keytab.
+/// Build a Kerberos acceptor, the server, from a KDC URL and the raw aes256
+/// service key that came out of the keytab.
 fn build_server(kdc_url: &str, service_key: Vec<u8>) -> Result<Kerberos, Box<dyn Error>> {
     // service_name is the SPN components WITHOUT realm, e.g. ["kafka","localhost"].
     let sname: Vec<&str> = SERVICE_SPN.split('/').collect();

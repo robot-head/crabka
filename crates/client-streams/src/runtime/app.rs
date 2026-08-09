@@ -1,9 +1,11 @@
-//! `KafkaStreams` — the managed runtime handle. Owns membership + a `StreamThread`.
+//! `KafkaStreams`, the managed runtime handle. It owns the membership and a
+//! `StreamThread`.
 //!
-//! `start()` builds the broker I/O, joins the streams group (membership owns the
-//! heartbeat), and spawns a supervisor that pumps membership events into a
-//! `StreamThread` while polling/committing on intervals. `close()` stops the
-//! supervisor (flush+commit+leave).
+//! `start()` builds the broker I/O and joins the streams group, where the
+//! membership owns the heartbeat. It then spawns a supervisor that pumps the
+//! membership events into a `StreamThread` and polls and commits on intervals.
+//! `close()` stops the supervisor, which flushes, commits, and leaves the
+//! group.
 
 use std::{sync::Arc, time::Duration};
 
@@ -46,8 +48,8 @@ pub const DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY: usize = 64;
 /// Default Client Streams state-store record-cache budget (the JVM default).
 pub const DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES: ByteSize = mebibytes(10);
 
-/// Largest cache budget representable by both the public `i64` API and the
-/// target's internal `usize` cache accounting.
+/// The largest cache budget that both the public `i64` API and the target's
+/// internal `usize` cache accounting can represent.
 #[allow(clippy::cast_possible_wrap)]
 pub const MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES: i64 = if usize::BITS >= i64::BITS {
     i64::MAX
@@ -57,9 +59,10 @@ pub const MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES: i64 = if usize::BITS >= i64::
 
 /// Target-supported Client Streams state-store record-cache budget.
 ///
-/// The validated magnitude is held as the raw `i64` byte count the refinement
-/// bounds are written over, so this stays `Eq` (a [`ByteSize`] stores `f64` and
-/// cannot be); [`size`](Self::size) puts the dimension back on at the seam.
+/// This type holds the validated magnitude as the raw `i64` byte count that the
+/// refinement bounds are written over, so it stays `Eq`. A [`ByteSize`] stores
+/// an `f64` and cannot be `Eq`. [`size`](Self::size) puts the dimension back on
+/// at the seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamsStateStoreCacheMaxBytes(i64);
 
@@ -259,16 +262,19 @@ fn validate_runtime_configuration(
     ))
 }
 
-/// A managed Kafka Streams runtime: joins a streams group, runs assigned tasks
-/// (fetch → process → produce → commit, at-least-once), and reacts to rebalances.
+/// A managed Kafka Streams runtime.
+///
+/// It joins a streams group, runs the assigned tasks in the at-least-once order
+/// fetch → process → produce → commit, and reacts to rebalances.
 pub struct KafkaStreams {
     member_id: String,
     shutdown: CancellationToken,
     handle: JoinHandle<()>,
-    /// Channel to the supervisor for interactive queries. Read by the
-    /// `KafkaStreams` IQ accessors.
+    /// Channel to the supervisor for interactive queries. The `KafkaStreams` IQ
+    /// accessors read it.
     iq_tx: mpsc::Sender<IqRequest>,
-    /// Channel to the supervisor for `IQv2` queries (separate from the v1 `iq_tx`).
+    /// Channel to the supervisor for `IQv2` queries. It is separate from the v1
+    /// `iq_tx`.
     iq2_tx: mpsc::Sender<Iq2Request>,
 }
 
@@ -310,8 +316,9 @@ impl KafkaStreams {
         client_dispatch_queue_capacity: usize,
         #[builder(default = DEFAULT_CLIENT_FRAME_MAX)] client_frame_max: ByteSize,
         #[builder(default = DEFAULT_FETCH_MIN)] fetch_min: ByteSize,
-        /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
-        /// caching. Threaded onto each task graph at `instantiate`.
+        /// Record-cache budget, which is the JVM `statestore.cache.max.bytes`.
+        /// `0` turns caching off. `instantiate` threads it onto each task
+        /// graph.
         #[builder(default = DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES)]
         cache_max_bytes: ByteSize,
         /// Capacity shared by the v1 and v2 interactive-query request queues.
@@ -497,9 +504,11 @@ impl KafkaStreams {
         &self.member_id
     }
 
-    /// A read-only view of the local `KeyValue` state store `name` for
-    /// interactive queries. Errors if the store is not assigned here, or it is
-    /// a different store kind.
+    /// A read-only view of the local `KeyValue` state store `name`, for
+    /// interactive queries.
+    ///
+    /// It returns an error when this instance holds no assignment for the store,
+    /// or when the store is of a different kind.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn key_value_store<K, V>(
@@ -556,9 +565,9 @@ impl KafkaStreams {
         Ok(view)
     }
 
-    /// Run an `IQv2` query against locally assigned partitions and return one
-    /// `QueryResult` per partition. Serde-free: the store supplies its own
-    /// serdes.
+    /// Run an `IQv2` query against the locally assigned partitions and return
+    /// one `QueryResult` per partition. The method takes no serdes, because the
+    /// store supplies its own.
     pub async fn query<Q: Query>(&self, req: StateQuery<Q>) -> StateQueryResult<Q::Result> {
         use crate::runtime::iqv2::dispatch::{Iq2Request, assemble};
 

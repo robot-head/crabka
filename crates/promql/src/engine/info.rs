@@ -27,7 +27,7 @@ pub(super) struct InfoContext<'a> {
     restrict_data_labels: bool,
 }
 
-/// Parse and validate an `info(v [, data_label_selector])` call.
+/// Parses and validates an `info(v [, data_label_selector])` call.
 pub(super) fn parse_info_call(call: &Call) -> Result<InfoContext<'_>> {
     let [_arg, data_label_selector @ ..] = call.args.args.as_slice() else {
         return Err(PromqlError::Plan(format!(
@@ -79,7 +79,7 @@ pub(super) fn parse_info_call(call: &Call) -> Result<InfoContext<'_>> {
     })
 }
 
-/// Join input series with overlapping `target_info` series.
+/// Joins input series with overlapping `target_info` series.
 pub(super) fn apply_info(
     samples: Vec<InstantSample>,
     info_by_key: &BTreeMap<String, InstantSample>,

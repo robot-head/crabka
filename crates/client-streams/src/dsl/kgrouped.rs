@@ -1,22 +1,25 @@
-//! `KGroupedStream<K,V>`: the intermediate handle between `groupByKey`/`groupBy`
-//! and a terminal aggregation (`count`/`reduce`/`aggregate`).
+//! `KGroupedStream<K,V>`: the handle between a group op and an aggregation.
 //!
-//! `groupByKey`/`groupBy` record **no** graph node — they capture lineage state
-//! (was the upstream key-changing?), the optional `Grouped` name, the value
-//! serdes (for the repartition topic), and a typed repartition-lowering thunk.
-//! The terminal aggregation then:
+//! The group ops are `groupByKey` and `groupBy`. The terminal aggregations are
+//! `count`, `reduce`, and `aggregate`.
 //!
-//! 1. Mints the **store name** (from `Materialized` or a fresh
-//!    `KSTREAM-AGGREGATE-STATE-STORE-`/`KSTREAM-REDUCE-STATE-STORE-` counter) at
-//!    the JVM counter position.
-//! 2. If the upstream is key-changing, records a `Repartition` node whose thunk
-//!    lowers `sink → add_repartition_topic → source` so records are re-grouped by
-//!    key before aggregation (splitting the topology into 2 subtopologies).
-//! 3. Records an `Aggregate` node whose thunk adds the aggregation processor and
-//!    its state store.
+//! `groupByKey` and `groupBy` record **no** graph node. They capture four things:
+//! whether the upstream was key-changing, the optional `Grouped` name, the value
+//! serdes for the repartition topic, and a typed repartition-lowering thunk. The
+//! terminal aggregation then does three steps:
 //!
-//! Repartition and changelog topic names follow the JVM naming rules so the
-//! built topology can be sent through `StreamsGroupHeartbeat`.
+//! 1. It mints the **store name** at the JVM counter position. The name comes
+//!    from `Materialized`, or from a fresh `KSTREAM-AGGREGATE-STATE-STORE-` or
+//!    `KSTREAM-REDUCE-STATE-STORE-` counter.
+//! 2. If the upstream is key-changing, it records a `Repartition` node. That
+//!    node's thunk lowers `sink → add_repartition_topic → source`, so the runtime
+//!    re-groups records by key before the aggregation. This splits the topology
+//!    into 2 subtopologies.
+//! 3. It records an `Aggregate` node whose thunk adds the aggregation processor
+//!    and its state store.
+//!
+//! Repartition and changelog topic names follow the JVM naming rules, so the
+//! client can send the built topology through `StreamsGroupHeartbeat`.
 
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
@@ -37,16 +40,19 @@ use crate::{
 };
 
 /// A typed thunk that wires a repartition `sink → topic → source` triple into
-/// the Processor-API topology, returning the source node's name. Built from the
-/// `Grouped` serdes so the (de)serialization round-trip through the repartition
-/// topic is type-correct; erased here so `KGroupedStream<K,V>` stays free of the
-/// serde type parameters.
+/// the Processor-API topology.
+///
+/// The thunk returns the source node's name. It is built from the `Grouped`
+/// serdes, so the serialization round-trip through the repartition topic is
+/// type-correct. It is type-erased here, so `KGroupedStream<K,V>` stays free of
+/// the serde type parameters.
 ///
 /// Args: `(state, parent_name, sink_name, source_name, topic)`.
 pub(crate) type RepartitionLowerFn =
     Box<dyn FnOnce(&mut LowerState, String, String, String, String) + Send>;
 
-/// Build a [`RepartitionLowerFn`] capturing the `Grouped` key/value serdes.
+/// Build a [`RepartitionLowerFn`] that captures the `Grouped` key and value
+/// serdes.
 pub(crate) fn repartition_lower<K, V, KS, VS>(key_serde: KS, value_serde: VS) -> RepartitionLowerFn
 where
     K: Any + Send + Clone,
@@ -81,22 +87,25 @@ where
     )
 }
 
-/// Handle produced by `groupByKey`/`groupBy`; terminal aggregations consume it.
+/// Handle produced by `groupByKey` and `groupBy`. A terminal aggregation
+/// consumes it.
 pub struct KGroupedStream<K, V> {
     builder: Rc<RefCell<InternalStreamsBuilder>>,
-    /// Logical id of the node feeding the aggregation (the source/select-key).
+    /// Logical id of the node that feeds the aggregation. That node is the
+    /// source or the select-key.
     parent: NodeId,
-    /// True when the upstream key was rewritten without a re-group → the
-    /// aggregation must insert a repartition before the aggregate node.
+    /// True when the upstream key was rewritten without a re-group. The
+    /// aggregation must then insert a repartition before the aggregate node.
     key_changing_upstream: bool,
     /// Explicit `Grouped` name used to derive the repartition topic name.
     #[allow(dead_code)]
     grouped_name: Option<String>,
-    /// Typed repartition-lowering thunk (taken once by the terminal op).
+    /// Typed repartition-lowering thunk. The terminal op takes it once.
     repartition_lower: Option<RepartitionLowerFn>,
-    /// The single source topic this grouped stream traces to, when applicable
-    /// (i.e. `groupByKey` on a single-source, key-unchanged stream). Used by
-    /// cogroup to register a copartition group over all input source topics.
+    /// The single source topic this grouped stream traces to, when one applies.
+    /// One applies for `groupByKey` on a single-source, key-unchanged stream.
+    /// Cogroup reads it to register a copartition group over all input source
+    /// topics.
     pub(crate) source_topic: Option<String>,
     _pd: PhantomData<fn() -> (K, V)>,
 }
@@ -149,11 +158,13 @@ where
         )
     }
 
-    /// `reduce`: combine values per key with `reducer`, materialized as
-    /// `KTable<K, V>`. The first value for a key seeds the accumulator (the JVM
-    /// `Reducer` has no separate `init`); later values fold via
-    /// `reducer(&acc, &value)`. The backing processor keeps
-    /// the public value type `V` (no `Option`/sentinel leaks into the `KTable`).
+    /// `reduce`: combine values per key with `reducer`.
+    ///
+    /// The result is materialized as `KTable<K, V>`. The first value for a key
+    /// seeds the accumulator, because the JVM `Reducer` has no separate `init`.
+    /// Later values fold with `reducer(&acc, &value)`. The backing processor keeps
+    /// the public value type `V`, so no `Option` and no sentinel leaks into the
+    /// `KTable`.
     pub fn reduce_explicit<KS, VS, R>(
         self,
         reducer: R,
@@ -169,8 +180,9 @@ where
         self.lower_reduce::<KS, VS, R>(materialized, store_name, reducer)
     }
 
-    /// `aggregate`: general aggregation with caller-supplied `init` + `agg`,
-    /// materialized as `KTable<K, VA>`.
+    /// `aggregate`: general aggregation with a caller-supplied `init` and `agg`.
+    ///
+    /// The result is materialized as `KTable<K, VA>`.
     pub fn aggregate_explicit<KS, VS, VA, I, A>(
         self,
         init: I,
@@ -248,10 +260,13 @@ where
         )
     }
 
-    /// `windowedBy(TimeWindows)`: switch to a windowed aggregation. Moves the
-    /// grouped lineage (parent, key-changing flag, repartition thunk) into a
-    /// [`crate::dsl::TimeWindowedKGroupedStream`], which exposes windowed
-    /// `count`/`reduce`/`aggregate` producing `KTable<Windowed<K>, _>`.
+    /// `windowedBy(TimeWindows)`: switch to a windowed aggregation.
+    ///
+    /// This method moves the grouped lineage into a
+    /// [`crate::dsl::TimeWindowedKGroupedStream`]. The lineage is the parent, the
+    /// key-changing flag, and the repartition thunk. That handle exposes the
+    /// windowed `count`, `reduce`, and `aggregate`, which produce a
+    /// `KTable<Windowed<K>, _>`.
     #[must_use]
     pub fn windowed_by(
         mut self,
@@ -267,11 +282,13 @@ where
         )
     }
 
-    /// `windowedBy(SessionWindows)`: switch to a session aggregation. Moves the
-    /// grouped lineage into a [`crate::dsl::SessionWindowedKGroupedStream`], which exposes
-    /// session `count`/`reduce`/`aggregate` producing `KTable<Windowed<K>, _>`.
-    /// (Distinct method name because Rust cannot overload `windowed_by` by the
-    /// window-spec argument type as the JVM does.)
+    /// `windowedBy(SessionWindows)`: switch to a session aggregation.
+    ///
+    /// This method moves the grouped lineage into a
+    /// [`crate::dsl::SessionWindowedKGroupedStream`]. That handle exposes the
+    /// session `count`, `reduce`, and `aggregate`, which produce a
+    /// `KTable<Windowed<K>, _>`. The method name is distinct, because Rust cannot
+    /// overload `windowed_by` by the window-spec argument type as the JVM does.
     #[must_use]
     pub fn windowed_by_session(
         mut self,
@@ -290,11 +307,13 @@ where
         )
     }
 
-    /// `windowedBy(SlidingWindows)`: switch to a sliding-window (KIP-450)
-    /// aggregation. Moves the grouped lineage into a
-    /// [`crate::dsl::SlidingWindowedKGroupedStream`]. (Distinct method name
-    /// because Rust cannot overload `windowed_by` by the window-spec argument
-    /// type as the JVM does.)
+    /// `windowedBy(SlidingWindows)`: switch to a sliding-window aggregation
+    /// (KIP-450).
+    ///
+    /// This method moves the grouped lineage into a
+    /// [`crate::dsl::SlidingWindowedKGroupedStream`]. The method name is
+    /// distinct, because Rust cannot overload `windowed_by` by the window-spec
+    /// argument type as the JVM does.
     #[must_use]
     pub fn windowed_by_sliding(
         mut self,
@@ -313,9 +332,11 @@ where
         )
     }
 
-    /// `cogroup`: begin a KIP-150 cogroup with this stream as the first input and
-    /// `agg` its aggregator. Returns a [`CogroupedKStream<K, VOut>`] to chain more
-    /// inputs and terminate with `aggregate` / `windowed_by*`.
+    /// `cogroup`: begin a KIP-150 cogroup with this stream as the first input.
+    ///
+    /// `agg` is this input's aggregator. Returns a
+    /// [`CogroupedKStream<K, VOut>`]. Chain more inputs onto it, then terminate
+    /// with `aggregate` or one of the `windowed_by*` methods.
     ///
     /// [`CogroupedKStream<K, VOut>`]: crate::dsl::cogrouped::CogroupedKStream
     #[must_use]
@@ -339,8 +360,9 @@ where
         )
     }
 
-    /// Decompose into the lineage parts a cogroup input needs (consumes the handle).
-    /// Returns `(parent_id, key_changing, repartition_lower, source_topic)`.
+    /// Decompose into the lineage parts a cogroup input needs. This method
+    /// consumes the handle. It returns
+    /// `(parent_id, key_changing, repartition_lower, source_topic)`.
     pub(crate) fn into_cogroup_parts(
         mut self,
     ) -> (NodeId, bool, Option<RepartitionLowerFn>, Option<String>) {
@@ -352,8 +374,9 @@ where
         )
     }
 
-    /// Shared body for `count`/`aggregate`: mint the store name at the JVM
-    /// counter position, then lower the (optional) repartition + aggregate node.
+    /// Shared body for `count` and `aggregate`. This method mints the store name
+    /// at the JVM counter position, then lowers the optional repartition node and
+    /// the aggregate node.
     fn aggregate_inner<KS, VS, VA, I, A>(
         self,
         materialized: Materialized<KS, VS>,
@@ -372,9 +395,9 @@ where
         self.lower_aggregate::<KS, VS, VA, I, A>(materialized, store_name, init, agg)
     }
 
-    /// Record the (optional) repartition node + a `KStreamAggregateProcessor`
-    /// aggregate node, returning the resulting `KTable`. The store name is already
-    /// minted (at the JVM counter position) by the caller.
+    /// Record the optional repartition node and a `KStreamAggregateProcessor`
+    /// aggregate node, then return the resulting `KTable`. The caller has already
+    /// minted the store name at the JVM counter position.
     fn lower_aggregate<KS, VS, VA, I, A>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -472,8 +495,9 @@ where
         .with_suppress_factory(Some(suppress_factory))
     }
 
-    /// Record the (optional) repartition node + a `KStreamReduceProcessor`
-    /// node (first value seeds, later values fold), returning the `KTable<K, V>`.
+    /// Record the optional repartition node and a `KStreamReduceProcessor` node,
+    /// then return the `KTable<K, V>`. The first value seeds the accumulator and
+    /// later values fold into it.
     fn lower_reduce<KS, VS, R>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -563,14 +587,17 @@ where
         .with_suppress_factory(Some(suppress_factory))
     }
 
-    /// If the upstream is key-changing, record a `Repartition` node
-    /// (`sink → repartition topic → source`) re-grouping by key and return its
-    /// id (the aggregation's parent). Otherwise return the grouped parent id
-    /// unchanged. The repartition topic name (`<app>-<store>-repartition`) is
-    /// finalized in the thunk using the same naming rule as the JVM client.
+    /// Record a `Repartition` node when the upstream is key-changing.
     ///
-    /// Takes the needed fields by value (not `&mut self`) so the caller can hold
-    /// the `builder.borrow_mut()` guard `g` across the call.
+    /// The node lowers as `sink → repartition topic → source` and re-groups by
+    /// key. This method then returns its id, which is the aggregation's parent.
+    /// If the upstream is not key-changing, it returns the grouped parent id
+    /// unchanged. The thunk finalizes the repartition topic name
+    /// `<app>-<store>-repartition` with the same naming rule as the JVM client.
+    ///
+    /// This method takes the fields it needs by value and not through
+    /// `&mut self`, so the caller can hold the `builder.borrow_mut()` guard `g`
+    /// across the call.
     pub(crate) fn record_repartition(
         g: &mut InternalStreamsBuilder,
         store_name: &str,
@@ -622,8 +649,11 @@ where
     }
 }
 
-/// Mint the store name: the `Materialized` name when present, else a fresh
-/// counter at the JVM position (called *before* the aggregate processor name).
+/// Mint the store name.
+///
+/// Returns the `Materialized` name when it is present, otherwise a fresh counter
+/// at the JVM position. The caller calls this *before* it mints the aggregate
+/// processor name.
 pub(crate) fn mint_store_name<KS, VS>(
     builder: &Rc<RefCell<InternalStreamsBuilder>>,
     materialized: &Materialized<KS, VS>,

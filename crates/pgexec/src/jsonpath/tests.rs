@@ -4,7 +4,8 @@ use crabka_pgtypes::{JsonbValue, jsonb};
 use super::JsonPath;
 
 /// Run `path` over `target` and render the result the way
-/// `jsonb_path_query_array` does, so a case reads exactly like its oracle probe.
+/// `jsonb_path_query_array` does, so a case reads exactly like its oracle
+/// probe.
 fn query(target: &str, path: &str) -> Result<String, String> {
     query_vars(target, path, None)
 }

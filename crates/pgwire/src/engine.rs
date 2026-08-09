@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::error::PgError;
 
-/// Type OIDs from `pg_type.dat`. The stub needs only these two; the real
+/// Type OIDs from `pg_type.dat`. The stub needs only these two. The real
 /// catalog crate will own the full set.
 pub mod oids {
     pub const INT4: u32 = 23;
@@ -16,10 +16,10 @@ pub mod oids {
 
 /// A single value, pre-encoded in both wire formats.
 ///
-/// SP2 NOTE: pre-computing both encodings is fine for the stub but doubles
-/// encoding work for a real engine; the wire layer knows the negotiated
-/// format at Bind time and could request only one. Revisit this seam when
-/// the real engine lands.
+/// SP2 NOTE: both encodings computed in advance are fine for the stub, but
+/// they double the encoding work for a real engine. The wire layer knows the
+/// negotiated format at Bind time and could request only one. Revisit this
+/// seam when the real engine lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     pub text: Bytes,
@@ -42,7 +42,8 @@ pub enum QueryResult {
         rows: Vec<Vec<Option<Cell>>>,
         tag: String,
     },
-    /// Statement with no result set (e.g. SET); tag like "INSERT 0 1".
+    /// Statement with no result set, for example SET. The tag looks like
+    /// "INSERT 0 1".
     Command { tag: String },
     /// Empty query string → `EmptyQueryResponse`.
     Empty,
@@ -73,7 +74,7 @@ pub trait ResultSink: Send {
     async fn send(&mut self, page: ResultPage) -> Result<(), PgError>;
 
     /// Deliver a non-error `PostgreSQL` diagnostic. Existing sinks may ignore
-    /// notices; wire-facing sinks can override this to emit `NoticeResponse`.
+    /// notices. Wire-facing sinks can override this to emit `NoticeResponse`.
     async fn send_notice(&mut self, notice: PgError) -> Result<(), PgError> {
         debug_assert!(notice.severity.is_notice());
         Ok(())
@@ -245,49 +246,55 @@ pub enum ExecuteOutcome {
 
 pub use crate::messages::backend::TxStatus;
 
-/// A database engine: a factory for per-connection sessions. Shared across all
-/// connections (`Send + Sync`); each connection gets its own [`Session`].
+/// A database engine: a factory for per-connection sessions.
 ///
-/// SP1 ships only `StubEngine`; the real engine implements this same trait.
+/// All connections share one engine, so it is `Send + Sync`. Each connection
+/// gets its own [`Session`].
+///
+/// SP1 ships only `StubEngine`. The real engine implements this same trait.
 pub trait Engine: Send + Sync + 'static {
     type Session: Session;
 
-    /// Create a fresh per-connection session. Called once per connection.
+    /// Create a fresh per-connection session. The wire layer calls this once
+    /// per connection.
     fn connect(&self) -> Self::Session;
 
     /// Create a fresh per-connection session that knows its backend process id.
     ///
-    /// `pid` is the same value the wire layer announces in `BackendKeyData`, so
-    /// an engine with LISTEN/NOTIFY can stamp it on the notifications it
-    /// publishes and self-notifications arrive with the listener's own pid, as
-    /// in Postgres. The default ignores the pid and delegates to
-    /// [`Engine::connect`].
+    /// `pid` is the same value the wire layer announces in `BackendKeyData`.
+    /// An engine with LISTEN/NOTIFY can therefore stamp it on the
+    /// notifications it publishes, and self-notifications arrive with the
+    /// listener's own pid, as in Postgres. The default ignores the pid and
+    /// delegates to [`Engine::connect`].
     fn connect_with_pid(&self, _pid: i32) -> Self::Session {
         self.connect()
     }
 }
 
-/// A per-connection session. Owns transaction state; not shared between
-/// connections. `simple_query`/`describe` take `&mut self` because they mutate
+/// A per-connection session.
+///
+/// A session owns transaction state and is not shared between connections.
+/// `simple_query` and `describe` take `&mut self` because they mutate
 /// transaction state.
 ///
-/// Cancellation: the wire layer may DROP an in-flight query future
-/// (`tokio::select!`), then awaits [`Session::cancel_current_query`] before it
+/// Cancellation: the wire layer may DROP an in-flight query future with
+/// `tokio::select!`, then await [`Session::cancel_current_query`] before it
 /// reports `ReadyForQuery`. Implementations must make that pair drop-safe.
 pub trait Session: Send {
     /// Complete engine-side connection startup before the wire layer reports
-    /// `ReadyForQuery`. Returning an error rejects the connection.
+    /// `ReadyForQuery`. An error return rejects the connection.
     fn startup(&mut self) -> impl Future<Output = Result<(), PgError>> + Send {
         async { Ok(()) }
     }
 
     /// Release whatever the session owns that outlives the connection but not
-    /// the session, called once when the message loop ends however it ends.
+    /// the session. The wire layer calls this once when the message loop ends,
+    /// however it ends.
     ///
-    /// This is not `Drop`: the work is a durable write, so it has to be
-    /// awaited. A session whose connection was severed still reaches here,
-    /// because the loop's outcome is carried past the call rather than
-    /// returned through it.
+    /// This is not `Drop`. The work is a durable write, so the caller must
+    /// await it. A session whose connection was severed still reaches here,
+    /// because the loop carries its outcome past the call rather than returns
+    /// it through the call.
     ///
     /// The default does nothing, which is right for a session that owns no
     /// such state.
@@ -295,8 +302,8 @@ pub trait Session: Send {
         async {}
     }
 
-    /// Execute the full text of a simple-protocol Query message (may contain
-    /// multiple statements — splitting is the engine's job).
+    /// Execute the full text of a simple-protocol Query message. The text can
+    /// contain several statements, and the engine must split them.
     fn simple_query(
         &mut self,
         sql: &str,
@@ -383,8 +390,9 @@ pub trait Session: Send {
     fn sync(&mut self) -> impl Future<Output = Result<(), PgError>> + Send;
 
     /// Return `Some` when `sql` is a supported simple-query COPY FROM STDIN
-    /// command. The wire layer enters copy-in mode and later calls `copy_in` with
-    /// all received `CopyData` frames. Non-COPY SQL returns `None`.
+    /// command. The wire layer then enters copy-in mode and later calls
+    /// `copy_in` with all received `CopyData` frames. Non-COPY SQL returns
+    /// `None`.
     fn begin_copy_in(
         &mut self,
         sql: &str,
@@ -409,9 +417,9 @@ pub trait Session: Send {
     }
 
     /// Finish an extended-protocol COPY FROM STDIN after `CopyDone`. `portal`
-    /// is the portal whose Execute returned [`ExecuteOutcome::CopyIn`]; engines
-    /// that return that outcome must implement this to apply the buffered
-    /// `CopyData` frames.
+    /// is the portal whose Execute returned [`ExecuteOutcome::CopyIn`].
+    /// Engines that return that outcome must implement this method to apply
+    /// the buffered `CopyData` frames.
     fn copy_in_portal(
         &mut self,
         portal: &str,
@@ -428,11 +436,11 @@ pub trait Session: Send {
 
     /// Hand the wire layer this session's asynchronous notification stream.
     ///
-    /// Called exactly once, immediately after the session is created: the wire
-    /// loop — not the session — owns the receiver, so a notification can be
-    /// pushed to the client while the connection is parked waiting for the next
-    /// frontend message. Engines without LISTEN/NOTIFY keep the default `None`
-    /// and never see an asynchronous message on the wire.
+    /// The wire layer calls this exactly once, immediately after it creates
+    /// the session. The wire loop owns the receiver, not the session, so it
+    /// can push a notification to the client while the connection waits for
+    /// the next frontend message. Engines without LISTEN/NOTIFY keep the
+    /// default `None` and never see an asynchronous message on the wire.
     fn take_notifications(&mut self) -> Option<mpsc::Receiver<Notification>> {
         None
     }
@@ -446,9 +454,10 @@ pub trait Session: Send {
 
     /// Mark the current statement as failed after a protocol-side error.
     ///
-    /// COPY FROM STDIN can fail because the client sends `CopyFail`, before the
-    /// engine sees `copy_in`. Engines with explicit transaction state must abort
-    /// the open transaction block here while leaving autocommit sessions usable.
+    /// COPY FROM STDIN can fail because the client sends `CopyFail` before the
+    /// engine sees `copy_in`. Engines with explicit transaction state must
+    /// abort the open transaction block here and must leave autocommit
+    /// sessions usable.
     fn mark_statement_failed(&mut self) {}
 
     /// Finish engine-side cancellation after the wire layer drops an in-flight

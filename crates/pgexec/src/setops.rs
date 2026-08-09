@@ -1,11 +1,12 @@
-//! SP38: set operations — UNION / INTERSECT / EXCEPT [ALL].
+//! SP38: set operations. UNION / INTERSECT / EXCEPT [ALL].
 //!
-//! A set operation folds the outputs of two or more SELECT branches. Each leaf is
-//! evaluated to a `Relation` via the existing `exec::select_to_relation`; this module
-//! resolves the combined output columns (PostgreSQL `select_common_type` semantics,
-//! incl. `unknown`-literal resolution), coerces every branch's rows to those common
-//! types, and applies the duplicate semantics. Duplicate matching reuses `Datum`'s
-//! grouping `Eq`/`Hash` (NULL = NULL), which is exactly PG's "not distinct" rule.
+//! A set operation folds the outputs of two or more SELECT branches. The
+//! existing `exec::select_to_relation` evaluates each leaf to a `Relation`. This
+//! module then resolves the combined output columns with PostgreSQL
+//! `select_common_type` semantics, including `unknown`-literal resolution. It
+//! coerces every branch's rows to those common types and applies the duplicate
+//! semantics. Duplicate matching reuses `Datum`'s grouping `Eq`/`Hash`
+//! (NULL = NULL), which is exactly PG's "not distinct" rule.
 
 use std::collections::{HashMap, HashSet};
 
@@ -19,38 +20,41 @@ use crate::{
     scope::{ColumnBinding, Scope},
 };
 
-/// Defense-in-depth recursion bound for the `SetExpr` tree walks (`fold` /
-/// `resolve_set_columns`), mirroring `eval`'s `MAX_EVAL_DEPTH`. The parser already
-/// caps a parsed set-op tree at `pgparser`'s `MAX_DEPTH` (well under this), so this
-/// only fires for a `SetExpr` built programmatically deeper than the parser allows.
+/// Defense-in-depth recursion bound for the `SetExpr` tree walks (`fold` and
+/// `resolve_set_columns`). It mirrors `eval`'s `MAX_EVAL_DEPTH`. The parser
+/// already caps a parsed set-op tree at `pgparser`'s `MAX_DEPTH`, well under
+/// this, so this fires only for a `SetExpr` built programmatically deeper than
+/// the parser allows.
 const MAX_SETOP_DEPTH: usize = 150;
 
-/// One resolved output column of a set-op query: its `name` (from the leftmost
-/// branch), its resolved `ty`, and whether it is still `unknown` — i.e. every
-/// contributing branch column was a bare untyped literal (`NULL` or a string
-/// literal), which PostgreSQL leaves as the `unknown` pseudo-type. An unknown column
-/// takes whatever a typed branch resolves to; if it stays unknown across every branch
-/// it becomes `text` (PG's final unknown→text rule).
+/// One resolved output column of a set-op query: its `name`, from the leftmost
+/// branch, its resolved `ty`, and whether it is still `unknown`. A column is
+/// still `unknown` when every contributing branch column was a bare untyped
+/// literal (`NULL` or a string literal), which PostgreSQL leaves as the
+/// `unknown` pseudo-type. An unknown column takes whatever a typed branch
+/// resolves to. If it stays unknown across every branch it becomes `text`,
+/// which is PG's final unknown-to-text rule.
 pub(crate) struct ResolvedCol {
     name: String,
     pub(crate) ty: ColumnType,
     pub(crate) unknown: bool,
 }
 
-/// A bare untyped literal — `NULL` or a string literal — is PostgreSQL's `unknown`
-/// pseudo-type in set-operation type resolution: it takes the type of the other
-/// branch rather than forcing a clash. An explicit cast (`'x'::text`), a column
-/// reference, or any function/expression result is a CONCRETE type and is NOT
-/// unknown (so `1 UNION 'x'::text` is still a 42804 mismatch, like PG).
+/// A bare untyped literal, which is `NULL` or a string literal, is PostgreSQL's
+/// `unknown` pseudo-type in set-operation type resolution. It takes the type of
+/// the other branch and forces no clash. An explicit cast (`'x'::text`), a
+/// column reference, or any function or expression result is a CONCRETE type and
+/// is NOT unknown, so `1 UNION 'x'::text` is still a 42804 mismatch, like PG.
 fn is_unknown_literal(e: &Expr) -> bool {
     matches!(e, Expr::NullLiteral | Expr::StringLiteral(_))
 }
 
-/// Unknown-aware pairwise column unification (PG `select_common_type`): an `unknown`
-/// operand yields the other operand's type; two `unknown`s stay `unknown`; two
-/// concrete types fold through `eval::unify_types` (numeric tower / identical, else
-/// 42804). `unify_types` is the LUB, so folding pairwise across a branch list equals
-/// resolving the whole list at once.
+/// Unknown-aware pairwise column unification (PG `select_common_type`). An
+/// `unknown` operand yields the other operand's type. Two `unknown`s stay
+/// `unknown`. Two concrete types fold through `eval::unify_types`, which takes
+/// the numeric tower or an identical type, and is 42804 otherwise.
+/// `unify_types` is the LUB, so a pairwise fold across a branch list equals a
+/// resolution of the whole list at once.
 fn unify_col(
     lt: ColumnType,
     lunk: bool,
@@ -67,11 +71,11 @@ fn unify_col(
     })
 }
 
-/// Resolve a set-op subtree's output columns (name + type + unknown-ness),
-/// schema-only (no rows). Names come from the LEFT branch; types are the
-/// unknown-aware unification across branches; a column-count mismatch raises 42601
-/// with the offending operator. Shared by `describe_set_expr` and
-/// `set_expr_to_relation`.
+/// Resolve a set-op subtree's output columns (name, type and unknown-ness),
+/// schema-only, with no rows. Names come from the LEFT branch. Types are the
+/// unknown-aware unification across branches. A column-count mismatch raises
+/// 42601 with the offending operator. `describe_set_expr` and
+/// `set_expr_to_relation` share this.
 fn resolve_set_columns(
     catalog_kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
@@ -170,8 +174,8 @@ fn resolve_set_columns(
     }
 }
 
-/// The final wire type of an output column: an unresolved `unknown` column becomes
-/// `text` (PG's final unknown→text rule).
+/// The final wire type of an output column. An unresolved `unknown` column
+/// becomes `text`, which is PG's final unknown-to-text rule.
 fn output_type(c: &ResolvedCol) -> ColumnType {
     if c.unknown { ColumnType::Text } else { c.ty }
 }
@@ -179,9 +183,9 @@ fn output_type(c: &ResolvedCol) -> ColumnType {
 /// The output columns of a set-op subtree, schema-only, with `PostgreSQL`'s
 /// `unknown` flag still attached.
 ///
-/// The `WITH RECURSIVE` type check needs the flag: an `unknown` recursive-term
-/// column adopts the non-recursive term's type rather than clashing with it, so
-/// it must not be collapsed to `text` first the way [`output_type`] does.
+/// The `WITH RECURSIVE` type check needs the flag. An `unknown` recursive-term
+/// column adopts the non-recursive term's type and does not clash with it, so it
+/// must not collapse to `text` first the way [`output_type`] does.
 pub(crate) fn set_expr_columns(
     catalog_kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
@@ -205,9 +209,9 @@ pub(crate) fn describe_set_expr_with_ctes(
 }
 
 /// One branch of a set-operation tree evaluated on its own, with no result-level
-/// tail. Used by the `WITH RECURSIVE` fixpoint, where the non-recursive and
-/// recursive terms are evaluated separately and the tail belongs to the whole
-/// recursion rather than to either term.
+/// tail. The `WITH RECURSIVE` fixpoint uses this. It evaluates the non-recursive
+/// and recursive terms separately, and the tail belongs to the whole recursion,
+/// not to either term.
 pub(crate) fn set_expr_relation(
     ctx: &crate::subquery::SubCtx<'_>,
     body: &SetExpr,
@@ -265,8 +269,9 @@ pub(crate) fn set_expr_to_relation(
     Ok(crate::join::Relation { scope, rows })
 }
 
-/// One ORDER BY key for the set-op output: integer literal → 1-based position;
-/// otherwise evaluate against the output scope (output column name / expression).
+/// One ORDER BY key for the set-op output. An integer literal is a 1-based
+/// position. Anything else evaluates against the output scope, which holds the
+/// output column names and expressions.
 fn order_key(expr: &Expr, scope: &Scope, row: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
     // PG: a positional ORDER BY out of range is 42P10 (invalid_column_reference),
     // not 0A000 — the feature IS supported, the position is just invalid.
@@ -278,10 +283,10 @@ fn order_key(expr: &Expr, scope: &Scope, row: &[Datum], ctx: &EvalCtx) -> Result
     crate::eval::eval(expr, scope, row, ctx)
 }
 
-/// Fold a set-op subtree to combined rows, coercing each leaf's rows to the common
-/// per-column output types `out_tys` (resolved once by `resolve_set_columns`). Both
-/// sides of a `SetOp` node therefore carry identical types, so the multiset combine
-/// compares like-typed `Datum`s.
+/// Fold a set-op subtree to combined rows, and coerce each leaf's rows to the
+/// common per-column output types `out_tys`, which `resolve_set_columns`
+/// resolved once. Both sides of a `SetOp` node then carry identical types, so
+/// the multiset combine compares like-typed `Datum`s.
 fn fold(
     ctx: &crate::subquery::SubCtx<'_>,
     e: &SetExpr,
@@ -346,10 +351,11 @@ fn combine_rows(
     }
 }
 
-/// Coerce each row's cells from the child's column types to the common `tys`. A NULL
-/// cell passes through unchanged (NULL of any type is NULL); a same-type cell is
-/// untouched; anything else is cast (e.g. an `unknown` string literal resolved to
-/// `int4` parses via `text→int4`, raising 22P02 on a bad value exactly like PG).
+/// Coerce each row's cells from the child's column types to the common `tys`. A
+/// NULL cell passes through unchanged, because NULL of any type is NULL. A
+/// same-type cell stays untouched. Anything else takes a cast. For example, an
+/// `unknown` string literal resolved to `int4` parses through `text` to `int4`,
+/// and raises 22P02 on a bad value exactly like PG.
 fn coerce_rows(
     rows: Vec<Vec<Datum>>,
     scope: &Scope,
@@ -371,7 +377,7 @@ fn coerce_rows(
     Ok(out)
 }
 
-/// Distinct, preserving first-seen order (UNION).
+/// Distinct, with first-seen order preserved (UNION).
 fn dedup_keep_order<I: Iterator<Item = Vec<Datum>>>(it: I) -> Vec<Vec<Datum>> {
     let mut seen: HashSet<Vec<Datum>> = HashSet::new();
     let mut out = Vec::new();
@@ -392,8 +398,9 @@ fn counts(rows: &[Vec<Datum>]) -> HashMap<Vec<Datum>, usize> {
     m
 }
 
-/// INTERSECT: rows in both. distinct → once per distinct row present in both;
-/// ALL → min(Lₙ, Rₙ). Distinct left rows are processed in first-seen order.
+/// INTERSECT: rows in both. The distinct form gives one row per distinct row
+/// present in both. The ALL form gives min(Lₙ, Rₙ). Distinct left rows run in
+/// first-seen order.
 fn intersect(lrows: Vec<Vec<Datum>>, rrows: Vec<Vec<Datum>>, all: bool) -> Vec<Vec<Datum>> {
     let lc = counts(&lrows); // read only on the ALL path (min multiplicity)
     let rc = counts(&rrows);
@@ -415,8 +422,9 @@ fn intersect(lrows: Vec<Vec<Datum>>, rrows: Vec<Vec<Datum>>, all: bool) -> Vec<V
     out
 }
 
-/// EXCEPT: distinct → distinct left rows ABSENT from right (count_R == 0), once;
-/// ALL → max(0, Lₙ − Rₙ). Distinct left rows are processed in first-seen order.
+/// EXCEPT: the distinct form gives each distinct left row ABSENT from the right
+/// (count_R == 0) once. The ALL form gives max(0, Lₙ − Rₙ). Distinct left rows
+/// run in first-seen order.
 fn except(lrows: Vec<Vec<Datum>>, rrows: Vec<Vec<Datum>>, all: bool) -> Vec<Vec<Datum>> {
     let lc = counts(&lrows);
     let rc = counts(&rrows);
@@ -549,7 +557,8 @@ mod tests {
     }
 
     /// End-to-end: UNION deduplicates across two tables and ORDER BY positions
-    /// the combined output — exercises the query relation pipeline plus session dispatch.
+    /// the combined output. This exercises the query relation pipeline and
+    /// session dispatch.
     #[tokio::test]
     async fn union_runs_end_to_end() {
         use crabka_pgwire::engine::{Engine, QueryResult, Session};

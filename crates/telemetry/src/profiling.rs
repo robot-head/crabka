@@ -1,19 +1,20 @@
 //! In-process profiling admin server.
 //!
-//! Always serves a CPU pprof profile at `GET /debug/pprof/profile?seconds=N`
-//! on Unix targets. When the `heap-profiling` feature is enabled (jemalloc),
-//! also serves a heap pprof profile at `GET /debug/pprof/heap`. Grafana Alloy
-//! `pyroscope.scrape` pulls both. The same admin server can carry extra routes
-//! (e.g. `/metrics`).
+//! On Unix targets, the server always serves a CPU pprof profile at
+//! `GET /debug/pprof/profile?seconds=N`. With the `heap-profiling` feature,
+//! which needs jemalloc, the server also serves a heap pprof profile at
+//! `GET /debug/pprof/heap`. Grafana Alloy `pyroscope.scrape` scrapes both. The
+//! same admin server can carry more routes, for example `/metrics`.
 //!
-//! Bodies are gzipped `Profile` protobufs — the standard pprof file format
-//! (what Go's net/http/pprof serves). Alloy's `pyroscope.scrape` forwards the
-//! scraped bytes verbatim as the push API's `raw_profile`, and the ingester
-//! gunzips them; returning a bare (uncompressed) protobuf makes that gunzip
-//! fail with "invalid gzip header".
+//! The bodies are gzipped `Profile` protobufs. This is the standard pprof file
+//! format, and it is what Go's net/http/pprof serves. Alloy's
+//! `pyroscope.scrape` forwards the scraped bytes without a change as the push
+//! API's `raw_profile`, and the ingester gunzips them. An uncompressed
+//! protobuf body makes that gunzip fail with "invalid gzip header".
 //!
-//! CPU profiling uses POSIX signals and is therefore gated to Unix; a 503 stub
-//! is returned on non-Unix targets so the crate compiles on all platforms.
+//! CPU profiling uses POSIX signals, so it is available only on Unix. On
+//! non-Unix targets the server returns a 503 stub, and the crate thus compiles
+//! on all platforms.
 
 use std::{net::SocketAddr, str::FromStr};
 
@@ -118,8 +119,8 @@ impl ProfilingConfig {
     /// Validate related profiling bounds.
     ///
     /// # Errors
-    /// Returns an error when a default exceeds its maximum or a maximum is
-    /// below the compatible one-second request floor.
+    /// Returns an error when a default exceeds its maximum. Returns an error
+    /// when a maximum is below the compatible one-second request floor.
     pub fn validate(&self) -> Result<(), String> {
         if self.profiling_cpu_default_duration > self.profiling_cpu_max_duration {
             return Err("profiling CPU default duration exceeds maximum".to_string());
@@ -167,7 +168,10 @@ struct HeapQuery {
     seconds: Option<u64>,
 }
 
-/// CPU profile in pprof protobuf, sampled for `?seconds=N` (default 30, clamped 1..=60).
+/// CPU profile in pprof protobuf, sampled for `?seconds=N`.
+///
+/// The default is 30 seconds, and the default configuration clamps the value
+/// to `1..=60` seconds.
 #[cfg(unix)]
 async fn cpu_profile(
     State(config): State<ProfilingConfig>,
@@ -219,7 +223,9 @@ async fn cpu_profile(
         .into_response()
 }
 
-/// Gzip a buffer — the pprof file format is a gzipped `Profile` protobuf.
+/// Gzip a buffer.
+///
+/// The pprof file format is a gzipped `Profile` protobuf.
 #[cfg(unix)]
 fn gzip(raw: &[u8]) -> Vec<u8> {
     use std::io::Write as _;
@@ -297,8 +303,11 @@ async fn heap_profile(
     }
 }
 
-/// The pprof routes with explicit policy: CPU always (returns 503 on
-/// non-Unix); heap under the `heap-profiling` feature (Unix only).
+/// The pprof routes with an explicit policy.
+///
+/// The router always has the CPU route, which returns 503 on non-Unix targets.
+/// The router has the heap route only with the `heap-profiling` feature, and
+/// only on Unix.
 ///
 /// # Errors
 /// Returns an error when related profiling duration bounds are invalid.
@@ -328,8 +337,11 @@ fn requested_duration(seconds: Option<u64>, default: Time, maximum: Time) -> Tim
         .min(maximum)
 }
 
-/// Bind an admin HTTP server on `addr` serving `pprof_router()` merged with
-/// `extra` (e.g. a `/metrics` route). Spawns the server and returns once bound.
+/// Bind an admin HTTP server on `addr`.
+///
+/// The server serves `pprof_router()` merged with `extra`, for example a
+/// `/metrics` route. This function spawns the server and returns after the
+/// bind.
 /// # Errors
 /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn serve_admin(addr: SocketAddr, extra: Router) -> std::io::Result<()> {
@@ -362,17 +374,21 @@ pub async fn serve_admin_with_config(
     Ok(())
 }
 
-/// Like [`serve_admin`] but resolves the bind address from
-/// `CRABKA_ADMIN_LISTEN_ADDR`, falling back to `default_addr`.
+/// Like [`serve_admin`], but with the bind address from the environment.
+///
+/// This function reads `CRABKA_ADMIN_LISTEN_ADDR` and falls back to
+/// `default_addr`.
 /// # Errors
 /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn serve_admin_from_env(default_addr: &str) -> std::io::Result<()> {
     serve_admin_from_env_with(default_addr, Router::new()).await
 }
 
-/// Like [`serve_admin_from_env`] but merges `extra` (e.g. a `GET /metrics`
-/// route) alongside the pprof routes. Services that expose Prometheus metrics
-/// call this with their `/metrics` router so the exporter shares the admin port.
+/// Like [`serve_admin_from_env`], but it also merges `extra` with the pprof routes.
+///
+/// `extra` is, for example, a `GET /metrics` route. Services that expose
+/// Prometheus metrics call this function with their `/metrics` router, and the
+/// exporter thus shares the admin port.
 /// # Errors
 /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 /// # Panics
@@ -392,8 +408,8 @@ pub async fn serve_admin_from_env_with(default_addr: &str, extra: Router) -> std
 /// Returns an error for invalid profiling configuration or listener failure.
 ///
 /// # Panics
-/// Panics when `CRABKA_ADMIN_LISTEN_ADDR` is not a socket address, preserving
-/// the default-compatible wrapper's behavior.
+/// Panics when `CRABKA_ADMIN_LISTEN_ADDR` is not a socket address. This
+/// behavior is the same as the default-compatible wrapper's behavior.
 pub async fn serve_admin_from_env_with_config(
     default_addr: &str,
     extra: Router,

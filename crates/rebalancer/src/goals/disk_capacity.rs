@@ -17,8 +17,9 @@ pub struct DiskCapacity;
 impl DiskCapacity {
     pub const NAME: &'static str = "DiskCapacity";
 
-    /// Disk-bytes total per broker (sum of partition `disk_bytes_avg`
-    /// for the 5-min window). Skips partitions with no usage data.
+    /// Disk-bytes total per broker: the sum of the partition
+    /// `disk_bytes_avg` values for the 5-min window. It skips partitions with
+    /// no usage data.
     fn totals(
         partitions: &[PartitionView],
         broker_ids: &[i32],

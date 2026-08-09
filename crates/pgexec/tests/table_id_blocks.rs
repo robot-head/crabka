@@ -24,8 +24,10 @@ impl RecordingCommitter {
         self.batches.lock().expect("batches mutex").clone()
     }
 
-    /// Batches whose shape is a table-id claim: one `Put` of the shared counter
-    /// and nothing else. Every other catalog batch carries relation keys too.
+    /// Batches whose shape is a table-id claim, which is one `Put` of the
+    /// shared counter and nothing else.
+    ///
+    /// Every other catalog batch carries relation keys too.
     fn table_id_reservations(&self) -> usize {
         self.batches()
             .iter()
@@ -48,7 +50,7 @@ impl Committer for RecordingCommitter {
     }
 }
 
-/// A scanner whose remote schema holds three tables, so one
+/// A scanner whose remote schema holds three tables, so that one
 /// `IMPORT FOREIGN SCHEMA` creates three relations in a single statement.
 struct ThreeTableScanner;
 
@@ -119,8 +121,9 @@ fn catalog_table_names(engine: &SqlEngine) -> Vec<String> {
 }
 
 /// `ids` sorted, and that same sorted list with adjacent duplicates removed.
-/// The two are equal exactly when every id is distinct, and comparing them
-/// reports which id collided rather than just how many did.
+///
+/// The two are equal exactly when every id is distinct. A comparison of them
+/// reports which id collided, and not only how many collided.
 fn sorted_and_deduped(ids: &[TableId]) -> (Vec<TableId>, Vec<TableId>) {
     let mut sorted = ids.to_vec();
     sorted.sort_unstable();

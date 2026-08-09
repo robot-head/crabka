@@ -7,7 +7,9 @@ use crate::Frame;
 const ROOT_NAME: &str = "total";
 const OTHER_NAME: &str = "other";
 
-/// One flamegraph level. Values are groups of four:
+/// One flamegraph level.
+///
+/// The `values` field holds groups of four numbers:
 /// `[xOffsetDelta, total, self, nameIndex]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Level {
@@ -41,7 +43,9 @@ struct Node {
     child_by_name: HashMap<String, usize>,
 }
 
-/// Symbolized profile tree. Root is the synthetic `"total"` node.
+/// Symbolized profile tree.
+///
+/// The root is the synthetic `"total"` node.
 #[derive(Clone, Debug)]
 pub struct Tree {
     nodes: Vec<Node>,

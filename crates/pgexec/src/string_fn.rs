@@ -6,8 +6,8 @@
 //! `parse_ident`, `to_ascii`).
 //!
 //! Like the other function families here, every entry is a pure transform over
-//! one row's already-evaluated Datums; `func::is_scalar` routes the names in, so
-//! no new dispatch point is needed in `eval`.
+//! one row's already-evaluated Datums. `func::is_scalar` routes the names in, so
+//! `eval` needs no new dispatch point.
 
 use crabka_pgparser::ast::{Expr, FuncCall};
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
@@ -80,13 +80,13 @@ fn str_func(name: &str) -> Option<StrFunc> {
     })
 }
 
-/// Is `name` one of this module's functions? (`func::is_scalar` folds this in.)
+/// Is `name` one of this module's functions? `func::is_scalar` folds this in.
 pub(crate) fn is_string_func(name: &str) -> bool {
     str_func(name).is_some()
 }
 
-/// Statically infer a string call's result type, validating name and arity.
-/// Argument *types* are mostly unconstrained here: PostgreSQL's `format`,
+/// Statically infer a string call's result type, and validate the name and the
+/// arity. Argument *types* are mostly unconstrained here. PostgreSQL's `format`,
 /// `concat_ws` and `quote_literal` all take `"any"`, and the rest accept any
 /// argument the text/bytea output functions can render.
 pub(crate) fn string_func_result_type(
@@ -195,8 +195,8 @@ fn require_int_or_null(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
 }
 
 /// Evaluate a string call. `format`, `concat_ws` and `quote_nullable` are not
-/// strict (they render or skip NULL arguments); everything else short-circuits
-/// to NULL on a NULL argument.
+/// strict, and they render or skip NULL arguments. Everything else
+/// short-circuits to NULL on a NULL argument.
 pub(crate) fn eval_string(
     fc: &FuncCall,
     ctx: &EvalCtx,
@@ -358,7 +358,7 @@ fn text_arg(d: &Datum) -> Result<&str, ExecError> {
 }
 
 /// The bytes a `bytea`-parameter function sees. An untyped literal reaches here
-/// as text; PostgreSQL coerces it to `bytea` through the input function, and for
+/// as text. PostgreSQL coerces it to `bytea` through the input function, and for
 /// a plain string that is its UTF-8 encoding.
 fn bytes_arg(d: &Datum) -> Result<&[u8], ExecError> {
     match d {
@@ -499,10 +499,10 @@ fn octal_triple(digits: &[u8]) -> Option<u8> {
 
 // ---- SQL quoting ----
 
-/// PostgreSQL 18's non-`UNRESERVED` scan keywords — every word `pg_get_keywords()`
-/// reports with a category other than `U`. `quote_ident` (and `format`'s `%I`)
-/// must quote these even though they are lexically valid identifiers, because
-/// re-parsing them bare would produce a different parse.
+/// PostgreSQL 18's non-`UNRESERVED` scan keywords: every word
+/// `pg_get_keywords()` reports with a category other than `U`. `quote_ident`
+/// (and `format`'s `%I`) must quote these even though they are lexically valid
+/// identifiers, because a bare re-parse would produce a different parse.
 const QUOTED_KEYWORDS: [&str; 164] = [
     "all",
     "analyse",
@@ -670,10 +670,10 @@ const QUOTED_KEYWORDS: [&str; 164] = [
     "xmltable",
 ];
 
-/// `quote_ident`: PostgreSQL's `quote_identifier` — leave the string bare only
-/// when it starts with a lowercase letter or `_`, contains nothing but
-/// `[a-z0-9_]`, and is not a non-unreserved keyword; otherwise double-quote it,
-/// doubling any embedded quote.
+/// `quote_ident`: PostgreSQL's `quote_identifier`. It leaves the string bare
+/// only when the string starts with a lowercase letter or `_`, contains nothing
+/// but `[a-z0-9_]`, and is not a non-unreserved keyword. Otherwise it
+/// double-quotes the string and doubles any embedded quote.
 pub(crate) fn quote_ident(s: &str) -> String {
     let safe = s.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
         && s.chars()
@@ -685,8 +685,8 @@ pub(crate) fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-/// `quote_literal`: single-quote, doubling embedded quotes; a backslash forces
-/// PostgreSQL's `E'…'` escape-string syntax.
+/// `quote_literal`: single-quote the string and double any embedded quote. A
+/// backslash forces PostgreSQL's `E'…'` escape-string syntax.
 fn quote_literal(s: &str) -> String {
     let body = s.replace('\'', "''");
     if s.contains('\\') {
@@ -698,9 +698,9 @@ fn quote_literal(s: &str) -> String {
 
 // ---- search and rewrite ----
 
-/// `split_part(string, delimiter, n)`: the `n`-th field, counting from 1, or
-/// from the end for a negative `n`. Out-of-range is the empty string; `n = 0` is
-/// an error.
+/// `split_part(string, delimiter, n)`: the `n`-th field, counted from 1, or from
+/// the end for a negative `n`. An out-of-range `n` gives the empty string, and
+/// `n = 0` is an error.
 fn split_part(s: &str, delim: &str, n: i64) -> Result<String, ExecError> {
     if n == 0 {
         return Err(ExecError::FunctionError {
@@ -730,7 +730,7 @@ fn split_part(s: &str, delim: &str, n: i64) -> Result<String, ExecError> {
 }
 
 /// `translate(string, from, to)`: replace each character of `from` with the
-/// character at the same position in `to`, deleting it when `to` is shorter.
+/// character at the same position in `to`, and delete it when `to` is shorter.
 fn translate(s: &str, from: &str, to: &str) -> String {
     let from: Vec<char> = from.chars().collect();
     let to: Vec<char> = to.chars().collect();
@@ -793,8 +793,8 @@ fn unistr(s: &str) -> Result<String, ExecError> {
 }
 
 /// `parse_ident(qualified_name [, strict])`: split a possibly-quoted dotted name
-/// into its parts, lowercasing the unquoted ones. `strict` (the default) rejects
-/// trailing junk instead of ignoring it.
+/// into its parts, and lowercase the unquoted ones. `strict`, the default,
+/// rejects trailing junk and does not ignore it.
 fn parse_ident(s: &str, strict: bool) -> Result<Datum, ExecError> {
     let not_ident = || ExecError::FunctionError {
         sqlstate: "22023",

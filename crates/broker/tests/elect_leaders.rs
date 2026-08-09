@@ -12,25 +12,27 @@
 // and its span computation ICEs in annotate-snippets on Rust 1.95.
 // `clippy::too_many_lines` fires on the auto-rebalance integration test body.
 
-//! Broker-side integration tests for the operator-triggered
-//! `ElectLeaders` RPC. Drives the wire path end-to-end with a Rust
-//! PLAINTEXT client; verifies the resulting partition state via
-//! `BrokerHandle` test accessors.
+//! Broker-side integration tests for the operator-triggered `ElectLeaders` RPC.
 //!
-//! Both tests use a **3-broker PLAINTEXT cluster** rather than 2-broker SASL:
+//! The tests drive the wire path end-to-end with a Rust PLAINTEXT client. They
+//! then read the resulting partition state through `BrokerHandle` test
+//! accessors.
+//!
+//! Both tests use a **3-broker PLAINTEXT cluster** and not a 2-broker SASL
+//! cluster, for two reasons:
 //!
 //! * A 2-broker raft cluster cannot form a quorum (2/2) when one broker is
-//!   dead, so the automatic partition-leader election and metadata commits
-//!   needed by these tests never succeed. A 3-broker cluster keeps quorum
-//!   (2/3) with one dead node, which is sufficient for both test scenarios.
+//!   dead. The automatic partition-leader election and the metadata commits
+//!   that these tests need thus never succeed. A 3-broker cluster keeps quorum
+//!   (2/3) with one dead node, which is enough for both test scenarios.
 //!
-//! * The authorizer's compatibility shim (`super_users` empty + zero ACLs
-//!   → Allow) lets the test exercise the full `ElectLeaders` wire path
-//!   without a SASL handshake, keeping the test helpers simpler.
+//! * The compatibility shim of the authorizer maps an empty `super_users` list
+//!   and zero ACLs to Allow. The test can thus exercise the full `ElectLeaders`
+//!   wire path without a SASL handshake, which keeps the test helpers simpler.
 //!
-//! Gated to non-Windows to match the multi-broker test convention from
-//! slices 10b/12b (openraft `debug_assert!` races on the hosted Windows
-//! task scheduler are unrelated to the protocol under test).
+//! These tests are gated to non-Windows to match the multi-broker test
+//! convention from slices 10b/12b. The openraft `debug_assert!` races on the
+//! hosted Windows task scheduler are unrelated to the protocol under test.
 
 use std::{
     io,
@@ -68,11 +70,14 @@ mod support;
 
 const ELECT_LEADERS_VERSION: i16 = 2;
 
-/// Shared cluster lock — serializes every test in this binary onto one
-/// 3-broker cluster at a time. Mirrors `quorum.rs` / `leader_election.rs`.
-/// Without this, the tests' static 3-voter clusters boot concurrently on
-/// the same loopback with short raft timings and starve each other's
-/// elections / ISR re-admission (intermittent `FENCED_LEADER_EPOCH` churn).
+/// Shared cluster lock for every test in this binary.
+///
+/// The lock serializes the tests onto one 3-broker cluster at a time. It
+/// mirrors the locks in `quorum.rs` and `leader_election.rs`. Without it, the
+/// static 3-voter clusters of the tests boot at the same time on the same
+/// loopback with short raft timings. They then starve each other of elections
+/// and of ISR re-admission, which shows as intermittent `FENCED_LEADER_EPOCH`
+/// churn.
 fn cluster_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -82,10 +87,12 @@ fn cluster_lock() -> &'static tokio::sync::Mutex<()> {
 // Minimal wire helpers — bare TCP on PLAINTEXT, no SASL.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Single length-prefixed request/response exchange over a **PLAINTEXT**
-/// connection. Encodes a Kafka request header v1 (non-flexible) or v2
-/// (flexible), writes the frame, reads one response frame, strips the
-/// response header, and returns the body bytes.
+/// Runs one length-prefixed request and response exchange.
+///
+/// The exchange uses a **PLAINTEXT** connection. This function encodes a Kafka
+/// request header v1, which is non-flexible, or v2, which is flexible. It then
+/// writes the frame, reads one response frame, strips the response header, and
+/// returns the body bytes.
 async fn round_trip(
     stream: &mut TcpStream,
     api_key: i16,
@@ -130,9 +137,11 @@ async fn round_trip(
     Ok(cur.to_vec())
 }
 
-/// Drive `ElectLeaders` over a fresh PLAINTEXT connection. The authorizer's
-/// compat shim (no `super_users` + no ACLs → Allow) lets this through without
-/// SASL. Asserts the top-level `error_code == 0` and returns per-partition
+/// Drives `ElectLeaders` over a fresh PLAINTEXT connection.
+///
+/// The compat shim of the authorizer maps no `super_users` and no ACLs to
+/// Allow, so this request passes without SASL. This function asserts that the
+/// top-level `error_code == 0`. It returns the per-partition
 /// `(partition_id, error_code)` rows for the topic named `topic`.
 async fn drive_elect_leaders(
     addr: SocketAddr,
@@ -183,19 +192,19 @@ async fn drive_elect_leaders(
 // Polling helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Await until `handle` sees `(topic, partition)` present in its image.
+/// Waits until `handle` sees `(topic, partition)` in its image.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
     handle.wait_until_partition_present(topic, partition).await;
 }
 
-/// Await until `handle` reports `leader` as the leader for `(topic, partition)`.
+/// Waits until `handle` reports `leader` as the leader for `(topic, partition)`.
 async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i32, leader: u64) {
     handle
         .wait_for_image(|img| img.partition(topic, partition).map(|p| p.leader.0) == Some(leader))
         .await;
 }
 
-/// Await until the ISR for `(topic, partition)` contains `node`.
+/// Waits until the ISR for `(topic, partition)` contains `node`.
 async fn wait_isr_contains(handle: &BrokerHandle, topic: &str, partition: i32, node: u64) {
     handle
         .wait_for_image(|img| {
@@ -205,7 +214,7 @@ async fn wait_isr_contains(handle: &BrokerHandle, topic: &str, partition: i32, n
         .await;
 }
 
-/// Await until the ISR for `(topic, partition)` is exactly `expected`.
+/// Waits until the ISR for `(topic, partition)` is exactly `expected`.
 async fn wait_partition_isr_only(
     handle: &BrokerHandle,
     topic: &str,
@@ -224,9 +233,11 @@ async fn wait_partition_isr_only(
         .await;
 }
 
-/// Poll until the partition's ISR contains `member`. Unlike
-/// [`wait_partition_isr_only`] this asserts membership, not an exact set, so it
-/// tolerates a live caught-up replica being (re-)admitted alongside `member`.
+/// Polls until the ISR of the partition contains `member`.
+///
+/// [`wait_partition_isr_only`] asserts an exact set. This function asserts
+/// membership only. It thus accepts a live caught-up replica that the broker
+/// admits or re-admits next to `member`.
 async fn wait_partition_isr_contains(
     handle: &BrokerHandle,
     topic: &str,
@@ -245,15 +256,17 @@ async fn wait_partition_isr_contains(
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 3-broker PLAINTEXT cluster, rf=2 topic (replicas = [1, 2]).
+/// A 3-broker PLAINTEXT cluster with an rf=2 topic where `replicas = [1, 2]`.
 ///
 /// Scenario:
-/// 1. Kill broker 1 (preferred replica). Broker 3 keeps raft quorum (2/3).
-/// 2. Broker 2 becomes partition leader via the automatic on-broker-dead path.
-/// 3. Revive broker 1 (Rejoin). It catches up on replication and expands
+/// 1. Kill broker 1, the preferred replica. Broker 3 keeps the raft quorum
+///    (2/3).
+/// 2. Broker 2 becomes partition leader through the automatic on-broker-dead
+///    path.
+/// 3. Revive broker 1 with Rejoin. It catches up on replication and expands
 ///    back into the ISR.
-/// 4. Send `ElectLeaders Preferred` (`election_type=0`) via wire.
-/// 5. Assert per-partition `error_code` = 0; poll until leader == 1 again.
+/// 4. Send `ElectLeaders Preferred` with `election_type=0` over the wire.
+/// 5. Assert per-partition `error_code` = 0. Poll until leader == 1 again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn preferred_election_via_wire_returns_success() {
     let _g = cluster_lock().lock().await;
@@ -347,17 +360,20 @@ async fn preferred_election_via_wire_returns_success() {
     drop(dead_dir);
 }
 
-/// 3-broker PLAINTEXT cluster, rf=2 topic (replicas = [1, 2]).
+/// A 3-broker PLAINTEXT cluster with an rf=2 topic where `replicas = [1, 2]`.
 ///
-/// Scenario (uses metadata injection to simulate a dead ISR without
-/// breaking raft quorum):
-/// 1. Submit a `PartitionRecord` with `isr=[99]` directly — broker 99 doesn't
-///    exist, so liveness says it's dead.
-/// 2. Broker 1 (in replicas but not in ISR) is alive and its heartbeat is
-///    known to the controller.
-/// 3. Send `ElectLeaders Unclean` (`election_type=1`) via wire.
-/// 4. The handler checks: is any ISR member (99) alive? No → unclean eligible.
-///    First alive replica in [1, 2]? Broker 1 → elected as leader, ISR=[1].
+/// The scenario injects metadata to simulate a dead ISR. It does not break the
+/// raft quorum.
+///
+/// 1. Submit a `PartitionRecord` with `isr=[99]` directly. Broker 99 does not
+///    exist, so liveness reports it as dead.
+/// 2. Broker 1 is in the replicas but not in the ISR. It is alive, and the
+///    controller knows its heartbeat.
+/// 3. Send `ElectLeaders Unclean` with `election_type=1` over the wire.
+/// 4. The handler checks whether any ISR member is alive. Member 99 is not
+///    alive, so the partition is eligible for an unclean election. The first
+///    alive replica in [1, 2] is broker 1, so the handler elects broker 1 as
+///    leader and sets ISR=[1].
 /// 5. Assert per-partition `error_code` = 0 and poll until leader == 1.
 // PRE-EXISTING FLAKE (orthogonal to KIP-595; bisected to caa97e85, the 3d-1
 // tip): the test forges leader=99/ISR=[99] (both dead) then drives an UNCLEAN
@@ -451,8 +467,10 @@ async fn unclean_election_via_wire_picks_alive_replica() {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Create a topic on a PLAINTEXT broker. The authorizer's compat shim
-/// (no `super_users`, no ACLs) lets the request through.
+/// Creates a topic on a PLAINTEXT broker.
+///
+/// The compat shim of the authorizer lets the request through because there
+/// are no `super_users` and no ACLs.
 async fn create_topic_plaintext(
     addr: SocketAddr,
     name: &str,
@@ -490,8 +508,10 @@ async fn create_topic_plaintext(
     );
 }
 
-/// Poll until the partition record for `(topic, partition)` is visible in the
-/// handle's metadata image and return a clone of it.
+/// Polls until the metadata image of the handle shows the partition record.
+///
+/// The record is the one for `(topic, partition)`. This function returns a
+/// clone of it.
 async fn wait_partition_record_known(
     handle: &BrokerHandle,
     topic: &str,
@@ -531,11 +551,11 @@ async fn wait_partition_record_known(
 
 /// Single-broker SASL/PLAIN cluster.
 ///
-/// alice is authenticated (PLAIN creds) but has **no** ACLs. A dummy ACL
-/// is seeded to disable the compat shim (the shim allows everything when
-/// `image.acls` is empty). Alice then sends `ElectLeaders Preferred` for
-/// topic "foo-auth-test" partition 0 and must receive
-/// `CLUSTER_AUTHORIZATION_FAILED (31)` per-row.
+/// alice authenticates with PLAIN credentials but has **no** ACLs. The test
+/// seeds a dummy ACL to disable the compat shim, which allows every operation
+/// while `image.acls` is empty. alice then sends `ElectLeaders Preferred` for
+/// topic "foo-auth-test" partition 0. Each row must carry
+/// `CLUSTER_AUTHORIZATION_FAILED (31)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_super_user_without_acl_denied() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -641,16 +661,20 @@ async fn non_super_user_without_acl_denied() {
 // T9b: auto_rebalance_restores_preferred_leader
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 3-broker PLAINTEXT cluster with `auto_leader_rebalance_enable = true`,
-/// `leader_imbalance_check_interval = crabka_units::secs(1)`, `leader_imbalance_per_broker = crabka_units::percent(0)`.
+/// A 3-broker PLAINTEXT cluster with automatic leader rebalance on.
+///
+/// The cluster sets `auto_leader_rebalance_enable = true`,
+/// `leader_imbalance_check_interval = crabka_units::secs(1)`, and `leader_imbalance_per_broker = crabka_units::percent(0)`.
 ///
 /// Scenario:
-/// 1. Create rf=2 topic via wire. With 3 registered brokers, round-robin
-///    assigns `replicas = [1, 2]`, so broker 1 is the preferred leader.
-/// 2. Broker 1 is shut down; broker 2 becomes partition leader.
-/// 3. Broker 1 is revived (Rejoin). It catches up into the ISR.
-/// 4. The background rebalance ticker (interval=1s, threshold=0%) fires
-///    within ~2 ticks and submits `ElectLeaders Preferred` internally.
+/// 1. Create an rf=2 topic over the wire. With 3 registered brokers,
+///    round-robin assigns `replicas = [1, 2]`, so broker 1 is the preferred
+///    leader.
+/// 2. Shut broker 1 down. Broker 2 becomes partition leader.
+/// 3. Revive broker 1 with Rejoin. It catches up into the ISR.
+/// 4. The background rebalance ticker runs with interval=1s and threshold=0%.
+///    It fires within about 2 ticks and submits `ElectLeaders Preferred`
+///    internally.
 /// 5. Within 15s, broker 1 must be the partition leader again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn auto_rebalance_restores_preferred_leader() {
@@ -790,8 +814,10 @@ async fn auto_rebalance_restores_preferred_leader() {
 // T9 helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Create a topic via SASL/PLAIN (used by the auth-deny test where the
-/// listener is `SASL_PLAINTEXT` rather than PLAINTEXT).
+/// Creates a topic with SASL/PLAIN.
+///
+/// The auth-deny test uses this helper, because its listener is
+/// `SASL_PLAINTEXT` and not PLAINTEXT.
 async fn create_topic_sasl_plain(
     addr: SocketAddr,
     user: &str,
@@ -833,10 +859,11 @@ async fn create_topic_sasl_plain(
     );
 }
 
-/// Drive `ElectLeaders` over a SASL/PLAIN authenticated connection.
-/// Returns per-partition `(partition_id, error_code)` rows for the
-/// given topic. Does **not** assert the top-level `error_code` so the
-/// caller can inspect per-row auth failures.
+/// Drives `ElectLeaders` over a SASL/PLAIN authenticated connection.
+///
+/// This function returns the per-partition `(partition_id, error_code)` rows
+/// for the given topic. It does **not** assert the top-level `error_code`, so
+/// the caller can examine per-row auth failures.
 async fn drive_elect_leaders_sasl_plain(
     addr: SocketAddr,
     user: &str,
@@ -880,9 +907,12 @@ async fn drive_elect_leaders_sasl_plain(
         .unwrap_or_default()
 }
 
-/// Open a TCP stream to `addr` and drive `ApiVersions` → `SaslHandshake(PLAIN)`
-/// → `SaslAuthenticate(\0user\0password)`. Returns the authenticated stream.
-/// Mirrors the equivalent helper in `tests/acl_handlers.rs`.
+/// Opens a TCP stream to `addr` and authenticates it.
+///
+/// The stream drives `ApiVersions` → `SaslHandshake(PLAIN)` →
+/// `SaslAuthenticate(\0user\0password)`. This function returns the
+/// authenticated stream. It mirrors the equivalent helper in
+/// `tests/acl_handlers.rs`.
 async fn sasl_plain_authenticate(
     addr: SocketAddr,
     user: &str,

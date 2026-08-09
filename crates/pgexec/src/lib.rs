@@ -31,11 +31,11 @@
 //! executor: turns parsed SQL into catalog/KV operations and implements the
 //! pgwire `Engine` trait. SP5 swaps SP4's commit_ts MVCC for PostgreSQL's
 //! xid/clog/snapshot model with uncommitted versions on disk. SP6 removes the
-//! global writer lock: writers run concurrently, serialized only at the row
-//! level via the `RowLockManager`, with rowid allocation via the
-//! `SequenceManager` and DDL serialized behind a small catalog lock — with the
-//! table-id counter split out from under it, into a lock of its own that a
-//! session takes once per block of ids rather than once per `CREATE TABLE`.
+//! global writer lock: writers run concurrently and serialize only at the row
+//! level through the `RowLockManager`. The `SequenceManager` allocates rowids,
+//! and a small catalog lock serializes DDL. The table-id counter has a lock of
+//! its own, which a session takes once per block of ids rather than once per
+//! `CREATE TABLE`.
 
 #![doc(html_root_url = "https://docs.rs/crabka-pgexec/0.3.9")]
 
@@ -160,9 +160,9 @@ impl EngineCoordination {
 
 /// Tracks xid writers separately from the physical conversion gate.
 ///
-/// A transaction retains its writer lease through commit or rollback. This lets
-/// DDL release its shared gate before waiting for the catalog lock without
-/// allowing conversion to rewrite that transaction's xid tuples.
+/// A transaction retains its writer lease through commit or rollback. DDL can
+/// thus release its shared gate before it waits for the catalog lock, and
+/// conversion still cannot rewrite that transaction's xid tuples.
 pub(crate) struct WriterFence {
     state: Mutex<WriterFenceState>,
     changed: tokio::sync::Notify,
@@ -283,9 +283,9 @@ fn coordination_for(kv: &Arc<dyn Kv>) -> Arc<EngineCoordination> {
 /// Cross-node `NOTIFY` replication state, shared by every handle of one engine
 /// (and so by every session it creates).
 ///
-/// `origin` is `None` until an owner calls [`SqlEngine::set_notify_origin`], and
-/// then nothing is appended anywhere: a single-node engine's commit batches are
-/// exactly what they were before this existed.
+/// `origin` is `None` until an owner calls [`SqlEngine::set_notify_origin`].
+/// Until then the engine appends nothing anywhere: a single-node engine's commit
+/// batches are exactly what they were before this existed.
 #[derive(Default)]
 pub(crate) struct NotifyReplication {
     origin: Mutex<Option<Arc<str>>>,
@@ -317,10 +317,12 @@ impl NotifyReplication {
     }
 }
 
-/// Whether the counter managers (`ProcArray`, `SequenceManager`) persist their
-/// counters themselves (`Durable` — the local/single-node path) or fold the
-/// counter advance into the commit batch for the replicated state machine to
-/// max-merge (`Replicated` — the Raft path, reseeded on leadership change).
+/// How the counter managers (`ProcArray`, `SequenceManager`) persist counters.
+///
+/// `Durable` is the local single-node path: the managers persist their counters
+/// themselves. `Replicated` is the Raft path: the managers fold the counter
+/// advance into the commit batch, and the replicated state machine max-merges
+/// it. The engine reseeds `Replicated` counters on a leadership change.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PersistMode {
     Durable,
@@ -393,20 +395,22 @@ impl RuntimePolicy {
     }
 }
 
-/// The SQL engine over a durable (or in-memory) KV store. Catalog, sequences,
-/// the xid counter, and the clog live in the KV store. Writers run concurrently
-/// (SP6): row-level conflicts serialize through the `RowLockManager`, rowid
-/// allocation goes through the `SequenceManager`, and DDL serializes among DDLs
-/// behind `catalog_lock`. The `ProcArray` is shared so every connection's
-/// snapshots see the same running-transaction set.
+/// The SQL engine over a durable (or in-memory) KV store.
+///
+/// Catalog, sequences, the xid counter, and the clog live in the KV store.
+/// Writers run concurrently (SP6): row-level conflicts serialize through the
+/// `RowLockManager`, and rowid allocation goes through the `SequenceManager`.
+/// DDL serializes against other DDL behind `catalog_lock`. Every handle shares
+/// the `ProcArray`, so every connection's snapshots see the same
+/// running-transaction set.
 pub struct SqlEngine {
     /// Keeps the registry entry strongly referenced for this engine's lifetime.
     coordination: Arc<EngineCoordination>,
     pub(crate) kv: Arc<dyn Kv>,
-    /// The store catalog lookups (table name→id→schema) resolve through. For the
-    /// single-range engine this is the same store as `kv`; under multi-range
-    /// sharding the catalog lives only on range 0, so a data range's engine
-    /// points this at range 0's store while `kv` holds its own rows.
+    /// The store that catalog lookups (table name→id→schema) resolve through.
+    /// For the single-range engine this is the same store as `kv`. Under
+    /// multi-range sharding the catalog lives only on range 0, so a data range's
+    /// engine points this at range 0's store while `kv` holds its own rows.
     pub(crate) catalog_kv: Arc<dyn Kv>,
     pub(crate) procarray: Arc<ProcArray>,
     pub(crate) seq: Arc<SequenceManager>,
@@ -425,11 +429,11 @@ pub struct SqlEngine {
     /// Covers the shared next-table-id counter's read-bump-commit, and nothing
     /// else.
     ///
-    /// `catalog_lock` used to cover both the catalog keyspace and this counter,
-    /// which made every `CREATE TABLE` — including a temporary one, whose
-    /// namespace no other session can even name — wait out a cluster-wide
-    /// critical section that spans a Raft round-trip. Split out, a session
-    /// claims a block of ids here and hands them out locally, so the common
+    /// `catalog_lock` used to cover both the catalog keyspace and this counter.
+    /// That made every `CREATE TABLE` wait out a cluster-wide critical section
+    /// that spans a Raft round-trip, even a temporary table whose namespace no
+    /// other session can name. With this lock split out, a session claims a
+    /// block of ids here and hands them out locally, so the common
     /// `CREATE TEMP TABLE` coordinates with nobody.
     ///
     /// Lock order where a statement wants both: `table_id_lock` first, then
@@ -459,13 +463,14 @@ pub struct SqlEngine {
     /// range 0's linearizable applied index. `None` on range 0's own engine (it
     /// reads its own current store) and on single-range engines.
     pub(crate) range0_barrier: Option<Arc<dyn crate::read_gate::Linearizer>>,
-    /// SP37: the clock backing each session's transaction/statement instant (and,
-    /// later, `now()`/`current_timestamp`). `SystemClock` in production; tests
-    /// inject a `FixedClock` via `with_clock` for deterministic temporal eval.
+    /// SP37: the clock that backs each session's transaction/statement instant
+    /// (and, later, `now()`/`current_timestamp`). `SystemClock` in production.
+    /// Tests inject a `FixedClock` with `with_clock` for deterministic temporal
+    /// eval.
     pub(crate) clock: Arc<dyn crate::clock::Clock>,
     /// SP40: the foreign-table scanner (the `kafka_fdw` seam). `None` until the
-    /// binary registers one via `set_foreign_scanner`; a `SELECT` from a foreign
-    /// table with no scanner registered returns `0A000`.
+    /// binary registers one with `set_foreign_scanner`. A `SELECT` from a
+    /// foreign table with no scanner registered returns `0A000`.
     pub(crate) foreign_scanner: Option<Arc<dyn foreign::ForeignScanner>>,
     /// G-8: range-aware table scanner. The default local scanner preserves the
     /// single-range scan path; multi-range assemblies inject a scatter-gather
@@ -484,30 +489,31 @@ pub struct SqlEngine {
     /// This range's local sequence for the single-shard commit bypass: a
     /// per-range monotone allocator in the shared timestamp domain plus its
     /// published closed timestamp. Autocommit transactions confined to this
-    /// range draw `start_ts`/`commit_ts` here instead of the global source, and
-    /// every timestamp read of this range's data reconciles against the closed
-    /// timestamp so no single-shard commit can be missed. Seeded at 0 and
-    /// lifted to the durable horizon (the Lamport receive rule) on each local
-    /// allocation, so a local grant always exceeds every global stamp this
-    /// range has applied. Shared across `clone_handle` handles for one range.
+    /// range draw `start_ts`/`commit_ts` here instead of from the global source.
+    /// Every timestamp read of this range's data reconciles against the closed
+    /// timestamp, so no single-shard commit can be missed. The sequence starts
+    /// at 0, and each local allocation lifts it to the durable horizon (the
+    /// Lamport receive rule), so a local grant always exceeds every global stamp
+    /// this range has applied. Every `clone_handle` handle of one range shares
+    /// it.
     pub(crate) local_sequence: Arc<local_sequence::LocalSequence>,
-    /// Snapshot pins and the cached decided floor backing the garbage horizon.
+    /// Snapshot pins and the cached decided floor that back the garbage horizon.
     /// Sessions pin their snapshots here so neither write-path pruning, `vacuum`,
     /// nor checkpoint compaction can reclaim a version a live snapshot still sees.
     pub(crate) gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
     /// Timestamp-domain dead-version reclamation state (read pins, reclaim
-    /// floor) for sharded tables; see [`ts_gc::TsVersionGc`]. Shared across
-    /// `clone_handle` handles for one range, like the local sequence.
+    /// floor) for sharded tables; see [`ts_gc::TsVersionGc`]. Every
+    /// `clone_handle` handle of one range shares it, like the local sequence.
     pub(crate) ts_gc: Arc<ts_gc::TsVersionGc>,
     /// The committer vacuum sweeps use for their own prune/freeze/clear
     /// batches. On local engines this is `committer` WITHOUT the
     /// demand-observing wrapper, so a sweep's version rewrites do not re-mark
     /// the swept table as dirty.
     pub(crate) sweep_committer: Arc<dyn crate::commit::Committer>,
-    /// Per-table committed version-write counters feeding demand-driven
+    /// Per-table committed version-write counters that feed demand-driven
     /// vacuum skipping (see [`VacuumDemand`]).
     pub(crate) vacuum_demand: Arc<VacuumDemand>,
-    /// Resumable sweep cursor and cycle bookkeeping; the async mutex also
+    /// Resumable sweep cursor and cycle bookkeeping. The async mutex also
     /// serializes concurrent `vacuum`/`vacuum_step` callers.
     vacuum_progress: Arc<tokio::sync::Mutex<VacuumProgress>>,
 }
@@ -554,16 +560,18 @@ pub struct VacuumStepStats {
 /// that never materializes more than one interval of chain keys.
 const VACUUM_INTERVAL_ROWIDS: u64 = 8_192;
 
-/// Tuple version keys one [`SqlEngine::vacuum_step`] examines before pausing;
-/// the sweep resumes from its cursor on the next step. Bounds a step's work at
-/// O(budget) instead of O(total data) so the periodic sweep cannot starve
-/// foreground statements on large stores. Sized so a fully-dirty step (every
-/// scanned version needs a per-row freeze commit — the post-bulk-load
-/// catch-up worst case) stays well under 10% of a 2s tick; measured on a
-/// 10M-row point-SELECT workload, 32k budgets cost ~30% foreground
-/// throughput while 8k budgets are within noise. Pacing loops that need to
-/// catch up should prefer MORE steps over larger ones
-/// ([`SqlEngine::vacuum_step_budgeted`] callers own that trade-off).
+/// Tuple version keys one [`SqlEngine::vacuum_step`] examines before it pauses.
+///
+/// The sweep resumes from its cursor on the next step. This bounds a step's
+/// work at O(budget) instead of O(total data), so the periodic sweep cannot
+/// starve foreground statements on large stores. The budget is sized so that a
+/// fully-dirty step stays well under 10% of a 2s tick. A fully-dirty step is
+/// the post-bulk-load catch-up worst case, where every scanned version needs a
+/// per-row freeze commit. Measured on a 10M-row point-SELECT workload, 32k
+/// budgets cost about 30% foreground throughput while 8k budgets are within
+/// noise. Pacing loops that need to catch up should prefer MORE steps over
+/// larger ones ([`SqlEngine::vacuum_step_budgeted`] callers own that
+/// trade-off).
 pub const VACUUM_STEP_KEY_BUDGET: usize = 8_192;
 
 /// Minimum budget charge per interval scan, so one step over sparse or empty
@@ -573,16 +581,16 @@ const VACUUM_INTERVAL_MIN_COST: usize = 64;
 /// Candidate rows processed between cooperative yields inside one interval.
 const VACUUM_YIELD_EVERY_ROWS: usize = 128;
 
-/// Per-table version-write accounting driving demand-driven vacuum sweeps.
+/// Per-table version-write accounting that drives demand-driven vacuum sweeps.
 ///
 /// The demand-observing committer bumps a table's counter after every
 /// committed batch that Puts an ordinary primary MVCC version key (new
 /// versions and `xmax` stamps alike). The sweep snapshots the counter when it
-/// enters a table and skips the table on later cycles while the counter is
-/// unchanged AND the recorded sweep left every surviving version fully
-/// settled (frozen `xmin`, invalid `xmax`): such a table holds no reclaimable
-/// garbage, nothing to freeze or clear, and no clog dependence, so skipping
-/// it can never invalidate a later clog truncation.
+/// enters a table. On later cycles the sweep skips the table while the counter
+/// is unchanged AND the recorded sweep left every surviving version fully
+/// settled (frozen `xmin`, invalid `xmax`). Such a table holds no reclaimable
+/// garbage, nothing to freeze or clear, and no clog dependence, so a skip can
+/// never invalidate a later clog truncation.
 #[derive(Default)]
 pub(crate) struct VacuumDemand {
     /// Monotone count of committed primary-version Puts per ordinary table.
@@ -639,10 +647,10 @@ impl VacuumDemand {
     }
 }
 
-/// Committer decorator feeding [`VacuumDemand`]. Counting happens after the
-/// inner commit succeeds, so a sweep never observes a count whose data is not
-/// yet visible. The engine's own sweep commits bypass this wrapper (through
-/// `sweep_committer`) so freeze/clear rewrites do not re-mark their table as
+/// Committer decorator that feeds [`VacuumDemand`]. This decorator counts after
+/// the inner commit succeeds, so a sweep never observes a count whose data is
+/// not yet visible. The engine's own sweep commits bypass this wrapper (through
+/// `sweep_committer`), so freeze/clear rewrites do not re-mark their table as
 /// dirty and re-trigger the sweep forever.
 struct VacuumDemandObservingCommitter {
     inner: Arc<dyn crate::commit::Committer>,
@@ -660,13 +668,13 @@ impl crate::commit::Committer for VacuumDemandObservingCommitter {
 }
 
 /// Resumable engine-level sweep state: the table/rowid cursor, per-cycle clog
-/// bookkeeping, and the per-table clean-sweep records demand skipping uses.
-/// Shared by every handle of one engine; steps serialize on the enclosing
-/// async mutex.
+/// bookkeeping, and the per-table clean-sweep records that demand skipping
+/// uses. Every handle of one engine shares this state. Steps serialize on the
+/// enclosing async mutex.
 #[derive(Default)]
 struct VacuumProgress {
     /// The sweep resumes at the first ordinary table whose id is at least
-    /// this (`u64` so advancing past `u32::MAX` cannot overflow).
+    /// this (`u64`, so an advance past `u32::MAX` cannot overflow).
     cursor_table: u64,
     /// The sweep resumes at this rowid within the cursor table.
     cursor_rowid: u64,
@@ -675,8 +683,8 @@ struct VacuumProgress {
     /// (The horizon is monotone across steps, so this is normally the first
     /// step's horizon.)
     cycle_floor: Option<u64>,
-    /// Whether any candidate row was skipped this cycle (a transient lock
-    /// verdict) — defers clog truncation to the next full cycle.
+    /// Whether a transient lock verdict skipped any candidate row this cycle.
+    /// A skip defers clog truncation to the next full cycle.
     cycle_skipped: bool,
     /// Scratch for the table currently under the cursor.
     current: Option<TableSweepScratch>,
@@ -686,9 +694,9 @@ struct VacuumProgress {
 
 impl VacuumProgress {
     /// Restart at the beginning of a fresh cycle (the full-pass
-    /// [`SqlEngine::vacuum`] entry point), discarding partial-cycle state but
-    /// keeping the per-table clean-sweep records — their validity depends
-    /// only on the demand counters, not on cycle boundaries.
+    /// [`SqlEngine::vacuum`] entry point). This discards partial-cycle state but
+    /// keeps the per-table clean-sweep records, whose validity depends only on
+    /// the demand counters, not on cycle boundaries.
     fn restart_cycle(&mut self) {
         self.cursor_table = 0;
         self.cursor_rowid = 0;
@@ -711,9 +719,9 @@ struct TableSweepScratch {
     /// Exclusive rowid bound for this table's sweep: the table's durable
     /// next-rowid at entry. Durable-mode sequences persist a block ahead of
     /// every handed-out rowid (see `SequenceManager`), so no row present at
-    /// entry can sit at or beyond it; rows inserted afterwards carry xids at
-    /// or above the cycle floor and need no pruning, freezing, or clog entry
-    /// this cycle.
+    /// entry can sit at or beyond it. Rows inserted after entry carry xids at
+    /// or above the cycle floor and need no prune, freeze, or clog entry this
+    /// cycle.
     terminal: u64,
 }
 
@@ -725,7 +733,7 @@ struct TableSweepRecord {
     unsettled: u64,
 }
 
-/// Outcome of sweeping one bounded rowid interval of one table.
+/// Outcome of one bounded rowid-interval sweep of one table.
 #[derive(Default)]
 struct VacuumIntervalOutcome {
     stats: VacuumStats,
@@ -737,13 +745,15 @@ struct VacuumIntervalOutcome {
     skipped: bool,
 }
 
-/// Whether `xmax` is a deleter stamp vacuum may clear at `horizon`: a decided
-/// abort (terminal, immutable at any xid), or a sub-horizon absent/in-progress
-/// entry — a crashed transaction that can never commit (every xid below the
-/// horizon is decided, and a PRESENT sub-horizon entry is always terminal).
-/// Committed stamps are never cleared: a committed sub-horizon deleter makes
-/// the version dead instead, and a committed deleter at or above the horizon
-/// may still be visible-to-delete for some snapshot.
+/// Whether `xmax` is a deleter stamp vacuum may clear at `horizon`.
+///
+/// Vacuum may clear a decided abort (terminal, and immutable at any xid), or a
+/// sub-horizon absent/in-progress entry. The second case is a crashed
+/// transaction that can never commit, because every xid below the horizon is
+/// decided and a PRESENT sub-horizon entry is always terminal. Committed stamps
+/// are never cleared: a committed sub-horizon deleter makes the version dead
+/// instead, and a committed deleter at or above the horizon may still be
+/// visible-to-delete for some snapshot.
 fn vacuum_stamp_is_clearable(
     xmax: u64,
     horizon: u64,
@@ -885,10 +895,10 @@ impl SqlEngine {
 
     /// Oldest xid that a checkpoint may vacuum without changing visibility.
     ///
-    /// The active-snapshot xmin is capped by the lowest registered snapshot pin
-    /// and by the first non-terminal clog entry at or above the durable recovery
-    /// scan watermark, so neither a live reader's snapshot nor prepared/
-    /// in-progress state can ever be pruned or frozen past.
+    /// The engine caps the active-snapshot xmin by the lowest registered
+    /// snapshot pin and by the first non-terminal clog entry at or above the
+    /// durable recovery scan watermark. Neither a live reader's snapshot nor
+    /// prepared/in-progress state can ever be pruned or frozen past.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -917,8 +927,8 @@ impl SqlEngine {
     /// True only for the plain single-range local engine (`new`/`open`/
     /// `with_kv`): Durable persist mode, no GTM, no range-0 barrier, and a
     /// single store for data + catalog. A vacuum sweep commits batches of its
-    /// own, outside any statement's replicated ordering — on a replicated
-    /// engine that local delete outside the WAL would diverge replicas and
+    /// own, outside any statement's replicated ordering. On a replicated engine
+    /// that local delete outside the WAL would diverge replicas and
     /// checkpoints. Write-path chain pruning is independent of this gate: its
     /// deletes ride each statement's own commit batch, so every engine kind
     /// prunes the rows it rewrites.
@@ -936,17 +946,17 @@ impl SqlEngine {
     /// below the horizon, and advance the durable clog scan floor to it.
     ///
     /// A version is dead iff its creator aborted (or crashed below the
-    /// horizon), or it was deleted/superseded by a transaction that committed
-    /// below the garbage horizon ([`crabka_pgmvcc::gc::version_is_dead`]);
-    /// the horizon is capped by running writers, registered snapshot pins,
-    /// and the first non-terminal clog entry, so nothing any live or future
-    /// snapshot can see is touched. Freezing rewrites a surviving committed
+    /// horizon), or a transaction that committed below the garbage horizon
+    /// deleted or superseded it ([`crabka_pgmvcc::gc::version_is_dead`]).
+    /// Running writers, registered snapshot pins, and the first non-terminal
+    /// clog entry cap the horizon, so the sweep touches nothing any live or
+    /// future snapshot can see. A freeze rewrites a surviving committed
     /// sub-horizon creator to `FROZEN_XID` (always visible without a clog
-    /// lookup), which is what makes deleting the sub-horizon clog entries
-    /// safe — without truncation the clog grows one entry per write
+    /// lookup), which is what makes the deletion of the sub-horizon clog
+    /// entries safe. Without truncation the clog grows one entry per write
     /// transaction forever.
     ///
-    /// A no-op (returning zeroed [`VacuumStats`]) on engines where
+    /// A no-op that returns zeroed [`VacuumStats`] on engines where
     /// [`SqlEngine::supports_local_vacuum`] is false.
     ///
     /// Internally this restarts the incremental sweep at the first table and
@@ -980,7 +990,7 @@ impl SqlEngine {
     /// Monotone count of committed primary-version Puts across every ordinary
     /// table (new versions and `xmax` stamps alike), observed after each
     /// batch is durably applied. Each Put is one unit of eventual sweep work,
-    /// so the delta between two reads measures garbage creation — the input
+    /// so the delta between two reads measures garbage creation, the input
     /// side of an adaptive vacuum pacing loop.
     #[must_use]
     pub fn committed_version_puts(&self) -> u64 {
@@ -993,14 +1003,14 @@ impl SqlEngine {
     /// default [`VACUUM_STEP_KEY_BUDGET`] (see [`SqlEngine::vacuum`] for what
     /// a full cycle does).
     ///
-    /// A step examines at most a budgeted number of tuple version keys,
-    /// resuming from a persistent-in-memory `(table, rowid)` cursor and
-    /// wrapping around the table list, so a full pass over a large store
-    /// spreads across many steps instead of storming the store in one call.
-    /// Tables whose demand counters prove them fully settled since their last
-    /// clean sweep are skipped without scanning. The clog-truncation + scan
-    /// floor advance runs only on the step that completes a cycle in which
-    /// nothing was lock-skipped.
+    /// A step examines at most a budgeted number of tuple version keys. It
+    /// resumes from a persistent-in-memory `(table, rowid)` cursor and wraps
+    /// around the table list, so a full pass over a large store spreads across
+    /// many steps and does not storm the store in one call. The step skips a
+    /// table without a scan when its demand counters prove it fully settled
+    /// since its last clean sweep. The clog-truncation + scan floor advance
+    /// runs only on the step that completes a cycle in which nothing was
+    /// lock-skipped.
     ///
     /// A no-op on engines where [`SqlEngine::supports_local_vacuum`] is false.
     ///
@@ -1014,8 +1024,8 @@ impl SqlEngine {
 
     /// [`SqlEngine::vacuum_step`] with a caller-chosen key budget, for pacing
     /// loops that tune step size to observed step latency. The budget bounds
-    /// one step's scan work; callers keep steps short (low-single-digit
-    /// milliseconds) and adapt by running MORE steps, not unbounded ones.
+    /// one step's scan work. Callers keep steps short (low-single-digit
+    /// milliseconds) and adapt with MORE steps, not with unbounded ones.
     ///
     /// # Errors
     ///
@@ -1337,8 +1347,8 @@ impl SqlEngine {
     /// Under the row's exclusive lock, extend a prune batch with rewrites that
     /// clear aborted/crashed deleter stamps from surviving versions (see
     /// [`vacuum_stamp_is_clearable`]). Every snapshot already reads such a
-    /// version as not deleted, so the rewrite is invisible; it only removes
-    /// the version's dependence on the deleter's clog entry so the row can
+    /// version as not deleted, so the rewrite is invisible. It only removes
+    /// the version's dependence on the deleter's clog entry, so the row can
     /// become fully settled and its table skippable. Returns the number of
     /// stamps cleared.
     fn clear_settled_stamp_ops(
@@ -1405,12 +1415,14 @@ impl SqlEngine {
     }
 
     /// Build an engine whose reads come from `sm_kv` (the applied state machine)
-    /// and whose writes are proposed through `committer` (a RaftCommitter). Uses
-    /// the Replicated persist mode so counters fold into the proposed batch.
+    /// and whose writes go through `committer` (a RaftCommitter) as proposals.
+    /// The engine uses the Replicated persist mode, so counters fold into the
+    /// proposed batch.
     ///
-    /// `catalog_kv` is the store catalog (schema) lookups resolve through. For a
-    /// single-range node it is the same `Arc` as `sm_kv`; a multi-range data
-    /// node passes range 0's applied store here while `sm_kv` holds its own rows.
+    /// `catalog_kv` is the store that catalog (schema) lookups resolve through.
+    /// For a single-range node it is the same `Arc` as `sm_kv`. A multi-range
+    /// data node passes range 0's applied store here, while `sm_kv` holds its
+    /// own rows.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1498,9 +1510,9 @@ impl SqlEngine {
 
     /// Reseed counters from the applied store (call when this node becomes leader).
     ///
-    /// Also invalidates the cached durable-timestamp horizon, so the next
-    /// statement rescans the applied store for timestamp state that was
-    /// replicated to this node while another leader was committing.
+    /// This also invalidates the cached durable-timestamp horizon, so the next
+    /// statement rescans the applied store for timestamp state that reached this
+    /// node by replication while another leader was the committer.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1525,9 +1537,9 @@ impl SqlEngine {
     }
 
     /// A second handle to the SAME engine (all fields are `Arc`/`Copy`): every
-    /// clone shares the applied store, committer, linearizer, and counters.
-    /// Used by the gateway to give each connection its own router without
-    /// re-opening the engine.
+    /// clone shares the applied store, committer, linearizer, and counters. The
+    /// gateway uses this to give each connection its own router without a
+    /// re-open of the engine.
     pub fn clone_handle(&self) -> SqlEngine {
         SqlEngine {
             coordination: Arc::clone(&self.coordination),
@@ -1579,20 +1591,21 @@ impl SqlEngine {
     /// `NOTIFY` also appends a record to this engine's WAL, stamped with
     /// `origin`.
     ///
-    /// Opt-in, and shared by every handle of this engine (`clone_handle` carries
-    /// it), so a node sets it once at startup. Until it is set — a single-node
-    /// engine, or a range that does not host the notification log — a committing
-    /// transaction appends nothing and the notify path is exactly the in-process
-    /// one. The records are WAL-only: every apply site drops them
-    /// (`crabka_pgkv::is_notify_op`) rather than writing them to a KV, so this
-    /// belongs on a replicated engine — a local committer writes its batches
-    /// straight to the store and has no such filter.
+    /// This is opt-in, and every handle of this engine shares it
+    /// (`clone_handle` carries it), so a node sets it once at startup. Until a
+    /// node sets it, a committing transaction appends nothing and the notify
+    /// path is exactly the in-process one. That covers a single-node engine and
+    /// a range that does not host the notification log. The records are
+    /// WAL-only: every apply site drops them (`crabka_pgkv::is_notify_op`)
+    /// instead of writing them to a KV, so this belongs on a replicated engine.
+    /// A local committer writes its batches straight to the store and has no
+    /// such filter.
     pub fn set_notify_origin(&self, origin: String) {
         self.notify_replication.set_origin(origin);
     }
 
     /// This engine's notify origin stamp, or `None` when it does not replicate.
-    /// A consumer reading records off the log uses it to recognise its own.
+    /// A consumer that reads records off the log uses it to recognise its own.
     #[must_use]
     pub fn notify_origin(&self) -> Option<String> {
         self.notify_replication
@@ -1673,7 +1686,7 @@ impl SqlEngine {
 
     /// Scan only this engine's local MVCC store for a table interval. Range-aware
     /// scanners use this to make the owning range evaluate visibility against its
-    /// own local clog while sharing the caller's global snapshot.
+    /// own local clog and still share the caller's global snapshot.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -1699,7 +1712,7 @@ impl SqlEngine {
         )
     }
 
-    /// Scan local visibility while exposing pending intents owned by `own_start_ts`.
+    /// Scan local visibility and expose pending intents owned by `own_start_ts`.
     ///
     /// # Errors
     ///
@@ -1904,10 +1917,11 @@ impl SqlEngine {
         Ok(plan)
     }
 
-    /// The plan and its SQL sequence advances kept apart, because the two have
-    /// different lifetimes: a caller that supplies its own hidden rowids drops
-    /// the plan's rowid op, but a `nextval` the statement evaluated still has to
-    /// reach the store or the next writer will hand the same value out again.
+    /// Return the plan and its SQL sequence advances separately, because the two
+    /// have different lifetimes. A caller that supplies its own hidden rowids
+    /// drops the plan's rowid op, but a `nextval` the statement evaluated still
+    /// has to reach the store, or the next writer will hand the same value out
+    /// again.
     fn plan_timestamp_write_parts(
         &self,
         sql: &str,
@@ -2015,10 +2029,11 @@ impl SqlEngine {
     }
 
     /// Allocate a write lease for a single-shard transaction confined to this
-    /// range from the range's [`local_sequence`](Self::local_sequence), bypassing
-    /// the global timestamp source. The durable horizon is folded in first (the
-    /// Lamport receive rule), so the allocated `start_ts` and hidden rowids
-    /// strictly exceed every global stamp this range has already applied.
+    /// range from the range's [`local_sequence`](Self::local_sequence), and
+    /// bypass the global timestamp source. This method folds in the durable
+    /// horizon first (the Lamport receive rule), so the allocated `start_ts` and
+    /// hidden rowids strictly exceed every global stamp this range has already
+    /// applied.
     ///
     /// # Errors
     ///
@@ -2050,8 +2065,9 @@ impl SqlEngine {
     }
 
     /// Allocate a single-shard commit timestamp from this range's
-    /// [`local_sequence`](Self::local_sequence), preserving `commit_ts > start_ts`
-    /// and the durable-horizon floor (folded in first).
+    /// [`local_sequence`](Self::local_sequence). The allocation preserves
+    /// `commit_ts > start_ts` and the durable-horizon floor, which this method
+    /// folds in first.
     ///
     /// # Errors
     ///
@@ -2069,17 +2085,19 @@ impl SqlEngine {
     }
 
     /// Reconcile a cross-range or single-range timestamp read against this
-    /// range's closed timestamp: reserve strictly above `read_ts` and publish the
-    /// watermark, so no single-shard commit this range subsequently allocates can
-    /// land at or below `read_ts`. Any single-shard commit already durable at or
-    /// below `read_ts` is visible to the read; any still in prewrite carries a
-    /// durable intent the scan resolves. This is the linearizability guarantee
-    /// the single-shard bypass rests on (proven by the two-range closed-timestamp
-    /// Stateright model).
+    /// range's closed timestamp.
     ///
-    /// At `u64::MAX` there is nothing above to reserve, but the local sequence can
-    /// never allocate a commit there either, so the read is already safe and the
-    /// reservation is skipped.
+    /// This method reserves strictly above `read_ts` and publishes the
+    /// watermark, so no single-shard commit this range allocates after that can
+    /// land at or below `read_ts`. Any single-shard commit already durable at or
+    /// below `read_ts` is visible to the read. Any commit still in prewrite
+    /// carries a durable intent the scan resolves. This is the linearizability
+    /// guarantee the single-shard bypass rests on, proven by the two-range
+    /// closed-timestamp Stateright model.
+    ///
+    /// At `u64::MAX` there is nothing above to reserve, but the local sequence
+    /// can never allocate a commit there either. The read is already safe, so
+    /// this method skips the reservation.
     pub fn reconcile_local_read(&self, read_ts: ReadTimestamp) {
         if read_ts.get() < u64::MAX {
             // Only fails at domain exhaustion, which `read_ts < u64::MAX` rules
@@ -2094,17 +2112,18 @@ impl SqlEngine {
         self.local_sequence.closed_timestamp()
     }
 
-    /// The timestamp-version GC state shared by every handle of this engine
+    /// The timestamp-version GC state that every handle of this engine shares
     /// (see [`ts_gc::TsVersionGc`]).
     #[must_use]
     pub fn ts_version_gc(&self) -> Arc<ts_gc::TsVersionGc> {
         Arc::clone(&self.ts_gc)
     }
 
-    /// The highest timestamp this range has locally spent or durably applied:
-    /// the floor a cross-range allocation must strictly exceed so its stamps
-    /// (and the hidden rowids derived from them) cannot collide with rows this
-    /// range minted through the single-shard bypass.
+    /// The highest timestamp this range has locally spent or durably applied.
+    ///
+    /// This is the floor a cross-range allocation must strictly exceed, so that
+    /// its stamps (and the hidden rowids derived from them) cannot collide with
+    /// rows this range minted through the single-shard bypass.
     ///
     /// # Errors
     ///
@@ -2321,9 +2340,10 @@ impl SqlEngine {
         }
     }
 
-    /// Make range 0's timestamp decision durable. Commit is refused unless all
-    /// participant acknowledgements are already durable. The descriptor is the
-    /// sole write-once primary record and includes the exact commit timestamp.
+    /// Make range 0's timestamp decision durable. This method refuses the commit
+    /// unless all participant acknowledgements are already durable. The
+    /// descriptor is the sole write-once primary record and includes the exact
+    /// commit timestamp.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -2368,9 +2388,9 @@ impl SqlEngine {
         }
     }
 
-    /// Recover a descriptor that has no terminal range-0 decision by choosing
-    /// durable abort.  A delayed coordinator subsequently attempting commit is
-    /// fenced by the GTM's write-once global decision.
+    /// Recover a descriptor that has no terminal range-0 decision. This method
+    /// chooses a durable abort. The GTM's write-once global decision fences a
+    /// delayed coordinator that tries to commit after that.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -2555,9 +2575,10 @@ impl SqlEngine {
         self.committer.commit(ops).await
     }
 
-    /// Idempotently resolve this range's operations using range 0's terminal
-    /// descriptor decision. Global-index intents are discovered from durable local
-    /// state, while delete-vs-put semantics come from the descriptor operations.
+    /// Idempotently resolve this range's operations with range 0's terminal
+    /// descriptor decision. This method discovers global-index intents from
+    /// durable local state. Delete-vs-put semantics come from the descriptor
+    /// operations.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -2655,8 +2676,8 @@ impl SqlEngine {
     }
 
     /// Rebuild the cached horizon source after the store wiring changed. A
-    /// range-0 barrier marks the catalog as a replica applied by another
-    /// process, whose timestamp descriptors must be rescanned per lookup.
+    /// range-0 barrier marks the catalog as a replica that another process
+    /// applied, so each lookup must rescan its timestamp descriptors.
     fn rebuild_timestamp_horizon(&mut self) {
         self.timestamp_horizon = timestamp_txn::TimestampHorizonSource::new(
             Arc::clone(&self.kv),
@@ -2678,10 +2699,10 @@ impl SqlEngine {
         Ok(())
     }
 
-    /// Copy this engine's `Arc<Gtm>` into `other`. Both engines then share the same
-    /// GTM — any range can resolve a `Prepared` row and the coordinator can drive
-    /// range 0. `self` must have been initialized via `init_gtm_coordinator` first;
-    /// `other` can be any range's engine.
+    /// Copy this engine's `Arc<Gtm>` into `other`. Both engines then share the
+    /// same GTM, so any range can resolve a `Prepared` row and the coordinator
+    /// can drive range 0. `init_gtm_coordinator` must have initialized `self`
+    /// first. `other` can be any range's engine.
     pub fn share_gtm_to(&self, other: &mut SqlEngine) {
         other.gtm = self.gtm.as_ref().map(Arc::clone);
     }
@@ -2799,18 +2820,21 @@ impl SqlEngine {
     }
 
     /// Scan THIS range's clog from `scan_lo` for in-doubt `Prepared(Li -> g)` markers.
-    /// Returns `(in_doubt_gs, new_scan_lo)` where `new_scan_lo` is the smallest scanned
-    /// `Li` whose `g` is NOT durably terminal (so it must keep being swept), or one past
-    /// the largest scanned `Li` if every scanned marker is terminal (or `scan_lo` if the
-    /// range is empty). `new_scan_lo` NEVER passes a non-terminal `g` — the recovery
+    ///
+    /// Returns `(in_doubt_gs, new_scan_lo)`. `new_scan_lo` is the smallest
+    /// scanned `Li` whose `g` is NOT durably terminal, so the sweep must keep
+    /// covering it. If every scanned marker is terminal, `new_scan_lo` is one
+    /// past the largest scanned `Li`, or `scan_lo` if the range is empty.
+    /// `new_scan_lo` NEVER passes a non-terminal `g`. That is the recovery
     /// (zombie-commit) safety invariant. Markers are never deleted.
     ///
-    /// The decidedness check reads `self.catalog_kv` directly (NOT through the range-0
-    /// read barrier), so on a lagging local range-0 replica an already-decided `g` may
-    /// be reported in-doubt. That is harmless: the recovery sweep merely abort-races
-    /// `g` to range 0, and the decision is WRITE-ONCE — racing an already-terminal `g`
-    /// is a no-op against the real decision. Do not "fix" this by routing through the
-    /// barrier; the staleness is intentional and adds no latency to the hot path.
+    /// The decidedness check reads `self.catalog_kv` directly (NOT through the
+    /// range-0 read barrier), so on a lagging local range-0 replica this can
+    /// report an already-decided `g` as in-doubt. That is harmless: the recovery
+    /// sweep only abort-races `g` to range 0, and the decision is WRITE-ONCE, so
+    /// a race against an already-terminal `g` is a no-op against the real
+    /// decision. Do not "fix" this with a route through the barrier. The
+    /// staleness is intentional and adds no latency to the hot path.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -2878,31 +2902,35 @@ impl SqlEngine {
         Ok(globals.into_iter().collect())
     }
 
-    /// SP24 abort-atomicity ROOT FIX — re-acquire the in-memory row locks for every
-    /// inherited in-doubt participant version on this range, returning the in-doubt
-    /// local xids `Li` that now hold those locks. Call on the leadership-rising edge,
-    /// AFTER the apply-wait (so every inherited `Prepared(Li -> g)` marker is visible)
-    /// and BEFORE the recovery gate opens (`mark_served`) — the settle-before-serve-for-
-    /// LOCKS step.
+    /// SP24 abort-atomicity ROOT FIX: re-acquire the in-memory row locks for
+    /// every inherited in-doubt participant version on this range.
     ///
-    /// Why locks, not just the per-session `effective_global_xid` fence: row locks live
-    /// ONLY in the in-memory `RowLockManager`, which is WIPED when this range's leader is
-    /// killed and a new one rises — yet the in-doubt `Prepared(Li -> g)` row version it
-    /// left behind is DURABLE + replicated. So a cross-range row can carry an unresolved
-    /// in-doubt marker with NO live lock holder; a concurrent re-staging writer whose
-    /// apply-lagged read misses the inherited version then writes a COMPETING version
-    /// under a different global decision → two live versions on commit (money created).
-    /// A per-statement fence cannot serialize N concurrent writers across apply lag; a
-    /// re-acquired exclusive lock does — the next writer BLOCKS until the inherited row
-    /// resolves, giving exactly one live version.
+    /// Returns the in-doubt local xids `Li` that now hold those locks. Call this
+    /// on the leadership-rising edge, AFTER the apply-wait (so every inherited
+    /// `Prepared(Li -> g)` marker is visible) and BEFORE the recovery gate opens
+    /// (`mark_served`). That is the settle-before-serve-for-LOCKS step.
     ///
-    /// Scans the clog from the recovery watermark for in-doubt `Prepared(Li -> g)`
-    /// markers (mirrors `in_doubt_globals_from`'s decidedness rule), then scans this
-    /// range's primary-index version keyspace once and, for every version whose `xmin`
-    /// is an in-doubt `Li`, re-acquires `(table, rowid)` EXCLUSIVELY under `Li`. Returns
-    /// the `(Li, g)` pairs so the rise sweep can release each `Li`'s lock the moment its
-    /// `g` is driven terminal (the abort-race), so the lock is NEVER freed while its `g`
-    /// is still in-doubt. Idempotent (a re-scan re-acquires the same locks).
+    /// Why locks, not just the per-session `effective_global_xid` fence: row
+    /// locks live ONLY in the in-memory `RowLockManager`, which is WIPED when
+    /// this range's leader is killed and a new one rises. The in-doubt
+    /// `Prepared(Li -> g)` row version that leader left behind is DURABLE +
+    /// replicated. A cross-range row can thus carry an unresolved in-doubt
+    /// marker with NO live lock holder. A concurrent re-staging writer whose
+    /// apply-lagged read misses the inherited version then writes a COMPETING
+    /// version under a different global decision, which gives two live versions
+    /// on commit (money created). A per-statement fence cannot serialize N
+    /// concurrent writers across apply lag, but a re-acquired exclusive lock
+    /// does: the next writer BLOCKS until the inherited row resolves, which
+    /// gives exactly one live version.
+    ///
+    /// This method scans the clog from the recovery watermark for in-doubt
+    /// `Prepared(Li -> g)` markers, and mirrors `in_doubt_globals_from`'s
+    /// decidedness rule. It then scans this range's primary-index version
+    /// keyspace once and re-acquires `(table, rowid)` EXCLUSIVELY under `Li` for
+    /// every version whose `xmin` is an in-doubt `Li`. It returns the `(Li, g)`
+    /// pairs so the rise sweep can release each `Li`'s lock the moment its `g`
+    /// is driven terminal (the abort-race), so the lock is NEVER freed while its
+    /// `g` is still in-doubt. Idempotent (a re-scan re-acquires the same locks).
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -2958,29 +2986,33 @@ impl SqlEngine {
         Ok(in_doubt.into_iter().collect())
     }
 
-    /// Release the in-doubt row locks re-acquired under `li` (frees every `(table, rowid)`
-    /// lock that local xid holds). Called by the rise sweep the moment `li`'s global `g`
-    /// has been driven TERMINAL by the abort-race, so the lock is never freed while its
-    /// `g` is in-doubt. A re-staging writer that blocked on the lock wakes to a fully-
-    /// RESOLVED row: its `effective_global_xid` fence sees the terminal decision and
-    /// proceeds correctly (exactly one live version). A no-op for an `li` that holds no
+    /// Release the in-doubt row locks re-acquired under `li`.
+    ///
+    /// This frees every `(table, rowid)` lock that local xid holds. The rise
+    /// sweep calls it the moment the abort-race has driven `li`'s global `g`
+    /// TERMINAL, so the lock is never freed while its `g` is in-doubt. A
+    /// re-staging writer that blocked on the lock wakes to a fully RESOLVED row:
+    /// its `effective_global_xid` fence sees the terminal decision and proceeds
+    /// correctly (exactly one live version). A no-op for an `li` that holds no
     /// lock.
     pub fn release_in_doubt_lock(&self, li: u64) {
         self.lockmgr.release_all(li);
     }
 
-    /// Scan THIS range's clog (from the recovery watermark) for an existing durable
-    /// `Prepared(Li -> g)` marker for the given in-doubt global xid `g`; return the local
-    /// xid `Li` of the first such marker, or `None`.
+    /// Scan THIS range's clog (from the recovery watermark) for an existing
+    /// durable `Prepared(Li -> g)` marker for the given in-doubt global xid `g`.
+    /// Returns the local xid `Li` of the first such marker, or `None`.
     ///
-    /// Makes participant `Stage` IDEMPOTENT per `(g, range)`. A `Stage(g)` RPC retried across
-    /// a participant-leader failover (the original leader durably staged then died; the retry
-    /// lands on the new leader, whose in-memory held-session map is empty) must NOT write a
-    /// SECOND `Prepared(-> g)` version of the row. The first attempt's marker was
-    /// Raft-committed before the old leader died, so the new leader — which won election with
-    /// that entry in its log — finds it here and the retry becomes a no-op. Bounded by the
-    /// watermark: an in-doubt `g`'s marker is never below `clog_scan_lo` (the watermark never
-    /// advances past a non-terminal `g`).
+    /// This makes participant `Stage` IDEMPOTENT per `(g, range)`. A `Stage(g)`
+    /// RPC retried across a participant-leader failover must NOT write a SECOND
+    /// `Prepared(-> g)` version of the row. In that failover the original leader
+    /// durably staged and then died, and the retry lands on the new leader,
+    /// whose in-memory held-session map is empty. Raft committed the first
+    /// attempt's marker before the old leader died, so the new leader won
+    /// election with that entry in its log, finds it here, and the retry becomes
+    /// a no-op. The watermark bounds the scan: an in-doubt `g`'s marker is never
+    /// below `clog_scan_lo`, because the watermark never advances past a
+    /// non-terminal `g`.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -3016,14 +3048,16 @@ impl SqlEngine {
         }
     }
 
-    /// Durably advance this range's recovery-scan watermark (monotone; a no-op if `lo`
-    /// is not greater than the current value). Proposed through the range committer.
+    /// Durably advance this range's recovery-scan watermark.
     ///
-    /// The read-then-write is NOT a CAS: monotonicity relies on the single-writer
-    /// discipline of the edge-triggered per-range leadership-rise sweep (one advance at a
-    /// time). Even a hypothetical interleaving that regressed the value low is
-    /// correctness-preserving — a lower watermark only enlarges the next scan, never skips
-    /// an in-doubt marker.
+    /// The advance is monotone, and a no-op if `lo` is not greater than the
+    /// current value. This method proposes it through the range committer.
+    ///
+    /// The read-then-write is NOT a CAS. Monotonicity relies on the single-writer
+    /// discipline of the edge-triggered per-range leadership-rise sweep, which
+    /// makes one advance at a time. Even a hypothetical interleaving that
+    /// regressed the value low preserves correctness: a lower watermark only
+    /// enlarges the next scan, and never skips an in-doubt marker.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -3157,9 +3191,9 @@ pub(crate) fn checkpoint_garbage_horizon(
     Ok(cap)
 }
 
-/// A sentinel global snapshot for single-range (non-GTM) engines. Any global xid
-/// `g >= xmax` is treated as InProgress by the resolver, but no `Prepared` tuples
-/// ever exist on a single-range engine so the Prepared branch is unreachable.
+/// A sentinel global snapshot for single-range (non-GTM) engines. The resolver
+/// treats any global xid `g >= xmax` as InProgress, but no `Prepared` tuples
+/// ever exist on a single-range engine, so the Prepared branch is unreachable.
 #[allow(non_snake_case)]
 pub(crate) fn NO_GLOBAL_SNAPSHOT() -> crabka_pgmvcc::visibility::Snapshot {
     use crabka_pgmvcc::xid::GLOBAL_XID_BASE;
@@ -3171,10 +3205,10 @@ pub(crate) fn NO_GLOBAL_SNAPSHOT() -> crabka_pgmvcc::visibility::Snapshot {
 }
 
 /// Replace every xid-MVCC tuple for `table` with timestamp tuples and return the
-/// rewrite in the same batch as the catalog transition.  Keeping stale invisible
-/// xid tuples would make a sharded scan fail to decode them, so the rewrite first
-/// deletes the complete old version set and then installs only the rows visible at
-/// the conversion point.
+/// rewrite in the same batch as the catalog transition. A sharded scan cannot
+/// decode stale invisible xid tuples, so the rewrite first deletes the complete
+/// old version set and then installs only the rows visible at the conversion
+/// point.
 fn timestamp_conversion_ops(
     kv: &dyn Kv,
     catalog_kv: &dyn Kv,
@@ -3224,8 +3258,9 @@ fn timestamp_conversion_ops(
     Ok(ops)
 }
 
-/// Field descriptions for `sql` resolving schema from `catalog_kv`, without a
-/// data store or execution (the gateway's Describe only needs the catalog).
+/// Field descriptions for `sql`, with the schema resolved from `catalog_kv`.
+/// This needs no data store and runs no execution, because the gateway's
+/// Describe only needs the catalog.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -3244,7 +3279,7 @@ pub fn describe_fields(
 impl Engine for SqlEngine {
     type Session = SqlSession;
 
-    /// A session with no client behind it — an embedded caller, or a range
+    /// A session with no client behind it: an embedded caller, or a range
     /// engine the gateway drives. It still draws a backend id, from the same
     /// process-wide counter the wire layer announces from, so `pg_backend_pid()`
     /// identifies it as distinctly as a connected session's does.
@@ -3955,12 +3990,12 @@ mod tests {
         );
     }
 
-    /// SP24 root fix: on a leadership rise, `reacquire_in_doubt_locks` re-takes the
-    /// exclusive row lock for an inherited in-doubt `Prepared(Li -> g)` version even
-    /// though the in-memory lock table was wiped — and a concurrent writer BLOCKS on
-    /// that lock until `release_in_doubt_lock(Li)` frees it once `g` is terminal. This
-    /// is the serialize-before-serve guarantee the per-session fence cannot give under
-    /// apply lag.
+    /// SP24 root fix: on a leadership rise, `reacquire_in_doubt_locks` re-takes
+    /// the exclusive row lock for an inherited in-doubt `Prepared(Li -> g)`
+    /// version even though the in-memory lock table was wiped. A concurrent
+    /// writer then BLOCKS on that lock until `release_in_doubt_lock(Li)` frees
+    /// it once `g` is terminal. This is the serialize-before-serve guarantee the
+    /// per-session fence cannot give under apply lag.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reacquire_in_doubt_locks_blocks_a_concurrent_writer_until_released() {
         use crabka_pgmvcc::{
@@ -4056,8 +4091,9 @@ mod tests {
         );
     }
 
-    /// `reacquire_in_doubt_locks` skips a marker whose `g` is already TERMINAL (no lock
-    /// taken — the row is settled), and returns only the genuinely in-doubt pairs.
+    /// `reacquire_in_doubt_locks` skips a marker whose `g` is already TERMINAL
+    /// and takes no lock, because the row is settled. It returns only the
+    /// genuinely in-doubt pairs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reacquire_in_doubt_locks_skips_terminal_g() {
         use crabka_pgmvcc::{

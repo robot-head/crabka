@@ -1,13 +1,15 @@
 //! Native Google Cloud Storage [`RemoteStorageManager`] backend (KIP-405).
 //!
-//! This is the GCS sibling of [`S3RemoteStorage`]: it builds an
+//! This module is the GCS sibling of [`S3RemoteStorage`]. It builds an
 //! `object_store::gcp::GoogleCloudStorage` client from a [`GcsConfig`] and
-//! wraps it in the same generic [`S3RemoteStorage`] engine via
-//! [`S3RemoteStorage::with_store`]. Because that engine is backend-agnostic
-//! (object-key layout, byte-range fetch, streaming multipart upload, and
-//! `object_store` error mapping are all generic over `dyn ObjectStore`), GCS
-//! reuses the entire copy / fetch / delete + multipart implementation —
-//! there is no separate trait impl or storage struct.
+//! wraps it in the same generic [`S3RemoteStorage`] engine with
+//! [`S3RemoteStorage::with_store`].
+//!
+//! That engine is backend-agnostic: the object-key layout, the byte-range
+//! fetch, the multipart upload stream, and the `object_store` error mapping
+//! are all generic over `dyn ObjectStore`, so GCS reuses the whole copy,
+//! fetch, delete, and multipart implementation. There is no separate trait
+//! impl or storage struct.
 //!
 //! ## Authentication
 //!
@@ -19,15 +21,15 @@
 //! 3. An application-default-credentials JSON file
 //!    ([`GcsConfig::application_credentials_path`]; when unset, the gcloud
 //!    well-known ADC file under `$HOME/.config/gcloud` if present).
-//! 4. The GKE / GCE metadata server — i.e. **Workload Identity**. This is the
-//!    keyless production path: leave all credential fields unset and the pod's
-//!    bound Kubernetes service account is exchanged for GCS access tokens by
-//!    the metadata server, with no secret material on disk or in the broker
+//! 4. The GKE / GCE metadata server, that is **Workload Identity**. This is
+//!    the keyless production path. Leave all credential fields unset, and the
+//!    metadata server exchanges the pod's bound Kubernetes service account
+//!    for GCS access tokens. No secret material is on disk or in the broker
 //!    config.
 //!
-//! This removes the S3-compatibility shim previously required to reach GCS
-//! through [`S3RemoteStorage::from_s3_config`] (which could not use Workload
-//! Identity and required HMAC interoperability keys).
+//! This backend does not need the S3-compatibility shim that reaches GCS
+//! through [`S3RemoteStorage::from_s3_config`]. That shim cannot use Workload
+//! Identity and needs HMAC interoperability keys.
 
 use crabka_object_store::{GcsConfig, ObjectStoreConfig, build_object_store};
 use crabka_units::prelude::{ByteSize, ByteSizeExt as _};
@@ -38,18 +40,18 @@ use crate::{
 };
 
 impl S3RemoteStorage {
-    /// Build a `GoogleCloudStorage` client from `cfg` and wrap it in the
+    /// Builds a `GoogleCloudStorage` client from `cfg` and wraps it in the
     /// generic [`S3RemoteStorage`] engine.
     ///
-    /// With no credential fields set, authentication uses Workload Identity /
-    /// ADC (the metadata server) — the keyless GKE path.
+    /// With no credential fields set, authentication uses Workload Identity
+    /// or ADC through the metadata server. This is the keyless GKE path.
     ///
     /// # Errors
     ///
-    /// Returns [`RemoteStorageError::InvalidArgument`] if the bucket /
-    /// credential / endpoint combination is rejected by `object_store`'s
-    /// builder (e.g. both a service-account path and key are supplied, a
-    /// credential file is unreadable, or the bucket name is empty).
+    /// Returns [`RemoteStorageError::InvalidArgument`] if `object_store`'s
+    /// builder rejects the bucket, credential, and endpoint combination. For
+    /// example, the caller supplied both a service-account path and a key, a
+    /// credential file is unreadable, or the bucket name is empty.
     pub fn from_gcs_config(cfg: &GcsConfig) -> Result<Self, RemoteStorageError> {
         let store = build_object_store(&ObjectStoreConfig::Gcs(cfg.clone()))
             .map_err(|e| RemoteStorageError::InvalidArgument(e.to_string()))?;
@@ -131,10 +133,10 @@ mod tests {
         }
     }
 
-    /// End-to-end round-trip against the generic engine reached through the
-    /// GCS construction path, asserting the operator-visible prefix is
-    /// applied. Uses `with_store(InMemory)` because the real GCS client needs
-    /// a live bucket.
+    /// End-to-end round-trip against the generic engine through the GCS
+    /// construction path. The test asserts that the engine applies the
+    /// operator-visible prefix. It uses `with_store(InMemory)` because the
+    /// real GCS client needs a live bucket.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn engine_round_trips_with_prefix() {
         let store =

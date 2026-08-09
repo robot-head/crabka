@@ -1,22 +1,22 @@
-//! `PostgreSQL`'s `jsonpath` language — the path expressions behind `@?`, `@@`
+//! `PostgreSQL`'s `jsonpath` language: the path expressions behind `@?`, `@@`
 //! and the `jsonb_path_*` function family.
 //!
-//! A jsonpath is compiled once by [`JsonPath::parse`] into a tree of
-//! [`Node`]s and [`Pred`]icates, then run over a `jsonb` target by
-//! [`JsonPath::query`] / [`JsonPath::exists`] / [`JsonPath::predicate`].
+//! [`JsonPath::parse`] compiles a jsonpath once into a tree of [`Node`]s and
+//! [`Pred`]icates. [`JsonPath::query`] / [`JsonPath::exists`] /
+//! [`JsonPath::predicate`] then run it over a `jsonb` target.
 //!
-//! Two things make the language unlike an ordinary expression evaluator and
-//! both are reproduced here:
+//! Two things make the language unlike an ordinary expression evaluator, and
+//! this module reproduces both:
 //!
 //! - **Every expression evaluates to a *sequence* of JSON items**, not to one
 //!   value. `$.a` over `{"a": 1}` is `[1]`, over `{}` it is `[]`, and `$[*]`
-//!   over `[1, 2]` is `[1, 2]`. Comparisons therefore have existential
-//!   semantics over the cross product of their operands' sequences.
+//!   over `[1, 2]` is `[1, 2]`. So comparisons have existential semantics over
+//!   the cross product of their operands' sequences.
 //! - **`lax` mode (the default) auto-unwraps and auto-wraps.** A member
-//!   accessor applied to an array is applied to each element instead; an array
-//!   accessor applied to a non-array treats it as a one-element array. `strict`
-//!   mode raises the structural error instead. This is why
-//!   `lax $.a` over `[{"a": 1}]` is `[1]` while `strict $.a` is `2203A`.
+//!   accessor on an array applies to each element instead. An array accessor on
+//!   a non-array treats it as a one-element array. `strict` mode raises the
+//!   structural error instead. This is why `lax $.a` over `[{"a": 1}]` is `[1]`
+//!   while `strict $.a` is `2203A`.
 //!
 //! Predicates are three-valued ([`Tri`]): a structural error inside a filter is
 //! `Unknown` rather than a raised error, which is what makes
@@ -33,19 +33,21 @@ use crate::error::ExecError;
 /// path cannot overflow the recursive-descent parser's stack.
 const MAX_DEPTH: u32 = 128;
 
-/// The maximum number of items one path evaluation may produce. `PostgreSQL`
-/// has no such cap; `.**` over a deeply nested document is otherwise unbounded
-/// work inside a single statement.
+/// The maximum number of items one path evaluation may produce.
+///
+/// `PostgreSQL` has no such cap. Without it, `.**` over a deeply nested
+/// document is unbounded work inside a single statement.
 const MAX_ITEMS: usize = 1_000_000;
 
 /// A compiled jsonpath.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonPath {
-    /// `strict` mode: structural mismatches are errors instead of being
-    /// unwrapped away. `lax` is the default when no mode word is written.
+    /// `strict` mode: structural mismatches are errors, and the engine does
+    /// not unwrap them away. `lax` is the default when no mode word is
+    /// written.
     pub strict: bool,
     /// `true` when the whole path is a *predicate* (`$.a == 1`) rather than a
-    /// path expression. `jsonb_path_match` requires this shape and
+    /// path expression. `jsonb_path_match` needs this shape, and
     /// `jsonb_path_query` renders the boolean as a JSON `true`/`false`.
     pub is_predicate: bool,
     root: Node,
@@ -54,13 +56,13 @@ pub struct JsonPath {
 /// One node of a path expression.
 #[derive(Debug, Clone, PartialEq)]
 enum Node {
-    /// `$` — the query target.
+    /// `$`: the query target.
     Root,
-    /// `@` — the item the innermost enclosing filter is testing.
+    /// `@`: the item the innermost enclosing filter tests.
     Current,
-    /// `last` — the last subscript of the array being indexed.
+    /// `last`: the last subscript of the indexed array.
     Last,
-    /// `$name` / `$"name"` — a member of the `vars` argument.
+    /// `$name` / `$"name"`: a member of the `vars` argument.
     Var(String),
     /// A literal number, string, `true`, `false` or `null`.
     Literal(JsonbValue),
@@ -74,7 +76,7 @@ enum Node {
         left: Box<Node>,
         right: Box<Node>,
     },
-    /// A predicate in value position — the top-level `$.a == 1` form, whose
+    /// A predicate in value position, the top-level `$.a == 1` form, whose
     /// value is the JSON boolean the predicate evaluates to.
     Predicate(Box<Pred>),
 }
@@ -84,17 +86,17 @@ enum Node {
 enum Accessor {
     /// `.key` / `."key"`.
     Member(String),
-    /// `.*` — every member value of an object.
+    /// `.*`: every member value of an object.
     MemberAll,
     /// `[i]`, `[i to j]`, and the comma-separated list of both.
     Index(Vec<(Node, Option<Node>)>),
-    /// `[*]` — every element of an array.
+    /// `[*]`: every element of an array.
     IndexAll,
-    /// `.**`, `.**{n}`, `.**{n to m}` — recursive descent, at the given depths.
+    /// `.**`, `.**{n}`, `.**{n to m}`: recursive descent, at the given depths.
     Any { from: u32, to: u32 },
-    /// `.type()`, `.size()`, … — an item method.
+    /// `.type()`, `.size()`, …: an item method.
     Method(Method),
-    /// `? (predicate)` — keep only the items the predicate is true for.
+    /// `? (predicate)`: keep only the items the predicate is true for.
     Filter(Box<Pred>),
 }
 
@@ -183,8 +185,10 @@ enum Pred {
     },
 }
 
-/// SQL/JSON three-valued logic. A structural error inside a predicate is
-/// [`Tri::Unknown`], which is how `$ ? (@.missing > 1)` quietly matches nothing.
+/// SQL/JSON three-valued logic.
+///
+/// A structural error inside a predicate is [`Tri::Unknown`], which is how
+/// `$ ? (@.missing > 1)` quietly matches nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tri {
     True,
@@ -233,8 +237,10 @@ impl PathError {
 
 type PathResult<T> = Result<T, PathError>;
 
-/// A jsonpath *syntax* error. `PostgreSQL` reports every one of these as 42601
-/// with a message naming the offending token.
+/// A jsonpath *syntax* error.
+///
+/// `PostgreSQL` reports every one of these as 42601, with a message that names
+/// the offending token.
 fn syntax(message: impl Into<String>) -> ExecError {
     ExecError::FunctionError {
         sqlstate: "42601",
@@ -246,7 +252,7 @@ fn syntax(message: impl Into<String>) -> ExecError {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
-    /// A bare word — a keyword, method name or object key.
+    /// A bare word: a keyword, method name or object key.
     Word(String),
     /// A double-quoted string (a key or a string literal).
     Str(String),
@@ -319,8 +325,10 @@ impl Tok {
     }
 }
 
-/// Split a jsonpath into tokens. `PostgreSQL` reports every lexical problem as
-/// 42601 "syntax error … of jsonpath input".
+/// Split a jsonpath into tokens.
+///
+/// `PostgreSQL` reports every lexical problem as 42601 "syntax error … of
+/// jsonpath input".
 fn lex(src: &str) -> Result<Vec<Tok>, ExecError> {
     let chars: Vec<char> = src.chars().collect();
     let mut out = Vec::new();
@@ -438,8 +446,10 @@ fn is_ident_cont(c: char) -> bool {
 }
 
 /// A number literal: optional integer part, optional fraction, optional
-/// exponent. `PostgreSQL` also accepts `0x`/`0o`/`0b` and `_` separators; those
-/// are deliberately not accepted here (see the module divergence list).
+/// exponent.
+///
+/// `PostgreSQL` also accepts `0x`/`0o`/`0b` and `_` separators. This parser
+/// deliberately does not accept those. See the module divergence list.
 fn lex_number(chars: &[char], start: usize) -> Result<(BigDecimal, usize), ExecError> {
     let mut j = start;
     while j < chars.len() && chars[j].is_ascii_digit() {
@@ -627,9 +637,10 @@ impl Parser {
         self.depth -= 1;
     }
 
-    /// `expr_or_predicate` — the whole path body after the optional mode word.
-    /// A predicate is recognized by parsing an expression and then finding a
-    /// predicate operator, or by the leading `!` / `exists` forms.
+    /// `expr_or_predicate`, the whole path body after the optional mode word.
+    ///
+    /// The parser recognizes a predicate when it parses an expression and then
+    /// finds a predicate operator, or from the leading `!` / `exists` forms.
     fn expr_or_predicate(&mut self) -> Result<(Node, bool), ExecError> {
         let pred = self.predicate_or_expr()?;
         Ok(match pred {
@@ -638,10 +649,11 @@ impl Parser {
         })
     }
 
-    /// Parse whatever comes next, reporting whether it turned out to be a
-    /// predicate or a plain path expression. This mirrors `PostgreSQL`'s grammar,
-    /// where the two share a prefix and only the operator after the first
-    /// operand decides.
+    /// Parse whatever comes next and report whether it is a predicate or a
+    /// plain path expression.
+    ///
+    /// This mirrors `PostgreSQL`'s grammar, where the two share a prefix and
+    /// only the operator after the first operand decides.
     fn predicate_or_expr(&mut self) -> Result<Either, ExecError> {
         self.enter()?;
         let result = self.or_level();
@@ -673,8 +685,10 @@ impl Parser {
         Ok(left)
     }
 
-    /// The comparison / `starts with` / `like_regex` / `is unknown` level. Each
-    /// is non-associative in `PostgreSQL`'s grammar, so exactly one may appear.
+    /// The comparison / `starts with` / `like_regex` / `is unknown` level.
+    ///
+    /// Each is non-associative in `PostgreSQL`'s grammar, so exactly one may
+    /// appear.
     fn compare_level(&mut self) -> Result<Either, ExecError> {
         let left = self.additive_or_unary()?;
         let op = match self.peek() {
@@ -735,7 +749,7 @@ impl Parser {
         Ok(left)
     }
 
-    /// `STRING | $var` — the only two spellings `starts with` accepts.
+    /// `STRING | $var`: the only two spellings `starts with` accepts.
     fn starts_with_initial(&mut self) -> Result<Node, ExecError> {
         match self.bump() {
             Tok::Str(s) => Ok(Node::Literal(JsonbValue::String(s))),
@@ -808,8 +822,8 @@ impl Parser {
         self.accessor_expr()
     }
 
-    /// `exists ( expr )` or `( predicate )` — the two forms `!` and the grammar's
-    /// `delimited_predicate` accept.
+    /// `exists ( expr )` or `( predicate )`, the two forms `!` and the
+    /// grammar's `delimited_predicate` accept.
     fn delimited_predicate(&mut self) -> Result<Pred, ExecError> {
         if self.peek_word("exists") {
             self.bump();
@@ -997,7 +1011,9 @@ impl Parser {
 }
 
 /// A parsed fragment that is still ambiguous between a path expression and a
-/// predicate — the two share a prefix in `PostgreSQL`'s grammar.
+/// predicate.
+///
+/// The two share a prefix in `PostgreSQL`'s grammar.
 enum Either {
     Expr(Node),
     Pred(Pred),
@@ -1026,8 +1042,10 @@ impl Either {
 }
 
 impl JsonPath {
-    /// Compile a jsonpath. Every failure is `PostgreSQL`'s 42601 "syntax error …
-    /// of jsonpath input".
+    /// Compile a jsonpath.
+    ///
+    /// Every failure is `PostgreSQL`'s 42601 "syntax error … of jsonpath
+    /// input".
     pub fn parse(src: &str) -> Result<Self, ExecError> {
         let toks = lex(src)?;
         let mut p = Parser {
@@ -1057,10 +1075,10 @@ impl JsonPath {
 
     /// Every item the path produces over `target`.
     ///
-    /// `vars` is the optional `vars` argument (a jsonb object) and `silent`
-    /// suppresses the structural errors `strict` mode would otherwise raise —
-    /// the `silent => true` flag of `jsonb_path_query` and the behavior `@?`
-    /// and `@@` always use.
+    /// `vars` is the optional `vars` argument (a jsonb object). `silent`
+    /// suppresses the structural errors `strict` mode would otherwise raise.
+    /// That is the `silent => true` flag of `jsonb_path_query`, and the
+    /// behavior `@?` and `@@` always use.
     pub fn query(
         &self,
         target: &JsonbValue,
@@ -1159,8 +1177,9 @@ struct Exec<'a> {
     strict: bool,
     vars: Option<&'a JsonbValue>,
     root: &'a JsonbValue,
-    /// The array length `last` resolves against, set while a subscript is being
-    /// evaluated.
+    /// The array length `last` resolves against.
+    ///
+    /// The evaluator sets this while it evaluates a subscript.
     last: Option<usize>,
 }
 
@@ -1276,7 +1295,7 @@ impl Exec<'_> {
         }
     }
 
-    /// Apply one accessor to one item, appending the results to `out`.
+    /// Apply one accessor to one item, and append the results to `out`.
     fn apply(
         &self,
         op: &Accessor,
@@ -1466,9 +1485,11 @@ impl Exec<'_> {
         }
     }
 
-    /// An item method. `.type()`, `.size()` and `.keyvalue()` inspect the item
-    /// as a whole; the numeric and string methods auto-unwrap an array in lax
-    /// mode and apply element-wise.
+    /// An item method.
+    ///
+    /// `.type()`, `.size()` and `.keyvalue()` inspect the item as a whole. The
+    /// numeric and string methods auto-unwrap an array in lax mode and apply
+    /// element-wise.
     fn method(&self, m: Method, item: &JsonbValue, out: &mut Vec<JsonbValue>) -> PathResult<()> {
         match m {
             Method::Type => {
@@ -1629,8 +1650,10 @@ impl Exec<'_> {
         })
     }
 
-    /// A predicate operand's item sequence. A structural error makes the whole
-    /// predicate Unknown (`None`) rather than raising.
+    /// A predicate operand's item sequence.
+    ///
+    /// A structural error makes the whole predicate Unknown (`None`) and raises
+    /// nothing.
     fn pred_operand(
         &self,
         node: &Node,
@@ -1661,8 +1684,10 @@ fn unwrap_arrays(items: Vec<JsonbValue>) -> Vec<JsonbValue> {
     out
 }
 
-/// `.**{from to to}` — every descendant at a depth within the window, the item
-/// itself counting as depth 0. Pre-order, matching `PostgreSQL`'s output order.
+/// `.**{from to to}`: every descendant at a depth within the window, and the
+/// item itself counts as depth 0.
+///
+/// Pre-order, which matches `PostgreSQL`'s output order.
 fn descend(item: &JsonbValue, depth: u32, from: u32, to: u32, out: &mut Vec<JsonbValue>) {
     if depth >= from && depth <= to {
         out.push(item.clone());
@@ -1713,8 +1738,10 @@ fn compare(op: CmpOp, left: &JsonbValue, right: &JsonbValue) -> Tri {
 }
 
 /// jsonpath arithmetic is `numeric` arithmetic, so it goes through the same
-/// operators SQL `+`/`-`/`*`/`/`/`%` use — which is why `$.a / 2` over `3`
-/// produces `1.5000000000000000` rather than `1.5`.
+/// operators SQL `+`/`-`/`*`/`/`/`%` use.
+///
+/// This is why `$.a / 2` over `3` produces `1.5000000000000000` and not
+/// `1.5`.
 fn arith(op: ArithOp, l: &BigDecimal, r: &BigDecimal) -> PathResult<BigDecimal> {
     use crabka_pgtypes::numeric::{self, NumericValue};
 
@@ -1892,8 +1919,10 @@ fn invalid_for(name: &'static str, text: &str, target: &str) -> PathError {
 }
 
 /// The date/time methods, rendered back as JSON strings in `PostgreSQL`'s
-/// canonical ISO-8601 output. See the module divergence list: crabka has no
-/// jsonpath datetime item type, so these results compare as strings.
+/// canonical ISO-8601 output.
+///
+/// See the module divergence list: crabka has no jsonpath datetime item type,
+/// so these results compare as strings.
 fn datetime_method(m: Method, item: &JsonbValue) -> PathResult<JsonbValue> {
     use crabka_pgtypes::{ColumnType, Datum};
 
@@ -2004,7 +2033,7 @@ fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or_default().trim().to_string()
 }
 
-/// Render a compiled path back to its canonical `PostgreSQL` text — the output
+/// Render a compiled path back to its canonical `PostgreSQL` text, the output
 /// form of the `jsonpath` type.
 impl std::fmt::Display for JsonPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

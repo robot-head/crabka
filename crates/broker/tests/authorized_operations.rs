@@ -1,4 +1,4 @@
-//! KIP-430 — `authorized_operations` bitfield on `Metadata`,
+//! KIP-430: the `authorized_operations` bitfield on `Metadata`,
 //! `DescribeCluster`, and `DescribeGroups` responses.
 //!
 //! Covered:
@@ -9,13 +9,13 @@
 //!     `include_cluster_authorized_operations` request flag.
 //!   * `DescribeGroups.DescribedGroup.authorized_operations` follows the
 //!     `include_authorized_operations` request flag.
-//!   * Bitfield contents reflect the configured authorizer's decisions
-//!     (super-user → full mask; explicit ACL row → just that bit + any
-//!     implications; opt-out → `i32::MIN` "not present" sentinel).
+//!   * Bitfield contents show the configured authorizer's decisions:
+//!     super-user → full mask; explicit ACL row → only that bit plus any
+//!     implications; opt-out → `i32::MIN` "not present" sentinel.
 //!
-//! These run against a plaintext loopback listener via the in-process
-//! handler dispatch (no SASL framing dance — we drive
-//! `BrokerConfig.authorizer` directly with a `SimpleAclAuthorizer`).
+//! These tests run against a plaintext loopback listener through the in-process
+//! handler dispatch. There is no SASL framing step. The tests drive
+//! `BrokerConfig.authorizer` directly with a `SimpleAclAuthorizer`.
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -83,12 +83,13 @@ impl Harness {
     }
 }
 
-/// Boot a single broker with a plaintext loopback listener and a
-/// [`SimpleAclAuthorizer`] configured so the connecting principal (the
-/// PLAINTEXT default `User:ANONYMOUS`) is a super-user. That gives the
-/// metadata-driving client unfettered access while still letting us seed
-/// ACLs and observe their effect on the authorized-operations bitfield
-/// for a separately-evaluated principal name.
+/// Boot a single broker with a plaintext loopback listener and an authorizer.
+///
+/// The [`SimpleAclAuthorizer`] is configured so that the connecting principal,
+/// the PLAINTEXT default `User:ANONYMOUS`, is a super-user. That gives the
+/// metadata-driving client full access. The test can still seed ACLs and see
+/// their effect on the authorized-operations bitfield for a principal name that
+/// the authorizer evaluates separately.
 fn boot_with_super_user(super_user: &str) -> impl std::future::Future<Output = Harness> {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let mut cfg = BrokerConfig::for_tests(tempdir.path().to_path_buf());
@@ -166,11 +167,12 @@ async fn metadata_topic_authorized_operations_default_is_not_present() {
     h.shutdown().await;
 }
 
-/// With `include_topic_authorized_operations = true`, a super-user sees
-/// the full topic mask, while a topic with no matching ACL for a
-/// non-super principal would show zero. Both rows surface in the same
-/// response: the super-user drives the request, but the bitfield is
-/// computed against the request's principal.
+/// With `include_topic_authorized_operations = true`, a super-user sees the
+/// full topic mask.
+///
+/// A topic with no matching ACL for a non-super principal would show zero. Both
+/// rows appear in the same response. The super-user drives the request, but the
+/// broker computes the bitfield against the request's principal.
 #[tokio::test]
 async fn metadata_topic_authorized_operations_super_user_gets_full_mask() {
     let h = boot_with_super_user("ANONYMOUS").await;
@@ -300,12 +302,12 @@ async fn describe_groups_authorized_operations_super_user_gets_full_mask() {
     h.shutdown().await;
 }
 
-/// On the v8-10 Metadata response window the cluster-level field also
-/// rides along; its opt-in is the request's
-/// `include_cluster_authorized_operations` bit. The default (false)
-/// must leave the wire-default sentinel even on those versions. The
-/// wire codec gates the field on the encoded response version anyway,
-/// so we exercise the populate path on the in-window v9 codec via
+/// The cluster-level field also travels on the v8-10 Metadata response window.
+///
+/// The request's `include_cluster_authorized_operations` bit is the opt-in. The
+/// default, false, must leave the wire-default sentinel even on those versions.
+/// The wire codec gates the field on the encoded response version anyway, so
+/// this test exercises the populate path on the in-window v9 codec with
 /// `MetadataRequest.include_cluster_authorized_operations`.
 #[tokio::test]
 async fn metadata_cluster_authorized_operations_super_user_gets_full_mask_v9() {

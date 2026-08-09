@@ -102,7 +102,7 @@ impl InMemoryMetricStore {
             });
     }
 
-    /// Apply one decoded metrics WAL record into this in-memory head.
+    /// Applies one decoded metrics WAL record to this in-memory head.
     pub fn apply_wal_record(&mut self, record: &WalRecord) {
         let series_labels = record.labels();
         match &record.payload {
@@ -138,18 +138,20 @@ impl InMemoryMetricStore {
         }
     }
 
-    /// Apply decoded metrics WAL records in log order.
+    /// Applies decoded metrics WAL records in log order.
     pub fn apply_wal_records<'a>(&mut self, records: impl IntoIterator<Item = &'a WalRecord>) {
         for record in records {
             self.apply_wal_record(record);
         }
     }
 
-    /// Record that `offset` for `partition` has been materialized in the head,
-    /// advancing the high-water (and seeding the low-water on first sight).
+    /// Records that `offset` for `partition` is materialized in the head.
+    ///
+    /// This method advances the high-water offset. At the first sight of
+    /// `partition` it also seeds the low-water offset.
     ///
     /// Offsets track ingestion progress for observability and rebuild bounds;
-    /// they are never moved by [`InMemoryMetricStore::prune`].
+    /// [`InMemoryMetricStore::prune`] never moves them.
     pub fn record_offset(&mut self, partition: PartitionIndex, offset: Offset) {
         self.watermarks
             .entry(partition)
@@ -185,11 +187,12 @@ impl InMemoryMetricStore {
         &self.watermarks
     }
 
-    /// Drop every sample older than `now_ms - retention` from each series,
-    /// removing series that become empty from the queryable index.
+    /// Drops every sample older than `now_ms - retention` from each series.
     ///
-    /// Returns how many samples and series were evicted. Offset watermarks are
-    /// left untouched: they track ingestion progress, not retention.
+    /// This method also removes each series that becomes empty from the
+    /// queryable index. It returns the number of evicted samples and series. It
+    /// does not touch the offset watermarks: they track ingestion progress, not
+    /// retention.
     pub fn prune(&mut self, now_ms: i64) -> PruneStats {
         let cutoff = now_ms.saturating_sub(self.retention.millis_i64());
         let mut stats = PruneStats::default();

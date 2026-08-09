@@ -258,13 +258,14 @@ pub(super) fn exemplars_json(exemplars: Vec<ExemplarRecord>) -> Vec<Value> {
         .collect()
 }
 
-/// Build Grafana Mimir's `/cardinality/label_names` response from a series set.
+/// Builds the Grafana Mimir `/cardinality/label_names` response from a series set.
 ///
 /// Shape: `{ "label_values_count_total": N, "label_names_count": M,
 /// "cardinality": [{ "label_name": .., "label_values_count": k }, ..] }`.
-/// The `cardinality` array is sorted by `label_values_count` DESC then
-/// `label_name` ASC, and `limit` (when > 0) truncates that array. The two
-/// totals are computed over the full, unlimited series set.
+///
+/// This function sorts the `cardinality` array by `label_values_count` DESC,
+/// then by `label_name` ASC. A `limit` greater than 0 truncates that array. This
+/// function computes the two totals over the full, unlimited series set.
 pub(super) fn cardinality_label_names_response(series: &[Labels], limit: Option<usize>) -> Value {
     let mut values_by_name = BTreeMap::<String, BTreeSet<String>>::new();
     for labels in series {
@@ -307,14 +308,16 @@ pub(super) fn cardinality_label_names_response(series: &[Labels], limit: Option<
     })
 }
 
-/// Build Grafana Mimir's `/cardinality/label_values` response from a series set.
+/// Builds the Grafana Mimir `/cardinality/label_values` response from a series set.
 ///
 /// Shape: `{ "series_count_total": N, "labels": [{ "label_name": ..,
 /// "label_values_count": k, "series_count": s, "cardinality": [{
-/// "label_value": .., "series_count": c }, ..] }, ..] }`. `labels` is sorted by
-/// `series_count` DESC then `label_name` ASC; each nested `cardinality` is
-/// sorted by `series_count` DESC then `label_value` ASC. `limit` (when > 0)
-/// truncates each nested `cardinality` array, matching Mimir's per-label limit.
+/// "label_value": .., "series_count": c }, ..] }, ..] }`.
+///
+/// This function sorts `labels` by `series_count` DESC, then by `label_name`
+/// ASC. It sorts each nested `cardinality` by `series_count` DESC, then by
+/// `label_value` ASC. A `limit` greater than 0 truncates each nested
+/// `cardinality` array, as the per-label limit of Mimir does.
 pub(super) fn cardinality_label_values_response(
     series: &[Labels],
     label_names: &[String],
@@ -400,9 +403,10 @@ pub(super) fn cardinality_label_values_response(
     })
 }
 
-/// Build Grafana Mimir's `/cardinality/active_series` response: a bare object
-/// with a single `data` array of flat label maps (no `status` envelope, no
-/// `seriesLabels`/`metric` wrapper).
+/// Builds the Grafana Mimir `/cardinality/active_series` response.
+///
+/// The response is a bare object with one `data` array of flat label maps. It
+/// has no `status` envelope and no `seriesLabels` or `metric` wrapper.
 pub(super) fn active_series_response(series: Vec<Labels>) -> Value {
     let data = series
         .into_iter()
@@ -436,22 +440,27 @@ pub(super) fn exemplar_key(exemplar: &ExemplarRecord) -> String {
     )
 }
 
-/// Encode a millisecond timestamp as the JSON number Prometheus emits from
-/// `jsonutil.MarshalTimestamp`: a bare integer for whole seconds, otherwise a
-/// trailing-zero-trimmed fraction (e.g. `10`, `1435781430.781`, `-0.5`).
+/// Encodes a millisecond timestamp as the JSON number Prometheus emits.
 ///
-/// `serde_json` renders an `f64` of `10` as `10.0`, so the value is carried as
-/// a pre-formatted [`RawValue`](serde_json::value::RawValue) number token to
-/// keep the output byte-exact.
+/// Prometheus emits this number from `jsonutil.MarshalTimestamp`. The number is
+/// a bare integer for whole seconds, and otherwise a fraction with the trailing
+/// zeros trimmed. Examples: `10`, `1435781430.781`, `-0.5`.
+///
+/// `serde_json` renders an `f64` of `10` as `10.0`. This function therefore
+/// carries the value as a pre-formatted
+/// [`RawValue`](serde_json::value::RawValue) number token, which keeps the
+/// output byte-exact.
 fn timestamp_seconds(ts_ms: i64) -> Box<serde_json::value::RawValue> {
     let token = format_timestamp_token(ts_ms);
     serde_json::value::RawValue::from_string(token)
         .expect("timestamp token is always valid JSON number syntax")
 }
 
-/// Build the JSON number token for a millisecond timestamp, mirroring
-/// Prometheus `MarshalTimestamp`: write the sign, then the absolute integer
-/// seconds, then a trailing-zero-trimmed millisecond fraction when non-zero.
+/// Builds the JSON number token for a millisecond timestamp.
+///
+/// This function mirrors Prometheus `MarshalTimestamp`. It writes the sign, then
+/// the absolute integer seconds, then a millisecond fraction with the trailing
+/// zeros trimmed when that fraction is non-zero.
 fn format_timestamp_token(ts_ms: i64) -> String {
     let mut out = String::new();
     if ts_ms < 0 {
@@ -473,12 +482,13 @@ pub(super) fn sample_string(value: f64) -> String {
     format_sample_value(value)
 }
 
-/// Format a float exactly like Prometheus `jsonutil.MarshalFloat`, which calls
-/// Go's `strconv.AppendFloat(f, fmt, -1, 64)`.
+/// Formats a float exactly like Prometheus `jsonutil.MarshalFloat`.
 ///
-/// Go picks `'e'` (scientific) notation when the magnitude is `< 1e-6` or
-/// `>= 1e21`, and `'f'` (plain decimal) otherwise. Precision `-1` means the
-/// shortest representation that round-trips back to the same `f64`.
+/// `jsonutil.MarshalFloat` calls the Go function
+/// `strconv.AppendFloat(f, fmt, -1, 64)`. Go picks the `'e'` scientific notation
+/// when the magnitude is `< 1e-6` or `>= 1e21`, and the `'f'` plain decimal
+/// notation otherwise. Precision `-1` means the shortest representation that
+/// round-trips back to the same `f64`.
 pub(crate) fn format_sample_value(f: f64) -> String {
     if f.is_nan() {
         return "NaN".to_string();
@@ -501,11 +511,12 @@ pub(crate) fn format_sample_value(f: f64) -> String {
     }
 }
 
-/// Render `f` in Go's `'e'` form (e.g. `1e+21`, `9.999e-07`, `-1.5e-07`).
+/// Renders `f` in the Go `'e'` form, for example `1e+21`, `9.999e-07`, `-1.5e-07`.
 ///
-/// Rust's `{:e}` produces the same shortest mantissa but a bare exponent
-/// (`1e21`, `9.999e-7`); Go always writes a sign and at least two exponent
-/// digits, so we re-assemble the exponent suffix here.
+/// The Rust `{:e}` format produces the same shortest mantissa but a bare
+/// exponent, such as `1e21` and `9.999e-7`. Go always writes a sign and at least
+/// two exponent digits. This function therefore re-assembles the exponent
+/// suffix.
 fn format_float_exponent(f: f64) -> String {
     let rust = format!("{f:e}");
     let (mantissa, exponent) = rust

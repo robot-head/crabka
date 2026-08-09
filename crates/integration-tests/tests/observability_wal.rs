@@ -1,8 +1,9 @@
 //! Live broker coverage for the observability logs WAL.
 //!
-//! This drives the real Kafka producer and consumer clients against an
-//! in-process Crabka broker, proving the distributor-facing WAL sink and the
-//! querier/compactor-facing WAL consumer agree on the durable record boundary.
+//! The test drives the real Kafka producer and consumer clients against an
+//! in-process Crabka broker. It proves that the distributor-facing WAL sink and
+//! the querier/compactor-facing WAL consumer agree on the durable record
+//! boundary.
 
 use std::{
     collections::BTreeMap,

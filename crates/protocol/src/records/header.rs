@@ -109,7 +109,7 @@ use zerocopy::{
 };
 
 /// The fixed 61-byte v2 record-batch header, reinterpreted in place from
-/// the wire bytes via `zerocopy`.
+/// the wire bytes with `zerocopy`.
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub struct RecordBatchHeader {
@@ -142,23 +142,28 @@ pub const BASE_OFFSET_RANGE: std::ops::Range<usize> = 0..8;
 /// within a v2 record-batch header.
 pub const LEADER_EPOCH_RANGE: std::ops::Range<usize> = 12..16;
 
-/// First byte covered by the v2 batch CRC (`attributes` onward). Bytes
-/// `0..21` — `base_offset`, `batch_length`, `partition_leader_epoch`,
-/// `magic`, and the `crc` field itself — are **outside** the CRC region.
+/// First byte covered by the v2 batch CRC, which starts at `attributes`.
+///
+/// Bytes `0..21` are outside the CRC region. Those bytes are `base_offset`,
+/// `batch_length`, `partition_leader_epoch`, `magic`, and the `crc` field
+/// itself.
 pub const CRC_COVERAGE_START: usize = 21;
 
-/// Patch `base_offset` (bytes 0..8) and `partition_leader_epoch`
-/// (bytes 12..16) in place in a writable copy of the verbatim batch
-/// bytes, writing both as big-endian.
+/// Patches `base_offset` and `partition_leader_epoch` in place in a writable
+/// copy of the verbatim batch bytes.
 ///
-/// Both fields lie **before** [`CRC_COVERAGE_START`], so this never
-/// invalidates the producer's CRC — the broker can stamp the assigned
-/// offset and leader epoch without recomputing CRC or touching the body.
+/// `base_offset` is bytes 0..8 and `partition_leader_epoch` is bytes 12..16.
+/// This function writes both as big-endian.
+///
+/// Both fields lie before [`CRC_COVERAGE_START`], so this function never
+/// invalidates the producer's CRC. The broker can stamp the assigned offset
+/// and leader epoch without a CRC recomputation and without a change to the
+/// body.
 ///
 /// # Panics
 ///
-/// Panics if `buf` is shorter than [`HEADER_LEN`]; callers must validate
-/// the batch header (e.g. via borrowed decode) first.
+/// Panics if `buf` is shorter than [`HEADER_LEN`]. Callers must validate the
+/// batch header first, for example with a borrowed decode.
 pub fn patch_base_offset_and_leader_epoch(buf: &mut [u8], base_offset: i64, leader_epoch: i32) {
     assert2::assert!(buf.len() >= HEADER_LEN);
     buf[BASE_OFFSET_RANGE].copy_from_slice(&base_offset.to_be_bytes());
@@ -333,8 +338,8 @@ mod tests {
         assert2::assert!(cleared == Attributes(0b0000_0000_0011_0000));
     }
 
-    /// Build a sample 61-byte header with known values. Reused across the
-    /// header table tests below.
+    /// Builds a sample 61-byte header with known values. The header table
+    /// tests below reuse it.
     fn sample_header_bytes() -> [u8; HEADER_LEN] {
         let mut buf = [0u8; HEADER_LEN];
         buf[0..8].copy_from_slice(&100i64.to_be_bytes()); // base_offset

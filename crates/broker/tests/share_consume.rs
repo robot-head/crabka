@@ -1,22 +1,23 @@
 //! End-to-end integration tests for KIP-932 Slice C: share-partition consume
-//! (`ShareFetch`, `api_key` 78) + acknowledge (`ShareAcknowledge`, `api_key` 79),
-//! driven against an in-process Crabka broker via `crabka-client-core`.
+//! (`ShareFetch`, `api_key` 78) and acknowledge (`ShareAcknowledge`, `api_key`
+//! 79), driven against an in-process Crabka broker through `crabka-client-core`.
 //!
-//! The typed client works because `ApiVersions` advertises `api_keys` 78/79; both
-//! `ShareFetchRequest` / `ShareAcknowledgeRequest` impl `ProtocolRequest`, so
-//! `client.send(req)` returns the typed response and exercises the real wire
-//! path (version negotiation through `ApiVersions` — both RPCs are MIN=1 MAX=2,
-//! so the client negotiates v2).
+//! The typed client works because `ApiVersions` advertises `api_keys` 78/79.
+//! Both `ShareFetchRequest` / `ShareAcknowledgeRequest` impl `ProtocolRequest`,
+//! so `client.send(req)` returns the typed response and exercises the real wire
+//! path. The client negotiates the version through `ApiVersions`. Both RPCs are
+//! MIN=1 MAX=2, so the client negotiates v2.
 //!
 //! These tests prove the full acquire/ack loop:
 //! - acquire under a lock and read the verbatim record bytes;
-//! - Accept advances the SPSO (and the advance survives a broker restart, i.e.
-//!   it was persisted to the share coordinator);
+//! - Accept advances the SPSO, and the advance survives a broker restart, which
+//!   shows the broker persisted it to the share coordinator;
 //! - Release re-delivers with an incremented `delivery_count`;
 //! - Reject archives and advances the SPSO past the poison record;
-//! - an unacknowledged lock that expires is re-delivered by the background
-//!   lock-timeout sweep;
-//! - a record that exhausts `max_delivery_attempts` is archived (poison pill);
+//! - the background lock-timeout sweep re-delivers an unacknowledged lock that
+//!   expires;
+//! - the broker archives a record that exhausts `max_delivery_attempts` (poison
+//!   pill);
 //! - the share-session epoch state machine rejects stale / unknown epochs.
 
 use std::{
@@ -116,12 +117,13 @@ fn wire(tid: uuid::Uuid) -> WireUuid {
     WireUuid(*tid.as_bytes())
 }
 
-/// Bootstrap `__share_group_state` (created lazily by `FindCoordinator(SHARE)`,
-/// exactly as a KIP-932 client does) and wait until this broker has materialized
-/// the state partition that owns `key`. Until that partition is led locally, the
-/// share-partition manager's persist would route to a not-yet-present leader and
-/// the SPSO advance would only live in memory — so a restart would lose it. This
-/// is the share-state analogue of waiting for the data partition.
+/// Bootstrap `__share_group_state` and wait until this broker has materialized
+/// the state partition that owns `key`. `FindCoordinator(SHARE)` creates the
+/// topic lazily, exactly as a KIP-932 client does. Until this broker leads that
+/// partition, the share-partition manager's persist would route to a
+/// not-yet-present leader, and the SPSO advance would only live in memory. A
+/// restart would then lose it. This is the share-state analogue of waiting for
+/// the data partition.
 const SHARE_STATE_TOPIC: &str = "__share_group_state";
 // These single-broker tests only need one state partition. Keeping the test
 // geometry small also prevents the parallel test runner from exhausting its
@@ -170,13 +172,13 @@ async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Cl
 }
 
 /// Wait until the group-coordinator lifecycle hook has durably initialized the
-/// share state for `(group, topic, partition)` (the persister summary becomes
-/// present). Until this lands the share coordinator is not yet write-ready and a
-/// consume's SPSO advance would not persist.
+/// share state for `(group, topic, partition)`. The persister summary then
+/// becomes present. Until that happens the share coordinator is not yet
+/// write-ready, and a consume's SPSO advance would not persist.
 ///
-/// The lifecycle hook fires on each heartbeat, so this drives steady-state
-/// heartbeats inside the wait loop (mirroring `share_groups.rs`'s
-/// `lifecycle_initializes_share_state` pattern) rather than sleeping.
+/// The lifecycle hook fires on each heartbeat, so this helper drives
+/// steady-state heartbeats inside the wait loop rather than sleeping. It mirrors
+/// the `lifecycle_initializes_share_state` pattern in `share_groups.rs`.
 async fn wait_for_share_init(
     broker: &crabka_broker::BrokerHandle,
     client: &Client,
@@ -215,9 +217,9 @@ async fn wait_for_share_init(
 /// Produce `n` records into `(topic, partition)` in a single batch. Each record
 /// carries a tiny distinct value so the bytes are non-empty.
 ///
-/// Retries while the freshly-created partition is still materializing its leader
-/// (`UNKNOWN_TOPIC_OR_PARTITION` / `NOT_LEADER_OR_FOLLOWER`), exactly as a real
-/// producer would.
+/// This helper retries while the freshly-created partition is still
+/// materializing its leader (`UNKNOWN_TOPIC_OR_PARTITION` /
+/// `NOT_LEADER_OR_FOLLOWER`), exactly as a real producer would.
 async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32, n: i64) {
     for _ in 0..40 {
         let records: Vec<Record> = (0..n)
@@ -273,7 +275,7 @@ async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32
 }
 
 /// Join `group` as a fresh member subscribed to `topic` so the share actor
-/// knows the member (the `ShareFetch` membership check needs this). Returns
+/// knows the member. The `ShareFetch` membership check needs this. Returns
 /// `(member_id, member_epoch)` so the caller can drive heartbeats inside the
 /// `wait_for_share_init` lifecycle loop.
 async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
@@ -294,7 +296,7 @@ async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
 }
 
 /// Build a `ShareFetchRequest` for a single `(topic_id, partition)` at the given
-/// share-session epoch, optionally piggybacking acknowledgement batches.
+/// share-session epoch. The request can also carry acknowledgement batches.
 fn share_fetch_req(
     group: &str,
     member: &str,
@@ -330,10 +332,11 @@ fn share_fetch_req(
     }
 }
 
-/// `ShareFetch`, retrying while the share-state leadership / acquisition is still
-/// settling. The first acquire pass after topic creation can briefly find the
-/// `__share_group_state` partition still materializing; mirror `share_state.rs`'s
-/// retry-on-not-ready loop. Returns the (single) partition row.
+/// `ShareFetch`. This helper retries while the share-state leadership and
+/// acquisition are still settling. The first acquire pass after topic creation
+/// can briefly find the `__share_group_state` partition still materializing, so
+/// this helper mirrors the retry-on-not-ready loop in `share_state.rs`. Returns
+/// the (single) partition row.
 async fn share_fetch(
     client: &Client,
     group: &str,
@@ -396,7 +399,7 @@ async fn share_ack(
 }
 
 /// A renew-ack `ShareAcknowledge` (`is_renew_ack = true`) over `[first, last]`
-/// with *empty* ack types — the broker renew path extends each batch's lock
+/// with *empty* ack types. The broker renew path extends each batch's lock
 /// without changing record state. Returns the partition row.
 async fn share_renew(
     client: &Client,
@@ -444,10 +447,10 @@ fn acquired_count(p: &crabka_protocol::owned::share_fetch_response::PartitionDat
         .sum()
 }
 
-/// Perform the very first `ShareFetch` for a freshly-created topic, retrying
-/// until the acquire pass actually returns records (leadership/materialization
-/// of both the data partition and `__share_group_state` may still be settling).
-/// Asserts the supplied invariant on the resulting row.
+/// Do the very first `ShareFetch` for a freshly-created topic. This helper
+/// retries until the acquire pass actually returns records. Leadership and
+/// materialization of both the data partition and `__share_group_state` may
+/// still be settling. Asserts the supplied invariant on the resulting row.
 async fn fetch_until_acquired(
     client: &Client,
     group: &str,
@@ -473,8 +476,9 @@ async fn fetch_until_acquired(
 // Tests.
 // ────────────────────────────────────────────────────────────────────────
 
-/// Acquire 3 records, Accept them all, observe the SPSO advance, then prove the
-/// advance was persisted by restarting the broker on the same data dir.
+/// Acquire 3 records, Accept them all, and observe the SPSO advance. The test
+/// then restarts the broker on the same data dir to prove the broker persisted
+/// the advance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consume_accept_restart() {
     let _permit = broker_test_permit().await;
@@ -594,8 +598,9 @@ async fn release_redelivers() {
     );
 }
 
-/// Reject archives the records: they are never re-delivered AND the SPSO
-/// advances past them (a freshly produced offset is the only thing acquired).
+/// Reject archives the records: the broker never re-delivers them AND the SPSO
+/// advances past them. A freshly produced offset is the only thing the test
+/// acquires.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reject_archives() {
     let _permit = broker_test_permit().await;
@@ -653,15 +658,15 @@ async fn reject_archives() {
 }
 
 /// Regression: a `ShareFetch` whose acquired offset begins a *later* record
-/// batch (a leading multi-record batch was already consumed/archived) must
-/// still return that offset's record bytes — not an empty payload.
+/// batch must still return that offset's record bytes, not an empty payload.
+/// The broker already consumed or archived a leading multi-record batch.
 ///
-/// `ShareFetch.partition_max_bytes` is a v0-only field; at the supported
+/// `ShareFetch.partition_max_bytes` is a v0-only field. At the supported
 /// versions (v1+) it is absent and decodes to 0. The read path must not use
-/// that 0 as the log-read byte budget: a 0 budget reads only one batch header,
-/// which cannot skip the leading batch to reach the acquired offset, so the
-/// acquired record is returned with no bytes (and stays locked). The read must
-/// fall back to the request-level `max_bytes`.
+/// that 0 as the log-read byte budget. A 0 budget reads only one batch header,
+/// which cannot skip the leading batch to reach the acquired offset. The broker
+/// then returns the acquired record with no bytes, and the record stays locked.
+/// The read must fall back to the request-level `max_bytes`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acquire_past_leading_batch_returns_bytes() {
     let _permit = broker_test_permit().await;
@@ -727,8 +732,8 @@ async fn acquire_past_leading_batch_returns_bytes() {
     );
 }
 
-/// An acquired-but-unacknowledged lock that expires is reverted by the
-/// background sweep, so the next fetch re-delivers at an incremented count.
+/// The background sweep reverts an acquired-but-unacknowledged lock that
+/// expires, so the next fetch re-delivers at an incremented count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lock_timeout_redelivers() {
     let _permit = broker_test_permit().await;
@@ -769,8 +774,8 @@ async fn lock_timeout_redelivers() {
     );
 }
 
-/// A record that exhausts `max_delivery_attempts` without an Accept is archived
-/// (poison pill): subsequent fetches acquire nothing and the SPSO advances.
+/// The broker archives a record that exhausts `max_delivery_attempts` without
+/// an Accept (poison pill). Later fetches acquire nothing and the SPSO advances.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delivery_limit_archives() {
     let _permit = broker_test_permit().await;
@@ -880,15 +885,16 @@ async fn session_epoch_validation() {
 // Slice F tests.
 // ────────────────────────────────────────────────────────────────────────
 
-/// F1 (renew): a renew-ack extends the acquisition lock, so a record that would
-/// otherwise be re-delivered after its lock expires is NOT re-acquired.
+/// F1 (renew): a renew-ack extends the acquisition lock. The broker does NOT
+/// re-acquire a record that it would otherwise re-deliver after the lock expires.
 ///
 /// Config: `record_lock_duration = 500ms` (sweeper ticks at 250ms). Acquire
-/// offset 0 (lock 500ms), send a renew-ack ~200ms in — which resets the
-/// deadline to renew-time + 500ms (≈ T0+700ms) — then check at ~T0+600ms, which
-/// is PAST the original 500ms deadline (so an un-renewed lock would already
-/// have been swept and re-delivered) but BEFORE the renewed 700ms deadline. The
-/// renew kept the record Acquired, so the fetch acquires nothing.
+/// offset 0 with a 500ms lock, then send a renew-ack about 200ms in. The
+/// renew-ack resets the deadline to renew-time + 500ms (≈ T0+700ms). Then check
+/// at about T0+600ms, which is PAST the original 500ms deadline but BEFORE the
+/// renewed 700ms deadline. The sweeper would already have swept and re-delivered
+/// an un-renewed lock. The renew kept the record Acquired, so the fetch acquires
+/// nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn renew_extends_lock_not_redelivered() {
     let _permit = broker_test_permit().await;
@@ -940,8 +946,8 @@ async fn renew_extends_lock_not_redelivered() {
 }
 
 /// F1 (control): the SAME timing WITHOUT a renew re-acquires the offset after
-/// the lock expires, at `delivery_count` 2 — proving the renew above is what
-/// suppressed the redelivery (not slack in the timing).
+/// the lock expires, at `delivery_count` 2. This proves the renew above
+/// suppressed the redelivery, and that slack in the timing did not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_renew_redelivers_after_lock_expiry() {
     let _permit = broker_test_permit().await;
@@ -983,11 +989,11 @@ async fn no_renew_redelivers_after_lock_expiry() {
 /// never surfaces records from an OPEN transaction (offsets past the LSO).
 ///
 /// A transactional producer begins a txn and sends 3 records but does NOT
-/// commit — so the partition's HWM is 3 while the LSO stays at 0. A
-/// `read_committed` share fetch clamps its read window to `min(LSO, HWM) = 0`, so
-/// it acquires nothing. After the txn commits the LSO advances to 3 and the
-/// same group then acquires all 3 — proving the clamp tracked the LSO and the
-/// records were merely deferred, not lost.
+/// commit. The partition's HWM is then 3 while the LSO stays at 0. A
+/// `read_committed` share fetch clamps its read window to `min(LSO, HWM) = 0`,
+/// so it acquires nothing. After the txn commits, the LSO advances to 3 and the
+/// same group then acquires all 3. This proves the clamp tracked the LSO, and
+/// that the broker merely deferred the records and did not lose them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_committed_skips_open_txn_then_sees_committed() {
     use crabka_broker::coordinator::unified::share::config::ShareIsolationLevel;
@@ -1083,10 +1089,11 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
 }
 
 /// Produce a single record carrying `value` into `(topic, partition)` as its OWN
-/// batch (so each offset is a distinct on-disk batch). This matters for the
+/// batch, so each offset is a distinct on-disk batch. This matters for the
 /// fragmented-window read test: the share-fetch read path reads verbatim bytes
-/// at *batch* granularity, so to surface byte-exact disjoint offsets each offset
-/// must be its own batch. Retries while the partition is still materializing.
+/// at *batch* granularity, so each offset must be its own batch to surface
+/// byte-exact disjoint offsets. This helper retries while the partition is still
+/// materializing.
 async fn produce_one(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32, value: &str) {
     for _ in 0..40 {
         let resp = client
@@ -1135,18 +1142,20 @@ async fn produce_one(client: &Client, topic: &str, tid: uuid::Uuid, partition: i
 }
 
 /// F5 (fragmented window): a single share fetch that returns DISJOINT acquired
-/// ranges must carry record bytes for exactly the acquired offsets — the gap
+/// ranges must carry record bytes for exactly the acquired offsets. The gap
 /// offset's value must not appear.
 ///
-/// Scenario: produce 3 records as THREE separate single-record batches (so
-/// offsets 0, 1, 2 are each their own on-disk batch — the share-fetch read is
-/// batch-granular, so byte-exact disjoint reads require separate batches).
-/// Acquire 0..2, then Accept the MIDDLE offset (1) only and Release the outer
-/// offsets 0 and 2. The SPSO stays at 0 (offset 0 isn't accepted); offset 1 is
-/// acknowledged and offsets 0, 2 return to Available — leaving a gap at offset
-/// 1. The re-fetch acquires the DISJOINT set {0, 2}; the read concatenates the
+/// Scenario: produce 3 records as THREE separate single-record batches, so
+/// offsets 0, 1, 2 are each their own on-disk batch. The share-fetch read is
+/// batch-granular, so byte-exact disjoint reads need separate batches. Acquire
+/// 0..2, then Accept the MIDDLE offset (1) only and Release the outer offsets 0
+/// and 2. The SPSO stays at 0 because offset 0 is not accepted. The broker
+/// acknowledges offset 1, and offsets 0, 2 return to Available, and that leaves
+/// a gap at offset 1.
+///
+/// The re-fetch acquires the DISJOINT set {0, 2}. The read concatenates the
 /// per-range bytes, so the payload decodes to exactly offsets {0, 2} (values
-/// v0, v2) — never the gap offset 1's value v1.
+/// v0, v2), never the gap offset 1's value v1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fragmented_window_records_match_acquired_offsets() {
     let _permit = broker_test_permit().await;

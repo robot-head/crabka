@@ -1,6 +1,8 @@
-//! Compatibility engine: resolve the effective level, pick the version set, and
-//! run the per-format directional check. Format-agnostic (delegates to
-//! `format::check`); knows nothing about Avro/Protobuf/JSON internals.
+//! Compatibility engine.
+//!
+//! It resolves the effective level, picks the version set, and runs the
+//! per-format directional check. It is format-agnostic and delegates to
+//! `format::check`. It knows nothing about Avro, Protobuf, or JSON internals.
 
 use crate::{
     error::SrError,
@@ -38,9 +40,9 @@ pub struct Verdict {
 }
 
 impl CompatibilityLevel {
-    /// Parse a stored level string; unknown strings fall back to the global
-    /// default `BACKWARD` (the `/config` layer validates input, so unknowns
-    /// are not expected).
+    /// Parse a stored level string. An unknown string falls back to the global
+    /// default `BACKWARD`. The `/config` layer validates input, so an unknown
+    /// string is not expected.
     #[must_use]
     pub fn parse(s: &str) -> Self {
         Self::try_parse(s).unwrap_or(Self::Backward)
@@ -79,7 +81,8 @@ impl CompatibilityLevel {
     }
 }
 
-/// Effective level for a subject: per-subject `/config` override if set, else global.
+/// Effective level for a subject. It is the per-subject `/config` override when
+/// set, and the global level otherwise.
 fn effective_level(snap: &StoreState, subject: &str) -> CompatibilityLevel {
     let s = snap
         .subject_compat(subject)
@@ -88,7 +91,7 @@ fn effective_level(snap: &StoreState, subject: &str) -> CompatibilityLevel {
 }
 
 /// Run `candidate` against one existing version's schema in the given
-/// directions, collecting failure messages.
+/// directions and collect the failure messages.
 fn check_pair(
     ty: SchemaType,
     candidate: &str,
@@ -109,8 +112,10 @@ fn check_pair(
     }
 }
 
-/// Enforcement on register: `Ok(())` if compatible / `NONE` / first version;
-/// `Err(SrError::Incompatible)` otherwise. `candidate` must be normalised.
+/// Enforcement on register. It returns `Ok(())` when the candidate is
+/// compatible, when the level is `NONE`, or when this is the first version. It
+/// returns `Err(SrError::Incompatible)` in every other case. `candidate` must
+/// be normalised.
 #[tracing::instrument(
     level = "debug",
     name = "compat.check_registration",
@@ -170,9 +175,9 @@ pub fn check_registration(
     }
 }
 
-/// `/compatibility` query: verdict of `candidate` against version `version`
-/// (`None` = latest) under the subject's effective level. `Err` for unknown
-/// subject/version.
+/// `/compatibility` query. It returns the verdict of `candidate` against
+/// version `version` under the subject's effective level, where `None` means
+/// the latest version. It returns `Err` for an unknown subject or version.
 #[tracing::instrument(
     level = "debug",
     name = "compat.check_against_version",

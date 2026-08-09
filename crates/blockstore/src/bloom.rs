@@ -60,9 +60,10 @@ impl BloomShard {
         }
     }
 
-    /// Reject a deserialized shard that would panic on lookup: `num_bits == 0`
-    /// (divide-by-zero in `probes`) or a `bits` vector too short to hold every
-    /// bit position (out-of-bounds index in `maybe_contains`/`insert`).
+    /// Rejects a deserialized shard that would panic on lookup. Such a shard
+    /// has `num_bits == 0`, which is a divide-by-zero in `probes`, or a `bits`
+    /// vector too short to hold every bit position, which is an out-of-bounds
+    /// index in `maybe_contains` or `insert`.
     fn validate(&self) -> Result<(), String> {
         if self.num_bits == 0 {
             return Err("bloom shard num_bits must be non-zero".into());
@@ -131,11 +132,12 @@ impl ShardedTraceBloom {
         bloom
     }
 
-    /// Validate invariants that constructors enforce but `Deserialize`
-    /// bypasses, so a corrupt snapshot errors at load time rather than
-    /// panicking on the first lookup. Rejects an empty `shards` vector (would
-    /// divide-by-zero in [`Self::shard_of`]) and any structurally invalid
-    /// shard.
+    /// Validates the invariants that constructors enforce but `Deserialize`
+    /// bypasses, so a corrupt snapshot errors at load time and does not panic
+    /// on the first lookup.
+    ///
+    /// The method rejects an empty `shards` vector, which would divide by zero
+    /// in [`Self::shard_of`], and any structurally invalid shard.
     ///
     /// # Errors
     ///

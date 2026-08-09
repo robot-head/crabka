@@ -21,17 +21,19 @@ spec:
             properties:
               authentication:
                 description: |-
-                  Tagged enum on `type`, mirroring Strimzi.
+                  Tagged enum on `type`, in the same shape as Strimzi.
 
-                  The wire shape is flat (Strimzi-compatible): `type` is the
-                  discriminator and per-variant config fields are siblings of `type`.
-                  The custom `schema_with` hand-rolls a structural schema because
-                  kube-rs 3.x's `StructuralSchemaRewriter` panics when `oneOf`
-                  branches share a `type` property with differing `enum` values (the
-                  default schemars output for tagged-union enums). Same workaround as
-                  `Storage` in `kafka_node_pool.rs`. Cross-variant constraints (e.g.
-                  "`iterations` only valid when `type=scram-sha-512`") are enforced
-                  by the operator at reconcile time, not by the apiserver.
+                  The wire shape is flat and Strimzi-compatible. `type` is the discriminator,
+                  and the per-variant config fields are siblings of `type`. The custom
+                  `schema_with` writes a structural schema by hand, because the
+                  `StructuralSchemaRewriter` of kube-rs 3.x panics when `oneOf` branches
+                  share a `type` property with different `enum` values. That is the default
+                  schemars output for tagged-union enums. This is the same workaround as
+                  `Storage` in `kafka_node_pool.rs`.
+
+                  The operator enforces the cross-variant constraints at reconcile time, and
+                  the apiserver does not. One such constraint is that `iterations` is valid
+                  only when `type=scram-sha-512`.
                 properties:
                   iterations:
                     maximum: 1000000.0
@@ -71,8 +73,9 @@ spec:
                 type: object
               authorization:
                 description: |-
-                  Authorization is optional — a user with no ACLs can still
-                  authenticate. When absent, ACL reconciliation is skipped.
+                  Authorization is optional. A user with no ACLs can still
+                  authenticate. When this field is absent, the operator skips ACL
+                  reconciliation.
                 nullable: true
                 oneOf:
                 - required:
@@ -82,19 +85,19 @@ spec:
                     default: []
                     items:
                       description: |-
-                        One rule from `spec.authorization.acls`. Expanded into one
-                        `(resource, operation, host, type)` tuple per `operations` entry
-                        at reconcile time.
+                        One rule from `spec.authorization.acls`. The operator expands it into one
+                        `(resource, operation, host, type)` tuple per `operations` entry at
+                        reconcile time.
                       properties:
                         host:
                           description: |-
-                            Source-address pattern; `"*"` is the wildcard. Defaults to
-                            `"*"` when omitted.
+                            Source-address pattern. `"*"` is the wildcard. Defaults to `"*"` when
+                            omitted.
                           type: string
                         operations:
                           description: |-
-                            Non-empty list — the reconciler refuses an empty `operations`
-                            with `Ready=False reason=InvalidSpec`.
+                            Non-empty list. The reconciler refuses an empty `operations` with
+                            `Ready=False reason=InvalidSpec`.
                           items:
                             description: |-
                               All 11 Kafka ACL operations. Matches the discriminants in
@@ -120,8 +123,8 @@ spec:
                             patternType:
                               default: literal
                               description: |-
-                                `literal` (exact match) or `prefixed` (resources whose name
-                                starts with `name`). Defaults to `literal`.
+                                `literal` for an exact match, or `prefixed` for resources whose name
+                                starts with `name`. Defaults to `literal`.
                               enum:
                               - literal
                               - prefixed
@@ -156,12 +159,12 @@ spec:
                 type: object
               quotas:
                 description: |-
-                  Optional per-user client quotas (KIP-13/124/257).
-                  Maps onto Kafka's `(user)` quota entity via `AlterClientQuotas`
-                  (`api_key` 49). Absent → operator does not touch the broker's
-                  quota state; present → the operator drives the broker's quota
-                  keys for `User:<name>` toward the spec (sets configured fields,
-                  tombstones omitted ones).
+                  Optional per-user client quotas (KIP-13/124/257). This field maps
+                  onto Kafka's `(user)` quota entity through `AlterClientQuotas`, which
+                  is `api_key` 49. When the field is absent, the operator does not touch
+                  the broker's quota state. When the field is present, the operator
+                  drives the broker's quota keys for `User:<name>` toward the spec. It
+                  sets the configured fields and tombstones the omitted ones.
                 nullable: true
                 properties:
                   consumerByteRate:
@@ -172,7 +175,7 @@ spec:
                     type: integer
                   controllerMutationRate:
                     description: |-
-                      KIP-599 controller-mutation rate (creates/deletes/sec).
+                      KIP-599 controller-mutation rate in creates and deletes per second.
                       Backed by `controller_mutation_rate`.
                     format: double
                     nullable: true
@@ -185,8 +188,8 @@ spec:
                     type: integer
                   requestPercentage:
                     description: |-
-                      Maximum percentage of a request-handler thread's time the user
-                      may consume (0..=100). Backed by `request_percentage`.
+                      Maximum percentage of a request-handler thread's time that the user
+                      can consume, in the range `0..=100`. Backed by `request_percentage`.
                     format: int32
                     maximum: 100.0
                     minimum: 0.0
@@ -201,7 +204,7 @@ spec:
             properties:
               conditions:
                 default: []
-                description: Standard Kubernetes-style condition list. Surfaces `Ready`.
+                description: Standard Kubernetes-style condition list. It shows `Ready`.
                 items:
                   properties:
                     lastTransitionTime:
@@ -217,7 +220,7 @@ spec:
                       description: '`True`, `False`, or `Unknown`.'
                       type: string
                     type:
-                      description: e.g. `Ready`.
+                      description: For example, `Ready`.
                       type: string
                   required:
                   - lastTransitionTime
@@ -229,38 +232,37 @@ spec:
                 type: array
               delegationTokenExpiryTimestampMs:
                 description: |-
-                  Current `expiry_timestamp_ms` of the operator-managed
-                  delegation token (extended on each successful renew). Compared
-                  against `now` to decide when to renew per
-                  `spec.authentication.renewBeforeExpiry`.
+                  Current `expiry_timestamp_ms` of the operator-managed delegation
+                  token. Each successful renew extends it. The operator compares it
+                  against `now` to decide when to renew, as
+                  `spec.authentication.renewBeforeExpiry` specifies.
                 format: int64
                 nullable: true
                 type: integer
               delegationTokenId:
                 description: |-
-                  Persisted `token_id` (UUID) of the operator-managed
-                  delegation token for this user. Used across reconciles to find
-                  the same token via `DescribeDelegationToken`. Present once the
-                  operator has successfully issued a token via
-                  `CreateDelegationToken`.
+                  Persisted `token_id`, a UUID, of the operator-managed delegation
+                  token for this user. The operator uses it across reconciles to find the
+                  same token with `DescribeDelegationToken`. It is present once the
+                  operator has issued a token with `CreateDelegationToken`.
                 nullable: true
                 type: string
               delegationTokenMaxTimestampMs:
                 description: |-
-                  Token's absolute upper bound (`max_timestamp_ms`).
-                  Renew can never push `expiry_timestamp_ms` past this — the
-                  operator stops renewing and surfaces `TokenExpiring` once
-                  further extension is impossible.
+                  Token's absolute upper bound, which is `max_timestamp_ms`. A renew can
+                  never push `expiry_timestamp_ms` past this bound. The operator stops
+                  the renews and surfaces `TokenExpiring` once no more extension is
+                  possible.
                 format: int64
                 nullable: true
                 type: integer
               external:
                 default: false
                 description: |-
-                  `true` once a credential-less user
-                  (`type: tls-external`) has been reconciled. Surfaces in
-                  `kubectl describe ku` so operators can tell at a glance that
-                  the operator does not own this user's credentials.
+                  `true` once the operator has reconciled a credential-less user with
+                  `type: tls-external`. It appears in `kubectl describe ku`, so that
+                  operators can see that the operator does not own this user's
+                  credentials.
                 type: boolean
               observedGeneration:
                 description: '`metadata.generation` of the last successfully-reconciled spec.'
@@ -270,9 +272,9 @@ spec:
               quotasInSync:
                 default: false
                 description: |-
-                  True once the spec's `quotas` (if any) have been reflected in the
-                  broker's `(user)` client-quota state. False when `spec.quotas`
-                  is `None` (the operator does not touch broker quotas).
+                  True once the operator has reflected the spec's `quotas`, if any, in
+                  the broker's `(user)` client-quota state. False when `spec.quotas` is
+                  `None`, because the operator then does not touch broker quotas.
                 type: boolean
               scramSha256:
                 default: false
@@ -289,8 +291,8 @@ spec:
               tls:
                 default: false
                 description: |-
-                  `true` once a TLS user has a current cert Secret. Mirrors
-                  `scram_sha512`.
+                  `true` once a TLS user has a current cert Secret. It has the same
+                  shape as `scram_sha512`.
                 type: boolean
               tlsCertNotAfter:
                 description: |-
@@ -300,15 +302,14 @@ spec:
                 type: string
               tlsPrincipal:
                 description: |-
-                  The principal string the operator pinned in ACLs (e.g.
-                  `User:CN=alice` for TLS users, `User:alice` for SCRAM and
-                  `tls-external` users). Always populated when the user is
-                  provisioned. Load-bearing for debugging "why isn't my ACL
-                  matching" issues.
+                  The principal string that the operator pinned in ACLs. It is
+                  `User:CN=alice` for TLS users, and `User:alice` for SCRAM and
+                  `tls-external` users. It is always filled in when the user is
+                  provisioned. It is load-bearing for the debug of ACL-match problems.
                 nullable: true
                 type: string
               username:
-                description: Effective Kafka principal name (matches `metadata.name`).
+                description: Effective Kafka principal name. It matches `metadata.name`.
                 nullable: true
                 type: string
             type: object

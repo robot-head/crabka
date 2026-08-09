@@ -38,14 +38,15 @@ pub enum CheckpointServiceStep {
     Pruned,
 }
 
-/// Compile-time test-only crash callback; returning true aborts at `step`.
+/// Compile-time test-only crash callback. When it returns true, the service
+/// aborts at `step`.
 #[cfg(feature = "checkpoint-test-hooks")]
 pub type CheckpointFailpoint = Arc<dyn Fn(CheckpointServiceStep) -> bool + Send + Sync>;
 
 /// Default number of checkpoint directories to retain.
 pub const DEFAULT_CHECKPOINT_RETAIN: usize = 2;
 
-/// Checkpointer thresholds and object layout knobs.
+/// Checkpointer thresholds and object layout settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckpointConfig {
     /// Tenant whose store is checkpointed.
@@ -70,7 +71,7 @@ impl CheckpointConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`SubstrateError`] when required names or numeric knobs are invalid.
+    /// Returns [`SubstrateError`] when required names or numeric settings are invalid.
     pub fn new(
         tenant: String,
         topic: String,
@@ -212,10 +213,12 @@ pub struct CheckpointRun {
 }
 
 /// Shared latest verified checkpoint metadata consumed by SQL planning.
+///
 /// Checkpoint manifests are range/tenant scoped and expose no per-table byte
 /// breakdown, so `total_bytes` is intentionally a conservative global upper
 /// bound returned for every table in that range.
-/// Publication clones the authoritative metadata only after verification; reads
+///
+/// Publication clones the authoritative metadata only after verification. Reads
 /// are synchronous and never retain the lock across an await point.
 #[derive(Debug, Default)]
 pub struct CheckpointPlannerStats {
@@ -351,14 +354,15 @@ where
 
     /// Force one checkpoint attempt against a caller-supplied snapshot.
     ///
-    /// This is the ungated variant: the caller is responsible for `snapshot`
-    /// matching the KV state this service will read. Prefer
-    /// [`Self::checkpoint_from_source`], which holds the writer's group gate
-    /// while it captures both, whenever a live committer can be running.
+    /// This is the ungated variant. The caller must make sure that `snapshot`
+    /// matches the KV state this service will read. Use
+    /// [`Self::checkpoint_from_source`] whenever a live committer can run.
+    /// That method holds the writer's group gate while it captures both.
     ///
     /// # Errors
     ///
-    /// Returns [`SubstrateError`] if snapshotting, manifest writing, truncating, or pruning fails.
+    /// Returns [`SubstrateError`] if the snapshot, the manifest write, the
+    /// truncation, or the prune fails.
     pub async fn checkpoint(
         &self,
         snapshot: CheckpointSnapshot,
@@ -545,7 +549,7 @@ where
 
     /// Spawn a command-only background control loop.
     ///
-    /// Nothing evaluates [`Self::threshold_trigger`] on this loop; use
+    /// Nothing evaluates [`Self::threshold_trigger`] on this loop. Use
     /// [`Self::spawn_with_source`] for any runtime whose WAL must be trimmed
     /// without an external request.
     #[must_use]
@@ -562,12 +566,12 @@ where
     /// The poll deliberately lives on this task and nowhere near a commit. A
     /// [`SubstrateCommitter`](crate::SubstrateCommitter) configured with
     /// `source` borrows `source`'s group gate as its own commit gate and holds
-    /// that single permit for the whole of `commit`, while
+    /// that single permit for the whole of `commit`.
     /// [`CheckpointSnapshotSource::capture`] must acquire the same permit to
-    /// pair the WAL metadata with the KV snapshot. Checking the threshold
-    /// synchronously from `commit` would therefore self-deadlock; checking it
+    /// pair the WAL metadata with the KV snapshot. A synchronous threshold
+    /// check from `commit` would therefore deadlock against itself. A check
     /// from this independent task cannot, because the task holds no lock a
-    /// committer waits on and every commit releases the permit when it returns.
+    /// committer waits on, and every commit releases the permit when it returns.
     #[must_use]
     pub fn spawn_with_source(
         self: Arc<Self>,

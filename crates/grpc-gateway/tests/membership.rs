@@ -1,6 +1,6 @@
 //! `run_membership` builds the `partition → owner_addr` routing table from the
-//! membership topic, and a later claim of the same partition (higher offset)
-//! supersedes an earlier one.
+//! membership topic. A later claim of the same partition, at a higher offset,
+//! replaces an earlier one.
 
 use std::{sync::Arc, time::Duration};
 

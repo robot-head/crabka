@@ -1,6 +1,6 @@
-//! Production `ClientFacade` over `crabka_client_core::Client`. Maps
-//! each trait method to the corresponding admin RPC via raw
-//! `Client::send`, mirroring the ingester pattern.
+//! Production `ClientFacade` over `crabka_client_core::Client`. It maps each
+//! trait method to the matching admin RPC through raw `Client::send`, and
+//! mirrors the ingester pattern.
 
 use std::collections::BTreeMap;
 
@@ -427,7 +427,8 @@ mod tests {
 
     use super::*;
 
-    /// Connect/request timeout for the deliberately-unreachable test client.
+    /// Connect and request timeout for the deliberately unreachable test
+    /// client.
     const CLIENT_TIMEOUT: Time = millis(50);
 
     fn movement(topic: &str, partition: i32, old: Vec<i32>, new: Vec<i32>) -> Movement {

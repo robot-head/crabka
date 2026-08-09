@@ -1,13 +1,13 @@
 //! Wire ↔ metadata enum mapping for ACL handlers.
 //!
-//! Kafka serializes ACL enums as `i8` discriminants. This module
-//! provides the conversions and a tiny error type for "unknown
-//! discriminant" / "ANY where a concrete value is required" cases.
+//! Kafka serializes ACL enums as `i8` discriminants. This module gives the
+//! conversions and a small error type. The error type covers an unknown
+//! discriminant and an ANY value where a concrete value is necessary.
 
 use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
 
-/// Kafka's singleton cluster resource name (`Resource.CLUSTER_NAME`);
-/// every cluster-scoped ACL and authorization check targets this name.
+/// Kafka's singleton cluster resource name (`Resource.CLUSTER_NAME`).
+/// Every cluster-scoped ACL and authorization check targets this name.
 pub const CLUSTER_RESOURCE_NAME: &str = "kafka-cluster";
 
 /// Wire `i8` discriminant of an ACL `resource_type` field.
@@ -19,24 +19,24 @@ pub type OperationCode = i8;
 /// Wire `i8` discriminant of an ACL `permission_type` field.
 pub type PermissionTypeCode = i8;
 
-/// Wire byte for `UNKNOWN` (0) — shared by every ACL enum axis.
+/// Wire byte for `UNKNOWN` (0). Every ACL enum axis shares it.
 const WIRE_UNKNOWN: i8 = 0;
-/// Wire byte for `ANY` (1) — a filter wildcard, never a concrete value;
-/// shared by every ACL enum axis.
+/// Wire byte for `ANY` (1), a filter wildcard and never a concrete value.
+/// Every ACL enum axis shares it.
 const WIRE_ANY: i8 = 1;
-/// Wire byte for `PatternType::MATCH` (2, KIP-290) — a filter-only
+/// Wire byte for `PatternType::MATCH` (2, KIP-290), a filter-only
 /// wildcard that matches both literal and prefixed patterns.
 const WIRE_PATTERN_MATCH: i8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireAclError {
     UnknownDiscriminant,
-    /// ANY/MATCH was used where a concrete value is required.
+    /// A caller passed ANY or MATCH where a concrete value is necessary.
     AnyRequiresFilter,
 }
 
 /// Parse a wire `resource_type` byte into a concrete `ResourceType`.
-/// Used by `CreateAcls` where the resource must be concrete.
+/// `CreateAcls` uses this function, because its resource must be concrete.
 pub fn resource_type_concrete(b: ResourceTypeCode) -> Result<ResourceType, WireAclError> {
     match b {
         2 => Ok(ResourceType::Topic),
@@ -52,7 +52,7 @@ pub fn resource_type_concrete(b: ResourceTypeCode) -> Result<ResourceType, WireA
 
 /// Parse a wire `resource_type` byte into a filter slot.
 ///
-/// `Any` (1) maps to `None`. Used by `DeleteAcls` and `DescribeAcls`.
+/// `Any` (1) maps to `None`. `DeleteAcls` and `DescribeAcls` use it.
 pub fn resource_type_filter(b: ResourceTypeCode) -> Result<Option<ResourceType>, WireAclError> {
     match b {
         WIRE_ANY => Ok(None),
@@ -78,7 +78,7 @@ pub fn resource_type_to_wire(rt: ResourceType) -> ResourceTypeCode {
 }
 
 /// Parse a wire `pattern_type` byte into a concrete `PatternType`.
-/// Used by `CreateAcls` where the pattern must be concrete.
+/// `CreateAcls` uses this function, because its pattern must be concrete.
 pub fn pattern_type_concrete(b: PatternTypeCode) -> Result<PatternType, WireAclError> {
     match b {
         3 => Ok(PatternType::Literal),
@@ -90,8 +90,8 @@ pub fn pattern_type_concrete(b: PatternTypeCode) -> Result<PatternType, WireAclE
 
 /// Parse a wire `pattern_type` byte into a filter slot.
 ///
-/// `Any` (1) and `Match` (2) both collapse to `None`. Used by
-/// `DeleteAcls` and `DescribeAcls`.
+/// `Any` (1) and `Match` (2) both collapse to `None`. `DeleteAcls` and
+/// `DescribeAcls` use this function.
 pub fn pattern_type_filter(b: PatternTypeCode) -> Result<Option<PatternType>, WireAclError> {
     match b {
         // ANY / MATCH both collapse to None for our matcher.
@@ -112,7 +112,7 @@ pub fn pattern_type_to_wire(pt: PatternType) -> PatternTypeCode {
 }
 
 /// Parse a wire `operation` byte into a concrete `AclOperation`.
-/// Used by `CreateAcls` where the operation must be concrete.
+/// `CreateAcls` uses this function, because its operation must be concrete.
 pub fn operation_concrete(b: OperationCode) -> Result<AclOperation, WireAclError> {
     match b {
         2 => Ok(AclOperation::All),
@@ -134,7 +134,7 @@ pub fn operation_concrete(b: OperationCode) -> Result<AclOperation, WireAclError
 
 /// Parse a wire `operation` byte into a filter slot.
 ///
-/// `Any` (1) maps to `None`. Used by `DeleteAcls` and `DescribeAcls`.
+/// `Any` (1) maps to `None`. `DeleteAcls` and `DescribeAcls` use it.
 pub fn operation_filter(b: OperationCode) -> Result<Option<AclOperation>, WireAclError> {
     match b {
         WIRE_ANY => Ok(None),
@@ -174,7 +174,7 @@ pub fn operation_to_wire(op: AclOperation) -> OperationCode {
 }
 
 /// Parse a wire `permission_type` byte into a concrete `PermissionType`.
-/// Used by `CreateAcls` where the permission must be concrete.
+/// `CreateAcls` uses this function, because its permission must be concrete.
 pub fn permission_concrete(b: PermissionTypeCode) -> Result<PermissionType, WireAclError> {
     match b {
         2 => Ok(PermissionType::Deny),
@@ -186,7 +186,7 @@ pub fn permission_concrete(b: PermissionTypeCode) -> Result<PermissionType, Wire
 
 /// Parse a wire `permission_type` byte into a filter slot.
 ///
-/// `Any` (1) maps to `None`. Used by `DeleteAcls` and `DescribeAcls`.
+/// `Any` (1) maps to `None`. `DeleteAcls` and `DescribeAcls` use it.
 pub fn permission_filter(b: PermissionTypeCode) -> Result<Option<PermissionType>, WireAclError> {
     match b {
         WIRE_ANY => Ok(None),
@@ -310,8 +310,9 @@ mod tests {
     }
 
     /// KIP-939: the `TWO_PHASE_COMMIT` operation is wire byte 15 and must
-    /// round-trip through the concrete + filter codecs so `CreateAcls` /
-    /// `DescribeAcls` can carry the 2PC grant on a `TransactionalId`.
+    /// round-trip through the concrete and filter codecs, so that
+    /// `CreateAcls` and `DescribeAcls` can carry the 2PC grant on a
+    /// `TransactionalId`.
     #[test]
     fn two_phase_commit_operation_is_byte_15() {
         check!(operation_to_wire(AclOperation::TwoPhaseCommit) == 15);
@@ -319,10 +320,10 @@ mod tests {
         check!(operation_filter(15) == Ok(Some(AclOperation::TwoPhaseCommit)));
     }
 
-    /// The KIP-48 `TOKEN` (a.k.a. `DELEGATION_TOKEN`)
-    /// resource type, wire byte 6, must round-trip through the wire
-    /// codec so `CreateAcls`/`DeleteAcls`/`DescribeAcls` can carry
-    /// ACLs guarding delegation tokens.
+    /// The KIP-48 `TOKEN` resource type, also named `DELEGATION_TOKEN`, is
+    /// wire byte 6. It must round-trip through the wire codec, so that
+    /// `CreateAcls`, `DeleteAcls`, and `DescribeAcls` can carry ACLs that
+    /// guard delegation tokens.
     #[test]
     fn delegation_token_resource_type_now_accepted() {
         use crabka_metadata::AclEntry;

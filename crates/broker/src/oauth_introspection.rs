@@ -1,6 +1,7 @@
-//! HTTP transport for RFC 7662 introspection + OIDC userinfo. Lives
-//! here (not in `crates/security`) so the security crate stays
-//! I/O-free, mirroring the JWKS-refresher pattern.
+//! HTTP transport for RFC 7662 introspection and OIDC userinfo.
+//!
+//! It lives here instead of in `crates/security`, so that the security crate
+//! stays free of I/O. This mirrors the JWKS-refresher pattern.
 
 use std::{path::Path, sync::Arc};
 
@@ -10,9 +11,10 @@ use crabka_security::{
 };
 use crabka_units::{Time, convert::TimeExt as _};
 
-/// reqwest-backed RFC 7662 introspection client. Uses HTTP Basic Auth
-/// with the operator-configured `client_id` + `client_secret`.
-/// Optionally calls a userinfo endpoint after a successful
+/// reqwest-backed RFC 7662 introspection client.
+///
+/// It uses HTTP Basic Auth with the operator-configured `client_id` and
+/// `client_secret`. It can also call a userinfo endpoint after a successful
 /// introspection.
 #[derive(Debug)]
 pub struct ReqwestIntrospectionClient {
@@ -23,7 +25,8 @@ pub struct ReqwestIntrospectionClient {
     client_secret: String,
 }
 
-/// Errors building the introspection client at broker startup.
+/// Errors that can occur while the broker builds the introspection client at
+/// startup.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error("tls trust: {0}")]
@@ -33,10 +36,13 @@ pub enum BuildError {
 }
 
 impl ReqwestIntrospectionClient {
-    /// Build a new client. When `tls_trust` is `Some`, the rustls
-    /// `ClientConfig` is built via `crabka_security::build_client_config_from_pem`
-    /// — the same trust bundle covers JWKS, introspection,
-    /// and userinfo. When `None`, reqwest's default webpki-roots apply.
+    /// Builds a new client.
+    ///
+    /// When `tls_trust` is `Some`, this method builds the rustls
+    /// `ClientConfig` with
+    /// `crabka_security::build_client_config_from_pem`. The same trust bundle
+    /// then covers JWKS, introspection, and userinfo. When `tls_trust` is
+    /// `None`, reqwest's default webpki-roots apply.
     // Returns Arc<dyn IntrospectionClient> to fit the validator's trait-object
     // slot; constructing the concrete type would just be unwrapped immediately
     // into the Arc.
@@ -143,9 +149,10 @@ mod tests {
         userinfo_auths: Mutex<Vec<String>>,
     }
 
-    /// Spin up an HTTPS test server. Routes:
+    /// Starts an HTTPS test server with these routes:
     ///   POST /introspect  -> `introspect_body` with `introspect_status`
-    ///   GET  /userinfo    -> `userinfo_body` (200) or 404 if None
+    ///   GET  /userinfo    -> `userinfo_body` with 200, or 404 when it is None
+    ///
     /// Returns (addr, shutdown, `ca_pem_path`, observed).
     // TLS handshake + HTTP/1.1 framing + dual-route dispatch sit naturally in one
     // function for the test fixture; extraction would just scatter mock state.

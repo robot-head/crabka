@@ -23,8 +23,10 @@ use crate::{
 };
 
 /// First non-zero per-partition `error_code` in an `OffsetCommitResponse`, or
-/// `0` if every partition committed cleanly. `with_coordinator_refind` reads
-/// this to decide whether to re-discover the coordinator and retry.
+/// `0` if every partition committed cleanly.
+///
+/// `with_coordinator_refind` reads this to decide whether to re-discover the
+/// coordinator and retry.
 fn first_commit_error(resp: &OffsetCommitResponse) -> i16 {
     for t in &resp.topics {
         for p in &t.partitions {
@@ -85,17 +87,21 @@ fn build_commit_request(
     }
 }
 
-/// Map an `OffsetCommit` response to a result, given whether the coordinator
-/// task is still alive. `0` is success. The rebalance codes `ILLEGAL_GENERATION
-/// (22)` and `REBALANCE_IN_PROGRESS (27)` are DEFERRED — treated as `Ok` — ONLY
-/// while the coordinator task is alive to rejoin and republish the generation
-/// (`current_generation`): the offsets stay in `next_offsets` and recommit on
-/// the next call (at-least-once), so a long-running block-builder/compactor
-/// commit loop survives a routine rebalance instead of crashing. If the
-/// coordinator task has EXITED it can never republish a fresh generation, so
-/// deferring would silently never-advance — surface those codes as fatal
-/// instead, so the process restarts and rejoins from scratch. Any other
-/// non-zero code is always fatal.
+/// Map an `OffsetCommit` response to a result, from the response and from
+/// whether the coordinator task is still alive.
+///
+/// `0` is success. This function DEFERS the rebalance codes
+/// `ILLEGAL_GENERATION (22)` and `REBALANCE_IN_PROGRESS (27)`, that is it
+/// treats them as `Ok`, ONLY while the coordinator task is alive to rejoin and
+/// republish the generation in `current_generation`. The offsets then stay in
+/// `next_offsets` and recommit on the next call, which is at-least-once. A
+/// long-running block-builder or compactor commit loop therefore survives a
+/// routine rebalance instead of crashing.
+///
+/// If the coordinator task has EXITED it can never republish a fresh
+/// generation, so deferral would silently never advance. This function then
+/// surfaces those codes as fatal, so the process restarts and rejoins from
+/// scratch. Any other non-zero code is always fatal.
 fn commit_response_result(
     resp: &OffsetCommitResponse,
     coordinator_alive: bool,
@@ -109,7 +115,8 @@ fn commit_response_result(
 
 impl Consumer {
     /// Commit the current next-offsets for every assigned partition.
-    /// Blocks until the broker acks.
+    ///
+    /// This method blocks until the broker acks.
     #[cfg_attr(test, mutants::skip)] // cargo-mutants: I/O-bound coordinator RPC, exercised by integration tests
     #[tracing::instrument(
         name = "consumer.commit_sync",
@@ -189,9 +196,11 @@ impl Consumer {
         commit_response_result(&resp, coordinator_alive)
     }
 
-    /// Fire-and-forget commit. Returns once the request is enqueued on the
-    /// client's writer task; does NOT wait for the broker ack. Errors are
-    /// logged but not returned.
+    /// Fire-and-forget commit.
+    ///
+    /// This method returns once the request is enqueued on the client's writer
+    /// task. It does NOT wait for the broker ack. It logs errors and does not
+    /// return them.
     #[cfg_attr(test, mutants::skip)] // cargo-mutants: fire-and-forget I/O spawn, exercised by integration tests
     #[tracing::instrument(
         name = "consumer.commit_async",

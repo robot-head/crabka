@@ -1,26 +1,27 @@
 //! End-to-end GSSAPI (Kerberos) parity tests.
 //!
-//! These prove that a stock cp-kafka GSSAPI client authenticates to Crabka
-//! end-to-end against a real MIT KDC, and that two Crabka brokers authenticate
-//! to each other over a GSSAPI inter-broker listener.
+//! These tests prove that a stock cp-kafka GSSAPI client authenticates to
+//! Crabka end-to-end against a real MIT KDC. They also prove that two Crabka
+//! brokers authenticate to each other over a GSSAPI inter-broker listener.
 //!
 //! # Topology
 //!
 //! The Crabka broker runs in-process on the host, bound to `0.0.0.0:9092`, and
 //! advertises `host.docker.internal:9092`. The cp-kafka CLI tools run inside
-//! `mirror.gcr.io/confluentinc/cp-kafka` containers launched with
+//! `mirror.gcr.io/confluentinc/cp-kafka` containers started with
 //! `--add-host=host.docker.internal:host-gateway`, so they reach the host
-//! broker via the advertised name (same trick as `jvm_acceptance.rs`).
+//! broker through the advertised name. `jvm_acceptance.rs` uses the same
+//! method.
 //!
-//! The KDC runs in its own container (see
-//! `crates/security/tests/fixtures/kdc`), mapping `88/tcp+udp` to the host.
-//! From inside the CLI containers it is reachable at `host.docker.internal:88`
-//! (configured in `tests/fixtures/gssapi/krb5.conf`).
+//! The KDC runs in its own container, see
+//! `crates/security/tests/fixtures/kdc`, and maps `88/tcp+udp` to the host.
+//! From inside the CLI containers it is reachable at `host.docker.internal:88`,
+//! which `tests/fixtures/gssapi/krb5.conf` configures.
 //!
 //! Because the broker advertises `host.docker.internal`, the stock Kafka GSSAPI
 //! client derives the server principal `kafka/host.docker.internal@CRABKA.TEST`.
-//! The KDC fixture provisions that SPN (alongside `kafka/localhost`) and exports
-//! both keys into the single `kafka.keytab` the broker loads.
+//! The KDC fixture supplies that SPN together with `kafka/localhost`, and
+//! exports both keys into the single `kafka.keytab` the broker loads.
 //!
 //! # Running
 //!
@@ -45,27 +46,30 @@ use crabka_security::{
     gssapi::{GssapiConfig, name::Rule},
 };
 
-/// cp-kafka image bundling the GSSAPI-capable console tools.
+/// cp-kafka image that holds the GSSAPI-capable console tools.
 const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:6.1.1";
 /// Host bind address for the broker's `SASL_PLAINTEXT` data-plane listener.
 const LISTEN: &str = "0.0.0.0:9092";
-/// Advertised name the CLI containers resolve via `--add-host`. Also the host
-/// component of the server SPN the stock client derives (`kafka/<this>`).
+/// Advertised name the CLI containers resolve with `--add-host`. It is also the
+/// host component of the server SPN the stock client derives, `kafka/<this>`.
 const BOOTSTRAP: &str = "host.docker.internal:9092";
 
-/// Absolute path to the KDC fixture dir (holds `kafka.keytab` / `alice.keytab`).
+/// Absolute path to the KDC fixture dir, which holds `kafka.keytab` and
+/// `alice.keytab`.
 fn kdc_fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../security/tests/fixtures/kdc")
 }
 
-/// Absolute path to the GSSAPI client config dir (`krb5.conf`, `client_jaas.conf`,
-/// `client.properties`).
+/// Absolute path to the GSSAPI client config dir, which holds `krb5.conf`,
+/// `client_jaas.conf`, and `client.properties`.
 fn gssapi_fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gssapi")
 }
 
-/// Spawn an in-process Crabka broker on `LISTEN` with a single `SASL_PLAINTEXT`
-/// listener advertising `GSSAPI`, backed by the KDC fixture's `kafka.keytab`.
+/// Spawn an in-process Crabka broker on `LISTEN`.
+///
+/// The broker has one `SASL_PLAINTEXT` listener that advertises `GSSAPI`. The
+/// KDC fixture's `kafka.keytab` backs that listener.
 async fn start_host_gssapi_broker() -> (BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -110,12 +114,13 @@ async fn start_host_gssapi_broker() -> (BrokerHandle, tempfile::TempDir) {
     (handle, dir)
 }
 
-/// Build the common `docker run` argument prefix for a cp-kafka GSSAPI tool:
-/// host-gateway hosts entry, the two fixture mounts, and `KAFKA_OPTS` pointing
-/// the JVM at the JAAS + krb5 configs.
+/// Build the common `docker run` argument prefix for a cp-kafka GSSAPI tool.
+///
+/// The prefix holds the host-gateway hosts entry, the two fixture mounts, and a
+/// `KAFKA_OPTS` value that points the JVM at the JAAS and krb5 configs.
 ///
 /// Mounts:
-///   - KDC fixtures  → `/fixtures` (provides `alice.keytab`, referenced by JAAS)
+///   - KDC fixtures  → `/fixtures` (supplies `alice.keytab`, which JAAS references)
 ///   - GSSAPI config → `/gssapi`   (`krb5.conf`, `client_jaas.conf`, `client.properties`)
 fn gssapi_docker_prefix() -> Vec<String> {
     let kdc = kdc_fixtures().canonicalize().expect("canonicalize kdc dir");
@@ -137,7 +142,7 @@ fn gssapi_docker_prefix() -> Vec<String> {
     ]
 }
 
-/// Run a cp-kafka GSSAPI tool to completion, asserting success.
+/// Run a cp-kafka GSSAPI tool to completion and assert that it succeeds.
 fn run_gssapi_tool(tool_args: &[&str]) -> std::process::Output {
     let mut args = gssapi_docker_prefix();
     args.push(KAFKA_IMAGE.to_string());

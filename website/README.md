@@ -1,7 +1,8 @@
 # Crabka documentation site
 
-Built with [Zola](https://www.getzola.org/) and deployed to GitHub Pages by
-`.github/workflows/docs.yml` on push to `main`.
+`.github/workflows/docs.yml` builds this site with
+[Zola](https://www.getzola.org/) and deploys it to GitHub Pages on each push to
+`main`.
 
 ## Local preview
 
@@ -16,6 +17,6 @@ Built with [Zola](https://www.getzola.org/) and deployed to GitHub Pages by
     # 3. Serve with live reload (requires Zola >= 0.22).
     cd website && zola serve
 
-Generated content under `content/docs/reference/` and everything under
-`static/api/` and `static/images/` is git-ignored — it is regenerated at build
-time and never committed.
+Git ignores the generated content under `content/docs/reference/` and everything
+under `static/api/` and `static/images/`. The build regenerates these files.
+Never commit them.

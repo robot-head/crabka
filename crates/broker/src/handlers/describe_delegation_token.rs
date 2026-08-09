@@ -1,30 +1,31 @@
 //! KIP-48: `DescribeDelegationToken` (`api_key` 41).
 //!
-//! Per spec §1.5: SASL-authenticated callers can list tokens visible
-//! to them. Filtering rules:
-//!   - Token-authed callers see only their own owned tokens (regardless
-//!     of any owner filter — KIP-48 isolation; the ACL extension below
-//!     does NOT apply to token-authed callers).
+//! Per spec §1.5, SASL-authenticated callers can list tokens visible
+//! to them. The filtering rules are:
+//!   - Token-authed callers see only their own owned tokens. An owner
+//!     filter does not change that. This is KIP-48 isolation, and the
+//!     ACL extension below does NOT apply to token-authed callers.
 //!   - With an explicit non-empty `owners` filter: tokens whose owner
-//!     matches one of the entries AND that the caller can see (owner
-//!     or listed renewer, OR Describe-ACL on `TOKEN:<owner>`).
-//!   - With no `owners` filter (or an empty/null one): every token
-//!     where the caller is owner / listed renewer / holds the
+//!     matches one of the entries AND that the caller can see. The
+//!     caller can see a token as its owner, as a listed renewer, OR
+//!     with a Describe-ACL on `TOKEN:<owner>`.
+//!   - With no `owners` filter, or an empty or null one: every token
+//!     where the caller is the owner, is a listed renewer, or holds the
 //!     `Describe` ACL on `TOKEN:<owner>`.
 //!
-//! ACL-based visibility (spec §5.3): for any token whose owner has
-//! been granted `Describe` on `TOKEN:<owner_principal_string>` to the
-//! calling principal, include it in the visible set even if the caller
-//! is not owner or renewer.
+//! ACL-based visibility (spec §5.3): when a token's owner has granted
+//! `Describe` on `TOKEN:<owner_principal_string>` to the calling
+//! principal, the handler puts that token in the visible set even if
+//! the caller is not the owner or a renewer.
 //!
-//! Token visibility is governed entirely by the explicit
-//! [`crate::authorizer::Authorizer`] trait. The "no super-users + no
-//! ACLs ⇒ Allow" behavior lives in [`crate::authorizer::
-//! AllowAllAuthorizer`], which is the documented "allow everything"
-//! mode — so showing every token under `AllowAll` is the correct
-//! behavior (it's what the operator asked for). With `SimpleAcl` or
-//! `Opa` configured, the authorizer returns Deny for callers without a
-//! `Describe`-on-`TOKEN:<owner>` ACL, filtering the visible set.
+//! The explicit [`crate::authorizer::Authorizer`] trait governs token
+//! visibility on its own. The "no super-users + no ACLs ⇒ Allow"
+//! behavior lives in [`crate::authorizer::AllowAllAuthorizer`], which is
+//! the documented "allow everything" mode. So showing every token under
+//! `AllowAll` is the correct behavior, because that is what the operator
+//! asked for. With `SimpleAcl` or `Opa` configured, the authorizer
+//! returns Deny for callers without a `Describe`-on-`TOKEN:<owner>` ACL.
+//! That filters the visible set.
 
 use std::net::SocketAddr;
 
@@ -258,13 +259,13 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
-    /// The tests below want the "real ACL" semantics — the
-    /// describe-via-ACL extension should add tokens iff the caller holds
-    /// a matching `Describe` ACL on `TOKEN:<owner>`. We construct a
-    /// [`SimpleAclAuthorizer`] explicitly for this. With
-    /// [`AllowAllAuthorizer`] every token would surface, which is
-    /// correct under "allow everything" but doesn't exercise the ACL
-    /// filter the tests are written against.
+    /// The tests below want the "real ACL" semantics. The
+    /// describe-via-ACL extension should add tokens if and only if the
+    /// caller holds a matching `Describe` ACL on `TOKEN:<owner>`. This
+    /// helper builds a [`SimpleAclAuthorizer`] for that. With
+    /// [`AllowAllAuthorizer`] every token would surface. That is correct
+    /// under "allow everything", but it does not exercise the ACL filter
+    /// these tests are written against.
     fn simple_authz() -> crate::authorizer::SimpleAclAuthorizer {
         crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new())
     }
@@ -421,11 +422,12 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Spec §5.3: a caller who is neither owner nor a
-    /// listed renewer can still see a token when granted `Describe` on
+    /// Spec §5.3: a caller who is neither owner nor a listed renewer can
+    /// still see a token when the owner grants it `Describe` on
     /// `TOKEN:<owner_principal_string>`. Token-authed callers do NOT
-    /// pick this extension up — covered by
-    /// `token_authed_caller_acl_extension_does_not_apply` below.
+    /// pick this extension up. The test
+    /// `token_authed_caller_acl_extension_does_not_apply` below covers
+    /// that.
     #[tokio::test]
     async fn describe_grants_visibility_via_token_acl() {
         use crabka_metadata::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};

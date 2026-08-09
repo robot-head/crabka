@@ -1,6 +1,6 @@
 use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
-/// RFC 4752 security-layer bitmask. We only support auth-only (matches Kafka).
+/// RFC 4752 security-layer bitmask. Crabka supports auth-only, which matches Kafka.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SecurityLayer(pub u8);
 
@@ -22,10 +22,10 @@ pub enum LayerError {
 
 /// The RFC 4752 `max recv size` field as its three big-endian wire bytes.
 ///
-/// The field is 24 bits wide, so the top byte of the `u32` is dropped —
-/// unchanged from the original encoding, which took a `u32` and sliced
-/// `[1..4]`. A cap wider than `u32` saturates rather than wrapping; every
-/// configured cap is orders of magnitude below that.
+/// The field is 24 bits wide, so this function drops the top byte of the `u32`.
+/// That is unchanged from the original encoding, which took a `u32` and sliced
+/// `[1..4]`. A cap wider than `u32` saturates and does not wrap. Every
+/// configured cap is far below that limit.
 fn max_recv_wire_bytes(max_recv: ByteSize) -> [u8; 3] {
     let raw = u32::try_from(max_recv.bytes_u64()).unwrap_or(u32::MAX);
     let [_, b1, b2, b3] = raw.to_be_bytes();
@@ -63,7 +63,7 @@ pub struct LayerChoice {
     pub authzid: Option<String>,
 }
 
-/// Decode the client's choice. Rejects any selected layer other than auth.
+/// Decode the client's choice. This rejects any selected layer other than auth.
 /// # Errors
 /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn decode_choice(bytes: &[u8]) -> Result<LayerChoice, LayerError> {
@@ -91,7 +91,7 @@ pub fn decode_choice(bytes: &[u8]) -> Result<LayerChoice, LayerError> {
     })
 }
 
-/// Client side: read the server's offered-layer bitmask (first byte).
+/// Client side: read the server's offered-layer bitmask, which is the first byte.
 ///
 /// # Errors
 /// Returns [`LayerError::Short`] if the offer is empty.
@@ -116,9 +116,9 @@ mod tests {
         assert2::assert!(bytes == vec![0x01, 0x01, 0x00, 0x00]);
     }
 
-    /// The 24-bit `max recv size` field is what the peer reads, so a
-    /// [`ByteSize`] must land on exactly the bytes the raw `u32` encoding
-    /// produced: the big-endian value with its top octet dropped.
+    /// The peer reads the 24-bit `max recv size` field, so a [`ByteSize`] must
+    /// land on exactly the bytes that the raw `u32` encoding produced: the
+    /// big-endian value with its top octet dropped.
     #[test]
     fn max_recv_size_encodes_to_the_same_three_wire_bytes_as_the_raw_u32() {
         for raw in [

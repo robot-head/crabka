@@ -1,37 +1,37 @@
 //! Routing, statement and 2PC tracing for the multi-range gateway.
 //!
-//! Every span this module builds is emitted under the single [`ROUTE_TARGET`]
+//! This module emits every span it builds under the single [`ROUTE_TARGET`]
 //! target, so an operator enables or silences the whole gateway tier with one
-//! `EnvFilter` directive. Only the OTLP layer names that target
-//! (`crabka_gres_ranges::route=debug` in the gres default filter); the stdout
-//! `fmt` layer deliberately does not, so a gateway that is not exporting pays a
-//! disabled level check per statement and prints nothing.
+//! `EnvFilter` directive. Only the OTLP layer names that target, as
+//! `crabka_gres_ranges::route=debug` in the gres default filter. The stdout
+//! `fmt` layer deliberately does not name it, so a gateway that does not export
+//! pays one disabled level check per statement and prints nothing.
 //!
 //! # Zero cost when disabled
 //!
 //! A disabled callsite costs a load and a branch, but its **field expressions
 //! still evaluate**. Two rules follow, and both are load-bearing here:
 //!
-//! - Any span whose fields cost more than a field read is built behind
+//! - Any span whose fields cost more than a field read sits behind
 //!   `tracing::enabled!(target: ROUTE_TARGET, Level::DEBUG)` with a
-//!   [`tracing::Span::none`] fallback. [`statement_span`] is the example: it
+//!   [`tracing::Span::none`] fallback. [`statement_span`] is the example. It
 //!   derives a query summary from the SQL text.
 //! - Every `record_*` helper below returns immediately when the span is
-//!   disabled, *before* formatting anything. That is what keeps the 2PC
-//!   participant list ([`record_scatter_plan`]) — a `String` built from a
-//!   `Vec<RangeId>` — off the hot path of an unsampled write.
+//!   disabled, *before* it formats anything. That keeps the 2PC participant
+//!   list from [`record_scatter_plan`], a `String` built from a `Vec<RangeId>`,
+//!   off the hot path of an unsampled write.
 //!
-//! Spans are built by hand rather than with `#[instrument]`: the attribute
+//! The code builds spans by hand rather than with `#[instrument]`. The attribute
 //! cannot express the `enabled!` guard, and every span here needs
-//! [`tracing::Span::record`] for fields that are only known once the statement
-//! has run (the commit timestamp, the 2PC outcome, the error status).
+//! [`tracing::Span::record`] for fields that are known only after the statement
+//! runs: the commit timestamp, the 2PC outcome, and the error status.
 //!
 //! # SQL text
 //!
-//! `db.query.text` carries the statement verbatim and is the only attribute
-//! here that can export a literal — a password, a national identifier, a
+//! `db.query.text` carries the statement verbatim. It is the only attribute here
+//! that can export a literal such as a password, a national identifier, or a
 //! customer name. It is **off** unless [`SQL_TEXT_ENV`] is set to a truthy
-//! value, is truncated at [`MAX_SQL_TEXT_BYTES`], and is recorded only on
+//! value. The code truncates it at [`MAX_SQL_TEXT_BYTES`] and records it only on
 //! `db.statement`, never on a child. With it off, `db.query.summary`,
 //! `db.operation.name`, `db.collection.name` and `pg.table_id` still identify
 //! the statement well enough to attribute latency.
@@ -40,11 +40,11 @@
 //!
 //! [`record_error`] sets `otel.status_code = "ERROR"` and
 //! `otel.status_description`, which `tracing-opentelemetry` maps onto the
-//! `OTel` span status — see that function for the two spellings-and-ordering
-//! traps in that contract. A successful span is left `Unset` on purpose —
-//! `"OK"` is never recorded, because in `OTel` it means "the application
-//! explicitly asserts success", which is stronger than what a statement
-//! returning rows tells us.
+//! `OTel` span status. See that function for the two spelling-and-ordering traps
+//! in that contract. A successful span stays `Unset` on purpose. The code never
+//! records `"OK"`, because in `OTel` that value means the application explicitly
+//! asserts success, which is a stronger claim than a statement that returns rows
+//! supports.
 
 use std::sync::LazyLock;
 
@@ -52,15 +52,16 @@ use crate::ids::RangeId;
 
 /// `tracing` target carrying every gateway routing, statement and 2PC span.
 ///
-/// Spelled to match the directive in `crabka_gres::telemetry::OTEL_DEFAULT_FILTER`;
-/// the two cannot share a constant because `crabka-gres` depends on this crate.
+/// The spelling matches the directive in
+/// `crabka_gres::telemetry::OTEL_DEFAULT_FILTER`. The two cannot share a
+/// constant, because `crabka-gres` depends on this crate.
 pub const ROUTE_TARGET: &str = "crabka_gres_ranges::route";
 
 /// Environment variable gating verbatim SQL on `db.statement`.
 pub const SQL_TEXT_ENV: &str = "CRABKA_OTLP_SQL_TEXT";
 
 /// Cap on the `db.query.text` attribute. A generated `INSERT` can carry
-/// megabytes of literals, which would be dropped by the collector anyway.
+/// megabytes of literals, and the collector would drop them anyway.
 pub const MAX_SQL_TEXT_BYTES: usize = 4096;
 
 /// Cap on `otel.status_description`. Error messages quote plan fragments and can
@@ -73,22 +74,23 @@ pub const ROLE_PRIMARY: &str = "primary";
 /// `pg.role` for a range holding a secondary lock.
 pub const ROLE_SECONDARY: &str = "secondary";
 
-/// Fate of one timestamp-scatter (Percolator-style 2PC) round, recorded as
-/// `pg.outcome`.
+/// Fate of one timestamp-scatter round, recorded as `pg.outcome`.
+///
+/// A timestamp scatter is the Percolator-style 2PC round.
 ///
 /// | Value | Meaning |
 /// |---|---|
-/// | `no_writes` | The statement planned no writes; no 2PC round ran. |
-/// | `aborted` | No durable effect: nothing was prewritten, or every prewrite was resolved as aborted. |
-/// | `prepared` | Prewrites are durable; the decision is deferred to the explicit `COMMIT`. |
-/// | `indeterminate` | Prewrites may be durable and unresolved — participants can still hold locks. |
+/// | `no_writes` | The statement planned no writes, so no 2PC round ran. |
+/// | `aborted` | No durable effect. Nothing was prewritten, or every prewrite was resolved as aborted. |
+/// | `prepared` | Prewrites are durable. The decision waits for the explicit `COMMIT`. |
+/// | `indeterminate` | Prewrites can be durable and unresolved, and participants can still hold locks. |
 /// | `committed` | The commit decision is durable at the primary. |
 ///
-/// `indeterminate` is the value an operator is hunting for: it is the only one
-/// that means someone has to look. Because the gateway threads a
-/// [`ScatterOutcome`] through the scatter body and records it once on the way
-/// out, every exit path — including the error paths that only propagate a `?` —
-/// lands one of these on the span.
+/// `indeterminate` is the value an operator looks for. It is the only one that
+/// means a person has to look. The gateway threads a [`ScatterOutcome`] through
+/// the scatter body and records it once on the way out. Every exit path
+/// therefore lands one of these values on the span, including the error paths
+/// that only propagate a `?`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScatterOutcome {
     /// The statement planned no writes, so no 2PC round ran.
@@ -119,9 +121,9 @@ impl ScatterOutcome {
 
 /// Whether verbatim SQL may be attached to statement spans.
 ///
-/// Read from the environment once per process: the flag decides whether
-/// potentially sensitive text leaves the node, so it must not be flippable by a
-/// mid-flight environment change.
+/// The code reads this flag from the environment once per process. The flag
+/// decides whether text that can be sensitive leaves the node, so a mid-flight
+/// environment change must not be able to flip it.
 #[must_use]
 pub fn sql_text_enabled() -> bool {
     static ENABLED: LazyLock<bool> =
@@ -129,8 +131,10 @@ pub fn sql_text_enabled() -> bool {
     *ENABLED
 }
 
-/// Parse the [`SQL_TEXT_ENV`] value. Absent, empty, or anything that is not an
-/// affirmative spelling leaves SQL text off — the safe direction.
+/// Parse the [`SQL_TEXT_ENV`] value.
+///
+/// An absent value, an empty value, and any value that is not an affirmative
+/// spelling all leave SQL text off. That is the safe direction.
 fn sql_text_flag(value: Option<&str>) -> bool {
     value.is_some_and(|value| {
         matches!(
@@ -140,26 +144,28 @@ fn sql_text_flag(value: Option<&str>) -> bool {
     })
 }
 
-/// Coerce an integer span field to `i64`, saturating.
+/// Coerce an integer span field to `i64`, and saturate on overflow.
 ///
 /// **Every numeric attribute in this module goes through here.** OTLP has no
 /// unsigned integer type, so `tracing-opentelemetry` records a `u32`, `u64` or
-/// `usize` field as a *string* — and a string attribute cannot be compared,
-/// sorted or range-filtered in Tempo, so a query like `pg.participants > 2`
-/// silently matches nothing. Recording `i64` keeps the attribute numeric.
+/// `usize` field as a *string*. Tempo cannot compare, sort, or range-filter a
+/// string attribute, so a query such as `pg.participants > 2` silently matches
+/// nothing. A record of `i64` keeps the attribute numeric.
 ///
-/// Saturating rather than wrapping: the only values that could exceed
-/// `i64::MAX` are timestamps and global xids, which would need a clock 292
-/// billion years out, and clamping at least preserves the ordering an operator
-/// is filtering on. `pg.participant_ranges` stays a string on purpose — it is a
-/// comma-joined list, not a quantity.
+/// This function saturates rather than wraps. Only timestamps and global xids
+/// could exceed `i64::MAX`, and they would need a clock 292 billion years out.
+/// A clamp at least preserves the order an operator filters on.
+/// `pg.participant_ranges` stays a string on purpose, because it is a
+/// comma-joined list and not a quantity.
 #[must_use]
 pub fn integer<T: TryInto<i64>>(value: T) -> i64 {
     value.try_into().unwrap_or(i64::MAX)
 }
 
-/// Truncate `text` to at most `max_bytes`, stepping back to a character
-/// boundary so the attribute is always valid UTF-8.
+/// Truncate `text` to at most `max_bytes`.
+///
+/// The function steps back to a character boundary, so the attribute is always
+/// valid UTF-8.
 #[must_use]
 pub fn truncate(text: &str, max_bytes: usize) -> &str {
     if text.len() <= max_bytes {
@@ -172,19 +178,21 @@ pub fn truncate(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
-/// SQL verbs recognised for `db.operation.name`. The gateway's own router keys
-/// off the same leading keywords, so this list mirrors what it can actually
-/// route rather than the whole `PostgreSQL` grammar.
+/// SQL verbs recognized for `db.operation.name`.
+///
+/// The gateway's own router keys off the same leading keywords, so this list
+/// mirrors what the router can route. It is not the whole `PostgreSQL` grammar.
 const OPERATIONS: [&str; 22] = [
     "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE", "BEGIN",
     "START", "COMMIT", "ROLLBACK", "ABORT", "END", "SET", "SHOW", "COPY", "EXPLAIN", "WITH",
     "NOTIFY", "LISTEN", "UNLISTEN",
 ];
 
-/// The `db.operation.name` for `sql`: its leading verb, upper-cased to the
-/// canonical spelling. Anything unrecognised becomes `"OTHER"` rather than the
-/// raw token, which keeps the attribute low-cardinality even under a garbage
-/// statement.
+/// The `db.operation.name` for `sql`, which is its leading verb in the canonical
+/// upper-case spelling.
+///
+/// An unrecognized verb becomes `"OTHER"` instead of the raw token. That keeps
+/// the attribute low-cardinality even under a garbage statement.
 #[must_use]
 pub fn operation_name(sql: &str) -> &'static str {
     let word = sql
@@ -198,8 +206,10 @@ pub fn operation_name(sql: &str) -> &'static str {
         .unwrap_or("OTHER")
 }
 
-/// The `db.query.summary` for an operation and its table, following the `OTel`
-/// convention of `"<operation> <target>"` (`"SELECT orders"`).
+/// The `db.query.summary` for an operation and its table.
+///
+/// The result follows the `OTel` convention of `"<operation> <target>"`, as in
+/// `"SELECT orders"`.
 #[must_use]
 pub fn query_summary(operation: &str, collection: Option<&str>) -> String {
     collection.map_or_else(
@@ -209,8 +219,9 @@ pub fn query_summary(operation: &str, collection: Option<&str>) -> String {
 }
 
 /// Render range ids as the comma-joined `pg.participant_ranges` attribute.
-/// Bounded by the tenant's range count, and exactly what an operator needs to
-/// find the participant that stalled.
+///
+/// The tenant's range count bounds the result. The result is exactly what an
+/// operator needs to find the participant that stalled.
 #[must_use]
 pub fn join_ranges(ranges: &[RangeId]) -> String {
     ranges
@@ -220,9 +231,11 @@ pub fn join_ranges(ranges: &[RangeId]) -> String {
         .join(",")
 }
 
-/// Build the routing span. `TRACE`, because routing is cheap and runs on every
-/// statement including the ones that never leave the coordinator; the route it
-/// resolved is recorded by [`record_route`] once it is known.
+/// Build the routing span.
+///
+/// The span level is `TRACE`, because routing is cheap and runs on every
+/// statement, including the statements that never leave the coordinator.
+/// [`record_route`] records the resolved route after the router knows it.
 #[must_use]
 pub fn route_span(tenant: &str) -> tracing::Span {
     tracing::trace_span!(
@@ -263,11 +276,13 @@ pub fn record_route(
     }
 }
 
-/// Build the gateway's per-statement span — the analogue of the range-local
-/// `db.statement` span, and the one an operator reads first.
+/// Build the gateway's per-statement span.
 ///
-/// Guard the call with `tracing::enabled!(target: ROUTE_TARGET, Level::DEBUG)`:
-/// deriving the summary walks the statement text.
+/// This span is the analogue of the range-local `db.statement` span, and the
+/// span an operator reads first.
+///
+/// Guard the call with `tracing::enabled!(target: ROUTE_TARGET, Level::DEBUG)`,
+/// because this function walks the statement text to derive the summary.
 #[must_use]
 pub fn statement_span(
     tenant: &str,
@@ -312,11 +327,11 @@ pub fn statement_span(
     span
 }
 
-/// Build the timestamp-scatter span covering one Percolator-style 2PC round.
+/// Build the timestamp-scatter span that covers one Percolator-style 2PC round.
 ///
-/// Everything the operator wants — participants, primary, timestamps, outcome —
-/// is only known part-way through the round, so it is declared `Empty` here and
-/// filled in by the `record_scatter_*` helpers.
+/// The round knows the participants, the primary, the timestamps, and the
+/// outcome only part-way through. This function therefore declares them `Empty`,
+/// and the `record_scatter_*` helpers fill them in.
 #[must_use]
 pub fn scatter_span(tenant: &str) -> tracing::Span {
     tracing::debug_span!(
@@ -340,9 +355,11 @@ pub fn scatter_span(tenant: &str) -> tracing::Span {
     )
 }
 
-/// Record how the round is being driven: whether it is an implicit
-/// single-statement transaction, and whether it commits against one range's
-/// local sequence instead of the global timestamp source.
+/// Record how the gateway drives the round.
+///
+/// This records whether the round is an implicit single-statement transaction,
+/// and whether it commits against one range's local sequence instead of the
+/// global timestamp source.
 pub fn record_scatter_mode(span: &tracing::Span, autocommit: bool, single_shard_bypass: bool) {
     if span.is_disabled() {
         return;
@@ -360,10 +377,11 @@ pub fn record_scatter_identity(span: &tracing::Span, start_ts: u64, global_xid: 
     span.record("pg.global_xid", integer(global_xid));
 }
 
-/// Record the participant set once planning has routed every write.
+/// Record the participant set after planning routes every write.
 ///
-/// This is the helper the disabled-span guard exists for: `participants` is
-/// joined into a `String`, which must not happen on an unsampled write.
+/// This is the helper the disabled-span guard exists for. The function joins
+/// `participants` into a `String`, and that must not happen on an unsampled
+/// write.
 pub fn record_scatter_plan(
     span: &tracing::Span,
     participants: &[RangeId],
@@ -379,10 +397,11 @@ pub fn record_scatter_plan(
     span.record("pg.table_id", integer(table_id));
 }
 
-/// Record which participant holds the primary lock. Recorded separately from
-/// [`record_scatter_plan`] because an autocommit round elects its primary from
-/// the plan, while a statement joining an open transaction inherits the one
-/// that transaction already committed to.
+/// Record which participant holds the primary lock.
+///
+/// This is separate from [`record_scatter_plan`] because an autocommit round
+/// elects its primary from the plan, while a statement that joins an open
+/// transaction inherits the primary that transaction already committed to.
 pub fn record_primary_range(span: &tracing::Span, primary_range: RangeId) {
     if span.is_disabled() {
         return;
@@ -390,7 +409,7 @@ pub fn record_primary_range(span: &tracing::Span, primary_range: RangeId) {
     span.record("pg.primary_range", integer(primary_range.as_u32()));
 }
 
-/// Record the commit timestamp once the decision is minted.
+/// Record the commit timestamp after the gateway mints the decision.
 pub fn record_commit_ts(span: &tracing::Span, commit_ts: u64) {
     if span.is_disabled() {
         return;
@@ -398,8 +417,10 @@ pub fn record_commit_ts(span: &tracing::Span, commit_ts: u64) {
     span.record("pg.commit_ts", integer(commit_ts));
 }
 
-/// Record the fate of a 2PC round. Called on the way out of the scatter and
-/// abort paths, so it lands on every exit including the propagated errors.
+/// Record the fate of a 2PC round.
+///
+/// The scatter path and the abort path call this on the way out, so it lands on
+/// every exit, including the exits that propagate an error.
 pub fn record_outcome(span: &tracing::Span, outcome: ScatterOutcome) {
     if span.is_disabled() {
         return;
@@ -407,10 +428,11 @@ pub fn record_outcome(span: &tracing::Span, outcome: ScatterOutcome) {
     span.record("pg.outcome", outcome.as_str());
 }
 
-/// Build the span for one participant's prewrite. `otel.kind = "client"`
-/// because the work happens on the range owner, which may be another node —
-/// `pg.local`, recorded by [`record_local`] once the body has picked its path,
-/// says which.
+/// Build the span for one participant's prewrite.
+///
+/// The span sets `otel.kind = "client"`, because the work happens on the range
+/// owner, which can be another node. `pg.local` says which node it is.
+/// [`record_local`] records that field after the body picks its path.
 #[must_use]
 pub fn prewrite_span(
     range_id: RangeId,
@@ -464,10 +486,10 @@ pub fn resolve_span(
 
 /// Build the span covering the abort round of a timestamp transaction.
 ///
-/// Separate from [`scatter_span`] because an abort also runs from `ROLLBACK`
-/// and from the failed-statement cleanup, where the scatter span is long
-/// closed — and an abort that half-completes is precisely the state that needs
-/// its own `pg.outcome`.
+/// This span is separate from [`scatter_span`], because an abort also runs from
+/// `ROLLBACK` and from the failed-statement cleanup, and the scatter span is
+/// long closed at those points. An abort that half-completes is exactly the
+/// state that needs its own `pg.outcome`.
 #[must_use]
 pub fn abort_scatter_span(
     primary_range: RangeId,
@@ -498,8 +520,10 @@ pub fn record_abort_participants(span: &tracing::Span, participants: &[RangeId])
     span.record("pg.participant_ranges", join_ranges(participants).as_str());
 }
 
-/// Build the span covering the global-xid 2PC commit — the other, distinct,
-/// distributed-commit protocol the gateway drives.
+/// Build the span that covers the global-xid 2PC commit.
+///
+/// That commit is the other, distinct, distributed-commit protocol the gateway
+/// drives.
 #[must_use]
 pub fn commit_global_span(tenant: &str, participants: &[RangeId]) -> tracing::Span {
     let span = tracing::debug_span!(
@@ -520,7 +544,7 @@ pub fn commit_global_span(tenant: &str, participants: &[RangeId]) -> tracing::Sp
     span
 }
 
-/// Record the global transaction id once the coordinator has minted it.
+/// Record the global transaction id after the coordinator mints it.
 pub fn record_global_xid(span: &tracing::Span, global_xid: u64) {
     if span.is_disabled() {
         return;
@@ -544,7 +568,9 @@ pub fn prepare_span(range_id: RangeId, global_xid: u64, local: bool) -> tracing:
     )
 }
 
-/// Build the span covering dispatch of a routed statement to its owning range.
+/// Build the span that covers the dispatch of a routed statement to its owning
+/// range.
+///
 /// `pg.local` separates the in-process seat from the network hop that
 /// [`remote_statement_span`] covers.
 #[must_use]
@@ -561,8 +587,8 @@ pub fn routed_statement_span(range_id: RangeId, kind: &'static str, local: bool)
     )
 }
 
-/// Build the span covering a statement forwarded to a range this node does not
-/// host.
+/// Build the span that covers a statement forwarded to a range this node does
+/// not host.
 #[must_use]
 pub fn remote_statement_span(range_id: RangeId, kind: &'static str) -> tracing::Span {
     tracing::debug_span!(
@@ -577,8 +603,10 @@ pub fn remote_statement_span(range_id: RangeId, kind: &'static str) -> tracing::
     )
 }
 
-/// Build the span covering DDL, which always runs on the range-0 catalog owner
-/// and then waits for the cluster-wide visibility barrier.
+/// Build the span that covers DDL.
+///
+/// DDL always runs on the range-0 catalog owner and then waits for the
+/// cluster-wide visibility barrier.
 #[must_use]
 pub fn ddl_span(tenant: &str) -> tracing::Span {
     tracing::debug_span!(
@@ -593,7 +621,8 @@ pub fn ddl_span(tenant: &str) -> tracing::Span {
     )
 }
 
-/// Record whether the DDL ran on an in-process range-0 seat or was forwarded.
+/// Record whether the DDL ran on an in-process range-0 seat or the gateway
+/// forwarded it.
 pub fn record_local(span: &tracing::Span, local: bool) {
     if span.is_disabled() {
         return;
@@ -603,20 +632,20 @@ pub fn record_local(span: &tracing::Span, local: bool) {
 
 /// Mark a span as failed.
 ///
-/// Sets `otel.status_code = "ERROR"` — never `"OK"`, so a successful span stays
-/// `Unset` — plus the SQLSTATE as both `error.type` and
-/// `db.response.status_code`. The SQLSTATE is a five-character enumeration,
+/// This function sets `otel.status_code = "ERROR"`. It never sets `"OK"`, so a
+/// successful span stays `Unset`. It also sets the SQLSTATE as both `error.type`
+/// and `db.response.status_code`. The SQLSTATE is a five-character enumeration,
 /// which makes it the right low-cardinality discriminator to group failures by.
-/// Fields the span did not declare are ignored, so one helper serves every span
+/// A span ignores the fields it did not declare, so one helper serves every span
 /// here.
 ///
-/// Two details of the `tracing-opentelemetry` contract are load-bearing and
-/// both fail silently if broken. The message field is spelled
-/// **`otel.status_description`** — `otel.status_message` is not recognised and
-/// exports as an ordinary attribute, leaving the status description empty. And
-/// the status code must be recorded **first**: setting it installs a status
-/// with an empty description, which would erase a description recorded before
-/// it.
+/// Two details of the `tracing-opentelemetry` contract are load-bearing, and
+/// both fail silently when broken. First, the message field is spelled
+/// **`otel.status_description`**. `tracing-opentelemetry` does not recognize
+/// `otel.status_message` and exports it as an ordinary attribute, which leaves
+/// the status description empty. Second, the code must record the status code
+/// **first**. A record of the status code installs a status with an empty
+/// description, which would erase a description recorded before it.
 pub fn record_error(span: &tracing::Span, sqlstate: &str, message: &str) {
     if span.is_disabled() {
         return;
@@ -630,9 +659,11 @@ pub fn record_error(span: &tracing::Span, sqlstate: &str, message: &str) {
     span.record("db.response.status_code", sqlstate);
 }
 
-/// Record the row counts a statement produced. Counters are accumulated by the
-/// caller and recorded once: a page-level span would emit hundreds of spans for
-/// one large result, all of which the exporter would drop.
+/// Record the row counts a statement produced.
+///
+/// The caller accumulates the counters and records them once. A page-level span
+/// would emit hundreds of spans for one large result, and the exporter would
+/// drop all of them.
 pub fn record_rows(span: &tracing::Span, returned_rows: Option<u64>, result_pages: Option<usize>) {
     if span.is_disabled() {
         return;
@@ -749,9 +780,9 @@ mod tests {
         }
     }
 
-    /// Every span builder must be disabled with no subscriber installed, and
-    /// every `record_*` helper must tolerate that. A panic or an allocation
-    /// here would be paid by every statement on a gateway that exports nothing.
+    /// Every span builder must be disabled when no subscriber is installed, and
+    /// every `record_*` helper must tolerate that. Every statement on a gateway
+    /// that exports nothing would pay for a panic or an allocation here.
     #[test]
     fn builders_are_inert_without_a_subscriber() {
         let spans = [
@@ -787,7 +818,7 @@ mod tests {
 
     /// The target string is what an operator types into `CRABKA_OTLP_FILTER`,
     /// and what `crabka-gres` names in its default filter. A rename that misses
-    /// either side silently stops exporting the whole gateway tier.
+    /// either side silently stops the export of the whole gateway tier.
     #[test]
     fn route_target_is_the_documented_directive() {
         check!(ROUTE_TARGET == "crabka_gres_ranges::route");

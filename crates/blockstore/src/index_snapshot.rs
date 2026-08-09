@@ -23,7 +23,7 @@ pub const DEFAULT_INDEX_SNAPSHOT_RETAIN: usize = 8;
 pub struct IndexSnapshotRetain(usize);
 
 impl IndexSnapshotRetain {
-    /// Validate an index-snapshot retention count.
+    /// Validates an index-snapshot retention count.
     ///
     /// # Errors
     ///

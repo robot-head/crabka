@@ -32,24 +32,25 @@ pub enum WriteOp {
     },
 }
 
-/// An ordered byte-key/byte-value store. Synchronous for the local engine; the
-/// distributed layer will introduce an async, transactional variant behind this
-/// boundary. All methods are fallible because a durable backend can hit I/O
-/// errors.
+/// An ordered byte-key/byte-value store.
+///
+/// It is synchronous for the local engine. The distributed layer will
+/// introduce an async, transactional variant behind this boundary. All methods
+/// are fallible because a durable backend can hit I/O errors.
 pub trait Kv: Send + Sync {
-    /// Read one value by key.
+    /// Reads one value by key.
     ///
     /// # Errors
     ///
     /// Returns [`KvError`] when the backing store cannot complete the read.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError>;
-    /// Insert or replace one key-value pair.
+    /// Inserts or replaces one key-value pair.
     ///
     /// # Errors
     ///
     /// Returns [`KvError`] when the backing store cannot persist the write.
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), KvError>;
-    /// Delete one key-value pair.
+    /// Deletes one key-value pair.
     ///
     /// # Errors
     ///
@@ -68,18 +69,18 @@ pub trait Kv: Send + Sync {
     ///
     /// Returns [`KvError`] when the backing store cannot complete the scan.
     fn scan_range(&self, start: &[u8], end: &[u8]) -> Result<KvScan, KvError>;
-    /// Apply all ops atomically and durably (fsync on a durable backend).
-    /// All-or-nothing across a crash.
+    /// Applies all ops atomically and durably. A durable backend fsyncs. The
+    /// batch is all-or-nothing across a crash.
     ///
     /// # Errors
     ///
     /// Returns [`KvError`] when validation fails or the backing store cannot
     /// persist the complete batch.
     fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError>;
-    /// Give the store a chance to retire shadowed data (LSM memtable rotation
-    /// so flush + compaction can drop deleted entries and tombstones). Called
-    /// after garbage-collection sweeps; a no-op for stores without background
-    /// structure.
+    /// Lets the store retire shadowed data. This is an LSM memtable rotation,
+    /// so flush and compaction can drop deleted entries and tombstones.
+    /// Callers call it after garbage-collection sweeps. It is a no-op for
+    /// stores with no background structure.
     ///
     /// # Errors
     ///
@@ -121,8 +122,10 @@ pub trait RestoreKv: Kv {
     fn restore_sorted(&self, pairs: &mut dyn KvSnapshot) -> Result<u64, KvError>;
 }
 
-/// In-memory ordered store backed by a `BTreeMap`. Infallible internally; returns
-/// `Ok` to satisfy the fallible trait. Used for tests and the ephemeral default.
+/// In-memory ordered store backed by a `BTreeMap`.
+///
+/// It is infallible internally and returns `Ok` to satisfy the fallible trait.
+/// Tests and the ephemeral default use it.
 #[derive(Default)]
 pub struct MemKv {
     map: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,

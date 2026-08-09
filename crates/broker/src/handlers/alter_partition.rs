@@ -1,9 +1,10 @@
 //! `AlterPartition` (`api_key=56`). Controller-side ISR update handler.
 //!
-//! Validates that this broker is the openraft leader (`NOT_CONTROLLER` if not),
-//! checks leader-epoch fencing per partition, validates that the proposed ISR
-//! is a non-empty subset of the partition's replicas, and submits the updated
-//! `PartitionRecord` via `controller.submit_change`.
+//! The handler validates that this broker is the openraft leader, and returns
+//! `NOT_CONTROLLER` if it is not. It then checks leader-epoch fencing for each
+//! partition, validates that the proposed ISR is a non-empty subset of the
+//! partition's replicas, and submits the updated `PartitionRecord` through
+//! `controller.submit_change`.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, ResourceType};
@@ -128,14 +129,13 @@ pub(crate) async fn handle(
     }
 }
 
-/// Validate and apply a single partition's ISR proposal. Returns the
-/// per-partition response data and appends to `changes` on success.
+/// Validates and applies the ISR proposal of one partition. It returns the
+/// per-partition response data, and on success it appends to `changes`.
 ///
-/// `new_isr_i32` carries the v2 `new_isr` field; `new_isr_with_epochs`
-/// carries the v3 field. For v3 requests `new_isr` is empty and
-/// `new_isr_with_epochs` is populated — this function falls back to
-/// extracting broker IDs from `new_isr_with_epochs` when `new_isr`
-/// is empty.
+/// `new_isr_i32` carries the v2 `new_isr` field, and `new_isr_with_epochs`
+/// carries the v3 field. A v3 request leaves `new_isr` empty and fills
+/// `new_isr_with_epochs`. When `new_isr` is empty, this function therefore
+/// takes the broker IDs from `new_isr_with_epochs`.
 fn handle_partition(
     image: &crabka_metadata::MetadataImage,
     topic_name: Option<&str>,
@@ -280,8 +280,9 @@ fn error_part(
     }
 }
 
-/// `ClusterAction` on `Cluster("kafka-cluster")` gate. Returns `true`
-/// when the principal is denied (inter-broker control-plane RPC).
+/// Gate for `ClusterAction` on `Cluster("kafka-cluster")`. It returns `true`
+/// when the authorizer denies the principal. This is an inter-broker
+/// control-plane RPC.
 fn cluster_action_denied(
     authorizer: &dyn crate::authorizer::Authorizer,
     image: &crabka_metadata::MetadataImage,
@@ -300,7 +301,8 @@ fn cluster_action_denied(
     ) == AuthorizationResult::Deny
 }
 
-/// Whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` response built on Deny.
+/// Builds the whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` reply for a
+/// Deny decision.
 fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
     encode_resp(
         version,
@@ -362,7 +364,8 @@ mod tests {
         partition_epoch: i32,
     }
 
-    /// Image with topic "t" and one partition. Brokers registered per `epochs`.
+    /// An image with the topic "t" and one partition. `epochs` gives the
+    /// registered brokers.
     fn image_with_partition(
         fixture: &PartitionFixture<'_>,
         epochs: &[(u64, i64)],
@@ -400,8 +403,8 @@ mod tests {
         image
     }
 
-    /// Image with topic "t" / partition 0, replicas [1,2,3], isr [1,2],
-    /// leader 1 @ `leader_epoch` 5. Brokers registered per `epochs`.
+    /// An image with topic "t" partition 0, replicas [1,2,3], isr [1,2], and
+    /// leader 1 at `leader_epoch` 5. `epochs` gives the registered brokers.
     fn image_with(epochs: &[(u64, i64)]) -> MetadataImage {
         image_with_partition(
             &PartitionFixture {
@@ -495,8 +498,8 @@ mod tests {
         }
     }
 
-    /// Empty ACLs + no super-users → every principal is denied
-    /// `ClusterAction`, so the denied response carries
+    /// With empty ACLs and no super-users, the authorizer denies
+    /// `ClusterAction` to every principal, so the denied response carries
     /// `CLUSTER_AUTHORIZATION_FAILED`.
     #[test]
     fn cluster_action_denied_yields_cluster_authorization_failed() {

@@ -2,18 +2,18 @@
 //!
 //! # Single-broker helper
 //!
-//! [`start`] / [`InProcess`] boot one broker + one client for simple
+//! [`start`] and [`InProcess`] boot one broker and one client for simple
 //! unit-style integration tests.
 //!
 //! # Multi-broker helpers
 //!
 //! [`start_n_node_with_retry`] boots an `n`-broker cluster with
-//! ephemeral ports + short raft timings. Each `tests/*.rs` integration-test
-//! crate that needs a 3-broker cluster declares `mod support;` and reaches
-//! in for `start_n_node_with_retry`.
+//! ephemeral ports and short raft timings. Each `tests/*.rs` integration-test
+//! crate that needs a 3-broker cluster declares `mod support;` and calls
+//! `start_n_node_with_retry`.
 //!
 //! Cargo treats `tests/support/mod.rs` (rather than `tests/support.rs`) as
-//! a non-binary submodule, so it doesn't get compiled as its own test
+//! a non-binary submodule, so it does not compile the file as its own test
 //! crate.
 
 #![allow(dead_code)]
@@ -54,9 +54,9 @@ pub async fn start() -> InProcess {
 
 /// Start a broker rooted at `dir` (caller owns the directory).
 ///
-/// Used by restart tests: pass the same path across two boots to verify
-/// that persistent state (audit chain, spool) is recovered correctly.
-/// Automatically detects if a raft log already exists and uses `Rejoin`.
+/// Restart tests use this helper. Pass the same path across two boots to
+/// verify that the broker recovers persistent state (audit chain, spool)
+/// correctly. The helper detects an existing raft log and then uses `Rejoin`.
 pub async fn start_with_dir(dir: &std::path::Path) -> (BrokerHandle, crabka_client_core::Client) {
     let mut config = BrokerConfig::for_tests(dir.to_path_buf());
     // Mirror the production heuristic from `detect_bootstrap_mode` in
@@ -169,9 +169,9 @@ pub fn start_with_audit_key(
 }
 
 /// Start a broker whose authorizer is `SimpleAclAuthorizer` with no ACLs and no
-/// super-users (deny-all for the anonymous test client). Audit is enabled via
-/// `for_tests` defaults. The anonymous client will be denied every admin
-/// operation, triggering `AuthorizationDenied` audit events.
+/// super-users (deny-all for the anonymous test client). The `for_tests`
+/// defaults enable audit. The broker denies the anonymous client every admin
+/// operation, which produces `AuthorizationDenied` audit events.
 pub async fn start_with_deny_all_authz() -> InProcess {
     use std::collections::HashSet;
 
@@ -199,8 +199,8 @@ pub async fn start_with_deny_all_authz() -> InProcess {
     }
 }
 
-/// Fetch all records from `AUDIT_TOPIC` partition 0 and JSON-decode each
-/// record value, returning the decoded objects. Mirrors the
+/// Fetch all records from `AUDIT_TOPIC` partition 0, JSON-decode each
+/// record value, and return the decoded objects. Mirrors the
 /// `broker_started_event_is_written_to_audit_topic` fetch pattern.
 pub async fn wait_for_audit_record<F>(
     client: &crabka_client_core::Client,
@@ -318,8 +318,8 @@ pub async fn topic_id_for(
 // Individual test files gate their use with ``.
 
 /// Lazily-initialized tracing subscriber so `RUST_LOG=...` works in
-/// integration tests. Safe to call multiple times; `try_init` is a no-op
-/// after the first success.
+/// integration tests. It is safe to call this many times, because `try_init`
+/// is a no-op after the first success.
 pub fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -330,13 +330,14 @@ pub fn init_tracing() {
         .try_init();
 }
 
-/// Reserve `n` pairs of ephemeral loopback ports (client + controller per
-/// broker) via the bind-and-drop trick: bind a `TcpListener` on
-/// `127.0.0.1:0`, read its assigned port, then drop the listener. The OS
-/// won't immediately reuse the port for another bind, so we can pass it
-/// to `Broker::start` and the broker re-binds it on the same address.
+/// Reserve `n` pairs of ephemeral loopback ports, one client port and one
+/// controller port per broker, with the bind-and-drop trick. Bind a
+/// `TcpListener` on `127.0.0.1:0`, read its assigned port, then drop the
+/// listener. The OS does not immediately reuse the port for another bind, so
+/// the caller can pass it to `Broker::start` and the broker re-binds it on the
+/// same address.
 ///
-/// Avoids the Linux `TIME_WAIT` trap that fixed ports hit when multiple
+/// This avoids the Linux `TIME_WAIT` problem that fixed ports hit when many
 /// tests in the same binary boot 3-broker clusters back-to-back.
 pub async fn bind_and_drop_ports(n: usize) -> (Vec<SocketAddr>, Vec<SocketAddr>) {
     let mut client_addrs = Vec::with_capacity(n);
@@ -351,21 +352,22 @@ pub async fn bind_and_drop_ports(n: usize) -> (Vec<SocketAddr>, Vec<SocketAddr>)
     (client_addrs, controller_addrs)
 }
 
-/// Race-free replacement for [`bind_and_drop_ports`]: bind `n` pairs of
-/// ephemeral loopback listeners (client + controller per broker) and return
-/// their concrete addrs **alongside the still-open listeners**, index-aligned.
+/// Race-free replacement for [`bind_and_drop_ports`]. It binds `n` pairs of
+/// ephemeral loopback listeners, one client and one controller per broker, and
+/// returns their concrete addrs **alongside the still-open listeners**,
+/// index-aligned.
 ///
-/// Hand `client_listeners[i]` / `controller_listeners[i]` to
-/// [`crabka_broker::Broker::start_with_listeners`] (or
-/// `start_with_controller_listener`) so the OS port is never released before
-/// the broker adopts it — closing the [`bind_and_drop_ports`] TOCTOU window
-/// where a concurrently-running test binary steals the freed port
+/// Hand `client_listeners[i]` and `controller_listeners[i]` to
+/// [`crabka_broker::Broker::start_with_listeners`] or
+/// `start_with_controller_listener`, so the OS port is never released before
+/// the broker adopts it. That closes the [`bind_and_drop_ports`] TOCTOU window
+/// in which a concurrently-running test binary steals the freed port
 /// (`AddrInUse`) under parallel `cargo nextest`.
 ///
 /// The returned `SocketAddr`s are the listeners' real `local_addr()`s, so the
-/// caller builds its static voter set / advertised addresses from them exactly
-/// as with [`bind_and_drop_ports`]; the only call-site change is passing the
-/// matching listener into `start_with_listeners` instead of letting
+/// caller builds its static voter set and advertised addresses from them
+/// exactly as with [`bind_and_drop_ports`]. The only call-site change is to
+/// pass the matching listener into `start_with_listeners` instead of letting
 /// `Broker::start` re-bind the address.
 #[allow(dead_code)] // not every test binary that includes `support` uses this
 pub async fn bind_and_hold_ports(
@@ -399,11 +401,11 @@ pub async fn bind_and_hold_ports(
 }
 
 /// Build a `BrokerConfig` for broker `i` (0-indexed) in an `n`-broker
-/// cluster using the supplied ephemeral port lists + static voter map.
-/// This is the *static-voter* bootstrap-then-join helper, kept for tests
-/// (like `elect_leaders`) that drive `add_learner` / `change_membership`
-/// manually and need to layer extra config overrides per broker — a flow
-/// that `start_n_node`'s auto-join path can't accommodate.
+/// cluster from the supplied ephemeral port lists and static voter map.
+/// This is the *static-voter* bootstrap-then-join helper. It exists for tests
+/// such as `elect_leaders` that drive `add_learner` and `change_membership`
+/// manually and need extra config overrides per broker. `start_n_node`'s
+/// auto-join path cannot support that flow.
 pub fn broker_config(
     i: usize,
     client_addrs: &[SocketAddr],
@@ -433,8 +435,8 @@ pub fn broker_config(
 /// Build a `BrokerConfig` for broker `i` (0-indexed) in a static `n`-voter
 /// cluster. Every broker boots in `Bootstrap` mode with the *same* configured
 /// `controller_quorum_voters` set, so each node seeds the full voter set and
-/// elects among the configured peers over the real KIP-595 wire — no
-/// auto-join (KIP-853 dynamic reconfig is Slice 5).
+/// elects among the configured peers over the real KIP-595 wire. There is no
+/// auto-join, because KIP-853 dynamic reconfig is Slice 5.
 fn static_voter_broker_config(
     i: usize,
     own_client_addr: SocketAddr,
@@ -466,17 +468,18 @@ fn static_voter_broker_config(
     cfg
 }
 
-/// Boot an `n`-broker cluster with ephemeral ports + short raft timings via
-/// **static multi-voter bootstrap** (KIP-595 Slice 3c):
+/// Boot an `n`-broker cluster with ephemeral ports and short raft timings
+/// through **static multi-voter bootstrap** (KIP-595 Slice 3c):
 ///
 /// * All `n` brokers boot in `Bootstrap` mode (`auto_join = false`), each
 ///   configured with the *same* `controller_quorum_voters` = the full
 ///   `[(1, ctrl_addr_1), …, (n, ctrl_addr_n)]` set.
-/// * Each node seeds the full static voter set and they elect a leader among
-///   themselves over the real KIP-595 wire — no `AddRaftVoter` / auto-join.
+/// * Each node seeds the full static voter set, and the nodes elect a leader
+///   among themselves over the real KIP-595 wire. There is no `AddRaftVoter`
+///   and no auto-join.
 ///
 /// Blocks until a leader emerges and reports the full `n`-voter committed set.
-/// Returns `(handle, config, tempdir)` triples preserving spawn order;
+/// Returns `(handle, config, tempdir)` triples in spawn order.
 /// `cluster[0]` is `broker_id` 1.
 pub async fn start_n_node(
     n: u64,
@@ -484,11 +487,12 @@ pub async fn start_n_node(
     start_n_node_with(n, |_, _| {}).await
 }
 
-/// Like [`start_n_node`] but invokes `customize(i, &mut cfg)` on each broker's
-/// `BrokerConfig` before start, letting a test layer per-broker overrides
-/// (e.g. `rack`, `replica_selector`) while keeping the race-free held-listener
-/// bootstrap — no `bind_and_drop_ports` TOCTOU window for a concurrently
-/// running test to steal a just-released port (`AddrInUse`).
+/// Like [`start_n_node`], but it invokes `customize(i, &mut cfg)` on each
+/// broker's `BrokerConfig` before start. A test can then add per-broker
+/// overrides such as `rack` or `replica_selector` and still keep the race-free
+/// held-listener bootstrap. There is no `bind_and_drop_ports` TOCTOU window in
+/// which a concurrently running test can steal a just-released port
+/// (`AddrInUse`).
 pub async fn start_n_node_with(
     n: u64,
     mut customize: impl FnMut(usize, &mut BrokerConfig),
@@ -607,8 +611,8 @@ pub async fn start_n_node_with(
     Ok(out)
 }
 
-/// Retry `start_n_node` up to 3 times. Short raft timings occasionally
-/// split-vote on slow runners; a fresh tempdir + port set on retry
+/// Retry `start_n_node` up to 3 times. Short raft timings sometimes
+/// split-vote on slow runners. A fresh tempdir and port set on retry
 /// clears the openraft state and usually succeeds within 2 attempts.
 pub async fn start_n_node_with_retry(n: u64) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
     let mut last_err = None;
@@ -626,13 +630,13 @@ pub async fn start_n_node_with_retry(n: u64) -> Vec<(BrokerHandle, BrokerConfig,
 }
 
 /// Await every broker's controller image until each one sees `n` brokers
-/// registered. Required before any test that needs the partition's replica set
-/// to include all `n` nodes (`CreateTopics` reads `image.brokers()` to pick
-/// replicas; a race here silently degrades to a smaller replica set).
+/// registered. Call this before any test that needs the partition's replica
+/// set to include all `n` nodes. `CreateTopics` reads `image.brokers()` to pick
+/// replicas, and a race here silently degrades to a smaller replica set.
 ///
-/// Uses the panicking `wait_until_brokers_registered` awaiter — that is
-/// intentional here: this helper is called directly from tests (not from the
-/// `start_n_node_with_retry` path), so a timeout should fail the test loudly.
+/// This helper uses the panicking `wait_until_brokers_registered` awaiter on
+/// purpose. Tests call this helper directly, not through the
+/// `start_n_node_with_retry` path, so a timeout must fail the test.
 pub async fn wait_for_all_brokers_registered(
     cluster: &[(BrokerHandle, BrokerConfig, TempDir)],
     n: usize,

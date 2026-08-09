@@ -141,7 +141,8 @@ pub struct CompactionWalRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionPartitionOffset {
     pub partition: PartitionIndex,
-    /// Kafka commit offset: the next offset after the last durable record.
+    /// Kafka commit offset. This is the next offset after the last durable
+    /// record.
     pub offset: Offset,
 }
 
@@ -390,7 +391,7 @@ impl ObjectStoreCompactionIndexSink {
         Self { store }
     }
 
-    /// Read and decode a previously written compaction index manifest.
+    /// Reads and decodes a compaction index manifest written earlier.
     /// # Errors
     /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub async fn read_manifest(
@@ -427,7 +428,8 @@ impl CompactionIndexSink for ObjectStoreCompactionIndexSink {
     }
 }
 
-/// Delete compacted metric blocks whose index manifest ends before the retention cutoff.
+/// Deletes compacted metric blocks whose index manifest ends before the
+/// retention cutoff.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn enforce_compaction_retention(
@@ -717,7 +719,7 @@ impl CompactionIndexManifest {
         }
     }
 
-    /// Encode via `serde-wincode`, matching the WAL record codec.
+    /// Encodes with `serde-wincode`, which matches the WAL record codec.
     /// # Errors
     /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn encode(&self) -> Result<Vec<u8>, CompactionIndexError> {
@@ -725,7 +727,7 @@ impl CompactionIndexManifest {
             .map_err(|error| CompactionIndexError::Encode(error.to_string()))
     }
 
-    /// Decode a [`CompactionIndexManifest`] from its `serde-wincode` bytes.
+    /// Decodes a [`CompactionIndexManifest`] from its `serde-wincode` bytes.
     /// # Errors
     /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn decode(bytes: &[u8]) -> Result<Self, CompactionIndexError> {
@@ -739,14 +741,15 @@ impl CompactionIndexManifest {
 /// Deterministic object key for one tenant/kind/WAL offset compaction window.
 ///
 /// The key is a pure function of `(tenant, kind, first_offset, last_offset)`, so
-/// re-compacting the *same* offset range writes the *same* object key (an
-/// idempotent overwrite). The accumulate-then-flush loop does NOT guarantee the
-/// same range is re-formed after a crash-before-commit: the flushed window
-/// depends on poll batching and the age timer, so a re-run may write the same
-/// records under a *different* key. That is at-least-once delivery, not
-/// byte-identical idempotency — but offset-overlapping duplicate blocks carry
-/// identical `(series, ts, value)` rows and are deduplicated at query time by the
-/// timestamp-keyed `PromQL` operator engine, so they do not double-count.
+/// a re-compaction of the *same* offset range writes the *same* object key as an
+/// idempotent overwrite. The accumulate-then-flush loop does NOT guarantee that
+/// the same range forms again after a crash before a commit. The flushed window
+/// depends on poll batching and the age timer, so a re-run can write the same
+/// records under a *different* key. That is at-least-once delivery and not
+/// byte-identical idempotency. Offset-overlapping duplicate blocks carry
+/// identical `(series, ts, value)` rows, and the timestamp-keyed `PromQL`
+/// operator engine deduplicates them at query time, so they do not
+/// double-count.
 #[must_use]
 pub fn compaction_object_key(
     tenant: &str,
@@ -835,7 +838,8 @@ fn compaction_index_key(block_key: &str) -> String {
     )
 }
 
-/// Convert polled consumer records from the metrics WAL topic into compactor inputs.
+/// Converts polled consumer records from the metrics WAL topic into compactor
+/// inputs.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn compaction_wal_records_from_consumer_records(
@@ -881,10 +885,10 @@ pub fn compaction_object_plan_for_rows(
     plan
 }
 
-/// Write all non-empty block kinds for a compacted tenant window.
+/// Writes all non-empty block kinds for a compacted tenant window.
 ///
-/// The block object is written before the corresponding index sidecar, so a
-/// caller can safely commit WAL consumer offsets only after this function
+/// This function writes the block object before the matching index sidecar, so
+/// a caller can safely commit WAL consumer offsets only after this function
 /// returns successfully.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
@@ -909,7 +913,7 @@ where
     .await
 }
 
-/// Write all non-empty block kinds for a compacted tenant partition window.
+/// Writes all non-empty block kinds for a compacted tenant partition window.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn write_compacted_tenant_partition_blocks<S>(
@@ -1024,7 +1028,8 @@ where
     Ok(writes)
 }
 
-/// Process a polled compaction batch by partition, preserving per-partition commits.
+/// Processes a polled compaction batch by partition, and keeps the per-partition
+/// commits.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn process_compaction_record_batch<S, C>(
@@ -1078,7 +1083,8 @@ where
     })
 }
 
-/// Poll the metrics WAL consumer once, compact returned records, and commit on success.
+/// Polls the metrics WAL consumer once, compacts the returned records, and
+/// commits on success.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn poll_compactor_once<P, S, C>(
@@ -1110,8 +1116,8 @@ where
 
 /// Monotonic clock used by the compaction loop to age the accumulation buffer.
 ///
-/// Abstracted so flush-by-age can be driven deterministically in tests without
-/// real wall-clock waits.
+/// This is an abstraction, so a test can drive flush-by-age deterministically
+/// and does not need real wall-clock waits.
 pub trait CompactionClock {
     fn now(&self) -> std::time::Instant;
 }
@@ -1129,9 +1135,9 @@ impl CompactionClock for SystemCompactionClock {
 /// Accumulates polled WAL records across polls so the compactor can flush one
 /// larger block per threshold instead of one tiny block per poll.
 ///
-/// The buffer retains each record's consumer offset/partition metadata, so the
+/// The buffer keeps each record's consumer offset and partition metadata, so the
 /// flush keys blocks by the buffered offset range exactly as a single-poll write
-/// would. The oldest record's arrival time anchors the age-based flush deadline.
+/// does. The oldest record's arrival time anchors the age-based flush deadline.
 struct CompactionBuffer {
     records: Vec<CompactionWalRecord>,
     oldest_arrival: Option<std::time::Instant>,
@@ -1149,8 +1155,8 @@ impl CompactionBuffer {
         self.records.is_empty()
     }
 
-    /// Append newly polled records, anchoring the age deadline at the first
-    /// record to enter an empty buffer.
+    /// Appends newly polled records. The first record to enter an empty buffer
+    /// anchors the age deadline.
     fn extend(&mut self, records: Vec<CompactionWalRecord>, now: std::time::Instant) {
         if records.is_empty() {
             return;
@@ -1161,7 +1167,7 @@ impl CompactionBuffer {
         self.records.extend(records);
     }
 
-    /// Whether the buffer should flush now given the configured thresholds.
+    /// Whether the buffer should flush now under the configured thresholds.
     fn should_flush(&self, config: &CompactionLoopConfig, now: std::time::Instant) -> bool {
         if self.is_empty() {
             return false;
@@ -1173,22 +1179,22 @@ impl CompactionBuffer {
             .is_some_and(|anchor| now.duration_since(anchor).as_time() >= config.flush_max_age)
     }
 
-    /// Take all buffered records, resetting the buffer to empty.
+    /// Takes all buffered records and resets the buffer to empty.
     fn take(&mut self) -> Vec<CompactionWalRecord> {
         self.oldest_arrival = None;
         std::mem::take(&mut self.records)
     }
 }
 
-/// Write one block from the buffered records and commit their offsets, folding
+/// Writes one block from the buffered records, commits their offsets, and folds
 /// the result into the running loop summary.
 ///
 /// CORRECTNESS: `process_compaction_record_batch` writes every partition's block
-/// and index sidecar durably *before* committing any offsets, then commits once
-/// after all writes succeed — so offsets are advanced only after the accumulated
-/// blocks are durable. The buffer is emptied by the caller via `take` *before*
-/// this call, so a write/commit error leaves the buffer empty and the next poll
-/// re-reads from the last committed offset — at-least-once.
+/// and index sidecar durably *before* it commits any offsets, and then commits
+/// once after all writes succeed. Offsets advance only after the accumulated
+/// blocks are durable. The caller empties the buffer with `take` *before* this
+/// call, so a write or commit error leaves the buffer empty and the next poll
+/// re-reads from the last committed offset. That is at-least-once.
 async fn flush_buffer<S, C>(
     block_writer: &BlockWriter,
     index_sink: &S,
@@ -1212,7 +1218,7 @@ where
     Ok(batch.committed_offsets)
 }
 
-/// Run the compactor polling loop until `should_stop` returns true, using the
+/// Runs the compactor polling loop until `should_stop` returns true. It uses the
 /// real monotonic clock for flush-by-age.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
@@ -1244,14 +1250,14 @@ where
 
 /// Accumulate-then-flush compactor loop with an injectable clock.
 ///
-/// Each poll appends to an in-memory buffer instead of writing a block. A block
-/// is written (and offsets committed) only when the buffer reaches
-/// `flush_max_rows` or its oldest record reaches `flush_max_age`, or when
-/// `should_stop` fires (shutdown), at which point the remaining buffer is
-/// flushed so no records are dropped. The `CompactionPollResult` handed to
-/// `should_stop` reports this poll's `polled_records`/`compacted_records`; its
-/// `batch` reflects only the writes/commits that occurred this iteration (empty
-/// while buffering, populated on a flush).
+/// Each poll appends to an in-memory buffer and does not write a block. The loop
+/// writes a block and commits offsets only when the buffer reaches
+/// `flush_max_rows`, when its oldest record reaches `flush_max_age`, or when
+/// `should_stop` fires at shutdown. At shutdown it flushes the remaining buffer,
+/// so it drops no records. The `CompactionPollResult` that reaches `should_stop`
+/// reports this poll's `polled_records` and `compacted_records`. Its `batch`
+/// holds only the writes and commits of this iteration, so it is empty while the
+/// loop buffers and populated on a flush.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn run_compactor_loop_with_clock<P, S, C, Stop, Clock>(
@@ -1313,8 +1319,8 @@ where
     Ok(summary)
 }
 
-/// Run the compactor polling loop using a single consumer handle for poll and
-/// commit, using the real monotonic clock for flush-by-age.
+/// Runs the compactor polling loop with a single consumer handle for poll and
+/// commit. It uses the real monotonic clock for flush-by-age.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn run_compactor_consumer_loop<C, S, Stop>(
@@ -1340,12 +1346,13 @@ where
     .await
 }
 
-/// Build the per-poll-batch `metrics_compaction` consumer span, joining it to the
-/// producer trace carried on a WAL record's `traceparent` header (if any).
+/// Builds the per-poll-batch `metrics_compaction` consumer span and joins it to
+/// the producer trace on a WAL record's `traceparent` header, if there is one.
 ///
-/// ONE span per poll batch (not per record). `set_remote_parent` is a no-op when
-/// no polled record carries a valid trace context, so the span is always safe to
-/// build. The first record carrying a `traceparent` header anchors the parent.
+/// There is ONE span per poll batch, and not one per record. `set_remote_parent`
+/// does nothing when no polled record carries a valid trace context, so this
+/// span is always safe to build. The first record with a `traceparent` header
+/// anchors the parent.
 fn compaction_batch_span(records: &[ConsumerRecord], wal_records: usize) -> tracing::Span {
     let span = tracing::info_span!(
         "metrics_compaction",
@@ -1373,9 +1380,10 @@ fn compaction_batch_span(records: &[ConsumerRecord], wal_records: usize) -> trac
 
 /// Accumulate-then-flush single-consumer compactor loop with an injectable clock.
 ///
-/// Mirrors [`run_compactor_loop_with_clock`] but polls and commits through one
-/// mutable consumer handle (`process_compaction_record_batch_with_consumer`),
-/// which likewise writes the block durably before committing offsets.
+/// This mirrors [`run_compactor_loop_with_clock`], but it polls and commits
+/// through one mutable consumer handle,
+/// `process_compaction_record_batch_with_consumer`. That handle also writes the
+/// block durably before it commits offsets.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn run_compactor_consumer_loop_with_clock<C, S, Stop, Clock>(
@@ -1451,12 +1459,12 @@ where
     Ok(summary)
 }
 
-/// Write one block from buffered records and commit through the consumer handle,
-/// folding the result into the running summary and returning the offsets committed
-/// this flush.
+/// Writes one block from the buffered records and commits through the consumer
+/// handle. It folds the result into the running summary and returns the offsets
+/// this flush committed.
 ///
 /// CORRECTNESS: `process_compaction_record_batch_with_consumer` writes the block
-/// and index sidecar durably before `commit_sync_mut`, so offsets are committed
+/// and index sidecar durably before `commit_sync_mut`, so it commits offsets
 /// only after the accumulated block is durable.
 async fn flush_buffer_with_consumer<C, S>(
     block_writer: &BlockWriter,
@@ -1482,7 +1490,7 @@ where
     Ok(batch.committed_offsets)
 }
 
-/// Poll, compact, and commit once using a single mutable consumer handle.
+/// Polls, compacts, and commits once with a single mutable consumer handle.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn poll_compactor_consumer_once<C, S>(
@@ -1515,11 +1523,11 @@ where
     })
 }
 
-/// Decode, compact, write, and commit one assigned WAL partition window.
+/// Decodes, compacts, writes, and commits one assigned WAL partition window.
 ///
-/// A successful return means all decoded records in the window are represented
-/// by durable block/index writes and the partition offset has been committed to
-/// the next offset. Empty windows are a no-op.
+/// A successful return means that durable block and index writes represent all
+/// decoded records in the window, and that the partition offset has moved to the
+/// next offset. An empty window does nothing.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn process_compaction_partition_window<S, C>(
@@ -1708,12 +1716,12 @@ where
     })
 }
 
-/// Percent-escape a tenant id for use as a single object-store path segment.
+/// Percent-escapes a tenant id for use as a single object-store path segment.
 ///
-/// `.` is allowed as an interior character (tenant ids legitimately contain
-/// dots), but a tenant that is *exactly* `.` or `..` would form a path-traversal
-/// segment in the object key. Tenants are validated upstream, so this is defense
-/// in depth: a whole-segment `.`/`..` has its dots percent-escaped so the
+/// An interior `.` is allowed, because tenant ids legitimately contain dots. A
+/// tenant that is *exactly* `.` or `..` would form a path-traversal segment in
+/// the object key. Validation happens upstream, so this is defense in depth.
+/// This function percent-escapes the dots of a whole-segment `.` or `..`, so the
 /// resulting segment can never be a relative-path component. The `kind` and
 /// offset segments are formatted separately and never pass through here.
 fn escape_object_path_segment(value: &str) -> String {
@@ -1734,7 +1742,7 @@ fn escape_object_path_segment(value: &str) -> String {
     out
 }
 
-/// Group WAL records by tenant and sort rows by `(fingerprint, timestamp)`.
+/// Groups WAL records by tenant and sorts the rows by `(fingerprint, timestamp)`.
 #[must_use]
 pub fn compact_wal_records(records: &[WalRecord]) -> Vec<TenantCompactionRows> {
     let mut tenants = BTreeMap::<String, TenantCompactionRows>::new();
@@ -1863,7 +1871,7 @@ fn series_labels_for_kind(
         .collect()
 }
 
-/// Encode one tenant's sorted rows into Arrow batches for the block writer.
+/// Encodes one tenant's sorted rows into Arrow batches for the block writer.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn encode_tenant_batches(
@@ -2670,9 +2678,9 @@ mod tests {
         );
     }
 
-    /// Index sink that succeeds for the first `ok_before_failure` manifest writes
-    /// and then fails, to model one partition's block write succeeding before a
-    /// later partition's write fails mid-batch.
+    /// Index sink that succeeds for the first `ok_before_failure` manifest
+    /// writes and then fails. It models one partition's block write that
+    /// succeeds before a later partition's write fails mid-batch.
     struct FailAfterIndexSink {
         ok_before_failure: usize,
         calls: Mutex<usize>,
@@ -3290,8 +3298,9 @@ mod tests {
         check!(manifests[0].row_count == 2);
     }
 
-    /// Index sink that appends an ordered event marker shared with a committer,
-    /// so a test can assert block/index writes precede the offset commit.
+    /// Index sink that appends an ordered event marker shared with a
+    /// committer, so a test can assert that the block and index writes come
+    /// before the offset commit.
     struct OrderingIndexSink {
         store: Arc<dyn ObjectStore>,
         events: Arc<Mutex<Vec<String>>>,
@@ -3321,8 +3330,8 @@ mod tests {
         }
     }
 
-    /// Committer that asserts the buffered block object is durable, then records
-    /// the commit event after the block/index writes.
+    /// Committer that asserts that the buffered block object is durable, and
+    /// then records the commit event after the block and index writes.
     struct OrderingCommitter {
         store: Arc<dyn ObjectStore>,
         events: Arc<Mutex<Vec<String>>>,

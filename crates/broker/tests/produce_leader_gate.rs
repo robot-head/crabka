@@ -1,29 +1,32 @@
 //! Multi-broker coverage for the Produce leadership gate.
 //!
-//! Kafka semantics: only the partition LEADER accepts a Produce. A Produce
-//! misrouted to a non-leader must be rejected with `NOT_LEADER_OR_FOLLOWER`
-//! (6) — and crucially must NOT be appended to a local follower replica —
-//! so the client refreshes metadata and re-routes to the real leader.
+//! Kafka semantics: only the partition LEADER accepts a Produce. The broker
+//! must reject a Produce misrouted to a non-leader with
+//! `NOT_LEADER_OR_FOLLOWER` (6). It must NOT append that Produce to a local
+//! follower replica. The client then refreshes metadata and re-routes to the
+//! real leader.
 //!
 //! Two discriminating cases:
 //!
 //!  * **rf=3 (follower replica present):** every broker hosts a replica, so a
 //!    Produce to a non-leader lands on a *follower's* local log if the handler
-//!    skips the leadership check. Pre-fix the broker silently appended to the
-//!    follower (`error_code=0`, follower log grew, leader never saw the record) —
-//!    silent data loss. The fix returns 6 and leaves the follower log untouched.
+//!    skips the leadership check. Before the fix, the broker silently appended
+//!    to the follower. It returned `error_code=0`, the follower log grew, and
+//!    the leader never saw the record. That is silent data loss. The fix
+//!    returns 6 and leaves the follower log untouched.
 //!
 //!  * **rf=1 (no replica on the target):** the non-leader broker holds no
-//!    replica at all. Pre-fix this returned `UNKNOWN_TOPIC_OR_PARTITION` (3)
-//!    because the local registry lookup missed. Kafka returns 6 (the partition
-//!    exists cluster-wide; this broker just isn't its leader), which the fix
-//!    now does by consulting the metadata image rather than the local registry.
+//!    replica at all. Before the fix this returned
+//!    `UNKNOWN_TOPIC_OR_PARTITION` (3) because the local registry lookup
+//!    missed. Kafka returns 6, because the partition exists cluster-wide and
+//!    this broker just isn't its leader. The fix now returns 6 as well. It
+//!    consults the metadata image rather than the local registry.
 //!
-//! The same Produce sent to the actual leader must succeed (code 0, record
-//! durably stored), proving the leader path is unaffected.
+//! The same Produce sent to the actual leader must succeed with code 0 and a
+//! durably stored record. This proves the leader path is unaffected.
 //!
-//! Windows-gated like the other multi-broker tests (openraft `debug_assert!`
-//! races on the hosted Windows scheduler).
+//! These tests are Windows-gated like the other multi-broker tests. openraft
+//! `debug_assert!` races on the hosted Windows scheduler.
 
 use std::{
     sync::OnceLock,
@@ -45,10 +48,10 @@ use tokio::sync::Mutex;
 
 mod support;
 
-/// Serialize the multi-broker tests in this binary: each boots a 3-node
+/// Serialize the multi-broker tests in this binary. Each one boots a 3-node
 /// loopback cluster, and running them concurrently exhausts ephemeral ports
-/// and starves openraft election timing. Same rationale as the `cluster_lock`
-/// in `producer_leader_routing.rs`.
+/// and starves openraft election timing. The reason is the same as for the
+/// `cluster_lock` in `producer_leader_routing.rs`.
 fn cluster_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -68,8 +71,8 @@ fn one_record_batch(v: &str) -> RecordBatch {
 }
 
 /// Send a single one-record Produce (`acks=1`) for `(topic, partition)` over
-/// `client`'s bootstrap connection — i.e. directly at whichever broker the
-/// client was built against, bypassing any leader routing. Returns
+/// `client`'s bootstrap connection. That is, send it directly at whichever
+/// broker the client was built against, and bypass any leader routing. Returns
 /// `(error_code, current_leader_id)`.
 async fn produce_one(
     client: &Client,
@@ -101,15 +104,16 @@ async fn produce_one(
 }
 
 /// Block until `broker` has materialized its LOCAL replica for
-/// `(topic, partition)` — i.e. the supervisor reconcile has turned the
-/// metadata image into a live writer-actor (`PartitionRegistry::get` returns
-/// `Some`). Producing directly at a broker before this is done races its
-/// image/replica catch-up: the metadata image is applied per-broker and a
-/// follower lags the controller, so a Produce can surface `UNKNOWN_TOPIC_ID`
-/// (100, the broker's image hasn't applied this `topic_id` yet — it resolves
-/// the request by id before the leadership gate) or a transient
-/// `NOT_LEADER_OR_FOLLOWER` (6, the image names this broker leader but the
-/// writer-actor isn't spun up yet). A materialized local replica implies the
+/// `(topic, partition)`. That is, the supervisor reconcile has turned the
+/// metadata image into a live writer-actor and `PartitionRegistry::get`
+/// returns `Some`. A Produce sent directly at a broker before this is done
+/// races the broker's image/replica catch-up. The broker applies the metadata
+/// image per-broker and a follower lags the controller, so a Produce can
+/// surface two errors. The first is `UNKNOWN_TOPIC_ID` (100): the broker's
+/// image hasn't applied this `topic_id` yet, and it resolves the request by id
+/// before the leadership gate. The second is a transient
+/// `NOT_LEADER_OR_FOLLOWER` (6): the image names this broker leader but the
+/// writer-actor isn't spun up yet. A materialized local replica implies the
 /// image already holds the topic + partition, so both races are closed.
 /// Panics if the replica never appears within 30s.
 async fn wait_for_local_replica(broker: &BrokerHandle, topic: &str, partition: i32) {

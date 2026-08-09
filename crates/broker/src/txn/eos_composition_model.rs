@@ -1,32 +1,37 @@
-//! COMPOSITIONAL model of the exactly-once READ visibility algebra — the second
-//! end-to-end model (after the data-path composition). Over a single partition
-//! with >= 2 interleaving transactional producers and an advancing HWM, it
-//! verifies that what a `read_committed` consumer may see — every offset below
-//! `effective_lso = min(lso, hw)`, minus aborted batches — is EXACTLY the
-//! committed records: no aborted record ever leaks, no still-open-transaction
-//! record is exposed, and nothing above the HWM is exposed. Because concurrent
-//! producers' batches interleave at the offset level, a committed txn can sit
-//! partly above the LSO (behind an older open txn) or above the HWM, so the
-//! guarantee is prefix-correctness, not whole-txn snapshot atomicity.
+//! COMPOSITIONAL model of the exactly-once READ visibility algebra.
 //!
-//! Scope — what is DRIVEN vs MODELED (an adversarial faithfulness review flagged
-//! the original framing as over-claiming):
-//!   - DRIVEN (real code): the EndTxn decision cores `decide_phase1_transition` /
-//!     `decide_end_txn_completion` on their Proceed path (the fencing / retry
-//!     arms are exercised by `decision_model.rs`, #523; a guard `unreachable!`s if
-//!     they ever fire here); and the real `read_committed` clamp of
-//!     `compute_visibility_window` (`effective_lso = lso.min(hw)`), which bites
-//!     non-trivially when an open txn's records sit above the HWM (witness
-//!     `hwm_clamp_active`).
-//!   - MODELED (faithful abstraction, NOT driving real code): the LSO rule
-//!     (Kafka's first-unstable-offset; `Log::lso()`'s incremental maintenance is
-//!     stored state, not a pure fn) and the abort filter (a Data batch is hidden
-//!     iff its txn aborted — equivalent to the client-side `poll.rs` /
-//!     `TxnIndex::aborted_in_range` range filtering ONLY under the one-in-flight-
-//!     txn-per-producer invariant this model enforces).
-//!   - NOT covered (left to the per-slice log / txn-index / fetch models): the
-//!     `Log::lso()` maintenance internals, `TxnIndex::aborted_in_range` overlap
-//!     arithmetic, and the consumer `aborted_pids` state machine.
+//! This is the second end-to-end model, after the data-path composition. It
+//! runs over a single partition with >= 2 interleaving transactional producers
+//! and an advancing HWM. It verifies that what a `read_committed` consumer may
+//! see is EXACTLY the committed records. That set is every offset below
+//! `effective_lso = min(lso, hw)`, minus aborted batches. No aborted record
+//! ever leaks. The visible set never holds a still-open-transaction record,
+//! and it never holds anything above the HWM.
+//!
+//! Concurrent producers' batches interleave at the offset level. So a
+//! committed txn can sit partly above the LSO, behind an older open txn, or
+//! above the HWM. The guarantee is prefix-correctness, not whole-txn snapshot
+//! atomicity.
+//!
+//! Scope: what is DRIVEN and what is MODELED. An adversarial faithfulness
+//! review flagged the original framing as over-claiming.
+//!   - DRIVEN (real code): the EndTxn decision cores `decide_phase1_transition`
+//!     and `decide_end_txn_completion` on their Proceed path.
+//!     `decision_model.rs` (#523) exercises the fencing and retry arms. A guard
+//!     `unreachable!`s if they ever fire here. Also DRIVEN: the real
+//!     `read_committed` clamp of `compute_visibility_window`
+//!     (`effective_lso = lso.min(hw)`). That clamp bites non-trivially when an
+//!     open txn's records sit above the HWM. The witness is `hwm_clamp_active`.
+//!   - MODELED (faithful abstraction, NOT driving real code): the LSO rule and
+//!     the abort filter. The LSO rule is Kafka's first-unstable-offset.
+//!     `Log::lso()`'s incremental maintenance is stored state, not a pure fn.
+//!     The abort filter hides a Data batch if and only if its txn aborted. That
+//!     is equivalent to the client-side `poll.rs` /
+//!     `TxnIndex::aborted_in_range` range filtering ONLY under the
+//!     one-in-flight-txn-per-producer invariant this model enforces.
+//!   - NOT covered, and left to the per-slice log / txn-index / fetch models:
+//!     the `Log::lso()` maintenance internals, `TxnIndex::aborted_in_range`
+//!     overlap arithmetic, and the consumer `aborted_pids` state machine.
 //!
 //! See the design spec.
 
@@ -63,8 +68,10 @@ enum Kind {
     Abort,
 }
 
-/// One appended batch (offset = index in the log). A transaction = a producer's
-/// run of `Data` batches in one `generation`, terminated by a Commit/Abort marker.
+/// One appended batch (offset = index in the log).
+///
+/// A transaction is a producer's run of `Data` batches in one `generation`. A
+/// Commit or Abort marker ends the transaction.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct Batch {
     producer: u8,
@@ -84,10 +91,10 @@ struct Prod {
 struct EosState {
     log: Vec<Batch>,
     prod: Vec<Prod>, // index = producer
-    /// High watermark = offsets replicated/durable so far (`hw <= log_end`),
-    /// advanced by `Ack`. An OPEN transaction's not-yet-replicated records can
-    /// push the LSO ABOVE the HWM, so the real `compute_visibility_window`
-    /// clamp `effective_lso = lso.min(hw)` genuinely bites (returns `hw`).
+    /// High watermark = offsets replicated/durable so far (`hw <= log_end`).
+    /// `Ack` advances it. An OPEN transaction's not-yet-replicated records can
+    /// push the LSO ABOVE the HWM. The real `compute_visibility_window` clamp
+    /// `effective_lso = lso.min(hw)` then bites and returns `hw`.
     hw: Offset,
 }
 
@@ -103,7 +110,8 @@ fn tstate(id: i8) -> TxnState {
 }
 
 /// Rebuild a real `TxnEntry` for producer `p` so the real decision cores behave
-/// exactly as in a live run (partitions/timestamps don't affect the decision).
+/// exactly as in a live run. Partitions and timestamps do not change the
+/// decision.
 fn rebuild(p: usize, pr: Prod) -> TxnEntry {
     // Per-producer pid = PID0 + index; wrap into `ProducerId` at the seam.
     let mut e = TxnEntry::new_empty(
@@ -131,9 +139,10 @@ fn txn_outcome(log: &[Batch], producer: u8, generation: u8) -> Option<Kind> {
 }
 
 /// LSO = base offset of the oldest still-OPEN txn (Data present, no marker yet),
-/// else the log end. Kafka's first-unstable-offset rule. Derived from the log
-/// alone (the txn universe is whatever (producer, generation) pairs appear), so
-/// the property closures stay non-capturing.
+/// else the log end. This is Kafka's first-unstable-offset rule. This function
+/// derives the LSO from the log alone. The txn universe is whatever
+/// (producer, generation) pairs appear, so the property closures stay
+/// non-capturing.
 fn lso(log: &[Batch]) -> Offset {
     let mut min_open: Option<i64> = None;
     let mut seen: Vec<(u8, u8)> = Vec::new();
@@ -149,10 +158,12 @@ fn lso(log: &[Batch]) -> Offset {
     Offset(min_open.unwrap_or(model_offset(log.len())))
 }
 
-/// The exclusive offset a `read_committed` consumer may see, driving the REAL
-/// `compute_visibility_window` (read-committed branch: `effective_lso =
-/// lso.min(hw)`). When an open txn's records sit above the HWM, `lso > hw` and
-/// the clamp returns `hw` — the consumer never reads above the watermark.
+/// The exclusive offset a `read_committed` consumer may see.
+///
+/// This function drives the REAL `compute_visibility_window` on its
+/// read-committed branch, where `effective_lso = lso.min(hw)`. When an open
+/// txn's records sit above the HWM, `lso > hw` and the clamp returns `hw`. The
+/// consumer never reads above the watermark.
 fn effective_lso(log: &[Batch], hw: Offset) -> Offset {
     let log_end = Offset(model_offset(log.len()));
     let l = lso(log);

@@ -1,23 +1,24 @@
-//! SP31: explicit type casts — `CAST(expr AS type)` and `expr::type`.
+//! SP31: explicit type casts, `CAST(expr AS type)` and `expr::type`.
 //!
 //! This is the *explicit* cast context (the broadest PostgreSQL cast context),
 //! among the slice's five runtime types (`bool`, `int4`, `int8`, `text`,
-//! `float8`). It is a pure value transform — no I/O, no catalog, no concurrency —
-//! so it lives here in the type layer and is proven exhaustively by unit tests.
+//! `float8`). It is a pure value transform with no I/O, no catalog and no
+//! concurrency, so it lives here in the type layer, and unit tests prove it
+//! exhaustively.
 //!
-//! Two entry points, sharing one cast matrix:
-//!   * [`cast_allowed`] — a *static* (plan-time) predicate on `(from, to)` column
+//! Two entry points share one cast matrix:
+//!   * [`cast_allowed`][]: a *static* (plan-time) predicate on `(from, to)` column
 //!     types, so [`crate::ops`]-free callers can reject an undefined cast with
 //!     SQLSTATE 42846 before any row is produced (and so `RowDescription` knows
 //!     the result type).
-//!   * [`cast`] — the *runtime* value conversion of one (possibly NULL) `Datum`.
+//!   * [`cast`][]: the *runtime* value conversion of one (possibly NULL) `Datum`.
 //!
 //! The defined casts (NULL → NULL for every one of them):
 //!   * identity `T → T`;
-//!   * numeric ↔ numeric (`int4`/`int8`/`float8`, any direction) — widening,
+//!   * numeric ↔ numeric (`int4`/`int8`/`float8`, any direction): widening,
 //!     range-checked narrowing (22003), and `float8 → int` rounding half-to-even;
-//!   * `bool → int4` (`false`→0, `true`→1) and `int4 → bool` (0→false, else true)
-//!     — PostgreSQL has these only for `int4`, not `int8`;
+//!   * `bool → int4` (`false`→0, `true`→1) and `int4 → bool` (0→false, else true).
+//!     PostgreSQL has these only for `int4`, not `int8`;
 //!   * any type `→ text` (the type's output text), and `text →` any type (parsed,
 //!     22P02 on bad syntax, 22003 on overflow).
 //!
@@ -30,9 +31,9 @@
 
 use crate::{ColumnType, Datum, TypeError, string::Coercion};
 
-/// Is an explicit cast from `from` to `to` defined among the slice's types? Used
-/// at plan time so an undefined cast surfaces as 42846 before execution, and so
-/// the result column type is known for `RowDescription`.
+/// Is an explicit cast from `from` to `to` defined among the slice's types? The
+/// planner calls this so an undefined cast surfaces as 42846 before execution,
+/// and so it knows the result column type for `RowDescription`.
 pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     use ColumnType::{Bool, Date, Int4, Text, Time, Timestamp, Timestamptz};
     // SP32: the numeric family — int2/int4/int8/float4/float8/numeric — all
@@ -114,30 +115,30 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     }
 }
 
-/// Is an *implicit-or-assignment* cast from `from` to `to` defined — the pairs
-/// PostgreSQL 18's `pg_cast` marks `castcontext` `'i'` or `'a'`, restricted to
-/// crabka's types? A strict SUBSET of [`cast_allowed`]: assignment (INSERT /
-/// UPDATE SET into a column) converts through these pairs automatically, while
-/// everything else keeps requiring an explicit `CAST`.
+/// Is an *implicit-or-assignment* cast from `from` to `to` defined, that is, one
+/// of the pairs PostgreSQL 18's `pg_cast` marks `castcontext` `'i'` or `'a'`,
+/// restricted to crabka's types? This is a strict SUBSET of [`cast_allowed`].
+/// Assignment (INSERT / UPDATE SET into a column) converts through these pairs
+/// automatically, and everything else still needs an explicit `CAST`.
 ///
 /// The allowed pairs and their `pg_cast` contexts:
 ///   * identity `T → T` (no cast needed);
-///   * numeric family (`int4`/`int8`/`float8`/`numeric`) interconversion —
+///   * numeric family (`int4`/`int8`/`float8`/`numeric`) interconversion:
 ///     widenings are `'i'`, narrowings are `'a'`;
-///   * string family (`text`/`varchar`/`char`) interconversion — `'i'`/`'a'`
+///   * string family (`text`/`varchar`/`char`) interconversion: `'i'`/`'a'`
 ///     (length re-coercion applies at assignment);
-///   * `date → timestamp` and `date → timestamptz` — `'i'`;
-///   * `timestamp → timestamptz` — `'i'`; `timestamptz → timestamp` — `'a'`
+///   * `date → timestamp` and `date → timestamptz`: `'i'`;
+///   * `timestamp → timestamptz`: `'i'`; `timestamptz → timestamp`: `'a'`
 ///     (both rotate through the session time zone).
 ///
 /// Deliberately NOT allowed (explicit-only in this matrix):
 ///   * non-string ↔ string (PostgreSQL's I/O-conversion casts are
-///     explicit-only since 8.3 — `INSERT` of an `int4` into a `text` column
-///     errors, and vice versa);
+///     explicit-only since 8.3, so an `INSERT` of an `int4` into a `text` column
+///     errors, and the reverse errors too);
 ///   * `bool ↔ int4` (`castcontext` `'e'`);
 ///   * `timestamp`/`timestamptz` → `date`/`time` (kept explicit-only here as a
 ///     conservative subset, though PostgreSQL marks these `'a'`);
-///   * everything involving `interval`, `bytea`, `uuid`, `regclass` across
+///   * every pair with `interval`, `bytea`, `uuid` or `regclass` across
 ///     type families.
 pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     use ColumnType::{Date, Timestamp, Timestamptz};
@@ -162,14 +163,14 @@ pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     }
 }
 
-/// Perform an explicit cast of a (possibly NULL) `Datum` to `to`. NULL casts to
+/// Do an explicit cast of a (possibly NULL) `Datum` to `to`. NULL casts to
 /// NULL of the target type. A text-parse failure is 22P02; a numeric overflow is
-/// 22003; an undefined `(from, to)` pair is 42846 — though callers that gate on
-/// [`cast_allowed`] at plan time never reach that arm for a non-NULL value.
+/// 22003; an undefined `(from, to)` pair is 42846. Callers that gate on
+/// [`cast_allowed`] at plan time never reach that last arm for a non-NULL value.
 ///
-/// `tz` is forwarded to `encode_text` for the `* → text` cast arms involving
-/// `Timestamptz`; all other cast paths ignore it. Task 7 will add `text →
-/// timestamptz` and will use `tz` for parsing.
+/// This function forwards `tz` to `encode_text` for the `* → text` cast arms
+/// with `Timestamptz`; all other cast paths ignore it. Task 7 will add `text →
+/// timestamptz` and will use `tz` for the parse.
 pub fn cast(value: &Datum, to: ColumnType, tz: &jiff::tz::TimeZone) -> Result<Datum, TypeError> {
     cast_in(value, to, crate::encoding::OutputStyle::with_zone(tz))
 }
@@ -177,10 +178,10 @@ pub fn cast(value: &Datum, to: ColumnType, tz: &jiff::tz::TimeZone) -> Result<Da
 /// [`cast`] under assignment rules rather than explicit-cast rules.
 ///
 /// The two contexts differ only in how a `varchar(n)`/`char(n)` target treats an
-/// over-long value: an explicit cast truncates it, while an assignment rejects it
+/// over-long value: an explicit cast truncates it, and an assignment rejects it
 /// with `string_data_right_truncation` unless the discarded characters are all
-/// spaces. Use this wherever a value is being *stored* — a column, a routine
-/// parameter — and [`cast`] for a cast the query wrote out.
+/// spaces. Use this wherever the engine *stores* a value, such as a column or a
+/// routine parameter, and use [`cast`] for a cast the query wrote out.
 ///
 /// # Errors
 ///
@@ -247,9 +248,9 @@ fn bounded_string(value: &Datum, to: ColumnType) -> Result<Datum, TypeError> {
     }
 }
 
-/// [`cast`] with the session's `DateStyle` field order, which decides how an
-/// otherwise-ambiguous all-numeric date literal (`01/02/03`) is read on the
-/// `text → date`/`timestamp`/`timestamptz` arms. Every other arm ignores it.
+/// [`cast`] with the session's `DateStyle` field order. That order decides how
+/// the `text → date`/`timestamp`/`timestamptz` arms read an otherwise-ambiguous
+/// all-numeric date literal (`01/02/03`). Every other arm ignores it.
 pub fn cast_in(
     value: &Datum,
     to: ColumnType,
@@ -548,13 +549,13 @@ pub fn cast_in(
     }
 }
 
-/// Wrap a value as a numeric `Datum`, applying a `numeric(p,s)` modifier
+/// Wrap a value as a numeric `Datum`, and apply a `numeric(p,s)` modifier
 /// (round to scale + precision overflow → 22003) when the target carries one.
 /// Casts to and from the user-defined types, `Ok(None)` when neither side is
 /// one and the built-in table should decide.
 ///
-/// A domain is unwrapped to its base — the value of a domain *is* a base value,
-/// and the domain's own constraints are checked by the executor, which is the
+/// A domain unwraps to its base, because the value of a domain *is* a base
+/// value. The executor checks the domain's own constraints, because it is the
 /// only layer that can evaluate their `CHECK` expressions. A composite converts
 /// from its text form (`record_in`), from another composite field by field, and
 /// to text (`record_out`). An enum converts from and to text only.
@@ -615,8 +616,8 @@ fn string_result(text: String, to: ColumnType) -> Result<Datum, TypeError> {
     }
 }
 
-/// A composite → composite coercion: field counts must agree and each field is
-/// cast to the target attribute's type.
+/// A composite → composite coercion: field counts must agree, and this function
+/// casts each field to the target attribute's type.
 fn cast_record(
     r: &crate::datum::RecordValue,
     target: Option<crate::usertype::UserTypeRef>,
@@ -691,7 +692,7 @@ fn record_from_text(
 }
 
 /// `enum_in`: the label, whitespace-trimmed as `PostgreSQL` trims it, must be
-/// one of the type's.
+/// one of the type's labels.
 fn enum_from_text(text: &str, named: crate::usertype::UserTypeRef) -> Result<Datum, TypeError> {
     let Some(ty) = crate::usertype::lookup_oid(named.oid) else {
         return Err(undefined_type(named.name));
@@ -781,7 +782,7 @@ fn i2_from_f64(f: f64) -> Result<Datum, TypeError> {
 /// `float8`/`numeric` → `float4` (PostgreSQL `dtof`): a finite input that
 /// becomes infinite is `value out of range: overflow`, and a non-zero input
 /// that flushes to zero is `value out of range: underflow`. An input that is
-/// *already* infinite passes straight through, as it does in PostgreSQL.
+/// *already* infinite passes through, as it does in PostgreSQL.
 fn f4_from_f64(f: f64) -> Result<Datum, TypeError> {
     let narrowed = f as f32;
     if narrowed.is_infinite() && f.is_finite() {
@@ -822,11 +823,11 @@ fn i8_from_f64(f: f64) -> Result<Datum, TypeError> {
     }
 }
 
-/// `text → bool`, mirroring PostgreSQL `boolin`/`parse_bool_with_len`: case-
+/// `text → bool`, which mirrors PostgreSQL `boolin`/`parse_bool_with_len`: case-
 /// insensitive, leading/trailing whitespace trimmed, then a non-empty prefix of
 /// `true`/`false`/`yes`/`no`/`on`/`off`, or the single chars `1`/`0`. The `o`
-/// prefix is ambiguous between `on`/`off` and PostgreSQL resolves it to `on`
-/// (true) by testing `on` first; everything else is 22P02.
+/// prefix is ambiguous between `on`/`off`, and PostgreSQL resolves it to `on`
+/// (true) because it tests `on` first; everything else is 22P02.
 fn text_to_bool(s: &str) -> Result<Datum, TypeError> {
     let t = s.trim().to_ascii_lowercase();
     let v = match t.as_bytes().first() {
@@ -878,9 +879,9 @@ fn text_to_i64(s: &str) -> Result<Datum, TypeError> {
         .map_err(|_| TypeError::Overflow)
 }
 
-/// 22P02 unless the trimmed text is `[+-]?[0-9]+`. Separating the syntax check
-/// from the width parse lets an out-of-range-but-well-formed value (e.g.
-/// `'99999999999'`) report 22003 rather than being lumped into 22P02.
+/// 22P02 unless the trimmed text is `[+-]?[0-9]+`. A separate syntax check ahead
+/// of the width parse lets an out-of-range-but-well-formed value (e.g.
+/// `'99999999999'`) report 22003 instead of 22P02.
 fn require_int_syntax(s: &str, type_name: &'static str) -> Result<(), TypeError> {
     let t = s.trim();
     let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
@@ -894,12 +895,12 @@ fn require_int_syntax(s: &str, type_name: &'static str) -> Result<(), TypeError>
     }
 }
 
-/// `text → float8`, matching PostgreSQL `float8in`: trimmed, accepts decimal /
-/// exponent forms and the specials `Infinity`/`-Infinity`/`NaN`/`inf` (case-
-/// insensitive). Bad syntax is 22P02; a *finite* literal that overflows to
-/// infinity (e.g. `'1e400'`) is 22003 — but an explicit infinity spelling is the
-/// value `Infinity`, not an error (this is why it cannot just reuse
-/// [`crate::ops::float_literal`], whose grammar has no infinity spelling).
+/// `text → float8`, which matches PostgreSQL `float8in`: trimmed, accepts
+/// decimal / exponent forms and the specials `Infinity`/`-Infinity`/`NaN`/`inf`
+/// (case-insensitive). Bad syntax is 22P02; a *finite* literal that overflows to
+/// infinity (e.g. `'1e400'`) is 22003. An explicit infinity spelling is the
+/// value `Infinity`, not an error, which is why this cannot reuse
+/// [`crate::ops::float_literal`], whose grammar has no infinity spelling.
 fn text_to_f64(s: &str) -> Result<Datum, TypeError> {
     let t = s.trim();
     match t.parse::<f64>() {
@@ -912,13 +913,13 @@ fn text_to_f64(s: &str) -> Result<Datum, TypeError> {
     }
 }
 
-/// `text → float4`, matching PostgreSQL `float4in`: trimmed, decimal/exponent
-/// forms plus the case-insensitive `Infinity`/`inf`/`NaN` spellings. Bad syntax
-/// is 22P02; a finite literal that overflows to infinity OR flushes a non-zero
-/// magnitude to zero is 22003 — `strtof` reports both through `ERANGE`, so
-/// `'1e39'` and `'1e-46'` are equally out of range while the subnormal
-/// `'1e-45'` is a value. The out-of-range message quotes the *trimmed* text,
-/// as PostgreSQL does.
+/// `text → float4`, which matches PostgreSQL `float4in`: trimmed,
+/// decimal/exponent forms plus the case-insensitive `Infinity`/`inf`/`NaN`
+/// spellings. Bad syntax is 22P02; a finite literal that overflows to infinity
+/// OR flushes a non-zero magnitude to zero is 22003. `strtof` reports both
+/// through `ERANGE`, so `'1e39'` and `'1e-46'` are equally out of range while
+/// the subnormal `'1e-45'` is a value. The out-of-range message quotes the
+/// *trimmed* text, as PostgreSQL does.
 fn text_to_f32(s: &str) -> Result<Datum, TypeError> {
     let t = s.trim();
     let Ok(parsed) = t.parse::<f32>() else {
@@ -1632,8 +1633,8 @@ mod tests {
         }
     }
 
-    /// int2/float4 join the numeric family for casting, but — like PostgreSQL —
-    /// neither gains a `bool` cast: only `int4` has one.
+    /// int2/float4 join the numeric family for casting, but neither gains a
+    /// `bool` cast: only `int4` has one, as in PostgreSQL.
     #[test]
     fn int2_and_float4_cast_matrix_excludes_bool() {
         use ColumnType::{Bool, Float4, Float8, Int2, Int4, Int8, Text};

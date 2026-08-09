@@ -1,5 +1,7 @@
-//! Expression evaluation over Datums, plus static result-type inference (used
-//! to build a stable RowDescription before any row is produced).
+//! Expression evaluation over Datums, plus static result-type inference.
+//!
+//! Static result-type inference builds a stable RowDescription before any row
+//! is produced.
 
 use std::cmp::Ordering;
 
@@ -15,28 +17,32 @@ use crate::{
     scope::Scope,
 };
 
-/// The maximum expression-tree depth `eval` will recurse before returning
-/// `54001` (statement_too_complex). This is DEFENSE-IN-DEPTH: the parser already
-/// caps the AST depth at `crabka_pgparser::parser::MAX_DEPTH` (50) at parse time, so a
-/// tree deeper than 50 can never reach here in practice — `150` leaves 3x
-/// headroom above that cap so the guard never wrongly rejects a parser-admitted
-/// tree. The value also stays well below the depth at which `eval` itself would
-/// overflow: a hypothetical over-deep tree must return a clean error rather than
-/// abort the process.
+/// The maximum expression-tree depth `eval` will recurse before it returns
+/// `54001` (statement_too_complex).
+///
+/// This limit is DEFENSE-IN-DEPTH. The parser already caps the AST depth at
+/// `crabka_pgparser::parser::MAX_DEPTH` (50) at parse time, so a tree deeper
+/// than 50 can never reach here in practice. `150` leaves 3x headroom above
+/// that cap, so the guard never wrongly rejects a parser-admitted tree. The
+/// value also stays well below the depth at which `eval` itself would overflow.
+/// A hypothetical over-deep tree must return a clean error and must not abort
+/// the process.
 ///
 /// It is deliberately **2×** the parser's `MAX_DEPTH` of 50, not more. The
 /// parser caps AST depth at parse time, so no tree the parser produces can
-/// exceed 50 and this guard only ever fires on a hand-built one; the multiple is
-/// headroom, not capacity. It was 3× (150), and that slack turned into an
+/// exceed 50, and this guard only ever fires on a hand-built tree. The multiple
+/// is headroom, not capacity. It was 3× (150), and that slack caused an
 /// aborting stack overflow three separate times as waves widened `Datum` and
-/// `ExecError` — the recursive frame carries both, so every byte added to them
-/// is multiplied by this constant. Raise it only alongside a measurement of the
+/// `ExecError`. The recursive frame carries both, so this constant multiplies
+/// every byte added to them. Raise it only together with a measurement of the
 /// frame size on the smallest stack the tests run on.
 const MAX_EVAL_DEPTH: usize = 100;
 
-/// Evaluate `expr` against a row (`values`, aligned to `scope.columns`). `ctx`
-/// carries the session time zone and the transaction/statement clock; non-temporal
-/// evaluation ignores it (UTC/epoch reproduces prior behavior).
+/// Evaluate `expr` against a row.
+///
+/// `values` is the row, aligned to `scope.columns`. `ctx` carries the session
+/// time zone and the transaction/statement clock. Non-temporal evaluation
+/// ignores `ctx`, and UTC/epoch reproduces prior behavior.
 pub(crate) fn eval(
     expr: &Expr,
     scope: &Scope,
@@ -47,10 +53,13 @@ pub(crate) fn eval(
     eval_depth(expr, scope, values, ctx, 0)
 }
 
-/// Depth-tracking core of [`eval`]. `depth` is the current recursion level; every
-/// recursive descent (direct calls AND the child-evaluation closures handed to
-/// the shared `eval_*`/`func::*` combinators) increments it, so a runaway tree is
-/// bounded on every path. Returns `54001` once it exceeds `MAX_EVAL_DEPTH`.
+/// Depth-tracking core of [`eval`].
+///
+/// `depth` is the current recursion level. Every recursive descent increments
+/// it, so a runaway tree is bounded on every path. This includes direct calls
+/// AND the child-evaluation closures given to the shared `eval_*`/`func::*`
+/// combinators. This function returns `54001` once `depth` exceeds
+/// `MAX_EVAL_DEPTH`.
 fn eval_depth(
     expr: &Expr,
     scope: &Scope,
@@ -339,11 +348,16 @@ fn eval_depth(
     }
 }
 
-/// `x IN (list)` / `x NOT IN (list)` with three-valued NULL logic. `eval_child`
-/// evaluates each list element. Truth table for `IN`: an empty list → false
-/// whatever `x` is, NULL included; NULL lhs against a non-empty list → NULL; an
-/// element comparing Equal → true; otherwise NULL if any element was NULL, else
-/// false. `NOT IN` is the boolean negation (NULL stays NULL).
+/// `x IN (list)` / `x NOT IN (list)` with three-valued NULL logic.
+///
+/// `eval_child` evaluates each list element. The truth table for `IN` is:
+///
+/// - An empty list is false for every `x`, NULL included.
+/// - A NULL left-hand side against a non-empty list is NULL.
+/// - An element that compares Equal makes the result true.
+/// - Otherwise the result is NULL if any element was NULL, and false if not.
+///
+/// `NOT IN` is the boolean negation. NULL stays NULL.
 pub(crate) fn eval_in_list(
     x: &Datum,
     list: &[Expr],
@@ -375,8 +389,10 @@ pub(crate) fn eval_in_list(
     }
 }
 
-/// `x BETWEEN lo AND hi` ≡ `x >= lo AND x <= hi`; `NOT BETWEEN` negates it. NULL
-/// propagates exactly as three-valued AND/NOT define.
+/// `x BETWEEN lo AND hi` ≡ `x >= lo AND x <= hi`.
+///
+/// `NOT BETWEEN` negates it. NULL propagates exactly as three-valued AND/NOT
+/// define.
 pub(crate) fn eval_between(
     x: &Datum,
     lo: &Datum,
@@ -390,9 +406,11 @@ pub(crate) fn eval_between(
     Ok(if negated { ops::not(&res)? } else { res })
 }
 
-/// `s LIKE|ILIKE|SIMILAR TO pat [ESCAPE e]` and their negations. A NULL subject,
-/// pattern, or escape string → NULL; a non-text operand → 42804. `escape` is the
-/// evaluated `ESCAPE` clause; without one each pattern language uses `\`.
+/// `s LIKE|ILIKE|SIMILAR TO pat [ESCAPE e]` and their negations.
+///
+/// A NULL subject, pattern, or escape string gives NULL. A non-text operand
+/// gives 42804. `escape` is the evaluated `ESCAPE` clause. Without an `ESCAPE`
+/// clause, each pattern language uses `\`.
 pub(crate) fn eval_like(
     s: &Datum,
     pat: &Datum,
@@ -425,14 +443,17 @@ fn as_text(d: &Datum) -> Result<&str, ExecError> {
     }
 }
 
-/// SQL `LIKE` matcher over Unicode scalar values: `%` matches zero-or-more
-/// characters, `_` exactly one, and `escape` (the `ESCAPE` clause's character,
-/// `\` by default and `None` for `ESCAPE ''`) makes the next pattern character
-/// literal. The escape is tested BEFORE the wildcards, so `ESCAPE '%'` really
-/// does take `%` out of service as a wildcard, as it does in `PostgreSQL`.
-/// `ci` folds ASCII case (the `ILIKE` form). A pattern ending in a lone escape
-/// character is an invalid escape sequence (22025). Iterative backtracking to
-/// the last `%`, O(n·m) worst case.
+/// SQL `LIKE` matcher over Unicode scalar values.
+///
+/// `%` matches zero or more characters and `_` matches exactly one. `escape` is
+/// the `ESCAPE` clause's character. It is `\` by default and `None` for
+/// `ESCAPE ''`, and it makes the next pattern character literal. The matcher
+/// tests the escape BEFORE the wildcards, so `ESCAPE '%'` stops `%` from acting
+/// as a wildcard, as it does in `PostgreSQL`.
+///
+/// `ci` folds ASCII case, which is the `ILIKE` form. A pattern that ends in a
+/// lone escape character is an invalid escape sequence (22025). The matcher
+/// backtracks iteratively to the last `%`, with an O(n·m) worst case.
 pub(crate) fn like_match(
     s: &str,
     p: &str,
@@ -504,11 +525,16 @@ pub(crate) fn like_match(
     Ok(true)
 }
 
-/// A `CASE` expression. Searched form (`operand` None): the first WHEN whose
-/// condition is TRUE wins (false/NULL skip; non-boolean → 42804). Simple form:
-/// the first WHEN value comparing Equal to the operand wins (NULL never
-/// matches). Falls through to ELSE, or NULL. Branches are evaluated lazily and
-/// in order, so a later branch's error/side-effect is never reached early.
+/// A `CASE` expression.
+///
+/// In the searched form, where `operand` is None, the first WHEN whose
+/// condition is TRUE wins. A false or NULL condition is skipped, and a
+/// non-boolean condition gives 42804. In the simple form, the first WHEN value
+/// that compares Equal to the operand wins, and NULL never matches. When no
+/// WHEN matches, the result is the ELSE branch, or NULL.
+///
+/// This function evaluates branches lazily and in order, so it never reaches a
+/// later branch's error or side effect early.
 pub(crate) fn eval_case(
     operand: Option<&Expr>,
     whens: &[(Expr, Expr)],
@@ -545,9 +571,11 @@ pub(crate) fn eval_case(
     }
 }
 
-/// Apply a unary operator to an already-evaluated operand. Shared by scalar
-/// `eval` and the SP27 grouped evaluator (`agg::eval_grouped`). `ctx` is threaded
-/// uniformly (no unary operator consumes it yet).
+/// Apply a unary operator to an already-evaluated operand.
+///
+/// Scalar `eval` and the SP27 grouped evaluator `agg::eval_grouped` share this
+/// function. `ctx` is threaded uniformly, and no unary operator consumes it
+/// yet.
 pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datum, ExecError> {
     match op {
         UnaryOp::Not => Ok(ops::not(v)?),
@@ -604,9 +632,10 @@ pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datu
 
 /// The operand of a boolean test as a three-valued boolean (`None` is UNKNOWN).
 ///
-/// A string is still `unknown` to `PostgreSQL` at this point, so it is parsed as
-/// a boolean literal and reports 22P02 when it is not one (`'x' IS TRUE`).
-/// Anything else non-boolean is 42804, worded as `PostgreSQL` words it.
+/// A string is still `unknown` to `PostgreSQL` at this point. This function
+/// therefore parses the string as a boolean literal and reports 22P02 when it
+/// is not one, as in `'x' IS TRUE`. Any other non-boolean operand is 42804,
+/// worded as `PostgreSQL` words it.
 fn boolean_test_operand(op: UnaryOp, v: &Datum) -> Result<Option<bool>, ExecError> {
     match v {
         Datum::Null => Ok(None),
@@ -640,9 +669,9 @@ fn boolean_test_spelling(op: UnaryOp) -> &'static str {
 /// The generic prefix operators `~` (bitwise NOT), `@` (absolute value), `|/`
 /// (square root) and `||/` (cube root).
 ///
-/// `~` and `@` preserve their operand's type (`@ 5.5` is `numeric`), while `|/`
-/// and `||/` are `PostgreSQL`'s `dsqrt`/`dcbrt` — `float8` regardless of the
-/// operand's type, so `|/ 16.0` is `4`, not `4.0000000000000000`.
+/// `~` and `@` keep their operand's type, so `@ 5.5` is `numeric`. `|/` and
+/// `||/` are `PostgreSQL`'s `dsqrt`/`dcbrt`. They give `float8` whatever the
+/// operand's type is, so `|/ 16.0` is `4`, not `4.0000000000000000`.
 fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
     if v.is_null() {
         return Ok(Datum::Null);
@@ -731,7 +760,7 @@ fn to_f64(d: &Datum) -> Option<f64> {
     }
 }
 
-/// A math/string domain error carrying its own `PostgreSQL` SQLSTATE.
+/// A math/string domain error that carries its own `PostgreSQL` SQLSTATE.
 fn domain_error(sqlstate: &'static str, message: &'static str) -> ExecError {
     ExecError::Type(TypeError::Domain { sqlstate, message })
 }
@@ -763,14 +792,16 @@ fn undefined_prefix_operator(op: UnaryOp, v: &Datum) -> ExecError {
 ///
 /// # `PostgreSQL` divergence
 ///
-/// `PostgreSQL` matches with its own POSIX *advanced* regular expressions; this
-/// uses the `regex` crate. The two agree across the ERE core that SQL predicates
-/// are written in — literals, bracket expressions and POSIX classes
-/// (`[[:alpha:]]`), alternation, greedy and non-greedy quantifiers, anchors,
-/// capture groups, and the same leftmost-unanchored match semantics. They part
-/// company where `PostgreSQL`'s dialect exceeds what a finite automaton can
-/// express: BACK-REFERENCES (`'aa' ~ '(a)\1'`) and LOOKAROUND compile in
-/// `PostgreSQL` but are reported here as an invalid regular expression (2201B).
+/// `PostgreSQL` matches with its own POSIX *advanced* regular expressions. This
+/// implementation uses the `regex` crate. The two agree across the ERE core
+/// that SQL predicates are written in: literals, bracket expressions and POSIX
+/// classes (`[[:alpha:]]`), alternation, greedy and non-greedy quantifiers,
+/// anchors, capture groups, and the same leftmost-unanchored match semantics.
+///
+/// The two differ where `PostgreSQL`'s dialect exceeds what a finite automaton
+/// can express. BACK-REFERENCES (`'aa' ~ '(a)\1'`) and LOOKAROUND compile in
+/// `PostgreSQL`, but this implementation reports them as an invalid regular
+/// expression (2201B).
 fn apply_regex_match(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
     if l.is_null() || r.is_null() {
         return Ok(Datum::Null);
@@ -788,10 +819,11 @@ fn apply_regex_match(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecEr
 
 /// The integer bitwise operators `&`, `|`, `#` (XOR), `<<` and `>>`.
 ///
-/// A shift count is reduced modulo the LEFT operand's width, reproducing what
-/// `PostgreSQL`'s `int4shl`/`int8shl` do: `1::int4 << 32` is 1, `1::int4 << 31`
-/// is −2147483648, and a negative count wraps (`1::int4 << -1` is
-/// −2147483648). `>>` is an ARITHMETIC shift, so `(-1)::int4 >> 1` stays −1.
+/// This function reduces a shift count modulo the LEFT operand's width, which
+/// is what `PostgreSQL`'s `int4shl`/`int8shl` do. `1::int4 << 32` is 1,
+/// `1::int4 << 31` is −2147483648, and a negative count wraps, so
+/// `1::int4 << -1` is −2147483648. `>>` is an ARITHMETIC shift, so
+/// `(-1)::int4 >> 1` stays −1.
 fn apply_bitwise(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
     if l.is_null() || r.is_null() {
         return Ok(Datum::Null);
@@ -854,15 +886,19 @@ fn apply_bitwise(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError>
     })
 }
 
-/// A shift count reduced to `width`, matching two's-complement masking of the
-/// low `log2(width)` bits (`-1` over 32 bits is 31, as `PostgreSQL` produces).
+/// A shift count reduced to `width`.
+///
+/// The reduction matches two's-complement masking of the low `log2(width)`
+/// bits. `-1` over 32 bits is 31, as `PostgreSQL` produces.
 fn shift_count(count: i64, width: i64) -> u32 {
     u32::try_from(count.rem_euclid(width)).unwrap_or(0)
 }
 
-/// An integer Datum as `i64`. Deliberately narrow: `numeric` and `float8` have
-/// no bitwise operators in `PostgreSQL`, so they must reach 42883, not be
-/// silently truncated.
+/// An integer Datum as `i64`.
+///
+/// This conversion is deliberately narrow. `numeric` and `float8` have no
+/// bitwise operators in `PostgreSQL`, so they must reach 42883 and must not be
+/// truncated.
 fn as_int(d: &Datum) -> Option<i64> {
     match d {
         Datum::Int2(n) => Some(i64::from(*n)),
@@ -872,10 +908,12 @@ fn as_int(d: &Datum) -> Option<i64> {
     }
 }
 
-/// `^` — exponentiation. There is no `integer ^ integer` in `PostgreSQL`, so an
-/// all-integer `2^3` resolves to the `float8` operator and yields `8`; a
-/// `numeric` operand with no `float8` operand selects the exact `numeric` form
-/// (`5.0^2` is `25.000000000000000`).
+/// `^`, exponentiation.
+///
+/// There is no `integer ^ integer` in `PostgreSQL`, so an all-integer `2^3`
+/// resolves to the `float8` operator and gives `8`. A `numeric` operand with no
+/// `float8` operand selects the exact `numeric` form, so `5.0^2` is
+/// `25.000000000000000`.
 fn apply_pow(l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
     if l.is_null() || r.is_null() {
         return Ok(Datum::Null);
@@ -917,13 +955,14 @@ fn apply_pow(l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
 }
 
 /// Apply a binary operator when the operand *expressions* and the scope are also
-/// in hand — the front door both evaluators use.
+/// available.
 ///
-/// Only `||` needs more than the values: PostgreSQL resolves which concatenation
-/// operator applies (text, jsonb, or one of the three array forms) from the
-/// operands' STATIC types, and those are indistinguishable once an operand has
-/// evaluated to SQL NULL. Every other operator resolves from the values alone and
-/// goes straight to [`apply_binary`].
+/// This is the entry point that both evaluators use. Only `||` needs more than
+/// the values. PostgreSQL resolves which concatenation operator applies, text,
+/// jsonb, or one of the three array forms, from the operands' STATIC types, and
+/// those types are indistinguishable once an operand has evaluated to SQL NULL.
+/// Every other operator resolves from the values alone and goes directly to
+/// [`apply_binary`].
 pub(crate) fn apply_binary_of(
     op: BinaryOp,
     left: &Expr,
@@ -943,10 +982,12 @@ pub(crate) fn apply_binary_of(
 }
 
 /// Convert an `unknown` string-literal operand's *value* to the type the
-/// operator resolved it to. Typing it is not enough on its own: the literal
-/// still evaluates to a `Datum::Text`, while the jsonb operators need a
-/// `Datum::Jsonb` (or a `text[]` path). Returns `None` per side when nothing
-/// needs converting, so the common case copies nothing.
+/// operator resolved it to.
+///
+/// A resolved type alone is not enough. The literal still evaluates to a
+/// `Datum::Text`, while the jsonb operators need a `Datum::Jsonb` or a `text[]`
+/// path. This function returns `None` per side when that side needs no
+/// conversion, so the common case copies nothing.
 fn coerce_untyped_literal_operands(
     op: BinaryOp,
     left: &Expr,
@@ -1038,9 +1079,10 @@ fn coerce_untyped_literal_operands(
     Ok((convert(left, l, r)?, convert(right, r, l)?))
 }
 
-/// Apply a binary operator to two already-evaluated operands. Shared by scalar
-/// `eval` and the SP27 grouped evaluator (`agg::eval_grouped`). `ctx` supplies the
-/// session zone used by `||`'s text rendering.
+/// Apply a binary operator to two already-evaluated operands.
+///
+/// Scalar `eval` and the SP27 grouped evaluator `agg::eval_grouped` share this
+/// function. `ctx` gives the session zone that `||`'s text rendering uses.
 pub(crate) fn apply_binary(
     op: BinaryOp,
     l: &Datum,
@@ -1138,9 +1180,10 @@ pub(crate) fn apply_binary(
     }
 }
 
-/// `@>` / `<@`: the operand values pick the jsonb or the array family (the
-/// static types already agreed at plan time). Both families are strict, so two
-/// SQL NULLs need no family at all.
+/// `@>` / `<@`, where the operand values pick the jsonb or the array family.
+///
+/// The static types already agreed at plan time. Both families are strict, so
+/// two SQL NULLs need no family at all.
 fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
     let contains = op == BinaryOp::Contains;
     if matches!(l, Datum::Jsonb(_)) || matches!(r, Datum::Jsonb(_)) {
@@ -1178,8 +1221,8 @@ enum ConcatKind {
     Text,
     /// `jsonb || jsonb`.
     Jsonb,
-    /// One of the three array forms (`anyarray || anyarray`, `anyarray ||
-    /// anyelement`, `anyelement || anyarray`).
+    /// One of the three array forms: `anyarray || anyarray`,
+    /// `anyarray || anyelement`, or `anyelement || anyarray`.
     Array(ConcatForm),
     /// `tsvector || tsvector`.
     TsVector,
@@ -1187,8 +1230,10 @@ enum ConcatKind {
     TsQuery,
 }
 
-/// Resolve `left || right` from the operands' STATIC types: the operator that
-/// applies plus its result type. 42883 when no `||` is defined for the pair.
+/// Resolve `left || right` from the operands' STATIC types.
+///
+/// The result is the operator that applies plus its result type. The result is
+/// 42883 when no `||` is defined for the pair.
 fn resolve_concat(
     left: &Expr,
     right: &Expr,
@@ -1200,10 +1245,12 @@ fn resolve_concat(
 }
 
 /// This codebase types a bare `NULL` literal as `text`, but PostgreSQL resolves
-/// the literal's `unknown` type against the other operand. That matters for `||`:
-/// `ARRAY[1,2] || NULL` must pick `array_cat` (yielding `{1,2}`), not
-/// `array_append` (which would yield `{1,2,NULL}`). Only the two families whose
-/// `||` a text fallback would silently steal — jsonb and arrays — are adopted.
+/// the literal's `unknown` type against the other operand.
+///
+/// That matters for `||`. `ARRAY[1,2] || NULL` must pick `array_cat`, which
+/// gives `{1,2}`, and must not pick `array_append`, which would give
+/// `{1,2,NULL}`. Only jsonb and arrays adopt, because they are the two families
+/// whose `||` a text fallback would take.
 fn adopt_null_literal_type(
     left: &Expr,
     right: &Expr,
@@ -1226,15 +1273,16 @@ fn adopt_null_literal_type(
 }
 
 /// PostgreSQL leaves a bare string literal `unknown` and resolves it against the
-/// other operand; this codebase types it `text` at once. Adopt it into `jsonb`
-/// when the other side is jsonb, so `j @> '{"a":1}'` and `j || '{"b":2}'` mean
-/// what they do in PostgreSQL. Without this, `||` is the dangerous one: a
-/// jsonb/text pair falls through to *string* concatenation and returns a
-/// plausible-looking wrong answer instead of merging.
+/// other operand. This codebase types it `text` at once.
 ///
-/// Deliberately jsonb-only. An array must NOT adopt, because PostgreSQL's
-/// `anyarray || anyelement` is what makes `ARRAY['a'] || 'b'` append `'b'` as an
-/// element rather than concatenating two arrays.
+/// Adopt it into `jsonb` when the other side is jsonb, so `j @> '{"a":1}'` and
+/// `j || '{"b":2}'` mean what they do in PostgreSQL. Without this, `||` is the
+/// dangerous case. A jsonb/text pair falls through to *string* concatenation
+/// and returns a plausible-looking wrong answer instead of a merge.
+///
+/// This adoption is deliberately jsonb-only. An array must NOT adopt, because
+/// PostgreSQL's `anyarray || anyelement` is what makes `ARRAY['a'] || 'b'`
+/// append `'b'` as an element instead of concatenating two arrays.
 fn adopt_string_literal_type(
     left: &Expr,
     right: &Expr,
@@ -1258,8 +1306,10 @@ fn adopt_string_literal_type(
 }
 
 /// Resolve an `unknown` string-literal operand of a jsonb operator to the type
-/// that operator expects on that side: `text[]` for the path and multi-key
-/// operators, `jsonb` for containment.
+/// that operator expects on that side.
+///
+/// The type is `text[]` for the path and multi-key operators, and `jsonb` for
+/// containment.
 fn adopt_json_operand_types(
     op: BinaryOp,
     left: &Expr,
@@ -1310,15 +1360,15 @@ fn adopt_json_operand_types(
 pub(crate) enum ArgType {
     /// A bare literal PostgreSQL leaves `unknown`, so it adopts the type of the
     /// parameter it is passed to. This codebase types both a string literal and
-    /// a bare `NULL` as `text` immediately, so the question has to be asked
+    /// a bare `NULL` as `text` immediately, so this code must ask the question
     /// syntactically.
     Unknown,
-    /// An argument carrying a type of its own.
+    /// An argument that carries a type of its own.
     Known(ColumnType),
-    /// An argument that carries a type, but not one visible here — a run-time
-    /// SQL NULL. Like [`ArgType::Unknown`] it resolves no polymorphic
-    /// parameter, but unlike it, it is never the *reason* one is unresolvable
-    /// (`to_jsonb(j)` on a NULL row value is not `to_jsonb('a')`).
+    /// An argument that carries a type, but not one visible here. It is a
+    /// run-time SQL NULL. Like [`ArgType::Unknown`] it resolves no polymorphic
+    /// parameter, but unlike it, it is never the *reason* one is unresolvable.
+    /// `to_jsonb(j)` on a NULL row value is not `to_jsonb('a')`.
     Opaque,
 }
 
@@ -1331,7 +1381,7 @@ impl ArgType {
         }
     }
 
-    /// Is this an `unknown` literal awaiting its parameter's type?
+    /// Is this an `unknown` literal that waits for its parameter's type?
     pub(crate) fn is_unknown(self) -> bool {
         self == ArgType::Unknown
     }
@@ -1350,8 +1400,9 @@ pub(crate) fn static_arg_types(args: &[Expr], scope: &Scope) -> Result<Vec<ArgTy
         .collect()
 }
 
-/// The same, at RUN time: an argument's type comes from its value, and a SQL
-/// NULL carries none.
+/// The same at RUN time.
+///
+/// An argument's type comes from its value, and a SQL NULL carries no type.
 pub(crate) fn value_arg_types(args: &[Expr], vals: &[Datum]) -> Vec<ArgType> {
     args.iter()
         .zip(vals)
@@ -1366,9 +1417,11 @@ pub(crate) fn value_arg_types(args: &[Expr], vals: &[Datum]) -> Vec<ArgType> {
 }
 
 /// Each argument's type once the `unknown` literals have adopted their
-/// parameter's type — what a family's plan-time checks and result type are
-/// computed from. A parameter a literal cannot adopt (a `"any"` parameter, where
-/// PostgreSQL resolves `unknown` to `text`) leaves it `text`.
+/// parameter's type.
+///
+/// A family computes its plan-time checks and its result type from these types.
+/// A literal cannot adopt a `"any"` parameter, where PostgreSQL resolves
+/// `unknown` to `text`, so that literal stays `text`.
 pub(crate) fn effective_arg_types(
     given: &[ArgType],
     params: &[Option<ColumnType>],
@@ -1387,10 +1440,12 @@ pub(crate) fn effective_arg_types(
 }
 
 /// Convert each `unknown` literal argument's `text` value to the type its
-/// parameter resolved to. Typing the literal is not enough on its own: it still
-/// evaluates to a `Datum::Text`, while `jsonb_set`'s path parameter needs a
-/// `Datum::Array` and its value parameter a `Datum::Jsonb`. A NULL value has
-/// nothing to convert.
+/// parameter resolved to.
+///
+/// A type on the literal alone is not enough. The literal still evaluates to a
+/// `Datum::Text`, while `jsonb_set`'s path parameter needs a `Datum::Array` and
+/// its value parameter needs a `Datum::Jsonb`. A NULL value has nothing to
+/// convert.
 pub(crate) fn coerce_unknown_args(
     args: &[Expr],
     vals: &mut [Datum],
@@ -1414,14 +1469,16 @@ pub(crate) fn coerce_unknown_args(
 }
 
 /// Type-check a whole `CHECK` predicate the way `PostgreSQL`'s parse analysis
-/// does when the constraint is created: *every* subexpression has to resolve,
-/// not just the ones whose result type depends on their operands.
+/// does when the constraint is created.
+///
+/// *Every* subexpression has to resolve, not only the ones whose result type
+/// depends on their operands.
 ///
 /// A query can leave an operator's operands to the values, so `infer_type`
 /// reports `boolean` for a comparison and a numeric-tower type for arithmetic
-/// without insisting the operands make sense. DDL cannot: the operand types are
-/// fixed by the table, so an operator or function that does not resolve for
-/// them has to fail the DDL rather than every later write to the table.
+/// without a check that the operands make sense. DDL cannot do that. The table
+/// fixes the operand types, so an operator or function that does not resolve
+/// for them has to fail the DDL instead of every later write to the table.
 pub(crate) fn check_predicate_resolves(expr: &Expr, scope: &Scope) -> Result<(), ExecError> {
     let mut failure: Option<ExecError> = None;
     crate::grouping::visit_expr(expr, &mut |node| {
@@ -1441,11 +1498,12 @@ pub(crate) fn check_predicate_resolves(expr: &Expr, scope: &Scope) -> Result<(),
 
 /// The 42883 for a comparison whose operands belong to different families.
 ///
-/// `infer_binary_type` types a comparison `boolean` without looking at its
-/// operands, which is right for a query (the values decide) but wrong for DDL:
-/// a stored `CHECK` that compares `text` to `integer` would be accepted and
-/// then fail every write to the table. An `unknown` literal on either side is
-/// skipped — it adopts the other operand's type.
+/// `infer_binary_type` types a comparison `boolean` without a look at its
+/// operands. That is right for a query, where the values decide, but wrong for
+/// DDL. A stored `CHECK` that compares `text` to `integer` would be accepted
+/// and would then fail every write to the table. This function skips an
+/// `unknown` literal on either side, because that literal adopts the other
+/// operand's type.
 fn comparison_mismatch(node: &Expr, scope: &Scope) -> Option<ExecError> {
     let Expr::Binary { op, left, right } = node else {
         return None;
@@ -1465,8 +1523,10 @@ fn comparison_mismatch(node: &Expr, scope: &Scope) -> Option<ExecError> {
     (lc != rc).then(|| undefined_operator(op_spelling(*op), lt, rt))
 }
 
-/// The families whose members compare with one another. Two types in
-/// *different* families have no comparison operator in `PostgreSQL`.
+/// The families whose members compare with one another.
+///
+/// Two types in *different* families have no comparison operator in
+/// `PostgreSQL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComparisonFamily {
     Number,
@@ -1478,7 +1538,9 @@ enum ComparisonFamily {
 }
 
 /// The comparison family a type belongs to, or `None` when crabka has no
-/// confident answer — the comparison is then left to the values.
+/// confident answer.
+///
+/// The values then decide the comparison.
 fn comparison_category(ty: ColumnType) -> Option<ComparisonFamily> {
     match ty {
         ColumnType::Int2
@@ -1503,18 +1565,22 @@ pub(crate) fn is_unknown_literal(e: &Expr) -> bool {
     matches!(e, Expr::StringLiteral(_) | Expr::NullLiteral)
 }
 
-/// PostgreSQL's 42804 for a polymorphic parameter (`anyarray`, `anyelement`)
-/// that nothing in the call resolves, because every argument that could have is
-/// an `unknown` literal — `cardinality('{1,2}')`, `to_jsonb('a')`.
+/// PostgreSQL's 42804 for a polymorphic parameter, `anyarray` or `anyelement`,
+/// that nothing in the call resolves.
+///
+/// Every argument that could resolve it is an `unknown` literal, as in
+/// `cardinality('{1,2}')` and `to_jsonb('a')`.
 pub(crate) fn undetermined_polymorphic_type() -> ExecError {
     ExecError::TypeMismatch(
         "could not determine polymorphic type because input has type unknown".into(),
     )
 }
 
-/// The `||` operator for a type pair, and its result type. Arrays are resolved
-/// before the text fallback so `text[] || text` appends rather than stringifies —
-/// PostgreSQL's `anyarray || anyelement` outranks `anynonarray || text` there.
+/// The `||` operator for a type pair, and its result type.
+///
+/// This function resolves arrays before the text fallback, so `text[] || text`
+/// appends instead of stringifies. PostgreSQL's `anyarray || anyelement`
+/// outranks `anynonarray || text` there.
 fn concat_kind(lt: ColumnType, rt: ColumnType) -> Option<(ConcatKind, ColumnType)> {
     if lt == ColumnType::TsVector && rt == ColumnType::TsVector {
         return Some((ConcatKind::TsVector, ColumnType::TsVector));
@@ -1649,8 +1715,9 @@ fn undefined_operator(op: &str, lt: ColumnType, rt: ColumnType) -> ExecError {
     ))
 }
 
-/// The same 42883, reported from the runtime values (an untyped SQL NULL has no
-/// type to name).
+/// The same 42883, reported from the runtime values.
+///
+/// An untyped SQL NULL has no type to name.
 fn undefined_operator_for(op: BinaryOp, l: &Datum, r: &Datum) -> ExecError {
     let name = |d: &Datum| d.column_type().map_or("unknown", ColumnType::name);
     ExecError::UndefinedFunction(format!(
@@ -1669,14 +1736,18 @@ pub(crate) fn quantifier_of(all: bool) -> Quantifier {
     }
 }
 
-/// SP37: tz-AWARE `timestamptz` arithmetic — the cells deferred from
-/// `crabka_pgtypes::ops` because they need the session zone (`ctx.time_zone`):
-/// `timestamptz ± interval → timestamptz` (calendar-aware in the zone) and
-/// `timestamptz − timestamptz → interval` (absolute-instant difference). Returns
-/// `Ok(None)` when neither operand is a `Timestamptz` (so the caller falls through
-/// to `crabka_pgtypes::ops`), and propagates NULL like `ops` does. Result types match
-/// `datetime_result_type`'s `Timestamptz`/`Interval` predictions, so plan-time
-/// inference and runtime never disagree.
+/// SP37: tz-AWARE `timestamptz` arithmetic.
+///
+/// These are the cells deferred from `crabka_pgtypes::ops` because they need
+/// the session zone `ctx.time_zone`. They are
+/// `timestamptz ± interval → timestamptz`, which is calendar-aware in the zone,
+/// and `timestamptz − timestamptz → interval`, which is an absolute-instant
+/// difference.
+///
+/// This function returns `Ok(None)` when neither operand is a `Timestamptz`, so
+/// the caller then uses `crabka_pgtypes::ops`. It propagates NULL as `ops`
+/// does. Result types match `datetime_result_type`'s `Timestamptz`/`Interval`
+/// predictions, so plan-time inference and runtime never disagree.
 fn apply_timestamptz_arith(
     op: BinaryOp,
     l: &Datum,
@@ -1733,8 +1804,10 @@ pub(crate) fn cmp_result(op: BinaryOp, ord: Option<Ordering>) -> Datum {
     }
 }
 
-/// Only the string types carry a collation. `PostgreSQL` rejects `COLLATE` on
-/// anything else at parse analysis, naming the offending type.
+/// Only the string types carry a collation.
+///
+/// `PostgreSQL` rejects `COLLATE` on every other type at parse analysis, and it
+/// names the offending type.
 pub(crate) fn require_collatable(ty: ColumnType) -> Result<(), ExecError> {
     if matches!(
         ty,
@@ -1748,9 +1821,11 @@ pub(crate) fn require_collatable(ty: ColumnType) -> Result<(), ExecError> {
     )))
 }
 
-/// `(composite).field` at run time: the attribute's value, or NULL when the
-/// whole composite is NULL — `PostgreSQL` propagates a NULL row through field
-/// selection rather than failing.
+/// `(composite).field` at run time.
+///
+/// The result is the attribute's value, or NULL when the whole composite is
+/// NULL. `PostgreSQL` propagates a NULL row through field selection instead of
+/// failing.
 pub(crate) fn select_field(value: &Datum, field: &str) -> Result<Datum, ExecError> {
     match value {
         Datum::Null => Ok(Datum::Null),
@@ -2195,9 +2270,11 @@ fn infer_binary_type(
 }
 
 /// The static result type of a jsonb or array operator, or `None` when the
-/// operand types resolve neither (the caller reports 42883 at plan time). The
-/// jsonb rules live in `json_fn`; the array rules are `@>` / `<@` / `&&` over two
-/// arrays sharing one element type.
+/// operand types resolve neither.
+///
+/// The caller reports 42883 at plan time. `json_fn` holds the jsonb rules. The
+/// array rules are `@>` / `<@` / `&&` over two arrays that share one element
+/// type.
 fn json_or_array_operator_result_type(
     op: BinaryOp,
     lt: ColumnType,
@@ -2219,11 +2296,13 @@ fn json_or_array_operator_result_type(
     None
 }
 
-/// The element type of an `ARRAY[…]` constructor: its elements unified exactly as
-/// `CASE`/`COALESCE` unify their branches, so a bare `NULL` element imposes no
-/// constraint and an all-NULL list falls back to `text` (PostgreSQL's `unknown` →
-/// `text`). `ARRAY[]` has nothing to unify — 42P18, and a cast supplies the type.
-/// An element type crabka has no array type for is 0A000.
+/// The element type of an `ARRAY[…]` constructor.
+///
+/// This function unifies the elements exactly as `CASE`/`COALESCE` unify their
+/// branches. A bare `NULL` element imposes no constraint, and an all-NULL list
+/// falls back to `text`, which is PostgreSQL's `unknown` → `text`. `ARRAY[]`
+/// has nothing to unify, so it is 42P18, and a cast supplies the type. An
+/// element type crabka has no array type for is 0A000.
 pub(crate) fn array_literal_elem_type(
     items: &[Expr],
     scope: &Scope,
@@ -2252,8 +2331,8 @@ pub(crate) fn array_literal_elem_type(
     })
 }
 
-/// `ARRAY[…]`'s evaluation, kept out of [`eval_depth`]'s own frame so the
-/// recursion budget is not spent on this arm's locals.
+/// `ARRAY[…]`'s evaluation, kept out of [`eval_depth`]'s own frame so that this
+/// arm's locals do not spend the recursion budget.
 #[inline(never)]
 fn eval_array_constructor(
     items: &[Expr],
@@ -2297,7 +2376,7 @@ fn eval_array_ref(
 }
 
 /// [`eval_subscripts`] for an assignment target, whose bounds are evaluated
-/// against the joined row rather than a projection scope.
+/// against the joined row instead of a projection scope.
 pub(crate) fn eval_assignment_subscripts(
     subscripts: &[crabka_pgparser::ast::ArraySubscript],
     scope: &Scope,
@@ -2338,7 +2417,7 @@ fn eval_subscripts(
 }
 
 /// A jsonb base subscripts by key or index at every level, so a chain folds
-/// left to right. `jsonb` has no slice operator.
+/// from left to right. `jsonb` has no slice operator.
 fn eval_jsonb_subscript_chain(
     base: &Datum,
     subscripts: &[crabka_pgparser::ast::ArraySubscript],
@@ -2362,9 +2441,12 @@ fn eval_jsonb_subscript_chain(
     Ok(value)
 }
 
-/// `ARRAY[]::int[]`: an empty array constructor has no element type of its own,
-/// so PostgreSQL pushes the cast's type context down into it. Returns the typed
-/// empty array when `expr`/`ty` are exactly that shape.
+/// `ARRAY[]::int[]`, where an empty array constructor has no element type of
+/// its own.
+///
+/// PostgreSQL pushes the cast's type context down into the constructor. This
+/// function returns the typed empty array when `expr`/`ty` are exactly that
+/// shape.
 pub(crate) fn empty_array_cast(expr: &Expr, ty: ColumnType) -> Option<Datum> {
     match (expr, ty.array_element()) {
         (Expr::ArrayLiteral(items), Some(elem)) if items.is_empty() => {
@@ -2379,9 +2461,10 @@ fn indeterminate_type(message: &str) -> ExecError {
     ExecError::IndeterminateType(message.to_string())
 }
 
-/// Infer a `CASE`'s result type by unifying every THEN result and the ELSE. A
-/// bare `NULL` branch imposes no constraint; an all-NULL CASE is `text` (PG's
-/// "unknown" → text); incompatible branch types are 42804.
+/// Infer a `CASE`'s result type from every THEN result and the ELSE.
+///
+/// A bare `NULL` branch imposes no constraint. An all-NULL CASE is `text`,
+/// which is PG's "unknown" → text. Incompatible branch types are 42804.
 fn infer_case_type(
     whens: &[(Expr, Expr)],
     else_result: Option<&Expr>,
@@ -2397,9 +2480,10 @@ fn infer_case_type(
     Ok(acc.unwrap_or(ColumnType::Text))
 }
 
-/// Fold one branch/argument into a running unified type. A bare `NULL` is
-/// type-neutral (imposes no constraint). Shared by `CASE` type inference and
-/// SP29's `coalesce`/`greatest`/`least`.
+/// Fold one branch or argument into a running unified type.
+///
+/// A bare `NULL` is type-neutral and imposes no constraint. `CASE` type
+/// inference and SP29's `coalesce`/`greatest`/`least` share this function.
 pub(crate) fn unify_branch(
     acc: Option<ColumnType>,
     expr: &Expr,
@@ -2449,12 +2533,14 @@ fn is_temporal(t: ColumnType) -> bool {
     matches!(t, Date | Time | Timetz | Timestamp | Timestamptz | Interval)
 }
 
-/// PostgreSQL's date/time arithmetic result-type matrix. Returns `Some(result)`
-/// for a defined `(op, lt, rt)` combination where at least one operand is
-/// temporal; `None` otherwise — including a temporal operand in an UNdefined
-/// combination, so the caller falls through to `numeric_result_type` and the real
-/// type error surfaces at evaluation (it never invents a numeric result for a
-/// temporal pair that PG would reject — eval is the authority).
+/// PostgreSQL's date/time arithmetic result-type matrix.
+///
+/// This function returns `Some(result)` for a defined `(op, lt, rt)`
+/// combination where at least one operand is temporal. It returns `None` in
+/// every other case, including a temporal operand in an UNdefined combination.
+/// The caller then uses `numeric_result_type`, and the real type error appears
+/// at evaluation. This function never invents a numeric result for a temporal
+/// pair that PG would reject, because eval is the authority.
 fn datetime_result_type(op: BinaryOp, lt: ColumnType, rt: ColumnType) -> Option<ColumnType> {
     use BinaryOp::{Add, Div, Mul, Sub};
     use ColumnType::{
@@ -2508,12 +2594,15 @@ fn datetime_result_type(op: BinaryOp, lt: ColumnType, rt: ColumnType) -> Option<
     })
 }
 
-/// The result type of `+ - * /` on two operand types. The numeric tower is
-/// int < numeric < float8: any float8 makes the result float8; else any numeric
-/// makes it numeric; else int4 only if both are int4, else int8. Permissive about
-/// non-numeric operands (a real type error surfaces at evaluation).
+/// The result type of `+ - * /` on two operand types.
+///
+/// The numeric tower is int < numeric < float8. Any float8 makes the result
+/// float8. If there is no float8, any numeric makes the result numeric. If
+/// there is neither, the result is int4 only when both operands are int4, and
+/// int8 otherwise. This function is permissive about non-numeric operands, and
+/// a real type error appears at evaluation.
 /// The types `PostgreSQL` defines `+ - * /` over once the date/time matrix has
-/// had its say: the numeric tower, and nothing else.
+/// been applied. These are the numeric tower, and nothing else.
 fn is_arithmetic_type(ty: ColumnType) -> bool {
     matches!(
         ty,
@@ -2603,8 +2692,10 @@ mod tests {
         }
     }
 
-    /// Build the `Scope` the tests evaluate against: the table's single-relation
-    /// scope, or the empty scope (FROM-less expressions).
+    /// Build the `Scope` the tests evaluate against.
+    ///
+    /// This is the table's single-relation scope, or the empty scope for
+    /// FROM-less expressions.
     fn scope_of(t: Option<&Table>) -> Scope {
         match t {
             Some(t) => Scope::single(t, &t.name.name),
@@ -2789,10 +2880,11 @@ mod tests {
         }
     }
 
-    /// Defense-in-depth: an expression tree deeper than `MAX_EVAL_DEPTH` — built
-    /// DIRECTLY here, bypassing the parser's parse-time cap — must return a clean
-    /// `54001` from `eval`, never overflow the stack. (In production the parser
-    /// cap means such a tree can't be built, but the guard must still hold.)
+    /// Defense-in-depth. An expression tree deeper than `MAX_EVAL_DEPTH`, built
+    /// DIRECTLY here to get past the parser's parse-time cap, must return a
+    /// clean `54001` from `eval` and must never overflow the stack. In
+    /// production the parser cap means such a tree cannot be built, but the
+    /// guard must still hold.
     #[test]
     fn eval_rejects_an_over_deep_tree_with_54001() {
         let mut e = Expr::BoolLiteral(true);
@@ -2808,7 +2900,8 @@ mod tests {
         assert_eq!(err.into_pg().code, "54001");
     }
 
-    /// A tree right at the limit still evaluates (the guard does not fire early).
+    /// A tree exactly at the limit still evaluates, because the guard does not
+    /// fire early.
     #[test]
     fn eval_accepts_a_tree_at_the_limit() {
         // `Not` chains of even length evaluate back to the base value.
@@ -2867,7 +2960,7 @@ mod tests {
         assert_eq!(ev("not true", None, &[]), Datum::Bool(false));
     }
 
-    /// The static half of the `int2`/`float4` promotion rules — what
+    /// The static half of the `int2`/`float4` promotion rules, which is what
     /// `RowDescription` reports. Every expectation is `pg_typeof(...)` on
     /// PostgreSQL 18.4.
     #[test]
@@ -2930,7 +3023,7 @@ mod tests {
         }
     }
 
-    /// The runtime half, cross-checked against the static half above: the value
+    /// The runtime half, cross-checked against the static half above. The value
     /// an expression evaluates to carries the type `infer_type` promised.
     #[test]
     fn int2_and_float4_evaluation_agrees_with_inference() {
@@ -2999,10 +3092,12 @@ mod tests {
         assert_eq!(ev("3 / 2.0::float8", None, &[]), Datum::Float8(1.5));
     }
 
-    /// SP37 §8: the tz-AWARE temporal cells that live in `apply_binary` (because
-    /// they need the session zone) — `timestamptz ± interval → timestamptz` and
-    /// `timestamptz − timestamptz → interval`. Each asserts BOTH the produced value
-    /// AND that `infer_type` predicts the same type (no infer/eval mismatch).
+    /// SP37 §8: the tz-AWARE temporal cells in `apply_binary`, which are there
+    /// because they need the session zone. They are
+    /// `timestamptz ± interval → timestamptz` and
+    /// `timestamptz − timestamptz → interval`. Each case asserts BOTH the
+    /// produced value AND that `infer_type` predicts the same type, so there is
+    /// no infer/eval mismatch.
     #[test]
     fn timestamptz_arithmetic_is_tz_aware_in_apply_binary() {
         use crabka_pgtypes::datetime;
@@ -3373,7 +3468,8 @@ mod tests {
 
     // ---- jsonb + array operators, constructors, and quantified comparisons ----
 
-    /// A relation covering every operand family the new operators resolve over.
+    /// A relation that covers every operand family the new operators resolve
+    /// over.
     fn jt() -> Table {
         Table {
             id: 2,
@@ -3432,7 +3528,7 @@ mod tests {
     }
 
     /// Every new operator's STATIC result type, routed through the `json_fn` /
-    /// `array_fn` rules so plan-time typing and evaluation never disagree.
+    /// `array_fn` rules, so plan-time typing and evaluation never disagree.
     #[test]
     fn new_operators_infer_their_result_types() {
         let text_array = ColumnType::Array(ElemType::Text);
@@ -3499,7 +3595,7 @@ mod tests {
     }
 
     /// Every new operator's VALUE, including the jsonb-null / SQL-NULL and
-    /// three-valued cells that distinguish them.
+    /// three-valued cells that tell them apart.
     #[test]
     fn new_operators_evaluate() {
         let cases: &[(&str, Datum)] = &[
@@ -3533,10 +3629,11 @@ mod tests {
         }
     }
 
-    /// `||` resolves to five different operators; the choice is made from the
-    /// operands' STATIC types, which is the only way `ARRAY[1,2] || NULL` (a
-    /// concatenation, `{1,2}`) can differ from `ARRAY[1,2] || NULL::int` (an
-    /// append, `{1,2,NULL}`) once both right sides have evaluated to SQL NULL.
+    /// `||` resolves to five different operators. The operands' STATIC types
+    /// make the choice. That is the only way `ARRAY[1,2] || NULL`, a
+    /// concatenation that gives `{1,2}`, can differ from
+    /// `ARRAY[1,2] || NULL::int`, an append that gives `{1,2,NULL}`, once both
+    /// right sides have evaluated to SQL NULL.
     #[test]
     fn concat_resolves_text_jsonb_and_the_three_array_forms() {
         let with_null = Datum::Array(ArrayValue::new(
@@ -3573,8 +3670,9 @@ mod tests {
         assert2::assert!(infer_jt("j || null").expect("infer") == ColumnType::Jsonb);
     }
 
-    /// jsonb `-` shares the `Sub` operator with arithmetic; the LEFT operand's
-    /// type disambiguates, and every numeric/temporal pair is untouched.
+    /// jsonb `-` shares the `Sub` operator with arithmetic. The LEFT operand's
+    /// type decides which one applies, and every numeric/temporal pair is
+    /// untouched.
     #[test]
     fn jsonb_delete_overloads_subtraction() {
         let cases: &[(&str, Datum)] = &[
@@ -3591,9 +3689,9 @@ mod tests {
         }
     }
 
-    /// `ARRAY[…]` unifies its elements exactly as `CASE` does; `ARRAY[]` has
-    /// nothing to unify and needs a cast (42P18); an all-NULL list falls back to
-    /// `text`, matching PostgreSQL's `unknown` → `text`.
+    /// `ARRAY[…]` unifies its elements exactly as `CASE` does. `ARRAY[]` has
+    /// nothing to unify and needs a cast, which is 42P18. An all-NULL list
+    /// falls back to `text`, which matches PostgreSQL's `unknown` → `text`.
     #[test]
     fn array_literal_typing_and_construction() {
         let text_array = ColumnType::Array(ElemType::Text);
@@ -3643,8 +3741,9 @@ mod tests {
         );
     }
 
-    /// Subscripting is 1-based, and out-of-range / NULL is SQL NULL rather than
-    /// an error. A non-array base has no subscripting operator at all.
+    /// Subscripting is 1-based, and an out-of-range or NULL subscript gives SQL
+    /// NULL instead of an error. A non-array base has no subscripting operator
+    /// at all.
     #[test]
     fn array_subscripting() {
         let cases: &[(&str, Datum)] = &[
@@ -3664,9 +3763,10 @@ mod tests {
         assert2::assert!(err.into_pg().code == "42804");
     }
 
-    /// `ANY`/`ALL` over an array, including the three-valued cells: an unmatched
-    /// `ANY` over an array containing NULL is UNKNOWN, not false; an empty array
-    /// is false for `ANY` and true for `ALL`; a NULL array is NULL for both.
+    /// `ANY`/`ALL` over an array, including the three-valued cells. An
+    /// unmatched `ANY` over an array that contains NULL is UNKNOWN, not false.
+    /// An empty array is false for `ANY` and true for `ALL`. A NULL array is
+    /// NULL for both.
     #[test]
     fn quantified_array_three_valued_logic() {
         let cases: &[(&str, Datum)] = &[
@@ -3697,8 +3797,8 @@ mod tests {
     }
 
     /// The jsonb + array FUNCTION families are reachable from scalar `eval` and
-    /// from static inference (the guard chains wire them in beside the older
-    /// scalar/datetime/format families).
+    /// from static inference. The guard chains wire them in beside the older
+    /// scalar/datetime/format families.
     #[test]
     fn json_and_array_function_families_are_wired_into_eval() {
         assert2::assert!(eval_jt("jsonb_typeof(j)").expect("eval") == Datum::Text("object".into()));

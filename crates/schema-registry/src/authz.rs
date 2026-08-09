@@ -1,14 +1,16 @@
 //! Topic-ACL authorization for the registry REST surface.
 //!
-//! Reuses Kafka's ACL model via `crabka-authz`: each schema *subject* maps to a
-//! `ResourceType::Topic` ACL by subject name; cluster-global operations map to
-//! `ResourceType::Cluster` name `"kafka-cluster"`. ACLs are sourced from the
-//! broker's `DescribeAcls` into an [`AclCache`] (the gateway pattern), refreshed
-//! on a timer by [`SchemaRegistryAuthz::run_acl_refresh`].
+//! This module reuses Kafka's ACL model through `crabka-authz`. Each schema
+//! *subject* maps to a `ResourceType::Topic` ACL by subject name.
+//! Cluster-global operations map to `ResourceType::Cluster` name
+//! `"kafka-cluster"`. ACLs come from the broker's `DescribeAcls` into an
+//! [`AclCache`], which is the gateway pattern, and
+//! [`SchemaRegistryAuthz::run_acl_refresh`] refreshes them on a timer.
 //!
-//! [`authz_target`] is the pure `(method, path) -> (resource, operation)` map;
-//! [`authz_layer`] is the `from_fn_with_state` middleware that gates each request
-//! (`403` on deny) and lets trusted intra-cluster forwards through untouched.
+//! [`authz_target`] is the pure `(method, path) -> (resource, operation)` map.
+//! [`authz_layer`] is the `from_fn_with_state` middleware that gates each
+//! request, returns `403` on deny, and lets trusted intra-cluster forwards
+//! through untouched.
 
 use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
@@ -30,8 +32,9 @@ use tokio_util::sync::CancellationToken;
 const KAFKA_CLUSTER: &str = "kafka-cluster";
 
 /// Map an incoming `(method, path)` to the `(resource_type, resource_name,
-/// operation)` it must be authorized against, or `None` when the path carries no
-/// authorization requirement (the registry root, health, unknown paths).
+/// operation)` it must be authorized against. Returns `None` when the path
+/// carries no authorization requirement, such as the registry root, health, and
+/// unknown paths.
 ///
 /// Subject-scoped endpoints map to `ResourceType::Topic` named by the subject;
 /// cluster-global endpoints map to `ResourceType::Cluster` named
@@ -135,10 +138,11 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
     }
 }
 
-/// Topic-ACL authorization decision point for the registry. Holds the
-/// [`Authorizer`] (a `crabka-authz` evaluator) and an `ArcSwap`'d [`AclCache`]
-/// refreshed from the broker's `DescribeAcls` by [`Self::run_acl_refresh`].
-/// Mirrors `grpc-gateway`'s `GatewayAuthz`.
+/// Topic-ACL authorization decision point for the registry.
+///
+/// It holds the [`Authorizer`], which is a `crabka-authz` evaluator, and an
+/// `ArcSwap`'d [`AclCache`] that [`Self::run_acl_refresh`] refreshes from the
+/// broker's `DescribeAcls`. It mirrors `grpc-gateway`'s `GatewayAuthz`.
 pub struct SchemaRegistryAuthz {
     authorizer: Arc<dyn Authorizer>,
     cache: ArcSwap<AclCache>,
@@ -147,11 +151,12 @@ pub struct SchemaRegistryAuthz {
 }
 
 impl SchemaRegistryAuthz {
-    /// Build with the configured super-user set. When `enabled` is false every
-    /// request is allowed (the authz-disabled default). The super-user bypass is
-    /// enforced both by the name short-circuit in [`Self::authorize`] and by the
-    /// underlying [`crabka_authz::SimpleAclAuthorizer`], which is constructed
-    /// with the same set.
+    /// Build with the configured super-user set. When `enabled` is false, every
+    /// request is allowed, which is the authz-disabled default. The
+    /// super-user bypass is enforced both by the name short-circuit in
+    /// [`Self::authorize`] and by the underlying
+    /// [`crabka_authz::SimpleAclAuthorizer`], which is constructed with the
+    /// same set.
     #[must_use]
     pub fn new(super_users: HashSet<String>, enabled: bool) -> Self {
         let authorizer: Arc<dyn Authorizer> =
@@ -164,8 +169,9 @@ impl SchemaRegistryAuthz {
         }
     }
 
-    /// Poll `DescribeAcls` into the cache until `shutdown` (the gateway pattern).
-    /// On error the prior snapshot is kept and a warning is logged.
+    /// Poll `DescribeAcls` into the cache until `shutdown`. This is the gateway
+    /// pattern. On error this method keeps the prior snapshot and logs a
+    /// warning.
     pub async fn run_acl_refresh(
         &self,
         mut admin: crabka_client_admin::AdminClient,
@@ -192,7 +198,7 @@ impl SchemaRegistryAuthz {
 
     /// Decide whether `principal` may perform `op` on `(rt, name)` from `host`.
     /// Short-circuits to `true` when authz is disabled or the principal is a
-    /// super-user; otherwise consults the current [`AclCache`].
+    /// super-user. In every other case it consults the current [`AclCache`].
     #[must_use]
     pub fn authorize(
         &self,
@@ -223,8 +229,9 @@ impl SchemaRegistryAuthz {
 }
 
 /// Convert a `crabka_client_admin::AclEntry` into a `crabka_metadata::AclEntry`.
-/// The admin crate keeps a structurally identical local copy (same field names
-/// and enum variants) to avoid a broker dependency; this maps between them.
+/// The admin crate keeps a structurally identical local copy, with the same
+/// field names and enum variants, to avoid a broker dependency. This function
+/// maps between them.
 fn acl_entry_from_admin(e: crabka_client_admin::AclEntry) -> crabka_metadata::AclEntry {
     use crabka_client_admin::{
         AclOperation as AO, PatternType as PT, PermissionType as Perm, ResourceType as RT,
@@ -274,10 +281,13 @@ fn acl_entry_from_admin(e: crabka_client_admin::AclEntry) -> crabka_metadata::Ac
     }
 }
 
-/// `from_fn_with_state` middleware that gates each request. Trusted intra-cluster
-/// forwards (carrying [`crate::rest::forward::FORWARD_HEADER`]) skip authz — they
-/// were already authorized at the receiving node. Paths with no authz
-/// requirement ([`authz_target`] returns `None`) pass through. On deny, `403`.
+/// `from_fn_with_state` middleware that gates each request.
+///
+/// Trusted intra-cluster forwards, which carry
+/// [`crate::rest::forward::FORWARD_HEADER`], skip authz. The receiving node
+/// already authorized them. Paths with no authz requirement, where
+/// [`authz_target`] returns `None`, pass through. On deny the middleware
+/// returns `403`.
 pub async fn authz_layer(
     State(az): State<Arc<SchemaRegistryAuthz>>,
     req: Request,
@@ -679,9 +689,10 @@ mod tests {
     };
     use tower::ServiceExt as _; // for `oneshot`
 
-    /// A router with `authz_layer` over `az`, exposing `/` (no authz target),
-    /// `GET /subjects` (cluster Describe) and `POST /subjects/{s}/versions`
-    /// (topic Write). The handler echoes `ok` so a pass-through is `200`.
+    /// A router with `authz_layer` over `az`. It exposes `/` with no authz
+    /// target, `GET /subjects` for cluster Describe, and
+    /// `POST /subjects/{s}/versions` for topic Write. The handler echoes `ok`,
+    /// so a pass-through is `200`.
     fn authz_app(az: SchemaRegistryAuthz) -> Router {
         Router::new()
             .route("/", get(|| async { "ok" }))

@@ -39,7 +39,7 @@ assert!(machine.is_voter());
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-raft](https://docs.rs/crabka-raft). The repository README contains project-wide setup, development, and release notes.
+Read the API documentation at [docs.rs/crabka-raft](https://docs.rs/crabka-raft). The repository README contains the project-wide setup, development, and release notes.
 
 ## License
 

@@ -1,5 +1,5 @@
-//! KIP-848 record types persisted in `__consumer_offsets`. Wire encoding
-//! matches the Apache Kafka reference implementation; values carry a
+//! KIP-848 record types persisted in `__consumer_offsets`. The wire encoding
+//! matches the Apache Kafka reference implementation. Values carry a
 //! version preamble.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -123,9 +123,10 @@ impl GroupMetadataValue {
 }
 
 /// Classic-protocol sub-state for a member hosted inside an upgraded consumer
-/// group (KIP-848 migration). Mirrors Kafka's
-/// `ConsumerGroupMemberMetadataValue.ClassicMemberMetadata`; lets a downgrade
-/// restore the classic member losslessly after a coordinator failover.
+/// group (KIP-848 migration). It mirrors Kafka's
+/// `ConsumerGroupMemberMetadataValue.ClassicMemberMetadata`. It lets a
+/// downgrade restore the classic member losslessly after a coordinator
+/// failover.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassicMemberMetadata {
     pub session_timeout_ms: i32,
@@ -146,8 +147,8 @@ pub struct MemberMetadataValue {
     pub subscribed_topic_regex: Option<String>,
     pub server_assignor: Option<String>,
     pub rebalance_timeout_ms: i32,
-    /// `Some` iff this is a hosted classic member; `None` for a native
-    /// consumer-protocol member.
+    /// `Some` if and only if this is a hosted classic member. `None` for a
+    /// native consumer-protocol member.
     pub classic: Option<ClassicMemberMetadata>,
 }
 

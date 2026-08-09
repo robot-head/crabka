@@ -70,11 +70,13 @@ const SCOPE_ORDER: &[TagScope] = &[
     TagScope::Instrumentation,
 ];
 
-/// A `TraceIndex` shared between the span store and live sources, swappable at
-/// runtime so a background task can reload it without restarting.
+/// A `TraceIndex` shared between the span store and the live sources.
+///
+/// It is swappable at runtime, so a background task can reload it without a
+/// restart.
 pub type SharedTraceIndex = Arc<ArcSwap<TraceIndex>>;
 
-/// Default and maximum safe memory size for concatenating scan batches.
+/// Default and maximum safe memory size for a concatenation of scan batches.
 pub const DEFAULT_SCAN_CONCAT_MAX: ByteSize = crabka_units::bytes(1_500_000_000);
 
 /// Query-side span store that merges sealed blocks with an optional live tier.
@@ -1373,14 +1375,20 @@ fn add_nested_intrinsic_columns(
         .collect()
 }
 
-/// Materialize regular span/resource attribute columns (`attr.<key>`) referenced
-/// by metric `by()`/`select()` projections. The selector path filters attributes
-/// directly on the parquet arrays, so these columns are otherwise never built and
-/// `rate() by(span.http.method)` cannot `GROUP BY attr.http.method`. Values are
-/// stringified into a Utf8 column (metric labels are strings); a span missing the
-/// attribute becomes NULL — the nil group, matching Tempo. Event/Link matchers
-/// are handled by `add_nested_intrinsic_columns`; `service.name` is skipped (it is
-/// the promoted `COL_ROOT_SERVICE_NAME` column, not an attribute).
+/// Materialize the regular span and resource attribute columns, `attr.<key>`,
+/// that metric `by()` and `select()` projections reference.
+///
+/// The selector path filters attributes directly on the parquet arrays, so
+/// nothing else builds these columns, and `rate() by(span.http.method)` cannot
+/// `GROUP BY attr.http.method` without them.
+///
+/// This converts values into a Utf8 column, because metric labels are strings.
+/// A span that lacks the attribute becomes NULL, which is the nil group and
+/// matches Tempo.
+///
+/// `add_nested_intrinsic_columns` handles the Event and Link matchers. This
+/// function skips `service.name`, which is the promoted
+/// `COL_ROOT_SERVICE_NAME` column rather than an attribute.
 fn add_span_attr_columns(
     batches: Vec<RecordBatch>,
     projection_matchers: &[SpanMatcher],
@@ -4968,10 +4976,12 @@ mod tests {
         assert2::assert!(resp.traces.is_empty());
     }
 
-    /// Verify that a live `ArcSwap` is observed: `candidate_blocks` returns nothing
-    /// from the initial empty index, then the new block is immediately visible
-    /// after `store()` on the shared handle — both directly and through the
-    /// `CrabkaSpanStore` that holds the same `Arc<ArcSwap<TraceIndex>>`.
+    /// Verify that a reader observes a live `ArcSwap`.
+    ///
+    /// `candidate_blocks` returns nothing from the initial empty index. After a
+    /// `store()` on the shared handle, the new block is immediately visible,
+    /// both directly and through the `CrabkaSpanStore` that holds the same
+    /// `Arc<ArcSwap<TraceIndex>>`.
     #[tokio::test]
     async fn span_store_observes_swapped_index() {
         let blocks = Arc::new(BlockStore::new(

@@ -1,8 +1,10 @@
-//! KIP-1022 "updating features" — JVM acceptance.
+//! JVM acceptance test for KIP-1022, "updating features".
 //!
-//! Drives the real `mirror.gcr.io/apache/kafka:4.0.0` `kafka-features` admin tool against an
-//! in-process Crabka broker advertised at `host.docker.internal:9092`, proving
-//! the `UpdateFeatures` / `ApiVersions` feature surface round-trips end to end:
+//! This test drives the real `kafka-features` admin tool from
+//! `mirror.gcr.io/apache/kafka:4.0.0` against an in-process Crabka broker
+//! advertised at `host.docker.internal:9092`. It proves that the
+//! `UpdateFeatures` and `ApiVersions` feature surface round-trips end to
+//! end:
 //!
 //! 1. `describe` lists Crabka's finalized features (`metadata.version`,
 //!    `group.version`, `transaction.version`) at the self-bootstrap defaults.
@@ -10,9 +12,9 @@
 //!    `describe` reflects the change.
 //! 3. `upgrade --feature transaction.version=2` round-trips it back.
 //!
-//! Gated `#[ignore]` (requires Docker); run with `--ignored`. Binds host port
-//! 9092, so it must not run concurrently with `jvm_acceptance` (single test
-//! here keeps it self-contained).
+//! The test is gated with `#[ignore]`, because it needs Docker. Run it with
+//! `--ignored`. It binds host port 9092, so it must not run at the same time
+//! as `jvm_acceptance`. One test in this file keeps it self-contained.
 
 use std::process::Command;
 
@@ -23,13 +25,13 @@ use crabka_log::LogConfig;
 const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
 /// Kafka 4.0 is the first image whose `kafka-features` understands the
-/// `group.version` / `transaction.version` feature surface (KIP-1022).
+/// `group.version` and `transaction.version` feature surface (KIP-1022).
 const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.0.0";
 
-/// Boot an in-process Crabka broker listening on `LISTEN`, advertised as
+/// Boots an in-process Crabka broker that listens on `LISTEN` and advertises
 /// `host.docker.internal:9092`. A standalone self-bootstrap finalizes the
-/// latest-release feature defaults (metadata.version=25, group.version=1,
-/// transaction.version=2).
+/// latest-release feature defaults: metadata.version=25, group.version=1, and
+/// transaction.version=2.
 async fn start_host_broker() -> (BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -63,8 +65,9 @@ async fn start_host_broker() -> (BrokerHandle, tempfile::TempDir) {
     (handle, dir)
 }
 
-/// Run `kafka-features <args>` from an `mirror.gcr.io/apache/kafka:4.0.0` container that can
-/// reach the host broker via `--add-host=host.docker.internal:host-gateway`.
+/// Runs `kafka-features <args>` from a `mirror.gcr.io/apache/kafka:4.0.0`
+/// container. The container reaches the host broker through
+/// `--add-host=host.docker.internal:host-gateway`.
 fn kafka_features(args: &[&str]) -> std::process::Output {
     let mut full: Vec<&str> = vec![
         "run",
@@ -89,8 +92,9 @@ fn kafka_features(args: &[&str]) -> std::process::Output {
     out
 }
 
-/// Extract `FinalizedVersionLevel` for `feature` from `kafka-features describe`
-/// output. Returns `None` if the feature is absent or shows no finalized level.
+/// Extracts the `FinalizedVersionLevel` for `feature` from the output of
+/// `kafka-features describe`. It returns `None` when the feature is absent,
+/// and when the feature shows no finalized level.
 fn finalized_level(describe_stdout: &str, feature: &str) -> Option<i64> {
     for line in describe_stdout.lines() {
         if line.contains(&format!("Feature: {feature}")) {

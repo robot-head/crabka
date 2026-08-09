@@ -1,17 +1,19 @@
 //! The WAL-only cross-node `NOTIFY` record.
 //!
-//! A `NOTIFY` executed on the coordinator is appended to the range-0 WAL as one
+//! The coordinator appends a `NOTIFY` to the range-0 WAL as one
 //! [`WriteOp::Put`] per notification, keyed by [`key::notify_key`]. Followers
 //! observe the frame as it streams past and re-inject the notifications into
-//! their local bus; **no apply site ever writes the record to the KV**, because
-//! range-0 checkpoints snapshot the whole KV and the WAL topic never expires by
-//! time. [`is_notify_op`] is that filter, and every apply site calls it.
+//! their local bus. **No apply site ever writes the record to the KV**,
+//! because range-0 checkpoints snapshot the whole KV and the WAL topic never
+//! expires by time. [`is_notify_op`] is that filter, and every apply site
+//! calls it.
 //!
 //! Layout (all integers big-endian):
 //! `[version: u8][olen: u32][origin][process_id: i32][clen: u32][channel]`
-//! `[plen: u32][payload]`. Strings are UTF-8. Every length is bounds-checked
-//! against the remaining buffer before it is used, so a corrupt record read off
-//! the log fails to decode rather than panicking or over-allocating.
+//! `[plen: u32][payload]`. Strings are UTF-8. The decoder bounds-checks every
+//! length against the remaining buffer before it uses that length, so a
+//! corrupt record read off the log fails to decode. It does not panic and it
+//! does not over-allocate.
 
 use crate::{KvError, WriteOp, key};
 
@@ -21,12 +23,12 @@ pub const NOTIFY_RECORD_VERSION: u8 = 1;
 /// One cross-node notification as it travels through the range-0 WAL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotifyRecord {
-    /// Per-node identity of the publisher, used as a cheap dedup safety net so
+    /// Per-node identity of the publisher. It is a cheap dedup safety net, so
     /// a node that observes its own record can ignore it.
     pub origin: String,
     /// The *originating* backend pid. `PostgreSQL` reports the notifying
-    /// backend's pid to every listener, so it must survive the hop rather than
-    /// being restamped by the receiving node.
+    /// backend's pid to every listener, so it must survive the hop. The
+    /// receiving node must not restamp it.
     pub process_id: i32,
     /// Channel name (`NOTIFY <channel>`).
     pub channel: String,
@@ -35,7 +37,7 @@ pub struct NotifyRecord {
 }
 
 impl NotifyRecord {
-    /// Serialize to the record byte layout.
+    /// Serializes to the record byte layout.
     ///
     /// # Panics
     ///
@@ -54,7 +56,7 @@ impl NotifyRecord {
         out
     }
 
-    /// Parse a record; every length is validated before use.
+    /// Parses a record. The decoder validates every length before use.
     ///
     /// # Errors
     ///
@@ -90,11 +92,11 @@ impl NotifyRecord {
 
 /// True when `op` touches the WAL-only notify keyspace.
 ///
-/// This is the never-persist predicate: every site that applies WAL ops to a KV
-/// must drop the ops it selects, otherwise a notification becomes permanent
-/// catalog state through the next checkpoint. It matches the whole `/0/notify/`
-/// namespace (not just well-formed keys) so nothing under it can ever land in
-/// the store.
+/// This is the never-persist predicate. Every site that applies WAL ops to a
+/// KV must drop the ops that this predicate selects. If it does not, a
+/// notification becomes permanent catalog state through the next checkpoint.
+/// The predicate matches the whole `/0/notify/` namespace, not just
+/// well-formed keys, so nothing under it can ever land in the store.
 #[must_use]
 pub fn is_notify_op(op: &WriteOp) -> bool {
     let op_key = match op {
@@ -135,8 +137,8 @@ impl<'a> Reader<'a> {
         Ok(self.take(1)?[0])
     }
 
-    /// Read four bytes as a fixed array — fallibly, so nothing in the decoder
-    /// can panic on input from the log.
+    /// Reads four bytes as a fixed array. The read is fallible, so nothing in
+    /// the decoder can panic on input from the log.
     fn four(&mut self) -> Result<[u8; 4], KvError> {
         self.take(4)?
             .try_into()
@@ -162,11 +164,13 @@ mod tests {
 
     use super::*;
 
-    /// `PostgreSQL`'s channel-name limit (`NAMEDATALEN - 1`), mirrored here so
-    /// the codec is exercised at the largest value a publisher can produce.
+    /// `PostgreSQL`'s channel-name limit (`NAMEDATALEN - 1`). It is mirrored
+    /// here so the tests exercise the codec at the largest value a publisher
+    /// can produce.
     const MAX_CHANNEL_BYTES: usize = 63;
-    /// `PostgreSQL`'s payload limit (`NOTIFY_PAYLOAD_MAX_LENGTH - 1`): 8000 is
-    /// rejected, so 7999 is the largest a publisher can produce.
+    /// `PostgreSQL`'s payload limit (`NOTIFY_PAYLOAD_MAX_LENGTH - 1`).
+    /// `PostgreSQL` rejects 8000, so 7999 is the largest a publisher can
+    /// produce.
     const MAX_PAYLOAD_BYTES: usize = 7999;
 
     fn sample() -> NotifyRecord {

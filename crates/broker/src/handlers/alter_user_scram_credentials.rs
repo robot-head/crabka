@@ -1,20 +1,20 @@
 //! `AlterUserScramCredentials` handler (`api_key` 51, KIP-554).
 //!
-//! KIP-554 puts PBKDF2 on the *client* side: the wire request carries the
+//! KIP-554 puts PBKDF2 on the *client* side. The wire request carries the
 //! already-stretched PBKDF2 output as `salted_password`. The broker derives
-//! `stored_key` / `server_key` from the supplied bytes without ever seeing the
+//! `stored_key` and `server_key` from the supplied bytes, and never sees the
 //! user's plaintext password.
 //!
-//! Per-user validation (each upsertion is checked independently):
+//! The handler validates each upsertion on its own:
 //!
-//! - `iterations >= 4096` else `UNACCEPTABLE_CREDENTIAL` (93).
-//! - `iterations <= 16384` else `UNACCEPTABLE_CREDENTIAL`.
-//! - Unknown mechanism wire value → `UNSUPPORTED_SASL_MECHANISM` (33).
+//! - `iterations >= 4096`, or else `UNACCEPTABLE_CREDENTIAL` (93).
+//! - `iterations <= 16384`, or else `UNACCEPTABLE_CREDENTIAL`.
+//! - An unknown mechanism wire value gives `UNSUPPORTED_SASL_MECHANISM` (33).
 //!
-//! Authorization: `Alter` on `Cluster("kafka-cluster")`. On Deny,
-//! every per-user result is `CLUSTER_AUTHORIZATION_FAILED` (31). The
-//! authorizer's super-user bypass short-circuits inside `authorize` → ALLOW
-//! when `super_users` is configured.
+//! Authorization needs `Alter` on `Cluster("kafka-cluster")`. On Deny, every
+//! per-user result is `CLUSTER_AUTHORIZATION_FAILED` (31). When `super_users`
+//! is configured, the authorizer's super-user bypass returns ALLOW from inside
+//! `authorize`.
 //!
 //! Duplicate detection preserves Kafka's first per-user validation/resource
 //! error. If the first alteration for a user has already recorded an error,
@@ -27,10 +27,10 @@
 //! Deletion targets that are not present in the current metadata image get
 //! `RESOURCE_NOT_FOUND` (91).
 //!
-//! On a successful submit the handler emits one `V1ScramCredential` or
-//! `V1DeleteScramCredential` record per accepted row through
-//! `controller.submit_change`. A single batched commit keeps the metadata
-//! image consistent across multiple rows in the same request.
+//! On a successful submit, the handler emits one `V1ScramCredential` or
+//! `V1DeleteScramCredential` record for each accepted row, through
+//! `controller.submit_change`. One batched commit keeps the metadata image
+//! consistent across several rows in the same request.
 
 use std::collections::HashMap;
 
@@ -60,12 +60,13 @@ const DUPLICATE_ALTERATION_MESSAGE: &str =
     "A user credential cannot be altered twice in the same request";
 const EMPTY_USERNAME_MESSAGE: &str = "Username must not be empty";
 
-/// KIP-554 wire byte identifying a SCRAM mechanism (see [`wire_to_mech`]).
+/// KIP-554 wire byte that identifies a SCRAM mechanism. See
+/// [`wire_to_mech`].
 type MechanismWireByte = i8;
 
-/// Run the `AlterUserScramCredentials` request and return the typed
-/// response. The caller (dispatch.rs) is responsible for wire-encoding
-/// the response and prepending the response header.
+/// Runs the `AlterUserScramCredentials` request and returns the typed
+/// response. The caller, `dispatch.rs`, encodes the response on the wire and
+/// prepends the response header.
 #[tracing::instrument(
     name = "handle_alter_user_scram_credentials",
     level = "info",
@@ -312,9 +313,9 @@ fn duplicate_alteration_error() -> AlterationError {
     }
 }
 
-/// Validate and optionally accept a single deletion. Returns the per-user
-/// result row to push into the response; pushes the metadata record to
-/// `records` on accept.
+/// Validates one deletion and accepts it if it is valid. It returns the
+/// per-user result row for the response, and on accept it pushes the metadata
+/// record to `records`.
 fn process_deletion(
     broker: &Broker,
     d: ScramCredentialDeletion,
@@ -329,9 +330,9 @@ fn process_deletion(
     ok_result(d.name)
 }
 
-/// Validate and optionally accept a single upsertion. Returns the per-user
-/// result row to push into the response; pushes the metadata record to
-/// `records` on accept.
+/// Validates one upsertion and accepts it if it is valid. It returns the
+/// per-user result row for the response, and on accept it pushes the metadata
+/// record to `records`.
 fn process_upsertion(
     u: ScramCredentialUpsertion,
     authorized: bool,
@@ -446,12 +447,12 @@ fn upsertion_record(
     })
 }
 
-/// Map the KIP-554 wire mechanism byte to a [`SaslMechanism`].
+/// Maps the KIP-554 wire mechanism byte to a [`SaslMechanism`].
 ///
 /// Per KIP-554:
-/// - `0` — unknown (reserved)
-/// - `1` — SCRAM-SHA-256
-/// - `2` — SCRAM-SHA-512
+/// - `0`: unknown, reserved
+/// - `1`: SCRAM-SHA-256
+/// - `2`: SCRAM-SHA-512
 fn wire_to_mech(wire: MechanismWireByte) -> Option<SaslMechanism> {
     match wire {
         1 => Some(SaslMechanism::ScramSha256),
@@ -527,7 +528,7 @@ mod tests {
         }
     }
 
-    /// A fully-pinned per-user result row as the handler renders it.
+    /// A fully-pinned per-user result row, as the handler renders it.
     fn expected_result(
         user: &str,
         error_code: i16,

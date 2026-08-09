@@ -1,8 +1,8 @@
 //! A compute with no tracing subscriber must not stamp anything onto the WAL.
 //!
-//! This lives in its own test binary on purpose: the assertion is about a
-//! process where *no* subscriber is installed, which a sibling test that calls
-//! `set_global_default` would silently invalidate.
+//! This test lives in its own test binary on purpose. The assertion is about a
+//! process where *no* subscriber is installed. A sibling test that calls
+//! `set_global_default` would silently invalidate it.
 
 use std::sync::Arc;
 
@@ -96,7 +96,7 @@ async fn wal_records(bootstrap: &str, topic: &str) -> Vec<Record> {
 }
 
 /// With every callsite disabled the carrier is empty, and an empty carrier must
-/// yield *no* headers — not an empty-valued `traceparent`.
+/// yield *no* headers. It must not yield an empty-valued `traceparent`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_commit_without_a_subscriber_writes_records_with_no_headers() {
     check!(

@@ -1,44 +1,44 @@
 //! Broker tracing + OTLP distributed-tracing pipeline.
 //!
 //! The broker always installs a structured-JSON `tracing_subscriber` `fmt`
-//! layer (stdout, gated by the usual `RUST_LOG` `EnvFilter`) so GKE / Cloud
-//! Logging ingests fields rather than ANSI text. When OTLP export is
-//! configured via the environment, a second `tracing-opentelemetry` layer
-//! is attached that converts `tracing` spans into OpenTelemetry spans and
-//! batch-exports them over OTLP to a collector (gRPC `:4317` or
-//! HTTP/protobuf `:4318`).
+//! layer on stdout, gated by the usual `RUST_LOG` `EnvFilter`, so GKE / Cloud
+//! Logging ingests fields rather than ANSI text. When the environment
+//! configures OTLP export, the broker attaches a second
+//! `tracing-opentelemetry` layer. That layer converts `tracing` spans into
+//! OpenTelemetry spans and batch-exports them over OTLP to a collector (gRPC
+//! `:4317` or HTTP/protobuf `:4318`).
 //!
 //! ## Enabling
 //!
-//! OTLP is **off by default** — a broker with no OTLP environment behaves
+//! OTLP is **off by default**. A broker with no OTLP environment behaves
 //! byte-for-byte as before. It turns on when any endpoint is set
 //! (`CRABKA_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
-//! `OTEL_EXPORTER_OTLP_ENDPOINT`) or `CRABKA_OTLP_ENABLED=true`, and is
-//! force-disabled by `OTEL_SDK_DISABLED=true`. The follow-up operator
-//! the operator surfaces these knobs through `Kafka.spec` and injects the env on
-//! the broker pods.
+//! `OTEL_EXPORTER_OTLP_ENDPOINT`) or `CRABKA_OTLP_ENABLED=true`.
+//! `OTEL_SDK_DISABLED=true` force-disables it. The operator surfaces these
+//! knobs through `Kafka.spec` and injects the env on the broker pods.
 //!
 //! ## Request spans
 //!
-//! Per-request spans are emitted under the dedicated
-//! [`REQUEST_TARGET`] target at `DEBUG`, so they cost nothing (a disabled
-//! level check) on a broker without OTLP, and the stdout `fmt` layer never
-//! prints them. Only the OTLP layer enables that target (via the
-//! `otel_default_filter` passed to [`init`]).
+//! The broker emits per-request spans under the dedicated
+//! [`REQUEST_TARGET`] target at `DEBUG`. They cost nothing on a broker without
+//! OTLP, because the level check is disabled, and the stdout `fmt` layer never
+//! prints them. Only the OTLP layer enables that target, with the
+//! `otel_default_filter` passed to [`init`].
 
 use std::net::SocketAddr;
 
 // Re-export the generic OTLP pipeline from crabka-telemetry.
 pub use crabka_telemetry::{OtlpConfig, OtlpProtocol, TelemetryError, TelemetryGuard, init};
 
-/// `tracing` target carrying per-request server spans. Kept off the `fmt`
-/// layer's default filter so request spans only materialise for OTLP.
+/// `tracing` target carrying per-request server spans. The broker keeps it off
+/// the `fmt` layer's default filter so request spans only materialise for OTLP.
 pub const REQUEST_TARGET: &str = "crabka_broker::request";
 
-/// Build the per-request server span. Disabled (zero-cost) unless the OTLP
-/// layer has enabled [`REQUEST_TARGET`] at `DEBUG`. The span name is set to
-/// the Kafka API name via the `otel.name` field that `tracing-opentelemetry`
-/// recognises; attribute names follow OpenTelemetry semantic conventions.
+/// Build the per-request server span. The span is disabled, and so costs
+/// nothing, unless the OTLP layer has enabled [`REQUEST_TARGET`] at `DEBUG`.
+/// This function sets the span name to the Kafka API name with the `otel.name`
+/// field that `tracing-opentelemetry` recognises. Attribute names follow
+/// OpenTelemetry semantic conventions.
 #[must_use]
 pub fn request_span(
     api_key: i16,
@@ -64,11 +64,11 @@ pub fn request_span(
 }
 
 /// Map a Kafka request `api_key` to its canonical protocol name, used as
-/// the `OTel` span name. The name is sourced from the generated
-/// [`crabka_protocol::ApiKey`] registry (whose variant names are the
-/// canonical Kafka request names), so it stays in sync with the schemas.
-/// Keys outside the registry render as `"Unknown"` so a span is still
-/// emitted.
+/// the `OTel` span name. This function takes the name from the generated
+/// [`crabka_protocol::ApiKey`] registry, so it stays in sync with the schemas.
+/// That registry's variant names are the canonical Kafka request names. Keys
+/// outside the registry render as `"Unknown"`, so the broker still emits a
+/// span.
 #[must_use]
 pub fn api_name(api_key: i16) -> &'static str {
     crabka_protocol::ApiKey::from_i16(api_key).map_or("Unknown", Into::into)

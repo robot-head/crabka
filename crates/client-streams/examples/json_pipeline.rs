@@ -1,13 +1,13 @@
 // `#[tracing::instrument]` on the DSL runtime deepens this example's `main`
 // future past the default type-layout depth limit; raise it.
 #![recursion_limit = "512"]
-//! JSON Schema schema-serde Streams pipeline using `StreamsApp` + the
-//! default-serde DSL. Requires a running broker (`127.0.0.1:9092`) and a
-//! Confluent-compatible registry (`http://127.0.0.1:8081`).
+//! JSON Schema schema-serde Streams pipeline that uses `StreamsApp` and the
+//! default-serde DSL. It needs a running broker at `127.0.0.1:9092` and a
+//! Confluent-compatible registry at `http://127.0.0.1:8081`.
 //!
-//! Reads JSON `Order` records from `orders-json`, doubles each total, and writes
-//! them to `orders-json-doubled`. Mirrors the Avro/Protobuf examples — only the
-//! serde format differs.
+//! The pipeline reads JSON `Order` records from `orders-json`, doubles each
+//! total, and writes them to `orders-json-doubled`. It matches the Avro and
+//! Protobuf examples, and only the serde format differs.
 //!
 //! Run: `cargo run -p crabka-client-streams --example json_pipeline`
 

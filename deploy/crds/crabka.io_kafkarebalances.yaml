@@ -21,26 +21,28 @@ spec:
             properties:
               endpoint:
                 description: |-
-                  Connect-RPC base URL of the `crabka-rebalancer` service, e.g.
-                  `http://my-cluster-rebalancer.kafka.svc:9300`. When omitted the
-                  operator derives `http://<cluster>-rebalancer.<namespace>.svc.cluster.local:9300`
+                  Connect-RPC base URL of the `crabka-rebalancer` service, for
+                  example `http://my-cluster-rebalancer.kafka.svc:9300`. When this
+                  field is absent, the operator derives
+                  `http://<cluster>-rebalancer.<namespace>.svc.cluster.local:9300`
                   from the `crabka.io/cluster` label.
                 nullable: true
                 type: string
               goals:
                 description: |-
-                  Optimization goals to apply, by name (e.g. `RackAware`,
-                  `ReplicaDistribution`). When omitted or empty the rebalancer uses
-                  its full default goal registry in priority order.
+                  Optimization goals to apply, by name, for example `RackAware` and
+                  `ReplicaDistribution`. When this field is absent or empty, the
+                  rebalancer uses its full default goal registry in priority
+                  order.
                 items:
                   type: string
                 nullable: true
                 type: array
               throttleBytesPerSec:
                 description: |-
-                  Replication throttle (bytes/sec) applied while the proposal
-                  executes (KIP-73). When omitted the rebalancer falls back to its
-                  own `--default-throttle-bytes-per-sec`.
+                  Replication throttle in bytes per second while the proposal
+                  executes. This is KIP-73. When this field is absent, the rebalancer
+                  uses its own `--default-throttle-bytes-per-sec`.
                 format: int64
                 minimum: 1.0
                 nullable: true
@@ -52,9 +54,10 @@ spec:
               conditions:
                 default: []
                 description: |-
-                  Kubernetes-style condition list. The active condition's `type`
-                  carries the rebalance state: one of `PendingProposal`,
-                  `ProposalReady`, `Rebalancing`, `Ready`, `NotReady`, `Stopped`.
+                  Kubernetes-style condition list. The `type` of the active
+                  condition holds the rebalance state. It is one of
+                  `PendingProposal`, `ProposalReady`, `Rebalancing`, `Ready`,
+                  `NotReady`, and `Stopped`.
                 items:
                   properties:
                     lastTransitionTime:
@@ -70,7 +73,7 @@ spec:
                       description: '`True`, `False`, or `Unknown`.'
                       type: string
                     type:
-                      description: e.g. `Ready`.
+                      description: For example, `Ready`.
                       type: string
                   required:
                   - lastTransitionTime
@@ -82,17 +85,18 @@ spec:
                 type: array
               observedGeneration:
                 description: |-
-                  `metadata.generation` of the last spec that produced the current
-                  proposal (advanced when a fresh proposal is computed).
+                  `metadata.generation` of the last spec that gave the current
+                  proposal. The operator advances it when it computes a new
+                  proposal.
                 format: int64
                 nullable: true
                 type: integer
               optimizationResult:
-                description: Summary of the most recently computed proposal.
+                description: Summary of the proposal that the operator computed last.
                 nullable: true
                 properties:
                   goals:
-                    description: The goals the rebalancer actually applied (post-selection).
+                    description: The goals that the rebalancer applied after the selection.
                     items:
                       type: string
                     type: array
@@ -129,8 +133,9 @@ spec:
                 type: object
               sessionId:
                 description: |-
-                  Rebalancer-assigned proposal id. Stored so `approve` / `stop` /
-                  poll operations target the same proposal across reconciles.
+                  Proposal id that the rebalancer assigned. The operator stores it,
+                  so that the `approve`, `stop`, and poll operations reach the same
+                  proposal in every reconcile.
                 nullable: true
                 type: string
             type: object

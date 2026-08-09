@@ -4,20 +4,21 @@
 //! same packed-`u64` timestamp domain as the global source. A transaction that
 //! reads and writes exactly one range draws `start_ts` and `commit_ts` from that
 //! range's [`LocalSequence`] instead of the tenant-wide timestamp source, so the
-//! global clock's load tracks cross-range traffic rather than total writes. The
+//! global clock's load tracks cross-range traffic and not total writes. The
 //! versions written are indistinguishable in storage from globally stamped ones.
 //!
-//! The sequence is seeded at recovery from the range's durable horizon and
-//! advanced by the Lamport receive rule: every globally stamped write applied to
-//! the range is [`observe`](LocalSequence::observe)d, so local allocations always
-//! exceed every global timestamp the range has seen. Under HLC mode this fold is
-//! literally the HLC receive rule, so the local sequence is a range-scoped HLC.
+//! At recovery the range seeds the sequence from its durable horizon, and the
+//! Lamport receive rule advances it. The range
+//! [`observe`](LocalSequence::observe)s every globally stamped write it applies,
+//! so local allocations always exceed every global timestamp the range has seen.
+//! Under HLC mode this fold is exactly the HLC receive rule, so the local
+//! sequence is a range-scoped HLC.
 //!
-//! Alongside allocation the sequence publishes a **closed timestamp**: a
-//! watermark it promises never to commit at or below again. A cross-range read at
-//! `read_ts` may be served by this range once its closed timestamp reaches
-//! `read_ts`. The closed-timestamp discipline is the safety property the whole
-//! bypass rests on; see [`LocalSequence::publish_closed_timestamp`].
+//! The sequence also publishes a **closed timestamp**, which is a watermark it
+//! promises never to commit at or below again. This range can serve a
+//! cross-range read at `read_ts` after its closed timestamp reaches `read_ts`.
+//! The closed-timestamp discipline is the safety property the whole bypass rests
+//! on. See [`LocalSequence::publish_closed_timestamp`].
 
 use std::sync::{
     Mutex,
@@ -32,13 +33,14 @@ use crate::timestamp_txn::{
 /// A range-local monotone timestamp allocator plus its published closed
 /// timestamp.
 ///
-/// Allocation is serialized by a [`Mutex`] guarding the underlying
-/// [`MonotonicTimestampAllocator`] — matching `LocalTimestampSource`'s idiom for
-/// a per-range allocator, whose critical section is a couple of `checked_add`s
-/// that cannot panic, so the mutex never poisons. The closed timestamp lives in a
-/// separate [`AtomicU64`] so the read path can load the watermark without
-/// contending on the allocation lock; it is only ever *written* while that lock
-/// is held, which is what keeps its advance atomic with respect to reservation.
+/// A [`Mutex`] that guards the underlying [`MonotonicTimestampAllocator`]
+/// serializes allocation. This matches `LocalTimestampSource`'s idiom for a
+/// per-range allocator. The critical section is a couple of `checked_add`s that
+/// cannot panic, so the mutex never poisons. The closed timestamp lives in a
+/// separate [`AtomicU64`], so the read path can load the watermark without
+/// contention on the allocation lock. The code *writes* the watermark only while
+/// it holds that lock, which keeps its advance atomic with respect to
+/// reservation.
 #[derive(Debug)]
 pub struct LocalSequence {
     allocator: Mutex<MonotonicTimestampAllocator>,
@@ -46,15 +48,16 @@ pub struct LocalSequence {
 }
 
 impl LocalSequence {
-    /// Seed a sequence from a range's durable `horizon` so that its next
-    /// allocation strictly exceeds `horizon` and its closed timestamp starts at
-    /// `horizon` (everything at or below the horizon is already settled and can
-    /// never be committed at again).
+    /// Seed a sequence from a range's durable `horizon`.
+    ///
+    /// The next allocation then strictly exceeds `horizon`, and the closed
+    /// timestamp starts at `horizon`. Everything at or below the horizon is
+    /// already settled and can never be committed at again.
     ///
     /// # Errors
     ///
     /// Returns [`TimestampTxnError::TimestampExhausted`] when `horizon` is
-    /// `u64::MAX`, leaving no timestamp above it to allocate.
+    /// `u64::MAX`, because no timestamp above it is left to allocate.
     pub fn seeded_at(horizon: u64) -> Result<Self, TimestampTxnError> {
         let first = horizon
             .checked_add(1)
@@ -103,13 +106,14 @@ impl LocalSequence {
         self.locked().allocate_commit_after(start_ts)
     }
 
-    /// Fold an applied global stamp into the sequence (the Lamport receive rule)
-    /// so every future allocation strictly exceeds `ts`.
+    /// Fold an applied global stamp into the sequence with the Lamport receive
+    /// rule, so every future allocation strictly exceeds `ts`.
     ///
-    /// Never regresses: a sequence that has already issued a newer stamp is
-    /// unchanged. This is best-effort at `u64` exhaustion — the only case where
-    /// the fold cannot advance is also the case where the allocator can serve no
-    /// further grant, so there is nothing to protect against.
+    /// The sequence never regresses. A sequence that has already issued a newer
+    /// stamp stays unchanged. The fold is best-effort at `u64` exhaustion. The
+    /// only case where the fold cannot advance is also the case where the
+    /// allocator can serve no further grant, so there is nothing to protect
+    /// against.
     pub fn observe(&self, ts: u64) {
         let _ = self.locked().advance_past(ts);
     }
@@ -121,29 +125,31 @@ impl LocalSequence {
         self.closed_ts.load(Ordering::Acquire)
     }
 
-    /// Raise the closed timestamp toward `target`, returning the resulting
+    /// Raise the closed timestamp toward `target`, and return the resulting
     /// watermark.
     ///
     /// # Safety invariant
     ///
     /// The closed timestamp must never reach or exceed a value the sequence
     /// might still allocate a commit at. This method reserves *strictly above*
-    /// `target` before publishing it: it advances the allocator so that
+    /// `target` before it publishes `target`. It advances the allocator so that
     /// `next_timestamp() > target`, and only then raises the watermark to
-    /// `target`. Every commit the sequence subsequently allocates is drawn from
+    /// `target`. Every commit the sequence allocates after that comes from
     /// `next_timestamp()` or higher, so `commit_ts > closed_timestamp()` holds
-    /// for all time. Combined with `fetch_max`, the watermark is monotone (it
-    /// only increases) and always strictly below the next allocatable timestamp —
-    /// the property a cross-range reader relies on when it serves a `read_ts`
-    /// this range has closed. A previously published watermark was reserved above
-    /// under the same lock and the allocator only moves forward, so it too stays
-    /// strictly below the current boundary.
+    /// for all time.
+    ///
+    /// With `fetch_max`, the watermark is monotone, so it only increases, and it
+    /// always stays strictly below the next allocatable timestamp. A cross-range
+    /// reader relies on that property when it serves a `read_ts` this range has
+    /// closed. A watermark published earlier was reserved above under the same
+    /// lock, and the allocator only moves forward, so it too stays strictly
+    /// below the current boundary.
     ///
     /// # Errors
     ///
     /// Returns [`TimestampTxnError::TimestampExhausted`] when `target` is
-    /// `u64::MAX`, leaving no timestamp above it to reserve; the watermark is
-    /// left unchanged.
+    /// `u64::MAX`, because no timestamp above it is left to reserve. The
+    /// watermark stays unchanged.
     pub fn publish_closed_timestamp(&self, target: u64) -> Result<u64, TimestampTxnError> {
         let mut allocator = self.locked();
         // Reserve strictly above `target` before the watermark can cover it.

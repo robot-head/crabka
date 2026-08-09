@@ -1,6 +1,8 @@
-//! Session store over the byte backend — `SessionKeySchema` keys (`key‖end‖start`),
-//! raw aggregate values. Third typed store beside `KeyValueBytesStore` and
-//! `WindowBytesStore`. Supports the JVM session-merge fetch (`find_sessions`).
+//! Session store over the byte backend.
+//!
+//! The keys follow `SessionKeySchema` as `key‖end‖start`, and the values are raw
+//! aggregates. This is the third typed store beside `KeyValueBytesStore` and
+//! `WindowBytesStore`. It supports the JVM session-merge fetch `find_sessions`.
 use std::{
     any::Any,
     sync::{Arc, Mutex},
@@ -19,9 +21,11 @@ use crate::{
     },
 };
 
-/// The session store's backing: either a plain boxed byte store or a record-cache
-/// wrapper over it. `Cached` is opted into via [`SessionBytesStore::enable_cache`];
-/// uncached stores keep today's behavior exactly. Mirrors `kv::Backing`.
+/// The session store's backing.
+///
+/// The backing is either a plain boxed byte store or a record-cache wrapper over
+/// it. A caller opts into `Cached` with [`SessionBytesStore::enable_cache`].
+/// Uncached stores keep their behavior exactly. This mirrors `kv::Backing`.
 enum Backing {
     Plain(Box<dyn ByteKeyValueStore>),
     Cached(CachingSessionStore),
@@ -41,8 +45,10 @@ impl Backing {
         }
     }
 
-    /// Processing-path write. Plain: direct put. Cached: write-back put carrying
-    /// the record context (changelog deferred to flush).
+    /// Processing-path write.
+    ///
+    /// `Plain` does a direct put. `Cached` does a write-back put that carries the
+    /// record context, and defers the changelog to flush.
     async fn put(&mut self, key: Bytes, value: Bytes, ctx: RecordContext) {
         match self {
             Backing::Plain(b) => b.put(key, value).await,
@@ -50,8 +56,10 @@ impl Backing {
         }
     }
 
-    /// Processing-path remove (tombstone). Plain: direct delete. Cached:
-    /// write-back tombstone carrying the context.
+    /// Processing-path remove, which writes a tombstone.
+    ///
+    /// `Plain` does a direct delete. `Cached` stages a write-back tombstone that
+    /// carries the context.
     async fn remove(&mut self, key: Bytes, ctx: RecordContext) {
         match self {
             Backing::Plain(b) => {
@@ -61,7 +69,9 @@ impl Backing {
         }
     }
 
-    /// Restore-path write (below the cache; never stages a dirty entry).
+    /// Restore-path write that goes below the cache.
+    ///
+    /// This method never stages a dirty entry.
     async fn apply(&mut self, key: Bytes, value: Option<Bytes>) {
         match (self, value) {
             (Backing::Plain(b), Some(v)) => b.put(key, v).await,
@@ -81,13 +91,18 @@ impl Backing {
     }
 }
 
-/// Typed session store keyed by `(K, start, end)`. `find_sessions` returns the
-/// merge candidates for a record: sessions whose `[start, end]` overlaps the
-/// inactivity gap window `[earliest_end, latest_start]`.
+/// Typed session store keyed by `(K, start, end)`.
+///
+/// `find_sessions` returns the merge candidates for a record. Those are the
+/// sessions whose `[start, end]` overlaps the inactivity gap window
+/// `[earliest_end, latest_start]`.
 #[async_trait]
 pub trait SessionStore<K: Send + Sync, V: Send>: StateStore {
-    /// Sessions for `key` with `end >= earliest_end && start <= latest_start`,
-    /// returned as `(start, end, value)` in store order (end asc, then start asc).
+    /// Returns the sessions for `key` with
+    /// `end >= earliest_end && start <= latest_start`.
+    ///
+    /// The result is `(start, end, value)` in store order. Store order is end
+    /// ascending, then start ascending.
     async fn find_sessions(
         &self,
         key: &K,
@@ -96,8 +111,10 @@ pub trait SessionStore<K: Send + Sync, V: Send>: StateStore {
     ) -> Vec<(i64, i64, V)>;
     async fn put(&mut self, key: K, start: i64, end: i64, value: V);
     async fn remove(&mut self, key: &K, start: i64, end: i64);
-    /// Every session across ALL keys whose `end <= close_time`, as
-    /// `(key, start, end, value)`. Backs emit-final's closed-session scan.
+    /// Returns every session across ALL keys whose `end <= close_time`.
+    ///
+    /// The result is `(key, start, end, value)`. The emit-final closed-session
+    /// scan uses this method.
     async fn find_closed_sessions(&self, close_time: i64) -> Vec<(K, i64, i64, V)>;
 }
 
@@ -109,9 +126,9 @@ pub struct SessionBytesStore<K, V> {
     value_serde: Box<dyn Serde<V>>,
     changelog: Vec<(Bytes, Option<Bytes>)>,
     logging: bool,
-    /// Set via [`StateStore::set_record_context`]; attached to the next cached
-    /// write so the deduped `Change` can be forwarded with the right context on
-    /// flush. Only meaningful when `backing` is `Cached`.
+    /// Set by [`StateStore::set_record_context`]. The store attaches it to the
+    /// next cached write, so it can forward the deduped `Change` with the right
+    /// context on flush. It is only meaningful when `backing` is `Cached`.
     pending_ctx: Option<RecordContext>,
 }
 
@@ -152,9 +169,11 @@ impl<K: 'static, V: 'static> SessionBytesStore<K, V> {
         )
     }
 
-    /// Wrap this store's backend in a record cache (moves the backend into a
-    /// [`CachingSessionStore`]). The caller supplies the [`NamedCache`] registered
-    /// in the task's `ThreadCache`. Re-wrapping an already-cached store is a no-op.
+    /// Wraps this store's backend in a record cache.
+    ///
+    /// This method moves the backend into a [`CachingSessionStore`]. The caller
+    /// supplies the [`NamedCache`] registered in the task's `ThreadCache`. A
+    /// re-wrap of an already-cached store does nothing.
     pub(crate) fn enable_cache(&mut self, cache: Arc<Mutex<NamedCache>>) {
         if !matches!(self.backing, Backing::Plain(_)) {
             return; // already cached
@@ -170,15 +189,17 @@ impl<K: 'static, V: 'static> SessionBytesStore<K, V> {
         ));
     }
 
-    /// Whether this store's backend has been wrapped in a record cache.
+    /// Returns `true` when a record cache wraps this store's backend.
     #[must_use]
     pub(crate) fn is_cached(&self) -> bool {
         matches!(self.backing, Backing::Cached(_))
     }
 
-    /// The context to stamp on the next cached write: the stashed
-    /// [`set_record_context`](StateStore::set_record_context) if present, else a
-    /// default rooted at the changelog topic.
+    /// Returns the context to stamp on the next cached write.
+    ///
+    /// The context is the stashed
+    /// [`set_record_context`](StateStore::set_record_context) if there is one. If
+    /// not, it is a default rooted at the changelog topic.
     fn write_ctx(&self) -> RecordContext {
         self.pending_ctx.clone().unwrap_or(RecordContext {
             topic: self.changelog_topic.clone(),
@@ -591,8 +612,9 @@ mod tests {
         );
     }
 
-    /// Cached `find_closed_sessions` routes through `Backing::Cached::scan_all`,
-    /// overlaying the cache across all keys (read-your-writes before flush).
+    /// Cached `find_closed_sessions` routes through `Backing::Cached::scan_all`.
+    /// It overlays the cache across all keys, so reads see your writes before
+    /// flush.
     #[tokio::test]
     async fn cached_find_closed_sessions_overlays_cache() {
         let mut s = cached_store();
@@ -612,9 +634,9 @@ mod tests {
         assert!(s.take_changelog().is_empty());
     }
 
-    /// On a cached store, `remove` stages a write-back tombstone (deferring its
-    /// changelog) that hides the inner session, then flushes the deduped
-    /// tombstone Change + changelog record.
+    /// On a cached store, `remove` stages a write-back tombstone that hides the
+    /// inner session and defers its changelog. The flush then emits the deduped
+    /// tombstone Change and the changelog record.
     #[tokio::test]
     async fn cached_remove_stages_tombstone_and_flushes() {
         use crate::dsl::processors::change::Change;
@@ -643,8 +665,8 @@ mod tests {
         assert!(cl[0].1.is_none()); // changelog tombstone
     }
 
-    /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry
-    /// → empty cache flush), and a `None` deletes through.
+    /// `apply_changelog` on a cached store writes BELOW the cache, so it stages
+    /// no dirty entry and the cache flush is empty. A `None` deletes through.
     #[tokio::test]
     async fn cached_apply_changelog_goes_below_cache() {
         let mut s = cached_store();
@@ -683,8 +705,8 @@ mod tests {
         assert!(buffer.is_empty());
     }
 
-    /// `enable_cache` is idempotent: re-wrapping an already-cached store is a
-    /// no-op.
+    /// `enable_cache` is idempotent. A re-wrap of an already-cached store does
+    /// nothing.
     #[tokio::test]
     async fn enable_cache_is_idempotent() {
         let mut s = store();
@@ -695,9 +717,9 @@ mod tests {
         assert!(s.is_cached());
     }
 
-    /// Plain-store lifecycle: `set_logging(false)` suppresses the changelog,
-    /// `flush`/`close` are no-ops, and `StateStore::clear` wipes the store + its
-    /// buffered changelog.
+    /// Plain-store lifecycle. `set_logging(false)` suppresses the changelog,
+    /// `flush` and `close` do nothing, and `StateStore::clear` wipes the store
+    /// and its buffered changelog.
     #[tokio::test]
     async fn plain_store_lifecycle_logging_flush_close_clear() {
         let mut s = store();

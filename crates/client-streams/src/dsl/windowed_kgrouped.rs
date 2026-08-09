@@ -2,17 +2,19 @@
 //! `KGroupedStream::windowed_by(TimeWindows)` and a terminal **windowed**
 //! aggregation (`count`/`reduce`/`aggregate`).
 //!
-//! This is the windowed analogue of [`crate::dsl::kgrouped::KGroupedStream`]: it
-//! holds the same grouped lineage (parent node, key-changing flag, optional
-//! `Grouped` name, repartition-lowering thunk) plus the [`TimeWindows`] spec, and
-//! its terminal ops mirror [`KGroupedStream::aggregate`]/`reduce` exactly — except
+//! This type is the windowed analogue of
+//! [`crate::dsl::kgrouped::KGroupedStream`]. It holds the same grouped lineage,
+//! which is the parent node, the key-changing flag, the optional `Grouped` name,
+//! and the repartition-lowering thunk. It also holds the [`TimeWindows`] spec.
+//! Its terminal ops match [`KGroupedStream::aggregate`] and `reduce` exactly,
+//! with two exceptions:
 //!
 //! 1. the aggregate processor emits `Windowed<K>` keys, and
 //! 2. the materialized store is a **window store**
-//!    ([`crate::topology::Topology::add_window_store`]) carrying the window size +
-//!    grace for changelog retention.
+//!    ([`crate::topology::Topology::add_window_store`]) that carries the window
+//!    size and grace for changelog retention.
 //!
-//! The result is a `KTable<Windowed<K>, _>` whose changelog is logged with
+//! The result is a `KTable<Windowed<K>, _>`. Its changelog is logged with
 //! `compact,delete` retention derived from the window size and grace.
 
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
@@ -35,23 +37,25 @@ use crate::{
     topology::NodeHandle,
 };
 
-/// Handle produced by [`KGroupedStream::windowed_by`]; terminal windowed
+/// Handle that [`KGroupedStream::windowed_by`] produces. Terminal windowed
 /// aggregations consume it.
 ///
 /// [`KGroupedStream::windowed_by`]: crate::dsl::kgrouped::KGroupedStream::windowed_by
 pub struct TimeWindowedKGroupedStream<K, V> {
     builder: Rc<RefCell<InternalStreamsBuilder>>,
-    /// Logical id of the node feeding the aggregation (the source/select-key).
+    /// Logical id of the node that feeds the aggregation: the source or
+    /// select-key.
     parent: NodeId,
-    /// True when the upstream key was rewritten without a re-group → the
-    /// aggregation must insert a repartition before the aggregate node.
+    /// True when the upstream key was rewritten and not re-grouped. The
+    /// aggregation must then insert a repartition before the aggregate node.
     key_changing_upstream: bool,
-    /// Explicit `Grouped` name (drives repartition topic naming).
+    /// Explicit `Grouped` name. It drives the repartition topic name.
     #[allow(dead_code)]
     grouped_name: Option<String>,
-    /// Typed repartition-lowering thunk (taken once by the terminal op).
+    /// Typed repartition-lowering thunk. The terminal op takes it once.
     repartition_lower: Option<RepartitionLowerFn>,
-    /// The window spec driving `windows_for(ts)` + the window-store retention.
+    /// The window spec that drives `windows_for(ts)` and the window-store
+    /// retention.
     windows: TimeWindows,
     /// Emit on every update (default) or only on window close (KIP-825).
     emit: EmitStrategy,
@@ -85,9 +89,9 @@ where
 
     /// Emit on every update (default) or only on window close (KIP-825).
     ///
-    /// In `on_window_close`, records whose window has already closed are dropped
-    /// (so no duplicate final is emitted — unlike the session variant, which may
-    /// re-emit under `grace < gap`).
+    /// In `on_window_close`, the operator drops a record whose window has already
+    /// closed, so it emits no duplicate final. The session variant differs: it
+    /// may re-emit under `grace < gap`.
     #[must_use]
     pub fn emit_strategy(mut self, emit: EmitStrategy) -> Self {
         self.emit = emit;
@@ -113,10 +117,10 @@ where
     }
 
     /// `reduce`: combine values per (key, window) with `reducer`, materialized as
-    /// `KTable<Windowed<K>, V>`. The first value in a window seeds the accumulator
-    /// (the JVM `Reducer` has no separate `init`); later values fold via
-    /// `reducer(&acc, &value)`. The backing processor keeps the public value
-    /// type `V`.
+    /// `KTable<Windowed<K>, V>`. The first value in a window seeds the
+    /// accumulator, because the JVM `Reducer` has no separate `init`. Later
+    /// values fold with `reducer(&acc, &value)`. The backing processor keeps the
+    /// public value type `V`.
     pub fn reduce_explicit<KS, VS, R>(
         self,
         reducer: R,
@@ -132,8 +136,8 @@ where
         self.lower_reduce_windowed::<KS, VS, R>(materialized, store_name, reducer)
     }
 
-    /// `aggregate`: general windowed aggregation with caller-supplied `init` +
-    /// `agg`, materialized as `KTable<Windowed<K>, VA>`.
+    /// `aggregate`: general windowed aggregation with a caller-supplied `init`
+    /// and `agg`, materialized as `KTable<Windowed<K>, VA>`.
     pub fn aggregate_explicit<KS, VS, VA, I, A>(
         self,
         init: I,
@@ -229,12 +233,15 @@ where
         )
     }
 
-    /// Shared body for windowed `count`/`aggregate`: mint the store name at the
-    /// JVM counter position, then lower the (optional) repartition + windowed
-    /// aggregate node. Unlike the non-windowed `count`, the JVM windowed `count`
-    /// does NOT burn an extra store-name index (validated byte-exact against the
-    /// `suppress_until_window_closes_logged` fixture #14, whose suppress store index
-    /// is consecutive with the aggregate store + processor).
+    /// Shared body for windowed `count` and `aggregate`.
+    ///
+    /// This method mints the store name at the JVM counter position. It then
+    /// lowers the optional repartition and the windowed aggregate node. The JVM
+    /// windowed `count` does NOT burn an extra store-name index, which is
+    /// different from the non-windowed `count`. This is validated byte-exact
+    /// against the `suppress_until_window_closes_logged` fixture #14, whose
+    /// suppress store index is consecutive with the aggregate store and
+    /// processor.
     fn aggregate_inner_windowed<KS, VS, VA, I, A>(
         self,
         materialized: Materialized<KS, VS>,
@@ -253,10 +260,11 @@ where
         self.lower_aggregate_windowed::<KS, VS, VA, I, A>(materialized, store_name, init, agg)
     }
 
-    /// Record the (optional) repartition node + a windowed aggregate node,
-    /// returning the resulting
-    /// `KTable<Windowed<K>, VA>`. Mirrors `KGroupedStream::lower_aggregate`, but
-    /// emits `Windowed<K>` keys and a window store.
+    /// Record the optional repartition node and a windowed aggregate node, then
+    /// return the resulting `KTable<Windowed<K>, VA>`.
+    ///
+    /// This method matches `KGroupedStream::lower_aggregate`, but it emits
+    /// `Windowed<K>` keys and a window store.
     fn lower_aggregate_windowed<KS, VS, VA, I, A>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -363,9 +371,9 @@ where
         .with_suppress_factory(Some(suppress_factory))
     }
 
-    /// Record the (optional) repartition node + a windowed reduce node (first
-    /// value in a window seeds, later
-    /// values fold), returning the `KTable<Windowed<K>, V>`.
+    /// Record the optional repartition node and a windowed reduce node, then
+    /// return the `KTable<Windowed<K>, V>`. The first value in a window seeds the
+    /// accumulator, and later values fold.
     fn lower_reduce_windowed<KS, VS, R>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -465,9 +473,11 @@ where
 }
 
 /// Build the suppress-store factory for a windowed-aggregation result table.
-/// Captures the windowed key serde ([`TimeWindowedSerde`]) + the aggregate value
-/// serde so a downstream `suppress` can register a
-/// `SuppressBytesStore<Windowed<K>, VA>` with the right serdes + changelog config.
+///
+/// The factory captures the windowed key serde ([`TimeWindowedSerde`]) and the
+/// aggregate value serde. A downstream `suppress` can then register a
+/// `SuppressBytesStore<Windowed<K>, VA>` with the correct serdes and changelog
+/// config.
 fn windowed_suppress_factory<K, VA, KS, VS>(
     key_serde: KS,
     value_serde: VS,
@@ -511,8 +521,8 @@ mod tests {
         test_driver::TopologyTestDriver,
     };
 
-    /// Sub-task 3d-ii: an emit-on-update (default) windowed aggregate store is
-    /// marked caching, so with a positive cache budget it lands in `cache_owner`.
+    /// Sub-task 3d-ii: an emit-on-update windowed aggregate store, the default,
+    /// is marked caching. With a positive cache budget it lands in `cache_owner`.
     #[test]
     fn emit_on_update_window_store_is_cached() {
         let b = StreamsBuilder::new();
@@ -535,8 +545,8 @@ mod tests {
     }
 
     /// Sub-task 3d-ii: an emit-FINAL (KIP-825) windowed aggregate store must stay
-    /// UNCACHED even with a positive budget — a cache flush would emit the
-    /// per-update changes emit-final deliberately suppresses. The
+    /// UNCACHED even with a positive budget. A cache flush would emit the
+    /// per-update changes that emit-final suppresses on purpose. The
     /// `emit.is_on_update()` guard at the mark site enforces this.
     #[test]
     fn emit_final_window_store_is_not_cached() {
@@ -561,11 +571,12 @@ mod tests {
     }
 
     /// `windowedBy(TimeWindows).emit_strategy(on_window_close).count`: emit-final
-    /// (KIP-825) suppresses per-update emits and forwards a single final count for
-    /// each window only once stream-time advances past its close. Records a@1 and
-    /// a@4 accumulate (count 2) in window `[0,10)` silently; the a@12 record opens
-    /// `[10,20)` and closes `[0,10)` (end 10 <= `window_close_time` 12), emitting
-    /// exactly one record: window `[0,10)` with value 2.
+    /// (KIP-825) suppresses the per-update emits. It forwards a single final
+    /// count for each window only after stream-time advances past that window's
+    /// close. Records a@1 and a@4 accumulate silently to count 2 in window
+    /// `[0,10)`. The a@12 record opens `[10,20)` and closes `[0,10)`, because end
+    /// 10 <= `window_close_time` 12. It emits exactly one record: window `[0,10)`
+    /// with value 2.
     #[test]
     fn dsl_windowed_count_emit_final_emits_once_on_close() {
         let b = StreamsBuilder::new();

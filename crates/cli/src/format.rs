@@ -1,21 +1,22 @@
 //! `crabka format` subcommand.
 //!
-//! Writes bootstrap metadata for a fresh broker:
-//! - a randomly-generated (or operator-supplied) cluster id
-//! - any seed SCRAM credentials supplied via `--add-scram`
+//! This command writes bootstrap metadata for a fresh broker:
+//! - a cluster id, either random or supplied by the operator
+//! - any seed SCRAM credentials from `--add-scram`
 //!
 //! ## Bootstrap output format
 //!
-//! Rather than writing a real raft-log snapshot directly (the bootstrap
-//! state is currently tangled with the live openraft engine's
-//! `initialize` call), this command writes a placeholder manifest listing
-//! the records the broker should pre-load. The output is:
+//! This command does not write a real raft-log snapshot. The bootstrap
+//! state is still coupled to the live openraft engine's `initialize`
+//! call. The command writes a placeholder manifest instead, and the
+//! manifest lists the records the broker should pre-load. The output is:
 //!
 //! - `<log_dir>/bootstrap.json` — a human-readable manifest with the
 //!   cluster id and a base64'd `serde_wincode` blob per metadata record.
 //! - `<log_dir>/bootstrap.records.bin` — the same records concatenated
 //!   as length-prefixed `serde_wincode<SerdeCompat<MetadataRecord>>`
-//!   payloads, so the broker can stream them without touching JSON.
+//!   payloads, so the broker can read them as a stream and does not
+//!   parse JSON.
 
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -52,7 +53,7 @@ pub struct FormatArgs {
     /// Directory to format. Must be empty or non-existent.
     #[arg(long)]
     log_dir: PathBuf,
-    /// Cluster id. Generated if not provided.
+    /// Cluster id. Generated if not supplied.
     #[arg(long)]
     cluster_id: Option<Uuid>,
     /// Bootstrap `metadata.version` (KIP-778), e.g. `4.0` or `4.0-IV3`.
@@ -60,15 +61,15 @@ pub struct FormatArgs {
     #[arg(long)]
     release_version: Option<String>,
     /// Set an individual feature's finalized level at format time (KIP-1022),
-    /// e.g. `--feature transaction.version=2`. May be repeated. Combines with
-    /// `--release-version` (which sets the base release) for every feature
+    /// e.g. `--feature transaction.version=2`. May be repeated. It combines with
+    /// `--release-version`, which sets the base release, for every feature
     /// except `metadata.version`, where the two conflict.
     #[arg(long = "feature", value_parser = parse_feature_spec)]
     feature: Vec<(String, i16)>,
     /// Seed a SCRAM credential. May be repeated.
     /// Format: `SCRAM-SHA-256=[name=<u>,password=<p>,iterations=<n>]`
     /// or `SCRAM-SHA-512=[name=<u>,password=<p>,iterations=<n>]`
-    /// (iterations defaults to 4096 when omitted)
+    /// Iterations default to 4096 when omitted.
     #[arg(long, value_parser = parse_scram_spec)]
     add_scram: Vec<ScramSpec>,
     /// Seed an ACL entry. May be repeated.
@@ -76,8 +77,8 @@ pub struct FormatArgs {
     /// Pattern defaults to `Literal`.
     #[arg(long, value_parser = parse_acl_spec)]
     add_acl: Vec<AclEntry>,
-    /// This node's raft id. Required with `--standalone` (KIP-853 needs
-    /// to know which voter this node *is* when seeding the singleton set).
+    /// This node's raft id. Required with `--standalone`: KIP-853 must know
+    /// which voter this node is when it seeds the singleton set.
     #[arg(long, value_parser = parse_node_id)]
     node_id: Option<crabka_metadata::NodeId>,
     /// Format this node as the sole initial controller voter.
@@ -86,8 +87,8 @@ pub struct FormatArgs {
     /// Explicit initial controllers: `id@host:port:dir-uuid`, comma-separated.
     #[arg(long, value_delimiter = ',')]
     initial_controllers: Vec<String>,
-    /// This node's controller listener (`host:port`) — written into the
-    /// `VotersRecord` when `--standalone`.
+    /// This node's controller listener as `host:port`. The command writes it
+    /// into the `VotersRecord` when you give `--standalone`.
     #[arg(long)]
     controller_listener: Option<String>,
 }
@@ -100,8 +101,9 @@ pub struct ScramSpec {
     iterations: u32,
 }
 
-/// Map a release string to a supported `metadata.version` feature level,
-/// erroring if it is unknown or outside `[MIN, MAX]`.
+/// Maps a release string to a supported `metadata.version` feature level.
+///
+/// Returns an error if the string is unknown or outside `[MIN, MAX]`.
 fn resolve_release_level(s: &str) -> Result<i16, String> {
     let mv = crabka_metadata::metadata_version::from_version_string(s)
         .ok_or_else(|| format!("unknown metadata.version {s:?}"))?;
@@ -114,13 +116,13 @@ fn resolve_release_level(s: &str) -> Result<i16, String> {
     Ok(level)
 }
 
-/// Parse a node id: a bare `u64` wrapped in the `NodeId` newtype.
+/// Parses a node id: a bare `u64` inside the `NodeId` newtype.
 fn parse_node_id(s: &str) -> Result<crabka_metadata::NodeId, String> {
     let id: u64 = s.trim().parse().map_err(|e| format!("node id: {e}"))?;
     Ok(crabka_metadata::NodeId(id))
 }
 
-/// Parse one `--feature NAME=LEVEL` spec into `(name, level)`.
+/// Parses one `--feature NAME=LEVEL` spec into `(name, level)`.
 fn parse_feature_spec(s: &str) -> Result<(String, i16), String> {
     let (name, level) = s
         .split_once('=')
@@ -136,16 +138,18 @@ fn parse_feature_spec(s: &str) -> Result<(String, i16), String> {
     Ok((name.to_string(), level))
 }
 
-/// Resolve `crabka format`'s KIP-1022 feature flags into the bootstrap
-/// `metadata.version` level and the per-feature override map, applying the
-/// validation `kafka-storage format` performs:
+/// Resolves `crabka format`'s KIP-1022 feature flags.
 ///
-/// - every `--feature` names a registered feature, finalized in its supported
-///   range (else reject);
+/// The result is the bootstrap `metadata.version` level and the per-feature
+/// override map. This function applies the same validation that
+/// `kafka-storage format` does:
+///
+/// - every `--feature` must name a registered feature, finalized in its
+///   supported range, and any other name is rejected;
 /// - `--feature metadata.version=X` conflicts with `--release-version`;
-/// - `bootstrap_mv` = `--feature metadata.version` if set, else
-///   `--release-version`, else the newest supported level (latest stable);
-/// - the fully-resolved feature set satisfies every KIP-1022 dependency.
+/// - `bootstrap_mv` is `--feature metadata.version` if set, else
+///   `--release-version`, else the newest supported level, the latest stable;
+/// - the fully-resolved feature set must satisfy every KIP-1022 dependency.
 fn resolve_format_features(
     release_version: Option<&str>,
     features: &[(String, i16)],
@@ -322,10 +326,11 @@ fn parse_acl_spec(spec: &str) -> Result<AclEntry, String> {
     })
 }
 
-/// Parse one `--initial-controllers` entry: `id@host:port:dir-uuid`.
+/// Parses one `--initial-controllers` entry: `id@host:port:dir-uuid`.
 ///
-/// The directory uuid is the trailing colon-delimited field, so we split
-/// it off the right first, then peel `host:port` off the remainder.
+/// The directory uuid is the last colon-delimited field. This function
+/// removes it from the right first, then splits `host:port` from the
+/// remainder.
 fn parse_initial_controller(spec: &str) -> Result<Voter, String> {
     let (id_part, rest) = spec.split_once('@').ok_or("missing '@'")?;
     let id = crabka_metadata::NodeId(id_part.parse::<u64>().map_err(|_| "bad id")?);
@@ -345,13 +350,13 @@ fn parse_initial_controller(spec: &str) -> Result<Voter, String> {
     })
 }
 
-/// Derive the initial controller voter set from the format args.
+/// Derives the initial controller voter set from the format arguments.
 ///
-/// - `--standalone`: a singleton set holding just this node (requires
-///   `--node-id` + `--controller-listener`).
-/// - `--initial-controllers`: the explicitly-listed voters.
-/// - neither: an empty set — this node is a joiner that relies on auto-join
-///   to enter an already-bootstrapped cluster.
+/// - `--standalone`: a singleton set that holds only this node. It needs
+///   `--node-id` and `--controller-listener`.
+/// - `--initial-controllers`: the voters in the list.
+/// - neither: an empty set. This node is a joiner and uses auto-join to
+///   enter a cluster that is already bootstrapped.
 fn build_initial_voters(args: &FormatArgs, directory_id: DirectoryId) -> Result<VoterSet, String> {
     if args.standalone {
         let id = args.node_id.ok_or("--standalone requires --node-id")?;
@@ -387,8 +392,10 @@ fn build_initial_voters(args: &FormatArgs, directory_id: DirectoryId) -> Result<
     }
 }
 
-/// Persist `meta.properties.json` — the broker recovers `directory_id`
-/// from it on every boot (KIP-853 voter identity).
+/// Writes `meta.properties.json` to disk.
+///
+/// The broker recovers `directory_id` from this file on every boot. The
+/// directory id is the KIP-853 voter identity.
 #[tracing::instrument(
     level = "debug",
     name = "cli.write_meta_properties",
@@ -415,16 +422,18 @@ fn write_meta_properties(
 /// Human-readable manifest written to `<log_dir>/bootstrap.json`.
 #[derive(Debug, Serialize)]
 struct BootstrapManifest {
-    /// Schema version of this bootstrap manifest. Bumped if the layout
-    /// changes; the broker's future consumer will reject unknown values.
+    /// Schema version of this bootstrap manifest. It increases when the
+    /// layout changes. The broker's future consumer will reject an unknown
+    /// value.
     schema: u32,
     // `ClusterId` is `#[serde(transparent)]`, so this serializes as the bare
     // UUID string exactly as the previous `Uuid` field did.
     cluster_id: ClusterId,
     record_count: usize,
-    /// Base64-encoded `SerdeCompat<MetadataRecord>` payloads, one per
-    /// seed record. Mirrors the contents of `bootstrap.records.bin` so
-    /// operators can inspect the file without a hex editor.
+    /// Base64-encoded `SerdeCompat<MetadataRecord>` payloads, one per seed
+    /// record. These payloads mirror the contents of
+    /// `bootstrap.records.bin`, so an operator can read the file without a
+    /// hex editor.
     records_b64: Vec<String>,
 }
 
@@ -573,8 +582,9 @@ pub async fn run(args: FormatArgs) -> i32 {
     EXIT_OK
 }
 
-/// Serialize the manifest + records to disk under `log_dir`. Returns the
-/// first I/O or encoding error encountered.
+/// Serializes the manifest and the records to disk under `log_dir`.
+///
+/// Returns the first I/O or encoding error.
 #[tracing::instrument(
     level = "debug",
     name = "cli.write_bootstrap_files",
@@ -622,10 +632,11 @@ fn write_bootstrap_files(
     Ok(())
 }
 
-/// Tiny self-contained base64 encoder (standard alphabet, padded). We
-/// don't pull in the `base64` crate just for the manifest mirror — the
-/// records are only base64'd for human readability; the authoritative
-/// copy lives in `bootstrap.records.bin`.
+/// Self-contained base64 encoder: standard alphabet, padded.
+///
+/// Crabka does not add the `base64` crate only for the manifest mirror.
+/// The records are base64-encoded for human readers alone. The
+/// authoritative copy is in `bootstrap.records.bin`.
 fn base64_encode(input: &[u8]) -> String {
     const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);

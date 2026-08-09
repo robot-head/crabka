@@ -1,17 +1,17 @@
 // `#[tracing::instrument]` on the DSL runtime deepens this example's `main`
 // future past the default type-layout depth limit; raise it.
 #![recursion_limit = "512"]
-//! Applied Avro Streams pipeline over **rich compound types** (a realistic
-//! e-commerce scenario), using `StreamsApp` + the default-serde DSL. Requires a
-//! running broker (`127.0.0.1:9092`) and a Confluent-compatible registry
-//! (`http://127.0.0.1:8081`).
+//! Applied Avro Streams pipeline over **compound types**, in an e-commerce
+//! scenario. It uses `StreamsApp` and the default-serde DSL. It needs a running
+//! broker at `127.0.0.1:9092` and a Confluent-compatible registry at
+//! `http://127.0.0.1:8081`.
 //!
-//! Pipeline: read Avro `Order` records from `orders`, run them through a custom
-//! Processor-API node, keep the paid ones, project each into an Avro
-//! `OrderSummary` (line-item count + discounted total), and write them to
-//! `order-summaries`. Every value crossing a topic boundary is a nested Avro
-//! record (structs, a `Vec`, an `Option`, and an enum) registered and resolved
-//! against the schema registry.
+//! The pipeline reads Avro `Order` records from `orders` and runs them through a
+//! custom Processor-API node. It keeps the paid orders, projects each one into an
+//! Avro `OrderSummary` with a line-item count and a discounted total, and writes
+//! them to `order-summaries`. Every value that crosses a topic boundary is a
+//! nested Avro record, built from structs, a `Vec`, an `Option`, and an enum. The
+//! pipeline registers and resolves each one against the schema registry.
 //!
 //! Run: `cargo run -p crabka-client-streams --example avro_pipeline`
 
@@ -20,8 +20,8 @@ use crabka_client_streams::{DefaultSerde, Record, SchemaSerde, StreamsApp, impl_
 use crabka_schema_serde::format::avro::AvroSerde;
 use serde::{Deserialize, Serialize};
 
-/// A customer order — the inbound Avro value. Nested record + array + optional +
-/// enum, i.e. the shape real payloads actually have.
+/// A customer order, the inbound Avro value. It holds a nested record, an array,
+/// an optional, and an enum, which is the shape that real payloads have.
 #[derive(Clone, Debug, Serialize, Deserialize, AvroSchema)]
 pub struct Order {
     pub order_id: String,
@@ -47,7 +47,7 @@ pub struct Coupon {
     pub percent_off: i32,
 }
 
-/// Order lifecycle state — a C-style Avro `enum`.
+/// Order lifecycle state, a C-style Avro `enum`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, AvroSchema)]
 pub enum OrderStatus {
     Placed,
@@ -56,7 +56,7 @@ pub enum OrderStatus {
     Cancelled,
 }
 
-/// The projected, billable summary — the outbound Avro value.
+/// The projected, billable summary, the outbound Avro value.
 #[derive(Clone, Debug, Serialize, Deserialize, AvroSchema)]
 pub struct OrderSummary {
     pub order_id: String,

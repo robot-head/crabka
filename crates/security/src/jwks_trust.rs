@@ -1,9 +1,10 @@
 //! Build a rustls `ClientConfig` whose trust roots are exclusively the
-//! certificates in a user-supplied PEM bundle. Backs the
-//! broker's outbound HTTPS to the JWKS endpoint when the operator
-//! configures a private `IdP` CA (Strimzi-shaped tlsTrustedCertificates
-//! "replace" semantic — webpki-roots are not consulted when this is
-//! used).
+//! certificates in a user-supplied PEM bundle.
+//!
+//! This backs the broker's outbound HTTPS to the JWKS endpoint when the
+//! operator configures a private `IdP` CA. It follows the Strimzi-shaped
+//! tlsTrustedCertificates "replace" semantic: when a caller uses this config,
+//! rustls does not consult webpki-roots.
 
 use std::{
     path::{Path, PathBuf},
@@ -24,9 +25,10 @@ pub enum JwksTrustError {
 }
 
 /// Read a PEM bundle of one or more CA certificates and produce a
-/// `rustls::ClientConfig` that trusts exactly those certificates. The
-/// returned config has no client auth (the broker does not present a
-/// client cert when fetching the JWKS endpoint).
+/// `rustls::ClientConfig` that trusts exactly those certificates.
+///
+/// The returned config has no client auth. The broker does not present a client
+/// cert when it fetches the JWKS endpoint.
 // JWKS-endpoint trust-anchor setup. skip_all keeps the loaded certs out of
 // span fields (the PEM path is not secret but adds no useful cardinality here).
 // `err` surfaces IO / parse / rustls failures (Debug).

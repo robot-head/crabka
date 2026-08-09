@@ -1,6 +1,8 @@
-//! Broker-free driver for columnar topologies (analog of `TopologyTestDriver`).
-//! Pipe a batch of input records for a source topic, read produced records per
-//! sink topic.
+//! Broker-free driver for columnar topologies, the analogue of
+//! `TopologyTestDriver`.
+//!
+//! Pipe a batch of input records for a source topic, then read the produced
+//! records per sink topic.
 
 use std::collections::HashMap;
 
@@ -9,7 +11,7 @@ use super::{
     graph::{BuiltColumnarTopology, ColumnarTopology},
 };
 
-/// Drives a [`ColumnarTopology`] in-process: pipe a batch of input records for a
+/// Drives a [`ColumnarTopology`] in process. Pipe a batch of input records for a
 /// source topic, then read the records produced to each sink topic.
 pub struct ColumnarTestDriver<'t> {
     built: BuiltColumnarTopology<'t>,
@@ -28,8 +30,8 @@ impl<'t> ColumnarTestDriver<'t> {
         })
     }
 
-    /// Run one batch of input records (arriving on `topic`) through the topology,
-    /// buffering produced records by sink topic.
+    /// Run one batch of input records, which arrive on `topic`, through the
+    /// topology. The method buffers the produced records by sink topic.
     ///
     /// # Errors
     /// Returns the codec/operator error string if processing the batch fails.
@@ -49,8 +51,8 @@ impl<'t> ColumnarTestDriver<'t> {
     /// Drain produced records for `topic`.
     ///
     /// # Returns
-    /// All records buffered for `topic` so far, removing them from the driver
-    /// (an empty `Vec` if none).
+    /// All records buffered for `topic` so far. The method removes them from the
+    /// driver and returns an empty `Vec` when there are none.
     pub fn read_output(&mut self, topic: &str) -> Vec<ProduceRecord> {
         self.output.remove(topic).unwrap_or_default()
     }

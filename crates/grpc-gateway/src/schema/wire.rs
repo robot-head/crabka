@@ -9,19 +9,20 @@
 //! +--------+--------------------------------+
 //! ```
 //!
-//! Protobuf values additionally carry a variable-length message-index prefix
-//! immediately after the 5-byte header (see [`strip_proto_index`] /
-//! [`prepend_proto_index`]).
+//! A Protobuf value also carries a variable-length message-index prefix
+//! immediately after the 5-byte header. See [`strip_proto_index`] and
+//! [`prepend_proto_index`].
 
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::codec::{CodecError, SchemaFormat};
 
-/// Encode a payload with the Confluent 5-byte magic+id framing header.
+/// Encode a payload with the Confluent 5-byte magic and id framing header.
 ///
-/// For `Protobuf`, a single-zero message-index byte is prepended to the
-/// payload (via [`prepend_proto_index`]) to indicate the first (top-level)
-/// message in the schema.  For `Avro` and `Json` the payload is written as-is.
+/// For `Protobuf`, [`prepend_proto_index`] puts a single-zero message-index
+/// byte in front of the payload. That byte selects the first, top-level message
+/// in the schema. For `Avro` and `Json`, this function writes the payload as it
+/// is.
 #[must_use]
 pub fn encode_frame(id: i32, fmt: SchemaFormat, payload: &[u8]) -> Bytes {
     let mut out = BytesMut::with_capacity(5 + 1 + payload.len());
@@ -38,9 +39,9 @@ pub fn encode_frame(id: i32, fmt: SchemaFormat, payload: &[u8]) -> Bytes {
 
 /// Decode a Confluent-framed value.
 ///
-/// Returns `(schema_id, payload)` where `payload` is the bytes *after* the
-/// 5-byte header.  For Protobuf, the caller must strip the message-index
-/// prefix from the returned payload via [`strip_proto_index`].
+/// Returns `(schema_id, payload)`, where `payload` is the bytes *after* the
+/// 5-byte header. For Protobuf, the caller must strip the message-index prefix
+/// from the returned payload with [`strip_proto_index`].
 /// # Errors
 /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn decode_frame(bytes: &[u8]) -> Result<(i32, Vec<u8>), CodecError> {
@@ -65,7 +66,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(i32, Vec<u8>), CodecError> {
 ///
 /// The encoding is:
 /// - A leading varint `count` giving the number of message-index entries.
-/// - If `count == 0` (the common single-first-message optimization), the
+/// - If `count == 0`, the common single-first-message optimization, the
 ///   remainder after that one byte is the proto payload.
 /// - Otherwise, `count` more varints follow, then the proto payload.
 /// # Errors
@@ -84,8 +85,8 @@ pub fn strip_proto_index(payload: &[u8]) -> Result<Vec<u8>, CodecError> {
     Ok(payload[pos..].to_vec())
 }
 
-/// Prepend the Protobuf message-index prefix (a single `[0x00]` for the
-/// top-level / first message in the schema) to `payload`.
+/// Prepend the Protobuf message-index prefix to `payload`. The prefix is a
+/// single `[0x00]` for the top-level, first message in the schema.
 #[must_use]
 pub fn prepend_proto_index(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + payload.len());

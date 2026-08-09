@@ -1,8 +1,9 @@
 //! Prometheus/Grafana-Mimir-equivalent metrics backend for Crabka.
 //!
-//! The crate contains the metrics ingest/data path: Arrow block schemas,
-//! native-histogram codecs, `remote_write`/OTLP decode, distributor WAL append,
-//! and compactor block/index writes. Query execution lives in `crabka-promql`.
+//! The crate holds the metrics ingest and data path: Arrow block schemas,
+//! native-histogram codecs, `remote_write` and OTLP decode, distributor WAL
+//! append, and compactor block and index writes. Query execution lives in
+//! `crabka-promql`.
 
 mod arrow_codec;
 

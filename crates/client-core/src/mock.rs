@@ -1,5 +1,7 @@
-//! In-process mock Kafka broker. Useful for testing `Connection`
-//! without spinning up a JVM. Gated to `#[cfg(any(test, feature = "mock"))]`.
+//! In-process mock Kafka broker.
+//!
+//! This module helps you test `Connection` without a JVM. It is gated to
+//! `#[cfg(any(test, feature = "mock"))]`.
 //!
 //! # Handler signature
 //!
@@ -8,11 +10,12 @@
 //!
 //! - `Some(bytes)` — `MockBroker` prepends the correlation-id and sends the
 //!   frame back to the client.
-//! - `None` — `MockBroker` silently drops the request. The client will
-//!   eventually hit its `request_timeout`.
+//! - `None` — `MockBroker` silently drops the request. The client
+//!   eventually reaches its `request_timeout`.
 //!
-//! The correlation-id header is prepended automatically; the handler only
-//! needs to supply the response body (the part after the correlation-id).
+//! `MockBroker` prepends the correlation-id header automatically. The handler
+//! only needs to supply the response body, which is the part after the
+//! correlation-id.
 
 #![cfg(any(test, feature = "mock"))]
 
@@ -27,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 /// A simple in-process mock Kafka broker for unit testing.
 ///
-/// Each accepted TCP connection is handled in its own Tokio task.
+/// `MockBroker` handles each accepted TCP connection in its own Tokio task.
 /// All connections share the same handler closure.
 pub struct MockBroker {
     /// The address the mock is listening on.
@@ -44,11 +47,12 @@ impl MockBroker {
     /// Start a mock broker listening on a random localhost port.
     ///
     /// The handler receives `(api_key, version, correlation_id, request_body)`
-    /// and returns `Some(body)` to send a response or `None` to stay silent
-    /// (causing the client to time out on that request).
+    /// and returns `Some(body)` to send a response or `None` to stay silent.
+    /// When the handler stays silent, the client times out on that request.
     ///
     /// The `MockBroker` prepends the correlation-id to the returned body
-    /// automatically; the handler only supplies the response body bytes.
+    /// automatically. The handler only supplies the response body bytes.
+    ///
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn start<F>(handler: F) -> Self

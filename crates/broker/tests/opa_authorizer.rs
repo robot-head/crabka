@@ -3,28 +3,25 @@
 // `tests/throttle.rs`). Disable pedantic locally; the rest of the
 // workspace still enforces the full pedantic gate.
 
-//! End-to-end OPA authorizer enforcement via the
-//! wire path.
+//! End-to-end OPA authorizer enforcement over the wire path.
 //!
-//! Two integration tests boot a single-broker `SASL_PLAINTEXT` cluster
-//! wired with an [`OpaAuthorizer`] pointed at a `wiremock::MockServer`.
-//! The mock is configured to return either `{"result": false}` or
-//! `{"result": true}` for every `POST`, and the tests assert that the
-//! per-topic `error_code` on a Produce response carries
-//! `TOPIC_AUTHORIZATION_FAILED (29)` or `0` respectively.
+//! Two integration tests boot a single-broker `SASL_PLAINTEXT` cluster with an
+//! [`OpaAuthorizer`] that points at a `wiremock::MockServer`. The mock returns
+//! either `{"result": false}` or `{"result": true}` for every `POST`. The
+//! tests assert that the per-topic `error_code` on a Produce response carries
+//! `TOPIC_AUTHORIZATION_FAILED (29)` or `0`, in that order.
 //!
-//! Topic-bootstrap strategy (test 1): the `admin` principal is set as a
-//! super-user in BOTH the [`OpaAuthorizer`] (so it bypasses OPA) and the
-//! [`BrokerConfig.super_users`] field (so the broker-level super-user
-//! checks accept it). The test calls `CreateTopics` over a SASL/PLAIN
-//! `admin` session — the super-user bypass means OPA is never asked,
-//! so the topic materialises even though the mock would otherwise deny
-//! it. The actual OPA gate fires when `alice` (non-super-user) issues
-//! Produce.
+//! Test 1 bootstraps its topic like this. The `admin` principal is a
+//! super-user in BOTH the [`OpaAuthorizer`], so it bypasses OPA, and the
+//! [`BrokerConfig.super_users`] field, so the broker-level super-user checks
+//! accept it. The test calls `CreateTopics` over a SASL/PLAIN `admin` session.
+//! The super-user bypass means the broker never asks OPA, so the topic
+//! materialises even though the mock would otherwise deny it. The OPA gate
+//! itself fires when `alice`, who is not a super-user, sends Produce.
 //!
-//! Gated to non-Windows for parity with the other SASL integration
-//! tests (the listener bring-up works on Windows, but keeping the gate
-//! uniform avoids one-off CI matrix surprises).
+//! These tests are gated to non-Windows, to match the other SASL integration
+//! tests. The listener bring-up works on Windows, but a uniform gate avoids
+//! one-off CI matrix surprises.
 
 use std::{io, net::SocketAddr};
 
@@ -73,17 +70,18 @@ const PRODUCE_VERSION: i16 = 11;
 // Cluster bring-up.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Boot a single-broker `SASL_PLAINTEXT` cluster whose `BrokerConfig.authorizer`
-/// is an [`OpaAuthorizer`] pointed at `opa_url`. `admin` is registered as a
-/// super-user in BOTH the authorizer (so it bypasses the OPA HTTP call) AND
-/// `BrokerConfig.super_users` (so broker-level super-user checks accept it).
-/// `alice` is a regular user — every authorization check on alice's sessions
-/// flows through OPA.
+/// Boots a single-broker `SASL_PLAINTEXT` cluster whose
+/// `BrokerConfig.authorizer` is an [`OpaAuthorizer`] that points at `opa_url`.
 ///
-/// `expire_after_ms = 1` keeps the OPA cache from masking same-test variation
-/// — the second authorization check in `produce_allowed_by_opa_succeeds`
-/// always re-fetches from the mock, so the assertion isn't sensitive to
-/// in-process cache hits from earlier requests within the same test process.
+/// `admin` is a super-user in BOTH the authorizer, so it bypasses the OPA HTTP
+/// call, AND `BrokerConfig.super_users`, so the broker-level super-user checks
+/// accept it. `alice` is a regular user, so every authorization check on
+/// alice's sessions goes through OPA.
+///
+/// `expire_after_ms = 1` stops the OPA cache from masking variation inside one
+/// test. The second authorization check in `produce_allowed_by_opa_succeeds`
+/// always fetches from the mock again, so the assertion does not depend on
+/// in-process cache hits from earlier requests in the same test process.
 fn start_broker_with_opa_authorizer(
     opa_url: String,
 ) -> impl std::future::Future<Output = (BrokerHandle, TempDir, SocketAddr)> {
@@ -319,9 +317,9 @@ async fn drive_produce_as_plain(
         .map_err(|e| io::Error::other(format!("Produce decode: {e}")))
 }
 
-/// Drive `CreateTopics(name, 1 partition, rf=1)` over a SASL/PLAIN admin
-/// session. Admin is the super-user in both tests so the call bypasses
-/// the OPA mock and the topic materialises regardless of OPA's response.
+/// Drives `CreateTopics(name, 1 partition, rf=1)` over a SASL/PLAIN admin
+/// session. Admin is the super-user in both tests, so the call bypasses the OPA
+/// mock and the topic materialises whatever OPA answers.
 async fn create_topic_as_admin(addr: SocketAddr, name: &str) {
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -344,22 +342,23 @@ async fn create_topic_as_admin(addr: SocketAddr, name: &str) {
     );
 }
 
-/// Wait (event-driven, on `handle`) until `topic`/partition-0's local
-/// writer-actor has materialised, then drive a single `drive_produce_as_plain`.
+/// Waits on `handle`, event-driven, until the local writer-actor of `topic`
+/// partition 0 has materialised, then runs a single `drive_produce_as_plain`.
 ///
-/// The local writer materialising implies the raft commit-then-apply gap
-/// between `CreateTopics` returning and the partition appearing in the
-/// broker's `MetadataImage` has closed. Before that point the authorizer can
-/// find no matching topic resource and denies alice's Write with
-/// `TOPIC_AUTHORIZATION_FAILED`; once the topic is applied, the check flows
-/// through OPA (which allows). Waiting on the same handle removes that race
-/// without a fixed-interval retry loop. (The OPA decision cache uses a 1 ms
-/// TTL, far below any scheduling delay here, so it never masks the result.)
-/// alice's SASL/PLAIN test password as bytes, assembled at runtime rather than
+/// Once the local writer materialises, the raft commit-then-apply gap has
+/// closed. That gap sits between `CreateTopics` returning and the partition
+/// appearing in the broker's `MetadataImage`. Before the gap closes, the
+/// authorizer finds no matching topic resource and denies alice's Write with
+/// `TOPIC_AUTHORIZATION_FAILED`. Once the broker applies the topic, the check
+/// goes through OPA, which allows it. Waiting on the same handle removes that
+/// race without a fixed-interval retry loop. The OPA decision cache uses a 1 ms
+/// TTL, far below any scheduling delay here, so it never masks the result.
+///
+/// alice's SASL/PLAIN test password as bytes, assembled at runtime instead of
 /// written as a byte-string literal. The value is a non-secret test fixture,
-/// but a literal flowing into the client auth calls trips GitHub's default
-/// code-scanning credential query; sourcing it here keeps those sites
-/// literal-free.
+/// but a literal that flows into the client auth calls trips GitHub's default
+/// code-scanning credential query. Building it here keeps those sites free of
+/// literals.
 fn alice_password() -> Vec<u8> {
     b"wonderland".to_vec()
 }
@@ -387,11 +386,11 @@ async fn produce_when_partition_ready(
 
 /// Spec §4.2 test 1.
 ///
-/// OPA mock returns `{"result": false}` for every POST. `alice`
-/// authenticates via SASL/PLAIN and sends Produce against a topic that
-/// `admin` (super-user) pre-created. The per-partition response must
-/// carry `TOPIC_AUTHORIZATION_FAILED (29)` because alice's Write check
-/// on the topic flows through OPA, which always denies.
+/// The OPA mock returns `{"result": false}` for every POST. `alice`
+/// authenticates through SASL/PLAIN and sends Produce against a topic that the
+/// super-user `admin` created beforehand. The per-partition response must carry
+/// `TOPIC_AUTHORIZATION_FAILED (29)`, because alice's Write check on the topic
+/// goes through OPA, which always denies it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn produce_blocked_by_opa_returns_topic_authorization_failed() {
     let opa = MockServer::start().await;
@@ -435,15 +434,15 @@ async fn produce_blocked_by_opa_returns_topic_authorization_failed() {
 
 /// Spec §4.2 test 2.
 ///
-/// OPA mock returns `{"result": true}` for every POST. `alice`
-/// authenticates and produces — must succeed with `error_code = 0` on
-/// the per-partition response row.
+/// The OPA mock returns `{"result": true}` for every POST. `alice`
+/// authenticates and produces, and the per-partition response row must carry
+/// `error_code = 0`.
 ///
-/// `produce_when_partition_ready` waits (event-driven, via the broker
-/// handle) for the partition's local writer to materialise — closing the
-/// raft commit-then-apply gap between `CreateTopics` returning and the
-/// partition appearing in the local `MetadataImage` — before the single
-/// Produce, so no fixed sleep is needed.
+/// `produce_when_partition_ready` waits on the broker handle, event-driven, for
+/// the partition's local writer to materialise, and only then sends the single
+/// Produce. That wait closes the raft commit-then-apply gap between
+/// `CreateTopics` returning and the partition appearing in the local
+/// `MetadataImage`, so the test needs no fixed sleep.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn produce_allowed_by_opa_succeeds() {
     let opa = MockServer::start().await;

@@ -70,12 +70,13 @@ fn stale_nan() -> f64 {
     f64::from_bits(0x7ff0_0000_0000_0002)
 }
 
-/// Compare two sorted instant-sample vectors for the parity tests, treating
-/// floats bit-exactly (so a genuine NaN equals a genuine NaN). `PartialEq`
-/// on `SampleValue::Float` uses IEEE `==`, under which `NaN != NaN`; a plain
-/// `assert_eq!` would therefore spuriously fail whenever a path correctly
-/// preserves a genuine NaN value. Stale-NaN markers are not expected to
-/// survive selection on either path, so they never reach this comparison.
+/// Compares two sorted instant-sample vectors bit-exactly for the parity tests.
+///
+/// A bit-exact float comparison makes a genuine NaN equal a genuine NaN.
+/// `PartialEq` on `SampleValue::Float` uses IEEE `==`, and `NaN != NaN` under
+/// that rule, so a plain `assert_eq!` fails when a path correctly keeps a
+/// genuine NaN value. The tests do not expect stale-NaN markers to survive
+/// selection on either path, so the markers never reach this comparison.
 fn instant_samples_match(left: &[crate::InstantSample], right: &[crate::InstantSample]) -> bool {
     if left.len() != right.len() {
         return false;
@@ -90,9 +91,10 @@ fn instant_samples_match(left: &[crate::InstantSample], right: &[crate::InstantS
     })
 }
 
-/// Assert the post-fix staleness semantics for the aggregate parity test's
-/// `nan_metric` queries: `sum` keeps the genuine NaN (NaN value, not a stale
-/// marker), and `count` drops the stale-NaN marker before counting (2, not 3).
+/// Asserts the staleness semantics for the `nan_metric` parity queries.
+///
+/// `sum` keeps the genuine NaN as a NaN value, not as a stale marker. `count`
+/// drops the stale-NaN marker before it counts, so the result is 2, not 3.
 fn assert_aggregate_nan_staleness(query: &str, via_operators: &[crate::InstantSample]) {
     if query == "sum(nan_metric)" {
         assert2::assert!(via_operators.len() == 1);
@@ -107,10 +109,11 @@ fn assert_aggregate_nan_staleness(query: &str, via_operators: &[crate::InstantSa
     }
 }
 
-/// Assert the NaN-ignoring `min`/`max` aggregation rule for the parity
-/// test's `minmax_nan` queries on absolute values: the mixed group's
-/// extremum is taken over its non-NaN samples (min=1, max=4), and the
-/// all-NaN group is kept with a NaN result (the series is not dropped).
+/// Asserts the NaN-ignore rule for `min` and `max` on the `minmax_nan` queries.
+///
+/// The test checks absolute values. `min` and `max` take the extremum of the
+/// mixed group over its non-NaN samples: min=1 and max=4. The engine keeps the
+/// all-NaN group with a NaN result and does not drop the series.
 fn assert_minmax_nan_ignoring(query: &str, via_operators: &[crate::InstantSample]) {
     // Look up a group's value by its `g` label.
     let by_group = |g: &str| -> f64 {
@@ -154,11 +157,13 @@ fn assert_minmax_nan_ignoring(query: &str, via_operators: &[crate::InstantSample
     }
 }
 
-/// Assert the SPARSE aggregate-over-rate rule for the parity test's
-/// `sparse_total` queries on absolute values: the no-value (sparse) series is
-/// excluded from its group, the `g="mix"` group survives with only its dense
-/// member's contribution, and the all-no-value `g="allsparse"` group produces
-/// no result row at all (the series is absent, not present-with-NaN).
+/// Asserts the sparse aggregate-over-rate rule for the `sparse_total` queries.
+///
+/// The test checks absolute values. The engine excludes the sparse no-value
+/// series from its group. The `g="mix"` group survives with only the
+/// contribution of its dense member. The result has no row for the
+/// all-no-value `g="allsparse"` group: the series is absent, not present with
+/// NaN.
 fn assert_sparse_aggregate_excludes_no_value(query: &str, via_operators: &[crate::InstantSample]) {
     let group_value = |g: &str| -> Option<f64> {
         via_operators
@@ -1521,9 +1526,11 @@ async fn instant_stddev_and_stdvar_aggregate_population_variance() {
     check!(approx_eq(float_value(&stddev_samples[0].value), 2.0));
 }
 
-/// M16: `stdvar`/`stddev` over a large-offset close-valued group must not
-/// catastrophically cancel into a negative variance (whose `sqrt` is NaN).
-/// Welford yields the small positive population variance `{0,1,2}` -> 2/3.
+/// M16: `stdvar` and `stddev` must not cancel into a negative variance.
+///
+/// The group has a large offset and close values. A negative variance gives
+/// NaN from `sqrt`. Welford returns the small positive population variance for
+/// `{0,1,2}` -> 2/3.
 #[tokio::test]
 async fn instant_stdvar_aggregate_is_stable_for_large_offset_group() {
     let mut store = InMemoryMetricStore::new();
@@ -1554,9 +1561,10 @@ async fn instant_stdvar_aggregate_is_stable_for_large_offset_group() {
     check!(approx_eq(value, 2.0 / 3.0), "stdvar == 2/3, got {value}");
 }
 
-/// M17: `avg` of very-large-magnitude samples must not overflow the running
-/// sum to +/-Inf; the incremental Kahan mean stays finite and equals the
-/// common value for two equal maxima.
+/// M17: `avg` of large-magnitude samples must not overflow the running sum.
+///
+/// The running sum must not reach +Inf or -Inf. The incremental Kahan mean
+/// stays finite and equals the common value for two equal maxima.
 #[tokio::test]
 async fn instant_avg_aggregate_does_not_overflow() {
     let mut store = InMemoryMetricStore::new();
@@ -1586,9 +1594,10 @@ async fn instant_avg_aggregate_does_not_overflow() {
     assert2::assert!(approx_eq(value, f64::MAX));
 }
 
-/// M19: `count_values` renders a non-finite sample value through the canonical
-/// Prometheus float formatter, so `+Inf` (not `f64::to_string`'s `inf`)
-/// becomes the label value.
+/// M19: `count_values` formats a non-finite value with the Prometheus formatter.
+///
+/// `count_values` uses the canonical Prometheus float formatter, so the label
+/// value is `+Inf`, not the `inf` that `f64::to_string` returns.
 #[tokio::test]
 async fn instant_count_values_formats_infinity_as_prometheus() {
     let mut store = InMemoryMetricStore::new();
@@ -5147,10 +5156,11 @@ async fn instant_over_time_accepts_subquery_range_argument() {
     check!(approx_eq(float_value(&samples[0].value), 5.0));
 }
 
-/// Compare two `RangeMatrix` results for the range parity test, bit-exact on
-/// float sample values so a genuine NaN equals a genuine NaN (plain
-/// `PartialEq` would spuriously fail `NaN == NaN`). Series order, labelsets,
-/// per-step timestamps, and gaps must all match.
+/// Compares two `RangeMatrix` results for the range parity test.
+///
+/// The comparison is bit-exact on float sample values, so a genuine NaN equals
+/// a genuine NaN. A plain `PartialEq` fails on `NaN == NaN`. Series order,
+/// labelsets, per-step timestamps, and gaps must all match.
 fn range_matrices_match(left: &QueryResult, right: &QueryResult) -> bool {
     let (QueryResult::RangeMatrix(left), QueryResult::RangeMatrix(right)) = (left, right) else {
         return false;
@@ -5173,13 +5183,15 @@ fn range_matrices_match(left: &QueryResult, right: &QueryResult) -> bool {
     })
 }
 
-/// Differential parity: a range query routed through the per-step operator
-/// planner must produce the byte-exact `RangeMatrix` the interpreter range
-/// path produces — same series (which appear, in what order), labelsets,
-/// per-step `(t, value)` points, gaps, and a scalar-over-range shape.
-/// Lock in which corpus-shaped range expressions route through the operator
-/// planner vs fall back to the interpreter, so the gate's coverage is
-/// explicit and regressions are caught.
+/// Differential parity for a range query through the per-step operator planner.
+///
+/// The planner must produce the byte-exact `RangeMatrix` that the interpreter
+/// range path produces: the same series, the same series order, the same
+/// labelsets, the same per-step `(t, value)` points, the same gaps, and the
+/// same scalar-over-range shape. The test also pins which corpus-shaped range
+/// expressions route through the operator planner and which fall back to the
+/// interpreter. The gate coverage is then explicit, and the test catches
+/// regressions.
 #[test]
 fn range_planner_gate_routes_expected_shapes() {
     use promql_parser::parser::Expr;
@@ -5642,13 +5654,15 @@ async fn instant_selector_planner_path_matches_interpreter() {
     }
 }
 
-/// Differential parity for the present-but-empty-valued-label fix. A series
-/// carrying `__unit__=""` (label PRESENT, value empty) must stay DISTINCT
-/// from a series of the same name with `__unit__` ABSENT, all the way through
-/// the operator leaf — which now encodes absent as NULL and present-empty as
-/// `""`. The planner instant-selector and rate-range paths must therefore
-/// produce the byte-exact result the interpreter does (same series set, same
-/// labelsets, same per-series values), where they previously fell back.
+/// Differential parity for a label that is present with an empty value.
+///
+/// A series with `__unit__=""` has the label present and the value empty. That
+/// series must stay distinct from a series of the same name that has no
+/// `__unit__` label, through to the operator leaf. The operator leaf encodes an
+/// absent label as NULL and a present empty label as `""`. The planner
+/// instant-selector path and the rate-range path must produce the byte-exact
+/// result that the interpreter produces: the same series set, the same
+/// labelsets, and the same per-series values.
 #[tokio::test]
 async fn empty_valued_label_planner_path_matches_interpreter() {
     use promql_parser::parser::Expr;
@@ -5750,18 +5764,17 @@ async fn empty_valued_label_planner_path_matches_interpreter() {
     assert2::assert!(fps.len() == 3);
 }
 
-/// Pin the corrected RANGE-path lookback boundary against Prometheus
-/// semantics: the instant-vector lookback window is `(eval - lookbackDelta,
-/// eval]` — left-OPEN, right-closed. A sample landing EXACTLY on the lower
-/// boundary (`ts == eval - lookbackDelta`) is EXCLUDED. Before the fix the
-/// interpreter range path used a left-CLOSED `>=`, spuriously including it;
-/// the operator path (and the interpreter's instant path) were already
-/// left-open and correct. This test proves:
-///   1. the bare-selector RANGE query now routes through the planner,
+/// Pins the range-path lookback boundary against Prometheus semantics.
+///
+/// The instant-vector lookback window is `(eval - lookbackDelta, eval]`, which
+/// is left-open and right-closed. A sample with `ts == eval - lookbackDelta`
+/// sits exactly on the lower boundary, and the engine excludes it. This test
+/// proves:
+///   1. the bare-selector range query routes through the planner,
 ///   2. planner == interpreter byte-for-byte across the grid, and
-///   3. the boundary sample is excluded (the Prometheus-correct behaviour),
-///      so a step whose only in-window candidate is the boundary sample has
-///      NO point.
+///   3. the engine excludes the boundary sample, which is the
+///      Prometheus-correct behaviour, so a step whose only in-window candidate
+///      is the boundary sample has no point.
 #[tokio::test]
 async fn range_bare_selector_lookback_boundary_matches_prometheus() {
     let lookback = EngineOpts::default().lookback_delta.millis_i64(); // 300_000 (5m)
@@ -5821,11 +5834,12 @@ async fn range_bare_selector_lookback_boundary_matches_prometheus() {
     assert2::assert!(samples.is_empty());
 }
 
-/// Differential parity for a bare top-level selector carrying `@ start()` /
-/// `@ end()` in a RANGE query. The per-step planner range driver now scopes the
-/// query's `[start, end]` bounds, and `plan_instant_selector` resolves
-/// `@ start()`/`@ end()` to those bounds (a fixed eval instant repeated across
-/// every step) — exactly as the interpreter's dedicated
+/// Differential parity for a bare top-level selector with `@ start()` or `@ end()`.
+///
+/// The query is a range query. The per-step planner range driver scopes the
+/// query bounds `[start, end]`, and `plan_instant_selector` resolves
+/// `@ start()` and `@ end()` to those bounds. The result is a fixed eval
+/// instant repeated across every step, the same as the interpreter's dedicated
 /// `eval_vector_selector_over_steps`. This proves:
 ///   1. the gate routes `m @ start()` / `m @ end()` through the planner, and
 ///   2. planner (public range path) == interpreter byte-for-byte.
@@ -5899,12 +5913,14 @@ async fn range_at_start_end_selector_planner_matches_interpreter() {
     assert2::assert!(matches!(instant_err, Err(PromqlError::Unsupported(_))));
 }
 
-/// Differential parity for the RESIDUAL range-vector folds the planner now
-/// routes through the shared interpreter dispatch (`plan_extended_range_fold_call`):
-/// `changes`/`resets`/`deriv` over a plain matrix selector (no operator-leaf
-/// UDF), and the `anchored`/`smoothed` extended-selector forms of
-/// `rate`/`increase`/`delta`/`changes`/`resets`. Each must plan to `Some` and
-/// match the interpreter's `eval_instant_expr` byte-for-byte.
+/// Differential parity for the residual range-vector folds.
+///
+/// The planner routes these folds through the shared interpreter dispatch
+/// `plan_extended_range_fold_call`. They are `changes`, `resets`, and `deriv`
+/// over a plain matrix selector with no operator-leaf UDF, and the `anchored`
+/// and `smoothed` extended-selector forms of `rate`, `increase`, `delta`,
+/// `changes`, and `resets`. Each fold must plan to `Some` and must match the
+/// interpreter's `eval_instant_expr` byte-for-byte.
 #[tokio::test]
 async fn extended_range_fold_planner_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
@@ -5999,11 +6015,12 @@ async fn extended_range_fold_planner_matches_interpreter() {
     }
 }
 
-/// Differential parity for a top-level SCALAR-typed RANGE query. A scalar
-/// expression (`time()`, `1 + 2`, an argless calendar form) now routes through
-/// the per-step planner driver, which folds an identical no-label scalar
-/// series per step. The result must be byte-exact with the interpreter's
-/// `eval_instant_expr_over_steps` scalar stitching.
+/// Differential parity for a top-level scalar-typed range query.
+///
+/// A scalar expression such as `time()`, `1 + 2`, or an argless calendar form
+/// routes through the per-step planner driver. The driver folds an identical
+/// no-label scalar series per step. The result must be byte-exact with the
+/// interpreter's `eval_instant_expr_over_steps` scalar stitching.
 #[tokio::test]
 async fn range_scalar_expr_planner_path_matches_interpreter() {
     use promql_parser::parser::Expr;
@@ -6383,11 +6400,13 @@ async fn over_time_range_planner_path_matches_interpreter() {
     }
 }
 
-/// Differential parity for **subqueries** routed through the recursive
-/// planner: a range/`*_over_time` call whose argument is `inner[range:res]`.
-/// The subquery's range vector is built per aligned sub-step through the
-/// planner and the shared outer fold is applied; the result must equal the
-/// interpreter's `eval_subquery` + outer fold byte-for-byte (NaN-aware).
+/// Differential parity for subqueries routed through the recursive planner.
+///
+/// The query is a range call or a `*_over_time` call whose argument is
+/// `inner[range:res]`. The planner builds the subquery range vector per
+/// aligned sub-step and then applies the shared outer fold. The result must
+/// equal the interpreter's `eval_subquery` plus outer fold byte-for-byte, with
+/// a NaN-aware comparison.
 #[tokio::test]
 async fn subquery_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
@@ -6846,11 +6865,12 @@ async fn label_ops_planner_path_matches_interpreter() {
     );
 }
 
-/// Differential parity for `info(v [, data_label_selector])` routed through the
-/// recursive planner: the input vector is recursed, the `target_info` /
-/// custom-selector series are selected through the shared interpreter helper,
-/// and the shared `apply_info` join is applied. The result must equal the
-/// interpreter's `eval_info_call` byte-for-byte.
+/// Differential parity for `info(v [, data_label_selector])` in the planner.
+///
+/// The recursive planner recurses the input vector. It selects the
+/// `target_info` series or the custom-selector series through the shared
+/// interpreter helper, then applies the shared `apply_info` join. The result
+/// must equal the interpreter's `eval_info_call` byte-for-byte.
 #[tokio::test]
 async fn info_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
@@ -7221,15 +7241,16 @@ async fn simple_aggregate_planner_path_matches_interpreter() {
     }
 }
 
-/// Differential parity for a simple aggregation whose inner bare selector has
-/// a genuine (non-stale) NaN series alone in its own `by` group — the exact
-/// shape the operator path must NOT drop. `sum(nan_metric)` (collapsed) already
-/// pins genuine-NaN propagation, but a genuine NaN ALONE in a distinct group is
-/// the case where a NaN-dropping selector would silently omit a whole group row
-/// rather than emit it with value NaN; this test pins that across all six simple
-/// ops, `by`/`without`, and a stale group (dropped) and a mixed NaN+finite group
-/// (NaN ignored by min/max), comparing the operator path against the interpreter
-/// and asserting the absolute Prometheus outcomes.
+/// Differential parity for a genuine NaN series alone in its own `by` group.
+///
+/// The inner bare selector of a simple aggregation holds one genuine, non-stale
+/// NaN series alone in its own group. The operator path must not drop that
+/// group. Collapsed `sum(nan_metric)` already pins genuine-NaN propagation, but
+/// a selector that drops NaN omits a whole group row here and does not emit the
+/// row with the value NaN. This test covers all six simple ops, `by` and
+/// `without`, a stale group that the engine drops, and a mixed NaN and finite
+/// group where `min` and `max` ignore the NaN. It compares the operator path
+/// against the interpreter and asserts the absolute Prometheus outcomes.
 #[tokio::test]
 async fn aggregate_genuine_nan_group_parity() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
@@ -7525,12 +7546,11 @@ async fn param_aggregate_planner_path_matches_interpreter() {
     // `experimental_param_aggregate_planner_path_matches_interpreter`.
 }
 
-/// M18: an out-of-range / NaN `quantile` phi does NOT error. Matching
-/// Prometheus (and the `histogram_quantile` family already in this file), the
-/// aggregate returns signed `+Inf` (phi > 1), `-Inf` (phi < 0), `NaN` (phi
-/// NaN) and raises an `InvalidQuantileWarning` — never aborting. (This
-/// reverses the earlier deliberate "canonical quantile-phi error" commit to
-/// realign with Prometheus.)
+/// M18: an out-of-range or NaN `quantile` phi does not error.
+///
+/// The aggregate matches Prometheus and the `histogram_quantile` family in this
+/// file. It returns `+Inf` for phi > 1, `-Inf` for phi < 0, and `NaN` for a NaN
+/// phi. It also raises an `InvalidQuantileWarning`, and it never aborts.
 #[tokio::test]
 async fn quantile_out_of_range_phi_returns_signed_inf_with_warning() {
     let mut store = InMemoryMetricStore::new();
@@ -7577,8 +7597,10 @@ async fn quantile_out_of_range_phi_returns_signed_inf_with_warning() {
     }
 }
 
-/// C2: `check_resolution_points` rejects a non-positive step, an abusive
-/// point count above `MAX_RESOLUTION_POINTS`, and accepts a count at the cap.
+/// C2: `check_resolution_points` guards the step and the point count.
+///
+/// The function rejects a non-positive step. It rejects an abusive point count
+/// above `MAX_RESOLUTION_POINTS`, and it accepts a count at the cap.
 #[test]
 fn check_resolution_points_enforces_cap() {
     // A non-positive step is rejected outright.
@@ -7600,8 +7622,10 @@ fn check_resolution_points_enforces_cap() {
     assert2::assert!(err.to_string().contains("exceeded maximum resolution"));
 }
 
-/// C2 (engine backstop): an abusive subquery resolution errors via the range
-/// driver's `check_resolution_points` guard rather than looping ~1e11 times.
+/// C2 engine backstop: an abusive subquery resolution returns an error.
+///
+/// The range driver's `check_resolution_points` guard returns the error. The
+/// driver does not loop about 1e11 times.
 #[tokio::test]
 async fn abusive_subquery_resolution_errors_before_looping() {
     let mut store = InMemoryMetricStore::new();
@@ -7617,14 +7641,15 @@ async fn abusive_subquery_resolution_errors_before_looping() {
     assert2::assert!(err.to_string().contains("exceeded maximum resolution"));
 }
 
-/// Divergences A + B: a collapsed/global `sum`/`avg` over a multi-series
-/// group must be (a) deterministic run-to-run (bit-exact via `to_bits`) and
-/// (b) bit-for-bit identical to the interpreter oracle — including the
-/// NaN-SIGN-bit case where a `{+Inf,-Inf}` group's sign-flipped NaN
-/// (`0xfff8…`) folds alongside genuine NaNs (`0x7ff8…`). A non-deterministic
-/// `DataFusion` hash-aggregate fold would flicker by 1 ULP or flip the NaN
-/// sign bit; routing through the shared `apply_simple_aggregate` kernel must
-/// not.
+/// Divergences A + B: a collapsed `sum` or `avg` must be deterministic and exact.
+///
+/// The aggregation runs over a multi-series group. The result must be
+/// deterministic run-to-run, bit-exact through `to_bits`. The result must also
+/// be bit-for-bit identical to the interpreter oracle. This covers the
+/// NaN-sign-bit case, where the sign-flipped NaN `0xfff8…` of a `{+Inf,-Inf}`
+/// group folds together with the genuine NaNs `0x7ff8…`. A non-deterministic
+/// `DataFusion` hash-aggregate fold flickers by 1 ULP or flips the NaN sign
+/// bit. The shared `apply_simple_aggregate` kernel must not do either.
 #[tokio::test]
 async fn sum_avg_collapsed_is_deterministic_and_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
@@ -7775,9 +7800,11 @@ async fn sum_avg_collapsed_is_deterministic_and_matches_interpreter() {
     }
 }
 
-/// Compare two whole [`QueryResult`]s for the parity tests below, NaN-aware
-/// across scalar / vector / matrix / string shapes (so a genuine NaN equals a
-/// genuine NaN). Vectors are pre-sorted by fingerprint by the caller.
+/// Compares two whole [`QueryResult`]s for the parity tests below.
+///
+/// The comparison is NaN-aware across the scalar, vector, matrix, and string
+/// shapes, so a genuine NaN equals a genuine NaN. The caller pre-sorts vectors
+/// by fingerprint.
 fn query_results_match(left: &QueryResult, right: &QueryResult) -> bool {
     match (left, right) {
         (
@@ -7810,9 +7837,10 @@ fn query_results_match(left: &QueryResult, right: &QueryResult) -> bool {
     }
 }
 
-/// Sort an instant-vector result by fingerprint in place (a no-op for the
-/// other result shapes), so `query_results_match` can compare vectors order-
-/// independently.
+/// Sorts an instant-vector result by fingerprint in place.
+///
+/// The function does nothing for the other result shapes. `query_results_match`
+/// can then compare vectors independent of order.
 fn sort_instant_result(result: QueryResult) -> QueryResult {
     match result {
         QueryResult::InstantVector(mut samples) => {
@@ -7823,11 +7851,13 @@ fn sort_instant_result(result: QueryResult) -> QueryResult {
     }
 }
 
-/// Differential parity for the newly-planned top-level structural node kinds:
-/// unary negation, bare numeric / string literals, a raw matrix selector and a
-/// subquery (both `RangeMatrix` results from `query_instant`), and the
-/// `smoothed` extended selector. Each must produce — through the operator
-/// planner — the byte-exact result the interpreter's `eval_instant_expr`
+/// Differential parity for the top-level structural node kinds.
+///
+/// The node kinds are unary negation, a bare numeric literal, a bare string
+/// literal, a raw matrix selector, a subquery, and the `smoothed` extended
+/// selector. `query_instant` returns a `RangeMatrix` for the raw matrix
+/// selector and for the subquery. Through the operator planner, each kind must
+/// produce the byte-exact result that the interpreter's `eval_instant_expr`
 /// produces.
 #[tokio::test]
 async fn structural_node_planner_path_matches_interpreter() {
@@ -7954,10 +7984,11 @@ async fn structural_node_planner_path_matches_interpreter() {
     }
 }
 
-/// Differential parity for the experimental scalar / range functions:
-/// `max_of`/`min_of`, `double_exponential_smoothing` over a bare matrix
-/// selector, and the duration helpers. Each delegates to the same interpreter
-/// method, so the result is parity-exact by construction.
+/// Differential parity for the experimental scalar and range functions.
+///
+/// The functions are `max_of`, `min_of`, `double_exponential_smoothing` over a
+/// bare matrix selector, and the duration helpers. Each one delegates to the
+/// same interpreter method, so the result is parity-exact by construction.
 #[cfg(feature = "experimental-functions")]
 #[tokio::test]
 async fn experimental_call_planner_path_matches_interpreter() {
@@ -8012,11 +8043,12 @@ async fn experimental_call_planner_path_matches_interpreter() {
     }
 }
 
-/// Differential parity for the experimental `limitk`/`limit_ratio` param
-/// aggregations, including `limit_ratio`'s `InvalidRatioWarning` annotation.
-/// The planner reuses the same parameter-resolution helpers and selection
-/// kernels as the interpreter, so both the result AND the emitted annotations
-/// match.
+/// Differential parity for the experimental `limitk` and `limit_ratio` aggregations.
+///
+/// These are param aggregations, and the test covers the `InvalidRatioWarning`
+/// annotation of `limit_ratio`. The planner reuses the same
+/// parameter-resolution helpers and selection kernels as the interpreter, so
+/// the result and the emitted annotations both match.
 #[cfg(feature = "experimental-functions")]
 #[tokio::test]
 async fn experimental_param_aggregate_planner_path_matches_interpreter() {
@@ -8237,12 +8269,13 @@ async fn classic_histogram_quantile_planner_path_matches_interpreter() {
     // planner too — see `native_histogram_planner_path_matches_interpreter`.
 }
 
-/// Differential parity for the **native-histogram** constructs that now route
-/// through the recursive planner: a bare native-histogram selector, native
-/// `histogram_quantile`, and every native accessor (`histogram_count`/`sum`/
-/// `avg`/`stddev`/`stdvar`/`fraction`). Each query MUST claim the operator
-/// (`Precomputed`) path and match the interpreter byte-for-byte, with the
-/// histogram payloads compared by value (not float `==`).
+/// Differential parity for the native-histogram constructs in the planner.
+///
+/// The recursive planner routes a bare native-histogram selector, native
+/// `histogram_quantile`, and every native accessor: `histogram_count`/`sum`/
+/// `avg`/`stddev`/`stdvar`/`fraction`. Each query MUST claim the operator
+/// `Precomputed` path and MUST match the interpreter byte-for-byte. The test
+/// compares the histogram payloads by value, not by float `==`.
 #[tokio::test]
 async fn native_histogram_planner_path_matches_interpreter() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};
@@ -8400,20 +8433,22 @@ async fn native_histogram_planner_path_matches_interpreter() {
     }
 }
 
-/// Differential parity for **histogram-bearing aggregations** that now route
-/// through the recursive planner via the shared `apply_simple_aggregate` /
-/// `apply_*` kernels (the `Precomputed` path). Each query MUST claim the
-/// operator path and match the interpreter byte-for-byte — including the
-/// native-histogram payloads (compared structurally, not by float `==`) and
-/// any warning/info annotations.
+/// Differential parity for histogram-bearing aggregations in the planner.
+///
+/// The recursive planner routes these aggregations through the shared
+/// `apply_simple_aggregate` and `apply_*` kernels, which is the `Precomputed`
+/// path. Each query MUST claim the operator path and MUST match the interpreter
+/// byte-for-byte. The match covers the native-histogram payloads, which the
+/// test compares structurally and not by float `==`, and any warning or info
+/// annotation.
 ///
 /// The store exercises every native-histogram aggregation rule:
-/// - `sum`/`avg` MERGE compatible histograms (and `avg` scales by `1/count`);
-/// - a group that MIXES a float and a histogram is DROPPED (the mixed-sample
-///   rule) under `sum`/`avg`;
+/// - `sum`/`avg` merge compatible histograms, and `avg` scales by `1/count`;
+/// - `sum`/`avg` drop a group that mixes a float and a histogram, which is the
+///   mixed-sample rule;
 /// - `count`/`group` count every sample regardless of type;
-/// - `min`/`max`/`stddev`/`stdvar`/`topk`/`bottomk`/`quantile` IGNORE
-///   histogram samples (drop them), reducing only the floats;
+/// - `min`/`max`/`stddev`/`stdvar`/`topk`/`bottomk`/`quantile` ignore and drop
+///   histogram samples, and reduce only the floats;
 /// - `count_values` formats a histogram value as its JSON label value.
 #[tokio::test]
 async fn histogram_aggregation_planner_path_matches_interpreter() {
@@ -9211,14 +9246,15 @@ async fn util_planner_path_matches_interpreter() {
 
 /// Corpus green-through-the-public-entry-points guard.
 ///
-/// Runs the FULL conformance corpus through the public `query_instant` /
-/// `query_range` entry points (exactly as the conformance harness does) and
-/// asserts every file passes. With the tree-walking interpreter deleted, the
-/// operator planner is the SOLE evaluation engine reached from these entry
-/// points, so a green corpus here is a green corpus through the planner. The
-/// direct totality proof (every valid query plans to `Ok(Some)`, every invalid
-/// one to `Err`, never `Ok(None)`) lives in
-/// [`plan_instant_expr_is_total_over_construct_sweep`].
+/// This test runs the full conformance corpus through the public
+/// `query_instant` and `query_range` entry points, the same way the conformance
+/// harness does, and asserts that every file passes. The tree-walking
+/// interpreter is deleted, so the operator planner is the only evaluation
+/// engine reached from these entry points. A green corpus here is then a green
+/// corpus through the planner. The direct totality proof lives in
+/// [`plan_instant_expr_is_total_over_construct_sweep`]: every valid query plans
+/// to `Ok(Some)`, every invalid one plans to `Err`, and none plans to
+/// `Ok(None)`.
 #[tokio::test]
 async fn conformance_corpus_runs_green_through_planner() {
     use crate::conformance::testkit::run_corpus_dir;
@@ -9229,11 +9265,13 @@ async fn conformance_corpus_runs_green_through_planner() {
     assert2::assert!(report.files.iter().all(|file| file.passed));
 }
 
-/// Direct totality assertion over a representative construct sweep: for every
-/// VALID query family the corpus can produce, `plan_instant_expr` must return
-/// `Ok(Some(..))` (it routes through the planner) — never `Ok(None)`. For
-/// every INVALID query, it must return `Err(..)` — never `Ok(None)`. This is
-/// the per-construct complement to the corpus-wide counter proof.
+/// Direct totality assertion over a representative construct sweep.
+///
+/// For every valid query family that the corpus can produce, `plan_instant_expr`
+/// must return `Ok(Some(..))` and route through the planner. It must never
+/// return `Ok(None)`. For every invalid query, it must return `Err(..)`, and it
+/// must never return `Ok(None)`. This test is the per-construct complement to
+/// the corpus-wide counter proof.
 #[tokio::test]
 async fn plan_instant_expr_is_total_over_construct_sweep() {
     use crate::{DurationExprContext, parse_promql_with_duration_context};

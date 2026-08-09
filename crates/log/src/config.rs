@@ -30,10 +30,9 @@ pub const DEFAULT_TIMESTAMP_SCAN_WINDOW: ByteSize = kibibytes(64);
 
 /// Per-topic policy for what to do with old log segments.
 ///
-/// `Delete` (default): age- or size-based segment deletion via
-/// `crate::retention`. `Compact`: newest-wins dedup-by-key,
-/// implemented in `crate::compact` and invoked through
-/// [`crate::Log::compact`].
+/// `Delete` is the default. It deletes segments by age or by size in
+/// `crate::retention`. `Compact` does newest-wins dedup by key. `crate::compact`
+/// implements it, and [`crate::Log::compact`] invokes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CleanupPolicy {
     #[default]
@@ -43,11 +42,10 @@ pub enum CleanupPolicy {
 
 /// Tunables for [`Log`](crate::Log) behavior.
 ///
-/// Defaults match Apache Kafka 4.2 (`segment.bytes`, `segment.ms`,
-/// `retention.ms`, `index.interval.bytes`, etc.). The
-/// [`Default`](Self::default) impl is the recommended starting point;
-/// most production deployments will only override [`Self::retention`] and
-/// [`Self::retention_size`].
+/// Defaults match Apache Kafka 4.2 for `segment.bytes`, `segment.ms`,
+/// `retention.ms`, `index.interval.bytes`, and the other tunables. Start from
+/// the [`Default`](Self::default) impl. Most production deployments override
+/// only [`Self::retention`] and [`Self::retention_size`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogConfig {
     /// Cap the initial allocation used by decoded and raw segment reads.
@@ -76,7 +74,8 @@ pub struct LogConfig {
     /// `index.interval.bytes`; default 4 KiB.
     pub index_interval: ByteSize,
 
-    /// fsync after every `append`. Default off; broker manages fsync separately.
+    /// fsync after every `append`. Default off. The broker manages fsync
+    /// separately.
     pub flush_on_append: bool,
 
     /// On open, CRC every batch in the active segment from the last index entry to EOF.
@@ -86,22 +85,22 @@ pub struct LogConfig {
     pub cleanup_policy: CleanupPolicy,
 
     /// Broker-side recompression target. `None` is Kafka's
-    /// `compression.type=producer` (pass-through — store the batch
-    /// exactly as the producer sent it). `Some(c)` forces every batch
-    /// the broker accepts on this partition to be re-encoded to `c`
-    /// before write. Matches Kafka's per-topic `compression.type`
-    /// config: `gzip` / `snappy` / `lz4` / `zstd` / `uncompressed` map
-    /// to `Some(_)`; `producer` (the default) maps to `None`.
+    /// `compression.type=producer`, which is pass-through: the broker stores
+    /// the batch exactly as the producer sent it. `Some(c)` re-encodes every
+    /// batch the broker accepts on this partition to `c` before the write.
+    /// This matches Kafka's per-topic `compression.type` config. `gzip`,
+    /// `snappy`, `lz4`, `zstd`, and `uncompressed` map to `Some(_)`.
+    /// `producer`, the default, maps to `None`.
     pub compression_type: Option<CompressionType>,
 
-    /// When `true`, this partition's sealed segments (KIP-405)
-    /// are eligible to be copied to the remote tier by the broker's
-    /// `RemoteLogManager`. Maps to Kafka's per-topic `remote.storage.enable`.
-    /// Default `false` (Kafka's default — tiered storage is opt-in per topic).
+    /// When `true`, the broker's `RemoteLogManager` may copy this
+    /// partition's sealed segments (KIP-405) to the remote tier. This maps to
+    /// Kafka's per-topic `remote.storage.enable`. Default `false`, which is
+    /// also Kafka's default, because tiered storage is opt-in per topic.
     pub remote_storage_enable: bool,
 
-    /// Local-disk time-retention window for tiered
-    /// partitions (KIP-405). `None` inherits [`Self::retention`]. Default `None`.
+    /// Local-disk time-retention window for tiered partitions (KIP-405).
+    /// `None` inherits [`Self::retention`]. Default `None`.
     pub local_retention: Option<Time>,
 
     /// Local-disk size budget for tiered partitions (KIP-405).
@@ -109,8 +108,8 @@ pub struct LogConfig {
     pub local_retention_size: Option<ByteSize>,
 
     /// KIP-534. After a tombstone or transaction marker first becomes
-    /// compaction-eligible, retain it for at least this long before deletion
-    /// (the delete-horizon grace window). Default 24h.
+    /// compaction-eligible, the log retains it for at least this long before
+    /// deletion. This is the delete-horizon grace window. Default 24h.
     pub delete_retention: Time,
 }
 

@@ -1,18 +1,18 @@
 //! Type-erased node adapters: `ProcessorNode`, `SinkNode`, `SourceNode`.
 //!
-//! Each adapter carries the `TypeId` of the `(K, V)` pairs it consumes and/or
-//! produces so graph construction can validate wiring without keeping the
-//! concrete type parameters in scope.
+//! Each adapter carries the `TypeId` of the `(K, V)` pairs that it consumes, or
+//! produces, or both. Graph construction can then validate the wiring without
+//! the concrete type parameters in scope.
 //!
 //! The three roles:
-//! - [`ProcessorNode`] — downcasts `ErasedRecord`, runs the user-supplied
-//!   [`Processor`], and any `forward` calls box the output back into
-//!   `ErasedRecord` entries in the dispatch buffer.
-//! - [`SinkNode`] — downcasts `ErasedRecord` and serializes it to
-//!   [`OutputRecord`] bytes (no children).
-//! - [`SourceNode`] — deserializes raw bytes into `ErasedRecord`; it is
-//!   entered by the graph driver directly via `deserialize`, not as a child
-//!   target of another node.
+//! - [`ProcessorNode`] downcasts `ErasedRecord` and runs the user-supplied
+//!   [`Processor`]. Each `forward` call boxes the output back into an
+//!   `ErasedRecord` entry in the dispatch buffer.
+//! - [`SinkNode`] downcasts `ErasedRecord` and serializes it to
+//!   [`OutputRecord`] bytes. It has no children.
+//! - [`SourceNode`] deserializes raw bytes into `ErasedRecord`. The graph driver
+//!   enters it directly through `deserialize`, and not as the child target of
+//!   another node.
 
 use std::any::{Any, type_name};
 
@@ -31,20 +31,21 @@ use super::{
 
 /// Object-safe trait for a node slot in the execution graph.
 ///
-/// Implemented by [`ProcessorNode`] and [`SinkNode`].  [`SourceNode`] does
-/// **not** implement this trait because sources are entered via their own
-/// `deserialize` method — they are never the target of a `forward` from a
+/// [`ProcessorNode`] and [`SinkNode`] implement this trait. [`SourceNode`] does
+/// **not** implement it, because the driver enters a source through the source's
+/// own `deserialize` method. A source is never the target of a `forward` from a
 /// parent node.
 #[async_trait]
 pub(crate) trait ErasedNode: Send {
-    /// Called once before the first record (e.g. to open stores). Default is
-    /// a no-op so sink nodes don't need to implement it.
+    /// The runtime calls this once before the first record, for example to open
+    /// stores. The default is a no-op, so a sink node does not need to implement
+    /// it.
     #[allow(dead_code)]
     async fn init(&mut self, _dispatch: &mut Dispatch<'_>) -> Result<(), ProcessorError> {
         Ok(())
     }
 
-    /// Called once at task shutdown. Default is a no-op.
+    /// The runtime calls this once at task shutdown. The default is a no-op.
     async fn close(&mut self) {}
 
     /// Process one erased record: downcast, run inner logic, push results.
@@ -59,8 +60,8 @@ pub(crate) trait ErasedNode: Send {
 // ProcessorNode
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Wraps a user [`Processor`] and handles type-erasure at both the input
-/// (downcast) and output (`ProcessorContext::forward` re-boxes).
+/// Wraps a user [`Processor`] and handles type-erasure on both sides. It
+/// downcasts the input, and `ProcessorContext::forward` re-boxes the output.
 pub(crate) struct ProcessorNode<KIn, VIn, KOut, VOut> {
     name: String,
     inner: Box<dyn Processor<KIn, VIn, KOut, VOut>>,
@@ -142,7 +143,7 @@ where
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Deserializes an [`ErasedRecord`] and pushes the resulting bytes to
-/// `Dispatch::output`. This is a terminal node — it has no children.
+/// `Dispatch::output`. This is a terminal node, and it has no children.
 pub(crate) struct SinkNode<K, V, KS, VS> {
     name: String,
     topic: String,
@@ -226,8 +227,9 @@ where
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Deserializes raw bytes from an input topic into a boxed `ErasedRecord`.
-/// The graph driver calls `deserialize` directly — `SourceNode` does **not**
-/// implement `ErasedNode` because it is never the target of a `forward`.
+///
+/// The graph driver calls `deserialize` directly. `SourceNode` does **not**
+/// implement `ErasedNode`, because it is never the target of a `forward`.
 pub(crate) struct SourceNode<K, V, KS, VS> {
     name: String,
     key_serde: KS,

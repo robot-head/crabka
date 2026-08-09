@@ -1,5 +1,5 @@
-//! Per-partition `.leader-epoch-checkpoint` file. Two-column text
-//! format matching Apache Kafka exactly:
+//! Per-partition `.leader-epoch-checkpoint` file. The two-column text format
+//! matches Apache Kafka exactly:
 //!
 //! ```text
 //!   0          <-- header version
@@ -9,7 +9,7 @@
 //!   ...
 //! ```
 //!
-//! Byte layout is preserved so `kafka-dump-log` can read our files.
+//! The byte layout stays the same, so `kafka-dump-log` can read these files.
 
 #![allow(dead_code)]
 
@@ -38,7 +38,8 @@ pub const UNDEFINED_EPOCH: LeaderEpoch = LeaderEpoch(-1);
 pub const UNDEFINED_OFFSET: Offset = Offset(-1);
 
 impl LeaderEpochCheckpoint {
-    /// Open (or recover) the checkpoint at `path`. Missing file → empty.
+    /// Open or recover the checkpoint at `path`. A missing file gives an
+    /// empty checkpoint.
     #[instrument(
         level = "debug",
         skip_all,
@@ -89,9 +90,10 @@ impl LeaderEpochCheckpoint {
         Ok(out)
     }
 
-    /// Append `(epoch, start_offset)`. Idempotent: re-appending an entry
-    /// with the same epoch is a no-op (keeps the earliest recorded
-    /// `start_offset`). Rewrites the file atomically.
+    /// Append `(epoch, start_offset)`. This method is idempotent. A second
+    /// append of an entry with the same epoch does nothing and keeps the
+    /// earliest recorded `start_offset`. The method rewrites the file
+    /// atomically.
     #[instrument(level = "debug", skip(self), fields(epoch = epoch.0, start_offset = start_offset.0), err)]
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
@@ -102,8 +104,9 @@ impl LeaderEpochCheckpoint {
         Ok(())
     }
 
-    /// Remove epoch entries that begin at or after `end_offset` (mirrors Kafka's
-    /// LeaderEpochFileCache.truncateFromEnd). Persists if anything changed.
+    /// Remove epoch entries that begin at or after `end_offset`. This mirrors
+    /// Kafka's LeaderEpochFileCache.truncateFromEnd. The method persists the
+    /// file if anything changed.
     #[instrument(level = "debug", skip(self), fields(end_offset = end_offset.0), err)]
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
@@ -116,11 +119,13 @@ impl LeaderEpochCheckpoint {
         Ok(())
     }
 
-    /// Drop every recorded epoch (mirrors Kafka's
-    /// `LeaderEpochFileCache.clearAndFlush`, invoked by
-    /// `LocalLog.truncateFullyAndStartAt`). Used by [`crate::Log::reset_to`]: once the
-    /// log has been emptied, no offset has a backing record, so no epoch may be
-    /// advertised. Persists the now-empty file only when something was removed.
+    /// Drop every recorded epoch. This mirrors Kafka's
+    /// `LeaderEpochFileCache.clearAndFlush`, which
+    /// `LocalLog.truncateFullyAndStartAt` invokes.
+    ///
+    /// [`crate::Log::reset_to`] uses this method. Once the log is empty, no
+    /// offset has a backing record, so the broker may advertise no epoch. The
+    /// method persists the now-empty file only when it removed something.
     #[instrument(level = "debug", skip(self), fields(cleared = self.entries.len()), err)]
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
@@ -149,9 +154,10 @@ impl LeaderEpochCheckpoint {
         Ok(())
     }
 
-    /// End offset of `epoch` = `start_offset` of the next-larger recorded
-    /// epoch, or `log_end_offset` if `epoch` is the current epoch.
-    /// Returns -1 (`UNDEFINED_OFFSET`) if `epoch` is unknown.
+    /// End offset of `epoch`. It is the `start_offset` of the next-larger
+    /// recorded epoch, or `log_end_offset` if `epoch` is the current epoch.
+    /// The method returns -1, which is `UNDEFINED_OFFSET`, if `epoch` is
+    /// unknown.
     #[must_use]
     pub fn end_offset_for_epoch(&self, epoch: LeaderEpoch, log_end_offset: Offset) -> Offset {
         if !self.entries.iter().any(|e| e.epoch == epoch) {
@@ -170,18 +176,19 @@ impl LeaderEpochCheckpoint {
             .unwrap_or(log_end_offset)
     }
 
-    /// Floor lookup: return the epoch of the entry whose `start_offset` is the
-    /// greatest value `<= offset`, i.e. the leader epoch that owned `offset`.
+    /// Floor lookup: return the epoch of the entry whose `start_offset` is
+    /// the greatest value `<= offset`, that is, the leader epoch that owned
+    /// `offset`.
     ///
-    /// Returns `None` when the checkpoint has no entries, or when `offset`
-    /// precedes the first entry's `start_offset` (the offset predates any
-    /// recorded epoch boundary).
+    /// The method returns `None` when the checkpoint has no entries, and when
+    /// `offset` comes before the first entry's `start_offset`. In the second
+    /// case the offset predates every recorded epoch boundary.
     ///
-    /// Since entries are stored in increasing `start_offset` order (by
-    /// construction: `append` always writes the epoch that is current, which
-    /// has a `start_offset` >= every prior entry), this is a single linear
-    /// scan from the back — equivalent to finding the last entry with
-    /// `start_offset <= offset`.
+    /// Entries are stored in increasing `start_offset` order by construction,
+    /// because `append` always writes the current epoch, whose `start_offset`
+    /// is `>=` that of every prior entry. This lookup is therefore a single
+    /// linear scan from the back. It is equivalent to a search for the last
+    /// entry with `start_offset <= offset`.
     #[must_use]
     pub fn epoch_for_offset(&self, offset: Offset) -> Option<LeaderEpoch> {
         self.entries
@@ -191,10 +198,11 @@ impl LeaderEpochCheckpoint {
             .map(|e| e.epoch)
     }
 
-    /// Kafka `LeaderEpochFileCache.endOffsetFor`. Returns
-    /// `(found_epoch, end_offset)` — the epoch the requested offset range
-    /// actually belongs to on this log, and the first offset *after* that
-    /// epoch. Used to detect follower/consumer log divergence (KIP-320):
+    /// Kafka `LeaderEpochFileCache.endOffsetFor`. It returns
+    /// `(found_epoch, end_offset)`: the epoch that the requested offset range
+    /// really belongs to on this log, and the first offset *after* that epoch.
+    /// The broker uses it to detect follower and consumer log divergence
+    /// (KIP-320):
     ///
     ///  - `requested == UNDEFINED_EPOCH`            → `(UNDEFINED_EPOCH, log_end_offset)`
     ///  - `requested == latest recorded epoch`      → `(requested, log_end_offset)`
@@ -224,9 +232,10 @@ impl LeaderEpochCheckpoint {
     }
 }
 
-/// Pure core of [`LeaderEpochCheckpoint::epoch_and_offset_for`] over a raw slice,
-/// so it can be exhaustively + property-tested without a file. The method
-/// delegates to this. See `leader_epoch_model.rs` for the divergence-safety model.
+/// Pure core of [`LeaderEpochCheckpoint::epoch_and_offset_for`] over a raw
+/// slice, so that tests can check it exhaustively and by property without a
+/// file. The method delegates to this function. See `leader_epoch_model.rs` for
+/// the divergence-safety model.
 #[must_use]
 pub fn epoch_and_offset_for_entries(
     entries: &[EpochEntry],
@@ -263,8 +272,9 @@ pub fn epoch_and_offset_for_entries(
     }
 }
 
-/// Pure core of [`LeaderEpochCheckpoint::append`]: idempotent push-if-absent.
-/// Returns `true` if a new entry was added (so the caller knows to flush).
+/// Pure core of [`LeaderEpochCheckpoint::append`]: an idempotent
+/// push-if-absent. It returns `true` when it added a new entry, so the caller
+/// knows that it must flush.
 pub(crate) fn append_to(
     entries: &mut Vec<EpochEntry>,
     epoch: LeaderEpoch,
@@ -613,7 +623,8 @@ mod fuzz {
     use super::{EpochEntry, UNDEFINED_EPOCH, append_to, epoch_and_offset_for_entries};
 
     /// Fold random `(epoch_gap, offset_jump)` steps into a strictly-increasing
-    /// leader epoch-history (gaps allowed, mirroring how `append` builds one).
+    /// leader epoch-history. Gaps are allowed, as they are when `append` builds
+    /// one.
     fn leader_history(steps: &[(i32, i64)]) -> Vec<EpochEntry> {
         let mut v: Vec<EpochEntry> = vec![];
         let (mut le, mut lo) = (-1i32, -1i64);
@@ -628,10 +639,11 @@ mod fuzz {
     }
 
     proptest! {
-        /// Large-N randomized leader epoch-histories + requested epoch + follower
-        /// log-end, asserting the same KIP-101/320 truncation contract the
-        /// exhaustive `leader_epoch_model` checks, at a scale the BFS can't reach
-        /// (histories up to 20 entries, epochs to ~60, offsets to ~20000).
+        /// Large-N randomized leader epoch-histories, requested epoch, and
+        /// follower log-end. The test asserts the same KIP-101/320 truncation
+        /// contract that the exhaustive `leader_epoch_model` checks, at a scale
+        /// the BFS cannot reach: histories up to 20 entries, epochs to about
+        /// 60, and offsets to about 20000.
         #[test]
         fn truncation_contract_holds(
             steps in proptest::collection::vec((0i32..10, 0i64..1000), 0..20usize),

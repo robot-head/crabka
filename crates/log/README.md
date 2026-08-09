@@ -11,13 +11,13 @@ of Apache Kafka-compatible infrastructure and clients.
 
 ## Overview
 
-`crabka-log` is the storage layer used by the Crabka broker. It opens,
+`crabka-log` is the storage layer that the Crabka broker uses. It opens,
 recovers, appends, reads, truncates, compacts, and exports Kafka-format log
-directories while preserving Kafka's segment naming and index formats.
+directories. It keeps Kafka's segment naming and index formats.
 
-The crate works at the single-partition log directory level. Broker-level topic
-configuration, leader/follower ownership, remote-tier scheduling, transaction
-visibility policy, and write serialization are applied by higher layers.
+The crate works at the single-partition log directory level. Higher layers apply
+broker-level topic configuration, leader/follower ownership, remote-tier
+scheduling, transaction visibility policy, and write serialization.
 
 ## Capabilities
 
@@ -32,9 +32,10 @@ visibility policy, and write serialization are applied by higher layers.
 
 ## Kafka Storage Scope
 
-The crate targets Kafka 4.x log directories: 20-digit zero-padded segment file
-names, append-only `.log` files containing v2 `RecordBatch` streams, sparse
-offset/time indexes, transaction indexes, and leader-epoch checkpoints.
+The crate targets Kafka 4.x log directories. These directories use 20-digit
+zero-padded segment file names and append-only `.log` files that contain v2
+`RecordBatch` streams. They also hold sparse offset/time indexes, transaction
+indexes, and leader-epoch checkpoints.
 
 `read` returns decoded `RecordBatch` values. Use `read_raw` when a caller needs
 verbatim bytes for network or tiered-storage transfer.

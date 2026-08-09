@@ -85,6 +85,7 @@ pub struct TopicMetadataEntry {
 impl AdminClient {
     /// Metadata for the named topics. Pass an empty slice to fetch all
     /// topics, per Kafka semantics.
+    ///
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn metadata(&mut self, topics: &[&str]) -> Result<TopicMetadata, AdminError> {
@@ -190,11 +191,11 @@ impl AdminClient {
         Ok(second)
     }
 
-    /// Delete records below each requested partition offset.
+    /// Deletes records below each requested partition offset.
     ///
-    /// `offset == -1` follows Kafka `DeleteRecords` semantics: truncate to the
-    /// partition high watermark. The returned `low_watermark` is the broker's
-    /// resulting log-start offset for that partition.
+    /// `offset == -1` follows Kafka `DeleteRecords` semantics and truncates to
+    /// the partition high watermark. The returned `low_watermark` is the
+    /// broker's resulting log-start offset for that partition.
     ///
     /// # Errors
     ///
@@ -223,9 +224,9 @@ impl AdminClient {
         Ok(outcomes)
     }
 
-    /// Fetch Metadata, find the controller's `host:port`, and replace
-    /// `self.conn` with a connection to it. Used by the per-method
-    /// `NOT_CONTROLLER` retry paths above.
+    /// Fetches Metadata, finds the controller's `host:port`, and replaces
+    /// `self.conn` with a connection to it. The per-method `NOT_CONTROLLER`
+    /// retry paths above use it.
     async fn refresh_controller_connection(&mut self) -> Result<(), AdminError> {
         let md_resp = self.conn.send(build_metadata(&[])).await?;
         let controller_addr =
@@ -650,9 +651,9 @@ mod tests {
     // decides whether to retry, and the metadata-response → host:port
     // resolver — so a refactor can't silently flip either one.
 
-    /// Spec test name: `not_controller_triggers_one_retry` (predicate
-    /// half). Verifies that `any_not_controller` returns `true` iff at
-    /// least one outcome carries the `NOT_CONTROLLER (41)` error code.
+    /// Spec test name: `not_controller_triggers_one_retry`, the predicate
+    /// half. It verifies that `any_not_controller` returns `true` iff at least
+    /// one outcome carries the `NOT_CONTROLLER (41)` error code.
     #[test]
     fn any_not_controller_predicate_matches_code_41() {
         let outcomes = vec![
@@ -681,12 +682,12 @@ mod tests {
         assert2::assert!(!any_not_controller(&all_ok, |o| o.error.as_ref()));
     }
 
-    /// Spec test name: `repeated_not_controller_errors_return_exhausted`
-    /// (predicate half). Non-`NOT_CONTROLLER` errors must NOT trigger
-    /// the retry path — only code 41 does. Combined with the integration
-    /// test, this locks the retry-eligibility check: if the predicate
-    /// fired on, say, `TOPIC_ALREADY_EXISTS`, callers would see spurious
-    /// reconnects + `NotControllerExhausted` returns on real failures.
+    /// Spec test name: `repeated_not_controller_errors_return_exhausted`, the
+    /// predicate half. Non-`NOT_CONTROLLER` errors must NOT trigger the retry
+    /// path. Only code 41 does. With the integration test, this locks the
+    /// retry-eligibility check. If the predicate fired on, for example,
+    /// `TOPIC_ALREADY_EXISTS`, callers would see spurious reconnects and
+    /// `NotControllerExhausted` returns on real failures.
     #[test]
     fn any_not_controller_ignores_other_errors() {
         let outcomes = vec![CreateTopicOutcome {
@@ -703,12 +704,12 @@ mod tests {
 
     // ── controller_endpoint resolver ───────────────────────────────
 
-    /// Spec test name: `connect_walks_bootstrap_list` (resolver half —
-    /// the actual bootstrap-walking integration coverage lives in
-    /// `tests/connect.rs`). `controller_endpoint` extracts the
-    /// `host:port` of the broker whose `node_id` matches the metadata
-    /// response's `controller_id`. This is the address the
-    /// `NOT_CONTROLLER` retry path reconnects to.
+    /// Spec test name: `connect_walks_bootstrap_list`, the resolver half. The
+    /// bootstrap-walking integration coverage itself lives in
+    /// `tests/connect.rs`. `controller_endpoint` extracts the `host:port` of
+    /// the broker whose `node_id` matches the metadata response's
+    /// `controller_id`. This is the address the `NOT_CONTROLLER` retry path
+    /// reconnects to.
     #[test]
     fn controller_endpoint_picks_broker_with_matching_node_id() {
         use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseBroker};
@@ -736,10 +737,9 @@ mod tests {
         assert2::assert!(addr.as_deref() == Some("h2:9093"));
     }
 
-    /// When the controller id doesn't appear in the broker list (e.g.
-    /// the cluster is mid-failover), `controller_endpoint` returns
-    /// `None`, which the retry path maps to
-    /// `AdminError::NotControllerExhausted`.
+    /// When the controller id does not appear in the broker list, for example
+    /// when the cluster is mid-failover, `controller_endpoint` returns `None`.
+    /// The retry path maps that to `AdminError::NotControllerExhausted`.
     #[test]
     fn controller_endpoint_returns_none_when_no_match() {
         use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseBroker};

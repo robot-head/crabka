@@ -1,8 +1,11 @@
-//! `SchemaRegistry` CRD. Deploys the standalone `crabka-schema-registry`
-//! service (a Kafka client of the broker; state lives in `_schemas`).
-//! Stateless — N replicas join the `"sr"` election group, one is elected
-//! primary, the rest forward writes. Associated with a managed `Kafka` via
-//! the `crabka.io/cluster` label (mirrors `KafkaTopic`).
+//! `SchemaRegistry` CRD.
+//!
+//! This CRD deploys the standalone `crabka-schema-registry` service. The
+//! service is a Kafka client of the broker, and its state lives in
+//! `_schemas`. The service is stateless. N replicas join the `"sr"`
+//! election group. The group elects one primary, and the other replicas
+//! forward the writes to it. The `crabka.io/cluster` label links the CR to
+//! a managed `Kafka`, as it does for `KafkaTopic`.
 
 use crabka_units::{ByteSize, Time};
 use kube::CustomResource;
@@ -23,7 +26,8 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaRegistrySpec {
-    /// Stateless replicas; all join the election group. Default 1.
+    /// Number of stateless replicas. All of them join the election
+    /// group. Default 1.
     #[schemars(range(min = 1, max = 1_000))]
     pub replicas: i32,
 
@@ -32,10 +36,11 @@ pub struct SchemaRegistrySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
 
-    /// Override bootstrap for an external/unmanaged Kafka. When unset,
-    /// bootstrap is derived from the `crabka.io/cluster`-labeled Kafka's
-    /// internal listener. (Secured external brokers are a future
-    /// enhancement; the managed/label path is the secured one.)
+    /// Bootstrap override for an external Kafka that the operator does
+    /// not manage. When unset, the operator derives the bootstrap from the
+    /// internal listener of the Kafka with the `crabka.io/cluster` label.
+    /// Secured external brokers are future work. The managed path with the
+    /// label is the secured one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_servers: Option<String>,
 
@@ -64,11 +69,12 @@ pub struct SchemaRegistrySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_checks: Option<SchemaRegistryHealthChecks>,
 
-    /// SR → broker client security (SASL / TLS). Maps to `--kafka-*` flags.
+    /// Client security from the SR to the broker, with SASL and TLS. It
+    /// maps to the `--kafka-*` flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_client: Option<SchemaRegistryKafkaClient>,
 
-    /// Server TLS (HTTPS REST). None = plain HTTP.
+    /// Server TLS for the HTTPS REST surface. `None` means plain HTTP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<SchemaRegistryTls>,
 
@@ -76,7 +82,7 @@ pub struct SchemaRegistrySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication: Option<SchemaRegistryAuthn>,
 
-    /// REST authorization (Kafka-ACL based).
+    /// REST authorization, based on the Kafka ACLs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<SchemaRegistryAuthz>,
 
@@ -193,7 +199,8 @@ pub struct SchemaRegistryHealthChecks {
 #[serde(rename_all = "camelCase")]
 pub struct CertManagerIssuerRef {
     pub name: String,
-    /// Defaults to `Issuer`; set `ClusterIssuer` for cluster-scoped issuers.
+    /// The default is `Issuer`. Set `ClusterIssuer` for an issuer with
+    /// cluster scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// API group. Default `cert-manager.io`.
@@ -201,23 +208,26 @@ pub struct CertManagerIssuerRef {
     pub group: Option<String>,
 }
 
-/// Server TLS: cert/key from a Secret or a cert-manager issuer, plus optional
-/// client-cert verification.
+/// Server TLS.
+///
+/// The cert and the key come from a Secret or from a cert-manager issuer.
+/// Client-cert verification is optional.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaRegistryTls {
-    /// Secret (type kubernetes.io/tls) with `tls.crt` + `tls.key`.
-    /// Mutually exclusive with `issuerRef`.
+    /// Secret of type kubernetes.io/tls with `tls.crt` and `tls.key`. Do
+    /// not set it together with `issuerRef`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_name: Option<String>,
-    /// cert-manager issuer reference. Mutually exclusive with `secretName`.
+    /// cert-manager issuer reference. Do not set it together with
+    /// `secretName`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_ref: Option<CertManagerIssuerRef>,
     /// Client-cert mode. Default `Disabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_auth: Option<TlsClientAuth>,
-    /// Secret with `ca.crt` to verify client certs (required when
-    /// `clientAuth` != Disabled).
+    /// Secret with `ca.crt` that verifies the client certs. It is
+    /// necessary when `clientAuth` is not Disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_ca_secret_name: Option<String>,
 }
@@ -247,9 +257,9 @@ pub struct SchemaRegistryAuthn {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BasicAuthn {
-    /// Secret with a single key holding newline-separated `user:cred`
-    /// entries (cred = plaintext or `$2…` bcrypt). The key is mounted as
-    /// a file and passed via `--basic-auth-file`.
+    /// Secret with one key that holds `user:cred` entries, one on each
+    /// line. The cred is plaintext or a `$2…` bcrypt hash. The operator
+    /// mounts the key as a file and gives it in `--basic-auth-file`.
     pub users_secret_name: String,
     /// Secret key holding the htpasswd-style file. Default `users`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -263,7 +273,7 @@ pub struct BearerAuthn {
     /// JWT claim used as the principal name. Default `sub`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_claim: Option<String>,
-    /// JWKS endpoint URI (required when `mode` = `Jwks`).
+    /// JWKS endpoint URI. It is necessary when `mode` is `Jwks`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_endpoint_uri: Option<String>,
     /// Expected `iss` claim value.
@@ -272,12 +282,12 @@ pub struct BearerAuthn {
     /// Expected `aud` claim value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_expected_audience: Option<String>,
-    /// Secret name whose `ca.crt` key is mounted and passed as
-    /// `--bearer-jwks-ca`.
+    /// Name of the Secret whose `ca.crt` key the operator mounts and
+    /// gives in `--bearer-jwks-ca`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_tls_secret_name: Option<String>,
-    /// JWT claim to use as the principal when mode is `Jwks`. Overrides
-    /// `principalClaim` for JWKS paths.
+    /// JWT claim to use as the principal when the mode is `Jwks`. It
+    /// overrides `principalClaim` on the JWKS paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_principal_claim: Option<String>,
     /// JWKS key-set refresh interval. Default `1m`.
@@ -292,9 +302,11 @@ pub struct BearerAuthn {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum BearerMode {
-    /// Dev-only: accept unsigned JWTs (no signature verification).
+    /// For development only. Accept unsigned JWTs and verify no
+    /// signature.
     Unsecured,
-    /// Production: verify JWT signatures against a remote JWKS endpoint.
+    /// For production. Verify the JWT signatures against a remote JWKS
+    /// endpoint.
     Jwks,
 }
 
@@ -315,11 +327,13 @@ pub struct SchemaRegistryAuthz {
     pub acl_refresh: Option<Time>,
 }
 
-/// SR → broker client security. Maps to the binary's `--kafka-*` flags.
+/// Client security from the SR to the broker.
+///
+/// It maps to the `--kafka-*` flags of the binary.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaRegistryKafkaClient {
-    /// e.g. `PLAINTEXT`, `SASL_PLAINTEXT`, `SSL`, `SASL_SSL`.
+    /// For example `PLAINTEXT`, `SASL_PLAINTEXT`, `SSL`, or `SASL_SSL`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,24 +342,24 @@ pub struct SchemaRegistryKafkaClient {
     pub tls: Option<KafkaClientTls>,
 }
 
-/// SASL credentials for the SR → broker connection.
+/// SASL credentials for the connection from the SR to the broker.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaClientSasl {
-    /// e.g. `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`.
+    /// For example `PLAIN`, `SCRAM-SHA-256`, or `SCRAM-SHA-512`.
     pub mechanism: String,
-    /// Name of the Secret holding `username` and `password` keys.
+    /// Name of the Secret that holds the `username` and `password` keys.
     pub secret_ref: String,
 }
 
-/// TLS settings for the SR → broker connection.
+/// TLS settings for the connection from the SR to the broker.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaClientTls {
-    /// Secret with a `ca.crt` key used as the broker CA.
+    /// Secret with a `ca.crt` key that gives the broker CA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_secret_name: Option<String>,
-    /// Override the server name used for TLS SNI / hostname verification.
+    /// Override the server name for TLS SNI and hostname verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_name_override: Option<String>,
 }
@@ -353,7 +367,8 @@ pub struct KafkaClientTls {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaRegistryStatus {
-    /// Kubernetes-style conditions: `KafkaReady`, `Available`, `Ready`.
+    /// Kubernetes-style conditions: `KafkaReady`, `Available`, and
+    /// `Ready`.
     #[serde(default)]
     pub conditions: Vec<crate::crd::KafkaCondition>,
     /// `metadata.generation` of the last successfully-reconciled spec.
@@ -363,7 +378,7 @@ pub struct SchemaRegistryStatus {
     pub replicas: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_replicas: Option<i32>,
-    /// In-cluster REST URL clients use.
+    /// In-cluster REST URL that the clients use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }

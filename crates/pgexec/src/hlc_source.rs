@@ -1,19 +1,19 @@
 //! [`TimestampSource`] backed by a node-local Hybrid Logical Clock.
 //!
-//! This is the distributed-mode ([`Hlc`]) implementation of the timestamp seam:
-//! every allocation is minted from the local [`HybridLogicalClock`] with no RPC
+//! This is the distributed-mode ([`Hlc`]) implementation of the timestamp seam.
+//! Every allocation is minted from the local [`HybridLogicalClock`] with no RPC
 //! to a central authority. Wall-clock time is *injected* through the
-//! [`WallClock`] trait — a [`SystemWallClock`] in production, a
-//! [`ManualWallClock`] under test — mirroring the `TsoClock` injection the
+//! [`WallClock`] trait, as a [`SystemWallClock`] in production and a
+//! [`ManualWallClock`] under test. This mirrors the `TsoClock` injection the
 //! range-0 oracle uses for deterministic timing.
 //!
-//! The seam's durable-horizon fencing survives: the `_after` variants fold the
-//! horizon into the clock (an `observe`) before minting, so every stamp strictly
-//! exceeds the durable horizon by construction rather than being checked and
-//! rejected after the fact. [`HlcTimestampSource::seeded_from_horizon`] is the
-//! promotion constructor — a solo tenant's persisted `LogicalTso` horizon (a
-//! packed stamp with physical component zero) is folded in so the first
-//! distributed stamp dominates it.
+//! The seam's durable-horizon fencing survives. The `_after` variants fold the
+//! horizon into the clock, which is an `observe`, before they mint. Every stamp
+//! therefore exceeds the durable horizon by construction, and no stamp is
+//! checked and rejected after the fact.
+//! [`HlcTimestampSource::seeded_from_horizon`] is the promotion constructor. It
+//! folds in a solo tenant's persisted `LogicalTso` horizon, a packed stamp with
+//! physical component zero, so the first distributed stamp dominates it.
 //!
 //! [`Hlc`]: crate::hlc
 
@@ -36,14 +36,14 @@ use crate::{
 
 /// Injected wall-clock source, in milliseconds since the Unix epoch.
 ///
-/// The clock rules never read `SystemTime` directly so allocation is
-/// deterministic under test; production wires [`SystemWallClock`].
+/// The clock rules never read `SystemTime` directly, so allocation is
+/// deterministic under test. Production wires [`SystemWallClock`].
 pub trait WallClock: Send + Sync {
     /// Current wall-clock reading in milliseconds since the Unix epoch.
     fn now_ms(&self) -> u64;
 }
 
-/// Production [`WallClock`] reading the system clock.
+/// Production [`WallClock`] that reads the system clock.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemWallClock;
 
@@ -62,13 +62,13 @@ impl WallClock for SystemWallClock {
 pub struct ManualWallClock(AtomicU64);
 
 impl ManualWallClock {
-    /// Create a manual clock reading `now_ms`.
+    /// Create a manual clock whose reading is `now_ms`.
     #[must_use]
     pub fn new(now_ms: u64) -> Self {
         Self(AtomicU64::new(now_ms))
     }
 
-    /// Set the reading returned by subsequent [`WallClock::now_ms`] calls.
+    /// Set the reading that later [`WallClock::now_ms`] calls return.
     pub fn set(&self, now_ms: u64) {
         self.0.store(now_ms, Ordering::Release);
     }
@@ -80,14 +80,14 @@ impl WallClock for ManualWallClock {
     }
 }
 
-/// Fault-injection [`WallClock`] decorator applying a fixed signed skew.
+/// Fault-injection [`WallClock`] decorator that applies a fixed signed skew.
 ///
 /// Load and chaos tests wrap a node's [`SystemWallClock`] in this decorator to
-/// emulate a wall clock running ahead of (positive skew) or behind (negative
-/// skew) its peers. Arithmetic saturates in both directions — a negative skew
-/// larger than the inner reading clamps to zero rather than panicking — so a
-/// skewed clock is safe under any inner reading. Testing seam only, not a
-/// production configuration.
+/// emulate a wall clock that runs ahead of its peers, with a positive skew, or
+/// behind them, with a negative skew. The arithmetic saturates in both
+/// directions. A negative skew larger than the inner reading clamps to zero and
+/// does not panic, so a skewed clock is safe under any inner reading. This is a
+/// testing seam only, and not a production configuration.
 #[derive(Clone)]
 pub struct SkewedWallClock {
     inner: Arc<dyn WallClock>,
@@ -104,7 +104,7 @@ impl std::fmt::Debug for SkewedWallClock {
 }
 
 impl SkewedWallClock {
-    /// Wrap `inner`, shifting every reading by `skew_ms` milliseconds.
+    /// Wrap `inner` and shift every reading by `skew_ms` milliseconds.
     #[must_use]
     pub fn new(inner: Arc<dyn WallClock>, skew_ms: i64) -> Self {
         Self { inner, skew_ms }
@@ -125,20 +125,23 @@ impl WallClock for SkewedWallClock {
 
 /// Node-local Hybrid Logical Clock exposed as a [`TimestampSource`].
 ///
-/// Allocation draws straight off the local [`HybridLogicalClock`]; `observe`
-/// folds a remote stamp under the HLC receive rule; `uncertainty_window`
-/// reports the configured `max_offset` (in the packed timestamp domain) that the
-/// multi-node read path will later size its restart window against. A
-/// single-source deployment — one `HlcTimestampSource` fanned to every engine —
-/// is correct on its own: there is one timestamp authority, so no cross-node
-/// skew and no read-restart. Multi-node stamping (folding participant HLCs at
-/// the cross-range commit site) and uncertainty-driven read-restart are the
-/// documented follow-up.
+/// Allocation draws directly off the local [`HybridLogicalClock`]. `observe`
+/// folds a remote stamp under the HLC receive rule. `uncertainty_window`
+/// reports the configured `max_offset`, in the packed timestamp domain, that
+/// the multi-node read path will later size its restart window against.
+///
+/// A single-source deployment, with one `HlcTimestampSource` fanned to every
+/// engine, is correct on its own. There is one timestamp authority, so there is
+/// no cross-node skew and no read-restart. Multi-node stamping, which folds
+/// participant HLCs at the cross-range commit site, and uncertainty-driven
+/// read-restart are the documented follow-up.
 pub struct HlcTimestampSource {
     clock: HybridLogicalClock,
     wall: Arc<dyn WallClock>,
-    /// Maximum clock offset in the packed timestamp domain (physical ms shifted
-    /// into the high bits). Zero means an empty uncertainty window.
+    /// Maximum clock offset in the packed timestamp domain, where physical
+    /// milliseconds are shifted into the high bits.
+    ///
+    /// Zero means an empty uncertainty window.
     max_offset: u64,
 }
 
@@ -163,13 +166,14 @@ impl HlcTimestampSource {
         }
     }
 
-    /// Build a source whose clock is seeded so no stamp it mints can fall at or
-    /// below `horizon`.
+    /// Build a source whose clock is seeded so that no stamp it mints can fall
+    /// at or below `horizon`.
     ///
-    /// This is the promotion constructor: `horizon` is the fenced solo tenant's
-    /// persisted `LogicalTso` horizon (a packed stamp with physical component
-    /// zero). Seeding folds it in so the first — and, by monotonicity, every —
-    /// distributed stamp strictly dominates it.
+    /// This is the promotion constructor. `horizon` is the fenced solo tenant's
+    /// persisted `LogicalTso` horizon, a packed stamp with physical component
+    /// zero. The seed folds that horizon in, so the first distributed stamp
+    /// strictly dominates it, and by monotonicity every later stamp does
+    /// too.
     #[must_use]
     pub fn seeded_from_horizon(horizon: u64, wall: Arc<dyn WallClock>, max_offset_ms: u64) -> Self {
         Self {
@@ -180,7 +184,7 @@ impl HlcTimestampSource {
     }
 
     /// Atomically reserve a contiguous run of `count` stamps against the
-    /// current wall reading, returning the first stamp of the run.
+    /// current wall reading, and return the first stamp of the run.
     ///
     /// See [`HybridLogicalClock::allocate_batch`] for the reservation rule.
     /// Returns [`None`] only when the reservation would overflow the `u64`
@@ -195,7 +199,8 @@ impl HlcTimestampSource {
         self.clock.now(self.wall.now_ms())
     }
 
-    /// Fold `floor` into the clock and mint a stamp strictly greater than it.
+    /// Fold `floor` into the clock and mint a stamp strictly greater than
+    /// `floor`.
     fn mint_after(&self, floor: u64) -> u64 {
         self.clock.observe(floor, self.wall.now_ms())
     }

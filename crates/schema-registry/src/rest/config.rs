@@ -1,5 +1,5 @@
-//! `/config` endpoints. Stored and replayed; compatibility enforcement lives
-//! with the format validators.
+//! `/config` endpoints. The registry stores and replays them. Compatibility
+//! enforcement lives with the format validators.
 
 use axum::{
     extract::{Path, State},
@@ -100,7 +100,8 @@ pub async fn put_subject(
     ))
 }
 
-/// DELETE /config/{subject} — remove per-subject compat override, revert to global.
+/// DELETE /config/{subject}. It removes the per-subject compat override and
+/// reverts to the global level.
 ///
 /// Returns 200 `{"compatibility": "<deleted-level>"}` or 404 `SubjectNotFound`
 /// if no per-subject override was set.

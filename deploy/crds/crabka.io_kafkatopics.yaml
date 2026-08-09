@@ -23,15 +23,17 @@ spec:
                 additionalProperties:
                   type: string
                 description: |-
-                  Opaque topic-level config (`retention.ms`, `cleanup.policy`,
-                  etc.). Reconciled via `IncrementalAlterConfigs` SET/DELETE diff
-                  against the cluster's current dynamic-topic overrides.
+                  Opaque topic-level config, such as `retention.ms` and
+                  `cleanup.policy`. The operator reconciles it with an
+                  `IncrementalAlterConfigs` SET and DELETE diff against the cluster's
+                  current dynamic-topic overrides.
                 nullable: true
                 type: object
               partitions:
                 description: |-
-                  Number of partitions. Increases honored via `CreatePartitions`;
-                  decreases rejected with `ImmutableFieldChanged`.
+                  Number of partitions. The operator applies increases through
+                  `CreatePartitions`. The operator rejects decreases with
+                  `ImmutableFieldChanged`.
                 format: int32
                 maximum: 1000000.0
                 minimum: 1.0
@@ -39,13 +41,12 @@ spec:
               preserveTopic:
                 default: false
                 description: |-
-                  When `true`, CRD delete still removes the finalizer but skips
-                  the `DeleteTopics` call so the Kafka topic survives. Default
-                  `false`.
+                  When `true`, a CRD delete still removes the finalizer but skips the
+                  `DeleteTopics` call, so the Kafka topic survives. Default: `false`.
                 type: boolean
               replicas:
                 description: |-
-                  Replication factor. Changes rejected with
+                  Replication factor. The operator rejects changes with
                   `ImmutableFieldChanged` until partition reassignment lands.
                 format: int32
                 maximum: 1000.0
@@ -54,8 +55,9 @@ spec:
               topicName:
                 description: |-
                   Optional override for the Kafka topic name. Defaults to
-                  `metadata.name`. Validated at reconcile time against Kafka's
-                  rules (length ≤ 249, chars `[A-Za-z0-9._-]`, not `.` or `..`).
+                  `metadata.name`. The operator validates it at reconcile time against
+                  Kafka's rules: length ≤ 249, characters `[A-Za-z0-9._-]`, and not `.`
+                  or `..`.
                 nullable: true
                 type: string
             required:
@@ -67,7 +69,7 @@ spec:
             properties:
               conditions:
                 default: []
-                description: Standard Kubernetes-style condition list. Surfaces `Ready`.
+                description: Standard Kubernetes-style condition list. It shows `Ready`.
                 items:
                   properties:
                     lastTransitionTime:
@@ -83,7 +85,7 @@ spec:
                       description: '`True`, `False`, or `Unknown`.'
                       type: string
                     type:
-                      description: e.g. `Ready`.
+                      description: For example, `Ready`.
                       type: string
                   required:
                   - lastTransitionTime
@@ -95,17 +97,21 @@ spec:
                 type: array
               observedGeneration:
                 description: |-
-                  `metadata.generation` of the last successfully-reconciled spec
-                  (i.e. last time we wrote `Ready=True reason=Ready`).
+                  `metadata.generation` of the last successfully-reconciled spec. That
+                  is the last time the operator wrote `Ready=True reason=Ready`.
                 format: int64
                 nullable: true
                 type: integer
               topicId:
-                description: Cluster-assigned topic UUID, populated once the topic exists.
+                description: |-
+                  Cluster-assigned topic UUID. The operator fills it in once the topic
+                  exists.
                 nullable: true
                 type: string
               topicName:
-                description: Effective topic name (defaulted if `spec.topicName` unset).
+                description: |-
+                  Effective topic name. The operator supplies a default if
+                  `spec.topicName` is unset.
                 nullable: true
                 type: string
             type: object

@@ -17,9 +17,9 @@ fn text_of(sql: &str) -> String {
     }
 }
 
-/// The SQLSTATE and message a failing expression reports, taken from whichever
-/// of the plan-time (`infer_type`) and run-time (`eval`) paths rejects it —
-/// exactly the order a real statement goes through.
+/// The SQLSTATE and message a failing expression reports. It comes from
+/// whichever path rejects the expression, the plan-time `infer_type` or the
+/// run-time `eval`, in exactly the order a real statement goes through.
 fn error_of(sql: &str) -> (String, String) {
     let ctx = EvalCtx::test_default();
     let expr = pexpr(sql).expect("parse");
@@ -125,7 +125,7 @@ fn width_bucket_numbers_both_bound_orders() {
 }
 
 /// PostgreSQL guarantees the degree functions return EXACT answers at the
-/// quadrant marks; a naive `sin(x * pi / 180)` misses several of these.
+/// quadrant marks. A naive `sin(x * pi / 180)` misses several of these.
 #[test]
 fn degree_trigonometry_is_exact_at_the_quadrant_marks() {
     let cases = [
@@ -202,7 +202,7 @@ fn hyperbolic_and_root_values() {
     }
 }
 
-/// PostgreSQL's `cbrt` is the C library's, which is NOT correctly rounded —
+/// PostgreSQL's `cbrt` is the C library's, which is NOT correctly rounded.
 /// `cbrt(27)` lands one ULP above 3. Rust's `f64::cbrt` returns exactly 3, so
 /// the ported routine is what keeps crabka's answer identical to the oracle's.
 #[test]
@@ -251,7 +251,7 @@ fn result_types_follow_the_argument_family() {
     }
 }
 
-/// Every function in the module is strict: one NULL argument makes the result
+/// Every function in the module is strict. One NULL argument makes the result
 /// NULL rather than an error.
 #[test]
 fn every_math_function_is_strict() {
@@ -294,8 +294,8 @@ fn random_stays_inside_its_bounds() {
     assert!(sqlstate("random(10, 1)") == "22023");
 }
 
-/// The same seed must replay the same stream, and different seeds must not
-/// share one — the property `setseed` exists to provide.
+/// The same seed must replay the same stream, and different seeds must not share
+/// one. That is the property `setseed` exists to give.
 #[test]
 fn the_generator_is_reproducible_per_seed() {
     // Compare the raw generator words rather than the doubles derived from
@@ -316,8 +316,8 @@ fn the_generator_is_reproducible_per_seed() {
     }
 }
 
-/// The bounded draw must never leave `[0, range]`, for ranges either side of a
-/// power-of-two boundary (where the rejection loop does the work).
+/// The bounded draw must never leave `[0, range]`, for ranges on either side of
+/// a power-of-two boundary, where the rejection loop does the work.
 #[test]
 fn the_bounded_draw_never_escapes_its_range() {
     let mut prng = Prng::seeded(12345);

@@ -6,21 +6,25 @@ use std::{
 use crate::result::Annotations;
 
 tokio::task_local! {
-    /// Per-query annotation sink. Scoped once at each public query entry point
-    /// so the deeply recursive evaluation path can record warnings/infos without
-    /// threading a collector argument through every call site.
+    /// Per-query annotation sink.
+    ///
+    /// Each public query entry point scopes this once. The deeply recursive
+    /// evaluation path can then record warnings and infos without a collector
+    /// argument at every call site.
     pub(crate) static ANNOTATIONS: RefCell<Annotations>;
 }
 
-/// Record a `PromQL warning:`-class annotation for the current query, if a sink
-/// is in scope. No-op outside a scoped query (e.g. unit tests calling internals
-/// directly), so emission is always safe.
+/// Records a `PromQL warning:`-class annotation for the current query.
+///
+/// This function does nothing if no sink is in scope. A unit test that calls
+/// internals directly is outside a scoped query, so a call is always safe.
 pub(super) fn emit_warning(message: impl Into<String>) {
     let _ = ANNOTATIONS.try_with(|sink| sink.borrow_mut().warn(message));
 }
 
-/// Record a `PromQL info:`-class annotation for the current query, if a sink is
-/// in scope. See `emit_warning`.
+/// Records a `PromQL info:`-class annotation for the current query.
+///
+/// This function does nothing if no sink is in scope. See `emit_warning`.
 pub(super) fn emit_info(message: impl Into<String>) {
     let _ = ANNOTATIONS.try_with(|sink| sink.borrow_mut().info(message));
 }
@@ -32,11 +36,13 @@ fn mixed_classic_native_warning(metric: &str) -> String {
     )
 }
 
-/// Exact Prometheus `InvalidQuantileWarning` text for a `quantile` /
-/// `quantile_over_time` phi outside `[0, 1]` (or NaN). Like the
-/// `histogram_quantile` family, Prometheus does NOT abort on a bad phi: it
-/// returns signed `+/-Inf` / `NaN` and raises this warning. `got` renders through
-/// the canonical Prometheus float formatter, matching Go's `%v`.
+/// Exact Prometheus `InvalidQuantileWarning` text for a bad phi.
+///
+/// A bad phi is a `quantile` or `quantile_over_time` phi outside `[0, 1]`, or
+/// NaN. Prometheus does not abort on a bad phi. It returns signed `+/-Inf` or
+/// `NaN` and raises this warning, the same as the `histogram_quantile` family.
+/// `got` renders through the canonical Prometheus float formatter, which
+/// matches Go's `%v`.
 pub(super) fn invalid_quantile_warning(got: f64) -> String {
     format!(
         "PromQL warning: quantile value should be between 0 and 1, got {}",
@@ -44,15 +50,19 @@ pub(super) fn invalid_quantile_warning(got: f64) -> String {
     )
 }
 
-/// Whether `phi` is a valid quantile in `[0, 1]`. An out-of-range or NaN phi is
-/// still evaluated (Prometheus returns `+/-Inf`/`NaN` + an
-/// `InvalidQuantileWarning` rather than erroring); this only gates the warning.
+/// Returns true if `phi` is a valid quantile in `[0, 1]`.
+///
+/// The engine still evaluates an out-of-range or NaN phi. Prometheus returns
+/// `+/-Inf` or `NaN` with an `InvalidQuantileWarning` and does not error. This
+/// function only gates the warning.
 pub(super) fn is_valid_quantile(phi: f64) -> bool {
     (0.0..=1.0).contains(&phi)
 }
 
-/// Emit one `MixedClassicNativeHistogramsWarning` per group key that carried
-/// both a classic and a native histogram for the same labelset.
+/// Emits one `MixedClassicNativeHistogramsWarning` per mixed group key.
+///
+/// A mixed group key held both a classic and a native histogram for the same
+/// label set.
 pub(super) fn warn_mixed_histograms(
     mixed_keys: &BTreeSet<String>,
     names: &BTreeMap<String, String>,
@@ -66,8 +76,8 @@ pub(super) fn warn_mixed_histograms(
 /// Exact Prometheus `InvalidRatioWarning` text.
 ///
 /// Rust's `f64` `Display` matches Go's `%g` for the integral and one-decimal
-/// ratios this annotation reports (`1` for `1.0`, `1.1` for `1.1`, `-1` for
-/// `-1.0`), so it renders the corpus-asserted text byte-for-byte.
+/// ratios this annotation reports: `1` for `1.0`, `1.1` for `1.1`, and `-1` for
+/// `-1.0`. The rendered text is then byte-for-byte the corpus-asserted text.
 #[cfg(feature = "experimental-functions")]
 pub(super) fn invalid_ratio_warning(got: f64, capped_to: f64) -> String {
     format!(
@@ -75,8 +85,10 @@ pub(super) fn invalid_ratio_warning(got: f64, capped_to: f64) -> String {
     )
 }
 
-/// Exact Prometheus `IncompatibleTypesInBinOpInfo` text for an operator applied
-/// to incompatible operand sample types (e.g. a histogram and a float).
+/// Exact Prometheus `IncompatibleTypesInBinOpInfo` text for incompatible operands.
+///
+/// An operator gets incompatible operand sample types, for example a histogram
+/// and a float.
 pub(super) fn incompatible_types_in_binop_info(
     lhs_type: &str,
     operator: &str,

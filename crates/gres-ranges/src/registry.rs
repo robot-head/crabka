@@ -138,22 +138,22 @@ impl RangeRegistry {
 /// Registry discovery failures.
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
-    /// A retry needed a fresh control-plane layout but this registry has no source.
+    /// A retry needed a fresh control-plane layout, but this registry has no source.
     #[error("range registry has no authoritative refresh source")]
     NoAuthoritativeSource,
     /// The authoritative control-plane lookup failed.
     #[error("authoritative range registry refresh failed: {0}")]
     Authoritative(String),
-    /// Tenant was absent from the control registry.
+    /// The tenant was absent from the control registry.
     #[error("tenant {0} is absent from the registry")]
     TenantMissing(String),
-    /// Requested range had no endpoint in the layout.
+    /// The requested range had no endpoint in the layout.
     #[error("range r{0} is absent from the registry layout")]
     RangeMissing(RangeId),
-    /// Range id cannot be represented locally.
+    /// The local type cannot represent the range id.
     #[error("range id {0} is too large")]
     RangeIdTooLarge(u32),
-    /// Table bound cannot be represented locally.
+    /// The local type cannot represent the table bound.
     #[error("table bound {0} is too large")]
     TableIdTooLarge(u64),
 }

@@ -17,23 +17,26 @@ use super::{
 };
 use crate::{PromqlError, engine::MAX_RESOLUTION_POINTS, parse_promql};
 
-/// Plan query-frontend fan-out for a Prometheus range query.
+/// Plans query-frontend fan-out for a Prometheus range query.
 ///
-/// Time splitting happens first. Sub-range boundaries align to *absolute*
-/// multiples of `split_interval` (Mimir-style): every evaluation timestamp
-/// `start + n*step` is assigned to the absolute split window
-/// `floor(t / split_interval) * split_interval`, and the eval points falling in
-/// one window form one sub-range `[first_eval, last_eval]`. Eval points stay on
-/// the caller's step grid, so each step appears in exactly one sub-range.
+/// Time splitting happens first. Sub-range boundaries align to absolute
+/// multiples of `split_interval`, in the Mimir style. Every evaluation timestamp
+/// `start + n*step` goes to the absolute split window
+/// `floor(t / split_interval) * split_interval`, and the eval points in one
+/// window form one sub-range `[first_eval, last_eval]`. Eval points stay on the
+/// caller's step grid, so each step appears in exactly one sub-range.
 ///
-/// Absolute alignment is what makes the range-result cache reusable across
-/// overlapping queries: an interior split window contains the same eval points
-/// for any query that shares the step phase and fully covers that window, so
-/// the interior sub-range (hence its cache key) is byte-for-byte identical even
-/// when the surrounding window slides. Only the partial leading/trailing
-/// windows clipped by the query bounds differ between such queries.
+/// Absolute alignment makes the range-result cache reusable across overlapping
+/// queries. An interior split window holds the same eval points for any query
+/// that shares the step phase and covers that window in full. The interior
+/// sub-range, and therefore its cache key, is byte-for-byte identical even when
+/// the surrounding window slides. Only the partial leading and trailing windows
+/// clipped by the query bounds differ between such queries.
+///
 /// # Errors
-/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
+///
+/// Returns an error when metric input is malformed, a limit is exceeded, or the
+/// backing WAL, block store, or remote endpoint fails.
 pub fn plan_range_query(
     query: &str,
     start_ms: i64,
@@ -115,12 +118,13 @@ pub fn plan_range_query(
     Ok(subqueries)
 }
 
-/// Reject a range query whose resolution exceeds the per-timeseries point cap,
-/// matching Prometheus's unconditional front-gate
-/// (`(end - start) / step > maxResolution`, integer division, where
-/// `maxResolution` is [`MAX_RESOLUTION_POINTS`]). Enforced before the per-step
-/// fan-out so an abusive resolution errors instead of expanding into ~1e11
-/// sub-queries. `step` is already validated positive by [`plan_range_query`].
+/// Rejects a range query whose resolution exceeds the per-timeseries point cap.
+///
+/// The check matches Prometheus's unconditional front-gate:
+/// `(end - start) / step > maxResolution`, with integer division, where
+/// `maxResolution` is [`MAX_RESOLUTION_POINTS`]. It runs before the per-step
+/// fan-out, so an abusive resolution errors instead of an expansion into ~1e11
+/// sub-queries. [`plan_range_query`] already validates that `step` is positive.
 fn check_range_resolution(start_ms: i64, end_ms: i64, step: Time) -> Result<(), PromqlError> {
     let step_ms = step.millis_i64();
     if step_ms <= 0 {
@@ -137,9 +141,10 @@ fn check_range_resolution(start_ms: i64, end_ms: i64, step: Time) -> Result<(), 
     Ok(())
 }
 
-/// Absolute split window a timestamp belongs to: the greatest multiple of
-/// `split_interval` that is `<= ts`. Uses flooring division so negative
-/// timestamps still align downward.
+/// The absolute split window a timestamp belongs to.
+///
+/// The window is the greatest multiple of `split_interval` that is `<= ts`. This
+/// function uses flooring division, so negative timestamps still align downward.
 fn absolute_split_window(ts: i64, split_interval: i64) -> i64 {
     let quotient = ts.div_euclid(split_interval);
     quotient.saturating_mul(split_interval)

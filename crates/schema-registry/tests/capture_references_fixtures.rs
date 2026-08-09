@@ -1,24 +1,28 @@
 //! Golden schema-references-lifecycle capture harness for Crabka Schema Registry.
 //!
 //! Boots a real `mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0` container against an
-//! in-process Crabka broker (same networking as `capture_admin_fixtures.rs`:
-//! the broker binds `0.0.0.0:9092` and advertises `host.docker.internal:9092`,
-//! while the host connects directly on `127.0.0.1:9092`), then drives the
-//! schema-references lifecycle for all three formats (Avro, Protobuf, JSON):
-//! for each format it registers a base schema, then a referrer that references
-//! it, then captures the REST status + body that cp returns for the
-//! referrer's id, the `references` array shape on `GET /schemas/ids/{id}`, the
-//! `referencedby` shape, the delete-protection code when deleting a referenced
-//! base, and the reference-not-found code for a dangling reference. Two
-//! fixtures are produced:
+//! in-process Crabka broker, with the same networking as
+//! `capture_admin_fixtures.rs`. The broker binds `0.0.0.0:9092` and advertises
+//! `host.docker.internal:9092`, while the host connects directly on
+//! `127.0.0.1:9092`.
 //!
-//!   * `tests/fixtures/references/rest.json`    — the REST status + parsed body
-//!     that cp returns for every op in the references lifecycle (the oracle for
-//!     ids / codes / `referencedby` shape of the references slice).
-//!   * `tests/fixtures/references/records.json` — the exact `(offset, key,
-//!     value)` bytes cp wrote to the `_schemas` topic over the lifecycle,
-//!     dumped by fetching partition 0 directly from the host broker (the goal
-//!     is the SCHEMA values carrying a non-empty `references` array).
+//! The harness then drives the schema-references lifecycle for all three
+//! formats: Avro, Protobuf, and JSON. For each format it registers a base
+//! schema, then a referrer that references it. It then captures the REST status
+//! and body that cp returns for the referrer's id, the `references` array shape
+//! on `GET /schemas/ids/{id}`, the `referencedby` shape, the delete-protection
+//! code for a delete of a referenced base, and the reference-not-found code for
+//! a dangling reference. Two fixtures are produced:
+//!
+//!   * `tests/fixtures/references/rest.json`: the REST status and parsed body
+//!     that cp returns for every op in the references lifecycle. It is the
+//!     oracle for the ids, codes, and `referencedby` shape of the references
+//!     slice.
+//!   * `tests/fixtures/references/records.json`: the exact `(offset, key,
+//!     value)` bytes cp wrote to the `_schemas` topic over the lifecycle. The
+//!     harness dumps them by fetching partition 0 directly from the host
+//!     broker. The goal is the SCHEMA values that carry a non-empty
+//!     `references` array.
 //!
 //! ```text
 //! cargo test -p crabka-schema-registry --test capture_references_fixtures -- --ignored --nocapture
@@ -244,10 +248,10 @@ async fn drive(
     })
 }
 
-/// Extract the integer schema id from a recorded REST result's body, panicking
-/// with the op label + body if it is absent (e.g. cp returned an error). Used
-/// to thread a registered referrer's id into the subsequent `GET
-/// /schemas/ids/{id}` lookup.
+/// Extract the integer schema id from a recorded REST result's body. Panics
+/// with the op label and body if the id is absent, for example when cp returned
+/// an error. Callers use it to thread a registered referrer's id into the later
+/// `GET /schemas/ids/{id}` lookup.
 fn id_from(result: &serde_json::Value) -> i64 {
     result["body"]["id"].as_i64().unwrap_or_else(|| {
         panic!(
@@ -260,12 +264,12 @@ fn id_from(result: &serde_json::Value) -> i64 {
 /// Drive the references lifecycle for one format and append every op's REST
 /// result to `results`.
 ///
-/// `prefix` namespaces the subjects (e.g. `av_`). `base_subject` /
-/// `referrer_subject` are the two subjects; `base_body` registers the base
-/// schema and `referrer_body` registers the referrer (whose `references` array
-/// points at `base_subject` version 1). `missing_body` registers a schema with
-/// a dangling reference to a non-existent subject (the reference-not-found
-/// path). The sequence per format is:
+/// `prefix` namespaces the subjects, for example `av_`. `base_subject` and
+/// `referrer_subject` are the two subjects. `base_body` registers the base
+/// schema, and `referrer_body` registers the referrer, whose `references` array
+/// points at `base_subject` version 1. `missing_body` registers a schema with a
+/// dangling reference to a non-existent subject, which is the
+/// reference-not-found path. The sequence per format is:
 ///
 ///   1. register base               → its id
 ///   2. register referrer (w/ refs) → its id (proves refs identity)
@@ -379,8 +383,8 @@ async fn run_format_lifecycle(
     );
 }
 
-/// Drive the full references lifecycle for all three formats, recording every
-/// op's REST result into the returned vector (→ `rest.json`).
+/// Drive the full references lifecycle for all three formats and record every
+/// op's REST result into the returned vector, which becomes `rest.json`.
 async fn run_references_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_json::Value> {
     let mut results: Vec<serde_json::Value> = Vec::new();
 
@@ -471,10 +475,10 @@ async fn run_references_lifecycle(http: &reqwest::Client, base: &str) -> Vec<ser
 // ── `_schemas` byte dump ────────────────────────────────────────────────────────
 
 /// Connect host-side directly to `127.0.0.1:9092` and dump every `_schemas`
-/// partition-0 record's `(offset, key, value)` bytes (UTF-8 lossy) to
+/// partition-0 record's `(offset, key, value)` bytes as UTF-8 lossy text to
 /// `records.json`. `fetch_partition` fetches over the given connection with no
-/// leader re-routing, so the direct (non-advertised) connection works. The
-/// goal is to capture the SCHEMA values carrying a non-empty `references` array.
+/// leader re-routing, so the direct, non-advertised connection works. The goal
+/// is to capture the SCHEMA values that carry a non-empty `references` array.
 async fn dump_schemas_records() {
     // Resolve the `_schemas` topic_id.
     let mut admin = crabka_client_admin::AdminClient::connect(&["127.0.0.1:9092".to_string()])

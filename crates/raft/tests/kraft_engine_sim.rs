@@ -1,18 +1,19 @@
-//! Multi-node `KraftController` async driver simulation — the **isolation
-//! acceptance** for the KIP-595 consensus engine (Slice 3c, Task 6).
+//! Multi-node `KraftController` async driver simulation. This is the isolation
+//! acceptance for the KIP-595 consensus engine (Slice 3c, Task 6).
 //!
 //! Three real [`KraftController`]s run over tempdir [`KraftLog`]s on a tokio
-//! multi-thread runtime, wired to each other through an in-memory [`PeerSender`]
-//! ([`SimNet`]) — no TCP. Each engine's `PeerSender` routes a
-//! `(peer, api_key, body)` to the target engine's [`KraftController::deliver`]
-//! and returns the response body. Because every engine's loop is non-blocking
-//! (peer sends are spawned fire-and-forget; the loop never `.await`s a send
-//! inline), reciprocal RPCs between engines cannot deadlock.
+//! multi-thread runtime. They are wired to each other through an in-memory
+//! [`PeerSender`], the [`SimNet`], and they use no TCP. Each engine's
+//! `PeerSender` routes a `(peer, api_key, body)` to the target engine's
+//! [`KraftController::deliver`] and returns the response body. Every engine's
+//! loop is non-blocking, because peer sends are spawned fire-and-forget and the
+//! loop never `.await`s a send inline. Reciprocal RPCs between engines therefore
+//! cannot deadlock.
 //!
-//! This exercises the real engine/loop/log/apply path — election, record-carrying
-//! Fetch replication, leader failover, and restart recovery — deterministically
-//! enough to be the debugging anchor when the TCP integration (Task 10)
-//! misbehaves.
+//! This exercises the real engine, loop, log, and apply path: election,
+//! record-carrying Fetch replication, leader failover, and restart recovery. It
+//! is deterministic enough to be the debugging anchor when the TCP integration
+//! (Task 10) misbehaves.
 
 use std::{
     collections::HashMap,
@@ -36,16 +37,18 @@ use tokio::sync::oneshot;
 /// round rather than splitting the vote.
 const STAGGERED_TIMEOUTS: [Time; 3] = [millis(150), millis(300), millis(450)];
 
-/// Shared registry of in-process engines, keyed by node id. Each engine holds a
-/// clone of one of these (via [`SimNet`]) so its outbound peer sends can reach
-/// the others. A node can be removed (leader-kill / restart) by dropping it from
-/// the registry: subsequent sends to it fail as unreachable, mirroring a crash.
+/// Shared registry of in-process engines, keyed by node id.
+///
+/// Each engine holds a clone of one of these, through [`SimNet`], so that its
+/// outbound peer sends can reach the others. A drop from the registry removes a
+/// node, which models a leader kill or a restart. Later sends to that node then
+/// fail as unreachable, which mirrors a crash.
 #[derive(Default)]
 struct Registry {
     nodes: HashMap<NodeId, KraftController>,
 }
 
-/// An in-memory [`PeerSender`]: routes the encoded request body to the target
+/// An in-memory [`PeerSender`]. It routes the encoded request body to the target
 /// engine's [`KraftController::deliver`] and awaits the oneshot reply.
 #[derive(Clone)]
 struct SimNet {
@@ -119,7 +122,7 @@ fn topic_record(name: &str, id: u128) -> crabka_metadata::MetadataRecord {
     })
 }
 
-/// Build (but do not register) a single engine over a fresh tempdir log.
+/// Builds a single engine over a fresh tempdir log, and does not register it.
 fn build_engine(
     me: NodeId,
     ids: &[NodeId],
@@ -130,9 +133,10 @@ fn build_engine(
     build_engine_with_snapshot_interval(me, ids, cluster_id, election_timeout, net, 0)
 }
 
-/// Like [`build_engine`] but with a caller-chosen `snapshot_interval_records`
-/// (`0` disables snapshotting). The snapshot catch-up acceptance uses a small
-/// interval so the leader snapshots + prunes its log after a short burst.
+/// Works like [`build_engine`], but with a caller-chosen
+/// `snapshot_interval_records`, where `0` disables snapshots. The snapshot
+/// catch-up acceptance uses a small interval, so the leader snapshots and prunes
+/// its log after a short burst.
 fn build_engine_with_snapshot_interval(
     me: NodeId,
     ids: &[NodeId],
@@ -163,8 +167,9 @@ fn build_engine_with_snapshot_interval(
     (ctrl, dir)
 }
 
-/// Poll `f` until it returns `Some`, bounded by `timeout`. Yields between polls
-/// so the engine loops make progress. Returns the value or panics on timeout.
+/// Polls `f` until it returns `Some`, bounded by `timeout`. The helper yields
+/// between polls, so the engine loops make progress. It returns the value, or
+/// panics on a timeout.
 async fn await_until<T, F>(timeout: Duration, mut f: F) -> T
 where
     F: FnMut() -> Option<T>,
@@ -179,8 +184,8 @@ where
     }
 }
 
-/// The set of `(node, leader_id, leader_epoch)` each live engine currently
-/// believes, read via the (non-mutating) `quorum_state` handle op.
+/// The set of `(node, leader_id, leader_epoch)` that each live engine currently
+/// believes, read through the non-mutating `quorum_state` handle op.
 async fn leaders(net: &SimNet, ids: &[NodeId]) -> Vec<(NodeId, Option<NodeId>, u32)> {
     let mut out = Vec::new();
     for &id in ids {
@@ -193,8 +198,8 @@ async fn leaders(net: &SimNet, ids: &[NodeId]) -> Vec<(NodeId, Option<NodeId>, u
     out
 }
 
-/// Wait until exactly one node believes itself leader and all live nodes agree
-/// on that leader id + epoch. Returns `(leader_id, epoch)`.
+/// Waits until exactly one node believes it is the leader and every live node
+/// agrees on that leader id and epoch. Returns `(leader_id, epoch)`.
 async fn await_single_leader(net: &SimNet, ids: &[NodeId], timeout: Duration) -> (NodeId, u32) {
     let net = net.clone();
     let ids = ids.to_vec();
@@ -255,13 +260,15 @@ async fn three_engines_elect_one_leader() {
     }
 }
 
-/// 1b. A bare majority (exactly 2 of a 3-voter set) elects a stable leader even
-///     with UNIFORM election timeouts and in-process lockstep. This guards the
-///     split-vote livelock fix: without per-(node, epoch) election-timeout jitter
-///     the two closely-synchronized voters both become candidates every round,
-///     self-vote, and never reach majority (the 3rd voter is down) — churning for
-///     tens of seconds. `start_n_node`-style "all voters up" topologies never
-///     exercised this; the mixed JVM+Crabka quorum (JVM boots slowly) did.
+/// 1b. A bare majority, exactly 2 of a 3-voter set, elects a stable leader even
+///     with UNIFORM election timeouts and in-process lockstep.
+///
+///     This guards the split-vote livelock fix. Without per-node, per-epoch
+///     election-timeout jitter, the two closely-synchronized voters both become
+///     candidates every round, self-vote, and never reach a majority, because
+///     the third voter is down. They then churn for tens of seconds. The
+///     `start_n_node`-style topologies with all voters up never exercised this.
+///     The mixed JVM and Crabka quorum did, because the JVM boots slowly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
     let net = SimNet::new();
@@ -291,7 +298,7 @@ async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
     }
 }
 
-/// 2. `submit_change` on a follower forwards to the leader, commits via
+/// 2. `submit_change` on a follower forwards to the leader, commits through
 ///    record-carrying replication, and the topic appears in ALL three images.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn follower_submit_change_propagates() {
@@ -348,8 +355,8 @@ async fn follower_submit_change_propagates() {
     }
 }
 
-/// 3. Killing the leader → the remaining two re-elect a single new leader, and a
-///    `submit_change` to the new leader commits.
+/// 3. After a kill of the leader, the remaining two re-elect a single new
+///    leader, and a `submit_change` to the new leader commits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leader_failure_reelects() {
     let net = SimNet::new();
@@ -401,8 +408,9 @@ async fn leader_failure_reelects() {
     }
 }
 
-/// 4. Restart recovery: commit, snapshot, drop one engine, reopen over its dir,
-///    assert the image is rebuilt from checkpoint + log.
+/// 4. Restart recovery: commit, snapshot, drop one engine, reopen it over its
+///    dir, then assert that the image is rebuilt from the checkpoint and the
+///    log.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_recovers_image() {
     let net = SimNet::new();
@@ -479,20 +487,22 @@ async fn restart_recovers_image() {
     }
 }
 
-/// 5. KIP-630 snapshot catch-up (the Slice-4 acceptance): a lagging controller
+/// 5. KIP-630 snapshot catch-up, the Slice-4 acceptance. A lagging controller
 ///    follower whose own log is empty and far behind the leader's pruned
-///    `log_start` catches up purely via `FetchSnapshot`, not log replication.
+///    `log_start` catches up purely through `FetchSnapshot`, and not through log
+///    replication.
 ///
-///    Topology: all three voters are configured up front (so an election can
-///    reach a majority), but the lagging node's engine is started LATE, on a
-///    fresh empty tempdir. The two timely voters (leader + one follower) commit
-///    a burst of distinct metadata records larger than `snapshot_interval_records`,
-///    which forces the leader to write a checkpoint and prune its log
-///    (`log_start_offset` advances past 0). When the lagging node finally joins,
-///    its `LEO == 0 < leader.log_start`, so its first Fetch is answered with a
-///    `snapshot_id`; the engine then runs the `FetchSnapshot` loop, installs the
-///    snapshot, and resumes a normal Fetch from the snapshot boundary. The
-///    follower's published `MetadataImage` must converge to the leader's.
+///    Topology: all three voters are configured up front, so an election can
+///    reach a majority, but the lagging node's engine starts LATE, on a fresh
+///    empty tempdir. The two timely voters, the leader and one follower, commit
+///    a burst of distinct metadata records larger than
+///    `snapshot_interval_records`. That forces the leader to write a checkpoint
+///    and prune its log, so its `log_start_offset` advances past 0. When the
+///    lagging node finally joins, its `LEO == 0 < leader.log_start`, so a
+///    `snapshot_id` answers its first Fetch. The engine then runs the
+///    `FetchSnapshot` loop, installs the snapshot, and resumes a normal Fetch
+///    from the snapshot boundary. The follower's published `MetadataImage` must
+///    converge to the leader's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lagging_follower_catches_up_via_snapshot() {
     let net = SimNet::new();

@@ -1,11 +1,11 @@
 //! Slice-48o integration: `KafkaMetadataEventLog` manual per-partition
 //! fetch consumer honors a partition subset and a non-zero start offset.
 //!
-//! Boots a bare loopback broker (no tiered-storage backend: this test
-//! constructs the `KafkaMetadataEventLog` directly, not through
-//! `Broker::start`'s RLMM bootstrap), publishes across three partitions,
-//! subscribes to a subset starting at a non-zero offset, and asserts the
-//! reworked consumer delivers exactly the assigned records — never the
+//! The test boots a bare loopback broker with no tiered-storage backend.
+//! It constructs the `KafkaMetadataEventLog` directly, not through
+//! `Broker::start`'s RLMM bootstrap. It publishes across three partitions,
+//! then subscribes to a subset from a non-zero offset. It asserts that the
+//! reworked consumer delivers exactly the assigned records, and never the
 //! unassigned partition.
 
 use assert2::assert;
@@ -22,11 +22,11 @@ use crabka_remote_storage_topic::{
 use futures_util::StreamExt;
 use tempfile::TempDir;
 
-/// Boot a bare loopback broker via the pinned-port pattern from
-/// `tiered_storage_topic_rlmm.rs::start_broker_with_topic_rlmm`, dropping
-/// the tiered-storage backend and the `remote_log_metadata`
-/// bootstrap (this test wires `KafkaMetadataEventLog` by hand). Returns
-/// the handle plus the log tempdir (kept alive by the caller).
+/// Boot a bare loopback broker with the pinned-port pattern from
+/// `tiered_storage_topic_rlmm.rs::start_broker_with_topic_rlmm`. This
+/// helper drops the tiered-storage backend and the `remote_log_metadata`
+/// bootstrap, because the test wires `KafkaMetadataEventLog` by hand. It
+/// returns the handle plus the log tempdir, which the caller keeps alive.
 async fn start_bare_broker() -> (BrokerHandle, TempDir) {
     support::init_tracing();
 

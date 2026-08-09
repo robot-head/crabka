@@ -2,9 +2,9 @@
 
 Each frame is two files with the same stem:
 
-- `*.hex` — the raw bytes of the message body (not including the 4-byte length
-  prefix). Whitespace is ignored.
-- `*.toml` — metadata sidecar:
+- `*.hex` holds the raw bytes of the message body. These bytes do not include
+  the 4-byte length prefix. The harness ignores whitespace.
+- `*.toml` is the metadata sidecar:
 
 ```toml
 api_key = 18
@@ -15,5 +15,5 @@ synthetic = false       # true if hand-constructed rather than captured
 description = "ApiVersions v3 from kafka-console-producer"
 ```
 
-Every commit, the test harness decodes every frame using the owned codec,
-re-encodes, and asserts the bytes match.
+On every commit, the test harness decodes every frame with the owned codec. The
+harness then re-encodes each frame and asserts that the bytes match.

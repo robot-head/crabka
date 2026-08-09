@@ -1,10 +1,12 @@
 //! One policy for a dotted relation name, across every statement that names a
 //! relation.
 //!
-//! There used to be four: a hardcoded schema whitelist that raised `3F000` at
-//! parse time, a `FROM` clause that kept `s.t` verbatim, a third path that also
-//! kept it, and a fourth that silently discarded the qualifier. This pins that
-//! they have become one — the parser carries the qualifier and decides nothing.
+//! There used to be four policies. A hardcoded schema whitelist raised `3F000`
+//! at parse time. A `FROM` clause kept `s.t` unchanged. A third path also kept
+//! it. A fourth path discarded the qualifier without a message.
+//!
+//! These tests pin the one policy that replaced the four. The parser carries
+//! the qualifier and decides nothing.
 
 use assert2::assert;
 use crabka_pgparser::{
@@ -84,7 +86,7 @@ const FORMS: &[&str] = &[
 ];
 
 /// A qualifier survives into the AST from every statement form, whatever the
-/// schema is called. Nothing is stripped, and nothing is refused here.
+/// schema is called. The parser strips nothing and refuses nothing here.
 #[test]
 fn every_statement_form_carries_the_schema_it_was_written_with() {
     for form in FORMS {
@@ -106,7 +108,7 @@ fn every_statement_form_carries_the_schema_it_was_written_with() {
     }
 }
 
-/// The lexer folds an unquoted identifier and keeps a quoted one, so a
+/// The lexer folds an unquoted identifier and keeps a quoted one. So a
 /// `RelationRef` built from its tokens already renders the form `PostgreSQL`
 /// names in `relation "s.t" does not exist`.
 #[test]
@@ -119,9 +121,9 @@ fn a_relation_ref_is_case_folded_and_renders_dotted() {
     assert!(named_relation("SELECT * FROM \"S\".\"T\"") == RelationRef::qualified("S", "T"));
 }
 
-/// The schema a statement names is not checked here at all: the parser has no
-/// catalog, and `PostgreSQL` reports a missing schema differently depending on
-/// the statement, which only the executor can decide.
+/// The parser does not check the schema a statement names at all. It has no
+/// catalog. `PostgreSQL` reports a missing schema differently for each
+/// statement, and only the executor can decide that.
 #[test]
 fn a_nonexistent_schema_is_not_a_parse_error() {
     for form in FORMS {
@@ -162,8 +164,8 @@ fn a_qualified_from_item_with_arguments_is_a_function_call() {
     assert!(functions[0].name == "pg_catalog.generate_series");
 }
 
-/// `CREATE SEQUENCE` and `DROP SEQUENCE` share the index/table variants, and
-/// the sentinel that tags them rides the relation's own name so the qualifier
+/// `CREATE SEQUENCE` and `DROP SEQUENCE` share the index/table variants. The
+/// sentinel that tags them sits in the relation's own name, so the qualifier
 /// stays where the resolver can see it.
 #[test]
 fn the_sequence_spelling_keeps_its_qualifier() {

@@ -1,7 +1,7 @@
-//! Background task: consume the state topic from offset 0, track the
-//! latest non-tombstone value, and flip `LoadedState::is_loaded` once
-//! the consumer has seen no new records for 5 consecutive 100ms polls
-//! (the "quiet period" end-of-log heuristic).
+//! Background task. It consumes the state topic from offset 0, tracks the
+//! latest non-tombstone value, and flips `LoadedState::is_loaded` once the
+//! consumer has seen no new record for 5 consecutive 100ms polls. That is the
+//! "quiet period" end-of-log heuristic.
 
 use std::sync::Arc;
 
@@ -28,12 +28,13 @@ use crate::{
         serde_format,
     },
 };
-/// The loader drains the log as fast as the broker will answer, so it asks for
-/// whatever is already there rather than parking on the broker's fetch queue.
+/// The loader drains the log as fast as the broker answers, so it asks for
+/// whatever is already there instead of parking on the broker's fetch queue.
 const NO_FETCH_WAIT: Time = Time::ZERO;
 const NO_MIN_BYTES: ByteSize = ByteSize::ZERO;
 
-/// `(absolute_offset, key_bytes, value_bytes)` — value is `None` for tombstones.
+/// `(absolute_offset, key_bytes, value_bytes)`. The value is `None` for
+/// tombstones.
 type FetchedRecord = (i64, Option<Vec<u8>>, Option<Vec<u8>>);
 
 pub struct StateTopicLoader {
@@ -208,7 +209,8 @@ mod tests {
     use super::*;
     use crate::executor::state::{InFlightFile, Phase};
 
-    /// Connect/request timeout for the deliberately-unreachable test client.
+    /// Connect and request timeout for the deliberately unreachable test
+    /// client.
     const CLIENT_TIMEOUT: Time = millis(50);
 
     fn in_flight(id: &str) -> InFlightFile {

@@ -1,6 +1,6 @@
-//! Periodic cluster-state snapshotter. Spawned by the binary entry;
-//! writes the latest snapshot into an `ArcSwap<Option<ClusterState>>`
-//! that the RPC handlers read.
+//! Periodic cluster-state snapshotter. The binary entry spawns it, and it
+//! writes the latest snapshot into an `ArcSwap<Option<ClusterState>>` that the
+//! RPC handlers read.
 
 pub mod admin_client;
 

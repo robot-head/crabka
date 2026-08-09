@@ -1,11 +1,11 @@
 //! In-memory `AdminClientLike` for reconcile tests.
 //!
-//! Records every call against an internal log and serves canned
-//! responses from a `HashMap<topic_name, TopicState>` the test
-//! pre-populates. Mirrors enough of the JVM-broker semantics for the
-//! `KafkaTopic` reconcile to exercise its happy / partition-change /
-//! immutable / config-diff / delete branches without a live TCP
-//! connection.
+//! This fake records every call in an internal log. It serves canned
+//! responses from a `HashMap<topic_name, TopicState>` that the test fills
+//! in first. It follows enough of the JVM-broker semantics for the
+//! `KafkaTopic` reconcile to exercise its branches without a live TCP
+//! connection: the happy path, a partition change, an immutable field, a
+//! config diff, and a delete.
 
 #![allow(dead_code)]
 
@@ -26,12 +26,15 @@ use crabka_metadata::DelegationToken;
 use crabka_security::KafkaPrincipal;
 use crabka_units::{Time, convert::TimeExt as _, days};
 
-/// Per-RPC error to inject. `Broker` surfaces as a per-outcome error
-/// (matches how Kafka reports per-topic errors); `Transport` surfaces as
-/// `AdminError::Transport(_)` (the variant the reconcile T3-fix evicts
-/// the cached admin client on); `BrokerToplevel` surfaces as
-/// `AdminError::Broker { .. }` (the variant `describe_configs` returns
-/// when any result carries a non-zero error code).
+/// The error to inject into one RPC.
+///
+/// `Broker` appears as a per-outcome error, which is how Kafka reports a
+/// per-topic error. `Transport` appears as `AdminError::Transport(_)`.
+/// That is the variant on which the T3 fix in the reconcile evicts the
+/// cached admin client. `BrokerToplevel` appears as
+/// `AdminError::Broker { .. }`. That is the variant that
+/// `describe_configs` returns when any result carries a non-zero error
+/// code.
 #[derive(Debug, Clone)]
 pub enum InjectableError {
     Broker {
@@ -58,8 +61,10 @@ pub struct InjectedErrors {
     pub metadata: Option<InjectableError>,
 }
 
-/// A single recorded admin call. Tests assert against the captured
-/// sequence to verify which RPCs were issued (and in what order).
+/// One recorded admin call.
+///
+/// The tests assert against the captured sequence to confirm which RPCs
+/// ran, and in what order.
 #[derive(Debug, Clone)]
 pub enum RecordedCall {
     Metadata(Vec<String>),
@@ -99,8 +104,10 @@ pub enum RecordedCall {
     },
 }
 
-/// Per-topic state held by the fake. Mirrors `TopicMetadataEntry` +
-/// dynamic-topic config overrides.
+/// Per-topic state that the fake holds.
+///
+/// It follows `TopicMetadataEntry` and the dynamic-topic config
+/// overrides.
 #[derive(Debug, Clone, Default)]
 pub struct TopicState {
     pub partitions: i32,
@@ -109,11 +116,13 @@ pub struct TopicState {
     pub config_overrides: BTreeMap<String, String>,
 }
 
-/// Test fake. `recorded_calls` and `topics` use `std::sync::Mutex`
-/// (rather than `tokio::sync::Mutex`) because both are accessed only
-/// while the fake's `async` methods hold the outer per-cluster
-/// `tokio::sync::Mutex` lock — there's no contention or await across
-/// these mutations.
+/// The test fake.
+///
+/// `recorded_calls` and `topics` use `std::sync::Mutex` and not
+/// `tokio::sync::Mutex`. The code touches both only while the `async`
+/// methods of the fake hold the outer per-cluster `tokio::sync::Mutex`
+/// lock. There is therefore no contention, and no await crosses these
+/// mutations.
 #[derive(Default)]
 pub struct FakeAdminClient {
     pub recorded_calls: StdMutex<Vec<RecordedCall>>,
@@ -121,30 +130,33 @@ pub struct FakeAdminClient {
     pub delete_topic_timeouts: StdMutex<Vec<Time>>,
     pub topics: StdMutex<HashMap<String, TopicState>>,
     pub injected: StdMutex<InjectedErrors>,
-    /// In-memory ACL store, keyed on the full tuple. Reconcile
-    /// tests pre-seed this when verifying convergence; the trait
-    /// implementations below diff against the live set.
+    /// In-memory ACL store, keyed on the full tuple. Reconcile tests fill
+    /// it in first when they verify convergence. The trait implementations
+    /// below diff against the live set.
     pub acls: StdMutex<BTreeSet<AclEntry>>,
-    /// SCRAM users that have been upserted at least once. The reconcile
-    /// happy-path only inspects the recorded-call log; this set lets
-    /// future deletion-path tests check eviction.
+    /// The SCRAM users that the fake upserted one time or more. The
+    /// reconcile happy path reads only the recorded-call log. This set
+    /// lets a future deletion-path test check the eviction.
     pub scram_users: StdMutex<BTreeSet<String>>,
-    /// In-memory client-quota store, keyed by username. Reconcile
-    /// tests seed this when verifying convergence.
+    /// In-memory client-quota store, keyed by username. Reconcile tests
+    /// fill it in when they verify convergence.
     pub user_quotas: StdMutex<BTreeMap<String, UserQuotaConfig>>,
-    /// In-memory delegation-token store. The fake mirrors the
-    /// broker's KIP-48 semantics enough for the reconciler's
-    /// Describe → decide → Create/Renew/Expire loop to exercise its
-    /// branches: `create_delegation_token_as_owner` mints a fresh token
-    /// keyed by a sequential id with `expiry_timestamp_ms = now + 7d`
-    /// and `max_timestamp_ms = now + 30d`; `renew_delegation_token`
-    /// extends `expiry_timestamp_ms` to `min(now + 7d, max_timestamp_ms)`;
+    /// In-memory delegation-token store.
+    ///
+    /// The fake follows enough of the KIP-48 semantics of the broker for
+    /// the Describe, decide, and Create, Renew, or Expire loop of the
+    /// reconciler to exercise its branches.
+    /// `create_delegation_token_as_owner` mints a new token with a
+    /// sequential id, `expiry_timestamp_ms = now + 7d`, and
+    /// `max_timestamp_ms = now + 30d`. `renew_delegation_token` extends
+    /// `expiry_timestamp_ms` to `min(now + 7d, max_timestamp_ms)`.
     /// `expire_delegation_token` removes the matching entry.
     pub delegation_tokens: StdMutex<Vec<DelegationToken>>,
     /// Monotonic id counter for minted tokens.
     pub next_token_id: StdMutex<u64>,
-    /// Makes successful `DeleteTopics` acknowledgements leave topic metadata
-    /// visible, modelling Kafka's asynchronous topic deletion.
+    /// Makes a successful `DeleteTopics` acknowledgement leave the topic
+    /// metadata visible. This models the asynchronous topic deletion of
+    /// Kafka.
     pub retain_topics_after_delete_ack: StdMutex<bool>,
 }
 
@@ -229,9 +241,11 @@ impl FakeAdminClient {
         });
     }
 
-    /// Inject a top-level `AdminError::Broker { .. }` for `describe_configs`.
-    /// Matches the path the real `describe_configs` returns when any
-    /// per-resource result carries a non-zero error code.
+    /// Injects a top-level `AdminError::Broker { .. }` for
+    /// `describe_configs`.
+    ///
+    /// This matches the path that the real `describe_configs` returns when
+    /// any per-resource result carries a non-zero error code.
     pub fn inject_describe_configs_broker_error(
         &self,
         code: i16,
@@ -246,8 +260,10 @@ impl FakeAdminClient {
         });
     }
 
-    /// Inject an `AdminError::Transport(_)` on the named RPC. The reconcile
-    /// loop evicts the cached admin client on this variant (the T3-fix path).
+    /// Injects an `AdminError::Transport(_)` on the named RPC.
+    ///
+    /// The reconcile loop evicts the cached admin client on this variant.
+    /// That is the T3-fix path.
     pub fn inject_metadata_transport_error(&self) {
         self.injected.lock().unwrap().metadata = Some(InjectableError::Transport);
     }
@@ -891,8 +907,9 @@ impl AdminClientLike for FakeAdminClient {
     }
 }
 
-/// True if every populated axis of `filter` matches `entry`. Matches
-/// the broker's `AclEntryFilter::matches` semantics.
+/// Returns true when every populated axis of `filter` matches `entry`.
+///
+/// It follows the semantics of `AclEntryFilter::matches` in the broker.
 fn matches_filter(f: &AclEntryFilter, e: &AclEntry) -> bool {
     f.resource_type.is_none_or(|rt| rt == e.resource_type)
         && f.resource_name

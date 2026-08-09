@@ -7,8 +7,8 @@ use bytes::Bytes;
 #[error("deserialization error: {0}")]
 pub struct SerdeError(pub String);
 
-/// Serialize a `T` to bytes and back. Used by source nodes (deserialize) and
-/// sink/repartition nodes (serialize).
+/// Serialize a `T` to bytes and back. Source nodes deserialize with it, and sink
+/// and repartition nodes serialize with it.
 #[diagnostic::on_unimplemented(
     message = "the type `{Self}` is not a valid serializer/deserializer for `{T}`",
     label = "does not implement `Serde<{T}>`",
@@ -20,21 +20,25 @@ pub trait Serde<T>: Send + Sync + 'static {
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<T, SerdeError>;
 
-    /// Pre-register any per-topic state (e.g. a schema-registry subject) before
-    /// processing begins. Called once per `(topic, role)` at topology wiring
-    /// time. Default: no-op (stateless serdes need nothing).
+    /// Pre-register any per-topic state, such as a schema-registry subject,
+    /// before processing starts. The topology calls this method once per
+    /// `(topic, role)` at wiring time. The default is a no-op, because a
+    /// stateless serde needs nothing.
     fn prepare(&self, _topic: &str, _role: SerdeRole) {}
 }
 
-/// Whether a serde is wired for the record key or value — passed to
-/// [`Serde::prepare`] so schema serdes can derive `<topic>-key` / `<topic>-value`.
+/// Whether a serde is wired for the record key or the record value. The
+/// topology passes this to [`Serde::prepare`], so a schema serde can derive
+/// `<topic>-key` or `<topic>-value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerdeRole {
     Key,
     Value,
 }
 
-/// Associate a concrete Serde type with its target deserialized type to enable automatic type inference.
+/// Associate a concrete Serde type with its deserialized target type.
+///
+/// This association gives automatic type inference.
 #[diagnostic::on_unimplemented(
     message = "the serde type `{Self}` is not associated with any target model type",
     label = "does not implement `SerdeAssociate`",
@@ -44,12 +48,13 @@ pub trait SerdeAssociate {
     type Target: Send + Sync + 'static;
 }
 
-/// The key + value [`Serde`]s used to **read** a topic into the topology.
+/// The key and value [`Serde`]s that **read** a topic into the topology.
 ///
-/// A source node (and [`TopologyTestDriver::pipe_input`]) deserializes incoming
-/// bytes with these. Pairing the two serdes into one named argument keeps their
-/// roles visible at the call site — `Consumed::with(keySerde, valueSerde)` reads
-/// the same as Kafka Streams' `Consumed`.
+/// A source node deserializes incoming bytes with these, and so does
+/// [`TopologyTestDriver::pipe_input`]. One named argument holds both serdes, so
+/// their roles stay visible at the call site.
+/// `Consumed::with(keySerde, valueSerde)` reads the same as Kafka Streams'
+/// `Consumed`.
 ///
 /// [`TopologyTestDriver::pipe_input`]: crate::TopologyTestDriver::pipe_input
 #[derive(Debug, Clone, Copy)]
@@ -59,8 +64,8 @@ pub struct Consumed<KS, VS> {
 }
 
 impl<KS, VS> Consumed<KS, VS> {
-    /// Pair a key serde with a value serde (key first, mirroring
-    /// `Consumed.with(keySerde, valueSerde)`).
+    /// Pair a key serde with a value serde, key first. This matches
+    /// `Consumed.with(keySerde, valueSerde)`.
     #[must_use]
     pub fn with(key_serde: KS, value_serde: VS) -> Self {
         Self {
@@ -70,9 +75,9 @@ impl<KS, VS> Consumed<KS, VS> {
     }
 }
 
-/// The key + value [`Serde`]s used to **write** a topic from the topology.
+/// The key and value [`Serde`]s that **write** a topic from the topology.
 ///
-/// A sink node serializes outgoing records with these;
+/// A sink node serializes outgoing records with these.
 /// [`TopologyTestDriver::read_output`] uses them to deserialize what a sink
 /// wrote. `Produced::with(keySerde, valueSerde)` reads the same as Kafka
 /// Streams' `Produced`.
@@ -85,8 +90,8 @@ pub struct Produced<KS, VS> {
 }
 
 impl<KS, VS> Produced<KS, VS> {
-    /// Pair a key serde with a value serde (key first, mirroring
-    /// `Produced.with(keySerde, valueSerde)`).
+    /// Pair a key serde with a value serde, key first. This matches
+    /// `Produced.with(keySerde, valueSerde)`.
     #[must_use]
     pub fn with(key_serde: KS, value_serde: VS) -> Self {
         Self {
@@ -96,10 +101,12 @@ impl<KS, VS> Produced<KS, VS> {
     }
 }
 
-/// A clonable [`Serde<T>`] over a type-erased `Arc<dyn Serde<T>>`. Lets a serde
-/// captured behind an `Arc` (e.g. a `KTable`'s stored key/value serde) be passed
-/// to `add_source`/`add_sink` (which want a `Serde<T> + Clone` value) or boxed
-/// into a processor field, without naming the concrete serde type.
+/// A clonable [`Serde<T>`] over a type-erased `Arc<dyn Serde<T>>`.
+///
+/// A serde captured behind an `Arc`, such as a `KTable`'s stored key or value
+/// serde, can go to `add_source` or `add_sink`, which want a `Serde<T> + Clone`
+/// value. It can also go into a processor field as a box. The caller never names
+/// the concrete serde type.
 pub(crate) struct SerdeArc<T>(pub(crate) std::sync::Arc<dyn Serde<T>>);
 
 impl<T> Clone for SerdeArc<T> {
@@ -177,8 +184,8 @@ impl SerdeAssociate for I64Serde {
 
 /// Mapping trait for types that have a default associated [`Serde`].
 ///
-/// If a type does not implement this trait, using `.stream` or other ergonomic
-/// methods will trigger a compiler error indicating that the default serde is not found.
+/// A type that does not implement this trait cannot use `.stream` or the other
+/// ergonomic methods. The compiler reports that it found no default serde.
 ///
 /// # Examples
 ///
@@ -224,10 +231,12 @@ impl<KS, VS> From<(KS, VS)> for Produced<KS, VS> {
     }
 }
 
-/// Write a Kafka signed/zigzag varint (same encoding as `ByteUtils.writeVarint` in the JVM).
+/// Write a Kafka signed/zigzag varint, the same encoding as the JVM
+/// `ByteUtils.writeVarint`.
 ///
-/// The value is zigzag-encoded (`n << 1 ^ n >> 31` for 32-bit equivalent) then
-/// written as a base-128 little-endian varint.  Values ≤ 63 encode to one byte.
+/// This function zigzag-encodes the value with `n << 1 ^ n >> 31` for the 32-bit
+/// equivalent. It then writes a base-128 little-endian varint. A value ≤ 63
+/// encodes to one byte.
 fn write_varint(n: usize, buf: &mut Vec<u8>) {
     // Zigzag encode: treat as i64 equivalent — all inputs here are non-negative
     // lengths, so the zigzag is simply n << 1 (sign bit = 0).
@@ -268,9 +277,9 @@ fn read_varint(bytes: &[u8]) -> Result<(usize, usize), SerdeError> {
     Err(SerdeError("truncated varint".to_string()))
 }
 
-/// [`Serde`] for `Change<V>` — byte-compatible with the JVM
-/// `ChangedSerializer`/`ChangedDeserializer` used on repartition topics when a
-/// `KGroupedTable` re-keys.
+/// [`Serde`] for `Change<V>`, byte-compatible with the JVM
+/// `ChangedSerializer` and `ChangedDeserializer`. Repartition topics use it when
+/// a `KGroupedTable` re-keys.
 ///
 /// # Wire format
 ///

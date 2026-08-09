@@ -1,11 +1,14 @@
-//! P2: the SQL-routine catalog — `CREATE FUNCTION`/`CREATE PROCEDURE` and the
+//! P2: the SQL-routine catalog.
+//!
+//! This module covers `CREATE FUNCTION` and `CREATE PROCEDURE`, and the
 //! `pg_proc` rows they produce.
 //!
-//! A routine is stored as its *source text* plus the resolved signature, the
-//! same shape the view catalog uses: the body is re-parsed when the routine is
-//! called, so a routine never carries a stale plan. Overloads coexist because
-//! the storage key is the routine's `name(argtype, …)` identity, exactly the
-//! identity `PostgreSQL` uses for `DROP FUNCTION f(int)`.
+//! The catalog stores a routine as its *source text* plus the resolved
+//! signature, the same shape the view catalog uses. It parses the body again
+//! when a caller calls the routine, so a routine never carries a stale plan.
+//! Overloads coexist because the storage key is the routine's
+//! `name(argtype, …)` identity. That is exactly the identity `PostgreSQL` uses
+//! for `DROP FUNCTION f(int)`.
 
 use crabka_pgkv::{Kv, KvError, WriteOp};
 use crabka_pgtypes::ColumnType;
@@ -16,8 +19,10 @@ use crate::{
     serde::{read_string, read_type, take_n, take_u8, write_str, write_type},
 };
 
-/// The first OID handed to a user routine. Sits above every other reserved
-/// catalog band so a routine's `pg_proc.oid` never collides with a relation's.
+/// The first OID handed to a user routine.
+///
+/// It sits above every other reserved catalog band, so a routine's
+/// `pg_proc.oid` never collides with a relation's.
 pub const ROUTINE_OID_BASE: u32 = 140_000;
 
 /// A routine's kind, which `PostgreSQL` reports as `pg_proc.prokind`.
@@ -147,7 +152,8 @@ impl RoutineType {
         }
     }
 
-    /// A type named but not resolved to a built-in (a composite, `void`, …).
+    /// A type that is named but not resolved to a built-in, such as a
+    /// composite or `void`.
     #[must_use]
     pub const fn named(name: String) -> Self {
         Self { column: None, name }
@@ -189,17 +195,19 @@ pub enum RoutineResult {
     Table(Vec<(String, RoutineType)>),
 }
 
-/// How a routine's body was written, which decides how `pg_get_functiondef`
-/// renders it and whether `pg_proc.prosrc` carries it.
+/// How the author wrote a routine's body.
+///
+/// This decides how `pg_get_functiondef` renders the body, and whether
+/// `pg_proc.prosrc` carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyForm {
-    /// `AS 'text'` / `AS $$ … $$` — the body is `pg_proc.prosrc`.
+    /// `AS 'text'` / `AS $$ … $$`. The body is `pg_proc.prosrc`.
     Source,
-    /// `BEGIN ATOMIC … END` — the body is `pg_proc.prosqlbody`; `prosrc` is
+    /// `BEGIN ATOMIC … END`. The body is `pg_proc.prosqlbody`, and `prosrc` is
     /// empty, exactly as `PostgreSQL` stores it.
     Atomic,
-    /// `RETURN <expr>` — the `PostgreSQL` 14 single-expression SQL body, stored
-    /// like `Atomic` but rendered as `RETURN`.
+    /// `RETURN <expr>`, the `PostgreSQL` 14 single-expression SQL body. The
+    /// catalog stores it like `Atomic` but renders it as `RETURN`.
     Return,
 }
 
@@ -215,7 +223,7 @@ pub struct Routine {
     pub result: RoutineResult,
     pub language: String,
     /// The body's source text. For [`BodyForm::Return`] this is the expression
-    /// alone; for the other forms it is the whole body.
+    /// alone. For the other forms it is the whole body.
     pub body: String,
     pub body_form: BodyForm,
     /// `pg_proc.provolatile` (`i`/`s`/`v`).
@@ -255,7 +263,7 @@ impl Routine {
         self.input_params().filter(|p| p.default.is_some()).count()
     }
 
-    /// The routine's `name(argtype, …)` identity — the same identity
+    /// The routine's `name(argtype, …)` identity. It is the same identity
     /// `PostgreSQL` prints in `42883` and accepts in `DROP FUNCTION`.
     #[must_use]
     pub fn identity(&self) -> String {
@@ -273,8 +281,10 @@ impl Routine {
     }
 }
 
-/// Spell a routine identity the way `PostgreSQL` does: `name(t1,t2)`, with no
-/// space after the comma and `name()` for a zero-argument routine.
+/// Spell a routine identity the way `PostgreSQL` does.
+///
+/// The form is `name(t1,t2)`, with no space after the comma. A zero-argument
+/// routine is `name()`.
 #[must_use]
 pub fn signature_identity(name: &str, arg_types: &[String]) -> String {
     format!("{name}({})", arg_types.join(","))
@@ -290,8 +300,10 @@ fn routine_key(identity: &str) -> Vec<u8> {
     k
 }
 
-/// The routine OID counter's key. It sits in the `meta` family rather than
-/// beside the routine records, so the routine scan sees only routines.
+/// The routine OID counter's key.
+///
+/// It sits in the `meta` family rather than beside the routine records, so the
+/// routine scan sees only routines.
 fn next_routine_oid_key() -> Vec<u8> {
     b"\0\0\0\0meta/next_routine_oid".to_vec()
 }
@@ -346,9 +358,10 @@ pub fn routines_named(kv: &dyn Kv, name: &str) -> Result<Vec<Routine>, CatalogEr
         .collect()
 }
 
-/// The write batch that stores `routine`, allocating its OID when it is new.
+/// The write batch that stores `routine`, and allocates its OID when it is new.
 ///
-/// A replacement keeps the existing OID, matching `CREATE OR REPLACE FUNCTION`.
+/// A replacement keeps the existing OID, which matches
+/// `CREATE OR REPLACE FUNCTION`.
 ///
 /// # Errors
 ///

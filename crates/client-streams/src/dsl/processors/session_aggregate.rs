@@ -1,14 +1,17 @@
-//! Session-window aggregation processors: JVM session-merge with selectable
+//! Session-window aggregation processors: JVM session-merge with a selectable
 //! emit strategy (KIP-825).
 //!
-//! On each record the processor finds all sessions within the inactivity gap,
-//! merges them (and the record) into one `[minStart, maxEnd]` session, removes
-//! the merged-away sessions, and stores the new merged session. Under the default
-//! `on_window_update` strategy it forwards a tombstone per merged-away session and
-//! a `Change::update` for the new session. Under `on_window_close` (emit-final)
-//! those per-update forwards are suppressed; instead a close-scan forwards each
-//! session whose `end <= window_close_time` (= `stream_time - grace`) exactly
-//! once, advancing `last_emitted_close` to prevent re-emission.
+//! On each record the processor finds all sessions within the inactivity gap. It
+//! merges those sessions and the record into one `[minStart, maxEnd]` session,
+//! removes the merged-away sessions, and stores the new merged session.
+//!
+//! Under the default `on_window_update` strategy the processor forwards one
+//! tombstone per merged-away session, plus a `Change::update` for the new
+//! session. Under `on_window_close`, which is emit-final, the processor
+//! suppresses those per-update forwards. A close-scan instead forwards each
+//! session whose `end <= window_close_time` exactly once, where
+//! `window_close_time` is `stream_time - grace`. The scan advances
+//! `last_emitted_close`, which prevents re-emission.
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
@@ -40,17 +43,18 @@ pub(crate) struct KStreamSessionAggregateProcessor<K, V, VA, I, A, M> {
     pub merger: M,
     /// Emit on every update (default) or only on window close (KIP-825).
     pub emit: crate::dsl::emit::EmitStrategy,
-    /// Session grace period — `window_close_time = stream_time - grace`.
+    /// Session grace period, where `window_close_time = stream_time - grace`.
     pub grace: Time,
     /// Observed max record timestamp (per task instance).
     pub stream_time: i64,
-    /// Highest `window_close_time` already emitted; prevents re-emit.
+    /// Highest `window_close_time` already emitted. It prevents a re-emit.
     pub last_emitted_close: i64,
-    /// Forward-suppression seam: when the session store is record-cached the
-    /// per-update forwards (the merged-away tombstones AND the new-session update)
-    /// are suppressed (the cache flush forwards the deduped `Change`s). Resolved in
-    /// `init`. Only the emit-on-update path is wrapped — emit-final stores are
-    /// never cached.
+    /// Forward-suppression seam. When the session store is record-cached, the
+    /// processor suppresses the per-update forwards, both the merged-away
+    /// tombstones AND the new-session update. The cache flush forwards the
+    /// deduped `Change`s instead. `init` resolves this seam. Only the
+    /// emit-on-update path is wrapped, because emit-final stores are never
+    /// cached.
     pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V, VA)>,
 }
@@ -166,9 +170,10 @@ where
     A: Fn(&K, &V, VA) -> VA + Send + 'static,
     M: Fn(&K, VA, VA) -> VA + Send + 'static,
 {
-    /// Emit-final close-scan: forward every session whose `end <= window_close_time`
-    /// and `end > last_emitted_close` as a `Change::update(None, value)`, then advance
-    /// the watermark to suppress re-emission.
+    /// Emit-final close-scan. It forwards every session whose
+    /// `end <= window_close_time` and `end > last_emitted_close` as a
+    /// `Change::update(None, value)`. It then advances the watermark, which
+    /// suppresses re-emission.
     async fn emit_closed_sessions(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
@@ -199,9 +204,10 @@ where
     }
 }
 
-/// Session reduce: keeps the public value type `V` (no `init`/sentinel). The
-/// first contribution seeds; folding old sessions + the new record uses
-/// `reducer`. The merge structure is identical to the aggregate processor.
+/// Session reduce. It keeps the public value type `V`, with no `init` and no
+/// sentinel. The first contribution seeds the accumulator, and `reducer` folds
+/// the old sessions and the new record. The merge structure is identical to the
+/// aggregate processor.
 #[allow(dead_code)]
 pub(crate) struct KStreamSessionReduceProcessor<K, V, R> {
     pub store_name: String,
@@ -209,11 +215,11 @@ pub(crate) struct KStreamSessionReduceProcessor<K, V, R> {
     pub reducer: R,
     /// Emit on every update (default) or only on window close (KIP-825).
     pub emit: crate::dsl::emit::EmitStrategy,
-    /// Session grace period — `window_close_time = stream_time - grace`.
+    /// Session grace period, where `window_close_time = stream_time - grace`.
     pub grace: Time,
     /// Observed max record timestamp (per task instance).
     pub stream_time: i64,
-    /// Highest `window_close_time` already emitted; prevents re-emit.
+    /// Highest `window_close_time` already emitted. It prevents a re-emit.
     pub last_emitted_close: i64,
     /// Forward-suppression seam (see [`KStreamSessionAggregateProcessor::forwarder`]).
     pub forwarder: TupleForwarder,
@@ -324,9 +330,10 @@ where
     V: std::any::Any + Send + Sync + Clone,
     R: Fn(&V, &V) -> V + Send + 'static,
 {
-    /// Emit-final close-scan: forward every session whose `end <= window_close_time`
-    /// and `end > last_emitted_close` as a `Change::update(None, value)`, then advance
-    /// the watermark to suppress re-emission.
+    /// Emit-final close-scan. It forwards every session whose
+    /// `end <= window_close_time` and `end > last_emitted_close` as a
+    /// `Change::update(None, value)`. It then advances the watermark, which
+    /// suppresses re-emission.
     async fn emit_closed_sessions(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
@@ -892,10 +899,11 @@ mod tests {
         stores
     }
 
-    /// Run `init` then two same-key records that MERGE (within the gap) through
-    /// the session aggregate, returning how many records reached the downstream
-    /// buffer. Record 1 @ ts=0 → session [0,0]; record 2 @ ts=30 (gap 60) merges →
-    /// on-update path forwards a tombstone for [0,0] + an update for [0,30].
+    /// Run `init`, then run two same-key records that MERGE within the gap
+    /// through the session aggregate. Return how many records reached the
+    /// downstream buffer. Record 1 at ts=0 gives session [0,0]. Record 2 at ts=30
+    /// merges under gap 60, so the on-update path forwards a tombstone for [0,0]
+    /// and an update for [0,30].
     async fn run_merge(stores: &mut StoreRegistry) -> usize {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -944,18 +952,20 @@ mod tests {
         buffer.len()
     }
 
-    /// Uncached → each on-update forward fires immediately: record 1 emits one
-    /// update [0,0]; record 2 emits a tombstone [0,0] + an update [0,30] → 3 total.
+    /// Uncached: each on-update forward fires at once. Record 1 emits one update
+    /// [0,0]. Record 2 emits a tombstone [0,0] and an update [0,30], which is 3
+    /// records in total.
     #[tokio::test]
     async fn uncached_session_aggregate_forwards_each_record() {
         let mut stores = session_registry(false);
         assert_eq!(run_merge(&mut stores).await, 3);
     }
 
-    /// Cached → ALL on-update forwards (the initial update, the merge tombstone,
-    /// and the merged update) are suppressed; the cache flush forwards the deduped
-    /// changes instead. The merged-away session [0,0] flushes as a tombstone and
-    /// the live session [0,30] as an update carrying the final count 2.
+    /// Cached: the processor suppresses ALL on-update forwards, which are the
+    /// initial update, the merge tombstone, and the merged update. The cache
+    /// flush forwards the deduped changes instead. The merged-away session [0,0]
+    /// flushes as a tombstone, and the live session [0,30] flushes as an update
+    /// that carries the final count 2.
     #[tokio::test]
     async fn cached_session_aggregate_suppresses_then_flushes_merge() {
         let mut stores = session_registry(true);

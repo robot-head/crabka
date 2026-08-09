@@ -74,7 +74,7 @@ impl Stats for SequenceCounters {
 
 /// Read-only statistics adapter over the engine's authoritative durable
 /// per-table next-rowid keys. It deliberately reads the applied KV on every
-/// estimate so sessions observe commits and replicated apply without refresh.
+/// estimate, so sessions observe commits and replicated apply with no refresh.
 #[derive(Clone)]
 pub struct DurableSequenceStats {
     kv: Arc<dyn crabka_pgkv::Kv>,
@@ -158,7 +158,7 @@ pub fn tables_are_co_partitioned(left: &Table, right: &Table) -> bool {
 }
 
 /// Prove that a co-partitioned join uses each table's complete hash key, in
-/// catalog order. Identical layouts alone are insufficient for range-local
+/// catalog order. Identical layouts alone are not enough for range-local
 /// equality joins on some other column.
 #[must_use]
 pub fn co_partitioned_join_keys_match(
@@ -215,8 +215,8 @@ pub fn plan_join(stats: &dyn Stats, config: PlannerConfig, inputs: JoinInputs) -
 }
 
 /// Select a join strategy and validate any co-partitioned answer against the
-/// physical catalog metadata used by execution. Statistics may suggest
-/// co-partitioning, but they cannot substitute for an identical hash layout.
+/// physical catalog metadata execution uses. Statistics may suggest
+/// co-partitioning, but they cannot replace an identical hash layout.
 #[must_use]
 pub fn plan_join_for_tables(
     stats: &dyn Stats,
@@ -277,8 +277,9 @@ impl Default for DistributedScanPlan {
     }
 }
 
-/// Build the currently-safe scan pre-pass. Unsupported fragments are omitted so
-/// the caller can keep the original local filter/projection as the source of truth.
+/// Build the currently-safe scan pre-pass. This function omits unsupported
+/// fragments, so the caller can keep the original local filter and projection as
+/// the source of truth.
 #[must_use]
 pub fn plan_scan(
     table: &Table,
@@ -330,8 +331,9 @@ fn text_search_pair(table: &Table, vector: &Expr, query: &Expr) -> Option<TextSe
     Some(TextSearchPredicate { column, query })
 }
 
-/// Parse a filter into a pushdown predicate, failing when any conjunct is not in
-/// the supported equality/range subset.
+/// Parse a filter into a pushdown predicate. This function fails when any
+/// conjunct is not in the supported equality and range subset.
+///
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -350,10 +352,10 @@ pub fn strict_predicate_for_filter(
     Ok(PredicatePushdown::Conjunctive(predicates))
 }
 
-/// Best-effort variant of [`strict_predicate_for_filter`]: a filter with any
+/// Best-effort variant of [`strict_predicate_for_filter`]. A filter with any
 /// unsupported conjunct degrades to [`PredicatePushdown::FullScan`] instead of
-/// erroring. Shared by the SELECT scan planner and the UPDATE/DELETE
-/// index-probe chooser so both extract equality conjuncts identically.
+/// reporting an error. The SELECT scan planner and the UPDATE/DELETE index-probe
+/// chooser share it, so both extract equality conjuncts identically.
 pub(crate) fn predicate_for_filter(table: &Table, filter: Option<&Expr>) -> PredicatePushdown {
     strict_predicate_for_filter(table, filter).unwrap_or(PredicatePushdown::FullScan)
 }
@@ -491,12 +493,12 @@ pub(crate) fn partial_aggregate_for_select_items(
     partial_aggregate_for_call(table, call)
 }
 
-/// The pushdown spec for one aggregate call: a plain (non-`DISTINCT`)
-/// `count(*)`/`count(col)`/`sum(col)`/`avg(col)`/`min(col)`/`max(col)` whose
-/// column type the partial-aggregate model supports. `None` for every other
-/// call — including an argument column that does not exist in `table`, which
-/// must fall back so name resolution reports 42703 instead of the spec
-/// silently degrading to a whole-table `count(*)`.
+/// The pushdown spec for one aggregate call. The call must be a plain
+/// `count(*)`, `count(col)`, `sum(col)`, `avg(col)`, `min(col)` or `max(col)`,
+/// without `DISTINCT`, whose column type the partial-aggregate model supports.
+/// Every other call is `None`. That includes an argument column that does not
+/// exist in `table`, which must fall back so name resolution reports 42703,
+/// instead of the spec silently degrading to a whole-table `count(*)`.
 pub(crate) fn partial_aggregate_for_call(
     table: &Table,
     call: &FuncCall,
@@ -529,7 +531,8 @@ pub(crate) fn partial_aggregate_for_call(
     }
 }
 
-/// Recognize the narrow grouped-partial shape: group columns followed by one aggregate.
+/// Recognize the narrow grouped-partial shape: group columns, then one
+/// aggregate.
 pub fn grouped_partial_aggregate_for_select(
     table: &Table,
     projection: &[SelectItem],

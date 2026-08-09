@@ -1,5 +1,5 @@
-//! Per-phase action functions, decoupled from `crabka_client_core::Client`
-//! via the `ClientFacade` trait so the state-machine tests can drive the
+//! Per-phase action functions. The `ClientFacade` trait decouples them from
+//! `crabka_client_core::Client`, so the state-machine tests can drive the
 //! executor against a `MockClient`.
 
 use std::collections::BTreeSet;
@@ -10,15 +10,15 @@ use crabka_units::{ByteRate, convert::ByteRateExt};
 use crate::{executor::throttle::ThrottleTargets, model::Movement};
 
 /// A typed wrapper over the small set of admin RPCs the executor needs.
-/// The production impl forwards to `crabka_client_core::Client::send`
-/// with the generated `crabka_protocol::owned::*` request types. Tests
-/// substitute a `MockClient`.
+///
+/// The production impl forwards to `crabka_client_core::Client::send` with the
+/// generated `crabka_protocol::owned::*` request types. Tests substitute a
+/// `MockClient`.
 #[async_trait]
 pub trait ClientFacade: Send + Sync {
-    /// `IncrementalAlterConfigs` — sets or deletes the four KIP-73
-    /// throttle keys derived from `targets` + `throttle`.
-    /// `op` is `ConfigOp::Set` for `ApplyThrottle` and `ConfigOp::Delete`
-    /// for `ClearThrottle`.
+    /// `IncrementalAlterConfigs`: sets or deletes the four KIP-73 throttle
+    /// keys derived from `targets` and `throttle`. `op` is `ConfigOp::Set` for
+    /// `ApplyThrottle` and `ConfigOp::Delete` for `ClearThrottle`.
     async fn alter_throttle_configs(
         &self,
         op: ConfigOp,
@@ -26,18 +26,19 @@ pub trait ClientFacade: Send + Sync {
         throttle: ByteRate,
     ) -> Result<(), PhaseError>;
 
-    /// `AlterPartitionReassignments` — submits the partition movements
-    /// in one request. Movements are passed pre-chunked by the caller
-    /// (`batch_size`).
+    /// `AlterPartitionReassignments`: submits the partition movements in one
+    /// request. The caller passes the movements already chunked at
+    /// `batch_size`.
     async fn submit_reassignments(&self, movements: &[Movement]) -> Result<(), PhaseError>;
 
-    /// `AlterPartitionReassignments` with `null` replicas — cancels the
-    /// listed partition reassignments. Used by `Cancel` + deadline-exceeded.
+    /// `AlterPartitionReassignments` with `null` replicas: cancels the listed
+    /// partition reassignments. `Cancel` and the deadline-exceeded path use
+    /// it.
     async fn cancel_reassignments(&self, partitions: &[(String, i32)]) -> Result<(), PhaseError>;
 
-    /// `ListPartitionReassignments` — returns the set of (topic, partition)
-    /// keys that still have an in-flight reassignment, scoped to the
-    /// caller's interest set.
+    /// `ListPartitionReassignments`: returns the set of (topic, partition)
+    /// keys that still have an in-flight reassignment, scoped to the caller's
+    /// interest set.
     async fn list_in_flight(
         &self,
         of_interest: &[(String, i32)],
@@ -58,8 +59,8 @@ pub enum PhaseError {
     Client(String),
 }
 
-/// Apply throttle: one `IncrementalAlterConfigs` request with all four
-/// KIP-73 keys SET to the target values.
+/// Apply the throttle with one `IncrementalAlterConfigs` request that SETs all
+/// four KIP-73 keys to the target values.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn apply_throttle(
@@ -72,9 +73,9 @@ pub async fn apply_throttle(
         .await
 }
 
-/// Clear throttle: one `IncrementalAlterConfigs` request with all four
-/// KIP-73 keys DELETED on the same resources. Idempotent — safe to
-/// re-run.
+/// Clear the throttle with one `IncrementalAlterConfigs` request that DELETEs
+/// all four KIP-73 keys on the same resources. The call is idempotent and safe
+/// to re-run.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn clear_throttle(
@@ -100,8 +101,8 @@ pub async fn submit_movements(
     Ok(())
 }
 
-/// Track per-partition keys derived from a proposal — used to scope
-/// `ListPartitionReassignments` + cancel calls to the proposal's surface.
+/// Track per-partition keys derived from a proposal. They scope
+/// `ListPartitionReassignments` and cancel calls to the proposal's surface.
 #[must_use]
 pub fn partition_keys(movements: &[Movement]) -> Vec<(String, i32)> {
     let mut s: BTreeSet<(String, i32)> = BTreeSet::new();
@@ -122,20 +123,20 @@ pub mod tests {
 
     use super::*;
 
-    /// Mock that records every call. Tests inspect the recorded log to
-    /// assert what the executor did.
+    /// Mock that records every call. Tests read the recorded log to assert
+    /// what the executor did.
     pub struct MockClient {
         pub calls: Mutex<Vec<MockCall>>,
         pub submit_remaining_failures: AtomicUsize,
-        /// When >= 1, `list_in_flight` returns the proposal's full set
-        /// for that many invocations, then empty thereafter (simulating
-        /// reassignment completion).
+        /// When >= 1, `list_in_flight` returns the proposal's full set for
+        /// that many invocations, and an empty set after that. This simulates
+        /// reassignment completion.
         pub list_in_flight_remaining: AtomicUsize,
         pub list_scope: Mutex<Vec<(String, i32)>>,
     }
 
-    /// `PartialEq` but not `Eq`: `AlterConfigs::rate` is an `f64`-backed
-    /// quantity.
+    /// `PartialEq` but not `Eq`, because `AlterConfigs::rate` is an
+    /// `f64`-backed quantity.
     #[derive(Debug, Clone, PartialEq)]
     pub enum MockCall {
         AlterConfigs {

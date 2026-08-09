@@ -1,19 +1,21 @@
 //! Headline multi-tenant isolation across every Tempo HTTP read surface.
 //!
-//! This is an in-process test (no Docker, never `#[ignore]`). It boots the real
-//! Slice 5 querier router over a real TCP socket and drives it with `reqwest`,
-//! so every request flows through the genuine `X-Scope-OrgID` tenant extractor.
+//! This is an in-process test. It needs no Docker and is never `#[ignore]`. It
+//! boots the real Slice 5 querier router over a real TCP socket and drives it
+//! with `reqwest`, so every request flows through the genuine `X-Scope-OrgID`
+//! tenant extractor.
 //!
-//! The sharpest probe here is a *colliding `trace_id`*: both tenants ingest a
+//! The sharpest probe here is a *colliding `trace_id`*. Both tenants ingest a
 //! trace whose `trace_id` bytes are byte-for-byte identical. The assertions can
-//! only pass if isolation happens at the tenant key — before the by-id /
-//! row-group lookup — rather than after it. A leak would surface as cross-tenant
-//! span bleed even though neither tenant ever sent the other's spans.
+//! pass only if isolation happens at the tenant key, before the by-id and
+//! row-group lookup, rather than after it. A leak would surface as cross-tenant
+//! span bleed, even though neither tenant ever sent the other's spans.
 //!
-//! Ingest goes through the real distributor OTLP-protobuf door (so the tenant is
-//! resolved from `X-Scope-OrgID` exactly as in production); the captured
-//! `SpanRecord`s are loaded into the tenant-keyed `InMemorySpanStore` that backs
-//! the querier, matching how the real store namespaces data by tenant.
+//! Ingest goes through the real distributor OTLP-protobuf door, so the tenant
+//! resolves from `X-Scope-OrgID` exactly as in production. The test then loads
+//! the captured `SpanRecord`s into the tenant-keyed `InMemorySpanStore` that
+//! backs the querier. That matches how the real store namespaces data by
+//! tenant.
 
 use std::{
     collections::BTreeMap,
@@ -109,7 +111,7 @@ async fn ingest(tenant: &str, otlp_body: &[u8]) -> TestResult<Vec<SpanRecord>> {
     Ok(records)
 }
 
-/// Boot the querier over a real socket atop a tenant-keyed store seeded from
+/// Boot the querier over a real socket, atop a tenant-keyed store seeded from
 /// `records`. The optional overrides drive per-tenant limit enforcement.
 async fn start_querier(
     records: Vec<SpanRecord>,
@@ -251,7 +253,7 @@ fn colliding_trace(service: &str, root_name: &str, extra_attrs: &[(&str, &str)])
     .encode_to_vec()
 }
 
-/// An OTLP trace with N spans sharing one fresh `trace_id`, used to drive ingest
+/// An OTLP trace with N spans that share one fresh `trace_id`. It drives ingest
 /// volume for the per-tenant quota probe.
 fn trace_with_n_spans(trace_seed: u8, n: usize) -> Vec<u8> {
     let spans = (0..n)
@@ -343,7 +345,7 @@ fn tag_names(tags: &JsonValue) -> Vec<String> {
         .collect()
 }
 
-/// Collect the tag values from a `/api/search/tag/{tag}/values` (v1) response.
+/// Collect the tag values from a v1 `/api/search/tag/{tag}/values` response.
 fn tag_values(values: &JsonValue) -> Vec<String> {
     values["tagValues"]
         .as_array()

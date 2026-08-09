@@ -1,5 +1,7 @@
-//! Integration tests for inter-broker mTLS rendering
-//! (broker config-file TLS block + `StatefulSet` mounts + idempotency).
+//! Integration tests for inter-broker mTLS rendering.
+//!
+//! The tests cover the broker config-file TLS block, the `StatefulSet` mounts,
+//! and idempotency.
 
 use std::sync::Arc;
 
@@ -62,8 +64,8 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
 /// - `client_ca_path = "/etc/crabka/cluster-ca/ca.crt"`
 /// - `client_auth = "Required"`
 ///
-/// Parsing via `toml::from_str::<crabka_broker::file_config::FileConfig>` must
-/// succeed and return `tls_config.is_some() = true`.
+/// A parse with `toml::from_str::<crabka_broker::file_config::FileConfig>`
+/// must succeed and return `tls_config.is_some() = true`.
 #[tokio::test]
 async fn rendered_broker_config_carries_controller_listener_protocol_ssl_and_tls_block() {
     let items = vec![fake_pool_list_item("brokers", "y", "c1", 1, 1)];
@@ -126,10 +128,9 @@ async fn rendered_broker_config_carries_controller_listener_protocol_ssl_and_tls
 
 // ── test 2: tls=true, authentication=None listener reconciles (anonymous TLS) ──
 
-/// A `Listener` with `tls: true` and no authentication
-/// is now valid — it represents anonymous-over-TLS. Reconcile must succeed
-/// and the rendered broker TOML must contain `protocol = "Ssl"` for that
-/// listener.
+/// A `Listener` with `tls: true` and no authentication is valid. It represents
+/// anonymous-over-TLS. Reconcile must succeed, and the rendered broker TOML
+/// must contain `protocol = "Ssl"` for that listener.
 #[tokio::test]
 async fn data_plane_tls_listener_anonymous_now_reconciles() {
     let items = vec![fake_pool_list_item("brokers", "y", "c1", 1, 1)];
@@ -236,8 +237,8 @@ fn pool_cr_labeled(
     pool
 }
 
-/// Build the happy-path rules for a pool reconcile (parent GET + STS
-/// pre-apply GET + STS PATCH + STS status GET + pool status PATCH).
+/// Build the happy-path rules for a pool reconcile: parent GET, STS pre-apply
+/// GET, STS PATCH, STS status GET, and pool status PATCH.
 fn pool_reconcile_rules(parent: &str, pool_name: &str, ns: &str) -> Vec<MockRule> {
     use shared::fake_parent_kafka_body;
     let sts_name = format!("{parent}-{pool_name}");
@@ -371,17 +372,16 @@ async fn statefulset_mounts_cluster_ca_broker_tls_clients_ca() {
 
 // ── test 4: render is idempotent across reconciles ───────────────────────────
 
-/// Running reconcile twice with the same spec must
-/// produce byte-identical `broker-0.toml` output. The second reconcile's
-/// GET-Secret calls return the bodies written by the first reconcile (the
-/// mock FIFO state is extended with second-pass rules after first-pass
-/// rules are consumed).
+/// Two reconcile passes with the same spec must produce byte-identical
+/// `broker-0.toml` output. The GET-Secret calls of the second reconcile return
+/// the bodies that the first reconcile wrote. The test extends the mock FIFO
+/// state with second-pass rules after the first-pass rules are consumed.
 ///
-/// Because the mock CA-Secret response returns empty `data: {}`, the
-/// operator regenerates a fresh CA on both passes. Idempotency here means
-/// the *structure* and *paths* in the TOML are identical, which is what
-/// the config-hash stability contract depends on. We assert that the two
-/// TOML strings are byte-identical.
+/// The mock CA-Secret response returns empty `data: {}`, so the operator
+/// regenerates a fresh CA on both passes. Idempotency here means that the
+/// *structure* and the *paths* in the TOML are identical. The config-hash
+/// stability contract depends on that. The test asserts that the two TOML
+/// strings are byte-identical.
 #[tokio::test]
 async fn render_is_idempotent_across_reconciles() {
     let items = vec![fake_pool_list_item("brokers", "y", "c1", 1, 1)];

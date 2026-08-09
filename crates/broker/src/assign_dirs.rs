@@ -1,11 +1,11 @@
 //! KIP-858: report which log-directory UUID hosts each local replica by
 //! sending `AssignReplicasToDirs` (api key 73) to the controller leader.
 //!
-//! Two entry points are exported:
+//! This module exports two entry points:
 //!
-//! - [`build_request`] — pure grouping builder, unit-testable with no
-//!   network.
-//! - [`send_assignments`] — async sender that mirrors the pattern used by
+//! - [`build_request`], a pure grouping builder that a unit test can drive
+//!   with no network.
+//! - [`send_assignments`], an async sender that mirrors the pattern in
 //!   `isr_maintenance::send_alter_partition`.
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -14,20 +14,20 @@ use crabka_protocol::owned::assign_replicas_to_dirs_request::{
     AssignReplicasToDirsRequest, DirectoryData, PartitionData, TopicData,
 };
 
-/// Kafka sentinel for "broker epoch unknown" in `AssignReplicasToDirs`,
-/// matching the convention used by `send_alter_partition`.
+/// Kafka sentinel for "broker epoch unknown" in `AssignReplicasToDirs`. It
+/// matches the convention in `send_alter_partition`.
 const UNKNOWN_BROKER_EPOCH: i64 = -1;
 
-/// Group flat `(topic_id, partition, dir_uuid)` assignments into the nested
-/// `AssignReplicasToDirs` wire shape:
-/// `directories[]` → `topics[]` → `partitions[]`.
+/// Groups flat `(topic_id, partition, dir_uuid)` assignments into the nested
+/// `AssignReplicasToDirs` wire shape, which is `directories[]`, then
+/// `topics[]`, then `partitions[]`.
 ///
-/// Groups deterministically (`BTreeMap` keyed by the 16-byte UUID representation)
-/// so the resulting request is stable across calls, which is important for
-/// unit tests.
+/// The grouping is deterministic, because it uses a `BTreeMap` keyed by the
+/// 16-byte UUID representation. The request is therefore stable across calls,
+/// which matters for unit tests.
 ///
-/// `broker_epoch` is set to `-1` (unknown), matching the convention used by
-/// `send_alter_partition`.
+/// This function sets `broker_epoch` to `-1`, which means unknown, and matches
+/// the convention in `send_alter_partition`.
 pub(crate) fn build_request(
     broker_id: i32,
     assignments: &[(uuid::Uuid, i32, uuid::Uuid)], // (topic_id, partition, dir_uuid)
@@ -80,18 +80,18 @@ pub(crate) fn build_request(
     }
 }
 
-/// Send an `AssignReplicasToDirs` report to the controller leader.
+/// Sends an `AssignReplicasToDirs` report to the controller leader.
 ///
-/// Resolves the controller leader's address from `controller`, opens a
+/// It resolves the controller leader's address from `controller`, opens a
 /// short-lived `crabka_client_core::Client`, sends `req`, and checks the
 /// top-level `error_code`.
 ///
-/// Returns `Err` on:
-/// - no controller leader in the image
-/// - leader broker record not in the image
-/// - connection failure
-/// - send/receive failure
-/// - non-zero `error_code` in the response
+/// It returns `Err` in these cases:
+/// - the image holds no controller leader
+/// - the image holds no broker record for the leader
+/// - the connection failed
+/// - the send or the receive failed
+/// - the response carries a non-zero `error_code`
 #[cfg(test)]
 pub(crate) async fn send_assignments(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,

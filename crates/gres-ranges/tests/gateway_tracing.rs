@@ -1,16 +1,16 @@
 //! Trace assertions for the multi-range gateway.
 //!
-//! Two things about the harness are load-bearing, and both cost hours if
-//! rediscovered:
+//! Two things about the harness are load-bearing, and each one costs hours to
+//! find again:
 //!
 //! - **Assert on exported [`SpanData`], never on a live `tracing::Span`.**
 //!   `tracing-opentelemetry` resolves a span's parent and trace id when the
-//!   span *closes*, so a live handle reports a tree that does not match what is
-//!   exported.
+//!   span *closes*, so a live handle reports a tree that does not match the
+//!   exported tree.
 //! - **Install with `set_global_default`, not `with_default`.** The gateway
-//!   moves work onto `spawn_blocking` and `std::thread::scope` threads, where a
-//!   thread-local subscriber is invisible — a test using `with_default` passes
-//!   with zero spans collected.
+//!   moves work onto `spawn_blocking` threads and `std::thread::scope` threads,
+//!   where a thread-local subscriber is invisible. A test that uses
+//!   `with_default` passes with zero spans collected.
 //!
 //! Each test installs its own global subscriber, which relies on the repository
 //! convention of running tests under `cargo nextest` (one process per test).
@@ -27,9 +27,9 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SdkTracerProvider, SpanData};
 use tracing_subscriber::{EnvFilter, Layer as _, layer::SubscriberExt as _};
 
-/// Rendered in place of an attribute the span never recorded, so a missing
-/// attribute fails the whole-map comparison with a readable diff instead of
-/// silently matching nothing.
+/// The test renders this in place of an attribute the span never recorded. A
+/// missing attribute then fails the whole-map comparison with a readable diff,
+/// and does not silently match nothing.
 const UNSET: &str = "<unset>";
 
 struct Traces {
@@ -73,9 +73,10 @@ fn attribute<'a>(span: &'a SpanData, key: &str) -> Option<&'a opentelemetry::Val
 
 /// The gateway's statement span for `operation`.
 ///
-/// Looked up by attribute rather than by name on purpose: `otel.name` renames
-/// the span to its `db.query.summary` (`"SELECT t150"`), which is the `OTel`
-/// convention for database spans and what an operator sees in the waterfall.
+/// The lookup uses an attribute rather than the name on purpose. `otel.name`
+/// renames the span to its `db.query.summary`, such as `"SELECT t150"`. That is
+/// the `OTel` convention for database spans, and it is what an operator sees in
+/// the waterfall.
 fn statement_span<'a>(spans: &'a [SpanData], operation: &str) -> &'a SpanData {
     let matching = spans
         .iter()
@@ -90,13 +91,14 @@ fn statement_span<'a>(spans: &'a [SpanData], operation: &str) -> &'a SpanData {
     matching[0]
 }
 
-/// The value of a numeric attribute, insisting it exported as an OTLP integer.
+/// The value of a numeric attribute. This function requires that the attribute
+/// exported as an OTLP integer.
 ///
-/// OTLP has no unsigned integer type, so a `u64`/`usize` span field is
-/// stringified by `tracing-opentelemetry` — and Tempo cannot compare, sort or
-/// range-filter a string, so `pg.participants > 2` silently matches nothing.
-/// Asserting the attribute merely exists does not catch that; asserting its
-/// variant does.
+/// OTLP has no unsigned integer type, so `tracing-opentelemetry` turns a `u64`
+/// or `usize` span field into a string. Tempo cannot compare, sort, or
+/// range-filter a string, so `pg.participants > 2` silently matches nothing. An
+/// assertion that the attribute only exists does not catch that. An assertion on
+/// its variant does.
 fn integer_attribute(span: &SpanData, key: &str) -> i64 {
     match attribute(span, key) {
         Some(opentelemetry::Value::I64(value)) => *value,
@@ -110,7 +112,7 @@ fn only<'a>(spans: &'a [SpanData], name: &str) -> &'a SpanData {
     matching[0]
 }
 
-/// Render the named attributes of `span` as strings so a test compares one
+/// Render the named attributes of `span` as strings, so a test compares one
 /// whole map rather than a chain of per-field assertions.
 fn attributes(span: &SpanData, keys: &[&str]) -> BTreeMap<String, String> {
     keys.iter()
@@ -149,9 +151,9 @@ fn hash_split_config(tenant: &str) -> MultiRangeTenantConfig {
     .expect("config")
 }
 
-/// Two `id` values that hash into different ranges, so an `INSERT` carrying
-/// both is a genuine multi-participant scatter rather than a one-range write
-/// dressed up as one.
+/// Two `id` values that hash into different ranges. An `INSERT` that carries
+/// both is therefore a true multi-participant scatter, and not a one-range write
+/// that only looks like one.
 fn cross_range_ids(range_map: &crabka_gres_ranges::RangeMap, spec: &HashShardSpec) -> (i32, i32) {
     let first = 0_i32;
     let first_range = hash_range(range_map, spec, first);
@@ -493,21 +495,22 @@ async fn scatter_failing_before_its_decision_records_indeterminate_and_error() {
     check!(description.as_ref() == error.message);
 }
 
-/// A `BEGIN`/write/write/`COMMIT` touching two ranges must reach commit as an
-/// escalated transaction and settle through the **global-xid** two-phase
-/// commit — `pg.commit_global` with one `pg.prepare` per participant.
+/// A `BEGIN`, write, write, `COMMIT` sequence that touches two ranges must
+/// reach commit as an escalated transaction and settle through the
+/// **global-xid** two-phase commit. That is `pg.commit_global` with one
+/// `pg.prepare` per participant.
 ///
-/// This is an atomicity assertion wearing a tracing test's clothes. Those two
-/// spans are the only external evidence that `touch_write_range` escalated;
-/// without escalation the writes would land on their ranges independently and a
-/// crash between them would leave the transaction half-applied.
+/// This is an atomicity assertion in the clothes of a tracing test. Those two
+/// spans are the only external evidence that `touch_write_range` escalated.
+/// Without the escalation, the writes would land on their ranges independently,
+/// and a crash between them would leave the transaction half-applied.
 ///
-/// It also pins which of the two commit protocols this shape uses. Plain
-/// per-range tables settle through the global-xid path asserted here; only
-/// hash-sharded tables use the timestamp-scatter protocol
-/// (`pg.timestamp_scatter` / `pg.prewrite` / `pg.resolve`), which
-/// `scatter_write_records_participants_and_commits` covers. Expecting scatter
-/// spans from a transaction like this one is a misreading, not a bug — see
+/// The test also pins which of the two commit protocols this shape uses. Plain
+/// per-range tables settle through the global-xid path asserted here. Only
+/// hash-sharded tables use the timestamp-scatter protocol, which emits
+/// `pg.timestamp_scatter`, `pg.prewrite`, and `pg.resolve`, and which
+/// `scatter_write_records_participants_and_commits` covers. To expect scatter
+/// spans from a transaction of this shape is a misreading, not a bug. See
 /// `GatewayTransaction` in `tenant.rs`.
 #[tokio::test]
 async fn cross_range_transaction_commits_through_global_two_phase_commit() {

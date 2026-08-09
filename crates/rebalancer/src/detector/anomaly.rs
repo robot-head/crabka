@@ -1,6 +1,6 @@
-//! Anomaly types persisted by `AnomalyStore` and surfaced via the
-//! `GetAnomalies` RPC. `(kind, key)` is the dedup unit used by the
-//! detector tick loop to fold a sustained condition into one record.
+//! Anomaly types that `AnomalyStore` persists and the `GetAnomalies` RPC
+//! surfaces. `(kind, key)` is the dedup unit that the detector tick loop uses
+//! to fold a sustained condition into one record.
 
 use serde::{Deserialize, Serialize};
 

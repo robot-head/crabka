@@ -1,5 +1,8 @@
-//! A single record-cache entry: value bytes (None = tombstone), dirty flag, and
-//! the record context needed to forward the entry downstream on flush.
+//! A single record-cache entry.
+//!
+//! The entry holds the value bytes, a dirty flag, and the record context. A
+//! `None` value is a tombstone. The cache uses the context to forward the entry
+//! downstream on flush.
 use bytes::Bytes;
 
 use crate::processor::record::RecordContext;
@@ -20,10 +23,12 @@ impl LruCacheEntry {
         }
     }
 
-    /// Heap footprint for `ThreadCache` budget accounting. Ports Kafka's
-    /// `LRUCacheEntry.size()`: value bytes + context overhead
-    /// (8 timestamp + 8 offset + 4 partition + topic bytes). Key length is added
-    /// by `NamedCache` (it owns the key).
+    /// Returns the heap footprint for `ThreadCache` budget accounting.
+    ///
+    /// This method ports Kafka's `LRUCacheEntry.size()`. The size is the value
+    /// bytes plus the context overhead of 8 timestamp bytes, 8 offset bytes,
+    /// 4 partition bytes, and the topic bytes. `NamedCache` adds the key length,
+    /// because `NamedCache` owns the key.
     pub fn value_size(&self) -> usize {
         let v = self.value.as_ref().map_or(0, Bytes::len);
         v + 8 + 8 + 4 + self.context.topic.len()

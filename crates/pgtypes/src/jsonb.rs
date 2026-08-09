@@ -1,18 +1,18 @@
 //! `PostgreSQL` `jsonb`: a decomposed, canonically-ordered JSON value.
 //!
-//! `jsonb` is not stored as source text — `PostgreSQL` parses the input, keeps
-//! numbers as `numeric`, discards insignificant whitespace, drops duplicate
-//! object keys (last one wins) and stores object keys in a canonical order
-//! (shorter keys first, then bytewise). Output is therefore re-rendered from
-//! the decomposed form, which is why `'{"b":1,"a":2}'::jsonb` prints as
+//! `PostgreSQL` does not store `jsonb` as source text. It parses the input,
+//! keeps numbers as `numeric`, discards insignificant whitespace, drops
+//! duplicate object keys (last one wins) and stores object keys in a canonical
+//! order (shorter keys first, then bytewise). Output therefore comes from the
+//! decomposed form, which is why `'{"b":1,"a":2}'::jsonb` prints as
 //! `{"a": 2, "b": 1}`.
 //!
 //! This module owns that representation ([`JsonbValue`]), a hand-written RFC
 //! 8259 parser ([`parse`]) and the canonical serializer ([`JsonbValue::to_text`]).
-//! The parser is hand-written rather than delegated to `serde_json` because
-//! `PostgreSQL`'s numbers are arbitrary-precision `numeric` values that preserve
-//! their input scale (`'1.00'::jsonb` prints `1.00`), which `serde_json::Number`
-//! cannot represent without changing that type workspace-wide.
+//! The parser is hand-written instead of delegated to `serde_json`.
+//! `PostgreSQL`'s numbers are arbitrary-precision `numeric` values that keep
+//! their input scale (`'1.00'::jsonb` prints `1.00`), and `serde_json::Number`
+//! cannot represent that without a change to the type workspace-wide.
 
 use std::{cmp::Ordering, fmt::Write as _};
 
@@ -20,7 +20,7 @@ use bigdecimal::BigDecimal;
 
 use crate::TypeError;
 
-/// The maximum nesting depth accepted by [`parse`]. `PostgreSQL` guards its
+/// The maximum nesting depth that [`parse`] accepts. `PostgreSQL` guards its
 /// recursive descent parser with a stack-depth check; this is the equivalent,
 /// so adversarial input cannot overflow the parser's stack.
 const MAX_DEPTH: u32 = 512;
@@ -29,11 +29,11 @@ const MAX_DEPTH: u32 = 512;
 ///
 /// Objects are **always** held in `PostgreSQL`'s canonical key order (key byte
 /// length first, then bytewise) with duplicate keys already resolved, so two
-/// `jsonb` values that `PostgreSQL` considers equal are structurally equal here
-/// — the property index keys and `GROUP BY` rely on.
+/// `jsonb` values that `PostgreSQL` considers equal are structurally equal
+/// here. Index keys and `GROUP BY` rely on that property.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsonbValue {
-    /// The JSON `null` literal — distinct from a SQL NULL.
+    /// The JSON `null` literal, distinct from a SQL NULL.
     Null,
     /// `true` / `false`.
     Bool(bool),
@@ -74,10 +74,11 @@ impl PartialOrd for JsonbValue {
 
 impl Ord for JsonbValue {
     /// `PostgreSQL`'s `jsonb` btree order: `Object > Array > Boolean > Number >
-    /// String > Null`. Within a type: numbers compare numerically, strings
-    /// compare bytewise (a documented divergence — `PostgreSQL` uses the database
-    /// collation), arrays compare by element count then element-wise, objects by
-    /// pair count then key/value pairs in canonical key order.
+    /// String > Null`. Within a type, numbers compare numerically and strings
+    /// compare bytewise. That is a documented divergence, because `PostgreSQL`
+    /// uses the database collation. Arrays compare by element count then
+    /// element-wise, and objects by pair count then key/value pairs in canonical
+    /// key order.
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (JsonbValue::Null, JsonbValue::Null) => Ordering::Equal,
@@ -172,9 +173,10 @@ impl JsonbValue {
         }
     }
 
-    /// Build an object from `pairs`, applying `PostgreSQL`'s canonical key order
-    /// and last-wins duplicate-key resolution. Use this instead of constructing
-    /// [`JsonbValue::Object`] directly, which assumes the invariant already holds.
+    /// Build an object from `pairs` with `PostgreSQL`'s canonical key order and
+    /// last-wins duplicate-key resolution. Use this instead of a direct
+    /// construction of [`JsonbValue::Object`], which assumes the invariant
+    /// already holds.
     #[must_use]
     pub fn object_from_pairs(pairs: Vec<(String, JsonbValue)>) -> Self {
         JsonbValue::Object(canonicalize_pairs(pairs))
@@ -193,11 +195,11 @@ impl JsonbValue {
     }
 
     /// Recursively normalize every number to its shortest exact form (`1.00` →
-    /// `1`, `-0.0` → `0`), returning `None` when nothing changed.
+    /// `1`, `-0.0` → `0`), and return `None` when nothing changed.
     ///
-    /// Index keys are compared as raw encoded bytes, so two values that compare
-    /// equal must encode identically; scale is the one part of a `jsonb` number
-    /// that equality ignores but the encoding would otherwise preserve.
+    /// This engine compares index keys as raw encoded bytes, so two values that
+    /// compare equal must encode identically. Scale is the one part of a `jsonb`
+    /// number that equality ignores but the encoding would otherwise preserve.
     #[must_use]
     pub fn normalized_numbers(&self) -> Option<Self> {
         match self {
@@ -255,8 +257,9 @@ pub fn compare_object_keys(a: &str, b: &str) -> Ordering {
         .then_with(|| a.as_bytes().cmp(b.as_bytes()))
 }
 
-/// Sort `pairs` into canonical key order and drop duplicate keys, keeping the
-/// last occurrence (`PostgreSQL`'s `jsonb` duplicate-key rule).
+/// Sort `pairs` into canonical key order and drop duplicate keys. This function
+/// keeps the last occurrence, which is `PostgreSQL`'s `jsonb` duplicate-key
+/// rule.
 fn canonicalize_pairs(mut pairs: Vec<(String, JsonbValue)>) -> Vec<(String, JsonbValue)> {
     // A stable sort keeps duplicates in input order, so the last one survives.
     pairs.sort_by(|(a, _), (b, _)| compare_object_keys(a, b));
@@ -270,9 +273,9 @@ fn canonicalize_pairs(mut pairs: Vec<(String, JsonbValue)>) -> Vec<(String, Json
     out
 }
 
-/// Append `s` as a JSON string literal, escaping exactly the characters
-/// `PostgreSQL`'s `escape_json` escapes (`"`, `\`, and the C0 controls; `/` and
-/// non-ASCII are emitted raw).
+/// Append `s` as a JSON string literal. This function escapes exactly the
+/// characters `PostgreSQL`'s `escape_json` escapes (`"`, `\`, and the C0
+/// controls), and it emits `/` and non-ASCII raw.
 fn write_json_string(s: &str, out: &mut String) {
     out.push('"');
     for ch in s.chars() {
@@ -306,9 +309,9 @@ pub fn parse(input: &str) -> Result<JsonbValue, TypeError> {
 
 /// [`parse`] plus `PostgreSQL`'s `WITH UNIQUE KEYS` observation: the second
 /// element of the pair is `true` when *some* object in the document repeated a
-/// key. Duplicate keys are still resolved last-wins in the returned value, so a
-/// caller that does not care about uniqueness sees exactly what [`parse`]
-/// returns.
+/// key. This function still resolves duplicate keys last-wins in the returned
+/// value, so a caller that does not care about uniqueness sees exactly what
+/// [`parse`] returns.
 ///
 /// `reject_duplicates` makes a duplicate key a parse error instead
 /// (`JSON_OBJECT(… WITH UNIQUE KEYS)`), which is the one place `PostgreSQL`
@@ -342,7 +345,7 @@ struct Parser<'a> {
     src: &'a [u8],
     pos: usize,
     input: &'a str,
-    /// Raise on a duplicate object key rather than merely recording one.
+    /// Raise on a duplicate object key rather than only report it.
     reject_duplicates: bool,
     /// Set when any object in the document repeated a key.
     saw_duplicate: bool,

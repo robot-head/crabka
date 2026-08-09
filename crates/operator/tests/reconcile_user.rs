@@ -315,8 +315,9 @@ fn clients_ca_cert_secret_body(
     })
 }
 
-/// `KafkaUser` with cluster label, no Secret yet → reconcile
-/// creates the Secret, upserts SCRAM, applies ACLs, sets Ready=True.
+/// A `KafkaUser` with the cluster label and no Secret yet. The reconcile
+/// creates the Secret, upserts SCRAM, applies the ACLs, and sets
+/// Ready=True.
 #[tokio::test]
 async fn first_reconcile_provisions_scram_and_acls() {
     let rules = vec![
@@ -436,8 +437,8 @@ async fn first_reconcile_provisions_scram_and_acls() {
     check!(body["status"]["scramSha512"] == true);
 }
 
-/// Reconcile with existing matching ACLs → no `CreateAcls` /
-/// `DeleteAcls` calls.
+/// A reconcile with matching ACLs already present makes no `CreateAcls`
+/// call and no `DeleteAcls` call.
 #[tokio::test]
 async fn noop_when_acls_already_match() {
     let rules = vec![
@@ -498,7 +499,8 @@ async fn noop_when_acls_already_match() {
     );
 }
 
-/// Reconcile drops out-of-band ACLs not in spec (CRD wins).
+/// The reconcile removes the ACLs that came from outside and are not in
+/// the spec. The CRD wins.
 #[tokio::test]
 async fn deletes_orphan_acls() {
     let rules = vec![
@@ -596,8 +598,9 @@ fn quota_rules() -> Vec<MockRule> {
     ]
 }
 
-/// `spec.quotas` absent ⇒ reconciler never calls Describe /
-/// `AlterClientQuotas`. Status carries `quotasInSync: false`.
+/// With `spec.quotas` absent, the reconciler never calls Describe and
+/// never calls `AlterClientQuotas`. The status carries
+/// `quotasInSync: false`.
 #[tokio::test]
 async fn omitted_quotas_skips_broker_call() {
     let state = MockState::new(quota_rules());
@@ -637,8 +640,9 @@ async fn omitted_quotas_skips_broker_call() {
     assert!(body["status"]["quotasInSync"] == false);
 }
 
-/// spec.quotas declares per-user limits, broker has nothing →
-/// reconciler issues `AlterClientQuotas` with one `Set` per declared key.
+/// `spec.quotas` declares per-user limits and the broker has none. The
+/// reconciler then issues `AlterClientQuotas` with one `Set` for each
+/// declared key.
 #[tokio::test]
 async fn first_reconcile_sets_declared_quotas() {
     let state = MockState::new(quota_rules());
@@ -707,8 +711,9 @@ async fn first_reconcile_sets_declared_quotas() {
     assert!(body["status"]["quotasInSync"] == true);
 }
 
-/// broker matches spec exactly → no `AlterClientQuotas` is
-/// issued. Describe still runs (the diff input source).
+/// The broker matches the spec exactly, so the reconciler issues no
+/// `AlterClientQuotas`. Describe still runs, because it is the input to
+/// the diff.
 #[tokio::test]
 async fn noop_when_quotas_already_match() {
     let state = MockState::new(quota_rules());
@@ -744,8 +749,8 @@ async fn noop_when_quotas_already_match() {
     );
 }
 
-/// broker has a quota the spec doesn't declare → reconciler
-/// issues a `Remove` for it. (The CRD wins.)
+/// The broker has a quota that the spec does not declare. The reconciler
+/// then issues a `Remove` for it, because the CRD wins.
 #[tokio::test]
 async fn drift_remove_path_emits_remove_op() {
     let state = MockState::new(quota_rules());
@@ -786,8 +791,9 @@ async fn drift_remove_path_emits_remove_op() {
     ));
 }
 
-/// `spec.quotas: {}` (empty object) wipes the broker's quota
-/// state for this user. Different from `spec.quotas: null` (=skip).
+/// `spec.quotas: {}`, an empty object, clears the quota state of this
+/// user on the broker. `spec.quotas: null` is different, because it
+/// skips the quota work.
 #[tokio::test]
 async fn empty_quotas_object_tombstones_everything() {
     let state = MockState::new(quota_rules());
@@ -826,9 +832,10 @@ async fn empty_quotas_object_tombstones_everything() {
 
 // --- TLS auth reconcile tests --------------------------------------------
 
-/// First reconcile of a TLS-auth `KafkaUser` provisions the
-/// clients CA (key + cert Secrets), the per-user cert Secret, and the
-/// ACLs by `User:CN=<name>` principal. No SCRAM call is made.
+/// The first reconcile of a `KafkaUser` with TLS authentication
+/// provisions the clients CA, which is the key Secret and the cert Secret,
+/// the cert Secret of the user, and the ACLs for the `User:CN=<name>`
+/// principal. It makes no SCRAM call.
 // straight-line fixture; splitting hurts more than it helps
 #[tokio::test]
 async fn first_reconcile_tls_provisions_certs_and_acls() {
@@ -985,9 +992,9 @@ async fn first_reconcile_tls_provisions_certs_and_acls() {
     );
 }
 
-/// TLS reconcile with an existing user Secret whose cert is
-/// well outside the renewal window reuses it — no PATCH on the user
-/// Secret is issued.
+/// A TLS reconcile with an existing user Secret whose cert is far outside
+/// the renewal window reuses that Secret. It issues no PATCH on the user
+/// Secret.
 #[tokio::test]
 async fn tls_reconcile_reuses_existing_cert_when_not_near_expiry() {
     let ca = ca::generate_clients_ca("ca", 365).expect("ca");
@@ -1056,8 +1063,8 @@ async fn tls_reconcile_reuses_existing_cert_when_not_near_expiry() {
     );
 }
 
-/// TLS reconcile with an existing cert inside the renewal
-/// window reissues — exactly one PATCH on the per-user Secret.
+/// A TLS reconcile with an existing cert inside the renewal window issues
+/// a new cert. It makes exactly one PATCH on the Secret of the user.
 #[tokio::test]
 async fn tls_reconcile_reissues_cert_near_expiry() {
     let ca = ca::generate_clients_ca("ca", 365).expect("ca");
@@ -1124,8 +1131,9 @@ async fn tls_reconcile_reissues_cert_near_expiry() {
     );
 }
 
-/// TLS user finalizer cleanup filters ACL deletes by the
-/// `User:CN=<name>` principal (not the bare `User:<name>` SCRAM form).
+/// The finalizer cleanup of a TLS user filters the ACL deletes by the
+/// `User:CN=<name>` principal, and not by the plain `User:<name>` SCRAM
+/// form.
 #[tokio::test]
 async fn tls_finalizer_filters_acls_by_dn() {
     let rules = vec![
@@ -1176,8 +1184,8 @@ async fn tls_finalizer_filters_acls_by_dn() {
     );
 }
 
-/// TLS user with quotas keys broker quota calls by the
-/// DN (`CN=alice`), not the bare name.
+/// A TLS user with quotas keys the broker quota calls by the DN,
+/// `CN=alice`, and not by the plain name.
 #[tokio::test]
 async fn tls_user_with_quotas_alters_quotas_by_dn() {
     let rules = vec![

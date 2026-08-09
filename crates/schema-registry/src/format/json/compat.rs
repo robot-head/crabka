@@ -1,6 +1,6 @@
-//! Backward-compatibility classification for JSON Schema differences. SEED from
-//! Confluent's behavior; the cp golden matrix (`compat_conformance`) is the
-//! authority and re-tunes this table.
+//! Backward-compatibility classification for JSON Schema differences. The SEED
+//! comes from Confluent's behavior. The cp golden matrix, which
+//! `compat_conformance` drives, is the authority and re-tunes this table.
 
 use super::diff::{Difference, Kind};
 

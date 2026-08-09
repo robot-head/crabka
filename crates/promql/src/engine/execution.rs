@@ -11,9 +11,10 @@ use super::{
 use crate::{PromqlError, error::Result, result::QueryResult, store::MetricStore};
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Execute a planned instant query and assemble its output batches into an
-    /// [`InstantVector`](QueryResult::InstantVector), reading each shape's
-    /// columns per `InstantShape`.
+    /// Executes a planned instant query and assembles its output batches into an
+    /// [`InstantVector`](QueryResult::InstantVector).
+    ///
+    /// This method reads each shape's columns as `InstantShape` defines them.
     #[tracing::instrument(
         name = "promql.execute_operator",
         level = "debug",
@@ -82,16 +83,19 @@ impl<S: MetricStore> PromqlEngine<S> {
         }
     }
 
-    /// Plan a sub-expression through the recursive operator planner and assemble
-    /// it into a [`QueryResult`] — the production resolver the `plan_*` helpers
-    /// use to evaluate their sub-trees (scalar args, binary/unary operands,
-    /// aggregate inners, function inputs). This makes the planner fully
-    /// self-recursive: it never re-enters the tree-walking interpreter, which is
-    /// retained solely as the `#[cfg(test)]` differential parity oracle.
+    /// Plans a sub-expression through the recursive operator planner and
+    /// assembles it into a [`QueryResult`].
     ///
-    /// `Self::plan_instant_expr` is proven total — it returns `Ok(Some(_))` for
-    /// every expression it accepts and `Err` for the invalid ones — so the
-    /// `Ok(None)` arm is unreachable and maps to an internal [`PromqlError::Plan`].
+    /// This method is the production resolver that the `plan_*` helpers use to
+    /// evaluate their sub-trees: scalar args, binary and unary operands,
+    /// aggregate inners, and function inputs. It makes the planner fully
+    /// self-recursive. The planner never re-enters the tree-walking interpreter,
+    /// which stays only as the `#[cfg(test)]` differential parity oracle.
+    ///
+    /// `Self::plan_instant_expr` is proven total: it returns `Ok(Some(_))` for
+    /// every expression it accepts and `Err` for the invalid ones. So the
+    /// `Ok(None)` arm is unreachable and maps to an internal
+    /// [`PromqlError::Plan`].
     pub(super) async fn plan_and_resolve(
         &self,
         tenant: &str,

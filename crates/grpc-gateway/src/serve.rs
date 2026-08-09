@@ -1,8 +1,9 @@
-//! Listener serving: plaintext via `axum::serve`, or rustls via a manual
-//! accept loop that hands each `TlsStream` to hyper and injects the mTLS peer
-//! principal (cert subject DN) into request extensions. TLS material is hot-
-//! reloadable (`DynamicServerConfig`); the plaintext path is unchanged from
-//! pre-P4 so existing tests are unaffected.
+//! Listener serving.
+//!
+//! The plaintext path runs through `axum::serve`. The rustls path runs through
+//! a manual accept loop that hands each `TlsStream` to hyper and injects the
+//! mTLS peer principal, the cert subject DN, into the request extensions. The
+//! TLS material is hot-reloadable through `DynamicServerConfig`.
 
 use std::{sync::Arc, time::Duration};
 
@@ -14,12 +15,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
-/// Serve `app` on `listener`. With `tls = Some(..)`, terminate rustls per
-/// connection; otherwise serve plaintext. Returns when `shutdown` is cancelled.
+/// Serve `app` on `listener`.
+///
+/// With `tls = Some(..)`, this function terminates rustls for each connection.
+/// Otherwise it serves plaintext. It returns when `shutdown` is cancelled.
 ///
 /// # Errors
-/// Propagates the `std::io` error from `axum::serve` (plaintext) or the
-/// accept loop (TLS).
+/// Propagates the `std::io` error from `axum::serve` on the plaintext path, or
+/// from the accept loop on the TLS path.
 pub async fn serve(
     listener: TcpListener,
     app: Router,
@@ -94,7 +97,7 @@ async fn serve_tls(
     Ok(())
 }
 
-/// Extract the mTLS peer principal (cert subject DN) after a handshake.
+/// Extract the mTLS peer principal, the cert subject DN, after a handshake.
 fn peer_principal(tls: &tokio_rustls::server::TlsStream<TcpStream>) -> Option<Principal> {
     let (_, conn) = tls.get_ref();
     let cert = conn.peer_certificates()?.first()?;
@@ -106,7 +109,7 @@ fn peer_principal(tls: &tokio_rustls::server::TlsStream<TcpStream>) -> Option<Pr
     })
 }
 
-/// Build the hot-reloadable server config + spawn the reload watcher. Returns
+/// Build the hot-reloadable server config and spawn the reload watcher. Returns
 /// the dynamic config to pass to [`serve`].
 ///
 /// # Errors
@@ -141,7 +144,7 @@ pub fn build_and_watch_tls(
 }
 
 /// The `tokio` tick for a validated reload interval. `tokio::time::interval`
-/// panics on a zero period, so the extent is checked here first.
+/// panics on a zero period, so this function checks the extent first.
 fn reload_tick(reload_interval: Time) -> Duration {
     assert2::assert!(reload_interval > secs(0));
     reload_interval.to_std()

@@ -47,10 +47,12 @@ const DEFAULT_HEATMAP_VALUE_BUCKETS: usize = 32;
 const DEFAULT_HEATMAP_TIME_BUCKETS_MAX: usize = 4096;
 const PROFILE_ID_LABEL: &str = "__profile_id__";
 
-/// Labels stored internally for span/exemplar lookups that Pyroscope does not
-/// expose through the label-enumeration APIs (`LabelNames`, `LabelValues`,
-/// series counting). `__profile_id__` is attached per profile, so surfacing it
-/// would leak per-profile cardinality that real Pyroscope never reports.
+/// Labels that Crabka stores internally for span and exemplar lookups.
+///
+/// Pyroscope does not expose these labels through the label-enumeration APIs
+/// `LabelNames` and `LabelValues`, or through series counting. Crabka attaches
+/// `__profile_id__` to each profile, so a report of it would leak per-profile
+/// cardinality that real Pyroscope never reports.
 fn is_internal_label(name: &str) -> bool {
     name == PROFILE_ID_LABEL
 }
@@ -181,9 +183,10 @@ impl<S: ProfileStore> QuerierState<S> {
         self
     }
 
-    /// Attach the process-shared metrics bundle (the one whose registry backs
-    /// the `/metrics` exporter) so query handlers record into the exported
-    /// series. Called once by the binary `main` after constructing the state.
+    /// Attaches the process-shared metrics bundle so query handlers record into
+    /// the exported series. The registry of this bundle backs the `/metrics`
+    /// exporter. The binary `main` calls this method once after it constructs
+    /// the state.
     #[must_use]
     pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
         self.metrics = metrics;
@@ -202,11 +205,13 @@ impl<S: ProfileStore> QuerierState<S> {
             .map_err(|err| ProfileError::Plan(err.message()))
     }
 
-    /// Global profile stats for a tenant across all ingested data. Pyroscope's
-    /// `GetProfileStats` is unbounded — the request carries no time range — so
-    /// this queries the full time span rather than a caller-supplied window. A
-    /// `[0, 0]`-scoped query always reports "no data" and traps Grafana's
-    /// Profiles Drilldown on its onboarding screen even when the tenant has data.
+    /// Returns global profile stats for a tenant across all ingested data.
+    ///
+    /// Pyroscope's `GetProfileStats` is unbounded, because the request carries
+    /// no time range. This method therefore queries the full time span and not
+    /// a caller-supplied window. A `[0, 0]`-scoped query always reports "no
+    /// data". It then traps Grafana's Profiles Drilldown on its onboarding
+    /// screen even when the tenant has data.
     async fn global_profile_stats(&self, tenant: &str) -> Result<ProfileStats, ProfileError> {
         self.store.stats(tenant, 0, i64::MAX).await
     }
@@ -1106,9 +1111,10 @@ fn heatmap_slot_timestamp(
     Some(start_ms + (bucket + 1) * step_ms)
 }
 
-/// Time `fut` (a Connect handler body) and record the outcome on `route`.
-/// `Ok` => `status="ok"`, any `ConnectError` => `status="error"`. The latency is
-/// observed regardless of outcome.
+/// Times `fut`, a Connect handler body, and records the outcome on `route`.
+///
+/// `Ok` gives `status="ok"` and any `ConnectError` gives `status="error"`. The
+/// function observes the latency for every outcome.
 async fn timed_query<T>(
     metrics: &ServiceMetrics,
     route: &str,
@@ -1120,9 +1126,10 @@ async fn timed_query<T>(
     result
 }
 
-/// Time `fut` (a raw axum handler body returning a `Response`) and record the
-/// outcome on `route`. A 2xx/3xx status counts as `ok`; 4xx/5xx counts as
-/// `error`.
+/// Times `fut`, a raw axum handler body, and records the outcome on `route`.
+///
+/// `fut` returns a `Response`. A 2xx or 3xx status counts as `ok`. A 4xx or 5xx
+/// status counts as `error`.
 async fn timed_query_response(
     metrics: &ServiceMetrics,
     route: &str,
@@ -1200,10 +1207,12 @@ where
     Ok(bound)
 }
 
-/// Pyroscope `settings.v1.SettingsService/Get`. Crabka does not persist UI
-/// settings, so it reports an empty set; the Grafana Profiles Drilldown app then
-/// uses its built-in defaults (same as a fresh Pyroscope tenant). Without this
-/// endpoint the app's init 404s and the landing renders empty.
+/// Pyroscope `settings.v1.SettingsService/Get`.
+///
+/// Crabka does not persist UI settings, so this handler reports an empty set.
+/// The Grafana Profiles Drilldown app then uses its built-in defaults, the same
+/// defaults as for a fresh Pyroscope tenant. Without this endpoint the init of
+/// the app gets a 404 and the landing page renders empty.
 async fn get_settings_handler(
     _req: ConnectRequest<pb::settings::v1::GetSettingsRequest>,
 ) -> Result<ConnectResponse<pb::settings::v1::GetSettingsResponse>, ConnectError> {
@@ -1214,8 +1223,10 @@ async fn get_settings_handler(
     ))
 }
 
-/// Pyroscope `settings.v1.SettingsService/Set`. Settings are not persisted; echo
-/// the value back so the app's optimistic UI update succeeds for the session.
+/// Pyroscope `settings.v1.SettingsService/Set`.
+///
+/// Crabka does not persist settings. This handler echoes the value back so the
+/// optimistic UI update of the app succeeds for the session.
 async fn set_settings_handler(
     req: ConnectRequest<pb::settings::v1::SetSettingsRequest>,
 ) -> Result<ConnectResponse<pb::settings::v1::SetSettingsResponse>, ConnectError> {
@@ -2210,13 +2221,14 @@ where
     }
 }
 
-/// Resolve and validate the tenant from the `X-Scope-OrgID` header.
+/// Resolves and validates the tenant from the `X-Scope-OrgID` header.
 ///
-/// Absent, empty, or non-UTF-8 headers resolve to the anonymous tenant; a
-/// present, non-empty header is validated against the tenant charset (see
-/// [`crate::tenant::validate_tenant`]). An invalid tenant id is surfaced as a
-/// [`ProfileError::Plan`] (Connect `invalid_argument` / legacy 400) with a
-/// generic, non-leaky message rather than being used as a storage key.
+/// Absent, empty, or non-UTF-8 headers resolve to the anonymous tenant. This
+/// function validates a present, non-empty header against the tenant charset.
+/// See [`crate::tenant::validate_tenant`]. An invalid tenant id becomes a
+/// [`ProfileError::Plan`], which maps to Connect `invalid_argument` and legacy
+/// 400 and carries a generic message. The function never uses an invalid id as
+/// a storage key.
 fn tenant_from_headers(headers: &HeaderMap) -> Result<String, ProfileError> {
     let header = headers
         .get("x-scope-orgid")
@@ -2380,11 +2392,12 @@ fn parse_render_time_param(
     reject_negative_render_time(normalize_render_unix_time(numeric), value)
 }
 
-/// Reject a render time bound that resolved to a negative millisecond value.
+/// Rejects a render time bound that resolved to a negative millisecond value.
 ///
-/// A `now-<offset>` larger than `now` (clock skew / huge lookback) or a literal
-/// negative timestamp both yield a negative bound, which is never a valid Unix
-/// time and would otherwise be passed downstream as a query window edge.
+/// A `now-<offset>` larger than `now` gives a negative bound, for example after
+/// clock skew or a very long lookback. A literal negative timestamp gives one
+/// too. A negative bound is never a valid Unix time, and without this check it
+/// travels downstream as a query window edge.
 fn reject_negative_render_time(resolved_ms: i64, raw: &str) -> Result<i64, ProfileError> {
     if resolved_ms < 0 {
         return Err(ProfileError::Plan(format!(
@@ -2405,8 +2418,9 @@ fn normalize_render_unix_time(value: i64) -> i64 {
 /// The `now-<offset>` lookback of Pyroscope's `/render` `from`/`until` params.
 ///
 /// The grammar is Pyroscope's, not `crabka-units`': a bare integer followed by
-/// exactly one of `s`/`m`/`h`/`d`. The result is an extent, so it is a [`Time`];
-/// the instant it resolves against stays epoch milliseconds at the call site.
+/// exactly one of `s`, `m`, `h`, or `d`. The result is an extent, so it is a
+/// [`Time`]. The instant that it resolves against stays epoch milliseconds at
+/// the call site.
 fn parse_render_offset(value: &str) -> Result<Time, ProfileError> {
     let (number, unit) = value.split_at(value.len().saturating_sub(1));
     let amount = number.parse::<i64>().map_err(|err| {
@@ -2646,13 +2660,14 @@ fn label_matcher_value_escape(value: &str) -> String {
         .collect()
 }
 
-/// Map a [`ProfileError`] to a legacy flamebearer HTTP response.
+/// Maps a [`ProfileError`] to a legacy flamebearer HTTP response.
 ///
-/// Mirrors [`connect_error`]'s code mapping: client-shaped errors
-/// (`Decode`/`Plan`/`Unsupported` — including limit/range violations surfaced as
-/// `Plan`) keep their user-facing message at 400, while internal failures
-/// (`Exec`/`Store`/`Symbolize`) return a generic 500 and log the detail via
-/// tracing so raw DataFusion/internal text never reaches the client.
+/// The mapping matches the code mapping of [`connect_error`]. The client-shaped
+/// errors are `Decode`, `Plan`, and `Unsupported`, and they include limit and
+/// range violations that become `Plan`. These keep their user-facing message at
+/// 400. The internal failures are `Exec`, `Store`, and `Symbolize`. These
+/// return a generic 500 and log the detail with tracing, so raw `DataFusion` text
+/// and other internal text never reaches the client.
 fn profile_error_response(err: ProfileError) -> Response {
     let status = match &err {
         ProfileError::Decode(_) | ProfileError::Plan(_) | ProfileError::Unsupported(_) => {
@@ -2899,9 +2914,9 @@ mod tests {
         store
     }
 
-    /// A store whose single series carries multiple labels pushed in an order
-    /// that is NOT sorted by name (`service_name` before `__profile_type__`),
-    /// exercising the `Series` response's sort-by-name path.
+    /// A store whose single series carries multiple labels in an order that is
+    /// NOT sorted by name, with `service_name` before `__profile_type__`. This
+    /// store exercises the sort-by-name path of the `Series` response.
     fn store_with_unsorted_labels() -> InMemoryProfileStore {
         let mut store = InMemoryProfileStore::new();
         let name_ref = store.symbols_mut().intern_string("main.work");
@@ -4136,11 +4151,12 @@ overrides:
         );
     }
 
-    /// The `Series` RPC must emit each label set SORTED by name, matching real
-    /// Pyroscope's `/series` wire order (e.g. `__profile_type__` before
-    /// `service_name`). The Grafana Profiles Drilldown compares this order, so an
-    /// insertion-order response is a wire-compat regression. Drives the live
-    /// handler over HTTP for both the projected and full-label-set forms.
+    /// The `Series` RPC must emit each label set SORTED by name. That order
+    /// matches real Pyroscope's `/series` wire order, for example
+    /// `__profile_type__` before `service_name`. The Grafana Profiles Drilldown
+    /// compares this order, so an insertion-order response is a wire-compat
+    /// regression. This test drives the live handler over HTTP for both the
+    /// projected form and the full-label-set form.
     #[tokio::test]
     async fn series_emits_label_sets_sorted_by_name() {
         let state = Arc::new(QuerierState::new(Arc::new(store_with_unsorted_labels())));

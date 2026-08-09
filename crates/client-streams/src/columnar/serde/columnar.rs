@@ -1,4 +1,5 @@
-//! `ColumnarSerde<T>`: native zero-copy `columnar` encoding at the `Serde<T>` boundary.
+//! `ColumnarSerde<T>`, the native zero-copy `columnar` encoding at the
+//! `Serde<T>` boundary.
 
 use std::marker::PhantomData;
 
@@ -11,22 +12,25 @@ use bytes::Bytes;
 
 use crate::processor::serde::{Serde, SerdeAssociate, SerdeError};
 
-/// `Serde<T>` for any `T: columnar::Columnar`, using columnar's native byte layout.
-/// Opt-in per type (no `DefaultSerde` blanket impl — Rust coherence forbids it).
+/// `Serde<T>` for any `T: columnar::Columnar`, with columnar's native byte
+/// layout.
+///
+/// You opt in per type. There is no `DefaultSerde` blanket impl, because Rust
+/// coherence forbids one.
 ///
 /// # Wire format
 ///
 /// The bytes are exactly columnar's own `indexed` encoding of a one-element
-/// container, produced via [`Stash::write_bytes`] and reconstructed via
-/// [`Stash::try_from_bytes`]. That encoding is a `u64`-aligned offset index
-/// followed by the column byte regions, so the buffer is self-describing and
-/// `8`-byte framed — no hand-rolled length prefixes are needed.
+/// container. [`Stash::write_bytes`] produces them and
+/// [`Stash::try_from_bytes`] rebuilds them. That encoding is a `u64`-aligned
+/// offset index followed by the column byte regions, so the buffer is
+/// self-describing and `8`-byte framed. It needs no hand-rolled length prefix.
 ///
-/// Reconstruction goes through [`Stash::try_from_bytes`], which validates the
-/// framing header, slice count, and `u64` alignment (relocating to an aligned
-/// buffer if the incoming slice is misaligned) before any indexing happens.
-/// Malformed or truncated input therefore returns [`SerdeError`] rather than
-/// panicking.
+/// Reconstruction goes through [`Stash::try_from_bytes`]. That function
+/// validates the framing header, the slice count, and the `u64` alignment before
+/// any indexing, and it relocates the data to an aligned buffer when the incoming
+/// slice is misaligned. Malformed or truncated input therefore returns a
+/// [`SerdeError`] and does not panic.
 pub struct ColumnarSerde<T>(PhantomData<fn() -> T>);
 
 impl<T> Clone for ColumnarSerde<T> {

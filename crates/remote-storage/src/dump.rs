@@ -1,10 +1,10 @@
-//! [`RlmmCacheDump`] — a flat, owned snapshot of an
+//! [`RlmmCacheDump`] is a flat, owned snapshot of an
 //! [`InmemoryRemoteLogMetadataManager`](crate::InmemoryRemoteLogMetadataManager)'s
-//! cache, used by the topic-backed manager's on-disk snapshot. Unlike the
-//! live mutation path, importing a dump
-//! bypasses lifecycle-transition validation: the dumped states are
-//! already the product of valid transitions, so re-applying them
-//! through `add`/`update` would wrongly reject terminal states.
+//! cache. The topic-backed manager's on-disk snapshot uses it.
+//!
+//! An import of a dump does no lifecycle-transition validation, unlike the
+//! live mutation path. The dumped states are already the product of valid
+//! transitions, so `add`/`update` would wrongly reject terminal states.
 
 use crate::metadata::{RemoteLogSegmentMetadata, RemotePartitionDeleteState, TopicIdPartition};
 

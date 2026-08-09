@@ -1,18 +1,19 @@
 //! Inbound TLS + SASL handshake for the controller listener.
 //!
-//! Mirror image of `network::client::InterBrokerClient`'s
-//! outbound auth flow. Reuses `network::auth::handle_handshake` +
-//! `handle_authenticate_*` state machines so the controller listener
-//! and data plane share one source of truth.
+//! This module is the mirror image of the outbound auth flow of
+//! `network::client::InterBrokerClient`. It reuses the
+//! `network::auth::handle_handshake` and `handle_authenticate_*` state
+//! machines, so the controller listener and the data plane share one source
+//! of truth.
 //!
-//! Frame helpers (`read_kafka_request`, `write_response`) are the
+//! The frame helpers `read_kafka_request` and `write_response` are the
 //! server-side inverse of `network::client::round_trip`. The header
 //! flexibility rules match exactly:
-//!   - `SaslHandshake (17)` v0+ uses a non-flexible response header
-//!     (bare `correlation_id`).
-//!   - `SaslAuthenticate (36)` v2+ uses a flexible response header
-//!     (`correlation_id` + 1-byte tagged-fields).
-//!   - `ApiVersions (18)` response header is *always* v0 by Kafka spec.
+//!   - `SaslHandshake (17)` v0+ uses a non-flexible response header, a bare
+//!     `correlation_id`.
+//!   - `SaslAuthenticate (36)` v2+ uses a flexible response header, a
+//!     `correlation_id` and a 1-byte tagged-fields section.
+//!   - The `ApiVersions (18)` response header is *always* v0 by Kafka spec.
 
 // Exercised via the runtime path and integration tests. Unit coverage in this
 // file is deliberately narrow — see the `tests` module docstring.
@@ -43,15 +44,15 @@ use crate::network::auth::{
 
 /// Late-bound handle to the broker's [`ControllerHandle`].
 ///
-/// The handshake is constructed *before* `crabka_raft::Controller::start`
-/// returns (it is moved into `ControllerConfig::handshake`), so the
-/// controller is only available later. We carry an `Arc<OnceCell<…>>`
-/// and `OnceCell::set` it from `Broker::start` once the controller is
-/// built. SCRAM credential lookup (one round per authenticate) is the
-/// only code path that touches the cell.
+/// The broker constructs the handshake *before* `crabka_raft::Controller::start`
+/// returns, and moves it into `ControllerConfig::handshake`, so the controller
+/// is only available later. This type therefore carries an
+/// `Arc<OnceCell<…>>`, and `Broker::start` calls `OnceCell::set` on it once
+/// the controller is built. The SCRAM credential lookup, one round for each
+/// authenticate, is the only code path that touches the cell.
 pub type ControllerHandleArc = Arc<OnceCell<Arc<ControllerHandle>>>;
 
-/// API key constants — match the wire-protocol IDs used elsewhere.
+/// API key constants. They match the wire-protocol IDs used elsewhere.
 const API_KEY_SASL_HANDSHAKE: i16 = 17;
 const API_KEY_SASL_AUTHENTICATE: i16 = 36;
 const API_KEY_API_VERSIONS: i16 = 18;
@@ -61,7 +62,8 @@ const API_KEY_API_VERSIONS: i16 = 18;
 const REQUEST_HEADER_PREFIX_LEN: usize = 10;
 
 /// `SaslAuthenticate (36)` switches to flexible (v2) request *and* response
-/// headers starting at this `api_version` (KIP-482 flexible-versions cutover).
+/// headers at this `api_version`. This is the KIP-482 flexible-versions
+/// cutover.
 const SASL_AUTHENTICATE_FLEXIBLE_VERSION: i16 = 2;
 
 /// Pre-auth APIs advertised in the hand-rolled `ApiVersionsResponse v0`,
@@ -72,14 +74,15 @@ const ADVERTISED_PRE_AUTH_APIS: [i16; 3] = [
     API_KEY_API_VERSIONS,
 ];
 
-/// Version range advertised for every pre-auth API in the minimal
-/// `ApiVersionsResponse v0` (covers `SaslHandshake` v0-1, `SaslAuthenticate`
-/// v0-2, `ApiVersions` v0 — the versions the inbound state machine accepts).
+/// Version range that the minimal `ApiVersionsResponse v0` advertises for
+/// every pre-auth API. It covers `SaslHandshake` v0-1, `SaslAuthenticate`
+/// v0-2, and `ApiVersions` v0, the versions the inbound state machine
+/// accepts.
 const ADVERTISED_MIN_VERSION: i16 = 0;
 /// See [`ADVERTISED_MIN_VERSION`].
 const ADVERTISED_MAX_VERSION: i16 = 2;
 
-/// Per-broker handshake adapter. Constructed in `Broker::start` and passed
+/// Per-broker handshake adapter. `Broker::start` constructs it and passes it
 /// into `ControllerConfig::handshake`.
 pub struct BrokerRaftHandshake {
     pub tls_acceptor: Option<TlsAcceptor>,
@@ -87,13 +90,13 @@ pub struct BrokerRaftHandshake {
     pub enabled_sasl_mechanisms: Vec<SaslMechanism>,
     pub protocol: ListenerProtocol,
     pub controller: ControllerHandleArc,
-    /// Authorizer used to gate controller RPCs after authentication
-    /// (H-1). Authentication proves *who* the peer is; this enforces that
-    /// the authenticated principal is allowed to drive controller/raft
-    /// RPCs (`CLUSTER_ACTION` on `Cluster("kafka-cluster")`). With the
-    /// default `AllowAllAuthorizer`, every principal is allowed, so
-    /// dev/single-node is unaffected; `SimpleAclAuthorizer` grants
-    /// super-users.
+    /// Authorizer that gates controller RPCs after authentication (H-1).
+    ///
+    /// Authentication proves *who* the peer is. This authorizer enforces that
+    /// the authenticated principal may drive controller and raft RPCs, that
+    /// is, `CLUSTER_ACTION` on `Cluster("kafka-cluster")`. The default
+    /// `AllowAllAuthorizer` allows every principal, so it does not change
+    /// dev and single-node setups. `SimpleAclAuthorizer` grants super-users.
     pub authorizer: Arc<dyn crate::authorizer::Authorizer>,
 }
 
@@ -103,13 +106,15 @@ fn pre_auth_state() -> ConnectionAuth {
 }
 
 impl BrokerRaftHandshake {
-    /// H-1: authorize an authenticated controller-listener peer for
-    /// controller/raft RPCs. Authentication established *who* the peer is;
-    /// this enforces that the principal holds `CLUSTER_ACTION` on
-    /// `Cluster("kafka-cluster")` — the same gate the inter-broker
-    /// control-plane RPCs (`BrokerHeartbeat`, etc.) use — evaluated against
-    /// the controller's *current* metadata image so ACL changes take
-    /// effect for new connections. On Deny the connection is dropped.
+    /// H-1: authorizes an authenticated controller-listener peer for
+    /// controller and raft RPCs.
+    ///
+    /// Authentication established *who* the peer is. This method enforces that
+    /// the principal holds `CLUSTER_ACTION` on `Cluster("kafka-cluster")`.
+    /// That is the same gate the inter-broker control-plane RPCs use, such as
+    /// `BrokerHeartbeat`. The method evaluates it against the controller's
+    /// *current* metadata image, so ACL changes take effect for new
+    /// connections. On Deny, the broker drops the connection.
     fn authorize_cluster_action(
         &self,
         principal: &crabka_security::Principal,
@@ -195,15 +200,18 @@ impl RaftListenerHandshake for BrokerRaftHandshake {
     }
 }
 
-/// Drive the server-side SASL state machine until the connection is
-/// authenticated or an error response has been written.
+/// Drives the server-side SASL state machine until the connection
+/// authenticates or the function writes an error response.
 ///
-/// Loop invariant: every iteration reads exactly one Kafka request frame
-/// and writes exactly one response frame. The `auth` state machine
-/// (`network::auth::ConnectionAuth`) carries continuation state across
-/// SCRAM rounds. Returns the authenticated [`Principal`] once
-/// `auth.is_authenticated()` (so `upgrade` can authorize it) and
-/// `Err(...)` if the peer sent an unexpected frame or auth failed.
+/// The loop invariant is that every iteration reads exactly one Kafka request
+/// frame and writes exactly one response frame. The `auth` state machine,
+/// `network::auth::ConnectionAuth`, carries continuation state across SCRAM
+/// rounds.
+///
+/// The function returns the authenticated [`Principal`] once
+/// `auth.is_authenticated()` holds, so that `upgrade` can authorize it. It
+/// returns `Err(...)` if the peer sent an unexpected frame or the auth
+/// failed.
 async fn run_inbound_sasl(
     stream: &mut dyn DuplexStream,
     cfg: &BrokerRaftHandshake,
@@ -322,15 +330,15 @@ async fn run_inbound_sasl(
 // Frame helpers (server-side inverse of `network::client::round_trip`).
 // ────────────────────────────────────────────────────────────────────────
 
-/// Read one length-prefixed Kafka request frame, peel off the
-/// `RequestHeader` (v1 or v2), and return `(api_key, api_version,
+/// Reads one length-prefixed Kafka request frame, removes the
+/// `RequestHeader` (v1 or v2), and returns `(api_key, api_version,
 /// correlation_id, body_bytes)`.
 ///
-/// Header parsing matches the outbound encoder in
+/// The header parsing matches the outbound encoder in
 /// `network::client::round_trip`:
-/// - v1 (non-flexible): `api_key i16 | api_version i16 | corr_id i32 |
+/// - v1, non-flexible: `api_key i16 | api_version i16 | corr_id i32 |
 ///   client_id i16-length-prefixed bytes`.
-/// - v2 (flexible, used by `SaslAuthenticate v2+`): v1 layout plus a
+/// - v2, flexible, which `SaslAuthenticate v2+` uses: the v1 layout plus a
 ///   trailing `0x00` tagged-fields byte.
 async fn read_kafka_request(
     stream: &mut dyn DuplexStream,
@@ -377,8 +385,8 @@ async fn read_kafka_request(
     Ok((api_key, api_version, corr_id, body))
 }
 
-/// Encode `resp`, prepend the `ResponseHeader` (v0 or v1 per the rules
-/// below), and write the length-prefixed frame.
+/// Encodes `resp`, prepends the `ResponseHeader` (v0 or v1 by the rules
+/// below), and writes the length-prefixed frame.
 async fn write_response<R: Encode>(
     stream: &mut dyn DuplexStream,
     api_key: i16,
@@ -407,9 +415,9 @@ async fn write_response<R: Encode>(
 
 /// Request-header flexibility rules.
 ///
-/// Mirrors the encoder side in `network::client::round_trip` where the
-/// caller passes `flexible = true` only for `SaslAuthenticate v2+`. All
-/// other pre-auth APIs use the non-flexible v1 header.
+/// Mirrors the encoder side in `network::client::round_trip`, where the caller
+/// passes `flexible = true` only for `SaslAuthenticate v2+`. Every other
+/// pre-auth API uses the non-flexible v1 header.
 fn is_request_header_flexible(api_key: i16, api_version: i16) -> bool {
     match api_key {
         API_KEY_SASL_AUTHENTICATE => api_version >= SASL_AUTHENTICATE_FLEXIBLE_VERSION,
@@ -420,10 +428,10 @@ fn is_request_header_flexible(api_key: i16, api_version: i16) -> bool {
 
 /// Response-header flexibility rules.
 ///
-/// - `SaslHandshake (17)` — non-flexible at every version we accept.
-/// - `SaslAuthenticate (36)` — flexible from v2.
-/// - `ApiVersions (18)` — *always* v0 response header per Kafka spec,
-///   regardless of body flexibility. The Kafka clients special-case this.
+/// - `SaslHandshake (17)`: non-flexible at every version this module accepts.
+/// - `SaslAuthenticate (36)`: flexible from v2.
+/// - `ApiVersions (18)`: *always* a v0 response header by Kafka spec,
+///   whatever the body flexibility. The Kafka clients special-case it.
 fn is_response_header_flexible(api_key: i16, api_version: i16) -> bool {
     // SaslHandshake (17) and ApiVersions (18) keep the v0 response header
     // at every version we accept; only SaslAuthenticate (36) flips to a
@@ -434,9 +442,9 @@ fn is_response_header_flexible(api_key: i16, api_version: i16) -> bool {
     }
 }
 
-/// Minimal hand-rolled `ApiVersionsResponse v0`. Advertises only the
-/// pre-auth APIs (17 / 36 / 18). Our own `InterBrokerClient` skips
-/// `ApiVersions`, so this exists purely to satisfy JVM-style peers that
+/// Minimal hand-rolled `ApiVersionsResponse v0`. It advertises only the
+/// pre-auth APIs 17, 36, and 18. Crabka's own `InterBrokerClient` skips
+/// `ApiVersions`, so this response exists only to serve JVM-style peers that
 /// always send it first.
 fn build_api_versions_response(corr_id: i32) -> Vec<u8> {
     // v0 body: error_code(i16) + api_versions array(i32 len, repeats of
@@ -469,12 +477,14 @@ fn build_api_versions_response(corr_id: i32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    //! Narrow unit coverage. The richer behavioural tests (PLAIN happy
-    //! path, SCRAM two-round dance, bad-creds rejection, TLS termination)
-    //! live in `tests/raft_sasl.rs` where a real two-broker raft
-    //! cluster is spun up. Here we just verify trait wiring + the
-    //! Plaintext short-circuit predicate so a regression that flips
-    //! `requires_*` would be caught at this layer.
+    //! Narrow unit coverage.
+    //!
+    //! The richer behavioural tests live in `tests/raft_sasl.rs`, which starts
+    //! a real two-broker raft cluster. Those cover the PLAIN happy path, the
+    //! two SCRAM rounds, bad-credential rejection, and TLS termination. These
+    //! tests check only the trait connections and the Plaintext
+    //! short-circuit predicate, so that this layer catches a regression that
+    //! flips `requires_*`.
 
     use assert2::assert;
     use bytes::BufMut;

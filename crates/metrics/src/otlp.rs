@@ -23,25 +23,27 @@ use crate::{
 const MAX_NATIVE_HISTOGRAM_SCHEMA: i32 = 8;
 const MIN_NATIVE_HISTOGRAM_SCHEMA: i32 = -4;
 
-/// Sane upper bound for an ingested sample timestamp, in milliseconds. Data
-/// points beyond this are rejected rather than translated into an absurd
-/// far-future millisecond value that would poison the per-series
-/// out-of-order/too-old window. `7_258_118_400_000` is `2200-01-01T00:00:00Z`:
-/// well past any legitimate metric timestamp yet still reachable from a `u64`
-/// `time_unix_nano` (whose ceiling is ~year 2554), so an absurd point such as
-/// `u64::MAX` is rejected consistent with Prometheus future-sample rejection.
+/// Sane upper bound for an ingested sample timestamp, in milliseconds. This
+/// module rejects a data point beyond this bound and does not translate it into
+/// an absurd far-future millisecond value, which would poison the per-series
+/// out-of-order and too-old window. `7_258_118_400_000` is
+/// `2200-01-01T00:00:00Z`. That is well past any legitimate metric timestamp and
+/// still reachable from a `u64` `time_unix_nano`, whose ceiling is about the
+/// year 2554. An absurd point such as `u64::MAX` is therefore rejected, which
+/// matches how Prometheus rejects a future sample.
 const MAX_SAMPLE_TIMESTAMP_MS: u64 = 7_258_118_400_000;
 
 /// Prometheus translation strategy for OTLP metric names.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TranslationStrategy {
-    /// Replace unsupported Prometheus metric/label characters with underscores
-    /// and apply conventional suffixes such as `_total` for monotonic sums.
+    /// Replaces unsupported Prometheus metric and label characters with
+    /// underscores, and applies the conventional suffixes such as `_total` for
+    /// monotonic sums.
     #[default]
     UnderscoreEscapingWithSuffixes,
 }
 
-/// Errors from OTLP metrics translation.
+/// Errors raised by OTLP metrics translation.
 #[derive(Debug, thiserror::Error)]
 pub enum OtlpError {
     #[error("protobuf decode failed: {0}")]
@@ -251,7 +253,7 @@ impl OtlpError {
     }
 }
 
-/// Decode a protobuf-encoded `MetricsData` body.
+/// Decodes a protobuf-encoded `MetricsData` body.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_otlp_bytes(
@@ -261,7 +263,7 @@ pub fn decode_otlp_bytes(
     decode_otlp(&MetricsData::decode(body)?, strategy)
 }
 
-/// Decode a protobuf-encoded `MetricsData` body with delta-state handling.
+/// Decodes a protobuf-encoded `MetricsData` body and handles the delta state.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_otlp_stateful_bytes(
@@ -272,7 +274,7 @@ pub fn decode_otlp_stateful_bytes(
     decode_otlp_stateful(&MetricsData::decode(body)?, strategy, accumulator)
 }
 
-/// Translate OTLP metrics into the common ingest representation.
+/// Translates OTLP metrics into the common ingest representation.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_otlp(
@@ -283,7 +285,7 @@ pub fn decode_otlp(
     decode_otlp_inner(data, strategy, Some(&mut accumulator))
 }
 
-/// Translate OTLP metrics with delta-temporality accumulation across calls.
+/// Translates OTLP metrics and accumulates delta temporality across calls.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_otlp_stateful(
@@ -429,7 +431,8 @@ fn resource_metrics_timestamp_ms(
     None
 }
 
-/// Normalize an OTLP identifier into a Prometheus-compatible metric or label name.
+/// Normalizes an OTLP identifier into a Prometheus-compatible metric name or
+/// label name.
 #[must_use]
 pub fn normalize_name(name: &str, _strategy: TranslationStrategy) -> String {
     let mut out = String::with_capacity(name.len());
@@ -525,7 +528,8 @@ fn prometheus_base_unit_suffix(unit: &str) -> Option<&'static str> {
     }
 }
 
-/// Convert one OTLP exponential histogram point to a native histogram sample.
+/// Converts one OTLP exponential histogram point to a native histogram
+/// sample.
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn exponential_histogram_to_native(
@@ -609,10 +613,11 @@ fn metric_series(
     }
 }
 
-/// Reject any data point whose `time_unix_nano` is beyond the sane future bound.
-/// Clamping such a value to `i64::MAX` would poison the per-series
-/// out-of-order/too-old window downstream, so we drop the request instead,
-/// matching Prometheus's rejection of samples too far in the future.
+/// Rejects any data point whose `time_unix_nano` is beyond the sane future
+/// bound. A clamp of such a value to `i64::MAX` would poison the per-series
+/// out-of-order and too-old window downstream, so this function drops the
+/// request instead. Prometheus rejects a sample too far in the future the same
+/// way.
 fn reject_far_future_points(name: &str, data: &metric::Data) -> Result<(), OtlpError> {
     let mut timestamps = Vec::new();
     match data {

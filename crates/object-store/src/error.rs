@@ -5,18 +5,21 @@ use object_store::path::Path as ObjectPath;
 /// Errors raised by the object-store substrate.
 #[derive(Debug, thiserror::Error)]
 pub enum ObjectStoreError {
-    /// A local-filesystem I/O failure (e.g. reading a segment file to upload).
+    /// A local-filesystem I/O failure, for example during a read of a segment
+    /// file to upload.
     #[error("object store I/O error: {0}")]
     Io(#[from] std::io::Error),
-    /// The backend builder rejected the config (bad bucket/region/endpoint/credentials).
+    /// The backend builder rejected the config: a bad bucket, region,
+    /// endpoint, or credential.
     #[error("invalid object store config: {0}")]
     InvalidConfig(String),
-    /// A specific object was not found (structured so consumers can upgrade it to
-    /// their own domain error without string-matching).
+    /// A specific object was not found. The variant is structured, so
+    /// consumers can upgrade it to their own domain error without string
+    /// matching.
     #[error("object not found: {0}")]
     NotFound(ObjectPath),
-    /// An object exceeded a caller-supplied size cap during a buffered read
-    /// (guards against OOM on a corrupt or malicious oversized object).
+    /// An object exceeded a caller-supplied size cap during a buffered read.
+    /// This guards against OOM on a corrupt or malicious oversized object.
     #[error("object `{key}` is {size} bytes, exceeds cap of {max_bytes} bytes")]
     TooLarge {
         /// The object that breached the cap.
@@ -26,7 +29,8 @@ pub enum ObjectStoreError {
         /// The cap in bytes.
         max_bytes: u64,
     },
-    /// Any other backend error, stringified so the public surface stays stable.
+    /// Any other backend error. The error becomes a string, so the public
+    /// surface stays stable.
     #[error("object store backend error: {0}")]
     Backend(String),
 }

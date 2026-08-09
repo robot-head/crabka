@@ -4,7 +4,7 @@ use crabka_pgwire::engine::{Engine, QueryResult, Session};
 use super::*;
 use crate::SqlEngine;
 
-/// Run `setup` then `sql`, returning each output row as its text cells.
+/// Run `setup`, then `sql`, and return each output row as its text cells.
 async fn rows(setup: &[&str], sql: &str) -> Vec<Vec<Option<String>>> {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
@@ -268,7 +268,8 @@ fn grouping_mask_sets_a_bit_per_aggregated_argument_msb_first() {
 
 /// A window function runs ABOVE the grouping, so it sees one row per
 /// grouping-set group. Before the window path consulted the grouping-set
-/// rewrite it silently dropped the clause and returned the plain grouped rows.
+/// rewrite, it silently dropped the clause and returned the plain grouped
+/// rows.
 #[tokio::test]
 async fn window_functions_run_over_the_expanded_grouping_sets() {
     let cases: &[(&str, &[&[&str]])] = &[
@@ -318,8 +319,8 @@ async fn window_functions_run_over_the_expanded_grouping_sets() {
     }
 }
 
-/// Over an empty input only an empty grouping set produces a group — and the
-/// window node then sees exactly those rows, one per such set.
+/// Over an empty input, only an empty grouping set produces a group. The window
+/// node then sees exactly those rows, one per such set.
 #[tokio::test]
 async fn window_functions_over_an_empty_grouping_set_input() {
     let setup: &[&str] = &["CREATE TABLE e (a int4, v int4)"];
@@ -342,8 +343,8 @@ async fn window_functions_over_an_empty_grouping_set_input() {
     }
 }
 
-/// `DISTINCT ON` runs over the GROUPED output. It used to be ignored entirely on
-/// the aggregate path, which returned every group.
+/// `DISTINCT ON` runs over the GROUPED output. The aggregate path used to ignore
+/// it entirely and returned every group.
 #[tokio::test]
 async fn distinct_on_dedups_the_grouped_output() {
     let cases: &[(&str, &[&[&str]])] = &[
@@ -373,9 +374,9 @@ async fn distinct_on_dedups_the_grouped_output() {
     }
 }
 
-/// A grouping expression is matched by the column the reference resolves to, not
-/// by how it was spelled, so `*` and a table-qualified reference are both
-/// grouped-valid — both used to be 42803.
+/// The column a reference resolves to matches a grouping expression, and the
+/// spelling does not. So `*` and a table-qualified reference are both
+/// grouped-valid. Both used to be 42803.
 #[tokio::test]
 async fn qualified_and_wildcard_references_match_the_grouping_expressions() {
     let cases: &[(&str, &[&[&str]])] = &[
@@ -450,7 +451,7 @@ async fn an_ungrouped_column_is_reported_with_its_qualifier() {
 }
 
 /// `GROUPING(…)` has no meaning below the grouping, and `PostgreSQL` names the
-/// clause it was found in.
+/// clause it appears in.
 #[tokio::test]
 async fn grouping_below_the_grouping_names_its_clause() {
     let cases = [

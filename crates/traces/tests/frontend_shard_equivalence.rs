@@ -1,7 +1,9 @@
-//! Shard-equivalence: a search sharded across N jobs (Live + per-block +
-//! per-row-group) equals the unsharded search over identical data — same trace
-//! set, `limit`/`spss` honored. Driven through the public `frontend` API with
-//! `MockQuerier` + `MockCatalog`.
+//! Shard-equivalence.
+//!
+//! A search sharded across N jobs, that is Live plus per-block plus
+//! per-row-group, equals the unsharded search over identical data. Both give
+//! the same trace set and honor `limit` and `spss`. The tests drive the public
+//! `frontend` API with `MockQuerier` and `MockCatalog`.
 
 use std::sync::Arc;
 

@@ -1,19 +1,19 @@
 //! Zero-copy capture of a `ProduceRequest`'s per-partition `records` fields.
 //!
-//! The produce hot path normally decodes each partition's `records` field
-//! into an owned `RecordBatch` (a full copy + parse). For the verbatim
-//! passthrough fast path the broker instead wants the producer's *exact*
-//! wire bytes as a refcounted [`Bytes`] slice of the request frame, so it
+//! The produce hot path normally decodes each partition's `records` field into
+//! an owned `RecordBatch`, which is a full copy and a full parse. On the
+//! verbatim passthrough fast path the broker instead needs the producer's exact
+//! wire bytes as a refcounted [`Bytes`] slice of the request frame, so that it
 //! can append them without re-encoding.
 //!
-//! [`produce_record_slices`] walks the `ProduceRequest` body over a
-//! [`Bytes`] cursor and, for every `(topic, partition)` in wire order,
-//! returns the records field as a zero-copy `Bytes::slice` (via
-//! `Buf::copy_to_bytes`, which on `Bytes` is a refcount bump, not a copy).
+//! [`produce_record_slices`] walks the `ProduceRequest` body over a [`Bytes`]
+//! cursor. For every `(topic, partition)` in wire order it returns the records
+//! field as a zero-copy `Bytes::slice`. It takes the slice with
+//! `Buf::copy_to_bytes`, which on `Bytes` is a refcount bump and not a copy.
 //!
 //! The walk mirrors the generated `ProduceRequest::decode` field order
-//! byte-for-byte (see `generated/ProduceRequest.owned.rs`); it is exercised
-//! against the generated encoder in the tests below so the two cannot drift.
+//! byte-for-byte. See `generated/ProduceRequest.owned.rs`. The tests below run
+//! the walk against the generated encoder, so the two cannot drift.
 
 use bytes::{Buf, Bytes};
 
@@ -29,8 +29,9 @@ use crate::{
     tagged_fields::read_tagged_fields,
 };
 
-/// `ProduceRequest`: flexible (KIP-482 tagged fields / compact encodings)
-/// at version 9 and above. Mirrors `is_flexible` in the generated code.
+/// `ProduceRequest` is flexible at version 9 and above, with KIP-482 tagged
+/// fields and compact encodings. This mirrors `is_flexible` in the generated
+/// code.
 const FLEXIBLE_MIN: i16 = 9;
 
 /// The verbatim `records` field bytes for one `(topic, partition)` slot,
@@ -48,12 +49,14 @@ pub struct PartitionRecordSlice {
     pub records: Option<Bytes>,
 }
 
-/// The request-level + per-topic framing of a `ProduceRequest`, captured by
-/// [`produce_framing`] **without decoding (or decompressing) any record
-/// batch**. This is the header-only view the broker's produce hot path uses
-/// to decide verbatim-passthrough vs owned-decode per partition: every field
-/// here comes straight off the wire framing; the actual record bytes are kept
-/// as zero-copy [`Bytes`] slices in [`ProduceFramingTopic::partitions`].
+/// The request-level and per-topic framing of a `ProduceRequest`.
+///
+/// [`produce_framing`] captures this framing and decodes no record batch and
+/// decompresses no record batch. The broker's produce hot path uses this
+/// header-only view to choose verbatim passthrough or owned decode for each
+/// partition. Every field here comes straight off the wire framing. The record
+/// bytes themselves stay as zero-copy [`Bytes`] slices in
+/// [`ProduceFramingTopic::partitions`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProduceFraming {
     /// `transactional_id` (v≥3, nullable). Drives the txn ACL preamble.
@@ -69,27 +72,27 @@ pub struct ProduceFraming {
 /// One topic's framing within a [`ProduceFraming`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProduceFramingTopic {
-    /// Topic name (STRING for v≤12; empty for v≥13 which is id-only).
+    /// Topic name. STRING for v≤12, and empty for v≥13, which is id-only.
     pub name: String,
-    /// Topic id (16-byte UUID for v≥13; [`Uuid::ZERO`] for v≤12).
+    /// Topic id. A 16-byte UUID for v≥13, and [`Uuid::ZERO`] for v≤12.
     pub topic_id: Uuid,
     /// Per-partition records slices in wire order.
     pub partitions: Vec<PartitionRecordSlice>,
 }
 
-/// Walk a `ProduceRequest` body (already positioned at the start of the
-/// request body, i.e. after the request header) and return every
-/// partition's `records` field as a zero-copy `Bytes` slice.
+/// Walks a `ProduceRequest` body and returns every partition's `records` field
+/// as a zero-copy `Bytes` slice.
 ///
-/// `body` must be a `Bytes` cursor over exactly the produce request body;
-/// `version` is the produce-request API version. The walk does not
-/// allocate for the records payloads — each slice is a refcount view into
-/// `body`'s backing buffer.
+/// The body must already sit at the start of the request body, that is after
+/// the request header. `body` must be a `Bytes` cursor over exactly the produce
+/// request body. `version` is the produce-request API version. The walk
+/// allocates nothing for the records payloads. Each slice is a refcount view
+/// into `body`'s backing buffer.
 ///
 /// # Errors
 ///
 /// Returns [`ProtocolError`] if the bytes do not parse as a `ProduceRequest`
-/// of the given version (malformed/short frame).
+/// of the given version, for example a malformed or short frame.
 pub fn produce_record_slices(
     mut body: Bytes,
     version: i16,
@@ -155,26 +158,28 @@ pub fn produce_record_slices(
     Ok(out)
 }
 
-/// Walk a `ProduceRequest` body (v≥3) and return the full request +
-/// per-topic framing **without decoding or decompressing any record
-/// batch**. Each partition's `records` field is captured as a zero-copy
-/// [`Bytes`] slice of `body`.
+/// Walks a `ProduceRequest` body (v≥3) and returns the full request framing
+/// and the per-topic framing.
 ///
-/// This is the header-only entry point for the produce hot path: it gives
-/// the handler everything it needs to run the ACL preamble, topic
-/// resolution, and the verbatim-vs-owned dispatch, while leaving the
-/// (potentially LZ4-compressed, 100×-expanding) record bodies untouched.
-/// The owned fallback re-decodes a single partition's slice only when the
-/// passthrough predicate fails.
+/// This function decodes no record batch and decompresses no record batch. It
+/// captures each partition's `records` field as a zero-copy [`Bytes`] slice of
+/// `body`.
+///
+/// This is the header-only entry point for the produce hot path. It gives the
+/// handler everything it needs for the ACL preamble, topic resolution, and the
+/// verbatim-versus-owned dispatch, and it leaves the record bodies untouched.
+/// Those bodies can be LZ4-compressed and can expand 100×. The owned fallback
+/// re-decodes a single partition's slice only when the passthrough predicate
+/// fails.
 ///
 /// The walk mirrors the generated `ProduceRequest::decode` field order
-/// byte-for-byte; it is exercised against the generated encoder in the
-/// tests below so the two cannot drift.
+/// byte-for-byte. The tests below run the walk against the generated encoder,
+/// so the two cannot drift.
 ///
 /// # Errors
 ///
 /// Returns [`ProtocolError`] if the bytes do not parse as a `ProduceRequest`
-/// of the given version (malformed/short frame).
+/// of the given version, for example a malformed or short frame.
 pub fn produce_framing(mut body: Bytes, version: i16) -> Result<ProduceFraming, ProtocolError> {
     let flex = version >= FLEXIBLE_MIN;
     let buf = &mut body;
@@ -248,8 +253,8 @@ pub fn produce_framing(mut body: Bytes, version: i16) -> Result<ProduceFraming, 
     })
 }
 
-/// Read a `NULLABLE_BYTES` / `COMPACT_NULLABLE_BYTES` length prefix and
-/// return the payload as a **zero-copy** `Bytes` slice of `buf`.
+/// Reads a `NULLABLE_BYTES` or `COMPACT_NULLABLE_BYTES` length prefix and
+/// returns the payload as a zero-copy `Bytes` slice of `buf`.
 fn read_nullable_bytes_slice(buf: &mut Bytes, flex: bool) -> Result<Option<Bytes>, ProtocolError> {
     let len = if flex {
         let raw = get_uvarint(buf)?;
@@ -306,8 +311,8 @@ mod tests {
         }
     }
 
-    /// Encode a produce request, then assert the captured slices match the
-    /// records the full decoder produces — byte-for-byte — for every
+    /// Encodes a produce request, then asserts that the captured slices match
+    /// the records the full decoder produces, byte-for-byte, for every
     /// (topic, partition).
     fn check_roundtrip(_case: &str, req: &ProduceRequest, version: i16) {
         let mut buf = BytesMut::new();
@@ -423,9 +428,10 @@ mod tests {
         assert2::assert!(ptr >= body_start && ptr < body_end);
     }
 
-    /// `produce_framing` must reproduce the request-level + per-topic +
-    /// per-partition framing that the full owned decoder produces, and
-    /// capture the same zero-copy records bytes — for every served version.
+    /// `produce_framing` must reproduce the request-level, per-topic, and
+    /// per-partition framing that the full owned decoder produces. It must
+    /// also capture the same zero-copy records bytes, for every served
+    /// version.
     fn check_framing_roundtrip(req: &ProduceRequest, version: i16) {
         let mut buf = BytesMut::new();
         req.encode(&mut buf, version).unwrap();

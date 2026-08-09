@@ -1,7 +1,9 @@
-//! mvcc: PostgreSQL-faithful multiversion concurrency control for Crabka Gres —
-//! xids, the clog (`pg_xact`), xid-keyed tuple (xmin/xmax) encoding, xid-list
-//! snapshots, and `HeapTupleSatisfiesMVCC` visibility. Concurrent writers (row
-//! locks, block-and-retry, `EvalPlanQual`) arrive in SP6; deadlock detection SP7.
+//! mvcc: PostgreSQL-faithful multiversion concurrency control for Crabka Gres.
+//!
+//! It supplies xids, the clog (`pg_xact`), xid-keyed tuple (xmin/xmax)
+//! encoding, xid-list snapshots, and `HeapTupleSatisfiesMVCC` visibility.
+//! Concurrent writers (row locks, block-and-retry, `EvalPlanQual`) arrive in
+//! SP6. Deadlock detection arrives in SP7.
 
 #![doc(html_root_url = "https://docs.rs/crabka-pgmvcc/0.3.9")]
 

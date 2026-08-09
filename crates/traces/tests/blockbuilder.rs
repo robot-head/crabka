@@ -631,14 +631,16 @@ async fn build_blocks_promotes_configured_attribute_columns() {
     assert2::assert!(values.value(key) == "GET");
 }
 
-/// Shared, ordered event log: object-store `put`s and consumer `commit`s push
-/// markers here so a test can assert the durable write strictly precedes the
-/// offset commit (the at-least-once invariant of `flush_and_commit`).
+/// Shared, ordered event log.
+///
+/// Object-store `put`s and consumer `commit`s push markers here, so a test can
+/// assert that the durable write strictly precedes the offset commit. That is
+/// the at-least-once invariant of `flush_and_commit`.
 type EventLog = Arc<StdMutex<Vec<String>>>;
 
-/// Object store that records every `put` (block / index write) into a shared
-/// event log, optionally failing `put` once a flush is reached. Everything else
-/// delegates to an inner [`InMemory`] store.
+/// Object store that records every `put`, that is every block or index write,
+/// into a shared event log. It can also fail `put` once a flush is reached.
+/// Everything else delegates to an inner [`InMemory`] store.
 struct RecordingObjectStore {
     inner: Arc<InMemory>,
     events: EventLog,
@@ -737,10 +739,12 @@ impl ObjectStore for RecordingObjectStore {
     }
 }
 
-/// Scripted WAL consumer: returns each queued batch in turn, then cancels the
-/// shutdown token and returns empty so `run` exits its loop and reaches the
-/// drain path. Every `commit_sync` is recorded both as a count and as an
-/// ordered marker in the shared event log.
+/// Scripted WAL consumer.
+///
+/// It returns each queued batch in turn. It then cancels the shutdown token and
+/// returns empty, so `run` exits its loop and reaches the drain path. It
+/// records every `commit_sync` both as a count and as an ordered marker in the
+/// shared event log.
 struct ScriptedConsumer {
     batches: std::collections::VecDeque<Vec<ConsumerRecord>>,
     shutdown: CancellationToken,

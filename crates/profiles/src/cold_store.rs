@@ -86,8 +86,9 @@ impl ColdProfileStore {
         })
     }
 
-    /// Current block index snapshot. Clones the inner `Arc` (cheap) so the lock is
-    /// released immediately and never held across an `.await`.
+    /// Current block index snapshot. The method clones the inner `Arc`, which is
+    /// cheap, so it releases the lock immediately and never holds it across an
+    /// `.await`.
     ///
     /// # Panics
     /// Panics if another thread poisoned the profile index lock.
@@ -97,7 +98,8 @@ impl ColdProfileStore {
     }
 
     /// Swap in a freshly-loaded block index so blocks written since the querier
-    /// started become queryable. Called by the querier's periodic refresh task.
+    /// started become queryable. The periodic refresh task of the querier calls
+    /// this method.
     ///
     /// # Panics
     /// Panics if another thread poisoned the profile index lock.
@@ -419,13 +421,14 @@ impl ColdProfileStore {
     }
 }
 
-/// Build the dense per-block partition map used by the cold read path.
+/// Build the dense per-block partition map that the cold read path uses.
 ///
-/// `stored_partitions` are this block's partitions as recorded in the index
-/// (already in the high bits if the block was compacted). They are re-based to a
-/// dense local `0..n` range and OR-ed with the per-block high-bit base so the
-/// external keys are unique even when several already-compacted blocks are read
-/// together. Maps `stored_partition -> base | local_id`.
+/// `stored_partitions` are the partitions of this block as the index records
+/// them. They are already in the high bits if the block was compacted. This
+/// function re-bases them to a dense local `0..n` range and ORs them with the
+/// per-block high-bit base. The external keys are then unique even when a read
+/// covers several already-compacted blocks. The map is
+/// `stored_partition -> base | local_id`.
 fn block_partition_map(
     block_idx: usize,
     stored_partitions: &[u64],

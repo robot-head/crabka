@@ -1,30 +1,32 @@
 //! KIP-1071 streams-group in-memory state machine.
 //!
-//! Mirrors the KIP-932 share-group state machine (`super::super::share::state`)
-//! in overall shape — the `dirty` flag pattern, `evict_expired`, `bump_epoch`,
-//! `install_target`, `advance_member_epoch` — and the KIP-848 next-gen consumer
-//! state machine (`super::super::consumer_state`) in reconciliation mechanics:
-//! the `member_epoch`/`previous_member_epoch` epoch dance and the
-//! revoke-before-assign split. The difference is that streams members hold
-//! *tasks* `(subtopology, partition)` across three disjoint roles — **active**,
-//! **standby**, and **warmup** — rather than topic partitions.
+//! This module mirrors the overall shape of the KIP-932 share-group state
+//! machine (`super::super::share::state`): the `dirty` flag pattern,
+//! `evict_expired`, `bump_epoch`, `install_target`, and
+//! `advance_member_epoch`. It also mirrors the reconciliation mechanics of the
+//! KIP-848 next-gen consumer state machine
+//! (`super::super::consumer_state`): the `member_epoch` and
+//! `previous_member_epoch` epoch exchange, and the revoke-before-assign split.
+//! The difference is that streams members hold *tasks*
+//! `(subtopology, partition)` across three disjoint roles, **active**,
+//! **standby**, and **warmup**, instead of topic partitions.
 //!
-//! Only **active** tasks use the revoke-before-assign dance: an active task
-//! must be revoked by its current owner before it can be re-assigned active
-//! elsewhere. Standby and warmup tasks are assigned/revoked freely (no
-//! pending-revocation bookkeeping).
+//! Only **active** tasks use the revoke-before-assign exchange. The current
+//! owner must revoke an active task before another member can take it as
+//! active. Standby and warmup tasks move freely, with no pending-revocation
+//! bookkeeping.
 //!
-//! A role's assignment is represented as `BTreeMap<String, Vec<i32>>`
-//! (`subtopology_id` -> sorted, deduped partition list). This representation is
-//! used everywhere so the state machine stays decoupled from any wire/codec or
-//! persistence newtype.
+//! A role's assignment is a `BTreeMap<String, Vec<i32>>`, from
+//! `subtopology_id` to a sorted, deduped partition list. Everything here uses
+//! that representation, so the state machine stays independent of any wire,
+//! codec, or persistence newtype.
 //!
-//! This module is fully self-contained: it depends only on `std` and the
-//! `uuid` crate (the latter solely for the [`StreamsMemberState::joining`]
-//! convenience that synthesizes a random `process_id`). It deliberately does
-//! NOT import the sibling `persistence` module; the `i8` conversions on
-//! [`StreamsMemberAssignmentState`] are provided here so the actor can persist
-//! the state without coupling the two files.
+//! This module is fully self-contained. It depends only on `std` and the
+//! `uuid` crate, and it needs `uuid` only for the
+//! [`StreamsMemberState::joining`] helper that synthesizes a random
+//! `process_id`. It deliberately does NOT import the sibling `persistence`
+//! module. The `i8` conversions on [`StreamsMemberAssignmentState`] live here,
+//! so the actor can persist the state without coupling the two files.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -35,36 +37,38 @@ use crabka_log::Offset;
 
 use super::super::expired_member_ids;
 
-/// The reconciliation state of a single streams-group member's **active** task
-/// set, mirroring KIP-848's `MemberAssignmentState`. Standby/warmup tasks do
-/// not participate in this dance.
+/// The reconciliation state of one streams-group member's **active** task set.
 ///
-/// Persistence stores this as a raw `i8`; [`as_i8`](Self::as_i8) /
-/// [`from_i8`](Self::from_i8) provide the conversion without coupling this
-/// module to the persistence layer.
+/// It mirrors KIP-848's `MemberAssignmentState`. Standby and warmup tasks take
+/// no part in it.
+///
+/// Persistence stores this as a raw `i8`. [`as_i8`](Self::as_i8) and
+/// [`from_i8`](Self::from_i8) convert it without coupling this module to the
+/// persistence layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamsMemberAssignmentState {
-    /// The member's active tasks match its target; nothing pending.
+    /// The member's active tasks match its target, and nothing is pending.
     #[default]
     Stable = 0,
-    /// The member still owns active tasks the new target took away from it; it
-    /// must revoke them (and acknowledge via heartbeat) before advancing.
+    /// The member still owns active tasks the new target took away from it.
+    /// It must revoke them and acknowledge that in a heartbeat before it
+    /// advances.
     UnrevokedActiveTasks = 1,
-    /// The member's target includes active tasks still owned (un-revoked) by
-    /// some other member; it must wait for them to be released.
+    /// The member's target includes active tasks that another member still
+    /// owns and has not revoked. The member must wait for their release.
     UnreleasedActiveTasks = 2,
 }
 
 impl StreamsMemberAssignmentState {
-    /// Raw `i8` discriminant used by the persistence layer.
+    /// Raw `i8` discriminant for the persistence layer.
     #[must_use]
     pub fn as_i8(self) -> i8 {
         self as i8
     }
 
-    /// Inverse of [`as_i8`](Self::as_i8). Returns `None` for an unknown
-    /// discriminant rather than panicking, so the caller (the actor) can decide
-    /// how to surface a corrupt persisted record.
+    /// Inverse of [`as_i8`](Self::as_i8). It returns `None` for an unknown
+    /// discriminant instead of a panic, so that the caller, the actor, decides
+    /// how to report a corrupt persisted record.
     #[must_use]
     pub fn from_i8(v: i8) -> Option<Self> {
         match v {
@@ -78,10 +82,10 @@ impl StreamsMemberAssignmentState {
 
 /// One member of a streams group.
 ///
-/// A member holds three disjoint sets of tasks by role — `active`, `standby`,
-/// and `warmup` — each keyed by subtopology id with a sorted, deduped partition
-/// list. The `active_pending_revocation` map carries active tasks the member
-/// must give up before it can advance its epoch.
+/// A member holds three disjoint sets of tasks by role: `active`, `standby`,
+/// and `warmup`. Each set keys by subtopology id and holds a sorted, deduped
+/// partition list. The `active_pending_revocation` map holds the active tasks
+/// the member must give up before it can advance its epoch.
 #[derive(Debug, Clone)]
 pub struct StreamsMemberState {
     // --- identity ---
@@ -90,13 +94,13 @@ pub struct StreamsMemberState {
     pub rack_id: Option<String>,
     pub client_id: String,
     pub client_host: String,
-    /// The Streams `process.id` — a stable per-process UUID string used by the
-    /// assignor to co-locate tasks of the same process.
+    /// The Streams `process.id`, a stable per-process UUID string. The
+    /// assignor reads it to co-locate the tasks of one process.
     pub process_id: String,
     /// Optional `(host, port)` the member advertises for interactive-query
     /// routing.
     pub user_endpoint: Option<(String, u32)>,
-    /// Arbitrary `(key, value)` client tags used by rack-aware / custom
+    /// Arbitrary `(key, value)` client tags for rack-aware and custom
     /// assignment.
     pub client_tags: Vec<(String, String)>,
     pub rebalance_timeout_ms: i32,
@@ -115,7 +119,7 @@ pub struct StreamsMemberState {
     pub standby: BTreeMap<String, Vec<i32>>,
     /// Assigned warmup tasks.
     pub warmup: BTreeMap<String, Vec<i32>>,
-    /// Active tasks the member must revoke before advancing (KIP-848 dance).
+    /// Active tasks the member must revoke before it advances (KIP-848).
     pub active_pending_revocation: BTreeMap<String, Vec<i32>>,
 
     // --- reported catch-up progress (for warmup -> active promotion) ---
@@ -130,10 +134,11 @@ pub struct StreamsMemberState {
 }
 
 impl StreamsMemberState {
-    /// Construct a freshly joining member at epoch 0 with no assignment. The
-    /// `process_id` is synthesized as a random UUID when not supplied by the
-    /// client; callers that already know the process id should set the field
-    /// afterwards.
+    /// Constructs a newly joining member at epoch 0 with no assignment.
+    ///
+    /// When the client supplies no `process_id`, this method synthesizes a
+    /// random UUID. A caller that already knows the process id should set the
+    /// field afterwards.
     pub fn joining(
         member_id: impl Into<String>,
         client_id: impl Into<String>,
@@ -164,8 +169,8 @@ impl StreamsMemberState {
     }
 }
 
-/// The target assignment computed by the most recent reconcile, stamped with
-/// the assignment epoch it was computed against. Each role maps a member id to
+/// The target assignment from the most recent reconcile, stamped with the
+/// assignment epoch it was computed against. Each role maps a member id to
 /// that member's per-subtopology partition lists.
 #[derive(Debug, Clone, Default)]
 pub struct StreamsTargetAssignment {
@@ -181,20 +186,21 @@ pub enum StreamsGroupStatePhase {
     /// No members.
     #[default]
     Empty,
-    /// Members present but the group cannot be assigned yet — typically no
-    /// topology has been initialized, or required internal topics are missing.
+    /// The group has members but cannot be assigned yet. Usually no topology
+    /// is initialized, or required internal topics are missing.
     NotReady,
     /// A reconcile is in flight computing a new target assignment.
     Assigning,
-    /// A target exists; members are converging on it (revoking/installing).
+    /// A target exists, and members converge on it by revoking and
+    /// installing tasks.
     Reconciling,
     /// All members are at the assignment epoch with no pending revocations.
     Stable,
 }
 
 impl StreamsGroupStatePhase {
-    /// The Kafka group-state string this phase serializes to (used by
-    /// `DescribeGroups`/`ListGroups` and the admin tools).
+    /// The Kafka group-state string this phase serializes to.
+    /// `DescribeGroups`, `ListGroups`, and the admin tools read it.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -208,34 +214,36 @@ impl StreamsGroupStatePhase {
 }
 
 /// A minimal handle for the resolved topology that lives in `topology.rs`.
-/// The state machine tracks the topology's *presence* and *epoch*; full
-/// subtopology/task derivation lives in the topology module.
+///
+/// The state machine tracks only the topology's *presence* and *epoch*. The
+/// topology module derives the full subtopology and task sets.
 #[derive(Debug, Clone, Default)]
 pub struct StoredTopologyHandle {
     pub epoch: i32,
 }
 
-/// Full in-memory state of a single streams group. Owned by exactly one
-/// `actor::GroupActor` task; never shared.
+/// Full in-memory state of one streams group. Exactly one
+/// `actor::GroupActor` task owns it, and it is never shared.
 #[derive(Debug)]
 pub struct StreamsGroupState {
     pub group_id: String,
     pub group_epoch: i32,
     pub assignment_epoch: i32,
     pub members: HashMap<String, StreamsMemberState>,
-    /// The topology epoch (0 = none initialized yet).
+    /// The topology epoch. 0 means no topology is initialized yet.
     pub topology_epoch: i32,
-    /// Presence + epoch of the stored topology. The full topology lives in
-    /// `topology.rs`; this only tracks that one exists.
+    /// Presence and epoch of the stored topology. The full topology lives in
+    /// `topology.rs`. This field only records that one exists.
     pub topology: Option<StoredTopologyHandle>,
     pub target: StreamsTargetAssignment,
-    /// Set whenever membership/subscription/topology-epoch changes so the actor
-    /// knows a reconcile is pending; cleared once the reconcile installs a
-    /// target.
+    /// The state machine sets this on every change to membership,
+    /// subscription, or topology epoch, so the actor knows a reconcile is
+    /// pending. It clears the flag once the reconcile installs a target.
     pub dirty: bool,
     pub phase: StreamsGroupStatePhase,
-    /// `(status_code, status_detail)` pairs surfaced via `DescribeStreamsGroups`
-    /// (e.g. missing-source-topic, missing-internal-topic warnings).
+    /// `(status_code, status_detail)` pairs that `DescribeStreamsGroups`
+    /// reports, for example missing-source-topic and missing-internal-topic
+    /// warnings.
     pub status: Vec<(i8, String)>,
 }
 
@@ -255,16 +263,20 @@ impl StreamsGroupState {
         }
     }
 
-    /// Increment the group epoch. Mirrors share/consumer: a fresh epoch implies
-    /// the assignment is stale, so mark the group dirty.
+    /// Increments the group epoch. This mirrors the share and consumer state
+    /// machines: a fresh epoch makes the assignment stale, so the method marks
+    /// the group dirty.
     pub fn bump_epoch(&mut self) {
         self.group_epoch += 1;
         self.dirty = true;
     }
 
-    /// Insert or replace a member. Marks the group dirty when membership is new
-    /// or the member's topology epoch changed (the two signals that can force a
-    /// reconcile). Re-adding an identical member leaves `dirty` untouched.
+    /// Inserts or replaces a member.
+    ///
+    /// The method marks the group dirty when the membership is new or the
+    /// member's topology epoch changed. Those are the two signals that can
+    /// force a reconcile. Re-adding an identical member leaves `dirty`
+    /// unchanged.
     pub fn add_or_update_member(&mut self, m: StreamsMemberState) {
         let changed = match self.members.get(&m.member_id) {
             None => true,
@@ -276,8 +288,8 @@ impl StreamsGroupState {
         }
     }
 
-    /// Remove a member, returning it if present. Marks the group dirty on a
-    /// real removal.
+    /// Removes a member and returns it if it was present. The method marks
+    /// the group dirty only on a real removal.
     pub fn remove_member(&mut self, member_id: &str) -> Option<StreamsMemberState> {
         let m = self.members.remove(member_id);
         if m.is_some() {
@@ -286,9 +298,9 @@ impl StreamsGroupState {
         m
     }
 
-    /// Remove members whose `last_seen` is older than `session_timeout`,
-    /// returning the evicted member ids. Marks the group dirty if any were
-    /// removed.
+    /// Removes members whose `last_seen` is older than `session_timeout` and
+    /// returns the evicted member ids. The method marks the group dirty if it
+    /// removed any member.
     pub fn evict_expired(&mut self, now: Instant, session_timeout: Duration) -> Vec<String> {
         let evicted = expired_member_ids(
             self.members
@@ -306,18 +318,22 @@ impl StreamsGroupState {
         evicted
     }
 
-    /// Install a freshly computed target assignment, stamped at the current
-    /// group epoch (which becomes the new `assignment_epoch`).
+    /// Installs a newly computed target assignment, stamped at the current
+    /// group epoch, which becomes the new `assignment_epoch`.
     ///
-    /// For every current member we compute the **active** revoke-split: any
-    /// active task the member currently owns that is *not* in its new active
-    /// target moves into `active_pending_revocation`, and the member transitions
-    /// to [`StreamsMemberAssignmentState::UnrevokedActiveTasks`] if anything was
-    /// revoked (otherwise it stays/returns to `Stable`). The member's currently
-    /// assigned `active` set is trimmed to the tasks it keeps (the intersection
-    /// of current and target). Standby and warmup are *not* installed here —
-    /// they are handed over wholesale in [`Self::advance_member_epoch`] — so the
-    /// member keeps serving its old standby/warmup until it advances.
+    /// For every current member, this method computes the **active**
+    /// revoke-split. Any active task the member owns that is *not* in its new
+    /// active target moves into `active_pending_revocation`. If the method
+    /// revoked anything, the member moves to
+    /// [`StreamsMemberAssignmentState::UnrevokedActiveTasks`]; otherwise it
+    /// stays at or returns to `Stable`. The method trims the member's assigned
+    /// `active` set to the tasks it keeps, the intersection of current and
+    /// target.
+    ///
+    /// This method does *not* install standby and warmup.
+    /// [`Self::advance_member_epoch`] hands those over as a whole, so the
+    /// member keeps serving its old standby and warmup tasks until it
+    /// advances.
     pub fn install_target(&mut self, target: StreamsTargetAssignment) {
         self.assignment_epoch = self.group_epoch;
         self.target = target;
@@ -339,12 +355,13 @@ impl StreamsGroupState {
         }
     }
 
-    /// Advance a member to the current assignment epoch and hand it the full
-    /// target the latest reconcile allotted it.
+    /// Advances a member to the current assignment epoch and gives it the full
+    /// target that the latest reconcile allotted to it.
     ///
-    /// Records `previous_member_epoch`, installs the member's target
-    /// active/standby/warmup as its assigned sets, clears any pending
-    /// revocation, and returns the member to [`StreamsMemberAssignmentState::Stable`].
+    /// The method records `previous_member_epoch`, installs the member's
+    /// target active, standby, and warmup sets as its assigned sets, clears
+    /// any pending revocation, and returns the member to
+    /// [`StreamsMemberAssignmentState::Stable`].
     pub fn advance_member_epoch(&mut self, member_id: &str) {
         // Read the target out first to sidestep the borrow conflict between the
         // immutable `self.target` reads and the mutable member borrow.
@@ -379,8 +396,8 @@ impl StreamsGroupState {
     }
 }
 
-/// Sort + dedup every subtopology's partition list and drop subtopology entries
-/// that end up empty. Idempotent.
+/// Sorts and dedups every subtopology's partition list, then drops the
+/// subtopology entries that end up empty. The function is idempotent.
 fn normalize_task_map(mut map: BTreeMap<String, Vec<i32>>) -> BTreeMap<String, Vec<i32>> {
     map.retain(|_, parts| {
         parts.sort_unstable();
@@ -390,9 +407,11 @@ fn normalize_task_map(mut map: BTreeMap<String, Vec<i32>>) -> BTreeMap<String, V
     map
 }
 
-/// Merge `src` into `dst` (union of partitions per subtopology), normalizing the
-/// result. Used by callers that accumulate a task map from multiple sources
-/// (e.g. the assignor); kept here as a shared task-map primitive.
+/// Merges `src` into `dst` as a union of the partitions of each subtopology,
+/// then normalizes the result.
+///
+/// Callers that build a task map from several sources, such as the assignor,
+/// use it. It lives here as a shared task-map primitive.
 #[allow(dead_code)] // exercised by unit tests and shared task-map callers.
 fn merge_task_maps(dst: &mut BTreeMap<String, Vec<i32>>, src: &BTreeMap<String, Vec<i32>>) {
     for (sub, parts) in src {
@@ -405,9 +424,10 @@ fn merge_task_maps(dst: &mut BTreeMap<String, Vec<i32>>, src: &BTreeMap<String, 
     dst.retain(|_, parts| !parts.is_empty());
 }
 
-/// Split a member's currently-owned active tasks against its new active target:
-/// tasks present in both are *kept*; tasks owned but no longer targeted are
-/// *revoked*. Both halves are normalized (sorted, deduped, empties dropped).
+/// Splits a member's currently-owned active tasks against its new active
+/// target. The function *keeps* tasks that are in both, and *revokes* tasks
+/// the member owns that the target no longer holds. It normalizes both halves:
+/// sorted, deduped, and with empty entries dropped.
 fn compute_active_revoke_split(
     current: &BTreeMap<String, Vec<i32>>,
     target: &BTreeMap<String, Vec<i32>>,

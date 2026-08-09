@@ -1,4 +1,4 @@
-//! Client-side transactional state machine. Drives the
+//! Client-side transactional state machine. It drives the
 //! `init_transactions` / `begin` / `commit` / `abort` / `send_offsets_to_transaction`
 //! flow.
 
@@ -9,37 +9,41 @@ use crate::{error::ProducerError, producer::Producer};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum TxnState {
-    /// `init_transactions` not yet called.
+    /// The caller has not yet called `init_transactions`.
     Uninitialized,
-    /// `init_transactions` succeeded; no in-flight txn.
+    /// `init_transactions` succeeded, and no txn is in flight.
     Ready,
     /// Inside `begin_transaction` ... `commit/abort`.
     InTransaction,
-    /// `commit`/`abort` in progress.
+    /// A `commit` or an `abort` is in progress.
     CommittingOrAborting,
     /// A guard was dropped or `EndTxn` had an uncertain transport outcome.
     /// `init_transactions` must establish a new epoch before reuse.
     RecoveryRequired,
-    /// Producer is fenced; no further txns possible without re-init.
+    /// The producer is fenced. No further txn is possible without a
+    /// re-init.
     Fenced,
 }
 
 /// An open transaction, borrowing the [`Producer`] that opened it.
 ///
-/// Returned by [`Producer::begin_transaction`]. [`commit`](Self::commit) and
+/// [`Producer::begin_transaction`] returns it. [`commit`](Self::commit) and
 /// [`abort`](Self::abort) each consume `self` on success, so a transaction
-/// cannot be silently reused or finished twice. On failure the guard is
-/// handed back via [`EndTransactionError::transaction`] instead of being
-/// dropped: Kafka's `EndTxn` contract makes some failures (e.g.
-/// `CONCURRENT_TRANSACTIONS`) retryable against the very same broker-side
-/// transaction, so the caller can retry `commit()`, or switch to `abort()`,
-/// on the returned guard. For non-retryable failures the producer's
-/// transaction state has already moved on, and the returned guard's next
-/// `commit`/`abort` attempt will itself fail immediately.
+/// cannot be silently reused or finished twice.
 ///
-/// Dropping an unresolved guard marks the producer as recovery-required. This
-/// never guesses whether Kafka committed or aborted the transaction; callers
-/// must call `init_transactions` before the producer can send or begin again.
+/// On failure the call hands the guard back through
+/// [`EndTransactionError::transaction`] instead of dropping it. Kafka's
+/// `EndTxn` contract makes some failures, such as `CONCURRENT_TRANSACTIONS`,
+/// retryable against the very same broker-side transaction, so the caller can
+/// retry `commit()` on the returned guard, or switch to `abort()`. For
+/// non-retryable failures the producer's transaction state has already moved
+/// on, and the returned guard's next `commit` or `abort` attempt fails
+/// immediately.
+///
+/// A dropped unresolved guard marks the producer as recovery-required. The
+/// producer never guesses whether Kafka committed or aborted the transaction.
+/// The caller must call `init_transactions` before the producer can send or
+/// begin again.
 #[derive(Debug)]
 #[must_use = "a transaction must be finished with `commit()` or `abort()`"]
 pub struct Transaction<'p> {
@@ -100,11 +104,11 @@ impl Drop for Transaction<'_> {
 /// Same contract as [`Transaction`], but owns an `Arc<Producer>` instead of
 /// borrowing it.
 ///
-/// For callers that must hold the guard across an owned/`'static` boundary a
-/// borrow can't survive — e.g. behind a `dyn Trait` object stored in a struct
-/// field across many separate async calls. Returned by
-/// [`Producer::begin_transaction_owned`]. Mirrors
-/// `tokio::sync::Mutex::{lock, lock_owned}` / `MutexGuard`/`OwnedMutexGuard`.
+/// Use it when the caller must hold the guard across an owned or `'static`
+/// boundary that a borrow cannot survive, for example behind a `dyn Trait`
+/// object stored in a struct field across many separate async calls.
+/// [`Producer::begin_transaction_owned`] returns it. It mirrors
+/// `tokio::sync::Mutex::{lock, lock_owned}` and `MutexGuard`/`OwnedMutexGuard`.
 #[derive(Debug)]
 #[must_use = "a transaction must be finished with `commit()` or `abort()`"]
 pub struct OwnedTransaction {
@@ -162,15 +166,18 @@ impl Drop for OwnedTransaction {
     }
 }
 
-/// Error returned by [`Transaction::commit`]/[`abort`](Transaction::abort) or
-/// the [`OwnedTransaction`] equivalents, carrying the guard back so a
-/// retryable failure (e.g. `CONCURRENT_TRANSACTIONS`) can be retried or
-/// aborted on the same underlying transaction instead of being stranded.
+/// Error returned by [`Transaction::commit`], [`abort`](Transaction::abort),
+/// and the [`OwnedTransaction`] equivalents.
+///
+/// It carries the guard back, so the caller can retry or abort a retryable
+/// failure, such as `CONCURRENT_TRANSACTIONS`, on the same underlying
+/// transaction instead of stranding it.
 #[derive(Debug, thiserror::Error)]
 #[error("{source}")]
 pub struct EndTransactionError<T> {
-    /// The guard the `commit`/`abort` call was made on, handed back so the
-    /// caller can retry `commit()` or call `abort()` on the same transaction.
+    /// The guard the `commit` or `abort` call was made on, handed back so the
+    /// caller can retry `commit()` or call `abort()` on the same
+    /// transaction.
     pub transaction: T,
     /// The underlying failure.
     #[source]
@@ -208,12 +215,14 @@ mod tests {
     }
 
     /// Boots a mock broker that also answers as its own transaction
-    /// coordinator (`FindCoordinator` resolves back to the mock's own
-    /// address), and returns a transactional `Producer` with
-    /// `init_transactions` already completed against it. `end_txn_error`
-    /// lets each test steer the `EndTxn` response's `error_code` (0 =
-    /// success) independently per call, so a test can fail a `commit`/`abort`
-    /// and then flip the mock to let a retry on the same guard succeed.
+    /// coordinator, so `FindCoordinator` resolves back to the mock's own
+    /// address. It returns a transactional `Producer` with `init_transactions`
+    /// already completed against that broker.
+    ///
+    /// `end_txn_error` lets each test steer the `error_code` of the `EndTxn`
+    /// response independently per call, where 0 means success. A test can
+    /// therefore fail a `commit` or `abort`, and then flip the mock so that a
+    /// retry on the same guard succeeds.
     async fn transactional_producer(end_txn_error: Arc<AtomicI16>) -> (MockBroker, Producer) {
         transactional_producer_with_end_txn_timeout(end_txn_error, Arc::new(AtomicBool::new(false)))
             .await

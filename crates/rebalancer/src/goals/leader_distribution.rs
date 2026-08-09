@@ -1,5 +1,5 @@
-//! Soft goal: balance the count of partitions led per broker.
-//! Movements are leader-only — replicas stay put — and only target
+//! Soft goal: balance the count of partitions led per broker. The movements
+//! are leader-only, so the replicas stay where they are, and they target only
 //! brokers already in the partition's replica set.
 
 use std::collections::HashMap;

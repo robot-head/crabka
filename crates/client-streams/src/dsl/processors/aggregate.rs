@@ -1,7 +1,8 @@
 //! Aggregation processors over a #3 `KeyValueStore`.
 //!
-//! - `KStreamAggregateProcessor`: general aggregate; count = `init || 0`, `agg |_,_,a| a+1`;
-//!   reduce = first-value seeded init, agg = reducer.
+//! - `KStreamAggregateProcessor` is the general aggregate. For count,
+//!   `init` is `|| 0` and `agg` is `|_,_,a| a+1`. For reduce, the first value
+//!   seeds `init` and `agg` is the reducer.
 
 use std::marker::PhantomData;
 
@@ -20,12 +21,13 @@ type Marker<T> = PhantomData<fn() -> T>;
 
 /// Aggregate records into a typed accumulator stored in a #3 `KeyValueStore`.
 ///
-/// For **count**: `init = || 0i64`, `agg = |_k, _v, acc| acc + 1`.
-/// For **reduce**: `init = || first_value` (caller's responsibility to seed on
-/// first record), `agg = reducer`.
+/// For **count**, `init = || 0i64` and `agg = |_k, _v, acc| acc + 1`.
+/// For **reduce**, `init = || first_value` and `agg = reducer`. The caller must
+/// seed `init` on the first record.
 ///
-/// Records with a null key are panicked — aggregations require non-null keys
-/// (enforced by the repartition step preceding this node in the DSL lowering).
+/// The processor panics on a record with a null key. Aggregations need non-null
+/// keys, and the repartition step before this node in the DSL lowering enforces
+/// that.
 #[allow(dead_code)]
 pub(crate) struct KStreamAggregateProcessor<K, V, VA, I, A> {
     pub store_name: String,
@@ -81,13 +83,16 @@ where
 
 /// Reduce records per key in a #3 `KeyValueStore` keyed by `K`, holding `V`.
 ///
-/// The JVM `Reducer` has no separate `init`: the **first** value for a key seeds
-/// the accumulator, and later values fold via `reducer(&acc, &value)`. This keeps
-/// the public value type `V` (no `Option`/sentinel leaks into the `KTable`); the
-/// "first value" check is the store lookup returning `None`.
+/// The JVM `Reducer` has no separate `init`. The **first** value for a key seeds
+/// the accumulator, and later values fold in through `reducer(&acc, &value)`.
 ///
-/// Records with a null key are panicked — aggregations require non-null keys
-/// (enforced by the repartition step preceding this node in the DSL lowering).
+/// This keeps the public value type `V`, so no `Option` and no sentinel leaks
+/// into the `KTable`. The check for the first value is the store lookup that
+/// returns `None`.
+///
+/// The processor panics on a record with a null key. Aggregations need non-null
+/// keys, and the repartition step before this node in the DSL lowering enforces
+/// that.
 #[allow(dead_code)]
 pub(crate) struct KStreamReduceProcessor<K, V, R> {
     pub store_name: String,
@@ -263,8 +268,9 @@ mod tests {
         stores
     }
 
-    /// Run `init` then two same-key `process` calls through the count aggregate,
-    /// returning how many records reached the downstream buffer.
+    /// Run `init`, then two same-key `process` calls, through the count
+    /// aggregate. The helper returns how many records reached the downstream
+    /// buffer.
     async fn run_two(stores: &mut StoreRegistry) -> usize {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -308,17 +314,18 @@ mod tests {
         buffer.len()
     }
 
-    /// Uncached store → the aggregate forwards each record immediately (today's
-    /// behavior, unchanged): two records → two forwards.
+    /// With an uncached store the aggregate forwards each record at once, so two
+    /// records give two forwards.
     #[tokio::test]
     async fn uncached_aggregate_forwards_each_record() {
         let mut stores = counts_registry(false);
         check!(run_two(&mut stores).await == 2);
     }
 
-    /// Cached store → the immediate forward is suppressed (the cache flush will
-    /// forward the deduped change later): two records → zero immediate forwards,
-    /// and the cached store holds the dirty entry until flush.
+    /// With a cached store the immediate forward is suppressed, because the cache
+    /// flush forwards the deduped change later. Two records then give zero
+    /// immediate forwards, and the cached store holds the dirty entry until the
+    /// flush.
     #[tokio::test]
     async fn cached_aggregate_suppresses_immediate_forward() {
         let mut stores = counts_registry(true);

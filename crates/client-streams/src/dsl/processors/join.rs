@@ -1,13 +1,14 @@
-//! `KStreamKTableJoinProcessor`: stream-table join (inner and left).
+//! `KStreamKTableJoinProcessor`, the stream-table join in its inner and left
+//! forms.
 //!
-//! - **Inner** (`emit_on_miss = false`): only forwards when the table has a
+//! - **Inner** (`emit_on_miss = false`) forwards only when the table has a
 //!   matching value for the stream record's key.
-//! - **Left** (`emit_on_miss = true`): always forwards; when the table has no
-//!   entry the joiner receives `None` as the table-side value.
+//! - **Left** (`emit_on_miss = true`) always forwards. When the table has no
+//!   entry, the joiner receives `None` as the table-side value.
 //!
-//! The joiner signature is `Fn(&V, Option<&VT>) -> VO`, which covers both forms:
-//! for inner joins the caller can assume `Some`; for left joins the caller handles
-//! `None`.
+//! The joiner signature is `Fn(&V, Option<&VT>) -> VO`, which covers both forms.
+//! In an inner join the caller can assume `Some`. In a left join the caller
+//! handles `None`.
 
 use std::marker::PhantomData;
 
@@ -23,16 +24,18 @@ type Marker<T> = PhantomData<fn() -> T>;
 
 /// Stream-table join processor.
 ///
-/// Looks up the stream record's key in the named state store (which holds the
-/// `KTable`'s materialized view). If a match is found — or `emit_on_miss` is
-/// true — invokes `joiner(&stream_value, table_value)` and forwards the result.
+/// The processor looks up the stream record's key in the named state store,
+/// which holds the `KTable`'s materialized view. On a match, or when
+/// `emit_on_miss` is true, it calls `joiner(&stream_value, table_value)` and
+/// forwards the result.
 pub(crate) struct KStreamKTableJoinProcessor<K, V, VT, VO, F> {
     pub table_store: String,
-    /// Joiner: `Fn(&V, Option<&VT>) -> VO`.
-    /// - Inner join: called only when `table_value.is_some()`.
-    /// - Left join: called always; `table_value` is `None` on a miss.
+    /// The joiner, `Fn(&V, Option<&VT>) -> VO`.
+    /// - An inner join calls it only when `table_value.is_some()`.
+    /// - A left join always calls it, and `table_value` is `None` on a miss.
     pub joiner: F,
-    /// `false` = inner join (skip on miss), `true` = left join (emit on miss).
+    /// `false` selects an inner join, which skips on a miss. `true` selects a
+    /// left join, which emits on a miss.
     pub emit_on_miss: bool,
     pub _pd: Marker<(K, V, VT, VO)>,
 }
@@ -61,11 +64,13 @@ where
     }
 }
 
-/// As-of stream–table join processor (KIP-914). Identical to
-/// [`KStreamKTableJoinProcessor`] except the table lookup is a versioned
-/// `get_as_of(key, streamRec.ts)` — the table value valid *as of the stream
-/// record's timestamp*. A null as-of result is treated like a miss (inner skips,
-/// left passes `None`). Output is forwarded at the stream record's timestamp.
+/// As-of stream-table join processor (KIP-914).
+///
+/// It matches [`KStreamKTableJoinProcessor`] except for the table lookup, which
+/// is a versioned `get_as_of(key, streamRec.ts)`. That call gives the table value
+/// valid *as of the stream record's timestamp*. A null as-of result counts as a
+/// miss, so an inner join skips it and a left join passes `None`. The processor
+/// forwards its output at the stream record's timestamp.
 #[allow(dead_code)]
 pub(crate) struct KStreamKTableJoinAsOfProcessor<K, V, VT, VO, F> {
     pub table_store: String,
@@ -136,7 +141,8 @@ mod tests {
     }
 
     /// Process a single `(key, value)` record through `proc` and return the
-    /// forwarded `i64` output, or `None` if nothing was forwarded.
+    /// forwarded `i64` output, or `None` when the processor forwarded
+    /// nothing.
     async fn run_one(
         proc: &mut KStreamKTableJoinProcessor<
             String,
@@ -218,7 +224,8 @@ mod tests {
         check!(miss == Some(2));
     }
 
-    /// Versioned store "vt" with key "a": value 10 `valid_from=100`, value 20 `valid_from=200`.
+    /// A versioned store "vt" with key "a": value 10 at `valid_from=100` and
+    /// value 20 at `valid_from=200`.
     async fn make_versioned_stores() -> StoreRegistry {
         let mut stores = StoreRegistry::default();
         let mut v = VersionedBytesStore::<String, i64>::in_memory(

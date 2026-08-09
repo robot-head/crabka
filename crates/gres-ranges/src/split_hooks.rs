@@ -1,8 +1,8 @@
 //! Production integration boundary for split orchestration side effects.
 //!
-//! This module adapts explicitly supplied infrastructure clients to [`SplitHooks`]. It does not
-//! provide a broker, storage, registry, or operator client, and therefore does not claim to move
-//! live data on its own.
+//! This module adapts explicitly supplied infrastructure clients to [`SplitHooks`]. It supplies no
+//! broker, storage, registry, or operator client. It therefore makes no claim to move live data on
+//! its own.
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use async_trait::async_trait;
 
 use crate::{CheckpointManifest, InDoubtMarker, SplitError, SplitHooks, SplitState};
 
-/// Identifies an infrastructure operation required by split orchestration.
+/// Identifies an infrastructure operation that split orchestration needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitHookOperation {
     /// Checkpoint predecessor ranges.
@@ -29,7 +29,7 @@ pub enum SplitHookOperation {
     PredecessorParking,
 }
 
-/// Forces durable predecessor checkpoints through the storage/checkpoint integration.
+/// Forces durable predecessor checkpoints through the storage and checkpoint integration.
 #[async_trait]
 pub trait CheckpointOperation: Send + Sync {
     /// Force a checkpoint for the ordinary predecessor path.
@@ -45,7 +45,7 @@ pub trait CheckpointOperation: Send + Sync {
     ) -> Result<CheckpointManifest, SplitError>;
 }
 
-/// Pauses and unpauses writes through the serving/write-gate integration.
+/// Pauses and unpauses writes through the serving and write-gate integration.
 #[async_trait]
 pub trait WriteGateOperation: Send + Sync {
     /// Pause writes before conversion begins.
@@ -117,9 +117,9 @@ pub trait PredecessorParkingOperation: Send + Sync {
 
 /// Concrete adapter that connects injected infrastructure operations to [`SplitHooks`].
 ///
-/// It is production-ready as an integration boundary: every hook delegates to an explicit client,
-/// and absent clients fail clearly. It does not supply those clients or implement live data
-/// movement itself.
+/// It is production-ready as an integration boundary. Every hook delegates to an explicit client,
+/// and an absent client fails clearly. This adapter does not supply those clients, and it does not
+/// implement live data movement itself.
 pub struct SplitHookAdapter {
     checkpoint: Option<Arc<dyn CheckpointOperation>>,
     write_gate: Option<Arc<dyn WriteGateOperation>>,
@@ -132,9 +132,9 @@ pub struct SplitHookAdapter {
 
 /// Builder for [`SplitHookAdapter`].
 ///
-/// [`Self::build`] rejects incomplete wiring. [`Self::build_fail_clear`] is intentionally useful
-/// only while assembling an integration: it preserves missing operations so they fail at their
-/// corresponding durable step rather than silently succeeding.
+/// [`Self::build`] rejects incomplete wiring. [`Self::build_fail_clear`] is deliberately useful
+/// only during the assembly of an integration. It keeps the missing operations, so each one fails
+/// at its own durable step instead of a silent success.
 #[derive(Default)]
 pub struct SplitHookAdapterBuilder {
     checkpoint: Option<Arc<dyn CheckpointOperation>>,
@@ -221,7 +221,7 @@ impl SplitHookAdapterBuilder {
         Ok(adapter)
     }
 
-    /// Build an adapter that fails clearly for operations not yet wired.
+    /// Build an adapter that fails clearly for the operations that are not yet wired.
     #[must_use]
     pub fn build_fail_clear(self) -> SplitHookAdapter {
         SplitHookAdapter {

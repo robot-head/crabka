@@ -1,7 +1,10 @@
-//! Metrics reconcile — `PodMonitor` / `ServiceMonitor` rendering,
-//! dynamic SSA apply against `monitoring.coreos.com/v1`, and the
-//! `reconcile_metrics` orchestrator. Mutually exclusive variants; the
-//! abandoned variant's leftover objects are garbage-collected best-effort.
+//! Metrics reconcile.
+//!
+//! This module renders `PodMonitor` and `ServiceMonitor` objects, applies
+//! them with a dynamic SSA apply against `monitoring.coreos.com/v1`, and
+//! holds the `reconcile_metrics` orchestrator. The two variants are
+//! mutually exclusive. The operator garbage-collects the leftover objects
+//! of the abandoned variant on a best-effort basis.
 
 use std::collections::BTreeMap;
 

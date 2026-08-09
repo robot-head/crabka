@@ -2,23 +2,24 @@
 //! Produce routing.
 //!
 //! The native producer used to send every `ProduceRequest` over the bootstrap
-//! connection. On a multi-broker cluster that misroutes writes: a partition
-//! whose leader is *not* the bootstrap broker holds **no replica at all**
-//! (rf=1), so a bootstrap-routed Produce gets `UNKNOWN_TOPIC_OR_PARTITION` (3)
-//! and the record is never stored. The producer now caches each partition's
-//! leader from `Metadata`, groups its drained batches by leader, and sends one
-//! `ProduceRequest` per leader via `Client::broker(id)`, so writes land on the
-//! correct broker regardless of which broker the producer bootstrapped at.
+//! connection. On a multi-broker cluster that behavior misroutes writes. At
+//! rf=1, a partition whose leader is *not* the bootstrap broker holds **no
+//! replica at all**, so a bootstrap-routed Produce gets
+//! `UNKNOWN_TOPIC_OR_PARTITION` (3) and the broker never stores the record. The
+//! producer now caches each partition's leader from `Metadata`, groups its
+//! drained batches by leader, and sends one `ProduceRequest` per leader with
+//! `Client::broker(id)`. Writes then land on the correct broker whatever broker
+//! the producer bootstrapped at.
 //!
 //! **Why rf=1 matters for test validity:** with rf=1 each partition lives on
 //! exactly ONE broker. A producer that only talks to the bootstrap broker
-//! cannot store records for partitions led by the other two nodes — the
+//! cannot store records for partitions led by the other two nodes, because the
 //! bootstrap broker has no replica to accept them. With rf=3 the bootstrap
-//! broker would hold a replica of every partition and the misroute could be
-//! masked, making the test hollow. rf=1 is what makes this discriminating.
+//! broker would hold a replica of every partition and could mask the misroute,
+//! and the test would be hollow. rf=1 is what makes this test discriminating.
 //!
-//! Windows-gated like the other multi-broker tests (openraft's `debug_assert!`
-//! races on the hosted Windows scheduler).
+//! Windows-gated like the other multi-broker tests, because openraft's
+//! `debug_assert!` races on the hosted Windows scheduler.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -39,10 +40,11 @@ use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
 
-/// Serialize the multi-broker tests in this binary: each boots a 3-node
-/// loopback cluster, and running them concurrently exhausts ephemeral ports
-/// and starves openraft election timing. Same rationale as the `cluster_lock`
-/// in `consumer_leader_routing.rs`.
+/// Serialize the multi-broker tests in this binary.
+///
+/// Each test boots a 3-node loopback cluster. Two tests at the same time
+/// exhaust the ephemeral ports and starve openraft election timing. The
+/// `cluster_lock` in `consumer_leader_routing.rs` has the same rationale.
 fn cluster_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -60,14 +62,14 @@ async fn wait_for_local_replica(broker: &BrokerHandle, topic: &str, partition: i
 }
 
 /// A native `Producer` against a 3-broker rf=1 cluster must store every
-/// partition's record on the partition's leader, including partitions whose
-/// leader (and sole replica) is NOT the broker it bootstrapped at.
+/// partition's record on the partition's leader. This includes partitions whose
+/// leader, and sole replica, is NOT the broker it bootstrapped at.
 ///
-/// With rf=1 there is no replica on the bootstrap broker for partitions led by
-/// other nodes — a bootstrap-only producer would get `UNKNOWN_TOPIC_OR_PARTITION`
-/// for those partitions and never store them. The producer MUST route each
-/// Produce to the actual partition leader. We verify durability by consuming
-/// every record back (the consumer already routes per-leader).
+/// With rf=1 the bootstrap broker holds no replica for partitions led by other
+/// nodes. A bootstrap-only producer would get `UNKNOWN_TOPIC_OR_PARTITION` for
+/// those partitions and would never store them. The producer MUST route each
+/// Produce to the actual partition leader. The test verifies durability and
+/// consumes every record back, because the consumer already routes per-leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn producer_routes_to_non_bootstrap_leaders() {
     let _g = cluster_lock().lock().await;

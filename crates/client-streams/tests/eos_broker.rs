@@ -1,36 +1,37 @@
 //! End-to-end exactly-once (EOS v2) broker integration test.
 //!
-//! Boots an in-process Crabka broker (whose transaction coordinator is already
-//! wired) and runs a *stateful* counting `KafkaStreams` app under
-//! [`ProcessingGuarantee::ExactlyOnceV2`]. Proves three things end-to-end:
+//! The test boots an in-process Crabka broker whose transaction coordinator is
+//! already wired. It then runs a *stateful* counting `KafkaStreams` app under
+//! [`ProcessingGuarantee::ExactlyOnceV2`]. It proves three things end-to-end:
 //!
-//! 1. **Atomic, `read_committed` output.** Reading the output topic with
+//! 1. **Atomic, `read_committed` output.** A read of the output topic with
 //!    `isolation_level = 1` (`READ_COMMITTED`) returns exactly the expected
-//!    aggregation — no duplicates, no aborted/uncommitted data leaking below the
-//!    last stable offset.
+//!    aggregation. There are no duplicates, and no aborted or uncommitted data
+//!    leaks below the last stable offset.
 //! 2. **Source-offset atomicity.** The committed source offsets for the
 //!    application-id group advance to the end of the input atomically with the
-//!    committed output (via `OffsetFetch` for the streams group). The producer
-//!    folds the consumed offsets into the SAME transaction as the output
-//!    (`AddOffsetsToTxn` + `TxnOffsetCommit`); the broker materializes those
-//!    transactional `__consumer_offsets` writes into the group's committed
-//!    offsets when the COMMIT marker lands, so `OffsetFetch` returns the
-//!    committed end offset (not `-1`).
+//!    committed output, which `OffsetFetch` shows for the streams group. The
+//!    producer folds the consumed offsets into the SAME transaction as the
+//!    output, with `AddOffsetsToTxn` and `TxnOffsetCommit`. The broker
+//!    materializes those transactional `__consumer_offsets` writes into the
+//!    group's committed offsets when the COMMIT marker lands, so `OffsetFetch`
+//!    returns the committed end offset and not `-1`.
 //! 3. **True cross-restart exactly-once.** A fresh `KafkaStreams` with the SAME
 //!    `application_id` and `ExactlyOnceV2` resumes from the committed SOURCE
-//!    offsets — it does NOT re-read the committed input. After one more `"a"` is
-//!    produced post-restart, the committed output grows to EXACTLY four records,
-//!    `[a→1, a→2, b→1, a→3]`: the original three (committed input processed
-//!    exactly once across the restart) plus the single new `a→3` (the restored
-//!    store `a=2` advanced by the one genuinely new `"a"`). This proves the
-//!    invariant in both directions — no committed input is re-read (a re-read
-//!    would re-emit `a→3` from the 2nd `"a"` and `b→2` at higher offsets, failing
-//!    the exact-set assertion), AND the restarted instance correctly fetches,
-//!    processes, and commits genuinely new input. This is the invariant the
-//!    broker fix unlocks: pre-fix the source offset read back as `-1`, so the
-//!    restarted consumer reset to `earliest`, re-read the input, and re-emitted
-//!    committed records (double-counting); post-fix it resumes from the
-//!    materialized offset and processes only the new record.
+//!    offsets. It does NOT re-read the committed input. The test produces one
+//!    more `"a"` after the restart, and the committed output then grows to
+//!    EXACTLY four records, `[a→1, a→2, b→1, a→3]`. Those are the original
+//!    three, which is the committed input processed exactly once across the
+//!    restart, plus the single new `a→3`, which is the restored store `a=2`
+//!    advanced by the one genuinely new `"a"`. This proves the invariant in both
+//!    directions. No committed input is re-read, because a re-read would re-emit
+//!    `a→3` from the 2nd `"a"` and `b→2` at higher offsets, and the exact-set
+//!    assertion would fail. The restarted instance also fetches, processes, and
+//!    commits genuinely new input correctly. This is the invariant that the
+//!    broker fix unlocks. Before the fix the source offset read back as `-1`, so
+//!    the restarted consumer reset to `earliest`, re-read the input, and
+//!    re-emitted committed records, which double-counted them. After the fix it
+//!    resumes from the materialized offset and processes only the new record.
 
 use std::time::Duration;
 
@@ -170,9 +171,10 @@ async fn eos_streams(bootstrap: &str) -> KafkaStreams {
 // ─── read_committed output collector ──────────────────────────────────────────
 
 /// Poll `OUT_TOPIC` partition 0 with **`READ_COMMITTED`** isolation until `want`
-/// records are visible (i.e. committed below the last stable offset). Returns
-/// `(key, i64_value)` pairs in arrival order. Records from aborted transactions
-/// are never returned by a `READ_COMMITTED` fetch.
+/// records are visible, which means committed below the last stable offset.
+///
+/// This function returns `(key, i64_value)` pairs in arrival order. A
+/// `READ_COMMITTED` fetch never returns records from aborted transactions.
 async fn collect_committed(
     admin: &Client,
     bootstrap: &str,
@@ -256,8 +258,10 @@ async fn collect_committed(
 }
 
 /// Fetch the committed source offset for `(IN_TOPIC, 0)` from the streams
-/// application-id group via `OffsetFetch` (v8+ `groups[]` + `topic_id` shape,
-/// mirroring the runtime's own `BrokerOffsetStore`). Returns `None` if no offset
+/// application-id group with `OffsetFetch`.
+///
+/// The request uses the v8+ `groups[]` and `topic_id` shape, which matches the
+/// runtime's own `BrokerOffsetStore`. This function returns `None` when no offset
 /// is committed yet.
 async fn committed_source_offset(admin: &Client) -> Option<i64> {
     let meta = admin.refresh_metadata().await.expect("metadata");
@@ -324,10 +328,13 @@ async fn committed_source_offset(admin: &Client) -> Option<i64> {
     None
 }
 
-/// Poll [`committed_source_offset`] until it is present, returning the committed
-/// offset. The transactional offset is materialized into the group's committed
-/// offsets at the COMMIT marker, which lands just after the committed output
-/// becomes visible — so a short poll bridges that window without flaking.
+/// Poll [`committed_source_offset`] until it is present, then return the
+/// committed offset.
+///
+/// The broker materializes the transactional offset into the group's committed
+/// offsets at the COMMIT marker. That marker lands just after the committed
+/// output becomes visible, so a short poll bridges that window and does not
+/// flake.
 async fn await_committed_source_offset(admin: &Client) -> i64 {
     loop {
         if let Some(off) = committed_source_offset(admin).await {

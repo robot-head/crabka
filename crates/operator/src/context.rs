@@ -19,40 +19,50 @@ use crate::{
     telemetry::{ControllerMetrics, SharedRegistry},
 };
 
-/// Boxed-dyn admin client handle: tests substitute a fake here without
-/// opening a TCP connection, while production code wraps a real
-/// `AdminClient`.
+/// Boxed-dyn admin client handle.
+///
+/// Tests substitute a fake here and open no TCP connection. Production
+/// code wraps a real `AdminClient`.
 pub type AdminClientHandle = Arc<Mutex<dyn AdminClientLike + Send>>;
 
-/// Boxed-dyn rebalancer client handle. Production wraps a
-/// [`ConnectRebalancerClient`]; reconcile tests substitute a fake. No
-/// `Mutex` — the client's methods take `&self` and the inner HTTP client
-/// is a shareable connection pool.
+/// Boxed-dyn rebalancer client handle.
+///
+/// Production wraps a [`ConnectRebalancerClient`]. Reconcile tests
+/// substitute a fake. The handle needs no `Mutex`, because the methods of
+/// the client take `&self` and the inner HTTP client is a connection pool
+/// that many callers can share.
 pub type RebalancerClientHandle = Arc<dyn RebalancerClientLike>;
 
-/// Gres control-plane write seam. Production writes Kafka records with the
-/// idempotent producer; tests install an in-memory recorder.
+/// Write seam for the Gres control plane.
+///
+/// Production writes Kafka records with the idempotent producer. Tests
+/// install an in-memory recorder.
 pub type GresControlHandle = Arc<dyn GresControlLike>;
 
-/// Narrow durable-checkpoint verification seam. Implementations retrieve and
-/// decode the referenced object before comparing its tenant and checkpoint
-/// metadata with the registry record.
+/// Narrow seam that verifies a durable checkpoint.
+///
+/// An implementation gets the referenced object and decodes it. It then
+/// compares the tenant metadata and the checkpoint metadata of that object
+/// with the registry record.
 pub type CheckpointManifestVerifierHandle = Arc<dyn CheckpointManifestVerifier>;
 
-/// Boxed `PgDog` admin seam. Production uses the `PgDog` admin `PostgreSQL`
-/// endpoint; tests install a deterministic fake that can report stale views.
+/// Boxed `PgDog` admin seam.
+///
+/// Production uses the `PgDog` admin `PostgreSQL` endpoint. Tests install
+/// a deterministic fake that can report stale views.
 pub type PgdogAdminHandle = Arc<dyn PgdogAdminLike>;
 
 #[async_trait::async_trait]
 pub trait CheckpointManifestVerifier: Send + Sync {
-    /// Verify that the durable manifest matches `record` exactly.
+    /// Verifies that the durable manifest matches `record` exactly.
     async fn validate(
         &self,
         record: &crabka_gres_control::TenantRecord,
     ) -> Result<(), CheckpointManifestError>;
 }
 
-/// Why the durable checkpoint required for WAL parking could not be verified.
+/// The reason why the operator could not verify the durable checkpoint
+/// that WAL parking needs.
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointManifestError {
     /// The operator was not configured with a durable checkpoint object store.
@@ -60,13 +70,14 @@ pub enum CheckpointManifestError {
         "Gres checkpoint verifier is not configured: set GRES_CHECKPOINT_STORE, GRES_CHECKPOINT_BUCKET, and provider settings"
     )]
     Unconfigured,
-    /// A provider-specific required setting was absent.
+    /// A necessary provider-specific setting was absent.
     #[error("Gres checkpoint verifier configuration is invalid: {0}")]
     InvalidConfiguration(String),
-    /// The object store client could not be constructed.
+    /// The operator could not construct the object store client.
     #[error("Gres checkpoint object store configuration: {0}")]
     ObjectStoreConfiguration(#[from] crabka_object_store::ObjectStoreError),
-    /// The referenced checkpoint is absent, corrupt, or does not match its registry record.
+    /// The referenced checkpoint is absent, is corrupt, or does not match
+    /// its registry record.
     #[error("Gres checkpoint manifest verification failed: {0}")]
     Verification(String),
 }
@@ -274,9 +285,11 @@ pub struct PgdogExpectedRoute {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgdogReloadRequest {
-    /// DNS name used for `PostgreSQL` host identity and TLS verification.
+    /// DNS name for the `PostgreSQL` host identity and for TLS
+    /// verification.
     pub host: String,
-    /// Optional per-replica TCP destination, while retaining `host` for SNI.
+    /// Optional TCP destination for one replica. `host` stays the SNI
+    /// name.
     pub connect_addr: Option<std::net::IpAddr>,
     pub port: u16,
     pub password: String,
@@ -727,7 +740,8 @@ pub trait GresControlLike: Send + Sync {
         &self,
         tenant: &crabka_gres_control::TenantName,
     ) -> Result<Option<crabka_gres_control::TenantRecord>, GresControlWriteError>;
-    /// Create a record or replace the exact version that the reconciler read.
+    /// Creates a record, or replaces the exact version that the
+    /// reconciler read.
     async fn replace_tenant_if_version(
         &self,
         record: &crabka_gres_control::TenantRecord,
@@ -737,9 +751,12 @@ pub trait GresControlLike: Send + Sync {
         &self,
         tenant: &crabka_gres_control::TenantName,
     ) -> Result<(), GresControlWriteError>;
-    /// Retrieve and validate the durable final checkpoint manifest referenced by
-    /// `record`. Implementations must verify manifest identity and checkpoint
-    /// metadata; registry metadata alone is not proof that it is durable.
+    /// Gets and validates the durable final checkpoint manifest that
+    /// `record` refers to.
+    ///
+    /// An implementation must verify the manifest identity and the
+    /// checkpoint metadata. The registry metadata alone is not proof that
+    /// the checkpoint is durable.
     async fn validate_final_checkpoint_manifest(
         &self,
         record: &crabka_gres_control::TenantRecord,
@@ -846,22 +863,25 @@ impl GresControlLike for KafkaGresControl {
     }
 }
 
-/// Shared per-reconciler context. Cheap to clone (all fields Arc /
-/// shared via interior mutability).
+/// Shared context for each reconciler.
+///
+/// A clone is cheap. Every field is an `Arc` or is shared with interior
+/// mutability.
 #[derive(Clone)]
 pub struct Context {
     pub client: Client,
     pub config: Arc<OperatorConfig>,
     pub registry: SharedRegistry,
-    /// Operator-wide controller metrics (reconcile counters/histograms/gauges).
-    /// Cheaply cloneable; the handles are registered against `registry`.
+    /// Controller metrics for the whole operator: the reconcile counters,
+    /// histograms, and gauges. A clone is cheap. The handles are
+    /// registered against `registry`.
     pub metrics: ControllerMetrics,
-    /// Per-cluster admin-client cache. Keyed by `Kafka` resource name.
-    /// Broken connections are replaced lazily on next use.
+    /// Per-cluster admin-client cache, keyed by `Kafka` resource name.
+    /// The cache replaces a broken connection at the next use.
     pub admin_clients: Arc<Mutex<HashMap<String, AdminClientHandle>>>,
-    /// Per-endpoint rebalancer-client cache. Keyed by the
-    /// resolved Connect base URL. Dropped + re-created lazily on
-    /// transport failure.
+    /// Per-endpoint rebalancer-client cache, keyed by the resolved Connect
+    /// base URL. The cache drops an entry after a transport failure and
+    /// builds it again at the next use.
     pub rebalancer_clients: Arc<Mutex<HashMap<String, RebalancerClientHandle>>>,
     gres_controls: Arc<Mutex<HashMap<(String, String), CachedGresControl>>>,
     pub checkpoint_manifest_verifier: CheckpointManifestVerifierHandle,
@@ -905,10 +925,11 @@ impl Context {
         self
     }
 
-    /// Look up or open an `AdminClient` for the named cluster.
+    /// Looks up an `AdminClient` for the named cluster, or opens one.
     ///
-    /// `bootstrap` is the inter-broker listener's `bootstrap_servers`
-    /// string, e.g. `demo-broker-headless.default.svc.cluster.local:9092`.
+    /// `bootstrap` is the `bootstrap_servers` string of the inter-broker
+    /// listener, for example
+    /// `demo-broker-headless.default.svc.cluster.local:9092`.
     /// # Errors
     /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub async fn admin_client_for(
@@ -940,21 +961,24 @@ impl Context {
         Ok(entry)
     }
 
-    /// Drop the cached admin client for `cluster` (used by reconcile when
-    /// a Transport error indicates the connection died — next call will
-    /// reopen).
+    /// Drops the cached admin client for `cluster`.
+    ///
+    /// Reconcile calls this when a Transport error shows that the
+    /// connection died. The next call opens a new connection.
     pub async fn drop_admin_client(&self, cluster: &str) {
         self.admin_clients.lock().await.remove(cluster);
     }
 
-    /// Test-only: pre-populate the admin-client cache with a caller-supplied
-    /// handle. The `AdminClientLike` trait abstracts over the real client
-    /// and per-test fakes, so reconcile tests can drive the trait methods
-    /// without opening a TCP connection.
+    /// Fills the admin-client cache with a handle from the caller. This is
+    /// for tests only.
     ///
-    /// Not cfg-gated: the function exists in the public API but is harmless
-    /// (and unused) in production — keeping it un-gated avoids a parallel
-    /// test-only build profile.
+    /// The `AdminClientLike` trait covers both the real client and the
+    /// fakes of each test, so reconcile tests can call the trait methods
+    /// and open no TCP connection.
+    ///
+    /// There is no `cfg` gate on this function. It stays in the public
+    /// API. In production it does no damage and nothing calls it. Without
+    /// the gate, the build needs no parallel test-only profile.
     pub async fn insert_admin_client_for_test(&self, cluster: &str, admin: AdminClientHandle) {
         self.admin_clients
             .lock()
@@ -962,10 +986,12 @@ impl Context {
             .insert(cluster.to_string(), admin);
     }
 
-    /// Look up or build a rebalancer client for `endpoint` (a Connect base
-    /// URL like `http://host:9300`). Construction is infallible (no
-    /// connection is opened until the first RPC), so this returns the
-    /// handle directly.
+    /// Looks up a rebalancer client for `endpoint`, or builds one.
+    ///
+    /// `endpoint` is a Connect base URL such as `http://host:9300`. The
+    /// construction cannot fail, because the client opens no connection
+    /// before the first RPC. This method therefore returns the handle
+    /// directly.
     pub async fn rebalancer_client_for(&self, endpoint: &str) -> RebalancerClientHandle {
         let mut map = self.rebalancer_clients.lock().await;
         if let Some(client) = map.get(endpoint) {
@@ -979,14 +1005,16 @@ impl Context {
         client
     }
 
-    /// Drop the cached rebalancer client for `endpoint` (used by reconcile
-    /// after a transport error — the next call rebuilds it).
+    /// Drops the cached rebalancer client for `endpoint`.
+    ///
+    /// Reconcile calls this after a transport error. The next call builds
+    /// the client again.
     pub async fn drop_rebalancer_client(&self, endpoint: &str) {
         self.rebalancer_clients.lock().await.remove(endpoint);
     }
 
-    /// Test-only: pre-populate the rebalancer-client cache with a fake.
-    /// Mirrors [`Self::insert_admin_client_for_test`].
+    /// Fills the rebalancer-client cache with a fake. This is for tests
+    /// only. It follows [`Self::insert_admin_client_for_test`].
     pub async fn insert_rebalancer_client_for_test(
         &self,
         endpoint: &str,

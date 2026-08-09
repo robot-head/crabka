@@ -1,19 +1,22 @@
-//! KIP-430. Compute the `(cluster|topic|group)_authorized_operations`
-//! bitfield surfaced on `Metadata`, `DescribeCluster`, and `DescribeGroups`
-//! responses when the corresponding request flag is set.
+//! KIP-430: computes the `(cluster|topic|group)_authorized_operations`
+//! bitfield.
 //!
-//! Encoding: for each operation in the resource type's supported set,
-//! ask the authorizer; OR `1 << op.code()` into the bitfield on Allow.
-//! `op.code()` is the same wire discriminant the ACL handlers serialize
-//! (see [`super::acl_wire::operation_to_wire`]).
+//! The `Metadata`, `DescribeCluster`, and `DescribeGroups` responses carry the
+//! bitfield when the matching request flag is set.
 //!
-//! Kafka's convention: when the include flag is *not* set, the field is
-//! `i32::MIN` (the "not present" sentinel). That's the schema-level
-//! default already; handlers only populate the field when the request
+//! The encoding works like this. For each operation in the supported set of
+//! the resource type, the module asks the authorizer. On Allow it ORs
+//! `1 << op.code()` into the bitfield. `op.code()` is the same wire
+//! discriminant the ACL handlers serialize. See
+//! [`super::acl_wire::operation_to_wire`].
+//!
+//! Kafka's convention is that the field is `i32::MIN`, the "not present"
+//! sentinel, when the include flag is *not* set. That is already the
+//! schema-level default, so the handlers fill the field only when the request
 //! opts in.
 //!
-//! Resource → supported-operation set tracks
-//! `org.apache.kafka.common.acl.AclEntry#supportedOperations` (Kafka 3.6+):
+//! The map from a resource to its supported-operation set follows
+//! `org.apache.kafka.common.acl.AclEntry#supportedOperations` for Kafka 3.6+:
 //!
 //! | resource         | operations                                                        |
 //! |------------------|-------------------------------------------------------------------|
@@ -33,8 +36,8 @@ use crabka_security::Principal;
 use super::acl_wire::operation_to_wire;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
 
-/// Returns the operations whose Allow decision contributes to the
-/// authorized-operations bitfield for `resource_type`. Matches Kafka's
+/// Returns the operations whose Allow decision adds to the
+/// authorized-operations bitfield for `resource_type`. It matches Kafka's
 /// `AclEntry.supportedOperations(...)`.
 #[must_use]
 pub fn supported_operations(resource_type: ResourceType) -> &'static [AclOperation] {
@@ -74,9 +77,10 @@ pub fn supported_operations(resource_type: ResourceType) -> &'static [AclOperati
     }
 }
 
-/// Compute the authorized-operations bitfield for `(resource_type, resource_name)`
-/// from `principal@host`'s perspective. The bit set for an operation is
-/// `1 << operation_to_wire(op)`, matching Kafka's
+/// Computes the authorized-operations bitfield for
+/// `(resource_type, resource_name)` from the point of view of
+/// `principal@host`. The bit for an operation is
+/// `1 << operation_to_wire(op)`, which matches Kafka's
 /// `AuthorizationHelper.authorizedOperations(...)`.
 #[must_use]
 pub fn authorized_operations_bits(

@@ -1,10 +1,15 @@
-//! Punctuation (`ProcessorContext::schedule`, KIP Processor API): periodic
-//! callbacks fired on stream-time or wall-clock boundaries. A `Punctuator` is a
-//! trait object erased to the driver exactly like a `Processor` (`TypedPunctuator`
-//! rebuilds the typed `ProcessorContext` from the `Dispatch`). Schedules live in
-//! the `Graph`, tagged by node index; the driver fires them positioned at that
-//! node so a punctuator's `forward` flows downstream. Punctuation is invisible in
-//! the wire topology — pure runtime.
+//! Punctuation through `ProcessorContext::schedule` in the KIP Processor API.
+//! These are periodic callbacks that fire on a stream-time or wall-clock
+//! boundary.
+//!
+//! A `Punctuator` is a trait object erased to the driver exactly like a
+//! `Processor`. `TypedPunctuator` rebuilds the typed `ProcessorContext` from the
+//! `Dispatch`.
+//!
+//! The schedules live in the `Graph`, tagged by node index. The driver fires each
+//! one positioned at that node, so a punctuator's `forward` flows downstream.
+//! Punctuation is invisible in the wire topology and is purely a runtime
+//! feature.
 use std::{
     any::Any,
     marker::PhantomData,
@@ -19,28 +24,31 @@ use crabka_units::prelude::*;
 
 use crate::processor::{api::ProcessorContext, erased::Dispatch};
 
-/// Which clock drives a punctuation schedule (JVM `PunctuationType`).
+/// Which clock drives a punctuation schedule. This is the JVM
+/// `PunctuationType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PunctuationType {
     /// Driven by the task's observed max record timestamp.
     StreamTime,
-    /// Driven by the system (or mock) wall clock.
+    /// Driven by the system wall clock, or by a mock wall clock.
     WallClockTime,
 }
 
-/// A periodic callback. Implemented on a user struct (like [`Processor`]); shares
-/// mutable state with its owning processor via `Arc<Mutex<_>>`.
+/// A periodic callback. You implement it on a user struct, as you do with
+/// [`Processor`]. It shares mutable state with its owning processor through an
+/// `Arc<Mutex<_>>`.
 ///
 /// [`Processor`]: crate::processor::api::Processor
 #[async_trait]
 pub trait Punctuator<K: Send, V: Send>: Send + 'static {
-    /// Fire at `timestamp` (stream-time: the scheduled time; wall-clock: the
-    /// clock's current time). May `forward` via `ctx` and use state stores.
+    /// Fire at `timestamp`. For a stream-time schedule this is the scheduled
+    /// time. For a wall-clock schedule it is the clock's current time. The
+    /// callback may `forward` through `ctx` and may use the state stores.
     async fn punctuate(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V>, timestamp: i64);
 }
 
-/// Handle returned by `ProcessorContext::schedule`. `cancel()` stops the schedule;
-/// the driver drops it on the next punctuate pass.
+/// The handle that `ProcessorContext::schedule` returns. `cancel()` stops the
+/// schedule, and the driver drops it on the next punctuate pass.
 #[derive(Clone)]
 pub struct Cancellable(Arc<AtomicBool>);
 impl Cancellable {
@@ -53,8 +61,8 @@ impl Cancellable {
     }
 }
 
-/// Internal: a punctuator erased to the driver's untyped surface (mirrors
-/// `ErasedNode`).
+/// An internal punctuator erased to the driver's untyped surface. It mirrors
+/// `ErasedNode`.
 #[async_trait]
 pub(crate) trait ErasedPunctuator: Send {
     async fn fire(&mut self, dispatch: &mut Dispatch<'_>, timestamp: i64);
@@ -92,9 +100,10 @@ pub(crate) struct ScheduleEntry {
     pub node_idx: usize,
     pub interval: Time,
     pub ty: PunctuationType,
-    /// The next time to fire — an instant on the evaluating clock's timeline.
-    /// Stamped at `schedule()` time as `base + interval` (the clock value when
-    /// the schedule is registered).
+    /// The next time to fire, as an instant on the evaluating clock's timeline.
+    ///
+    /// `schedule()` stamps it as `base + interval`, where `base` is the clock
+    /// value at the moment the schedule is registered.
     pub next_time: i64,
     pub punctuator: Box<dyn ErasedPunctuator>,
     pub cancel: Arc<AtomicBool>,

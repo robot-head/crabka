@@ -1,6 +1,6 @@
 //! MockBroker-based unit tests for `Connection`.
 //!
-//! These tests spin up an in-process mock Kafka broker and verify that
+//! These tests start an in-process mock Kafka broker and verify that
 //! `Connection::connect`, `Connection::send`, and the timeout path all
 //! behave correctly without any JVM dependency.
 //!
@@ -27,8 +27,8 @@ use crabka_protocol::{
 /// - `api_key` 18 (`ApiVersions`): min 0, max 3
 /// - `api_key` 3 (`Metadata`): min 0, max 12
 ///
-/// The mock returns this as the response body (after the correlation-id,
-/// which `MockBroker` prepends automatically).
+/// The mock returns this as the response body. It comes after the
+/// correlation-id, which `MockBroker` prepends automatically.
 fn api_versions_response_v0() -> Vec<u8> {
     let resp = ApiVersionsResponse {
         error_code: 0,
@@ -63,7 +63,7 @@ fn api_versions_response_v0() -> Vec<u8> {
 ///   the UVARINT-encoded empty tagged-fields count (0x00).
 ///
 /// Exception: `ApiVersionsResponse` always uses `ResponseHeader` v0 even when
-/// the request version is flexible — but the tests here handle `MetadataResponse`
+/// the request version is flexible. The tests here handle `MetadataResponse`,
 /// which follows the normal rule.
 fn metadata_response_at(version: i16) -> Vec<u8> {
     metadata_response_with_throttle(version, 0)
@@ -115,12 +115,12 @@ async fn connect_negotiates_api_versions() {
 /// When the mock never responds to `ApiVersions`, `Connection::connect` returns
 /// `ClientError::Timeout` once `connect_timeout` elapses.
 ///
-/// Design note: the handler returns `None` (the `Option<Vec<u8>>` sentinel in
-/// `MockBroker`'s API) so the broker silently drops the request instead of
-/// sending even an empty frame. An empty length-delimited frame would still
-/// be a valid frame with 0 body bytes that the client would attempt to decode,
-/// producing a codec error rather than a timeout. `None` correctly simulates
-/// a hung or unreachable broker.
+/// Design note: the handler returns `None`, the `Option<Vec<u8>>` sentinel in
+/// `MockBroker`'s API, so the broker silently drops the request and does not
+/// send even an empty frame. An empty length-delimited frame would still be a
+/// valid frame with 0 body bytes. The client would try to decode it and would
+/// then report a codec error rather than a timeout. `None` correctly
+/// simulates a hung or unreachable broker.
 #[tokio::test]
 async fn timeout_when_handler_silent() {
     let mock = MockBroker::start(|_api_key, _version, _corr_id, _body| {
@@ -238,10 +238,11 @@ async fn concurrent_sends_get_correct_responses() {
 /// `Client::refresh_metadata` calls the bootstrap broker, decodes the broker
 /// list, and populates the pool's address registry.
 ///
-/// The mock serves two synthetic brokers (ids 1 and 2). After `refresh_metadata`
-/// the test verifies the response decoded correctly (2 brokers in the list).
-/// We cannot connect to those addresses (they're fake ports the mock isn't
-/// listening on), but the registry population is exercised.
+/// The mock serves two synthetic brokers with ids 1 and 2. After
+/// `refresh_metadata` the test verifies that the response decoded correctly
+/// and holds 2 brokers. The test cannot connect to those addresses, because
+/// they are fake ports the mock does not listen on, but it does exercise the
+/// registry population.
 #[tokio::test]
 async fn client_refresh_metadata_populates_pool() {
     use crabka_protocol::owned::metadata_response::{

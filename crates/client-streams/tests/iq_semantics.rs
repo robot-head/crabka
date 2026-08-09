@@ -1,22 +1,26 @@
-//! Execution-level tests for Interactive-Query *read semantics* over the three
-//! materialized store kinds (KV / window / session). Each test builds a counting
-//! topology with the Rust DSL, pipes deterministic input through the broker-free
-//! [`TopologyTestDriver`], then reads the materialized store back through the
-//! driver's IQ helpers — which go through the byte-level `IqQueryable` layer the
-//! supervisor serves real `KafkaStreams::*_store` queries from.
+//! Execution-level tests for Interactive-Query *read semantics*.
 //!
-//! Expectations here are hand-computed over our own runtime (this is an EXECUTION
-//! assertion, not a wire golden). The cross-check against the JVM lives in
-//! `iq_golden.rs`, which replays the same inputs and asserts parity with a
-//! captured JVM `TopologyTestDriver` run.
+//! The tests cover the three materialized store kinds: KV, window, and session.
+//! Each test builds a counting topology with the Rust DSL and pipes deterministic
+//! input through the broker-free [`TopologyTestDriver`]. The test then reads the
+//! materialized store back through the driver's IQ helpers. Those helpers go
+//! through the byte-level `IqQueryable` layer that the supervisor serves real
+//! `KafkaStreams::*_store` queries from.
+//!
+//! The expectations here are hand-computed over our own runtime. This is an
+//! EXECUTION assertion and not a wire golden. The cross-check against the JVM
+//! lives in `iq_golden.rs`, which replays the same inputs and asserts parity with
+//! a captured JVM `TopologyTestDriver` run.
 
 use crabka_client_streams::{
     Consumed, I64Serde, SessionWindows, StringSerde, TimeWindows, dsl::StreamsBuilder,
 };
 use crabka_units::prelude::*;
 
-/// KV count store: `get(present)` returns the count, `get(absent)` is `None`,
-/// `range` is inclusive `[lo, hi]`, `all`/`count` cover every key.
+/// KV count store read semantics.
+///
+/// `get(present)` returns the count, and `get(absent)` returns `None`. `range` is
+/// inclusive over `[lo, hi]`. `all` and `count` cover every key.
 #[tokio::test]
 async fn iq_kv_count_read_semantics() {
     let b = StreamsBuilder::new();
@@ -95,9 +99,11 @@ async fn iq_kv_count_read_semantics() {
     assert_eq!(d.iq_kv_count("nope").await, 0);
 }
 
-/// Window count store (tumbling, size 10): `fetch_single(key, start)` reads one
-/// window's count; `fetch(key, from, to)` returns ascending `(windowStart, count)`
-/// over the inclusive time span.
+/// Window count store read semantics, tumbling with size 10.
+///
+/// `fetch_single(key, start)` reads the count of one window. `fetch(key, from,
+/// to)` returns ascending `(windowStart, count)` pairs over the inclusive time
+/// span.
 #[tokio::test]
 async fn iq_window_count_read_semantics() {
     let b = StreamsBuilder::new();
@@ -149,9 +155,10 @@ async fn iq_window_count_read_semantics() {
     assert_eq!(first, vec![(0, 2)]);
 }
 
-/// Session count store (inactivity gap 60): `fetch(key)` returns each session as
-/// `((start, end), count)`. Records within the gap merge; records beyond it form
-/// a separate session.
+/// Session count store read semantics, with an inactivity gap of 60.
+///
+/// `fetch(key)` returns each session as `((start, end), count)`. Records inside
+/// the gap merge. Records beyond the gap form a separate session.
 #[tokio::test]
 async fn iq_session_count_read_semantics() {
     let b = StreamsBuilder::new();

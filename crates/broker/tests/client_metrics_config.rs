@@ -4,9 +4,9 @@
 
 //! Broker-side integration test for KIP-714 `CLIENT_METRICS` config round-trip.
 //!
-//! Drives `IncrementalAlterConfigs` → `DescribeConfigs` → `ListConfigResources`
-//! for a `CLIENT_METRICS` subscription over the real in-process broker, asserting
-//! the full operator-facing round-trip.
+//! It drives `IncrementalAlterConfigs` → `DescribeConfigs` →
+//! `ListConfigResources` for a `CLIENT_METRICS` subscription over the real
+//! in-process broker, and it asserts the full operator-facing round-trip.
 
 use assert2::{assert, check};
 mod support;
@@ -97,10 +97,11 @@ fn assert_list_response(response: &ListConfigResourcesResponse) {
 /// 2. `DescribeConfigs` for `CLIENT_METRICS` "sub-a". Asserts:
 ///    - `metrics` value == "org.apache.kafka.consumer.", `config_source` == 7.
 ///    - `interval.ms` value == "60000", `config_source` == 7.
-///    - `match` entry present (defaulted), `config_source` == 5.
+///    - the `match` entry is present at its default, `config_source` == 5.
 ///
-/// 3. `ListConfigResources` (v1, `resource_types`=[16]). Asserts the result
-///    contains a `ConfigResource` with `resource_type` 16 and `resource_name` "sub-a".
+/// 3. `ListConfigResources` (v1, `resource_types`=[16]). Asserts that the result
+///    contains a `ConfigResource` with `resource_type` 16 and `resource_name`
+///    "sub-a".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_metrics_config_alter_describe_list_round_trip() {
     let cluster = start_n_node(1).await.expect("start_n_node");

@@ -38,7 +38,7 @@ pub struct WalLocation {
     pub lines: Vec<(u32, i64)>,
 }
 
-/// A wire-compatible boolean flag used by [`WalMapping`].
+/// A wire-compatible boolean flag that [`WalMapping`] uses.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -92,7 +92,7 @@ pub struct ProfileRecord {
 }
 
 impl ProfileRecord {
-    /// Encode via `serde-wincode`.
+    /// Encode with `serde-wincode`.
     ///
     /// # Errors
     /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
@@ -110,7 +110,7 @@ impl ProfileRecord {
             .map_err(|err| ProfilesError::Wal(err.to_string()))
     }
 
-    /// Series fingerprint via blockstore `Labels`, independent of label order.
+    /// Series fingerprint from blockstore `Labels`, independent of label order.
     #[must_use]
     pub fn series_fingerprint(&self) -> u64 {
         let mut labels = Labels::new();

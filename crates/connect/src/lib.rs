@@ -1,8 +1,8 @@
 //! Connector-framework SPI for Crabka.
 //!
-//! This crate defines the keystone traits that every connector — every CDC
-//! source, every telemetry sink — builds on, plus the converter layer that
-//! bridges typed payloads to the Kafka wire.
+//! This crate defines the keystone traits that every connector builds on, that
+//! is, every CDC source and every telemetry sink. It also defines the converter
+//! layer that bridges typed payloads to the Kafka wire.
 //!
 //! - [`Source`] pulls records out of an external system one at a time
 //!   ([`poll`](Source::poll)), snapshots its read position
@@ -12,24 +12,26 @@
 //! - [`Sink`] pushes records into an external system in batches
 //!   ([`put`](Sink::put)), makes them durable ([`flush`](Sink::flush)), and
 //!   optionally gates writes behind a transaction for exactly-once delivery
-//!   ([`begin`](Sink::begin) / [`commit`](Sink::commit) / [`abort`](Sink::abort)).
+//!   with [`begin`](Sink::begin), [`commit`](Sink::commit), and
+//!   [`abort`](Sink::abort).
 //! - [`Converter`] bridges a connector's typed payload `T` to and from wire
 //!   [`bytes::Bytes`]. [`ByteIdentity`] is a byte-for-byte passthrough;
 //!   [`SchemaConverter`] wraps the Confluent schema-registry serdes from
 //!   `crabka-schema-serde`.
 //!
 //! - [`ConnectorRuntime`] is the embeddable, single-process driver that owns a
-//!   `Source` + `Sink` pair and pipes records between them — polling, applying
-//!   bounded backpressure, coordinating source checkpoints with sink commits
-//!   through the transactional gate, and exposing pause/resume + graceful-drain
-//!   lifecycle hooks. No Connect worker protocol, no REST.
+//!   `Source` and `Sink` pair and pipes records between them. It polls, applies
+//!   bounded backpressure, coordinates source checkpoints with sink commits
+//!   through the transactional gate, and exposes pause, resume, and
+//!   graceful-drain lifecycle hooks. It needs no Connect worker protocol and no
+//!   REST.
 //!
-//! The transport traits mirror the streams runtime I/O traits
-//! (`RecordFetcher` / `RecordProducer`) and the remote-storage
-//! `RemoteStorageManager` SPI; the converter layer mirrors Kafka Connect's
-//! `Converter`. All records carry an optional key, optional value (a `None`
-//! value is a tombstone), optional Kafka destination routing, an optional
-//! timestamp, and ordered headers — see [`ConnectRecord`].
+//! The transport traits mirror the streams runtime I/O traits `RecordFetcher`
+//! and `RecordProducer`, and the remote-storage `RemoteStorageManager` SPI. The
+//! converter layer mirrors Kafka Connect's `Converter`. All records carry an
+//! optional key, an optional value, optional Kafka destination routing, an
+//! optional timestamp, and ordered headers. A `None` value is a tombstone. See
+//! [`ConnectRecord`].
 
 pub mod config;
 pub mod convert;
@@ -62,8 +64,9 @@ pub use source::Source;
 
 #[cfg(test)]
 mod tests {
-    //! An end-to-end exercise of the SPI with in-memory fakes, proving the
-    //! traits are object-safe and compose as the runtime would drive them.
+    //! An end-to-end exercise of the SPI with in-memory fakes. It proves that
+    //! the traits are object-safe and that they compose as the runtime would
+    //! drive them.
 
     use async_trait::async_trait;
     use bytes::Bytes;

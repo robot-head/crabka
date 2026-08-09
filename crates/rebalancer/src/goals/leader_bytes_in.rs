@@ -1,9 +1,9 @@
-//! Soft goal: balance the producer-driven ingress load per broker.
-//! Per-broker total = sum over partitions where the broker is the
-//! current leader of
-//! `UsageStore::bytes_in_rate(broker, topic, partition, FiveMin)`.
-//! Distinct from `NetworkInUsage` which sums for every replica
-//! (including follower replication traffic).
+//! Soft goal: balance the producer-driven ingress load per broker. The
+//! per-broker total is the sum, over the partitions where the broker is the
+//! current leader, of
+//! `UsageStore::bytes_in_rate(broker, topic, partition, FiveMin)`. This differs
+//! from `NetworkInUsage`, which sums over every replica and therefore includes
+//! follower replication traffic.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,7 +20,7 @@ pub struct LeaderBytesIn;
 impl LeaderBytesIn {
     pub const NAME: &'static str = "LeaderBytesIn";
 
-    /// Leader-bytes-in rate (bytes/sec) per broker.
+    /// Leader-bytes-in rate per broker, in bytes/sec.
     fn totals(
         partitions: &[PartitionView],
         broker_ids: &[i32],

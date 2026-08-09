@@ -1,5 +1,7 @@
-//! DSL golden frame: the wire `Topology` the DSL lowers to must byte-match the
-//! captured JVM 4.x fixture for the same logical pipeline.
+//! DSL golden frame.
+//!
+//! The wire `Topology` the DSL lowers to must byte-match the captured JVM 4.x
+//! fixture for the same logical pipeline.
 use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
 use crabka_units::prelude::*;
 

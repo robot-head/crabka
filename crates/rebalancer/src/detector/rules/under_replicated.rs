@@ -1,7 +1,7 @@
-//! `UnderReplicatedPartitions` rule — fires when a partition's ISR has
-//! been smaller than its replica set for >=`under_replicated_threshold`.
-//! Skips partitions currently being reassigned (transient ISR
-//! shortfalls during rebalance are expected).
+//! `UnderReplicatedPartitions` rule. It fires when a partition's ISR has been
+//! smaller than its replica set for >=`under_replicated_threshold`. It skips
+//! partitions that are currently being reassigned, because a transient ISR
+//! shortfall during a rebalance is expected.
 
 use std::collections::{HashMap, HashSet};
 

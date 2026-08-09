@@ -1,16 +1,17 @@
 //! KIP-932 share-group consumer client.
 //!
-//! A [`ShareConsumer`] joins a *share group* via `ShareGroupHeartbeat`
-//! (API key 76) and — unlike the classic [`Consumer`](crate::Consumer) — does
-//! not own partitions exclusively. The broker assigns the *same* partitions to
-//! multiple members of the group; records are acquired (not assigned) per
-//! `ShareFetch` and acknowledged individually (KIP-932 queues).
+//! A [`ShareConsumer`] joins a *share group* with `ShareGroupHeartbeat`
+//! (API key 76). Unlike the classic [`Consumer`](crate::Consumer), it does not
+//! own partitions exclusively. The broker assigns the *same* partitions to
+//! several members of the group. A member acquires records per `ShareFetch`
+//! rather than receiving an assignment, and acknowledges them individually
+//! through the KIP-932 queues.
 //!
-//! Membership runs over a `ShareGroupHeartbeat` join + background heartbeat loop
-//! that tracks the member epoch and live assignment; `poll()` issues
-//! `ShareFetch` over the live assignment and acknowledgement (implicit/explicit)
-//! is carried back via `ShareFetch` piggyback or a standalone
-//! `ShareAcknowledge`.
+//! Membership runs over a `ShareGroupHeartbeat` join plus a background
+//! heartbeat loop that tracks the member epoch and the live assignment.
+//! `poll()` issues `ShareFetch` over the live assignment. Acknowledgement,
+//! implicit or explicit, travels back on a `ShareFetch` piggyback or on a
+//! standalone `ShareAcknowledge`.
 
 mod consumer;
 mod coordinator;

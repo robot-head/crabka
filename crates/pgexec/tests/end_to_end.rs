@@ -1713,7 +1713,7 @@ async fn null_and_bool_parameters_roundtrip() {
 
 /// Wire-protocol version of the blocking UPDATE test.
 ///
-/// conn1 opens a transaction and locks a row via UPDATE; conn2's UPDATE on
+/// conn1 opens a transaction and locks a row with UPDATE. conn2's UPDATE on
 /// the same row blocks over the wire. After conn1 commits, conn2 completes
 /// and reports exactly 1 affected row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1776,12 +1776,13 @@ use crabka_pgexec::{
 };
 use crabka_pgtypes::Datum;
 
-/// A fake `ForeignScanner` for tests: returns canned rows aligned to the foreign
-/// table's column layout (envelope columns first, then value columns). Records the
-/// last server/mapping it was handed so a test can assert they were resolved.
-/// `import_tables` are the canned `(name, value_columns)` pairs IMPORT FOREIGN
-/// SCHEMA materializes (after the requested filter is applied); the `FakeScanner`
-/// supplies the standard `topic`/`value_format=raw` OPTIONS for each.
+/// A fake `ForeignScanner` for tests. It returns canned rows aligned to the
+/// foreign table's column layout, with envelope columns first and then value
+/// columns. It records the last server and mapping it received, so a test can
+/// assert that they resolved. `import_tables` are the canned
+/// `(name, value_columns)` pairs IMPORT FOREIGN SCHEMA materializes, after the
+/// requested filter runs. The `FakeScanner` supplies the standard
+/// `topic`/`value_format=raw` OPTIONS for each.
 struct FakeScanner {
     rows: Vec<Vec<Datum>>,
     import_tables: Vec<(String, Vec<crabka_pgcatalog::Column>)>,
@@ -1843,9 +1844,9 @@ async fn spawn_with_scanner(scanner: Arc<dyn ForeignScanner>) -> u16 {
     port
 }
 
-/// DDL round-trip: CREATE SERVER + CREATE FOREIGN TABLE + DROP FOREIGN TABLE all
-/// succeed and report the `PostgreSQL` command tags. No scanner is needed (no scan
-/// runs), so this uses the default (scanner-less) `spawn()`.
+/// DDL round-trip: CREATE SERVER, CREATE FOREIGN TABLE and DROP FOREIGN TABLE
+/// all succeed and report the `PostgreSQL` command tags. No scan runs, so this
+/// needs no scanner and uses the default, scanner-less `spawn()`.
 #[tokio::test]
 async fn create_drop_foreign_objects_roundtrip() {
     let client = connect(spawn().await).await;
@@ -1887,8 +1888,8 @@ async fn create_drop_foreign_objects_roundtrip() {
 }
 
 /// Read path: with a fake scanner registered, a `SELECT` from a foreign table
-/// returns the canned rows, and projection + WHERE compose over those rows exactly
-/// like an ordinary table.
+/// returns the canned rows, and projection and WHERE compose over those rows
+/// exactly like an ordinary table.
 #[tokio::test]
 async fn foreign_select_reads_scanner_rows_with_projection_and_where() {
     // Canned rows for `orders (id int4, amount int4)`: layout is the 5 envelope
@@ -1946,9 +1947,10 @@ async fn foreign_select_reads_scanner_rows_with_projection_and_where() {
     assert_eq!(ids, vec![2, 3], "WHERE filters the scanner rows");
 }
 
-/// No-scanner path: with no foreign scanner registered, a `SELECT` from a foreign
-/// table returns the clear 0A000 ("foreign tables require the `kafka` feature").
-/// DDL still works (no scan), so the table can be created without a scanner.
+/// No-scanner path: with no foreign scanner registered, a `SELECT` from a
+/// foreign table returns the clear 0A000 ("foreign tables require the `kafka`
+/// feature"). DDL still works, because no scan runs, so a `CREATE` needs no
+/// scanner.
 #[tokio::test]
 async fn foreign_select_without_scanner_is_unsupported() {
     let client = connect(spawn().await).await;
@@ -1975,10 +1977,11 @@ async fn foreign_select_without_scanner_is_unsupported() {
     );
 }
 
-/// IMPORT FOREIGN SCHEMA through the full pgwire path: the fake scanner reports
-/// two tables; `EXCEPT (payments)` drops one; the survivor becomes a queryable
-/// foreign table (the scanner returns no rows here, so the SELECT is empty but
-/// the table — with its envelope + value columns — must exist and be selectable).
+/// IMPORT FOREIGN SCHEMA through the full pgwire path. The fake scanner reports
+/// two tables, `EXCEPT (payments)` drops one, and the survivor becomes a
+/// queryable foreign table. The scanner returns no rows here, so the SELECT is
+/// empty, but the table must exist and be selectable, with its envelope and
+/// value columns.
 #[tokio::test]
 async fn import_foreign_schema_materializes_foreign_tables() {
     use crabka_pgcatalog::Column;

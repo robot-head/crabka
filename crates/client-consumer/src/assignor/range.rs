@@ -1,8 +1,8 @@
-//! Range assignor (Kafka's classic default).
+//! Range assignor, Kafka's classic default.
 //!
-//! Given a set of members and a per-topic partition count, hands each
+//! From a set of members and a per-topic partition count, it hands each
 //! member a contiguous range of partitions per topic. The trailing
-//! members get one less partition when the partition count doesn't
+//! members get one partition less when the partition count does not
 //! divide evenly.
 
 use std::collections::HashMap;

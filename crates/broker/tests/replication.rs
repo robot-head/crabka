@@ -1,8 +1,8 @@
 //! Spins up a 3-broker cluster on loopback, creates a topic with
 //! replication-factor 3, produces records to the leader, and asserts
 //! every follower's local log converges to the leader's
-//! `log_end_offset`. Exercises the full replication path:
-//! supervisor reconcile, follower Fetch loop, and
+//! `log_end_offset`. It exercises the full replication path: the
+//! supervisor reconcile, the follower Fetch loop, and
 //! `Partition::replicate_batch`.
 
 // Test-file pragmatism: casts turn 1-based `i` into broker ids.
@@ -24,9 +24,9 @@ use tokio::sync::Mutex;
 mod support;
 
 /// Test-binary-wide serialization. Each test in this file spins up a
-/// 3-broker cluster on loopback; running them concurrently exhausts
-/// loopback ephemeral ports and starves the openraft election timing.
-/// Same rationale as `quorum.rs::cluster_lock`.
+/// 3-broker cluster on loopback. Concurrent runs exhaust the
+/// loopback ephemeral ports and starve the openraft election timing.
+/// This is the same reason as for `quorum.rs::cluster_lock`.
 fn cluster_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

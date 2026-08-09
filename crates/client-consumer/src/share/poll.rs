@@ -1,28 +1,30 @@
 //! `ShareConsumer::poll` + acknowledgement (`ShareFetch` / `ShareAcknowledge`).
 //!
-//! `poll()` issues one `ShareFetch` over the live assignment. Acquired records
-//! are paired with the `acquired_records` ranges the broker returns (so each
-//! carries the broker's `delivery_count`), and the ranges are remembered for the
-//! next poll's implicit auto-`Accept`.
+//! `poll()` issues one `ShareFetch` over the live assignment. It pairs each
+//! acquired record with the `acquired_records` range that the broker returns,
+//! so each record carries the broker's `delivery_count`. It also keeps the
+//! ranges for the next poll's implicit auto-`Accept`.
 //!
 //! ## Acknowledgement
 //!
-//! - [`Implicit`](super::types::ShareAckMode::Implicit) (default): the *next*
-//!   `poll()` (and `close()`) implicitly `Accept`s every range returned by the
-//!   previous `poll()`. Nothing is required of the application.
+//! - [`Implicit`](super::types::ShareAckMode::Implicit) is the default. The
+//!   *next* `poll()`, and `close()`, implicitly `Accept` every range that the
+//!   previous `poll()` returned. The application does nothing.
 //! - [`Explicit`](super::types::ShareAckMode::Explicit): the application calls
-//!   [`acknowledge`](ShareConsumer::acknowledge) per record; staged acks are
-//!   flushed on the next `poll()` (piggybacked) or via
-//!   [`commit`](ShareConsumer::commit) (standalone `ShareAcknowledge`).
+//!   [`acknowledge`](ShareConsumer::acknowledge) per record. The next `poll()`
+//!   flushes the staged acks as a piggyback, or
+//!   [`commit`](ShareConsumer::commit) flushes them in a standalone
+//!   `ShareAcknowledge`.
 //!
 //! ## Session epoch
 //!
-//! The broker's share-session cache opens at epoch 0 (storing 1) and then
-//! expects each subsequent `ShareFetch` *or* `ShareAcknowledge` to carry the
-//! stored epoch, incrementing on each accepted request. We mirror that exactly:
-//! send `self.share_session_epoch`, and advance it by one after every successful
-//! `ShareFetch` / `ShareAcknowledge` (sequence 0 → 1 → 2 → …). Getting this wrong
-//! makes the broker drop the session (`INVALID_SHARE_SESSION_EPOCH`).
+//! The broker's share-session cache opens at epoch 0 and stores 1. It then
+//! expects every later `ShareFetch` *or* `ShareAcknowledge` to carry the stored
+//! epoch, and it increments the epoch on each accepted request. This module
+//! mirrors that exactly: it sends `self.share_session_epoch` and advances it by
+//! one after every successful `ShareFetch` / `ShareAcknowledge`, the sequence
+//! 0 → 1 → 2 → …. A wrong epoch makes the broker drop the session with
+//! `INVALID_SHARE_SESSION_EPOCH`.
 
 use std::collections::HashMap;
 
@@ -158,13 +160,15 @@ fn record_timestamp(base_timestamp: i64, timestamp_delta: i64) -> i64 {
 impl ShareConsumer {
     /// Acquire and return the next batch of records.
     ///
-    /// Carries acknowledgements for the previous `poll()` (implicit auto-`Accept`
-    /// or drained explicit `acknowledge()` calls) piggybacked on the
-    /// `ShareFetch`, then decodes the acquired records — each paired with the
-    /// broker-reported `delivery_count` from its `acquired_records` range.
+    /// This method piggybacks the acknowledgements for the previous `poll()` on
+    /// the `ShareFetch`. Those are the implicit auto-`Accept` ranges, or the
+    /// drained explicit `acknowledge()` calls. It then decodes the acquired
+    /// records and pairs each one with the broker-reported `delivery_count`
+    /// from its `acquired_records` range.
     ///
-    /// With no assignment yet, sleeps for `timeout` and returns empty (mirroring
-    /// the classic [`Consumer::poll`](crate::Consumer::poll)).
+    /// With no assignment yet, this method sleeps for `timeout` and returns
+    /// empty. That mirrors the classic
+    /// [`Consumer::poll`](crate::Consumer::poll).
     #[tracing::instrument(
         name = "share_consumer.poll",
         level = "debug",
@@ -306,19 +310,20 @@ impl ShareConsumer {
         Ok(out)
     }
 
-    /// Stage an explicit acknowledgement for `record` (Explicit mode).
+    /// Stage an explicit acknowledgement for `record`, in Explicit mode.
     ///
-    /// The ack is flushed on the next [`poll`](ShareConsumer::poll) (piggybacked)
-    /// or [`commit`](ShareConsumer::commit) (standalone `ShareAcknowledge`).
+    /// The next [`poll`](ShareConsumer::poll) flushes the ack as a piggyback,
+    /// or [`commit`](ShareConsumer::commit) flushes it in a standalone
+    /// `ShareAcknowledge`.
     ///
     /// # Errors
     ///
     /// Returns [`ConsumerError::IllegalState`] in
-    /// [`Implicit`](super::types::ShareAckMode::Implicit) mode: there, every
-    /// delivered record is auto-`Accept`ed on the next poll/close, so an explicit
-    /// `acknowledge()` cannot be honored (staging it would silently leak into
-    /// `pending_acks`, which the implicit path never flushes). This mirrors the
-    /// JVM `KafkaShareConsumer`, which raises `IllegalStateException` if you
+    /// [`Implicit`](super::types::ShareAckMode::Implicit) mode. In that mode the
+    /// next poll or close auto-`Accept`s every delivered record, so this method
+    /// cannot honor an explicit `acknowledge()`. Staging it would silently leak
+    /// into `pending_acks`, which the implicit path never flushes. This mirrors
+    /// the JVM `KafkaShareConsumer`, which raises `IllegalStateException` if you
     /// explicitly acknowledge while in implicit acknowledgement mode.
     pub fn acknowledge(
         &mut self,
@@ -343,19 +348,22 @@ impl ShareConsumer {
         Ok(())
     }
 
-    /// Renew the acquisition lock on a single delivered `record` (KIP-932
-    /// RENEW). Sends a standalone `ShareAcknowledge` with `is_renew_ack = true`
-    /// and an empty `acknowledge_types` for the record's offset, which extends
-    /// the broker-side lock deadline without changing the record's state. Like
-    /// [`acknowledge`](ShareConsumer::acknowledge), this is only valid in
-    /// explicit ack mode. Advances the session epoch on success.
+    /// Renew the acquisition lock on a single delivered `record`, the KIP-932
+    /// RENEW.
+    ///
+    /// This method sends a standalone `ShareAcknowledge` with
+    /// `is_renew_ack = true` and an empty `acknowledge_types` for the record's
+    /// offset. That extends the broker-side lock deadline without a change to
+    /// the record's state. Like [`acknowledge`](ShareConsumer::acknowledge),
+    /// this is only valid in explicit ack mode. It advances the session epoch on
+    /// success.
     ///
     /// # Errors
     ///
     /// Returns [`ConsumerError::IllegalState`] in
-    /// [`Implicit`](super::types::ShareAckMode::Implicit) mode (records are
-    /// auto-accepted on the next poll/close, so renewing a lock is meaningless),
-    /// and [`ConsumerError::Server`] if the broker rejects the renew.
+    /// [`Implicit`](super::types::ShareAckMode::Implicit) mode, where the next
+    /// poll or close auto-accepts the records, so a lock renewal is meaningless.
+    /// Returns [`ConsumerError::Server`] if the broker rejects the renew.
     #[tracing::instrument(
         name = "share_consumer.renew",
         level = "debug",
@@ -404,8 +412,8 @@ impl ShareConsumer {
         Ok(())
     }
 
-    /// Flush staged explicit acknowledgements via a standalone
-    /// `ShareAcknowledge`. No-op when nothing is staged.
+    /// Flush the staged explicit acknowledgements in a standalone
+    /// `ShareAcknowledge`. This is a no-op when nothing is staged.
     #[tracing::instrument(
         name = "share_consumer.commit",
         level = "debug",
@@ -419,9 +427,11 @@ impl ShareConsumer {
         self.flush_pending_acks().await
     }
 
-    /// Drain `pending_acks` into a `ShareAcknowledge`. Advances the session epoch
-    /// on success (an accepted `ShareAcknowledge` consumes one epoch, exactly
-    /// like a `ShareFetch`). No-op (and no epoch advance) when nothing is staged.
+    /// Drain `pending_acks` into a `ShareAcknowledge`.
+    ///
+    /// This method advances the session epoch on success, because an accepted
+    /// `ShareAcknowledge` consumes one epoch exactly like a `ShareFetch`. It is
+    /// a no-op, with no epoch advance, when nothing is staged.
     #[tracing::instrument(
         name = "share_consumer.flush_pending_acks",
         level = "debug",
@@ -461,7 +471,7 @@ impl ShareConsumer {
     }
 
     /// Build the piggyback acknowledgement batches for the next `ShareFetch`,
-    /// keyed by `(topic_id, partition)`, consuming the source state.
+    /// keyed by `(topic_id, partition)`. This method consumes the source state.
     ///
     /// - Implicit: one `Accept` batch per previously-delivered range.
     /// - Explicit: the drained `pending_acks`, grouped into per-offset batches.
@@ -500,9 +510,11 @@ impl ShareConsumer {
         out
     }
 
-    /// Resolve a topic id from a topic name via the live assignment / cached
-    /// `topic_names`. Returns the zero uuid if unknown (the broker will reject the
-    /// ack, surfacing the misuse rather than silently mis-acking).
+    /// Resolve a topic id from a topic name through the live assignment or the
+    /// cached `topic_names`.
+    ///
+    /// This method returns the zero uuid if the name is unknown. The broker then
+    /// rejects the ack, which surfaces the misuse instead of a silent mis-ack.
     fn topic_id_for(&self, name: &str) -> WireUuid {
         // The assignment carries (topic_id, name, partition); use it first since
         // it is the set the application is acking against. `try_lock` keeps this
@@ -521,9 +533,9 @@ impl ShareConsumer {
     }
 }
 
-/// Group `(topic_id, partition, first, last, ack_wire)` acks into
-/// `ShareAcknowledge` topic/partition/batch shape, coalescing by topic and
-/// partition.
+/// Group `(topic_id, partition, first, last, ack_wire)` acks into the
+/// `ShareAcknowledge` topic/partition/batch shape. This function coalesces by
+/// topic and by partition.
 fn build_ack_topics(acks: Vec<(WireUuid, i32, i64, i64, i8)>) -> Vec<AcknowledgeTopic> {
     let mut by_topic: HashMap<WireUuid, HashMap<i32, Vec<AckAckBatch>>> = HashMap::new();
     for (tid, partition, first, last, ack) in acks {

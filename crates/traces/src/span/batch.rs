@@ -25,8 +25,9 @@ pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
 /// Build one span-block `RecordBatch` from spans of one trace with configured
 /// attributes duplicated into dedicated columns.
 ///
-/// `spans` must be the complete per-trace span set: the trace-level columns
-/// (root service/name, start, duration) are computed over exactly these spans.
+/// `spans` must be the complete per-trace span set. The trace-level columns,
+/// which are the root service and name, the start and the duration, are
+/// computed over exactly these spans.
 ///
 /// # Errors
 /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
@@ -40,9 +41,9 @@ pub fn span_batch_with_promoted_attrs(
 /// Build one span-block `RecordBatch` whose rows are `row_spans` but whose
 /// trace-level columns are computed over `trace_spans`.
 ///
-/// Use this when a query window clips a trace: `row_spans` is the in-window
-/// subset, while `trace_spans` is the trace's full span set so that
-/// `root_service_name` / `root_span_name` / `trace_start_unix_nano` /
+/// Use this when a query window clips a trace. `row_spans` is the in-window
+/// subset. `trace_spans` is the trace's full span set, so that
+/// `root_service_name`, `root_span_name`, `trace_start_unix_nano` and
 /// `trace_duration_nanos` reflect the whole trace rather than only the window.
 /// Pass the same slice for both to materialize a complete trace.
 ///
@@ -110,14 +111,13 @@ fn child_counts(nested: &[crate::span::nested_set::NestedSet]) -> Vec<i32> {
         .collect()
 }
 
-/// Compute the trace-level columns (root service/name, trace start, trace
-/// duration) for one trace.
+/// Compute the trace-level columns for one trace: the root service and name,
+/// the trace start, and the trace duration.
 ///
-/// CONTRACT: `spans` must be the COMPLETE per-trace span set. Passing a
-/// time-windowed or otherwise filtered subset yields trace-level values that
-/// reflect only the subset, not the trace. Callers that materialize rows from a
-/// clipped window must use [`span_batch_for_window`] and pass the full trace's
-/// spans here.
+/// CONTRACT: `spans` must be the COMPLETE per-trace span set. A time-windowed
+/// or otherwise filtered subset yields trace-level values that reflect only the
+/// subset, not the trace. Callers that materialize rows from a clipped window
+/// must use [`span_batch_for_window`] and pass the full trace's spans here.
 fn root_info(spans: &[Span]) -> (String, String, i64, Time) {
     let root = spans
         .iter()

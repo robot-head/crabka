@@ -1,16 +1,17 @@
-//! Exhaustive stateright checks of the `KRaft` consensus core. See `model/mod.rs`.
+//! Exhaustive stateright checks of the `KRaft` consensus core. See
+//! `model/mod.rs`.
 //!
-//! Memory safety: stateright BFS keeps every visited unique state resident, so
-//! each checker run is fenced with `target_state_count` + `timeout` backstops
-//! (in addition to the model's tight `within_boundary`) so a runaway space
-//! cannot exhaust host RAM.
+//! Memory safety: the stateright BFS keeps every visited unique state resident.
+//! Each checker run is therefore fenced with `target_state_count` and `timeout`
+//! backstops, on top of the model's tight `within_boundary`, so a runaway space
+//! cannot exhaust the host RAM.
 //!
-//! Two configs, because the linearizability tester (its history lives in the
-//! fingerprinted state) blows the space up by ~30x:
-//! - `three_voters_election_safety`: 3 voters, NO client appends — election +
-//!   log-matching safety over the small/fast space.
-//! - `two_voters_linearizable`: 2 voters, client appends — committed-log
-//!   linearizability over a tightly-bounded space.
+//! There are two configs, because the linearizability tester keeps its history
+//! in the fingerprinted state and so blows the space up by about 30x:
+//! - `three_voters_election_safety`: 3 voters and NO client appends. This covers
+//!   election and log-matching safety over the small, fast space.
+//! - `two_voters_linearizable`: 2 voters with client appends. This covers
+//!   committed-log linearizability over a tightly-bounded space.
 mod model;
 
 use std::time::Duration;
@@ -19,16 +20,18 @@ use crabka_ids::NodeId;
 use model::ConsensusModel;
 use stateright::{Checker, Model};
 
-/// Hard backstop on explored (generated) states — bounds memory even if
-/// `within_boundary` is looser than intended. Set well above each config's true
-/// bounded count so it never truncates a real check (which would spuriously
-/// fail a `sometimes` witness or leave an `always` only partially verified).
+/// Hard backstop on the explored, that is generated, states. It bounds memory
+/// even if `within_boundary` is looser than intended. It is set well above the
+/// true bounded count of each config, so it never truncates a real check. Such
+/// a truncation would spuriously fail a `sometimes` witness, or leave an
+/// `always` only partially verified.
 const MAX_STATES: usize = 2_000_000;
-/// Wall-clock backstop (generous; the configs below complete in a few seconds).
+/// Wall-clock backstop. It is generous, because the configs below complete in a
+/// few seconds.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
-/// Depth backstop. Must exceed each config's reachable-graph diameter or the
-/// search is depth-truncated (incomplete). The configs below are bounded so
-/// their diameter sits comfortably under this.
+/// Depth backstop. It must exceed the reachable-graph diameter of each config,
+/// or the search is depth-truncated and therefore incomplete. The configs below
+/// are bounded, so their diameter sits well under this value.
 const MAX_DEPTH: usize = 60;
 
 fn run(model: ConsensusModel, label: &str) {

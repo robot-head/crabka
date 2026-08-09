@@ -1,6 +1,6 @@
 //! Subscribe-style consumer client for Apache Kafka in Rust.
 //!
-//! Builds on `crabka-client-core` for transport; adds the classic
+//! This crate builds on `crabka-client-core` for transport. It adds the classic
 //! consumer-group lifecycle (`JoinGroup` → `SyncGroup` → `Heartbeat` →
 //! `Fetch` → `OffsetCommit` → `LeaveGroup`) and a built-in heartbeat
 //! task.
@@ -59,10 +59,10 @@
 //!
 //! This crate owns consumer-facing semantics: classic group membership,
 //! assignment, fetch/poll, offset commit, cooperative shutdown, and KIP-932
-//! share-group consumption. It intentionally does not duplicate admin-client
-//! surfaces such as `DescribeGroups`/`ListGroups`, and manual partition fetches
-//! remain available through the lower-level helpers in `crabka-client-core`.
-//! Transactional consume-process-produce workflows use this crate's
+//! share-group consumption. It does not duplicate admin-client surfaces such as
+//! `DescribeGroups`/`ListGroups`. Manual partition fetches stay available
+//! through the lower-level helpers in `crabka-client-core`. Transactional
+//! consume-process-produce workflows use this crate's
 //! [`ConsumerGroupMetadata`] together with `crabka-client-producer`'s
 //! `send_offsets_to_transaction` support.
 //!

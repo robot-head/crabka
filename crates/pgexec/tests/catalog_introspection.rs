@@ -1,6 +1,8 @@
 //! F-2: the `pg_catalog`/`information_schema` breadth `psql`'s `\d` family and
-//! ORM preambles depend on, exercised through the SQL session the way a client
-//! would reach it.
+//! ORM preambles depend on.
+//!
+//! These tests exercise that breadth through the SQL session, the way a client
+//! reaches it.
 
 use crabka_pgexec::SqlEngine;
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
@@ -61,7 +63,8 @@ async fn fixture() -> SqlEngine {
 }
 
 /// Every relation this wave names must resolve. Where crabka has no such object
-/// kind yet, the answer is zero rows — never `relation ... does not exist`.
+/// kind yet, the answer is zero rows, and never
+/// `relation ... does not exist`.
 #[tokio::test]
 async fn every_named_catalog_relation_resolves() {
     let engine = SqlEngine::new();
@@ -162,8 +165,10 @@ async fn pg_class_describes_every_relation_kind() {
     );
 }
 
-/// The column metadata `\d` and every ORM read, including the packed
-/// `numeric(p, s)` modifier `format_type` reconstructs the type name from.
+/// The column metadata `\d` and every ORM read.
+///
+/// This includes the packed `numeric(p, s)` modifier that `format_type`
+/// reconstructs the type name from.
 #[tokio::test]
 async fn pg_attribute_carries_the_metadata_psql_prints() {
     let engine = fixture().await;
@@ -208,9 +213,11 @@ async fn pg_constraint_covers_keys_and_not_null() {
 }
 
 /// A constraint that references nothing leaves the `conf*` columns in
-/// `PostgreSQL`'s blank spelling — `confrelid` 0, a single space in each of the
-/// three `"char"` codes, NULL attnum arrays — which is how a client tells the
-/// foreign keys out of a relation's constraint listing.
+/// `PostgreSQL`'s blank spelling: `confrelid` 0, a single space in each of the
+/// three `"char"` codes, and NULL attnum arrays.
+///
+/// That is how a client picks the foreign keys out of a relation's constraint
+/// listing.
 #[tokio::test]
 async fn constraints_without_a_referent_leave_the_referential_columns_blank() {
     let engine = fixture().await;
@@ -310,8 +317,8 @@ async fn pg_get_viewdef_answers_by_name_and_by_oid() {
     assert2::assert!(not_a_view == some(&["Not a view"]));
 }
 
-/// A sequence is a relation: `\ds` lists it out of `pg_class`, and
-/// `pg_sequence`/`information_schema.sequences` describe its parameters.
+/// A sequence is a relation. `\ds` lists it out of `pg_class`, and
+/// `pg_sequence` and `information_schema.sequences` describe its parameters.
 #[tokio::test]
 async fn sequences_appear_as_relations_and_in_their_own_catalogs() {
     let engine = SqlEngine::new();
@@ -346,7 +353,7 @@ async fn sequences_appear_as_relations_and_in_their_own_catalogs() {
 }
 
 /// `COMMENT ON` text reaches `pg_description`, `obj_description` and
-/// `col_description`, and clearing a comment removes all three answers.
+/// `col_description`. A cleared comment removes all three answers.
 #[tokio::test]
 async fn comments_reach_pg_description_and_the_description_functions() {
     let engine = fixture().await;
@@ -468,7 +475,7 @@ async fn identity_and_formatting_functions_answer() {
     );
 }
 
-/// `pg_postmaster_start_time()` must be in the past: a lazily captured instant
+/// `pg_postmaster_start_time()` must be in the past. A lazily captured instant
 /// would make every uptime query report a negative age.
 #[tokio::test]
 async fn the_postmaster_start_time_precedes_the_statement() {
@@ -481,8 +488,8 @@ async fn the_postmaster_start_time_precedes_the_statement() {
     assert2::assert!(answer == some(&["t"]));
 }
 
-/// The `has_*_privilege` family answers for the owner and rejects a privilege
-/// name `PostgreSQL` does not know (22023) rather than answering false.
+/// The `has_*_privilege` family answers for the owner. It rejects a privilege
+/// name `PostgreSQL` does not know with 22023, and it does not answer false.
 #[tokio::test]
 async fn privilege_tests_answer_for_the_owner_and_reject_unknown_privileges() {
     let engine = fixture().await;
@@ -510,8 +517,8 @@ async fn privilege_tests_answer_for_the_owner_and_reject_unknown_privileges() {
     assert2::assert!(missing.code == "42P01", "{missing:?}");
 }
 
-/// A relation size resolves its argument (so a missing relation is 42P01) and
-/// reports zero: crabka keeps no per-relation storage accounting.
+/// A relation size resolves its argument, so a missing relation is 42P01, and
+/// it reports zero. Crabka keeps no per-relation storage accounting.
 #[tokio::test]
 async fn relation_sizes_resolve_their_argument_and_report_zero() {
     let engine = fixture().await;

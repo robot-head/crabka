@@ -56,11 +56,11 @@ const ERROR_SPAN_ID_HEX: &str = "0404040404040404";
 const OTLP_STATUS_CODE_ERROR: i32 = 2;
 const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
-/// Tempo query-frontend HTTP port inside the container (matches
-/// `http_listen_port` in [`TEMPO_CONFIG`]).
+/// Tempo query-frontend HTTP port inside the container. It matches
+/// `http_listen_port` in [`TEMPO_CONFIG`].
 const TEMPO_HTTP_PORT: u16 = 3200;
-/// Tempo OTLP/HTTP receiver port inside the container (matches the
-/// `distributor.receivers.otlp` endpoint in [`TEMPO_CONFIG`]).
+/// Tempo OTLP/HTTP receiver port inside the container. It matches the
+/// `distributor.receivers.otlp` endpoint in [`TEMPO_CONFIG`].
 const TEMPO_OTLP_PORT: u16 = 4318;
 /// Grafana HTTP port inside the container.
 const GRAFANA_HTTP_PORT: u16 = 3000;
@@ -592,32 +592,33 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
     Ok(())
 }
 
-/// LEG 5 (Service Graph) — the loop-closing leg.
+/// LEG 5 (Service Graph), the loop-closing leg.
 ///
-/// In Grafana, the Tempo datasource's **Service Graph** tab is NOT served by a
-/// Tempo endpoint: Grafana renders it from `traces_service_graph_*` series in a
-/// **Prometheus** datasource (spec §7.2/§8). The full production loop is
+/// In Grafana, a Tempo endpoint does NOT serve the Tempo datasource's
+/// **Service Graph** tab. Grafana renders it from `traces_service_graph_*`
+/// series in a **Prometheus** datasource, per spec §7.2/§8. The full production
+/// loop is
 ///   traces → metrics-generator → Prometheus `remote_write` → Prometheus → Grafana.
 ///
 /// What this test FAITHFULLY covers (no fabrication):
-///   1. The **Grafana-side wiring**: Grafana accepts and round-trips a
-///      `prometheus`-type datasource (the Service-Graph backend), proving the
-///      datasource half of the loop is configured exactly as the Tempo
+///   1. The **Grafana-side wiring**. Grafana accepts and round-trips a
+///      `prometheus`-type datasource, the Service-Graph backend. That proves
+///      the datasource half of the loop is configured exactly as the Tempo
 ///      datasource's `serviceMap.datasourceUid` would point at.
-///   2. The **Crabka-side production**: the real in-process metrics-generator
-///      `EdgeStore` (Slice 7) pairs the seed's client↔server span pair into the
-///      exact `traces_service_graph_request_total` series — with the `client` /
-///      `server` / `connection_type` edge labels — that Grafana's Service Graph
-///      queries. This is the series the loop depends on.
+///   2. The **Crabka-side production**. The real in-process metrics-generator
+///      `EdgeStore` from Slice 7 pairs the seed's client↔server span pair into
+///      the exact `traces_service_graph_request_total` series that Grafana's
+///      Service Graph queries, with the `client`, `server` and
+///      `connection_type` edge labels. This is the series the loop depends on.
 ///
-/// What this test does NOT stand up (documented gap, deliberately not faked):
-///   The metrics-generator → Prometheus `remote_write` ingestion path and a live
-///   Prometheus container. There is no in-process Prometheus `/api/v1/query`
-///   endpoint in `crabka-traces` (the metrics-generator emits via a
-///   `RemoteWriteSink`, not a query API), so a live `POST /api/ds/query` against
-///   the Prometheus datasource cannot return real data within this harness. We
-///   therefore prove the two ends of the loop separately rather than asserting a
-///   passing query against data the harness never produces.
+/// What this test does NOT stand up (a documented gap, not faked on purpose):
+///   The metrics-generator → Prometheus `remote_write` ingestion path, and a
+///   live Prometheus container. `crabka-traces` has no in-process Prometheus
+///   `/api/v1/query` endpoint, because the metrics-generator emits through a
+///   `RemoteWriteSink` rather than a query API. A live `POST /api/ds/query`
+///   against the Prometheus datasource therefore cannot return real data within
+///   this harness. This test proves the two ends of the loop separately, and
+///   does not assert a passing query against data the harness never produces.
 #[tokio::test]
 #[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
 async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult {
@@ -703,9 +704,11 @@ async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult 
     Ok(())
 }
 
-/// Drive the real Slice 7 `EdgeStore` over a client↔server span pair (the same
-/// caller/callee shape the seed's `GET /checkout` → `SELECT cart` models) and
+/// Drive the real Slice 7 `EdgeStore` over a client↔server span pair, and
 /// return the emitted service-graph series.
+///
+/// The pair has the same caller/callee shape that the seed's
+/// `GET /checkout` → `SELECT cart` models.
 fn service_graph_series_for_seed_edge() -> Vec<Series> {
     let mut store = EdgeStore::new(&MetricsGenConfig::default());
     let client = metrics_span(
@@ -1051,11 +1054,13 @@ async fn get_json_until_positive_metric_total(
     Err(format!("timed out waiting for positive metric total from {url}: {last}").into())
 }
 
-/// Real Tempo has ingestion latency: a freshly pushed trace is not immediately
-/// queryable by id — `/api/v2/traces/{id}` returns 404 until the span is flushed
-/// out of the ingester. Poll until the trace materialises, mirroring how the
-/// search legs poll for non-empty results. (Crabka serves its in-process store
-/// synchronously, so only the real-Tempo side needs this.)
+/// Real Tempo has ingestion latency. A freshly pushed trace is not immediately
+/// queryable by id, and `/api/v2/traces/{id}` returns 404 until the ingester
+/// flushes the span out.
+///
+/// This function polls until the trace materialises, which mirrors how the
+/// search legs poll for non-empty results. Crabka serves its in-process store
+/// synchronously, so only the real-Tempo side needs this.
 async fn get_trace_by_id_until_found(
     client: &reqwest::Client,
     base: &str,
@@ -1147,8 +1152,8 @@ fn assert_metric_totals_match(tempo: &JsonValue, crabka: &JsonValue) {
     assert2::assert!((tempo_total - crabka_total).abs() < f64::EPSILON);
 }
 
-/// The set of `series[].labels[].key` strings across a TraceQL-metrics response
-/// (the grouped-attribute names Grafana renders panels by).
+/// The set of `series[].labels[].key` strings across a TraceQL-metrics
+/// response. These are the grouped-attribute names Grafana renders panels by.
 fn metric_series_label_keys(resp: &JsonValue) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     if let Some(series) = resp.get("series").and_then(JsonValue::as_array) {
@@ -1165,7 +1170,7 @@ fn metric_series_label_keys(resp: &JsonValue) -> BTreeSet<String> {
     keys
 }
 
-/// The `series[].promLabels` strings (Grafana's legend form), for diagnostics.
+/// The `series[].promLabels` strings, Grafana's legend form, for diagnostics.
 fn metric_prom_labels_list(resp: &JsonValue) -> Vec<String> {
     resp.get("series")
         .and_then(JsonValue::as_array)

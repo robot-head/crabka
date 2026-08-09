@@ -1,13 +1,14 @@
 //! KIP-345 static-membership integration tests.
 //!
-//! Exercises the full `JoinGroup` → `SyncGroup` → (rejoin with same
-//! `group.instance.id`) cycle through the in-process broker harness and
-//! checks the three KIP-345 invariants:
+//! These tests exercise the full `JoinGroup` → `SyncGroup` → rejoin cycle,
+//! where the rejoin uses the same `group.instance.id`, through the in-process
+//! broker harness. They check the three KIP-345 invariants:
 //!
-//! 1. A static rejoin into a `Stable` group preserves the prior assignment
+//! 1. A static rejoin into a `Stable` group keeps the prior assignment
 //!    and does NOT advance `generation_id`.
-//! 2. A second client trying to use the same `group.instance.id` while
-//!    the first is still live is rejected with `FENCED_INSTANCE_ID`.
+//! 2. The broker rejects a second client that uses the same
+//!    `group.instance.id` while the first is still live, with
+//!    `FENCED_INSTANCE_ID`.
 //! 3. `LeaveGroup` v3+ with a `MemberIdentity { member_id: "",
 //!    group_instance_id: Some(...) }` resolves the static slot and
 //!    removes it.
@@ -25,7 +26,7 @@ mod support;
 
 /// `FENCED_INSTANCE_ID` (82, KIP-345).
 const FENCED_INSTANCE_ID: i16 = 82;
-/// `MEMBER_ID_REQUIRED` (79, KIP-394 bootstrap dance).
+/// `MEMBER_ID_REQUIRED` (79, the KIP-394 bootstrap exchange).
 const MEMBER_ID_REQUIRED: i16 = 79;
 
 fn join_request(group_id: &str, member_id: &str, instance_id: Option<&str>) -> JoinGroupRequest {

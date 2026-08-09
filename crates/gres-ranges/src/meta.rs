@@ -15,7 +15,7 @@ const RANGE_MAP_METADATA_FORMAT_VERSION: u16 = 1;
 pub struct RangeMapMetadata {
     /// Metadata envelope version.
     pub format_version: u16,
-    /// Monotonic map version. Readers replace their cache only when this increases.
+    /// Monotonic map version. A reader replaces its cache only when this value increases.
     pub version: u64,
     /// Validated v2 range map descriptor.
     pub map: RangeMap,
@@ -170,7 +170,7 @@ where
         }
     }
 
-    /// Return the map pinned for an already-open snapshot, without refreshing.
+    /// Return the map pinned for an already-open snapshot, with no refresh.
     pub async fn map_for_open_snapshot(&self) -> LoadedRangeMap {
         self.cached.lock().await.clone()
     }
@@ -200,7 +200,7 @@ pub enum RangeMapMetadataError {
     /// Metadata JSON was malformed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    /// The metadata envelope version is not supported by this greenfield build.
+    /// This greenfield build does not support the metadata envelope version.
     #[error("unsupported range map metadata format_version {format_version}")]
     UnsupportedFormat { format_version: u16 },
     /// Metadata versions start at one.

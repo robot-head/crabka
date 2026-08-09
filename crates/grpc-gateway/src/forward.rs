@@ -1,12 +1,15 @@
-//! Internal gateway→gateway forwarding: the owner-routing client plus the
-//! `/internal/v1/forward` endpoint that receives a forwarded record and
-//! produces it LOCALLY (the receiver is the partition's owner).
+//! Internal gateway-to-gateway forwarding.
 //!
-//! Transport is JSON over HTTP on the gateway's own listener — plaintext by
-//! default, or mutually-authenticated https (mTLS) when the gateway runs with
-//! TLS (the forwarder presents the gateway's own client cert and the receiver
-//! requires a cert-authenticated peer). This INTERNAL protocol is deliberately
-//! separate from the public Connect `Send` API so the two evolve independently.
+//! This module holds the owner-routing client and the `/internal/v1/forward`
+//! endpoint. The endpoint receives a forwarded record and produces it LOCALLY,
+//! because the receiver is the partition's owner.
+//!
+//! The transport is JSON over HTTP on the gateway's own listener. It is
+//! plaintext by default. When the gateway runs with TLS, the transport is
+//! mutually-authenticated https (mTLS): the forwarder presents the gateway's
+//! own client cert, and the receiver requires a cert-authenticated peer. This
+//! INTERNAL protocol is deliberately separate from the public Connect `Send`
+//! API, so the two can evolve independently.
 
 use std::sync::Arc;
 
@@ -31,7 +34,8 @@ use crate::{
     types::{GatewayRecord, RecordOutcome},
 };
 
-/// Wire form of a forwarded record (bytes as JSON arrays — no extra deps).
+/// Wire form of a forwarded record. Bytes are JSON arrays, so no extra
+/// dependency is needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardRecord {
     pub topic: String,
@@ -41,19 +45,20 @@ pub struct ForwardRecord {
     pub partition: Option<i32>,
     pub timestamp_ms: Option<i64>,
     pub idempotency_key: Option<String>,
-    /// The ORIGINAL caller's resolved identity, relayed by the forwarding
-    /// gateway so the owning replica re-authorizes the caller (not the
-    /// forwarding gateway's own mTLS identity). `None` ⇒ the owner treats the
-    /// caller as ANONYMOUS. The owner trusts the mTLS-authenticated peer
-    /// gateway to relay this truthfully (trusted-proxy chain).
+    /// The ORIGINAL caller's resolved identity. The forwarding gateway relays
+    /// it so the owning replica re-authorizes that caller, not the forwarding
+    /// gateway's own mTLS identity. `None` ⇒ the owner treats the caller as
+    /// ANONYMOUS. The owner trusts the mTLS-authenticated peer gateway to relay
+    /// this truthfully, as a trusted-proxy chain.
     pub principal: Option<ForwardPrincipal>,
 }
 
 /// Wire form of a resolved caller [`Principal`] carried on a forward.
-/// `auth_method` is a string because [`AuthMethod`] is not `Serialize`; it
-/// round-trips through [`ForwardPrincipal::from_principal`] /
-/// [`ForwardPrincipal::to_principal`] (unknown strings map to
-/// [`AuthMethod::Anonymous`]).
+///
+/// `auth_method` is a string because [`AuthMethod`] is not `Serialize`. It
+/// round-trips through [`ForwardPrincipal::from_principal`] and
+/// [`ForwardPrincipal::to_principal`]. An unknown string maps to
+/// [`AuthMethod::Anonymous`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardPrincipal {
     pub name: String,
@@ -72,7 +77,7 @@ impl ForwardPrincipal {
         }
     }
 
-    /// Reconstruct a session [`Principal`] from the wire form. An unrecognized
+    /// Reconstruct a session [`Principal`] from the wire form. An unknown
     /// `auth_method` string defaults to [`AuthMethod::Anonymous`].
     #[must_use]
     pub fn to_principal(&self) -> Principal {
@@ -97,7 +102,7 @@ fn auth_method_to_str(m: AuthMethod) -> &'static str {
     }
 }
 
-/// Inverse of [`auth_method_to_str`]; unknown tags ⇒ [`AuthMethod::Anonymous`].
+/// Inverse of [`auth_method_to_str`]. An unknown tag ⇒ [`AuthMethod::Anonymous`].
 fn auth_method_from_str(s: &str) -> AuthMethod {
     match s {
         "SaslPlain" => AuthMethod::SaslPlain,
@@ -154,8 +159,8 @@ pub struct ForwardResult {
     pub partition: PartitionIndex,
     pub offset: Offset,
     pub deduplicated: bool,
-    /// Present when the owner could not produce; `retriable` ⇒ the origin maps
-    /// it back to `Unavailable` and retries / re-resolves.
+    /// Present when the owner could not produce. `retriable` ⇒ the origin maps
+    /// it back to `Unavailable`, then retries and re-resolves.
     pub error: Option<ForwardError>,
 }
 
@@ -172,7 +177,7 @@ pub struct Forwarder {
 }
 
 impl Forwarder {
-    /// Plaintext forwarder (http://). Used when the gateway runs without TLS.
+    /// Plaintext forwarder over `http://`, for a gateway that runs without TLS.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -181,8 +186,8 @@ impl Forwarder {
         }
     }
 
-    /// mTLS forwarder (https://) presenting `client_config`'s identity and
-    /// trusting its roots — the gateway's own cert authenticates it to the
+    /// mTLS forwarder over `https://`. It presents `client_config`'s identity
+    /// and trusts its roots. The gateway's own cert authenticates it to the
     /// owning replica.
     ///
     /// # Errors
@@ -202,10 +207,12 @@ impl Forwarder {
         })
     }
 
-    /// POST the record to `owner_addr`'s internal forward endpoint. Transport
-    /// failures and owner-`retriable` errors become `Unavailable` so the origin
-    /// retries / re-resolves to the (possibly new) owner; an owner authorization
-    /// denial (HTTP 403) becomes a non-retriable `Unauthorized`.
+    /// POST the record to `owner_addr`'s internal forward endpoint.
+    ///
+    /// A transport failure and an owner-`retriable` error both become
+    /// `Unavailable`, so the origin retries and re-resolves to the owner, which
+    /// may be a new one. An owner authorization denial, HTTP 403, becomes a
+    /// non-retriable `Unauthorized`.
     #[tracing::instrument(skip_all)]
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
@@ -275,7 +282,7 @@ impl Default for Forwarder {
     }
 }
 
-/// The `/internal/v1/forward` route. Mount alongside the Connect + health
+/// The `/internal/v1/forward` route. Mount it beside the Connect and health
 /// routers on the gateway listener.
 #[must_use = "router must be merged into the application"]
 pub fn forward_router(state: Arc<AppState>) -> Router {
@@ -284,9 +291,11 @@ pub fn forward_router(state: Arc<AppState>) -> Router {
         .layer(Extension(state))
 }
 
-/// Receiver side: produce LOCALLY (no further forwarding — this replica owns
-/// the partition; `produce_local` returns `Unavailable` if it just lost it,
-/// which the origin retries). Never re-forwards, so there are no forward loops.
+/// Receiver side: produce LOCALLY, with no further forwarding.
+///
+/// This replica owns the partition. If it just lost the partition,
+/// `produce_local` returns `Unavailable` and the origin retries. This handler
+/// never re-forwards, so there are no forward loops.
 async fn forward_handler(
     Extension(state): Extension<Arc<AppState>>,
     principal: Option<Extension<crabka_security::Principal>>,
@@ -417,7 +426,8 @@ mod tests {
 
     const N: u32 = 4;
 
-    /// Test double: always denies, driving `forward_handler`'s authz-deny arm.
+    /// Test double that always denies. It drives `forward_handler`'s
+    /// authz-deny arm.
     #[derive(Debug)]
     struct DenyAllAuthorizer;
 
@@ -566,8 +576,9 @@ mod tests {
         broker.shutdown().await;
     }
 
-    /// The TLS-required 403 gate reports the `(-1, -1)` sentinel coordinates —
-    /// pins the `PartitionIndex(-1)` / `Offset(-1)` in the mTLS-reject arm.
+    /// The TLS-required 403 gate reports the `(-1, -1)` sentinel coordinates.
+    /// This test pins the `PartitionIndex(-1)` and `Offset(-1)` in the
+    /// mTLS-reject arm.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forward_handler_tls_reject_uses_sentinel_coordinates() {
         const DEDUP: &str = "__crabka_grpc_dedup_fh_tls_sentinel";
@@ -596,8 +607,8 @@ mod tests {
         broker.shutdown().await;
     }
 
-    /// The authz-deny 403 arm reports the `(-1, -1)` sentinel coordinates —
-    /// pins the `PartitionIndex(-1)` / `Offset(-1)` in the deny arm.
+    /// The authz-deny 403 arm reports the `(-1, -1)` sentinel coordinates.
+    /// This test pins the `PartitionIndex(-1)` and `Offset(-1)` in the deny arm.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forward_handler_authz_deny_uses_sentinel_coordinates() {
         const DEDUP: &str = "__crabka_grpc_dedup_fh_deny_sentinel";
@@ -627,10 +638,10 @@ mod tests {
         broker.shutdown().await;
     }
 
-    /// The produce-local error arm reports the `(-1, -1)` sentinel coordinates —
-    /// pins the `PartitionIndex(-1)` / `Offset(-1)` in the produce-error arm.
-    /// The empty `DedupStore` owns no partition, so `produce_local` returns
-    /// `Unavailable` before any write.
+    /// The produce-local error arm reports the `(-1, -1)` sentinel coordinates.
+    /// This test pins the `PartitionIndex(-1)` and `Offset(-1)` in the
+    /// produce-error arm. The empty `DedupStore` owns no partition, so
+    /// `produce_local` returns `Unavailable` before any write.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forward_handler_produce_error_uses_sentinel_coordinates() {
         const DEDUP: &str = "__crabka_grpc_dedup_fh_prod_sentinel";

@@ -47,11 +47,11 @@ pub struct PreparedParticipant {
 /// Durable-enough-for-process state for a local transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionPhase {
-    /// Single-range local transaction; no 2PC needed.
+    /// Single-range local transaction. It needs no 2PC.
     Local,
     /// A global xid exists and participants may be prepared.
     Begun,
-    /// Every participant has a prepare record and is waiting for decision.
+    /// Every participant has a prepare record and waits for the decision.
     Prepared,
     /// Terminal state.
     Decided,
@@ -72,10 +72,10 @@ pub enum LocalCoordinatorError {
     /// The xid is unknown to this process-local coordinator.
     #[error("unknown local coordinator transaction {xid}")]
     UnknownTransaction { xid: u64 },
-    /// The range was not part of the participant set captured at begin.
+    /// The range was not in the participant set captured at the begin.
     #[error("range r{range_id} is not a participant in local coordinator transaction {xid}")]
     UnknownParticipant { xid: u64, range_id: RangeId },
-    /// A different final decision has already been recorded.
+    /// The coordinator has already recorded a different final decision.
     #[error("local coordinator transaction {xid} already decided {existing:?}")]
     DecisionAlreadyFinal {
         xid: u64,
@@ -84,7 +84,7 @@ pub enum LocalCoordinatorError {
     /// Commit requires all participants to have prepare records.
     #[error("local coordinator transaction {xid} cannot commit before every participant prepared")]
     CommitBeforePrepared { xid: u64 },
-    /// An existing xid is already associated with different participants.
+    /// Different participants are already associated with an existing xid.
     #[error("local coordinator transaction {xid} already begun with different participants")]
     ExistingTransactionConflict { xid: u64 },
     /// An existing xid has advanced past the begin phase.
@@ -386,7 +386,8 @@ impl NetCoordinator {
         Self { rpc }
     }
 
-    /// Prepare every participant, then commit if all prepared or abort otherwise.
+    /// Prepare every participant, then commit if all of them prepared, and abort
+    /// otherwise.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -451,7 +452,8 @@ impl NetCoordinator {
 pub enum NetDecision {
     /// All participants committed.
     Commit,
-    /// At least one participant refused prepare; prepared participants were aborted.
+    /// At least one participant refused the prepare, and the coordinator aborted
+    /// the prepared participants.
     Abort,
 }
 

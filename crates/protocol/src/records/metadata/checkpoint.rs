@@ -1,6 +1,7 @@
 //! Builds a `KRaft` `bootstrap.checkpoint`: a `SnapshotHeader` control batch, a
-//! data batch of `FeatureLevelRecord`s, and a `SnapshotFooter` control batch —
-//! matching what `kafka-storage format` writes (minus per-run timestamps).
+//! data batch of `FeatureLevelRecord`s, and a `SnapshotFooter` control batch.
+//! This matches what `kafka-storage format` writes, except for the per-run
+//! timestamps.
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -22,7 +23,8 @@ use crate::{
 /// `FeatureLevelRecord`s are always written at apiVersion 0.
 const FEATURE_LEVEL_API_VERSION: i16 = 0;
 
-/// Build a `bootstrap.checkpoint` from an ordered list of `(feature_name, level)`.
+/// Builds a `bootstrap.checkpoint` from an ordered list of
+/// `(feature_name, level)`.
 ///
 /// # Panics
 /// Panics only if a record fails to encode, which cannot happen for these

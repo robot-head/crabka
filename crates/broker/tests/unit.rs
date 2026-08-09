@@ -16,7 +16,7 @@ use crabka_protocol::{
     records::{Record, RecordBatch},
 };
 
-/// Build a single `RecordBatch` carrying `n` empty records with sequential
+/// Builds one `RecordBatch` that carries `n` empty records with sequential
 /// offset deltas.
 fn one_record_batch(n: i32) -> RecordBatch {
     let mut b = RecordBatch {
@@ -50,9 +50,10 @@ async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
     assert!(resp.topics[0].error_code == 0, "CreateTopics for {name}");
 }
 
-/// Resolve a topic's UUID via a Metadata round trip. Produce v ≥ 13 sends
-/// only `topic_id` on the wire, so tests need this to drive the broker
-/// with a non-zero UUID.
+/// Resolves a topic's UUID through a Metadata round trip.
+///
+/// Produce v ≥ 13 sends only `topic_id` on the wire, so tests need this
+/// helper to drive the broker with a non-zero UUID.
 async fn topic_id_for(
     p: &support::InProcess,
     name: &str,

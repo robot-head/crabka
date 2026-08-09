@@ -3,9 +3,9 @@
 //!
 //! `findTargetlistEntrySQL92` decides this in the parser, before any expression
 //! typing happens, so the test is purely syntactic: *is the item an `A_Const`?*
-//! A `A_Const` holding an integer is an output position; any other constant —
-//! decimal, string, boolean, NULL, or an integer too wide for `int4` — is
-//! rejected with `42601`, and everything else is an ordinary expression.
+//! An `A_Const` that holds an integer is an output position. Any other constant
+//! is rejected with `42601`: a decimal, a string, a boolean, NULL, or an integer
+//! too wide for `int4`. Everything else is an ordinary expression.
 //!
 //! Two details are easy to get wrong and are what this module exists to pin
 //! down. The `-` of a negative literal folds *into* the constant (`doNegate`),
@@ -17,8 +17,9 @@ use crabka_pgparser::ast::{Expr, UnaryOp};
 
 use crate::error::ExecError;
 
-/// The clause a position reference appears in. Only affects error text, which
-/// `PostgreSQL` spells with the clause name (`non-integer constant in ORDER BY`).
+/// The clause a position reference appears in. It affects only the error text,
+/// which `PostgreSQL` spells with the clause name
+/// (`non-integer constant in ORDER BY`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Sql92Clause {
     OrderBy,
@@ -40,8 +41,8 @@ impl Sql92Clause {
 /// A bare constant, classified the way `findTargetlistEntrySQL92` does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Constant {
-    /// An `int4`-ranged integer constant — the only kind that names a position.
-    /// May be zero or negative; the caller reports that as `42P10`.
+    /// An `int4`-ranged integer constant, the only kind that names a position.
+    /// It may be zero or negative, and the caller reports that as `42P10`.
     Position(i64),
     /// Any other constant. `PostgreSQL` rejects it outright with `42601`.
     NonInteger,
@@ -49,11 +50,11 @@ enum Constant {
 
 /// The output-column position `expr` names, if it is a bare constant.
 ///
-/// `Ok(None)` means `expr` is an ordinary expression and must be resolved as
-/// one. `Ok(Some(pos))` is an unchecked 1-based position — the caller compares
-/// it against its own output width and reports `42P10` with this exact value, so
-/// `ORDER BY -1` says `position -1`. `Err` is `PostgreSQL`'s `42601` for a
-/// constant that is not an integer.
+/// `Ok(None)` means `expr` is an ordinary expression, and the caller must
+/// resolve it as one. `Ok(Some(pos))` is an unchecked 1-based position. The
+/// caller compares it against its own output width and reports `42P10` with this
+/// exact value, so `ORDER BY -1` says `position -1`. `Err` is `PostgreSQL`'s
+/// `42601` for a constant that is not an integer.
 pub(crate) fn position(expr: &Expr, clause: Sql92Clause) -> Result<Option<i64>, ExecError> {
     match constant(expr) {
         Some(Constant::Position(pos)) => Ok(Some(pos)),
@@ -65,11 +66,11 @@ pub(crate) fn position(expr: &Expr, clause: Sql92Clause) -> Result<Option<i64>, 
     }
 }
 
-/// Range-check a position against an output list `width` columns wide, yielding
-/// the 0-based index.
+/// Range-check a position against an output list `width` columns wide, and
+/// return the 0-based index.
 ///
 /// `PostgreSQL` echoes the position exactly as the query wrote it, so a negative
-/// one reports `position -1` rather than being clamped or silently ignored.
+/// one reports `position -1`. Nothing clamps it and nothing ignores it.
 pub(crate) fn output_index(
     position: i64,
     width: usize,

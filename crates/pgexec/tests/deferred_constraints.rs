@@ -1,6 +1,8 @@
-//! Constraint deferral: `DEFERRABLE INITIALLY DEFERRED` foreign keys checked at
-//! `COMMIT`, `SET CONSTRAINTS` moving the check point mid-transaction, and the
-//! savepoint interaction. Every expectation is the behaviour of a live
+//! Constraint deferral.
+//!
+//! The tests cover `DEFERRABLE INITIALLY DEFERRED` foreign keys checked at
+//! `COMMIT`, `SET CONSTRAINTS` that moves the check point inside a transaction,
+//! and the savepoint interaction. Every expectation is the behaviour of a live
 //! `PostgreSQL` 18.4.
 
 use assert2::assert;
@@ -87,9 +89,9 @@ async fn pair_with(tail: &str) -> (SqlEngine, SqlSession) {
 // ---------------------------------------------------------------------------
 // The deferred check point
 
-/// The headline case: two relations that reference each other cannot be
-/// populated at all unless the checks wait for `COMMIT`. Each row satisfies the
-/// other by then, so the transaction commits.
+/// The main case: two relations that reference each other cannot be populated
+/// at all unless the checks wait for `COMMIT`. Each row satisfies the other by
+/// then, so the transaction commits.
 #[tokio::test]
 async fn circular_deferred_references_commit_when_each_satisfies_the_other() {
     let (_engine, mut s) = engine_with(&[
@@ -111,9 +113,9 @@ async fn circular_deferred_references_commit_when_each_satisfies_the_other() {
     assert!(query(&mut s, "SELECT id, a_id FROM b").await == vec![text_row(&["1", "1"])]);
 }
 
-/// The same pair with only one side supplied: the violation surfaces at
-/// `COMMIT` as an ordinary 23503, and neither row is committed — the block's
-/// rows are durable but no clog entry ever makes them visible.
+/// The same pair with only one side supplied. The violation appears at
+/// `COMMIT` as an ordinary 23503, and neither row is committed. The block's
+/// rows are durable, but no clog entry ever makes them visible.
 #[tokio::test]
 async fn a_deferred_violation_fails_the_commit_and_commits_no_rows() {
     let (_engine, mut s) = pair_with("DEFERRABLE INITIALLY DEFERRED").await;
@@ -132,8 +134,8 @@ async fn a_deferred_violation_fails_the_commit_and_commits_no_rows() {
 }
 
 /// `INITIALLY DEFERRED` in autocommit is checked at the end of the statement,
-/// which is the same instant as the implicit commit: nothing is promoted out of
-/// the statement queue when no block is open.
+/// which is the same instant as the implicit commit. Nothing leaves the
+/// statement queue when no block is open.
 #[tokio::test]
 async fn an_initially_deferred_constraint_still_fires_in_autocommit() {
     let (_engine, mut s) = pair_with("DEFERRABLE INITIALLY DEFERRED").await;
@@ -141,8 +143,8 @@ async fn an_initially_deferred_constraint_still_fires_in_autocommit() {
     assert!(query(&mut s, "SELECT a FROM c").await.is_empty());
 }
 
-/// A `NOT DEFERRABLE` constraint ignores the block entirely: the check fires at
-/// the end of the statement that queued it.
+/// A `NOT DEFERRABLE` constraint ignores the block completely. The check fires
+/// at the end of the statement that queued it.
 #[tokio::test]
 async fn a_non_deferrable_constraint_fires_at_the_statement_inside_a_block() {
     let (_engine, mut s) = pair_with("NOT DEFERRABLE").await;
@@ -155,14 +157,14 @@ async fn a_non_deferrable_constraint_fires_at_the_statement_inside_a_block() {
 // SET CONSTRAINTS
 
 /// `SET CONSTRAINTS ALL DEFERRED` moves a `DEFERRABLE INITIALLY IMMEDIATE`
-/// constraint's check to `COMMIT`; `ALL IMMEDIATE` moves it back and drains
-/// what is already pending, raising there rather than at `COMMIT`.
+/// constraint's check to `COMMIT`. `ALL IMMEDIATE` moves it back and drains
+/// what is already pending, and it raises there and not at `COMMIT`.
 #[tokio::test]
 async fn set_constraints_all_moves_the_check_point() {
     struct Case {
         /// Statements run inside the block, in order.
         block: &'static [&'static str],
-        /// The statement expected to fail, and its SQLSTATE; `None` when the
+        /// The statement expected to fail, and its SQLSTATE. `None` when the
         /// block commits.
         expect: Option<(&'static str, &'static str)>,
         why: &'static str,
@@ -343,7 +345,7 @@ async fn a_deferred_set_null_and_set_default_also_run_at_the_statement() {
 }
 
 /// A three-level chain of deferred `ON DELETE CASCADE` runs end to end inside
-/// the one `DELETE` — not a level per drain, and not at `COMMIT`.
+/// the one `DELETE`. It is not a level per drain, and it is not at `COMMIT`.
 #[tokio::test]
 async fn a_deferred_cascade_chain_reaches_the_leaf_inside_the_statement() {
     let (_engine, mut s) = engine_with(&[
@@ -367,9 +369,9 @@ async fn a_deferred_cascade_chain_reaches_the_leaf_inside_the_statement() {
     assert!(query(&mut s, "SELECT id FROM leaf ORDER BY id").await == vec![text_row(&["200"])]);
 }
 
-/// The split is per trigger, not per constraint: the *check* on a constraint
-/// carrying `ON DELETE CASCADE` still waits for `COMMIT`, so an insert with no
-/// parent is accepted at the statement and fails the commit.
+/// The split is per trigger, not per constraint. The *check* on a constraint
+/// that carries `ON DELETE CASCADE` still waits for `COMMIT`, so an insert with
+/// no parent is accepted at the statement and fails the commit.
 #[tokio::test]
 async fn the_check_on_a_cascading_constraint_still_defers() {
     let (_engine, mut s) = pair_with("ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED").await;
@@ -379,9 +381,9 @@ async fn the_check_on_a_cascading_constraint_still_defers() {
     assert!(query(&mut s, "SELECT a FROM c").await.is_empty());
 }
 
-/// By the time `SET CONSTRAINTS ALL IMMEDIATE` runs there is no cascade left to
-/// drain — the `DELETE` performed it — and the drain is a no-op over the rows it
-/// already left behind.
+/// When `SET CONSTRAINTS ALL IMMEDIATE` runs, there is no cascade left to
+/// drain, because the `DELETE` already did it. The drain is a no-op over the
+/// rows the `DELETE` left behind.
 #[tokio::test]
 async fn set_constraints_immediate_finds_a_deferred_cascade_already_run() {
     let (_engine, mut s) = engine_with(&[
@@ -408,14 +410,14 @@ async fn set_constraints_immediate_finds_a_deferred_cascade_already_run() {
 /// The pair that proves `RESTRICT` is not a synonym for `NO ACTION`. Both are
 /// `DEFERRABLE INITIALLY DEFERRED` and both delete a referenced parent and
 /// re-supply the key before `COMMIT`. `NO ACTION` defers, re-probes, and finds
-/// the re-supplied parent; `RESTRICT` ignores the deferral and fires at the end
+/// the re-supplied parent. `RESTRICT` ignores the deferral and fires at the end
 /// of the `DELETE` statement, where the key genuinely is still referenced.
 #[tokio::test]
 async fn deferred_no_action_accepts_a_resupplied_key_and_restrict_does_not() {
     struct Case {
         action: &'static str,
-        /// `None` when the sequence commits; otherwise the SQLSTATE and the
-        /// statement that reports it.
+        /// `None` when the sequence commits. If it does not commit, this is the
+        /// SQLSTATE and the statement that reports it.
         expect: Option<(&'static str, &'static str)>,
         why: &'static str,
     }
@@ -479,8 +481,8 @@ async fn an_immediate_no_action_and_restrict_both_fire_at_the_delete() {
 // Savepoints
 
 /// `SET CONSTRAINTS` is a utility statement, so `ROLLBACK TO SAVEPOINT` undoes
-/// it: a check deferred by a rolled-back sub-transaction goes back to firing at
-/// the statement.
+/// it. A check that a rolled-back sub-transaction deferred fires at the
+/// statement again.
 #[tokio::test]
 async fn rollback_to_savepoint_restores_the_deferral_modes() {
     let (_engine, mut s) = pair_with("DEFERRABLE INITIALLY IMMEDIATE").await;
@@ -502,7 +504,7 @@ async fn rollback_to_savepoint_restores_the_deferral_modes() {
     assert!(err_code(&mut s, "COMMIT").await == "23503");
 }
 
-/// Rolling back a row-modifying sub-transaction removes both its row and the
+/// A rollback of a row-modifying sub-transaction removes both its row and the
 /// deferred check that row queued.
 #[tokio::test]
 async fn rollback_to_savepoint_unwinds_a_queued_check() {
@@ -522,7 +524,7 @@ async fn rollback_to_savepoint_unwinds_a_queued_check() {
 // Extended protocol
 
 /// `ALTER TABLE … ADD FOREIGN KEY` and `SET CONSTRAINTS` describe as zero-field
-/// results rather than erroring at `Parse`.
+/// results. They do not raise an error at `Parse`.
 #[tokio::test]
 async fn foreign_key_utility_statements_describe_as_zero_field_results() {
     let (_engine, mut s) = engine_with(&[

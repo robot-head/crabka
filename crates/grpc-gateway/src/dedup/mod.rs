@@ -4,9 +4,11 @@ pub mod membership;
 pub mod store;
 pub mod topic;
 
-/// Deterministic FNV-1a-64 over the key, modulo partition count. Stable
-/// across processes/restarts (unlike `DefaultHasher`'s per-run state), so a
-/// given key always maps to the same dedup partition.
+/// Deterministic FNV-1a-64 over the key, modulo the partition count.
+///
+/// The result is stable across processes and restarts, unlike
+/// `DefaultHasher`'s per-run state, so a given key always maps to the same
+/// dedup partition.
 ///
 /// # Panics
 ///
@@ -40,8 +42,9 @@ use crate::{
 };
 
 /// A lazily-initialized transactional producer pinned to one dedup partition.
-/// One in-flight transaction at a time ⇒ the `Mutex` serializes that
-/// partition's record+claim transactions.
+///
+/// Only one transaction can be in flight at a time, so the `Mutex` serializes
+/// that partition's record and claim transactions.
 type TxnSlot = Mutex<Option<Producer>>;
 
 pub struct DedupEngine {
@@ -116,7 +119,7 @@ impl DedupEngine {
         }
     }
 
-    /// The dedup partition a key hashes to (for routing decisions).
+    /// The dedup partition a key hashes to. Routing decisions use it.
     #[must_use]
     pub fn partition_for_key(&self, key: &str) -> u32 {
         partition_for(key, self.partitions)
@@ -128,9 +131,11 @@ impl DedupEngine {
         self.store.owns(p)
     }
 
-    /// EOS produce: fast-path map hit returns the cached offset; a miss takes
-    /// the partition's transactional producer and writes the data record +
-    /// claim atomically, then updates the local map.
+    /// EOS produce.
+    ///
+    /// A fast-path map hit returns the cached offset. A miss takes the
+    /// partition's transactional producer, writes the data record and the claim
+    /// atomically, then updates the local map.
     #[tracing::instrument(skip_all)]
     /// # Panics
     /// Panics if the validated partition count cannot be represented locally.
@@ -192,12 +197,14 @@ impl DedupEngine {
         }
     }
 
-    /// The fallible begin→record→claim→commit sequence for one keyed record.
-    /// Factored out so `dedup_produce` can reset the producer slot on any
-    /// error. The abort-on-error logic lives in here (rather than in
-    /// `dedup_produce`) because only the holder of the `Transaction` guard
-    /// returned by `begin_transaction` can abort it. The caller must hold
-    /// `slot`'s lock and have confirmed the key is not already claimed.
+    /// The fallible begin, record, claim, and commit sequence for one keyed
+    /// record.
+    ///
+    /// This method is separate so `dedup_produce` can reset the producer slot
+    /// on any error. The abort-on-error logic lives here, and not in
+    /// `dedup_produce`, because only the holder of the `Transaction` guard that
+    /// `begin_transaction` returns can abort it. The caller must hold `slot`'s
+    /// lock and must already have confirmed that the key is not claimed.
     async fn txn_write(
         &self,
         slot: &mut Option<Producer>,

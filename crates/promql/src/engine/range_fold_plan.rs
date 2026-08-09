@@ -22,22 +22,26 @@ use crate::{
 };
 
 impl<S: MetricStore> PromqlEngine<S> {
-    /// Plan a RESIDUAL range-vector fold call (see [`is_extended_range_fold_call`])
-    /// self-recursively: resolve the call's [`OuterRangeFn`] (and any scalar
-    /// parameter) through the planner's own helpers, build the windowed range
-    /// vector through the shared [`Self::eval_range_arg`] leaf kernel — which honors
-    /// an `anchored`/`smoothed` extended selector's window and validates the
-    /// modifier against the function name — and fold it with the shared
-    /// [`apply_outer_range_fn`]. This is byte-for-byte identical to the
-    /// `#[cfg(test)]` tree-walking oracle's `eval_*_call` family by construction
-    /// (they run the same `eval_range_arg` + `apply_outer_range_fn`), including the
-    /// per-function error for an invalid modifier/arity/parameter, which surfaces
-    /// here as the SAME `Err`.
+    /// Plans a residual range-vector fold call self-recursively.
     ///
-    /// This is the planner arm that closes the range-fold fallback: a plain-matrix
-    /// `changes`/`resets`/`deriv`/`predict_linear`/`double_exponential_smoothing`
-    /// and ANY rate-family / `*_over_time` fold over an anchored/smoothed selector
-    /// now route through the planner.
+    /// See [`is_extended_range_fold_call`] for the calls this arm accepts. This
+    /// method resolves the call's [`OuterRangeFn`] and any scalar parameter
+    /// through the planner's own helpers. It then builds the windowed range
+    /// vector through the shared [`Self::eval_range_arg`] leaf kernel, which
+    /// obeys the window of an `anchored` or `smoothed` extended selector and
+    /// validates the modifier against the function name. It folds that range
+    /// vector with the shared [`apply_outer_range_fn`].
+    ///
+    /// The result is byte-for-byte identical to the `eval_*_call` family of the
+    /// `#[cfg(test)]` tree-walking oracle, because both run the same
+    /// `eval_range_arg` and `apply_outer_range_fn`. The per-function error for an
+    /// invalid modifier, arity, or parameter surfaces here as the same `Err`.
+    ///
+    /// This is the planner arm that closes the range-fold fallback. It routes a
+    /// plain-matrix `changes`, `resets`, `deriv`, `predict_linear`, or
+    /// `double_exponential_smoothing` call through the planner. It also routes
+    /// every rate-family or `*_over_time` fold over an anchored or smoothed
+    /// selector.
     pub(super) async fn plan_extended_range_fold_call(
         &self,
         tenant: &str,
@@ -49,15 +53,17 @@ impl<S: MetricStore> PromqlEngine<S> {
         ))
     }
 
-    /// Resolve a residual range-vector fold [`Call`] (see
-    /// [`range_fold_range_arg_index`]) into its folded instant vector without
-    /// re-entering the tree-walking interpreter: map the function name to its
-    /// [`OuterRangeFn`] (resolving any scalar parameter via the planner's own
-    /// scalar resolvers), materialize the windowed range vector through the shared
-    /// [`Self::eval_range_arg`] leaf kernel, and apply the shared
-    /// [`apply_outer_range_fn`] fold. The per-function arity / scalar-type /
-    /// modifier errors are raised exactly as the oracle's `eval_*_call` family
-    /// raises them.
+    /// Resolves a residual range-vector fold [`Call`] into its folded instant vector.
+    ///
+    /// See [`range_fold_range_arg_index`] for the calls this method accepts. The
+    /// method does not re-enter the tree-walking interpreter. It maps the
+    /// function name to its [`OuterRangeFn`] and resolves any scalar parameter
+    /// with the planner's own scalar resolvers. It then materializes the windowed
+    /// range vector through the shared [`Self::eval_range_arg`] leaf kernel and
+    /// applies the shared [`apply_outer_range_fn`] fold.
+    ///
+    /// This method raises the per-function arity, scalar-type, and modifier
+    /// errors exactly as the `eval_*_call` family of the oracle raises them.
     pub(super) async fn resolve_range_fold_call(
         &self,
         tenant: &str,
@@ -190,35 +196,37 @@ impl<S: MetricStore> PromqlEngine<S> {
         Ok(apply_outer_range_fn(range, outer, time_ms))
     }
 
-    /// Plan a range/`*_over_time` call whose argument is a **subquery**
-    /// (`f(inner[range:resolution] ...)`) onto the operator path.
+    /// Plans a range or `*_over_time` call over a subquery onto the operator path.
     ///
-    /// The subquery's range vector is built by evaluating its inner instant
-    /// expression at each aligned sub-step on the grid covering
-    /// `(end - range, end]` with stride `resolution` (default = the engine's
-    /// global eval interval) — through the **recursive planner**
-    /// ([`Self::eval_range_via_planner`]), so every sub-step matches the
-    /// interpreter's per-step `eval_instant_expr` byte-for-byte. The sub-grid
-    /// alignment (`align_subquery_start`), the resolution default, and the
-    /// subquery's `@`/offset are resolved identically to the interpreter's
-    /// [`Self::eval_subquery`]. The outer fold is then the **shared**
-    /// [`apply_outer_range_fn`] — the same one the interpreter's `eval_*_call`
-    /// uses — so the whole evaluation is parity-exact by construction, and the
-    /// result is returned as a [`PlannedInstant::Precomputed`].
+    /// The call has the form `f(inner[range:resolution] ...)`. This method builds
+    /// the range vector of the subquery through the recursive planner
+    /// [`Self::eval_range_via_planner`]. It evaluates the inner instant
+    /// expression at each aligned sub-step on the grid that covers
+    /// `(end - range, end]` with stride `resolution`. The default `resolution` is
+    /// the global eval interval of the engine. Every sub-step therefore matches
+    /// the per-step `eval_instant_expr` of the interpreter byte-for-byte.
     ///
-    /// Returns `None` (interpreter fallback) when:
-    /// - the inner expression is not structurally planner-supported, or any
-    ///   sub-step's shape is data-dependently non-plannable (e.g. a histogram
-    ///   series appears in-window) — [`Self::eval_range_via_planner`] returns
-    ///   `None`, and the whole subquery falls back so the interpreter produces a
-    ///   consistent result;
+    /// This method resolves the sub-grid alignment through
+    /// `align_subquery_start`. It resolves the default resolution and the `@` and
+    /// `offset` of the subquery in the same way as the interpreter method
+    /// [`Self::eval_subquery`]. The outer fold is then the shared
+    /// [`apply_outer_range_fn`], the same one the `eval_*_call` of the
+    /// interpreter uses. The whole evaluation is parity-exact by construction.
+    /// This method returns the result as a [`PlannedInstant::Precomputed`].
+    ///
+    /// This method returns `None` and falls back to the interpreter when:
+    /// - the inner expression is not structurally planner-supported, or the shape
+    ///   of a sub-step is data-dependently non-plannable, for example when a
+    ///   histogram series appears in the window. [`Self::eval_range_via_planner`]
+    ///   returns `None`, and the whole subquery falls back so the interpreter
+    ///   gives a consistent result;
     /// - a `quantile_over_time` `phi` is non-scalar, or a `predict_linear`
-    ///   duration / smoothing factor is non-scalar (the interpreter then raises
-    ///   the identical canonical error). A NaN / out-of-`[0, 1]` `phi` is NOT a
-    ///   fallback: it evaluates to signed `±Inf` / `NaN` plus an
-    ///   `InvalidQuantileWarning`, matching Prometheus;
-    /// - the subquery step is non-positive (the interpreter raises the canonical
-    ///   "subquery step must be positive" error).
+    ///   duration or smoothing factor is non-scalar. The interpreter then raises
+    ///   the identical canonical error. A `phi` that is NaN or outside `[0, 1]` is
+    ///   not a fallback: it evaluates to signed `±Inf` or `NaN` plus an
+    ///   `InvalidQuantileWarning`, as Prometheus does;
+    /// - the subquery step is non-positive. The interpreter raises the canonical
+    ///   "subquery step must be positive" error.
     pub(super) async fn plan_subquery_range_call(
         &self,
         tenant: &str,

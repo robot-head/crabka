@@ -10,13 +10,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the operator: watch CRDs and reconcile.
+    /// Runs the operator. It watches the CRDs and reconciles them.
     Run(Box<RunArgs>),
-    /// Emit CRD YAML manifests to a directory.
+    /// Writes the CRD YAML manifests into a directory.
     GenCrds { out_dir: std::path::PathBuf },
-    /// Scan all (or one namespace's) Kafka CRs and reissue any
-    /// broker leaf certs within renewalDays of expiry. Designed to be
-    /// driven by the `CronJob` shipped in the operator Helm chart.
+    /// Scans the Kafka CRs of all namespaces, or of one namespace, and
+    /// issues a new cert for every broker leaf cert that is within
+    /// renewalDays of its expiry. The `CronJob` in the operator Helm chart
+    /// runs this command.
     CaRenewalCheck(CaRenewalCheckArgs),
 }
 
@@ -28,7 +29,8 @@ struct RunArgs {
 
 #[derive(Debug, clap::Args)]
 struct CaRenewalCheckArgs {
-    /// Run scoped to a single namespace. Default: cluster-scoped.
+    /// Run with the scope of one namespace. The default is cluster
+    /// scope.
     #[arg(long, env = "WATCH_NAMESPACE")]
     namespace: Option<String>,
 }

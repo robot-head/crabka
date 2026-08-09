@@ -1,8 +1,9 @@
 //! Reconcile-level tests for the `KafkaRebalance` controller.
 //!
-//! Drive the controller's annotation-driven state machine against a faked
-//! `crabka-rebalancer` (the `FakeRebalancerClient`) and assert both the
-//! Connect-RPC sequence and the kube-side status / annotation patches.
+//! These tests drive the annotation-driven state machine of the controller
+//! against a faked `crabka-rebalancer`, the `FakeRebalancerClient`. They
+//! assert on the Connect-RPC sequence, and on the status patches and the
+//! annotation patches on the kube side.
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -93,8 +94,9 @@ fn status_patch_body(observed: &[Request<Bytes>], name: &str) -> serde_json::Val
     serde_json::from_slice(req.body()).expect("status body is JSON")
 }
 
-/// New rebalance with no status → `CreateProposal` → `ProposalReady`,
-/// recording the goals and the returned session id.
+/// A new rebalance with no status leads to `CreateProposal` and then to
+/// `ProposalReady`. The controller records the goals and the session id
+/// that the rebalancer returned.
 #[tokio::test]
 async fn new_rebalance_creates_proposal() {
     let (ctx, state) = build_ctx(NS, vec![status_rule("demo")]);
@@ -120,8 +122,9 @@ async fn new_rebalance_creates_proposal() {
     check!(body["status"]["observedGeneration"] == 1);
 }
 
-/// `approve` on a `ProposalReady` proposal → `ExecuteProposal` (with the
-/// configured throttle) → `Rebalancing`, and the annotation is consumed.
+/// `approve` on a `ProposalReady` proposal leads to `ExecuteProposal`,
+/// with the configured throttle, and then to `Rebalancing`. The controller
+/// consumes the annotation.
 #[tokio::test]
 async fn approve_executes_and_enters_rebalancing() {
     let (ctx, state) = build_ctx(NS, vec![annotation_rule("demo"), status_rule("demo")]);
@@ -166,7 +169,8 @@ async fn approve_executes_and_enters_rebalancing() {
     assert!(body["status"]["sessionId"] == "p1");
 }
 
-/// Polling an in-flight execution that has completed → `Ready`.
+/// A poll of an execution that is in flight and has finished gives
+/// `Ready`.
 #[tokio::test]
 async fn poll_completes_to_ready() {
     let (ctx, state) = build_ctx(NS, vec![status_rule("demo")]);
@@ -186,7 +190,8 @@ async fn poll_completes_to_ready() {
     assert!(body["status"]["sessionId"] == "p1");
 }
 
-/// `stop` while `Rebalancing` → `CancelExecution` → `Stopped`.
+/// `stop` during `Rebalancing` leads to `CancelExecution` and then to
+/// `Stopped`.
 #[tokio::test]
 async fn stop_cancels_to_stopped() {
     let (ctx, state) = build_ctx(NS, vec![annotation_rule("demo"), status_rule("demo")]);
@@ -208,7 +213,8 @@ async fn stop_cancels_to_stopped() {
     assert!(body["status"]["conditions"][0]["type"] == "Stopped");
 }
 
-/// A failed execution surfaces `NotReady` with the broker's reason.
+/// An execution that failed gives `NotReady` with the reason from the
+/// broker.
 #[tokio::test]
 async fn poll_failure_surfaces_not_ready() {
     let (ctx, state) = build_ctx(NS, vec![status_rule("demo")]);
@@ -226,8 +232,8 @@ async fn poll_failure_surfaces_not_ready() {
     assert!(body["status"]["conditions"][0]["message"] == "broker 3 unreachable");
 }
 
-/// No `spec.endpoint` and no `crabka.io/cluster` label → `NotReady` with
-/// `MissingEndpoint` and zero Connect-RPCs.
+/// No `spec.endpoint` and no `crabka.io/cluster` label gives `NotReady`
+/// with `MissingEndpoint` and zero Connect-RPCs.
 #[tokio::test]
 async fn missing_endpoint_sets_not_ready() {
     let (ctx, state) = build_ctx(NS, vec![status_rule("demo")]);
@@ -243,9 +249,9 @@ async fn missing_endpoint_sets_not_ready() {
     assert!(body["status"]["conditions"][0]["reason"] == "MissingEndpoint");
 }
 
-/// A transport error leaves the status untouched (no kube writes) so the
-/// next reconcile retries — the proposal computation isn't lost to a
-/// transient blip.
+/// A transport error leaves the status unchanged and writes nothing to
+/// kube, so that the next reconcile tries again. A short transient failure
+/// therefore does not lose the proposal computation.
 #[tokio::test]
 async fn transport_error_leaves_status_untouched() {
     // Zero rules: any kube call would 404 and surface as an unexpected

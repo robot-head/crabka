@@ -1,9 +1,9 @@
 //! Native PL/pgSQL block parser.
 //!
-//! Procedural words stay soft: the SQL lexer intentionally emits most of them
+//! Procedural words stay soft. The SQL lexer intentionally emits most of them
 //! as identifiers, and this parser matches their source spelling only where the
-//! PL grammar expects them. Embedded expressions and SQL statements are handed
-//! back to the ordinary SQL parser.
+//! PL grammar expects them. This parser hands embedded expressions and SQL
+//! statements back to the ordinary SQL parser.
 
 use std::collections::HashSet;
 

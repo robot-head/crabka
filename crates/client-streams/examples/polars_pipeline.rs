@@ -1,6 +1,7 @@
 //! Native columnar topology: sum `amount` per `user` within a batch and write the
-//! result as an IPC `DataFrame`. Driven in-process with `ColumnarTestDriver` (no
-//! broker required).
+//! result as an IPC `DataFrame`.
+//!
+//! `ColumnarTestDriver` drives it in process, and it needs no broker.
 //! Run: `cargo run -p crabka-client-streams --features polars --example polars_pipeline`
 
 use crabka_client_streams::{

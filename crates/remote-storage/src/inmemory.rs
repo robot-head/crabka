@@ -1,5 +1,5 @@
-//! [`InmemoryRemoteLogMetadataManager`] — a process-memory reference
-//! [`RemoteLogMetadataManager`], mirroring Kafka's test fixture of the same
+//! [`InmemoryRemoteLogMetadataManager`] is a process-memory reference
+//! [`RemoteLogMetadataManager`]. It mirrors Kafka's test fixture of the same
 //! name. Tiered-storage tests run against this manager.
 
 use std::{collections::HashMap, sync::Mutex};
@@ -17,10 +17,11 @@ use crate::{
     metadata_manager::RemoteLogMetadataManager,
 };
 
-/// In-memory [`RemoteLogMetadataManager`]: one
-/// `RemoteLogMetadataCache` per partition behind a single
-/// mutex. Not durable — state is lost on restart — but enforces the full
-/// lifecycle state machine, so it is a faithful stand-in for the
+/// In-memory [`RemoteLogMetadataManager`]: one `RemoteLogMetadataCache` per
+/// partition behind a single mutex.
+///
+/// It is not durable, and the state is lost on restart. It does enforce the
+/// full lifecycle state machine, so it is a faithful stand-in for the
 /// topic-backed production manager in tests and single-process setups.
 #[derive(Debug, Default)]
 pub struct InmemoryRemoteLogMetadataManager {
@@ -28,15 +29,15 @@ pub struct InmemoryRemoteLogMetadataManager {
 }
 
 impl InmemoryRemoteLogMetadataManager {
-    /// Construct an empty manager.
+    /// Constructs an empty manager.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Dump every partition's segment + partition-delete metadata for
-    /// snapshotting. The result is order-independent;
-    /// [`Self::import`] re-derives ordering and the epoch index.
+    /// Dumps every partition's segment and partition-delete metadata for a
+    /// snapshot. The result is order-independent. [`Self::import`] re-derives
+    /// the order and the epoch index.
     #[must_use]
     /// # Panics
     /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
@@ -75,9 +76,11 @@ impl InmemoryRemoteLogMetadataManager {
         RlmmCacheDump { partitions }
     }
 
-    /// Seed the cache from a dump, bypassing transition validation
-    /// Intended for a freshly-constructed manager during
-    /// snapshot restore; existing partitions are overwritten.
+    /// Seeds the cache from a dump and does no transition validation.
+    ///
+    /// Use it on a freshly-constructed manager during a snapshot restore. It
+    /// overwrites existing partitions.
+    ///
     /// # Panics
     /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
     pub fn import(&self, dump: RlmmCacheDump) {

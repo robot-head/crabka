@@ -1,12 +1,15 @@
-//! Lowering driver: walk the logical DSL graph and run each node's lowering
-//! thunk to build the Processor-API [`Topology`].
+//! The lowering driver. It walks the logical DSL graph and runs each node's
+//! lowering thunk to build the Processor-API [`Topology`].
 //!
-//! Nodes are visited in id order. Because [`LogicalGraph::add`] assigns ids
-//! sequentially and a node's predecessors are passed in by id when it is added,
-//! every predecessor has a strictly smaller id than its child — so id order is a
-//! valid topological order (parents before children) for stateless chains,
-//! merges, joins, repartitions, and table operations. A node whose thunk is
-//! `None` is structural metadata and has no Processor-API node to lower.
+//! The driver visits the nodes in id order. [`LogicalGraph::add`] assigns the
+//! ids in sequence, and the caller passes a node's predecessors by id when it
+//! adds the node, so every predecessor has a strictly smaller id than its child.
+//! Id order is therefore a valid topological order, with parents before
+//! children, for stateless chains, merges, joins, repartitions, and table
+//! operations.
+//!
+//! A node whose thunk is `None` is structural metadata and has no Processor-API
+//! node to lower.
 use crate::dsl::graph::{GraphNodeKind, LogicalGraph, LowerState};
 
 #[tracing::instrument(

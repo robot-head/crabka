@@ -20,7 +20,7 @@ pub struct MetadataIndex {
 }
 
 impl MetadataIndex {
-    /// Build a deterministic metadata index from compacted tenant rows.
+    /// Builds a deterministic metadata index from compacted tenant rows.
     #[must_use]
     pub fn from_compaction_rows(rows: &[TenantCompactionRows]) -> Self {
         let mut by_tenant = BTreeMap::<String, BTreeSet<MetricMetadata>>::new();
@@ -44,7 +44,8 @@ impl MetadataIndex {
         }
     }
 
-    /// Return metadata for `tenant`, optionally restricted to one metric family.
+    /// Returns metadata for `tenant`. An optional argument restricts it to one
+    /// metric family.
     #[must_use]
     pub fn metadata(&self, tenant: &str, metric: Option<&str>) -> Vec<MetricMetadata> {
         self.by_tenant

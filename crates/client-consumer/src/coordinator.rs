@@ -1,19 +1,19 @@
-//! Background coordinator task — owns the join/sync/heartbeat/rebalance
+//! Background coordinator task. It owns the join/sync/heartbeat/rebalance
 //! lifecycle for a [`Consumer`](crate::consumer::Consumer).
 //!
-//! On each tick we either send a `Heartbeat` (steady-state) or run a
-//! full `JoinGroup` + `SyncGroup` round (`needs_rejoin`). The broker
-//! signals a rebalance via `error_code = 27 (REBALANCE_IN_PROGRESS)`
-//! on heartbeat; `25 (UNKNOWN_MEMBER_ID)` forces a from-scratch
-//! handshake (clear `member_id`, `generation_id = -1`).
+//! On each tick the task either sends a steady-state `Heartbeat` or runs a
+//! full `JoinGroup` + `SyncGroup` round when `needs_rejoin` is set. The broker
+//! signals a rebalance with `error_code = 27 (REBALANCE_IN_PROGRESS)`
+//! on heartbeat. `25 (UNKNOWN_MEMBER_ID)` forces a from-scratch
+//! handshake, which clears `member_id` and sets `generation_id = -1`.
 //!
-//! Cooperative rebalance (KIP-429) runs phase-1 + phase-2 in place:
-//! phase 1 reduces the owned set to the partitions we kept, then we
-//! immediately re-Join + re-Sync so the leader can place the freshly
+//! Cooperative rebalance (KIP-429) runs phase-1 and phase-2 in place. Phase 1
+//! reduces the owned set to the partitions the member kept. The task then
+//! re-Joins and re-Syncs at once, so the leader can place the freshly
 //! freed partitions onto whoever needs them. Eager (`range`) drops the
-//! whole assignment and reinstalls in a single round.
+//! whole assignment and reinstalls it in a single round.
 //!
-//! During a rejoin in flight we deliberately do *not* heartbeat —
+//! While a rejoin is in flight the task deliberately does *not* heartbeat.
 //! `JoinGroup` resets the broker-side session timer.
 
 use std::{
@@ -103,10 +103,12 @@ pub(crate) fn is_retriable_transport_error(e: &crabka_client_core::ClientError) 
 }
 
 /// Read the effective `error_code` from a `FindCoordinatorResponse` across wire
-/// shapes: v4+ carries per-key rows in `coordinators` (we use the first), v0-v3
-/// uses the top-level field. crabka's broker populates both, so either read is
-/// correct against it; this keeps us right against real Kafka at any negotiated
-/// version.
+/// shapes.
+///
+/// v4+ carries per-key rows in `coordinators`, and this function uses the
+/// first row. v0-v3 uses the top-level field. crabka's broker populates both,
+/// so either read is correct against it. This function stays correct against
+/// real Kafka at any negotiated version.
 fn coordinator_error_code(r: &FindCoordinatorResponse) -> i16 {
     r.coordinators
         .first()
@@ -114,7 +116,8 @@ fn coordinator_error_code(r: &FindCoordinatorResponse) -> i16 {
 }
 
 /// Read the coordinator `node_id` from a `FindCoordinatorResponse` across wire
-/// shapes (v4+ `coordinators[0].node_id`, else the top-level `node_id`).
+/// shapes: v4+ uses `coordinators[0].node_id`, and older versions use the
+/// top-level `node_id`.
 fn coordinator_node_id(r: &FindCoordinatorResponse) -> i32 {
     r.coordinators.first().map_or(r.node_id, |c| c.node_id)
 }
@@ -122,17 +125,18 @@ fn coordinator_node_id(r: &FindCoordinatorResponse) -> i32 {
 /// Discover the broker that currently coordinates `group_id` and return its
 /// node id.
 ///
-/// Sends `FindCoordinator(key = group_id)` over the bootstrap
-/// connection (any broker can answer `FindCoordinator`), retrying cold/loading
-/// coordinator codes (14/15/16) with backoff. On success we `refresh_metadata`
-/// so the pool learns the coordinator broker's address (it appears in the
-/// cluster's broker list); without this,
-/// [`Client::broker`](crabka_client_core::Client::broker) for the coordinator id
-/// would fail with `Disconnected`.
+/// This function sends `FindCoordinator(key = group_id)` over the bootstrap
+/// connection, because any broker can answer `FindCoordinator`. It retries the
+/// cold and loading coordinator codes (14/15/16) with backoff. On success it
+/// calls `refresh_metadata`, so the pool learns the coordinator broker's
+/// address from the cluster's broker list. Without that refresh,
+/// [`Client::broker`](crabka_client_core::Client::broker) for the coordinator
+/// id would fail with `Disconnected`.
 ///
-/// Returns the coordinator's `node_id`. Errors with `Server(code)` if the lookup
-/// keeps returning a non-zero, non-retriable code; with `CoordinatorUnavailable`
-/// if after the refresh the pool still has no dialable address for that id.
+/// This function returns the coordinator's `node_id`. It errors with
+/// `Server(code)` if the lookup keeps returning a non-zero, non-retriable code.
+/// It errors with `CoordinatorUnavailable` if, after the refresh, the pool
+/// still has no dialable address for that id.
 #[tracing::instrument(
     name = "consumer.find_coordinator",
     level = "info",
@@ -230,18 +234,20 @@ fn build_heartbeat_request(
     }
 }
 
-/// Send a group-coordinator RPC to the *current* coordinator broker, and on a
-/// cold/relocating-coordinator code (14/15/16) re-discover the coordinator
-/// before retrying — so a moved coordinator (real Kafka returns `NOT_COORDINATOR`
-/// when an RPC reaches the wrong broker) is chased to its new home instead of
-/// looping forever on the stale id. This is the crux of the fix: the plain
-/// `with_coordinator_retry` re-sends the identical request to the same broker.
+/// Send a group-coordinator RPC to the *current* coordinator broker, and
+/// re-discover the coordinator before a retry on a cold or relocating
+/// coordinator code (14/15/16).
 ///
-/// `coordinator_id` is the shared cell read by `make` (so each retry targets
-/// the latest id) and updated in place as re-discovery succeeds; `make` does the
-/// `client.broker(id).send(...)` routing itself. Mirrors
-/// `with_coordinator_retry`'s deadline and backoff; the only addition is the
-/// re-find between retriable attempts.
+/// This chases a moved coordinator to its new home instead of looping forever
+/// on the stale id. Real Kafka returns `NOT_COORDINATOR` when an RPC reaches
+/// the wrong broker. The plain `with_coordinator_retry` re-sends the identical
+/// request to the same broker.
+///
+/// `coordinator_id` is the shared cell that `make` reads, so each retry targets
+/// the latest id. Re-discovery updates that cell in place on success. `make`
+/// does the `client.broker(id).send(...)` routing itself. This function mirrors
+/// the deadline and backoff of `with_coordinator_retry`. The only addition is
+/// the re-find between retriable attempts.
 pub(crate) async fn with_coordinator_refind<R, F, Fut>(
     client: &Client,
     group_id: &str,
@@ -297,13 +303,15 @@ where
     }
 }
 
-/// Send a group-coordinator RPC, retrying on cold-coordinator codes
-/// (14/15/16) and transient transport errors with capped
-/// exponential backoff until `timeout` elapses. `make` rebuilds the request
-/// each attempt (so it can be re-sent); `code` reads the response's
-/// `error_code`. On deadline, returns the last response (so the caller's
-/// `error_code` handling runs) or `CoordinatorUnavailable` if the last attempt
-/// was a transport failure.
+/// Send a group-coordinator RPC and retry on the cold-coordinator codes
+/// (14/15/16) and on transient transport errors.
+///
+/// The retry uses capped exponential backoff until `timeout` elapses. `make`
+/// rebuilds the request on each attempt, so the function can re-send it. `code`
+/// reads the response's `error_code`. On the deadline this function returns the
+/// last response, so the caller's `error_code` handling runs. It returns
+/// `CoordinatorUnavailable` instead if the last attempt was a transport
+/// failure.
 pub(crate) async fn with_coordinator_retry<R, F, Fut>(
     retry: CoordinatorRetryPolicy,
     code: impl Fn(&R) -> i16,
@@ -337,32 +345,31 @@ where
 
 /// Mutable state owned exclusively by the coordinator task.
 ///
-/// The `Arc<Mutex<...>>` fields are shared with the parent `Consumer`
-/// so that `poll()` / `assignment()` see live updates as rebalances
-/// land. Plain (non-`Arc`) fields are exclusive to the coordinator
-/// and may be mutated freely — `member_id` and `generation_id` change
-/// on a from-scratch rejoin.
+/// The `Arc<Mutex<...>>` fields are shared with the parent `Consumer`, so
+/// `poll()` and `assignment()` see live updates as rebalances land. The plain
+/// non-`Arc` fields belong to the coordinator alone, and it can mutate them
+/// freely. `member_id` and `generation_id` change on a from-scratch rejoin.
 pub(crate) struct CoordinatorState {
     pub client: Client,
     pub group_id: String,
-    /// Node id of the broker currently coordinating this group, discovered via
-    /// `FindCoordinator`. Every group RPC (Join/Sync/Heartbeat/Commit/Fetch/
-    /// Leave) is routed here with `client.broker(coordinator_id)`; it's
-    /// re-discovered when a coordinator RPC returns 14/15/16.
+    /// Node id of the broker that currently coordinates this group, discovered
+    /// with `FindCoordinator`. Every group RPC (Join/Sync/Heartbeat/Commit/
+    /// Fetch/Leave) routes here with `client.broker(coordinator_id)`. A
+    /// coordinator RPC that returns 14/15/16 triggers re-discovery.
     ///
-    /// Shared (`Arc<AtomicI32>`) with the parent `Consumer` so its commit path
-    /// (`commit.rs`, running on the data-path client) routes `OffsetCommit` to
-    /// the same coordinator, and sees re-discovery updates the moment they land.
+    /// This `Arc<AtomicI32>` is shared with the parent `Consumer`, so its commit
+    /// path (`commit.rs`, on the data-path client) routes `OffsetCommit` to the
+    /// same coordinator and sees re-discovery updates the moment they land.
     pub coordinator_id: Arc<AtomicI32>,
     pub member_id: String,
     pub group_instance_id: Option<String>,
     pub generation_id: i32,
-    /// Published copy of `generation_id`, shared (`Arc<AtomicI32>`) with the
-    /// parent `Consumer` so its commit path (`commit.rs`) stamps the CURRENT
-    /// generation onto `OffsetCommit`. The coordinator is the sole writer;
-    /// always update both fields together via [`set_generation`] so a commit
-    /// after a rebalance never carries the stale generation the broker rejects
-    /// with `ILLEGAL_GENERATION`.
+    /// Published copy of `generation_id`. This `Arc<AtomicI32>` is shared with
+    /// the parent `Consumer`, so its commit path (`commit.rs`) stamps the
+    /// CURRENT generation onto `OffsetCommit`. The coordinator is the sole
+    /// writer. Always update both fields together with [`set_generation`], so a
+    /// commit after a rebalance never carries the stale generation that the
+    /// broker rejects with `ILLEGAL_GENERATION`.
     pub current_generation: Arc<AtomicI32>,
     pub assignor: Assignor,
     pub subscribed_topics: Vec<String>,
@@ -377,21 +384,24 @@ pub(crate) struct CoordinatorState {
     pub leave_group_timeout: Time,
     pub auto_offset_reset: AutoOffsetReset,
     pub client_rack: Option<String>,
-    /// Subscribed-topic partition counts the INITIAL assignment was computed
-    /// against — the metadata snapshot `start_once` already fetched. The
-    /// coordinator seeds its rejoin baseline from this rather than a fresh
-    /// post-spawn `Metadata` fetch: a fresh fetch could already include a topic
-    /// created in the window between the initial assignment and this task
-    /// starting, comparing equal to the baseline forever and stranding the
-    /// empty cold-start assignment permanently.
+    /// Subscribed-topic partition counts that the INITIAL assignment was
+    /// computed against. This is the metadata snapshot that `start_once` already
+    /// fetched. The coordinator seeds its rejoin baseline from this and not from
+    /// a fresh post-spawn `Metadata` fetch. A fresh fetch could already include
+    /// a topic created in the window between the initial assignment and the
+    /// start of this task. It would then compare equal to the baseline forever
+    /// and strand the empty cold-start assignment permanently.
     pub initial_subscribed_counts: HashMap<String, i32>,
     pub retry_policy: CoordinatorRetryPolicy,
 }
 
 /// Set the coordinator's working generation AND publish it to the shared atomic
-/// the commit path reads. Use this for EVERY generation change (join, rejoin,
-/// from-scratch reset) so the parent `Consumer`'s `OffsetCommit` always stamps
-/// the current generation — a stale one is rejected with `ILLEGAL_GENERATION`.
+/// that the commit path reads.
+///
+/// Use this for EVERY generation change: join, rejoin, and from-scratch reset.
+/// The parent `Consumer`'s `OffsetCommit` then always stamps the current
+/// generation. The broker rejects a stale generation with
+/// `ILLEGAL_GENERATION`.
 fn set_generation(state: &mut CoordinatorState, generation_id: i32) {
     state.generation_id = generation_id;
     state
@@ -404,17 +414,17 @@ fn set_generation(state: &mut CoordinatorState, generation_id: i32) {
 enum HeartbeatOutcome {
     /// `error_code == 0`.
     Ok,
-    /// `REBALANCE_IN_PROGRESS (27)` or `ILLEGAL_GENERATION (22)` — rejoin
-    /// with the current `member_id`. `ILLEGAL_GENERATION` fires when our
-    /// heartbeat tick lands after the broker has already advanced past
-    /// the generation we last synced on (e.g. a rebalance completed
-    /// while we were between heartbeat windows); without a rejoin we'd
-    /// keep heartbeating the dead generation forever and never pick up
-    /// the new assignment.
+    /// `REBALANCE_IN_PROGRESS (27)` or `ILLEGAL_GENERATION (22)`. Rejoin with
+    /// the current `member_id`. `ILLEGAL_GENERATION` fires when the heartbeat
+    /// tick lands after the broker has already advanced past the generation the
+    /// member last synced on, for example when a rebalance completed between
+    /// two heartbeat windows. Without a rejoin the member would keep
+    /// heartbeating the dead generation forever and would never pick up the new
+    /// assignment.
     NeedRejoin,
-    /// `UNKNOWN_MEMBER_ID (25)` — clear `member_id` + rejoin from scratch.
+    /// `UNKNOWN_MEMBER_ID (25)`. Clear `member_id` and rejoin from scratch.
     RejoinFromScratch,
-    /// Transport error or unexpected non-fatal broker code; retry on next tick.
+    /// Transport error or unexpected non-fatal broker code. Retry on the next tick.
     Transient,
 }
 
@@ -429,18 +439,20 @@ fn heartbeat_outcome(error_code: i16) -> HeartbeatOutcome {
 
 /// Drive the heartbeat + rebalance loop until `shutdown` fires.
 ///
-/// On entry the caller has already done one initial Join+Sync, so we
-/// begin in steady-state heartbeating. `needs_rejoin` becomes `true`
-/// as soon as the broker signals a rebalance; the next tick performs
-/// the rejoin in place of heartbeating.
+/// On entry the caller has already done one initial Join+Sync, so the loop
+/// begins in steady-state heartbeating. `needs_rejoin` becomes `true` as soon
+/// as the broker signals a rebalance. The next tick then does the rejoin in
+/// place of the heartbeat.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: long-running I/O event loop, exercised by integration tests
 fn subscription_metadata_refresh_due(last_check: tokio::time::Instant, interval: Time) -> bool {
     last_check.elapsed().as_time() >= interval
 }
 
 /// Current partition count of each subscribed topic that exists in broker
-/// metadata. A subscribed topic not yet created is simply absent from the map
-/// (so it later shows up as growth once the topic is created).
+/// metadata.
+///
+/// A subscribed topic that does not exist yet is absent from the map. It shows
+/// up later as growth once someone creates the topic.
 #[tracing::instrument(
     name = "consumer.subscribed_partition_counts",
     level = "debug",
@@ -466,24 +478,28 @@ async fn subscribed_partition_counts(
     Ok(counts)
 }
 
-/// True when any subscribed topic has more partitions now than the assignment
-/// was last computed against (a topic appeared, or grew). Such a change means
-/// the group must rejoin so the assignor (re)distributes the new partitions —
-/// without it, a consumer that joined before its WAL topic existed keeps an
-/// EMPTY assignment forever, because a single-member Stable group is never sent
-/// a broker-driven rebalance (the only thing that otherwise sets `needs_rejoin`).
+/// True when any subscribed topic now has more partitions than the assignment
+/// was last computed against, which means a topic appeared or grew.
+///
+/// Such a change means the group must rejoin, so the assignor redistributes the
+/// new partitions. Without the rejoin, a consumer that joined before its WAL
+/// topic existed keeps an EMPTY assignment forever. The broker never sends a
+/// rebalance to a single-member Stable group, and that rebalance is the only
+/// other thing that sets `needs_rejoin`.
 fn subscribed_topics_grew(known: &HashMap<String, i32>, current: &HashMap<String, i32>) -> bool {
     current
         .iter()
         .any(|(topic, count)| *count > known.get(topic).copied().unwrap_or(0))
 }
 
-/// Fold `current` into `known`, taking the per-topic max. Kafka partition
-/// counts are monotonic (a topic never loses partitions), so the rejoin
-/// baseline must only ever ADVANCE: a transient metadata under-report
-/// (controller failover / a partial response) must never lower it and
-/// re-trigger a spurious rejoin, and a non-leader rejoin (whose snapshot is
-/// empty) must leave the baseline untouched rather than erase it.
+/// Fold `current` into `known` and take the per-topic max.
+///
+/// Kafka partition counts are monotonic, because a topic never loses
+/// partitions. The rejoin baseline must therefore only ever ADVANCE. A
+/// transient metadata under-report from a controller failover or a partial
+/// response must never lower it and re-trigger a spurious rejoin. A non-leader
+/// rejoin, whose snapshot is empty, must leave the baseline untouched and must
+/// not erase it.
 fn merge_counts(known: &mut HashMap<String, i32>, current: &HashMap<String, i32>) {
     for (topic, &count) in current {
         let entry = known.entry(topic.clone()).or_insert(0);
@@ -609,12 +625,12 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
 
 /// Best-effort `LeaveGroup` for the coordinator's *current* member id.
 ///
-/// Sent once, on shutdown, with a short timeout: the broker falling back to
-/// session-timeout eviction is harmless on close, but a stalled send would
-/// hang `close()` (which awaits this task). Mirrors the Java client, which
-/// leaves the group on close for dynamic members. Skips a cleared id (a
-/// from-scratch rejoin that never re-completed), which the broker wouldn't
-/// recognize anyway.
+/// The task sends it once, on shutdown, with a short timeout. A broker that
+/// falls back to session-timeout eviction is harmless on close, but a stalled
+/// send would hang `close()`, which awaits this task. This mirrors the Java
+/// client, which leaves the group on close for dynamic members. This function
+/// skips a cleared id, which comes from a from-scratch rejoin that never
+/// re-completed, and which the broker would not recognize anyway.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort shutdown I/O, exercised by integration tests
 #[tracing::instrument(
     name = "consumer.leave_group",
@@ -646,10 +662,10 @@ async fn leave_group(state: &CoordinatorState) {
 /// Send one `Heartbeat` to the coordinator broker and translate the response
 /// into a directive.
 ///
-/// A cold/relocating-coordinator code (14/15/16) triggers in-place
-/// re-discovery — the coordinator moved, so the next tick's heartbeat/rejoin
-/// must target the new broker — and is reported as `Transient` so we simply
-/// retry on the next tick.
+/// A cold or relocating coordinator code (14/15/16) triggers in-place
+/// re-discovery, because the coordinator moved and the next tick's heartbeat or
+/// rejoin must target the new broker. This function reports such a code as
+/// `Transient`, so the task simply retries on the next tick.
 #[tracing::instrument(
     name = "consumer.heartbeat",
     level = "debug",
@@ -700,10 +716,12 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
     }
 }
 
-/// Best-effort coordinator re-discovery used off the heartbeat path (which
-/// can't surface an error). Publishes the new id into the shared
-/// `coordinator_id` cell on success; logs and keeps the last-known id on
-/// failure (the next tick retries).
+/// Best-effort coordinator re-discovery for use off the heartbeat path, which
+/// cannot surface an error.
+///
+/// On success this function publishes the new id into the shared
+/// `coordinator_id` cell. On failure it logs and keeps the last-known id, and
+/// the next tick retries.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort discovery I/O, exercised by integration tests
 async fn refind_after(state: &CoordinatorState, ctx: &str) {
     match find_coordinator(&state.client, &state.group_id, state.retry_policy).await {
@@ -714,12 +732,12 @@ async fn refind_after(state: &CoordinatorState, ctx: &str) {
     }
 }
 
-/// Run one complete rebalance round (Join + Sync), then mutate the
-/// shared `assigned` / `next_offsets` snapshots in place.
+/// Run one complete rebalance round, Join and Sync, then mutate the shared
+/// `assigned` and `next_offsets` snapshots in place.
 ///
-/// For [`RebalanceProtocol::Cooperative`] this may issue *two* Join+Sync
-/// rounds back-to-back: the first to install the kept partitions only,
-/// the second (phase 2) to receive the freshly placed ones. See KIP-429.
+/// For [`RebalanceProtocol::Cooperative`] this can issue *two* Join+Sync rounds
+/// back-to-back. The first installs the kept partitions only. The second, phase
+/// 2, receives the freshly placed ones. See KIP-429.
 #[tracing::instrument(
     name = "consumer.rejoin",
     level = "info",
@@ -867,13 +885,13 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, Co
     Ok(final_counts)
 }
 
-/// Best-effort `OffsetCommit` for partitions being revoked in a
-/// cooperative rebalance, using the current (pre-rebalance) generation.
+/// Best-effort `OffsetCommit` for the partitions that a cooperative rebalance
+/// revokes. It uses the current, pre-rebalance generation.
 ///
-/// Failures are logged and swallowed: a revoke-time commit racing the
-/// generation bump can return `ILLEGAL_GENERATION`, and surfacing that
-/// into `poll()` would break the KIP-429 transparency guarantee. Worst
-/// case the new owner re-delivers a few records (at-least-once).
+/// This function logs and swallows failures. A revoke-time commit that races
+/// the generation bump can return `ILLEGAL_GENERATION`, and surfacing that into
+/// `poll()` would break the KIP-429 transparency guarantee. In the worst case
+/// the new owner re-delivers a few records, which is at-least-once.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort revoke-time commit I/O, exercised by integration tests
 #[tracing::instrument(
     name = "consumer.commit_revoked",
@@ -1131,9 +1149,11 @@ async fn perform_join(
     Ok(join_resp)
 }
 
-/// Issue `JoinGroup` (handling the `MEMBER_ID_REQUIRED` two-step when
-/// our `member_id` is empty), assign as leader if we won the election,
-/// then `SyncGroup`. Returns `(assignment, generation_id, protocol_name)`.
+/// Issue `JoinGroup`, assign as leader if this member won the election, then
+/// issue `SyncGroup`.
+///
+/// This function handles the `MEMBER_ID_REQUIRED` two-step when `member_id` is
+/// empty. It returns `(assignment, generation_id, protocol_name)`.
 // Sequential join/sync state machine; splitting fragments the linear
 // MEMBER_ID_REQUIRED → leader-assign → SyncGroup flow.
 #[tracing::instrument(
@@ -1304,10 +1324,11 @@ async fn sync_assignment(
     Ok(decode_assignment(&response.assignment))
 }
 
-/// Populate `next_offsets` for newly added partitions by batch-fetching
-/// committed offsets, falling back to `auto.offset.reset` semantics
-/// when no commit exists. Mirrors the initial-prime in
-/// `consumer.rs::start` step 5.
+/// Populate `next_offsets` for newly added partitions with a batch fetch of the
+/// committed offsets.
+///
+/// When no commit exists, this function falls back to `auto.offset.reset`
+/// semantics. It mirrors the initial prime in `consumer.rs::start` step 5.
 #[tracing::instrument(
     name = "consumer.prime_offsets",
     level = "debug",

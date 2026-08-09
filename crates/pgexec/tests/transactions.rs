@@ -1905,8 +1905,8 @@ async fn ddl_inside_a_writing_transaction_does_not_deadlock() {
 /// and mixed with `ISOLATION LEVEL`.
 ///
 /// A `READ ONLY` block refuses anything that would change rows or catalog state
-/// with `PostgreSQL`'s 25006, naming the command the way `PostgreSQL` names it, and
-/// `SHOW transaction_read_only` reports the mode the block actually opened with.
+/// with `PostgreSQL`'s 25006, and names the command the way `PostgreSQL` names
+/// it. `SHOW transaction_read_only` reports the mode the block opened with.
 #[tokio::test]
 async fn a_read_only_transaction_refuses_writes_and_reports_its_mode() {
     use assert2::assert;

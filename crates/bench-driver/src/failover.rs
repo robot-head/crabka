@@ -1,7 +1,7 @@
-//! Kill-broker orchestration for the `failover` scenario. Uses the
-//! in-cluster `kube` API via the Job's `ServiceAccount` — the
-//! `ServiceAccount` needs `pods: get,list,delete` in the target namespace,
-//! and is only mounted when a failover scenario actually requests it.
+//! Kill-broker orchestration for the `failover` scenario. This module uses the
+//! in-cluster `kube` API through the Job's `ServiceAccount`. That
+//! `ServiceAccount` needs `pods: get,list,delete` in the target namespace, and
+//! it is mounted only when a failover scenario asks for it.
 //!
 //! `partition0_leader` resolves the topic metadata first and then maps the
 //! partition leader's broker id back to the matching `StatefulSet` pod. If that
@@ -22,9 +22,9 @@ use kube::{
 
 use crate::scenario::Stack;
 
-/// Discover an in-cluster Kubernetes client (uses the in-pod
-/// `serviceAccount` token). When running outside the cluster — useful for
-/// `cargo test` — this returns an `Err` and the caller should report the
+/// Discovers an in-cluster Kubernetes client, which uses the in-pod
+/// `serviceAccount` token. Outside the cluster, which is useful for
+/// `cargo test`, this returns an `Err` and the caller should report the
 /// failover as skipped.
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
@@ -34,7 +34,8 @@ pub async fn try_client() -> Result<KubeClient> {
         .context("build in-cluster kube client")
 }
 
-/// Query topic metadata and return partition 0's current leader broker id.
+/// Queries the topic metadata and returns partition 0's current leader broker
+/// id.
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub async fn partition0_leader_from_metadata(
@@ -63,9 +64,9 @@ pub async fn partition0_leader_from_metadata(
     Ok(leader)
 }
 
-/// Delete the requested broker pod. When `leader_id` is `Some`, the pod whose
-/// ordinal matches that broker id is targeted; otherwise the first matching pod
-/// is deleted for backwards-compatible smoke runs. `grace_period_seconds = 0`
+/// Deletes the requested broker pod. When `leader_id` is `Some`, this targets
+/// the pod whose ordinal matches that broker id. Otherwise it deletes the first
+/// matching pod, for backwards-compatible smoke runs. `grace_period_seconds = 0`
 /// means SIGKILL.
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
@@ -101,8 +102,9 @@ pub async fn kill_broker_pod(
     Ok(target)
 }
 
-/// Delete the first broker pod (alphabetical) matching the stack's pod-name
-/// regex root. Kept as a compatibility wrapper for non-partition-targeted runs.
+/// Deletes the first broker pod in alphabetical order that matches the stack's
+/// pod-name regex root. This stays as a compatibility wrapper for runs that do
+/// not target a partition.
 /// # Errors
 /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub async fn kill_first_broker(

@@ -1,4 +1,4 @@
-//! `Log` — a sorted collection of `Segment`s with append/read/truncate.
+//! `Log`: a sorted collection of `Segment`s with append, read, and truncate.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -34,10 +34,10 @@ fn size_from_len(len: usize) -> ByteSize {
 
 /// The fixed v2 record-batch header, as a quantity.
 ///
-/// Every per-segment read is asked for at least this much, so the header walk
-/// that finds batch boundaries always has one to look at (Kafka's anti-stall
-/// rule). Derived from [`HEADER_LEN`] rather than restated, so the floor
-/// cannot drift from the protocol.
+/// The log asks every per-segment read for at least this much, so the header
+/// walk that finds batch boundaries always has a header to read. This is
+/// Kafka's anti-stall rule. The value comes from [`HEADER_LEN`] rather than a
+/// restated constant, so the floor cannot drift from the protocol.
 fn batch_header() -> ByteSize {
     size_from_len(HEADER_LEN)
 }
@@ -45,9 +45,9 @@ fn batch_header() -> ByteSize {
 /// A Kafka-format log: a sorted collection of [`Segment`]s plus a single
 /// active segment that accepts appends.
 ///
-/// `Log` is single-writer (`&mut self` for mutation) and supports
-/// concurrent readers (`&self` for `read`/`log_start_offset`/etc.).
-/// Construct one with [`Log::open`].
+/// `Log` has one writer and many concurrent readers. Mutation takes
+/// `&mut self`; `read`, `log_start_offset`, and the other read methods take
+/// `&self`. Construct one with [`Log::open`].
 #[derive(Debug)]
 pub struct Log {
     dir: PathBuf,
@@ -56,12 +56,12 @@ pub struct Log {
     active: Option<Segment>,
     dir_sync_needed: bool,
     /// Override for `log_start_offset()`. When `Some(n)`, the effective
-    /// `log_start` is `max(derived_from_segments, n)`. Used by
-    /// `trim_to_offset` (and in tests) to advance the log start pointer
-    /// without physically deleting segments (active-segment case) or to
-    /// simulate retention-driven truncation in integration tests. KIP-405's
+    /// `log_start` is `max(derived_from_segments, n)`. `trim_to_offset` uses
+    /// this in the active-segment case to advance the log start pointer
+    /// without deletion of on-disk segments. Integration tests also use it to
+    /// simulate retention-driven truncation. KIP-405's
     /// `local_log_start_offset` co-advances with this pointer, so
-    /// [`Log::local_log_start_offset`] delegates here — there is a single
+    /// [`Log::local_log_start_offset`] delegates here. There is a single
     /// source of truth.
     start_offset_override: Option<Offset>,
 
@@ -71,42 +71,43 @@ pub struct Log {
     lso: Offset,
 
     /// In-flight transactions: `producer_id` → first offset of this
-    /// producer's currently-open txn. Cleared when a commit/abort
-    /// marker for that `producer_id` is applied.
+    /// producer's currently-open txn. The log clears the entry when it
+    /// applies a commit or abort marker for that `producer_id`.
     pending: HashMap<ProducerId, Offset>,
 
-    /// Active segment's `TxnIndex`. Reopened on segment roll.
+    /// Active segment's `TxnIndex`. The log reopens it on segment roll.
     active_txn_index: TxnIndex,
 
     /// Injected source of the additional internal stamp coordinate. `None`
-    /// (the default) means this partition stamps nothing — behavior and all
-    /// wire-exact bytes are exactly as without stamping. Set via
-    /// [`Log::set_stamp_source`]; wiring a real HLC / solo-mode oracle is
-    /// broker-side future work.
+    /// is the default and means this partition stamps nothing. Behavior and
+    /// all wire-exact bytes stay exactly as they are without a stamp.
+    /// [`Log::set_stamp_source`] sets this field. Broker-side future work
+    /// will connect a real HLC or solo-mode oracle.
     stamp_source: Option<std::sync::Arc<dyn StampSource>>,
 
-    /// Active segment's `.stampindex` sidecar, present exactly when a
-    /// [`StampSource`] is injected. Reopened on segment roll, mirroring
-    /// `active_txn_index`. The stamp is derived state stored beside the
-    /// wire-exact `.log`; it is never consulted by any produce/fetch path.
+    /// Active segment's `.stampindex` sidecar. It is present exactly when a
+    /// [`StampSource`] is injected. The log reopens it on segment roll, in
+    /// the same way as `active_txn_index`. The stamp is derived state stored
+    /// beside the wire-exact `.log`. No produce or fetch path ever reads it.
     active_stamp_index: Option<StampIndex>,
 
-    /// Per-partition leader-epoch checkpoint. Shared across segments —
+    /// Per-partition leader-epoch checkpoint. All segments share it, and
     /// epoch history accumulates over the log's lifetime.
     epoch_checkpoint: LeaderEpochCheckpoint,
 
-    /// External next-offset authority used by diskless recovery. When set by
-    /// the broker after reading the committed `KRaft` frontier, caller-supplied
-    /// append-at bases must equal `max(log_end_offset, reconciled_frontier)`.
+    /// External next-offset authority used by diskless recovery. The broker
+    /// sets this after it reads the committed `KRaft` frontier. Caller-supplied
+    /// append-at bases must then equal
+    /// `max(log_end_offset, reconciled_frontier)`.
     reconciled_frontier: Offset,
 }
 
 /// Result of [`Log::read`]: the absolute offset of the first batch
 /// returned and the batches themselves.
 ///
-/// `start_offset` falls back to the requested offset when no batches are
-/// returned (e.g., reading at the log end), so callers can resume from
-/// the value without special-casing emptiness.
+/// `start_offset` falls back to the requested offset when the read returns
+/// no batches, for example a read at the log end. Callers can then resume
+/// from the value and need no special case for an empty result.
 #[derive(Debug)]
 pub struct ReadOutput {
     /// Absolute offset of the first record in [`Self::batches`], or the
@@ -123,8 +124,8 @@ pub struct RawRead {
     /// Absolute offset of the first batch in [`Self::bytes`], or the
     /// requested offset when no bytes were returned.
     pub start_offset: Offset,
-    /// Verbatim `.log` bytes — zero or more complete v2 batches, spanning
-    /// segment boundaries.
+    /// Verbatim `.log` bytes: zero or more complete v2 batches. The bytes
+    /// can span segment boundaries.
     pub bytes: Bytes,
     /// Length of [`Self::bytes`] in bytes.
     pub total: usize,
@@ -180,13 +181,15 @@ mod sync_observer {
 }
 
 crate::sendfile_cfg! {
-    /// Descriptor form of [`Log::read_raw`] for the zero-copy (`sendfile`) fetch
-    /// path (Increments D + E): the records run is described by one
-    /// [`crabka_protocol::records::FileRegion`] per contributing segment — so a multi-segment fetch is
-    /// `sendfile`d as several regions with **no** coalescing copy (unlike
-    /// `read_raw`, which concatenates cross-segment chunks into a fresh
-    /// `BytesMut`). Compiled on the SENDFILE alias (Linux + Apple +
-    /// FreeBSD/DragonFly).
+    /// Descriptor form of [`Log::read_raw`] for the zero-copy `sendfile` fetch
+    /// path, Increments D + E.
+    ///
+    /// One [`crabka_protocol::records::FileRegion`] describes the records run
+    /// for each contributing segment. A multi-segment fetch therefore goes
+    /// out as several `sendfile` regions with **no** coalescing copy.
+    /// `read_raw` instead concatenates cross-segment chunks into a fresh
+    /// `BytesMut`. This type is compiled on the SENDFILE alias: Linux, Apple,
+    /// and FreeBSD/DragonFly.
     #[derive(Debug, Clone)]
     pub struct RawReadDesc {
         /// Absolute offset of the first batch in the regions, or the requested
@@ -209,26 +212,29 @@ crate::sendfile_cfg! {
     }
 }
 
-/// A producer batch to append **verbatim** (no decode/re-encode), used by
-/// the produce zero-copy passthrough path. Carries the producer's exact
-/// wire bytes plus the header fields the log needs for offset assignment,
-/// LSO/transaction tracking, the leader-epoch checkpoint, and the time
-/// index — all of which the caller has already read from the batch header
-/// via a borrowed header-only decode.
+/// A producer batch that the log appends **verbatim**, with no decode and
+/// no re-encode.
 ///
-/// The append patches only `base_offset` and `partition_leader_epoch`
-/// (both outside the CRC region) into a writable copy of [`Self::bytes`];
-/// the body and CRC are written byte-for-byte as the producer sent them.
+/// The produce zero-copy passthrough path uses this type. It carries the
+/// producer's exact wire bytes plus the header fields the log needs for
+/// offset assignment, LSO and transaction tracking, the leader-epoch
+/// checkpoint, and the time index. The caller has already read all of those
+/// fields from the batch header with a borrowed header-only decode.
 ///
-/// Control batches (transaction markers) are intentionally **not**
-/// representable here — the LSO bookkeeping for a control batch needs the
+/// The append patches only `base_offset` and `partition_leader_epoch` into a
+/// writable copy of [`Self::bytes`]. Both fields sit outside the CRC region.
+/// The log writes the body and the CRC byte-for-byte as the producer sent
+/// them.
+///
+/// This type deliberately **cannot** hold a control batch, that is, a
+/// transaction marker. The LSO bookkeeping for a control batch needs the
 /// inner marker record, which the header-only path does not read. Such
 /// batches take the owned [`Log::append`] path instead.
 #[derive(Debug, Clone)]
 pub struct VerbatimBatch {
     /// The producer's verbatim v2 batch bytes (CRC-validated by the caller).
     pub bytes: Bytes,
-    /// `last_offset_delta` from the header — how many offsets the batch spans.
+    /// `last_offset_delta` from the header: how many offsets the batch spans.
     pub last_offset_delta: i32,
     /// `max_timestamp` from the header (for `max_timestamp` + time index).
     pub max_timestamp: i64,
@@ -240,10 +246,12 @@ pub struct VerbatimBatch {
     pub is_transactional: bool,
 }
 
-/// A sealed segment described for tiered-storage
-/// offload (KIP-405). Carries the on-disk file paths plus the offset / timestamp /
-/// size metadata and the leader-epoch ranges a `RemoteLogManager` needs to
-/// build remote-segment metadata. Produced by [`Log::tierable_segments`].
+/// A sealed segment described for tiered-storage offload (KIP-405).
+///
+/// It carries the on-disk file paths, the offset, timestamp, and size
+/// metadata, and the leader-epoch ranges that a `RemoteLogManager` needs to
+/// build remote-segment metadata. [`Log::tierable_segments`] produces these
+/// values.
 // No `Eq`: `size` is a `ByteSize`, which stores `f64`. The derive was unused —
 // `SegmentExport` is never hashed nor used as a map key.
 #[derive(Debug, Clone, PartialEq)]
@@ -272,9 +280,11 @@ pub struct SegmentExport {
 }
 
 impl Log {
-    /// Open or create a `Log` at `dir`. Discovers existing segments by
-    /// `.log` filename, marks all but the latest as sealed, and (if the
-    /// directory is empty) creates a fresh active segment at offset 0.
+    /// Open or create a `Log` at `dir`.
+    ///
+    /// This method finds existing segments by `.log` filename and marks all
+    /// but the latest as sealed. If the directory is empty, it creates a
+    /// fresh active segment at offset 0.
     #[instrument(
         level = "info",
         skip_all,
@@ -376,9 +386,9 @@ impl Log {
     }
 
     /// Directory this log was opened against. The broker's intra-broker
-    /// log-dir reassignment (KIP-113) reads this to determine the
-    /// current owning `log.dir` of a partition without re-implementing
-    /// the directory-layout convention.
+    /// log-dir reassignment (KIP-113) reads this to find the current owning
+    /// `log.dir` of a partition. The broker does not have to repeat the
+    /// directory-layout convention.
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -400,11 +410,12 @@ impl Log {
         derived
     }
 
-    /// Advance `log_start_offset` to `new_start`. Must be in
-    /// `[current log_start, log_end]`. Used by `trim_to_offset` for the
-    /// active-segment case and by the broker's `DeleteRecords` handler.
-    /// Does NOT physically truncate on-disk segments — only shifts the
-    /// in-memory start pointer.
+    /// Advance `log_start_offset` to `new_start`.
+    ///
+    /// `new_start` must be in `[current log_start, log_end]`.
+    /// `trim_to_offset` uses this method for the active-segment case, and the
+    /// broker's `DeleteRecords` handler uses it too. This method does NOT
+    /// truncate on-disk segments. It only moves the in-memory start pointer.
     ///
     /// `new_start` must be non-negative.
     ///
@@ -430,12 +441,14 @@ impl Log {
         self.set_log_start_offset(new_start)
     }
 
-    /// Reset the log to be empty starting at `new_base`. Drops every
-    /// segment + on-disk file and creates a fresh active segment at
-    /// `new_base`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
-    /// recovery path when the follower has fallen behind the leader's
-    /// `log_start` — `truncate_to` can't help here because we need to
-    /// move `log_start` *forward* past where there is no local data.
+    /// Reset the log to be empty at `new_base`.
+    ///
+    /// This method drops every segment and every on-disk file, then creates
+    /// a fresh active segment at `new_base`. The replicator's
+    /// `OFFSET_OUT_OF_RANGE` recovery path uses it when the follower has
+    /// fallen behind the leader's `log_start`. `truncate_to` cannot help
+    /// there, because `log_start` must move *forward* past the point where
+    /// no local data exists.
     #[instrument(level = "info", skip_all, fields(new_base = new_base.0), err)]
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
@@ -496,11 +509,12 @@ impl Log {
         Offset(0)
     }
 
-    /// Total `.log` size across sealed and active segments. Read from
-    /// the segments' tracked logical size rather than a filesystem stat,
-    /// so it reflects buffered appends immediately and consistently across
-    /// platforms (a directory stat can lag an open, unflushed write handle
-    /// on some OSes).
+    /// Total `.log` size across sealed and active segments.
+    ///
+    /// The value comes from the segments' tracked logical size, not from a
+    /// filesystem stat. It therefore shows buffered appends immediately and
+    /// in the same way on every platform. On some operating systems a
+    /// directory stat can lag an open, unflushed write handle.
     #[must_use]
     pub fn size(&self) -> ByteSize {
         let active = self.active.as_ref().map_or(ByteSize::ZERO, Segment::size);
@@ -518,26 +532,29 @@ impl Log {
         self.lso
     }
 
-    /// Close all segments. Drop runs automatically when `self` moves;
-    /// this method just names the operation explicitly.
+    /// Close all segments. Drop runs automatically when `self` moves. This
+    /// method only gives the operation a name.
     pub fn close(self) {
         drop(self);
     }
 
-    /// Atomically swap the active `LogConfig`. The next retention/roll check
-    /// reads the new value; in-flight `append` calls hold the lock for
-    /// trivially short windows and will not see a half-applied config.
+    /// Atomically swap the active `LogConfig`.
     ///
-    /// Callable through `&self` (the `Arc<RwLock<…>>` wrapping lets us
-    /// mutate the inner value without an exclusive borrow on the `Log`).
+    /// The next retention or roll check reads the new value. In-flight
+    /// `append` calls hold the lock for very short windows and will not see
+    /// a half-applied config.
+    ///
+    /// Callers can use this method through `&self`. The `Arc<RwLock<…>>`
+    /// wrapper permits mutation of the inner value without an exclusive
+    /// borrow on the `Log`.
     /// # Panics
     /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn set_config(&self, new: LogConfig) {
         *self.config.write().unwrap() = new;
     }
 
-    /// Snapshot the current config. Allocates a clone; cheap because
-    /// `LogConfig` is small and `Clone`.
+    /// Snapshot the current config. This allocates a clone, which is cheap
+    /// because `LogConfig` is small and `Clone`.
     #[must_use]
     /// # Panics
     /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
@@ -548,12 +565,12 @@ impl Log {
     /// Return all aborted transactions from the active segment's
     /// `.txnindex` whose offset range overlaps `[start, end)`.
     ///
-    /// Only the active segment's index is consulted (older sealed
-    /// segments' `.txnindex` files are not loaded into
-    /// memory). The window `[fetch_offset, lso)` always falls within
-    /// the active segment in practice because LSO can only advance past
-    /// a committed/aborted marker, which lands in the same segment as
-    /// the corresponding transactional batches.
+    /// This method reads only the active segment's index. It does not load
+    /// the `.txnindex` files of older sealed segments into memory. In
+    /// practice the window `[fetch_offset, lso)` always falls within the
+    /// active segment, because the LSO can only advance past a commit or
+    /// abort marker, and that marker lands in the same segment as the
+    /// related transactional batches.
     #[must_use]
     pub fn aborted_in_range(
         &self,
@@ -567,13 +584,16 @@ impl Log {
     }
 
     /// Inject the [`StampSource`] that folds the additional internal stamp
-    /// coordinate into this partition. Opens (or recovers) the active
-    /// segment's `.stampindex`; from now on every durably-appended data batch
-    /// records a stamped range there.
+    /// coordinate into this partition.
     ///
-    /// This is the sole enabling switch: with no source injected the log
-    /// stamps nothing and is byte-for-byte identical to today. It touches no
-    /// wire-facing state — not the `.log` bytes, offset assignment, LSO, or
+    /// This method opens or recovers the active segment's `.stampindex`. From
+    /// this point every durably-appended data batch records a stamped range
+    /// there.
+    ///
+    /// This is the only switch that enables the feature. With no source
+    /// injected the log stamps nothing and its bytes are identical to those
+    /// of an unstamped log. It changes no wire-facing state: not the `.log`
+    /// bytes, not offset assignment, not the LSO, and not the
     /// high-watermark.
     ///
     /// # Errors
@@ -595,24 +615,28 @@ impl Log {
         Ok(())
     }
 
-    /// The internal stamp covering `offset`, or `None` when this partition is
-    /// unstamped (no source injected) or no stamped range covers `offset`.
+    /// The internal stamp that covers `offset`, or `None` when there is no
+    /// such stamp.
     ///
-    /// Consults only the active segment's `.stampindex`, mirroring
-    /// [`Log::aborted_in_range`]. This is an internal, server-side query: no
-    /// produce or fetch handler calls it, so the stamp can never reach a
-    /// client-facing response.
+    /// The result is `None` when the partition is unstamped, that is, when no
+    /// source is injected. It is also `None` when no stamped range covers
+    /// `offset`. This method reads only the active segment's `.stampindex`,
+    /// in the same way as [`Log::aborted_in_range`]. This is an internal,
+    /// server-side query. No produce or fetch handler calls it, so the stamp
+    /// can never reach a client-facing response.
     #[must_use]
     pub fn stamp_for_offset(&self, offset: Offset) -> Option<u64> {
         self.active_stamp_index.as_ref()?.stamp_for_offset(offset)
     }
 
     /// Record a stamped `[base, last]` range for a durably-appended data
-    /// batch. No-op when no [`StampSource`] is injected. Callers invoke this
-    /// strictly after the batch is durable and only for non-control batches,
-    /// in append (offset) order, so recorded ranges are non-overlapping and
-    /// their `base_offset`s strictly increase — satisfying
-    /// [`StampIndex::append`]'s ordering precondition.
+    /// batch.
+    ///
+    /// This method does nothing when no [`StampSource`] is injected. Callers
+    /// invoke it strictly after the batch is durable, only for non-control
+    /// batches, and in append order, which is offset order. Recorded ranges
+    /// therefore do not overlap and their `base_offset`s strictly increase.
+    /// That satisfies the ordering precondition of [`StampIndex::append`].
     fn record_stamp(&mut self, base: Offset, last: Offset) -> Result<(), LogError> {
         if let (Some(index), Some(source)) =
             (self.active_stamp_index.as_mut(), self.stamp_source.as_ref())
@@ -627,9 +651,11 @@ impl Log {
         Ok(())
     }
 
-    /// Reopen the active `.stampindex` for a new active segment, mirroring the
-    /// `active_txn_index` reopen on roll / truncate / reset. When no source is
-    /// injected this clears the (already-absent) index and does no I/O.
+    /// Reopen the active `.stampindex` for a new active segment.
+    ///
+    /// This mirrors the `active_txn_index` reopen on roll, truncate, and
+    /// reset. When no source is injected, this method clears the index, which
+    /// is already absent, and does no I/O.
     ///
     /// # Errors
     /// Returns an error when opening the `.stampindex` sidecar fails.
@@ -642,10 +668,11 @@ impl Log {
         Ok(())
     }
 
-    /// Append a `RecordBatch`. The batch's `base_offset` is overwritten
-    /// by the log to be the next assigned offset; `last_offset_delta`
-    /// determines how many absolute offsets this batch consumes.
-    /// Returns the assigned `base_offset`.
+    /// Append a `RecordBatch` and return the assigned `base_offset`.
+    ///
+    /// The log overwrites the batch's `base_offset` with the next assigned
+    /// offset. `last_offset_delta` sets how many absolute offsets this batch
+    /// consumes.
     #[instrument(
         level = "debug",
         skip_all,
@@ -675,18 +702,19 @@ impl Log {
         Ok(assigned_base)
     }
 
-    /// Append a producer batch **verbatim** (no decode/re-encode), assigning
-    /// `base_offset` from the log's current end. Returns the assigned
+    /// Append a producer batch **verbatim** and return the assigned
     /// `base_offset`.
     ///
-    /// This is the produce zero-copy passthrough path. The caller has
-    /// already CRC-validated the bytes and read the header fields into
-    /// [`VerbatimBatch`]; the log patches `base_offset` +
-    /// `partition_leader_epoch` (both outside the CRC region) and writes the
-    /// bytes as-is. Offset assignment, segment roll, flush, LSO/transaction
-    /// tracking, and the leader-epoch checkpoint behave exactly as
-    /// [`Log::append`] — verbatim vs. owned differ only in how the batch
-    /// bytes are produced, not in any log-level invariant.
+    /// The log does not decode or re-encode the batch, and it takes
+    /// `base_offset` from the log's current end. This is the produce
+    /// zero-copy passthrough path. The caller has already CRC-validated the
+    /// bytes and read the header fields into [`VerbatimBatch`]. The log
+    /// patches `base_offset` and `partition_leader_epoch`, which both sit
+    /// outside the CRC region, then writes the bytes as they are. Offset
+    /// assignment, segment roll, flush, LSO and transaction tracking, and the
+    /// leader-epoch checkpoint behave exactly as in [`Log::append`]. The
+    /// verbatim path and the owned path differ only in how the log gets the
+    /// batch bytes, not in any log-level invariant.
     #[instrument(
         level = "debug",
         skip_all,
@@ -717,14 +745,16 @@ impl Log {
 
     /// Append a producer batch **verbatim** at a caller-supplied base offset.
     ///
-    /// `base_offset` must equal the log's current [`Log::log_end_offset`];
-    /// otherwise this returns [`LogError::OffsetMismatch`] without appending.
-    /// On success, the stored batch is stamped with `base_offset` and the
-    /// batch's leader epoch without decoding or re-encoding CRC-covered bytes.
+    /// `base_offset` must equal the log's current [`Log::log_end_offset`]. If
+    /// it does not, this method returns [`LogError::OffsetMismatch`] and
+    /// appends nothing. On success the log stamps the stored batch with
+    /// `base_offset` and the batch's leader epoch. It does not decode or
+    /// re-encode the CRC-covered bytes.
     ///
     /// # Errors
     /// Returns [`LogError::OffsetMismatch`] when `base_offset` is not the log
-    /// end offset, or propagates segment/checkpoint I/O and validation errors.
+    /// end offset. It also propagates segment and checkpoint I/O errors and
+    /// validation errors.
     #[instrument(
         level = "debug",
         skip_all,
@@ -762,9 +792,11 @@ impl Log {
     }
 
     /// Flush and `fsync` the active segment to stable storage, independent of
-    /// [`LogConfig::flush_on_append`]. Also fsyncs the log directory after a new
-    /// segment file has been created, so the segment remains reachable after a
-    /// crash on filesystems that require parent-directory fsync.
+    /// [`LogConfig::flush_on_append`].
+    ///
+    /// This method also fsyncs the log directory after it creates a new
+    /// segment file. The segment therefore stays reachable after a crash on
+    /// filesystems that require a parent-directory fsync.
     ///
     /// # Errors
     /// Returns a [`LogError`] if the underlying segment or directory flush fails.
@@ -809,12 +841,13 @@ impl Log {
         segment.flush()
     }
 
-    /// Verbatim counterpart of [`Log::append_preserving_offset`]: roll if
-    /// needed, append the verbatim bytes to the active segment, honor
-    /// `flush_on_append`, and update LSO from the batch's
-    /// transactional/producer metadata. Mirrors the non-control branches of
-    /// the owned path; control batches never reach here (they take the
-    /// owned path).
+    /// Verbatim counterpart of [`Log::append_preserving_offset`].
+    ///
+    /// This function rolls the segment if necessary, appends the verbatim
+    /// bytes to the active segment, honors `flush_on_append`, and updates the
+    /// LSO from the batch's transactional and producer metadata. It mirrors
+    /// the non-control branches of the owned path. Control batches never
+    /// reach here, because they take the owned path.
     fn append_verbatim_preserving_offset(
         &mut self,
         batch: &VerbatimBatch,
@@ -893,17 +926,16 @@ impl Log {
         self.log_end_offset().max(self.reconciled_frontier)
     }
 
-    /// Append a `RecordBatch` whose `base_offset` is set by the caller.
+    /// Append a `RecordBatch` whose `base_offset` the caller sets.
     ///
-    /// Unlike [`Log::append`], this does NOT overwrite `batch.base_offset`
-    /// — it is used by the broker's replicator to preserve the
+    /// Unlike [`Log::append`], this method does NOT overwrite
+    /// `batch.base_offset`. The broker's replicator uses it to keep the
     /// leader-assigned offset on the follower's local log.
     ///
-    /// `offset` must equal the log's current [`Log::log_end_offset`];
-    /// otherwise this returns
-    /// [`LogError::OffsetMismatch`]. On success, `batch.base_offset` is
-    /// set to `offset` (it should already match) before the batch is
-    /// written.
+    /// `offset` must equal the log's current [`Log::log_end_offset`]. If it
+    /// does not, this method returns [`LogError::OffsetMismatch`]. On success
+    /// the log sets `batch.base_offset` to `offset`, which should already
+    /// match, before it writes the batch.
     #[instrument(
         level = "debug",
         skip(self, batch),
@@ -939,10 +971,11 @@ impl Log {
     }
 
     /// Internal helper shared by [`Log::append`] and [`Log::append_at`].
-    /// Performs segment-roll-if-needed, appends to the active segment, and
-    /// honors `config.flush_on_append` — but does NOT reassign
-    /// `batch.base_offset`. Callers are responsible for setting it first.
-    /// Also updates LSO and the active `.txnindex` based on batch attributes.
+    ///
+    /// This function rolls the segment if necessary, appends to the active
+    /// segment, and honors `config.flush_on_append`. It does NOT reassign
+    /// `batch.base_offset`. Callers must set that field first. It also
+    /// updates the LSO and the active `.txnindex` from the batch attributes.
     fn append_preserving_offset(&mut self, batch: &mut RecordBatch) -> Result<(), LogError> {
         let (segment_size, index_interval, flush_on_append) = {
             let cfg = self.config.read().unwrap();
@@ -1044,9 +1077,11 @@ impl Log {
         Ok(())
     }
 
-    /// Read batches starting at `offset`, returning up to roughly
-    /// `max_size` of `.log` data. Walks sealed segments first, then the
-    /// active segment, so reads can span segment boundaries.
+    /// Read batches from `offset` and return up to about `max_size` of
+    /// `.log` data.
+    ///
+    /// The read walks sealed segments first, then the active segment, so a
+    /// read can span segment boundaries.
     #[instrument(
         level = "debug",
         skip(self),
@@ -1121,9 +1156,11 @@ impl Log {
         })
     }
 
-    /// Like [`Log::read`] but returns verbatim wire bytes (no decode), walking
-    /// sealed segments then the active segment. Includes only batches with
-    /// `base_offset < limit_offset`, up to roughly `max_size` (≥ one batch).
+    /// Like [`Log::read`], but returns verbatim wire bytes with no decode.
+    ///
+    /// The read walks sealed segments and then the active segment. It
+    /// includes only batches with `base_offset < limit_offset`, up to about
+    /// `max_size`, and always at least one batch.
     #[instrument(
         level = "debug",
         skip(self),
@@ -1227,12 +1264,14 @@ impl Log {
     }
 
     crate::sendfile_cfg! {
-    /// Descriptor variant of [`Log::read_raw`] for the zero-copy (`sendfile`)
-    /// fetch path: walks sealed segments then the active segment exactly as
-    /// `read_raw` does, but collects one [`crabka_protocol::records::FileRegion`] per contributing segment
-    /// (via [`Segment::read_raw_desc`]) instead of owned `Bytes`. Crucially,
-    /// multi-segment fetches are **not** coalesced — each region is `sendfile`d
-    /// separately, dropping the cross-segment copy.
+    /// Descriptor variant of [`Log::read_raw`] for the zero-copy `sendfile`
+    /// fetch path.
+    ///
+    /// This method walks sealed segments and then the active segment exactly
+    /// as `read_raw` does. It collects one [`crabka_protocol::records::FileRegion`] for each contributing segment
+    /// through [`Segment::read_raw_desc`], instead of owned `Bytes`.
+    /// Multi-segment fetches are **not** coalesced. Each region goes out in
+    /// its own `sendfile` call, so the cross-segment copy disappears.
     ///
     /// The selected byte ranges are byte-identical to what `read_raw` would
     /// have returned for the same `(fetch_offset, limit_offset, max_size)`.
@@ -1316,8 +1355,8 @@ impl Log {
     }
     }
 
-    /// Truncate the log so no records at offset `>= offset` remain. Used
-    /// by replication / leader election.
+    /// Truncate the log so that no record at offset `>= offset` remains.
+    /// Replication and leader election use this method.
     #[instrument(level = "info", skip(self), err)]
     /// # Errors
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
@@ -1402,13 +1441,15 @@ impl Log {
         Ok(())
     }
 
-    /// Trim from the start of the log: drop every sealed segment whose
-    /// last offset is `< target`, advance `log_start_offset` if `target`
-    /// falls inside the active segment. Active segment is never deleted
-    /// by this call. Returns the resulting `log_start_offset`.
+    /// Trim from the start of the log and return the resulting
+    /// `log_start_offset`.
     ///
-    /// `target` is clamped to `[0, log_end_offset()]`. Caller asks for
-    /// trim past LEO → trim to LEO.
+    /// This method drops every sealed segment whose last offset is
+    /// `< target`. It advances `log_start_offset` when `target` falls inside
+    /// the active segment. It never deletes the active segment.
+    ///
+    /// `target` is clamped to `[0, log_end_offset()]`. A caller that asks for
+    /// a trim past the LEO gets a trim to the LEO.
     ///
     /// # Errors
     ///
@@ -1479,10 +1520,12 @@ impl Log {
         Ok(result)
     }
 
-    /// Periodic maintenance: apply time- and size-based retention to the
-    /// sealed segments. The active segment is never deleted, and if every
-    /// segment would otherwise be evicted we retain at least one.
-    /// (Active-roll-on-age is a placeholder per the plan; skip it.)
+    /// Periodic maintenance: apply time-based and size-based retention to
+    /// the sealed segments.
+    ///
+    /// This method never deletes the active segment. If retention would evict
+    /// every segment, the log keeps at least one. Active-roll-on-age is a
+    /// placeholder in the plan, so this method skips it.
     #[instrument(
         level = "debug",
         skip_all,
@@ -1531,20 +1574,24 @@ impl Log {
         Ok(())
     }
 
-    /// First absolute offset still present on this
-    /// broker's local disk (KIP-405). This delegates to
-    /// [`Log::log_start_offset`] — the two pointers co-advance.
+    /// First absolute offset still present on this broker's local disk
+    /// (KIP-405).
+    ///
+    /// This method delegates to [`Log::log_start_offset`]. The two pointers
+    /// co-advance.
     #[must_use]
     pub fn local_log_start_offset(&self) -> Offset {
         self.log_start_offset()
     }
 
-    /// Earliest local `(offset, record_timestamp)` whose record
-    /// timestamp is `>= target_ts`, searching sealed segments
-    /// oldest-first then the active segment. The first segment whose
-    /// `max_timestamp >= target_ts` holds the answer; the per-segment
-    /// helper does the index lookup + forward scan. `None` when no
-    /// local record qualifies (including an empty log).
+    /// Earliest local `(offset, record_timestamp)` whose record timestamp is
+    /// `>= target_ts`.
+    ///
+    /// The search reads sealed segments oldest-first and then the active
+    /// segment. The first segment whose `max_timestamp >= target_ts` holds
+    /// the answer. The per-segment helper does the index lookup and the
+    /// forward scan. The result is `None` when no local record qualifies,
+    /// including the case of an empty log.
     ///
     /// # Panics
     ///
@@ -1567,11 +1614,13 @@ impl Log {
         None
     }
 
-    /// Offset and timestamp of the record carrying the partition's
-    /// largest timestamp, scanning sealed segments then the active
-    /// segment. Ties resolve to the earliest offset (the first segment,
-    /// and the first record within it, wins). Returns `None` when the
-    /// log holds no records.
+    /// Offset and timestamp of the record that carries the partition's
+    /// largest timestamp.
+    ///
+    /// The scan reads sealed segments and then the active segment. Ties
+    /// resolve to the earliest offset: the first segment wins, and the first
+    /// record within it wins. The result is `None` when the log holds no
+    /// records.
     ///
     /// # Panics
     ///
@@ -1600,15 +1649,16 @@ impl Log {
             .map_or_else(|| self.log_start_offset(), |(offset, _)| offset)
     }
 
-    /// Physically delete every sealed segment whose
-    /// `last_offset < target`, then advance `log_start_offset` to `target`
-    /// (KIP-405). The active segment is never touched. Returns the count of
-    /// segments removed; a no-op (returns `Ok(0)`) when
+    /// Delete every sealed segment whose `last_offset < target` from disk,
+    /// then advance `log_start_offset` to `target` (KIP-405).
+    ///
+    /// This method never touches the active segment. It returns the number of
+    /// segments removed. It does nothing and returns `Ok(0)` when
     /// `target <= local_log_start_offset()`.
     ///
-    /// The caller is responsible for verifying these segments are safely
-    /// in the remote tier (`CopySegmentFinished`) before invoking this;
-    /// `Log` enforces no tiered-storage invariants. See
+    /// The caller must confirm that these segments are safely in the remote
+    /// tier (`CopySegmentFinished`) before it calls this method. `Log`
+    /// enforces no tiered-storage invariants. See
     /// `crates/broker/src/remote_log_manager.rs` for the production caller.
     ///
     /// # Errors
@@ -1671,15 +1721,16 @@ impl Log {
         Ok(removed)
     }
 
-    /// Describe every sealed segment for
-    /// tiered-storage offload (KIP-405). The active segment is never included — only
-    /// sealed segments are immutable and safe to copy.
+    /// Describe every sealed segment for tiered-storage offload (KIP-405).
     ///
-    /// `last_offset` is derived from the next segment's `base_offset` (the
-    /// active segment's base for the most-recent sealed segment), so it is
-    /// correct even for segments loaded from disk without a tail scan.
-    /// `max_timestamp` falls back to `-1` (unknown) when the in-memory
-    /// value has not been populated.
+    /// The result never includes the active segment. Only sealed segments are
+    /// immutable and safe to copy.
+    ///
+    /// `last_offset` comes from the next segment's `base_offset`. For the
+    /// most-recent sealed segment it comes from the active segment's base.
+    /// The value is therefore correct even for segments loaded from disk
+    /// without a tail scan. `max_timestamp` falls back to `-1`, which means
+    /// unknown, when the in-memory value is not set.
     #[must_use]
     pub fn tierable_segments(&self) -> Vec<SegmentExport> {
         // Sort the epoch entries once here rather than per-segment inside
@@ -1721,17 +1772,17 @@ impl Log {
             .collect()
     }
 
-    /// Run one compaction pass over the sealed segment list. No-op if
-    /// fewer than 2 sealed segments exist (nothing to dedup yet).
+    /// Run one compaction pass over the sealed segment list.
     ///
-    /// The active segment is never touched. Output is a single new
-    /// sealed segment at the lowest input base offset, replacing all
-    /// consumed sealed segments.
+    /// This method does nothing when fewer than 2 sealed segments exist,
+    /// because there is nothing to dedup yet. It never touches the active
+    /// segment. The output is a single new sealed segment at the lowest input
+    /// base offset, and it replaces all consumed sealed segments.
     ///
-    /// `ctx` carries the wall clock (for KIP-534 delete-horizon
-    /// computation) and the set of currently-active producers (so their
-    /// last batch is preserved via `RETAIN_EMPTY` even when fully
-    /// compacted away).
+    /// `ctx` carries the wall clock, which drives the KIP-534 delete-horizon
+    /// computation, and the set of currently-active producers. The cleaner
+    /// keeps the last batch of each active producer with `RETAIN_EMPTY`, even
+    /// when compaction removes all of its records.
     #[instrument(
         level = "info",
         skip_all,
@@ -1794,17 +1845,18 @@ impl Log {
     }
 }
 
-/// Inputs to one [`Log::compact`] pass that depend on broker-side state:
-/// the wall clock used to compute KIP-534 delete horizons, and the set of
-/// producers currently considered active.
+/// Inputs to one [`Log::compact`] pass that depend on broker-side state.
 ///
-/// `active_producers` maps `producer_id` → the `base_offset` of that
-/// producer's last batch. When a producer's last batch is fully compacted
-/// away, the cleaner re-emits a bare batch header (`RETAIN_EMPTY`) so the
-/// producer's sequence/epoch state and the log-end offset survive.
+/// These inputs are the wall clock that computes the KIP-534 delete horizons,
+/// and the set of producers that count as active.
+///
+/// `active_producers` maps `producer_id` to the `base_offset` of that
+/// producer's last batch. When compaction removes every record of that batch,
+/// the cleaner writes a bare batch header (`RETAIN_EMPTY`) again, so the
+/// producer's sequence and epoch state and the log-end offset survive.
 #[derive(Debug, Clone)]
 pub struct CompactionContext {
-    /// Wall clock for this pass. Drives delete-horizon stamping/expiry.
+    /// Wall clock for this pass. It drives delete-horizon stamps and expiry.
     pub now: std::time::SystemTime,
     /// `producer_id` → last batch `base_offset` for currently-active
     /// producers.
@@ -1979,9 +2031,9 @@ mod tests {
 
     crate::sendfile_cfg! {
     /// Increment D/E: `Log::read_raw_desc` across a segment seam must yield
-    /// regions whose **concatenation** is byte-identical to `read_raw`'s
-    /// coalesced bytes — but as multiple `FileRegion`s (one per contributing
-    /// segment), proving the cross-segment copy was dropped.
+    /// regions whose **concatenation** is byte-identical to the coalesced
+    /// bytes of `read_raw`. The result must be several `FileRegion`s, one for
+    /// each contributing segment. That proves the cross-segment copy is gone.
     #[test]
     fn log_read_raw_desc_multi_segment_regions_equal_read_raw() {
         use std::os::unix::fs::FileExt;
@@ -2031,8 +2083,8 @@ mod tests {
     }
     } // sendfile_cfg!
 
-    /// Encode a "producer" batch (with a producer-chosen `base_offset` and
-    /// leader epoch) and return both the wire bytes and a `VerbatimBatch`.
+    /// Encode a "producer" batch with a producer-chosen `base_offset` and
+    /// leader epoch. Return both the wire bytes and a `VerbatimBatch`.
     fn verbatim_from(producer: &RecordBatch, leader_epoch: LeaderEpoch) -> (Bytes, VerbatimBatch) {
         let mut wire = bytes::BytesMut::new();
         producer.encode(&mut wire).unwrap();
@@ -2694,8 +2746,8 @@ mod tests {
         Bytes::from(buf.to_vec())
     }
 
-    /// A commit control batch (`marker_type=1`) for the given pid/epoch.
-    /// Offsets are rewritten by `Log::append`.
+    /// A commit control batch (`marker_type=1`) for the given pid and epoch.
+    /// `Log::append` rewrites the offsets.
     fn commit_marker(pid: i64, epoch: i16) -> RecordBatch {
         RecordBatch {
             base_offset: 0,
@@ -2714,8 +2766,8 @@ mod tests {
         }
     }
 
-    /// An abort control batch (`marker_type=0`) for the given pid/epoch.
-    /// Offsets are rewritten by `Log::append`.
+    /// An abort control batch (`marker_type=0`) for the given pid and epoch.
+    /// `Log::append` rewrites the offsets.
     fn abort_marker(pid: i64, epoch: i16) -> RecordBatch {
         RecordBatch {
             base_offset: 0,
@@ -2759,11 +2811,12 @@ mod tests {
 
     // ---- .stampindex append-path wiring tests ----
 
-    /// Append three data batches spanning distinct offset ranges to a
-    /// stamp-enabled log; the `.stampindex` records one entry per batch (in
-    /// order, with the source's successive stamps) and `stamp_for_offset`
-    /// resolves every covered offset, including interior and inclusive-end
-    /// offsets, while gaps past the end resolve to `None`.
+    /// Append three data batches with distinct offset ranges to a
+    /// stamp-enabled log. The `.stampindex` records one entry for each batch,
+    /// in order, with the successive stamps from the source.
+    /// `stamp_for_offset` resolves every covered offset, including interior
+    /// offsets and the inclusive end offset. Offsets past the end resolve to
+    /// `None`.
     #[test]
     fn stampindex_records_appended_batches_and_resolves_offsets() {
         let (dir, mut log) = test_log();
@@ -2808,9 +2861,9 @@ mod tests {
         );
     }
 
-    /// A log with no injected stamp source stamps nothing: `stamp_for_offset`
-    /// is always `None` and no `.stampindex` file is ever created — the
-    /// unchanged-behavior guarantee for pure-Kafka partitions.
+    /// A log with no injected stamp source stamps nothing. `stamp_for_offset`
+    /// is always `None` and the log never creates a `.stampindex` file. This
+    /// is the unchanged-behavior guarantee for pure-Kafka partitions.
     #[test]
     fn no_stamp_source_stamps_nothing() {
         let (dir, mut log) = test_log();
@@ -2822,9 +2875,9 @@ mod tests {
         assert2::assert!(!dir.path().join("00000000000000000000.stampindex").exists());
     }
 
-    /// The control (commit/abort) marker of a transaction is NOT stamped —
-    /// stamps are a coordinate for data records, not markers. The two data
-    /// batches around the marker are stamped; the marker's own offset is not.
+    /// The commit or abort marker of a transaction is NOT stamped. A stamp is
+    /// a coordinate for data records, not for markers. The log stamps the two
+    /// data batches around the marker, but not the marker's own offset.
     #[test]
     fn control_markers_are_not_stamped() {
         let (dir, mut log) = test_log();
@@ -2863,12 +2916,12 @@ mod tests {
         );
     }
 
-    /// The verbatim (replication) append path stamps the batch's *full*
-    /// offset span: a multi-record batch appended through `append_verbatim`
-    /// records `last_offset == base_offset + last_offset_delta`, so interior
-    /// and inclusive-end offsets resolve and one past the end does not. Guards
-    /// the `base + delta` arithmetic on that path, which the owned-append
-    /// tests above don't exercise.
+    /// The verbatim replication append path stamps the *full* offset span of
+    /// the batch. A multi-record batch appended through `append_verbatim`
+    /// records `last_offset == base_offset + last_offset_delta`. Interior
+    /// offsets and the inclusive end offset therefore resolve, and one offset
+    /// past the end does not. This test guards the `base + delta` arithmetic
+    /// on that path, which the owned-append tests above do not exercise.
     #[test]
     fn append_verbatim_stamps_full_offset_range() {
         let (dir, mut log) = test_log();
@@ -2900,11 +2953,11 @@ mod tests {
         );
     }
 
-    /// Rolling to a new segment reopens the active `.stampindex` at the new
-    /// segment's own sidecar: the post-roll batch's entry lands in the new
-    /// segment's file, and does not leak back into the sealed segment's file.
-    /// Guards the reopen — a no-op reopen would keep stamping the sealed
-    /// segment's index.
+    /// A roll to a new segment reopens the active `.stampindex` at the
+    /// sidecar of the new segment. The entry for the post-roll batch lands in
+    /// the new segment's file and does not leak back into the sealed
+    /// segment's file. This test guards the reopen. A reopen that did nothing
+    /// would keep the stamps in the sealed segment's index.
     #[test]
     fn roll_reopens_stampindex_for_new_segment() {
         let dir = tempdir().unwrap();
@@ -2946,13 +2999,13 @@ mod tests {
         );
     }
 
-    /// Wire-exactness invariance: appending an identical mixed sequence
-    /// (non-txn, transactional data, commit marker, non-txn) to a
-    /// stamp-enabled log and an unstamped log yields byte-for-byte identical
-    /// `.log` output and identical assigned offsets and LSO at every step.
-    /// The stamp is a pure additional sidecar — it cannot perturb any
-    /// client-facing coordinate (high-watermark is derived from these, so it
-    /// too is unaffected).
+    /// Wire-exactness invariance. This test appends an identical mixed
+    /// sequence to a stamp-enabled log and to an unstamped log: non-txn,
+    /// transactional data, commit marker, non-txn. Both logs give
+    /// byte-for-byte identical `.log` output, and identical assigned offsets
+    /// and LSO at every step. The stamp is only an added sidecar and cannot
+    /// change any client-facing coordinate. The high-watermark comes from
+    /// these values, so it too stays the same.
     #[test]
     fn stamping_does_not_change_offsets_lso_or_log_bytes() {
         // Build the same append script for both logs.
@@ -3383,9 +3436,9 @@ mod tests {
         }
     }
 
-    /// A `CompactionContext` with a fixed epoch (deterministic) and no
-    /// active producers. Used by the in-crate compaction tests where
-    /// tombstone/marker aging is not under test.
+    /// A `CompactionContext` with a fixed, deterministic epoch and no active
+    /// producers. The in-crate compaction tests use it where tombstone and
+    /// marker age are not under test.
     fn compaction_ctx() -> CompactionContext {
         CompactionContext {
             now: SystemTime::UNIX_EPOCH,
@@ -3447,12 +3500,12 @@ mod tests {
         assert2::assert!(keys.contains(&b"active-key".as_ref()));
     }
 
-    /// Compaction must actually run — not be a no-op. Three sealed segments
-    /// each carry a record under the SAME key "k1"; after `compact` exactly ONE
-    /// k1 record (the newest, "v2") must remain, and the sealed segment list
-    /// must collapse to a single rewritten segment. Skipping compaction
-    /// (`return Ok(())`) would leave all three k1 records and three sealed
-    /// segments.
+    /// Compaction must run and must not do nothing. Three sealed segments
+    /// each carry a record under the SAME key "k1". After `compact`, exactly
+    /// ONE k1 record must remain, the newest one, "v2". The sealed segment
+    /// list must collapse to a single rewritten segment. A compaction that
+    /// returned `Ok(())` at once would leave all three k1 records and three
+    /// sealed segments.
     #[test]
     fn compact_actually_dedupes_reducing_record_count() {
         let dir = tempdir().unwrap();
@@ -3669,8 +3722,9 @@ mod tests {
 
     // ---- Local-retention helpers (KIP-405) ----
 
-    /// Build a log rolled into several sealed segments under `dir`. Mirror
-    /// of the `remote_log_manager` test helper, kept local to this module.
+    /// Build a log rolled into several sealed segments under `dir`. This
+    /// mirrors the `remote_log_manager` test helper and stays local to this
+    /// module.
     fn rolled_log(dir: &std::path::Path, extra: &LogConfig) -> Log {
         let mut log = Log::open(
             dir,

@@ -1,32 +1,34 @@
 //! Newtypes for the gateway's Kafka record-coordinate domain values.
 //!
-//! A produced/consumed record is identified by a `(partition, offset)` pair
-//! plus a `timestamp`. In raw form these are `i32` (partition) and two adjacent
-//! `i64`s (offset, timestamp) — the offset/timestamp pair is the textbook swap
-//! shape: transpose them in a struct literal or a call and it still compiles,
-//! silently mislabelling the record. These wrappers make the compiler reject
-//! the mix-up.
+//! A `(partition, offset)` pair plus a `timestamp` identifies a produced or
+//! consumed record. In raw form the partition is an `i32`, and the offset and
+//! timestamp are two adjacent `i64`s. That pair is the textbook swap shape:
+//! transpose the two in a struct literal or a call and the code still compiles
+//! and mislabels the record. These wrappers make the compiler reject the
+//! mix-up.
 //!
-//! The gateway owns these only *between* its wire edges — it reads the raw
-//! primitives out of the native producer/consumer types and the generated
+//! The gateway owns these only *between* its wire edges. It reads the raw
+//! primitives out of the native producer and consumer types and the generated
 //! protobuf, wraps them here, and unwraps back to the primitive when it
-//! re-encodes. The canonical cross-crate `Offset`/`PartitionIndex` newtypes
-//! (owned by `protocol`) are a separate staged rollout; these crate-local
-//! types convert at the boundary via `From`/`Into` until that lands.
+//! re-encodes. The canonical cross-crate `Offset` and `PartitionIndex`
+//! newtypes, which `protocol` owns, are a separate staged rollout. Until that
+//! lands, these crate-local types convert at the boundary with `From` and
+//! `Into`.
 //!
-//! Several carrying structs are serialised — `WebhookResponse` (JSON over
-//! HTTP), `ForwardResult` (the internal forward wire), and `ClaimValue` (the
-//! compacted dedup-topic value) — so every newtype is `#[serde(transparent)]`:
-//! the encoded JSON is exactly the inner primitive, never a wrapping object,
-//! keeping the byte shape identical.
+//! Several carrying structs are serialised: `WebhookResponse` as JSON over
+//! HTTP, `ForwardResult` on the internal forward wire, and `ClaimValue` as the
+//! compacted dedup-topic value. Every newtype is therefore
+//! `#[serde(transparent)]`. The encoded JSON is exactly the inner primitive and
+//! never a wrapping object, which keeps the byte shape identical.
 
-/// The canonical cross-crate Kafka `(partition, offset)` coordinate. `Timestamp`
-/// stays gateway-local (it is not one of the shared core identifiers).
+/// The canonical cross-crate Kafka `(partition, offset)` coordinate.
+/// `Timestamp` stays gateway-local, because it is not one of the shared core
+/// identifiers.
 pub use crabka_ids::{Offset, PartitionIndex};
 use derive_more::{Display, From, Into};
 use serde::{Deserialize, Serialize};
 
-/// A record's timestamp in epoch milliseconds (`i64` on the wire).
+/// A record's timestamp in epoch milliseconds. It is an `i64` on the wire.
 #[derive(
     Debug,
     Clone,

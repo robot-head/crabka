@@ -1,11 +1,14 @@
-//! `DescribeCluster` (`api_key=60`). Pure projection over the metadata
-//! image. Authorizes `Describe` on `Cluster("kafka-cluster")`; on Deny
-//! returns a whole-response `error_code = CLUSTER_AUTHORIZATION_FAILED` (31).
+//! `DescribeCluster` (`api_key=60`).
 //!
-//! KIP-430: when the request's `include_cluster_authorized_operations`
-//! flag is set, the response carries a bitfield of the cluster
-//! operations the principal is authorized for; otherwise the field is
-//! left at `i32::MIN` (Kafka's "not present" sentinel).
+//! This handler is a pure projection over the metadata image. It authorizes
+//! `Describe` on `Cluster("kafka-cluster")`. On Deny it returns a
+//! whole-response `error_code = CLUSTER_AUTHORIZATION_FAILED` (31).
+//!
+//! KIP-430: when the request sets the
+//! `include_cluster_authorized_operations` flag, the response carries a
+//! bitfield of the cluster operations the principal is authorized for. If the
+//! flag is not set, the field stays at `i32::MIN`, which is Kafka's "not
+//! present" sentinel.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};

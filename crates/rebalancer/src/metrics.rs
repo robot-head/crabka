@@ -2,10 +2,10 @@
 //!
 //! Usage and latency counters are registered off the same `Registry`.
 //!
-//! The `Counter` / `Gauge` handles from `prometheus-client` are cheaply
-//! clonable (internally `Arc`-backed), so [`RebalancerMetrics`] itself
-//! is `Clone` and can be shared between the ingester tick and the RPC
-//! handlers without further wrapping.
+//! The `Counter` and `Gauge` handles from `prometheus-client` are cheap to
+//! clone, because they are `Arc`-backed internally. [`RebalancerMetrics`] is
+//! therefore `Clone`, and the ingester tick and the RPC handlers can share one
+//! bundle without further wrapping.
 
 use crabka_units::{Time, convert::TimeExt as _};
 use prometheus_client::{
@@ -14,16 +14,17 @@ use prometheus_client::{
     registry::Registry,
 };
 
-/// Label for a rebalance-compute outcome (`"ok"`, `"no_movements"`,
-/// `"error"`).
+/// Label for a rebalance-compute outcome: `"ok"`, `"no_movements"`, or
+/// `"error"`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct ResultLabel {
     pub result: String,
 }
 
-/// Bucket boundaries (seconds) for the rebalance-compute latency histogram.
+/// Bucket boundaries, in seconds, for the rebalance-compute latency histogram.
+///
 /// The optimizer is CPU-bound over the in-memory cluster snapshot, so the
-/// buckets skew sub-second (1 ms – 5 s) with headroom for very large
+/// buckets skew sub-second, from 1 ms to 5 s, with headroom for very large
 /// clusters.
 fn rebalance_duration_buckets() -> [f64; 11] {
     [
@@ -33,10 +34,10 @@ fn rebalance_duration_buckets() -> [f64; 11] {
 
 /// Bundle of metric handles emitted by the rebalancer process.
 ///
-/// Metric names are intentionally bare (no `_total` / no prefix); the
-/// `crabka_rebalancer` prefix is applied by the shared `Registry`
-/// (see [`crate::health::new_registry`]) and `prometheus-client`
-/// appends `_total` to `Counter` names automatically at encode time.
+/// Metric names are deliberately bare, with no `_total` suffix and no prefix.
+/// The shared `Registry` applies the `crabka_rebalancer` prefix, as
+/// [`crate::health::new_registry`] shows, and `prometheus-client` appends
+/// `_total` to `Counter` names automatically at encode time.
 #[derive(Clone)]
 pub struct RebalancerMetrics {
     /// Unix epoch millis of the most recent successful cluster-state snapshot.
@@ -53,8 +54,8 @@ pub struct RebalancerMetrics {
     pub executions_failed_total: Counter,
     /// Total executions that reached `Cancelled` via `CancelExecution`.
     pub executions_cancelled_total: Counter,
-    /// Rebalance (optimizer) computations, labelled by result
-    /// (`ok`, `no_movements`, `error`).
+    /// Rebalance computations in the optimizer, labelled by result: `ok`,
+    /// `no_movements`, or `error`.
     pub rebalances: Family<ResultLabel, Counter>,
     /// Wall-clock latency of a single `optimizer::optimize` invocation, seconds.
     pub rebalance_duration_seconds: Histogram,
@@ -83,10 +84,11 @@ impl Default for RebalancerMetrics {
 }
 
 impl RebalancerMetrics {
-    /// Register all metrics against `registry` and return a bundle of
-    /// the handles. Caller-supplied registry so the binary entry can
-    /// share one `Registry` between this and the axum `/metrics`
-    /// handler.
+    /// Register all metrics against `registry` and return a bundle of the
+    /// handles.
+    ///
+    /// The caller supplies the registry, so the binary entry can share one
+    /// `Registry` between this bundle and the axum `/metrics` handler.
     #[must_use]
     pub fn register(registry: &mut Registry) -> Self {
         let m = Self::default();
@@ -149,8 +151,8 @@ impl RebalancerMetrics {
         m
     }
 
-    /// Record a rebalance-compute outcome with the given `result` label
-    /// (`"ok"`, `"no_movements"`, `"error"`).
+    /// Record a rebalance-compute outcome with the given `result` label:
+    /// `"ok"`, `"no_movements"`, or `"error"`.
     pub fn record_rebalance(&self, result: &str) {
         self.rebalances
             .get_or_create(&ResultLabel {

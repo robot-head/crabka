@@ -476,11 +476,11 @@ async fn probe_durable_retire_receipt(
 }
 
 /// Client-side time the workload's ambiguity protocol may spend on top of
-/// engine recovery before an acknowledgement can land: a 3s healthy-empty-read
-/// streak plus polling and psql round trips. Added to the observed-safe engine
-/// ack-gap bounds. A 4s allowance was overshot by 425ms on a CI runner
-/// (19425ms against the 15s running/checkpointed engine bound), so this
-/// carries a wider margin.
+/// engine recovery before an acknowledgement can land. It covers a 3s
+/// healthy-empty-read streak plus polling and psql round trips, and it is added
+/// to the observed-safe engine ack-gap bounds. A 4s allowance was overshot by
+/// 425ms on a CI runner, at 19425ms against the 15s running and checkpointed
+/// engine bound, so this carries a wider margin.
 const WORKLOAD_AMBIGUITY_RESOLUTION_MS: u128 = 6_000;
 
 fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
@@ -564,10 +564,13 @@ fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
     })
 }
 
-/// Explains a final-ledger mismatch per offending sequence, using the client
-/// attempt and ambiguity-retry records to distinguish engine double-apply
-/// (duplicate rows without any client retry) from a workload grace-window
-/// breach (duplicate rows after the client concluded absence and re-INSERTed).
+/// Explains a final-ledger mismatch for each offending sequence.
+///
+/// It reads the client attempt records and the ambiguity-retry records to tell
+/// an engine double-apply from a workload grace-window breach. An engine
+/// double-apply gives duplicate rows without any client retry. A grace-window
+/// breach gives duplicate rows after the client concluded absence and
+/// re-INSERTed.
 fn describe_ledger_mismatch(
     rows: &[(i64, String)],
     expected: &[(i64, String)],
@@ -1234,8 +1237,9 @@ async fn prepare_split_foundation() -> SplitFoundationSetup {
 /// Scan one range directly, bypassing the gateway.
 ///
 /// `routing_table_id` is the suffix the fixture bakes into the relation name to
-/// pin its routing slot; the scan RPC addresses the relation by *catalog* id, so
-/// the two are resolved against each other here rather than assumed equal.
+/// pin its routing slot. The scan RPC addresses the relation by *catalog* id,
+/// so this function resolves the two against each other rather than assume they
+/// are equal.
 async fn direct_successor_rows(
     system: &ProcessHarness,
     range_id: u32,

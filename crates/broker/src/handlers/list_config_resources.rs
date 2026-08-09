@@ -2,15 +2,15 @@
 //! resource an admin client can target with `DescribeConfigs` /
 //! `AlterConfigs`. The same RPC at v0 was historically called
 //! `ListClientMetricsResources` (KIP-714) and returned only client-metrics
-//! subscriptions; v1 generalises it with a `resource_types` filter.
+//! subscriptions. v1 generalises it with a `resource_types` filter.
 //!
-//! Crabka surfaces three resource types — `TOPIC` (2), `BROKER` (4), and
+//! Crabka surfaces three resource types: `TOPIC` (2), `BROKER` (4), and
 //! `CLIENT_METRICS` (16). `BROKER_LOGGER` (8) and `GROUP` (32) are
-//! intentionally omitted: dynamic per-broker `log4j`-style loggers aren't a
-//! concept here (the broker reads `RUST_LOG` from its `ConfigMap`),
-//! and Crabka has no group-config knobs today. Clients filtering for those
-//! types get an empty list — the same surface the JVM client expects when
-//! the broker doesn't recognise the type.
+//! deliberately omitted. Dynamic per-broker `log4j`-style loggers are not a
+//! concept here, because the broker reads `RUST_LOG` from its `ConfigMap`,
+//! and Crabka has no group-config knobs today. A client that filters for those
+//! types gets an empty list, which is the same surface the JVM client expects
+//! when the broker does not recognise the type.
 //!
 //! `CLIENT_METRICS` enumerates configured subscription names from the
 //! metadata image (see `MetadataImage::client_metrics_subscriptions`).
@@ -32,15 +32,15 @@ use crate::{
     error::BrokerError,
 };
 
-/// Kafka wire-level resource-type ids. Match the JVM
+/// Kafka wire-level resource-type ids. They match the JVM
 /// `org.apache.kafka.common.config.ConfigResource.Type` enum.
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
 const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
 
 /// Default set returned when v1 callers omit `resource_types` (KIP-1142).
-/// Mirrors the JVM admin client's expectation: every supported type the
-/// broker can describe configs for.
+/// It mirrors the JVM admin client's expectation, which is every supported
+/// type that the broker can describe configs for.
 const DEFAULT_RESOURCE_TYPES: [i8; 3] = [
     RESOURCE_TYPE_TOPIC,
     RESOURCE_TYPE_BROKER,
@@ -98,12 +98,12 @@ pub(crate) fn handle(
     crate::handlers::encode_response(&resp, version)
 }
 
-/// Resolve the effective filter (v0 → client-metrics-only; v1 with empty
-/// list → default set; v1 with explicit types → caller's filter) and
-/// enumerate each requested type from the image. Pure — testable without
-/// a broker. The output is sorted by `(resource_type, resource_name)` so
-/// the wire payload is deterministic regardless of underlying iteration
-/// order in `MetadataImage`.
+/// Resolve the effective filter and enumerate each requested type from the
+/// image. v0 gives client-metrics only. v1 with an empty list gives the
+/// default set. v1 with explicit types gives the caller's filter. The function
+/// is pure, so a test can call it without a broker. The output is sorted by
+/// `(resource_type, resource_name)`, so the wire payload is deterministic
+/// whatever the underlying iteration order in `MetadataImage` is.
 fn collect_resources(
     image: &crabka_metadata::MetadataImage,
     version: i16,

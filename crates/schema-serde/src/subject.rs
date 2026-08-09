@@ -1,5 +1,7 @@
-//! Subject naming. Confluent's default `TopicNameStrategy` maps a topic +
-//! key/value role to `<topic>-key` / `<topic>-value`.
+//! Subject naming.
+//!
+//! Confluent's default `TopicNameStrategy` maps a topic and a key/value role to
+//! `<topic>-key` or `<topic>-value`.
 
 /// Whether a serde handles the record key or value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,7 +19,10 @@ pub enum SchemaKind {
 }
 
 impl SchemaKind {
-    /// Registry `schemaType` wire value (`None` ⇒ omitted ⇒ AVRO default).
+    /// Registry `schemaType` wire value.
+    ///
+    /// `None` omits the field from the request body, and the registry then
+    /// applies the AVRO default.
     #[must_use]
     pub fn wire_name(self) -> Option<&'static str> {
         match self {
@@ -28,9 +33,10 @@ impl SchemaKind {
     }
 }
 
-/// Maps `(topic, role)` to a registry subject. The seam exists so
-/// Record/TopicRecord strategies can be added later; only `TopicNameStrategy`
-/// ships now.
+/// Maps `(topic, role)` to a registry subject.
+///
+/// This trait is the seam for Record and `TopicRecord` strategies, which can come
+/// later. Only `TopicNameStrategy` ships now.
 pub trait SubjectStrategy: Send + Sync + 'static {
     fn subject(&self, topic: &str, role: Role) -> String;
 }

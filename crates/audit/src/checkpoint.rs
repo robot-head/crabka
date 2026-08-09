@@ -1,8 +1,8 @@
 //! Signed chain-checkpoint records.
 //!
-//! A checkpoint is a special audit record (`event_class = "checkpoint"`) that
-//! is NOT part of the hash-chain; it asserts and signs the chain head at its
-//! position so an attacker without the signing key cannot forge a consistent
+//! A checkpoint is a special audit record with `event_class = "checkpoint"`. It
+//! is NOT part of the hash-chain. It asserts and signs the chain head at its
+//! position, so an attacker without the signing key cannot forge a consistent
 //! rewrite of the records before it.
 
 use serde_json::json;
@@ -15,7 +15,7 @@ use crate::{
     sink::AuditRecord,
 };
 
-/// `event_class` header value identifying a checkpoint record.
+/// `event_class` header value that identifies a checkpoint record.
 pub const EVENT_CLASS_CHECKPOINT: &str = "checkpoint";
 
 /// A signed checkpoint over the chain head at sequence `seq_high`.
@@ -67,7 +67,7 @@ impl Checkpoint {
         verify_signature(public_key, &msg, &self.signature)
     }
 
-    /// Encode as an audit record for the audit topic.
+    /// Encode this checkpoint as an audit record for the audit topic.
     #[must_use]
     pub fn to_record(&self) -> AuditRecord {
         let value = serde_json::to_vec(&json!({
@@ -90,8 +90,9 @@ impl Checkpoint {
         }
     }
 
-    /// Parse a checkpoint from its record value JSON. Returns `None` if any
-    /// field is missing or malformed.
+    /// Parse a checkpoint from its record value JSON.
+    ///
+    /// Returns `None` if any field is missing or malformed.
     #[must_use]
     pub fn from_value(v: &serde_json::Value) -> Option<Self> {
         let key_id = v.get("key_id")?.as_str()?.to_string();

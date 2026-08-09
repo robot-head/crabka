@@ -42,7 +42,7 @@ broker.shutdown().await;
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-broker](https://docs.rs/crabka-broker). The repository README contains project-wide setup, development, and release notes.
+Read the API documentation on [docs.rs/crabka-broker](https://docs.rs/crabka-broker). The repository README contains the project-wide setup, development, and release notes.
 
 ## License
 

@@ -1,10 +1,10 @@
-//! Row constructors — `ROW(a, b)` and the bare parenthesised `(a, b)`.
+//! Row constructors: `ROW(a, b)` and the bare parenthesised `(a, b)`.
 //!
 //! A row reaching an ordinary value position becomes a [`Datum::Record`] of the
-//! anonymous `record` type (OID 2249), with `PostgreSQL`'s `f1`…`fn` field
-//! names. The *row-wise* operations — comparison, `IN`, `IS [NOT] NULL`, and
-//! `IS [NOT] DISTINCT FROM` — are still taken here, field by field, before the
-//! row is packaged, because their three-valued semantics differ from the
+//! anonymous `record` type, OID 2249, with `PostgreSQL`'s `f1`…`fn` field names.
+//! This module still takes the *row-wise* operations field by field, before it
+//! packages the row. Those operations are comparison, `IN`, `IS [NOT] NULL`, and
+//! `IS [NOT] DISTINCT FROM`. Their three-valued semantics differ from the
 //! composite-value operators of the same spelling: `ROW(1,NULL) < ROW(1,2)` is
 //! NULL, while the same comparison between two composite *values* is `false`.
 
@@ -35,15 +35,15 @@ pub(crate) fn eval_row(
 }
 
 /// `PostgreSQL`'s `record_out`, over already-evaluated field values.
-/// Row-wise comparison: fields are compared left to right and the first pair
-/// that differs decides the whole row. A NULL pair reached before any decision
-/// makes the comparison NULL — which is why `(1,NULL) < (2,2)` is true (the
-/// first pair already decided) while `(1,2) < (1,NULL)` is NULL.
+/// Row-wise comparison: this function compares fields left to right, and the
+/// first pair that differs decides the whole row. A NULL pair reached before any
+/// decision makes the comparison NULL. That is why `(1,NULL) < (2,2)` is true,
+/// because the first pair already decided, while `(1,2) < (1,NULL)` is NULL.
 ///
-/// `ROW()` has nothing to decide with, and `PostgreSQL` refuses to order or
-/// equate two of them (0A000) rather than calling them equal — even though
-/// `IS [NOT] DISTINCT FROM` and `IS [NOT] NULL`, which do not go through here,
-/// answer for it happily.
+/// `ROW()` has nothing to decide with. `PostgreSQL` refuses to order or equate
+/// two of them, with 0A000, rather than calling them equal. `IS [NOT] DISTINCT
+/// FROM` and `IS [NOT] NULL` still answer for it, and they do not go through
+/// here.
 fn compare(left: &[Datum], right: &[Datum]) -> Result<Option<Ordering>, ExecError> {
     if left.is_empty() && right.is_empty() {
         return Err(ExecError::Unsupported(
@@ -60,9 +60,9 @@ fn compare(left: &[Datum], right: &[Datum]) -> Result<Option<Ordering>, ExecErro
     Ok(Some(Ordering::Equal))
 }
 
-/// Row-wise `IS DISTINCT FROM`: two rows are distinct iff some field pair is,
-/// where a field pair of two NULLs is not distinct and a NULL against a
-/// non-NULL is. Never NULL.
+/// Row-wise `IS DISTINCT FROM`: two rows are distinct if and only if some field
+/// pair is distinct. A field pair of two NULLs is not distinct, and a NULL
+/// against a non-NULL is distinct. The result is never NULL.
 fn distinct(left: &[Datum], right: &[Datum]) -> Result<bool, ExecError> {
     for (l, r) in left.iter().zip(right) {
         if is_distinct(l, r)? {
@@ -72,7 +72,7 @@ fn distinct(left: &[Datum], right: &[Datum]) -> Result<bool, ExecError> {
     Ok(false)
 }
 
-/// Scalar `IS DISTINCT FROM`: null-safe inequality, never NULL.
+/// Scalar `IS DISTINCT FROM`: null-safe inequality. The result is never NULL.
 pub(crate) fn is_distinct(l: &Datum, r: &Datum) -> Result<bool, ExecError> {
     match (l.is_null(), r.is_null()) {
         (true, true) => Ok(false),
@@ -82,8 +82,8 @@ pub(crate) fn is_distinct(l: &Datum, r: &Datum) -> Result<bool, ExecError> {
 }
 
 /// `left <op> right` when BOTH operands are row constructors, for the operators
-/// defined over rows. `Ok(None)` when this is not a row-wise operation, leaving
-/// the caller's ordinary path in charge.
+/// defined over rows. Returns `Ok(None)` when this is not a row-wise operation,
+/// which leaves the caller's ordinary path in charge.
 pub(crate) fn eval_binary(
     op: BinaryOp,
     left: &Expr,
@@ -116,9 +116,9 @@ pub(crate) fn eval_binary(
     Ok(Some(crate::eval::cmp_result(op, compare(&lv, &rv)?)))
 }
 
-/// `row IS [NOT] NULL`, which is field-wise and therefore not a pair of
-/// negations: `IS NULL` holds only when EVERY field is NULL, `IS NOT NULL` only
-/// when every field is non-NULL, so `ROW(1, NULL)` satisfies neither.
+/// `row IS [NOT] NULL`, which is field-wise and so not a pair of negations.
+/// `IS NULL` holds only when EVERY field is NULL, and `IS NOT NULL` only when
+/// every field is non-NULL, so `ROW(1, NULL)` satisfies neither. Returns
 /// `Ok(None)` when the operand is not a row constructor.
 pub(crate) fn eval_is_null(
     expr: &Expr,
@@ -138,8 +138,9 @@ pub(crate) fn eval_is_null(
 }
 
 /// `row [NOT] IN (row, …)`, compared row-wise with the same three-valued logic
-/// as the scalar list: an equal row wins, otherwise a NULL comparison anywhere
-/// makes the result NULL. `Ok(None)` when the left operand is not a row.
+/// as the scalar list. An equal row wins. If no row is equal, a NULL comparison
+/// anywhere makes the result NULL. Returns `Ok(None)` when the left operand is
+/// not a row.
 pub(crate) fn eval_in_list(
     expr: &Expr,
     list: &[Expr],
@@ -181,7 +182,7 @@ mod tests {
     }
 
     /// `record_out`'s quoting, which is what a composite value's text form goes
-    /// through on the wire: a field is quoted only when leaving it bare would be
+    /// through on the wire. A field is quoted only when leaving it bare would be
     /// ambiguous, a NULL field is empty, and `"`/`\\` are doubled/escaped.
     #[test]
     fn text_output_quotes_the_fields_postgres_quotes() {

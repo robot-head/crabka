@@ -1,8 +1,10 @@
-//! `KafkaTopic` reconciler — unidirectional (CRD wins).
+//! `KafkaTopic` reconciler. It works in one direction, and the CRD wins.
 //!
-//! Watches `KafkaTopic` (primary) and `Kafka` (secondary, so a cluster
-//! becoming Ready wakes pending topic reconciles). Diff-and-apply
-//! against the live cluster via `crabka_client_admin::AdminClient`.
+//! The reconciler watches `KafkaTopic` as its primary resource. It watches
+//! `Kafka` as a secondary resource, so that a cluster that becomes Ready
+//! wakes the topic reconciles that wait for it. The reconciler diffs the
+//! spec against the live cluster and applies the difference with
+//! `crabka_client_admin::AdminClient`.
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -29,7 +31,7 @@ use crate::{
 
 const FINALIZER: &str = "crabka.io/topic-finalizer";
 
-/// Run the controller forever.
+/// Runs the controller forever.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
@@ -61,8 +63,9 @@ pub fn error_policy(_obj: Arc<KafkaTopic>, err: &ReconcileError, ctx: Arc<Contex
     common::error_requeue(ctx)
 }
 
-/// Reconcile entry point. Times the pass and records the reconcile
-/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
+/// Reconcile entry point. It times the pass, records the reconcile
+/// counter and histogram, then calls the internal `reconcile_inner`
+/// operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -454,8 +457,10 @@ async fn reconcile_inner(
     }
 }
 
-/// Diff `desired` against `current` overrides; produce a `Vec` of
-/// `IncrementalAlterOps`. Pure function — covered by tests below.
+/// Diffs `desired` against the `current` overrides and produces a `Vec`
+/// of `IncrementalAlterOps`.
+///
+/// This is a pure function. The tests below cover it.
 pub(crate) fn diff_configs(
     current: &BTreeMap<String, String>,
     desired: &BTreeMap<String, String>,
@@ -482,8 +487,11 @@ pub(crate) fn diff_configs(
     ops
 }
 
-/// Bootstrap address from `Kafka.status.listeners[<inter_broker>]`.
-/// Returns `None` if `Kafka.status.conditions[Ready].status != "True"`.
+/// Returns the bootstrap address from
+/// `Kafka.status.listeners[<inter_broker>]`.
+///
+/// The result is `None` when
+/// `Kafka.status.conditions[Ready].status != "True"`.
 pub(crate) fn internal_listener_bootstrap(kafka: &Kafka) -> Option<String> {
     let ready_true = kafka
         .status
@@ -506,7 +514,8 @@ pub(crate) fn internal_listener_bootstrap(kafka: &Kafka) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Kafka topic name validation. Mirrors the JVM client's `Topic.validate`.
+/// Validates a Kafka topic name. It follows `Topic.validate` of the JVM
+/// client.
 pub(crate) fn validate_kafka_topic_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("topic name is empty".into());
@@ -555,9 +564,11 @@ async fn remove_finalizer(api: &Api<KafkaTopic>, name: &str) -> Result<(), Recon
     Ok(())
 }
 
-/// Build + patch status. `advance_generation = true` writes
-/// `observedGeneration` to the current generation (only on successful
-/// True/Ready landings).
+/// Builds the status and patches it.
+///
+/// With `advance_generation = true`, this function writes
+/// `observedGeneration` to the current generation. The caller sets that
+/// flag only when the resource lands on a True or Ready state.
 // pure status helper; arity reflects the condition contract
 #[tracing::instrument(
     level = "info",

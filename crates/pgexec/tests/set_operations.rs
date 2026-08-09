@@ -1,6 +1,7 @@
-//! SP38: UNION / INTERSECT / EXCEPT [ALL] — end-to-end over the wire (simple query
-//! protocol → exercises the engine's own execution + text encoding), complementing
-//! the in-crate unit tests in `crabka_pgexec::setops`.
+//! SP38: UNION / INTERSECT / EXCEPT [ALL], end to end over the wire. These tests
+//! use the simple query protocol, so they exercise the engine's own execution
+//! and its text encoding. They complement the in-crate unit tests in
+//! `crabka_pgexec::setops`.
 
 use std::sync::Arc;
 
@@ -177,10 +178,10 @@ async fn set_op_error_surface() {
     );
 }
 
-/// `PostgreSQL` `unknown`-literal resolution across set-op branches: a bare `NULL` or
-/// string literal takes the other branch's type and is coerced via the cast matrix
-/// (a well-formed value parses; a bad one raises 22P02). All confirmed against a live
-/// `PostgreSQL` 18 oracle.
+/// `PostgreSQL` `unknown`-literal resolution across set-op branches. A bare
+/// `NULL` or string literal takes the other branch's type, and the cast matrix
+/// coerces it. A well-formed value parses, and a bad one raises 22P02. All of
+/// this was confirmed against a live `PostgreSQL` 18 oracle.
 #[tokio::test]
 async fn unknown_literal_branches_resolve_like_pg() {
     let port = spawn().await;

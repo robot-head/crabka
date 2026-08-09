@@ -14,8 +14,10 @@ use crate::{error::SchemaSerdeError, subject::SchemaKind};
 const CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 const MAX_REFERENCE_DEPTH: usize = 64;
 
-/// Thin async client over the registry REST API. Cloneable (shares the
-/// underlying `reqwest::Client` connection pool).
+/// Thin async client over the registry REST API.
+///
+/// The client is cloneable. Every clone shares the same underlying
+/// `reqwest::Client` connection pool.
 #[derive(Debug, Clone)]
 pub struct RegistryClient {
     base_url: String,
@@ -31,7 +33,8 @@ pub struct FetchedSchema {
 }
 
 impl RegistryClient {
-    /// Build a client for a registry at `base_url` (e.g. `http://localhost:8081`).
+    /// Build a client for a registry at `base_url`, for example
+    /// `http://localhost:8081`.
     #[must_use]
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
@@ -40,8 +43,10 @@ impl RegistryClient {
         }
     }
 
-    /// Register `schema` under `subject`, returning its global id
-    /// (`auto.register.schemas=true`).
+    /// Register `schema` under `subject` and return its global id.
+    ///
+    /// This method gives the `auto.register.schemas=true` behavior.
+    ///
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn register(
@@ -62,8 +67,10 @@ impl RegistryClient {
         Ok(resp.id)
     }
 
-    /// Look up the id of an already-registered `schema` under `subject`
-    /// (`auto.register.schemas=false`).
+    /// Look up the id of an already-registered `schema` under `subject`.
+    ///
+    /// This method gives the `auto.register.schemas=false` behavior.
+    ///
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn lookup(
@@ -84,8 +91,10 @@ impl RegistryClient {
         Ok(resp.id)
     }
 
-    /// Fetch the latest registered version's id under `subject`
-    /// (`use.latest.version=true`).
+    /// Fetch the latest registered version under `subject`.
+    ///
+    /// This method gives the `use.latest.version=true` behavior.
+    ///
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn latest(&self, subject: &str) -> Result<SubjectVersionResponse, SchemaSerdeError> {
@@ -93,15 +102,20 @@ impl RegistryClient {
         self.get_json(&url).await
     }
 
-    /// Fetch the latest registered version's id under `subject`
-    /// (`use.latest.version=true`).
+    /// Fetch the latest registered version's id under `subject`.
+    ///
+    /// This method gives the `use.latest.version=true` behavior.
+    ///
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn latest_id(&self, subject: &str) -> Result<u32, SchemaSerdeError> {
         Ok(self.latest(subject).await?.id)
     }
 
-    /// Fetch a schema's text and optional metadata by global id (deserialize path).
+    /// Fetch a schema's text and optional metadata by global id.
+    ///
+    /// The deserialize path uses this method.
+    ///
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn schema_by_id(&self, id: u32) -> Result<FetchedSchema, SchemaSerdeError> {
@@ -118,8 +132,8 @@ impl RegistryClient {
     ///
     /// # Errors
     ///
-    /// Returns an error when the registry request fails or its response cannot
-    /// be decoded.
+    /// Returns an error when the registry request fails. Returns an error when
+    /// the client cannot decode the response.
     pub async fn schema_by_subject_version(
         &self,
         subject: &str,
@@ -136,13 +150,15 @@ impl RegistryClient {
 
     /// Resolve registry references to their exact, name-keyed source text.
     ///
-    /// Resolution is bounded and detects subject-version cycles. It never uses
-    /// the filesystem or any import mechanism beyond Schema Registry.
+    /// This method bounds the depth of the resolution and detects
+    /// subject-version cycles. It never uses the filesystem or any import
+    /// mechanism other than Schema Registry.
     ///
     /// # Errors
     ///
-    /// Returns an error when a reference is cyclic, exceeds the depth limit,
-    /// or cannot be fetched or decoded from the registry.
+    /// Returns an error when a reference is cyclic. Returns an error when a
+    /// reference exceeds the depth limit. Returns an error when the client
+    /// cannot fetch or decode a reference from the registry.
     pub async fn reference_sources(
         &self,
         references: &[SchemaReference],

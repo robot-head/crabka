@@ -1,16 +1,17 @@
-//! `DescribeConfigs` (`api_key=32`). Returns dynamic (override) configs
-//! stored in the metadata image.
+//! `DescribeConfigs` (`api_key=32`). It returns the dynamic override configs
+//! that the metadata image holds.
 //!
-//! - `resource_type=2` (TOPIC): reads per-topic override map, emits entries
-//!   with `config_source = DYNAMIC_TOPIC_CONFIG (1)`.
-//! - `resource_type=4` (BROKER): parses the resource name as a `NodeId`,
-//!   reads the broker override map from `MetadataImage::broker_config`, emits
-//!   entries with `config_source = DYNAMIC_BROKER_CONFIG (2)`.
-//! - All other resource types receive an empty configs list with no error —
-//!   the JVM `AdminClient` tolerates that.
+//! - `resource_type=2` (TOPIC): the handler reads the per-topic override map
+//!   and emits entries with `config_source = DYNAMIC_TOPIC_CONFIG (1)`.
+//! - `resource_type=4` (BROKER): the handler parses the resource name as a
+//!   `NodeId`, reads the broker override map from
+//!   `MetadataImage::broker_config`, and emits entries with
+//!   `config_source = DYNAMIC_BROKER_CONFIG (2)`.
+//! - Every other resource type receives an empty configs list and no error.
+//!   The JVM `AdminClient` accepts that.
 //!
-//! The `configuration_keys` filter on the request is honored: if the client
-//! supplies an explicit key list, only those keys are returned.
+//! The handler honors the `configuration_keys` filter on the request. When the
+//! client supplies an explicit key list, the response holds only those keys.
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
@@ -32,8 +33,8 @@ use crate::{
     error::BrokerError,
 };
 
-/// `ConfigSource::DYNAMIC_TOPIC_CONFIG` — the value Kafka uses for per-topic
-/// overrides stored in `ZooKeeper` / `KRaft` metadata.
+/// `ConfigSource::DYNAMIC_TOPIC_CONFIG`, the value Kafka uses for per-topic
+/// overrides held in `ZooKeeper` or `KRaft` metadata.
 ///
 /// From `org.apache.kafka.clients.admin.ConfigEntry.ConfigSource`:
 /// `DYNAMIC_TOPIC_CONFIG = 1`, `DYNAMIC_BROKER_CONFIG = 2`,
@@ -41,7 +42,7 @@ use crate::{
 /// `DEFAULT_CONFIG = 5`, `DYNAMIC_BROKER_LOGGER_CONFIG = 6`.
 const CONFIG_SOURCE_DYNAMIC_TOPIC: i8 = 1;
 const CONFIG_SOURCE_DYNAMIC_BROKER: i8 = 2;
-/// `ConfigSource::DEFAULT_CONFIG` — used for keys reported at their default.
+/// `ConfigSource::DEFAULT_CONFIG`, for keys reported at their default.
 const CONFIG_SOURCE_DEFAULT: i8 = 5;
 /// `DescribeConfigsResponse.ConfigSource::CLIENT_METRICS_CONFIG` wire byte.
 const CONFIG_SOURCE_CLIENT_METRICS: i8 = 7;
@@ -50,11 +51,11 @@ const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
 const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
 
-/// `ConfigDef.Type::UNKNOWN` wire byte — Crabka doesn't report typed config
-/// metadata, matching brokers that predate KIP-226's typed responses.
+/// `ConfigDef.Type::UNKNOWN` wire byte. Crabka reports no typed config
+/// metadata, which matches brokers from before KIP-226's typed responses.
 const CONFIG_TYPE_UNKNOWN: i8 = 0;
 
-/// Produce a `DescribeConfigsResourceResult` for a single `(key, value)` pair.
+/// Produces a `DescribeConfigsResourceResult` for one `(key, value)` pair.
 fn make_entry(key: &str, value: &str, config_source: i8) -> DescribeConfigsResourceResult {
     DescribeConfigsResourceResult {
         name: key.to_owned(),
@@ -69,7 +70,7 @@ fn make_entry(key: &str, value: &str, config_source: i8) -> DescribeConfigsResou
     }
 }
 
-/// Dispatch a single resource entry from a `DescribeConfigs` request.
+/// Dispatches one resource entry from a `DescribeConfigs` request.
 fn describe_one(
     image: &crabka_metadata::MetadataImage,
     r: crabka_protocol::owned::describe_configs_request::DescribeConfigsResource,
@@ -156,12 +157,15 @@ fn describe_one(
     ok(Vec::new())
 }
 
-/// Per-resource `DescribeConfigs` ACL check. Topic resources require
-/// `DescribeConfigs` on `Topic(name)`; Broker resources require
-/// `DescribeConfigs` on `Cluster("kafka-cluster")`. Returns the
-/// authorization-failed code to stamp on Deny, or `None` when allowed (or
-/// for resource types we don't gate — they get an empty configs list with
-/// no error, as before).
+/// Per-resource `DescribeConfigs` ACL check.
+///
+/// A Topic resource needs `DescribeConfigs` on `Topic(name)`. A Broker
+/// resource needs `DescribeConfigs` on `Cluster("kafka-cluster")`.
+///
+/// This function returns the authorization-failed code to stamp on a Deny. It
+/// returns `None` when the check allows the request, and for a resource type
+/// that it does not gate. An ungated resource type still gets an empty configs
+/// list with no error.
 fn resource_authz_failure(
     authorizer: &dyn crate::authorizer::Authorizer,
     image: &crabka_metadata::MetadataImage,
@@ -196,8 +200,8 @@ fn resource_authz_failure(
     (allow == AuthorizationResult::Deny).then_some(failure_code)
 }
 
-/// Build a `DescribeConfigsResult` carrying only the authorization-failed
-/// error code for a denied resource.
+/// Builds a `DescribeConfigsResult` that carries only the
+/// authorization-failed error code, for a denied resource.
 fn denied_result(
     resource_type: i8,
     resource_name: String,
@@ -283,7 +287,7 @@ mod tests {
     };
     use uuid::Uuid;
 
-    /// Build a minimal `MetadataImage` with one broker config entry.
+    /// Builds a minimal `MetadataImage` with one broker config entry.
     fn image_with_broker_config(node_id: u64, key: &str, value: &str) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {

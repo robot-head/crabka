@@ -4,8 +4,9 @@ use crabka_pgtypes::{ColumnType, Datum, ElemType};
 
 use crate::{clock::EvalCtx, scope::Scope};
 
-/// Evaluate a FROM-less expression and render it the way the wire would, so an
-/// array result reads as PostgreSQL prints it (`{a,b}`).
+/// Evaluate a FROM-less expression and render it the way the wire would.
+///
+/// An array result then reads as PostgreSQL prints it, for example `{a,b}`.
 fn text_of(sql: &str) -> String {
     let ctx = EvalCtx::test_default();
     let value =
@@ -16,9 +17,11 @@ fn text_of(sql: &str) -> String {
     }
 }
 
-/// The SQLSTATE and message a failing expression reports, taken from whichever
-/// of the plan-time (`infer_type`) and run-time (`eval`) paths rejects it —
-/// exactly the order a real statement goes through.
+/// The SQLSTATE and message a failing expression reports.
+///
+/// The result comes from whichever path rejects the expression: the plan-time
+/// path `infer_type` or the run-time path `eval`. This is the same order a real
+/// statement goes through.
 fn error_of(sql: &str) -> (String, String) {
     let ctx = EvalCtx::test_default();
     let expr = pexpr(sql).expect("parse");

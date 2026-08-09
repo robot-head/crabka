@@ -13,7 +13,7 @@ pub enum ExecutionPolicy {
     /// Stop after the first failed or unsupported operation.
     #[default]
     StopOnFailure,
-    /// Attempt every operation and report all outcomes.
+    /// Try every operation and report all outcomes.
     BestEffort,
 }
 
@@ -21,11 +21,11 @@ pub enum ExecutionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStatus {
-    /// The operation was planned but not attempted.
+    /// The plan holds this operation, but the executor did not try it.
     Planned,
-    /// The operation was accepted by the executor.
+    /// The executor accepted the operation.
     Applied,
-    /// The executor attempted the operation and it failed.
+    /// The executor tried the operation and the operation failed.
     Failed,
     /// The executor has no typed hook for this operation kind.
     Unsupported,
@@ -51,7 +51,7 @@ pub struct ExecutionReport {
 }
 
 impl ExecutionReport {
-    /// Return true when every planned operation was applied.
+    /// Return true when the executor applied every planned operation.
     #[must_use]
     pub fn is_fully_applied(&self) -> bool {
         self.operation_results
@@ -109,9 +109,11 @@ pub trait BalanceExecutor {
     ///
     /// # Errors
     ///
-    /// Returns [`ExecutionError::Unsupported`] when the executor has no typed
-    /// hook for this operation kind, or [`ExecutionError::Failed`] when the hook
-    /// rejects the operation.
+    /// This method returns [`ExecutionError::Unsupported`] when the executor has
+    /// no typed hook for this operation kind.
+    ///
+    /// It returns [`ExecutionError::Failed`] when the hook rejects the
+    /// operation.
     fn apply_operation(&mut self, operation: &BalanceOperation) -> Result<(), ExecutionError>;
 }
 
@@ -178,7 +180,7 @@ impl DryRunExecutor {
     }
 }
 
-/// Validate-only executor used until registry mutation hooks are provided.
+/// Validate-only executor used until registry mutation hooks exist.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UnsupportedExecutor;
 
@@ -195,8 +197,10 @@ impl BalanceExecutor for UnsupportedExecutor {
 }
 
 /// Compatibility executor for callers that previously selected registry layout
-/// execution. Physical range orchestration is not implemented, so every
-/// operation is rejected before any registry mutation is attempted.
+/// execution.
+///
+/// This crate does not implement physical range orchestration, so this executor
+/// rejects every operation before it tries any registry mutation.
 pub struct RegistryLayoutExecutor<S> {
     store: S,
 }

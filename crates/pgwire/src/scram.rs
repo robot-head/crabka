@@ -13,10 +13,11 @@ pub const DEFAULT_ITERATIONS: u32 = 4096; // PostgreSQL's default
 
 /// Salt length used for both real and mock verifiers. Mock salts MUST match
 /// the real salt length so the server-first `s=` field is the same size for
-/// known and unknown users (no username-enumeration oracle via salt length).
+/// known and unknown users. Salt length then gives no username-enumeration
+/// oracle.
 pub const SALT_LEN: usize = 16;
 
-/// Precomputed SCRAM-SHA-256 verifier — stores no plaintext password.
+/// Precomputed SCRAM-SHA-256 verifier. It stores no plaintext password.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScramVerifier {
     pub salt: Vec<u8>,
@@ -88,7 +89,7 @@ impl ScramVerifier {
     }
 
     #[must_use]
-    /// Derive a deterministic unknown-user verifier using the applicable
+    /// Derive a deterministic unknown-user verifier with the applicable
     /// real-verifier iteration policy.
     ///
     /// # Panics

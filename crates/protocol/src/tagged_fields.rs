@@ -15,8 +15,8 @@ pub struct UnknownTaggedField {
 }
 
 /// A collection of tagged fields that the schema does not declare. Generated
-/// message types contain a `Vec<UnknownTaggedField>` (sorted by tag) so that
-/// values can be round-tripped without information loss.
+/// message types hold a `Vec<UnknownTaggedField>`, sorted by tag, so that
+/// values round-trip without information loss.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnknownTaggedFields(pub Vec<UnknownTaggedField>);
 
@@ -31,11 +31,12 @@ impl UnknownTaggedFields {
     }
 }
 
-/// Read the tagged-fields trailer at the current position of `buf`. `known`
-/// is called for each entry whose tag is in the schema; it should consume the
-/// field's payload (a `size`-byte slice) and return Ok if it recognised the
-/// tag. Anything `known` returns `Ok(false)` for is captured into the unknown
-/// vec instead.
+/// Reads the tagged-fields trailer at the current position of `buf`.
+///
+/// This function calls `known` for each entry whose tag is in the schema.
+/// `known` must consume the field's payload, a `size`-byte slice, and return
+/// `Ok(true)` if it recognized the tag. Every entry for which `known` returns
+/// `Ok(false)` goes into the unknown vec instead.
 /// # Errors
 /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn read_tagged_fields<B, F>(
@@ -83,9 +84,9 @@ where
     Ok(UnknownTaggedFields(unknown))
 }
 
-/// Helper used by generated code while emitting tagged fields. Call
-/// `WriteTaggedFields::new()`, then `add` each known tag-and-payload-encoder,
-/// then `write` to flush, merging with `unknown`.
+/// Helper for generated code that emits tagged fields. Call
+/// `WriteTaggedFields::new()`, then `add` for each known tag and payload
+/// encoder, then `write` to flush the fields and merge them with `unknown`.
 pub struct WriteTaggedFields {
     entries: Vec<(u32, Bytes)>,
 }
@@ -147,12 +148,12 @@ pub fn tagged_fields_len(known: &[(u32, usize)], unknown: &UnknownTaggedFields) 
     n
 }
 
-/// Encode a value into a freshly-allocated `Bytes` (used to materialize a
-/// tagged-field payload before sizing the outer trailer).
+/// Encodes a value into a freshly allocated `Bytes`. This materializes a
+/// tagged-field payload before the outer trailer is sized.
 ///
-/// The write closure may return an error (e.g. from nested struct encode);
-/// the error propagates as a panic since tagged-field encoding failures indicate
-/// a bug in the emitter's `encoded_len` prediction.
+/// The write closure can return an error, for example from a nested struct
+/// encode. The error propagates as a panic, because a tagged-field encoding
+/// failure shows a bug in the emitter's `encoded_len` prediction.
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn encode_to_bytes<F>(predicted_len: usize, write: F) -> Bytes

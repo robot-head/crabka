@@ -1,7 +1,9 @@
-//! Idiomatic high-level Streams DSL over schema serdes (compile-checked).
-//! Reads JSON `OrderEvent`s, normalizes to a Protobuf `OrderProto`, writes them out.
-//! Requires an external broker + registry to actually run; by default it only
-//! builds the topology. Run: `cargo run -p crabka-client-streams --example format_dsl`
+//! Idiomatic high-level Streams DSL over compile-checked schema serdes.
+//!
+//! The example reads JSON `OrderEvent`s, normalizes them to a Protobuf
+//! `OrderProto`, and writes them out. It needs an external broker and registry to
+//! run. By default it only builds the topology.
+//! Run: `cargo run -p crabka-client-streams --example format_dsl`
 use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsApp};
 use crabka_schema_serde::format::{json::JsonSerde, protobuf::ProtobufSerde};
 use serde::{Deserialize, Serialize};

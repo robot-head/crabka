@@ -55,20 +55,21 @@ impl OverTimeFn {
     }
 }
 
-/// A range/`*_over_time` function applied to an already-evaluated range vector
-/// (a [`RangeEval`]), carrying any scalar parameters resolved by the caller.
+/// A range or `*_over_time` function applied to an evaluated range vector.
 ///
-/// This is the **outer** half of a range-function evaluation: the per-series
-/// fold that turns each window of `(end - range, end]` samples into one instant
-/// sample. Both the interpreter (`eval_*_call`) and the recursive planner's
-/// subquery dispatch construct one of these and apply it via
-/// [`apply_outer_range_fn`], so the operator path matches the interpreter
-/// byte-for-byte for whichever underlying range vector it was handed.
+/// The range vector is a [`RangeEval`]. This type holds any scalar parameters
+/// the caller resolved. It is the outer half of a range-function evaluation:
+/// the per-series fold that turns each window of `(end - range, end]` samples
+/// into one instant sample. The interpreter (`eval_*_call`) and the recursive
+/// planner's subquery dispatch both build one of these and apply it through
+/// [`apply_outer_range_fn`]. The operator path therefore matches the
+/// interpreter byte-for-byte for any range vector it gets.
 ///
-/// `absent` / `absent_over_time` (which synthesize an absent-labels series) and
-/// the scalar-typed helpers (`time`/`pi`/…) are *not* range-vector folds and are
-/// not represented here. The experimental `double_exponential_smoothing` carries
-/// its two factors; under the non-experimental build it is unreachable.
+/// `absent` and `absent_over_time` build an absent-labels series, and the
+/// scalar-typed helpers `time` and `pi` return scalars. None of them are
+/// range-vector folds, so this type does not cover them. The experimental
+/// `double_exponential_smoothing` holds its two factors. The non-experimental
+/// build cannot reach it.
 #[derive(Clone, Copy)]
 pub(super) enum OuterRangeFn {
     Range(RangeFn),
@@ -84,10 +85,12 @@ pub(super) enum OuterRangeFn {
     },
 }
 
-/// Apply an [`OuterRangeFn`] over an already-evaluated range vector, producing the
-/// instant vector at `time_ms`. This is the single shared implementation of every
-/// range/`*_over_time` function's per-series fold; the interpreter and the
-/// planner's subquery path both route through it so they cannot diverge.
+/// Applies an [`OuterRangeFn`] over an evaluated range vector.
+///
+/// This function returns the instant vector at `time_ms`. It is the one shared
+/// implementation of every range and `*_over_time` function's per-series fold.
+/// The interpreter and the planner's subquery path both route through it, so
+/// they cannot diverge.
 pub(super) fn apply_outer_range_fn(
     range: RangeEval,
     outer: OuterRangeFn,
@@ -113,9 +116,11 @@ pub(super) fn apply_outer_range_fn(
         .collect()
 }
 
-/// Fold one series' window into its `(result labels, value)`, mirroring exactly
-/// what each interpreter `eval_*_call` does per series. Returns `None` for a
-/// no-value window (the series is dropped from the result).
+/// Folds one series' window into its `(result labels, value)`.
+///
+/// The fold matches what each interpreter `eval_*_call` does per series. This
+/// function returns `None` for a no-value window, and the result drops that
+/// series.
 fn outer_range_sample_from_series(
     series: &RangeSeries,
     range_end_ms: i64,
@@ -969,11 +974,13 @@ enum ExtremumKind {
 }
 
 impl ExtremumKind {
-    /// Whether the running value `running` should be replaced by `candidate`
-    /// under Prometheus' NaN-ignoring float ordering — the same rule
-    /// `AggregateState::push_float` and the `prom_min`/`prom_max` aggregate UDAF
-    /// apply. A NaN running value is always replaced; a NaN candidate (with a
-    /// non-NaN running value) never is (`NaN > _` / `NaN < _` are both false).
+    /// Returns true if `candidate` should replace the running value `running`.
+    ///
+    /// The rule is Prometheus' NaN-ignoring float order. `AggregateState::push_float`
+    /// and the `prom_min`/`prom_max` aggregate UDAF apply the same rule. This
+    /// method always replaces a NaN running value. A NaN candidate never
+    /// replaces a non-NaN running value, because `NaN > _` and `NaN < _` are
+    /// both false.
     fn should_replace(self, running: f64, candidate: f64) -> bool {
         if running.is_nan() {
             return true;
@@ -985,12 +992,12 @@ impl ExtremumKind {
     }
 }
 
-/// NaN-ignoring `min_over_time`/`max_over_time` fold over a non-empty sample
-/// window: seed with the first sample (NaN included), then replace under
-/// [`ExtremumKind::should_replace`]. The result is NaN only when *every* sample
-/// is NaN — matching Prometheus, the `*_over_time` UDF, and the `min`/`max`
-/// aggregate. (The previous `total_cmp` reduction wrongly propagated a single
-/// NaN sample into the extremum.)
+/// Folds a non-empty sample window for `min_over_time` or `max_over_time`.
+///
+/// The fold ignores NaN. It seeds with the first sample, NaN included, then
+/// replaces the running value under [`ExtremumKind::should_replace`]. The
+/// result is NaN only when every sample is NaN. This matches Prometheus, the
+/// `*_over_time` UDF, and the `min`/`max` aggregate.
 fn fold_over_time_extremum(samples: &[(i64, f64)], extremum: ExtremumKind) -> f64 {
     let mut running = samples[0].1;
     for (_, candidate) in &samples[1..] {
@@ -1001,11 +1008,13 @@ fn fold_over_time_extremum(samples: &[(i64, f64)], extremum: ExtremumKind) -> f6
     running
 }
 
-/// Population variance of a sample window via Welford's online algorithm with
-/// Kahan-compensated accumulation, matching Prometheus' `stdvar_over_time` /
+/// Returns the population variance of a sample window.
+///
+/// The fold uses Welford's online algorithm with Kahan-compensated
+/// accumulation, and matches Prometheus' `stdvar_over_time` and
 /// `stddev_over_time`. The naive `E[x^2] - E[x]^2` form suffers catastrophic
-/// cancellation for large-magnitude close-valued windows (yielding a negative
-/// variance whose `sqrt` is NaN); Welford stays numerically stable.
+/// cancellation for large-magnitude close-valued windows and gives a negative
+/// variance whose `sqrt` is NaN. Welford stays numerically stable.
 fn over_time_variance(samples: &[(i64, f64)]) -> f64 {
     let mut count = 0.0_f64;
     let (mut mean, mut mean_comp) = (0.0_f64, 0.0_f64);
@@ -1024,11 +1033,13 @@ fn over_time_variance(samples: &[(i64, f64)]) -> f64 {
     (aux + aux_comp) / count
 }
 
-/// Arithmetic mean of a non-empty float window via Prometheus' incremental
-/// Kahan-compensated mean (`avg_over_time` in `promql/engine.go`). The naive
-/// `sum / count` overflows to ±Inf for very-large-magnitude windows; the
-/// incremental form keeps the running mean finite and, once it does saturate to
-/// ±Inf, preserves Prometheus' same-sign-infinity handling.
+/// Returns the arithmetic mean of a non-empty float window.
+///
+/// The fold uses Prometheus' incremental Kahan-compensated mean
+/// (`avg_over_time` in `promql/engine.go`). The naive `sum / count` overflows
+/// to ±Inf for very-large-magnitude windows. The incremental form keeps the
+/// running mean finite. Once it does saturate to ±Inf, it keeps Prometheus'
+/// same-sign-infinity handling.
 fn over_time_mean(values: impl Iterator<Item = f64>) -> f64 {
     let mut count = 0.0_f64;
     let (mut mean, mut comp) = (0.0_f64, 0.0_f64);
@@ -1051,10 +1062,12 @@ fn over_time_mean(values: impl Iterator<Item = f64>) -> f64 {
     mean + comp
 }
 
-/// One Kahan-compensated incremental sum step: add `increment` to the running
-/// sum `(sum, comp)`, returning the updated `(sum, comp)`. A direct port of
-/// Prometheus' `kahanSumInc` (`promql/engine.go`), used by the numerically
-/// stable mean/variance folds so the operator and interpreter agree bit-for-bit.
+/// Does one Kahan-compensated incremental sum step.
+///
+/// This function adds `increment` to the running sum `(sum, comp)` and returns
+/// the updated `(sum, comp)`. It is a direct port of Prometheus' `kahanSumInc`
+/// (`promql/engine.go`). The numerically stable mean and variance folds use it,
+/// so the operator and interpreter agree bit-for-bit.
 pub(super) fn kahan_sum_inc(increment: f64, sum: f64, comp: f64) -> (f64, f64) {
     let new_sum = sum + increment;
     // Recover the rounding error lost when `increment` is small relative to

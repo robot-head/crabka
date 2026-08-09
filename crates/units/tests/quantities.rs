@@ -51,8 +51,8 @@ fn units_of_the_same_magnitude_compare_equal() {
     check!(kibibytes(1) < mebibytes(1));
 }
 
-/// Dividing a size by a time yields the rate, and multiplying back returns the
-/// size — the dimensional analysis this crate exists for.
+/// A size divided by a time gives the rate, and the rate multiplied back gives
+/// the size. This is the dimensional analysis this crate exists for.
 #[test]
 fn size_over_time_is_a_rate() {
     let rate = byte_rate(mebibytes(8), secs(2));
@@ -65,7 +65,7 @@ fn size_over_time_is_a_rate() {
     check!(per_sec(100).period() == millis(10));
 }
 
-/// An unset (zero) rate transfers instantly rather than yielding an infinity.
+/// An unset rate of zero transfers instantly and does not give an infinity.
 #[test]
 fn zero_rate_transfers_instantly() {
     check!(ByteRate::ZERO.time_to_transfer(gibibytes(1)) == Time::ZERO);
@@ -92,7 +92,7 @@ fn wire_conversions_round_trip() {
     check!(ByteRate::from_bytes_per_sec(1_048_576).bytes_per_sec_i64() == 1_048_576);
 }
 
-/// Truncating extraction matches an external format that integer-divides, and
+/// Truncated extraction matches an external format that integer-divides, and
 /// does not lose a millisecond to float error on an exact extent.
 #[test]
 fn truncating_millis_matches_integer_division() {
@@ -107,7 +107,7 @@ fn truncating_millis_matches_integer_division() {
 }
 
 /// A `Duration` survives the trip through a quantity, and a negative extent
-/// clamps rather than panicking.
+/// clamps and does not panic.
 #[test]
 fn std_duration_round_trips() {
     let original = core::time::Duration::from_millis(1_500);
@@ -406,7 +406,7 @@ fn optional_fractions_round_trip() {
     check!(reparsed == set);
 }
 
-/// A human-form field rejects a bare number rather than guessing its unit.
+/// A human-form field rejects a bare number and does not guess its unit.
 #[test]
 fn serde_human_form_requires_a_unit() {
     #[derive(Debug, Deserialize)]

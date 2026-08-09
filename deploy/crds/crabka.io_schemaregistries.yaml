@@ -32,9 +32,9 @@ spec:
                         type: string
                       usersSecretName:
                         description: |-
-                          Secret with a single key holding newline-separated `user:cred`
-                          entries (cred = plaintext or `$2…` bcrypt). The key is mounted as
-                          a file and passed via `--basic-auth-file`.
+                          Secret with one key that holds `user:cred` entries, one on each
+                          line. The cred is plaintext or a `$2…` bcrypt hash. The operator
+                          mounts the key as a file and gives it in `--basic-auth-file`.
                         type: string
                     required:
                     - usersSecretName
@@ -43,7 +43,7 @@ spec:
                     nullable: true
                     properties:
                       jwksEndpointUri:
-                        description: JWKS endpoint URI (required when `mode` = `Jwks`).
+                        description: JWKS endpoint URI. It is necessary when `mode` is `Jwks`.
                         nullable: true
                         type: string
                       jwksExpectedAudience:
@@ -52,8 +52,8 @@ spec:
                         type: string
                       jwksPrincipalClaim:
                         description: |-
-                          JWT claim to use as the principal when mode is `Jwks`. Overrides
-                          `principalClaim` for JWKS paths.
+                          JWT claim to use as the principal when the mode is `Jwks`. It
+                          overrides `principalClaim` on the JWKS paths.
                         nullable: true
                         type: string
                       jwksRefresh:
@@ -62,8 +62,8 @@ spec:
                         type: string
                       jwksTlsSecretName:
                         description: |-
-                          Secret name whose `ca.crt` key is mounted and passed as
-                          `--bearer-jwks-ca`.
+                          Name of the Secret whose `ca.crt` key the operator mounts and
+                          gives in `--bearer-jwks-ca`.
                         nullable: true
                         type: string
                       jwksValidIssuer:
@@ -92,7 +92,7 @@ spec:
                     type: boolean
                 type: object
               authorization:
-                description: REST authorization (Kafka-ACL based).
+                description: REST authorization, based on the Kafka ACLs.
                 nullable: true
                 properties:
                   aclRefresh:
@@ -109,10 +109,11 @@ spec:
                 type: object
               bootstrapServers:
                 description: |-
-                  Override bootstrap for an external/unmanaged Kafka. When unset,
-                  bootstrap is derived from the `crabka.io/cluster`-labeled Kafka's
-                  internal listener. (Secured external brokers are a future
-                  enhancement; the managed/label path is the secured one.)
+                  Bootstrap override for an external Kafka that the operator does
+                  not manage. When unset, the operator derives the bootstrap from the
+                  internal listener of the Kafka with the `crabka.io/cluster` label.
+                  Secured external brokers are future work. The managed path with the
+                  label is the secured one.
                 nullable: true
                 type: string
               clientId:
@@ -156,43 +157,47 @@ spec:
                 nullable: true
                 type: string
               kafkaClient:
-                description: SR → broker client security (SASL / TLS). Maps to `--kafka-*` flags.
+                description: |-
+                  Client security from the SR to the broker, with SASL and TLS. It
+                  maps to the `--kafka-*` flags.
                 nullable: true
                 properties:
                   sasl:
-                    description: SASL credentials for the SR → broker connection.
+                    description: SASL credentials for the connection from the SR to the broker.
                     nullable: true
                     properties:
                       mechanism:
-                        description: e.g. `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`.
+                        description: For example `PLAIN`, `SCRAM-SHA-256`, or `SCRAM-SHA-512`.
                         type: string
                       secretRef:
-                        description: Name of the Secret holding `username` and `password` keys.
+                        description: Name of the Secret that holds the `username` and `password` keys.
                         type: string
                     required:
                     - mechanism
                     - secretRef
                     type: object
                   securityProtocol:
-                    description: e.g. `PLAINTEXT`, `SASL_PLAINTEXT`, `SSL`, `SASL_SSL`.
+                    description: For example `PLAINTEXT`, `SASL_PLAINTEXT`, `SSL`, or `SASL_SSL`.
                     nullable: true
                     type: string
                   tls:
-                    description: TLS settings for the SR → broker connection.
+                    description: TLS settings for the connection from the SR to the broker.
                     nullable: true
                     properties:
                       caSecretName:
-                        description: Secret with a `ca.crt` key used as the broker CA.
+                        description: Secret with a `ca.crt` key that gives the broker CA.
                         nullable: true
                         type: string
                       serverNameOverride:
-                        description: Override the server name used for TLS SNI / hostname verification.
+                        description: Override the server name for TLS SNI and hostname verification.
                         nullable: true
                         type: string
                     type: object
                 type: object
               replicas:
-                description: Stateless replicas; all join the election group. Default 1.
+                description: |-
+                  Number of stateless replicas. All of them join the election
+                  group. Default 1.
                 format: int32
                 maximum: 1000.0
                 minimum: 1.0
@@ -292,7 +297,7 @@ spec:
                 nullable: true
                 type: integer
               tls:
-                description: Server TLS (HTTPS REST). None = plain HTTP.
+                description: Server TLS for the HTTPS REST surface. `None` means plain HTTP.
                 nullable: true
                 properties:
                   clientAuth:
@@ -306,12 +311,14 @@ spec:
                     type: string
                   clientCaSecretName:
                     description: |-
-                      Secret with `ca.crt` to verify client certs (required when
-                      `clientAuth` != Disabled).
+                      Secret with `ca.crt` that verifies the client certs. It is
+                      necessary when `clientAuth` is not Disabled.
                     nullable: true
                     type: string
                   issuerRef:
-                    description: cert-manager issuer reference. Mutually exclusive with `secretName`.
+                    description: |-
+                      cert-manager issuer reference. Do not set it together with
+                      `secretName`.
                     nullable: true
                     properties:
                       group:
@@ -319,7 +326,9 @@ spec:
                         nullable: true
                         type: string
                       kind:
-                        description: Defaults to `Issuer`; set `ClusterIssuer` for cluster-scoped issuers.
+                        description: |-
+                          The default is `Issuer`. Set `ClusterIssuer` for an issuer with
+                          cluster scope.
                         nullable: true
                         type: string
                       name:
@@ -329,8 +338,8 @@ spec:
                     type: object
                   secretName:
                     description: |-
-                      Secret (type kubernetes.io/tls) with `tls.crt` + `tls.key`.
-                      Mutually exclusive with `issuerRef`.
+                      Secret of type kubernetes.io/tls with `tls.crt` and `tls.key`. Do
+                      not set it together with `issuerRef`.
                     nullable: true
                     type: string
                 type: object
@@ -342,7 +351,9 @@ spec:
             properties:
               conditions:
                 default: []
-                description: 'Kubernetes-style conditions: `KafkaReady`, `Available`, `Ready`.'
+                description: |-
+                  Kubernetes-style conditions: `KafkaReady`, `Available`, and
+                  `Ready`.
                 items:
                   properties:
                     lastTransitionTime:
@@ -358,7 +369,7 @@ spec:
                       description: '`True`, `False`, or `Unknown`.'
                       type: string
                     type:
-                      description: e.g. `Ready`.
+                      description: For example, `Ready`.
                       type: string
                   required:
                   - lastTransitionTime
@@ -382,7 +393,7 @@ spec:
                 nullable: true
                 type: integer
               url:
-                description: In-cluster REST URL clients use.
+                description: In-cluster REST URL that the clients use.
                 nullable: true
                 type: string
             type: object

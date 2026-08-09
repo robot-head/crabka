@@ -17,18 +17,17 @@ pub struct ProducerEntry {
     pub epoch: i16,
     pub last_sequence: i32,
     /// Last absolute offset of the last accepted batch for this producer
-    /// (`base_offset + last_offset_delta`). Read by
-    /// [`ProducerState::truncate`] to drop entries whose batch was truncated
-    /// off the log.
+    /// (`base_offset + last_offset_delta`). [`ProducerState::truncate`] reads
+    /// it to drop entries whose batch was truncated off the log.
     pub last_offset: LogOffset,
     pub base_offset: LogOffset,
     /// Timestamp of the last accepted batch for this producer.
     #[allow(dead_code)]
     pub last_timestamp: i64,
     /// Wall-clock millis of the last `commit` that touched this entry.
-    /// Used by [`ProducerState::expire_older_than`] to evict idle
-    /// idempotent-producer state, matching Kafka's
-    /// `producer.id.expiration.ms` (KAFKA: expire by inactivity).
+    /// [`ProducerState::expire_older_than`] uses it to evict idle
+    /// idempotent-producer state. This matches Kafka's
+    /// `producer.id.expiration.ms`, which expires by inactivity.
     pub last_activity_ms: i64,
 }
 
@@ -54,9 +53,11 @@ pub enum Decision {
     Fenced,
 }
 
-/// Pure idempotent-producer dedup/ordering decision. The async `check` is a thin
-/// lock-acquiring wrapper over this; extracted so it is exhaustively and
-/// property-tested in isolation (see `producer_state_model.rs`).
+/// Pure idempotent-producer dedup/ordering decision.
+///
+/// The async `check` is a thin lock-acquiring wrapper over this function. The
+/// decision is a separate function so that the tests can exhaustively test and
+/// property-test it in isolation. See `producer_state_model.rs`.
 pub(crate) fn check_pure(
     entry: Option<&ProducerEntry>,
     producer_epoch: i16,
@@ -88,10 +89,10 @@ pub(crate) fn check_pure(
 }
 
 /// Per-partition idempotent-producer state, nested under the owning
-/// topic. Keyed by partition index (`i32`, `Copy`) so per-call lookups
-/// allocate nothing; the outer topic map is keyed by `String` but its
-/// `get`/`entry` accept a borrowed `&str` and only allocate the owned
-/// topic key on the first produce to a previously-unseen topic.
+/// topic. The partition index (`i32`, `Copy`) is the key, so per-call
+/// lookups allocate nothing. The outer topic map is keyed by `String`, but
+/// its `get`/`entry` accept a borrowed `&str`. That map allocates the owned
+/// topic key only on the first produce to a topic it has not seen before.
 type PartitionMap = DashMap<PartitionIndex, Arc<Mutex<PartitionProducerState>>>;
 
 #[derive(Debug, Default)]
@@ -109,7 +110,7 @@ impl ProducerState {
 
     /// Decide whether to append the incoming batch.
     ///
-    /// `base_sequence` is the wire `base_sequence`; `last_offset_delta` is
+    /// `base_sequence` is the wire `base_sequence`. `last_offset_delta` is
     /// the batch's `last_offset_delta` field. Together they imply the
     /// batch's `last_sequence = base_sequence + last_offset_delta`.
     pub async fn check(
@@ -160,19 +161,22 @@ impl ProducerState {
         );
     }
 
-    /// Drop idempotent-producer entries whose last accepted batch has been
-    /// truncated off the log — i.e. `last_offset >= offset`. Called after the
-    /// partition log is truncated below the recorded batch (KIP-320 divergence
-    /// truncation on rejoin, or `OFFSET_OUT_OF_RANGE` reset).
+    /// Drop idempotent-producer entries whose last accepted batch was
+    /// truncated off the log, that is `last_offset >= offset`.
     ///
-    /// Without this, a producer retrying a batch from the truncated tail is
-    /// deduplicated against a `base_offset` no longer in the log, and the
-    /// `acks=all` HW gate (`await_hw_at_least(base_offset + delta + 1)`) waits
-    /// forever for a high watermark that can never reach the truncated offset —
-    /// a permanent produce stall after failover. Dropping the entry makes the
-    /// retry re-append fresh instead. Mirrors Kafka's
-    /// `ProducerStateManager.truncateAndReload`. Does not create state for a
-    /// partition that has never been tracked.
+    /// The broker calls this after it truncates the partition log below the
+    /// recorded batch. Two paths do that: KIP-320 divergence truncation on
+    /// rejoin, and an `OFFSET_OUT_OF_RANGE` reset.
+    ///
+    /// Without this call, the broker deduplicates a producer that retries a
+    /// batch from the truncated tail against a `base_offset` that is no longer
+    /// in the log. The `acks=all` HW gate
+    /// (`await_hw_at_least(base_offset + delta + 1)`) then waits forever for a
+    /// high watermark that can never reach the truncated offset. That is a
+    /// permanent produce stall after failover. When this function drops the
+    /// entry, the retry re-appends fresh instead. This mirrors Kafka's
+    /// `ProducerStateManager.truncateAndReload`. It does not create state for a
+    /// partition that the broker has never tracked.
     pub async fn truncate(&self, topic: &str, partition: PartitionIndex, offset: LogOffset) {
         let Some(parts) = self.by_topic.get(topic).map(|e| e.value().clone()) else {
             return;
@@ -184,10 +188,11 @@ impl ProducerState {
         s.entries.retain(|_pid, e| e.last_offset < offset);
     }
 
-    /// Resolve (creating on miss) the per-partition state handle. The
-    /// outer topic lookup borrows `&str` and only allocates an owned
-    /// `String` key when the topic is seen for the first time; the inner
-    /// partition lookup is keyed by `i32` and never allocates.
+    /// Resolve the per-partition state handle, and create it on a miss.
+    ///
+    /// The outer topic lookup borrows `&str`. It allocates an owned `String`
+    /// key only on the first lookup of that topic. The inner partition lookup
+    /// is keyed by `i32` and never allocates.
     fn handle(&self, topic: &str, partition: PartitionIndex) -> Arc<Mutex<PartitionProducerState>> {
         // `get` first to avoid allocating the topic `String` on the hot
         // path (the topic almost always already exists).
@@ -208,14 +213,15 @@ impl ProducerState {
     }
 
     /// Read-only snapshot of every active producer entry on
-    /// `(topic, partition)`. Returns an empty list when the partition
-    /// has no entries — i.e. no idempotent or transactional producer
-    /// has produced to it yet. Used by the
-    /// `DescribeProducers` admin handler (`api_key=61`, KIP-664) to
-    /// surface per-partition producer-state to admin clients
-    /// (`kafka-admin --describe-producers`, etc.).
+    /// `(topic, partition)`.
     ///
-    /// The snapshot drops the mutex before returning, so callers don't
+    /// This function returns an empty list when the partition has no entries.
+    /// That means no idempotent or transactional producer has produced to it
+    /// yet. The `DescribeProducers` admin handler (`api_key=61`, KIP-664)
+    /// calls it to show per-partition producer state to admin clients such as
+    /// `kafka-admin --describe-producers`.
+    ///
+    /// The snapshot drops the mutex before it returns, so callers do not
     /// hold the per-partition lock across response encoding.
     pub async fn snapshot(
         &self,
@@ -247,22 +253,25 @@ impl ProducerState {
             .collect()
     }
 
-    /// Snapshot of currently-active producers on `(topic, partition)`:
-    /// `producer_id` → that producer's last-accepted-batch `base_offset`.
-    /// A producer is "active" when `now_ms - last_activity_ms <=
-    /// expiration_ms` (Kafka's `producer.id.expiration.ms` inactivity
-    /// window). Expired producers are excluded.
+    /// Snapshot of currently-active producers on `(topic, partition)`.
     ///
-    /// Used by the cleaner to build a `CompactionContext`: an active
-    /// producer's last batch must be preserved via `RETAIN_EMPTY` even when
-    /// fully compacted away, so the producer's sequence/epoch state survives.
+    /// The map holds `producer_id` → that producer's last-accepted-batch
+    /// `base_offset`. A producer is "active" when
+    /// `now_ms - last_activity_ms <= expiration_ms`. That is Kafka's
+    /// `producer.id.expiration.ms` inactivity window. This function excludes
+    /// expired producers.
     ///
-    /// Returns an empty map for an unknown `(topic, partition)`.
+    /// The cleaner calls it to build a `CompactionContext`. The cleaner must
+    /// keep an active producer's last batch with `RETAIN_EMPTY` even when
+    /// compaction removes all of its records, so the producer's
+    /// sequence/epoch state survives.
     ///
-    /// Called by the partition writer task's `WriterMessage::Compact`
-    /// handler (the broker-wide `ProducerState` is threaded through
-    /// `spawn_partition` into `partition_writer::run`) to populate the
-    /// `CompactionContext::active_producers` set.
+    /// This function returns an empty map for an unknown `(topic, partition)`.
+    ///
+    /// The caller is the partition writer task's `WriterMessage::Compact`
+    /// handler, which fills the `CompactionContext::active_producers` set.
+    /// `spawn_partition` threads the broker-wide `ProducerState` into
+    /// `partition_writer::run` for that handler.
     pub async fn active_snapshot(
         &self,
         topic: &str,
@@ -296,18 +305,19 @@ impl ProducerState {
     }
 
     /// Evict idempotent-producer entries whose last activity is older
-    /// than `ttl` relative to `now_ms`, mirroring Kafka's
-    /// `producer.id.expiration.ms` (default `86_400_000` ms = 24h). Kafka
-    /// expires by *inactivity*: an entry that keeps receiving produces
-    /// is retained; one that has gone quiet past the window is dropped so
-    /// the map doesn't grow unbounded.
+    /// than `ttl` relative to `now_ms`.
     ///
-    /// Empty partition maps (and empty topic maps) are removed once their
-    /// last entry expires so stale `(topic, partition)` keys don't leak.
-    /// Returns the number of producer-id entries evicted.
+    /// This mirrors Kafka's `producer.id.expiration.ms`, whose default is
+    /// `86_400_000` ms = 24h. Kafka expires by *inactivity*. An entry that
+    /// keeps receiving produces stays. An entry that has gone quiet past the
+    /// window goes, so the map does not grow unbounded.
     ///
-    /// This provides the mechanism only; the periodic caller (a broker
-    /// maintenance loop) is wired separately.
+    /// This function removes empty partition maps and empty topic maps once
+    /// their last entry expires, so stale `(topic, partition)` keys do not
+    /// leak. It returns the number of producer-id entries it evicted.
+    ///
+    /// This function gives the mechanism only. The periodic caller is a
+    /// broker maintenance loop, wired separately.
     pub async fn expire_older_than(&self, now_ms: i64, ttl: Time) -> usize {
         let ttl_ms = ttl.millis_i64();
         let mut evicted = 0usize;
@@ -512,12 +522,13 @@ mod tests {
     /// A bumped producer epoch (same `producer_id`, higher epoch) establishes a
     /// FRESH sequence baseline: `base_sequence == 0` at the new epoch must be a
     /// fresh `Append`, NOT a `Duplicate` against the prior epoch's high-water.
-    /// This is the EOS-restart path (the client resets its sequence to 0).
+    /// This is the EOS-restart path. The client resets its sequence to 0.
     ///
-    /// Regression test for the cross-restart EOS data-loss bug: pre-fix, a
-    /// restarted EOS producer's first record on each partition was silently
-    /// deduped (echoing the old `base_offset`) while the txn's offset commit
-    /// still landed, so the source offset advanced but the output record vanished.
+    /// This is the regression test for the cross-restart EOS data-loss bug.
+    /// Before the fix, the broker silently deduped a restarted EOS producer's
+    /// first record on each partition and echoed the old `base_offset`. The
+    /// txn's offset commit still landed. The source offset advanced, but the
+    /// output record vanished.
     #[tokio::test]
     async fn higher_epoch_at_seq_zero_appends() {
         let s = ProducerState::new();
@@ -540,11 +551,12 @@ mod tests {
     }
 
     /// A bumped epoch that CONTINUES the sequence (`base_sequence > 0`) also
-    /// appends: this is the KIP-890 (`TV_2`) per-`EndTxn` epoch-bump path, where
-    /// broker bumps the epoch on every commit/abort within the SAME producer
-    /// session and the client keeps its sequence counter going. The first batch
-    /// at the new epoch is the baseline regardless of its `base_sequence`;
-    /// same-epoch ordering resumes once it commits.
+    /// appends. This is the KIP-890 (`TV_2`) per-`EndTxn` epoch-bump path. The
+    /// broker bumps the epoch on every commit or abort within the SAME
+    /// producer session, and the client keeps its sequence counter going. The
+    /// first batch at the new epoch is the baseline whatever its
+    /// `base_sequence` is. Same-epoch ordering resumes once that batch
+    /// commits.
     #[tokio::test]
     async fn higher_epoch_continuing_sequence_appends() {
         let s = ProducerState::new();
@@ -720,11 +732,13 @@ mod fuzz {
     use super::{Decision, ProducerEntry, check_pure};
 
     proptest! {
-        /// Large-N randomized submit sequences over `check_pure`: the
-        /// accepted-append log per epoch is a contiguous, duplicate-free,
-        /// monotonic prefix; a lower epoch is fenced; a higher epoch resets the
-        /// baseline. Complements the exhaustive `producer_state_model` at a scale
-        /// the BFS can't reach (epoch 0..6, base_seq 0..200, up to 400 ops).
+        /// Large-N randomized submit sequences over `check_pure`.
+        ///
+        /// The accepted-append log per epoch is a contiguous, duplicate-free,
+        /// monotonic prefix. A lower epoch is fenced. A higher epoch resets
+        /// the baseline. This test complements the exhaustive
+        /// `producer_state_model` at a scale the BFS cannot reach: epoch 0..6,
+        /// base_seq 0..200, and up to 400 ops.
         #[test]
         fn idempotent_log_invariants(
             ops in proptest::collection::vec(

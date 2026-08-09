@@ -1,5 +1,6 @@
-//! Ensure the `_schemas` compacted topic exists; resolve its `topic_id`
-//! (needed by Fetch v>=13). Mirrors `remote-storage-topic`'s `ensure_topic`.
+//! Ensure the `_schemas` compacted topic exists and resolve its `topic_id`,
+//! which Fetch v>=13 needs. This mirrors `remote-storage-topic`'s
+//! `ensure_topic`.
 
 use std::collections::BTreeMap;
 
@@ -24,8 +25,8 @@ fn schemas_topic_spec(cfg: &RegistryConfig) -> (CreateTopicSpec, Time) {
     )
 }
 
-/// Create `_schemas` (1 partition, cleanup.policy=compact) if absent and return
-/// its `topic_id`. Idempotent.
+/// Create `_schemas` with 1 partition and `cleanup.policy=compact` if it is
+/// absent, and return its `topic_id`. The function is idempotent.
 #[tracing::instrument(
     level = "info",
     name = "kafkastore.ensure_schemas_topic",
@@ -80,7 +81,8 @@ pub async fn ensure_schemas_topic(
     Ok(entry.topic_id.map_or(WireUuid::ZERO, to_wire_uuid))
 }
 
-/// Convert admin's `uuid::Uuid` to the protocol `WireUuid` (same byte order).
+/// Convert admin's `uuid::Uuid` to the protocol `WireUuid`. The byte order is
+/// the same.
 fn to_wire_uuid(id: uuid::Uuid) -> WireUuid {
     WireUuid(*id.as_bytes())
 }

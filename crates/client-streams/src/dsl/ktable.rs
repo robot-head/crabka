@@ -1,12 +1,14 @@
-//! `KTable<K,V>`: a materialized, changelog-backed table view. Produced by a
-//! terminal aggregation (`count`/`reduce`/`aggregate`) or by
-//! [`StreamsBuilder::table`](crate::dsl::StreamsBuilder::table), and convertible back to a `KStream` via
-//! [`KTable::to_stream`].
+//! `KTable<K,V>`: a materialized, changelog-backed table view.
 //!
-//! Each op records a logical node + a lowering thunk in the same style as
-//! [`crate::dsl::kstream::KStream`]: reconstruct the parent handle from
-//! `LowerState`, perform the typed Processor-API call, record the resulting node
-//! name. Materialized ops (`map_values`/`filter`) also register a state store.
+//! A terminal aggregation (`count`/`reduce`/`aggregate`) or
+//! [`StreamsBuilder::table`](crate::dsl::StreamsBuilder::table) produces a
+//! `KTable`. [`KTable::to_stream`] converts it back to a `KStream`.
+//!
+//! Each op records a logical node and a lowering thunk in the same style as
+//! [`crate::dsl::kstream::KStream`]. The thunk rebuilds the parent handle from
+//! `LowerState`, makes the typed Processor-API call, and records the resulting
+//! node name. The materialized ops `map_values` and `filter` also register a
+//! state store.
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
 use crabka_units::prelude::*;
@@ -43,16 +45,20 @@ use crate::{
     topology::NodeHandle,
 };
 
-/// A serde-carrying closure that registers a `SuppressBytesStore` for a `suppress`
-/// node during lowering. Attached to a `KTable` by the producing op (windowed/
-/// session aggregation or `builder.table`), which alone knows the concrete serdes.
+/// A serde-carrying closure that registers a `SuppressBytesStore` for a
+/// `suppress` node during lowering.
 ///
-/// Called as `factory(state, store_name, processor_name, logging)`: it registers
-/// the suppress store (with the captured serdes) under `store_name`, connected to
-/// `processor_name`, with the changelog gated by `logging`. Type-erased (the
-/// concrete `K`/`V`/serdes are baked into the closure) so the `KTable` field is
-/// non-generic. `Arc` + `Send + Sync` because the lowering thunk that clones it in
-/// is itself `Send` (the captured serdes are `Send + Sync`: the `Serde` supertrait).
+/// The producing op attaches this closure to a `KTable`. That op is a windowed
+/// aggregation, a session aggregation, or `builder.table`, and it alone knows the
+/// concrete serdes.
+///
+/// The caller calls it as `factory(state, store_name, processor_name, logging)`.
+/// It registers the suppress store with the captured serdes under `store_name`,
+/// connected to `processor_name`, and `logging` gates the changelog. The closure
+/// is type-erased, because the concrete `K`, `V`, and serdes are baked into it,
+/// so the `KTable` field is non-generic. It is an `Arc` and it is `Send + Sync`,
+/// because the lowering thunk that clones it in is itself `Send`. The captured
+/// serdes are `Send + Sync` through the `Serde` supertrait.
 pub(crate) type SuppressStoreFactory = Arc<dyn Fn(&mut LowerState, &str, &str, bool) + Send + Sync>;
 
 struct ForeignKeyJoinGraph {
@@ -115,10 +121,13 @@ fn allocate_foreign_key_join_graph(
     }
 }
 
-/// Build a non-windowed [`SuppressStoreFactory`] from a table's key/value serdes
-/// (plain aggregations + `builder.table`). Registers a `SuppressBytesStore<K, V>`
-/// with the JVM 1-day default changelog retention. (Windowed/session aggregations
-/// use their own factories wrapping `TimeWindowedSerde`/`SessionWindowedSerde`.)
+/// Build a non-windowed [`SuppressStoreFactory`] from a table's key and value
+/// serdes.
+///
+/// Plain aggregations and `builder.table` use this factory. It registers a
+/// `SuppressBytesStore<K, V>` with the JVM 1-day default changelog retention.
+/// Windowed and session aggregations use their own factories, which wrap
+/// `TimeWindowedSerde` and `SessionWindowedSerde`.
 pub(crate) fn kv_suppress_factory<K, V, KS, VS>(
     key_serde: KS,
     value_serde: VS,
@@ -142,11 +151,13 @@ where
     )
 }
 
-/// A changelog-backed table handle. `store_name` is the materialized store this
-/// table reads/writes (used to derive changelog topics + reuse the store in
-/// downstream materialized ops). `source_topic` is the Kafka topic this table
-/// was sourced from (set for `builder.table_explicit()` `KTables`; `None` for derived
-/// `KTables`). Used by the join DSL to declare copartition groups.
+/// A changelog-backed table handle.
+///
+/// `store_name` is the materialized store this table reads and writes. The DSL
+/// uses it to derive changelog topics and to reuse the store in downstream
+/// materialized ops. `source_topic` is the Kafka topic this table was sourced
+/// from. It is set for `builder.table_explicit()` `KTables` and is `None` for
+/// derived `KTables`. The join DSL reads it to declare copartition groups.
 pub struct KTable<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde>::Serde> {
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     pub(crate) node: NodeId,
@@ -158,13 +169,14 @@ pub struct KTable<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde
     /// at `window.end + window_grace`). `None` for non-windowed tables.
     pub(crate) window_grace: Option<Time>,
     /// The history retention when this table is materialized into a versioned
-    /// store (KIP-889). Drives as-of stream–table join lookups (KIP-914) + the
-    /// table–table out-of-order gate + grace validation. Mirrors `window_grace`.
-    /// `None` for non-versioned / derived tables.
+    /// store (KIP-889). It drives as-of stream-table join lookups (KIP-914), the
+    /// table-table out-of-order gate, and grace validation. It mirrors
+    /// `window_grace`. `None` for non-versioned and derived tables.
     pub(crate) versioned_retention: Option<Time>,
-    /// Set by serde-carrying producers (aggregations, `builder.table`); read by
-    /// `suppress` to register its store with the right serdes. `None` on derived
-    /// tables whose value type changed (`map_values`) — `suppress` then panics.
+    /// The serde-carrying producers set this field. Those producers are the
+    /// aggregations and `builder.table`. `suppress` reads it to register its store
+    /// with the right serdes. It is `None` on a derived table whose value type
+    /// changed through `map_values`, and `suppress` then panics.
     pub(crate) suppress_store_factory: Option<SuppressStoreFactory>,
     pub(crate) key_serde: KS,
     pub(crate) value_serde: VS,
@@ -240,8 +252,9 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
         Arc::new(self.value_serde.clone())
     }
 
-    /// This table's logical graph node id (the FK-join DSL feeds its `SubscriptionSend`
-    /// from the left node and its `ForeignTableJoin` from the right node).
+    /// This table's logical graph node id. The FK-join DSL feeds its
+    /// `SubscriptionSend` from the left node and its `ForeignTableJoin` from the
+    /// right node.
     pub(crate) fn node_id(&self) -> NodeId {
         self.node
     }
@@ -252,34 +265,36 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
         self.store_name.as_deref()
     }
 
-    /// The Kafka source topic this table was sourced from (`builder.table_explicit()`),
-    /// or `None` for derived `KTables` (aggregations, `map_values`, `filter`).
+    /// The Kafka source topic this table was sourced from through
+    /// `builder.table_explicit()`. `None` for a derived `KTable` such as an
+    /// aggregation, a `map_values`, or a `filter`.
     #[allow(dead_code)]
     pub(crate) fn source_topic(&self) -> Option<&str> {
         self.source_topic.as_deref()
     }
 
-    /// Tag this table with its upstream window's grace (set by windowed/session
-    /// aggregations; propagated through `Change`-preserving ops). Read by `suppress`
-    /// (which accesses the `window_grace` field directly).
+    /// Tag this table with its upstream window's grace. The windowed and session
+    /// aggregations set it, and `Change`-preserving ops propagate it. `suppress`
+    /// reads it, and it accesses the `window_grace` field directly.
     #[must_use]
     pub(crate) fn with_window_grace(mut self, grace: Option<Time>) -> Self {
         self.window_grace = grace;
         self
     }
 
-    /// Tag this table with its versioned-store history retention (set by
-    /// `builder.table` when `Materialized::as_versioned` was used). Read by the
-    /// stream–table join (as-of routing) and table–table join (out-of-order gate).
+    /// Tag this table with its versioned-store history retention. `builder.table`
+    /// sets it when the caller used `Materialized::as_versioned`. The stream-table
+    /// join reads it for as-of routing, and the table-table join reads it for the
+    /// out-of-order gate.
     #[must_use]
     pub(crate) fn with_versioned_retention(mut self, retention: Option<Time>) -> Self {
         self.versioned_retention = retention;
         self
     }
 
-    /// Attach (or propagate) the serde-carrying suppress-store factory. Set by
-    /// aggregations / `builder.table`; propagated through value-preserving ops
-    /// (`filter`, `suppress` itself). Read by `suppress`.
+    /// Attach or propagate the serde-carrying suppress-store factory. The
+    /// aggregations and `builder.table` set it. The value-preserving ops `filter`
+    /// and `suppress` itself propagate it. `suppress` reads it.
     #[must_use]
     pub(crate) fn with_suppress_factory(mut self, factory: Option<SuppressStoreFactory>) -> Self {
         self.suppress_store_factory = factory;
@@ -292,11 +307,13 @@ where
     K: Any + Send + Sync + Clone,
     V: Any + Send + Clone,
 {
-    /// Test-only terminal: collect each forwarded `Change<V>`'s key + **new**
-    /// value (including tombstones, where `new == None`) into a shared buffer, in
-    /// arrival order. Unlike [`to_stream`](Self::to_stream) it preserves
-    /// tombstones, so an exec test can assert a table's full change-stream
-    /// (value updates *and* `None` deletions) — matching the JVM
+    /// Test-only terminal: collect the change-stream into a shared buffer.
+    ///
+    /// This terminal collects each forwarded `Change<V>`'s key and **new** value
+    /// into a shared buffer in arrival order. It includes tombstones, where
+    /// `new == None`. Unlike [`to_stream`](Self::to_stream) it keeps tombstones,
+    /// so an exec test can assert a table's full change-stream of value updates
+    /// *and* `None` deletions. That matches the JVM
     /// `toStream().to_explicit(topic)` capture, which writes null-valued records.
     #[cfg(test)]
     pub(crate) fn collect_changes(
@@ -366,9 +383,11 @@ where
         )
     }
 
-    /// `mapValues`: transform each value and forward the rewritten table view
-    /// **without materializing** a store (the JVM's non-materialized
-    /// `mapValues`). Key unchanged; emits no changelog topic. Use
+    /// `mapValues`: transform each value and forward the rewritten table view.
+    ///
+    /// This op **does not materialize** a store. It matches the JVM's
+    /// non-materialized `mapValues`. The key stays unchanged, and the op emits no
+    /// changelog topic. Use
     /// [`map_values_materialized`](Self::map_values_materialized) for the
     /// store-backed form.
     pub fn map_values<V2, F>(&self, f: F) -> KTable<K, V2, KS, <V2 as DefaultSerde>::Serde>
@@ -491,10 +510,11 @@ where
         .with_window_grace(grace)
     }
 
-    /// `filter`: keep rows matching `predicate`, materializing the filtered view.
-    /// A row that previously matched but stops matching is removed from the store
-    /// and forwarded as a `Change<V>` tombstone so downstream views drop it (see
-    /// the processor module doc).
+    /// `filter`: keep the rows that match `predicate` and materialize the view.
+    ///
+    /// When a row that matched before stops matching, this op removes it from the
+    /// store and forwards it as a `Change<V>` tombstone, so downstream views drop
+    /// it. See the processor module doc.
     #[must_use]
     pub fn filter<NKS, NVS, P>(
         &self,
@@ -574,9 +594,11 @@ where
         .with_suppress_factory(suppress_factory)
     }
 
-    /// `groupBy`: re-group the table by a new `(KR, VR)` derived from each entry,
-    /// then aggregate with `count`/`reduce`/`aggregate`. Always repartitions (the
-    /// JVM `KTable.groupBy` inserts a repartition-map + sink + source).
+    /// `groupBy`: re-group the table by a new `(KR, VR)` derived from each entry.
+    ///
+    /// After the re-group, aggregate with `count`, `reduce`, or `aggregate`. This
+    /// op always repartitions: the JVM `KTable.groupBy` inserts a repartition-map,
+    /// a sink, and a source.
     pub fn group_by<KR, VR, M>(
         &self,
         mapper: M,
@@ -660,13 +682,16 @@ where
         )
     }
 
-    /// `join` (inner KTable-KTable join): for each key, the join row exists only
-    /// when **both** tables hold a value. On any change to either side, the join
-    /// re-reads the other side's current value from its store and forwards a
-    /// `Change<VR>` (a tombstone when the row stops existing).
+    /// `join` (inner KTable-KTable join): join rows that both tables hold.
     ///
-    /// Both tables must be materialized — the join reads each side's store. The
-    /// two source topics are declared as a copartition group (KIP-1071).
+    /// For each key, the join row exists only when **both** tables hold a value.
+    /// On any change to either side, the join re-reads the other side's current
+    /// value from its store and forwards a `Change<VR>`. It forwards a tombstone
+    /// when the row stops existing.
+    ///
+    /// Both tables must be materialized, because the join reads each side's
+    /// store. The join declares the two source topics as a copartition group
+    /// (KIP-1071).
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn join<VB, VR, F, VBS>(
@@ -692,9 +717,10 @@ where
         self.join_impl(other, jf, JoinKind::inner())
     }
 
-    /// `leftJoin` (left KTable-KTable join): emits a row whenever the **left**
-    /// (this) side is present; the right side is optional (the joiner receives
-    /// `None` for it on a miss).
+    /// `leftJoin` (left KTable-KTable join): emit a row for every left row.
+    ///
+    /// This join emits a row whenever the **left** (this) side is present. The
+    /// right side is optional, and the joiner receives `None` for it on a miss.
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn left_join<VB, VR, F, VBS>(
@@ -714,8 +740,10 @@ where
         self.join_impl(other, jf, JoinKind::left())
     }
 
-    /// `outerJoin` (outer KTable-KTable join): emits a row whenever **either**
-    /// side is present; the joiner receives `Option` for each side.
+    /// `outerJoin` (outer KTable-KTable join): emit a row for either side.
+    ///
+    /// This join emits a row whenever **either** side is present. The joiner
+    /// receives an `Option` for each side.
     pub fn outer_join<VB, VR, F, VBS>(
         &self,
         other: &KTable<K, VB, KS, VBS>,
@@ -732,20 +760,20 @@ where
         self.join_impl(other, joiner, JoinKind::outer())
     }
 
-    /// Shared lowering for KTable-KTable inner/left/outer joins.
+    /// Shared lowering for the inner, left, and outer KTable-KTable joins.
     ///
-    /// Records three logical nodes and their thunks:
-    /// - `KTABLE-JOINTHIS-` (fed by this table's node): reads the OTHER (`b`)
-    ///   store, applies the join, forwards `Change<VR>`.
-    /// - `KTABLE-JOINOTHER-` (fed by the other table's node): reads the OTHER
-    ///   (`a`) store, applies the join, forwards `Change<VR>`.
-    /// - `KTABLE-MERGE-` (fed by both join nodes): forwards each `Change<VR>`
-    ///   unchanged, unioning the two join outputs.
+    /// This method records three logical nodes and their thunks:
+    /// - `KTABLE-JOINTHIS-`, fed by this table's node. It reads the OTHER (`b`)
+    ///   store, applies the join, and forwards `Change<VR>`.
+    /// - `KTABLE-JOINOTHER-`, fed by the other table's node. It reads the OTHER
+    ///   (`a`) store, applies the join, and forwards `Change<VR>`.
+    /// - `KTABLE-MERGE-`, fed by both join nodes. It forwards each `Change<VR>`
+    ///   unchanged and unions the two join outputs.
     ///
-    /// Each join node is connected to the store it reads (so the lowering pulls it
-    /// into the same subtopology as that store's owning table source). When both
-    /// tables are single-source-topic tables, their source topics are declared as
-    /// a copartition group.
+    /// Each join node connects to the store it reads, so the lowering pulls it
+    /// into the same subtopology as that store's owning table source. When both
+    /// tables are single-source-topic tables, this method declares their source
+    /// topics as a copartition group.
     fn join_impl<VB, VR, JF, VBS>(
         &self,
         other: &KTable<K, VB, KS, VBS>,
@@ -928,14 +956,17 @@ where
         )
     }
 
-    /// `join` on a foreign key (KIP-213 inner FK join): for each left record, the
-    /// foreign key `fk_extractor(&VA)` selects a row in `other` (`KTable<KO, VB>`),
-    /// and `joiner(&VA, &VB)` produces the result whenever both are present.
+    /// `join` on a foreign key (KIP-213 inner FK join).
     ///
-    /// Both tables must be materialized **source** tables (`builder.table`) — the
-    /// join reads `sa`/`sb` and needs their serdes. Lowers to the two-subtopology
-    /// KIP-213 graph (subscription registration + response repartition topics, a
-    /// subscription state store, and the five FK-join processors). See the module
+    /// For each left record, the foreign key `fk_extractor(&VA)` selects a row in
+    /// `other`, which is a `KTable<KO, VB>`. `joiner(&VA, &VB)` produces the
+    /// result whenever both are present.
+    ///
+    /// Both tables must be materialized **source** tables built with
+    /// `builder.table`, because the join reads `sa` and `sb` and needs their
+    /// serdes. The join lowers to the two-subtopology KIP-213 graph: the
+    /// subscription registration and response repartition topics, a subscription
+    /// state store, and the five FK-join processors. See the module
     /// `dsl::processors::fk` for the per-processor semantics.
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -965,9 +996,10 @@ where
         self.fk_join_impl(other, fk_extractor, jf, fk_serde, false)
     }
 
-    /// `leftJoin` on a foreign key (KIP-213 left FK join): emits a row for every
-    /// left record; the joiner receives `None` for the foreign value when the
-    /// foreign key has no matching row.
+    /// `leftJoin` on a foreign key (KIP-213 left FK join).
+    ///
+    /// This join emits a row for every left record. The joiner receives `None`
+    /// for the foreign value when the foreign key has no matching row.
     pub fn left_join_on_foreign_key<KO, VB, VR, FKE, J, KOS, KosOther, VbsOther>(
         &self,
         other: &KTable<KO, VB, KosOther, VbsOther>,
@@ -992,16 +1024,19 @@ where
         self.fk_join_impl(other, fk_extractor, joiner, fk_serde, true)
     }
 
-    /// Shared lowering for inner/left foreign-key joins. `jf` is the outer-form
-    /// joiner `Fn(&V, Option<&VB>) -> VR`; `is_left` selects the JVM
-    /// `leftJoinInstructions` / inner staleness rules.
+    /// Shared lowering for the inner and left foreign-key joins.
     ///
-    /// The whole KIP-213 graph is recorded under a **single** logical OUTPUT node
-    /// fed by both tables' nodes (so the lowering driver visits it after both
-    /// sources and before `toStream`). All 14 JVM counter indices (registration
-    /// topic 4 … result store 17) are minted **eagerly** here so a downstream op
-    /// (`toStream`=18, sink=19) lands at the JVM index; the thunk then registers
-    /// the Topology sources/processors/sinks/stores/repartition-topics/copartition.
+    /// `jf` is the outer-form joiner `Fn(&V, Option<&VB>) -> VR`. `is_left`
+    /// selects either the JVM `leftJoinInstructions` or the inner staleness
+    /// rules.
+    ///
+    /// This method records the whole KIP-213 graph under a **single** logical
+    /// OUTPUT node fed by both tables' nodes, so the lowering driver visits it
+    /// after both sources and before `toStream`. It mints all 14 JVM counter
+    /// indices **eagerly**, from registration topic 4 to result store 17, so that
+    /// a downstream op lands at the JVM index (`toStream`=18, sink=19). The thunk
+    /// then registers the Topology sources, processors, sinks, stores,
+    /// repartition topics, and copartition group.
     // the 14-node KIP-213 graph is one cohesive lowering
     fn foreign_key_join_sources<KO, VB, KosOther, VbsOther>(
         &self,
@@ -1285,14 +1320,18 @@ where
     K: Any + Send + Sync + Clone,
     V: Any + Send + Clone,
 {
-    /// `suppress(Suppressed)`: buffer updates and emit on a delay. `until_window_closes`
-    /// (windowed tables) emits each window's final value once it closes;
-    /// `until_time_limit` rate-limits any table to one update per key per wait.
+    /// `suppress(Suppressed)`: buffer updates and emit on a delay.
     ///
-    /// The buffer is a registered [`SuppressBytesStore`](crate::store::suppress_store)
-    /// — durable (changelog + restore) when `logging` is on. The serdes come from
-    /// the table-producing operation; calling `suppress` on a table that changed
-    /// its value type (`map_values`) panics because no serde factory is available.
+    /// On a windowed table, `until_window_closes` emits each window's final value
+    /// once the window closes. `until_time_limit` rate-limits any table to one
+    /// update per key per wait.
+    ///
+    /// The buffer is a registered
+    /// [`SuppressBytesStore`](crate::store::suppress_store). It is durable, with
+    /// a changelog and restore, when `logging` is on. The serdes come from the
+    /// table-producing operation. A call to `suppress` on a table that changed its
+    /// value type through `map_values` panics, because no serde factory is
+    /// available.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -1372,8 +1411,10 @@ where
     }
 }
 
-/// Mint a materialized table store name: the `Materialized` name when present,
-/// else a fresh counter at the JVM position.
+/// Mint a materialized table store name.
+///
+/// Returns the `Materialized` name when it is present, otherwise a fresh counter
+/// at the JVM position.
 fn mint_table_store<KS, VS>(
     builder: &Rc<RefCell<InternalStreamsBuilder>>,
     materialized: &crate::dsl::config::Materialized<KS, VS>,
@@ -1435,11 +1476,13 @@ mod fk_exec_tests {
         &'a [(&'a str, Option<&'a str>)],
     );
 
-    /// One input record: `topic:key=val@ts`. (The runtime has no null-value
-    /// source-record path — a `Record`'s value is always present — so the
-    /// behavior.json `a:k1=null@6` tombstone-into-the-table step can't be piped
-    /// here; it's a redundant `k1=null` after step 5 already emits `k1=null`, so
-    /// dropping it leaves every distinct FK retraction case covered.)
+    /// One input record: `topic:key=val@ts`.
+    ///
+    /// The runtime has no null-value source-record path, because a `Record`'s
+    /// value is always present. The behavior.json `a:k1=null@6`
+    /// tombstone-into-the-table step therefore cannot be piped here. That step is
+    /// a redundant `k1=null` after step 5 already emits `k1=null`, so dropping it
+    /// leaves every distinct FK retraction case covered.
     fn pipe(d: &mut TopologyTestDriver, topic: &str, key: &str, val: &str, ts: i64) {
         d.pipe_input(
             topic,
@@ -1450,9 +1493,9 @@ mod fk_exec_tests {
         );
     }
 
-    /// Drive the (k, v, ts) input steps, asserting each step's *incremental*
-    /// collected output equals `want` (the collector preserves tombstones as
-    /// `(Some(k), None)`).
+    /// Drive the (k, v, ts) input steps and assert each step's *incremental*
+    /// collected output equals `want`. The collector keeps tombstones as
+    /// `(Some(k), None)`.
     fn run_sequence(buf: &Out, d: &mut TopologyTestDriver, steps: &[Step]) {
         let mut seen = 0usize;
         for (topic, key, val, ts, want) in steps {
@@ -1476,12 +1519,14 @@ mod fk_exec_tests {
         (ta, tb)
     }
 
-    /// Inner FK join over the behavior.json `inner_sequence` (steps 0–5). fk
-    /// extractor = identity on the left String value; joiner = va+vb. Validates:
-    /// first-arrival skip (`a:k1=A` → []), match emit (`b:A=X` → `k1=AX`),
-    /// FK-change retraction tombstone (`a:k1=A2` → `k1=null`, since fk "A"→"A2"
-    /// and "A2" has no foreign value), a second primary key, the right-table
-    /// re-emit (`b:A=Y` → `k2=AY`), and another FK-change tombstone.
+    /// Inner FK join over the behavior.json `inner_sequence` (steps 0–5).
+    ///
+    /// The fk extractor is the identity on the left String value, and the joiner
+    /// is va+vb. The test checks the first-arrival skip (`a:k1=A` → []), the
+    /// match emit (`b:A=X` → `k1=AX`), and the FK-change retraction tombstone
+    /// (`a:k1=A2` → `k1=null`, because fk "A"→"A2" and "A2" has no foreign
+    /// value). It then checks a second primary key, the right-table re-emit
+    /// (`b:A=Y` → `k2=AY`), and another FK-change tombstone.
     #[test]
     fn fk_inner_sequence_matches_behavior_json() {
         let b = StreamsBuilder::new();
@@ -1512,12 +1557,13 @@ mod fk_exec_tests {
         );
     }
 
-    /// Left FK join over the behavior.json `left_sequence` (steps 0–5). joiner =
-    /// va + (vb? vb : "_"). Validates the left-join non-match emit (`a:k1=A` →
-    /// `k1=A_`), the match (`b:A=X` → `k1=AX`), the FK-change re-evaluation
-    /// (`a:k1=A2` → `k1=A2_` — fk "A2" has no foreign value, so left emits the
-    /// left value with the empty marker rather than a tombstone), and the
-    /// right-table re-emit.
+    /// Left FK join over the behavior.json `left_sequence` (steps 0–5).
+    ///
+    /// The joiner is va + (vb? vb : "_"). The test checks the left-join non-match
+    /// emit (`a:k1=A` → `k1=A_`), the match (`b:A=X` → `k1=AX`), the FK-change
+    /// re-evaluation (`a:k1=A2` → `k1=A2_`), and the right-table re-emit. In the
+    /// re-evaluation, fk "A2" has no foreign value, so left emits the left value
+    /// with the empty marker and not a tombstone.
     #[test]
     fn fk_left_sequence_matches_behavior_json() {
         let b = StreamsBuilder::new();

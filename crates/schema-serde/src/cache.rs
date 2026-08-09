@@ -1,5 +1,7 @@
-//! Shared, background-refreshed schema cache. Hot-path reads are synchronous;
-//! registry I/O happens at pre-warm and on background fetches.
+//! Shared, background-refreshed schema cache.
+//!
+//! Hot-path reads are synchronous. Registry I/O happens at pre-warm and on
+//! background fetches.
 
 use std::{
     collections::HashMap,
@@ -17,30 +19,30 @@ use crate::{
 
 /// A registry writer schema and the `.proto` sources named by its references.
 ///
-/// The root source is stored in [`Self::schema`]. Reference sources are keyed
-/// by the exact import name supplied by Schema Registry, never by a filesystem
-/// path or URL.
+/// [`Self::schema`] holds the root source. The map keys the reference sources
+/// by the exact import name that Schema Registry supplies, never by a
+/// filesystem path or a URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterSchema {
     pub schema: String,
     pub references: HashMap<String, String>,
 }
 
-/// How serialize-side ids are resolved.
+/// How the cache resolves serialize-side ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterMode {
-    /// Register the local schema on pre-warm (Confluent default).
+    /// Register the local schema on pre-warm. This is the Confluent default.
     AutoRegister,
-    /// Look up the local schema's id; never register.
+    /// Look up the local schema's id. Never register.
     LookupOnly,
     /// Use the latest registered version's id for the subject.
     UseLatest,
 }
 
-/// Default delay before retrying a transient schema fetch failure.
+/// Default delay before the cache retries a transient schema fetch failure.
 pub const DEFAULT_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF: Time = millis(10);
 
-/// Default maximum delay between transient schema fetch retries.
+/// Default maximum delay between retries of a transient schema fetch.
 pub const DEFAULT_SCHEMA_FETCH_RETRY_MAX_BACKOFF: Time = secs(1);
 
 /// Validated retry range for transient schema fetch failures.
@@ -55,9 +57,9 @@ impl SchemaFetchRetryPolicy {
     ///
     /// # Errors
     ///
-    /// Returns an error when either bound cannot be represented as a
-    /// [`Duration`], either bound is zero, or the initial bound exceeds the
-    /// maximum.
+    /// Returns an error when a [`Duration`] cannot hold either bound. Returns
+    /// an error when either bound is zero. Returns an error when the initial
+    /// bound is more than the maximum.
     pub fn new(initial_backoff: Time, max_backoff: Time) -> Result<Self, String> {
         let initial = validated_duration("initial schema fetch retry backoff", initial_backoff)?;
         let max = validated_duration("maximum schema fetch retry backoff", max_backoff)?;
@@ -74,7 +76,7 @@ impl SchemaFetchRetryPolicy {
         })
     }
 
-    /// Initial delay before retrying a transient failure.
+    /// Initial delay before the cache retries a transient failure.
     #[must_use]
     pub const fn initial_backoff(self) -> Time {
         self.initial_backoff
@@ -121,7 +123,7 @@ impl Default for CacheConfig {
     }
 }
 
-/// An interned local schema awaiting pre-warm resolution.
+/// An interned local schema that waits for pre-warm to resolve it.
 #[derive(Debug, Clone)]
 struct Interned {
     subject: String,
@@ -132,30 +134,33 @@ struct Interned {
 
 #[derive(Default)]
 struct Inner {
-    /// subject ⇒ resolved id (serialize path).
+    /// subject ⇒ resolved id, for the serialize path.
     subject_id: HashMap<String, u32>,
-    /// id ⇒ fully resolved writer schema and reference sources (deserialize path).
+    /// id ⇒ fully resolved writer schema and reference sources, for the
+    /// deserialize path.
     id_writer_schema: HashMap<u32, WriterSchema>,
-    /// id ⇒ protobuf message descriptor full name (deserialize path).
+    /// id ⇒ protobuf message descriptor full name, for the deserialize path.
     id_message_type: HashMap<u32, String>,
     /// Local schemas to resolve on pre-warm.
     interned: Vec<Interned>,
-    /// ids whose fetch is in flight (dedup background fetches).
+    /// ids whose fetch is in flight. This set dedups background fetches.
     fetching: std::collections::HashSet<u32>,
     /// ids known not to exist in the registry or whose schemas are invalid.
     unavailable_schemas: HashMap<u32, String>,
-    /// earliest time a transiently failed fetch may be retried.
+    /// earliest time the cache may retry a fetch that failed transiently.
     retry_after: HashMap<u32, Instant>,
-    /// consecutive transient fetch failures, used to increase the next delay.
+    /// consecutive transient fetch failures. The cache uses the count to
+    /// increase the next delay.
     retry_attempts: HashMap<u32, u32>,
 }
 
 /// Return a capped exponential retry delay with deterministic per-id jitter.
 ///
-/// The deterministic jitter avoids synchronized retries without making tests
-/// depend on random timing. The jitter is stable for an id: it is added to the
-/// exponential delay while headroom remains, then the delay stays at the
-/// policy maximum. Each later attempt is at least as long as its predecessor.
+/// The deterministic jitter prevents synchronized retries, and tests do not
+/// depend on random timing. The jitter is stable for an id. This function adds
+/// the jitter to the exponential delay while headroom remains. After that, the
+/// delay stays at the policy maximum. Each later attempt is at least as long as
+/// the attempt before it.
 fn retry_delay(policy: SchemaFetchRetryPolicy, id: u32, attempt: u32) -> Duration {
     let initial_backoff = Duration::try_from_secs_f64(policy.initial_backoff().secs_f64())
         .expect("schema fetch retry policy was validated");
@@ -175,7 +180,7 @@ fn retry_delay(policy: SchemaFetchRetryPolicy, id: u32, attempt: u32) -> Duratio
         .min(max_backoff)
 }
 
-/// `Arc`-shared cache wiring serdes to a registry.
+/// `Arc`-shared cache that wires serdes to a registry.
 pub struct SchemaCache {
     client: RegistryClient,
     config: CacheConfig,
@@ -191,14 +196,18 @@ impl std::fmt::Debug for SchemaCache {
     }
 }
 
-/// Process-wide default registry cache, read by the `Default` impls of the
-/// format serdes (so a type can declare a default schema serde without
-/// threading a cache to the call site — analogous to Confluent serdes reading
-/// `schema.registry.url` from config). Set once at application startup.
+/// Process-wide default registry cache.
+///
+/// The `Default` impls of the format serdes read this cache. A type can then
+/// declare a default schema serde without a cache at the call site. Confluent
+/// serdes read `schema.registry.url` from config in the same way. Set this
+/// cache once at application startup.
 static DEFAULT_REGISTRY: std::sync::OnceLock<Arc<SchemaCache>> = std::sync::OnceLock::new();
 
-/// Install the process-wide default registry cache (first call wins). Required
-/// before constructing any default (`Default::default()`) format serde.
+/// Install the process-wide default registry cache.
+///
+/// The first call wins. You must call this function before you construct any
+/// default format serde with `Default::default()`.
 pub fn set_default_registry(cache: Arc<SchemaCache>) {
     let _ = DEFAULT_REGISTRY.set(cache);
 }
@@ -210,7 +219,7 @@ pub fn default_registry() -> Option<Arc<SchemaCache>> {
 }
 
 impl SchemaCache {
-    /// Build a cache from a registry client and config, using `TopicNameStrategy`.
+    /// Build a cache from a registry client and config with `TopicNameStrategy`.
     #[must_use]
     pub fn new(client: RegistryClient, config: CacheConfig) -> Arc<Self> {
         Arc::new(Self {
@@ -227,13 +236,16 @@ impl SchemaCache {
         self.strategy.subject(topic, role)
     }
 
-    /// Return the retry policy used for transient schema fetch failures.
+    /// Return the retry policy for transient schema fetch failures.
     #[must_use]
     pub fn fetch_retry_policy(&self) -> SchemaFetchRetryPolicy {
         self.config.fetch_retry_policy
     }
 
-    /// Register a local `(subject, kind, schema)` for pre-warm. Idempotent.
+    /// Register a local `(subject, kind, schema)` for pre-warm.
+    ///
+    /// The call is idempotent.
+    ///
     /// # Panics
     /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn intern(
@@ -255,8 +267,11 @@ impl SchemaCache {
         });
     }
 
-    /// Resolve every interned subject's id (register/lookup/latest per mode).
-    /// Called once at client/membership start.
+    /// Resolve every interned subject's id.
+    ///
+    /// The mode selects register, lookup, or latest. The client calls this
+    /// method once at client start or at membership start.
+    ///
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     /// # Panics
@@ -325,8 +340,11 @@ impl SchemaCache {
         self.inner.lock().unwrap().subject_id.get(subject).copied()
     }
 
-    /// Synchronous hot-path read of a writer schema by id. On a miss, spawns a
-    /// background fetch and returns `WriterSchemaPending` (retriable).
+    /// Synchronous hot-path read of a writer schema by id.
+    ///
+    /// On a miss, this method spawns a background fetch and returns
+    /// `WriterSchemaPending`. That error is retriable.
+    ///
     /// # Errors
     /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     /// # Panics
@@ -336,19 +354,22 @@ impl SchemaCache {
             .map(|writer_schema| writer_schema.schema)
     }
 
-    /// Synchronous hot-path read of a writer schema and all registry-provided
-    /// reference sources. A cold read starts one bounded background fetch and
-    /// returns [`SchemaSerdeError::WriterSchemaPending`].
+    /// Synchronous hot-path read of a writer schema and all its reference
+    /// sources.
+    ///
+    /// The registry supplies the reference sources. A cold read starts one
+    /// bounded background fetch and returns
+    /// [`SchemaSerdeError::WriterSchemaPending`].
     ///
     /// # Errors
     ///
-    /// Returns an unavailable or pending error when the schema cannot be
-    /// served from the cache immediately.
+    /// Returns an unavailable error or a pending error when the cache cannot
+    /// serve the schema immediately.
     ///
     /// # Panics
     ///
-    /// Panics if the cache mutex is poisoned or this is called outside a
-    /// Tokio runtime while a background fetch must be started.
+    /// Panics if the cache mutex is poisoned. Panics if a background fetch must
+    /// start and the caller is outside a Tokio runtime.
     pub fn writer_schema_with_references(
         self: &Arc<Self>,
         id: u32,

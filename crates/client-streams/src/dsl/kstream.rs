@@ -1,11 +1,12 @@
-//! `KStream<K,V>` handle + its stateless DSL ops.
+//! `KStream<K,V>` handle and its stateless DSL ops.
 //!
-//! Each op (1) mints a JVM-matching node name, (2) adds a type-erased
-//! `StatelessProcessor` node to the logical graph with the right
-//! `key_changing_operation` flag, and (3) attaches a lowering thunk that performs
-//! the typed [`Topology::add_processor`] call and records the resulting node name.
-//! The thunk captures the op's concrete K/V types and the user closure, so types
-//! are statically known *inside* the thunk even though the graph is type-erased.
+//! Each op does three things. It mints a JVM-matching node name. It adds a
+//! type-erased `StatelessProcessor` node to the logical graph with the right
+//! `key_changing_operation` flag. It attaches a lowering thunk that makes the
+//! typed [`Topology::add_processor`] call and records the resulting node name.
+//! The thunk captures the op's concrete K/V types and the user closure, so the
+//! types are known statically *inside* the thunk even though the graph is
+//! type-erased.
 //!
 //! [`Topology::add_processor`]: crate::topology::Topology::add_processor
 use std::{
@@ -39,9 +40,10 @@ use crate::{
     topology::NodeHandle,
 };
 
-/// The shared outer-form joiner threaded into a windowed stream-stream join
-/// (`join`/`left_join`/`outer_join` all lift their user joiner to this shape).
-/// Each per-side processor wraps it so a match passes the present sides.
+/// The shared outer-form joiner for a windowed stream-stream join.
+///
+/// `join`, `left_join`, and `outer_join` all lift their user joiner to this
+/// shape. Each per-side processor wraps it, so a match passes the present sides.
 type SharedOuterJoiner<V, V2, VO> = Arc<dyn Fn(Option<&V>, Option<&V2>) -> VO + Send + Sync>;
 
 struct StreamJoinGraph {
@@ -107,15 +109,19 @@ fn allocate_stream_join_graph(
     }
 }
 
-/// Type-erased KIP-923 grace lowering, built by the `*_with` methods (which hold
-/// the `Serde`/`Sync` bounds the grace buffer store + processor require) and run
-/// once inside [`KStream::join_table_impl`]'s lowering thunk. Given the live
-/// `LowerState`, the stream-side parent `NodeId` (the closure rebuilds the typed
-/// `NodeHandle<K, V>` itself, since `V` is in scope where it is built), the
-/// auto-minted join node name, and the table store name, it registers the grace
-/// processor + its `<join_name>-Buffer` store, connects the join to the buffer,
-/// and returns the join node handle. The impl then performs the shared table-store
-/// connect + copartition declaration (identical to the non-grace path).
+/// Type-erased KIP-923 grace lowering.
+///
+/// The `*_with` methods build this closure, because they hold the `Serde` and
+/// `Sync` bounds that the grace buffer store and the processor need.
+/// [`KStream::join_table_impl`] runs it once inside its lowering thunk.
+///
+/// The closure takes the live `LowerState`, the stream-side parent `NodeId`, the
+/// auto-minted join node name, and the table store name. It rebuilds the typed
+/// `NodeHandle<K, V>` itself, because `V` is in scope where the closure is built.
+/// It registers the grace processor and its `<join_name>-Buffer` store, connects
+/// the join to the buffer, and returns the join node handle. The impl then does
+/// the shared table-store connect and the copartition declaration, the same as
+/// the non-grace path.
 type GraceLowering<K, VO> =
     Box<dyn FnOnce(&mut LowerState, NodeId, String, String) -> NodeHandle<K, VO> + Send>;
 
@@ -124,22 +130,27 @@ pub struct KStream<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerd
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     #[allow(dead_code)]
     pub(crate) node: NodeId,
-    /// True when the current key was produced by a key-changing op upstream
-    /// (`select_key`/`map`/`flat_map`/`group_by`) that has *not* since been
-    /// re-grouped through a repartition. A downstream aggregation reads this to
-    /// decide whether it must insert a repartition before the aggregate node.
-    /// A source stream starts `false`; value-only ops propagate the parent bit.
+    /// True when a key-changing op upstream produced the current key and no
+    /// repartition has re-grouped it since. The key-changing ops are
+    /// `select_key`, `map`, `flat_map`, and `group_by`. A downstream aggregation
+    /// reads this flag to decide whether it must insert a repartition before the
+    /// aggregate node. A source stream starts `false`. Value-only ops propagate
+    /// the parent bit.
     pub(crate) key_changing: bool,
-    /// The single Kafka source topic this stream still reads, when known. Set by
-    /// [`StreamsBuilder::stream`] when a stream is sourced from exactly one topic;
-    /// propagated unchanged through value-only ops (`map_values`/`filter`/`peek`/…)
-    /// since they don't change the key or the partitioning. Cleared (`None`) by
-    /// key-changing ops, `merge`, `repartition`, `to_stream`, and a join output —
-    /// in those cases the stream no longer corresponds to a single original source
-    /// topic. [`join`](Self::join) reads this as the stream-side copartition group
-    /// member when the key is unchanged (otherwise it repartitions and uses the
-    /// repartition topic as the member). `group_by_key` likewise propagates it so
-    /// a downstream cogroup can register its inputs' copartition group.
+    /// The single Kafka source topic this stream still reads, when known.
+    ///
+    /// [`StreamsBuilder::stream`] sets this when a stream reads exactly one
+    /// topic. Value-only ops such as `map_values`, `filter`, and `peek` propagate
+    /// it unchanged, because they do not change the key or the partitioning.
+    /// Key-changing ops, `merge`, `repartition`, `to_stream`, and a join output
+    /// all clear it to `None`. In those cases the stream no longer corresponds to
+    /// a single original source topic.
+    ///
+    /// [`join`](Self::join) reads this as the stream-side copartition group
+    /// member when the key is unchanged. If the key changed, `join` repartitions
+    /// and uses the repartition topic as the member. `group_by_key` also
+    /// propagates it, so a downstream cogroup can register its inputs'
+    /// copartition group.
     pub(crate) source_topic: Option<String>,
     pub(crate) key_serde: KS,
     pub(crate) value_serde: VS,
@@ -581,7 +592,7 @@ where
         }));
     }
 
-    /// `to`: write the stream to a topic via a sink (consumes the stream).
+    /// `to`: write the stream to a topic through a sink (consumes the stream).
     pub fn to_explicit<KS2, VS2>(
         self,
         topic: impl Into<String>,
@@ -662,21 +673,24 @@ where
         )
     }
 
-    /// `join` (inner stream-table join): for each record on this stream, look up
-    /// the record's key in `table`'s materialized store and, **only when a value is
-    /// present**, forward `joiner(&stream_value, &table_value)` keyed by the same
-    /// key. Records whose key is absent from the table are dropped (inner join).
+    /// `join` (inner stream-table join): look each stream record up in `table`.
     ///
-    /// `table` must be materialized (sourced via [`StreamsBuilder::table`] or any
-    /// materialized op) — the join reads its store by name. The stream side and the
-    /// table's source topic are declared as a **copartition group** (KIP-1071), so
-    /// the streams-group coordinator co-locates their partitions.
+    /// For each record on this stream, this method looks the record's key up in
+    /// `table`'s materialized store. **Only when a value is present**, it
+    /// forwards `joiner(&stream_value, &table_value)` keyed by the same key. It
+    /// drops records whose key is absent from the table. This is an inner join.
     ///
-    /// The stream key must be unchanged relative to its source partitioning (a
-    /// stream-table join is partition-local). If a key-changing op (`map`/
-    /// `select_key`/`flat_map`/`group_by`) precedes the join, call
-    /// [`repartition`](Self::repartition) first to re-partition by the new key;
-    /// otherwise `join_table` panics.
+    /// `table` must be materialized, that is, sourced through
+    /// [`StreamsBuilder::table`] or any materialized op. The join reads its store
+    /// by name. The join declares the stream side and the table's source topic as
+    /// a **copartition group** (KIP-1071), so the streams-group coordinator
+    /// co-locates their partitions.
+    ///
+    /// The stream key must be unchanged relative to its source partitioning,
+    /// because a stream-table join is partition-local. If a key-changing op such
+    /// as `map`, `select_key`, `flat_map`, or `group_by` comes before the join,
+    /// call [`repartition`](Self::repartition) first to re-partition by the new
+    /// key. If you do not, `join_table` panics.
     ///
     /// # Naming vs the JVM
     /// The JVM overloads `join` for both stream-table and (windowed) stream-stream
@@ -725,14 +739,18 @@ where
         self.join_table_impl::<VT, VO, _, VTS>(table, joiner, true, None)
     }
 
-    /// `join` with [`Joined`] config (KIP-923 grace path). Identical to
-    /// [`join_table`](Self::join_table) when `joined.grace` is `None`. When a
-    /// grace period is set, the join buffers each stream record into a
-    /// `JoinGraceBufferStore` and drains it as-of its own timestamp once the grace
-    /// horizon passes — so out-of-order stream records join against the table
-    /// version that was current at the record's own timestamp. Grace **requires**
-    /// the table to be versioned ([`Materialized::as_versioned`]); `grace` must
-    /// be strictly less than the table's `history_retention`.
+    /// `join` with [`Joined`] config (KIP-923 grace path).
+    ///
+    /// This method is identical to [`join_table`](Self::join_table) when
+    /// `joined.grace` is `None`. When a grace period is set, the join buffers
+    /// each stream record into a `JoinGraceBufferStore`. It drains the buffer
+    /// as-of the record's own timestamp once the grace horizon passes.
+    /// Out-of-order stream records therefore join against the table version that
+    /// was current at the record's own timestamp.
+    ///
+    /// Grace **requires** the table to be versioned. See
+    /// [`Materialized::as_versioned`]. `grace` must be strictly less than the
+    /// table's `history_retention`.
     ///
     /// [`Materialized::as_versioned`]: crate::dsl::config::Materialized::as_versioned
     #[must_use]
@@ -793,17 +811,19 @@ where
         self.join_table_impl::<VT, VO, _, VTS>(table, joiner, true, grace)
     }
 
-    /// Build the [`GraceLowering`] closure for a KIP-923 grace join, or `None` when
-    /// `joined.grace` is unset. This method holds the `Serde`/`Sync` bounds the
-    /// grace buffer store + processor require (which the type-erased
-    /// [`join_table_impl`](Self::join_table_impl) does not), and validates the
-    /// versioned-table + `grace < history_retention` preconditions up front.
+    /// Build the [`GraceLowering`] closure for a KIP-923 grace join.
     ///
-    /// The returned closure, run once inside the impl's lowering thunk, rebuilds the
-    /// typed stream parent handle, registers the grace processor + its
-    /// `<join_name>-Buffer` store (changelog `app-<join_name>-Buffer-changelog`,
-    /// derived by the topology layer), connects the join node to the buffer, and
-    /// returns the join node handle.
+    /// Returns `None` when `joined.grace` is unset. This method holds the `Serde`
+    /// and `Sync` bounds that the grace buffer store and the processor need,
+    /// which the type-erased [`join_table_impl`](Self::join_table_impl) does not
+    /// hold. It also checks the versioned-table precondition and the
+    /// `grace < history_retention` precondition up front.
+    ///
+    /// The impl's lowering thunk runs the returned closure once. The closure
+    /// rebuilds the typed stream parent handle, registers the grace processor and
+    /// its `<join_name>-Buffer` store, connects the join node to the buffer, and
+    /// returns the join node handle. The topology layer derives the changelog
+    /// name `app-<join_name>-Buffer-changelog`.
     fn build_grace_lowering<VT, VO, LF, VTS>(
         &self,
         table: &KTable<K, VT, KS, VTS>,
@@ -873,16 +893,18 @@ where
         ))
     }
 
-    /// Shared lowering for inner/left stream-table join. `left_form` is the
-    /// `Fn(&V, Option<&VT>) -> VO` joiner; `emit_on_miss` is `false` for inner,
-    /// `true` for left.
+    /// Shared lowering for the inner and left stream-table join.
     ///
-    /// Records a `KSTREAM-JOIN-` processor node wired to this stream's node, and in
-    /// its thunk: (1) builds a [`KStreamKTableJoinProcessor`] reading the table's
-    /// store, (2) `connect_processor_store`s the join to that store (the union pulls
-    /// the join into the SAME subtopology as the table source, so both sources land
-    /// together), and (3) declares the `(stream_member, table_source)` copartition
-    /// group when both members are single source topics.
+    /// `left_form` is the `Fn(&V, Option<&VT>) -> VO` joiner. `emit_on_miss` is
+    /// `false` for an inner join and `true` for a left join.
+    ///
+    /// This method records a `KSTREAM-JOIN-` processor node wired to this
+    /// stream's node. Its thunk then does three things. It builds a
+    /// [`KStreamKTableJoinProcessor`] that reads the table's store. It calls
+    /// `connect_processor_store` to connect the join to that store, and the union
+    /// pulls the join into the SAME subtopology as the table source, so both
+    /// sources land together. It declares the `(stream_member, table_source)`
+    /// copartition group when both members are single source topics.
     fn join_table_impl<VT, VO, LF, VTS>(
         &self,
         table: &KTable<K, VT, KS, VTS>,
@@ -1001,16 +1023,18 @@ where
         )
     }
 
-    /// `join` (inner stream-globaltable join): for each record on this stream,
-    /// compute the lookup key `gk = key_mapper(&streamKey, &streamValue)`, look it
-    /// up in `global`'s fully-replicated store, and — **only on a hit** — forward
-    /// `joiner(&stream_value, &global_value)` keyed by the **stream key** with the
-    /// stream timestamp. Records whose derived key is absent are dropped.
+    /// `join` (inner stream-globaltable join): look each record up in `global`.
     ///
-    /// Unlike [`join_table`](Self::join_table), the lookup key is *derived* from
-    /// the record (so it may differ from the stream key), and because a
-    /// `GlobalKTable` is fully replicated there is **no copartitioning, no
-    /// repartition, and no key-changing assertion** — any record can look up any
+    /// For each record on this stream, this method computes the lookup key
+    /// `gk = key_mapper(&streamKey, &streamValue)` and looks it up in `global`'s
+    /// fully-replicated store. **Only on a hit**, it forwards
+    /// `joiner(&stream_value, &global_value)` keyed by the **stream key** with
+    /// the stream timestamp. It drops records whose derived key is absent.
+    ///
+    /// The lookup key is *derived* from the record, unlike
+    /// [`join_table`](Self::join_table), so it can differ from the stream key. A
+    /// `GlobalKTable` is fully replicated, so there is **no copartitioning, no
+    /// repartition, and no key-changing assertion**. Any record can look up any
     /// key on every instance.
     ///
     /// [`GlobalKTable`]: crate::dsl::global_table::GlobalKTable
@@ -1061,17 +1085,20 @@ where
         self.join_global_impl::<GK, VG, VR, KM, _, GKS, VGS>(global, key_mapper, joiner, true)
     }
 
-    /// Shared lowering for inner/left stream-globaltable join. `left_form` is the
-    /// `Fn(&V, Option<&VG>) -> VR` joiner; `emit_on_miss` is `false` for inner,
-    /// `true` for left.
+    /// Shared lowering for the inner and left stream-globaltable join.
     ///
-    /// Records a `KSTREAM-GLOBALTABLE-JOIN-` processor node wired to this stream's
-    /// node; its thunk builds a [`KStreamGlobalTableJoinProcessor`] that reads the
-    /// global table's store by name via the global registry accessor. Unlike the
-    /// stream-table join there is **no** copartition group and **no**
-    /// `connect_processor_store` (the global store is fully replicated and reached
-    /// through the global registry, not a copartitioned subtopology), and **no**
-    /// `key_changing` assertion (the lookup key is derived, not the stream key).
+    /// `left_form` is the `Fn(&V, Option<&VG>) -> VR` joiner. `emit_on_miss` is
+    /// `false` for an inner join and `true` for a left join.
+    ///
+    /// This method records a `KSTREAM-GLOBALTABLE-JOIN-` processor node wired to
+    /// this stream's node. Its thunk builds a
+    /// [`KStreamGlobalTableJoinProcessor`] that reads the global table's store by
+    /// name through the global registry accessor. Unlike the stream-table join,
+    /// there is **no** copartition group and **no** `connect_processor_store`,
+    /// because the global store is fully replicated and the processor reaches it
+    /// through the global registry, not through a copartitioned subtopology.
+    /// There is also **no** `key_changing` assertion, because the lookup key is
+    /// derived and is not the stream key.
     fn join_global_impl<GK, VG, VR, KM, LF, GKS, VGS>(
         &self,
         global: &crate::dsl::global_table::GlobalKTable<GK, VG, GKS, VGS>,
@@ -1133,24 +1160,28 @@ where
         )
     }
 
-    /// `join` (windowed inner stream-stream join): for each record on either
-    /// stream, the record is put into its own [`JoinWindowStore`] and the OTHER
-    /// stream's store is fetched over the join window; one output is forwarded per
-    /// match, keyed by the same key. A left record at `t` matches right records
-    /// with timestamp in `[t - before, t + after]` (and symmetrically — the
-    /// per-side OTHER processor swaps `before`/`after` so the rule holds whichever
-    /// side drives the record).
+    /// `join` (windowed inner stream-stream join): match records over a window.
     ///
-    /// Lowers (mirroring [`KTable::join`]'s dual+merge) to a **THIS** processor fed
-    /// by this stream, an **OTHER** processor fed by `other`, and a **MERGE** node
-    /// unioning the two outputs. Each side puts into its own `retainDuplicates`
-    /// join-window store and reads the other's, and is connected to BOTH stores so
-    /// the grouping pass folds A, B, both stores, and the two join nodes into one
-    /// copartitioned subtopology. When both streams are single-source-topic streams
-    /// their source topics are declared as a copartition group (KIP-1071).
+    /// For each record on either stream, the join puts the record into its own
+    /// [`JoinWindowStore`] and fetches the OTHER stream's store over the join
+    /// window. It forwards one output per match, keyed by the same key. A left
+    /// record at `t` matches right records with a timestamp in
+    /// `[t - before, t + after]`. The rule is symmetric: the per-side OTHER
+    /// processor swaps `before` and `after`, so the rule holds whichever side
+    /// drives the record.
     ///
-    /// Both stream keys must be unchanged relative to their source partitioning;
-    /// a key-changing op upstream must be `repartition()`-ed first (else panics).
+    /// The join lowers to a **THIS** processor fed by this stream, an **OTHER**
+    /// processor fed by `other`, and a **MERGE** node that unions the two
+    /// outputs. This mirrors [`KTable::join`]'s dual+merge shape. Each side puts
+    /// into its own `retainDuplicates` join-window store and reads the other
+    /// side's store. Each side connects to BOTH stores, so the grouping pass
+    /// folds A, B, both stores, and the two join nodes into one copartitioned
+    /// subtopology. When both streams are single-source-topic streams, the join
+    /// declares their source topics as a copartition group (KIP-1071).
+    ///
+    /// Both stream keys must be unchanged relative to their source partitioning.
+    /// You must call `repartition()` after a key-changing op upstream. If you do
+    /// not, the join panics.
     ///
     /// # Naming vs the JVM
     /// The JVM overloads `join` for stream-table and stream-stream. Rust cannot, so
@@ -1187,11 +1218,13 @@ where
         self.join_impl::<V2, VO, V2S>(other, &j, windows, stream_joined, JoinKind::inner())
     }
 
-    /// `leftJoin` (windowed left stream-stream join): every record on THIS (left)
-    /// stream that finds no match in the OTHER (right) window emits
-    /// `joiner(&this, None)` once that record's window closes (KIP-633,
-    /// stream-time-driven). Matched records emit `joiner(&this, Some(&other))` as in
-    /// the inner join. The right side never emits a non-join.
+    /// `leftJoin` (windowed left stream-stream join): emit unmatched left records.
+    ///
+    /// Every record on THIS (left) stream that finds no match in the OTHER
+    /// (right) window emits `joiner(&this, None)` once that record's window
+    /// closes. Stream time drives the window close (KIP-633). Matched records
+    /// emit `joiner(&this, Some(&other))`, as in the inner join. The right side
+    /// never emits a non-join.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -1218,9 +1251,11 @@ where
         self.join_impl::<V2, VO, V2S>(other, &j, windows, stream_joined, JoinKind::left())
     }
 
-    /// `outerJoin` (windowed outer stream-stream join): every record on EITHER side
-    /// that finds no match emits `joiner(Some, None)` / `joiner(None, Some)` once its
-    /// window closes (KIP-633). Matched records emit `joiner(Some, Some)`.
+    /// `outerJoin` (windowed outer stream-stream join): emit from either side.
+    ///
+    /// Every record on EITHER side that finds no match emits
+    /// `joiner(Some, None)` or `joiner(None, Some)` once its window closes
+    /// (KIP-633). Matched records emit `joiner(Some, Some)`.
     #[must_use]
     pub fn outer_join<V2, VO, F, V2S>(
         &self,
@@ -1243,22 +1278,26 @@ where
         self.join_impl::<V2, VO, V2S>(other, &joiner, windows, stream_joined, JoinKind::outer())
     }
 
-    /// Shared dual+merge lowering for inner/left/outer windowed stream-stream joins.
+    /// Shared dual+merge lowering for windowed stream-stream joins.
     ///
-    /// `outer_joiner` is the shared outer-form joiner `Fn(Option<&V>, Option<&V2>) ->
-    /// VO`; each per-side processor wraps it so a match passes the present sides. The
-    /// `kind` drives which side emits non-joins: **THIS (A)** emits when B is not
-    /// required (`!kind.b_required` → left & outer), **OTHER (B)** emits when A is not
-    /// required (`!kind.a_required` → outer only).
+    /// `outer_joiner` is the shared outer-form joiner
+    /// `Fn(Option<&V>, Option<&V2>) -> VO`. Each per-side processor wraps it, so
+    /// a match passes the present sides. The `kind` decides which side emits
+    /// non-joins. **THIS (A)** emits when B is not required
+    /// (`!kind.b_required`), that is, for the left and outer joins. **OTHER (B)**
+    /// emits when A is not required (`!kind.a_required`), that is, for the outer
+    /// join only.
     ///
-    /// Lowers (mirroring [`KTable::join`]'s dual+merge) to a **THIS** processor fed by
-    /// this stream, an **OTHER** processor fed by `other`, and a **MERGE** node. Each
-    /// side puts into its own `retainDuplicates` join-window store and reads the
-    /// other's. For left/outer, one shared `KSTREAM-OUTERSHARED-` KV store buffers
-    /// unmatched records and a single shared [`TimeTracker`] (cloned into both
-    /// supplier closures) drives the window-close emission; both join processors
-    /// connect to that store. For inner the outer store/tracker are not created, so
-    /// the wire topology is byte-identical to the inner-only golden.
+    /// The lowering mirrors [`KTable::join`]'s dual+merge shape. It creates a
+    /// **THIS** processor fed by this stream, an **OTHER** processor fed by
+    /// `other`, and a **MERGE** node. Each side puts into its own
+    /// `retainDuplicates` join-window store and reads the other side's store. For
+    /// the left and outer joins, one shared `KSTREAM-OUTERSHARED-` KV store
+    /// buffers unmatched records, and one shared [`TimeTracker`] drives the
+    /// window-close emission. Both supplier closures get a clone of that tracker,
+    /// and both join processors connect to that store. For the inner join, this
+    /// method creates no outer store and no tracker, so the wire topology is
+    /// byte-identical to the inner-only golden.
     ///
     /// [`KTable::join`]: crate::dsl::ktable::KTable::join
     /// [`TimeTracker`]: crate::dsl::processors::outer_join_store::TimeTracker
@@ -1514,16 +1553,16 @@ where
 
     /// `repartition`: force a repartition through an internal topic.
     ///
-    /// Lowers as `sink → add_repartition_topic → source`, the same pattern used
-    /// by the implicit repartition inserted before a stateful aggregation. The
-    /// repartition topic name is `<app_id>-<name>-repartition`, where `<name>` is
+    /// This op lowers as `sink → add_repartition_topic → source`. It is the same
+    /// pattern that the implicit repartition before a stateful aggregation uses.
+    /// The repartition topic name is `<app_id>-<name>-repartition`. `<name>` is
     /// the explicit [`Repartitioned`](crate::dsl::config::Repartitioned) name when
     /// set, otherwise an auto-name minted from the counter.
     ///
-    /// **Byte-exactness vs JVM:** the JVM assigns a distinct `KSTREAM-REPARTITION-`
-    /// counter for standalone `repartition()` calls. That counter is NOT validated
-    /// against a golden fixture — functional correctness (no panic,
-    /// records flow through) is the bar here.
+    /// **Byte-exactness vs JVM:** the JVM assigns a distinct
+    /// `KSTREAM-REPARTITION-` counter for standalone `repartition()` calls. No
+    /// golden fixture validates that counter. The bar here is functional
+    /// correctness: no panic, and records flow through.
     #[must_use]
     pub fn repartition<KS2, VS2>(
         &self,
@@ -1591,11 +1630,13 @@ where
         KStream::new_with_key_changing(Rc::clone(&self.builder), id, false, key_serde, value_serde)
     }
 
-    /// `split`: begin a branching fan-out. Returns a [`BranchedStream`] builder
-    /// from which individual [`branch`](BranchedStream::branch) calls create
-    /// filtered child streams. The split itself adds no node to the topology —
-    /// each `branch` call creates a filter-backed child wired
-    /// directly to this stream's node.
+    /// `split`: begin a branching fan-out.
+    ///
+    /// Returns a [`BranchedStream`] builder. Individual
+    /// [`branch`](BranchedStream::branch) calls on that builder create filtered
+    /// child streams. The split itself adds no node to the topology. Each
+    /// `branch` call creates a filter-backed child wired directly to this
+    /// stream's node.
     ///
     /// **Simplification vs JVM:** each branch receives a record when its predicate
     /// matches, not just the first matching branch. For mutually-exclusive
@@ -1621,13 +1662,14 @@ where
         }
     }
 
-    /// `groupByKey`: group by the existing key, preparing for an aggregation.
+    /// `groupByKey`: group by the existing key, ready for an aggregation.
     ///
-    /// Records no graph node — the (optional) repartition + aggregate node are
-    /// recorded when a terminal `count`/`reduce`/`aggregate` is called. The
-    /// returned [`KGroupedStream`] carries whether the upstream key lineage is
-    /// key-changing (→ the aggregation must insert a repartition) and a typed
-    /// repartition-lowering thunk built from the `Grouped` serdes.
+    /// This op records no graph node. A terminal `count`, `reduce`, or
+    /// `aggregate` call records the optional repartition and the aggregate node.
+    /// The returned [`KGroupedStream`] carries two things: whether the upstream
+    /// key lineage is key-changing, which forces the aggregation to insert a
+    /// repartition, and a typed repartition-lowering thunk built from the
+    /// `Grouped` serdes.
     pub fn group_by_key_explicit<GKS, GVS>(
         &self,
         grouped: impl Into<Grouped<GKS, GVS>>,
@@ -1677,10 +1719,10 @@ where
         })
     }
 
-    /// `groupBy`: re-key via `f`, then group by the new key.
+    /// `groupBy`: re-key with `f`, then group by the new key.
     ///
-    /// Equivalent to `select_key(f).group_by_key_explicit(grouped)`; the key change forces
-    /// a repartition before any subsequent aggregation.
+    /// This op is equivalent to `select_key(f).group_by_key_explicit(grouped)`.
+    /// The key change forces a repartition before any later aggregation.
     pub fn group_by<GKS, GVS, F>(
         &self,
         f: F,
@@ -1700,20 +1742,22 @@ where
 
     /// `process`: attach a custom Processor-API node that may rewrite the key.
     ///
-    /// `supplier` is any user [`ProcessorSupplier`] (e.g. a `|| MyProc` closure);
-    /// `store_names` names the [`StreamsBuilder::add_state_store`]-registered stores
-    /// the processor reads/writes via [`ProcessorContext::get_state_store`]. Each
-    /// named store's connect thunk is looked up **now** (so the store must have been
-    /// added before this call) and invoked during lowering to register the store +
-    /// emit its compact `<app>-<store>-changelog` changelog, connecting it to this
-    /// processor node.
+    /// `supplier` is any user [`ProcessorSupplier`], for example a `|| MyProc`
+    /// closure. `store_names` names the stores that
+    /// [`StreamsBuilder::add_state_store`] registered and that the processor
+    /// reads and writes through [`ProcessorContext::get_state_store`]. This
+    /// method looks up each named store's connect thunk **now**, so you must add
+    /// the store before this call. Lowering then invokes each thunk to register
+    /// the store, emit its compact `<app>-<store>-changelog` changelog, and
+    /// connect the store to this processor node.
     ///
-    /// Mirrors the JVM `KStream.process`: the result is treated as **key-changing**
-    /// (the processor may call `forward` with any key), so the single-source-topic
-    /// lineage is broken and a downstream aggregation/join must `repartition` first.
+    /// This op mirrors the JVM `KStream.process`. It treats the result as
+    /// **key-changing**, because the processor may call `forward` with any key.
+    /// The single-source-topic lineage therefore breaks, and a downstream
+    /// aggregation or join must `repartition` first.
     ///
     /// # Panics
-    /// Panics if any name in `store_names` was not registered via
+    /// Panics if any name in `store_names` was not registered through
     /// [`add_state_store`](crate::dsl::builder::StreamsBuilder::add_state_store).
     ///
     /// [`ProcessorSupplier`]: crate::processor::api::ProcessorSupplier
@@ -1785,24 +1829,28 @@ where
         )
     }
 
-    /// `processValues`: attach a custom fixed-key Processor-API node (KIP-820) that
-    /// may rewrite the value but NOT the key.
+    /// `processValues`: attach a custom fixed-key Processor-API node (KIP-820).
     ///
-    /// `supplier` is any [`FixedKeyProcessorSupplier`] (e.g. a `|| MyFixedProc`
-    /// closure); `store_names` names the [`add_state_store`]-registered stores the
-    /// processor reads/writes via [`FixedKeyProcessorContext::get_state_store`]. As
-    /// with [`process`](Self::process), each named store's connect thunk is looked
-    /// up **now** (so the store must have been added before this call) and invoked
-    /// during lowering to register the store + emit its compact
-    /// `<app>-<store>-changelog` changelog, connecting it to this processor node.
+    /// The node may rewrite the value but NOT the key.
     ///
-    /// Unlike [`process`](Self::process), the key is preserved — so the result is
-    /// **non-key-changing** and carries the single-source-topic lineage unchanged
-    /// (a downstream aggregation/join needs no repartition). The supplier is wrapped
-    /// in an internal adapter so the runtime sees a `Processor<K, V, K, VOut>`.
+    /// `supplier` is any [`FixedKeyProcessorSupplier`], for example a
+    /// `|| MyFixedProc` closure. `store_names` names the stores that
+    /// [`add_state_store`] registered and that the processor reads and writes
+    /// through [`FixedKeyProcessorContext::get_state_store`]. As with
+    /// [`process`](Self::process), this method looks up each named store's
+    /// connect thunk **now**, so you must add the store before this call.
+    /// Lowering then invokes each thunk to register the store, emit its compact
+    /// `<app>-<store>-changelog` changelog, and connect the store to this
+    /// processor node.
+    ///
+    /// Unlike [`process`](Self::process), this op keeps the key. The result is
+    /// therefore **non-key-changing** and carries the single-source-topic lineage
+    /// unchanged, so a downstream aggregation or join needs no repartition. An
+    /// internal adapter wraps the supplier, so the runtime sees a
+    /// `Processor<K, V, K, VOut>`.
     ///
     /// # Panics
-    /// Panics if any name in `store_names` was not registered via
+    /// Panics if any name in `store_names` was not registered through
     /// [`add_state_store`](crate::dsl::builder::StreamsBuilder::add_state_store).
     ///
     /// [`FixedKeyProcessorSupplier`]: crate::processor::fixed_key::FixedKeyProcessorSupplier
@@ -1878,16 +1926,17 @@ where
         .with_source_topic(self.source_topic.clone())
     }
 
-    /// `toTable`: materialize this stream into a [`KTable`] by writing each record
-    /// into a state store and forwarding a `Change<V>` change-stream (prior store
-    /// value as `old`).
+    /// `toTable`: materialize this stream into a [`KTable`].
     ///
-    /// The key is carried through unchanged, so `to_table` never inserts a
-    /// repartition (the JVM only repartitions when the upstream key is rewritten
-    /// without a re-group). The store name is `Materialized`'s explicit name when
-    /// set, else a fresh `KSTREAM-TOTABLE-STATE-STORE-` counter; the store gets the
-    /// standard `<app>-<store>-changelog` changelog (or none when
-    /// [`Materialized::with_logging(false)`]).
+    /// The op writes each record into a state store and forwards a `Change<V>`
+    /// change-stream that carries the prior store value as `old`.
+    ///
+    /// `to_table` carries the key through unchanged, so it never inserts a
+    /// repartition. The JVM repartitions only when the upstream key is rewritten
+    /// without a re-group. The store name is `Materialized`'s explicit name when
+    /// set, otherwise a fresh `KSTREAM-TOTABLE-STATE-STORE-` counter. The store
+    /// gets the standard `<app>-<store>-changelog` changelog, or no changelog
+    /// when [`Materialized::with_logging(false)`].
     ///
     /// [`Materialized::with_logging(false)`]: crate::dsl::config::Materialized::with_logging
     pub fn to_table_explicit<NKS, NVS>(
@@ -1995,18 +2044,19 @@ where
 // BranchedStream
 // ---------------------------------------------------------------------------
 
-/// Builder returned by [`KStream::split`]. Each [`branch`](Self::branch) call
-/// adds a filter-backed child node wired to the parent node and
-/// returns a new [`KStream`] carrying only the records for which the predicate
-/// returns `true`.
+/// Builder returned by [`KStream::split`].
 ///
-/// **Simplification vs JVM first-match-wins:** records are forwarded to ALL
-/// branches whose predicate matches. For mutually-exclusive predicates the
+/// Each [`branch`](Self::branch) call adds a filter-backed child node wired to
+/// the parent node. It returns a new [`KStream`] that carries only the records
+/// for which the predicate returns `true`.
+///
+/// **Simplification vs JVM first-match-wins:** this builder forwards records to
+/// ALL branches whose predicate matches. For mutually-exclusive predicates the
 /// behaviour is identical.
 ///
-/// Drop `BranchedStream` before calling [`StreamsBuilder::build`] — it holds an
-/// `Rc` clone of the shared internal builder and will otherwise cause the
-/// `Rc::try_unwrap` inside `build` to fail.
+/// Drop `BranchedStream` before you call [`StreamsBuilder::build`]. It holds an
+/// `Rc` clone of the shared internal builder, and it otherwise makes the
+/// `Rc::try_unwrap` inside `build` fail.
 ///
 /// [`StreamsBuilder::build`]: crate::dsl::builder::StreamsBuilder::build
 pub struct BranchedStream<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde>::Serde> {
@@ -2026,9 +2076,11 @@ where
     KS: Clone,
     VS: Clone,
 {
-    /// Add a branch: records for which `predicate(key, value)` returns `true`
-    /// are forwarded to the returned [`KStream`]. Uses a `KSTREAM-BRANCHCHILD-`
-    /// node backed by the same filter processor used by [`KStream::filter`].
+    /// Add a branch.
+    ///
+    /// This method forwards records for which `predicate(key, value)` returns
+    /// `true` to the returned [`KStream`]. It uses a `KSTREAM-BRANCHCHILD-` node
+    /// backed by the same filter processor that [`KStream::filter`] uses.
     pub fn branch<P>(&self, predicate: P) -> KStream<K, V, KS, VS>
     where
         P: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,
@@ -2203,9 +2255,9 @@ mod to_table_caching_tests {
         store::backend::StoreBackend,
     };
 
-    /// Caching ON: the `to_table` store is marked cached (`cache_owner` rooted),
-    /// two same-key updates are suppressed until flush, and the flush emits a
-    /// single deduped record carrying the latest value.
+    /// Caching ON: the `to_table` store is marked cached (`cache_owner` rooted).
+    /// Two same-key updates stay suppressed until flush, and the flush emits a
+    /// single deduped record that carries the latest value.
     #[test]
     fn to_table_caches_marks_and_dedups_emit() {
         let b = StreamsBuilder::new();

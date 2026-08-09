@@ -1,9 +1,9 @@
-//! In-process integration tests for leader election +
-//! KIP-101 leader-epoch + ISR shrink/expand.
+//! In-process integration tests for leader election, the KIP-101 leader
+//! epoch, and ISR shrink and expand.
 //!
-//! Windows-gated like the other multi-broker tests: openraft +
-//! `tokio` scheduling on Windows runners cause flakes that have
-//! nothing to do with the protocol being tested.
+//! These tests are gated off Windows, like the other multi-broker tests.
+//! openraft and `tokio` scheduling on Windows runners cause flakes that have
+//! nothing to do with the protocol under test.
 
 use std::time::{Duration, Instant};
 
@@ -24,8 +24,8 @@ use tempfile::TempDir;
 
 mod support;
 
-/// Await until exactly one broker reports itself as the openraft controller
-/// leader. Returns the cluster index of that broker (0-based).
+/// Waits until exactly one broker reports itself as the openraft controller
+/// leader. It returns the 0-based cluster index of that broker.
 async fn find_controller_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) -> usize {
     for (h, _, _) in cluster {
         h.wait_until_controller_leader().await;

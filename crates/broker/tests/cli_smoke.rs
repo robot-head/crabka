@@ -8,15 +8,18 @@ fn broker_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(exe)
 }
 
-/// Format a fresh standalone log directory via `crabka format`. KIP-853
-/// requires every node be formatted (it seeds `meta.properties.json` + the
-/// singleton `VotersRecord`) before `crabka-broker` will boot; an unformatted
-/// dir is treated as operator error and aborts startup.
+/// Format a fresh standalone log directory with `crabka format`.
 ///
-/// `crabka` lives in the `crabka-cli` package, so its `CARGO_BIN_EXE_*` isn't
-/// exported to this crate's test env — shell out via `env!("CARGO")` like
-/// `bootstrap_consumption.rs` does. The `crabka-cli` dev-dep keeps it in the
-/// compile graph so this is a cache hit, not a rebuild.
+/// KIP-853 needs every node to be formatted before `crabka-broker` boots. The
+/// format step seeds `meta.properties.json` and the singleton
+/// `VotersRecord`. The broker treats an unformatted dir as operator error and
+/// aborts startup.
+///
+/// `crabka` lives in the `crabka-cli` package, so its `CARGO_BIN_EXE_*` is
+/// not exported to this crate's test env. This function therefore shells out
+/// with `env!("CARGO")`, as `bootstrap_consumption.rs` does. The `crabka-cli`
+/// dev-dep keeps `crabka` in the compile graph, so this is a cache hit and
+/// not a rebuild.
 fn run_crabka_format(log_dir: &std::path::Path, node_id: u32, controller_listener: &str) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let out = Command::new(cargo)
@@ -75,9 +78,9 @@ fn version_returns_zero() {
     assert!(out.status.success());
 }
 
-/// Boot `crabka-broker` with `--config-file` pointing at a
-/// minimal TOML and assert the process binds the listener declared in
-/// the file (port comes from the file, not from a CLI flag).
+/// Boot `crabka-broker` with `--config-file` set to a minimal TOML, and
+/// assert that the process binds the listener declared in the file. The port
+/// comes from the file, not from a CLI flag.
 #[test]
 fn boots_with_config_file_listener() {
     use std::io::Write as _;

@@ -3,14 +3,13 @@
 
 //! Prometheus `/metrics` HTTP endpoint.
 //!
-//! Boots a broker with a metrics listener on `127.0.0.1:0`, scrapes
+//! This test boots a broker with a metrics listener on `127.0.0.1:0`, scrapes
 //! `/metrics`, exercises the Produce wire path, and verifies that the
-//! topic-labelled counters tick up. Proves the registry → handler →
-//! HTTP endpoint chain works end-to-end.
+//! topic-labelled counters go up. It proves that the chain from the registry,
+//! to the handler, to the HTTP endpoint works end to end.
 //!
-//! Gated to non-Windows: the broker handle's `metrics_addr()` is
-//! Linux/macOS-only by convention (matches the other integration
-//! test conventions).
+//! It is gated to non-Windows. The broker handle's `metrics_addr()` is for
+//! Linux and macOS by convention, which matches the other integration tests.
 
 use std::{io, time::Duration};
 
@@ -291,9 +290,9 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
     handle.shutdown().await;
 }
 
-/// Confirm that per-partition counters land alongside
-/// topic-level ones, and that the disk-scanner gauge picks up
-/// non-zero values for materialized partitions.
+/// Confirms that the per-partition counters appear next to the topic-level
+/// ones, and that the disk-scanner gauge reports non-zero values for
+/// materialized partitions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn partition_level_metrics_and_disk_gauge_render() {
     let log_dir = tempfile::tempdir().unwrap();

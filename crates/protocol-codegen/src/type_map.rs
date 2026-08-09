@@ -1,9 +1,9 @@
 //! Map a schema field type string to a Rust type expression.
 
 /// Owned-flavor Rust type for a schema type. `nullable` and `is_struct_ref`
-/// shape the wrapping. Struct references must be resolved by the caller and
-/// passed in as `is_struct_ref = true` along with the resolved Rust path
-/// (e.g., `"super::common::ProduceTopic"`).
+/// shape the wrapping. The caller must resolve struct references and pass them
+/// in as `is_struct_ref = true`, together with the resolved Rust path, for
+/// example `"super::common::ProduceTopic"`.
 #[must_use]
 pub fn owned_type(schema_type: &str, nullable: bool, struct_path: Option<&str>) -> String {
     let inner = inner_owned(schema_type, struct_path);
@@ -14,8 +14,9 @@ pub fn owned_type(schema_type: &str, nullable: bool, struct_path: Option<&str>) 
     }
 }
 
-/// Borrowed-flavor Rust type. Strings/bytes become `&'a str`/`&'a [u8]`,
-/// arrays own their outer `Vec`, struct references take the `<'a>` form.
+/// Borrowed-flavor Rust type. Strings and bytes become `&'a str` and
+/// `&'a [u8]`, arrays own their outer `Vec`, and struct references take the
+/// `<'a>` form.
 #[must_use]
 pub fn borrowed_type(schema_type: &str, nullable: bool, struct_path: Option<&str>) -> String {
     let inner = inner_borrowed(schema_type, struct_path);

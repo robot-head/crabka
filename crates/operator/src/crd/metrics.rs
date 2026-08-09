@@ -1,5 +1,7 @@
-//! `Kafka.spec.metricsConfig` — operator-side surface for the
-//! broker's Prometheus `/metrics` endpoint.
+//! `Kafka.spec.metricsConfig`.
+//!
+//! This is the operator-side surface for the Prometheus `/metrics`
+//! endpoint of the broker.
 
 use std::collections::BTreeMap;
 

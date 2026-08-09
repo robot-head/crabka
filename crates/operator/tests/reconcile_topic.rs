@@ -23,9 +23,9 @@ use shared::{
     fake_topic_body, fixture_ctx, json_response, mock_client, not_found_body,
 };
 
-/// JSON body shaped like a Ready Kafka with a single PLAIN internal
-/// listener. Used by the finalizer-add-path test below; the topic
-/// reconciler reads the Ready condition + listener bootstrap off this.
+/// JSON body shaped like a Ready Kafka with one PLAIN internal listener. The
+/// finalizer-add-path test below uses it. The topic reconciler reads the Ready
+/// condition and the listener bootstrap from it.
 fn ready_kafka_body(name: &str, namespace: &str) -> serde_json::Value {
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
@@ -108,8 +108,8 @@ async fn missing_cluster_label_sets_status() {
     }
 }
 
-/// `KafkaTopic` referencing a Kafka that doesn't exist → status
-/// `ClusterNotReady`; no admin RPCs.
+/// A `KafkaTopic` that references a Kafka that does not exist gives status
+/// `ClusterNotReady` and no admin RPCs.
 #[tokio::test]
 async fn cluster_not_found_sets_status_cluster_not_ready() {
     let rules = vec![
@@ -150,9 +150,8 @@ async fn cluster_not_found_sets_status_cluster_not_ready() {
     assert!(cond["reason"] == "ClusterNotReady");
 }
 
-/// `KafkaTopic` whose effective name is invalid
-/// (`spec.topicName="."`) → status `InvalidTopicName`; no Kafka GET, no
-/// admin RPCs.
+/// A `KafkaTopic` whose effective name is invalid, with `spec.topicName="."`,
+/// gives status `InvalidTopicName`, no Kafka GET, and no admin RPCs.
 #[tokio::test]
 async fn invalid_topic_name_sets_status() {
     let rules = vec![MockRule {
@@ -185,10 +184,10 @@ async fn invalid_topic_name_sets_status() {
     assert!(cond["reason"] == "InvalidTopicName");
 }
 
-/// A `KafkaTopic` referencing a Ready Kafka but with no
-/// finalizer set must PATCH `/kafkatopics/<name>` adding the finalizer
-/// and request an immediate re-enter (`Action::requeue(Duration::ZERO)`).
-/// No admin RPCs are issued — the finalizer-add path returns before any
+/// A `KafkaTopic` that references a Ready Kafka but has no finalizer must
+/// PATCH `/kafkatopics/<name>` to add the finalizer, and must request an
+/// immediate re-enter with `Action::requeue(Duration::ZERO)`. The reconcile
+/// issues no admin RPCs, because the finalizer-add path returns before any
 /// connection.
 #[tokio::test]
 async fn finalizer_add_path_patches_metadata_and_requeues_immediately() {
@@ -255,10 +254,10 @@ const CLUSTER: &str = "demo";
 const NS: &str = "y";
 const TOPIC_NAME: &str = "foo";
 
-/// Build a `KafkaTopic` with the cluster label, finalizer, and the requested
-/// partition/replicas/config values. Use this for branch tests; the
-/// `topic()` helper above intentionally omits the finalizer so the
-/// finalizer-add-path test works.
+/// Build a `KafkaTopic` with the cluster label, the finalizer, and the
+/// requested partition, replicas, and config values. Use this for branch
+/// tests. The `topic()` helper above omits the finalizer on purpose, so that
+/// the finalizer-add-path test works.
 fn topic_with_finalizer(
     name: &str,
     partitions: i32,
@@ -285,10 +284,10 @@ fn topic_with_finalizer(
     kt
 }
 
-/// Wire a kube mock with the `GET kafkas/<cluster>` rule (returns a Ready
-/// cluster) and one `PATCH /kafkatopics/<name>/status` rule. The reconcile
-/// for the branch tests below issues exactly these two kube requests on
-/// the happy/no-op/partition/immutable/config paths.
+/// Wire a kube mock with the `GET kafkas/<cluster>` rule, which returns a
+/// Ready cluster, and one `PATCH /kafkatopics/<name>/status` rule. The
+/// reconcile for the branch tests below issues exactly these two kube requests
+/// on the happy, no-op, partition, immutable, and config paths.
 fn standard_kube_rules(topic_name: &str) -> Vec<MockRule> {
     vec![
         MockRule {
@@ -304,9 +303,9 @@ fn standard_kube_rules(topic_name: &str) -> Vec<MockRule> {
     ]
 }
 
-/// Wire a kube mock for the delete path: `GET kafkas/<cluster>` plus
-/// `PATCH /kafkatopics/<name>` (finalizer removal — metadata patch, not
-/// /status).
+/// Wire a kube mock for the delete path: `GET kafkas/<cluster>` and
+/// `PATCH /kafkatopics/<name>`. The second request removes the finalizer. It
+/// is a metadata patch and not a /status patch.
 fn delete_kube_rules(topic_name: &str) -> Vec<MockRule> {
     vec![
         MockRule {
@@ -339,8 +338,8 @@ fn last_status_patch_body(state: &Arc<MockState>, topic_name: &str) -> serde_jso
     serde_json::from_slice(patch.body()).expect("status body parses as JSON")
 }
 
-/// Kafka Ready, topic absent → one `CreateTopics` call,
-/// status `Ready=True topic_id=Some(...)`.
+/// Kafka Ready and topic absent gives one `CreateTopics` call and status
+/// `Ready=True topic_id=Some(...)`.
 #[tokio::test]
 async fn creates_topic_on_first_reconcile() {
     let state = MockState::new(standard_kube_rules(TOPIC_NAME));
@@ -381,8 +380,8 @@ async fn creates_topic_on_first_reconcile() {
     );
 }
 
-/// Kafka Ready, topic already matches spec exactly → no mutating
-/// admin calls, status `Ready=True`.
+/// Kafka Ready and a topic that already matches the spec exactly gives no
+/// mutating admin calls and status `Ready=True`.
 #[tokio::test]
 async fn noop_when_spec_matches_cluster() {
     let state = MockState::new(standard_kube_rules(TOPIC_NAME));
@@ -431,7 +430,7 @@ async fn noop_when_spec_matches_cluster() {
     assert!(cond["reason"] == "Ready");
 }
 
-/// current=3 partitions, spec=5 → one CreatePartitions(5) call,
+/// current=3 partitions and spec=5 gives one CreatePartitions(5) call and
 /// status Ready.
 #[tokio::test]
 async fn partition_increase_triggers_create_partitions() {
@@ -473,8 +472,8 @@ async fn partition_increase_triggers_create_partitions() {
     assert!(body["status"]["conditions"][0]["reason"] == "Ready");
 }
 
-/// current=5 partitions, spec=2 → no mutating admin calls,
-/// status `Ready=False reason=ImmutableFieldChanged`.
+/// current=5 partitions and spec=2 gives no mutating admin calls and status
+/// `Ready=False reason=ImmutableFieldChanged`.
 #[tokio::test]
 async fn partition_decrease_sets_immutable_field_changed() {
     let state = MockState::new(standard_kube_rules(TOPIC_NAME));
@@ -518,8 +517,8 @@ async fn partition_decrease_sets_immutable_field_changed() {
     assert!(cond["reason"] == "ImmutableFieldChanged");
 }
 
-/// `current.replication_factor=1`, spec=2 → no mutating admin
-/// calls, status `Ready=False reason=ImmutableFieldChanged`.
+/// `current.replication_factor=1` and spec=2 gives no mutating admin calls
+/// and status `Ready=False reason=ImmutableFieldChanged`.
 #[tokio::test]
 async fn replicas_change_sets_immutable_field_changed() {
     let state = MockState::new(standard_kube_rules(TOPIC_NAME));
@@ -563,7 +562,7 @@ async fn replicas_change_sets_immutable_field_changed() {
     assert!(cond["reason"] == "ImmutableFieldChanged");
 }
 
-/// current overrides `{foo: 1}`, desired `{bar: 2}` →
+/// Current overrides `{foo: 1}` and desired `{bar: 2}` gives
 /// `IncrementalAlterConfigs` with Set(bar=2) and Delete(foo).
 #[tokio::test]
 async fn config_diff_sets_and_deletes() {
@@ -623,8 +622,8 @@ async fn config_diff_sets_and_deletes() {
     assert!(body["status"]["conditions"][0]["reason"] == "Ready");
 }
 
-/// deletionTimestamp set, preserveTopic=false → one `DeleteTopics`
-/// call + finalizer removed via metadata PATCH.
+/// deletionTimestamp set and preserveTopic=false gives one `DeleteTopics`
+/// call, and a metadata PATCH removes the finalizer.
 #[tokio::test]
 async fn delete_with_finalizer_calls_delete_topics() {
     let state = MockState::new(delete_kube_rules(TOPIC_NAME));
@@ -685,9 +684,9 @@ async fn delete_with_finalizer_calls_delete_topics() {
 // the `FakeAdminClient` and asserts the status / requeue / eviction the
 // reconcile takes in response.
 
-/// Kafka Ready, topic absent, broker rejects `CreateTopics` with
-/// `TOPIC_ALREADY_EXISTS` → status `Ready=False reason=BrokerError`,
-/// message references the API + error name.
+/// Kafka Ready, topic absent, and the broker rejects `CreateTopics` with
+/// `TOPIC_ALREADY_EXISTS`. The status is then `Ready=False reason=BrokerError`,
+/// and the message references the API and the error name.
 #[tokio::test]
 async fn creates_topic_broker_error_surfaces_in_status() {
     let state = MockState::new(standard_kube_rules(TOPIC_NAME));
@@ -711,9 +710,9 @@ async fn creates_topic_broker_error_surfaces_in_status() {
     assert!(msg.contains("TOPIC_ALREADY_EXISTS"), "message {msg:?}");
 }
 
-/// topic exists at 3 partitions, spec=5; broker rejects
-/// `CreatePartitions` with `INVALID_PARTITIONS` → status
-/// `Ready=False reason=BrokerError` referencing `CreatePartitions`.
+/// The topic exists at 3 partitions and spec=5, and the broker rejects
+/// `CreatePartitions` with `INVALID_PARTITIONS`. The status is then
+/// `Ready=False reason=BrokerError` and references `CreatePartitions`.
 #[tokio::test]
 async fn create_partitions_broker_error_surfaces_in_status() {
     let state = MockState::new(standard_kube_rules(TOPIC_NAME));
@@ -746,8 +745,8 @@ async fn create_partitions_broker_error_surfaces_in_status() {
     assert!(msg.contains("INVALID_PARTITIONS"), "message {msg:?}");
 }
 
-/// topic matches spec but has a stale config override; broker
-/// rejects `IncrementalAlterConfigs` with `INVALID_CONFIG` → status
+/// The topic matches the spec but has a stale config override, and the broker
+/// rejects `IncrementalAlterConfigs` with `INVALID_CONFIG`. The status is then
 /// `Ready=False reason=BrokerError`.
 #[tokio::test]
 async fn incremental_alter_configs_broker_error_surfaces_in_status() {
@@ -787,8 +786,8 @@ async fn incremental_alter_configs_broker_error_surfaces_in_status() {
     assert!(msg.contains("INVALID_CONFIG"), "message {msg:?}");
 }
 
-/// `describe_configs` returns `AdminError::Broker` → the
-/// reconcile logs + requeues 15s WITHOUT updating status.
+/// `describe_configs` returns `AdminError::Broker`. The reconcile then logs
+/// and requeues 15s WITHOUT an update of the status.
 #[tokio::test]
 async fn describe_configs_broker_error_requeues_without_status_update() {
     // Only the cluster GET is wired: a status PATCH here would surface as
@@ -839,9 +838,9 @@ async fn describe_configs_broker_error_requeues_without_status_update() {
     );
 }
 
-/// `DeleteTopics` fails during finalizer cleanup with a broker
-/// error → the finalizer is STILL removed (best-effort path); the
-/// `DeleteTopics` call is still observed in the fake's call log.
+/// `DeleteTopics` fails during finalizer cleanup with a broker error. The
+/// operator STILL removes the finalizer, because the path is best-effort. The
+/// fake's call log still shows the `DeleteTopics` call.
 #[tokio::test]
 async fn delete_topics_broker_error_during_finalizer_does_not_block_cleanup() {
     let state = MockState::new(delete_kube_rules(TOPIC_NAME));
@@ -896,9 +895,9 @@ async fn delete_topics_broker_error_during_finalizer_does_not_block_cleanup() {
     assert!(body["metadata"]["finalizers"] == serde_json::json!([]));
 }
 
-/// A Transport error on `metadata` → reconcile
-/// requeues 15s, issues NO status patch, and EVICTS the cached admin
-/// client (so the next reconcile reopens the connection).
+/// A Transport error on `metadata` makes the reconcile requeue 15s, issue NO
+/// status patch, and EVICT the cached admin client. The next reconcile then
+/// opens the connection again.
 #[tokio::test]
 async fn metadata_transport_error_requeues_and_evicts_admin_client() {
     let rules = vec![MockRule {
@@ -937,8 +936,8 @@ async fn metadata_transport_error_requeues_and_evicts_admin_client() {
     );
 }
 
-/// deletionTimestamp set, preserveTopic=true → no `DeleteTopics`
-/// call, finalizer still removed.
+/// deletionTimestamp set and preserveTopic=true gives no `DeleteTopics` call,
+/// and the operator still removes the finalizer.
 #[tokio::test]
 async fn delete_with_preserve_topic_skips_delete_topics() {
     let state = MockState::new(delete_kube_rules(TOPIC_NAME));

@@ -1,8 +1,9 @@
 //! Formally verified pure kernels shared by Crabka's consensus and log crates.
 //!
-//! Every function here is a total, synchronous, allocation-light kernel whose
-//! functional contract is proven with Creusot (see `docs/verification.md`).
-//! Host crates call through - there are no duplicate bodies anywhere.
+//! Every function here is a total, synchronous, allocation-light kernel, and
+//! Creusot proves its functional contract. See `docs/verification.md`. Host
+//! crates call through to these functions, and there are no duplicate bodies
+//! anywhere.
 #![doc(html_root_url = "https://docs.rs/crabka-verified/0.3.9")]
 
 pub mod compaction;

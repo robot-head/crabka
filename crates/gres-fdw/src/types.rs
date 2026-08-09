@@ -1,10 +1,10 @@
 //! Schema→column and `Value`→`Datum` type mapping for the Kafka FDW.
 //!
 //! Three entry-points:
-//! - `avro_schema_to_columns` / `json_schema_to_columns` /
-//!   `protobuf_message_to_columns` — derive the logical column list from a
-//!   writer schema or message descriptor.
-//! - `project` — map a decoded value to `Vec<Datum>` in column order.
+//! - `avro_schema_to_columns`, `json_schema_to_columns`, and
+//!   `protobuf_message_to_columns` derive the logical column list from a
+//!   writer schema or a message descriptor.
+//! - `project` maps a decoded value to `Vec<Datum>` in column order.
 
 use std::fmt::Write as _;
 
@@ -24,8 +24,8 @@ use crate::decode::DecodedValue;
 // Avro epoch helpers
 // ---------------------------------------------------------------------------
 
-/// Unix epoch (1970-01-01) as a `jiff` civil date, used to convert
-/// Avro `Date` (days since Unix epoch) to `jiff::civil::Date`.
+/// Unix epoch (1970-01-01) as a `jiff` civil date. It converts an Avro
+/// `Date`, which is days since the Unix epoch, to a `jiff::civil::Date`.
 fn unix_epoch_date() -> jiff::civil::Date {
     jiff::civil::Date::constant(1970, 1, 1)
 }
@@ -34,8 +34,8 @@ fn unix_epoch_date() -> jiff::civil::Date {
 // Avro schema → ColumnType
 // ---------------------------------------------------------------------------
 
-/// Map an Avro schema node to a `ColumnType`, returning `None` for types we
-/// cannot represent (unsupported unions, enums, fixed, etc.).
+/// Maps an Avro schema node to a `ColumnType`. Returns `None` for types this
+/// crate cannot represent, such as unsupported unions, enums, and fixed.
 fn avro_to_column_type(schema: &AvroSchema) -> Option<ColumnType> {
     match schema {
         AvroSchema::Null => None,
@@ -62,8 +62,8 @@ fn avro_to_column_type(schema: &AvroSchema) -> Option<ColumnType> {
     }
 }
 
-/// If `u` is exactly `[null, T]` (or `[T, null]`), return the type of `T`.
-/// Any other union shape falls through to `None`.
+/// Returns the type of `T` if `u` is exactly `[null, T]` or `[T, null]`.
+/// Any other union shape gives `None`.
 fn nullable_union_type(u: &UnionSchema) -> Option<ColumnType> {
     let variants = u.variants();
     if variants.len() != 2 {
@@ -77,10 +77,10 @@ fn nullable_union_type(u: &UnionSchema) -> Option<ColumnType> {
     avro_to_column_type(non_null)
 }
 
-/// Derive the column list from an Avro Record schema.
+/// Derives the column list from an Avro Record schema.
 ///
-/// Only top-level Record schemas are expected; non-Record schemas (primitive,
-/// union, …) return an empty list.
+/// This function expects only top-level Record schemas. A non-Record schema,
+/// such as a primitive or a union, returns an empty list.
 #[must_use]
 pub fn avro_schema_to_columns(schema: &AvroSchema) -> Vec<Column> {
     let AvroSchema::Record(RecordSchema { fields, .. }) = schema else {
@@ -96,7 +96,7 @@ pub fn avro_schema_to_columns(schema: &AvroSchema) -> Vec<Column> {
 // JSON schema → ColumnType
 // ---------------------------------------------------------------------------
 
-/// Map a JSON Schema `type` string to a `ColumnType`.
+/// Maps a JSON Schema `type` string to a `ColumnType`.
 fn json_type_to_column_type(type_str: &str) -> ColumnType {
     match type_str {
         "boolean" => ColumnType::Bool,
@@ -106,10 +106,10 @@ fn json_type_to_column_type(type_str: &str) -> ColumnType {
     }
 }
 
-/// Derive columns from a JSON Schema object (draft-04 / Confluent subset).
+/// Derives columns from a JSON Schema object (draft-04 / Confluent subset).
 ///
-/// Inspects the top-level `"properties"` map; the `"type"` of each property
-/// is mapped to a `ColumnType`.
+/// The function inspects the top-level `"properties"` map and maps the
+/// `"type"` of each property to a `ColumnType`.
 #[must_use]
 pub fn json_schema_to_columns(schema: &JsonValue) -> Vec<Column> {
     let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
@@ -131,11 +131,11 @@ pub fn json_schema_to_columns(schema: &JsonValue) -> Vec<Column> {
 // Protobuf schema → ColumnType
 // ---------------------------------------------------------------------------
 
-/// Map a Protobuf field [`Kind`] to a [`ColumnType`].
+/// Maps a Protobuf field [`Kind`] to a [`ColumnType`].
 ///
-/// Repeated and map fields are handled at the call site; this function maps
-/// the scalar kind only.  Complex types (message) fall back to JSON-serialised
-/// `Text` so no field is silently dropped.
+/// The call site handles repeated and map fields. This function maps the
+/// scalar kind only. A complex type, that is a message, falls back to
+/// JSON-serialised `Text`, so no field is silently dropped.
 fn proto_kind_to_column_type(kind: &Kind) -> ColumnType {
     match kind {
         // Signed 32-bit variants
@@ -153,11 +153,11 @@ fn proto_kind_to_column_type(kind: &Kind) -> ColumnType {
     }
 }
 
-/// Derive columns from a [`prost_reflect::MessageDescriptor`].
+/// Derives columns from a [`prost_reflect::MessageDescriptor`].
 ///
-/// Repeated and map fields are mapped to `Text` (JSON-serialised), because
-/// there is no native array or map `ColumnType` in this codebase.  All other
-/// fields use the scalar mapping from [`proto_kind_to_column_type`].
+/// Repeated and map fields map to JSON-serialised `Text`, because this
+/// codebase has no native array or map `ColumnType`. All other fields use the
+/// scalar mapping from [`proto_kind_to_column_type`].
 #[must_use]
 pub fn protobuf_message_to_columns(descriptor: &prost_reflect::MessageDescriptor) -> Vec<Column> {
     descriptor
@@ -178,10 +178,10 @@ pub fn protobuf_message_to_columns(descriptor: &prost_reflect::MessageDescriptor
 // Protobuf Value → Datum
 // ---------------------------------------------------------------------------
 
-/// Convert a single [`prost_reflect::Value`] to a [`Datum`].
+/// Converts a single [`prost_reflect::Value`] to a [`Datum`].
 ///
-/// List and Map variants are JSON-serialised into a `Text` datum.  Missing
-/// (unset) fields are represented by the caller as `None` → `Datum::Null`.
+/// The List and Map variants become a JSON-serialised `Text` datum. The
+/// caller represents a missing, unset field as `None` → `Datum::Null`.
 pub fn proto_value_to_datum(value: &ProtoValue) -> Datum {
     match value {
         ProtoValue::Bool(b) => Datum::Bool(*b),
@@ -271,13 +271,13 @@ fn to_hex_text(bytes: &[u8]) -> String {
 // Avro Value → Datum
 // ---------------------------------------------------------------------------
 
-/// Map an Avro `Value` to a `Datum` for the given column type.
+/// Maps an Avro `Value` to a `Datum` for the given column type.
 ///
-/// `Union(_, inner)` is unwrapped; `Null` produces `Datum::Null`.
+/// The function unwraps `Union(_, inner)`. `Null` produces `Datum::Null`.
 ///
-/// `decimal_scale` — the scale from the Avro field's `DecimalSchema` (number
-/// of fractional digits). Must be provided when the value may be
-/// `AvroValue::Decimal`; pass `None` for non-decimal fields.
+/// `decimal_scale` is the scale from the Avro field's `DecimalSchema`, that
+/// is the number of fractional digits. You must supply it when the value may
+/// be `AvroValue::Decimal`. Pass `None` for non-decimal fields.
 fn avro_value_to_datum(value: &AvroValue, col_ty: ColumnType, decimal_scale: Option<u32>) -> Datum {
     match value {
         AvroValue::Null => Datum::Null,
@@ -372,8 +372,8 @@ fn avro_value_to_datum(value: &AvroValue, col_ty: ColumnType, decimal_scale: Opt
     }
 }
 
-/// Convert an Avro `Value` to a `serde_json::Value` (best-effort; used when
-/// serialising nested Avro values into a text column).
+/// Converts an Avro `Value` to a `serde_json::Value`. The conversion is
+/// best-effort and serves nested Avro values that go into a text column.
 fn avro_value_to_json(value: &AvroValue) -> JsonValue {
     match value {
         AvroValue::Union(_, inner) => avro_value_to_json(inner),
@@ -441,20 +441,21 @@ fn json_value_to_datum(value: &JsonValue, col_ty: ColumnType) -> Datum {
 // project
 // ---------------------------------------------------------------------------
 
-/// Project a decoded Kafka value onto `value_columns`, returning one `Datum`
-/// per column (in order).
+/// Projects a decoded Kafka value onto `value_columns` and returns one
+/// `Datum` per column, in order.
 ///
-/// * `DecodedValue::Avro(Record(...))` — look up each column by name in the
-///   Avro Record fields.
-/// * `DecodedValue::Json(Object {...})` — look up each column by name in the
-///   JSON object.
-/// * `DecodedValue::Raw(bytes)` — return a single `Datum::Bytea` regardless
-///   of `value_columns` (raw fallback is always one bytea column).
+/// * `DecodedValue::Avro(Record(...))`: the function looks up each column by
+///   name in the Avro Record fields.
+/// * `DecodedValue::Json(Object {...})`: the function looks up each column by
+///   name in the JSON object.
+/// * `DecodedValue::Raw(bytes)`: the function returns a single
+///   `Datum::Bytea` whatever `value_columns` holds. The raw fallback is
+///   always one bytea column.
 ///
-/// `avro_schema` — the parsed writer schema for the Avro case. When provided
-/// and the schema is a Record, field-level sub-schemas are consulted to
-/// recover the `scale` of `decimal` fields so that `AvroValue::Decimal` is
-/// correctly scaled. Pass `None` for JSON / Raw paths.
+/// `avro_schema` is the parsed writer schema for the Avro case. When you
+/// supply it and the schema is a Record, the function reads the field-level
+/// sub-schemas to recover the `scale` of `decimal` fields, so it scales
+/// `AvroValue::Decimal` correctly. Pass `None` for the JSON and Raw paths.
 #[must_use]
 pub fn project(
     decoded: &DecodedValue,
@@ -763,10 +764,11 @@ mod tests {
     // Protobuf: helper to build a MessageDescriptor from inline .proto source
     // -----------------------------------------------------------------------
 
-    /// Compile a small `.proto` source string at test time (no file I/O, no
-    /// protoc binary) using the pure-Rust `protox` compiler, then load the
-    /// resulting `FileDescriptorSet` into a `prost_reflect::DescriptorPool`
-    /// and return the descriptor for the named message.
+    /// Compiles a small `.proto` source string at test time with the
+    /// pure-Rust `protox` compiler. There is no file I/O and no protoc
+    /// binary. It then loads the resulting `FileDescriptorSet` into a
+    /// `prost_reflect::DescriptorPool` and returns the descriptor for the
+    /// named message.
     fn make_descriptor(proto_src: &str, message_name: &str) -> prost_reflect::MessageDescriptor {
         struct InMemoryResolver {
             name: String,

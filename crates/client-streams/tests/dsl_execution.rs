@@ -1,11 +1,13 @@
-//! Execution-level tests for the KStream/KTable DSL: build a counting app via
-//! `StreamsBuilder`, run it through the broker-free `TopologyTestDriver`, and
-//! assert the forwarded running count + materialized store contents.
+//! Execution-level tests for the `KStream` and `KTable` DSL.
 //!
-//! The byte-exact golden validation (store-name index, repartition topic names)
-//! is Task 8 — this test's gate is *execution correctness*, so it uses
-//! `group_by_key` with no preceding key change (single subtopology, no
-//! repartition) to stay robust.
+//! Each test builds a counting app with `StreamsBuilder`, runs it through the
+//! broker-free `TopologyTestDriver`, and asserts the forwarded running count
+//! and the materialized store contents.
+//!
+//! The byte-exact golden validation of the store-name index and the repartition
+//! topic names is Task 8. This test's gate is *execution correctness*, so it
+//! uses `group_by_key` with no preceding key change. That gives one subtopology
+//! and no repartition, which keeps the test robust.
 use crabka_client_streams::{
     Consumed, Grouped, I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
 };
@@ -52,7 +54,7 @@ fn dsl_count_executes() {
 /// `group_by` is key-changing, so `count` must insert a repartition
 /// (sink → internal repartition topic → source) and split into 2 subtopologies.
 /// The test driver loops the repartition topic back, so the count is still
-/// correct end-to-end. (Byte-exact repartition topic naming is Task 8.)
+/// correct end to end. Byte-exact repartition topic naming is Task 8.
 #[test]
 fn dsl_count_with_repartition_executes() {
     let b = StreamsBuilder::new();
@@ -95,8 +97,8 @@ fn dsl_count_with_repartition_executes() {
     );
 }
 
-/// `reduce`: first value per key seeds the accumulator; later values fold via
-/// the reducer. Concatenate string values per key.
+/// `reduce`: the first value per key seeds the accumulator, and later values
+/// fold with the reducer. This test concatenates the string values per key.
 #[test]
 fn dsl_reduce_executes() {
     let b = StreamsBuilder::new();
@@ -135,12 +137,13 @@ fn dsl_reduce_executes() {
     );
 }
 
-/// `split`/`branch`: records are routed to matching branch children.
+/// `split` and `branch` route records to the matching branch children.
 ///
-/// Uses mutually-exclusive predicates so each record reaches exactly one branch;
-/// both branches are merged to a single output. The implementation routes a record
-/// to EVERY branch whose predicate matches (not first-match-wins); with
-/// mutually-exclusive predicates the behaviour is identical.
+/// The test uses mutually-exclusive predicates, so each record reaches exactly
+/// one branch, and it merges both branches into a single output. The
+/// implementation routes a record to EVERY branch whose predicate matches, not
+/// to the first match only. With mutually-exclusive predicates the behaviour is
+/// identical.
 #[test]
 fn dsl_branch_executes() {
     let b = StreamsBuilder::new();
@@ -184,7 +187,7 @@ fn dsl_branch_executes() {
     );
 }
 
-/// `repartition()` must not panic — records must flow through the internal
+/// `repartition()` must not panic. Records must flow through the internal
 /// loop-back repartition topic and arrive at the sink.
 ///
 /// Topology: stream("in") → repartition → `map_values(upper)` → to("out").
@@ -225,11 +228,11 @@ fn dsl_repartition_executes() {
 
 // ── New execution tests for previously untested operators ────────────────────
 
-/// `map`: rewrite both key and value end-to-end through the driver.
+/// `map` rewrites both the key and the value end to end through the driver.
 ///
 /// Topology: `stream("in")` → `map(key=len(k), value=upper(v))` → `to("out")`.
-/// Verifies that both the new key (derived from the original key) and the new
-/// value are forwarded correctly.
+/// The test checks that the driver forwards both the new key, which comes from
+/// the original key, and the new value.
 #[test]
 fn dsl_map_executes() {
     let b = StreamsBuilder::new();
@@ -255,10 +258,11 @@ fn dsl_map_executes() {
     );
 }
 
-/// `select_key`: rewrite only the key, value unchanged.
+/// `select_key` rewrites only the key and leaves the value unchanged.
 ///
 /// Topology: `stream("in")` → `select_key(value as key)` → `to("out")`.
-/// Asserts the outgoing key is the original value and the value is unmodified.
+/// The test asserts that the outgoing key is the original value and that the
+/// value is unmodified.
 #[test]
 fn dsl_select_key_executes() {
     let b = StreamsBuilder::new();
@@ -284,12 +288,12 @@ fn dsl_select_key_executes() {
     );
 }
 
-/// `filter_not`: the complement of `filter` — records where the predicate is
-/// false pass through; records where it is true are dropped.
+/// `filter_not` is the complement of `filter`. Records where the predicate is
+/// false pass through, and records where it is true are dropped.
 ///
 /// Topology: `stream("in")` → `filter_not(value == "drop")` → `to("out")`.
-/// Pipe three records: "keep", "drop", "also-keep". Only "keep" and "also-keep"
-/// must appear in the output.
+/// The test pipes three records: "keep", "drop", and "also-keep". Only "keep"
+/// and "also-keep" must appear in the output.
 #[test]
 fn dsl_filter_not_executes() {
     let b = StreamsBuilder::new();
@@ -321,7 +325,7 @@ fn dsl_filter_not_executes() {
     );
 }
 
-/// `flat_map`: one input record expands to multiple `(K2, V2)` output records.
+/// `flat_map` expands one input record into several `(K2, V2)` output records.
 ///
 /// Topology: `stream("in")` → `flat_map(split value on '-')` → `to("out")`.
 /// Input "a-b-c" with key "k" expands to three output records each keyed by
@@ -364,7 +368,7 @@ fn dsl_flat_map_executes() {
     );
 }
 
-/// `flat_map_values`: one value expands to multiple values, key unchanged.
+/// `flat_map_values` expands one value into several values and keeps the key.
 ///
 /// Topology: `stream("in")` → `flat_map_values(chars)` → `to("out")`.
 /// Input "hi" with key "k" expands to two records with values "h" and "i",
@@ -398,12 +402,13 @@ fn dsl_flat_map_values_executes() {
     );
 }
 
-/// `peek`: side-effect is executed for each record; records pass through
+/// `peek` runs a side effect for each record, and the records pass through
 /// unchanged.
 ///
 /// Topology: stream("in") → peek(collect into shared vec) → to("out").
-/// Pipes two records and asserts: (1) both appear at "out" unchanged, and
-/// (2) the shared vec collected the two (key, value) pairs.
+/// The test pipes two records and asserts two things. First, both records
+/// appear at "out" unchanged. Second, the shared vec collected the two
+/// (key, value) pairs.
 #[test]
 fn dsl_peek_executes() {
     use std::sync::{Arc, Mutex};
@@ -452,9 +457,11 @@ fn dsl_peek_executes() {
     );
 }
 
-/// `foreach`: terminal side-effect — records are collected via a shared vec
-/// but no output topic exists. Verifies the closure fires for each record and
-/// that nothing is forwarded (no sink is wired after `foreach`).
+/// `foreach` is a terminal side effect. A shared vec collects the records, and
+/// no output topic exists.
+///
+/// The test checks that the closure runs for each record and that nothing is
+/// forwarded, because no sink is wired after `foreach`.
 #[test]
 fn dsl_foreach_executes() {
     use std::sync::{Arc, Mutex};
@@ -489,12 +496,13 @@ fn dsl_foreach_executes() {
     );
 }
 
-/// `aggregate`: generic aggregation with a caller-supplied `init` and `agg`
+/// `aggregate` is a generic aggregation with a caller-supplied `init` and `agg`
 /// function, materialized as a `KTable`.
 ///
 /// Topology: `stream("in")` → `group_by_key` → `aggregate(init=0, agg=sum of
-/// value lengths)` → `to_stream` → `to("out")`. Each record accumulates the sum of
-/// the string value lengths per key, forwarding the running sum.
+/// value lengths)` → `to_stream` → `to("out")`. Each record adds to the sum of
+/// the string value lengths per key, and the topology forwards the running
+/// sum.
 #[test]
 fn dsl_aggregate_executes() {
     let b = StreamsBuilder::new();
@@ -542,12 +550,13 @@ fn dsl_aggregate_executes() {
     );
 }
 
-/// `KTable::filter`: matching rows are forwarded and materialized; non-matching
-/// rows are removed from the store and not forwarded.
+/// `KTable::filter` forwards and materializes the matching rows. It removes the
+/// non-matching rows from the store and does not forward them.
 ///
 /// Topology: `table("in")` → `filter(v > 10)` → `to_stream` → `to("out")`.
-/// Pipe value 42 for "a" (matches) then value 5 for "b" (dropped). Only the
-/// "a" record must appear at "out"; the store must contain "a" but not "b".
+/// The test pipes value 42 for "a", which matches, then value 5 for "b", which
+/// is dropped. Only the "a" record must appear at "out". The store must contain
+/// "a" but not "b".
 #[test]
 fn dsl_ktable_filter_executes() {
     let b = StreamsBuilder::new();
@@ -594,12 +603,13 @@ fn dsl_ktable_filter_executes() {
     );
 }
 
-/// `KTable::map_values` (non-materialized view form): forwards rewritten values
-/// without materializing a store or emitting a changelog topic.
+/// `KTable::map_values` in the non-materialized view form forwards the
+/// rewritten values. It does not materialize a store and does not emit a
+/// changelog topic.
 ///
 /// Topology: `table("in")` → `map_values(v*2, non-materialized)` → `to_stream` →
-/// `to("out")`. Asserts the doubled value reaches the sink and that no store
-/// named for this step exists in the topology.
+/// `to("out")`. The test asserts that the doubled value reaches the sink and
+/// that the topology holds no store named for this step.
 #[test]
 fn dsl_ktable_map_values_view_executes() {
     let b = StreamsBuilder::new();
@@ -631,9 +641,9 @@ fn dsl_ktable_map_values_view_executes() {
     );
 }
 
-/// `Materialized::with_logging(false)` must suppress the changelog topic from
-/// the wire topology. The store is still functional (in-memory state is
-/// maintained), but `state_changelog_topics` must be empty.
+/// `Materialized::with_logging(false)` must keep the changelog topic out of the
+/// wire topology. The store still works and keeps its in-memory state, but
+/// `state_changelog_topics` must be empty.
 #[test]
 fn dsl_count_no_logging_omits_changelog() {
     let b = StreamsBuilder::new();
@@ -677,9 +687,9 @@ fn dsl_count_no_logging_omits_changelog() {
 /// `KTable::filter` tombstone propagates to a downstream materialized store.
 ///
 /// Topology: `table("in")` → `filter(v != "drop")` → `map_values_materialized(identity)`.
-/// After "k"="keep" is written, the downstream "view" store holds "keep".
-/// After "k"="drop" is written (fails the filter), the filter emits a tombstone;
-/// `map_values_materialized` must delete "k" from "view".
+/// After the test writes "k"="keep", the downstream "view" store holds "keep".
+/// After it writes "k"="drop", which fails the filter, the filter emits a
+/// tombstone and `map_values_materialized` must delete "k" from "view".
 #[test]
 fn dsl_ktable_filter_tombstone_propagates_downstream() {
     let b = StreamsBuilder::new();
@@ -730,8 +740,10 @@ fn dsl_ktable_filter_tombstone_propagates_downstream() {
 }
 
 /// `StreamsBuilder::table` materializes a source topic into a `KTable`, and
-/// `map_values` rewrites + re-materializes it. Exercises the table source +
-/// table map-values execution paths end-to-end through `to_stream`.
+/// `map_values` rewrites and re-materializes it.
+///
+/// The test drives the table-source path and the table map-values path end to
+/// end through `to_stream`.
 #[test]
 fn dsl_table_map_values_executes() {
     let b = StreamsBuilder::new();
@@ -762,11 +774,13 @@ fn dsl_table_map_values_executes() {
     );
 }
 
-/// `to_table`: materialize a stream into a `KTable`, then back to a stream.
+/// `to_table` materializes a stream into a `KTable`, and the test then converts
+/// it back to a stream.
 ///
-/// Each input record overwrites the prior value for its key in the store; the
-/// `KTable` change-stream forwards the new value, which `to_stream` extracts and
-/// sends to the sink. The materialized store holds the latest value per key.
+/// Each input record overwrites the previous value for its key in the store.
+/// The `KTable` change-stream forwards the new value, `to_stream` extracts it,
+/// and the sink receives it. The materialized store holds the latest value per
+/// key.
 #[test]
 fn dsl_to_table_executes() {
     use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
@@ -807,10 +821,13 @@ fn dsl_to_table_executes() {
     );
 }
 
-/// `to_table` with an **unnamed** `Materialized` (no `.as_store()`) auto-mints a
-/// store name from the `KSTREAM-TOTABLE-STATE-STORE-` counter. The store name is
-/// opaque here — we just assert that the output is correct (records flow through),
-/// which exercises the `store_name = None → auto-mint` branch in `to_table`.
+/// `to_table` with an **unnamed** `Materialized`, that is without
+/// `.as_store()`, auto-mints a store name from the
+/// `KSTREAM-TOTABLE-STATE-STORE-` counter.
+///
+/// The store name is opaque here. The test asserts only that the output is
+/// correct and that records flow through, which covers the
+/// `store_name = None → auto-mint` branch in `to_table`.
 #[test]
 fn dsl_to_table_unnamed_store_executes() {
     let b = StreamsBuilder::new();
@@ -850,10 +867,12 @@ fn dsl_to_table_unnamed_store_executes() {
     );
 }
 
-/// `KStream::join` (inner stream-table join): a stream record is joined against
-/// the materialized table store. Populate the table FIRST (pipe a `right` record),
-/// then drive the stream side: a key present in the table produces an output; a
-/// key absent from the table is dropped (inner join).
+/// `KStream::join`, the inner stream-table join, joins a stream record against
+/// the materialized table store.
+///
+/// The test populates the table FIRST with a `right` record, then drives the
+/// stream side. A key present in the table produces an output. A key absent
+/// from the table is dropped, because this is an inner join.
 #[test]
 fn dsl_stream_table_inner_join_executes() {
     let b = StreamsBuilder::new();
@@ -899,9 +918,9 @@ fn dsl_stream_table_inner_join_executes() {
     );
 }
 
-/// `KStream::left_join` (left stream-table join): every stream record is
-/// forwarded. On a table hit the joiner receives `Some`; on a miss it receives
-/// `None` (here rendered as the empty string).
+/// `KStream::left_join`, the left stream-table join, forwards every stream
+/// record. On a table hit the joiner receives `Some`. On a miss it receives
+/// `None`, which this test renders as the empty string.
 #[test]
 fn dsl_stream_table_left_join_executes() {
     let b = StreamsBuilder::new();
@@ -949,9 +968,11 @@ fn dsl_stream_table_left_join_executes() {
     );
 }
 
-/// `KTable::join` (inner KTable-KTable join): a row exists in the join output
-/// only when BOTH source tables have a value for the key. Populate the left
-/// table first (no output yet), then the right table (join emits "AB").
+/// `KTable::join`, the inner KTable-KTable join, puts a row in the join output
+/// only when BOTH source tables have a value for the key.
+///
+/// The test populates the left table first, which produces no output yet, then
+/// the right table, and the join emits "AB".
 #[test]
 fn dsl_ktable_ktable_inner_join_executes() {
     use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
@@ -991,9 +1012,9 @@ fn dsl_ktable_ktable_inner_join_executes() {
     );
 }
 
-/// `KTable::left_join`: emits a row whenever the LEFT (this) side is present;
-/// the right side is optional. Pipe only the left table → output reflects the
-/// left value with an empty right side.
+/// `KTable::left_join` emits a row whenever the LEFT side, that is this side, is
+/// present. The right side is optional. The test pipes only the left table, so
+/// the output holds the left value with an empty right side.
 #[test]
 fn dsl_ktable_ktable_left_join_executes() {
     use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
@@ -1023,8 +1044,9 @@ fn dsl_ktable_ktable_left_join_executes() {
     );
 }
 
-/// `KTable::outer_join`: emits a row whenever EITHER side is present. Pipe only
-/// the right table → output reflects the right value with an empty left side.
+/// `KTable::outer_join` emits a row whenever EITHER side is present. The test
+/// pipes only the right table, so the output holds the right value with an
+/// empty left side.
 #[test]
 fn dsl_ktable_ktable_outer_join_executes() {
     use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
@@ -1058,9 +1080,9 @@ fn dsl_ktable_ktable_outer_join_executes() {
     );
 }
 
-/// `to_table` with `with_logging(false)` must suppress the changelog topic from
-/// the wire topology (`add_state_store_no_changelog` branch). The store is still
-/// functional at runtime.
+/// `to_table` with `with_logging(false)` must keep the changelog topic out of
+/// the wire topology through the `add_state_store_no_changelog` branch. The
+/// store still works at runtime.
 #[test]
 fn dsl_to_table_no_logging_omits_changelog() {
     let b = StreamsBuilder::new();
@@ -1117,8 +1139,9 @@ fn dsl_to_table_no_logging_omits_changelog() {
 
 // ── Windowed aggregations (windowedBy) ──────────────────────────────────────
 
-/// `windowedBy(TimeWindows).count` (tumbling): per-window running count. A
-/// record at ts=12 falls into a new window `[10,20)`, so its count restarts.
+/// `windowedBy(TimeWindows).count` on a tumbling window keeps a per-window
+/// running count. A record at ts=12 falls into a new window `[10,20)`, so its
+/// count restarts.
 #[test]
 fn dsl_windowed_count_tumbling_executes() {
     use crabka_client_streams::{
@@ -1191,9 +1214,9 @@ fn dsl_windowed_count_tumbling_executes() {
     );
 }
 
-/// `windowedBy(TimeWindows.advance_by)` (hopping): a record at ts=12 with a
-/// size-10/advance-5 window falls into both `[5,15)` and `[10,20)`, emitting
-/// one count per overlapping window.
+/// `windowedBy(TimeWindows.advance_by)` on a hopping window puts a record at
+/// ts=12 with a size-10 and advance-5 window into both `[5,15)` and `[10,20)`.
+/// It emits one count per overlapping window.
 #[test]
 fn dsl_windowed_count_hopping_executes() {
     use crabka_client_streams::{
@@ -1243,8 +1266,9 @@ fn dsl_windowed_count_hopping_executes() {
     );
 }
 
-/// `windowedBy(TimeWindows).reduce`: concatenate string values within a window;
-/// the first value in a window seeds the accumulator, later values fold.
+/// `windowedBy(TimeWindows).reduce` concatenates the string values within a
+/// window. The first value in a window seeds the accumulator, and later values
+/// fold into it.
 #[test]
 fn dsl_windowed_reduce_executes() {
     use crabka_client_streams::{
@@ -1317,8 +1341,8 @@ fn dsl_windowed_reduce_executes() {
     );
 }
 
-/// `windowedBy(TimeWindows).aggregate`: general init+agg summing the integer
-/// values per window.
+/// `windowedBy(TimeWindows).aggregate` is the general init and agg form. It
+/// sums the integer values per window.
 #[test]
 fn dsl_windowed_aggregate_executes() {
     use crabka_client_streams::{
@@ -1395,10 +1419,11 @@ fn dsl_windowed_aggregate_executes() {
 // Windowed KStream-KStream inner join (#4d-iii Task B3)
 // ---------------------------------------------------------------------------
 
-/// `KStream::join` (windowed inner stream-stream join): for each record on either
-/// side, the matching window of the OTHER side's store is scanned and a joined
-/// record emitted per match. A left record at `t` matches right records with
-/// timestamp in `[t - before, t + after]` (and symmetrically the other side).
+/// `KStream::join`, the windowed inner stream-stream join, scans the matching
+/// window of the OTHER side's store for each record on either side and emits one
+/// joined record per match. A left record at `t` matches right records with a
+/// timestamp in `[t - before, t + after]`, and the other side behaves
+/// symmetrically.
 #[test]
 fn dsl_stream_stream_inner_join_executes() {
     use crabka_client_streams::{
@@ -1459,8 +1484,8 @@ fn dsl_stream_stream_inner_join_executes() {
 
 /// Asymmetric `JoinWindows::of(millis(10)).before(millis(0)).after(millis(20))` proves the OTHER-side
 /// fetch-window swap. A record at `t` matches the other side over `[t-before,
-/// t+after]` *from this record's perspective*; the per-side processor swaps
-/// `before`/`after` so this holds for whichever side drives the record.
+/// t+after]` *from this record's perspective*. The per-side processor swaps
+/// `before` and `after`, so this holds for whichever side drives the record.
 #[test]
 fn dsl_stream_stream_join_swap_asymmetric() {
     use crabka_client_streams::{
@@ -1537,8 +1562,9 @@ fn dsl_stream_stream_join_swap_asymmetric() {
     );
 }
 
-/// Windowed join emits one output per matching record on the other side: two left
-/// records at the same timestamp, then one right record in the window → TWO joins.
+/// A windowed join emits one output per matching record on the other side. Two
+/// left records at the same timestamp, then one right record in the window,
+/// give TWO joins.
 #[test]
 fn dsl_stream_stream_join_duplicates() {
     use crabka_client_streams::{
@@ -1604,10 +1630,11 @@ fn dsl_stream_stream_join_duplicates() {
 // Windowed KStream-KStream left/outer join (#4d-iii Phase C, KIP-633)
 // ---------------------------------------------------------------------------
 
-/// `KStream::left_join` (windowed left stream-stream join): an unmatched LEFT
-/// record is buffered and emitted as `joiner(a, None)` once its window closes
-/// (driven by a later left record advancing stream-time). A matched left record
-/// emits `joiner(a, Some(b))` and is NOT later re-emitted as a null.
+/// `KStream::left_join`, the windowed left stream-stream join, buffers an
+/// unmatched LEFT record and emits it as `joiner(a, None)` once its window
+/// closes. A later left record advances stream-time and drives that close. A
+/// matched left record emits `joiner(a, Some(b))` and is NOT re-emitted later
+/// as a null.
 #[test]
 fn dsl_stream_stream_left_join_executes() {
     use crabka_client_streams::{
@@ -1690,9 +1717,10 @@ fn dsl_stream_stream_left_join_executes() {
     );
 }
 
-/// `KStream::outer_join` (windowed outer stream-stream join): an unmatched RIGHT
-/// record is buffered and emitted as `joiner(None, Some(b))` once its window
-/// closes (driven by a later right record advancing stream-time).
+/// `KStream::outer_join`, the windowed outer stream-stream join, buffers an
+/// unmatched RIGHT record and emits it as `joiner(None, Some(b))` once its
+/// window closes. A later right record advances stream-time and drives that
+/// close.
 #[test]
 fn dsl_stream_stream_outer_join_executes() {
     use crabka_client_streams::{
@@ -1751,9 +1779,9 @@ fn dsl_stream_stream_outer_join_executes() {
 }
 
 /// Session window count: two records within the inactivity gap merge into one
-/// session (with a tombstone for the intermediate session, which `to_stream`
-/// drops); a record beyond the gap starts a new session. Exercises the JVM
-/// session-merge in the DSL execution path.
+/// session. The merge also emits a tombstone for the intermediate session,
+/// which `to_stream` drops. A record beyond the gap starts a new session. The
+/// test drives the JVM session-merge in the DSL execution path.
 #[test]
 fn dsl_session_count_merges_within_gap() {
     use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
@@ -1820,7 +1848,7 @@ fn dsl_session_count_merges_within_gap() {
 }
 
 /// Two records separated by more than the inactivity gap form two independent
-/// sessions (no merge, no tombstone).
+/// sessions, with no merge and no tombstone.
 #[test]
 fn dsl_session_count_separate_beyond_gap() {
     use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
@@ -1872,8 +1900,9 @@ fn dsl_session_count_separate_beyond_gap() {
     assert_eq!(d.read_output("out", out), None);
 }
 
-/// Session window `reduce`: values per session fold via the reducer; two records
-/// within the gap merge into one session whose value is the reduced concatenation.
+/// Session window `reduce` folds the values per session with the reducer. Two
+/// records within the gap merge into one session whose value is the reduced
+/// concatenation.
 #[test]
 fn dsl_session_reduce_executes() {
     use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
@@ -1927,9 +1956,10 @@ fn dsl_session_reduce_executes() {
     assert_eq!(d.read_output("out", out), None);
 }
 
-/// Session window `aggregate` (with an explicit init/aggregator/merger): a
-/// count-equivalent over a session, exercising the generic session-aggregate
-/// lowering (distinct from the `count` convenience path).
+/// Session window `aggregate` with an explicit init, aggregator, and merger
+/// gives a count-equivalent over a session. The test drives the generic
+/// session-aggregate lowering, which differs from the `count` convenience
+/// path.
 #[test]
 fn dsl_session_aggregate_executes() {
     use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
@@ -1984,9 +2014,10 @@ fn dsl_session_aggregate_executes() {
     assert_eq!(d.read_output("out", out), None);
 }
 
-/// Suppress(untilWindowCloses): a window's count is buffered and emitted exactly
+/// Suppress(untilWindowCloses) buffers a window's count and emits it exactly
 /// once, when stream-time passes the window's end. Records in window [0,60000)
-/// produce no output until a later-window record advances stream-time past 60000.
+/// produce no output until a later-window record advances stream-time past
+/// 60000.
 #[test]
 fn dsl_suppress_until_window_closes_emits_final_only() {
     use crabka_client_streams::{
@@ -2049,9 +2080,10 @@ fn dsl_suppress_until_window_closes_emits_final_only() {
     assert_eq!(d.read_output("out", out), None);
 }
 
-/// Suppress closing multiple buffered windows at once: two keys buffered in window
-/// [0,60000) are both emitted (in buffer order) when a later-window record advances
-/// stream-time past 60000. Exercises the end-to-end multi-entry eviction path.
+/// Suppress closes several buffered windows at once. Two keys buffered in
+/// window [0,60000) are both emitted in buffer order when a later-window record
+/// advances stream-time past 60000. The test drives the end-to-end multi-entry
+/// eviction path.
 #[test]
 fn dsl_suppress_closes_multiple_windows_in_order() {
     use crabka_client_streams::{
@@ -2132,9 +2164,10 @@ fn dsl_suppress_closes_multiple_windows_in_order() {
     assert_eq!(d.read_output("out", out), None);
 }
 
-/// Suppress with a record cap: exceeding `maxRecords` shuts the task down
-/// (shutDownWhenFull). Three distinct keys land in one still-open window
-/// [0,60000) with a cap of 2 → the third overflows → panic.
+/// Suppress with a record cap shuts the task down when the buffer exceeds
+/// `maxRecords`, which is the shutDownWhenFull policy. Three distinct keys land
+/// in one still-open window [0,60000) with a cap of 2, so the third overflows
+/// and the task panics.
 #[test]
 #[should_panic(expected = "max capacity")]
 fn dsl_suppress_max_records_shuts_down_when_full() {
@@ -2172,11 +2205,13 @@ fn dsl_suppress_max_records_shuts_down_when_full() {
     }
 }
 
-/// Suppress `with_max_bytes` on a STRICT (`until_window_closes`) buffer →
-/// shutDownWhenFull. Each buffered entry is `TimeWindowedSerde` key (1-char key +
-/// 8-byte window start = 9) + i64 value (8) = 17 bytes. With a 20-byte cap the
-/// first key fits (17 ≤ 20); the second (34 > 20) overflows the still-open window
-/// → panic. Exercises the full DSL → `BufferConfig::byte_cap` → processor path.
+/// Suppress `with_max_bytes` on a STRICT (`until_window_closes`) buffer applies
+/// the shutDownWhenFull policy. Each buffered entry is a `TimeWindowedSerde`
+/// key, which is a 1-char key plus an 8-byte window start, so 9 bytes, plus an
+/// i64 value of 8 bytes, so 17 bytes in total. With a 20-byte cap the first key
+/// fits, because 17 ≤ 20. The second key overflows the still-open window,
+/// because 34 > 20, so the task panics. The test drives the full DSL →
+/// `BufferConfig::byte_cap` → processor path.
 #[test]
 #[should_panic(expected = "bytes")]
 fn dsl_suppress_max_bytes_shuts_down_when_full() {
@@ -2214,10 +2249,11 @@ fn dsl_suppress_max_bytes_shuts_down_when_full() {
     }
 }
 
-/// Suppress `max_bytes` on an EAGER (`until_time_limit`) buffer → emitEarlyWhenFull:
-/// an over-full byte buffer evicts + emits the oldest early. Non-windowed count keys
-/// serialize to 1 byte + 8-byte i64 = 9 bytes each; a 10-byte cap holds one, so the
-/// second key evicts the first early.
+/// Suppress `max_bytes` on an EAGER (`until_time_limit`) buffer applies the
+/// emitEarlyWhenFull policy. An over-full byte buffer evicts the oldest entry
+/// and emits it early. Non-windowed count keys serialize to 1 byte plus an
+/// 8-byte i64, so 9 bytes each. A 10-byte cap holds one, so the second key
+/// evicts the first early.
 #[test]
 fn dsl_suppress_max_bytes_emit_early() {
     use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
@@ -2259,8 +2295,9 @@ fn dsl_suppress_max_bytes_emit_early() {
     );
 }
 
-/// Suppress `until_time_limit`: a key is buffered and emitted once stream-time
-/// advances past `record_ts + wait`. Rate-limiter for a non-windowed table.
+/// Suppress `until_time_limit` buffers a key and emits it once stream-time
+/// advances past `record_ts + wait`. This is the rate limiter for a non-windowed
+/// table.
 #[test]
 fn dsl_suppress_until_time_limit_rate_limits() {
     use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
@@ -2302,8 +2339,9 @@ fn dsl_suppress_until_time_limit_rate_limits() {
     );
 }
 
-/// Suppress `emit_early_when_full`: an over-full eager buffer evicts + emits the
-/// oldest early (no panic). cap 1, two keys → the first emits when the second lands.
+/// Suppress `emit_early_when_full`: an over-full eager buffer evicts the oldest
+/// entry and emits it early, with no panic. With a cap of 1 and two keys, the
+/// first key emits when the second key lands.
 #[test]
 fn dsl_suppress_emit_early_when_full_evicts_oldest() {
     use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
@@ -2341,7 +2379,7 @@ fn dsl_suppress_emit_early_when_full_evicts_oldest() {
     );
 }
 
-/// `until_window_closes` requires a strict buffer — an eager config panics at
+/// `until_window_closes` needs a strict buffer. An eager config panics at
 /// construction.
 #[test]
 #[should_panic(expected = "strict")]
@@ -2359,9 +2397,10 @@ fn dsl_until_window_closes_rejects_eager_buffer() {
 // can target it; the key-mapper derives the lookup key from the record value, so a
 // stream value of "v1" looks up global key "v1".
 
-/// Inner stream-globaltable join: a global hit forwards `joiner(sv, gv)` keyed by
-/// the stream key. With `key_mapper = |_k, v| v.clone()`, a stream value "v1" looks
-/// up global key "v1" (a NON-stream-key lookup) → "G1" → "v1G1".
+/// Inner stream-globaltable join: a global hit forwards `joiner(sv, gv)` keyed
+/// by the stream key. With `key_mapper = |_k, v| v.clone()`, a stream value "v1"
+/// looks up global key "v1", which is a NON-stream-key lookup, and gives
+/// "G1" → "v1G1".
 #[test]
 fn dsl_global_join_inner_hit_executes() {
     use crabka_client_streams::GlobalKTable;
@@ -2429,7 +2468,8 @@ fn dsl_global_join_inner_miss_drops() {
     );
 }
 
-/// Left join miss: a global miss still forwards, the joiner receiving `None`.
+/// Left join miss: a global miss still forwards, and the joiner receives
+/// `None`.
 #[test]
 fn dsl_global_left_join_miss_emits_none() {
     use crabka_client_streams::GlobalKTable;
@@ -2464,7 +2504,7 @@ fn dsl_global_left_join_miss_emits_none() {
 }
 
 /// Mid-stream global update: a later record sees the latest global value after
-/// the global store is re-`pipe_global`'d with a new value for the same key.
+/// the test calls `pipe_global` again with a new value for the same key.
 #[test]
 fn dsl_global_join_sees_midstream_update() {
     use crabka_client_streams::GlobalKTable;
@@ -2509,9 +2549,10 @@ fn dsl_global_join_sees_midstream_update() {
     );
 }
 
-/// Key-mapper to a key derived from BOTH stream key and value (neither alone): the
-/// lookup key is `"<k>:<v>"`, distinct from the stream key, the value, and the
-/// emitted output key (which stays the stream key).
+/// The key mapper builds a key from BOTH the stream key and the value, and not
+/// from either one alone. The lookup key is `"<k>:<v>"`. It differs from the
+/// stream key, from the value, and from the emitted output key, which stays the
+/// stream key.
 #[test]
 fn dsl_global_join_key_mapper_derives_compound_key() {
     use crabka_client_streams::GlobalKTable;
@@ -2547,12 +2588,14 @@ fn dsl_global_join_key_mapper_derives_compound_key() {
 // KStream::process (custom Processor-API node + connected state stores)
 // ---------------------------------------------------------------------------
 
-/// `KStream::process` with a stateful custom processor: a `Counter` reads/writes
-/// a connected `counts` store per record and forwards `(value, running_count)`.
+/// `KStream::process` with a stateful custom processor: a `Counter` reads and
+/// writes a connected `counts` store per record and forwards
+/// `(value, running_count)`.
 ///
 /// Topology: `stream("in")` → `process(Counter, ["counts"])` → `to("out")`.
-/// Pipe `("k","a")`,`("k","a")`,`("k","b")`; the per-VALUE running count yields
-/// `("a",1)`,`("a",2)`,`("b",1)`, and the store holds 2 for "a".
+/// The test pipes `("k","a")`, `("k","a")`, and `("k","b")`. The per-VALUE
+/// running count gives `("a",1)`, `("a",2)`, and `("b",1)`, and the store holds
+/// 2 for "a".
 #[test]
 fn dsl_process_stateful_counter_executes() {
     use crabka_client_streams::{Processor, ProcessorContext, Record};
@@ -2611,10 +2654,12 @@ fn dsl_process_stateful_counter_executes() {
     );
 }
 
-/// `KStream::process` is **key-changing**: a downstream aggregation must insert a
-/// repartition. Build `stream("in").process(Fwd,["store"]).group_by_key().count()`
-/// and assert the wire carries a repartition topic (the process result re-keys, so
-/// the count repartitions before aggregating).
+/// `KStream::process` is **key-changing**, so a downstream aggregation must
+/// insert a repartition.
+///
+/// The test builds `stream("in").process(Fwd,["store"]).group_by_key().count()`
+/// and asserts that the wire carries a repartition topic. The process result
+/// re-keys the records, so the count repartitions before it aggregates.
 #[test]
 fn dsl_process_is_key_changing_forces_repartition() {
     use crabka_client_streams::{Processor, ProcessorContext, Record};
@@ -2658,12 +2703,13 @@ fn dsl_process_is_key_changing_forces_repartition() {
 // KStream::process_values (fixed-key custom Processor-API node)
 // ---------------------------------------------------------------------------
 
-/// `KStream::process_values` with a fixed-key processor that uppercases the value
-/// and forwards — the KEY is preserved (KIP-820 fixed-key semantics).
+/// `KStream::process_values` with a fixed-key processor uppercases the value and
+/// forwards it. The KEY is preserved, which is KIP-820 fixed-key semantics.
 ///
 /// Topology: `stream("in")` → `process_values(Upper, ["store"])` → `to("out")`.
-/// Pipe `("k","hi")`; the output is `("k","HI")` — SAME key, uppercased value. The
-/// store is connected (so the changelog appears) but not read by the processor.
+/// The test pipes `("k","hi")` and the output is `("k","HI")`, the SAME key with
+/// an uppercased value. The store is connected, so the changelog appears, but
+/// the processor does not read it.
 #[test]
 fn dsl_process_values_preserves_key_executes() {
     use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
@@ -2705,12 +2751,14 @@ fn dsl_process_values_preserves_key_executes() {
     );
 }
 
-/// `KStream::process_values` is **non-key-changing** (KIP-820 preserves the key):
-/// a downstream aggregation must NOT insert a repartition. Build
-/// `stream("in").process_values(Upper,["store"]).group_by_key().count()` and assert
-/// the wire carries NO repartition topic anywhere. This is the CONTRAST with the
-/// `process` case (`dsl_process_is_key_changing_forces_repartition`), which DOES
-/// repartition.
+/// `KStream::process_values` is **non-key-changing**, because KIP-820 preserves
+/// the key, so a downstream aggregation must NOT insert a repartition.
+///
+/// The test builds
+/// `stream("in").process_values(Upper,["store"]).group_by_key().count()` and
+/// asserts that the wire carries NO repartition topic anywhere. This is the
+/// CONTRAST with the `process` case
+/// (`dsl_process_is_key_changing_forces_repartition`), which DOES repartition.
 #[test]
 fn dsl_process_values_is_not_key_changing_no_repartition() {
     use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
@@ -2751,11 +2799,13 @@ fn dsl_process_values_is_not_key_changing_no_repartition() {
     );
 }
 
-/// `process_values` reading a CONNECTED store via `get_state_store` and the source
-/// `record_context`: a `Tagger` counts per-key occurrences in the `seen` store and
-/// forwards `value#count`, keeping the key. Exercises the fixed-key context's
-/// store/record-context accessors over the real runtime path. Pipe `("k","a")`,
-/// `("k","b")` → `("k","a#1")`,`("k","b#2")`.
+/// `process_values` reads a CONNECTED store through `get_state_store` and the
+/// source `record_context`. A `Tagger` counts the per-key occurrences in the
+/// `seen` store and forwards `value#count`, and it keeps the key.
+///
+/// The test drives the fixed-key context's store accessor and record-context
+/// accessor over the real runtime path. It pipes `("k","a")` and `("k","b")`,
+/// which give `("k","a#1")` and `("k","b#2")`.
 #[test]
 fn dsl_process_values_reads_store_and_record_context() {
     use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
@@ -2805,9 +2855,10 @@ fn dsl_process_values_reads_store_and_record_context() {
     );
 }
 
-/// `process` referencing a store that was never `add_state_store`-ed panics at call
-/// time (the missing-store guard) — the store thunk is looked up when `process` is
-/// called, not deferred to lowering.
+/// `process` panics at call time when it references a store that no
+/// `add_state_store` call registered. This is the missing-store guard. The code
+/// looks up the store thunk when it calls `process`, and does not defer the
+/// lookup to lowering.
 #[test]
 #[should_panic(expected = "was not added via add_state_store")]
 fn dsl_process_unknown_store_panics() {
@@ -2828,7 +2879,8 @@ fn dsl_process_unknown_store_panics() {
         .process(|| Fwd, ["missing"]);
 }
 
-/// `process_values` referencing an unadded store panics at call time, same guard.
+/// `process_values` panics at call time when it references an unadded store,
+/// through the same guard.
 #[test]
 #[should_panic(expected = "was not added via add_state_store")]
 fn dsl_process_values_unknown_store_panics() {
@@ -2853,10 +2905,10 @@ fn dsl_process_values_unknown_store_panics() {
 /// against the Rust runtime and compare every emission (key, window, value) to the
 /// JVM `TopologyTestDriver` capture in `testdata/sliding_window/behavior.json`.
 ///
-/// The input script deliberately includes an out-of-order record (`("a", 3)` after
-/// stream-time has advanced to 12) and a cross-key record (`("b", 7)`) that falls
-/// entirely in closed-window territory for that key — matching the exact JVM
-/// `KStreamSlidingWindowAggregate` behavior.
+/// The input script deliberately includes an out-of-order record, `("a", 3)`
+/// after stream-time has advanced to 12, and a cross-key record, `("b", 7)`,
+/// that falls entirely in closed-window territory for that key. This matches the
+/// exact JVM `KStreamSlidingWindowAggregate` behavior.
 #[test]
 fn sliding_window_count_matches_jvm_behavior() {
     use crabka_client_streams::{
@@ -2929,8 +2981,10 @@ struct EmitFinalRow {
 }
 
 /// Emit-final (KIP-825) TIME-window count must match the JVM 4.1.0 capture in
-/// `testdata/emit_final/time.json` (`EmitStrategy.onWindowClose()`). Pins the
-/// strict close boundary: a window emits only once stream-time moves PAST its end.
+/// `testdata/emit_final/time.json` for `EmitStrategy.onWindowClose()`.
+///
+/// This test pins the strict close boundary. A window emits only once
+/// stream-time moves PAST its end.
 #[test]
 fn emit_final_time_window_matches_jvm_behavior() {
     use crabka_client_streams::{
@@ -3032,9 +3086,10 @@ fn emit_final_sliding_window_matches_jvm_behavior() {
 }
 
 /// Emit-final SESSION-window count must match `testdata/emit_final/session.json`.
-/// The grace-0 script (`a@0,a@4` merge → `[0,4]`; `a@20` opens `[20,20]`; `a@100`
-/// closes both) is the discriminator that pinned the strict close boundary —
-/// the JVM emits NO zero-width `[0,0]` at stream-time 0.
+///
+/// The grace-0 script is the discriminator that pinned the strict close
+/// boundary: `a@0,a@4` merge into `[0,4]`, `a@20` opens `[20,20]`, and `a@100`
+/// closes both. The JVM emits NO zero-width `[0,0]` at stream-time 0.
 #[test]
 fn emit_final_session_window_matches_jvm_behavior() {
     use crabka_client_streams::{
@@ -3172,9 +3227,9 @@ fn sliding_window_reduce_matches_jvm_behavior() {
     );
 }
 
-/// Sliding-window aggregate via the ergonomic non-explicit `.aggregate()` form.
-/// Uses a count-style aggregator (`+1`) to assert the first left-window emission
-/// is correct for two in-order records.
+/// Sliding-window aggregate through the ergonomic non-explicit `.aggregate()`
+/// form. It uses a count-style aggregator (`+1`) to assert that the first
+/// left-window emission is correct for two in-order records.
 #[test]
 fn sliding_window_aggregate_executes() {
     use crabka_client_streams::{
@@ -3224,10 +3279,12 @@ fn sliding_window_aggregate_executes() {
 }
 
 /// Sliding-window emit-final (KIP-825): `.emit_strategy(on_window_close())`
-/// must suppress all per-update emits and forward finals only once windows
-/// close. With a large grace the windows from the two in-order records stay
-/// open (nothing emitted); a far-future record advances stream-time past their
-/// close, flushing the finals. The discriminator vs emit-on-update is that the
+/// must suppress all per-update emits and forward the finals only once the
+/// windows close.
+///
+/// With a large grace the windows from the two in-order records stay open and
+/// emit nothing. A far-future record advances stream-time past their close and
+/// flushes the finals. The discriminator against emit-on-update is that the
 /// first two records produce NO output.
 #[test]
 fn sliding_window_emit_final_emits_only_on_close() {
@@ -3277,9 +3334,9 @@ fn sliding_window_emit_final_emits_only_on_close() {
     );
 }
 
-/// Sliding-window count via the ergonomic non-explicit `.count()` form.
-/// Exercises the `count` → `count_explicit` lowering path distinct from
-/// `count_explicit` called directly.
+/// Sliding-window count through the ergonomic non-explicit `.count()` form.
+/// The test drives the `count` → `count_explicit` lowering path, which differs
+/// from a direct `count_explicit` call.
 #[test]
 fn sliding_window_count_nonexplicit_builds_and_runs() {
     use crabka_client_streams::{
@@ -3321,9 +3378,10 @@ fn sliding_window_count_nonexplicit_builds_and_runs() {
     );
 }
 
-/// Sliding-window reduce via the ergonomic non-explicit `.reduce()` form.
-/// One record seeds the first value (no prior in window → `value.clone()`),
-/// asserting the single left-window emission.
+/// Sliding-window reduce through the ergonomic non-explicit `.reduce()` form.
+/// One record seeds the first value, because no earlier value is in the window,
+/// so the result is `value.clone()`. The test asserts the single left-window
+/// emission.
 #[test]
 fn sliding_window_reduce_nonexplicit() {
     use crabka_client_streams::{
@@ -3365,10 +3423,10 @@ fn sliding_window_reduce_nonexplicit() {
     );
 }
 
-/// `table_explicit` with `Materialized::as_versioned` materializes records into a
-/// versioned key-value store. Out-of-order records are stored under their own
-/// timestamp without overwriting the latest pointer; the store returns the
-/// most-recent record by commit timestamp on `get`.
+/// `table_explicit` with `Materialized::as_versioned` materializes records into
+/// a versioned key-value store. The store keeps out-of-order records under their
+/// own timestamp and does not overwrite the latest pointer. On `get`, the store
+/// returns the most recent record by commit timestamp.
 #[test]
 fn versioned_table_keeps_latest_on_out_of_order() {
     use crabka_client_streams::{I64Serde, Materialized, StringSerde};
@@ -3414,9 +3472,10 @@ fn versioned_table_keeps_latest_on_out_of_order() {
 }
 
 /// The bytes the versioned table's changelog produces must match the JVM 4.1
-/// capture exactly: KEY = raw key, VALUE = bare serialized value, version
-/// timestamp in the record-timestamp field (KIP-889). Built UNOPTIMIZED so the
-/// changelog is the derived `app-vt-changelog` topic the JVM oracle captured.
+/// capture exactly. KEY is the raw key, VALUE is the bare serialized value, and
+/// the version timestamp is in the record-timestamp field (KIP-889). The test
+/// builds UNOPTIMIZED, so the changelog is the derived `app-vt-changelog` topic
+/// that the JVM oracle captured.
 #[test]
 fn versioned_table_changelog_matches_jvm() {
     fn hex(b: &[u8]) -> String {

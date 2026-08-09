@@ -1,14 +1,16 @@
-//! A `quote!`-based reimplementation of the `borrowed` emitter — the
-//! zero-copy / lifetime-carrying flavor (`&'a str`, `&'a [u8]`,
-//! `RecordsPayloadBorrowed<'a>`), plus a `to_owned()` bridge to the owned types
-//! and a `DecodeBorrow<'de>` impl.
+//! A `quote!`-based reimplementation of the `borrowed` emitter.
 //!
-//! Same approach as [`super::owned_quote`]: the structural scaffolding (struct,
-//! `Default`, `to_owned`, `Encode`, `DecodeBorrow`, nested structs, `populated`)
-//! is built as tokens, while the leaf codec expressions, import and constant
-//! blocks, and common-struct files are reused verbatim from `super::borrowed`
-//! (whose wire bytes are already test-covered). The `borrowed_quote_parity`
-//! test asserts token-stream equality with the string emitter for every schema.
+//! This is the zero-copy, lifetime-carrying flavor with `&'a str`, `&'a [u8]`,
+//! and `RecordsPayloadBorrowed<'a>`, plus a `to_owned()` bridge to the owned
+//! types and a `DecodeBorrow<'de>` impl.
+//!
+//! The approach is the same as [`super::owned_quote`]. This module builds the
+//! structural scaffolding as tokens: the struct, `Default`, `to_owned`,
+//! `Encode`, `DecodeBorrow`, nested structs, and `populated`. It reuses the
+//! leaf codec expressions, the import and constant blocks, and the
+//! common-struct files verbatim from `super::borrowed`, whose wire bytes are
+//! already test-covered. The `borrowed_quote_parity` test asserts
+//! token-stream equality with the string emitter for every schema.
 
 use std::str::FromStr;
 
@@ -150,10 +152,11 @@ pub fn emit(
 
 /// Emit the standalone `.rs` file bodies for the message's `commonStructs`.
 ///
-/// `commonStructs` are message-local: each is emitted under a per-message nested
-/// module `common/<message_snake>/<struct_snake>`. The `commons` key is the
-/// relative path stem `<message_snake>/<struct_snake>`; the caller turns that
-/// into the on-disk body path and the wrapper module nesting.
+/// `commonStructs` are message-local. The emitter writes each one under a
+/// per-message nested module `common/<message_snake>/<struct_snake>`. The
+/// `commons` key is the relative path stem `<message_snake>/<struct_snake>`.
+/// The caller turns that stem into the on-disk body path and the wrapper
+/// module nesting.
 fn emit_commons(
     spec: &MessageSpec,
     res_map: &ResMap,
@@ -241,8 +244,9 @@ fn version_err(spec: &MessageSpec) -> TokenStream {
 }
 
 /// Struct + `Default` + `to_owned` + `Encode` + `DecodeBorrow` + `populated`.
-/// `top_level` toggles the tagged-field-owned typing that only the message type
-/// uses; nested structs always store tagged fields in their borrowed form.
+/// `top_level` toggles the tagged-field-owned typing that only the message
+/// type uses. Nested structs always store tagged fields in their borrowed
+/// form.
 fn struct_block(
     ctx: &Ctx,
     name: &str,
@@ -418,8 +422,8 @@ fn default_is_null(f: &FieldSpec) -> bool {
     matches!(&f.default, Some(serde_json::Value::Null))
 }
 
-/// Rust struct-field type. Top-level tagged fields that cannot borrow from the
-/// ephemeral tagged-payload buffer are stored owned.
+/// Rust struct-field type. The emitter stores top-level tagged fields owned
+/// when they cannot borrow from the ephemeral tagged-payload buffer.
 fn field_type(ctx: &Ctx, f: &FieldSpec, top_level: bool) -> String {
     if is_tagged(f) {
         let nullable = is_nullable(f) || default_is_null(f);
@@ -576,8 +580,8 @@ fn encode_one(f: &FieldSpec) -> TokenStream {
     quote!(if #cond { #inner })
 }
 
-/// Tagged string/bytes fields stored owned use the owned-flavor codec (it adds
-/// `.as_deref()`); everything else uses the borrowed codec.
+/// Tagged string and bytes fields stored owned use the owned-flavor codec,
+/// which adds `.as_deref()`. Everything else uses the borrowed codec.
 fn tagged_owned_codec(ctx: &Ctx, f: &FieldSpec) -> bool {
     tagged_field_needs_owned(f, ctx.res_map)
         && matches!(base_type(&f.field_type), "string" | "bytes")

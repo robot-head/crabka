@@ -1,11 +1,11 @@
-//! Cross-run aggregation — the "accurate averages" layer.
+//! Cross-run aggregation, the "accurate averages" layer.
 //!
-//! A benchmark *cell* is one `(scenario name, broker_count)`. Each cell is run
-//! `N` times per stack; this module reduces those `N` [`RunOutput`]s into a
-//! mean ± sample-stddev per metric, and averages the per-interval time series
-//! across runs at each time offset. Both the Markdown summary and the Plotly
-//! graphs read these aggregates, so "the average" is computed in exactly one
-//! place rather than re-derived ad hoc per renderer.
+//! A benchmark *cell* is one `(scenario name, broker_count)`. The harness runs
+//! each cell `N` times per stack. This module reduces those `N` [`RunOutput`]s
+//! into a mean ± sample-stddev per metric, and averages the per-interval time
+//! series across runs at each time offset. Both the Markdown summary and the
+//! Plotly graphs read these aggregates, so one place computes "the average" and
+//! no renderer re-derives it.
 
 use std::collections::BTreeMap;
 
@@ -17,19 +17,20 @@ use crate::{
     scenario::{BrokerSample, RunOutput, Sample, Stack},
 };
 
-/// Mean / spread of a single scalar metric over the runs of one `(cell, stack)`.
+/// Mean and spread of a single scalar metric over the runs of one
+/// `(cell, stack)`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Stat {
     pub mean: f64,
-    /// Sample (Bessel-corrected) standard deviation; `0.0` for fewer than two
-    /// runs (a single run has no measurable spread).
+    /// Bessel-corrected sample standard deviation. This is `0.0` for fewer than
+    /// two runs, because a single run has no measurable spread.
     pub stddev: f64,
     pub n: usize,
 }
 
 impl Stat {
-    /// Coefficient of variation as a percentage (`stddev ÷ mean × 100`); `0`
-    /// when the mean is `0` so an absent/zero metric renders cleanly.
+    /// Coefficient of variation as a percentage (`stddev ÷ mean × 100`). This is
+    /// `0` when the mean is `0`, so an absent or zero metric renders cleanly.
     #[must_use]
     pub fn cv_percent(&self) -> f64 {
         if self.mean == 0.0 {
@@ -40,7 +41,7 @@ impl Stat {
     }
 }
 
-/// Mean + sample stddev + count over a sample of run-level values.
+/// Mean, sample stddev, and count over a sample of run-level values.
 #[must_use]
 pub fn stat(values: &[f64]) -> Stat {
     let n = values.len();
@@ -57,13 +58,14 @@ pub fn stat(values: &[f64]) -> Stat {
     Stat { mean, stddev, n }
 }
 
-/// A headline scalar metric: its key, how to pull it from a run, and which
-/// direction counts as "better" (so a renderer can colour/ratio correctly).
+/// A headline scalar metric. It holds its key, a way to pull it from a run, and
+/// which direction counts as "better", so a renderer can colour and ratio it
+/// correctly.
 ///
 /// `extract` returns a plain number in the metric's stated `unit`, because the
-/// statistics below (and the Plotly axes above) are dimension-agnostic — a
-/// mean and a stddev are taken over whatever unit the axis is labelled with.
-/// The quantity-to-number seam is in each metric's `extract`.
+/// statistics below and the Plotly axes above are dimension-agnostic. A mean and
+/// a stddev run over whatever unit the axis carries. The quantity-to-number seam
+/// is in each metric's `extract`.
 #[derive(Clone, Copy)]
 pub struct ScalarMetric {
     pub key: &'static str,
@@ -133,12 +135,13 @@ pub fn scalar_metrics() -> Vec<ScalarMetric> {
 #[derive(Debug, Clone, Default)]
 pub struct StackAgg {
     pub n_runs: usize,
-    /// metric key → [`Stat`] across this stack's runs in the cell.
+    /// A map from metric key to the [`Stat`] across this stack's runs in the
+    /// cell.
     pub metrics: BTreeMap<&'static str, Stat>,
 }
 
-/// One benchmark cell: a `(scenario, topology)` with crabka and kafka
-/// aggregates side by side.
+/// One benchmark cell. It holds a `(scenario, topology)` with the crabka and
+/// kafka aggregates side by side.
 #[derive(Debug, Clone)]
 pub struct CellAgg {
     pub scenario: String,
@@ -148,8 +151,9 @@ pub struct CellAgg {
     pub kafka: StackAgg,
 }
 
-/// Group runs by `(scenario, broker_count)` and reduce each stack's runs to a
-/// per-metric [`Stat`]. Cells are returned in `(scenario, broker_count)` order.
+/// Groups runs by `(scenario, broker_count)` and reduces each stack's runs to a
+/// per-metric [`Stat`]. This returns the cells in `(scenario, broker_count)`
+/// order.
 #[must_use]
 pub fn aggregate_cells(runs: &[RunOutput]) -> Vec<CellAgg> {
     let metrics = scalar_metrics();
@@ -191,8 +195,8 @@ pub fn aggregate_cells(runs: &[RunOutput]) -> Vec<CellAgg> {
     out
 }
 
-/// One averaged point of a time series: the across-run mean of a metric at a
-/// fixed offset into the run, plus how many runs contributed that offset.
+/// One averaged point of a time series. It holds the across-run mean of a metric
+/// at a fixed offset into the run, and how many runs gave that offset.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TsPoint {
     pub t_offset_ms: TimeOffsetMs,
@@ -231,10 +235,10 @@ fn broker_ts_metrics() -> Vec<(&'static str, BrokerExtract)> {
     ]
 }
 
-/// For each `(scenario, broker_count, stack, metric)`, average the per-interval
-/// samples across all runs at each shared time offset. Ragged runs (one ended
-/// early) simply contribute fewer points to the tail offsets; `TsPoint::n`
-/// records how many runs backed each averaged point.
+/// For each `(scenario, broker_count, stack, metric)`, averages the per-interval
+/// samples across all runs at each shared time offset. A ragged run that ended
+/// early gives fewer points to the tail offsets. `TsPoint::n` records how many
+/// runs backed each averaged point.
 #[must_use]
 pub fn averaged_timeseries(runs: &[RunOutput]) -> Vec<TsSeries> {
     let client_metrics = client_ts_metrics();
@@ -292,8 +296,8 @@ pub fn averaged_timeseries(runs: &[RunOutput]) -> Vec<TsSeries> {
     out
 }
 
-/// Average each time-offset bucket across runs into a [`TsSeries`], or `None`
-/// when no run in the group produced any sample for this metric.
+/// Averages each time-offset bucket across runs into a [`TsSeries`]. Returns
+/// `None` when no run in the group produced any sample for this metric.
 fn series_from_buckets(
     scenario: &str,
     broker_count: u32,

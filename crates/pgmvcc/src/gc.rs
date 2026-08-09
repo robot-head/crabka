@@ -1,22 +1,23 @@
 //! Garbage-collection horizon support: snapshot pins and the dead-version rule.
 //!
-//! The `ProcArray` only registers WRITER xids, so a read-only snapshot (a
-//! REPEATABLE READ transaction, or a single statement's READ COMMITTED
-//! snapshot) would otherwise be invisible to the garbage horizon: a version
+//! The `ProcArray` only registers WRITER xids, so a read-only snapshot, that
+//! is a REPEATABLE READ transaction or a single statement's READ COMMITTED
+//! snapshot, would be invisible to the garbage horizon. A version
 //! whose committed `xmax` was still running when such a snapshot was taken
-//! could be pruned out from under it mid-use. [`GcHorizon`] closes that gap:
-//! every snapshot consumer registers a [`SnapshotPin`] at its snapshot's
+//! could be pruned out from under it mid-use. [`GcHorizon`] closes that gap.
+//! Every snapshot consumer registers a [`SnapshotPin`] at its snapshot's
 //! `xmin` for exactly as long as the snapshot is in use, and the horizon
 //! computation caps itself at the minimum registered pin. Any xid a live
 //! snapshot could still consider "running" is `>=` that snapshot's `xmin`
 //! `>=` its pin, so no version such a snapshot can see is ever below the
 //! horizon.
 //!
-//! [`GcHorizon`] also caches a monotone `decided_floor`: the highest xid
-//! below which every transaction is known decided (terminal in the clog, or
-//! absent-and-not-running, i.e. crashed). Horizon computations scan the clog
-//! only from this floor, so the per-statement cost is amortized O(1) per xid
-//! instead of O(all xids ever) once the floor catches up.
+//! [`GcHorizon`] also caches a monotone `decided_floor`. This is the highest
+//! xid below which every transaction is known decided, that is terminal in
+//! the clog, or absent and not running, which means crashed. Horizon
+//! computations scan the clog only from this floor. Once the floor catches
+//! up, the per-statement cost is amortized O(1) per xid instead of O(all xids
+//! ever).
 
 use std::{
     collections::BTreeMap,
@@ -53,16 +54,18 @@ pub struct PinBelowReclaimFloor {
 pub struct GcHorizon {
     /// Multiset of pinned snapshot `xmin`s (value = number of holders).
     pins: Mutex<BTreeMap<Xid, usize>>,
-    /// Every xid strictly below this value is decided (terminal clog entry,
-    /// or absent while not registered as running — a crash leftover that can
-    /// never commit). Monotone; purely an in-process scan-cost cache, never a
-    /// correctness input on its own.
+    /// Every xid strictly below this value is decided. It has a terminal clog
+    /// entry, or it is absent while not registered as running, which is a
+    /// crash leftover that can never commit. The value is monotone. It is
+    /// purely an in-process scan-cost cache, and never a correctness input on
+    /// its own.
     decided_floor: AtomicU64,
-    /// Monotone reclaim floor: history below it may be physically reclaimed,
-    /// so [`GcHorizon::pin_above`] refuses pins under it. Raised only while
-    /// holding the pin registry lock (`raise_reclaim_floor`) or by folding in
-    /// an already-published durable value (`observe_reclaim_floor`), so a pin
-    /// admitted at value `v` guarantees no later raise passes `v`.
+    /// Monotone reclaim floor. History below it may be physically reclaimed,
+    /// so [`GcHorizon::pin_above`] refuses pins under it. It rises only while
+    /// a caller holds the pin registry lock (`raise_reclaim_floor`), or when a
+    /// caller folds in an already-published durable value
+    /// (`observe_reclaim_floor`). A pin admitted at value `v` guarantees that
+    /// no later raise passes `v`.
     reclaim_floor: AtomicU64,
 }
 
@@ -73,8 +76,8 @@ impl GcHorizon {
         Self::default()
     }
 
-    /// Register a snapshot whose `xmin` must hold the garbage horizon back
-    /// until the returned pin is dropped.
+    /// Registers a snapshot whose `xmin` must hold the garbage horizon back
+    /// until the caller drops the returned pin.
     ///
     /// # Panics
     ///
@@ -111,16 +114,17 @@ impl GcHorizon {
         self.decided_floor.load(Ordering::SeqCst)
     }
 
-    /// Raise the cached decided floor (monotone; lower values are ignored).
+    /// Raises the cached decided floor. The floor is monotone, and lower
+    /// values are ignored.
     pub fn advance_decided_floor(&self, floor: Xid) {
         self.decided_floor.fetch_max(floor, Ordering::SeqCst);
     }
 
-    /// Register a snapshot pin at `value`, refusing values below the reclaim
-    /// floor. The floor check and the pin insertion happen under one lock, so
-    /// an admitted pin can never be overtaken by a concurrent
-    /// [`GcHorizon::raise_reclaim_floor`]: the raise either sees the pin (and
-    /// bounds itself below it) or happened first (and this pin is refused).
+    /// Registers a snapshot pin at `value` and refuses values below the
+    /// reclaim floor. The floor check and the pin insertion happen under one
+    /// lock, so a concurrent [`GcHorizon::raise_reclaim_floor`] can never
+    /// overtake an admitted pin. The raise either sees the pin and bounds
+    /// itself below it, or it happened first and this pin is refused.
     ///
     /// # Errors
     ///
@@ -147,10 +151,10 @@ impl GcHorizon {
         })
     }
 
-    /// Raise the reclaim floor toward `candidate`, bounded by the lowest
-    /// registered pin, and return the resulting floor. The floor is monotone:
-    /// a candidate below the current floor (or a pin below it) leaves the
-    /// floor unchanged. Reclaiming history strictly below the returned value
+    /// Raises the reclaim floor toward `candidate`, bounded by the lowest
+    /// registered pin, and returns the resulting floor. The floor is monotone.
+    /// A candidate below the current floor, or a pin below it, leaves the
+    /// floor unchanged. A reclaim of history strictly below the returned value
     /// is safe with respect to every pin registered on this horizon.
     ///
     /// # Panics
@@ -167,12 +171,13 @@ impl GcHorizon {
         previous.max(bounded)
     }
 
-    /// Fold an externally published (durable) reclaim floor into this horizon
-    /// (monotone; lower values are ignored). Unlike
-    /// [`GcHorizon::raise_reclaim_floor`] this does NOT consult pins: the
-    /// value was already the published floor when the caller read it, so pins
-    /// below it can only belong to snapshots admitted against an older
-    /// applied state whose history is still intact.
+    /// Folds an externally published, durable, reclaim floor into this
+    /// horizon. The floor is monotone, and lower values are ignored.
+    ///
+    /// Unlike [`GcHorizon::raise_reclaim_floor`], this method does NOT consult
+    /// pins. The value was already the published floor when the caller read
+    /// it, so pins below it can only belong to snapshots admitted against an
+    /// older applied state whose history is still intact.
     pub fn observe_reclaim_floor(&self, floor: Xid) {
         self.reclaim_floor.fetch_max(floor, Ordering::SeqCst);
     }
@@ -184,7 +189,7 @@ impl GcHorizon {
     }
 }
 
-/// Indices of timestamp-stamped versions that are dead below `floor`: no read
+/// Indices of timestamp-stamped versions that are dead below `floor`. No read
 /// at or above `floor` can see them, because a NEWER committed or deleted
 /// version also sits at or below `floor` and supersedes them.
 ///
@@ -192,14 +197,15 @@ impl GcHorizon {
 /// with `commit_ts <= floor`. Every `Committed`/`Deleted` version with
 /// `commit_ts < c*` is dead: a read at `read_ts >= floor >= c*` resolves to
 /// the newest version at or below its `read_ts`, which is the `c*` version or
-/// newer. The `c*` version itself is always kept (it IS the visible version
-/// for reads in `[c*, next commit)`), as is everything above `floor`.
-/// `Intent` versions are never dead (their outcome is undecided), and
-/// `Aborted` markers are kept so late idempotent resolutions still find them.
+/// newer. The function always keeps the `c*` version itself, because it IS the
+/// visible version for reads in `[c*, next commit)`. It also keeps everything
+/// above `floor`. `Intent` versions are never dead, because their outcome is
+/// undecided. The function keeps `Aborted` markers so late idempotent
+/// resolutions still find them.
 ///
-/// Reads strictly below `floor` may miss pruned history; callers must ensure
-/// such reads are refused (the reclaim-floor contract of
-/// [`GcHorizon::pin_above`]). Uncertainty-window semantics are unaffected:
+/// Reads strictly below `floor` may miss pruned history. Callers must make
+/// sure that such reads are refused, which is the reclaim-floor contract of
+/// [`GcHorizon::pin_above`]. Uncertainty-window semantics do not change.
 /// [`crate::visibility::read_verdict`] restarts only on commits ABOVE the
 /// read timestamp, and every version above `floor` survives.
 ///
@@ -267,32 +273,32 @@ impl Drop for SnapshotPin {
     }
 }
 
-/// Is a tuple version `(xmin, xmax)` dead — invisible to every current AND
-/// future registered snapshot — at `horizon`?
+/// Is a tuple version `(xmin, xmax)` dead at `horizon`, that is invisible to
+/// every current AND future registered snapshot?
 ///
 /// `horizon` must satisfy the garbage-horizon contract: every xid strictly
 /// below it is decided, and it is no higher than any live registered
-/// snapshot's `xmin` (writer xids via the `ProcArray`, reader snapshots via
-/// [`GcHorizon`] pins).
+/// snapshot's `xmin`. The `ProcArray` supplies the writer xids, and
+/// [`GcHorizon`] pins supply the reader snapshots.
 ///
 /// A version is dead iff:
 ///
 /// - (a) its creator aborted (`clog(xmin) == Aborted`), or its creator sits
-///   below the horizon with an in-progress/absent clog entry — a crashed
-///   transaction that can never commit (any xid below the horizon is not
-///   running, so an absent entry is a crash leftover). Either way the version
-///   was never visible to any snapshot other than its own — now terminated —
-///   transaction; or
-/// - (b) it was deleted/superseded by a transaction that committed below the
-///   horizon (`xmax != INVALID && xmax < horizon && clog(xmax) == Committed`):
-///   the deletion is visible to every snapshot at or above the horizon, so
-///   the version itself is visible to none of them.
+///   below the horizon with an in-progress or absent clog entry. Such a
+///   creator is a crashed transaction that can never commit, because any xid
+///   below the horizon is not running, so an absent entry is a crash
+///   leftover. Either way, the version was never visible to any snapshot
+///   other than its own transaction, which has now terminated; or
+/// - (b) a transaction that committed below the horizon deleted or superseded
+///   it (`xmax != INVALID && xmax < horizon && clog(xmax) == Committed`). The
+///   deletion is visible to every snapshot at or above the horizon, so the
+///   version itself is visible to none of them.
 ///
-/// The newest committed version of a live row is never dead: its `xmax` is
+/// The newest committed version of a live row is never dead. Its `xmax` is
 /// invalid, in-progress, or aborted, so (b) cannot hold, and its `xmin`
 /// committed, so (a) cannot hold. `FROZEN_XID` creators also read as absent
-/// from the clog but are the always-visible sentinel, explicitly exempt from
-/// the crashed-creator arm of (a).
+/// from the clog, but they are the always-visible sentinel and are explicitly
+/// exempt from the crashed-creator arm of (a).
 ///
 /// # Errors
 ///

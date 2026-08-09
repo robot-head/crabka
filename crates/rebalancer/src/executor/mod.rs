@@ -1,8 +1,8 @@
-//! Execute-path state machine. `Executor` runs one `Execution` at a
-//! time against the cluster via a `ClientFacade`.
+//! Execute-path state machine. `Executor` runs one `Execution` at a time
+//! against the cluster through a `ClientFacade`.
 //!
-//! The full state machine (`ApplyThrottle` -> `Submit` ->
-//! `Wait` -> `ClearThrottle`) provides on-disk persistence with restart resume.
+//! The full state machine, `ApplyThrottle` -> `Submit` -> `Wait` ->
+//! `ClearThrottle`, gives on-disk persistence with restart resume.
 
 pub mod client_impl;
 pub mod phases;
@@ -50,10 +50,10 @@ pub struct ExecutorState {
     pub config: ExecutorConfig,
     pub metrics: RebalancerMetrics,
     pub in_flight: Arc<Mutex<Option<ExecutionHandle>>>,
-    /// State backend for in-flight executor state. Production: topic-backed
-    /// `StateTopic`; tests: `fake::InMemoryBackend`. Replaces the
-    /// file-backed `{data_dir}/in_flight.json` store. (`data_dir` is now
-    /// used only by the anomaly store.)
+    /// State backend for in-flight executor state. Production uses the
+    /// topic-backed `StateTopic`, and tests use `fake::InMemoryBackend`. It
+    /// replaces the file-backed `{data_dir}/in_flight.json` store. Only the
+    /// anomaly store still uses `data_dir`.
     pub state_topic: Arc<dyn crate::state_topic::StateBackend>,
 }
 
@@ -97,7 +97,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
         }
     }
 
-    /// Resume from a persisted phase (recovery on startup).
+    /// Resume from a persisted phase, for recovery on startup.
     pub fn resume(
         client: Arc<C>,
         state: ExecutorState,
@@ -117,8 +117,8 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
         }
     }
 
-    /// Drive the state machine to a terminal status. Always clears
-    /// throttle before returning.
+    /// Drive the state machine to a terminal status. This always clears the
+    /// throttle before it returns.
     // One span per execution run (info): the whole ApplyThrottle→Submit→Wait→
     // ClearThrottle lifecycle. Per-phase steps stay as their existing
     // `info!`/`warn!` events inside the loop (not separate spans).
@@ -396,9 +396,9 @@ mod tests {
         state_topic::{StateBackend, StateTopicError},
     };
 
-    /// Bounded yield-poll: spin (yielding to the runtime) until `cond` holds,
-    /// so a test waits on observable in-process progress deterministically
-    /// instead of sleeping a fixed settle.
+    /// Bounded yield-poll. It spins and yields to the runtime until `cond`
+    /// holds, so a test waits on observable in-process progress
+    /// deterministically instead of sleeping for a fixed settle time.
     async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
         for _ in 0..200_000 {
             if cond() {

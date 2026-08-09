@@ -1,4 +1,4 @@
-//! `ApiVersionTable` — broker-advertised version ranges per API key,
+//! `ApiVersionTable`: broker-advertised version ranges per API key,
 //! plus client-side negotiation.
 
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ impl ApiVersionTable {
     }
 
     /// Highest version both sides support for `R`, or
-    /// [`ClientError::IncompatibleVersion`] if the ranges don't overlap.
+    /// [`ClientError::IncompatibleVersion`] if the ranges do not overlap.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn negotiate<R: ProtocolRequest>(&self) -> Result<i16, ClientError> {
@@ -45,7 +45,7 @@ impl ApiVersionTable {
     }
 
     /// Return the broker-advertised `(min, max)` version range for `api_key`,
-    /// or `None` if the broker didn't advertise it.
+    /// or `None` if the broker did not advertise it.
     #[must_use]
     pub fn broker_range(&self, api_key: i16) -> Option<(i16, i16)> {
         self.by_key.get(&api_key).copied()

@@ -1,7 +1,8 @@
-//! Materialized view of the compacted dedup-claim topic. The ownership
-//! consumer (`run_ownership`) joins the owners consumer group, tracks the
-//! assigned dedup partitions, and keeps the claim map warm. P3 gates every
-//! produce on ownership + warmth so only the owning replica may write.
+//! Materialized view of the compacted dedup-claim topic.
+//!
+//! The ownership consumer, `run_ownership`, joins the owners consumer group,
+//! tracks the assigned dedup partitions, and keeps the claim map warm. P3 gates
+//! every produce on ownership and warmth, so only the owning replica can write.
 
 use std::sync::{
     Arc, OnceLock,
@@ -32,14 +33,16 @@ pub struct ClaimValue {
 pub struct DedupStore {
     map: DashMap<String, ClaimValue>,
     partitions: u32,
-    /// Dedup-partition ids this replica currently owns (consumer-group assignment).
+    /// Dedup-partition ids this replica owns, from the consumer-group assignment.
     owned: std::sync::RwLock<std::collections::HashSet<u32>>,
-    /// Caught up reading owned partitions since the last assignment change.
+    /// Caught up on reads of the owned partitions since the last assignment
+    /// change.
     warm: AtomicBool,
-    /// Has been warm at least once (drives /readyz).
+    /// Has been warm at least once. This drives /readyz.
     warmed_once: AtomicBool,
-    /// Optional membership publisher; set by the binary before `run_ownership`
-    /// starts. `None` in single-owner/unit contexts means no publishing.
+    /// Optional membership publisher. The binary sets it before `run_ownership`
+    /// starts. In a single-owner or unit context it is `None`, and the store
+    /// publishes nothing.
     membership: OnceLock<Arc<crate::dedup::membership::MembershipPublisher>>,
     poll_timeout: Time,
     warmup_empty_polls: u32,
@@ -67,13 +70,13 @@ impl DedupStore {
         }
     }
 
-    /// Install the membership publisher. Call before spawning `run_ownership`
-    /// so the first assignment is published.
+    /// Install the membership publisher. Call this before you spawn
+    /// `run_ownership`, so the store publishes the first assignment.
     pub fn set_membership(&self, publisher: Arc<crate::dedup::membership::MembershipPublisher>) {
         let _ = self.membership.set(publisher);
     }
 
-    /// True if dedup-partition `p` is currently owned by this replica.
+    /// True if this replica currently owns dedup-partition `p`.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
@@ -81,13 +84,14 @@ impl DedupStore {
         self.owned.read().expect("owned lock").contains(&p)
     }
 
-    /// True once caught up on owned partitions since the last assignment change.
+    /// True once the store is caught up on the owned partitions since the last
+    /// assignment change.
     #[must_use]
     pub fn is_warm(&self) -> bool {
         self.warm.load(Ordering::SeqCst)
     }
 
-    /// Has warmed at least once (readiness probe).
+    /// Has warmed at least once. The readiness probe reads this.
     #[must_use]
     pub fn has_warmed_once(&self) -> bool {
         self.warmed_once.load(Ordering::SeqCst)
@@ -98,16 +102,19 @@ impl DedupStore {
         self.map.get(key).map(|v| v.clone())
     }
 
-    /// Apply a claim to the in-memory map (called locally after a commit).
+    /// Apply a claim to the in-memory map. The local path calls this after a
+    /// commit.
     pub fn apply(&self, key: String, value: ClaimValue) {
         self.map.insert(key, value);
     }
 
-    /// Run the ownership consumer until `shutdown` fires. Joins the owners group
-    /// on the dedup topic; its assignment is the owned-partition set. Reads owned
-    /// partitions from earliest (never commits) to (re)build the claim map,
-    /// re-arming the warm gate on each assignment change. Closes the consumer on
-    /// exit so the coordinator task + group member don't leak.
+    /// Run the ownership consumer until `shutdown` fires.
+    ///
+    /// The consumer joins the owners group on the dedup topic, and its
+    /// assignment is the owned-partition set. It reads owned partitions from
+    /// earliest, and never commits, to build the claim map again. Each
+    /// assignment change re-arms the warm gate. The task closes the consumer on
+    /// exit, so the coordinator task and the group member do not leak.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     /// # Panics
@@ -244,8 +251,9 @@ impl DedupStore {
         }
     }
 
-    /// Test/helper writer: produce a single claim record (compacted topic key
-    /// = idempotency key, value = JSON `ClaimValue`) to its hashed partition.
+    /// Test and helper writer that produces a single claim record to its hashed
+    /// partition. On the compacted topic the key is the idempotency key and the
+    /// value is a JSON `ClaimValue`.
     /// # Panics
     /// Panics if the validated partition count cannot be represented by Kafka.
     /// # Errors

@@ -1,7 +1,7 @@
 //! Deny-wins residency gate. A topic-flow is permitted unless a matching policy
-//! denies it. Semantics mirror Crabka's ACL authorizer: DENY beats ALLOW; an
-//! `allow_zones` list means "only these zones are allowed" (deny-by-default for
-//! the matched topic).
+//! denies it. The semantics mirror Crabka's ACL authorizer: DENY beats ALLOW.
+//! An `allow_zones` list means "only these zones are allowed", which is
+//! deny-by-default for the matched topic.
 
 use crate::{
     config::{PolicyConfig, Residency},
@@ -22,8 +22,8 @@ pub struct ResidencyGate {
 impl ResidencyGate {
     /// Compile a [`ResidencyGate`] from a slice of policies.
     ///
-    /// Only policies that carry a [`Residency`] constraint contribute rules;
-    /// policies without one are silently skipped.
+    /// Only policies that carry a [`Residency`] constraint contribute rules. The
+    /// function silently skips a policy without one.
     ///
     /// # Errors
     ///
@@ -43,7 +43,8 @@ impl ResidencyGate {
 
     /// May `topic` replicate to a target whose compliance zones are `target_zones`?
     ///
-    /// Returns `true` (permitted) unless a matching rule blocks the flow:
+    /// Returns `true`, which means permitted, unless a matching rule blocks the
+    /// flow:
     /// - A zone in `deny_zones` always blocks (DENY beats ALLOW).
     /// - A non-empty `allow_zones` list blocks if the target has none of those zones.
     /// - An unmatched topic is always permitted.

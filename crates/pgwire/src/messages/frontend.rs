@@ -114,8 +114,8 @@ pub enum FrontendMessage {
     Query {
         sql: String,
     },
-    /// 'p' carries password / `SASLInitialResponse` / `SASLResponse` depending on
-    /// auth state; the session layer interprets the raw body.
+    /// 'p' carries password, `SASLInitialResponse`, or `SASLResponse`,
+    /// depending on auth state. The session layer interprets the raw body.
     Password(Bytes),
     Parse {
         name: String,
@@ -129,7 +129,8 @@ pub enum FrontendMessage {
         params: Vec<Option<Bytes>>,
         result_formats: Vec<i16>,
     },
-    /// `kind` is NOT validated here ('S'/'P' expected); the session maps invalid kinds to 08P01.
+    /// `kind` is NOT validated here ('S'/'P' expected). The session maps
+    /// invalid kinds to 08P01.
     Describe {
         kind: u8,
         name: String,
@@ -138,7 +139,8 @@ pub enum FrontendMessage {
         portal: String,
         max_rows: i32,
     },
-    /// `kind` is NOT validated here ('S'/'P' expected); the session maps invalid kinds to 08P01.
+    /// `kind` is NOT validated here ('S'/'P' expected). The session maps
+    /// invalid kinds to 08P01.
     Close {
         kind: u8,
         name: String,
@@ -169,7 +171,7 @@ pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, PgE
 ///
 /// # Errors
 /// Returns a protocol error for malformed lengths, tags, fields, payloads, or
-/// messages exceeding `max_message_len`.
+/// messages larger than `max_message_len`.
 ///
 /// # Panics
 /// Panics only on a platform where a positive protocol `i32` length cannot be
@@ -663,7 +665,8 @@ mod proptests {
         }
     }
 
-    /// Builds a structurally valid Bind message body — the deepest parse path.
+    /// Builds a structurally valid Bind message body. This is the deepest
+    /// parse path.
     fn valid_bind_frame(nparams: u16, param_len: u16) -> Vec<u8> {
         use bytes::BufMut;
         let mut body = bytes::BytesMut::new();

@@ -1,8 +1,10 @@
-//! KIP-320 consumer position validation. Two responsibilities:
-//!   1. Refresh per-partition leader id + leader epoch from `Metadata`, flagging
-//!      a partition `awaiting_validation` when its leader epoch advances.
-//!   2. For flagged partitions, issue `OffsetForLeaderEpoch` and decide (via
-//!      `position::classify`) whether to resume or reset for truncation.
+//! KIP-320 consumer position validation. It has two responsibilities:
+//!   1. Refresh the per-partition leader id and leader epoch from `Metadata`,
+//!      and flag a partition `awaiting_validation` when its leader epoch
+//!      advances.
+//!   2. For a flagged partition, issue `OffsetForLeaderEpoch` and use
+//!      `position::classify` to decide whether to resume or to reset for
+//!      truncation.
 
 use std::collections::HashMap;
 
@@ -59,9 +61,11 @@ fn mark_validation_error(pos: &mut PartitionPosition) {
 }
 
 impl Consumer {
-    /// Refresh leader id / leader epoch for every partition reported by
-    /// `Metadata`. A partition whose metadata leader epoch is greater than the
-    /// epoch we last consumed (`offset_epoch`) is flagged `awaiting_validation`.
+    /// Refresh the leader id and leader epoch for every partition that
+    /// `Metadata` reports.
+    ///
+    /// This method flags a partition `awaiting_validation` when its metadata
+    /// leader epoch is greater than the last consumed epoch in `offset_epoch`.
     #[cfg_attr(test, mutants::skip)] // cargo-mutants: metadata-refresh I/O, exercised by integration tests
     #[tracing::instrument(
         name = "consumer.refresh_leader_epochs",
@@ -92,10 +96,12 @@ impl Consumer {
         Ok(())
     }
 
-    /// Validate every `awaiting_validation` partition via `OffsetForLeaderEpoch`.
-    /// Returns the set of partitions that truncated, mapped to the safe offset
-    /// the caller must reset `next_offsets` to. Clears the validation flag for
-    /// partitions confirmed consistent.
+    /// Validate every `awaiting_validation` partition with
+    /// `OffsetForLeaderEpoch`.
+    ///
+    /// This method returns the set of partitions that truncated, mapped to the
+    /// safe offset that the caller must reset `next_offsets` to. It clears the
+    /// validation flag for every partition it confirms as consistent.
     #[cfg_attr(test, mutants::skip)] // cargo-mutants: OffsetForLeaderEpoch RPC orchestration, exercised by integration tests
     #[tracing::instrument(
         name = "consumer.validate_positions",

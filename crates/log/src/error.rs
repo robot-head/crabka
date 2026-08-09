@@ -10,9 +10,8 @@ pub enum LogError {
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A partial batch was found at the tail of a `.log` file during
-    /// recovery — the trailing bytes will be truncated to the last
-    /// cleanly decoded batch.
+    /// Recovery found a partial batch at the tail of a `.log` file. The log
+    /// truncates the trailing bytes back to the last cleanly decoded batch.
     #[error("partial batch at offset {file_offset} in segment {segment}: truncating")]
     PartialBatch {
         /// Absolute base offset of the segment containing the partial batch.
@@ -46,11 +45,12 @@ pub enum LogError {
         log_start: Offset,
     },
 
-    /// Encoding/decoding of a `RecordBatch` failed.
+    /// The encode or decode of a `RecordBatch` failed.
     #[error("records: {0}")]
     Records(#[from] crabka_protocol::records::RecordsError),
 
-    /// A segment filename couldn't be parsed (e.g., wrong length, not all digits).
+    /// A segment filename would not parse. For example, it has the wrong
+    /// length, or it is not all digits.
     #[error("invalid segment filename: {0}")]
     BadSegmentName(String),
 
@@ -60,13 +60,14 @@ pub enum LogError {
     /// log's expected next offset.
     #[error("offset mismatch: expected {expected}, got {actual}")]
     OffsetMismatch {
-        /// The offset the log expected — i.e. its current end offset.
+        /// The offset the log expected, that is, its current end offset.
         expected: Offset,
         /// The offset the caller actually supplied.
         actual: Offset,
     },
 
-    /// A log file (e.g., `.txnindex`) is corrupt: wrong size, bad checksum, etc.
+    /// A log file such as `.txnindex` is corrupt. It has the wrong size, a
+    /// bad checksum, or a similar defect.
     #[error("corrupt log: {0}")]
     Corrupt(String),
 

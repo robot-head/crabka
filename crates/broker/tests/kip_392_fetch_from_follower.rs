@@ -1,19 +1,19 @@
 //! KIP-392 end-to-end fetch-from-follower (rack-aware reads) integration
-//! test. Boots a 2-broker cluster in two different racks, both configured
-//! with the rack-aware replica selector, and asserts the full consumer
-//! redirect path:
+//! test. The test boots a 2-broker cluster in two different racks. Both
+//! brokers use the rack-aware replica selector. The test asserts the full
+//! consumer redirect path:
 //!
 //!   1. A consumer Fetch to the LEADER carrying the follower's rack gets a
-//!      `preferred_read_replica` pointing at the same-rack follower.
+//!      `preferred_read_replica` that points at the same-rack follower.
 //!   2. A consumer Fetch sent to that FOLLOWER returns the committed
-//!      records (the follower tracks the leader-reported high watermark).
+//!      records. The follower tracks the leader-reported high watermark.
 //!   3. A consumer Fetch to the LEADER carrying the leader's own rack gets
-//!      `preferred_read_replica == -1` (read from the leader).
+//!      `preferred_read_replica == -1` and reads from the leader.
 //!
 //! The shared `support` harness has no per-broker config customizer, so
-//! this test inlines the harness's bootstrap-then-join start loop (option
-//! (b) in the task plan) to set a distinct `rack` and the `RackAware`
-//! selector on each broker. The blast radius stays in this file.
+//! this test inlines the harness's bootstrap-then-join start loop to set a
+//! distinct `rack` and the `RackAware` selector on each broker. This is
+//! option (b) in the task plan. The change stays inside this file.
 
 // Rust 1.95 annotate-snippets ICE on `clippy::pedantic` in test files; the
 // sibling integration tests allow it wholesale for the same reason.
@@ -41,9 +41,9 @@ use tokio::sync::Mutex;
 
 mod support;
 
-/// Serialize the whole test binary: a 2-broker loopback cluster plus short
-/// raft timings starves the openraft election if run concurrently with
-/// anything else in the same binary. Same rationale as
+/// Serialize the whole test binary. A 2-broker loopback cluster plus short
+/// raft timings starves the openraft election when it runs at the same time
+/// as anything else in the same binary. The rationale is the same as
 /// `replication.rs::cluster_lock`.
 fn cluster_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -55,11 +55,11 @@ const RACK_A: &str = "rack-a"; // broker 1 (leader)
 const RACK_B: &str = "rack-b"; // broker 2 (follower)
 
 /// Boot an `n`-broker cluster where each broker carries a distinct `rack` and
-/// the `RackAware` replica selector, via KIP-595 Slice 3c static multi-voter
-/// bootstrap (all brokers boot in `Bootstrap` mode with the same static voter
-/// set and elect among themselves — no `add_learner` / `change_membership`).
-/// Injects the KIP-392 config into each broker before it starts. `racks[i]`
-/// is broker `i+1`'s rack.
+/// the `RackAware` replica selector. The boot uses KIP-595 Slice 3c static
+/// multi-voter bootstrap. All brokers boot in `Bootstrap` mode with the same
+/// static voter set and elect among themselves, with no `add_learner` and no
+/// `change_membership`. This function injects the KIP-392 config into each
+/// broker before it starts. `racks[i]` is broker `i+1`'s rack.
 async fn start_rack_aware_cluster(racks: &[&str]) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
     // Reuse the shared race-free static-voter bootstrap (it holds the ephemeral
     // listeners live until each broker adopts them, so there is no
@@ -86,8 +86,8 @@ async fn wait_for_partition_on_all(
     }
 }
 
-/// Poll until `(topic, partition)` has `leader` as leader and an ISR equal
-/// to `expected_isr` (as a set), observed via `handle`.
+/// Poll until `(topic, partition)` has `leader` as leader and an ISR equal to
+/// `expected_isr` as a set. This function observes the state through `handle`.
 async fn wait_leader_and_isr(
     handle: &BrokerHandle,
     topic: &str,
@@ -122,9 +122,9 @@ fn record_batch(n: i32) -> RecordBatch {
 }
 
 /// Build a consumer Fetch (`replica_id` = -1) for a single (topic, partition)
-/// at `offset`, carrying `rack_id`. The shared `Client` negotiates the
-/// broker's max Fetch version (>= 11), so `rack_id` is serialized on the
-/// wire and `preferred_read_replica` is present in the decoded response.
+/// at `offset`, with `rack_id`. The shared `Client` negotiates the broker's
+/// max Fetch version (>= 11). So the client serializes `rack_id` on the wire,
+/// and the decoded response carries `preferred_read_replica`.
 fn consumer_fetch(topic: &str, topic_id: WireUuid, offset: i64, rack: &str) -> FetchRequest {
     FetchRequest {
         replica_id: -1,

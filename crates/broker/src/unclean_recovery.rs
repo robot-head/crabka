@@ -1,15 +1,17 @@
-//! KIP-966 offset-aware unclean recovery: pure selection helpers + the
-//! controller-side Unclean Recovery Manager (URM) task. The URM polls
-//! surviving replicas for their log-end-offset and last-written leader
-//! epoch (`GetReplicaLogInfo`, `api_key` 93) and elects the most complete
-//! log.
+//! KIP-966 offset-aware unclean recovery.
+//!
+//! This module holds the pure selection helpers and the controller-side
+//! Unclean Recovery Manager (URM) task. The URM polls surviving replicas for
+//! their log-end-offset and last-written leader epoch with `GetReplicaLogInfo`
+//! (`api_key` 93), and elects the most complete log.
 
 use crabka_raft::NodeId;
 use crabka_units::{Time, convert::TimeExt as _};
 
-/// One replica's reported log state, gathered from a `GetReplicaLogInfo`
-/// response. Decoupled from the generated wire type so the selection
-/// logic is unit-testable without building protocol structs.
+/// One replica's reported log state, from a `GetReplicaLogInfo` response.
+///
+/// This type is separate from the generated wire type, so a unit test can
+/// drive the selection logic without building protocol structs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplicaLogInfo {
     pub broker_id: NodeId,
@@ -18,8 +20,8 @@ pub(crate) struct ReplicaLogInfo {
     pub current_leader_epoch: i32,
 }
 
-/// Pick the replica with the most complete log: highest
-/// `last_written_leader_epoch`, then highest `log_end_offset`, then
+/// Picks the replica with the most complete log. It ranks by the highest
+/// `last_written_leader_epoch`, then the highest `log_end_offset`, then the
 /// lowest `broker_id` for determinism. Returns `None` for an empty input.
 pub(crate) fn select_best_replica(responses: &[ReplicaLogInfo]) -> Option<NodeId> {
     responses
@@ -33,9 +35,9 @@ pub(crate) fn select_best_replica(responses: &[ReplicaLogInfo]) -> Option<NodeId
         .map(|r| r.broker_id)
 }
 
-/// True if any responder reports a `current_leader_epoch` strictly
-/// greater than the controller's known `leader_epoch` for the partition,
-/// meaning a newer leader already exists and this recovery is stale.
+/// Returns true if any responder reports a `current_leader_epoch` strictly
+/// greater than the controller's known `leader_epoch` for the partition. A
+/// newer leader then already exists, and this recovery is stale.
 pub(crate) fn has_newer_leader(responses: &[ReplicaLogInfo], known_leader_epoch: i32) -> bool {
     responses
         .iter()
@@ -77,34 +79,38 @@ impl RecoveryPolicy {
     }
 }
 
-/// A request to (possibly) run unclean recovery for one partition. Enqueued
-/// by the failover path and the `ElectLeaders` handler; serviced by the URM.
+/// A request to run unclean recovery for one partition, if it is needed. The
+/// failover path and the `ElectLeaders` handler enqueue it, and the URM
+/// services it.
 pub(crate) struct RecoveryJob {
     pub topic: String,
     pub partition: i32,
     pub strategy: RecoveryStrategy,
-    /// Optional reply channel. `ElectLeaders` (admin-triggered) wants the
-    /// outcome; the background failover path fires-and-forgets.
+    /// Optional reply channel. The admin-triggered `ElectLeaders` path wants
+    /// the outcome. The background failover path sends the job and does not
+    /// wait for a reply.
     pub reply: Option<oneshot::Sender<RecoveryOutcome>>,
 }
 
 /// Result of attempting unclean recovery for a single partition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoveryOutcome {
-    /// A new leader was elected (and the change submitted). Carries the id.
+    /// The URM elected a new leader and submitted the change. This variant
+    /// carries the id.
     Elected(NodeId),
     /// No surviving replica could serve as a leader.
     NoEligibleReplica,
-    /// Recovery turned out to be unnecessary (leader alive, or we are not
-    /// the controller leader, or the partition is gone).
+    /// Recovery was unnecessary. The leader is alive, or this node is not the
+    /// controller leader, or the partition is gone.
     NotNeeded,
-    /// A newer leader already exists; this recovery is stale and was aborted.
+    /// A newer leader already exists, so this recovery is stale and the URM
+    /// aborted it.
     Stale,
     /// Another recovery for the same `(topic, partition)` is already running.
     InProgress,
 }
 
-/// Cloneable handle for enqueuing [`RecoveryJob`]s onto the URM task.
+/// Cloneable handle that enqueues [`RecoveryJob`] values onto the URM task.
 #[derive(Clone)]
 pub(crate) struct UncleanRecoveryHandle {
     tx: mpsc::Sender<RecoveryJob>,
@@ -116,8 +122,8 @@ impl UncleanRecoveryHandle {
         Self { tx }
     }
 
-    /// Enqueue a recovery job. Logs (but does not panic) if the manager has
-    /// shut down.
+    /// Enqueues a recovery job. It logs a message, and does not panic, if the
+    /// manager has shut down.
     pub(crate) async fn enqueue(&self, job: RecoveryJob) {
         if self.tx.send(job).await.is_err() {
             warn!("unclean recovery manager is gone; job dropped");
@@ -125,9 +131,11 @@ impl UncleanRecoveryHandle {
     }
 }
 
-/// The controller-side Unclean Recovery Manager. Receives [`RecoveryJob`]s,
-/// dedups in-flight work per partition, queries surviving replicas for their
-/// log state, and elects the most-complete-log replica via `submit_change`.
+/// The controller-side Unclean Recovery Manager.
+///
+/// It receives [`RecoveryJob`] values, dedups the in-flight work for each
+/// partition, queries surviving replicas for their log state, and elects the
+/// replica with the most complete log through `submit_change`.
 pub(crate) struct UncleanRecoveryManager {
     controller: Arc<dyn crate::metadata_source::MetadataSource>,
     liveness: Arc<ControllerLivenessState>,
@@ -140,9 +148,9 @@ pub(crate) struct UncleanRecoveryManager {
 }
 
 impl UncleanRecoveryManager {
-    /// Spawn the URM dispatch loop and return a cloneable handle for
-    /// enqueuing jobs. The loop exits when `shutdown` fires or the last
-    /// handle is dropped.
+    /// Spawns the URM dispatch loop and returns a cloneable handle that
+    /// enqueues jobs. The loop exits when `shutdown` fires or when the last
+    /// handle drops.
     pub(crate) fn spawn(
         controller: Arc<dyn crate::metadata_source::MetadataSource>,
         liveness: Arc<ControllerLivenessState>,
@@ -178,9 +186,9 @@ impl UncleanRecoveryManager {
         UncleanRecoveryHandle { tx }
     }
 
-    /// Per-job entry point: dedup against in-flight recoveries for the same
-    /// partition, run the recovery, then release the in-flight slot and
-    /// reply (if a reply channel was supplied).
+    /// Per-job entry point. It dedups against the in-flight recoveries for
+    /// the same partition, runs the recovery, then releases the in-flight slot
+    /// and replies if the caller supplied a reply channel.
     async fn recover_one(self: Arc<Self>, job: RecoveryJob) {
         let key = (job.topic.clone(), job.partition);
         {
@@ -199,10 +207,12 @@ impl UncleanRecoveryManager {
         }
     }
 
-    /// Core recovery routine. Confirms we are the controller leader and the
-    /// partition still needs recovery, queries surviving replicas, and (if a
-    /// winner emerges and no newer leader has appeared) submits the leader
-    /// change.
+    /// Core recovery routine.
+    ///
+    /// It confirms that this node is the controller leader and that the
+    /// partition still needs recovery, then queries the surviving replicas.
+    /// If a winner emerges and no newer leader has appeared, it submits the
+    /// leader change.
     async fn run_recovery(&self, job: &RecoveryJob) -> RecoveryOutcome {
         let is_leader = self
             .controller
@@ -291,8 +301,9 @@ impl UncleanRecoveryManager {
         self.commit_elected_leader(job, pr, winner).await
     }
 
-    /// Build and submit the `PartitionRecord` electing `winner` as the new
-    /// leader (bumping the epoch and shrinking ISR to just the winner).
+    /// Builds and submits the `PartitionRecord` that elects `winner` as the
+    /// new leader. The record bumps the epoch and shrinks the ISR to the
+    /// winner alone.
     async fn commit_elected_leader(
         &self,
         job: &RecoveryJob,
@@ -330,9 +341,10 @@ impl UncleanRecoveryManager {
     }
 }
 
-/// Query one replica for its log-end-offset and leader-epoch state via
-/// `GetReplicaLogInfo` (`api_key` 93). Returns `None` on any connect / send /
-/// decode error, or if the replica reports an error for this partition.
+/// Queries one replica for its log-end-offset and leader-epoch state with
+/// `GetReplicaLogInfo` (`api_key` 93). Returns `None` on any connect, send, or
+/// decode error, and also if the replica reports an error for this
+/// partition.
 struct ReplicaQuery {
     proto: crabka_security::ListenerProtocol,
     host: String,
@@ -387,9 +399,11 @@ async fn query_replica(client: &InterBrokerClient, query: ReplicaQuery) -> Optio
     None
 }
 
-/// Drive the per-replica query futures concurrently. Returns when all futures
-/// resolve OR `deadline` elapses, whichever is first. On timeout, returns
-/// whatever responses arrived so far (never silently discards partial data).
+/// Drives the per-replica query futures concurrently.
+///
+/// It returns when all futures resolve OR when `deadline` passes, whichever
+/// comes first. On a timeout it returns the responses that arrived so far, and
+/// never silently discards partial data.
 async fn gather_responses<F>(futs: Vec<F>, deadline: Duration) -> Vec<ReplicaLogInfo>
 where
     F: std::future::Future<Output = Option<ReplicaLogInfo>> + Send + 'static,
@@ -560,9 +574,9 @@ mod run_recovery_tests {
         heartbeat::controller_state::ControllerLivenessState, metadata_source::MetadataSource,
     };
 
-    /// Minimal `MetadataSource` for driving `run_recovery`'s control flow. Only
-    /// `watch_leader`, `current_image`, and `submit_change` are exercised; the
-    /// rest are never reached on these paths.
+    /// Minimal `MetadataSource` that drives the control flow of
+    /// `run_recovery`. These paths exercise only `watch_leader`,
+    /// `current_image`, and `submit_change`, and never reach the rest.
     struct MockSource {
         leader_rx: watch::Receiver<Option<NodeId>>,
         _leader_tx: watch::Sender<Option<NodeId>>,

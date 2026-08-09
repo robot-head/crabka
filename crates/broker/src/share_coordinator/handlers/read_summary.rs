@@ -1,8 +1,11 @@
-//! `ReadShareGroupStateSummary` (`api_key=87`). Returns the lightweight summary
-//! (state epoch, leader epoch, start offset, delivery-complete count) for each
-//! `(group, topic, partition)` without the full state-batch list. A partition
-//! this broker does not lead returns per-partition `NOT_COORDINATOR`; an
-//! unknown-but-led key returns the initial summary (`start_offset = -1`) with
+//! `ReadShareGroupStateSummary` (`api_key=87`).
+//!
+//! This handler returns the small summary for each
+//! `(group, topic, partition)` without the full state-batch list. The summary
+//! holds the state epoch, the leader epoch, the start offset, and the
+//! delivery-complete count. A partition this broker does not lead returns
+//! per-partition `NOT_COORDINATOR`. A key that this broker leads but does not
+//! know returns the initial summary, `start_offset = -1`, with
 //! `error_code = 0`.
 
 use std::sync::Arc;

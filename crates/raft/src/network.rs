@@ -2,12 +2,13 @@
 //! [`crabka_client_core::Connection`]. One cached connection per peer.
 //!
 //! The engine's transport seam ([`crate::kraft::transport::PeerSender`]) hands
-//! this an already-encoded KIP-595 request *body* plus the destination peer +
-//! api key; the impl resolves the peer's controller endpoint, dials (TLS/SASL
-//! terminating in the injected [`OutboundDialer`]), and issues a
-//! `raw_request(api_key, version, body)`. `raw_request` builds the v2
-//! `RequestHeader` and strips the v1 `ResponseHeader`, so the returned bytes are the
-//! bare response body the engine decodes back into a `Receive*Response` event.
+//! this impl an already-encoded KIP-595 request body, the destination peer, and
+//! the api key. The impl resolves the peer's controller endpoint and dials it.
+//! The injected [`OutboundDialer`] terminates TLS and SASL on that dial. The
+//! impl then issues a `raw_request(api_key, version, body)`. `raw_request`
+//! builds the v2 `RequestHeader` and strips the v1 `ResponseHeader`, so the
+//! returned bytes are the bare response body. The engine decodes that body back
+//! into a `Receive*Response` event.
 //!
 //! Peer addresses are resolved from the static voter set's CONTROLLER
 //! endpoints.
@@ -32,16 +33,17 @@ use crate::{
 
 /// Outbound dialer the controller hands to the peer sender.
 ///
-/// `crabka-raft` cannot depend on `crabka-broker` (that would be a cycle), so
-/// the broker provides an impl wrapping its `InterBrokerClient` (TLS + SASL)
-/// and injects it via [`ControllerConfig::dialer`](crate::ControllerConfig).
-/// When no dialer is injected, the controller falls back to a plain
-/// `Connection::connect(addr)` — the PLAINTEXT path.
+/// `crabka-raft` cannot depend on `crabka-broker`, because that would be a
+/// cycle. The broker therefore supplies an impl that wraps its
+/// `InterBrokerClient`, with TLS and SASL, and injects it through
+/// [`ControllerConfig::dialer`](crate::ControllerConfig). When no dialer is
+/// injected, the controller falls back to a plain `Connection::connect(addr)`,
+/// which is the PLAINTEXT path.
 #[async_trait]
 pub trait OutboundDialer: Send + Sync {
-    /// Open a `Connection` to the raft peer `target` reachable on `addr`. The
-    /// returned connection has already negotiated `ApiVersions` and is usable
-    /// for `raw_request` immediately.
+    /// Opens a `Connection` to the raft peer `target`, which is reachable on
+    /// `addr`. The returned connection has already negotiated `ApiVersions`,
+    /// and `raw_request` can use it immediately.
     async fn dial(
         &self,
         target: NodeId,
@@ -50,9 +52,10 @@ pub trait OutboundDialer: Send + Sync {
     ) -> Result<Connection, ClientError>;
 }
 
-/// Default no-op dialer: opens a raw `TcpStream` via `Connection::connect`.
-/// Used when the broker hasn't injected an `InterBrokerClient`-backed dialer
-/// (legacy PLAINTEXT path).
+/// Default no-op dialer: it opens a raw `TcpStream` with `Connection::connect`.
+///
+/// The controller uses this dialer when the broker has injected no
+/// `InterBrokerClient`-backed dialer. This is the legacy PLAINTEXT path.
 pub struct PlaintextDialer;
 
 #[async_trait]
@@ -83,15 +86,18 @@ impl OutboundDialer for PlaintextDialer {
     }
 }
 
-/// Resolve a voter's controller-listener address from the voter set. By
-/// convention the endpoint named `CONTROLLER`, falling back to the first.
+/// Resolves a voter's controller-listener address from the voter set.
+///
+/// By convention this is the endpoint named `CONTROLLER`. If there is no such
+/// endpoint, this function falls back to the first one.
 fn controller_addr(voters: &VoterSet, id: NodeId) -> Option<String> {
     let voter = voters.get(id)?;
     controller_endpoint_addr(&voter.endpoints)
 }
 
-/// KIP-595 api version per api key, matching the bodies the engine's transport
-/// codec produces (Vote v2, Begin/End `QuorumEpoch` v1, Fetch v17).
+/// KIP-595 api version for each api key. These match the bodies the engine's
+/// transport codec produces: Vote v2, `BeginQuorumEpoch` v1,
+/// `EndQuorumEpoch` v1, and Fetch v17.
 fn api_version_for(key: ApiKey) -> ApiVersion {
     ApiVersion(match key {
         ApiKey(api_key::VOTE) => 2,
@@ -103,10 +109,11 @@ fn api_version_for(key: ApiKey) -> ApiVersion {
     })
 }
 
-/// Real [`PeerSender`]: dials each voter's controller listener and issues the
-/// KIP-595 RPC over [`crabka_client_core::Connection::raw_request`]. Caches one
-/// connection per peer; a failed RPC evicts the cached connection so the next
-/// send redials.
+/// Real [`PeerSender`]: it dials each voter's controller listener and issues
+/// the KIP-595 RPC over [`crabka_client_core::Connection::raw_request`].
+///
+/// The sender caches one connection per peer. A failed RPC evicts the cached
+/// connection, so the next send dials again.
 pub(crate) struct RealPeerSender {
     connections: DashMap<NodeId, Arc<Connection>>,
     voters: VoterSet,
@@ -134,7 +141,7 @@ impl RealPeerSender {
         }
     }
 
-    /// Look up or open a connection to `peer`.
+    /// Looks up or opens a connection to `peer`.
     #[tracing::instrument(level = "debug", skip_all, fields(peer), err)]
     async fn connect(&self, peer: NodeId) -> Result<Arc<Connection>, RaftError> {
         if let Some(c) = self.connections.get(&peer) {

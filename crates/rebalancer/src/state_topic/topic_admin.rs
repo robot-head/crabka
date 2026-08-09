@@ -1,5 +1,5 @@
-//! Idempotent topic-create for the rebalancer's state topic. Run once
-//! at startup; existing topic is left alone.
+//! Idempotent topic-create for the rebalancer's state topic. The binary runs
+//! it once at startup, and it leaves an existing topic alone.
 
 use std::collections::BTreeMap;
 
@@ -37,18 +37,19 @@ impl TopicAdminClient for AdminClient {
     }
 }
 
-/// Create the state topic if missing, with the compaction configs the
-/// loader expects. `replication_factor` is the requested value; the
-/// broker may downgrade it (or reject) based on the live broker count.
+/// Create the state topic if it is missing, with the compaction configs the
+/// loader expects.
 ///
-/// If the broker rejects the requested replication factor as invalid
-/// (`INVALID_REPLICATION_FACTOR`, code 38 — returned when RF > broker count),
-/// the call retries with RF=1 so single-broker development clusters work
-/// without any extra configuration.
+/// `replication_factor` is the requested value. The broker may downgrade it or
+/// reject it, based on the live broker count. If the broker rejects the
+/// requested replication factor as invalid, with `INVALID_REPLICATION_FACTOR`,
+/// code 38, which it returns when RF > broker count, the call retries with
+/// RF=1. Single-broker development clusters then work without any extra
+/// configuration.
 ///
-/// Idempotent: if the topic already exists with any config, this is a
-/// no-op (the existing topic's configs are NOT updated; that's a
-/// separate operator reconciliation path).
+/// The call is idempotent. If the topic already exists with any config, the
+/// call is a no-op. It does NOT update the existing topic's configs; that is a
+/// separate operator reconciliation path.
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn ensure_topic<A: TopicAdminClient + ?Sized>(
@@ -108,9 +109,9 @@ pub async fn ensure_topic_with_policy<A: TopicAdminClient + ?Sized>(
     Ok(())
 }
 
-/// Inner helper: attempt to create with `rf`; if the broker returns
-/// `INVALID_REPLICATION_FACTOR` and `rf > 1`, retry with `rf = 1`.
-/// Returns the replication factor that succeeded.
+/// Inner helper. It tries to create the topic with `rf`. If the broker returns
+/// `INVALID_REPLICATION_FACTOR` and `rf > 1`, it retries with `rf = 1`. It
+/// returns the replication factor that succeeded.
 async fn try_create_topic<A: TopicAdminClient + ?Sized>(
     admin: &mut A,
     name: &str,

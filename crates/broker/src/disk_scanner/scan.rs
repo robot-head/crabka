@@ -1,7 +1,7 @@
-//! Pure-logic helper: sum the regular-file sizes inside a partition
-//! directory. Returns 0 for a missing directory (treated as "not yet
-//! materialized", not an error) and propagates IO errors for other
-//! failure modes.
+//! Pure-logic helper that sums the regular-file sizes inside a partition
+//! directory. It returns 0 for a missing directory, which it treats as not yet
+//! materialized and not as an error. It propagates IO errors for every other
+//! failure mode.
 
 use std::{fs, io, path::Path};
 

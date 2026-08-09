@@ -1,10 +1,13 @@
-//! Per-group tokio actor. Owns one unified `Group` — either the classic
-//! 5-state machine or the next-gen epoch machine. Next-gen heartbeats are
-//! non-parking mpsc messages with `oneshot` replies; classic
-//! `JoinGroup`/`SyncGroup` parking is re-expressed as a park/wake message
-//! protocol where the actor holds the reply `oneshot::Sender` in a parked
-//! registry and resolves it at the rebalance boundary (the rebalance-deadline
-//! timer, an all-members-joined early-complete, or the leader's `SyncGroup`).
+//! Per-group tokio actor.
+//!
+//! The actor owns one unified `Group`: either the classic 5-state machine or
+//! the next-gen epoch machine. Next-gen heartbeats are non-parking mpsc
+//! messages with `oneshot` replies.
+//!
+//! Classic `JoinGroup` and `SyncGroup` parking becomes a park/wake message
+//! protocol. The actor holds the reply `oneshot::Sender` in a parked registry
+//! and resolves it at the rebalance boundary: the rebalance-deadline timer, an
+//! all-members-joined early-complete, or the leader's `SyncGroup`.
 
 use std::{
     collections::HashMap,
@@ -54,27 +57,29 @@ use crate::{
 /// fields. The values live in [`crate::codes`].
 pub type ErrorCode = i16;
 
-/// Fallback session timeout (30 s, in ms) used when a persisted or requested
-/// classic `session_timeout_ms` can't be represented in the target type.
+/// Fallback session timeout (30 s, in ms) for a persisted or requested classic
+/// `session_timeout_ms` that the target type cannot represent.
 const FALLBACK_SESSION_TIMEOUT_MS: u64 = 30_000;
 
 /// [`FALLBACK_SESSION_TIMEOUT_MS`] as the persisted/wire `i32` field.
 const FALLBACK_SESSION_TIMEOUT_MS_I32: i32 = 30_000;
 
-/// Fallback rebalance timeout (60 s, in ms) used when a persisted or requested
-/// `rebalance_timeout_ms` can't be represented in the target type.
+/// Fallback rebalance timeout (60 s, in ms) for a persisted or requested
+/// `rebalance_timeout_ms` that the target type cannot represent.
 const FALLBACK_REBALANCE_TIMEOUT_MS: u64 = 60_000;
 
 /// [`FALLBACK_REBALANCE_TIMEOUT_MS`] as the persisted/wire `i32` field.
 const FALLBACK_REBALANCE_TIMEOUT_MS_I32: i32 = 60_000;
 
-/// Fallback `heartbeat_interval_ms` (5 s — the KIP-848 default heartbeat
-/// interval) reported when the configured interval overflows the wire `i32`.
+/// Fallback `heartbeat_interval_ms` of 5 s, the KIP-848 default heartbeat
+/// interval. The actor reports it when the configured interval overflows the
+/// wire `i32`.
 const FALLBACK_HEARTBEAT_INTERVAL_MS: i32 = 5_000;
 
-/// Which protocol an actor's `Group` speaks. Fixed at spawn; exposed on the
-/// handle so the coordinator can route/reject cross-protocol RPCs and filter
-/// admin views without messaging the actor.
+/// Which protocol an actor's `Group` speaks. This value is fixed at spawn. The
+/// handle exposes it so that the coordinator can route or reject
+/// cross-protocol RPCs, and filter admin views, without a message to the
+/// actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupKindTag {
     Classic,
@@ -90,13 +95,15 @@ pub enum GroupActorMessage {
         reply: oneshot::Sender<ConsumerGroupHeartbeatResponse>,
     },
     /// Validate an `OffsetCommit` against the group's LIVE protocol. The actor
-    /// dispatches on `group.kind`: next-gen checks `member_epoch`, classic checks
-    /// member/instance/generation. `Ok(())` = allowed; `Err(code)` = reject.
+    /// dispatches on `group.kind`. Next-gen checks `member_epoch`. Classic
+    /// checks member, instance, and generation. `Ok(())` allows the commit and
+    /// `Err(code)` rejects it.
     ValidateCommit {
         member_id: String,
         group_instance_id: Option<String>,
-        /// The request's `generation_id_or_member_epoch` field; interpreted as the
-        /// consumer `member_epoch` or the classic generation per the live kind.
+        /// The request's `generation_id_or_member_epoch` field. The actor
+        /// reads it as the consumer `member_epoch` or as the classic
+        /// generation, depending on the live kind.
         generation_or_epoch: i32,
         reply: oneshot::Sender<Result<(), ErrorCode>>,
     },
@@ -127,10 +134,12 @@ pub enum GroupActorMessage {
     ClassicInspect {
         reply: oneshot::Sender<ClassicView>,
     },
-    /// Kind-agnostic admin snapshot for the classic `ListGroups`/`DescribeGroups`
-    /// path. Projects the LIVE group — classic OR consumer (hosted-classic
-    /// included, post-migration) — into a `GroupSnapshot`, so a migrated group
-    /// reports coherently regardless of the handle's spawn-time `kind` hint.
+    /// Kind-agnostic admin snapshot for the classic `ListGroups` and
+    /// `DescribeGroups` path. It projects the LIVE group into a
+    /// `GroupSnapshot`, whether that group is classic or consumer, and
+    /// including a hosted-classic group after migration. A migrated group
+    /// therefore reports coherently whatever the handle's spawn-time `kind`
+    /// hint holds.
     InspectAny {
         reply: oneshot::Sender<GroupSnapshot>,
     },
@@ -155,13 +164,13 @@ pub enum GroupActorMessage {
     Shutdown(oneshot::Sender<()>),
 
     /// Test-only: flip the live `Group` to a fresh empty consumer group in
-    /// place, exercising the tick's dispatch on the live `group.kind`.
+    /// place. This exercises the tick's dispatch on the live `group.kind`.
     #[cfg(test)]
     TestForceConsumerKind,
 }
 
-/// Structured `JoinGroup` result handed back to the handler, which encodes it
-/// for the wire version. Mirrors the fields of `JoinGroupResponse`.
+/// Structured `JoinGroup` result for the handler, which encodes it for the
+/// wire version. It mirrors the fields of `JoinGroupResponse`.
 #[derive(Debug, Default, Clone)]
 pub struct JoinResult {
     pub error_code: ErrorCode,
@@ -180,7 +189,7 @@ pub struct JoinResultMember {
     pub metadata: Bytes,
 }
 
-/// Structured `SyncGroup` result handed back to the handler.
+/// Structured `SyncGroup` result for the handler.
 #[derive(Debug, Default, Clone)]
 pub struct SyncResult {
     pub error_code: ErrorCode,
@@ -189,9 +198,9 @@ pub struct SyncResult {
     pub protocol_name: Option<String>,
 }
 
-/// Read-only projection of a classic `Group` for the admin / offset-delete
-/// handlers (which need member subscriptions the next-gen `DescribeView`
-/// doesn't carry).
+/// Read-only projection of a classic `Group` for the admin and offset-delete
+/// handlers. Those handlers need member subscriptions that the next-gen
+/// `DescribeView` does not carry.
 #[derive(Debug, Clone)]
 pub struct ClassicView {
     pub group_id: String,
@@ -241,16 +250,19 @@ impl ClassicView {
     }
 }
 
-/// Project a next-gen consumer `GroupState` into the classic admin
-/// `GroupSnapshot` (`ListGroups`/`DescribeGroups`). KIP-848 consumer groups are
-/// reported to the classic admin path with `protocol_type = "consumer"`, the
-/// classic `Stable` state (the value the classic path uses for a settled group —
-/// Kafka shows a healthy consumer group as `Stable`), and `generation_id` set to
-/// the group epoch (the next-gen analogue of the classic generation). Each
-/// member's assignment is its reconciler TARGET translated to a
-/// `ConsumerProtocolAssignment` blob — the same source `serve_classic_sync` /
-/// the heartbeat response use — so an assigned member (hosted classic included)
-/// reports a non-empty assignment.
+/// Projects a next-gen consumer `GroupState` into the classic admin
+/// `GroupSnapshot` (`ListGroups` and `DescribeGroups`).
+///
+/// This function reports KIP-848 consumer groups to the classic admin path
+/// with `protocol_type = "consumer"` and the classic `Stable` state. `Stable`
+/// is the value the classic path uses for a settled group, and Kafka shows a
+/// healthy consumer group as `Stable`. It sets `generation_id` to the group
+/// epoch, the next-gen equivalent of the classic generation.
+///
+/// Each member's assignment is its reconciler TARGET, translated to a
+/// `ConsumerProtocolAssignment` blob. `serve_classic_sync` and the heartbeat
+/// response use that same source, so an assigned member reports a non-empty
+/// assignment. This includes a hosted classic member.
 fn build_consumer_snapshot(state: &GroupState, image: &ReconcileInput) -> GroupSnapshot {
     GroupSnapshot {
         group_id: state.group_id.clone(),
@@ -301,21 +313,23 @@ pub struct DescribeMember {
     pub client_host: String,
     pub subscribed_topic_names: Vec<String>,
     pub assigned_partitions: HashMap<Uuid, Vec<i32>>,
-    /// `true` iff this is a classic member hosted in an upgraded group (its
-    /// `ClassicMemberFacade` is set). Distinguishes a classic-protocol member
-    /// served through the next-gen machinery from a native consumer member.
+    /// `true` if and only if this is a classic member hosted in an upgraded
+    /// group, which means its `ClassicMemberFacade` is set. This flag separates
+    /// a classic-protocol member served through the next-gen machinery from a
+    /// native consumer member.
     pub is_classic: bool,
 }
 
 #[derive(Debug)]
 pub struct GroupActorHandle {
     pub tx: mpsc::Sender<GroupActorMessage>,
-    /// Spawn-time protocol hint. Fixed for the actor's lifetime — a KIP-848 live
-    /// migration can flip the group's kind in place after spawn, leaving this
-    /// stale. It is therefore used ONLY for spawn-time wiring (the initial
-    /// `CoordinatorGroup::new_classic`/`new_consumer`) and replay assertions; every
-    /// routing/validation decision dispatches on the actor's LIVE `group.kind`
-    /// inside the actor, never on this field.
+    /// Spawn-time protocol hint, fixed for the actor's lifetime. A KIP-848
+    /// live migration can flip the group's kind in place after spawn, which
+    /// leaves this field stale. The code therefore reads it ONLY for
+    /// spawn-time wiring (the initial `CoordinatorGroup::new_classic` or
+    /// `new_consumer`) and for replay assertions. Every routing and validation
+    /// decision dispatches on the actor's LIVE `group.kind` inside the actor,
+    /// never on this field.
     pub kind: GroupKindTag,
     _task: JoinHandle<()>,
 }
@@ -354,9 +368,11 @@ pub trait MetadataProvider: Send + Sync + std::fmt::Debug {
 /// Parked classic-protocol waiters for one group.
 #[derive(Default)]
 struct ParkedWaiters {
-    /// Parked `JoinGroup` handlers, keyed by `member_id` → reply sender.
+    /// Parked `JoinGroup` handlers, keyed by `member_id`, holding the reply
+    /// sender.
     joiners: HashMap<String, oneshot::Sender<JoinResult>>,
-    /// Parked `SyncGroup` followers, keyed by `member_id` → reply sender.
+    /// Parked `SyncGroup` followers, keyed by `member_id`, holding the reply
+    /// sender.
     followers: HashMap<String, oneshot::Sender<SyncResult>>,
 }
 
@@ -840,13 +856,13 @@ async fn opt_sleep(deadline: Option<Instant>) {
     }
 }
 
-/// Run the rebalance vote and resolve every parked joiner. Mirrors the old
-/// `join_group.rs` block 5 + `notify_waiters()`.
+/// Runs the rebalance vote and resolves every parked joiner. It mirrors
+/// `join_group.rs` block 5 and `notify_waiters()`.
 ///
-/// Also drains any stale parked followers with `REBALANCE_IN_PROGRESS`: they
-/// belong to a previous `CompletingRebalance` whose leader was dead and never
-/// sent `SyncGroup`. Notifying them lets the client rejoin immediately rather
-/// than waiting for the 30-second request timeout.
+/// It also drains any stale parked follower with `REBALANCE_IN_PROGRESS`. Such
+/// a follower belongs to a previous `CompletingRebalance` whose leader was
+/// dead and never sent `SyncGroup`. The notification lets the client rejoin at
+/// once instead of waiting for the 30-second request timeout.
 fn complete_classic_rebalance(
     state: &mut ClassicState,
     joiners: &mut HashMap<String, oneshot::Sender<JoinResult>>,
@@ -900,8 +916,9 @@ fn drain_removed_classic_waiters(
     }
 }
 
-/// Complete the rebalance early iff every still-live member has joined this
-/// round and the group has rebalanced before (mirrors `wake_other_joiners`).
+/// Completes the rebalance early if and only if every still-live member has
+/// joined this round and the group has rebalanced before. This mirrors
+/// `wake_other_joiners`.
 fn maybe_complete_classic(
     state: &mut ClassicState,
     joiners: &mut HashMap<String, oneshot::Sender<JoinResult>>,
@@ -915,7 +932,8 @@ fn maybe_complete_classic(
     }
 }
 
-/// Deliver each parked follower its installed assignment (post leader-sync).
+/// Delivers to each parked follower its installed assignment, after the leader
+/// sync.
 fn drain_parked_followers(
     state: &ClassicState,
     followers: &mut HashMap<String, oneshot::Sender<SyncResult>>,
@@ -956,9 +974,9 @@ fn build_classic_view(state: &ClassicState) -> ClassicView {
     }
 }
 
-/// Called on every heartbeat-interval tick. Evicts expired members and
-/// writes the resulting tombstones to `__consumer_offsets`. Returns `Err`
-/// if the log write fails (the actor should exit).
+/// Runs on every heartbeat-interval tick. It evicts expired members and writes
+/// the resulting tombstones to `__consumer_offsets`. It returns `Err` when the
+/// log write fails, and the actor must then exit.
 async fn handle_session_tick(
     state: &mut GroupState,
     config: &NextGenConfig,
@@ -1002,13 +1020,17 @@ async fn handle_session_tick(
     Ok(())
 }
 
-/// KIP-848 DOWNGRADE trigger. After a membership change on a consumer-kind
-/// group, flip it back to classic in place when no NATIVE consumer member
-/// remains, there ARE hosted classic members, and policy allows it. The flip
-/// is one atomic batch: tombstone the next-gen k3 + k6 (both group-level) +
-/// every member's k5/k7/k8, and write the classic k2 `GroupMetadata`. Returns `Ok(true)` if a flip
-/// happened, `Ok(false)` if the conditions weren't met, `Err` on a log-write
-/// failure (the caller exits the actor loop).
+/// KIP-848 DOWNGRADE trigger.
+///
+/// After a membership change on a consumer-kind group, this function flips the
+/// group back to classic in place when no NATIVE consumer member remains,
+/// there ARE hosted classic members, and policy allows it. The flip is one
+/// atomic batch: it tombstones the next-gen k3 and k6 (both group-level) and
+/// every member's k5, k7, and k8, then writes the classic k2 `GroupMetadata`.
+///
+/// It returns `Ok(true)` when a flip happened, `Ok(false)` when the conditions
+/// were not met, and `Err` on a log-write failure. The caller then exits the
+/// actor loop.
 // TODO(kip-848): confirm exact downgrade trigger boundary against mirror.gcr.io/apache/kafka:4.0.0
 async fn maybe_downgrade(
     group: &mut CoordinatorGroup,
@@ -1134,16 +1156,19 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
     state.dirty = false;
 }
 
-/// KIP-848 live migration: serve a classic `JoinGroup` for a member hosted in
-/// an upgraded consumer group. Upserts the member into the next-gen state and,
-/// if its subscription is new or changed (the group went dirty), reconciles and
-/// persists the membership change exactly the way `handle_heartbeat`'s
-/// first-join path does — `run_reconcile` → `advance_member_epoch` →
-/// `snapshot_pending_after_change` → `flush_pending`. Replies on `reply` with a
-/// server-assigned single-member `JoinResult`; the assignment is delivered on
-/// the member's next `SyncGroup`. Returns `Err` only on a log-write failure (so
-/// the actor exits), after replying with the same failure code the heartbeat
-/// path uses.
+/// KIP-848 live migration: serves a classic `JoinGroup` for a member hosted in
+/// an upgraded consumer group.
+///
+/// This function upserts the member into the next-gen state. When the member's
+/// subscription is new or changed, which makes the group dirty, it reconciles
+/// and persists the membership change exactly as `handle_heartbeat`'s
+/// first-join path does: `run_reconcile`, then `advance_member_epoch`, then
+/// `snapshot_pending_after_change`, then `flush_pending`.
+///
+/// It replies on `reply` with a server-assigned single-member `JoinResult`.
+/// The member receives the assignment on its next `SyncGroup`. It returns
+/// `Err` only on a log-write failure, so the actor exits, and it first replies
+/// with the same failure code the heartbeat path uses.
 struct HostedJoin<'a> {
     request: &'a JoinGroupRequest,
     client_host: &'a str,
@@ -1236,11 +1261,13 @@ pub(crate) struct HeartbeatStep {
     pub pending: PendingRecords,
 }
 
-/// The pure, synchronous heartbeat decision core: assignor-selection and epoch
-/// validation, member upsert / leave, `update_member_state`, `run_reconcile`,
-/// `advance_member_epoch`, and response build. Contains no `.await` and performs
-/// no I/O — `handle_heartbeat` calls this, then flushes `pending` to the log.
-/// Extracted so the reconciliation policy is independently model-checkable.
+/// The pure, synchronous heartbeat decision core: assignor selection and epoch
+/// validation, member upsert or leave, `update_member_state`, `run_reconcile`,
+/// `advance_member_epoch`, and the response build.
+///
+/// This function holds no `.await` and does no I/O. `handle_heartbeat` calls
+/// it, then flushes `pending` to the log. It is a separate function so that
+/// the reconciliation policy is model-checkable on its own.
 pub(crate) fn step_heartbeat(
     state: &mut super::consumer_state::GroupState,
     config: &NextGenConfig,
@@ -1323,9 +1350,9 @@ pub(crate) fn step_heartbeat(
     HeartbeatStep { response, pending }
 }
 
-/// Pure form of the leave path (`member_epoch == -1`): remove the member, bump
-/// the group epoch, and build the tombstone + group-epoch records. The async
-/// caller flushes the returned `pending`.
+/// Pure form of the leave path (`member_epoch == -1`). It removes the member,
+/// raises the group epoch, and builds the tombstone and group-epoch records.
+/// The async caller flushes the returned `pending`.
 fn leave_step(
     state: &mut super::consumer_state::GroupState,
     config: &NextGenConfig,
@@ -1368,9 +1395,10 @@ async fn handle_heartbeat(
     Ok(step.response)
 }
 
-/// The partitions a member reports owning in its heartbeat. Absent
-/// `topic_partitions` means "unchanged" — the caller substitutes the member's
-/// current assignment so a keepalive can still pick up newly-freed partitions.
+/// The partitions a member reports that it owns in its heartbeat. An absent
+/// `topic_partitions` means "unchanged". The caller then substitutes the
+/// member's current assignment, so that a keepalive can still take newly freed
+/// partitions.
 fn reported_owned(req: &ConsumerGroupHeartbeatRequest) -> HashMap<Uuid, Vec<i32>> {
     req.topic_partitions
         .as_ref()
@@ -1382,8 +1410,8 @@ fn reported_owned(req: &ConsumerGroupHeartbeatRequest) -> HashMap<Uuid, Vec<i32>
         .unwrap_or_default()
 }
 
-/// Apply steady-state member updates and run reconciliation.
-/// Returns `true` if any change occurred that requires a log write.
+/// Applies steady-state member updates and runs reconciliation. It returns
+/// `true` when a change happened that needs a log write.
 fn update_member_state(
     state: &mut super::consumer_state::GroupState,
     config: &NextGenConfig,
@@ -1605,13 +1633,14 @@ use super::persistence_next_gen::{
 #[derive(Debug, Default)]
 pub(crate) struct PendingRecords {
     pub group_metadata: Option<GroupMetadataValue>,
-    /// `Some(value)` writes the record; `None` writes a tombstone (null value).
+    /// `Some(value)` writes the record. `None` writes a tombstone (null
+    /// value).
     pub member_metadata: Vec<(String, Option<MemberMetadataValue>)>,
     pub target_metadata: Option<TargetAssignmentMetadataValue>,
     pub target_per_member: Vec<(String, Option<TargetAssignmentMemberValue>)>,
     pub current_per_member: Vec<(String, Option<CurrentMemberAssignmentValue>)>,
-    /// When set, the batch also tombstones the classic k2 `GroupMetadata` record
-    /// for this group (used by an upgrade flip).
+    /// When set, the batch also tombstones the classic k2 `GroupMetadata`
+    /// record for this group. An upgrade flip sets it.
     pub classic_group_metadata_tombstone: bool,
     /// Tombstone the next-gen k3 `GroupMetadata` (downgrade flip).
     pub next_gen_group_metadata_tombstone: bool,
@@ -1723,10 +1752,10 @@ impl PendingRecords {
 }
 
 /// Snapshot a `GroupState` into a `GroupSeed` suitable for restoring a
-/// Map a member's in-memory classic facade (if any) into the persisted k5
-/// `ClassicMemberMetadata` sub-block. Single source of truth for both the cache
-/// snapshot (`snapshot_seed`) and the log-write path (`snapshot_pending_after_change`)
-/// so the two cannot drift.
+/// Maps a member's in-memory classic facade, if there is one, into the
+/// persisted k5 `ClassicMemberMetadata` sub-block. It is the single source of
+/// truth for both the cache snapshot (`snapshot_seed`) and the log-write path
+/// (`snapshot_pending_after_change`), so the two cannot drift.
 fn classic_member_metadata(
     m: &super::consumer_state::MemberState,
 ) -> Option<super::persistence_next_gen::ClassicMemberMetadata> {
@@ -1740,7 +1769,7 @@ fn classic_member_metadata(
         })
 }
 
-/// freshly-respawned actor. Mirrors what bootstrap replay would produce.
+/// freshly-respawned actor. It mirrors what bootstrap replay would produce.
 // PERF: this deep-clones EVERY member's subscriptions/assignments into a
 // fresh `GroupSeed` on every persisted heartbeat, even when only one member
 // changed. An incremental cache update — applying just the affected-member
@@ -1821,9 +1850,9 @@ fn chrono_now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
 }
 
-/// Build a `PendingRecords` set reflecting the state changes for the
-/// listed `affected_members`. Always includes the current group epoch
-/// and (if non-zero) target epoch.
+/// Builds a `PendingRecords` set that carries the state changes for the listed
+/// `affected_members`. It always includes the current group epoch, and the
+/// target epoch when that epoch is non-zero.
 fn snapshot_pending_after_change(
     state: &super::consumer_state::GroupState,
     affected_members: &[String],
@@ -1900,22 +1929,25 @@ fn snapshot_pending_after_change(
     pending
 }
 
-/// Build a `PendingRecords` set describing the WHOLE consumer group: the group
-/// epoch, the target epoch (if non-zero), and every member's k5 member-metadata
-/// (facade included), k8 current-assignment, and k7 target (if present). Used by
-/// the upgrade flip to atomically write the full converted group in one batch.
+/// Builds a `PendingRecords` set that describes the WHOLE consumer group: the
+/// group epoch, the target epoch when non-zero, and every member's k5
+/// member-metadata (facade included), k8 current-assignment, and k7 target
+/// when present. The upgrade flip uses it to write the full converted group
+/// atomically in one batch.
 pub(crate) fn full_pending_records(state: &super::consumer_state::GroupState) -> PendingRecords {
     let all_member_ids: Vec<String> = state.members.keys().cloned().collect();
     snapshot_pending_after_change(state, &all_member_ids)
 }
 
-/// Build a wire-faithful classic k2 `GroupMetadataValue` from a downgraded
-/// [`super::classic_state::ClassicGroup`]. Every classic member is persisted with its
-/// `subscription` (the selected `protocol_metadata`) and `assignment` (the seed
-/// the downgrade computed from the next-gen target), so bootstrap replay
-/// reconstructs the classic group with its members and their assignments intact
-/// (see `apply_group_metadata` in `coordinator::bootstrap`). Used by the
-/// downgrade flip.
+/// Builds a wire-faithful classic k2 `GroupMetadataValue` from a downgraded
+/// [`super::classic_state::ClassicGroup`].
+///
+/// It persists every classic member with its `subscription` (the selected
+/// `protocol_metadata`) and its `assignment` (the seed the downgrade computed
+/// from the next-gen target). Bootstrap replay therefore reconstructs the
+/// classic group with its members and their assignments intact. See
+/// `apply_group_metadata` in `coordinator::bootstrap`. The downgrade flip uses
+/// this function.
 pub(crate) fn classic_group_metadata_record(
     state: &super::classic_state::ClassicGroup,
 ) -> crate::coordinator::unified::persistence::GroupMetadataValue {
@@ -1967,20 +1999,22 @@ async fn flush_pending(
     Ok(())
 }
 
-/// Validate an offset commit — regular or transactional — against the group's
+/// Validates an offset commit, regular or transactional, against the group's
 /// membership and generation (classic) or member epoch (KIP-848 next-gen).
-/// Returns `Some(error_code)` if the commit must be rejected, `None` if it may
-/// proceed.
 ///
-/// Shared by `OffsetCommit` and `TxnOffsetCommit` so the two paths fence
-/// identically — KIP-447 requires transactional offset fencing to be
-/// "consistent with normal offset fencing". For a simple consumer (empty
-/// `member_id`, no `group_instance_id`) the classic path no-ops, so a producer
-/// that supplies no group metadata is never fenced.
+/// It returns `Some(error_code)` when the commit must be rejected, and `None`
+/// when the commit may proceed.
 ///
-/// Dispatch happens inside the actor on the LIVE `group.kind` (the single
-/// `ValidateCommit` message), not on the spawn-time `handle.kind` hint — a
-/// KIP-848 migration may have flipped the protocol in place after spawn.
+/// `OffsetCommit` and `TxnOffsetCommit` share this function so that the two
+/// paths fence identically. KIP-447 requires transactional offset fencing to
+/// be "consistent with normal offset fencing". For a simple consumer (empty
+/// `member_id`, no `group_instance_id`) the classic path does nothing, so the
+/// broker never fences a producer that supplies no group metadata.
+///
+/// Dispatch happens inside the actor on the LIVE `group.kind`, through the
+/// single `ValidateCommit` message. It does not use the spawn-time
+/// `handle.kind` hint, because a KIP-848 migration may have flipped the
+/// protocol in place after spawn.
 pub(crate) async fn validate_group_commit(
     handle: &GroupActorHandle,
     member_id: &str,
@@ -2012,9 +2046,9 @@ pub(crate) async fn validate_group_commit(
 #[path = "reconciler_model.rs"]
 mod reconciler_model;
 
-/// Compositional model: the KIP-848 reconciliation engine composed with a
-/// modeled offset-commit fencing + fetch layer (consumer delivery correctness
-/// through rebalances).
+/// Compositional model: the KIP-848 reconciliation engine, composed with a
+/// modeled offset-commit fencing and fetch layer. It covers consumer delivery
+/// correctness through rebalances.
 #[cfg(test)]
 #[path = "consumer_group_composition_model.rs"]
 mod consumer_group_composition_model;
@@ -2032,8 +2066,8 @@ mod tests {
         reconciler::ReconcileInput,
     };
 
-    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
-    /// stall fails the test deterministically instead of spinning forever.
+    /// Yield-polls until `cond` holds. A bounded hang-guard makes a real stall
+    /// fail the test deterministically instead of spinning forever.
     async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
         for _ in 0..200_000 {
             if cond() {
@@ -2144,10 +2178,11 @@ mod tests {
     }
 
     /// As [`make_coordinator_with_topic`], but with an explicit migration
-    /// policy. Hosted-classic tests pin `Upgrade` so the native
-    /// member's leave in `seed_and_upgrade` does NOT trigger a downgrade back
-    /// to classic (which would strand them on the wrong RPC path); the
-    /// downgrade trigger itself is exercised with `Bidirectional`/`Downgrade`.
+    /// policy. Hosted-classic tests pin `Upgrade` so that the native member's
+    /// leave in `seed_and_upgrade` does NOT trigger a downgrade back to
+    /// classic, which would strand them on the wrong RPC path. The tests
+    /// exercise the downgrade trigger itself with `Bidirectional` and
+    /// `Downgrade`.
     fn make_coordinator_with_topic_policy(
         topic: &str,
         partitions: i32,
@@ -2467,10 +2502,10 @@ mod tests {
         assert!(batch.records[0].value.is_none());
     }
 
-    /// Regression for the epoch double-bump: a single session-timeout
-    /// eviction must advance `group_epoch` by exactly 1. The fix removed the
-    /// explicit `state.bump_epoch()` in `handle_session_tick`, leaving the
-    /// reconciler (`reconcile_if_dirty`) as the sole bump.
+    /// Regression for the epoch double-bump: a single session-timeout eviction
+    /// must advance `group_epoch` by exactly 1. `handle_session_tick` has no
+    /// explicit `state.bump_epoch()`, so the reconciler (`reconcile_if_dirty`)
+    /// is the only place that raises the epoch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn single_eviction_advances_epoch_by_one() {
         use crate::coordinator::unified::consumer_state::GroupState;
@@ -2902,14 +2937,15 @@ mod tests {
         assert!(Arc::ptr_eq(&k_classic, &k_consumer));
     }
 
-    /// KIP-848 live migration: the tick must dispatch on the LIVE `group.kind`,
-    /// not the captured spawn-time kind. Spawn a classic actor, flip it to a
-    /// consumer group in place, and fire a tick — the actor must keep running
-    /// rather than panic on a kind-mismatched `expect(...)`.
+    /// KIP-848 live migration: the tick must dispatch on the LIVE
+    /// `group.kind`, not on the captured spawn-time kind. This test spawns a
+    /// classic actor, flips it to a consumer group in place, and fires a tick.
+    /// The actor must keep running rather than panic on a kind-mismatched
+    /// `expect(...)`.
     ///
-    /// The session-expiry tick is driven by an injected mock sleeper, so the
-    /// tick fires on a controlled timeline instead of a real ~1.2s wall-clock
-    /// sleep: deterministic and instant.
+    /// An injected mock sleeper drives the session-expiry tick, so the tick
+    /// fires on a controlled timeline instead of a real 1.2 s wall-clock
+    /// sleep. The test is therefore deterministic and instant.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actor_tick_does_not_panic_after_in_place_flip() {
         use qubit_clock::{MockWaiterKind, sleep::MockSleeper};
@@ -2974,10 +3010,11 @@ mod tests {
         assert!(!handle.tx.is_closed());
     }
 
-    /// KIP-848 upgrade trigger: a `ConsumerGroupHeartbeat` for a *classic* group
-    /// (default `bidirectional` policy) converts it in place to a next-gen
-    /// consumer group hosting the classic member, atomically tombstoning the
-    /// classic k2 `GroupMetadata` and writing the full next-gen record set.
+    /// KIP-848 upgrade trigger: a `ConsumerGroupHeartbeat` for a *classic*
+    /// group under the default `bidirectional` policy converts that group in
+    /// place to a next-gen consumer group that hosts the classic member. The
+    /// conversion atomically tombstones the classic k2 `GroupMetadata` and
+    /// writes the full next-gen record set.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consumer_heartbeat_upgrades_a_classic_group() {
         use super::super::{
@@ -3083,9 +3120,10 @@ mod tests {
         ConsumerProtocolAssignment::decode(&mut cur, version).expect("assignment decodes")
     }
 
-    /// Seed a classic consumer group with member `m-classic` subscribed to
-    /// `topic`, then upgrade it in place via a native consumer heartbeat. After
-    /// this returns, the group is consumer-kind and `m-classic` has a target.
+    /// Seeds a classic consumer group with member `m-classic` subscribed to
+    /// `topic`, then upgrades it in place with a native consumer heartbeat.
+    /// After this returns, the group is consumer-kind and `m-classic` has a
+    /// target.
     async fn seed_and_upgrade(coord: &Arc<GroupCoordinator>, topic: &str) -> Arc<GroupActorHandle> {
         use super::super::{
             classic_state::{ClassicGroup as ClassicState, Member},
@@ -3345,9 +3383,9 @@ mod tests {
 
     /// KIP-848 DOWNGRADE trigger: a consumer group that hosts a classic member
     /// must flip back to classic in place when the LAST native consumer member
-    /// leaves (default `Bidirectional` policy). The flip tombstones the
-    /// next-gen k3 `GroupMetadata`, writes a classic k2, and re-expresses the
-    /// hosted classic member as a classic member.
+    /// leaves, under the default `Bidirectional` policy. The flip tombstones
+    /// the next-gen k3 `GroupMetadata`, writes a classic k2, and re-expresses
+    /// the hosted classic member as a classic member.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn last_consumer_member_leaving_downgrades_to_classic() {
         use super::super::{
@@ -3441,10 +3479,10 @@ mod tests {
     }
 
     /// KIP-848 admin coherence: after an in-place UPGRADE the group is
-    /// consumer-kind, yet the classic `kafka-consumer-groups --list`/`--describe`
-    /// path must still report it. `describe_group` (which used to return `None`
-    /// for any non-classic handle) now inspects the LIVE group and projects the
-    /// consumer state into a `GroupSnapshot`; `list_groups` includes it too.
+    /// consumer-kind, yet the classic `kafka-consumer-groups --list` and
+    /// `--describe` path must still report it. `describe_group` inspects the
+    /// LIVE group and projects the consumer state into a `GroupSnapshot`, and
+    /// `list_groups` includes it too.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn describe_reports_an_upgraded_consumer_group() {
         // Pin `Upgrade` policy so the transient native member's leave in
@@ -3497,8 +3535,8 @@ mod tests {
         );
     }
 
-    /// `true` iff some appended record WRITES (non-null value) a classic k2
-    /// `GroupMetadata` for `group_id`.
+    /// `true` if and only if some appended record WRITES a classic k2
+    /// `GroupMetadata` for `group_id` with a non-null value.
     async fn log_has_classic_group_metadata_write(
         log: &InMemoryOffsetsLog,
         group_id: &str,
@@ -3526,11 +3564,12 @@ mod tests {
     // message arms) rather than a `tests/` integration file, which could not
     // see this scaffolding.
 
-    /// Seed a classic consumer group "g" with a single classic member
-    /// `member_id` subscribed to `topic`, optionally carrying a KIP-345 static
-    /// `group_instance_id`. Mirrors the inline seeding the upgrade/downgrade
-    /// tests use, but parameterized so a static-identity test can attach an
-    /// instance id (which `seed_and_upgrade`'s fixed `m-classic` cannot).
+    /// Seeds a classic consumer group "g" with a single classic member
+    /// `member_id` subscribed to `topic`, and with an optional KIP-345 static
+    /// `group_instance_id`. It mirrors the inline seeding that the upgrade and
+    /// downgrade tests use, but it takes parameters, so a static-identity test
+    /// can attach an instance id. The fixed `m-classic` in `seed_and_upgrade`
+    /// cannot do that.
     fn seed_classic_member(
         coord: &Arc<GroupCoordinator>,
         member_id: &str,
@@ -3565,9 +3604,10 @@ mod tests {
         coord.find("g").expect("seeded classic actor")
     }
 
-    /// Send a native consumer `Heartbeat` and return the response. A `member_id`
-    /// of `""`/epoch 0 is a first-join (which triggers an upgrade when the group
-    /// is a convertible classic group under an upgrade-allowing policy).
+    /// Sends a native consumer `Heartbeat` and returns the response. A
+    /// `member_id` of `""` with epoch 0 is a first-join. A first-join triggers
+    /// an upgrade when the group is a convertible classic group under a policy
+    /// that allows the upgrade.
     async fn consumer_heartbeat(
         handle: &GroupActorHandle,
         member_id: &str,
@@ -3594,7 +3634,8 @@ mod tests {
         rx.await.unwrap()
     }
 
-    /// Read the live `ClassicInspect` view (only a classic-kind group replies).
+    /// Reads the live `ClassicInspect` view. Only a classic-kind group
+    /// replies.
     async fn classic_inspect(handle: &GroupActorHandle) -> ClassicView {
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -3629,8 +3670,8 @@ mod tests {
         rx.await.unwrap()
     }
 
-    /// Validate an offset commit against the group's LIVE kind via the single
-    /// `ValidateCommit` message.
+    /// Validates an offset commit against the group's LIVE kind, through the
+    /// single `ValidateCommit` message.
     async fn validate_commit(
         handle: &GroupActorHandle,
         member_id: &str,
@@ -3650,7 +3691,7 @@ mod tests {
         rx.await.unwrap()
     }
 
-    /// Round-trip the kind-agnostic committed-offset store.
+    /// Round-trips the kind-agnostic committed-offset store.
     async fn fetch_committed(
         handle: &GroupActorHandle,
     ) -> HashMap<(String, i32), super::super::classic_state::OffsetEntry> {
@@ -3663,10 +3704,11 @@ mod tests {
         rx.await.unwrap()
     }
 
-    /// Scenario 1: a full upgrade→downgrade round trip under `Bidirectional`. A
-    /// classic member "m1" joins; a native consumer "c1" heartbeats → upgrade;
-    /// c1 leaves → downgrade. The group must end CLASSIC with "m1" still present
-    /// and still assigned (its partitions preserved across both flips).
+    /// Scenario 1: a full upgrade and downgrade round trip under
+    /// `Bidirectional`. A classic member "m1" joins. A native consumer "c1"
+    /// heartbeats, which upgrades the group. Then c1 leaves, which downgrades
+    /// it. The group must end CLASSIC with "m1" still present and still
+    /// assigned, with its partitions kept across both flips.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upgrade_then_downgrade_round_trip() {
         use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
@@ -3740,10 +3782,11 @@ mod tests {
     }
 
     /// Scenario 2: KIP-345 static identity must survive both flips. A classic
-    /// member with `group.instance.id = "inst-a"` joins; upgrade; then downgrade.
-    /// The restored classic member must still carry `group_instance_id ==
-    /// Some("inst-a")` (read from the classic inspect view — `MemberSnapshot`
-    /// does not carry the instance id, but `ClassicMemberView` does).
+    /// member with `group.instance.id = "inst-a"` joins, then the group
+    /// upgrades, then it downgrades. The restored classic member must still
+    /// carry `group_instance_id == Some("inst-a")`. The test reads this from
+    /// the classic inspect view, because `MemberSnapshot` does not carry the
+    /// instance id but `ClassicMemberView` does.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn static_member_identity_survives_both_flips() {
         use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
@@ -3774,9 +3817,10 @@ mod tests {
         );
     }
 
-    /// Scenario 3: under `Disabled` policy a classic group stays classic — a
-    /// native consumer heartbeat for the same group is REJECTED rather than
-    /// upgrading it. This reproduces today's hard classic/next-gen separation.
+    /// Scenario 3: under the `Disabled` policy a classic group stays classic.
+    /// The broker REJECTS a native consumer heartbeat for that group instead
+    /// of upgrading it. This reproduces the hard classic and next-gen
+    /// separation.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn policy_disabled_keeps_group_classic() {
         use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
@@ -3804,10 +3848,10 @@ mod tests {
         assert!(handle.kind == GroupKindTag::Classic);
     }
 
-    /// Scenario 4: committed offsets live on the kind-agnostic `Group` container
-    /// and must survive both flips untouched. Commit an offset for ("t", 0) on a
-    /// classic group, upgrade, assert it's still readable, downgrade, assert it's
-    /// STILL there.
+    /// Scenario 4: committed offsets live on the kind-agnostic `Group`
+    /// container and must survive both flips unchanged. The test commits an
+    /// offset for ("t", 0) on a classic group, upgrades, asserts the offset is
+    /// still readable, downgrades, and asserts it is STILL there.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn committed_offsets_survive_a_flip() {
         use super::super::classic_state::OffsetEntry;
@@ -3856,20 +3900,21 @@ mod tests {
         );
     }
 
-    /// Regression for the stale-`handle.kind` defect (KIP-848 live migration):
-    /// a group SPAWNED as a consumer group (its first RPC was a native
-    /// `ConsumerGroupHeartbeat`, so `handle.kind == Consumer`) that later hosts a
-    /// classic member and then DOWNGRADES in place when the last native member
-    /// leaves. The handle's spawn-time `kind` stays `Consumer` and is now stale.
+    /// Regression for the stale-`handle.kind` defect (KIP-848 live migration).
+    /// The group is SPAWNED as a consumer group, because its first RPC was a
+    /// native `ConsumerGroupHeartbeat`, so `handle.kind == Consumer`. It later
+    /// hosts a classic member and then DOWNGRADES in place when the last
+    /// native member leaves. The handle's spawn-time `kind` stays `Consumer`
+    /// and is now stale.
     ///
-    /// The defect: `offset_commit::validate` pre-dispatched on a per-handle kind
-    /// mirror, so a downgraded classic member's offset commit was at risk of
-    /// being routed to the next-gen epoch path (`group.as_consumer()` is now
-    /// `None`, so it would reject with `UNKNOWN_MEMBER_ID`). With the
-    /// single-source-of-truth fix the one `ValidateCommit` message dispatches on
-    /// the actor's LIVE `group.kind` — now classic — and `classic_ops::
-    /// validate_commit` finds the re-expressed classic member and accepts the
-    /// commit (`Ok(())`).
+    /// The defect was this: `offset_commit::validate` pre-dispatched on a
+    /// per-handle kind mirror, so the broker could route a downgraded classic
+    /// member's offset commit to the next-gen epoch path. `group.as_consumer()`
+    /// is now `None`, so that path would reject with `UNKNOWN_MEMBER_ID`.
+    /// With the single-source-of-truth fix, the one `ValidateCommit` message
+    /// dispatches on the actor's LIVE `group.kind`, which is now classic.
+    /// `classic_ops::validate_commit` then finds the re-expressed classic
+    /// member and accepts the commit (`Ok(())`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawned_consumer_group_downgrade_allows_classic_offset_commit() {
         use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
@@ -3945,13 +3990,16 @@ mod tests {
     }
 
     /// Regression (user-requested): a group that downgraded in place becomes
-    /// deletable. Spawn a CONSUMER group (first RPC a `ConsumerGroupHeartbeat`),
-    /// host a classic member, then downgrade (the native consumer leaves). The
-    /// handle's spawn-time `kind` is stale `Consumer`, but `delete_group` now
-    /// dispatches on `ClassicInspect`'s live-kind reply — the downgraded group
-    /// answers as classic, so a non-empty group reports `NonEmpty` (NOT
-    /// `NotFound`), proving delete sees it as classic. Pre-refactor the stale
-    /// `handle.kind == Consumer` gate short-circuited to `NotFound`.
+    /// deletable. The test spawns a CONSUMER group, whose first RPC is a
+    /// `ConsumerGroupHeartbeat`, hosts a classic member, then downgrades when
+    /// the native consumer leaves.
+    ///
+    /// The handle's spawn-time `kind` is a stale `Consumer`, but `delete_group`
+    /// dispatches on `ClassicInspect`'s live-kind reply. The downgraded group
+    /// answers as classic, so a non-empty group reports `NonEmpty` and NOT
+    /// `NotFound`. That proves delete sees it as classic. Before the refactor,
+    /// the stale `handle.kind == Consumer` gate short-circuited to
+    /// `NotFound`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn downgraded_group_is_deletable_once_empty() {
         use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
@@ -4001,13 +4049,14 @@ mod tests {
     }
 
     /// Regression (user-requested): an UPGRADED group runs the consumer epoch
-    /// fence on a native consumer member's commit. A classic group upgrades (a
-    /// native consumer heartbeats in), so the handle's spawn-time `kind` is the
-    /// stale `Classic`. `ValidateCommit` for that native member must dispatch on
-    /// the LIVE (consumer) kind and apply the epoch fence: a STALE epoch (<
-    /// current) → `STALE_MEMBER_EPOCH`, a FENCED epoch (> current) →
-    /// `FENCED_MEMBER_EPOCH`. Pre-refactor a spawned-Classic upgraded group sent
-    /// the classic validate path and SKIPPED the epoch check.
+    /// fence on a native consumer member's commit. A classic group upgrades
+    /// when a native consumer heartbeats in, so the handle's spawn-time `kind`
+    /// is a stale `Classic`. `ValidateCommit` for that native member must
+    /// dispatch on the LIVE consumer kind and apply the epoch fence. A STALE
+    /// epoch, below the current one, gives `STALE_MEMBER_EPOCH`. A FENCED
+    /// epoch, above the current one, gives `FENCED_MEMBER_EPOCH`. Before the
+    /// refactor, a spawned-Classic upgraded group took the classic validate
+    /// path and SKIPPED the epoch check.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upgraded_group_fences_stale_native_consumer_commit() {
         use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;

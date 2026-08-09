@@ -4,27 +4,31 @@ use std::net::SocketAddr;
 
 use crabka_units::{ByteSize, Time, bytes, mebibytes, secs};
 
-/// Static configuration for the `query-frontend` role. Ports the fields the
-/// legacy `QueryFrontendConfig` carried (querier addrs, live frontier, queue
-/// depth, target bytes per job), plus the typed-merge knobs (default
-/// limit/spss, max trace bytes, timeouts).
+/// Static configuration for the `query-frontend` role.
+///
+/// It ports the fields the legacy `QueryFrontendConfig` carried: querier
+/// addresses, the live frontier, the queue depth, and the target bytes per job.
+/// It adds the typed-merge knobs: the default limit and spss, the max trace
+/// bytes, and the timeouts.
 #[derive(Clone, Debug)]
 pub struct FrontendConfig {
-    /// Querier backend addresses (`host:port`, no scheme) the HTTP pool fans
-    /// over.
+    /// Querier backend addresses the HTTP pool fans over, as `host:port` with
+    /// no scheme.
     pub querier_addrs: Vec<String>,
     /// Target size per search job; a block larger than this fans into
     /// per-row-group-range jobs. Zero disables row-group splitting.
     pub target_per_job: ByteSize,
     /// Max jobs in flight at once across all queriers.
     pub max_concurrency: usize,
-    /// Default trace limit when the request omits `limit` (Tempo default 20).
+    /// Default trace limit when the request omits `limit`. The Tempo default
+    /// is 20.
     pub default_limit: usize,
-    /// Default spans-per-spanSet when the request omits `spss` (Tempo
-    /// default 3).
+    /// Default spans-per-spanSet when the request omits `spss`. The Tempo
+    /// default is 3.
     pub default_spss: usize,
-    /// The cold-edge timestamp: data at/after it is in the live (hot) tier; the
-    /// live shard is probed when a query window's `end_ns` reaches it.
+    /// The cold-edge timestamp. Data at or after it is in the live hot tier.
+    /// The planner probes the live shard when a query window's `end_ns` reaches
+    /// this timestamp.
     pub hot_frontier_ns: i64,
     /// Max assembled-trace size before the v2 by-id path returns `PARTIAL`.
     pub max_trace: ByteSize,

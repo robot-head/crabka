@@ -1,4 +1,4 @@
-//! `crabka-broker` — single-node Kafka-compatible broker daemon.
+//! `crabka-broker`, the single-node Kafka-compatible broker daemon.
 
 // Heap profiling: install jemalloc as the global allocator and enable the
 // prof:true malloc_conf so jemalloc_pprof can dump heap profiles at runtime.
@@ -534,8 +534,8 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:9092", conflicts_with = "config_file")]
     listen_addr: SocketAddr,
 
-    /// `host:port` to advertise to clients (defaults to `listen_addr`).
-    /// Set via env `CRABKA_ADVERTISED_LISTENER` from the operator.
+    /// `host:port` to advertise to clients. Default: `listen_addr`.
+    /// The operator sets it with the env var `CRABKA_ADVERTISED_LISTENER`.
     /// Mutually exclusive with `--config-file`.
     #[arg(
         long,
@@ -544,9 +544,9 @@ struct Args {
     )]
     advertised_listener: Option<String>,
 
-    /// Path to a TOML config file (operator-managed). When set,
-    /// `--listen-addr` / `--advertised-listener` must NOT be set;
-    /// listener configuration comes from the file's `[[listeners]]`
+    /// Path to an operator-managed TOML config file. When it is set,
+    /// `--listen-addr` and `--advertised-listener` must NOT be set. The
+    /// listener configuration then comes from the file's `[[listeners]]`
     /// table. See `crabka_broker::file_config::FileConfig`.
     #[arg(long)]
     config_file: Option<PathBuf>,
@@ -556,10 +556,10 @@ struct Args {
     #[arg(long, default_value = "./crabka-data")]
     log_dir: PathBuf,
 
-    /// Additional JBOD data directories (KIP-113), comma-separated. New
-    /// partitions are spread across `--log-dir` plus these by least-loaded
-    /// placement. The cluster-metadata log always stays on `--log-dir`.
-    /// Maps to Kafka's `log.dirs` having more than one entry.
+    /// More JBOD data directories (KIP-113), comma-separated. Least-loaded
+    /// placement spreads new partitions across `--log-dir` and these
+    /// directories. The cluster-metadata log always stays on `--log-dir`.
+    /// This maps to a Kafka `log.dirs` with more than one entry.
     #[arg(
         long,
         env = "CRABKA_EXTRA_LOG_DIRS",
@@ -573,8 +573,8 @@ struct Args {
     broker_id: i32,
 
     /// `KRaft` `process.roles`, comma-separated (`controller`, `broker`).
-    /// Defaults to the combined set when unset. The operator normally sets
-    /// this via the `[process]` section of `--config-file` instead.
+    /// Default: the combined set. The operator normally sets this in the
+    /// `[process]` section of `--config-file` instead.
     #[arg(
         long,
         env = "CRABKA_PROCESS_ROLES",
@@ -584,14 +584,14 @@ struct Args {
     process_roles: Vec<String>,
 
     /// Cluster UUID. Every broker in the same cluster must share this
-    /// value. Set via env `CRABKA_CLUSTER_ID` from the operator
-    /// (the `KafkaCluster` UID).
+    /// value. The operator sets it with the env var `CRABKA_CLUSTER_ID`,
+    /// which holds the `KafkaCluster` UID.
     #[arg(long, env = "CRABKA_CLUSTER_ID")]
     cluster_id: Option<uuid::Uuid>,
 
     /// Bind address for the Prometheus `/metrics` HTTP endpoint.
-    /// Empty string (or `none`) disables. Defaults to `0.0.0.0:9404`
-    /// — the same port `jmx_prometheus_javaagent` uses for vanilla
+    /// An empty string or `none` disables it. Default: `0.0.0.0:9404`.
+    /// That is the same port `jmx_prometheus_javaagent` uses for vanilla
     /// Kafka, so existing scrape configs apply unchanged.
     #[arg(
         long,
@@ -601,15 +601,15 @@ struct Args {
     metrics_listen_addr: String,
 
     /// Partition disk-usage scan cadence. `0s` disables the scanner entirely.
-    /// The rebalancer's usage scraper
-    /// reads the `partition_disk_bytes` gauge this populates.
+    /// The scanner populates the `partition_disk_bytes` gauge, and the
+    /// rebalancer's usage scraper reads that gauge.
     #[arg(long, env = "CRABKA_PARTITION_DISK_SCAN_INTERVAL", value_parser = crabka_units::parse::non_negative_time)]
     partition_disk_scan_interval: Option<Time>,
 
     /// KIP-853: controller endpoints to discover the quorum leader at cold
-    /// start, comma-separated `host:port`. Used by joiner nodes (those
-    /// formatted without `--standalone` / `--initial-controllers`). Maps to
-    /// Kafka's `controller.quorum.bootstrap.servers`.
+    /// start, comma-separated `host:port`. Joiner nodes use them, that is,
+    /// nodes formatted without `--standalone` or `--initial-controllers`.
+    /// This maps to Kafka's `controller.quorum.bootstrap.servers`.
     #[arg(
         long,
         env = "CRABKA_CONTROLLER_BOOTSTRAP_SERVERS",
@@ -618,8 +618,9 @@ struct Args {
     )]
     controller_bootstrap_servers: Vec<SocketAddr>,
 
-    /// KIP-853: auto-join the quorum as a voter once caught up as an
-    /// observer. Maps to Kafka's `controller.quorum.auto.join.enable`.
+    /// KIP-853: auto-join the quorum as a voter after the node catches up as
+    /// an observer. This maps to Kafka's
+    /// `controller.quorum.auto.join.enable`.
     #[arg(long, env = "CRABKA_CONTROLLER_AUTO_JOIN")]
     controller_auto_join: bool,
 
@@ -707,7 +708,7 @@ struct Args {
     )]
     metadata_max_between_snapshots: Option<ByteSize>,
 
-    /// Maximum time between metadata-log snapshots; `0s` disables the interval cap.
+    /// Maximum time between metadata-log snapshots. `0s` disables the interval cap.
     #[arg(long, env = "CRABKA_METADATA_MAX_SNAPSHOT_INTERVAL", value_parser = crabka_units::parse::non_negative_time)]
     metadata_max_snapshot_interval: Option<Time>,
 
@@ -727,7 +728,7 @@ struct Args {
     )]
     metadata_snapshot_fetch_max: Option<ByteSize>,
 
-    /// Idle-transaction abort cleanup interval; `0s` disables the reaper.
+    /// Idle-transaction abort cleanup interval. `0s` disables the reaper.
     #[arg(long, env = "CRABKA_TXN_ABORT_CLEANUP_INTERVAL", value_parser = crabka_units::parse::non_negative_time)]
     txn_abort_cleanup_interval: Option<Time>,
 
@@ -747,7 +748,7 @@ struct Args {
     )]
     leader_imbalance_per_broker: Option<Ratio>,
 
-    /// TLS cert/key reload polling interval; `0s` disables the watcher.
+    /// TLS cert/key reload polling interval. `0s` disables the watcher.
     #[arg(long, env = "CRABKA_TLS_RELOAD_INTERVAL", value_parser = crabka_units::parse::non_negative_time)]
     tls_reload_interval: Option<Time>,
 
@@ -851,7 +852,7 @@ struct Args {
     #[arg(long, env = "OTEL_EXPORTER_OTLP_TIMEOUT_SECS")]
     otel_exporter_otlp_timeout_secs: Option<String>,
 
-    /// OTLP heartbeat interval; `0s` disables heartbeats.
+    /// OTLP heartbeat interval. `0s` disables heartbeats.
     #[arg(long, env = "CRABKA_OTLP_HEARTBEAT_INTERVAL", value_parser = crabka_units::parse::non_negative_time)]
     crabka_otlp_heartbeat_interval: Option<Time>,
 }
@@ -1124,11 +1125,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Block until a process-termination signal arrives, returning its name for
-/// logging. On Unix this is SIGINT (Ctrl-C) **or SIGTERM** — `kubectl delete
-/// pod` (and the default container stop) sends SIGTERM, so catching only
-/// SIGINT meant the broker was hard-killed by SIGKILL with no controlled
-/// shutdown. On non-Unix targets, Ctrl-C only.
+/// Block until a process-termination signal arrives, then return its name for
+/// logging. On Unix that signal is SIGINT (Ctrl-C) **or SIGTERM**. `kubectl
+/// delete pod` and the default container stop both send SIGTERM. If this
+/// function caught only SIGINT, SIGKILL would hard-kill the broker with no
+/// controlled shutdown. On non-Unix targets it catches Ctrl-C only.
 #[cfg(unix)]
 async fn wait_for_termination_signal() -> &'static str {
     use tokio::signal::unix::{SignalKind, signal};
@@ -1154,8 +1155,8 @@ async fn wait_for_termination_signal() -> &'static str {
 }
 
 /// Map the `--metrics-listen-addr` CLI value onto an `Option<SocketAddr>`.
-/// Empty string or `none` (case-insensitive) disables the endpoint;
-/// anything else must parse as `SocketAddr`.
+/// An empty string or `none`, in any case, disables the endpoint. Every other
+/// value must parse as a `SocketAddr`.
 fn parse_metrics_addr(s: &str) -> Result<Option<SocketAddr>, Box<dyn std::error::Error>> {
     let trimmed = s.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
@@ -1164,19 +1165,18 @@ fn parse_metrics_addr(s: &str) -> Result<Option<SocketAddr>, Box<dyn std::error:
     Ok(Some(trimmed.parse()?))
 }
 
-/// Pick `Bootstrap` (fresh cluster) vs `Rejoin` (restart on existing
-/// state) based on whether the raft log directory has been populated.
+/// Pick `Bootstrap` for a fresh cluster or `Rejoin` for a restart on existing
+/// state. The choice depends on whether the raft log directory holds data.
 ///
 /// The broker hands `BrokerConfig.log_dir.join("__cluster_metadata")`
 /// to `ControllerConfig.log_dir` (see `broker.rs:833`), and
 /// `RaftLogStore::open` then puts its segment files under
 /// `<that>/@metadata-0/`. So the absolute path of the raft segments is
 /// `<log_dir>/__cluster_metadata/@metadata-0/`. On the first broker
-/// boot the directory doesn't exist yet; on every subsequent boot it
-/// has segment files from the prior run. Using directory presence +
-/// non-empty as the signal matches `Controller::start`'s
-/// `log_is_empty` check without having to open the log store from
-/// here.
+/// boot the directory does not exist yet. On every later boot it
+/// has segment files from the previous run. A present and non-empty
+/// directory is the signal, which matches the `log_is_empty` check in
+/// `Controller::start` and needs no log store open from here.
 fn detect_bootstrap_mode(log_dir: &Path) -> BootstrapMode {
     // Use the controller's own emptiness check (durable raft state =
     // `__cluster_metadata/quorum-state`, written only after the node has

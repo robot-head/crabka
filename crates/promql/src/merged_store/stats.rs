@@ -69,11 +69,12 @@ pub(super) fn merge_named_stats(
     out
 }
 
-/// Combine the head min-time of two stores using explicit presence flags.
+/// Combines the head min-time of two stores with explicit presence flags.
 ///
-/// Emptiness is reported via `None` (the caller threads a has-data flag) rather
-/// than overloading `0`, so a legitimate `min_time == 0` from a store that does
-/// hold samples is preserved instead of being mistaken for "empty".
+/// A store reports emptiness with `None`, not with a `0` min-time, and the
+/// caller threads a has-data flag through for this. This function keeps a
+/// legitimate `min_time == 0` from a store that does hold samples, and never
+/// reads that value as an empty store.
 pub(super) fn min_present_time(left: Option<i64>, right: Option<i64>) -> i64 {
     match (left, right) {
         (Some(left), Some(right)) => left.min(right),

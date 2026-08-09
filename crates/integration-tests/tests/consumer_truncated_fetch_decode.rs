@@ -1,7 +1,9 @@
-//! Regression: a Fetch response with a truncated trailing record batch (as
-//! Apache Kafka returns when a partition byte budget is hit) must decode the
-//! complete batches and drop the fragment, rather than failing the whole
-//! response decode and stalling the consumer.
+//! Regression: a truncated trailing record batch must not fail the decode.
+//!
+//! Apache Kafka returns a Fetch response with a truncated trailing record batch
+//! when a partition byte budget is reached. The decoder must decode the
+//! complete batches and drop the fragment. It must not fail the whole response
+//! decode and stall the consumer.
 
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::{

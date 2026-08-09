@@ -2,7 +2,7 @@
 //! actions and their `ON DELETE SET …` column lists, the constraint
 //! deferrability tail, and `SET CONSTRAINTS`.
 //!
-//! Every refusal asserted here was captured from a live `PostgreSQL` 18.4.
+//! Every refusal asserted here comes from a live `PostgreSQL` 18.4.
 
 use assert2::assert;
 use crabka_pgparser::{

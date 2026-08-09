@@ -2,17 +2,18 @@
 //! core (`AcquisitionState`).
 //!
 //! The model state holds the REAL `AcquisitionState` and drives the production
-//! `materialize` / `acquire` / `acknowledge` / `renew` / `expire_locks` /
-//! `to_persist_batches` / `load_from`; the BFS checker explores every
-//! interleaving of consumer operations, time advance, and (in the failover
-//! config) leader-reload, asserting the share-group delivery-safety invariants
-//! never break. Design:
+//! `materialize`, `acquire`, `acknowledge`, `renew`, `expire_locks`,
+//! `to_persist_batches`, and `load_from`. The BFS checker explores every
+//! interleaving of consumer operations, time advance, and, in the failover
+//! config, leader-reload. It asserts that the share-group delivery-safety
+//! invariants never break. Design:
 //! `docs/superpowers/specs/2026-06-13-crabka-share-group-model-design.md`.
 //!
 //! Memory safety: stateright BFS keeps every visited unique state resident, so
-//! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
-//! and MUST be executed under the host memory watchdog while bounds are tuned
-//! (never unguarded — a runaway space exhausts host RAM).
+//! each run is fenced with `within_boundary`, `target_state_count`, and
+//! `timeout`. While bounds are tuned, every run MUST execute under the host
+//! memory watchdog. Never run one unguarded, because a runaway space exhausts
+//! host RAM.
 
 use std::time::{Duration, Instant};
 
@@ -26,24 +27,25 @@ use super::{AckType, AcquisitionState, RecordState};
 /// the clock reaches `clock + 1`.
 const LOCK: Duration = Duration::from_secs(1);
 
-/// Hard backstop on generated states — bounds host memory even if
-/// `within_boundary` is looser than intended. Set well above each config's true
-/// bounded count so a real (exhaustive) run never truncates.
+/// Hard backstop on generated states. It bounds host memory even if
+/// `within_boundary` is looser than intended. Set it well above each config's
+/// true bounded count, so a real exhaustive run never truncates.
 const MAX_STATES: usize = 200_000;
-/// Depth backstop. Must exceed each config's reachable-graph diameter, or the
-/// search is depth-truncated (incomplete) and the `run` harness fails loudly.
+/// Depth backstop. It must exceed each config's reachable-graph diameter.
+/// Otherwise the search is depth-truncated and incomplete, and the `run`
+/// harness fails.
 const MAX_DEPTH: usize = 80;
 /// Wall-clock backstop.
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Bounded model config (held here, not in the fingerprinted state).
+/// Bounded model config. It lives here, not in the fingerprinted state.
 struct ShareModel {
-    /// Base instant; all `now` values are `t0 + LOCK*clock`. Captured once per
-    /// run, so deadlines are drawn from a finite, hashable set.
+    /// Base instant. All `now` values are `t0 + LOCK*clock`. The model captures
+    /// it once per run, so deadlines come from a finite, hashable set.
     t0: Instant,
     /// Number of consumer members (named `m0`..`m{members-1}`).
     members: u8,
-    /// High-watermark / window cap (records produced over a path).
+    /// High-watermark and window cap: records produced over a path.
     max_offset: Offset,
     /// Logical-clock cap.
     max_tick: u8,
@@ -51,12 +53,13 @@ struct ShareModel {
     max_attempts: i16,
     /// Max records `materialize` pulls into the window at once.
     max_inflight: i32,
-    /// Whether the leader-failover `Reload` action is generated (Task 3).
+    /// Whether the model generates the leader-failover `Reload` action
+    /// (Task 3).
     allow_reload: bool,
 }
 
-/// The fingerprinted model state: the REAL machine plus the small finite clock
-/// and produced-record high-watermark.
+/// The fingerprinted model state. It holds the REAL machine plus the small
+/// finite clock and the produced-record high-watermark.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct ShareState {
     sm: AcquisitionState,
@@ -79,7 +82,7 @@ enum ShareAction {
         last: Offset,
         ack: AckType,
     },
-    /// `member` renews (extends) the lock on `[first, last]` it holds.
+    /// `member` renews, that is, extends, the lock on `[first, last]` it holds.
     Renew {
         member: u8,
         first: Offset,
@@ -89,13 +92,15 @@ enum ShareAction {
     ExpireLocks,
     /// Advance the logical clock by one lock-duration.
     Tick,
-    /// Leader failover: persist + reload (drops Acquired → Available, locks lost).
+    /// Leader failover: persist and reload. Acquired drops to Available, and
+    /// the locks are lost.
     Reload,
 }
 
 impl ShareModel {
-    /// Concurrency config: full action set EXCEPT `Reload`. Bounds start small
-    /// (proven memory-safe); Task 4 scales `max_offset` empirically.
+    /// Concurrency config: the full action set EXCEPT `Reload`. Bounds start
+    /// small, at a proven memory-safe size. Task 4 scales `max_offset`
+    /// empirically.
     fn concurrency(max_offset: i64, max_inflight: i32) -> Self {
         Self {
             t0: Instant::now(),
@@ -108,7 +113,7 @@ impl ShareModel {
         }
     }
 
-    /// Failover config: adds `Reload` over a small window; focuses the
+    /// Failover config: it adds `Reload` over a small window. It focuses on the
     /// `acknowledged_is_terminal` durability invariant across crash-recovery.
     fn failover() -> Self {
         Self {
@@ -150,8 +155,9 @@ fn offset_dc(sm: &AcquisitionState, off: Offset) -> Option<i16> {
 }
 
 /// Maximal contiguous offset runs currently Acquired by `member`. Adjacent
-/// same-owner batches with differing lock deadlines do not coalesce, so they are
-/// stitched back into one run here (the whole run is ack/renew-able at once).
+/// same-owner batches with different lock deadlines do not coalesce, so this
+/// function stitches them back into one run. The whole run is then
+/// ack-able and renew-able at once.
 fn acquired_runs(sm: &AcquisitionState, member: &str) -> Vec<(Offset, Offset)> {
     let mut runs: Vec<(Offset, Offset)> = Vec::new();
     let mut cur: Option<(Offset, Offset)> = None;
@@ -180,7 +186,7 @@ fn acquired_runs(sm: &AcquisitionState, member: &str) -> Vec<(Offset, Offset)> {
 // ---- state-level invariants (Property::always predicates) ------------------
 
 /// Batches are sorted, gap-free, non-overlapping, and exactly cover
-/// `[start_offset, end_offset)`; `start_offset <= end_offset`.
+/// `[start_offset, end_offset)`. Also, `start_offset <= end_offset`.
 fn window_integrity(sm: &AcquisitionState) -> bool {
     if sm.start_offset > sm.end_offset {
         return false;
@@ -200,17 +206,17 @@ fn window_integrity(sm: &AcquisitionState) -> bool {
     last.first_offset <= last.last_offset && last.last_offset + 1 == sm.end_offset
 }
 
-/// Every Acquired batch carries exactly one owner. Combined with
+/// Every Acquired batch carries exactly one owner. With
 /// `window_integrity`'s non-overlap, no offset is concurrently held by two
-/// members — the headline share-group guarantee.
+/// members. That is the main share-group guarantee.
 fn mutual_exclusion(sm: &AcquisitionState) -> bool {
     sm.batches
         .iter()
         .all(|b| b.state != RecordState::Acquired || b.acquired_by.is_some())
 }
 
-/// Lock bookkeeping matches the delivery state: Acquired ⇒ owner + deadline
-/// present; every other state ⇒ neither present.
+/// Lock bookkeeping matches the delivery state. Acquired ⇒ both owner and
+/// deadline present. Every other state ⇒ neither present.
 fn lock_consistency(sm: &AcquisitionState) -> bool {
     sm.batches.iter().all(|b| match b.state {
         RecordState::Acquired => b.acquired_by.is_some() && b.lock_deadline.is_some(),
@@ -220,9 +226,10 @@ fn lock_consistency(sm: &AcquisitionState) -> bool {
 
 // ---- transition-level invariants (asserted in next_state) ------------------
 
-/// Compare a parent machine to its child after one operation; panic on any
-/// monotonicity / durability violation. Kept OUT of the fingerprinted state so
-/// no path-history ghost can explode the space (Phase-1 OOM lesson).
+/// Compare a parent machine to its child after one operation, and panic on any
+/// monotonicity or durability violation. This stays OUT of the fingerprinted
+/// state, so no path-history ghost can explode the space. That was the Phase-1
+/// OOM lesson.
 fn assert_transition(parent: &AcquisitionState, child: &AcquisitionState) {
     assert!(
         child.start_offset >= parent.start_offset,
@@ -487,8 +494,8 @@ impl Model for ShareModel {
     }
 }
 
-/// Run one bounded config to completion and assert it was exhaustive (not
-/// truncated by a cap) and that all properties hold.
+/// Run one bounded config to completion. Assert that the run was exhaustive,
+/// that is, that no cap truncated it, and that all properties hold.
 fn run(model: ShareModel, label: &str) {
     let checker = model
         .checker()
