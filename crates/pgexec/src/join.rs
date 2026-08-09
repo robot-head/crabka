@@ -19,7 +19,7 @@ use crabka_pgtypes::{ColumnType, Datum};
 use crate::{
     bind::BoundExpr,
     error::ExecError,
-    scope::{ColumnBinding, Exposure, LIVE_QUALIFIER, Scope},
+    scope::{ColumnBinding, Exposure, LIVE_QUALIFIER, Scope, WholeRowRefs, wants_whole_row},
 };
 
 /// A materialized relation: an ordered `Scope` (the schema) plus its rows, each
@@ -31,27 +31,52 @@ pub(crate) struct Relation {
     pub rows: Vec<Vec<Datum>>,
 }
 
-/// Join two relations under `kind` and `constraint`, and return the combined
-/// relation. `ctx` carries the session zone and clock that evaluate an `ON`
-/// predicate with temporal expressions in it. A USING/NATURAL/CROSS join, or a
-/// rows-free schema join, never touches `ctx`.
+/// What the statement, rather than the two relations, decides about a join.
+///
+/// Both fields are the enclosing statement's business and neither is derivable
+/// from the rows being joined, which is why they travel together.
+#[derive(Clone, Copy)]
+pub(crate) struct JoinPolicy<'a> {
+    /// Memory one blocking operator may retain before it reports 53200.
+    pub(crate) memory: crabka_units::ByteSize,
+    /// The statement's whole-row references, which decide the hidden liveness
+    /// markers an outer join carries. `None` marks every qualifier; see
+    /// [`missing_live_markers`].
+    pub(crate) whole_row: Option<&'a WholeRowRefs>,
+}
+
+impl Default for JoinPolicy<'_> {
+    /// The engine's own budget, and no statement to narrow markers by, so every
+    /// qualifier an outer join can null-extend is marked.
+    ///
+    /// This is what a join built with no statement in hand gets: the
+    /// schema-description path, whose relations have no rows for either field to
+    /// bear on, and the unit tests below, which join hand-built relations.
+    fn default() -> Self {
+        Self {
+            memory: crate::scanner::BLOCKING_QUERY_MEMORY,
+            whole_row: None,
+        }
+    }
+}
+
+/// Join two relations under `kind` + `constraint`, returning the combined
+/// relation. `ctx` carries the session zone + clock used to evaluate an `ON`
+/// predicate that contains temporal expressions (a USING/NATURAL/CROSS join, or a
+/// rows-free schema join, never touches it).
+///
+/// `policy` is what the enclosing statement decides: its memory budget and its
+/// whole-row references, the latter deciding which hidden liveness markers an
+/// outer join carries. See [`JoinPolicy`].
 pub(crate) fn join_relations(
     left: Relation,
     right: Relation,
     kind: JoinKind,
     constraint: &JoinConstraint,
     ctx: &crate::clock::EvalCtx,
-    blocking_query_memory: crabka_units::ByteSize,
+    policy: JoinPolicy<'_>,
 ) -> Result<Relation, ExecError> {
-    join_relations_impl(
-        left,
-        &right,
-        kind,
-        constraint,
-        ctx,
-        blocking_query_memory,
-        None,
-    )
+    join_relations_impl(left, &right, kind, constraint, ctx, policy, None)
 }
 
 pub(crate) struct PreparedJoinIndex {
@@ -102,18 +127,10 @@ pub(crate) fn join_relations_prepared(
     kind: JoinKind,
     constraint: &JoinConstraint,
     ctx: &crate::clock::EvalCtx,
-    blocking_query_memory: crabka_units::ByteSize,
+    policy: JoinPolicy<'_>,
     prepared: &PreparedJoinIndex,
 ) -> Result<Relation, ExecError> {
-    join_relations_impl(
-        left,
-        right,
-        kind,
-        constraint,
-        ctx,
-        blocking_query_memory,
-        Some(prepared),
-    )
+    join_relations_impl(left, right, kind, constraint, ctx, policy, Some(prepared))
 }
 
 /// Count a join's output rows without materializing them. This is the same
@@ -281,19 +298,27 @@ impl JoinCondition {
     }
 }
 
-/// The qualifiers on a side an outer join can null-extend that carry no liveness
-/// marker yet, in row order.
+/// The qualifiers on a side an outer join can null-extend that `whole_row` can
+/// read and that carry no liveness marker yet, in row order.
 ///
 /// A side that is itself an outer join already marks the qualifiers *it* can
 /// invent, and null-extending the side nulls those markers along with everything
 /// else in it, so a nested join adds only what is missing. A `USING`/`NATURAL`
 /// join's merged columns belong to no relation and have no whole row, so they
 /// need none.
-fn missing_live_markers(side: &Scope) -> Vec<String> {
+///
+/// A marker is only ever read by [`Scope::whole_row_value`], through a bare name
+/// the statement spells, so a qualifier no name of the statement can reach needs
+/// none either — which is what keeps an outer join in a query with no whole-row
+/// reference exactly as wide as it was before markers existed. `whole_row` is
+/// `None` wherever the statement is not known, and then every qualifier is
+/// marked; see [`wants_whole_row`].
+fn missing_live_markers(side: &Scope, whole_row: Option<&WholeRowRefs>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for column in &side.columns {
         if let Some(qualifier) = &column.qualifier
             && column.exposure != Exposure::LiveMarker
+            && wants_whole_row(whole_row, qualifier)
             && side.live_marker(qualifier).is_none()
             && !out.contains(qualifier)
         {
@@ -323,9 +348,13 @@ fn join_relations_impl(
     kind: JoinKind,
     constraint: &JoinConstraint,
     ctx: &crate::clock::EvalCtx,
-    blocking_query_memory: crabka_units::ByteSize,
+    policy: JoinPolicy<'_>,
     prepared: Option<&PreparedJoinIndex>,
 ) -> Result<Relation, ExecError> {
+    let JoinPolicy {
+        memory: blocking_query_memory,
+        whole_row,
+    } = policy;
     let condition = JoinCondition::new(&left, right, constraint)?;
     let lw = left.scope.width();
 
@@ -334,11 +363,11 @@ fn join_relations_impl(
     // keeps unmatched LEFT rows, which means it is the RIGHT side it invents.
     let (left_markers, right_markers) = match kind {
         JoinKind::Inner | JoinKind::Cross => (Vec::new(), Vec::new()),
-        JoinKind::Left => (Vec::new(), missing_live_markers(&right.scope)),
-        JoinKind::Right => (missing_live_markers(&left.scope), Vec::new()),
+        JoinKind::Left => (Vec::new(), missing_live_markers(&right.scope, whole_row)),
+        JoinKind::Right => (missing_live_markers(&left.scope, whole_row), Vec::new()),
         JoinKind::Full => (
-            missing_live_markers(&left.scope),
-            missing_live_markers(&right.scope),
+            missing_live_markers(&left.scope, whole_row),
+            missing_live_markers(&right.scope, whole_row),
         ),
     };
     let (nl, nr) = (left_markers.len(), right_markers.len());
@@ -1249,14 +1278,7 @@ mod tests {
         constraint: &JoinConstraint,
         ctx: &crate::clock::EvalCtx,
     ) -> Result<Relation, ExecError> {
-        super::join_relations(
-            left,
-            right,
-            kind,
-            constraint,
-            ctx,
-            crate::scanner::BLOCKING_QUERY_MEMORY,
-        )
+        super::join_relations(left, right, kind, constraint, ctx, JoinPolicy::default())
     }
 
     fn rel(qual: &str, cols: &[&str], rows: Vec<Vec<i32>>) -> Relation {
@@ -1926,9 +1948,18 @@ mod tests {
 
         let count = count_join_rows(&left, &right, JoinKind::Left, &constraint, &tctx(), budget)
             .expect("count without joined-row materialization");
-        let error =
-            super::join_relations(left, right, JoinKind::Left, &constraint, &tctx(), budget)
-                .expect_err("wide materialized join must exceed the same budget");
+        let error = super::join_relations(
+            left,
+            right,
+            JoinKind::Left,
+            &constraint,
+            &tctx(),
+            JoinPolicy {
+                memory: budget,
+                whole_row: None,
+            },
+        )
+        .expect_err("wide materialized join must exceed the same budget");
 
         assert2::assert!(count == 80);
         assert2::assert!(error.into_pg().code == "53200");
@@ -1970,7 +2001,7 @@ mod tests {
                         kind,
                         &constraint,
                         &tctx(),
-                        crate::scanner::BLOCKING_QUERY_MEMORY,
+                        JoinPolicy::default(),
                         &prepared,
                     )
                     .expect("prepared join")
@@ -2181,7 +2212,7 @@ mod tests {
             JoinKind::Inner,
             &on_eq("a", "k", "b", "k"),
             &tctx(),
-            crate::scanner::BLOCKING_QUERY_MEMORY,
+            JoinPolicy::default(),
             &prepared,
         )
         .expect("nested-loop fallback");

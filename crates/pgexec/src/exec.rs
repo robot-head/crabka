@@ -261,6 +261,7 @@ impl<'a> WriteContext<'a> {
             blocking_query_memory: self.blocking_query_memory,
             security_role: self.fctx.effective_role(),
             policy_stack: self.policy_stack,
+            whole_row: None,
         }
     }
 
@@ -11709,7 +11710,7 @@ fn append_from_item(
             kind,
             pushed_constraint.as_ref().unwrap_or(constraint),
             read_ctx.eval_ctx,
-            read_ctx.blocking_query_memory,
+            read_ctx.join_policy(),
         );
     }
     lateral_join(read_ctx, acc, te, kind, constraint)
@@ -11887,14 +11888,7 @@ fn lateral_join(
         }
         // Nothing was correlated, so the item is an ordinary relation.
         let right = build_table_expr(read_ctx, &specialized, None, None, None)?;
-        return join_relations(
-            acc,
-            right,
-            kind,
-            constraint,
-            ctx,
-            read_ctx.blocking_query_memory,
-        );
+        return join_relations(acc, right, kind, constraint, ctx, read_ctx.join_policy());
     }
     let mut rows: Vec<Vec<Datum>> = Vec::new();
     let mut scope: Option<Scope> = None;
@@ -11922,7 +11916,7 @@ fn lateral_join(
                 kind,
                 constraint,
                 ctx,
-                read_ctx.blocking_query_memory,
+                read_ctx.join_policy(),
                 &cached.index,
             )?
         } else {
@@ -11986,7 +11980,7 @@ fn lateral_join(
                     kind,
                     constraint,
                     ctx,
-                    read_ctx.blocking_query_memory,
+                    read_ctx.join_policy(),
                     &cached.index,
                 )?
             } else if let Some(index) = index {
@@ -11998,18 +11992,11 @@ fn lateral_join(
                     kind,
                     constraint,
                     ctx,
-                    read_ctx.blocking_query_memory,
+                    read_ctx.join_policy(),
                     &index,
                 )?
             } else {
-                join_relations(
-                    one,
-                    right,
-                    kind,
-                    constraint,
-                    ctx,
-                    read_ctx.blocking_query_memory,
-                )?
+                join_relations(one, right, kind, constraint, ctx, read_ctx.join_policy())?
             }
         };
         for row in &joined.rows {
@@ -12039,7 +12026,7 @@ fn lateral_join(
                 kind,
                 constraint,
                 ctx,
-                read_ctx.blocking_query_memory,
+                read_ctx.join_policy(),
             )?
             .scope
         }
@@ -16955,6 +16942,20 @@ pub(crate) fn select_to_relation_with_ctes(
     read_ctx: &crate::subquery::SubCtx<'_>,
     s: &SelectStmt,
 ) -> Result<Relation, ExecError> {
+    // The whole-row references of THIS statement, which narrow the hidden
+    // liveness markers its outer joins carry. Established before anything below
+    // reads a relation, and replacing whatever the caller reached here with, so
+    // a view body, a derived table or a correlated subquery is measured by its
+    // own text and never by the text that reached it — a narrower set inherited
+    // from an enclosing statement would be a marker missing where this one reads
+    // it.
+    //
+    // Read off the statement as written rather than as rewritten below: subquery
+    // resolution only folds subqueries into constants and internally qualified
+    // markers, so the references it leaves are a subset of these, and collecting
+    // first is what puts every read path under this statement's own set.
+    let whole_row = crate::scope::WholeRowRefs::of_select(s);
+    let read_ctx = &read_ctx.with_whole_row(&whole_row);
     let catalog_kv = read_ctx.catalog_kv;
     let ctes = read_ctx.ctes;
     let ctx = read_ctx.eval_ctx;
@@ -17124,7 +17125,7 @@ pub(crate) fn build_from_schema_with_ctes_and_context(
             crabka_pgparser::ast::JoinKind::Cross,
             &crabka_pgparser::ast::JoinConstraint::None,
             &crate::clock::EvalCtx::test_default(),
-            crate::scanner::BLOCKING_QUERY_MEMORY,
+            crate::join::JoinPolicy::default(),
         )?;
     }
     Ok(acc)
@@ -17245,7 +17246,7 @@ fn build_table_expr_schema_with_ctes(
                 *kind,
                 constraint,
                 &crate::clock::EvalCtx::test_default(),
-                crate::scanner::BLOCKING_QUERY_MEMORY,
+                crate::join::JoinPolicy::default(),
             )
         }
         TableExpr::Derived {

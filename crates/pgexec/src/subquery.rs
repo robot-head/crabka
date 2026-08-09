@@ -54,6 +54,14 @@ pub(crate) struct SubCtx<'a> {
     /// policy that reads its own relation reports 42P17 instead of recursing
     /// until the stack runs out.
     pub policy_stack: &'a crate::rls::PolicyStack,
+    /// The whole-row references of the statement whose FROM clause is being
+    /// built, which decide the hidden liveness markers an outer join carries.
+    ///
+    /// `None` is "not known here", and marks every qualifier — what every read
+    /// path did before markers became conditional. Each statement overwrites it
+    /// with its own as it starts, so a view body or a subquery is measured by
+    /// its own text and never by the text of whatever reached it.
+    pub whole_row: Option<&'a crate::scope::WholeRowRefs>,
 }
 
 impl<'a> SubCtx<'a> {
@@ -75,6 +83,27 @@ impl<'a> SubCtx<'a> {
             blocking_query_memory: self.blocking_query_memory,
             security_role: self.security_role,
             policy_stack: self.policy_stack,
+            whole_row: self.whole_row,
+        }
+    }
+
+    /// The same read context, measuring outer-join liveness markers against
+    /// `whole_row` — the whole-row references of the statement about to build
+    /// its FROM clause.
+    ///
+    /// Every statement calls this as it starts, so the narrowing never outlives
+    /// the text it was derived from: a view body, a derived table and a
+    /// correlated subquery each replace it with their own.
+    pub(crate) fn with_whole_row<'b>(
+        &'b self,
+        whole_row: &'b crate::scope::WholeRowRefs,
+    ) -> SubCtx<'b>
+    where
+        'a: 'b,
+    {
+        SubCtx {
+            whole_row: Some(whole_row),
+            ..*self
         }
     }
 
@@ -122,6 +151,14 @@ impl<'a> SubCtx<'a> {
                 ..self.fctx
             },
             ..*self
+        }
+    }
+
+    /// What this statement decides about the joins its FROM clause builds.
+    pub(crate) fn join_policy(&self) -> crate::join::JoinPolicy<'_> {
+        crate::join::JoinPolicy {
+            memory: self.blocking_query_memory,
+            whole_row: self.whole_row,
         }
     }
 

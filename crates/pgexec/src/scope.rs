@@ -6,6 +6,10 @@
 //! slice used.
 
 use crabka_pgcatalog::Table;
+use crabka_pgparser::ast::{
+    DistinctClause, Expr, FrameBound, FuncArgs, JoinConstraint, QueryBody, QueryExpr, SelectItem,
+    SelectStmt, SetExpr, TableExpr, WindowCall, WindowRef, WindowSpec,
+};
 use crabka_pgtypes::{ColumnType, Datum, RecordValue};
 
 use crate::error::ExecError;
@@ -119,6 +123,266 @@ pub(crate) const CORRELATED_QUALIFIER: &str = "$corr";
 /// no user relation can collide with this qualifier, and both `*` and a bare
 /// name skip the columns carrying it.
 pub(crate) const LIVE_QUALIFIER: &str = "$live";
+
+/// The relation names one statement could take a whole row of.
+///
+/// A liveness marker ([`LIVE_QUALIFIER`]) is one hidden column on every row an
+/// outer join emits, so a join that adds one it never needs makes the whole
+/// result wider for nothing — enough, over a ten-thousand-row join, to push a
+/// query past the blocking-query memory budget it used to fit inside. This is
+/// what lets a join add only the markers the statement can read.
+///
+/// The set is every UNQUALIFIED name written anywhere in the statement, which is
+/// a superset of the whole-row references in it: [`Scope::whole_row_value`] is
+/// reached from exactly one place, an `Expr::Column` whose `table` is `None`
+/// that no column of the scope answers, so a marker can only ever be read
+/// through a bare name the statement spells. Names that turn out to be ordinary
+/// columns (the overwhelming majority) cost a marker only when a relation of the
+/// same query happens to share the name, and a marker nothing reads is merely
+/// the width this type exists to avoid — never a wrong answer.
+///
+/// Deliberately not narrowed to "names that fail to resolve": which names those
+/// are depends on the scope, and the scope is what the join is in the middle of
+/// building.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WholeRowRefs {
+    names: std::collections::HashSet<String>,
+}
+
+/// Must a join carry a liveness marker for `qualifier`?
+///
+/// `None` is "the statement is not known here", which marks every qualifier —
+/// the behaviour every path had before markers became conditional. Only a caller
+/// holding the statement whose FROM clause it is building can narrow it, and a
+/// caller that cannot must not guess.
+pub(crate) fn wants_whole_row(refs: Option<&WholeRowRefs>, qualifier: &str) -> bool {
+    refs.is_none_or(|refs| refs.names.contains(qualifier))
+}
+
+impl WholeRowRefs {
+    /// Every unqualified name `select` spells, in it and in every query nested
+    /// inside it.
+    ///
+    /// A nested query re-derives its own set when it executes, so descending is
+    /// not what makes an inner reference safe; it covers the reverse case, an
+    /// inner expression that is evaluated against THIS statement's scope — a
+    /// correlated select list, a lateral item's `ON` — whose text belongs to the
+    /// inner query but whose reference is resolved out here.
+    pub(crate) fn of_select(select: &SelectStmt) -> Self {
+        let mut refs = Self::default();
+        refs.add_select(select);
+        refs
+    }
+
+    fn add_select(&mut self, select: &SelectStmt) {
+        // Destructured without `..` on purpose: a clause added to `SelectStmt`
+        // later has to be considered here rather than silently skipped, and the
+        // cost of overlooking one is a marker missing where something reads it.
+        let SelectStmt {
+            projection,
+            from,
+            filter,
+            distinct,
+            group_by,
+            grouping: _, // indices into `group_by`, which is walked in full
+            having,
+            windows,
+            window_calls,
+            order_by,
+            limit,
+            offset,
+            with_ties: _,
+            locking: _, // relation names, never expressions
+        } = select;
+        for item in projection {
+            match item {
+                SelectItem::Expr { expr, alias: _ } => self.add_expr(expr),
+                // `*` and `a.*` expand to the columns themselves, never to a
+                // whole row.
+                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => {}
+            }
+        }
+        for item in from {
+            self.add_table_expr(item);
+        }
+        for expr in filter.iter().chain(having).chain(limit).chain(offset) {
+            self.add_expr(expr);
+        }
+        if let DistinctClause::On(keys) = distinct {
+            for key in keys {
+                self.add_expr(key);
+            }
+        }
+        for expr in group_by {
+            self.add_expr(expr);
+        }
+        for item in order_by {
+            self.add_expr(&item.expr);
+        }
+        for window in windows {
+            self.add_window_spec(&window.spec);
+        }
+        for WindowCall {
+            name: _,
+            distinct: _,
+            args,
+            filter,
+            over,
+        } in window_calls
+        {
+            match args {
+                FuncArgs::Exprs(args) => {
+                    for arg in args {
+                        self.add_expr(arg);
+                    }
+                }
+                // `count(*)` reads no expression at all.
+                FuncArgs::Star => {}
+            }
+            if let Some(expr) = filter {
+                self.add_expr(expr);
+            }
+            match over {
+                WindowRef::Spec(spec) => self.add_window_spec(spec),
+                // A `WINDOW` name, whose spec is in `windows` and walked there.
+                WindowRef::Named(_) => {}
+            }
+        }
+    }
+
+    fn add_window_spec(&mut self, spec: &WindowSpec) {
+        let WindowSpec {
+            base: _, // a `WINDOW` name, whose own spec is walked where it is defined
+            partition_by,
+            order_by,
+            frame,
+        } = spec;
+        for expr in partition_by {
+            self.add_expr(expr);
+        }
+        for item in order_by {
+            self.add_expr(&item.expr);
+        }
+        if let Some(frame) = frame {
+            for bound in [&frame.start, &frame.end] {
+                match bound {
+                    FrameBound::Preceding(expr) | FrameBound::Following(expr) => {
+                        self.add_expr(expr);
+                    }
+                    FrameBound::UnboundedPreceding
+                    | FrameBound::CurrentRow
+                    | FrameBound::UnboundedFollowing => {}
+                }
+            }
+        }
+    }
+
+    /// Every FROM item is destructured without `..`, for the reason
+    /// [`Self::add_select`] is: an expression-bearing field added later must
+    /// stop the build rather than be skipped.
+    fn add_table_expr(&mut self, table: &TableExpr) {
+        match table {
+            TableExpr::Table {
+                name: _,
+                only: _,
+                alias: _,
+                columns: _,
+                sample,
+            } => {
+                for expr in sample
+                    .iter()
+                    .flat_map(|s| std::iter::once(&s.percent).chain(s.repeatable.iter()))
+                {
+                    self.add_expr(expr);
+                }
+            }
+            TableExpr::Derived {
+                subquery,
+                alias: _,
+                columns: _,
+                lateral: _,
+            } => self.add_query(subquery),
+            TableExpr::Join {
+                left,
+                right,
+                kind: _,
+                constraint,
+            } => {
+                self.add_table_expr(left);
+                self.add_table_expr(right);
+                if let JoinConstraint::On(expr) = constraint {
+                    self.add_expr(expr);
+                }
+            }
+            TableExpr::Function {
+                functions,
+                rows_from: _,
+                with_ordinality: _,
+                lateral: _,
+                alias: _,
+                column_aliases: _,
+            } => {
+                for call in functions {
+                    for arg in &call.args {
+                        self.add_expr(arg);
+                    }
+                }
+            }
+            TableExpr::JsonTable(table) => {
+                for expr in table.exprs() {
+                    self.add_expr(expr);
+                }
+            }
+        }
+    }
+
+    fn add_query(&mut self, query: &QueryExpr) {
+        if let Some(with) = &query.with {
+            for cte in &with.ctes {
+                if let Some(body) = cte.body.as_query() {
+                    self.add_query(body);
+                }
+            }
+        }
+        self.add_set_expr(&query.body);
+        for item in &query.order_by {
+            self.add_expr(&item.expr);
+        }
+        for expr in query.limit.iter().chain(&query.offset) {
+            self.add_expr(expr);
+        }
+    }
+
+    fn add_set_expr(&mut self, body: &SetExpr) {
+        match body {
+            SetExpr::Query(QueryBody::Select(select)) => self.add_select(select),
+            SetExpr::Query(QueryBody::Values(values)) => {
+                for row in &values.rows {
+                    for expr in row {
+                        self.add_expr(expr);
+                    }
+                }
+            }
+            SetExpr::Query(QueryBody::Nested(nested)) => self.add_query(nested),
+            SetExpr::SetOp { left, right, .. } => {
+                self.add_set_expr(left);
+                self.add_set_expr(right);
+            }
+        }
+    }
+
+    fn add_expr(&mut self, expr: &Expr) {
+        if let Expr::Column { table: None, name } = expr {
+            self.names.insert(name.clone());
+        }
+        for child in crate::exec::expr_children(expr) {
+            self.add_expr(child);
+        }
+        for query in crate::exec::query_children(expr) {
+            self.add_query(query);
+        }
+    }
+}
 
 /// The ordered schema of a relation. Flat indices line up with the combined row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

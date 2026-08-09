@@ -450,3 +450,186 @@ async fn duplicate_aliases_are_still_rejected_across_nested_outer_joins() {
     )
     .await;
 }
+
+/// The two tables that separate an invented row from a stored all-NULL one in a
+/// single result: `ON wa.x = 1` matches `wn`'s only row — every column of it
+/// NULL — for one `wa` row and nothing for the other.
+///
+/// So `wn` is `(,)` on the first output row and NULL on the second, and any
+/// reader that cannot see the marker reports `(,)` for both.
+async fn discriminating_fixture(s: &mut SqlSession) {
+    for sql in [
+        "CREATE TABLE wa (x int)",
+        "CREATE TABLE wn (x int, z text)",
+        "INSERT INTO wa VALUES (1),(2)",
+        "INSERT INTO wn VALUES (NULL, NULL)",
+    ] {
+        s.simple_query(sql)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+    }
+}
+
+/// A marker is added for the qualifiers the statement can name, so every clause
+/// a whole-row reference can be written in has to be one the collection reads.
+///
+/// Each case here is answered one way when the marker is there and the other way
+/// when it is not, because the matched row and the invented one are both in the
+/// result and their columns are identical. A clause the collection overlooked
+/// would report the invented row as the composite `(,)` — the defect the marker
+/// exists to prevent, returning through the door conditionality opened.
+#[tokio::test]
+async fn a_whole_row_reference_is_marked_from_every_clause_that_can_write_one() {
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    discriminating_fixture(&mut s).await;
+
+    check(
+        &mut s,
+        &[
+            // The select list.
+            (
+                "SELECT wa.x, wn::text, wn IS DISTINCT FROM NULL \
+                 FROM wa LEFT JOIN wn ON wa.x = 1 ORDER BY 1",
+                &["1|(,)|t", "2|<NULL>|f"],
+            ),
+            // WHERE.
+            (
+                "SELECT count(*) FROM wa LEFT JOIN wn ON wa.x = 1 \
+                 WHERE wn IS DISTINCT FROM NULL",
+                &["1"],
+            ),
+            // ORDER BY, where the key is not in the select list at all.
+            (
+                "SELECT wa.x FROM wa LEFT JOIN wn ON wa.x = 1 \
+                 ORDER BY (wn IS DISTINCT FROM NULL), wa.x",
+                &["2", "1"],
+            ),
+            // GROUP BY.
+            (
+                "SELECT (wn IS DISTINCT FROM NULL), count(*) FROM wa LEFT JOIN wn ON wa.x = 1 \
+                 GROUP BY (wn IS DISTINCT FROM NULL) ORDER BY 1",
+                &["f|1", "t|1"],
+            ),
+            // HAVING.
+            (
+                "SELECT wa.x FROM wa LEFT JOIN wn ON wa.x = 1 \
+                 GROUP BY wa.x HAVING count(wn) = 1 ORDER BY 1",
+                &["1"],
+            ),
+            // DISTINCT ON.
+            (
+                "SELECT DISTINCT ON (wn IS DISTINCT FROM NULL) wa.x \
+                 FROM wa LEFT JOIN wn ON wa.x = 1 \
+                 ORDER BY (wn IS DISTINCT FROM NULL), wa.x",
+                &["2", "1"],
+            ),
+            // A window call's argument.
+            (
+                "SELECT wa.x, count(wn) OVER () FROM wa LEFT JOIN wn ON wa.x = 1 ORDER BY 1",
+                &["1|1", "2|1"],
+            ),
+            // An aggregate's own ORDER BY and FILTER.
+            (
+                "SELECT count(*) FILTER (WHERE wn IS DISTINCT FROM NULL), \
+                        array_agg(wa.x ORDER BY (wn IS DISTINCT FROM NULL), wa.x) \
+                 FROM wa LEFT JOIN wn ON wa.x = 1",
+                &["1|{2,1}"],
+            ),
+            // The `ON` of a join written above the one that invents the row.
+            (
+                "SELECT wa.x, k.k FROM (wa LEFT JOIN wn ON wa.x = 1) \
+                 LEFT JOIN (SELECT 1 AS k) k ON (wn IS DISTINCT FROM NULL) ORDER BY 1",
+                &["1|1", "2|<NULL>"],
+            ),
+            // A derived table: its own statement, so its own collection.
+            (
+                "SELECT t.x, t.live FROM \
+                 (SELECT wa.x AS x, wn IS DISTINCT FROM NULL AS live \
+                  FROM wa LEFT JOIN wn ON wa.x = 1) t ORDER BY 1",
+                &["1|t", "2|f"],
+            ),
+            // A CTE body, likewise.
+            (
+                "WITH c AS (SELECT wa.x AS x, wn IS DISTINCT FROM NULL AS live \
+                            FROM wa LEFT JOIN wn ON wa.x = 1) \
+                 SELECT x, live FROM c ORDER BY 1",
+                &["1|t", "2|f"],
+            ),
+            // A set-operation branch.
+            (
+                "SELECT wa.x, wn IS DISTINCT FROM NULL FROM wa LEFT JOIN wn ON wa.x = 1 \
+                 UNION ALL SELECT 9, NULL ORDER BY 1",
+                &["1|t", "2|f", "9|<NULL>"],
+            ),
+        ],
+    )
+    .await;
+}
+
+/// The smallest blocking-query memory budget `sql` completes under, in bytes.
+///
+/// Bisected rather than computed: what a row costs is the executor's business,
+/// and the point of measuring is the difference between two of these, not either
+/// one. The join is a nested loop over `ON true`, so no budget-dependent index
+/// choice sits between the budget and the answer and the search is monotone.
+async fn budget_floor(sql: &str) -> u32 {
+    let (mut low, mut high) = (0u32, 1u32);
+    while !fits(high, sql).await {
+        low = high;
+        high *= 2;
+        assert!(high < 1 << 30, "no budget completes {sql}");
+    }
+    while high - low > 1 {
+        let mid = low + (high - low) / 2;
+        if fits(mid, sql).await {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    high
+}
+
+/// Does `sql` complete under a `budget`-byte blocking-query budget, over a
+/// hundred-row outer relation joined to one wide row?
+async fn fits(budget: u32, sql: &str) -> bool {
+    let engine = crabka_pgexec::SqlEngine::new_with_policy(crabka_pgexec::RuntimePolicy {
+        blocking_query_memory: crabka_units::bytes(budget),
+        ..crabka_pgexec::RuntimePolicy::default()
+    })
+    .expect("runtime policy");
+    let mut s = engine.connect();
+    for setup in [
+        "CREATE TABLE ma (x int)",
+        "CREATE TABLE mb (a int, b int, c int, d int, e int, f int)",
+        "INSERT INTO ma SELECT g FROM generate_series(1, 100) g",
+        "INSERT INTO mb VALUES (1,2,3,4,5,6)",
+    ] {
+        if s.simple_query(setup).await.is_err() {
+            return false;
+        }
+    }
+    s.simple_query(sql).await.is_ok()
+}
+
+/// An outer join carries a liveness marker only where a whole-row reference can
+/// read it, so a query that writes none is exactly as wide as it was before
+/// markers existed.
+///
+/// Measured as the memory budget each form needs, because width is what a marker
+/// costs and the budget is where a hidden column becomes visible: a wide outer
+/// join already close to the cap stops answering when every row grows. All three
+/// queries join the same rows to the same rows over `ON true` — same output rows,
+/// same real columns — so the only difference between their floors is the marker.
+#[tokio::test]
+async fn an_outer_join_pays_for_a_marker_only_where_a_whole_row_reads_it() {
+    let plain = budget_floor("SELECT count(mb.a) FROM ma LEFT JOIN mb ON true").await;
+    let whole = budget_floor("SELECT count(mb) FROM ma LEFT JOIN mb ON true").await;
+    let inner = budget_floor("SELECT count(mb) FROM ma JOIN mb ON true").await;
+
+    // The reference is what buys the marker.
+    assert!(whole > plain, "plain {plain}, whole row {whole}");
+    // An inner join invents nothing, so it never marks — even for a whole row.
+    assert!(inner == plain, "plain {plain}, inner {inner}");
+}

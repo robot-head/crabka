@@ -7339,6 +7339,7 @@ impl SqlSession {
                 blocking_query_memory,
                 security_role: fctx.effective_role(),
                 policy_stack: &policy_stack,
+                whole_row: None,
             };
             with_query_cancel_runtime(Some(cancel.canceled), || {
                 with_guc_runtime(guc_values, guc_settings, prepared, || {
@@ -8894,6 +8895,7 @@ impl SqlSession {
                 blocking_query_memory,
                 security_role: fctx.effective_role(),
                 policy_stack: &policy_stack,
+                whole_row: None,
             };
             crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
                 runtime.block_on(async {
