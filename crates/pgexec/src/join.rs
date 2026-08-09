@@ -19,7 +19,7 @@ use crabka_pgtypes::Datum;
 use crate::{
     bind::BoundExpr,
     error::ExecError,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// A materialized relation: an ordered `Scope` (the schema) plus its rows, each
@@ -393,6 +393,7 @@ fn join_relations_impl(
         Ok(coalesce_join_columns(
             &left.scope,
             &right.scope,
+            kind,
             &condition.pairs,
             &condition.join_cols,
             rows,
@@ -988,84 +989,159 @@ fn push_bounded_join_row(
     Ok(())
 }
 
-/// The column names common to both scopes, matched by name, in left order, and
-/// deduplicated. This drives `NATURAL JOIN`'s join-column set. An empty set
-/// degenerates to a cross join, as PostgreSQL does.
+/// The column names common to both scopes (matched by name), in left order,
+/// deduplicated. Drives `NATURAL JOIN`'s join-column set (empty => degenerates to
+/// a cross join, per PostgreSQL).
+/// A join input of an earlier `USING`/`NATURAL` join is not a column of the
+/// relation — a bare reference to its name reaches the merged column instead —
+/// so commonality is computed over the visible columns only. Otherwise `a JOIN b
+/// USING (x) NATURAL JOIN c` would match `c.x` against the retained `a.x` and
+/// `b.x` as well as the merged `x`.
 fn natural_common_columns(left: &Scope, right: &Scope) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for c in &left.columns {
-        if right.columns.iter().any(|rc| rc.name == c.name) && !out.contains(&c.name) {
+    for c in left.columns.iter().filter(|c| !c.is_join_input()) {
+        if right
+            .columns
+            .iter()
+            .any(|rc| !rc.is_join_input() && rc.name == c.name)
+            && !out.contains(&c.name)
+        {
             out.push(c.name.clone());
         }
     }
     out
 }
 
+/// Which side's column `PostgreSQL` reuses as a `USING`/`NATURAL` join's merged
+/// column, per `buildMergedJoinVar`.
+///
+/// An INNER or LEFT join takes the left input's column and a RIGHT join the
+/// right input's — the merged column *is* that side's variable, not a copy of
+/// it. Only a FULL join needs a real `COALESCE`, because there either side can
+/// be the null-extended one. The values agree whichever rule is applied, since a
+/// `USING` key joins on `=` and a NULL never matches; what the identity decides
+/// is whether `SELECT x … GROUP BY ja.x` names one variable or two.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MergedFrom {
+    Left,
+    Right,
+    Coalesce,
+}
+
+impl MergedFrom {
+    fn of(kind: JoinKind) -> Self {
+        match kind {
+            JoinKind::Inner | JoinKind::Cross | JoinKind::Left => Self::Left,
+            JoinKind::Right => Self::Right,
+            JoinKind::Full => Self::Coalesce,
+        }
+    }
+}
+
 /// Reshape a `left ++ right` combined relation into PostgreSQL's USING/NATURAL
-/// output. Each join column appears ONCE, coalesced so that the present side
-/// wins, which matters for outer joins. Each join column is unqualified and sits
-/// FIRST in `join` order. The remaining left columns follow, and then the
-/// remaining right columns.
+/// output.
+///
+/// The merged join columns come FIRST, in `USING` order and unqualified: that is
+/// what a bare `x` and a `SELECT *` see. Both sides' raw columns then follow
+/// whole, each in its own declaration order, marked [`Exposure::JoinInput`] so
+/// that only a qualified reference reaches them.
+///
+/// Keeping them is the point. `PostgreSQL` leaves the base range-table entries
+/// intact and adds the merged list on top, so `ja.x` still names the left side's
+/// own column. Dropping them made `SELECT ja.*` return a row one column short
+/// with no error at all; and on the nullable side of an outer join the raw
+/// column genuinely differs from the merged one — over `ja LEFT JOIN jb USING
+/// (x)` a null-extended row has `x` = 2 while `jb.x` is NULL, which is what
+/// makes the `WHERE jb.x IS NULL` anti-join idiom select anything.
+///
+/// One flat list cannot serve both orders, which is why the merged columns are
+/// separate entries rather than the raw ones renamed: `SELECT *` over `m1 JOIN
+/// m2 USING (b, a)` yields `b, a, c, d`, while `SELECT m1.*` over that same join
+/// yields `a, b, c`. The cost is one extra datum per row per join column.
 fn coalesce_join_columns(
     left_scope: &Scope,
     right_scope: &Scope,
+    kind: JoinKind,
     pairs: &[(usize, usize)], // (left_idx, right_idx) per join column, in join order
     join_names: &[String],
     rows: Vec<Vec<Datum>>, // combined left ++ right rows
 ) -> Relation {
     let lw = left_scope.width();
-    let left_join: Vec<usize> = pairs.iter().map(|(li, _)| *li).collect();
-    let right_join: Vec<usize> = pairs.iter().map(|(_, ri)| *ri).collect();
+    let merged_width = pairs.len();
+    let merged_from = MergedFrom::of(kind);
+    // Where each input column lands once the merged ones are in front.
+    let left_at = |i: usize| merged_width + i;
+    let right_at = |i: usize| merged_width + lw + i;
 
-    // New schema: merged join cols (unqualified), then non-join left, then non-join right.
-    // The merged column takes the LEFT side's type. USING/NATURAL keys are the same
-    // type on both sides in this slice's tested surface; PG unifies left/right types
-    // for a mixed-width key (e.g. `int4` USING `int8`) — that unification is deferred.
-    let mut columns: Vec<ColumnBinding> = Vec::new();
-    for ((li, _ri), name) in pairs.iter().zip(join_names) {
+    // The merged column takes its identity side's type. USING/NATURAL keys are
+    // the same type on both sides in this slice's tested surface; PG unifies
+    // left/right types for a mixed-width key (e.g. `int4` USING `int8`) — that
+    // unification is deferred.
+    let mut columns: Vec<ColumnBinding> =
+        Vec::with_capacity(merged_width + lw + right_scope.width());
+    for ((li, ri), name) in pairs.iter().zip(join_names) {
         columns.push(ColumnBinding {
             qualifier: None,
             name: name.clone(),
-            ty: left_scope.ty_at(*li),
+            ty: match merged_from {
+                MergedFrom::Right => right_scope.ty_at(*ri),
+                MergedFrom::Left | MergedFrom::Coalesce => left_scope.ty_at(*li),
+            },
+            exposure: Exposure::Output,
         });
     }
-    for (i, c) in left_scope.columns.iter().enumerate() {
-        if !left_join.contains(&i) {
-            columns.push(c.clone());
-        }
+    // Both sides whole. An input a side inherited from an earlier USING join
+    // keeps its own link, rebased onto the new indices, so a chained `ja JOIN jb
+    // USING (x) JOIN jc USING (x)` still collapses `ja.x` onto the outermost
+    // merged column.
+    let rebase = |c: &ColumnBinding, offset: usize| match c.exposure {
+        Exposure::JoinInput {
+            merged: Some(merged),
+        } => Exposure::JoinInput {
+            merged: Some(offset + merged),
+        },
+        other => other,
+    };
+    for c in &left_scope.columns {
+        columns.push(ColumnBinding {
+            exposure: rebase(c, merged_width),
+            ..c.clone()
+        });
     }
-    for (i, c) in right_scope.columns.iter().enumerate() {
-        if !right_join.contains(&i) {
-            columns.push(c.clone());
-        }
+    for c in &right_scope.columns {
+        columns.push(ColumnBinding {
+            exposure: rebase(c, merged_width + lw),
+            ..c.clone()
+        });
+    }
+    // Demote each side's join column: a bare name and `*` must see the merged
+    // one instead. Its `merged` link records whether PostgreSQL treats the two
+    // as one variable (see [`MergedFrom`]).
+    for (join_index, (li, ri)) in pairs.iter().enumerate() {
+        columns[left_at(*li)].exposure = Exposure::JoinInput {
+            merged: (merged_from == MergedFrom::Left).then_some(join_index),
+        };
+        columns[right_at(*ri)].exposure = Exposure::JoinInput {
+            merged: (merged_from == MergedFrom::Right).then_some(join_index),
+        };
     }
     let scope = Scope { columns };
 
     let new_rows = rows
         .into_iter()
-        .map(|row| {
+        .map(|mut row| {
             let mut out: Vec<Datum> = Vec::with_capacity(scope.width());
-            // Coalesced join columns (left value unless NULL, else right value).
             for (li, ri) in pairs {
-                let lv = &row[*li];
-                out.push(if lv.is_null() {
-                    row[lw + *ri].clone()
-                } else {
-                    lv.clone()
+                let left = &row[*li];
+                let right = &row[lw + *ri];
+                out.push(match merged_from {
+                    MergedFrom::Left => left.clone(),
+                    MergedFrom::Right => right.clone(),
+                    MergedFrom::Coalesce if left.is_null() => right.clone(),
+                    MergedFrom::Coalesce => left.clone(),
                 });
             }
-            // Remaining left columns.
-            for (i, val) in row[..lw].iter().enumerate() {
-                if !left_join.contains(&i) {
-                    out.push(val.clone());
-                }
-            }
-            // Remaining right columns.
-            for (i, val) in row[lw..].iter().enumerate() {
-                if !right_join.contains(&i) {
-                    out.push(val.clone());
-                }
-            }
+            out.append(&mut row);
             out
         })
         .collect();
@@ -1077,6 +1153,7 @@ fn coalesce_join_columns(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use crabka_pgtypes::{ArrayValue, ColumnType, ElemType};
     use crabka_units::prelude::ByteSizeExt as _;
 
@@ -1110,6 +1187,7 @@ mod tests {
             columns: cols
                 .iter()
                 .map(|n| crate::scope::ColumnBinding {
+                    exposure: crate::scope::Exposure::Output,
                     qualifier: Some(qual.into()),
                     name: (*n).into(),
                     ty: ColumnType::Int4,
@@ -1277,6 +1355,7 @@ mod tests {
     fn cross_join_rejects_result_before_memory_budget_is_crossed() {
         let scope = |qualifier: &str| Scope {
             columns: vec![crate::scope::ColumnBinding {
+                exposure: crate::scope::Exposure::Output,
                 qualifier: Some(qualifier.into()),
                 name: "value".into(),
                 ty: ColumnType::Text,
@@ -1343,20 +1422,100 @@ mod tests {
             &tctx(),
         )
         .expect("using");
-        // Output schema: merged unqualified `id` first, then a.av, then b.bv.
-        assert_eq!(j.scope.columns[0].qualifier, None);
-        assert_eq!(j.scope.columns[0].name, "id");
-        assert_eq!(
-            j.scope
-                .columns
-                .iter()
-                .map(|c| c.name.clone())
-                .collect::<Vec<_>>(),
-            vec!["id", "av", "bv"]
+        // What `SELECT *` sees: the merged unqualified `id` first, then a.av,
+        // then b.bv. Both sides' own `id` is kept but skipped here.
+        let visible: Vec<&str> = j
+            .scope
+            .columns
+            .iter()
+            .filter(|c| !c.is_join_input())
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(visible == vec!["id", "av", "bv"]);
+        assert!(j.scope.columns[0].qualifier.is_none());
+        // A bare name reaches the merged column; each side's own `id` is still
+        // reachable under its qualifier, which is what `a.*` and `SELECT a` read.
+        assert!(j.scope.resolve(None, "id") == Ok(0));
+        assert!(j.scope.resolve(Some("a"), "id") == Ok(1));
+        assert!(j.scope.resolve(Some("b"), "id") == Ok(3));
+        assert!(j.scope.whole_row("a") == Some(vec![1, 2]));
+        assert!(j.scope.whole_row("b") == Some(vec![3, 4]));
+        assert!(
+            j.rows
+                == vec![vec![
+                    Datum::Int4(2),
+                    Datum::Int4(2),
+                    Datum::Int4(20),
+                    Datum::Int4(2),
+                    Datum::Int4(200),
+                ]]
         );
-        assert_eq!(
-            j.rows,
-            vec![vec![Datum::Int4(2), Datum::Int4(20), Datum::Int4(200)]]
+    }
+
+    /// Which side's column `PostgreSQL` reuses as the merged one, per join kind.
+    ///
+    /// The values agree whichever side is picked — a `USING` key joins on `=`,
+    /// so a matched row has both sides equal and an unmatched one has the other
+    /// side NULL. What the identity decides is whether the merged column and the
+    /// side's own column are ONE variable, which is what makes `SELECT x … GROUP
+    /// BY ja.x` grouped-valid over a LEFT join and 42803 over a FULL one.
+    #[test]
+    fn merged_column_takes_its_side_from_the_join_kind() {
+        // (kind, index the LEFT input's `id` collapses onto, and the RIGHT's)
+        let cases: Vec<(JoinKind, Option<usize>, Option<usize>)> = vec![
+            (JoinKind::Inner, Some(0), None),
+            (JoinKind::Left, Some(0), None),
+            (JoinKind::Right, None, Some(0)),
+            (JoinKind::Full, None, None),
+        ];
+        for (kind, left_merged, right_merged) in cases {
+            let a = rel("a", &["id", "av"], vec![vec![1, 10], vec![2, 20]]);
+            let b = rel("b", &["id", "bv"], vec![vec![2, 200], vec![3, 300]]);
+            let j = join_relations(
+                a,
+                b,
+                kind,
+                &JoinConstraint::Using(vec!["id".into()]),
+                &tctx(),
+            )
+            .expect("using join");
+            let left = j.scope.resolve(Some("a"), "id").expect("a.id");
+            let right = j.scope.resolve(Some("b"), "id").expect("b.id");
+            assert!(
+                j.scope.canonical(left) == left_merged.unwrap_or(left),
+                "{kind:?}: a.id"
+            );
+            assert!(
+                j.scope.canonical(right) == right_merged.unwrap_or(right),
+                "{kind:?}: b.id"
+            );
+        }
+    }
+
+    /// A FULL join really does need the `COALESCE`: neither side's raw column
+    /// carries the merged value on every row.
+    #[test]
+    fn full_join_using_merges_a_value_neither_side_holds_alone() {
+        let a = rel("a", &["id"], vec![vec![1], vec![2]]);
+        let b = rel("b", &["id"], vec![vec![2], vec![3]]);
+        let j = join_relations(
+            a,
+            b,
+            JoinKind::Full,
+            &JoinConstraint::Using(vec!["id".into()]),
+            &tctx(),
+        )
+        .expect("full using");
+        // [merged id, a.id, b.id] — the merged column is 1 where b.id is NULL
+        // and 3 where a.id is NULL, so it equals neither raw column throughout.
+        let mut rows = j.rows.clone();
+        rows.sort_by_key(|r| format!("{:?}", r[0]));
+        assert!(
+            rows == vec![
+                vec![Datum::Int4(1), Datum::Int4(1), Datum::Null],
+                vec![Datum::Int4(2), Datum::Int4(2), Datum::Int4(2)],
+                vec![Datum::Int4(3), Datum::Null, Datum::Int4(3)],
+            ]
         );
     }
 
@@ -1366,8 +1525,13 @@ mod tests {
         let b = rel("b", &["id"], vec![vec![2], vec![3]]);
         let j = join_relations(a, b, JoinKind::Inner, &JoinConstraint::Natural, &tctx())
             .expect("natural");
-        assert_eq!(j.scope.columns.len(), 1); // single merged `id`
-        assert_eq!(j.rows, vec![vec![Datum::Int4(2)]]);
+        // One merged `id` that a bare name and `*` see, and both sides' own `id`
+        // kept behind their qualifiers so `a.id`, `a.*` and `SELECT a` still work.
+        assert!(j.scope.columns.len() == 3);
+        assert!(j.scope.resolve(None, "id") == Ok(0));
+        assert!(j.scope.resolve(Some("a"), "id") == Ok(1));
+        assert!(j.scope.resolve(Some("b"), "id") == Ok(2));
+        assert!(j.rows == vec![vec![Datum::Int4(2), Datum::Int4(2), Datum::Int4(2)]]);
     }
 
     #[test]
@@ -1384,16 +1548,31 @@ mod tests {
             &tctx(),
         )
         .expect("left using");
-        // rows: id=1 unmatched -> (1, 10, NULL); id=2 matched -> (2, 20, 200).
+        // Row shape is [merged id, a.id, a.av, b.id, b.bv]. The unmatched left
+        // row is the case that separates the merged column from the raw ones:
+        // `id` is 1 because LEFT takes the left input's value, while `b.id` is
+        // NULL because that side really was null-extended. Pointing `b.id` at
+        // the merged column would pass every inner-join test and break the
+        // `WHERE b.id IS NULL` anti-join idiom.
         assert!(
             j.rows
-                .contains(&vec![Datum::Int4(1), Datum::Int4(10), Datum::Null])
+                == vec![
+                    vec![
+                        Datum::Int4(1),
+                        Datum::Int4(1),
+                        Datum::Int4(10),
+                        Datum::Null,
+                        Datum::Null,
+                    ],
+                    vec![
+                        Datum::Int4(2),
+                        Datum::Int4(2),
+                        Datum::Int4(20),
+                        Datum::Int4(2),
+                        Datum::Int4(200),
+                    ],
+                ]
         );
-        assert!(
-            j.rows
-                .contains(&vec![Datum::Int4(2), Datum::Int4(20), Datum::Int4(200)])
-        );
-        assert_eq!(j.rows.len(), 2);
     }
 
     /// A relation whose single key column holds `keys`, with `None` for NULL.
@@ -1401,6 +1580,7 @@ mod tests {
         Relation {
             scope: Scope {
                 columns: vec![crate::scope::ColumnBinding {
+                    exposure: crate::scope::Exposure::Output,
                     qualifier: Some(qualifier.into()),
                     name: "k".into(),
                     ty: ColumnType::Int4,
@@ -1478,6 +1658,7 @@ mod tests {
             columns: names
                 .iter()
                 .map(|name| ColumnBinding {
+                    exposure: Exposure::Output,
                     qualifier: Some(qualifier.into()),
                     name: (*name).into(),
                     ty: ColumnType::Int4,
@@ -1613,11 +1794,13 @@ mod tests {
         let scope = |qualifier: &str| Scope {
             columns: vec![
                 ColumnBinding {
+                    exposure: Exposure::Output,
                     qualifier: Some(qualifier.into()),
                     name: "k".into(),
                     ty: ColumnType::Int4,
                 },
                 ColumnBinding {
+                    exposure: Exposure::Output,
                     qualifier: Some(qualifier.into()),
                     name: "payload".into(),
                     ty: ColumnType::Text,
@@ -1776,6 +1959,7 @@ mod tests {
                 columns: ["x", "y"]
                     .into_iter()
                     .map(|name| ColumnBinding {
+                        exposure: Exposure::Output,
                         qualifier: Some("a".into()),
                         name: name.into(),
                         ty: ColumnType::Int4,
@@ -1790,11 +1974,13 @@ mod tests {
             scope: Scope {
                 columns: vec![
                     ColumnBinding {
+                        exposure: Exposure::Output,
                         qualifier: Some("b".into()),
                         name: "k".into(),
                         ty: ColumnType::Int4,
                     },
                     ColumnBinding {
+                        exposure: Exposure::Output,
                         qualifier: Some("b".into()),
                         name: "wide".into(),
                         ty: ColumnType::Int8,
@@ -1950,6 +2136,7 @@ mod tests {
         let right = Relation {
             scope: Scope {
                 columns: vec![crate::scope::ColumnBinding {
+                    exposure: crate::scope::Exposure::Output,
                     qualifier: Some("b".into()),
                     name: "k".into(),
                     ty: ColumnType::Int8,
@@ -1977,11 +2164,13 @@ mod tests {
             scope: Scope {
                 columns: vec![
                     ColumnBinding {
+                        exposure: Exposure::Output,
                         qualifier: Some(qualifier.into()),
                         name: "name".into(),
                         ty: ColumnType::Text,
                     },
                     ColumnBinding {
+                        exposure: Exposure::Output,
                         qualifier: Some(qualifier.into()),
                         name: "args".into(),
                         ty: ColumnType::OidVector,

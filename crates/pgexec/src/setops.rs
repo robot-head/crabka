@@ -17,7 +17,7 @@ use crabka_pgtypes::{ColumnType, Datum};
 use crate::{
     clock::EvalCtx,
     error::ExecError,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// Defense-in-depth recursion bound for the `SetExpr` tree walks (`fold` and
@@ -233,6 +233,7 @@ pub(crate) fn set_expr_relation(
         columns: cols
             .iter()
             .map(|c| ColumnBinding {
+                exposure: Exposure::Output,
                 qualifier: None,
                 name: c.name.clone(),
                 ty: output_type(c),
@@ -254,6 +255,7 @@ pub(crate) fn set_expr_to_relation(
         columns: cols
             .iter()
             .map(|c| ColumnBinding {
+                exposure: Exposure::Output,
                 qualifier: None,
                 name: c.name.clone(),
                 ty: output_type(c),

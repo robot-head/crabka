@@ -31,7 +31,7 @@ use crate::{
         JoinExecutionStrategy, JoinKind as ScannerJoinKind, JoinRangeRequest, JoinRow,
         JoinSnapshot, JoinTableInterval, PredicatePushdown, RowInterval, ScanRequest, ScannedRow,
     },
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
     timestamp_txn::{PrimaryTxnDecision, ReadTimestamp, TimestampTransactionId, TimestampWrite},
 };
 
@@ -6197,6 +6197,7 @@ impl ReturningSpec {
         scope.columns.extend(image_bindings(table, "new"));
         if merge {
             scope.columns.push(ColumnBinding {
+                exposure: Exposure::Output,
                 qualifier: None,
                 name: MERGE_ACTION_BINDING.to_string(),
                 ty: ColumnType::Text,
@@ -6214,16 +6215,25 @@ impl ReturningSpec {
                     } else {
                         (0..visible_width).collect()
                     };
-                    items.extend(order.into_iter().map(|i| {
-                        let c = &scope.columns[i];
-                        SelectItem::Expr {
-                            expr: Expr::Column {
-                                table: c.qualifier.clone(),
-                                name: c.name.clone(),
-                            },
-                            alias: Some(c.name.clone()),
-                        }
-                    }));
+                    // This expands by index range rather than through
+                    // `resolve_projection`, so it has to skip a USING/NATURAL
+                    // join's retained input columns itself: `UPDATE … FROM a
+                    // JOIN b USING (x) RETURNING *` must not return `x` thrice.
+                    items.extend(
+                        order
+                            .into_iter()
+                            .filter(|i| !scope.columns[*i].is_join_input())
+                            .map(|i| {
+                                let c = &scope.columns[i];
+                                SelectItem::Expr {
+                                    expr: Expr::Column {
+                                        table: c.qualifier.clone(),
+                                        name: c.name.clone(),
+                                    },
+                                    alias: Some(c.name.clone()),
+                                }
+                            }),
+                    );
                 }
                 SelectItem::QualifiedWildcard(q) if Some(q) == old_alias.as_ref() => {
                     items.extend(image_wildcard(table, "old"));
@@ -6319,6 +6329,7 @@ impl ReturningSpec {
                 .iter()
                 .zip(&tys)
                 .map(|(f, ty)| ColumnBinding {
+                    exposure: Exposure::Output,
                     qualifier: None,
                     name: f.name.clone(),
                     ty: *ty,
@@ -6344,6 +6355,7 @@ fn image_bindings(table: &Table, image: &str) -> Vec<ColumnBinding> {
         .columns
         .iter()
         .map(|c| ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: None,
             name: image_binding_name(image, &c.name),
             ty: c.ty,
@@ -13667,6 +13679,7 @@ impl CorrelatedRowExprs {
         self.sources.push(expr.clone());
         self.exprs.push(planned);
         self.bindings.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(crate::scope::CORRELATED_QUALIFIER.to_string()),
             name: index.to_string(),
             ty,
@@ -15391,6 +15404,7 @@ fn build_base_table(
                     .columns
                     .into_iter()
                     .map(|(name, ty)| ColumnBinding {
+                        exposure: Exposure::Output,
                         qualifier: Some(qualifier.to_string()),
                         name,
                         ty,
@@ -16109,6 +16123,7 @@ fn try_execute_partial_aggregate_pushdown(
             .iter()
             .zip(&tys)
             .map(|(field, ty)| ColumnBinding {
+                exposure: Exposure::Output,
                 qualifier: None,
                 name: field.name.clone(),
                 ty: *ty,
@@ -16331,6 +16346,7 @@ fn try_execute_local_streaming_aggregate(
             .iter()
             .zip(&tys)
             .map(|(field, ty)| ColumnBinding {
+                exposure: Exposure::Output,
                 qualifier: None,
                 name: field.name.clone(),
                 ty: *ty,
@@ -17169,6 +17185,7 @@ fn build_table_expr_schema_with_ctes(
                             .columns
                             .into_iter()
                             .map(|(name, ty)| ColumnBinding {
+                                exposure: Exposure::Output,
                                 qualifier: Some(qualifier.to_string()),
                                 name,
                                 ty,
@@ -17192,6 +17209,7 @@ fn build_table_expr_schema_with_ctes(
                                 .columns
                                 .iter()
                                 .map(|column| ColumnBinding {
+                                    exposure: Exposure::Output,
                                     qualifier: Some(qualifier.to_string()),
                                     name: column.name.clone(),
                                     ty: column.ty,
@@ -17243,6 +17261,7 @@ fn build_table_expr_schema_with_ctes(
                 .iter()
                 .map(|f| {
                     Ok(ColumnBinding {
+                        exposure: Exposure::Output,
                         qualifier: None,
                         name: f.name.clone(),
                         ty: column_type_from_oid(f.type_oid)?,
@@ -21590,9 +21609,13 @@ fn order_output_exprs_equivalent(scope: &Scope, a: &Expr, b: &Expr) -> bool {
                 name: name_b,
             },
         ) => {
+            // Through `Scope::canonical`, so that a USING/NATURAL join input and
+            // the merged column PostgreSQL builds from it count as one key:
+            // `SELECT DISTINCT x … ORDER BY ja.x` is legal over a LEFT join.
             let left = scope.resolve(table_a.as_deref(), name_a);
             let right = scope.resolve(table_b.as_deref(), name_b);
-            matches!((left, right), (Ok(left), Ok(right)) if left == right)
+            matches!((left, right), (Ok(left), Ok(right))
+                if scope.canonical(left) == scope.canonical(right))
         }
         _ => false,
     }
@@ -21792,11 +21815,14 @@ pub(crate) fn resolve_projection(
                 //
                 // The synthetic window-result, grouping-set and correlated
                 // select-list bindings are not part of the relation, so `*`
-                // never expands to them.
+                // never expands to them. Neither is a USING/NATURAL join's
+                // retained input column: `SELECT * FROM ja JOIN jb USING (x)`
+                // yields the merged `x` once, not `x`, `ja.x` and `jb.x`.
                 for (index, c) in scope.columns.iter().enumerate().filter(|(_, c)| {
                     !is_window_binding(c)
                         && !crate::grouping::is_hidden_binding(c)
                         && !is_correlated_binding(c)
+                        && !c.is_join_input()
                 }) {
                     fields.push(field(&c.name, c.ty));
                     exprs.push(wildcard_reference(scope, index, c));
@@ -21862,6 +21888,7 @@ fn projected_scope(fields: &[FieldDescription], tys: &[ColumnType]) -> Scope {
             .iter()
             .zip(tys)
             .map(|(f, ty)| ColumnBinding {
+                exposure: Exposure::Output,
                 qualifier: None, // a projected result has no base-table qualifier
                 name: f.name.clone(),
                 ty: *ty,
@@ -27180,7 +27207,7 @@ mod tests {
         TopKColumn, TopKSpec,
         plan_dist::DistributedScanPlan,
         scanner::{PredicatePushdown, ProjectionPushdown, ScanRequest, ScannedRow},
-        scope::{ColumnBinding, Scope},
+        scope::{ColumnBinding, Exposure, Scope},
     };
 
     struct RejectingRangeScanner;
@@ -28912,11 +28939,13 @@ mod tests {
         Scope {
             columns: vec![
                 ColumnBinding {
+                    exposure: Exposure::Output,
                     qualifier: Some("t".into()),
                     name: "a".into(),
                     ty: crabka_pgtypes::ColumnType::Int4,
                 },
                 ColumnBinding {
+                    exposure: Exposure::Output,
                     qualifier: Some("t".into()),
                     name: "b".into(),
                     ty: crabka_pgtypes::ColumnType::Int4,

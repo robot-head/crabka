@@ -28,7 +28,7 @@ use crabka_pgwire::engine::FieldDescription;
 use crate::{
     clock::EvalCtx,
     error::ExecError,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// Qualifier of the synthetic bindings that carry a grouped query's pre-window
@@ -477,6 +477,7 @@ fn extend_scope(scope: &Scope, calls: &[PlannedCall], names: &[String]) -> Scope
     let mut extended = scope.clone();
     for (index, (call, label)) in calls.iter().zip(names).enumerate() {
         extended.columns.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(crabka_pgparser::ast::WINDOW_QUALIFIER.to_string()),
             name: crabka_pgparser::ast::window_binding_name(index, label),
             ty: call.result_ty,
@@ -745,6 +746,7 @@ fn lower_over_grouping(
     let mut leaf_scope = Scope::empty();
     for (index, leaf) in leaves.iter().enumerate() {
         leaf_scope.columns.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(GROUPED_QUALIFIER.to_string()),
             name: grouped_binding_name(index),
             ty: crate::eval::infer_type(leaf, scope)?,

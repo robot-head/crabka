@@ -237,6 +237,7 @@ pub(crate) fn describe_cte_relation(
             .iter()
             .map(|f| {
                 Ok(crate::scope::ColumnBinding {
+                    exposure: crate::scope::Exposure::Output,
                     qualifier: None,
                     name: f.name.clone(),
                     ty: crate::exec::column_type_from_oid(f.type_oid)?,
@@ -258,6 +259,7 @@ pub(crate) fn describe_cte_relation(
             .iter()
             .map(|f| {
                 Ok(crate::scope::ColumnBinding {
+                    exposure: crate::scope::Exposure::Output,
                     qualifier: None,
                     name: f.name.clone(),
                     ty: crate::exec::column_type_from_oid(f.type_oid)?,

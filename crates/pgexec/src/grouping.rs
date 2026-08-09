@@ -52,7 +52,7 @@ use crabka_pgtypes::{ColumnType, Datum};
 use crate::{
     clock::EvalCtx,
     error::ExecError,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// Scope qualifier for this module's hidden columns. `$` cannot begin an
@@ -261,7 +261,11 @@ pub(crate) fn canonicalize_columns(e: &Expr, scope: &Scope) -> Expr {
             let Ok(index) = scope.resolve(table.as_deref(), name) else {
                 return Ok(None);
             };
-            let binding = &scope.columns[index];
+            // `Scope::canonical` collapses a USING/NATURAL join input onto the
+            // merged column when PostgreSQL treats the two as one variable, so
+            // `SELECT x … GROUP BY ja.x` is grouped-valid over a LEFT join and
+            // still 42803 over a FULL one, where the merged value is a COALESCE.
+            let binding = &scope.columns[scope.canonical(index)];
             Ok(Some(Expr::Column {
                 table: binding.qualifier.clone(),
                 name: binding.name.clone(),
@@ -372,12 +376,14 @@ fn augmented_scope(scope: &Scope, key_types: &[ColumnType]) -> Scope {
     let mut columns = scope.columns.clone();
     for (index, ty) in key_types.iter().enumerate() {
         columns.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(GROUPING_QUALIFIER.to_string()),
             name: key_column(index),
             ty: *ty,
         });
     }
     columns.push(ColumnBinding {
+        exposure: Exposure::Output,
         qualifier: Some(GROUPING_QUALIFIER.to_string()),
         name: SET_COLUMN.to_string(),
         ty: ColumnType::Int4,

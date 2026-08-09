@@ -941,6 +941,7 @@ pub fn check_domain(
 fn value_scope(base: ColumnType) -> crate::scope::Scope {
     crate::scope::Scope {
         columns: vec![crate::scope::ColumnBinding {
+            exposure: crate::scope::Exposure::Output,
             qualifier: None,
             name: "value".to_string(),
             ty: base,

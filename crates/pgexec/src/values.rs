@@ -4,7 +4,7 @@ use crabka_pgtypes::{ColumnType, Datum};
 use crate::{
     clock::EvalCtx,
     error::ExecError,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +138,7 @@ fn scope_from_schema(schema: &ValuesSchema, qualifier: Option<&str>) -> Scope {
             .iter()
             .zip(&schema.types)
             .map(|(name, ty)| ColumnBinding {
+                exposure: Exposure::Output,
                 qualifier: qualifier.map(str::to_string),
                 name: name.clone(),
                 ty: *ty,

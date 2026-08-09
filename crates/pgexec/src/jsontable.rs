@@ -28,7 +28,7 @@ use crate::{
     clock::EvalCtx,
     error::{ExecError, SqlJsonError},
     join::Relation,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// The relation a `JSON_TABLE` FROM item produces.
@@ -238,6 +238,7 @@ fn schema_of(columns: &[JsonTableColumn], out: &mut Vec<ColumnBinding>) {
             JsonTableColumn::Nested(_) => continue,
         };
         out.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: None,
             name: name.clone(),
             ty,

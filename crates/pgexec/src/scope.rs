@@ -10,15 +10,52 @@ use crabka_pgtypes::{ColumnType, Datum, RecordValue};
 
 use crate::error::ExecError;
 
-/// One column visible in a scope: its source qualifier, its name, and its type.
-///
-/// The qualifier is a table name or an alias. It is `None` for a
-/// USING/NATURAL-coalesced column.
+/// One column visible in a scope: its source qualifier (table name or alias;
+/// `None` for a USING/NATURAL-coalesced column), its name, its type, and how a
+/// reference can reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ColumnBinding {
     pub(crate) qualifier: Option<String>,
     pub(crate) name: String,
     pub(crate) ty: ColumnType,
+    pub(crate) exposure: Exposure,
+}
+
+/// How a reference can reach a column.
+///
+/// `PostgreSQL` keeps a joined query's base range-table entries whole and adds
+/// the join's own merged column list on top, so `ja.x` and the merged `x` are
+/// two different things that a flat, one-qualifier-per-column list cannot both
+/// hold. [`Exposure::JoinInput`] is the second of them: the side's raw column,
+/// kept in the row so `ja.x`, `ja.*` and `SELECT ja` still see the side's own
+/// value, but reachable only when a reference names its qualifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Exposure {
+    /// An ordinary column of the relation: reachable bare or qualified, and
+    /// expanded by `*`.
+    #[default]
+    Output,
+    /// A `USING`/`NATURAL` join's raw input column from one side. A bare name
+    /// and `*` see the join's merged column instead; only `ja.x`, `ja.*` and a
+    /// whole-row `ja` reach this one.
+    ///
+    /// `merged` is the flat index of the merged column when `PostgreSQL`'s
+    /// merged variable *is* this very column, and `None` when it is not.
+    /// `PostgreSQL` builds that variable in `buildMergedJoinVar`: an INNER or
+    /// LEFT join takes the left input's column, a RIGHT join the right input's,
+    /// and only a FULL join needs a real `COALESCE` of the two. That is why
+    /// `SELECT x … GROUP BY ja.x` is grouped-valid over a LEFT join but not over
+    /// a FULL one, and why `pg_get_viewdef` prints the merged column of a RIGHT
+    /// join as `jb.x`.
+    JoinInput { merged: Option<usize> },
+}
+
+impl ColumnBinding {
+    /// Is this the raw input column of a `USING`/`NATURAL` join, which a bare
+    /// name and `*` must both skip?
+    pub(crate) fn is_join_input(&self) -> bool {
+        matches!(self.exposure, Exposure::JoinInput { .. })
+    }
 }
 
 /// The qualifier of a positional column reference, where `$pos.3` is "the
@@ -73,6 +110,7 @@ impl Scope {
                     qualifier: Some(qualifier.to_string()),
                     name: c.name.clone(),
                     ty: c.ty,
+                    exposure: Exposure::Output,
                 })
                 .collect(),
         }
@@ -136,9 +174,19 @@ impl Scope {
         // ONE pass, testing the name before the qualifier. Both tests are pure,
         // so the order does not change the outcome, and the name rejects almost
         // every column without touching the qualifier at all.
+        //
+        // A qualified reference reaches every column carrying that qualifier,
+        // join inputs included — that is the only way to `ja.x`. A bare one
+        // skips them, so the merged `x` of a USING/NATURAL join is the single
+        // match rather than one of three.
         let mut found: Option<usize> = None;
         for (i, c) in self.columns.iter().enumerate() {
-            if c.name == name && qualifier.is_none_or(|q| c.qualifier.as_deref() == Some(q)) {
+            if c.name == name
+                && match qualifier {
+                    Some(q) => c.qualifier.as_deref() == Some(q),
+                    None => !c.is_join_input(),
+                }
+            {
                 if found.is_some() {
                     return Err(ExecError::AmbiguousColumn(name.to_string()));
                 }
@@ -162,8 +210,40 @@ impl Scope {
         Err(ExecError::UndefinedColumn(name.to_string()))
     }
 
+    /// The index that names the same *variable* as the column at `index`.
+    ///
+    /// A `USING`/`NATURAL` join input whose value `PostgreSQL` reuses as the
+    /// merged column is not a separate variable there: over `ja LEFT JOIN jb
+    /// USING (x)` the merged `x` and `ja.x` are one and the same `Var`, which is
+    /// why `SELECT x … GROUP BY ja.x` is grouped-valid and why `pg_get_viewdef`
+    /// prints that merged column as `ja.x`. Following the link collapses the two
+    /// spellings onto one index so `GROUP BY` matching agrees. A FULL join's
+    /// merged column is a real `COALESCE` of both sides and links to neither, so
+    /// grouping by one side alone stays 42803, exactly as `PostgreSQL` has it.
+    ///
+    /// Chained joins nest the links (`ja JOIN jb USING (x) JOIN jc USING (x)`
+    /// merges a merged column again), so this follows them to the end. The walk
+    /// is bounded by the scope width, because every step moves to a strictly
+    /// earlier column.
+    pub fn canonical(&self, index: usize) -> usize {
+        let mut index = index;
+        for _ in 0..self.columns.len() {
+            match self.columns[index].exposure {
+                Exposure::JoinInput {
+                    merged: Some(merged),
+                } => index = merged,
+                _ => break,
+            }
+        }
+        index
+    }
+
     /// Resolve a *whole-row* reference: the flat indices, in row order, of every
     /// column carrying `qualifier`.
+    ///
+    /// A `USING`/`NATURAL` join input carries its side's qualifier and belongs
+    /// to that side's row, so `SELECT ja` over such a join still yields every
+    /// column of `ja` in declaration order.
     ///
     /// `SELECT t FROM t` does not name a column at all. `PostgreSQL` resolves a
     /// bare name that matches no column against the range table, and a match
@@ -240,6 +320,7 @@ mod tests {
 
     fn binding(qualifier: &str, name: &str, ty: ColumnType) -> ColumnBinding {
         ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(qualifier.to_string()),
             name: name.to_string(),
             ty,

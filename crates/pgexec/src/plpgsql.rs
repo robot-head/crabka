@@ -3814,6 +3814,7 @@ impl SqlBinder<'_, '_> {
                 .into_iter()
                 .map(|field| {
                     Ok(crate::scope::ColumnBinding {
+                        exposure: crate::scope::Exposure::Output,
                         qualifier: None,
                         name: field.name,
                         ty: crate::exec::column_type_from_oid(field.type_oid)?,
@@ -3831,13 +3832,21 @@ impl SqlBinder<'_, '_> {
         for item in projection {
             match item {
                 SelectItem::Wildcard => {
-                    columns.extend(input.columns.iter().map(|column| {
-                        crate::scope::ColumnBinding {
-                            qualifier: None,
-                            name: column.name.clone(),
-                            ty: column.ty,
-                        }
-                    }));
+                    // Skips a USING/NATURAL join's retained input columns for
+                    // the same reason the real projection does, so this name
+                    // scope keeps agreeing with the projection's width.
+                    columns.extend(
+                        input
+                            .columns
+                            .iter()
+                            .filter(|column| !column.is_join_input())
+                            .map(|column| crate::scope::ColumnBinding {
+                                exposure: crate::scope::Exposure::Output,
+                                qualifier: None,
+                                name: column.name.clone(),
+                                ty: column.ty,
+                            }),
+                    );
                 }
                 SelectItem::QualifiedWildcard(qualifier) => columns.extend(
                     input
@@ -3845,6 +3854,7 @@ impl SqlBinder<'_, '_> {
                         .iter()
                         .filter(|column| column.qualifier.as_deref() == Some(qualifier))
                         .map(|column| crate::scope::ColumnBinding {
+                            exposure: crate::scope::Exposure::Output,
                             qualifier: None,
                             name: column.name.clone(),
                             ty: column.ty,
@@ -3852,6 +3862,7 @@ impl SqlBinder<'_, '_> {
                 ),
                 SelectItem::Expr { expr, alias } => {
                     columns.push(crate::scope::ColumnBinding {
+                        exposure: crate::scope::Exposure::Output,
                         qualifier: None,
                         name: alias
                             .clone()

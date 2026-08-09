@@ -56,7 +56,7 @@ use crate::{
     join::Relation,
     json_fn::JsonbSrf,
     json_record::RecordShape,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// The set-returning functions crabka implements.
@@ -1461,6 +1461,7 @@ fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
     let mut extended = scope.clone();
     for (index, call) in calls.iter().enumerate() {
         extended.columns.push(ColumnBinding {
+            exposure: Exposure::Output,
             qualifier: Some(SRF_QUALIFIER.to_string()),
             name: index.to_string(),
             ty: projected_type(&call.plan),
@@ -2167,6 +2168,7 @@ fn compile_regex(pattern: &str, flags: &str) -> Result<regex::Regex, ExecError> 
 
 fn column(name: &str, ty: ColumnType) -> ColumnBinding {
     ColumnBinding {
+        exposure: Exposure::Output,
         qualifier: None,
         name: name.to_string(),
         ty,

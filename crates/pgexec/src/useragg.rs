@@ -36,7 +36,7 @@ use crabka_pgwire::engine::QueryResult;
 use crate::{
     clock::EvalCtx,
     error::ExecError,
-    scope::{ColumnBinding, Scope},
+    scope::{ColumnBinding, Exposure, Scope},
 };
 
 /// The qualifier of the synthetic scope a transition or final expression is
@@ -617,6 +617,7 @@ fn synthetic_scope(types: &[ColumnType]) -> Scope {
             .iter()
             .enumerate()
             .map(|(index, ty)| ColumnBinding {
+                exposure: Exposure::Output,
                 qualifier: Some(AGG_QUALIFIER.to_string()),
                 name: format!("a{index}"),
                 ty: *ty,
